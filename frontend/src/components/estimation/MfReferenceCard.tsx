@@ -4,7 +4,8 @@
  * estimation page (estimation_runs.reference_rent, migration 131). Both
  * columns carry the same JSON shape; the structural type below accepts
  * either, so the two surfaces can never drift apart. */
-import { fmtCzk } from '@/lib/format';
+import { fmtCzk, fmtMeasuredPricePerM2 } from '@/lib/format';
+import type { ReferenceRent } from '@/lib/types';
 
 const MF_ADJ_LABELS: Record<string, string> = {
   balcony: 'balkón',
@@ -15,28 +16,22 @@ const MF_ADJ_LABELS: Record<string, string> = {
   other_material: 'jiný konstrukční materiál',
 };
 
-/* Structural common denominator of types.MfReferenceRent (listing column)
- * and types.ReferenceRent (run column). */
-export interface MfReferenceLike {
-  territory: { name: string; kraj: string | null };
-  vk: number;
-  is_novostavba: boolean;
-  source_date?: string | null;
-  base_per_m2: number;
-  adjustments: ReadonlyArray<{ attribute: string; czk_per_m2: number }>;
-  total_per_m2: number;
-  area_m2: number;
-  monthly_rent_czk: number;
-}
+/* This file used to declare a third description of the same JSON — a structural
+ * "common denominator" of types.MfReferenceRent and types.ReferenceRent. All
+ * three are now the single types.ReferenceRent, which both columns satisfy. */
 
 export function MfReferenceCard({
   refRent,
   yieldPct = null,
 }: {
-  refRent: MfReferenceLike;
+  refRent: ReferenceRent;
   yieldPct?: number | null;
 }) {
-  const perM2 = (n: number) => `${n.toLocaleString('cs-CZ')} Kč/m²`;
+  /* Every per-m² figure in this card is a MONTHLY rent per m² — it is a rent
+   * map. The private formatter this replaced labelled them "Kč/m²", the capital
+   * unit, on a card whose own headline already reads "/měs". The shared
+   * formatter carries the rent basis, so they agree now. */
+  const perM2 = (n: number) => fmtMeasuredPricePerM2(n, 'rent');
   return (
     <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] p-3">
       <p className="text-[0.6rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">

@@ -39,7 +39,7 @@ import type {
   ListingFreshnessCheckPublic,
   ListingPublic,
   ListingSnapshotPublic,
-  MfReferenceRent,
+  ReferenceRent,
   PipelineCardBroker,
   PortalHealth,
   PropertySource,
@@ -101,7 +101,17 @@ export const CARD_PAGE_SIZE = 24;
  * The map has no keyset tiebreaker column, so it carries `property_id` explicitly
  * (Table/Cards get it from withKeysetColumns / CARD_COLS) for the final null-safe
  * `?property=` detail-link fallback. */
-const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat,lng,price_czk,disposition,subtype,area_m2,district,last_seen_at,is_active,tom_days';
+/* `price_per_m2` is the SERVER measure (migration 425); `category_main` +
+ * `category_type` are what the pin resolves its BASIS from, per feature. They
+ * are NOT a convenience: Browse never forces a sale/rent choice (rule 22 —
+ * `deal=any` is a first-class cohort), so one map can hold a sale pin and a rent
+ * pin at once, and a map-wide unit would be wrong on one of them by ~300x.
+ * Deliberately NOT selecting the published `price_per_m2_basis` column: it lives
+ * on browse_projection but only reaches `properties_map_mv` when that matview's
+ * rebuild runs, so asking for it would 400 the whole map until then. The two
+ * category columns are on BOTH map relations today, and ppm2Basis() mirrors the
+ * same SQL function over them. */
+const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat,lng,price_czk,price_per_m2,category_main,category_type,disposition,subtype,area_m2,district,last_seen_at,is_active,tom_days';
 /* `property_id` is listed explicitly rather than arriving via withKeysetColumns:
  * it used to come free because the tiebreak was ALWAYS property_id, but the
  * portal-mirror lane tiebreaks on listing_id, which would have left
@@ -114,6 +124,13 @@ const TABLE_COLS =
    * was built from. withKeysetColumns dedupes, so naming it here is safe even
    * when it is also the active sort field. */
   'price_per_m2,' +
+  /* The two BASIS inputs of the measure, the same pair the cards already
+   * select. Without them the Kč/m² cell has a number and no unit, and the
+   * Price cell cannot tell a monthly rent from a purchase price.
+   * NOTE for future editors: tests/test_browse_read_path_guardrail.py parses
+   * this constant by naive single-quote pairing, so an apostrophe anywhere in
+   * these comments splits the select-list into nonsense. Keep them out. */
+  'category_main,category_type,' +
   'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type,total_price_change_pct,price_change_count';
 const CARD_COLS =
   'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
@@ -123,6 +140,16 @@ const CARD_COLS =
    * browse_list (migrations 276/343/363) and simply never selected — they
    * existed only as filter inputs, never as anything displayed. */
   'category_main,category_type,mf_gross_yield_pct,total_price_change_pct,price_change_count';
+
+/* The four select-lists, grouped for one purpose: a test can assert that the
+ * measure's BASIS INPUTS travel with the measure on every lane. `price_per_m2`
+ * without `category_main` + `category_type` is a number nothing can label, and
+ * the failure mode is silent — a rent renders under a sale unit. */
+export const BROWSE_SELECT_COLUMNS = {
+  map: MAP_COLS,
+  table: TABLE_COLS,
+  cards: CARD_COLS,
+} as const;
 
 export type SortField =
   | 'sreality_id' | 'district' | 'disposition'
@@ -499,6 +526,12 @@ export interface MapRow {
   lat: number;
   lng: number;
   price_czk: number | null;
+  /* The SERVER measure + the two inputs its basis is resolved from. The map
+   * label switches between price_czk and price_per_m2 (the "Ceny" control), and
+   * the unit is decided PER PIN — see MAP_COLS. */
+  price_per_m2: number | null;
+  category_main: string | null;
+  category_type: string | null;
   disposition: string | null;
   subtype: string | null;
   area_m2: number | null;
@@ -845,6 +878,9 @@ export interface TableRow {
    * column the Kč/m² sort and filter read, so the cell can never contradict
    * the cohort. */
   price_per_m2: number | null;
+  /* The measure's basis inputs — see TABLE_COLS. */
+  category_main: string | null;
+  category_type: string | null;
   first_seen_at: string;
   last_seen_at: string;
   is_active: boolean;
@@ -1093,6 +1129,13 @@ export interface BrowseStats {
   new_30d: number;
   price: { p25: number; p50: number; p75: number } | null;
   ppm2:  { p25: number; p50: number; p75: number } | null;
+  /* The cohort's basis, decided SERVER-side over the same rows the percentiles
+   * came from: one of the migration-425 tokens, 'mixed' when the cohort spans
+   * more than one, or null when no row has a measure. Basis is cohort-grain,
+   * not box-grain — every disposition in one cohort shares it — so it sits here
+   * rather than inside each Ppm2Box (which also keeps that interface an exact
+   * mirror of the JSON the annotations API is sent). */
+  ppm2_basis: string | null;
   dispositions: ReadonlyArray<BrowseStatsDispositionRow>;
   price_band_velocity: ReadonlyArray<PriceBandVelocityRow>;
 }
@@ -1236,6 +1279,13 @@ const DETAIL_COLS =
   'building_type,condition,energy_rating,' +
   'estate_area,usable_area,garden_area,category_sub_cb,' +
   'furnished,terrace,cellar,garage,parking_lots,ownership,' +
+  /* The measure AND its published label. Unlike the two Browse snapshots,
+   * `listings_public` is a plain view over `listings`, so it carries
+   * `price_per_m2_basis` as soon as the migration-425 view bodies land, with no
+   * rebuild in between. The detail surfaces read the published label rather
+   * than re-deriving it, which is the point of the program. (No apostrophes in
+   * here: a guardrail test parses these constants by quote pairing.) */
+  'price_per_m2,price_per_m2_basis,' +
   'description,mf_reference_rent_czk,mf_gross_yield_pct,mf_reference_rent';
 
 /* Legacy /listing/{id} route: URL literally IS the sreality_id, one round trip,
@@ -1327,7 +1377,7 @@ export const fetchPropertyReprNaturalKey = async (
  * advert's per-listing listings.mf_* (which could be one portal's under-stated
  * parse). */
 export interface PropertyMf {
-  mf_reference_rent: MfReferenceRent | null;
+  mf_reference_rent: ReferenceRent | null;
   mf_gross_yield_pct: number | null;
   /* The property's canonical asking price (current_price_czk = most-recently-seen
    * active ask) — the price the golden-record estimate/yield is built on, so the

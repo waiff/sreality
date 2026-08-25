@@ -3,10 +3,11 @@ import { Link } from 'react-router-dom';
 import {
   fmtArea,
   fmtCzk,
-  fmtPricePerM2,
+  fmtMeasuredPricePerM2,
   fmtRelative,
   fmtAbsolute,
 } from '@/lib/format';
+import { ppm2BasisFromToken } from '@/lib/measure';
 import type { ImagePublic, ListingPublic, ListingSummaryBody } from '@/lib/types';
 import { listingKindLabel } from '@/lib/enums';
 import { imageSrc } from '@/lib/imageUrl';
@@ -102,7 +103,10 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 }
 
 function Header({ listing }: { listing: ListingPublic }) {
-  const ppm = fmtPricePerM2(listing.price_czk, listing.area_m2);
+  const ppm = fmtMeasuredPricePerM2(
+    listing.price_per_m2,
+    ppm2BasisFromToken(listing.price_per_m2_basis),
+  );
   return (
     <div className="pr-10">
       <p className="text-[0.65rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">

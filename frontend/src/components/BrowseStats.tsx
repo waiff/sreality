@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { BrowseStats } from '@/lib/queries';
 import { fmtCount, fmtCzk } from '@/lib/format';
+import { PPM2_UNIT, type Ppm2Basis } from '@/lib/measure';
 import DispositionBoxPlots from '@/components/region/DispositionBoxPlots';
 import PriceBandVelocity from '@/components/PriceBandVelocity';
 
@@ -8,6 +9,10 @@ interface Props {
   stats: BrowseStats | null;
   isLoading: boolean;
   isEmpty: boolean;
+  /* The cohort's per-m² basis, resolved server-side (BrowseStats.ppm2_basis).
+   * Required, not optional: a Kč/m² percentile without one cannot be read.
+   * 'mixed' / null withhold the figures rather than labelling them wrongly. */
+  basis: Ppm2Basis | null;
   /* Per-disposition box-plot annotations (summarize-1), keyed by
    * disposition. Optional — the view renders fully without them. */
   annotations?: Record<string, string>;
@@ -18,6 +23,7 @@ export default function BrowseStatsView({
   stats,
   isLoading,
   isEmpty,
+  basis,
   annotations,
   annotationsLoading,
 }: Props) {
@@ -38,16 +44,28 @@ export default function BrowseStatsView({
             {fmtCount(stats.total)}
           </p>
         </Card>
+        {/* The absolute-price card was hardcoded "Kč / mo" — right for the
+            default rent cohort, wrong for every sale one: the same mistake as a
+            blanket per-m² unit, one card to the left. It now follows the cohort
+            basis, and only a rent basis carries a monthly period. */}
         <PercentileCard
           label="Price"
-          unit="Kč / mo"
+          unit={basis === 'rent' ? 'Kč / měs' : 'Kč'}
           pct={stats.price}
           fmt={(n) => fmtCzk(n).replace(/ Kč$/, '')}
         />
+        {/* A mixed cohort's Kč/m² percentiles pool sale and rent into one
+            distribution — the median of ~91 535 and ~319 is not a price, it is
+            an artefact of the mix. Withhold it, and say what to do about it. */}
         <PercentileCard
           label="Price per m²"
-          unit="Kč / m²"
-          pct={stats.ppm2}
+          unit={basis == null || basis === 'mixed' ? '' : PPM2_UNIT[basis]}
+          pct={basis == null || basis === 'mixed' ? null : stats.ppm2}
+          empty={
+            basis === 'mixed'
+              ? 'Smíšený základ (prodej + pronájem) — zvolte jeden typ nabídky'
+              : undefined
+          }
           fmt={(n) => fmtCount(n)}
         />
       </div>
@@ -64,6 +82,7 @@ export default function BrowseStatsView({
           Tukey 1.5×IQR whiskers clipped to min/max. Median in copper. Hover a box for the full numeric breakdown.
         </p>
         <DispositionBoxPlots
+          basis={basis}
           rows={stats.dispositions.map((r) => ({
             disposition: r.disposition,
             n: r.n,
@@ -128,16 +147,20 @@ function PercentileCard({
   unit,
   pct,
   fmt,
+  empty,
 }: {
   label: string;
   unit: string;
   pct: { p25: number; p50: number; p75: number } | null;
   fmt: (n: number) => string;
+  /* Replaces the "no priced listings" line when the figures are withheld for a
+   * reason the operator can act on, rather than simply being absent. */
+  empty?: string;
 }) {
   return (
     <Card label={`${label} percentiles`}>
       {pct == null ? (
-        <p className="text-sm text-[var(--color-ink-4)]">— no priced listings</p>
+        <p className="text-sm text-[var(--color-ink-4)]">{empty ?? '— no priced listings'}</p>
       ) : (
         <div className="grid grid-cols-3 gap-2">
           <PctCell tier="p25" value={fmt(pct.p25)} />

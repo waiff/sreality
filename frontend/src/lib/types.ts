@@ -16,14 +16,22 @@ export type Disposition =
 export type Furnished = 'ano' | 'ne' | 'castecne';
 export type Ownership = 'osobni' | 'druzstevni' | 'statni';
 
-/* Migration 134 — MF Cenová mapa reference-rent formula breakdown stored on
- * sale apartments (listings.mf_reference_rent). */
-export interface MfReferenceRentAdjustment {
+/* THE MF "Cenová mapa nájemného" reference-rent breakdown — ONE shape for both
+ * columns that store it: `listings.mf_reference_rent` (migration 134) and
+ * `estimation_runs.reference_rent` (migration 131). They were modelled as three
+ * parallel interfaces — MfReferenceRent, ReferenceRent, and MfReferenceCard's
+ * own structural "MfReferenceLike" — which is three chances for the same JSON to
+ * be described three different ways. The two genuinely per-column fields are
+ * optional here rather than duplicated into a second interface.
+ *
+ * Every `*_per_m2` field is CZK per m² per MONTH: this is a rent map. The card
+ * renders them through the shared rent-basis formatter so they carry /měs. */
+export interface ReferenceRentAdjustment {
   attribute: string;
   czk_per_m2: number;
 }
 
-export interface MfReferenceRent {
+export interface ReferenceRent {
   territory: {
     ruian_code: number;
     level: 'ku' | 'obec';
@@ -33,9 +41,12 @@ export interface MfReferenceRent {
   vk: number;
   is_novostavba: boolean;
   source_revision: number;
+  /* estimation_runs.reference_rent only (migration 131). */
+  source_date?: string | null;
   base_per_m2: number;
-  adjustments: MfReferenceRentAdjustment[];
-  adjustments_sum_per_m2: number;
+  adjustments: ReferenceRentAdjustment[];
+  /* listings.mf_reference_rent only (migration 134). */
+  adjustments_sum_per_m2?: number;
   total_per_m2: number;
   area_m2: number;
   monthly_rent_czk: number;
@@ -121,7 +132,15 @@ export interface ListingPublic {
    * behind both. */
   mf_reference_rent_czk: number | null;
   mf_gross_yield_pct: number | null;
-  mf_reference_rent: MfReferenceRent | null;
+  mf_reference_rent: ReferenceRent | null;
+  /* Migration 425 — THE per-m² measure and its published basis label, straight
+   * off listings_public. Every detail surface reads this pair instead of
+   * dividing price_czk by area_m2: the measure is basis-resolved and floored, so
+   * a re-derivation would print figures the platform elsewhere says do not
+   * exist. `price_per_m2_basis` is one of sale_capital_czk_m2 /
+   * rent_monthly_czk_m2 / land_capital_czk_m2, or null when undecidable. */
+  price_per_m2: number | null;
+  price_per_m2_basis: string | null;
 }
 
 export interface ListingSnapshotPublic {
@@ -643,31 +662,6 @@ export interface ListingEstimate {
   gross_yield_pct: number | null;
   estimated_monthly_rent_czk: number | null;
   created_at: string | null;
-}
-
-/* Migration 131 — the MF Cenová mapa secondary rent reference breakdown
- * stored on estimation_runs.reference_rent. */
-export interface ReferenceRentAdjustment {
-  attribute: string;
-  czk_per_m2: number;
-}
-
-export interface ReferenceRent {
-  territory: {
-    ruian_code: number;
-    level: 'ku' | 'obec';
-    name: string;
-    kraj: string | null;
-  };
-  vk: number;
-  is_novostavba: boolean;
-  source_revision: number;
-  source_date: string | null;
-  base_per_m2: number;
-  adjustments: ReferenceRentAdjustment[];
-  total_per_m2: number;
-  area_m2: number;
-  monthly_rent_czk: number;
 }
 
 /* Phase AI slice B — one row per operator feedback submission on
@@ -1229,7 +1223,11 @@ export interface WatchdogFilterSpec {
   // When true AND a price bound is set, keep no-price (price_czk IS NULL)
   // listings instead of dropping them. No-op when no bound is set.
   include_no_price: boolean;
-  // Price per m² bounds (price_czk / NULLIF(area_m2, 0)).
+  // Price per m² bounds, matched against THE measure — properties_public
+  // .price_per_m2, i.e. measure_price_per_m2 (migration 425), basis-resolved
+  // and floored. Rule 16: the same column Browse filters on, so a saved
+  // watchdog and the Browse cohort it was built from cannot disagree. It is
+  // NOT price_czk / area_m2, which is what this said before the measure existed.
   min_price_per_m2: number | null;
   max_price_per_m2: number | null;
   // MF gross rental yield % bounds (migration 133). Sale apartments only;

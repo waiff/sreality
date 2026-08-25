@@ -7,7 +7,8 @@
  * listings row. */
 import { Suspense, useLayoutEffect, useRef, useState } from 'react';
 import { lazyChunk } from '@/lib/lazyChunk';
-import { fmtCzk, fmtArea, fmtPricePerM2, fmtAbsolute } from '@/lib/format';
+import { fmtCzk, fmtArea, fmtMeasuredPricePerM2, fmtAbsolute } from '@/lib/format';
+import { areaKindOf, ppm2BasisFromToken } from '@/lib/measure';
 import type { ImagePublic, ListingPublic } from '@/lib/types';
 import { listingKindParts } from '@/lib/enums';
 import { placePrimary } from '@/lib/placeLabel';
@@ -100,7 +101,9 @@ function Header({
   // and/or disposition ("2+kk"). Commercial/houses keep their kind instead of
   // the old bare "—"; apartments are unchanged (subtype NULL → disposition).
   const kindParts = listingKindParts(listing);
-  const area = fmtArea(listing.area_m2);
+  /* A pozemek's area_m2 is its PLOT, not a floor plan — the header has room to
+   * say which, so it does. */
+  const area = fmtArea(listing.area_m2, areaKindOf(listing.category_main));
   const floor =
     listing.floor != null
       ? listing.total_floors != null
@@ -111,7 +114,14 @@ function Header({
   // it's real source state, not missing data — surface it as such.
   const hasPrice = listing.price_czk != null;
   const price = hasPrice ? fmtCzk(listing.price_czk) : 'Cena na vyžádání';
-  const ppm = fmtPricePerM2(listing.price_czk, listing.area_m2);
+  /* THE measure and THE label, both straight off listings_public (migration
+   * 425) — this used to divide price by area in the component, which printed a
+   * figure for rows the platform elsewhere refuses to give one, and printed it
+   * with a sale unit even on a monthly rent. */
+  const ppm = fmtMeasuredPricePerM2(
+    listing.price_per_m2,
+    ppm2BasisFromToken(listing.price_per_m2_basis),
+  );
   const unit = hasPrice && listing.price_unit ? ` / ${listing.price_unit}` : '';
   // Only sreality carries a real portal id; other sources hold a synthetic
   // (negative) sreality_id that must never surface as an "ID".

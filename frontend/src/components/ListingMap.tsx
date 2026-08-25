@@ -12,7 +12,9 @@ import type {
 import type { CenterRadius, MapBounds } from '@/lib/filters';
 import { groupForPicker, indexLabel, pinnedFirst } from '@/lib/cityIndexes';
 import { legendGradient, mapRampStops, normalizeIndexValue } from '@/lib/cityIndexScale';
-import { fmtCzk, fmtArea, fmtRelative, fmtAbsolute } from '@/lib/format';
+import { fmtCzk, fmtArea, fmtMeasuredPricePerM2, fmtRelative, fmtAbsolute } from '@/lib/format';
+import { PPM2_UNIT, areaKindOf, ppm2Basis } from '@/lib/measure';
+import type { PriceMetric } from '@/lib/browseState';
 import { listingKindLabel } from '@/lib/enums';
 import type { PriceStatDataset, PriceStatGrowthRow, PriceStatGrowthShape } from '@/lib/priceStats';
 import {
@@ -97,19 +99,35 @@ const czPriceCompact = new Intl.NumberFormat('cs-CZ', {
   maximumFractionDigits: 1,
 });
 
-/* Pre-formats a compact Kč price into the GeoJSON feature properties so
- * the map symbol layer can use it directly via ['get', 'price_label'].
- * Listings without a price are blanked rather than dropped — the dot
- * still anchors them on the map. */
-const formatPriceLabel = (n: number | null): string => {
-  if (n == null) return '';
-  return `${czPriceCompact.format(n)} Kč`;
+/* Pre-formats the pin label into the GeoJSON feature properties so the symbol
+ * layer can use it directly via ['get', 'price_label']. Listings without a
+ * label are blanked rather than dropped — the dot still anchors them.
+ *
+ * *** THE UNIT IS DECIDED PER FEATURE, NEVER PER MAP. *** Browse does not force
+ * a sale/rent choice (rule 22: `deal=any` is a first-class cohort), so a single
+ * screen can hold a sale pin and a rent pin at once. Their medians are ~91 535
+ * Kč/m² and ~319 Kč/m²/měs — a 300x gap — so one map-wide unit would be a
+ * category error on every pin of the other basis. Each feature resolves its own
+ * basis from its own (category_main, category_type) and carries its own suffix.
+ *
+ * A pin whose measure is NULL — below its basis floor, or no decidable basis —
+ * blanks its label and KEEPS its dot: exactly what a missing price already does,
+ * not a new failure mode. The numeral stays compact (the map's own long-standing
+ * convention for a pin); only the unit comes from the shared vocabulary, joined
+ * with a non-breaking space so MapLibre can never wrap a figure off its unit. */
+const formatPriceLabel = (r: MapRow, metric: PriceMetric): string => {
+  if (metric === 'total') {
+    return r.price_czk == null ? '' : `${czPriceCompact.format(r.price_czk)} Kč`;
+  }
+  const basis = ppm2Basis(r.category_main, r.category_type);
+  if (r.price_per_m2 == null || basis == null) return '';
+  return `${czPriceCompact.format(r.price_per_m2)}\u00a0${PPM2_UNIT[basis]}`;
 };
 
 type MapFeatureProps = MapRow & { price_label: string };
 type FC = GeoJSON.FeatureCollection<GeoJSON.Point, MapFeatureProps>;
 
-const toFeatureCollection = (rows: MapRow[]): FC => ({
+const toFeatureCollection = (rows: MapRow[], metric: PriceMetric): FC => ({
   type: 'FeatureCollection',
   features: rows.map((r) => ({
     type: 'Feature',
@@ -120,7 +138,7 @@ const toFeatureCollection = (rows: MapRow[]): FC => ({
      * feature id would make setFeatureState a no-op post-Gate-2. */
     id: r.listing_id,
     geometry: { type: 'Point', coordinates: [r.lng, r.lat] },
-    properties: { ...r, price_label: formatPriceLabel(r.price_czk) },
+    properties: { ...r, price_label: formatPriceLabel(r, metric) },
   })),
 });
 
@@ -312,7 +330,10 @@ const toKrajFC = (kraje: RentMapKraj[]): KrajFC => ({
 });
 
 const rentPopupHtml = (p: RentFeatureProps): string => {
-  const rentText = p.rent >= 0 ? `${czIntFmt.format(p.rent)} Kč/m²` : '—';
+  /* The MF rent map stores rent_monthly_czk_m2 — the same basis token migration
+   * 425 gives a monthly rent — but this popup labelled it with the CAPITAL unit,
+   * so a reference rent read as a purchase price per m². */
+  const rentText = p.rent >= 0 ? `${czIntFmt.format(p.rent)} ${PPM2_UNIT.rent}` : '—';
   const place = p.kraj ? `${p.name}, ${p.kraj}` : p.name;
   return `
     <div class="lp">
@@ -400,6 +421,11 @@ interface Props {
   cityIndexDefinitions?: CityIndexDefinition[];
   onToggleShowCities?: (next: boolean) => void;
   onColorByIndexChange?: (indexName: string | null) => void;
+  /* What the pin labels show — the total price or the per-m² measure. The
+   * control lives in the bottom-left panel next to Show cities; the state
+   * itself is MapOverlayState.priceMetric, URL key `pm`. */
+  priceMetric?: PriceMetric;
+  onPriceMetricChange?: (next: PriceMetric) => void;
   /* MF rent-price choropleth ("Cenová mapa nájemného"). The Browse page
    * hands in the full ~7.6K territory polygons + the 14 kraj borders
    * (fetched once, cached forever) when the layer is enabled. The fill
@@ -456,6 +482,8 @@ export default function ListingMap({
   cities,
   cityPolygons,
   showCities = true,
+  priceMetric = 'total',
+  onPriceMetricChange,
   colorByIndex,
   cityIndexValues,
   cityIndexValuesAll,
@@ -1358,7 +1386,7 @@ export default function ListingMap({
     if (!ready || !mapRef.current) return;
     const src = mapRef.current.getSource('listings') as GeoJSONSource | undefined;
     if (!src) return;
-    const fc = toFeatureCollection(rows);
+    const fc = toFeatureCollection(rows, priceMetric);
     src.setData(fc);
 
     if (rows.length === 0 || didInitialFitRef.current) return;
@@ -1370,7 +1398,10 @@ export default function ListingMap({
       duration: 700,
     });
     didInitialFitRef.current = true;
-  }, [rows, ready]);
+    /* `priceMetric` is a dependency because the labels are BAKED into the
+     * feature properties — flipping the control has to re-run setData, not just
+     * repaint. It never re-fits: the operator's viewport is theirs. */
+  }, [rows, ready, priceMetric]);
 
   /* Imperative flyTo on each new command (identity-based via ts).
    * Marks didInitialFitRef so the rows-effect doesn't subsequently
@@ -1520,18 +1551,27 @@ export default function ListingMap({
           </button>
         )}
       </div>
-      {cities && cities.length > 0 && (
-        <CityMapControls
-          showCities={showCities}
-          onToggleShowCities={onToggleShowCities}
-          colorByIndex={colorByIndex ?? null}
-          cityIndexDefinitions={cityIndexDefinitions ?? []}
-          onColorByIndexChange={onColorByIndexChange}
-          colorByMin={colorByMin}
-          onColorByMinChange={setColorByMin}
-          cityCount={cities.length}
+      {/* Bottom-left overlay stack. The wrapper moved OUT of CityMapControls so
+          the price-metric control shares it: the Ceny toggle must not vanish
+          with the city pins, which is what gating it on `cities` would do. */}
+      <div className="pointer-events-none absolute bottom-9 left-3 flex flex-col gap-2 items-start">
+        <PriceMetricControls
+          priceMetric={priceMetric}
+          onPriceMetricChange={onPriceMetricChange}
         />
-      )}
+        {cities && cities.length > 0 && (
+          <CityMapControls
+            showCities={showCities}
+            onToggleShowCities={onToggleShowCities}
+            colorByIndex={colorByIndex ?? null}
+            cityIndexDefinitions={cityIndexDefinitions ?? []}
+            onColorByIndexChange={onColorByIndexChange}
+            colorByMin={colorByMin}
+            onColorByMinChange={setColorByMin}
+            cityCount={cities.length}
+          />
+        )}
+      </div>
       {/* Bottom-right overlay stack: growth control sits ABOVE the rent-map
           control. Both are flex children here so they never overlap. */}
       <div className="pointer-events-none absolute bottom-10 right-3 flex flex-col gap-2 items-end">
@@ -1735,7 +1775,8 @@ function RentMapControls({
           </div>
           <div className="flex flex-col gap-1 border-t border-[var(--color-rule)] pt-1.5">
             <span className="text-[0.65rem] text-[var(--color-ink-3)]">
-              Nájemné (Kč/m²)
+              {/* Same correction as the popup: this ramp is monthly. */}
+              Nájemné ({PPM2_UNIT.rent})
             </span>
             <div
               className="h-1.5 rounded-sm"
@@ -1777,7 +1818,7 @@ function CityMapControls({
   cityCount: number;
 }) {
   return (
-    <div className="pointer-events-none absolute bottom-9 left-3 flex flex-col gap-2 items-start">
+    <>
       <div className="pointer-events-auto flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)]">
         <label className="inline-flex items-center gap-1.5 text-[0.75rem] text-[var(--color-ink-2)] cursor-pointer">
           <input
@@ -1861,6 +1902,48 @@ function CityMapControls({
           </div>
         </div>
       )}
+    </>
+  );
+}
+
+/* The "Ceny" segmented control — the pin label switches between the total price
+ * and the per-m² measure. Two buttons rather than a dropdown because there are
+ * exactly two states and the current one has to be readable at a glance while
+ * the operator is reading pins. It does NOT recolour anything: per-basis colour
+ * ramps are a separate problem (a sale ramp and a rent ramp cannot share a
+ * domain) and are deliberately not in this wave. */
+function PriceMetricControls({
+  priceMetric,
+  onPriceMetricChange,
+}: {
+  priceMetric: PriceMetric;
+  onPriceMetricChange?: (next: PriceMetric) => void;
+}) {
+  const opts: ReadonlyArray<{ value: PriceMetric; label: string }> = [
+    { value: 'total', label: 'Celkem' },
+    { value: 'per_m2', label: PPM2_UNIT.sale },
+  ];
+  return (
+    <div className="pointer-events-auto flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)] text-[0.75rem]">
+      <span className="text-[var(--color-ink-2)] font-medium">Ceny:</span>
+      <div className="inline-flex rounded-[var(--radius-sm)] border border-[var(--color-rule)] overflow-hidden">
+        {opts.map((o) => (
+          <button
+            key={o.value}
+            type="button"
+            aria-pressed={priceMetric === o.value}
+            onClick={() => onPriceMetricChange?.(o.value)}
+            className={[
+              'px-2 py-0.5 text-[0.72rem] transition-colors',
+              priceMetric === o.value
+                ? 'bg-[var(--color-ink)] text-[var(--color-paper)]'
+                : 'bg-[var(--color-paper-2)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)]',
+            ].join(' ')}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1875,7 +1958,15 @@ function Pill({ children }: { children: React.ReactNode }) {
 
 function popupHtml(r: MapRow): string {
   const price = fmtCzk(r.price_czk);
-  const area = fmtArea(r.area_m2);
+  /* The popup has room, so it says what the m² MEASURES: a pozemek's area_m2 is
+   * its plot, not a floor plan (the Option-A fork keeps the column polymorphic). */
+  const area = fmtArea(r.area_m2, areaKindOf(r.category_main));
+  /* The server measure with its own basis suffix — the popup is where a pin's
+   * label can be read next to the figure it was derived from. */
+  const ppm = fmtMeasuredPricePerM2(
+    r.price_per_m2,
+    ppm2Basis(r.category_main, r.category_type),
+  );
   const disposition = listingKindLabel(r) ?? '—';
   const district = r.district ?? '';
   const seen = fmtRelative(r.last_seen_at);
@@ -1891,6 +1982,7 @@ function popupHtml(r: MapRow): string {
         <span class="lp-mono">${escape(disposition)}</span>
         <span class="lp-sep">·</span>
         <span class="lp-mono">${escape(area)}</span>
+        ${ppm === '—' ? '' : `<span class="lp-sep">·</span><span class="lp-mono">${escape(ppm)}</span>`}
       </p>
       ${district ? `<p class="lp-district">${escape(district)}</p>` : ''}
       <p class="lp-seen" title="${escape(seenAbs)}">last seen ${escape(seen)}</p>
