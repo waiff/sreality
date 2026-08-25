@@ -110,8 +110,12 @@ def test_coverage_is_exactly_what_the_migration_claims(conn, policies):
 
     RED by: dropping the admin arm from any policy.
     """
+    # Count the WRAPPER, not the name. The deparser renders the wrapped form as
+    # `( SELECT is_platform_admin() AS is_platform_admin)`, so the name appears TWICE per
+    # site — once as the call, once as the alias — and counting the name reports 22 for 11.
     sites = sum(
-        (p["qual"] + " " + p["withcheck"]).count("is_platform_admin") for p in policies
+        (p["qual"] + " " + p["withcheck"]).lower().count("select is_platform_admin()")
+        for p in policies
     )
     assert (len(policies), sites) == (_EXPECTED_POLICIES, _EXPECTED_SITES), (
         f"expected {_EXPECTED_POLICIES} gated policies / {_EXPECTED_SITES} sites, got "
