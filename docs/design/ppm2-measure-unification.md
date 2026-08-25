@@ -565,3 +565,73 @@ W3 ──┴──────────┴──> W4 ──┬──> W5 ─�
 12. **The SQL corpus covers none of the Python-emitted per-m² SQL** (verified: 0 discovered items in `comparables.py` and `neighborhoods.py`). W5 must arrange PREPARE coverage explicitly; a plan that leans on automatic coverage leans on nothing.
 13. **`CLAUDE.md` is 300/300.** Rule #23 cannot land until lines are reclaimed in the same PR, or the blocking `docs-budget` job goes red.
 14. **`main` is not branch-protected** (standing repo note) — a red PR *can* merge and auto-deploy. Confirm green before every merge in this sprint; the destructive step in W4 makes that non-optional.
+---
+
+## 7. OPEN ITEMS AFTER W1–W9 — the close-out
+
+Three items survived the nine waves. Status lives here; the numbers and the live readings live in
+[roadmap/measure-track.md](../../roadmap/measure-track.md) § "What remains OPEN".
+
+### Item 1 — the W2 backfill write passes
+
+**Root cause of the stall, found on the first live dispatch: W2 shipped both scripts without their
+runners.** `scripts/backfill_idnes_areas.py`, the precedent both were cloned from, has
+`backfill_idnes_areas.yml`; these two had nothing, so the only way to run them was a local shell
+holding `SUPABASE_DB_URL` — a credential that lives in GitHub Actions. Both now have a dispatch-only
+workflow, inverted from the house style so that `write` (not `dry_run`) is the input and the default
+is to report.
+
+**And neither script could actually run.** `listings` carries 9.1 GB of TOAST, so any statement that
+touches `raw_json` across a large row set runs against the cluster's 120 s `statement_timeout`.
+`backfill_mmreality_areas` put its resume marker in the `WHERE`, which forces a detoast of all 11,218
+candidates before a `LIMIT` can apply — it died on the opening `count(*)`, 121 s in, never reaching
+the select. `backfill_unit_price_masquerade` kept the marker out of the predicate but projected
+`raw_json` for 5,000 rows per statement, and was cancelled on page 8 with 35,000 of ceskereality's
+70,560 rows examined. Both are now **two statements per page** — ids only, then payload by primary
+key — so the page bounds the detoast rather than the planner's choice. The derivation functions
+(`derive()`, `changed_columns()`, `decide()`, `price_text_from_fragment()`) are untouched: only the
+access path changed.
+
+### Item 2 — the `area_basis` backfill
+
+**THE FORK, decided: a script calling `derive_headline_area`, not a forward migration.**
+
+The stamp is a claim about a value already stored, so a backfill must PROVE which arm of the
+resolver won — never infer it, and never guess. `scripts/backfill_area_basis.py` therefore feeds the
+one measure the stored columns prove was the winner to `scraper.area.derive_headline_area` and
+writes back whatever it returns. The precedence and the five-token vocabulary keep exactly ONE
+definition; what the script adds is only the *inference of which input won*, which is new knowledge
+about an existing row rather than a second copy of the derivation. This is the same reasoning as
+W4's: the north star constrains the definition, not the mechanism that observes it.
+
+A forward migration was rejected on two independent grounds. It would have restated the resolver's
+branch order as a second definition — the exact thing rule #23 exists to prevent. And it could not
+have batched: a single `UPDATE` over ~242k rows of an 11 GB table does not fit the 120 s
+`statement_timeout`, and wrapping it in a `do $$ loop $$` holds one transaction across the whole
+sweep. The repo's `backfill_*.py` pattern already solves both.
+
+**What is provable, and what is refused.** Three proofs cover ~241,900 of the 459,896 stampable rows
+and take `plot` from **0 to 71,353**. The refusal is the load-bearing half: idnes and ceskereality
+store a *collapsed* `usable_area`, so `area_m2 = usable_area` there proves only that one of three
+labels won, and stamping `usable` would fabricate provenance on ~183k rows. Those stay NULL until
+someone re-parses `portal_raw_pages` — a re-parse project, not a stamp. sreality's 39,371 land rows
+also stay NULL, because `area_m2` is NULL on all of them and a basis describes `area_m2`; that is
+the concrete, permanent reason a land gate must keep OR-ing `category_main = 'pozemek'` and can
+never trust `area_basis` alone.
+
+**Snapshot impact is zero by three independent mechanisms** — the column is out of `_HASH_FIELDS`,
+the script writes that column and nothing else, and both `listings` triggers are `UPDATE OF` clauses
+naming other columns. It is DML, not DDL, so unlike an `alter table` on this table it cannot
+head-block a writer; it still declines to start while a `rebuild_%` is active.
+
+### Item 3 — dropping `public.browse_stats`
+
+Destructive, and gated on operator approval. Two facts make the spelling of the drop non-negotiable:
+the census matches a registered site to a scanned one by **exact string equality on `(path, arm)`**,
+and `_SQL_DROP`'s kind alternation recognises only `materialized view | view | function | table`.
+So a `drop routine`, a double-quoted identifier, or a 428-style `do $$ … execute format(…) … $$`
+dynamic loop would all leave migration 083's `create` in the effective set — the function would be
+gone while the census stayed green on a registration for an object that no longer exists. The drop
+must be a plain, statement-level `drop function public.browse_stats(<full signature>)`, paired in
+the same PR with deleting the `KIND_DEBT` entry from `toolkit.measures.REGISTERED_SITES`. The two
+edits are strictly coupled: either alone reds the census.
