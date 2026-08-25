@@ -148,6 +148,18 @@ jobs:
           DB_RAILS_REQUIRED: "1"
         run: pytest tests/test_location_drain_index_plan.py -q
 
+      # The admin gate is SECURITY DEFINER and, in all 10 tenancy policies, sits inside an
+      # OR with column references — so it is not pseudoconstant and the executor calls it
+      # once per candidate row (llm_calls: 293,551 rows). Migration 431 hoists it into an
+      # InitPlan. Nothing else fails if that regresses: the rows returned are identical and
+      # only the cost changes, and ALTER POLICY leaves no trace in the file that created
+      # the policy — so only the replayed catalog can see it.
+      - name: Admin gate stays hoisted on every policy (migration 431)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: pytest tests/test_admin_gate_policies_live.py -q
+
       # The /costs rollups are only indexable because their bucket expressions name a
       # zone explicitly — a bare `called_at::date` is STABLE, and Postgres refuses to
       # index it (42P17). Revert either view and the index stops matching silently: the
