@@ -78,7 +78,14 @@ def _plan(conn) -> dict:
         # Plain SET, not SET LOCAL: this connection is autocommit, and outside a
         # transaction SET LOCAL is a silent no-op — the plan comes back as a Seq Scan
         # and the rail fails for a reason that has nothing to do with the index.
+        #
+        # bitmapscan off as well as seqscan: on CI's empty table the planner prefers a
+        # Bitmap Heap Scan for `= ANY(array)`, and a bitmap scan does not preserve index
+        # order, so it needs a Sort no matter how good the index is. Forcing an ORDERED
+        # index scan is what actually asks the question this rail exists to ask — with a
+        # bare (property_id) index the Sort would still be there.
         cur.execute("set enable_seqscan = off")
+        cur.execute("set enable_bitmapscan = off")
         cur.execute(
             "EXPLAIN (FORMAT JSON) " + _PROPERTY_MEMBERS_BULK_SQL, ([1, 2, 3],)
         )

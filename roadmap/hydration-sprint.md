@@ -968,6 +968,48 @@ string in a method body this statement was invisible to it (verified: it now app
 UTC here is deliberate and scoped to matching the index. The page's *displayed* day is a
 separate question with one declared zone, decided in W3.
 
+### STOP 1 — the T0 baseline, captured 2026-08-25 05:37 UTC
+
+Captured **at the moment F1 landed**, because the "before" window is the *past* 24 h and
+ages out of `cron.job_run_details`. This is the row the ≥24 h re-measurement compares against.
+
+| jobid | job | schedule | runs | failed | avg | max | 24h total |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 6 | browse-list-rebuild | `*/15` | 110 | **31 (28.2%)** | 388.3 s | 600.3 s | 42,713 s |
+| 1 | refresh-health-dashboard | `*/10` | 109 | **38 (34.9%)** | 348.1 s | 900.8 s | 37,594 s |
+| 8 | dedup-funnel-mv-refresh | `*/15` | 89 | 3 | 390.9 s | 600.9 s | **34,399 s** |
+| 7 | browse-map-rebuild | `7,37` | 25 of 48 | 0 | 262.3 s | 582.1 s | 6,557 s |
+| 3 | capture-data-quality | `30 */6` | 3 | 1 | 294.8 s | 432.7 s | 884 s |
+| 5 | emit-verification-stale-alert | `10 * * * *` | 21 | 0 | 38.1 s | 600.0 s | 799 s |
+
+**The finding the proposal did not have a number for: the scheduler is *oversubscribed*, not
+at 74% of budget.** Total job wall-clock is **122,946 s inside an 86,400 s day = a 142% duty
+cycle** — these jobs are not queuing politely, they are running *concurrently and contending*,
+which is the mechanism behind both the 28.2% / 34.9% failure rates (jobs hitting their
+`statement_timeout`, `max_s` pinned at 600.3 / 900.8) and jobid 7's **47.9% launch loss**
+(25 runs against 48 scheduled).
+
+jobid 8's share is **28.0%** of scheduler wall-clock here, against the proposal's 34.7% —
+window-dependent in magnitude, stable in direction, exactly as correction #8 warns. **Always
+quote the window.** W0b returns those 34,399 s/day.
+
+Instance-wide at T0: cache hit **88.98%**, 4,610,969,944 blocks read cumulative,
+**1,556.6 GB** of temp files, database **138 GB**, `stats_reset` null (counters are all-time).
+
+Cumulative `pg_stat_statements` at T0, for the deltas the re-measurement will compute:
+
+| statement | calls | blocks | mean |
+| --- | --- | --- | --- |
+| `rebuild_browse_list()` | 2,884 | 8,071,893,409 | 122,154 ms |
+| `refresh_health_matviews()` | 1,333 | 2,194,833,959 | 63,079 ms |
+| `rebuild_properties_map_mv()` | 467 | 1,225,479,173 | 95,948 ms |
+| location drain bulk read *(F1's target)* | 39,488 | 2,737,573,584 | 982 ms |
+
+**Scheduled, not skipped.** Per the operator's amendment, STOP 1 is report-don't-wait: the
+full ≥24 h re-measurement still runs (it decides W5/W6's shape), and W1–W4 proceed meanwhile
+under amended Corollary D, whose whole point is that block counts do not need a quiet
+instance to be honest.
+
 ### Filed with a trigger
 
 One line each: flag · trigger · evidence needed to close · filing wave.
