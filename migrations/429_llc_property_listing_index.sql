@@ -1,0 +1,44 @@
+-- 429_llc_property_listing_index.sql
+-- Cardinality Doctrine W0a / F1 — the platform's #1 disk consumer gets its index.
+--
+-- location_data/resolver/drain.py runs every 15 minutes:
+--     SELECT property_id, ... FROM listing_location_current
+--      WHERE property_id = ANY(%s::bigint[]) ORDER BY property_id, listing_id
+--
+-- listing_location_current carried 15 indexes and NOT ONE led on property_id, so that
+-- read was a seq scan: 38,800 calls x ~36,355 blocks = 1,410,552,687 blocks, i.e.
+-- 36.7% of ALL disk reads on the platform, 55% of them physical because the scan cycles
+-- the entire 1 GB buffer pool twice a minute. That eviction is also the answer to the
+-- hydration ledger's open thread (a) — why rebuild_browse_list costs 10 s on 2026-08-18
+-- and 419 s on 2026-08-16 with the same query and the same rows.
+--
+-- Composite and partial, deliberately, not a bare (property_id): the second key column
+-- serves the ORDER BY property_id, listing_id so there is no sort node, and NULL
+-- property_id is never queried by this shape.
+--
+-- Batching by a key you have not indexed converts N cheap lookups into one full scan —
+-- drain.py's own comment shows this was written as an optimisation ("Every touched
+-- property's members in ONE read"). Right as a request shape, wrong at the plan level.
+--
+-- HOW THIS WAS ACTUALLY APPLIED, recorded honestly because it is not the usual pattern:
+-- NOT concurrently. Both Supabase MCP paths (`execute_sql` and `apply_migration`) wrap
+-- their payload in a transaction, and `CREATE INDEX CONCURRENTLY` cannot run inside one
+-- (25001). A first attempt through the MCP was killed mid-build by the 120 s
+-- `statement_timeout` and left an INVALID index, which was dropped before this ran.
+--
+-- So it was applied as a BOUNDED blocking build in a verified-quiet window: no
+-- `rebuild_%` / `refresh ... concurrently` active (checked in `pg_stat_activity`), at
+-- 05:25 UTC between the */15 cron bursts, with `lock_timeout='6s'` (queue briefly so
+-- short readers drain, but bound the head-block) and `statement_timeout='300s'` (bound
+-- the SHARE lock if the build stalls). A plain CREATE INDEX takes SHARE: it blocks
+-- writes on this table, not reads, and this table's writers are batch jobs that retry.
+-- Completed well inside the window; measured 21 MB.
+--
+-- The statement below is also the replay/CI record — a no-op against prod where the
+-- index now exists, fast on CI's empty table.
+--
+-- Rollback: DROP INDEX CONCURRENTLY llc_property_listing;  (available out-of-band; it is
+-- only CREATE that the transaction wrapper blocks in an unrecoverable way)
+create index if not exists llc_property_listing
+  on public.listing_location_current (property_id, listing_id)
+  where property_id is not null;

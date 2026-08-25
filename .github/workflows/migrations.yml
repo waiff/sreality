@@ -132,6 +132,22 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_tenant_isolation_live.py -q
 
+      # The location drain's bulk member read was the platform's single largest disk
+      # consumer — 39,488 calls x 69,327 blocks = 2.74 BILLION blocks, because
+      # listing_location_current carried 15 indexes and none led on property_id. The
+      # statement type-checks either way, so the PREPARE sweep above passes with or
+      # without migration 429's index, and the fake connections cannot produce a plan at
+      # all. Only EXPLAIN against a real schema can tell the two apart.
+      #
+      # DB_RAILS_REQUIRED=1 is what makes this a rail rather than a wish: without it a
+      # missing TEST_DATABASE_URL would report `skipped` and this step would stay green
+      # while asserting nothing. With it, a misconfigured lane goes RED.
+      - name: Location drain's bulk read stays index-servable (migration 429)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: pytest tests/test_location_drain_index_plan.py -q
+
       # The /costs rollups are only indexable because their bucket expressions name a
       # zone explicitly — a bare `called_at::date` is STABLE, and Postgres refuses to
       # index it (42P17). Revert either view and the index stops matching silently: the
