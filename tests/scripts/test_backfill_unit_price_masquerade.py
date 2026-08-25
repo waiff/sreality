@@ -132,13 +132,13 @@ class _FakeCursor:
             # `FROM listings l`.
             wanted = set(params["ids"])
             self._rows = [r for r in self._conn.corpus if r[0] in wanted]
+            self._conn.pages.append(len(self._rows))
         elif "FROM listings l" in sql:
-            # Step 1 of the page: ids only, no wide column.
+            # The one-shot id list: every match above the cursor, no LIMIT.
             if self._conn.raise_on_select:
                 raise RuntimeError("statement timeout")
-            after, page = params["after"], params["page"]
-            rows = [r for r in self._conn.corpus if r[0] > after][:page]
-            self._conn.pages.append(len(rows))
+            rows = [r for r in self._conn.corpus if r[0] > params["after"]]
+            self._conn.id_list_queries += 1
             self._rows = [(r[0],) for r in rows]
         elif "UPDATE listings" in sql:
             self._conn.quarantined.append(params["id"])
@@ -158,6 +158,7 @@ class _FakeConn:
         self.corpus = corpus
         self.raise_on_select = raise_on_select
         self.pages: list[int] = []
+        self.id_list_queries = 0
         self.quarantined: list[int] = []
 
     def cursor(self) -> _FakeCursor:
@@ -190,10 +191,13 @@ def _run(monkeypatch, corpus: list[tuple], argv: list[str],
     return conn, []
 
 
-def test_page_size_trims_to_whatever_limit_has_left() -> None:
-    assert mod.page_size(None, 199_000, 5000) == 5000
-    assert mod.page_size(200_000, 199_000, 5000) == 1000
-    assert mod.page_size(200_000, 200_000, 5000) == 0
+def test_the_id_list_is_fetched_exactly_once(monkeypatch) -> None:
+    # One un-LIMITed bitmap scan per run, not one pathological pkey walk per
+    # page. Three payload pages must still mean ONE id query.
+    conn, _ = _run(monkeypatch, _corpus(12), ["--batch-size", "5"])
+    assert mod.main() == 0
+    assert conn.id_list_queries == 1
+    assert conn.pages == [5, 5, 2]
 
 
 def test_the_sweep_walks_past_the_batch_boundary(monkeypatch) -> None:
@@ -232,13 +236,14 @@ def test_a_cancelled_statement_still_reports_counts_and_a_cursor(
     assert "BACKFILL INCOMPLETE" in caplog.text
 
 
-def test_page_ids_query_touches_no_wide_column():
-    # The whole point of the two-statement page. `listings` carries 9.1 GB of
-    # TOAST; naming raw_json here lets the planner detoast ahead of the LIMIT,
-    # which is what cancelled page 8 of the first live dispatch 35,000 rows in.
-    assert "raw_json" not in mod._PAGE_IDS_SQL
-    assert "ORDER BY l.id" in mod._PAGE_IDS_SQL
-    assert "LIMIT" in mod._PAGE_IDS_SQL
+def test_the_id_query_carries_no_limit_and_no_wide_column():
+    # BOTH halves are load-bearing and both were learned from a cancelled run.
+    # raw_json here would let the planner detoast the corpus; a LIMIT here makes
+    # it abandon the source-index bitmap for a listings_pkey walk that scans
+    # ~400k rows to find the first page, and is cancelled at 120s.
+    assert "raw_json" not in mod._ALL_IDS_SQL
+    assert "LIMIT" not in mod._ALL_IDS_SQL
+    assert "ORDER BY l.id" in mod._ALL_IDS_SQL
 
 
 def test_payload_query_is_keyed_by_id_and_carries_no_limit():
@@ -271,3 +276,12 @@ def test_payload_projection_matches_the_positional_unpacking():
     assert names == ["id", "source", "source_id_native", "category_main",
                      "category_type", "property_id", "price_czk", "area_m2",
                      "raw_price_text"]
+
+
+def test_a_limit_equal_to_the_corpus_is_still_a_clean_finish(monkeypatch, caplog):
+    # --limit truncating the id list must read as INCOMPLETE, but a --limit that
+    # happens to equal the population is a complete pass and must not.
+    _run(monkeypatch, _corpus(12), ["--batch-size", "5", "--limit", "12"])
+    with caplog.at_level(logging.WARNING, logger=mod.LOG.name):
+        assert mod.main() == 0
+    assert "BACKFILL INCOMPLETE" not in caplog.text

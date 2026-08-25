@@ -886,10 +886,10 @@
         },
         {
           "name": "batch_size",
-          "description": "Rows per keyset page",
+          "description": "Rows per payload page (blank = the script's own default)",
           "required": false,
           "type": "string",
-          "default": "5000",
+          "default": "",
           "options": null
         },
         {
