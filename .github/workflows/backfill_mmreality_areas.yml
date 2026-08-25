@@ -1,0 +1,80 @@
+name: Backfill mmreality areas (plot stored as the headline)
+
+# One-off, dispatch-only backfill for the per-m² measure program's W2 heal.
+# Before W1, mmreality's own `or` chain read `totalArea or usableArea`, and for a
+# HOUSE mmreality's `totalArea` is the PARCEL — so thousands of active `dum` rows
+# carry a ~905 m² plot in `area_m2` with the real ~130 m² floor area sitting
+# unused in `usableArea`, yielding a median ~5,700 Kč/m² against ~48,000 on every
+# other portal. Re-derives the area columns from the source object ALREADY staged
+# in `raw_json` (NO re-fetch of mmreality) by re-running the fixed parser's own
+# decision, and stamps `area_basis` on every processed row. All four area columns
+# are in the content hash but this writes NO snapshot — correcting our own
+# mis-parse of the SAME staged state is a data-quality fix, and each healed row
+# appends exactly one genuine snapshot on its next successful detail refetch.
+# Idempotent + resumable (each row stamped `raw_json.area_reparse_v2`); rerun
+# until "pending=0". Healed rows enqueue their property so the */5 incremental
+# recompute propagates the corrected denominator into properties + the map matview.
+# NOT a portal ingest workflow, so it carries no `# portal:` tag.
+#
+# The script DEFAULTS TO DRY-RUN: it reports and exits unless `write` is true.
+#
+# Required GitHub secret: SUPABASE_DB_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      write:
+        description: Actually write. Left false, this only reports what would change.
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      limit:
+        description: Max listings processed this run
+        required: false
+        default: "20000"
+        type: string
+      max_seconds:
+        description: Wall-clock budget in seconds (blank = no budget)
+        required: false
+        default: ""
+        type: string
+      verbose:
+        description: Log every individual heal (DEBUG)
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: backfill-mmreality-areas
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Backfill areas
+        run: |
+          ARGS="--limit ${{ inputs.limit || '20000' }}"
+          if [ -n "${{ inputs.max_seconds }}" ]; then ARGS="$ARGS --max-seconds ${{ inputs.max_seconds }}"; fi
+          if [ "${{ inputs.write }}" = "true" ]; then ARGS="$ARGS --write"; fi
+          if [ "${{ inputs.verbose }}" = "true" ]; then ARGS="$ARGS --verbose"; fi
+          python -m scripts.backfill_mmreality_areas $ARGS
