@@ -1248,7 +1248,8 @@ renumber.** Navigate by area:
     `ruian_*` / `area_km2` / `area_ha` are exempt by name on the denominator. And the SQL half is
     a census of `migrations/` **on disk, not of the database**: an object created by dynamic DDL
     inside plpgsql (migrations 283 / 299 / 371 / 376) or one that drifted into production with no
-    numbered create statement (`property_sources_mv`) is unregisterable and unseen. The full list
+    numbered create statement is unregisterable and unseen — `property_sources_mv` was that
+    example until migration 432 dropped it, and the blind spot it demonstrates remains. The full list
     is in the test module's own docstring, and it is the first thing to extend when a new shape
     gets through. A registered site that is NOT legitimate is marked `kind="debt"` and must name
     an owner and a blocker — and `debt` may not mean *reachable*: migration 083's `browse_stats`

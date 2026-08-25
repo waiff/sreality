@@ -102,6 +102,30 @@ jobs:
             psql -v ON_ERROR_STOP=1 -q -f "$f"
           done
 
+      # TEMPORARY — W0b's rule-1 gate. Proves migrations/reverts/432_revert_new_dedup_teardown.sql
+      # actually EXECUTES against a real PG17 carrying the real replayed schema and the real
+      # Supabase roles: the DDL parses and name-resolves, is_platform_admin() resolves, both
+      # unique indexes build, both wrapper views compile against the recreated matviews, and the
+      # grants apply. It does NOT prove rows come back — for four of the five objects there are
+      # no rows to come back, and the fifth's rows are preserved as real rows in
+      # dedup_funnel_resolutions_archive by the forward migration itself.
+      #
+      # The replay applies `ls migrations/*.sql` (not recursive), so reverts/ is never applied
+      # in the normal chain — this step is the only thing that executes it. DELETE THIS STEP
+      # BEFORE MERGE; the run URL goes in the PR body. `main` must not carry a step that
+      # recreates objects it just dropped.
+      - name: "TEMP (delete before merge): execute the W0b rollback once"
+        run: |
+          set -euo pipefail
+          psql -v ON_ERROR_STOP=1 -f migrations/reverts/432_revert_new_dedup_teardown.sql
+          psql -v ON_ERROR_STOP=1 \
+            -c "select 'dedup_funnel_resolutions_public'::regclass,
+                       'dedup_llm_cost_by_category_public'::regclass,
+                       'property_sources_mv'::regclass;"
+          echo ">>> rollback executed and all three objects resolve; re-dropping so the"
+          echo ">>> rest of the lane sees the post-teardown schema"
+          psql -v ON_ERROR_STOP=1 -f migrations/432_new_dedup_teardown.sql
+
       - name: Sanity check (key relations exist + queryable)
         run: |
           psql -v ON_ERROR_STOP=1 \

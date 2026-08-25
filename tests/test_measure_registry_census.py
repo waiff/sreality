@@ -44,8 +44,9 @@ THE NAMED BLIND SPOTS — real, and listed so nobody has to rediscover them:
   * The SQL half is a census of `migrations/` ON DISK, not of the database. An
     object created by dynamic DDL inside plpgsql (`execute 'create …'`, e.g.
     migrations 283 / 299 / 371 / 376), or one that drifted into production with
-    no create statement in any numbered file (`property_sources_mv` today), is
-    unregisterable and unseen.
+    no create statement in any numbered file, is unregisterable and unseen.
+    (`property_sources_mv` was that example until migration 432 dropped it as a
+    61 MB orphan — the CLASS of blind spot is unchanged.)
   * The census is VALUE-BLIND: it counts occurrences, never compares them. The
     two tests at the foot of this file are the exception, and they exist because
     counting could not tell a verbatim copy of a unit from a wrong one.

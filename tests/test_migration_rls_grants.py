@@ -315,7 +315,7 @@ _ADMIN_ONLY_RELATIONS = frozenset({
     "scrape_runs", "worker_heartbeats",
     "health_summary_mv", "portal_health_mv", "scraper_health_checks_mv",
     "category_trends_mv", "image_storage_overview_mv", "snapshot_churn_24h_mv",
-    "dedup_funnel_resolutions_mv", "dedup_llm_cost_by_category_mv",
+    "dedup_funnel_resolutions_archive",
     "images_failure_overview_mv",
 })
 

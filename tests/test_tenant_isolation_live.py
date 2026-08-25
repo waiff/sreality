@@ -100,7 +100,7 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
     "scrape_runs", "worker_heartbeats",
     "health_summary_mv", "portal_health_mv", "scraper_health_checks_mv",
     "category_trends_mv", "image_storage_overview_mv", "snapshot_churn_24h_mv",
-    "dedup_funnel_resolutions_mv", "dedup_llm_cost_by_category_mv",
+    "dedup_funnel_resolutions_archive",
     "images_failure_overview_mv",
 ]
 
@@ -781,8 +781,7 @@ def test_tenant_view_scopes_both_ways(
 # independent of RLS/security_invoker/ownership.
 _ADMIN_GATED_VIEWS: list[str] = [
     "data_quality_by_source", "dedup_engine_flow_public", "dedup_engine_runs_public",
-    "dedup_funnel_resolutions_public", "dedup_label_events",
-    "dedup_llm_cost_by_category_public", "dedup_queue_snapshot_public",
+    "dedup_label_events", "dedup_queue_snapshot_public",
     "dedup_recency_backlog", "dedup_scan_state_public",
     "dedup_vision_bakeoff_results_public", "detail_latency_recent",
     "image_border_cases_public", "image_tag_annotations_public",
@@ -1004,15 +1003,12 @@ def test_admin_ops_views_deny_non_admin_allow_admin(
    sees zero rows through every admin-gated view/function; promoting that same user
    to `admins` makes them see through it (may still be zero rows if the table itself
    is empty in this schema-replay DB -- the point is no permission/relation error,
-   not a specific count). Three objects (dedup_funnel_resolutions_public,
-   dedup_llm_cost_by_category_public, images_failure_overview()) wrap a materialized
-   view that a fresh schema-replay never refreshes (production refreshes all three
-   on a cron) -- querying an unrefreshed matview errors regardless of caller, so
-   refresh them here to match production instead of asserting on that unrelated
-   failure mode."""
+   not a specific count). One object (images_failure_overview()) wraps a materialized
+   view that a fresh schema-replay never refreshes (production refreshes it on a
+   cron) -- querying an unrefreshed matview errors regardless of caller, so refresh
+   it here to match production instead of asserting on that unrelated failure
+   mode."""
     with svc.cursor() as cur:
-        cur.execute("REFRESH MATERIALIZED VIEW dedup_funnel_resolutions_mv")
-        cur.execute("REFRESH MATERIALIZED VIEW dedup_llm_cost_by_category_mv")
         cur.execute("REFRESH MATERIALIZED VIEW images_failure_overview_mv")
         # Positive control: without a seeded row behind each view, the non-admin
         # `count(*) == 0` below passes on an empty schema replay whether or not the
@@ -1110,8 +1106,6 @@ def test_no_anon_write_grants(svc: Any) -> None:
 # Deliberately absent: properties_map_mv, price_stat_choropleth, rent_map_choropleth
 # — the SPA reads those three directly as shared-market data.
 _ADMIN_GATED_MATVIEWS: list[str] = [
-    "dedup_funnel_resolutions_mv",
-    "dedup_llm_cost_by_category_mv",
     "images_failure_overview_mv",
     "health_summary_mv",
     "health_mv_refresh_stamp",

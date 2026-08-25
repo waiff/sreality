@@ -395,7 +395,8 @@ trust — worse than no rail, because a green run reads as proof. What remains u
 purpose and in writing: closed-vocabulary spelling (`price_czk / sqm`, `amount / area_m2`, a unit
 assembled at runtime), a division routed through a helper, and the fact that the SQL half is a
 census of `migrations/` **on disk, not of the database** — dynamic DDL inside plpgsql (migrations
-283/299/371/376) and the `property_sources_mv` drift are unregisterable and unseen. Registry as
+283/299/371/376) and un-numbered drift are unregisterable and unseen (`property_sources_mv`
+was the standing example until migration 432 dropped it). Registry as
 hardened: **43 site-arms / 102 occurrences**, ~1.1 s.
 
 ### W9 — The plausibility gate
