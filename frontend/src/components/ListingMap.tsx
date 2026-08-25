@@ -1961,7 +1961,12 @@ function PriceMetricControls({
 }) {
   const opts: ReadonlyArray<{ value: PriceMetric; label: string }> = [
     { value: 'total', label: 'Celkem' },
-    { value: 'per_m2', label: PPM2_UNIT.sale },
+    /* A basis-FREE word, deliberately not PPM2_UNIT.sale. This control picks a
+       metric, not a basis: the default Browse cohort is `pronajem`, so borrowing
+       the sale unit would print "Kč/m²" on a button whose every pin reads
+       "Kč/m²/měs". It would also couple the button to the sale unit string, so
+       editing that string later would silently rewrite this label. */
+    { value: 'per_m2', label: 'Za m²' },
   ];
   const hint = labelsVisible
     ? 'Popisky pinů: celková cena nebo cena za m²'
