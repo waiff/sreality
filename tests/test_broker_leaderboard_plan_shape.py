@@ -116,18 +116,26 @@ def test_firms_is_touched_above_the_limit(plan):
     )
 
 
-def test_brokers_is_reached_by_the_partial_index_below_the_limit(plan):
-    """The activity semi-join runs inside the ranking CTE, on migration 434's index.
+def test_the_active_set_resolves_once_below_the_limit(plan):
+    """The activity filter runs inside the ranking CTE, resolved ONCE.
 
-    RED by: dropping `brokers_active_id_idx`, or moving the semi-join above the LIMIT.
+    A `CTE Scan on active_brokers` below the Limit is the signature of the MATERIALIZED
+    form. If the CTE inlines instead, `brokers` appears directly under the join and the
+    planner probes it once per candidate row — measured 3,942 loops / 11,826 blocks on a
+    single region chip, i.e. the nested loop this wave exists to delete.
+
+    Deliberately NOT asserted: which access method reaches `brokers`. A sequential scan of
+    1,776 pages is the CORRECT plan here — an index-only scan on this table pays heavy heap
+    fetches because `brokers` is only ~39% all-visible (a rollup updates every active broker
+    every 10 minutes), which is why the originally-designed partial index was measured and
+    dropped.
+
+    RED by: deleting `as materialized` from the CTE.
     """
     limit = _find_limit(plan)
-    broker_nodes = [n for n in _nodes(limit) if n.get("Relation Name") == "brokers"]
-    assert broker_nodes, (
-        "`brokers` is not reached below the Limit — the activity semi-join is not inside "
-        "the ranking CTE, which is the under-fill defect:\n" + json.dumps(limit, indent=2)
-    )
-    assert not any(n["Node Type"] == "Seq Scan" for n in broker_nodes), (
-        "the activity semi-join seq-scans brokers (1,776 blocks) — migration 434's "
-        f"brokers_active_id_idx is missing: {[n['Node Type'] for n in broker_nodes]}"
+    below = list(_nodes(limit))
+    assert any(n["Node Type"] == "CTE Scan" and n.get("CTE Name") == "active_brokers"
+               for n in below), (
+        "no `CTE Scan on active_brokers` below the Limit — the active set is not being "
+        "resolved once:\n" + json.dumps(limit, indent=2)
     )

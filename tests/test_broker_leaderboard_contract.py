@@ -1,4 +1,4 @@
-"""Offline contracts W4 must not break (migrations 434, 435).
+"""Offline contracts W4 must not break (migration 435).
 
 Three things about the broker leaderboard are load-bearing, invisible in the normal test
 suite, and would each fail only in production:
@@ -12,12 +12,11 @@ suite, and would each fail only in production:
     `primary_phone`, a DROP+CREATE silently re-exposes broker PII to `anon` — undoing
     migration 299. The existing rule-4 gate scans for literal `grant` statements and cannot
     see a default-ACL restoration.
-  * The index in 434 must stay a BARE `(id)` partial index. `_BROKER_ROLLUP` UPDATEs 17
-    columns on every active broker every 10 minutes, so an INCLUDE payload of any
-    rollup-written column breaks HOT-update eligibility 144 times a day and the index bloats
-    continuously — decaying the win invisibly. A PII-shaped payload would additionally put a
-    second physical copy of 22,760 emails and phones on disk, outside the A6 perimeter's
-    view enumeration.
+  * The active-broker set must be resolved ONCE, via `AS MATERIALIZED`. Written as an
+    inlinable `IN (select ... from brokers)`, the planner probes `brokers` once per
+    candidate row on every geo shape — 3,942 loops and 11,826 blocks on a single region
+    chip — reproducing the exact nested loop this wave exists to delete. Nothing else in
+    CI can see that: the rows returned are identical either way.
 
 All offline text assertions — they run in the normal `pytest -q` lane. The plan-shape half
 lives in `tests/test_broker_leaderboard_plan_shape.py`.
@@ -36,7 +35,6 @@ from tests.test_migration_rls_grants import _statements, _strip_comments
 _ROOT = Path(__file__).resolve().parent.parent
 _MIGRATIONS = _ROOT / "migrations"
 
-_INDEX_MIGRATION = _MIGRATIONS / "434_brokers_active_id_index.sql"
 _FN_MIGRATION = _MIGRATIONS / "435_broker_leaderboard_deferred_hydration.sql"
 _OUTREACH = _ROOT / "api" / "outreach.py"
 
@@ -151,30 +149,6 @@ def test_the_function_migration_replaces_and_reasserts_the_revokes():
     )
 
 
-# --- the index shape -------------------------------------------------------
-
-
-def test_the_active_broker_index_is_bare_and_partial():
-    """No INCLUDE payload, ever.
-
-    RED by: adding `include (display_name)` or any `*_count` to 434.
-    """
-    statements = [
-        " ".join(s.split()).lower()
-        for s in _statements(_INDEX_MIGRATION.read_text())
-        if "create index" in s.lower()
-    ]
-    assert len(statements) == 1, f"434 should create exactly one index, found {len(statements)}"
-    stmt = statements[0]
-    assert "on public.brokers (id)" in stmt, f"the key list must be exactly (id): {stmt}"
-    assert "where status = 'active'" in stmt, f"the index must stay partial: {stmt}"
-    assert "include" not in stmt, (
-        "no INCLUDE payload on brokers: _BROKER_ROLLUP UPDATEs 17 columns every 10 minutes, "
-        "so any rollup-written payload column breaks HOT 144 times a day — and a "
-        f"PII-shaped payload would breach the broker-PII constraint: {stmt}"
-    )
-
-
 # --- the tiebreaker --------------------------------------------------------
 
 
@@ -234,8 +208,26 @@ def test_the_activity_filter_is_inside_the_aggregating_cte():
     body = _sql(_FN_MIGRATION)
     fn = body[body.index("as $function$") : body.index("$function$;")]
     semi_at = fn.lower().index("where b.status = 'active'")
+    join_at = fn.lower().index("join active_brokers ab on ab.id = r.broker_id")
     limit_at = fn.lower().index("limit greatest(1, least(p_limit, 2000))")
-    assert semi_at < limit_at, (
-        "the activity semi-join must be evaluated BEFORE the LIMIT, inside `agg` — "
-        "otherwise the page silently under-fills"
+    assert semi_at < join_at < limit_at, (
+        "the active-broker set must be resolved and joined BEFORE the LIMIT — otherwise "
+        "the page silently under-fills when a merged_away broker holds stats rows"
+    )
+
+
+def test_the_active_set_is_materialized():
+    """`AS MATERIALIZED` is load-bearing, not style.
+
+    Without it the CTE inlines and the planner probes `brokers` once per candidate row:
+    measured 3,942 loops / 11,826 blocks on a single region chip, i.e. it reproduces the
+    nested loop W4 exists to delete. With it, the active set resolves once (a sequential
+    1,776-block scan) and hash-joins: 22,952 -> 2,479 blocks.
+
+    RED by: deleting `as materialized`.
+    """
+    fn = _sql(_FN_MIGRATION)
+    assert "active_brokers as materialized" in fn.lower(), (
+        "the active-broker CTE lost `AS MATERIALIZED` — the planner will inline it and "
+        "probe brokers once per candidate row, restoring the nested loop"
     )

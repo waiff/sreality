@@ -858,7 +858,7 @@ Same ledger, same rules, plus what this build's evidence earned:
 | W1b | Item 4 — 36 view/function wraps (uniform spelling) | — | |
 | W2 | Item 1a — `_check_daily_cost` spelling | [#1163](https://github.com/waiff/sreality/pull/1163) | ✅ merged |
 | W3 | Item 1b — hour rollup + watermark + F5-minimal registry | — | |
-| W4 | Item 3 — broker deferred join | — | |
+| W4 | Item 3 — broker deferred join (mig 435) | [#1171](https://github.com/waiff/sreality/pull/1171) | open |
 | W5 | Item 2 — city-quality, keyed on `obec_id` | — | |
 | W6 | Item 5 — map cluster RPC | — | |
 | W7 | Retirements + registry completion (destructive gate) | — | |
@@ -1048,6 +1048,84 @@ both `is_platform_admin()` and `current_account_ids()`**, which forces every RLS
 on these 9 tables to run serially. Marking them PARALLEL SAFE would likely dwarf the hoist.
 Both are planner inputs and do not belong in a security replay whose whole discipline is
 verbatim-with-wrapper.
+
+### W4 — the leaderboard ranks before it hydrates (migration 435)
+
+Today the function joins `brokers_public` to the **whole** aggregated candidate set, sorts,
+and only then takes the top 100. **Between 87% and 99.2% of every joined-and-decorated row
+is discarded by the LIMIT.**
+
+| shape | before | after | factor |
+| --- | --- | --- | --- |
+| default byt/prodej | 3,140 | 3,378 | **0.93× — neutral, honestly worse** |
+| single region chip | 22,952 | **2,479** | **9.3×** |
+| multi-chip geo | 38,405 | **2,774** | **13.8×** |
+| firm chip | 4,227 | **2,375** | **1.8×** |
+
+Equivalence verified live on the default shape: **100/100 rows, full overlap, zero value
+mismatches, zero inactive brokers leaked.**
+
+**The default does not improve, and that is the honest result.** Its cost was never the
+nested loops — it was two sequential scans, and resolving the active set still needs one of
+them. The wins are on the chip shapes, which are the page's headline affordance.
+
+**The production baseline is `pg_stat_statements`, not those figures:** 42 calls, **5,390
+blocks/call**, mean 1,081 ms — with **65% `shared_read`** and 20,777 buffers written back.
+This RPC evicts; the warm EXPLAINs are a lower bound.
+
+**Three of the proposal's four shape figures were wrong**, from two systematic errors. Its
+937-block planning number was a **cold-backend artifact** (warm: 42); its `dirtied=212 /
+written=942` are hint-bit writeback noise and are **zero** warm. The region chip is
+**22,952**, not 14,285 — understated by 8,667 blocks. The firm chip is 4,227, not 5,859.
+Multi-chip, the page's worst shape, was never measured at all.
+
+**The diagnosis was right but mis-weighted.** The 71,364-discarded-index-entries finding is
+exact (`Rows Removed by Filter: 71423` today) — but that waste is only ~1,032 of the
+default's blocks. The dominant cost was the display join.
+
+#### The design's index was measured and REMOVED — a real reversal
+
+The proposal specified `create index brokers_active_id_idx on brokers (id) where
+status='active'`, arguing the semi-join's build side would otherwise fall back to a
+1,776-block seq scan. It was built, measured, and **dropped**:
+
+| | default | region chip |
+| --- | --- | --- |
+| with the index | **5,725** | 11,899 |
+| without it | 3,378 | 12,529 |
+| without it, `AS MATERIALIZED` | **3,378** | **2,479** |
+
+The index's only use is an **index-only scan**, and `brokers` is **696 of 1,776 pages
+all-visible — 39% — fifteen minutes after an autovacuum**, because `_BROKER_ROLLUP` updates
+every active broker every 10 minutes and 60% of those updates are non-HOT. So the scan paid
+**18,905 heap fetches / 4,123 blocks** where a sequential scan costs 1,776. **The visibility
+map is a property of the table, not the index**, so no index can escape it. Hazard H-E was
+right in kind and understated by 5×.
+
+#### What actually fixed it: `AS MATERIALIZED`, and it is the doctrine
+
+Written as an inlinable `IN (select ... from brokers where status='active')`, the planner
+probes `brokers` **once per candidate row** on every geo shape — 3,942 loops, 11,826 blocks
+on a single region chip. That is hazard H-F materialising: *the wave reproducing the very
+nested loop it exists to delete.*
+
+`AS MATERIALIZED` forces the active-broker set to resolve **once** and be hash-joined. Which
+is precisely the Cardinality Doctrine's own sentence: **an expression that does not vary
+across the rows being scanned is evaluated once, not once per row.** The fix was not a new
+index; it was making the planner honour the invariant.
+
+#### The part that is not an optimisation
+
+`status='active'` moves **into** the ranking CTE. Leaving it above the LIMIT lets a
+`merged_away` broker holding surviving stats rows consume a top-N slot and be discarded —
+an under-filled page, and a shrunken `outreach` pool. **LIVE:** 5 such brokers exist now,
+and of 19,200 merged-away brokers **717 carry a metric at or above the default cut of 26**
+(44 above the all-categories cut, max 1,277). The matview refreshes only on the daily sweep
+(mean gap 25.2 h, max 65.1 h) while inactivation is continuous — the two failure modes are
+**correlated**.
+
+The tiebreaker ships here too: **seven brokers tie at the default limit-100 boundary**, and
+once the LIMIT is under the join an unstable sort decides *membership*, not position.
 
 ### STOP 1 — the T0 baseline, captured 2026-08-25 05:37 UTC
 

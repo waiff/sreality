@@ -81,7 +81,13 @@ as $function$
   -- doubling its counts. Keeping one GROUP BY above the union also preserves rule 15's
   -- existing cross-region double-count EXACTLY as it is today — correcting that changes
   -- published numbers and is an explicit non-goal of this build.
-  with raw as (
+  with active_brokers as materialized (
+    select b.id
+    from brokers b
+    where b.status = 'active'
+      and (p_firm_ids is null or b.primary_firm_id = any(p_firm_ids))
+  ),
+  raw as (
     -- arm A (national): fires only when no geo chip is set.
     select s.broker_id, s.listing_count, s.property_count,
            s.active_listing_count, s.active_property_count
@@ -130,8 +136,17 @@ as $function$
       and (p_category_type is null or s.category_type = p_category_type)
   ),
 
-  -- ONE semi-join carries BOTH invariants. Two separate pushdowns would scan `brokers`
-  -- twice (~1,500 blocks instead of ~764); the combined predicate is logically identical.
+  -- ONE resolution of the active set, carrying BOTH invariants. Two separate pushdowns
+  -- would scan `brokers` twice; the combined predicate is logically identical.
+  --
+  -- `AS MATERIALIZED` IS LOAD-BEARING AND WAS ARRIVED AT BY MEASUREMENT, NOT STYLE.
+  -- Written as an inlinable `IN (select ... from brokers where status='active')`, the
+  -- planner probes `brokers` ONCE PER CANDIDATE ROW on every geo shape — 3,942 loops on a
+  -- single region chip, 11,826 blocks, i.e. it reproduces the very nested loop this wave
+  -- exists to delete. MATERIALIZED forces the active set to resolve ONCE (a sequential
+  -- 1,776-block scan) and be hash-joined. That IS the cardinality doctrine: the active-broker
+  -- set does not vary across the rows being scanned, so it is evaluated once, not per row.
+  -- Measured: single region chip 22,952 -> 2,479 blocks.
   --
   -- It keys on broker_id — the GROUP BY key — so evaluating it in WHERE, before the
   -- aggregate, is exactly equivalent to evaluating it after: every row of a group shares
@@ -152,12 +167,7 @@ as $function$
            sum(r.active_listing_count)::bigint   as active_listing_count,
            sum(r.active_property_count)::bigint  as active_property_count
     from raw r
-    where r.broker_id in (
-            select b.id
-            from brokers b
-            where b.status = 'active'
-              and (p_firm_ids is null or b.primary_firm_id = any(p_firm_ids))
-          )
+    join active_brokers ab on ab.id = r.broker_id
     group by r.broker_id
   ),
 
