@@ -79,23 +79,16 @@ DEFAULT_SYSTEM_PROMPT_FALLBACK = (
 # the hard guards; this is just an early-warning log line.
 DEFAULT_DAILY_COST_WARN_USD = 5.0
 
-# Spelled to MATCH llm_calls_utc_day_rollup_idx (migration 421) EXACTLY. `called_at::date`
-# is STABLE — it depends on the reading session's TimeZone — so Postgres cannot use that
-# index for it, and this ran as a Parallel Seq Scan discarding 293,562 rows for 10, on
-# every recorded LLM call, inside a try/except that swallowed the cost. Measured warm:
-# 9,665 -> 8 blocks, 3,310 -> 13.6 ms.
+# The zone lives in the DATABASE now, in exactly three places (migration 437): the daily
+# view's day expression, llm_cost_hour_rollup_prague_day_idx, and llm_cost_today_usd's own
+# body. This constant deliberately carries NO date arithmetic and NO zone constant, so the
+# guard's "today" can never drift from the page's "today" — a drift that changes no number
+# anywhere and is therefore invisible to every other test.
 #
-# The zone is UTC here and ONLY here, deliberately: the day boundary this compares against
-# is the same one migration 421's index is built on. The page's displayed day is a separate
-# question with its own declared zone.
-#
-# Module-level so the SQL-correctness CI gate discovers it (it PREPAREs discovered SQL
-# constants; an inline string in a method body is invisible to it) and so the plan rail
-# can assert against the real statement rather than a copy.
-DAILY_COST_TODAY_SQL = (
-    "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls "
-    "WHERE (called_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date"
-)
+# Stays module-level so the SQL-correctness gate (tests/test_sql_schema_prepare.py)
+# discovers and PREPAREs it — which is what turns a missing or unprivileged
+# llm_cost_today_usd() into a RED CI run rather than a guard that silently never fires.
+DAILY_COST_TODAY_SQL = "SELECT public.llm_cost_today_usd()"
 
 
 def provider_for_model(model: str) -> str:
@@ -323,7 +316,10 @@ class LLMClient:
                 cur.execute(DAILY_COST_TODAY_SQL)
                 row = cur.fetchone()
         except Exception as exc:
-            LOG.debug("daily cost check failed: %s", exc)
+            # WARNING, not DEBUG: a missing or unprivileged llm_cost_today_usd() degrades
+            # this guard to "never warns", and every other signal stays green — the number
+            # it would have reported is simply never computed.
+            LOG.warning("daily cost check failed: %s", exc)
             return
         total = float(row[0]) if row and row[0] is not None else 0.0
         prior = total - just_recorded

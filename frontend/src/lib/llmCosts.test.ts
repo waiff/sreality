@@ -4,11 +4,17 @@ import {
   buildHourlySeries,
   colorTokenFor,
   computeKpis,
+  COST_DAY_TZ,
   summarizeByFeature,
   summarizeByModel,
   type LlmCostDailyRow,
 } from './llmCosts';
 
+/* Midday UTC maps to the same civil date in COST_DAY_TZ, so every day-string
+ * assertion below is zone-stable and survived the UTC→Prague day cutover
+ * (migration 437) unchanged. The cases that pin the NEW behaviour are the two
+ * at the bottom, which sit deliberately inside the window where the two zones
+ * disagree. */
 const NOW = new Date('2026-07-07T12:00:00Z');
 
 const row = (over: Partial<LlmCostDailyRow>): LlmCostDailyRow => ({
@@ -145,5 +151,37 @@ describe('buildHourlySeries', () => {
     const h12 = s.data.find((d) => d.bucket === '2026-07-07T12:00:00.000Z')!;
     expect(h12.a).toBe(9);
     expect(h12.other).toBe(1);
+  });
+});
+
+/* Migration 437 turned `llm_cost_daily_public.day` from a UTC calendar day into
+ * a COST_DAY_TZ civil day. These two cases are the ones that go red if the
+ * client ever drifts back to UTC day arithmetic; the whole suite must also stay
+ * green under a non-UTC TZ (CI runs it once as TZ=Asia/Tokyo). */
+describe('day keys are civil days in COST_DAY_TZ', () => {
+  it('is pinned to the zone the daily view groups by', () => {
+    expect(COST_DAY_TZ).toBe('Europe/Prague');
+  });
+
+  it('picks the Prague day for "Today" during the nightly two-hour overlap', () => {
+    // 22:30 UTC on the 7th is already 00:30 on the 8th in Prague (CEST, +2).
+    // On UTC day keys the tile would show a day that ended half an hour ago and
+    // hide the spend actually accruing — silently, for two hours every night.
+    const now = new Date('2026-07-07T22:30:00Z');
+    const rows = [
+      row({ day: '2026-07-08', cost_usd: 3 }), // the Prague day now in progress
+      row({ day: '2026-07-07', cost_usd: 11 }), // the UTC day still open
+    ];
+    expect(computeKpis(rows, now).today).toBe(3);
+  });
+
+  it('steps the civil date across the 25-hour DST day, not the instant', () => {
+    // Prague falls back 03:00 CEST -> 02:00 CET on 2026-10-25, so this instant
+    // is 23:30 local ON the 25th. Subtracting 24 h from the INSTANT lands at
+    // 00:30 CEST on the 25th again — the same civil day — which would collapse
+    // two of these three keys into one.
+    const now = new Date('2026-10-25T22:30:00Z');
+    const s = buildDailySeries([], now, 3);
+    expect(s.data.map((d) => d.day)).toEqual(['2026-10-23', '2026-10-24', '2026-10-25']);
   });
 });

@@ -853,13 +853,13 @@ Same ledger, same rules, plus what this build's evidence earned:
 | --- | --- | --- | --- |
 | RN | `verify_pipeline` credit-outage matcher | [#1161](https://github.com/waiff/sreality/pull/1161) | ✅ merged |
 | W0a | F1 location index + F2 autovacuum (migs 429, 430) | [#1164](https://github.com/waiff/sreality/pull/1164) | ✅ merged |
-| W0b | F3 teardown — 5 objects + jobid 8 (mig 432) | [#1167](https://github.com/waiff/sreality/pull/1167) | open |
+| W0b | F3 teardown — 5 objects + jobid 8 (mig 432) | [#1167](https://github.com/waiff/sreality/pull/1167) | ✅ merged |
 | W1a | Item 4 — admin gate hoist, 10 policies (mig 431) | [#1166](https://github.com/waiff/sreality/pull/1166) | ✅ merged |
 | W1b | Item 4 — 36 view/function wraps (uniform spelling) | — | |
 | W2 | Item 1a — `_check_daily_cost` spelling | [#1163](https://github.com/waiff/sreality/pull/1163) | ✅ merged |
-| W3 | Item 1b — hour rollup + watermark + F5-minimal registry | — | |
+| W3 | Item 1b — hour rollup + watermark + F5-minimal registry (mig 437) | [#1174](https://github.com/waiff/sreality/pull/1174) | ✅ merged |
 | W4 | Item 3 — broker deferred join (mig 435) | [#1171](https://github.com/waiff/sreality/pull/1171) | ✅ merged |
-| W5 | Item 2 — city-quality, keyed on `obec_id` (mig 436) | #1172 | open |
+| W5 | Item 2 — city-quality, keyed on `obec_id` (mig 436) | [#1173](https://github.com/waiff/sreality/pull/1173) | ✅ merged |
 | W6 | Item 5 — map cluster RPC | — | |
 | W7 | Retirements + registry completion (destructive gate) | — | |
 
@@ -1210,6 +1210,109 @@ reads the `_public` views deliberately, and a rail asserts it.
 Wire shape **verified against live PostgREST** rather than assumed: `RETURNS SETOF bigint`
 comes back as a bare JSON array of numbers (`[584495, 554782, …]`), not an array of objects.
 
+### W3 — the cost page stops re-aggregating its source (migration 437)
+
+Store **one** grain (the UTC hour), derive the day at read time, serve reads as
+`[closed hours from the rollup] UNION ALL [the open edge, live from llm_calls]`.
+
+| Read | before | after | |
+| --- | --- | --- | --- |
+| `llm_cost_daily_public`, 35 days | 10,439 blocks / 90 rows | **47** | **222×** |
+| `llm_cost_hourly_public`, 49 hours | ~1,250 (July-shape) | **27** | see caveat |
+
+Plan confirmed by node name before the block claim was quoted (amended Corollary D):
+`Index Cond` on `llm_cost_hour_rollup_prague_day_idx` — so the day predicate really does
+push through the outer GROUP BY and distribute into the UNION ALL branches — a `One-Time
+Filter: is_platform_admin()` above the `Append`, and the watermark resolved by **InitPlan**
+in both branches rather than per row.
+
+**The earn-test was run first and precompute won on the numbers.** A pure rewrite exists:
+bounding the SPA's one-sided range flips the plan from an ordered Index Scan feeding
+GroupAggregate to a Bitmap Heap Scan, 11,885 → 4,033 blocks, free. That is 2.95× and still
+~200× above the rows-on-screen floor, so it does not earn its way out of state. It is also
+**superseded, not additive** — after this migration no `/costs` query scans `llm_calls`
+unbounded — so it was deliberately **not** also shipped, and 2.95× is not counted here.
+
+#### Equivalence, proven rather than argued
+
+Prague-day re-aggregation from UTC hour buckets is **exact**. Over all 293,561 rows the
+rewritten daily view and a direct Prague-day aggregate of `llm_calls` produce **332 groups
+each with zero rows in either symmetric difference**, cost column included; the hourly view
+is likewise byte-identical to migration 421's body. `llm_cost_today_usd()` returns the same
+value the page shows. Prague's offsets over 2024→2027 are exactly {+1h, +2h} with no
+fractional-hour sample, so a Prague day boundary always lands on a UTC hour boundary.
+
+#### Three defects in the commissioned design, each caught by measurement
+
+- **`GREATEST` vs `'-infinity'` — self-contradictory.** The design said the backfill *is*
+  `refresh_llm_cost_rollups('-infinity')` **and** that the window is
+  `max(p_from, complete_through - 3h)`. `greatest('-infinity', …)` discards `'-infinity'`,
+  so the backfill and every "full repair" would have been silent no-ops while the
+  idempotency rail passed asserting nothing. Shipped as `LEAST` with an `'infinity'`
+  coalesce, which additionally makes it structurally impossible to *shrink* the re-scan.
+- **Double-rounding.** The design left `cost_usd numeric` unspecified as rounded or not.
+  Storing the rounded hourly value and summing 24 of them is sum-of-rounds, not
+  round-of-sum: measured live, that corrupts **74 of 332 daily groups**. The rollup stores
+  the exact sum and each view rounds once, at the outer projection. The rail asserts the
+  74 — a negative control, so it proves it is testing the thing that would break.
+- **The state table as a JOIN is a single point of total failure.** An inner join to the
+  singleton watermark row returns **zero rows from both views** if that row is ever missing
+  — `/costs` goes blank with nothing failing. Shipped as an uncorrelated scalar subquery
+  with a `'-infinity'` fallback: a missing row degrades to *today's exact numbers at
+  today's cost*, and being uncorrelated it renders as the InitPlan above.
+
+#### A registry column that could not ever be written
+
+The design gave `derived_artifacts` a `last_error` column stamped by an
+`exception when others then update …; raise;` handler, published as `has_error`.
+**Verified live on this instance: a handler's write cannot survive its own re-raise** — the
+re-raise unwinds the subtransaction the handler ran in, and the probe table came back empty.
+So `last_error` could only ever be NULL and `has_error` could only ever read **false —
+including during a total outage**. That is the same defect class as migration 432's guard
+that could not fire, and a health signal that cannot fire is worse than none because the
+panel renders it green. **Both columns were cut**, along with `last_started_at` (same
+transaction, same fate). The durable failure record is `cron.job_run_details`; the published
+signal is `last_succeeded_at` against `staleness_budget`, which stays correct *because* it
+rolls back with a failed run.
+
+#### The union's correctness is a CHECK constraint, not a habit
+
+The split is exact only if the watermark lands on a UTC hour boundary, because
+`bucket_hour = floor_hour(called_at)`. Off-boundary it silently double-counts or drops the
+straddling hour, forever, with nothing failing. `date_trunc(text, timestamp)` is IMMUTABLE,
+so this is enforceable — one careless `update … set complete_through = now()` is now rejected
+by the database rather than by a code review.
+
+#### Corrections to the recon that sized this wave
+
+- **"blocks ≈ 0.13–0.17 × calls" is false.** Observed 0.042–0.203 across seven warm
+  measurements, not one inside the stated band. The ratio is a property of the **plan**, not
+  the data: an ordered Index Scan feeding GroupAggregate revisits heap pages at ~0.20
+  blk/call; a Bitmap Heap Scan de-duplicates the page list at ~0.042, which is just the
+  heap-page floor.
+- **The rollup is sized against the surviving workload, not the July peak.** 71.4% of
+  `llm_calls` history came from two permanently retired workloads — the three `compare_*`
+  dedup feeders stopped dead 2026-08-06 at the teardown (151,249 calls), and
+  `score_listing_condition` stopped 06-18 (58,436). The surviving workload's worst-ever
+  35-day window is **307 hour-groups, not 2,565** — 8.4× smaller than the figure the design
+  sized against. Any later retention or partitioning decision must not use that peak.
+- **Migration 421's two indexes do NOT both go dead.** The design predicted zero scans for
+  both. Measured: `llm_calls_utc_hour_rollup_idx` is still the access path for the hourly
+  view's live branch (the SPA's `bucket` predicate pushes into it). Only
+  `llm_calls_utc_day_rollup_idx` goes idle. Both were kept regardless — 4.5 MB total, and the
+  revert depends on them.
+
+Cost of the new `pg_cron` job: 96 ticks/day at ~179 blocks each (July-shape) ≈ **5
+job-seconds/day**, or **0.014%** of the 34,399 s/day W0b returned. Scheduled `4,19,34,49`,
+which collides with nothing on the live board — a plain `*/15` would have landed on jobid 6,
+the instance's heaviest and most fragile job.
+
+**Measurement caveat, stated because every "current" reading understates the steady state:**
+the OpenAI credit outage since 2026-08-15 has driven `llm_calls` to ~59 rows/day against
+~1,000/day before it. The 27-block hourly figure is measured in that state; the July-shape
+comparison (~1,250 → ~70–100) is the honest one for the hourly grain. The daily 10,439 → 47
+is not affected, because its cost was always in the rollup scan, not the live edge.
+
 ### STOP 1 — the T0 baseline, captured 2026-08-25 05:37 UTC
 
 Captured **at the moment F1 landed**, because the "before" window is the *past* 24 h and
@@ -1280,3 +1383,14 @@ One line each: flag · trigger · evidence needed to close · filing wave.
   `scripts/ingest_boundaries.py` (whose `wipe_table` depends on the FK's `ON DELETE SET NULL`).
   Enforcement ships instead as the migration's DO block + the live rail · **trigger:** an
   `ingest_boundaries` restructure to load-into-staging + swap · filed W5.
+- **`llm_calls_utc_day_rollup_idx` (2,224 kB) goes to zero scans under migration 437** — the
+  daily view no longer predicates a UTC day on `llm_calls`. Its sibling
+  `llm_calls_utc_hour_rollup_idx` is **still live** (the hourly view's open edge uses it), so
+  this is a single-index retirement, not the pair the design predicted. Deliberately NOT
+  dropped in W3: the revert restores migration 421's bodies and needs it · **trigger:** W7,
+  once the rollup has run unreverted for a full traffic period · **evidence:**
+  `pg_stat_user_indexes.idx_scan` over that period · filed W3.
+- **`derived_artifacts` covers 3 of ~17 derived artifacts.** The catalog-diff rail goes RED
+  only for *newly created* artifacts; the 15 pre-existing matviews plus `browse_list` sit in
+  an explicit `_W7_BACKLOG` set whose docstring says so · **trigger:** W7 · **evidence:**
+  emptying that set · filed W3.

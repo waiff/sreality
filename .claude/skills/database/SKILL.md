@@ -282,6 +282,23 @@ is the matching OFFLINE gate — it reaches inside `EXECUTE`-embedded DDL for th
 specifically, unlike `test_migration_rls_grants.py`'s scanner, which treats dollar-quoted
 function bodies as opaque by design.
 
+**Every derived artifact declares its own freshness in `derived_artifacts`** (migration 437) —
+one row per artifact carrying `producer` / `host` / `cadence` / `staleness_budget`, plus
+`complete_through`, `last_succeeded_at`, `last_duration_ms`, `last_rows`. It generalizes the
+singleton `browse_read_model_state` (whose two artifacts it currently adapts through a UNION
+branch that W7 removes). Same posture as 276: RLS on with zero policies, everything revoked,
+published through `derived_artifacts_public` (enumerated columns, `authenticated` only, not
+`security_invoker` — owner rights are what read through the RLS wall). **A new derived
+artifact needs a registry row**, and `tests/test_derived_artifacts_registry.py` goes RED
+without one; the pre-existing matviews sit in an explicit `_W7_BACKLOG` set.
+There is deliberately **no `last_error` column**: a plpgsql `exception when others then
+update …; raise;` handler cannot persist its write (the re-raise unwinds the subtransaction
+it ran in — verified live), so such a column could only ever be NULL and would publish
+"healthy" during an outage. Failures belong in `cron.job_run_details`; the published signal
+is `last_succeeded_at` against `staleness_budget`, which is correct precisely *because* it
+rolls back with the failed run. **Never add an error column to a registry a producer writes
+inside its own transaction.**
+
 **A `SECURITY DEFINER` gate in a view's WHERE is per-row ONLY when it is combined with a
 column predicate.** Three cases, don't conflate them:
 - **Standalone** (`WHERE is_platform_admin()`) — the qual references no column, so it is a

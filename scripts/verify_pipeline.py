@@ -48,6 +48,16 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "llm_silence_fail_hours": 4,
     "llm_spend_24h_warn_usd": 90,
     "llm_spend_24h_fail_usd": 150,
+    # The llm-cost rollup (migration 437) absorbs late arrivals by re-scanning the
+    # trailing 3 hours on every tick: called_at defaults to now() = TRANSACTION START,
+    # so a call whose transaction opened at 10:59:59 and committed at 11:00:05 lands in
+    # the already-closed hour 10 and is repaired by the next tick. That holds ONLY while
+    # no transaction stays open longer than the window. Measured 2026-08-25 the oldest
+    # open transaction on this instance was 28.7 minutes — 6x inside the margin, but not
+    # a comfortable order of magnitude on an instance that runs 600-second cron
+    # statements. Warn at 1 hour: a third of the window, so there is time to act before
+    # correctness is at stake. No fail tier — a long transaction is not itself a fault.
+    "long_open_txn_warn_minutes": 60,
     "db_cron_fail_rate_fail": 0.5,
     "worker_stale_fail_minutes": 5,
     "verification_stale_hours": 24,
@@ -225,6 +235,15 @@ def _status_for_burn(spend_24h: float, warn_usd: float, fail_usd: float) -> str:
     if spend_24h > warn_usd:
         return "warn"
     return "ok"
+
+
+def _status_for_long_open_txn(oldest_minutes: float, warn_minutes: float) -> str:
+    """Warn (never fail) once the oldest open transaction passes `warn_minutes`.
+
+    A long transaction is not a fault in itself — it is the one condition under which the
+    llm-cost rollup's trailing re-scan stops being self-healing, so this is an advisory
+    axis, not a gate."""
+    return "warn" if oldest_minutes > warn_minutes else "ok"
 
 
 _MIN_CRON_RUNS = 3  # ignore jobs with too few finished runs to judge a rate
@@ -729,6 +748,64 @@ def check_llm_burn_rate(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]
         "value": round(spend, 2),
         "details": {"spend_24h_usd": round(spend, 2), "warn_usd": warn_usd,
                     "fail_usd": fail_usd, "top_spenders": dict(top)},
+        "message": message,
+    }
+
+
+_LONG_OPEN_TXN_SQL = """
+select coalesce(max(extract(epoch from (now() - xact_start)) / 60.0), 0) as oldest_min
+from pg_stat_activity
+where xact_start is not null and pid <> pg_backend_pid()
+"""
+
+_LONG_OPEN_TXN_TOP_SQL = """
+select coalesce(nullif(application_name, ''), backend_type) as who,
+       coalesce(state, 'unknown') as state,
+       round((extract(epoch from (now() - xact_start)) / 60.0)::numeric, 1) as age_min
+from pg_stat_activity
+where xact_start is not null and pid <> pg_backend_pid()
+order by xact_start
+limit 3
+"""
+
+
+def check_long_open_transaction(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """The one condition under which the llm-cost rollup stops self-healing.
+
+    `llm_calls.called_at` defaults to now() = transaction START, so a call whose transaction
+    opened just before an hour boundary and committed just after it lands in an
+    already-closed hour. `refresh_llm_cost_rollups` absorbs that by fully recomputing the
+    trailing 3 hours on every tick — never a double-count, never a drop that outlives one
+    tick — but only while no transaction outlives the window. Names the oldest backends so
+    the alert says WHAT to look at; the repair, if it ever fires, is one statement:
+    `select refresh_llm_cost_rollups('-infinity');`"""
+    warn_minutes = float(thresholds["long_open_txn_warn_minutes"])
+    row = _fetchone(conn, _LONG_OPEN_TXN_SQL)
+    oldest = float(row[0]) if row and row[0] is not None else 0.0
+    top = [
+        (str(who), str(state), float(age))
+        for (who, state, age) in _fetchall(conn, _LONG_OPEN_TXN_TOP_SQL)
+    ]
+    status = _status_for_long_open_txn(oldest, warn_minutes)
+    top_str = ", ".join(f"{who} [{state}] {age:.1f}m" for who, state, age in top) or "none"
+    if status == "warn":
+        message = (
+            f"Oldest open transaction is {oldest:.1f}m (> {warn_minutes:.0f}m) — the "
+            "llm-cost rollup's 3h trailing re-scan only absorbs late arrivals shorter than "
+            "the transaction that produced them. Oldest: "
+            f"{top_str}. Repair after it clears: select refresh_llm_cost_rollups('-infinity');"
+        )
+    else:
+        message = f"Oldest open transaction {oldest:.1f}m (oldest backends: {top_str})."
+    return {
+        "check_key": "long_open_transaction",
+        "status": status,
+        "value": round(oldest, 1),
+        "details": {"oldest_minutes": round(oldest, 1), "warn_minutes": warn_minutes,
+                    "oldest_backends": [
+                        {"who": who, "state": state, "age_minutes": age}
+                        for who, state, age in top
+                    ]},
         "message": message,
     }
 
@@ -1507,6 +1584,7 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("llm_errors", check_llm_errors),
     ("llm_liveness", check_llm_liveness),
     ("llm_burn_rate", check_llm_burn_rate),
+    ("long_open_transaction", check_long_open_transaction),
     ("db_saturation", check_db_saturation),
     ("worker_liveness", check_worker_liveness),
     ("dual_write_parity", check_dual_write_parity),

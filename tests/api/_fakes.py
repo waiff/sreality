@@ -57,6 +57,14 @@ class _FakeCursor:
                 "params": params,
             })
             self._last = [row_id]
+        elif "llm_cost_today_usd" in sql_norm:
+            # Migration 437 moved the spend guard's "today" behind a function, so its
+            # statement no longer mentions llm_calls or sum(cost_usd) and would fall
+            # through to `self._last = None` — leaving the cost-guard tests asserting
+            # nothing while still passing.
+            self._last = [
+                sum(float(row["params"][7] or 0) for row in self._conn.llm_calls_rows)
+            ]
         elif "sum(cost_usd)" in sql_norm and "from llm_calls" in sql_norm:
             if "estimation_run_id" in sql_norm:
                 target = params[0] if isinstance(params, tuple) else None
