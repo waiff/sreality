@@ -44,6 +44,50 @@ The editable estimation block still shares its scenario state (rent / fond
 oprav / listing price) with the SPA's `/estimation/:id` page via the
 `scenario` JSONB column on `estimation_runs`.
 
+### Per-m² figures carry their basis (measure sprint W7)
+
+"One measure, one definition, one label" — the panel **reads** per-m² numbers,
+it never derives them:
+
+- The MF ledger line renders the server's `mf_reference_rent_per_m2_czk`
+  (the named measure, migration 425). It used to divide `mf_reference_rent_czk`
+  by `area_m2` in the browser, which mixed grains — the rent is
+  **property**-grain (the golden record) and the area is **listing**-grain, so
+  the quotient was wrong for every merged multi-portal group.
+- Both monthly per-m² figures (the MF reference rent and the *Fond oprav + SVJ*
+  rate) are labelled **Kč/m²/měs**, the same unit string
+  `toolkit/measures.PPM2_UNIT_CS` uses. A bare `Kč/m²` is the *capital* unit.
+- The subject's area shows **which** area it is — `905 m² (pozemek)`,
+  `65 m² (užitná)` — from `listings.area_basis` (migration 423). `area_m2` is
+  polymorphic, so the bare number cannot say whether it is a flat or a field.
+- The fond is **not multiplied by a parcel**, and *whether a fond applies* is
+  decided in exactly one place — the server, on `area_basis` **or**
+  `category_main` (`api/portal_lookup._fond_default_czk_per_m2`). The panel
+  reads that answer rather than re-deriving it, because migration 423 added
+  `area_basis` with no backfill: a land row not yet re-scraped has no stamp,
+  and a client rule keyed on the stamp alone would disagree with the server.
+  Where no fond applies the field is disabled, the hint says so and nothing is
+  written to the run's scenario; otherwise a 10 Kč per m² monthly charge
+  against a 905 m² plot would manufacture ~9 050 Kč/month of cost, which the
+  yield subtracts from the rent and which can turn the figure negative.
+- The default fond rate is **served per subject** by `POST /listings/lookup`
+  (`fond_per_m2_czk_default`) from the one definition in
+  `api/schemas.DEFAULT_FOND_CZK_PER_M2`; the extension holds no live copy of
+  the number. Three distinct states: a number is the rate, `null` means "no
+  fond can apply to this subject", and an **absent key** means the API predates
+  this change — the panel then falls back to the pre-W7 literal so an old
+  deployment cannot silently blank the field and drop the headline yield.
+- `POST /estimations` is **category-aware**: the panel sends the subject's
+  `category_main` and picks `estimate_kind` from it (a subject being sold needs
+  a rent, one already let needs a sale price, land is never estimated as a
+  rent), instead of the flat `estimate_kind:'rent'` with no category it sent
+  before. **This arm is latent today.** The estimation block only renders when
+  `isSaleApt !== false` — apartments for sale, plus a listing we don't have
+  whose URL doesn't say otherwise — so every reachable call still resolves to
+  `rent` + `byt`, which is what the old hardcoded body sent. It takes effect
+  the moment that category gate widens; no house, commercial unit or plot can
+  reach this surface's estimate button in the meantime.
+
 > **Backend dependency:** needs the `POST /listings/lookup` endpoint
 > (shipped in the `feature/portal-mf-lookup` PR). Make sure that's deployed
 > to the Railway API before loading this build.

@@ -33,8 +33,17 @@ import type {
 // same one the SPA uses. Rebranding there updates the panel wordmark here too.
 import { APP_NAME } from '../../frontend/src/lib/brand';
 
-const DEFAULT_FOND_CZK_PER_M2 = 10;
 const DEFAULT_RENOVATION_CZK = 0;
+/* Back-compat ONLY, never a second live definition of the fond rate: the value
+ * to seed when the lookup response carries no `fond_per_m2_czk_default` KEY at
+ * all — a bundle built from this tree talking to an API deployed before W7
+ * (build-extension.yml uploads a dist/ on every PR, so that pairing is the
+ * normal way this branch gets reviewed). Without it an absent key reads as
+ * "no fond applies", the yield returns null and the panel's headline figure
+ * silently disappears for every subject. The live definition is the server's
+ * `api/schemas.DEFAULT_FOND_CZK_PER_M2`, served per subject; delete this once
+ * no pre-W7 API can be reached. */
+const LEGACY_FOND_FALLBACK_CZK_PER_M2 = 10;
 const PATCH_DEBOUNCE_MS = 500;
 const POLL_INTERVAL_MS = 2000;
 // Agent estimates (Wave 1) run the LLM comparable search and may drain via the
@@ -43,6 +52,33 @@ const POLL_INTERVAL_MS = 2000;
 // agent's ~240 s wall clock plus queue latency.
 const POLL_MAX_ATTEMPTS = 180;
 const HOST_ELEMENT_ID = '__sreality_yield_panel_host__';
+
+/* ---- the measure vocabulary, as this territory spells it -----------------
+ *
+ * The extension is a third territory that cannot import the Python or the SPA
+ * module holding these, so they are copied — but copied VERBATIM, because a
+ * second spelling of a unit is a second definition of it.
+ *
+ * The unit of every MONTHLY per-m² figure the panel renders (the MF reference
+ * rent and the fond rate alike), spelled as
+ * `toolkit/measures.PPM2_UNIT_CS['rent_monthly_czk_m2']`. The bare unit
+ * without the period suffix is the CAPITAL one: using it for a per-month
+ * charge misnames the figure by a factor of twelve. */
+const CZK_PER_M2_MONTH = 'Kč/m²/měs';
+
+/* Czech names for `listings.area_basis` (migration 423) — the stamp that says
+ * WHICH physical area `area_m2` holds. 'unknown' is deliberately absent: an
+ * area nobody labelled renders bare rather than being handed a basis it never
+ * had. */
+const AREA_BASIS_CS: Record<string, string> = {
+  usable: 'užitná',
+  floor: 'podlahová',
+  total: 'celková',
+  plot: 'pozemek',
+};
+
+/* The one `area_basis` value that means `area_m2` IS the parcel. */
+const PLOT_AREA_BASIS = 'plot';
 
 /* Minimized = the panel collapses to a tiny bar showing just the two yield
  * figures. The preference persists across listings/pages via chrome.storage.local
@@ -342,8 +378,47 @@ function buildConfirmRow(opts: {
   return row;
 }
 
-function subjectArea(state: PanelState): number | null {
-  return state.run?.input_spec?.area_m2 ?? state.listing?.area_m2 ?? null;
+/* The subject's area AND the basis of that area — never one without the other.
+ * `area_m2` is polymorphic (migration 423): 905 m² of floor and 905 m² of
+ * parcel are different denominators, and only the stamp says which one this is.
+ *
+ * Two sources, in the historical fallback order. `state.run.input_spec` carries
+ * an area but NO stamp — the server builds that spec from lat/lng/area/
+ * disposition/floor only — so its basis is taken from the lookup row when we
+ * have one (the run's target area IS that row's area whenever the URL matched
+ * something we scrape) and is honestly null when we don't (an LLM-parsed
+ * subject that isn't in our DB has no stamp anywhere). */
+interface SubjectArea {
+  value: number | null;
+  basis: string | null;
+}
+
+function subjectArea(state: PanelState): SubjectArea {
+  const l = state.listing;
+  const listingBasis = l?.found ? l.area_basis ?? null : null;
+  const specArea = state.run?.input_spec?.area_m2 ?? null;
+  if (specArea != null) return { value: specArea, basis: listingBasis };
+  if (l?.area_m2 != null) return { value: l.area_m2, basis: listingBasis };
+  return { value: null, basis: null };
+}
+
+/* A fond (fond oprav + SVJ) is levied per m² of a DWELLING's floor area. It is
+ * never levied on a parcel, so when the denominator is a plot the rate must not
+ * be multiplied by it at all: 10 Kč per m² × 905 m² of land manufactures ~9 050
+ * Kč/month of cost, which the yield then subtracts from the rent — enough to
+ * drive the figure negative.
+ *
+ * WHERE that decision is made is the whole point. The server makes it once
+ * (`api/portal_lookup._fond_default_czk_per_m2`) and states it by serving a
+ * present-but-NULL rate; this reads that answer. Re-deriving it here from
+ * `area_basis` would be a second definition of "does a fond apply", and the two
+ * would disagree: the server tests `area_basis == 'plot'` OR
+ * `category_main == 'pozemek'`, and migration 423 added `area_basis` with no
+ * backfill — so a land row not yet re-scraped is `area_basis` NULL while it is
+ * plainly a parcel. An ABSENT field is an API predating W7: assume a fond
+ * applies, exactly as the panel did before. */
+function fondApplies(state: PanelState): boolean {
+  return state.listing?.fond_per_m2_czk_default !== null;
 }
 
 function defaultPrice(state: PanelState): number | null {
@@ -353,6 +428,20 @@ function defaultPrice(state: PanelState): number | null {
     return run.estimated_sale_price_czk;
   }
   return state.listing?.price_czk ?? null;
+}
+
+/* The starting service charge, SERVED BY THE SERVER per subject
+ * (api/schemas.DEFAULT_FOND_CZK_PER_M2, resolved through the lookup). The
+ * extension deliberately holds no live copy of the number.
+ *
+ * A served `null` is a real answer — no fond can apply to this subject — and
+ * an empty field is then the honest state. An ABSENT key is a different thing
+ * entirely: an API that predates W7, or no lookup row at all. Collapsing the
+ * two with `?? null` is what would blank the field, make `fond` null and drop
+ * the yield to "—" for every listing, so they are branched apart explicitly. */
+function defaultFond(state: PanelState): number | null {
+  const served = state.listing?.fond_per_m2_czk_default;
+  return served === undefined ? LEGACY_FOND_FALLBACK_CZK_PER_M2 : served;
 }
 
 function defaultRent(state: PanelState): number | null {
@@ -366,7 +455,14 @@ function defaultRent(state: PanelState): number | null {
 function computeYield(state: PanelState): number | null {
   const { rent, costPerM2, price, renovation } = state;
   const area = subjectArea(state);
-  const fond = costPerM2 != null && area != null ? costPerM2 * area : null;
+  /* Not-applicable is ZERO, not null: a plot genuinely carries no fond, so the
+   * yield is still rent × 12 ÷ acquisition and must keep rendering. Null stays
+   * reserved for "a fond applies but we can't size it" (no rate, no area). */
+  const fond = !fondApplies(state)
+    ? 0
+    : costPerM2 != null && area.value != null
+      ? costPerM2 * area.value
+      : null;
   /* Total acquisition cost = listing price + one-off renovation budget. */
   const acquisition = price != null ? price + (renovation ?? 0) : null;
   if (rent == null || fond == null || acquisition == null || acquisition <= 0) {
@@ -381,8 +477,17 @@ function computeYield(state: PanelState): number | null {
  * renovation). Empty fond hint (no area) collapses via `.field-hint:empty`. */
 function fondHint(state: PanelState): string {
   const area = subjectArea(state);
-  if (state.costPerM2 == null || area == null) return '';
-  return `= ${fmtCzk(Math.round(state.costPerM2 * area))}/měs`;
+  /* Say WHY the field is inert rather than leaving the operator to wonder why
+   * their typed rate changes nothing. The DECISION came from the server; the
+   * `area_basis` stamp is used only to word it, and is absent for a land row
+   * the server recognised by `category_main` alone. */
+  if (!fondApplies(state)) {
+    return area.basis === PLOT_AREA_BASIS
+      ? 'Neuplatní se — plocha je pozemek.'
+      : 'Neuplatní se u tohoto typu nemovitosti.';
+  }
+  if (state.costPerM2 == null || area.value == null) return '';
+  return `= ${fmtCzk(Math.round(state.costPerM2 * area.value))}/měs`;
 }
 
 function acquisitionHint(state: PanelState): string {
@@ -436,7 +541,11 @@ function onToggleMinimize(): void {
 function bodyFromState(state: PanelState): YieldScenarioUpdate {
   return {
     rent_czk: state.rentTouched ? state.rent : null,
-    fond_per_m2_czk: state.costTouched ? state.costPerM2 : null,
+    /* `estimation_runs.scenario` is ONE persisted value shared with the SPA's
+     * RunPanel, which applies whatever it finds there. Writing a rate this
+     * panel has just declared inert would hand the same run two yields — ours
+     * with fond 0, the SPA's with the rate × a parcel. Never persist one. */
+    fond_per_m2_czk: state.costTouched && fondApplies(state) ? state.costPerM2 : null,
     price_czk: state.priceTouched ? state.price : null,
     renovation_czk: state.renovationTouched ? state.renovation : null,
   };
@@ -453,7 +562,7 @@ function seedFromRun(state: PanelState, run: EstimationRun): PanelState {
     priceTouched: sc?.price_czk != null,
     renovationTouched: sc?.renovation_czk != null,
     rent: sc?.rent_czk ?? defaultRent(next),
-    costPerM2: sc?.fond_per_m2_czk ?? DEFAULT_FOND_CZK_PER_M2,
+    costPerM2: sc?.fond_per_m2_czk ?? defaultFond(next),
     price: sc?.price_czk ?? defaultPrice(next),
     renovation: sc?.renovation_czk ?? DEFAULT_RENOVATION_CZK,
   };
@@ -1104,8 +1213,15 @@ function mountPanel(): {
     mf.appendChild(figure);
 
     if (l?.mf_reference_rent_czk != null) {
-      const area = l.area_m2 ?? null;
-      const perM2 = area && area > 0 ? Math.round(l.mf_reference_rent_czk / area) : null;
+      /* The per-m² figure comes from the SERVER's named measure, not from a
+       * division here. `mf_reference_rent_czk` is PROPERTY-grain (the golden
+       * record shared by every portal's advert of one flat) while `area_m2` is
+       * LISTING-grain, so the quotient this replaces divided one grain by
+       * another — wrong for every merged multi-portal group, independent of any
+       * basis question. The server computes both halves off one row and applies
+       * the rent basis's own validity floor, so `null` here means "no figure",
+       * never "compute it yourself". */
+      const perM2 = l.mf_reference_rent_per_m2_czk ?? null;
       const ledger = document.createElement('div');
       ledger.className = 'mf-ledger';
       const lab = document.createElement('span');
@@ -1115,7 +1231,9 @@ function mountPanel(): {
       val.className = 'mf-ledger-value';
       val.textContent =
         `${fmtCzk(l.mf_reference_rent_czk)}/měs` +
-        (perM2 != null ? ` · ${perM2.toLocaleString('cs-CZ')} Kč/m²` : '');
+        (perM2 != null
+          ? ` · ${Math.round(perM2).toLocaleString('cs-CZ')} ${CZK_PER_M2_MONTH}`
+          : '');
       ledger.appendChild(lab);
       ledger.appendChild(val);
       mf.appendChild(ledger);
@@ -1146,7 +1264,15 @@ function mountPanel(): {
       line.appendChild(disp);
     }
     const meta: string[] = [];
-    if (l.area_m2 != null) meta.push(`${Math.round(l.area_m2)} m²`);
+    /* The area carries its basis: `area_m2` is polymorphic, so "905 m²" alone
+     * cannot tell the operator whether they are looking at a flat or a field.
+     * An unstamped/unknown basis renders bare rather than guessing. */
+    if (l.area_m2 != null) {
+      const areaBasis = AREA_BASIS_CS[l.area_basis ?? ''] ?? null;
+      meta.push(
+        `${Math.round(l.area_m2)} m²` + (areaBasis != null ? ` (${areaBasis})` : ''),
+      );
+    }
     if (l.price_czk != null) meta.push(fmtCzk(l.price_czk));
     if (meta.length > 0) {
       const m = document.createElement('span');
@@ -1242,9 +1368,14 @@ function mountPanel(): {
       value: state.rent, onInput: (v) => onEdit('rent', v),
     }));
     fields.appendChild(buildField({
-      key: 'cost', label: 'Fond oprav + SVJ', suffix: 'Kč/m²',
+      // A MONTHLY rate. The period-less unit this replaces is the capital one —
+      // it named a per-month charge as if it were a purchase price per m².
+      key: 'cost', label: 'Fond oprav + SVJ', suffix: CZK_PER_M2_MONTH,
       value: state.costPerM2, onInput: (v) => onEdit('cost', v),
       hint: fondHint(state),
+      /* An editable field that changes nothing is a lie — and a typed rate
+       * would still reach `estimation_runs.scenario` for the SPA to apply. */
+      disabled: !fondApplies(state),
     }));
     fields.appendChild(buildField({
       key: 'price', label: 'Cena', suffix: 'Kč',
@@ -1297,6 +1428,7 @@ function mountPanel(): {
     value: number | null;
     onInput: (v: number | null) => void;
     hint?: string;
+    disabled?: boolean;
   }): HTMLElement {
     const wrap = document.createElement('div');
     wrap.className = 'field';
@@ -1311,6 +1443,7 @@ function mountPanel(): {
     input.inputMode = 'decimal';
     input.className = 'field-input';
     input.value = formatNumber(opts.value);
+    input.disabled = opts.disabled === true;
     input.dataset.key = opts.key;
     input.addEventListener('focus', () => { lastFocusedKey = opts.key; });
     input.addEventListener('blur', () => {
@@ -1429,11 +1562,26 @@ function onEdit(
   schedulePatch();
 }
 
+/* WHICH estimate this subject needs — and, through the server's
+ * `category_type`-follows-the-kind rule, which comparable cohort gets searched.
+ *
+ * The panel's yield wants the MISSING half of the pair: a subject being sold
+ * needs a rent, a subject already let needs a sale price. Land is never
+ * estimated as a rent — a per-m² of parcel is a capital figure, and the server's
+ * measure guard refuses to call an area-scaled capital per-m² a monthly rent.
+ * A subject we don't have keeps the historical default. */
+function estimateKindFor(l: PortalListing | null): 'rent' | 'sale' {
+  if (l == null || !l.found) return 'rent';
+  if (l.category_type === 'pronajem') return 'sale';
+  if (l.category_main === 'pozemek') return 'sale';
+  return 'rent';
+}
+
 function onReset(): void {
   setState((prev) => ({
     ...prev,
     rent: defaultRent(prev),
-    costPerM2: DEFAULT_FOND_CZK_PER_M2,
+    costPerM2: defaultFond(prev),
     price: defaultPrice(prev),
     renovation: DEFAULT_RENOVATION_CZK,
     rentTouched: false, costTouched: false, priceTouched: false,
@@ -1450,8 +1598,14 @@ function onReset(): void {
 async function onCreateRun(): Promise<void> {
   const epoch = renderEpoch;
   setState((prev) => ({ ...prev, busy: true, errorMessage: null }));
+  const subject = state.listing;
   const res = await call<EstimationRun>({
-    type: 'create_estimation', url: panelUrl,
+    type: 'create_estimation',
+    url: panelUrl,
+    estimate_kind: estimateKindFor(subject),
+    // Only from a listing we actually have: a guess here would pin the whole
+    // comparable cohort to the wrong category.
+    category_main: subject?.found ? subject.category_main : null,
   });
   if (!res.ok) {
     // 429 = the monthly allowance is spent (the atomic quota gate). Refresh the
