@@ -150,22 +150,68 @@
 -- widened 7-argument signature.
 --
 -- ORDERING INSIDE THE FILE: browse_projection is re-emitted, then
--- rebuild_browse_list()/rebuild_properties_map_mv() run INLINE at the end so the
--- new column reaches the `browse_list` table and the `properties_map_mv` matview
+-- rebuild_browse_list()/rebuild_properties_map_mv() run at the end so the new
+-- column reaches the `browse_list` table and the `properties_map_mv` matview
 -- immediately (both are `select * from browse_projection`) -- the ordering 363
 -- and 375 already use. Their bodies are NOT retyped. Migration 254 is dead
 -- history for properties_map_mv (superseded by 277) and is not an edit target.
 --
--- TWO TRANSACTIONS, DELIBERATELY. The `alter table properties add column` pair
--- must commit on its OWN, because ALTER TABLE takes an ACCESS EXCLUSIVE lock on
--- `properties` and holds it until its transaction commits -- and the second
--- transaction runs the two read-model rebuilds, which took 446 s and 332 s
--- respectively on their last live run (580 579 / 555 281 rows). Folding the
--- ALTERs into that transaction would lock the platform's hottest table for
--- ~13 minutes. Split, the ALTERs hold it for milliseconds and the long
--- transaction only ever holds ACCESS SHARE. Both ALTERs are additive and
--- idempotent, so committing them independently is safe even if what follows
--- fails and rolls back.
+-- browse_projection IS DROPPED AND RE-CREATED, NOT REPLACED -- but only where it
+-- has to be. `create or replace view` may APPEND output columns; it may not
+-- REPOSITION one. Live browse_projection carries all_sources (67) and
+-- active_sources (68) ahead of home_city_id (69); on a fresh CI replay the last
+-- definition is migration 375's, where home_city_id is column 67 and the drift
+-- pair does not exist at all. The same `create or replace` therefore succeeds on
+-- production (append #70) and fails on the replay with `cannot change name of
+-- view column "home_city_id" to "all_sources"`, aborting migrations.yml under
+-- ON_ERROR_STOP and skipping every later gate in that job. Adding the two BASE
+-- columns (section 0) makes the SELECT legal but does not make the REPOSITION
+-- legal. So section 3 opens with a guard that fires ONLY when the view is still
+-- the narrow 375 shape: there it drops properties_map_mv (its one and only
+-- dependent, via pg_rewrite -- verified live) and the view, and the statement
+-- below becomes a plain create at the correct shape. On production the guard is
+-- inert: nothing is dropped, the matview stays up, and the view keeps its ACL
+-- and its comment. The comment is re-asserted after the create anyway, because
+-- it documents the load-bearing `(select publication_gate_enabled())` wrapping
+-- and a dropped view does not carry it forward.
+--
+-- THREE PHASES, AND THE LOCK ACCOUNTING THAT FORCES THEM.
+--
+--   Transaction 1  the `alter table properties add column` pair. ALTER TABLE
+--                  takes ACCESS EXCLUSIVE on `properties` and holds it to
+--                  commit, so it commits on its own -- milliseconds. Both ALTERs
+--                  are additive and idempotent, so committing them
+--                  independently is safe even if what follows rolls back.
+--
+--   Transaction 2  every function, view, comment and grant. `create or replace
+--                  view` ALSO takes ACCESS EXCLUSIVE -- on listings_public,
+--                  properties_public, browse_projection, listing_feed_public and
+--                  pipeline_board_public -- and Postgres holds every lock until
+--                  the transaction ends. This transaction is therefore SHORT: it
+--                  contains no rebuild, so those five locks last milliseconds.
+--
+--   After it       the two read-model rebuilds, each as its own autocommit
+--                  statement, exactly the way pg_cron jobs 6 and 7 run them
+--                  today (`set statement_timeout='600s'; select
+--                  public.rebuild_browse_list();`). Each builds a `_next`
+--                  relation under ACCESS SHARE and takes ACCESS EXCLUSIVE only
+--                  for its own drop+rename swap.
+--
+-- DO NOT FOLD THE REBUILDS BACK INTO TRANSACTION 2. Their last live run took
+-- 446 s and 332 s (580 579 / 555 281 rows) -- ~13 minutes. Inside the DDL
+-- transaction that is 13 minutes of ACCESS EXCLUSIVE on all five browser-read
+-- views: `authenticated` carries statement_timeout=8s and `authenticator`
+-- lock_timeout=8s, so every SPA read of Browse, every listing page, the kanban
+-- and the extension lookup would not merely slow down, they would ERROR for the
+-- whole window, and browse_list would be locked for the last ~5.5 minutes on top.
+-- The rebuild functions' `_next`-then-swap design exists precisely to keep that
+-- window at milliseconds; a long transaction throws the property away.
+--
+-- STATEMENT_TIMEOUT IS SET EXPLICITLY BEFORE THE REBUILDS, and that is not
+-- decoration: the `postgres` role this migration is applied as (Supabase MCP)
+-- reports statement_timeout = 2min, and 446 s is 3.7x that cap. Without the
+-- raise, `select rebuild_browse_list()` is cancelled at 120 s -- deterministically,
+-- not as a race -- and the error names the rebuild rather than the missing GUC.
 --
 -- BEFORE APPLYING: pause the browse read-model rebuild cron, or accept that a
 -- concurrent cron tick holding `pg_try_advisory_lock(hashtext(...))` makes
@@ -179,7 +225,7 @@ set local lock_timeout = '5s';
 
 -- ---------------------------------------------------------------------------
 -- 0. Drift repair: the two columns live browse_projection already projects.
---    Own transaction -- see the ACCESS EXCLUSIVE note in the header.
+--    TRANSACTION 1, on its own -- see the lock accounting in the header.
 -- ---------------------------------------------------------------------------
 alter table properties add column if not exists all_sources text[];
 alter table properties add column if not exists active_sources text[];
@@ -288,7 +334,9 @@ grant execute on function public.measure_price_per_m2_basis(text, text)
   to anon, authenticated, service_role;
 
 -- ---------------------------------------------------------------------------
--- 3. The four public views. Migration 420 / 398 / 375 / 370 bodies VERBATIM,
+-- 3. The four public views (still TRANSACTION 2 -- short, no rebuild inside it:
+--    every `create or replace view` below takes ACCESS EXCLUSIVE and holds it to
+--    COMMIT). Migration 420 / 398 / 375 / 370 bodies VERBATIM,
 --    with only the per-m2 expression substituted and price_per_m2_basis
 --    appended. broker_email / broker_phone stay `null::text` (migration 398):
 --    restoring the real columns would re-expose broker PII on a browser-readable
@@ -461,6 +509,31 @@ grant select on public.properties_public to authenticated;
 -- browse_projection feeds BOTH read models (`select * from browse_projection`),
 -- so price_per_m2_basis reaches browse_list and properties_map_mv through the
 -- rebuilds at the end of this file.
+
+-- SHAPE CONVERGENCE BEFORE THE REPLACE -- see the header. `create or replace
+-- view` may append a column but may not REPOSITION one, and the live view
+-- carries all_sources/active_sources ahead of home_city_id while a fresh replay
+-- of migration 375 does not carry them at all. This guard fires ONLY on the
+-- narrow 375 shape (i.e. on the replay), where it drops the view and its single
+-- dependent so the statement below becomes a plain create at the right shape.
+-- On production both columns are already there: nothing is dropped, the matview
+-- stays up, and the view keeps its ACL. rebuild_properties_map_mv() at the end
+-- of this file re-creates the matview with its indexes and grants.
+do $$
+begin
+  if not exists (
+    select 1 from pg_attribute
+     where attrelid = 'public.browse_projection'::regclass
+       and attname = 'all_sources' and not attisdropped
+  ) then
+    -- Plain plpgsql statements, deliberately not dynamic DDL: DDL built inside a
+    -- string is invisible to tests/test_migration_rls_grants.py's statement
+    -- scanner and would disarm every grant rule it holds over this migration.
+    drop materialized view if exists properties_map_mv;
+    drop view browse_projection;
+  end if;
+end $$;
+
 create or replace view browse_projection as
 select
     id as property_id,
@@ -541,6 +614,19 @@ where status = 'active'::text
   and (not (select publication_gate_enabled()) or published_at is not null);
 revoke all on browse_projection from anon;
 grant select on browse_projection to authenticated;
+
+-- Re-asserted because the guard above may have dropped the view, and a dropped
+-- view does not carry its comment forward. Migration 276's text verbatim: it
+-- documents the load-bearing gate wrapping that
+-- tests/test_browse_read_path_guardrail.py pins.
+comment on view browse_projection is
+  'The ONE Browse read-model projection (migration 276): column contract + the '
+  'publication-gate predicate in a single place. browse_list (5-min rebuild) and '
+  'properties_map_mv (30-min rebuild, + lat/lng filter) are both materialized '
+  'FROM this view by the rebuild functions in migration 277. The gate call MUST '
+  'stay wrapped as (select publication_gate_enabled()) — a bare SECURITY DEFINER '
+  'call cannot be inlined and runs per row (the PR-#707 incident); pinned by '
+  'tests/test_browse_read_path_guardrail.py. Internal object: no anon grant.';
 
 create or replace view listing_feed_public as
 select
@@ -1270,19 +1356,42 @@ begin
   end loop;
 end $$;
 
+commit;
+
 -- ---------------------------------------------------------------------------
 -- 8. Materialise the new column into both read models. Both are
 --    `select * from browse_projection`; their bodies are NOT retyped here.
 --
---    Each builds a `_next` relation first and only takes ACCESS EXCLUSIVE on the
---    live one for the final swap -- which this transaction then holds until
---    COMMIT, so these are the LAST statements. 5 s is too tight for that swap
---    against live Browse traffic.
+--    OUTSIDE THE DDL TRANSACTION, ON PURPOSE -- the `commit;` above is
+--    load-bearing. Each rebuild builds a `_next` relation under ACCESS SHARE
+--    and takes ACCESS EXCLUSIVE only for its own drop+rename swap. Run inside
+--    transaction 2 instead, the five `create or replace view` locks taken there
+--    would be held for the rebuilds' full ~13 minutes (446 s + 332 s on the last
+--    live run) and every browser read of Browse / listing detail / the kanban
+--    would ERROR on the 8 s statement_timeout that `authenticated` carries, not
+--    merely queue. Autocommit statements are exactly how pg_cron jobs 6 and 7
+--    run these functions against live traffic today.
+--
+--    statement_timeout is raised the way those two jobs raise it. The `postgres`
+--    role this file is applied as reports statement_timeout = 2min; 446 s is
+--    3.7x that, so without the raise rebuild_browse_list() is cancelled at 120 s
+--    every single time. 900 s leaves headroom over the 600 s the cron uses.
 -- ---------------------------------------------------------------------------
-set local lock_timeout = '30s';
+set statement_timeout = '900s';
+set lock_timeout = '30s';
 
 select rebuild_browse_list();
 select rebuild_properties_map_mv();
+
+reset statement_timeout;
+reset lock_timeout;
+
+-- ---------------------------------------------------------------------------
+-- 9. Post-rebuild assertions, in their own short transaction.
+-- ---------------------------------------------------------------------------
+begin;
+
+set local lock_timeout = '5s';
 
 -- Both rebuilds SKIP (notice, not error) when a cron tick already holds their
 -- advisory lock. A skip here would leave browse_list and properties_map_mv one

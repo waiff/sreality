@@ -132,8 +132,10 @@ class WatchdogFilterSpec(BaseModel):
     # listings instead of dropping them. No-op when no bound is set. Mirrors
     # the Browse toggle so a saved alert means the same thing (rule #16).
     include_no_price: bool = False
-    # Price per m² (price_czk / NULLIF(area_m2, 0)). NULL area_m2 falls
-    # out when either bound is set.
+    # Price per m²: properties_public.price_per_m2, i.e. measure_price_per_m2
+    # (migration 425) -- basis-resolved from (category_main, category_type) and
+    # withheld below its basis floor. Rows with no area, no price, an
+    # undecidable basis, or a sub-floor price fall out when either bound is set.
     min_price_per_m2: float | None = None
     max_price_per_m2: float | None = None
     # MF gross rental yield % (migration 133). Sale apartments only.
@@ -325,15 +327,19 @@ def _build_match_clauses(
         else:
             where.append("l.price_czk <= %(max_price_czk)s")
         params["max_price_czk"] = spec.max_price_czk
+    # ONE measure, one definition (migration 425). `l` is properties_public,
+    # which publishes price_per_m2 as measure_price_per_m2(...) -- basis-resolved
+    # and floored. Browse filters on the SAME measure (browse_list.price_per_m2,
+    # materialised from browse_projection), so a hand-typed
+    # `price_czk / NULLIF(area_m2, 0)` here would make the Watchdog fire on rows
+    # Browse excludes -- e.g. a 136 Kc commercial "rental" at 0.54 Kc/m2, whose
+    # measure is NULL below the rent floor. Rule #16 is that the two surfaces
+    # share one definition of "matches"; reading the published column is how.
     if spec.min_price_per_m2 is not None:
-        where.append(
-            "l.price_czk::numeric / NULLIF(l.area_m2, 0) >= %(min_price_per_m2)s"
-        )
+        where.append("l.price_per_m2 >= %(min_price_per_m2)s")
         params["min_price_per_m2"] = spec.min_price_per_m2
     if spec.max_price_per_m2 is not None:
-        where.append(
-            "l.price_czk::numeric / NULLIF(l.area_m2, 0) <= %(max_price_per_m2)s"
-        )
+        where.append("l.price_per_m2 <= %(max_price_per_m2)s")
         params["max_price_per_m2"] = spec.max_price_per_m2
     if spec.min_mf_gross_yield_pct is not None:
         where.append("l.mf_gross_yield_pct >= %(min_mf_gross_yield_pct)s")
