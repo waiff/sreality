@@ -34,7 +34,8 @@ import {
   type CityIndexDefinition,
 } from '@/lib/queries';
 import { PINNED_SLUGS, indexLabel } from '@/lib/cityIndexes';
-import { fmtPct, fmtPP } from '@/lib/format';
+import { fmtCount, fmtPct, fmtPP } from '@/lib/format';
+import { PPM2_UNIT } from '@/lib/measure';
 import DatasetMap, { METRICS, type DatasetMetric } from '@/components/DatasetMap';
 import CityPicker from '@/components/CityPicker';
 import { buildHoverData } from '@/lib/growthChoropleth';
@@ -71,8 +72,11 @@ function estimateScrapeText(cities: number, startYm: string, endYm: string): str
  * decimal point and no space, on an otherwise Czech page. */
 const fmtGrowthPct = (n: number | null | undefined): string =>
   fmtPct(n, { signed: true });
-const fmtPerM2 = (n: number | null | undefined): string =>
-  n == null || !Number.isFinite(n) ? '—' : n.toLocaleString('cs-CZ');
+/* The private `fmtPerM2` that stood here emitted the bare numeral and NO unit
+ * at all — two adjacent columns, one capital Kč/m² and one monthly Kč/m²/měs,
+ * rendered identically. The numeral now goes through the shared count formatter
+ * and the UNIT lives in the column header, taken from the one basis vocabulary
+ * so a 43-row table is not 86 repetitions of the suffix. */
 
 const median = (xs: number[]): number | null => {
   const v = xs.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
@@ -111,12 +115,12 @@ const BASE_COLUMNS: ColSpec[] = [
     render: (r) => r.okres
       ? <>{r.locality_name} <span className="text-[var(--color-ink-4)]">· {r.okres}</span></>
       : r.locality_name },
-  { key: 'sale_latest_price', label: 'Sale Kč/m²', align: 'right', defaultOn: true,
-    sortVal: (r) => r.sale_latest_price, render: (r) => fmtPerM2(r.sale_latest_price) },
+  { key: 'sale_latest_price', label: `Sale ${PPM2_UNIT.sale}`, align: 'right', defaultOn: true,
+    sortVal: (r) => r.sale_latest_price, render: (r) => fmtCount(r.sale_latest_price) },
   { key: 'sale_cagr_pct', label: 'Sale growth', align: 'right', metric: 'sale_cagr_pct', defaultOn: true,
     sortVal: (r) => r.sale_cagr_pct, render: (r) => <Delta n={r.sale_cagr_pct} fmt={fmtGrowthPct} /> },
-  { key: 'rent_latest_price', label: 'Rent Kč/m²/mo', align: 'right', defaultOn: true,
-    sortVal: (r) => r.rent_latest_price, render: (r) => fmtPerM2(r.rent_latest_price) },
+  { key: 'rent_latest_price', label: `Rent ${PPM2_UNIT.rent}`, align: 'right', defaultOn: true,
+    sortVal: (r) => r.rent_latest_price, render: (r) => fmtCount(r.rent_latest_price) },
   { key: 'rent_cagr_pct', label: 'Rent growth', align: 'right', metric: 'rent_cagr_pct', defaultOn: true,
     sortVal: (r) => r.rent_cagr_pct, render: (r) => <Delta n={r.rent_cagr_pct} fmt={fmtGrowthPct} /> },
   { key: 'gross_yield_pct', label: 'Gross yield', align: 'right', defaultOn: true,

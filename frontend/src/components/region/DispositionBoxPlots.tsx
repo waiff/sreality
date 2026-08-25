@@ -13,9 +13,27 @@
 
 import { useMemo, useState } from 'react';
 import type { Ppm2Box, RegionDispositionRow } from '@/lib/types';
+import {
+  MIXED_BASIS_HINT,
+  PPM2_UNIT,
+  type MixedBasisCause,
+  type Ppm2Basis,
+  type Ppm2RowBasis,
+} from '@/lib/measure';
+import { fmtMeasuredPricePerM2 } from '@/lib/format';
 
 interface Props {
   rows: RegionDispositionRow[];
+  /* The cohort's per-m² basis. Required — every box on this chart shares one
+   * horizontal scale, so the scale itself only means something if every row is
+   * on the same basis. 'mixed' and null are refused rather than drawn. */
+  basis: Ppm2Basis | null;
+  /* WHY a 'mixed' basis is mixed — the server only reports THAT it is. The
+   * refusal has to name the mix the operator can actually clear: a cohort that
+   * has already fixed one deal type and merely spans pozemek + byt is told to
+   * exclude the pozemky, not to "choose one deal type" (which would be a
+   * no-op instruction and leave the tab blank with no way out). */
+  mixedCause: MixedBasisCause;
   /* Per-disposition natural-language annotations of the Kč/m²
    * distribution, generated server-side (summarize-1). Keyed by
    * disposition label. Optional: the chart renders fully without them. */
@@ -30,9 +48,7 @@ interface Props {
 
 const MIN_BOX_N = 5;
 
-const NBSP = ' ';
 const cz = new Intl.NumberFormat('cs-CZ');
-const fmtPpm2 = (n: number): string => `${cz.format(Math.round(n))}${NBSP}Kč/m²`;
 
 /* SVG geometry. The chart is drawn inside a fixed viewBox that the parent's
  * width scales via CSS; aspect ratio is row-count-driven. */
@@ -90,6 +106,8 @@ interface RenderRow {
 
 export default function DispositionBoxPlots({
   rows,
+  basis,
+  mixedCause,
   annotations,
   annotationsLoading = false,
   annotationsNote = null,
@@ -102,6 +120,25 @@ export default function DispositionBoxPlots({
   const renderable = data.filter((r) => r.box != null && r.box.n >= MIN_BOX_N) as Array<
     RenderRow & { box: Ppm2Box }
   >;
+
+  /* A mixed-basis cohort is refused OUTRIGHT, before any geometry. Every row
+   * here shares one horizontal scale by design ("so visual comparison is
+   * honest"), and pooling sale (~91 535 Kč/m²) with rent (~319 Kč/m²/měs) on it
+   * would squash every rent box to a hairline against the sale range and invite
+   * the reader to compare them. The land mix is the same failure one order
+   * down: a plot at 850 Kč/m² of PLOT against a flat at 91 535 Kč/m² of FLOOR
+   * is not a comparison, it is two denominators on one axis. There is no honest
+   * way to draw this chart without a single basis — but the refusal must name
+   * which of the two mixes fired, or it reads as an unactionable dead end. */
+  if (basis == null || basis === 'mixed') {
+    return (
+      <p className="text-sm text-[var(--color-ink-3)] italic">
+        {basis === 'mixed'
+          ? `${MIXED_BASIS_HINT[mixedCause]}, aby měla osa Kč/m² jednotku.`
+          : 'Bez rozpoznaného základu Kč/m² pro tuto skupinu.'}
+      </p>
+    );
+  }
 
   if (renderable.length === 0) {
     return (
@@ -179,7 +216,7 @@ export default function DispositionBoxPlots({
             fill="var(--color-ink-4)"
             style={{ letterSpacing: '0.04em' }}
           >
-            Kč/m²
+            {PPM2_UNIT[basis]}
           </text>
 
           {/* One row per disposition. */}
@@ -210,7 +247,7 @@ export default function DispositionBoxPlots({
                   n = {cz.format(row.n)}
                 </text>
                 {row.box && row.box.n >= MIN_BOX_N ? (
-                  <BoxRow box={row.box} yMid={yMid} xOf={xOf} />
+                  <BoxRow box={row.box} basis={basis} yMid={yMid} xOf={xOf} />
                 ) : (
                   <InsufficientPlaceholder
                     yMid={yMid}
@@ -298,10 +335,12 @@ function Annotations({
 
 function BoxRow({
   box,
+  basis,
   yMid,
   xOf,
 }: {
   box: Ppm2Box;
+  basis: Ppm2RowBasis;
   yMid: number;
   xOf: (v: number) => number;
 }) {
@@ -397,14 +436,14 @@ function BoxRow({
           width="240"
           height="120"
         >
-          <BoxTooltip box={box} />
+          <BoxTooltip box={box} basis={basis} />
         </foreignObject>
       )}
     </g>
   );
 }
 
-function BoxTooltip({ box }: { box: Ppm2Box }) {
+function BoxTooltip({ box, basis }: { box: Ppm2Box; basis: Ppm2RowBasis }) {
   return (
     <div
       className="text-[0.7rem] bg-[var(--color-paper-3)] border border-[var(--color-rule-strong)] rounded-[var(--radius-sm)] p-2"
@@ -412,25 +451,35 @@ function BoxTooltip({ box }: { box: Ppm2Box }) {
     >
       <table className="w-full">
         <tbody>
-          <Row label="max" v={box.max} />
-          <Row label="p75" v={box.p75} />
-          <Row label="median" v={box.median} bold />
-          <Row label="p25" v={box.p25} />
-          <Row label="min" v={box.min} />
+          <Row label="max" v={box.max} basis={basis} />
+          <Row label="p75" v={box.p75} basis={basis} />
+          <Row label="median" v={box.median} basis={basis} bold />
+          <Row label="p25" v={box.p25} basis={basis} />
+          <Row label="min" v={box.min} basis={basis} />
         </tbody>
       </table>
     </div>
   );
 }
 
-function Row({ label, v, bold }: { label: string; v: number; bold?: boolean }) {
+function Row({
+  label,
+  v,
+  basis,
+  bold,
+}: {
+  label: string;
+  v: number;
+  basis: Ppm2RowBasis;
+  bold?: boolean;
+}) {
   return (
     <tr>
       <td className="text-[var(--color-ink-3)] pr-3">{label}</td>
       <td
         className={`text-right tabular-nums ${bold ? 'font-medium text-[var(--color-ink)]' : 'text-[var(--color-ink)]'}`}
       >
-        {fmtPpm2(v)}
+        {fmtMeasuredPricePerM2(v, basis)}
       </td>
     </tr>
   );

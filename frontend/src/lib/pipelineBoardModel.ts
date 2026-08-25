@@ -19,7 +19,13 @@ export const PIPELINE_BOARD_COLS =
   'sreality_id, source, source_id_native, listing_id, category_main, ' +
   'street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, ' +
   'total_price_change_pct, price_change_count, obec_id, okres_id, region_id, ' +
-  'place_search_text, obec, locality, okres, region, is_active';
+  'place_search_text, obec, locality, okres, region, is_active, ' +
+  /* Migration 425 widened the view for exactly this: the board is deal-agnostic
+   * by rule 22 (a card can be added from any cohort, and the pipeline scope is
+   * `?pipeline=any`), so two cards in one column can be an 18 000 Kč/měs rent
+   * and an 18 000 Kč sale. Without category_type they render the identical
+   * string; without the measure + its label there is no per-m² figure at all. */
+  'category_type, price_per_m2, price_per_m2_basis';
 
 export interface PipelineBoardRow {
   property_id: number;
@@ -51,6 +57,9 @@ export interface PipelineBoardRow {
   okres: string | null;
   region: string | null;
   is_active: boolean | null;
+  category_type: string | null;
+  price_per_m2: number | null;
+  price_per_m2_basis: string | null;
 }
 
 export function composePipelineCards(
@@ -87,5 +96,8 @@ export function composePipelineCards(
     okres: r.okres,
     region: r.region,
     is_active: r.is_active ?? true,
+    category_type: r.category_type,
+    price_per_m2: r.price_per_m2,
+    price_per_m2_basis: r.price_per_m2_basis,
   }));
 }

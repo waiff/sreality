@@ -45,7 +45,18 @@ export interface MapOverlayState {
   showRentMap: boolean;
   rentVk: RentVk;
   showKraje: boolean;
+  /* What the pin LABEL shows: the total price or the per-m² measure. A view
+   * knob, not a cohort filter — it belongs here for the three properties this
+   * interface guarantees: it is URL-serialised (so a Kč/m² map is a shareable
+   * link), it is carried by preserveExtras (so filtering does not silently
+   * reset it), and it sits OUTSIDE preset identity (so flipping it can never
+   * mark a saved preset dirty — the same reasoning rule 22 applies to the
+   * pipeline scope). The UNIT is still decided per pin, never per map. */
+  priceMetric: PriceMetric;
 }
+
+/* The two things a pin can be labelled with. */
+export type PriceMetric = 'total' | 'per_m2';
 
 export const DEFAULT_OVERLAY: MapOverlayState = {
   showCities: true,
@@ -53,6 +64,7 @@ export const DEFAULT_OVERLAY: MapOverlayState = {
   showRentMap: false,
   rentVk: 1,
   showKraje: false,
+  priceMetric: 'total',
 };
 
 /* The contract <BrowseExperience> consumes. Setters carry the page's history
@@ -81,7 +93,7 @@ export interface BrowseViewState {
   loadPipelineView: () => void;
 }
 
-const OVERLAY_URL_KEYS = ['tab', 'sort', 'cities', 'colorby', 'rentmap', 'rentvk', 'kraje', 'preset'];
+const OVERLAY_URL_KEYS = ['tab', 'sort', 'cities', 'colorby', 'rentmap', 'rentvk', 'kraje', 'preset', 'pm'];
 
 /* The Browse page adapter. Lifted verbatim from the page so its behaviour —
  * the dual serialization (filters via toSearchParams + overlay knobs carried by
@@ -99,6 +111,7 @@ export function useUrlBrowseState(): BrowseViewState {
       showRentMap: searchParams.get('rentmap') === '1',
       rentVk: ([1, 2, 3, 4].includes(rentVkParam) ? rentVkParam : 1) as RentVk,
       showKraje: searchParams.get('kraje') === '1',
+      priceMetric: searchParams.get('pm') === 'per_m2' ? 'per_m2' : 'total',
     };
   }, [searchParams]);
   const activePresetId = searchParams.get('preset');
@@ -158,6 +171,10 @@ export function useUrlBrowseState(): BrowseViewState {
       if ('showRentMap' in patch) patch.showRentMap ? sp.set('rentmap', '1') : sp.delete('rentmap');
       if ('rentVk' in patch) patch.rentVk === 1 ? sp.delete('rentvk') : sp.set('rentvk', String(patch.rentVk));
       if ('showKraje' in patch) patch.showKraje ? sp.set('kraje', '1') : sp.delete('kraje');
+      /* Default ('total') deletes the key, like every other knob here — a
+       * default-state map must serialise to the plain /browse URL. */
+      if ('priceMetric' in patch)
+        patch.priceMetric === 'per_m2' ? sp.set('pm', 'per_m2') : sp.delete('pm');
       setSearchParams(sp, { replace: true });
     },
     [searchParams, setSearchParams],
@@ -311,6 +328,7 @@ export const browseUrlFromState = (s: {
   if (s.overlay.showRentMap) sp.set('rentmap', '1');
   if (s.overlay.rentVk !== 1) sp.set('rentvk', String(s.overlay.rentVk));
   if (s.overlay.showKraje) sp.set('kraje', '1');
+  if (s.overlay.priceMetric === 'per_m2') sp.set('pm', 'per_m2');
   const qs = sp.toString();
   return qs ? `/browse?${qs}` : '/browse';
 };

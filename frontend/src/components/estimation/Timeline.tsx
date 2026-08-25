@@ -28,7 +28,8 @@ import type {
   TraceStepReasoning,
   TraceStepToolCall,
 } from '@/lib/types';
-import { fmtCount, fmtCzk } from '@/lib/format';
+import { fmtCount, fmtCzk, fmtMeasuredPricePerM2 } from '@/lib/format';
+import { ppm2Basis } from '@/lib/measure';
 import { useTracePayload } from '@/lib/queries';
 
 interface Props {
@@ -66,6 +67,12 @@ interface SelectionRoundFilters {
   has_parking?: boolean | null;
   min_price_czk?: number | null;
   max_price_czk?: number | null;
+  /* The per-m² MEASURE bounds (EstimationFilters.min/max_price_per_m2). The
+   * agent has been relaxing on these all along; the trace panel simply never
+   * had a key for them, so a round that widened the Kč/m² band showed no
+   * change at all. */
+  min_price_per_m2?: number | null;
+  max_price_per_m2?: number | null;
   category_main?: string | null;
   category_type?: string | null;
   category_sub_cb?: number | null;
@@ -311,6 +318,15 @@ function fmtCzkPrice(v: unknown): string {
   return typeof v === 'number' ? fmtCzk(v) : EM_DASH;
 }
 
+/* A per-m² bound with the basis the ROUND itself was constrained to. A round
+ * with no category_type has no decidable basis, so the bound renders bare
+ * rather than borrowing a unit it cannot justify. */
+function fmtPpm2Bound(v: unknown, f: SelectionRoundFilters): string {
+  if (typeof v !== 'number') return EM_DASH;
+  const basis = ppm2Basis(f.category_main, f.category_type);
+  return basis == null ? fmtCount(Math.round(v)) : fmtMeasuredPricePerM2(v, basis);
+}
+
 function filterValueEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (Array.isArray(a) && Array.isArray(b)) {
@@ -326,7 +342,11 @@ function filterValueEqual(a: unknown, b: unknown): boolean {
 const FILTER_ROWS: Array<{
   key: keyof SelectionRoundFilters;
   label: string;
-  fmt: (v: unknown) => string;
+  /* `fmt` also receives the whole round so a value whose UNIT depends on other
+   * keys can resolve it — the per-m² bounds need (category_main, category_type)
+   * to know whether they are capital or monthly. Every other formatter ignores
+   * the second argument. */
+  fmt: (v: unknown, f: SelectionRoundFilters) => string;
   // When present, the displayed value is derived from the whole filter
   // object instead of filters[key] — used by the lifecycle row to read
   // the new key while falling back to legacy traces' population/active_only.
@@ -355,6 +375,12 @@ const FILTER_ROWS: Array<{
   { key: 'has_parking', label: 'Has parking*', fmt: fmtBool },
   { key: 'min_price_czk', label: 'Min price', fmt: fmtCzkPrice },
   { key: 'max_price_czk', label: 'Max price', fmt: fmtCzkPrice },
+  /* Unit-less on purpose: a trace round carries no category_type, so its basis
+   * is not knowable here, and labelling the bound "Kč/m²" would assert a basis
+   * this panel cannot verify. The number alone is what the round actually
+   * relaxed. */
+  { key: 'min_price_per_m2', label: 'Min price / m²', fmt: fmtPpm2Bound },
+  { key: 'max_price_per_m2', label: 'Max price / m²', fmt: fmtPpm2Bound },
   { key: 'category_main', label: 'Category', fmt: fmtString },
   { key: 'category_type', label: 'Type', fmt: fmtString },
   { key: 'category_sub_cb', label: 'Sub-category', fmt: (v) => (typeof v === 'number' ? String(v) : EM_DASH) },
@@ -466,7 +492,7 @@ function FilterDeltaTable({ rounds }: { rounds: SelectionRound[] }) {
                       : 'text-[var(--color-ink)]',
                   ].join(' ')}
                 >
-                  {fmt(v)}
+                  {fmt(v, r.filters)}
                 </td>
               );
             })}
@@ -475,6 +501,7 @@ function FilterDeltaTable({ rounds }: { rounds: SelectionRound[] }) {
                 derive
                   ? derive(rounds[rounds.length - 1].filters)
                   : rounds[rounds.length - 1].filters[key],
+                rounds[rounds.length - 1].filters,
               )}
             </td>
           </tr>

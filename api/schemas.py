@@ -281,6 +281,8 @@ class SummarizeRegionDispositionsIn(BaseModel):
     22 makes that the DEFAULT Browse cohort). 'mixed' is refused server-side.
     Optional so a client that has not been taught to send it yet still works;
     absent, the annotator is told the unit is unknown rather than guessing one.
+    It is also part of the cache identity: a cached sentence about a ~91 535
+    capital figure is false about a ~319 monthly one.
     """
     region_key: str = Field(min_length=1, max_length=8192)
     dispositions: list[RegionDispositionIn] = Field(default_factory=list, max_length=40)

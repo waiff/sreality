@@ -51,6 +51,7 @@ import {
   type ListingFilters,
 } from '@/lib/filters';
 import { usePageTitle } from '@/lib/pageTitle';
+import { ppm2BasisFromToken } from '@/lib/measure';
 import CreateWatchdogModal from '@/components/CreateWatchdogModal';
 import PresetBar from '@/components/PresetBar';
 import type { ListingEstimate } from '@/lib/types';
@@ -576,6 +577,25 @@ export default function BrowseExperience({
   });
 
   const regionKey = useMemo(() => regionKeyFromFilters(filters), [filters]);
+  /* The cohort's basis, decided SERVER-side over the rows the percentiles came
+   * from (browse_stats_properties.ppm2_basis, migration 425) — not guessed from
+   * the filters, so it stays right when a cohort happens to contain only one
+   * basis despite `deal=any`. */
+  const statsBasis = useMemo(
+    () => ppm2BasisFromToken(statsQuery.data?.ppm2_basis),
+    [statsQuery.data],
+  );
+  /* `placeholderData: (prev) => prev` keeps the PREVIOUS cohort's payload on
+   * screen while the new one loads, so on the render where `filters` changes
+   * `regionKey` is already the new cohort while `statsQuery.data` is still the
+   * old one. Everything derived from the payload — the basis, the boxes — is
+   * therefore stale for that window, and the annotations query below must not
+   * act on it: an enabled=true computed from the OLD basis fires a paid LLM
+   * call whose body is the old distributions but whose region_key (and server
+   * cache key) is the new cohort, poisoning that cohort for the rest of the
+   * day. `enabled: false` does not cancel an in-flight v5 query, so the gate
+   * has to be on freshness, not on a later correction. */
+  const statsIsStale = statsQuery.isPlaceholderData;
   const boxDispositions = useMemo(
     () =>
       (statsQuery.data?.dispositions ?? []).filter(
@@ -596,6 +616,11 @@ export default function BrowseExperience({
         region_key: regionKey,
         region_label: regionLabelFromFilters(filters),
         ppm2_overall: statsQuery.data?.ppm2 ?? null,
+        /* The basis the numbers below are on, in the migration-425 vocabulary —
+         * a service boundary carries the SQL token, not this app's render-side
+         * shorthand. Without it the model is narrating bare Kč/m² and cannot
+         * know whether "319" is cheap or absurd. `enabled` below guarantees a
+         * single row basis here, so the lookup is total. */
         ppm2_basis: ppm2Basis,
         dispositions: boxDispositions.map((d) => ({
           disposition: d.disposition,
@@ -603,8 +628,17 @@ export default function BrowseExperience({
           ppm2_box: d.ppm2_box,
         })),
       }),
+    /* A mixed-basis cohort is NOT annotated at all — not "annotated with a
+     * caveat". The distributions being described would be sale and rent stacked
+     * on one axis, so every sentence about them would be false, and it is a paid
+     * LLM call to produce it. The chart itself withholds the same cohort. */
     enabled:
-      tab === 'stats' && isApiConfigured() && boxDispositions.length > 0,
+      tab === 'stats'
+      && isApiConfigured()
+      && !statsIsStale
+      && boxDispositions.length > 0
+      && statsBasis != null
+      && statsBasis !== 'mixed',
     staleTime: 60 * 60 * 1000,
     retry: false,
   });
@@ -878,6 +912,8 @@ export default function BrowseExperience({
                     cityPolygons={cityPolygonsMap}
                     showCities={overlay.showCities}
                     onToggleShowCities={(next) => view.setOverlay({ showCities: next })}
+                    priceMetric={overlay.priceMetric}
+                    onPriceMetricChange={(next) => view.setOverlay({ priceMetric: next })}
                     colorByIndex={cityOverlay.colorByIndex}
                     cityIndexValues={cityOverlay.cityIndexValues}
                     cityIndexValuesAll={cityOverlay.cityIndexValuesAll}
@@ -942,6 +978,11 @@ export default function BrowseExperience({
                 stats={statsQuery.data ?? null}
                 isLoading={statsQuery.isLoading}
                 isEmpty={!statsQuery.isLoading && (statsQuery.data?.total ?? 0) === 0}
+                basis={statsBasis}
+                cohort={{
+                  categoryMain: filters.categoryMain,
+                  categoryType: filters.categoryType,
+                }}
                 annotations={annotationsQuery.data?.data.annotations}
                 annotationsLoading={annotationsQuery.isFetching}
                 annotationsNote={
