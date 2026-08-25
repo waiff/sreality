@@ -393,28 +393,6 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
         "definition; every other consumer calls this function.",
     ),
     RegisteredSite(
-        path="migrations/083_browse_stats_price_per_m2.sql::function:browse_stats",
-        arm="division",
-        hits=11,
-        measure="ppm2",
-        kind=KIND_DEBT,
-        why="KNOWN DEBT, not legitimate. An ORPHAN function: zero callers in "
-        "api/, toolkit/, frontend/src/ and scripts/ (grep-verified), and no "
-        "function or view in the database references it either (pg_proc + "
-        "pg_get_viewdef, checked live). Superseded by browse_stats_properties "
-        "(migration 378, moved onto the measure in 425). It computes eleven "
-        "unfloored, basis-blind per-m² expressions. It was ALSO EXECUTE-granted "
-        "to `authenticated`, i.e. REACHABLE as a PostgREST RPC by any logged-in "
-        "SPA session — registering a reachable re-derivation as inert debt is "
-        "the one thing this census must never do, so migration 428 revokes that "
-        "grant (additive, so autonomous under the database gate). The definition "
-        "now stays on disk and in the catalog but is not reachable from the "
-        "perimeter. OWNER: operator. BLOCKER: approval for the `drop function` "
-        "itself, which is DESTRUCTIVE and needs a pg_dump; migration 083's own "
-        "text is the restore script. When it is dropped, delete this entry — "
-        "the census will then require it gone.",
-    ),
-    RegisteredSite(
         path="migrations/354_health_image_matviews_on_listing_id.sql"
         "::materialized view:scraper_health_checks_mv",
         arm="division",
