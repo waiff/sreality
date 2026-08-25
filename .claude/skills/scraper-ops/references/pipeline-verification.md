@@ -15,7 +15,11 @@ polls. A `SECURITY DEFINER` dead-man-switch pg_cron function fires if the hourly
 running (the migration-136 exception-guarded pg_cron pattern). This exists because the pipeline
 stalled silently for two days in 2026-07 (Anthropic credit exhaustion, 38k+ failed LLM calls) and
 the only alarm was a failing GH Actions cron the operator happened to miss. The live checks are
-`llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`, `worker_liveness`,
+`llm_errors`, `llm_liveness`, `llm_burn_rate`, `long_open_transaction` (6-hourly only, from
+migration 437: warns when the oldest `pg_stat_activity.xact_start` passes an hour, because
+`refresh_llm_cost_rollups`' 3-hour trailing re-scan only absorbs a late arrival whose
+transaction was shorter than that — `called_at` defaults to now() = transaction START; the
+repair is `select refresh_llm_cost_rollups('-infinity');`), `db_saturation`, `worker_liveness`,
 `dual_write_parity`, `property_maintenance` (last-complete-sweep stamp age + oldest
 dirty-queue row — the 2026-08-06 sweep-death/stranded-lease incident; both axes O(1) reads,
 never a properties scan) and `broker_resolution_freshness` (**three** axes over

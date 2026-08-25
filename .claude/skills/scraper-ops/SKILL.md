@@ -407,7 +407,9 @@ Two lanes: `llm_health.yml` hourly (the acute checks, `--only ... --exit-nonzero
 `fail` also reds the run and emails) and `verify_pipeline.yml` 6-hourly (everything). Live checks:
 `llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`, `worker_liveness`,
 `dual_write_parity`, `property_maintenance`, `broker_resolution_freshness`,
-`broker_merge_suppression`, and — 6-hourly only, from the per-m² measure program's W9 — the four
+`broker_merge_suppression`, and two 6-hourly-only groups — from migration 437,
+`long_open_transaction` (warn-only: the llm-cost rollup's 3h trailing re-scan stops
+self-healing once a transaction outlives it), and from the per-m² measure program's W9, the four
 plausibility checks `ppm2_median_shift`, `ppm2_basis_floor_share`, `area_vs_usable_divergence` and
 `ppm2_measure_coverage` over `measure_plausibility_by_source` (migration 427), which watch what a
 value IS where `data_quality_by_source` only tests that it exists — the fourth watching whether
