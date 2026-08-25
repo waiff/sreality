@@ -813,3 +813,207 @@ Multi-category cohort ordering (revisit if a preset drops its district filter) �
 payload 16.8 MB · instance sizing (after W-1b root-cause and W10a) · React Query persistence
 · /notifications 100-row cap · repr-flip semantics (own PR, see W4) · connection pool +
 gzip middleware · the unexplained client-side count abort on Browse.
+
+---
+
+# The Cardinality Doctrine — follow-up build, opened 2026-08-25
+
+The hydration sprint closed with five north-star violations still standing. A 15-agent
+investigation (3 architects, 2 judges, 2 adversarial critiques) produced a ruling proposal
+that **corrected twelve of its own commissioned premises** before designing anything. The
+headline correction: the commission assumed "only precompute fixes it", and that is true
+for exactly **one** of the five. The other four are the same plan defect four times —
+an expression that does not vary across the scanned rows being re-evaluated per row —
+and **two of the five delete state**.
+
+Same ledger, same rules, plus what this build's evidence earned:
+
+- **Corollary E — the derived-state rule.** Every precomputed artifact declares, in the
+  migration that creates it, *who produces it, on what cadence, and the staleness budget
+  beyond which rendering it is wrong*. An artifact nobody can watch go stale is not
+  precomputed, it is cached by accident.
+- **Corollary F — the completeness rule.** A surface that cannot render its whole cohort
+  must say so in the cohort's own terms. **A `LIMIT` without an `ORDER BY` is a sample, and
+  a sample chosen by the planner is not a contract.**
+- **Corollary D, rewritten.** Block counts are the currency *precisely because they are
+  eviction-invariant for a fixed plan* — contention moves blocks between `hit` and `read`,
+  not into or out of existence. So: (a) never quote a *timing* claim measured while a
+  maintenance job runs; (b) before quoting a *block* claim, assert the plan is the one you
+  designed, **by node name**; (c) check (a) with `pg_stat_activity`, never
+  `cron.job_run_details` — migration 371's `SET` prefix makes pg_cron publish a provisional
+  `succeeded / 'SET' / 0.1 s` row while the real work still burns I/O.
+- **Standing methodology rule.** Cheap statements are measured **warm** — in-transaction
+  after a warm-up statement, or from `pg_stat_statements`. A first-statement-in-a-fresh-
+  backend measurement inflates by ~460 blocks, and **the Supabase MCP opens a fresh backend
+  per call**. This artefact manufactured a commissioned item (see W1).
+
+### Waves
+
+| Wave | Content | PR | State |
+| --- | --- | --- | --- |
+| RN | `verify_pipeline` credit-outage matcher | [#1161](https://github.com/waiff/sreality/pull/1161) | ✅ merged |
+| W0a | F1 location index + F2 autovacuum | — | in progress |
+| W0b | F3 teardown (destructive gate) | — | |
+| W1 | Item 4 — admin gate hoist | — | |
+| W2 | Item 1a — `_check_daily_cost` spelling | [#1163](https://github.com/waiff/sreality/pull/1163) | open |
+| W3 | Item 1b — hour rollup + watermark + F5-minimal registry | — | |
+| W4 | Item 3 — broker deferred join | — | |
+| W5 | Item 2 — city-quality, keyed on `obec_id` | — | |
+| W6 | Item 5 — map cluster RPC | — | |
+| W7 | Retirements + registry completion (destructive gate) | — | |
+
+### W0a — the index that was 36.7% of all disk reads (migrations 429, 430)
+
+**Not one of the five.** The platform's single largest disk consumer was never in the
+ledger. `location_data/resolver/drain.py` runs every 15 minutes:
+
+```sql
+SELECT property_id, <29 columns> FROM listing_location_current
+ WHERE property_id = ANY(%s::bigint[]) ORDER BY property_id, listing_id
+```
+
+`listing_location_current` carried **15 indexes and not one leading on `property_id`**.
+
+**Baseline, `pg_stat_statements`, live 2026-08-25** — and *worse* than the proposal's own
+figure, because the table grew between investigation and build:
+
+| | calls | blocks | blocks/call | mean |
+| --- | --- | --- | --- | --- |
+| proposal (as commissioned) | 38,800 | 1,410,552,687 | 36,355 | — |
+| **live at build time** | **39,488** | **2,737,573,584** | **69,327** | 982 ms |
+| (a second registered shape) | 3,827 | 270,177,122 | 70,598 | 230 ms |
+
+**After** — measured warm, in-transaction after a warm-up statement, 200-property batch:
+
+```
+Index Scan using llc_property_listing on listing_location_current (rows=387)
+  Index Cond: (property_id = ANY (...))
+  Buffers: shared hit=434
+Execution Time: 1.697 ms
+```
+
+| | blocks/call |
+| --- | --- |
+| before | 69,327 |
+| after | **434** |
+
+**160×.** Plan shape asserted by node name per amended Corollary D: `Index Scan using
+llc_property_listing`, an `Index Cond`, and **no Sort node**. The cold run of the same
+statement reported the identical **434** blocks against 352 hit / 82 read — corollary D's
+eviction-invariance, demonstrated rather than asserted.
+
+**Composite and partial deliberately.** Two of the three design proposals asked for a bare
+`(property_id)`, which leaves a Sort on the highest-leverage fix in the build. The second
+key column serves `ORDER BY property_id, listing_id`; `property_id IS NULL` is never
+queried by this shape.
+
+**Worth naming as a pattern:** `drain.py`'s own comment shows this was written *as an
+optimisation* — "Every touched property's members in ONE read… It also DE-DUPLICATES the
+rebuild." Right as a request shape, wrong at the plan level. **Batching by a key you have
+not indexed converts N cheap lookups into one full scan.**
+
+**F2 — autovacuum.** Both location tables were 14.0% / 15.8% dead tuples with their last
+autovacuum on **2026-08-13**, on tables rewritten every 15 minutes: at the default 0.2
+scale factor the threshold sits ~137k/114k rows behind. Set to 0.02 (≈ hourly at the
+current write rate). Every scan was reading ~15% dead rows straight back into F1's
+eviction picture.
+
+**How it was applied, recorded because it is not the usual pattern.** *Not* concurrently.
+Both Supabase MCP paths wrap their payload in a transaction and `CREATE INDEX
+CONCURRENTLY` cannot run inside one (25001); a first attempt was killed mid-build by the
+120 s `statement_timeout` and left an INVALID index. It was applied instead as a **bounded
+blocking build in a verified-quiet window** — no `rebuild_%` active in `pg_stat_activity`,
+05:25 UTC between the `*/15` bursts, `lock_timeout='6s'`, `statement_timeout='300s'`. A
+plain `CREATE INDEX` takes SHARE: it blocks writes on this table, not reads, and this
+table's writers are batch jobs that retry.
+
+**Rails.** `tests/test_location_drain_index_plan.py`, migrations lane, **errors rather than
+skips** without `TEST_DATABASE_URL`. It asserts the index exists with **both** key columns
+and the partial predicate, that the drain's real statement can be served by it, and that
+**no Sort node** appears. It runs with `enable_seqscan=off` on purpose: CI's replayed table
+is empty, where a seq scan genuinely is cheapest, so "the planner prefers it" is not a
+property CI can assert — "the index can serve this exact shape, ORDER BY included" is.
+
+**Rollback.** `DROP INDEX CONCURRENTLY llc_property_listing;` and
+`ALTER TABLE … RESET (autovacuum_vacuum_scale_factor, autovacuum_analyze_scale_factor);`
+on both tables.
+
+**This is the input to STOP 1.** The ledger's open thread (a) — "why does the same rebuild
+cost 10 s on a quiet day and 419 s on a bad one, same query, same rows" — has a candidate
+answer that is not a planner mystery: whether the location lane is evicting `listings` and
+`properties` from a 1 GB pool. The ≥24 h re-measurement decides whether an incremental
+`browse_list` rebuild needs specifying at all.
+
+### W2 — the daily-cost guard reads its own index
+
+`_check_daily_cost` runs on **every recorded LLM call** and spelled its predicate
+`called_at::date = CURRENT_DATE`. That cast is STABLE — it depends on the reading session's
+`TimeZone` — so it cannot match `llm_calls_utc_day_rollup_idx` (migration 421).
+
+| | blocks | time |
+| --- | --- | --- |
+| before — Parallel Seq Scan, 293,552 rows discarded for 10 | 9,665 | 3,310 ms |
+| after — Bitmap Index Scan on `llm_calls_utc_day_rollup_idx`, `Index Cond` | **8** | **13.6 ms** |
+
+**1,208×**, recorded against the proposal's projected "1,610×" — which was derived, not
+measured. **It hid because the read sits inside a `try/except` that logs at DEBUG and
+returns**: when it regressed the *number stayed correct* and only the cost changed. That is
+why the rail asserts the plan, not the value.
+
+Lifting the statement to a module constant `DAILY_COST_TODAY_SQL` is not cosmetic — the
+SQL-correctness CI gate works by PREPARE-ing *discovered SQL constants*, and as an inline
+string in a method body this statement was invisible to it (verified: it now appears in
+`sql_corpus.discover()`'s 748 items).
+
+UTC here is deliberate and scoped to matching the index. The page's *displayed* day is a
+separate question with one declared zone, decided in W3.
+
+### STOP 1 — the T0 baseline, captured 2026-08-25 05:37 UTC
+
+Captured **at the moment F1 landed**, because the "before" window is the *past* 24 h and
+ages out of `cron.job_run_details`. This is the row the ≥24 h re-measurement compares against.
+
+| jobid | job | schedule | runs | failed | avg | max | 24h total |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 6 | browse-list-rebuild | `*/15` | 110 | **31 (28.2%)** | 388.3 s | 600.3 s | 42,713 s |
+| 1 | refresh-health-dashboard | `*/10` | 109 | **38 (34.9%)** | 348.1 s | 900.8 s | 37,594 s |
+| 8 | dedup-funnel-mv-refresh | `*/15` | 89 | 3 | 390.9 s | 600.9 s | **34,399 s** |
+| 7 | browse-map-rebuild | `7,37` | 25 of 48 | 0 | 262.3 s | 582.1 s | 6,557 s |
+| 3 | capture-data-quality | `30 */6` | 3 | 1 | 294.8 s | 432.7 s | 884 s |
+| 5 | emit-verification-stale-alert | `10 * * * *` | 21 | 0 | 38.1 s | 600.0 s | 799 s |
+
+**The finding the proposal did not have a number for: the scheduler is *oversubscribed*, not
+at 74% of budget.** Total job wall-clock is **122,946 s inside an 86,400 s day = a 142% duty
+cycle** — these jobs are not queuing politely, they are running *concurrently and contending*,
+which is the mechanism behind both the 28.2% / 34.9% failure rates (jobs hitting their
+`statement_timeout`, `max_s` pinned at 600.3 / 900.8) and jobid 7's **47.9% launch loss**
+(25 runs against 48 scheduled).
+
+jobid 8's share is **28.0%** of scheduler wall-clock here, against the proposal's 34.7% —
+window-dependent in magnitude, stable in direction, exactly as correction #8 warns. **Always
+quote the window.** W0b returns those 34,399 s/day.
+
+Instance-wide at T0: cache hit **88.98%**, 4,610,969,944 blocks read cumulative,
+**1,556.6 GB** of temp files, database **138 GB**, `stats_reset` null (counters are all-time).
+
+Cumulative `pg_stat_statements` at T0, for the deltas the re-measurement will compute:
+
+| statement | calls | blocks | mean |
+| --- | --- | --- | --- |
+| `rebuild_browse_list()` | 2,884 | 8,071,893,409 | 122,154 ms |
+| `refresh_health_matviews()` | 1,333 | 2,194,833,959 | 63,079 ms |
+| `rebuild_properties_map_mv()` | 467 | 1,225,479,173 | 95,948 ms |
+| location drain bulk read *(F1's target)* | 39,488 | 2,737,573,584 | 982 ms |
+
+**Scheduled, not skipped.** Per the operator's amendment, STOP 1 is report-don't-wait: the
+full ≥24 h re-measurement still runs (it decides W5/W6's shape), and W1–W4 proceed meanwhile
+under amended Corollary D, whose whole point is that block counts do not need a quiet
+instance to be honest.
+
+### Filed with a trigger
+
+One line each: flag · trigger · evidence needed to close · filing wave.
+
+- `llm_calls` carries 64 MB of index on a 76 MB heap; `called_for`/`provider` leading keys
+  look unused · **trigger:** credits restored and a full traffic period captured ·
+  **evidence:** `pg_stat_user_indexes` over that period · filed W2.

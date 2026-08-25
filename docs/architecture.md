@@ -1500,7 +1500,7 @@ DataFileReads and wedged two lanes with no error at all. **No batch statement ru
 nothing else; per-unit and per-batch work arms `SET LOCAL statement_timeout` in its own transaction
 (budgets env-overridable, `LOCATION_*_TIMEOUT_S`; gate
 `tests/location_data/test_location_batch_hardening.py`). And the drain's cost is **round trips, not
-work**: from Actions it is network-RTT-bound at ~5–17 listings/s (~75 ms per GitHub↔Frankfurt trip
+work**: from Actions it is network-RTT-bound at ~5–17 listings/s (~75 ms per GitHub↔`eu-west-1` trip
 against 0.02–0.5 ms of server-side work), so the slice-batching, memoization and prefetching that got
 it there compound if the lane ever moves onto the always-on Railway worker (~1–2 ms RTT).
 

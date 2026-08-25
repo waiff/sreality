@@ -10,7 +10,7 @@ keeps getting broken, fix it here — don't repeat the correction by hand.
 
 A **market-wide real-estate intelligence platform** for the Czech market. It began as an
 hourly sreality.cz scraper and now collects, enriches, and reasons over property data from
-**nine portals**. Store of record: Postgres (Supabase, Frankfurt, PostGIS) with full
+**nine portals**. Store of record: Postgres (Supabase, `eu-west-1` Ireland, PostGIS) with full
 listing history.
 
 Data layered together:
