@@ -380,11 +380,51 @@ a rule.
    **48 325 Kč/m²** for the same cell on every other portal. Nothing downstream can fix this —
    the measure is faithfully dividing a real price by a plot area stored in a floor-area column.
 2. **`area_basis` is a young stamp, and NOTHING carries the plot token yet.** Migration 423 ships
-   no backfill; the column fills as rows are detail-drained. Live 2026-08-25: **24.1% of 701 698
-   listings** populated (up from ~14.6% at W7), tokens `floor` / `usable` / `unknown` — and
-   **zero rows anywhere carry `plot`**. So any gate written on `area_basis` ALONE is inert today
+   no backfill; the column fills as rows are detail-drained. Live 2026-08-25: **24.1% of 701 704
+   listings** populated (up from ~14.6% at W7) — `usable` 146 687, `unknown` 22 560, `floor` **1**,
+   `total` **0**, `plot` **0**. So any gate written on `area_basis` ALONE is inert today
    and will read "not land" for every plot in the database. **Gate on `category_main = 'pozemek'`
    as well**, exactly as `measure_price_per_m2` itself does.
+
+   **DECIDED: a script calling `derive_headline_area`, not a forward migration**
+   (`scripts/backfill_area_basis.py` + `backfill_area_basis.yml`). The stamp is a claim about a
+   value already stored, so the backfill must PROVE which arm won, never infer it. The script
+   feeds the one measure the stored columns prove was the winner to
+   `scraper.area.derive_headline_area` and writes back what it returns — so the precedence and
+   the five-token vocabulary keep exactly one definition. A SQL migration would have restated
+   that logic as a second one, and could not have batched: a single `UPDATE` over ~242k rows of
+   an 11 GB table does not fit the 120 s `statement_timeout`, and a `do $$ loop $$` would hold
+   one transaction across the whole sweep.
+
+   **Three proofs, ~241 900 of the 459 896 stampable rows (52.6%), taking the table to ~58.6%:**
+   `plot` where `category_main='pozemek'` and there is an area — **71 353 rows, and the token
+   goes off zero** — because the land arm stamps `plot` on whatever measure the page carried and
+   that value IS `area_m2`, so no portal input is needed; `unknown` for bazos's 61 041 non-land
+   rows, whose parser passes `fallback` and nothing else; `usable` on the ~109 500 rows where
+   `area_m2 = usable_area` on the **six** portals that store that column un-collapsed.
+
+   **DECLINED, ~218 000 rows, deliberately.** idnes and ceskereality collapse
+   `užitná ?? podlahová ?? plocha` into `usable_area` before storing it, so an exact match there
+   proves only "one of three labels won" — stamping `usable` would fabricate provenance on ~183k
+   rows. Recoverable later by re-parsing `portal_raw_pages` (100% detail coverage on all seven
+   HTML portals), which is a re-parse project, not a stamp. **sreality land (39 371 rows) stays
+   NULL and that is correct**: `area_m2 IS NULL` on every one of them while the parcel sits in
+   `estate_area`, and a basis describes `area_m2`. Moving it would be a value change on a hashed
+   column — a different project. This is the concrete reason the `category_main` half of the gate
+   can never be dropped.
+
+   **Snapshot impact: zero, by three independent mechanisms.** `area_basis` is in
+   `_LISTING_FIELDS` and not in `_HASH_FIELDS`; the script writes that column and nothing else;
+   and both triggers on `listings` are `UPDATE OF geom` / `UPDATE OF geom, obec_id, category_main,
+   category_type`, so neither fires. It is DML, not DDL — no ACCESS EXCLUSIVE, so unlike an
+   `alter table` here it cannot head-block a writer — and it still refuses to start while a
+   `rebuild_%` is active. It also skips `dirty_properties`: the singleton rollup does not mirror
+   `area_basis` onto `properties` at all, so all 686 291 property rows stay NULL until a rollup
+   change ships.
+
+   It additionally corrects **8 rows that carry a basis `derive_headline_area` cannot produce**
+   (7 sreality `pozemek` stamped `usable` with no area at all), which is why the selection reaches
+   past `area_basis IS NULL`.
 3. **`drop function public.browse_stats(<083 signature>)` still needs operator approval + a
    pg_dump.** Verified still present on production 2026-08-25. It is an orphan — zero callers in
    `api/ toolkit/ frontend/src/ scripts/`, and no function or view in the database references it
