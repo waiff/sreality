@@ -79,6 +79,24 @@ DEFAULT_SYSTEM_PROMPT_FALLBACK = (
 # the hard guards; this is just an early-warning log line.
 DEFAULT_DAILY_COST_WARN_USD = 5.0
 
+# Spelled to MATCH llm_calls_utc_day_rollup_idx (migration 421) EXACTLY. `called_at::date`
+# is STABLE — it depends on the reading session's TimeZone — so Postgres cannot use that
+# index for it, and this ran as a Parallel Seq Scan discarding 293,562 rows for 10, on
+# every recorded LLM call, inside a try/except that swallowed the cost. Measured warm:
+# 9,665 -> 8 blocks, 3,310 -> 13.6 ms.
+#
+# The zone is UTC here and ONLY here, deliberately: the day boundary this compares against
+# is the same one migration 421's index is built on. The page's displayed day is a separate
+# question with its own declared zone.
+#
+# Module-level so the SQL-correctness CI gate discovers it (it PREPAREs discovered SQL
+# constants; an inline string in a method body is invisible to it) and so the plan rail
+# can assert against the real statement rather than a copy.
+DAILY_COST_TODAY_SQL = (
+    "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls "
+    "WHERE (called_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date"
+)
+
 
 def provider_for_model(model: str) -> str:
     """The provider that serves a model id, so a caller that only knows the model
@@ -302,10 +320,7 @@ class LLMClient:
         threshold = _resolve_threshold()
         try:
             with self._conn.cursor() as cur:
-                cur.execute(
-                    "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls "
-                    "WHERE called_at::date = CURRENT_DATE"
-                )
+                cur.execute(DAILY_COST_TODAY_SQL)
                 row = cur.fetchone()
         except Exception as exc:
             LOG.debug("daily cost check failed: %s", exc)
