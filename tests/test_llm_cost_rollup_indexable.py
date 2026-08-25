@@ -95,6 +95,39 @@ def test_rollup_index_expression_matches_the_view(conn, view, index):
         assert "date_trunc('hour'" in indexdef
 
 
+def test_daily_cost_guard_matches_the_same_index(conn):
+    """The write-side spend guard must use the index the read-side views use.
+
+    `api.llm_client.DAILY_COST_TODAY_SQL` runs on EVERY recorded LLM call. Spelled as
+    `called_at::date = CURRENT_DATE` it is STABLE, cannot match
+    `llm_calls_utc_day_rollup_idx`, and plans as a Parallel Seq Scan — measured live at
+    9,665 blocks discarding 293,562 rows for 10, inside a `try/except` that logs at DEBUG
+    and returns. Nothing anywhere else fails when this regresses: the number stays
+    correct, only the cost changes, and the exception handler hides even an error.
+
+    Asserts the plan, not the string, so a future rewrite that stays indexable passes.
+    """
+    from api.llm_client import DAILY_COST_TODAY_SQL
+
+    with conn.cursor() as cur:
+        cur.execute("EXPLAIN (FORMAT JSON) " + DAILY_COST_TODAY_SQL)
+        plan = cur.fetchone()[0][0]["Plan"]
+
+    def nodes(node):
+        yield node
+        for child in node.get("Plans", []):
+            yield from nodes(child)
+
+    found = list(nodes(plan))
+    assert not any(n["Node Type"].endswith("Seq Scan") for n in found), (
+        "the daily-cost guard is back to a seq scan of llm_calls — it lost the "
+        f"zone-pinned spelling that matches llm_calls_utc_day_rollup_idx: {found}"
+    )
+    assert any(n.get("Index Name") == "llm_calls_utc_day_rollup_idx" for n in found), (
+        f"expected llm_calls_utc_day_rollup_idx, got {[n['Node Type'] for n in found]}"
+    )
+
+
 def test_rollups_are_admin_only_not_anon_readable(conn):
     """These carry spend data. They were `anon`-dark before 421 and must stay so."""
     with conn.cursor() as cur:
