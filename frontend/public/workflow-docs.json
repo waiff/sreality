@@ -605,6 +605,63 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_idnes_brokers.yml"
     },
     {
+      "filename": "backfill_mmreality_areas.yml",
+      "name": "Backfill mmreality areas (plot stored as the headline)",
+      "description": "One-off, dispatch-only backfill for the per-m² measure program's W2 heal. Before W1, mmreality's own `or` chain read `totalArea or usableArea`, and for a HOUSE mmreality's `totalArea` is the PARCEL — so thousands of active `dum` rows carry a ~905 m² plot in `area_m2` with the real ~130 m² floor area sitting unused in `usableArea`, yielding a median ~5,700 Kč/m² against ~48,000 on every other portal. Re-derives the area columns from the source object ALREADY staged in `raw_json` (NO re-fetch of mmreality) by re-running the fixed parser's own decision, and stamps `area_basis` on every processed row. All four area columns are in the content hash but this writes NO snapshot — correcting our own mis-parse of the SAME staged state is a data-quality fix, and each healed row appends exactly one genuine snapshot on its next successful detail refetch. Idempotent + resumable (each row stamped `raw_json.area_reparse_v2`); rerun until \"pending=0\". Healed rows enqueue their property so the */5 incremental recompute propagates the corrected denominator into properties + the map matview. NOT a portal ingest workflow, so it carries no `# portal:` tag.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "write",
+          "description": "Actually write. Left false, this only reports what would change.",
+          "required": false,
+          "type": "choice",
+          "default": "false",
+          "options": [
+            "false",
+            "true"
+          ]
+        },
+        {
+          "name": "limit",
+          "description": "Max listings processed this run",
+          "required": false,
+          "type": "string",
+          "default": "20000",
+          "options": null
+        },
+        {
+          "name": "max_seconds",
+          "description": "Wall-clock budget in seconds (blank = no budget)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "verbose",
+          "description": "Log every individual heal (DEBUG)",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "backfill-mmreality-areas",
+      "cancelInProgress": false,
+      "timeoutMinutes": 90,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_mmreality_areas.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_mmreality_areas.yml"
+    },
+    {
       "filename": "backfill_portal_streets.yml",
       "name": "Backfill portal streets",
       "description": "One-off, dispatch-only backfill. Re-derives listings.street (+ house_number / zip for bezrealitky) on existing idnes / maxima / remax / bezrealitky / bazos rows from data ALREADY stored (locality, raw_json, or the existing street), via the shared scraper.street helper — NO re-fetch, NO LLM, NO Mapy spend. street/house_number/zip are out of the content hash so NO snapshot is written. Idempotent + resumable (each row stamped raw_json.portal_street_backfill); rerun until \"pending=0\". A changed-street row enqueues its property so the */5 recompute propagates the group-best street to properties.street. NOT a portal ingest workflow, so it carries no `# portal:` tag.",
@@ -775,6 +832,92 @@
       "permissions": "contents: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_street_name_key.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_street_name_key.yml"
+    },
+    {
+      "filename": "backfill_unit_price_masquerade.yml",
+      "name": "Backfill unit-price masquerade (per-m² rate stored as price_czk)",
+      "description": "One-off, dispatch-only quarantine for the per-m² measure program's W2 heal. ceskereality, realitymix and bazos each render commercial and land offers at a RATE (\"100 Kč za m²/měsíc\", \"45 Kč / (za m²)\") and the pre-W1 parsers wrote that rate into `price_czk`, which every consumer reads as a total. Unlike the mmreality area damage this is NOT repairable — the true total was never on the page — so it is a QUARANTINE: `price_czk` goes to NULL and the convicting text is recorded in `raw_json.unit_price_quarantined_*`, reversible until the next refetch repopulates the price correctly through W1's parse-time rail. A row is quarantined ONLY when the portal's own price cell, re-read from already-staged state, carries the anchored per-area marker (CONFIRMATION, NEVER MAGNITUDE); rows whose cell cannot be read are left alone and counted as `unconfirmed`. bazos confirms nothing by design — its cell is a bare \"170 Kč\" and the m² basis lives only in prose — and stays wired to report that zero honestly. `price_czk` is in the content hash but this writes NO snapshot, on the same reasoning as the mmreality heal. The read is keyset-paginated and exhaustive; a pass that stopped early logs \"BACKFILL INCOMPLETE\" with a `--after` resume cursor, and silence means done. NOT a portal ingest workflow, so it carries no `# portal:` tag.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "source",
+          "description": "Limit to one portal (blank = all three)",
+          "required": false,
+          "type": "choice",
+          "default": "",
+          "options": [
+            "",
+            "ceskereality",
+            "realitymix",
+            "bazos"
+          ]
+        },
+        {
+          "name": "write",
+          "description": "Actually write. Left false, this only reports what would change.",
+          "required": false,
+          "type": "choice",
+          "default": "false",
+          "options": [
+            "false",
+            "true"
+          ]
+        },
+        {
+          "name": "limit",
+          "description": "Max listings examined this run (blank = the whole corpus)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "after",
+          "description": "Resume from this listings.id cursor (exclusive)",
+          "required": false,
+          "type": "string",
+          "default": "0",
+          "options": null
+        },
+        {
+          "name": "batch_size",
+          "description": "Rows per keyset page",
+          "required": false,
+          "type": "string",
+          "default": "5000",
+          "options": null
+        },
+        {
+          "name": "max_seconds",
+          "description": "Wall-clock budget in seconds (blank = no budget)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "verbose",
+          "description": "Log every individual quarantine (DEBUG)",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "backfill-unit-price-masquerade",
+      "cancelInProgress": false,
+      "timeoutMinutes": 350,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_unit_price_masquerade.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_unit_price_masquerade.yml"
     },
     {
       "filename": "bazos_detail_drain.yml",

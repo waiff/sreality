@@ -1,0 +1,104 @@
+name: Backfill unit-price masquerade (per-m² rate stored as price_czk)
+
+# One-off, dispatch-only quarantine for the per-m² measure program's W2 heal.
+# ceskereality, realitymix and bazos each render commercial and land offers at a
+# RATE ("100 Kč za m²/měsíc", "45 Kč / (za m²)") and the pre-W1 parsers wrote that
+# rate into `price_czk`, which every consumer reads as a total. Unlike the
+# mmreality area damage this is NOT repairable — the true total was never on the
+# page — so it is a QUARANTINE: `price_czk` goes to NULL and the convicting text
+# is recorded in `raw_json.unit_price_quarantined_*`, reversible until the next
+# refetch repopulates the price correctly through W1's parse-time rail. A row is
+# quarantined ONLY when the portal's own price cell, re-read from already-staged
+# state, carries the anchored per-area marker (CONFIRMATION, NEVER MAGNITUDE);
+# rows whose cell cannot be read are left alone and counted as `unconfirmed`.
+# bazos confirms nothing by design — its cell is a bare "170 Kč" and the m² basis
+# lives only in prose — and stays wired to report that zero honestly. `price_czk`
+# is in the content hash but this writes NO snapshot, on the same reasoning as the
+# mmreality heal. The read is keyset-paginated and exhaustive; a pass that stopped
+# early logs "BACKFILL INCOMPLETE" with a `--after` resume cursor, and silence
+# means done. NOT a portal ingest workflow, so it carries no `# portal:` tag.
+#
+# The script DEFAULTS TO DRY-RUN: it reports and exits unless `write` is true.
+#
+# Required GitHub secret: SUPABASE_DB_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Limit to one portal (blank = all three)
+        required: false
+        default: ""
+        type: choice
+        options:
+          - ""
+          - ceskereality
+          - realitymix
+          - bazos
+      write:
+        description: Actually write. Left false, this only reports what would change.
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      limit:
+        description: Max listings examined this run (blank = the whole corpus)
+        required: false
+        default: ""
+        type: string
+      after:
+        description: Resume from this listings.id cursor (exclusive)
+        required: false
+        default: "0"
+        type: string
+      batch_size:
+        description: Rows per keyset page
+        required: false
+        default: "5000"
+        type: string
+      max_seconds:
+        description: Wall-clock budget in seconds (blank = no budget)
+        required: false
+        default: ""
+        type: string
+      verbose:
+        description: Log every individual quarantine (DEBUG)
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: backfill-unit-price-masquerade
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Quarantine unit prices
+        run: |
+          ARGS="--after ${{ inputs.after || '0' }} --batch-size ${{ inputs.batch_size || '5000' }}"
+          if [ -n "${{ inputs.source }}" ]; then ARGS="$ARGS --source ${{ inputs.source }}"; fi
+          if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+          if [ -n "${{ inputs.max_seconds }}" ]; then ARGS="$ARGS --max-seconds ${{ inputs.max_seconds }}"; fi
+          if [ "${{ inputs.write }}" = "true" ]; then ARGS="$ARGS --write"; fi
+          if [ "${{ inputs.verbose }}" = "true" ]; then ARGS="$ARGS --verbose"; fi
+          python -m scripts.backfill_unit_price_masquerade $ARGS
