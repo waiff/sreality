@@ -35,9 +35,12 @@ def _mk_market_row(source: str, source_id: str, found: bool, **cols: Any) -> dic
         "sreality_id": None, "listing_id": None, "property_id": None,
         "source_url": None,
         "category_main": None, "category_type": None,
-        "area_m2": None, "price_czk": None, "disposition": None, "subtype": None,
+        "area_m2": None, "area_basis": None,
+        "price_czk": None, "price_per_m2": None, "price_per_m2_basis": None,
+        "disposition": None, "subtype": None,
         "district": None, "locality": None, "is_active": None,
         "last_seen_at": None, "mf_reference_rent_czk": None,
+        "mf_reference_rent_per_m2_czk": None,
         "mf_gross_yield_pct": None,
     }
     row.update(cols)

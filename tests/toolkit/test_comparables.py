@@ -15,7 +15,8 @@ from toolkit.comparables import (
     find_comparables,
     find_comparables_relaxed,
 )
-from toolkit.comparables import _apply_relaxation
+from toolkit.comparables import _apply_relaxation, _filters_used
+from toolkit.measures import per_m2_basis_sql, per_m2_sql
 
 
 def test_minimal_query_only_spatial():
@@ -111,8 +112,11 @@ def test_default_applies_no_category_filter():
         TargetSpec(lat=50.0, lng=14.0),
         ComparableFilters(),
     )
-    assert "l.category_main" not in sql
-    assert "l.category_type" not in sql
+    # The measure takes both columns as ARGUMENTS and the projection selects
+    # them, so their bare names are in the SQL by design (migration 425). What
+    # must be absent is the equality FILTER on either.
+    assert "l.category_main = %(category_main)s" not in sql
+    assert "l.category_type = %(category_type)s" not in sql
     assert "category_main" not in params
     assert "category_type" not in params
 
@@ -219,20 +223,44 @@ def test_price_bounds_bind_when_set():
 
 
 def test_price_per_m2_bounds_bind_when_set():
+    """Both bounds are spelled by the ONE named measure, not a fourth copy.
+
+    Asserting against `per_m2_sql('l')` rather than a hand-typed division is the
+    point: a hand-typed expectation here is exactly how a fourth definition of
+    price-per-m² got into the repo, and it would keep passing while the query
+    drifted away from what Browse and the Watchdog mean by the same words.
+    """
     sql, params = build_query(
         TargetSpec(lat=50.0, lng=14.0),
         ComparableFilters(min_price_per_m2=50000, max_price_per_m2=120000),
     )
-    assert (
-        "l.price_czk::numeric / NULLIF(l.area_m2, 0) >= %(min_price_per_m2)s"
-        in sql
-    )
-    assert (
-        "l.price_czk::numeric / NULLIF(l.area_m2, 0) <= %(max_price_per_m2)s"
-        in sql
-    )
+    assert f"{per_m2_sql('l')} >= %(min_price_per_m2)s" in sql
+    assert f"{per_m2_sql('l')} <= %(max_price_per_m2)s" in sql
+    # `listings` has no price_per_m2 column: that spelling would fail at PREPARE.
+    assert "l.price_per_m2 " not in sql
     assert params["min_price_per_m2"] == 50000
     assert params["max_price_per_m2"] == 120000
+
+
+def test_projection_carries_the_measure_and_its_label():
+    """Every downstream basis-aware consumer reads the label off these dicts."""
+    sql, _ = build_query(TargetSpec(lat=50.0, lng=14.0), ComparableFilters())
+    assert f"{per_m2_sql('l')} AS price_per_m2" in sql
+    assert f"{per_m2_basis_sql('l')} AS price_per_m2_basis" in sql
+
+
+def test_filters_used_names_the_basis_the_bounds_are_in():
+    used = _filters_used(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(category_main="byt", category_type="pronajem"),
+    )
+    assert used["price_per_m2_basis"] == "rent_monthly_czk_m2"
+
+
+def test_filters_used_basis_is_none_for_an_unpinned_cohort():
+    """Rule 22: category_type is nullable, and a mixed cohort has no unit."""
+    used = _filters_used(TargetSpec(lat=50.0, lng=14.0), ComparableFilters())
+    assert used["price_per_m2_basis"] is None
 
 
 def test_locality_district_id_filter():

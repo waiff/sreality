@@ -11,6 +11,15 @@ Input is the same `ppm2_box` payload that drives DispositionBoxPlots, so
 the annotation can never disagree with the chart. The cohort-wide
 percentiles ride along as context for cross-disposition comparisons.
 
+The caller also supplies `ppm2_basis`, the unit those numbers are in
+(migration 425's four-token vocabulary). A `'mixed'` cohort — rule 22 puts one
+one click away, since the default Browse cohort is sale + rent — is REFUSED
+outright: its box plot stacks monthly rents on top of purchase prices, so there
+is no factual sentence to write about it and no unit to name. No LLM call, no
+cache write, an explicit note instead. The basis needs no place in the cache key:
+`region_key` already carries the category and deal filters the basis resolves
+from, so two different bases can never collide on one hash.
+
 Cache lives in `region_disposition_annotations`, keyed on
 (region_hash, day): a region's annotations are generated once per calendar
 day so repeat browser sessions don't re-bill the API. region_hash is the
@@ -27,6 +36,8 @@ from __future__ import annotations
 
 import hashlib
 from typing import TYPE_CHECKING, Any
+
+from toolkit.measures import BASIS_MIXED, unit_label
 
 try:
     from psycopg.types.json import Jsonb as _Jsonb
@@ -101,6 +112,7 @@ def summarize_region_dispositions(
     dispositions: list[dict[str, Any]],
     ppm2_overall: dict[str, Any] | None = None,
     region_label: str | None = None,
+    ppm2_basis: str | None = None,
     min_box_n: int = DEFAULT_MIN_BOX_N,
     force_refresh: bool = False,
 ) -> dict[str, Any]:
@@ -118,8 +130,29 @@ def summarize_region_dispositions(
             cost_usd=None,
             cache_hit=False,
             min_box_n=min_box_n,
+            ppm2_basis=ppm2_basis,
             force_refresh=force_refresh,
             now_iso=_now_iso(),
+        )
+
+    # A mixed cohort has no unit, so it has no describable distribution: its
+    # boxes are monthly rents and purchase prices in one axis. Refuse rather
+    # than hand the model numbers whose meaning changes row to row.
+    if ppm2_basis == BASIS_MIXED:
+        return _envelope(
+            region_key=region_key,
+            annotations={},
+            model="",
+            cost_usd=None,
+            cache_hit=False,
+            min_box_n=min_box_n,
+            ppm2_basis=ppm2_basis,
+            force_refresh=force_refresh,
+            now_iso=_now_iso(),
+            notes=[
+                "cohort mixes sale and rental listings, so its Kč/m² figures "
+                "have no single unit; refusing to characterise it"
+            ],
         )
 
     cache_hit = False
@@ -138,6 +171,7 @@ def summarize_region_dispositions(
                 region_label=region_label,
                 renderable=renderable,
                 ppm2_overall=ppm2_overall,
+                ppm2_basis=ppm2_basis,
             )
     else:
         annotations, model, cost_usd = _produce_annotations(
@@ -147,6 +181,7 @@ def summarize_region_dispositions(
             region_label=region_label,
             renderable=renderable,
             ppm2_overall=ppm2_overall,
+            ppm2_basis=ppm2_basis,
         )
 
     return _envelope(
@@ -156,6 +191,7 @@ def summarize_region_dispositions(
         cost_usd=cost_usd,
         cache_hit=cache_hit,
         min_box_n=min_box_n,
+        ppm2_basis=ppm2_basis,
         force_refresh=force_refresh,
         now_iso=_now_iso(),
     )
@@ -170,8 +206,9 @@ def _produce_annotations(
     region_label: str | None,
     renderable: list[dict[str, Any]],
     ppm2_overall: dict[str, Any] | None,
+    ppm2_basis: str | None,
 ) -> tuple[dict[str, str], str, float | None]:
-    payload = _build_payload(region_label, renderable, ppm2_overall)
+    payload = _build_payload(region_label, renderable, ppm2_overall, ppm2_basis)
 
     system = llm_client.resolve_system_prompt(_SYSTEM_PROMPT_KEY)
     model = llm_client.resolve_model(_MODEL_KEY)
@@ -223,20 +260,33 @@ def _build_payload(
     region_label: str | None,
     renderable: list[dict[str, Any]],
     ppm2_overall: dict[str, Any] | None,
+    ppm2_basis: str | None = None,
 ) -> str:
+    # The unit is STATED, not implied. `unit_label` is the one place the three
+    # strings live; an absent or unrecognised basis renders no unit at all and
+    # the prompt is told so explicitly, which is what it already did implicitly
+    # ("do not assume which") — only now the caller can remove the ambiguity.
+    unit = unit_label(ppm2_basis)
+    unit_sfx = f" ({unit})" if unit else ""
     lines: list[str] = []
     lines.append(f"Region: {region_label or '(filtered cohort)'}")
+    lines.append(
+        f"Price-per-m² basis: {ppm2_basis} — unit is {unit}"
+        if unit
+        else "Price-per-m² basis: not supplied — the unit of every number below "
+             "is UNKNOWN. Do not name a unit and do not assume sale or rental."
+    )
     if ppm2_overall:
         p25 = ppm2_overall.get("p25")
         p50 = ppm2_overall.get("p50")
         p75 = ppm2_overall.get("p75")
         if p50 is not None:
             lines.append(
-                "Cohort-wide price per m² (Kč/m²): "
+                f"Cohort-wide price per m²{unit_sfx}: "
                 f"p25={p25} median={p50} p75={p75}"
             )
     lines.append("")
-    lines.append("Per-disposition price-per-m² box statistics (Kč/m²):")
+    lines.append(f"Per-disposition price-per-m² box statistics{unit_sfx}:")
     for r in renderable:
         b = r["box"]
         lines.append(
@@ -356,20 +406,25 @@ def _envelope(
     min_box_n: int,
     force_refresh: bool,
     now_iso: str,
+    ppm2_basis: str | None = None,
+    notes: list[str] | None = None,
 ) -> dict[str, Any]:
-    return {
+    envelope: dict[str, Any] = {
         "data": {
             "region_key": region_key,
             "annotations": annotations,
             "model": model,
             "cost_usd": float(cost_usd) if cost_usd is not None else None,
             "cache_hit": cache_hit,
+            "ppm2_basis": ppm2_basis,
+            "ppm2_unit": unit_label(ppm2_basis),
         },
         "metadata": {
             "tool": "summarize_region_dispositions",
             "filters_used": {
                 "region_key": region_key,
                 "min_box_n": min_box_n,
+                "ppm2_basis": ppm2_basis,
                 "force_refresh": force_refresh,
             },
             "result_count": len(annotations),
@@ -377,3 +432,6 @@ def _envelope(
             "data_freshness": None,
         },
     }
+    if notes:
+        envelope["metadata"]["notes"] = notes
+    return envelope

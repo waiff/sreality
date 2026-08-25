@@ -16,6 +16,8 @@ import math
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from toolkit.measures import BASIS_MIXED, per_m2_basis_sql, per_m2_sql
+
 if TYPE_CHECKING:
     import psycopg
 
@@ -57,12 +59,18 @@ def build_query(
     else:
         age_clause = ""
 
+    ppm2 = per_m2_sql("l")
+    ppm2_basis = per_m2_basis_sql("l")
+    mixed = BASIS_MIXED
+
     sql = f"""
 WITH base AS (
   SELECT
     l.sreality_id, l.is_active, l.first_seen_at, l.last_seen_at,
     l.disposition, l.building_type, l.condition,
     l.price_czk, l.area_m2,
+    {ppm2} AS price_per_m2,
+    {ppm2_basis} AS price_per_m2_basis,
     EXTRACT(DAY FROM (now() - l.last_seen_at))::int AS data_age_days
   FROM listings l
   WHERE l.geom IS NOT NULL
@@ -99,21 +107,23 @@ price_stats AS (
     disposition AS d,
     count(*) AS n,
     percentile_cont(0.5) WITHIN GROUP (ORDER BY price_czk)::float AS median_price_czk,
-    percentile_cont(0.5) WITHIN GROUP (
-      ORDER BY (price_czk::numeric / NULLIF(area_m2, 0))
-    )::float AS median_pp,
-    percentile_cont(0.25) WITHIN GROUP (
-      ORDER BY (price_czk::numeric / NULLIF(area_m2, 0))
-    )::float AS p25_pp,
-    percentile_cont(0.75) WITHIN GROUP (
-      ORDER BY (price_czk::numeric / NULLIF(area_m2, 0))
-    )::float AS p75_pp,
-    percentile_cont(0.5) WITHIN GROUP (ORDER BY area_m2)::float AS median_area
+    percentile_cont(0.5) WITHIN GROUP (ORDER BY price_per_m2)::float AS median_pp,
+    percentile_cont(0.25) WITHIN GROUP (ORDER BY price_per_m2)::float AS p25_pp,
+    percentile_cont(0.75) WITHIN GROUP (ORDER BY price_per_m2)::float AS p75_pp,
+    percentile_cont(0.5) WITHIN GROUP (ORDER BY area_m2)::float AS median_area,
+    -- The unit these three percentiles are IN. One basis or the literal
+    -- 'mixed': category is optional on this tool, so a disposition can hold
+    -- sale and rental rows at once and no single unit describes them.
+    CASE WHEN count(DISTINCT price_per_m2_basis) = 1
+         THEN min(price_per_m2_basis) ELSE '{mixed}' END AS ppm2_basis
   FROM active
+  -- Gated on the MEASURE, not on price+area: a row whose price sits below its
+  -- basis floor contributes nothing to the percentiles, so counting it in `n`
+  -- would describe a sample that isn't there. The measure also decides
+  -- median_price_czk's and median_area's cohort, so all five numbers describe
+  -- one set of listings rather than three overlapping ones.
   WHERE disposition IS NOT NULL
-    AND price_czk IS NOT NULL
-    AND area_m2 IS NOT NULL
-    AND area_m2 > 0
+    AND price_per_m2 IS NOT NULL
   GROUP BY disposition
   HAVING count(*) >= 5
 )
@@ -133,7 +143,8 @@ SELECT
       'median_price_per_m2', median_pp,
       'p25_price_per_m2', p25_pp,
       'p75_price_per_m2', p75_pp,
-      'median_area_m2', median_area
+      'median_area_m2', median_area,
+      'price_per_m2_basis', ppm2_basis
     )) FROM price_stats
   ), '[]'::jsonb) AS price_stats_list,
   (SELECT count(*) FROM base
@@ -201,6 +212,9 @@ def describe_neighborhood(
             "p25_price_per_m2": _to_float(s.get("p25_price_per_m2")),
             "p75_price_per_m2": _to_float(s.get("p75_price_per_m2")),
             "median_area_m2": _to_float(s.get("median_area_m2")),
+            # Never omit this: a consumer that gets three numbers and no unit
+            # has to guess one, which is the failure this program exists to end.
+            "price_per_m2_basis": s.get("price_per_m2_basis"),
         }
         for s in (rec.get("price_stats_list") or [])
     }

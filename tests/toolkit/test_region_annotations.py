@@ -179,7 +179,8 @@ def test_envelope_metadata_shape():
     md = res["metadata"]
     assert md["tool"] == "summarize_region_dispositions"
     assert md["filters_used"] == {
-        "region_key": "k", "min_box_n": 5, "force_refresh": False,
+        "region_key": "k", "min_box_n": 5,
+        "ppm2_basis": None, "force_refresh": False,
     }
     assert md["result_count"] == 1
     assert md["data_freshness"] is None

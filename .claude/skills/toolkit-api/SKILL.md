@@ -208,6 +208,24 @@ it (`api/`). They do not apply to the scraper.
     caller that needs a guaranteed structured response (no prose fallback) can force it; pass
     it through `LLMClient.call(..., tool_choice=...)` — omitted, providers/fakes without the
     param keep working.
+12. **Never spell `price / area`. `toolkit/measures.py` is the only per-m² definition.**
+    (Numbered last on purpose — the rules above are cited by code comments; never renumber.)
+    `per_m2_sql(alias)` / `per_m2_basis_sql(alias)` render calls to `measure_price_per_m2` /
+    `measure_price_per_m2_basis` (migration 425); `alias` is required, so a unit-blind call
+    cannot be written. Against the `listings` TABLE the four-argument call is the ONLY legal
+    spelling — `listings` has no `price_per_m2` column, so the published-column form fails at
+    PREPARE; against `properties_public` / `browse_list`, read the published column, which IS
+    the measure. Vocabulary: four values (`sale_capital_czk_m2`, `rent_monthly_czk_m2`,
+    `land_capital_czk_m2`, NULL) plus two non-basis COHORT states, `mixed` and `unknown`.
+    Floors are on the PRICE (rent < 1000, sale non-land < 100000, land unfloored) and a NULL
+    is a visible gap, never a guess. Every envelope carrying a per-m² number carries `basis`
+    beside it, in `data` and in `filters_used`; a tool handed caller-supplied rows degrades to
+    `'unknown'` rather than defaulting to sale. `require_scalable_basis` gates any
+    multiplication of a per-m² percentile by an area (`estimate_yield._scale`), raising
+    `MeasureBasisError` → 422. The five statements assembled by in-function concatenation
+    (comparables, velocity, the transit corridor, neighborhoods, the watchdog matcher) are
+    INVISIBLE to `tests/sql_corpus.discover()`; `tests/test_measure_sql_prepare.py` is their
+    PREPARE gate and must gain a line when a sixth appears.
 
 ## Identity, login, and admin gating (Phase 1, `api/dependencies.py`)
 

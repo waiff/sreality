@@ -94,7 +94,9 @@ def test_metadata_envelope_shape():
     res = analyze_distribution(listings)
     md = res["metadata"]
     assert md["tool"] == "analyze_distribution"
-    assert md["filters_used"] == {"field": "price_per_m2"}
+    # The unit rides in filters_used beside the field. Rows carrying no label
+    # (this fixture's) read 'unknown' — never a default of sale.
+    assert md["filters_used"] == {"field": "price_per_m2", "basis": "unknown"}
     assert md["result_count"] == 3
     assert "queried_at" in md
     assert "data_freshness" in md

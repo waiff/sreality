@@ -49,6 +49,7 @@ from toolkit import (
 )
 from toolkit import filter_registry
 from toolkit.comparables import ComparableFilters, TargetSpec
+from toolkit.measures import ppm2_basis, unit_label
 
 if TYPE_CHECKING:
     import psycopg
@@ -159,6 +160,16 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                     "field": {
                         "type": "string",
                         "enum": ["price_per_m2", "price_czk", "area_m2"],
+                        "description": (
+                            "price_per_m2 is the named measure: its unit is "
+                            "reported back as `basis` (sale_capital_czk_m2 = "
+                            "Kč/m², rent_monthly_czk_m2 = Kč/m² per MONTH, "
+                            "land_capital_czk_m2 = Kč/m² of plot). A cohort "
+                            "whose rows disagree reads 'mixed' and a cohort "
+                            "that carries no label reads 'unknown' — in both "
+                            "cases the percentiles have no single unit and you "
+                            "must not name one. price_czk is Kč; area_m2 is m²."
+                        ),
                     },
                 },
                 "required": [],
@@ -178,6 +189,11 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                     "field": {
                         "type": "string",
                         "enum": ["price_per_m2", "price_czk"],
+                        "description": (
+                            "Same measure and same `basis` label as "
+                            "analyze_distribution: every returned `value`, plus "
+                            "`median` and `iqr`, are in that unit."
+                        ),
                     },
                     "iqr_multiplier": {"type": "number", "minimum": 0.5, "maximum": 5.0},
                 },
@@ -1016,7 +1032,7 @@ def _persist_cohort_entries(
         "INSERT INTO estimation_cohort_entries ("
         "  estimation_run_id, sreality_id, listing_id, first_seen_round_n,"
         "  last_seen_round_n, snapshot_id, distance_m, price_czk,"
-        "  area_m2, price_per_m2, disposition"
+        "  area_m2, price_per_m2, price_per_m2_basis, disposition"
         ") VALUES ("
         # listing_id is bound DIRECTLY, not resolved through the legacy key.
         # estimation_cohort_entries.listing_id is NOT NULL (it is half the PK
@@ -1026,7 +1042,8 @@ def _persist_cohort_entries(
         # `except` below, i.e. cohort provenance would vanish with a green run.
         "  %(run_id)s, %(sid)s, %(lid)s,"
         "  %(round)s, %(round)s,"
-        "  %(snap)s, %(dist)s, %(price)s, %(area)s, %(ppm2)s, %(disp)s"
+        "  %(snap)s, %(dist)s, %(price)s, %(area)s, %(ppm2)s, %(ppm2_basis)s,"
+        "  %(disp)s"
         # Arbiter is listing_id (R2 Phase C, estimation_cohort_entries_run_listing_id_key).
         ") ON CONFLICT (estimation_run_id, listing_id) DO UPDATE SET"
         "  last_seen_round_n = EXCLUDED.last_seen_round_n,"
@@ -1035,6 +1052,8 @@ def _persist_cohort_entries(
         "  price_czk         = COALESCE(EXCLUDED.price_czk, estimation_cohort_entries.price_czk),"
         "  area_m2           = COALESCE(EXCLUDED.area_m2, estimation_cohort_entries.area_m2),"
         "  price_per_m2      = COALESCE(EXCLUDED.price_per_m2, estimation_cohort_entries.price_per_m2),"
+        # NULL stays NULL for a pre-426 row: "basis unknown", not "sale".
+        "  price_per_m2_basis = COALESCE(EXCLUDED.price_per_m2_basis, estimation_cohort_entries.price_per_m2_basis),"
         "  disposition       = COALESCE(EXCLUDED.disposition, estimation_cohort_entries.disposition)"
     )
     try:
@@ -1052,6 +1071,7 @@ def _persist_cohort_entries(
                     "price": l.get("price_czk"),
                     "area": l.get("area_m2"),
                     "ppm2": l.get("price_per_m2"),
+                    "ppm2_basis": l.get("price_per_m2_basis"),
                     "disp": l.get("disposition"),
                 })
     except Exception as exc:
@@ -1360,20 +1380,39 @@ def _tool_summary(name: str, result: dict[str, Any]) -> dict[str, Any]:
     if name == "analyze_distribution":
         return {
             "field": md.get("filters_used", {}).get("field"),
+            # Never summarise the percentiles without the unit they are in.
+            "basis": data.get("basis"),
             "n": data.get("n"),
             "median": data.get("median"),
             "p25": data.get("p25"),
             "p75": data.get("p75"),
         }
     if name == "find_distribution_outliers":
+        outliers = data.get("outliers") or []
+        # `n` is not a key this envelope publishes — it always read None. The
+        # cohort size is the two id lists together.
         return {
-            "n_outliers": len(data.get("outliers") or []),
-            "n_total": data.get("n"),
+            "basis": data.get("basis"),
+            "n_outliers": len(outliers),
+            "n_total": len(outliers) + len(data.get("non_outlier_ids") or []),
         }
     if name == "describe_neighborhood":
+        # Both keys were wrong: describe_neighborhood publishes
+        # `active_listing_count` and a per-DISPOSITION price block, never a
+        # cohort-wide `median_price_per_m2`, so this summary has always shown
+        # the agent two Nones. It now reports the count that exists and the
+        # per-disposition medians WITH the basis each is in.
+        by_disposition = data.get("price_stats_by_disposition") or {}
         return {
-            "n": data.get("active_listings"),
-            "median_price_per_m2": data.get("median_price_per_m2"),
+            "n": data.get("active_listing_count"),
+            "median_price_per_m2_by_disposition": {
+                k: {
+                    "n": v.get("n"),
+                    "median_price_per_m2": v.get("median_price_per_m2"),
+                    "basis": v.get("price_per_m2_basis"),
+                }
+                for k, v in by_disposition.items()
+            },
         }
     if name == "verify_listing_freshness":
         return {
@@ -1690,6 +1729,7 @@ def _initial_user_message(
     subject_condition: dict[str, Any] | None = None,
 ) -> str:
     cond = subject_condition or {}
+    _basis = ppm2_basis(filters.category_main, filters.category_type)
     payload = {
         "target": {
             "lat": target.lat,
@@ -1707,6 +1747,11 @@ def _initial_user_message(
             "category_main": filters.category_main,
             "category_type": filters.category_type,
         },
+        # The unit every Kč/m² number in this run will be in, named up front so
+        # the model never has to infer it from the category pins. null means the
+        # cohort has no single basis — then no per-m² figure may be labelled.
+        "price_per_m2_basis": _basis,
+        "price_per_m2_unit": unit_label(_basis),
         "purchase_price_czk": purchase_price_czk,
     }
     body = (

@@ -60,8 +60,10 @@ def test_query_omits_category_clauses_when_none():
         lat=50.0, lng=14.0, radius_m=1000, max_age_days=7,
         category_main=None, category_type=None,
     )
-    assert "category_main" not in sql
-    assert "category_type" not in sql
+    # Both columns are ARGUMENTS to the measure and its label (migration 425),
+    # so their names appear regardless; only the filter clauses must be absent.
+    assert "AND l.category_main = %(category_main)s" not in sql
+    assert "AND l.category_type = %(category_type)s" not in sql
     assert "category_main" not in params
     assert "category_type" not in params
 

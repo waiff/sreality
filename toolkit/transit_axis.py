@@ -38,6 +38,7 @@ from toolkit.comparables import (
     _lifecycle_where,
     _shared_filter_where,
 )
+from toolkit.measures import per_m2_basis_sql, per_m2_sql
 
 if TYPE_CHECKING:
     import psycopg
@@ -260,20 +261,15 @@ def _write_cache(
         )
 
 
-def _query_corridor(
-    conn: "psycopg.Connection",
+def build_corridor_query(
     target: TargetSpec,
     filters: ComparableFilters,
     transport_types: list[str],
     anchor_radius_m: int,
     corridor_m: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
-    """Return (listings, lines_used, line_fetched_max_iso).
-
-    `listings` rows include `nearest_line_source_id`,
-    `nearest_line_transport_type`, `nearest_line_route_ref`, and
-    `corridor_distance_m`.
-    """
+) -> tuple[str, dict[str, Any]]:
+    """Render the corridor SQL + params. Pure; exposed so the schema-aware
+    PREPARE gate can reach a statement built by in-function concatenation."""
     shared_where, params = _shared_filter_where(target, filters)
     # _shared_filter_where adds a ST_DWithin(l.geom, anchor, radius_m)
     # clause we don't want here — strip it.
@@ -310,7 +306,12 @@ def _query_corridor(
         "candidate AS (\n"
         "  SELECT\n"
         "    l.id AS listing_id, l.sreality_id, l.price_czk, l.area_m2,\n"
-        "    (l.price_czk::numeric / NULLIF(l.area_m2, 0)) AS price_per_m2,\n"
+        # THE measure and its label (migration 425), same pair find_comparables
+        # projects -- a corridor cohort feeds the same distribution and clustering
+        # tools, so it must arrive carrying the same unit.
+        f"    {per_m2_sql('l')} AS price_per_m2,\n"
+        f"    {per_m2_basis_sql('l')} AS price_per_m2_basis,\n"
+        "    l.category_main, l.category_type, l.area_basis,\n"
         "    l.disposition, l.district,\n"
         "    l.locality_district_id, l.locality_region_id,\n"
         "    l.floor, l.total_floors,\n"
@@ -344,6 +345,26 @@ def _query_corridor(
         "WHERE rn = 1\n"
         "ORDER BY corridor_distance_m\n"
         f"LIMIT {_HARD_LIMIT}"
+    )
+    return sql, params
+
+
+def _query_corridor(
+    conn: "psycopg.Connection",
+    target: TargetSpec,
+    filters: ComparableFilters,
+    transport_types: list[str],
+    anchor_radius_m: int,
+    corridor_m: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
+    """Return (listings, lines_used, line_fetched_max_iso).
+
+    `listings` rows include `nearest_line_source_id`,
+    `nearest_line_transport_type`, `nearest_line_route_ref`, and
+    `corridor_distance_m`.
+    """
+    sql, params = build_corridor_query(
+        target, filters, transport_types, anchor_radius_m, corridor_m,
     )
 
     with conn.cursor() as cur:
