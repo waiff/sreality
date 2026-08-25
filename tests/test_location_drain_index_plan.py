@@ -75,7 +75,10 @@ def _plan(conn) -> dict:
     from location_data.resolver.drain import _PROPERTY_MEMBERS_BULK_SQL
 
     with conn.cursor() as cur:
-        cur.execute("set local enable_seqscan = off")
+        # Plain SET, not SET LOCAL: this connection is autocommit, and outside a
+        # transaction SET LOCAL is a silent no-op — the plan comes back as a Seq Scan
+        # and the rail fails for a reason that has nothing to do with the index.
+        cur.execute("set enable_seqscan = off")
         cur.execute(
             "EXPLAIN (FORMAT JSON) " + _PROPERTY_MEMBERS_BULK_SQL, ([1, 2, 3],)
         )
