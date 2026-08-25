@@ -163,11 +163,17 @@ describe('the unit vocabulary', () => {
   it('gives the rent basis a monthly period and the capital bases none', () => {
     expect(PPM2_UNIT.rent).toBe('Kč/m²/měs');
     expect(PPM2_UNIT.sale).toBe('Kč/m²');
-    expect(PPM2_UNIT.land).toBe('Kč/m²');
+    expect(PPM2_UNIT.land).toBe('Kč/m² pozemku');
   });
 
-  it('has a distinct unit for the rent basis', () => {
-    expect(PPM2_UNIT.rent).not.toBe(PPM2_UNIT.sale);
+  /* THREE bases, THREE strings — pairwise, not just rent-vs-sale. `land` was
+   * spelled exactly like `sale` until W8, which is the one way this assertion
+   * can pass while the vocabulary is wrong: a plot rate and a floor rate are
+   * different denominators and must not share a suffix. */
+  it('gives all three bases mutually distinct units', () => {
+    const all: Ppm2RowBasis[] = ['sale', 'rent', 'land'];
+    expect(new Set(all.map((b) => PPM2_UNIT[b])).size).toBe(all.length);
+    expect(new Set(all.map((b) => PPM2_VALUE_LABEL[b])).size).toBe(all.length);
   });
 
   it('spells the value labels the way the growth choropleth always did', () => {

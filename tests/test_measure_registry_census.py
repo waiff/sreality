@@ -1,4 +1,4 @@
-"""THE CENSUS — a 65th unit-blind per-m² site cannot be added silently.
+"""THE CENSUS — a unit-blind per-m² site cannot be added silently.
 
 North star: one measure, one definition, one label. W1–W7 and W9 moved 64 call
 sites onto `public.measure_price_per_m2` / `..._basis` (migration 425). This
@@ -9,20 +9,51 @@ every push and fails unless every occurrence is named in
 WHY A CENSUS AND NOT A BAN. Some occurrences are legitimate and always will be:
 the measure's own SQL body divides a price by an area — that is what a measure
 IS — and the unit strings have to be spelled somewhere. A ban would be either
-false or unenforceable. A census is neither: it allows exactly the enumerated
-population and reds on the next one, whatever it is.
+false or unenforceable. A census is neither: it allows exactly the population
+enumerated in the registry and reds on anything else it can see.
+
+WHAT IT CAN SEE, STATED HONESTLY. This is the contract, and it is narrower than
+"any new site reds the build" — a rail that oversells itself is worse than no
+rail, because the next session reads the guarantee as proof. THREE ARMS:
+  * `division` — a price-ish expression over an area-ish one. Both operands are
+    resolved by a bracket-balanced walk outward from the operator, so
+    `sum(l.price_czk)::numeric / nullif(sum(l.area_m2), 0)`, `r["price_czk"] /
+    r["area_m2"]`, `coalesce(price_czk, 0) / area_m2` and `price // area_m2` all
+    land, not only bare identifiers. It CANNOT catch `12.0 * rent_per_m2_month /
+    sale_per_m2` (`scraper/price_stats_metrics.py`), which divides one per-m²
+    rate by another and names no area at all.
+  * `unit` — a per-m² unit literal (`Kč/m²`, `CZK/m2`, `Kč/m²/měs`, …). That is
+    the arm that catches the one above, and every render surface besides.
+  * `vocab` — any file that reads `PPM2_UNIT` / `PPM2_UNIT_CS` /
+    `PPM2_VALUE_LABEL` / `PPM2_BASIS_TOKEN`, one hit per FILE. This arm exists
+    because the other two are spelling filters and W8 teaches developers to
+    IMPORT the label rather than spell it: a site that labels correctly and
+    computes the number itself spells no unit and names no price identifier, so
+    it walks through both. Consuming the vocabulary is a census event, and the
+    registry entry must say where the number beside the label came from.
+
+THE NAMED BLIND SPOTS — real, and listed so nobody has to rediscover them:
+  * Both value arms are CLOSED-VOCABULARY SPELLING FILTERS. `price_czk / sqm`
+    and `amount / area_m2` miss (`sqm` is not an area token, `amount` is not a
+    price one), as does a unit assembled at runtime (`'Kč' + '/m²'`, or a bare
+    `/m²` suffix with the currency formatted separately).
+  * A division through a helper — `np.divide(price, area)`, `ratio(a, b)` — has
+    no operator to walk out from and is invisible.
+  * `ruian_*`, `area_km2` and `area_ha` are exempt BY NAME on the denominator,
+    with no inspection of what the code does.
+  * The SQL half is a census of `migrations/` ON DISK, not of the database. An
+    object created by dynamic DDL inside plpgsql (`execute 'create …'`, e.g.
+    migrations 283 / 299 / 371 / 376), or one that drifted into production with
+    no create statement in any numbered file (`property_sources_mv` today), is
+    unregisterable and unseen.
+  * The census is VALUE-BLIND: it counts occurrences, never compares them. The
+    two tests at the foot of this file are the exception, and they exist because
+    counting could not tell a verbatim copy of a unit from a wrong one.
+A rail that documents its own edges cannot manufacture confidence.
 
 OFFLINE, NO DB, NO NEW DEPENDENCY. Pure `re` + `tokenize` over files on disk,
 collected by the existing `pytest -q`. It reaches the three territories the type
 system cannot: migrations, the Chrome extension, and Python-emitted SQL strings.
-
-TWO ARMS, because one is provably not enough.
-  * `division` — a price identifier over an area identifier. Catches the classic
-    `price_czk / area_m2`. It CANNOT catch `12.0 * rent_per_m2_month /
-    sale_per_m2` (`scraper/price_stats_metrics.py`), which divides one per-m²
-    rate by another and names no area at all.
-  * `unit` — a per-m² unit literal (`Kč/m²`, `CZK/m2`, `Kč/m²/měs`, …). That is
-    the arm that catches it, and every render surface besides.
 
 WHAT IS SCANNED, AND WHAT IS NOT.
   * Source: `.py` / `.ts` / `.tsx` under scraper, toolkit, api, scripts,
@@ -32,14 +63,22 @@ WHAT IS SCANNED, AND WHAT IS NOT.
     inside one is a label a user will read. (This is also why the
     `price_stats_metrics` docstring counts: it is the module's own declaration
     of the two units it cancels.)
-  * SQL: the EFFECTIVE definition of each database object — the highest-numbered
-    `create` for that object, unless a strictly later migration drops it.
-    Superseded history is not scanned, which is the point of "effective":
+  * SQL, in two halves. OBJECT DEFINITIONS: the EFFECTIVE one per object — the
+    highest-numbered `create` for it, unless a strictly later migration drops
+    it. Superseded history is not scanned, which is the point of "effective":
     `migrations/420`'s `listings_public` is dead the moment 425 replaces it.
-  * `ruian_*` identifiers and `area_km2` / `area_ha` are excluded by name.
-    `location_data/ruian_boundaries.py` and `migrations/381` use `area_m2` for
-    POLYGON area — a name collision, not a measure — and a naive regex
-    false-positives on `neighborhoods.py`'s `active_count / area_km2` density.
+    EVERY OTHER STATEMENT — `alter table … generated always as`, `insert` /
+    `update` backfills, `create index ((…))`, `comment on column`, `grant`,
+    `do $$ … $$` — is scanned UNCONDITIONALLY, because it is not a definition
+    anything can supersede: it ran once, in order. Leaving that half out is how
+    a persisted, unfloored, basis-blind second definition of the measure ships
+    through a green rail, and it left the database catalog — a declared label
+    surface of this program, migration 425 § 7 — uncovered.
+  * `ruian_*` identifiers and `area_km2` / `area_ha` are excluded by name, on
+    the DENOMINATOR only. `location_data/ruian_boundaries.py` and
+    `migrations/381` use `area_m2` for POLYGON area — a name collision, not a
+    measure — and a naive regex false-positives on `neighborhoods.py`'s
+    `active_count / area_km2` density.
 
 TWO TREES ARE DELIBERATELY OUT OF SCOPE, and the omission is a choice rather
 than an oversight. `location_data/` holds the RÚIAN boundary code, whose
@@ -51,7 +90,9 @@ ships a per-m² figure to a human today. If either ever does, add it to
 TO ADD A SITE: put it in `REGISTERED_SITES` with a `why` that says which of the
 three legitimate things it is — it calls the measure, it IS the measure's
 definition, or it is a different quantity — or mark it `KIND_DEBT` and say who
-owes what. Do not widen the regexes.
+owes what. A match on ordinary PROSE (a docstring listing column names, a
+sentence naming the anti-pattern) belongs in the registry as `KIND_PROSE`; do
+NOT reword the sentence to dodge the gate, and do not widen the regexes.
 """
 
 from __future__ import annotations
@@ -84,26 +125,85 @@ SOURCE_SUFFIXES: tuple[str, ...] = (".py", ".ts", ".tsx")
 
 ARM_DIVISION = "division"
 ARM_UNIT = "unit"
+ARM_VOCAB = "vocab"
 
-# --- the two arms ---------------------------------------------------------
+# --- the three arms -------------------------------------------------------
 
-_IDENT = r"[A-Za-z_$][A-Za-z0-9_.$]*"
-# A division whose left operand is a price-ish identifier and whose right
-# operand is an area-ish one, tolerating a `::numeric` cast, a closing paren
-# from `round(`, and one wrapping call on the denominator (`nullif(area_m2, 0)`).
-# Every gap is a SINGLE `\s*` and every optional piece absorbs its own
-# whitespace: three consecutive `\s*` separated by optional groups is
-# ambiguous, and the resulting backtracking cost 5 s on one 2 000-line module.
-_DIVISION = re.compile(
-    rf"(?P<num>{_IDENT})(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)?(?:\s*\))?\s*/\s*"
-    rf"(?:\(\s*)?"
-    rf"(?:(?:nullif|coalesce|greatest|Number|parseFloat|float|Decimal)\s*\(\s*)?"
-    rf"(?P<den>{_IDENT})"
-)
 _PRICE_TOKEN = re.compile(r"price|cena|rent|czk", re.IGNORECASE)
 _AREA_TOKEN = re.compile(r"area|plocha|vymera", re.IGNORECASE)
-# Excluded by name: polygon area (a name collision) and the density denominator.
+# Excluded by name, on the DENOMINATOR only: polygon area (a name collision)
+# and the density denominator. Applying it to the numerator too would exempt
+# `ruian_price_czk / area_m2`, which is a real re-derivation.
 _AREA_EXCLUDED = re.compile(r"ruian|area_km2|area_ha", re.IGNORECASE)
+
+# Every division operator, `/` and Python's floor `//` alike, taken as one
+# token so the right operand starts after both slashes.
+_SLASH = re.compile(r"/{1,2}")
+# A trailing `::numeric` on the numerator, stripped before the walk.
+_TRAILING_CAST = re.compile(r"::\s*[A-Za-z_][A-Za-z0-9_]*\s*$")
+# No operand this program cares about is longer; the bound is what keeps the
+# walk linear and what stops one unbalanced paren swallowing a whole module.
+_MAX_OPERAND = 160
+_OPERAND_EXTRA = "_.$"
+
+
+def _left_operand(source: str, end: int) -> str:
+    """The whole expression the `/` at `end` divides — not just an identifier.
+
+    Walks backwards over a BALANCED bracket run, so `sum(l.price_czk)`,
+    `coalesce(price_czk, 0)` and `r["price_czk"]` all resolve to text that
+    still carries the token, instead of vanishing the way an identifier-only
+    pattern made them vanish. Returns "" when the brackets do not balance
+    inside the bound — a miss is better than a 160-character false positive.
+    """
+    j = end
+    while j > 0 and source[j - 1] in " \t\r\n":
+        j -= 1
+    cast = _TRAILING_CAST.search(source[max(0, j - _MAX_OPERAND) : j])
+    if cast:
+        j = max(0, j - _MAX_OPERAND) + cast.start()
+        while j > 0 and source[j - 1] in " \t\r\n":
+            j -= 1
+    limit, depth, k = max(0, j - _MAX_OPERAND), 0, j
+    while k > limit:
+        c = source[k - 1]
+        if c in ")]":
+            depth += 1
+        elif c in "([":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and not (c.isalnum() or c in _OPERAND_EXTRA):
+            break
+        k -= 1
+    return "" if depth else source[k:j]
+
+
+def _right_operand(source: str, start: int) -> str:
+    """The mirror walk, forwards: `nullif(sum(l.area_m2), 0)`, `r['area_m2']`."""
+    i, n = start, len(source)
+    while i < n and source[i] in " \t\r\n":
+        i += 1
+    limit, depth, k = min(n, i + _MAX_OPERAND), 0, i
+    while k < limit:
+        c = source[k]
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and not (c.isalnum() or c in _OPERAND_EXTRA):
+            break
+        k += 1
+    return "" if depth else source[i:k]
+
+
+# The shared per-m² vocabulary. Importing one of these names is itself a census
+# event (arm three) — see the module docstring.
+_VOCAB_SYMBOL = re.compile(
+    r"\bPPM2_(?:UNIT_CS|VALUE_LABEL|BASIS_TOKEN|UNIT)\b"
+)
 
 # `Kč/m²`, `CZK/m2`, `Kč / m²`, `Kč&nbsp;/&nbsp;m²`, and the `…/měs` forms
 # (the suffix rides along on the same match).
@@ -128,25 +228,36 @@ class Hit:
 
 
 def _scan(path: str, source: str) -> list[Hit]:
-    """Both arms over one already-comment-stripped body."""
+    """All three arms over one already-comment-stripped body."""
     hits: list[Hit] = []
     lines = source.split("\n")
 
     def _line_of(offset: int) -> int:
         return source.count("\n", 0, offset) + 1
 
-    for m in _DIVISION.finditer(source):
-        num, den = m.group("num"), m.group("den")
-        if not _PRICE_TOKEN.search(num) or not _AREA_TOKEN.search(den):
+    def _add(arm: str, offset: int) -> None:
+        line = _line_of(offset)
+        hits.append(Hit(path, arm, line, lines[line - 1].strip()[:140]))
+
+    for m in _SLASH.finditer(source):
+        num = _left_operand(source, m.start())
+        if not _PRICE_TOKEN.search(num):
             continue
-        if _AREA_EXCLUDED.search(num) or _AREA_EXCLUDED.search(den):
+        den = _right_operand(source, m.end())
+        if not _AREA_TOKEN.search(den) or _AREA_EXCLUDED.search(den):
             continue
-        line = _line_of(m.start())
-        hits.append(Hit(path, ARM_DIVISION, line, lines[line - 1].strip()[:140]))
+        _add(ARM_DIVISION, m.start())
 
     for m in _UNIT_LITERAL.finditer(source):
-        line = _line_of(m.start())
-        hits.append(Hit(path, ARM_UNIT, line, lines[line - 1].strip()[:140]))
+        _add(ARM_UNIT, m.start())
+
+    # ONE hit per file, deliberately: this arm censuses FILES that consume the
+    # shared vocabulary, not occurrences of it. Counting occurrences would red
+    # the build when a component reads `PPM2_UNIT[basis]` twice instead of
+    # once — churn on a correct edit, which is how a gate gets switched off.
+    vocab = _VOCAB_SYMBOL.search(source)
+    if vocab:
+        _add(ARM_VOCAB, vocab.start())
 
     return hits
 
@@ -378,12 +489,17 @@ def _migration_number(path: Path) -> int:
     return int(path.name.split("_", 1)[0])
 
 
-def effective_sql_definitions() -> dict[str, tuple[Path, str]]:
+def effective_sql_definitions(root: Path = MIGRATIONS) -> dict[str, tuple[Path, str]]:
     """`"<kind>:<name>" -> (migration file, statement text)` for every object
-    whose newest `create` is not superseded by a strictly later `drop`."""
+    whose newest `create` is not superseded by a strictly later `drop`.
+
+    `root` is a parameter so the supersede logic can be exercised against
+    synthetic migration text in a tmp_path instead of against live filenames,
+    which churn (`listings_public` has been replaced eighteen times).
+    """
     created: dict[str, tuple[int, Path, str]] = {}
     dropped: dict[str, int] = {}
-    for path in sorted(MIGRATIONS.glob("*.sql")):
+    for path in sorted(root.glob("*.sql")):
         num = _migration_number(path)
         sql = path.read_text(encoding="utf-8")
         for stmt in _sql_statements(sql):
@@ -409,11 +525,39 @@ def effective_sql_definitions() -> dict[str, tuple[Path, str]]:
     }
 
 
+def one_shot_sql_statements(root: Path = MIGRATIONS) -> dict[Path, list[str]]:
+    """Every statement that is NOT one of the five tracked `create` forms.
+
+    `alter table … generated always as`, `insert` / `update` backfills,
+    `create index ((price / area))`, `comment on column … 'CZK/m²'`, `grant`,
+    `do $$ … $$`. The supersede logic above decides which OBJECT DEFINITIONS
+    are still live; these are not definitions — they execute exactly once, in
+    order, and nothing later replaces them — so they are scanned
+    unconditionally. Leaving them out is how a persisted, unfloored,
+    basis-blind second definition of the measure ships through a green rail.
+    """
+    out: dict[Path, list[str]] = {}
+    for path in sorted(root.glob("*.sql")):
+        sql = path.read_text(encoding="utf-8")
+        stmts = [
+            stmt
+            for stmt in _sql_statements(sql)
+            if not _SQL_CREATE.match(_SQL_LEAD.sub("", stmt))
+        ]
+        if stmts:
+            out[path] = stmts
+    return out
+
+
 def scan_sql() -> list[Hit]:
     hits: list[Hit] = []
     for key, (path, stmt) in sorted(effective_sql_definitions().items()):
         site = f"migrations/{path.name}::{key}"
         hits.extend(_scan(site, strip_sql_comments(stmt)))
+    for path, stmts in sorted(one_shot_sql_statements().items()):
+        site = f"migrations/{path.name}::statements"
+        for stmt in stmts:
+            hits.extend(_scan(site, strip_sql_comments(stmt)))
     return hits
 
 
@@ -513,7 +657,9 @@ def test_every_measure_has_a_defining_site_and_every_site_a_known_measure() -> N
     )
     for site in REGISTERED_SITES:
         assert site.kind in SITE_KINDS, f"{site.path}: unknown kind {site.kind!r}"
-        assert site.arm in (ARM_DIVISION, ARM_UNIT), f"{site.path}: bad arm"
+        assert site.arm in (ARM_DIVISION, ARM_UNIT, ARM_VOCAB), (
+            f"{site.path}: bad arm"
+        )
         assert site.hits >= 1, f"{site.path}: a site with no hits is not a site"
         assert len(site.why.strip()) > 40, (
             f"{site.path}: `why` must say which of the three legitimate things "
@@ -547,13 +693,68 @@ def test_registered_debt_names_an_owner_and_a_blocker() -> None:
 
 
 def test_the_division_arm_fires_on_a_bare_re_derivation() -> None:
+    """Every shape below was probed against the W8 draft of this arm and MISSED.
+
+    The draft matched a bare or dotted identifier on each side, so it saw
+    `row.price_czk / row.area_m2` and nothing else. But psycopg dict rows and
+    JSON payloads are SUBSCRIPTED throughout this repo (`r["price_czk"]` occurs
+    twenty-odd times across toolkit, api, scraper and six portal mains), and the
+    natural shape of a new region- or obec-stats RPC is an AGGREGATE ratio —
+    which is the same class of site as `region_stats`, the worst find of the
+    whole program. A rail that reds on the naive spelling and passes the
+    idiomatic one manufactures exactly the confidence it is supposed to earn.
+    """
     for snippet in (
+        # what the identifier-only pattern already caught
         "select price_czk::numeric / area_m2 as ppm2 from listings",
         "const ppm2 = row.price_czk / row.area_m2;",
         "round(p.current_price_czk::numeric / nullif(p.area_m2, 0), 2)",
         "median_rent / usable_area",
+        # subscripted operands — the dominant row-access idiom here
+        'return r["price_czk"] / r["area_m2"]',
+        'r.get("price_czk") / r.get("area_m2")',
+        'float(r["price_czk"]) / float(r["area_m2"])',
+        "const v = l['price_czk'] / l['area_m2'];",
+        # aggregates and wrapped operands, on EITHER side
+        "sum(price_czk) / sum(area_m2)",
+        "avg(price_czk)/avg(area_m2)",
+        "sum(l.price_czk)::numeric / nullif(sum(l.area_m2), 0) as ppm2",
+        "coalesce(price_czk, 0) / area_m2",
+        # Python's floor division
+        "total_price_czk // area_m2",
+        # a persisted second definition, the worst outcome of all
+        "alter table listings add column ppm2 numeric "
+        "generated always as (price_czk / area_m2) stored;",
     ):
         assert [h for h in _scan("x", snippet) if h.arm == ARM_DIVISION], snippet
+
+
+def test_the_vocabulary_arm_fires_on_a_correct_label_over_a_wrong_number() -> None:
+    """The combination neither spelling filter can see.
+
+    A site that imports the shared label and computes the number itself spells
+    no unit (the unit arm is silent — W8 itself teaches developers to import
+    rather than spell) and names no price or area identifier (the division arm
+    is silent). That is the shape an adversarial probe used to walk straight
+    through the two-arm census. Consuming the vocabulary is therefore itself a
+    census event, and the registry entry has to say where the NUMBER came from.
+    """
+    probe = (
+        "num = sum(x.total for x in rows)\n"
+        "den = sum(x.size for x in rows)\n"
+        'label = PPM2_UNIT_CS["sale_capital_czk_m2"]\n'
+        "return f'{num / den} {label}'\n"
+    )
+    hits = _scan("x", probe)
+    assert not [h for h in hits if h.arm in (ARM_DIVISION, ARM_UNIT)]
+    assert [h for h in hits if h.arm == ARM_VOCAB], probe
+
+    # One per file, not one per occurrence: a component that reads the map
+    # twice instead of once has not changed the population.
+    twice = "a = PPM2_UNIT.rent;\nb = PPM2_UNIT.sale;\n"
+    assert len([h for h in _scan("x", twice) if h.arm == ARM_VOCAB]) == 1
+    # `PPM2_UNIT_CS` must not also register as a `PPM2_UNIT` occurrence.
+    assert len(_scan("x", "PPM2_UNIT_CS")) == 1
 
 
 def test_the_unit_arm_fires_where_the_division_arm_cannot() -> None:
@@ -592,14 +793,88 @@ def test_comments_are_stripped_but_strings_are_not() -> None:
 def test_the_effective_sql_definition_is_the_newest_undropped_one() -> None:
     """`listings_public` divided price by area until migration 425 replaced it.
     Scanning superseded history would make the census permanently red and
-    permanently ignored."""
+    permanently ignored.
+
+    The invariant is SEMANTIC — whatever migration currently defines the view,
+    it calls the measure — and deliberately NOT `startswith("425_")`. That view
+    has been replaced eighteen times in this repo's history; pinning the
+    filename would red the build on the nineteenth replacement, blaming the
+    wrong migration, for exactly the change rule #23 asks for. A gate that reds
+    on correct work gets edited out. The supersede mechanics are covered
+    against synthetic text below, where no live filename can rot the assertion.
+    """
     effective = effective_sql_definitions()
-    assert effective["view:listings_public"][0].name.startswith("425_"), (
-        "listings_public should resolve to migration 425, not to 420"
+    assert "measure_price_per_m2" in effective["view:listings_public"][1], (
+        "the live definition of listings_public no longer calls the measure"
     )
-    assert "measure_price_per_m2" in effective["view:listings_public"][1]
     # dropped in 425, rebuilt from browse_projection by rebuild_properties_map_mv
     assert "materialized view:properties_map_mv" not in effective
+
+
+def test_a_later_drop_supersedes_a_create_but_a_same_file_drop_does_not(
+    tmp_path: Path,
+) -> None:
+    """The drop/supersede rule, on migration text this test owns.
+
+    Three cases, all real shapes: a view replaced by a later migration resolves
+    to the LATER one; a view dropped by a later migration disappears; a
+    drop-and-recreate INSIDE one file (083, 425) is a redefinition, not a
+    removal, which is why the comparison is `<=` and not `<`.
+    """
+    (tmp_path / "001_a.sql").write_text(
+        "create view v_kept as select 1 as x;\n"
+        "create view v_gone as select 2 as x;\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "002_b.sql").write_text(
+        "create or replace view v_kept as select price_czk / area_m2 as ppm2 from listings;\n"
+        "drop view if exists v_gone;\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "003_c.sql").write_text(
+        "drop view if exists v_cycled;\ncreate view v_cycled as select 3 as x;\n",
+        encoding="utf-8",
+    )
+
+    effective = effective_sql_definitions(tmp_path)
+    assert effective["view:v_kept"][0].name == "002_b.sql"
+    assert "price_czk / area_m2" in effective["view:v_kept"][1]
+    assert "view:v_gone" not in effective
+    assert effective["view:v_cycled"][0].name == "003_c.sql"
+
+
+def test_every_statement_is_scanned_not_only_the_create_forms(
+    tmp_path: Path,
+) -> None:
+    """A generated column, a DML backfill, an index expression and a column
+    comment are all second definitions or second labels of the measure, and
+    none of them is a tracked `create`. The generated column is the worst of
+    them: a persisted, unfloored, basis-blind figure that every downstream
+    consumer would then legitimately read as a plain column."""
+    shapes = {
+        "gen": "alter table listings add column ppm2 numeric "
+        "generated always as (price_czk / area_m2) stored;",
+        "insert": "insert into ppm2_cache (id, ppm2) "
+        "select id, price_czk / area_m2 from listings;",
+        "update": "update listings set ppm2 = price_czk / area_m2 where ppm2 is null;",
+        "index": "create index listings_ppm2_idx on listings ((price_czk / area_m2));",
+        "comment": "comment on column listings.price_czk is 'monthly rent in CZK/m2';",
+    }
+    for i, (label, sql) in enumerate(sorted(shapes.items()), start=1):
+        (tmp_path / f"{900 + i}_{label}.sql").write_text(sql + "\n", encoding="utf-8")
+
+    seen: dict[str, list[str]] = {}
+    for path, stmts in one_shot_sql_statements(tmp_path).items():
+        for stmt in stmts:
+            for hit in _scan(path.name, strip_sql_comments(stmt)):
+                seen.setdefault(path.name.split("_", 1)[1][:-4], []).append(hit.arm)
+
+    assert sorted(seen) == sorted(shapes), (
+        f"these statement shapes are invisible to the census: "
+        f"{sorted(set(shapes) - set(seen))}"
+    )
+    assert seen["comment"] == [ARM_UNIT]
+    assert seen["gen"] == [ARM_DIVISION]
 
 
 def test_per_m2_sql_requires_an_alias() -> None:
@@ -613,3 +888,66 @@ def test_per_m2_sql_requires_an_alias() -> None:
         measures.per_m2_sql()  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         measures.per_m2_basis_sql()  # type: ignore[call-arg]
+
+
+# ------------------------------------------------- the VALUE half of the rail --
+#
+# The census counts occurrences. It is value-BLIND by construction, so it cannot
+# tell a verbatim copy of a unit string from a wrong one: changing the
+# extension's monthly suffix to the bare capital one leaves every count at its
+# registered number and CI green, while re-introducing the exact factor-of-twelve
+# mislabel W8 removed from RunPanel. These two tests close that: the three
+# territories are compared VALUE by VALUE, in the only direction that works —
+# Python reading the other two as text, since neither can be imported here.
+
+_TS_UNIT_MAP = re.compile(
+    r"export const PPM2_UNIT\s*:[^=]*=\s*\{(?P<body>[^}]*)\}", re.DOTALL
+)
+_TS_UNIT_ENTRY = re.compile(r"(?P<key>sale|rent|land)\s*:\s*'(?P<value>[^']*)'")
+_EXT_MONTHLY_UNIT = re.compile(r"const CZK_PER_M2_MONTH\s*=\s*'(?P<value>[^']*)'")
+
+
+def test_the_spa_unit_vocabulary_matches_the_python_one_value_for_value() -> None:
+    """`frontend/src/lib/measure.ts` is called a twin; this is what makes it one.
+
+    `PPM2_UNIT.land` was a byte-for-byte copy of `PPM2_UNIT.sale` while
+    `PPM2_UNIT_CS` named the plot denominator — one measure with two labels,
+    and the census could not see it because both spellings are legal strings.
+    """
+    src = (REPO / "frontend/src/lib/measure.ts").read_text(encoding="utf-8")
+    body = _TS_UNIT_MAP.search(src)
+    assert body, "PPM2_UNIT is no longer an object literal in measure.ts"
+    spa = {m.group("key"): m.group("value") for m in _TS_UNIT_ENTRY.finditer(body.group("body"))}
+
+    from toolkit import measures
+
+    expected = {
+        "sale": measures.PPM2_UNIT_CS[measures.SALE_CAPITAL_CZK_M2],
+        "rent": measures.PPM2_UNIT_CS[measures.RENT_MONTHLY_CZK_M2],
+        "land": measures.PPM2_UNIT_CS[measures.LAND_CAPITAL_CZK_M2],
+    }
+    assert spa == expected, (
+        f"PPM2_UNIT (SPA) and PPM2_UNIT_CS (Python) disagree: {spa} vs {expected}. "
+        f"One measure, one label — pick the spelling and change BOTH, or the same "
+        f"number renders in two units depending on which territory drew it."
+    )
+    assert len(set(expected.values())) == 3, (
+        "two bases share a unit string, so the surfaces cannot distinguish them"
+    )
+
+
+def test_the_extension_copy_is_still_verbatim() -> None:
+    """The Chrome extension has no test job and no importable module, so this is
+    the ONLY thing standing between its copied suffix and a silent 12x
+    mislabel of the fond rate and the MF reference rent."""
+    src = (REPO / "chrome-extension/src/content.ts").read_text(encoding="utf-8")
+    m = _EXT_MONTHLY_UNIT.search(src)
+    assert m, "CZK_PER_M2_MONTH is gone from the extension — was it renamed?"
+
+    from toolkit import measures
+
+    assert m.group("value") == measures.PPM2_UNIT_CS[measures.RENT_MONTHLY_CZK_M2], (
+        "the extension's monthly per-m² suffix is no longer a verbatim copy of "
+        "PPM2_UNIT_CS['rent_monthly_czk_m2']. The bare capital unit on a monthly "
+        "charge is wrong by a factor of twelve."
+    )

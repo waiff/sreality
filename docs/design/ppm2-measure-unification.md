@@ -334,6 +334,70 @@ file, as `COUNT MOVED`, printing the registered justification to re-read before 
 number. Part (a) proven the same way: making one `@ts-expect-error` call valid turns the
 directive itself into a TS2578 build failure.
 
+**HARDENED after adversarial review — the first draft's rail was narrower than its own claim.**
+Six changes, five of them because a probe walked straight through the gate:
+
+1. **The division arm now resolves whole OPERANDS, not identifiers.** The draft matched a bare or
+   dotted name on each side, so `r["price_czk"] / r["area_m2"]` — the dominant row-access idiom in
+   this repo, twenty-odd live occurrences across `toolkit/snapshots.py`, `api/notifications.py`,
+   `scraper/db.py` and six portal mains — was invisible, as were `sum(price_czk) / sum(area_m2)`,
+   `coalesce(price_czk, 0) / area_m2` and `price // area_m2`. The aggregate form is not exotic: it
+   is the natural shape of a new region/obec stats RPC, i.e. the same class of site as
+   `region_stats`, this program's worst find. Both sides are now resolved by a bracket-balanced
+   walk outward from the operator, bounded at 160 characters (a miss beats a runaway false
+   positive), `//` counts, and `_AREA_EXCLUDED` applies to the DENOMINATOR only — applying it to
+   the numerator exempted `ruian_price_czk / area_m2`, which is a real re-derivation.
+2. **Every migration statement is scanned, not only the five `create` forms.** The draft kept only
+   statements matching `create [or replace] (materialized view|view|function|procedure|table)`, so
+   `alter table … add column ppm2 generated always as (price_czk / area_m2) stored`, DML
+   backfills, `create index ((price_czk / area_m2))` and `comment on column … 'CZK/m2'` were
+   never scanned at all. The generated-column case is the worst outcome this charter contemplates:
+   a persisted, unfloored, basis-blind second definition that every downstream consumer would then
+   legitimately read as a plain column. And the `comment on` case is not hypothetical — migration
+   425 § 7 puts the canonical unit strings into the catalog itself. The supersede logic still
+   decides which OBJECT DEFINITIONS are live; everything else executes once and is scanned
+   unconditionally. Registry grew by four SQL entries (migrations 104, 425 ×2, 426).
+3. **A third arm: consuming the vocabulary is a census event.** Both value arms are spelling
+   filters, and W8 itself teaches developers to IMPORT the label rather than spell it — so a probe
+   that imported `PPM2_UNIT_CS` and computed `num / den` on a cohort with no basis resolution
+   spelled nothing and named nothing, and passed green. `vocab` registers every file reading
+   `PPM2_UNIT` / `PPM2_UNIT_CS` / `PPM2_VALUE_LABEL` / `PPM2_BASIS_TOKEN`, one hit per FILE
+   (counting occurrences would red the build when a component reads the map twice instead of
+   once — churn on a correct edit is how a gate gets switched off). Thirteen entries.
+4. **The three "twin" vocabularies were compared, and they already disagreed.**
+   `PPM2_UNIT.land` was a byte-for-byte copy of `PPM2_UNIT.sale` while `PPM2_UNIT_CS`, the SPA's
+   own `PPM2_VALUE_LABEL.land` and `fmtArea(n, 'plot')` all said *pozemku* — one measure, two
+   labels, in the two modules the registry calls twins, and `format.test.ts` pinned the wrong one
+   because it asserted only `rent != sale`. The census counts occurrences and is value-BLIND by
+   construction, so it could never have seen this. Two value-comparing tests now pin
+   `PPM2_UNIT` and the extension's `CZK_PER_M2_MONTH` against `PPM2_UNIT_CS` basis-for-basis; the
+   extension matters most, since that territory has no test job at all.
+5. **`browse_stats` was registered as inert debt while it was still REACHABLE.**
+   `has_function_privilege('authenticated', 'public.browse_stats', 'EXECUTE')` was true on
+   production. Registering a reachable re-derivation as inert is the one thing the census must not
+   do. Migration 428 revokes the grant — additive, autonomous, reversible with one `grant` — and
+   the debt entry now states the truth: on disk and in the catalog, not reachable; the DROP still
+   waits on the operator.
+6. **Two tests were pinned to things that rot.** `test_the_effective_sql_definition_is_the_newest_undropped_one`
+   asserted `listings_public` resolves to a migration whose FILENAME starts `425_`; that view has
+   been replaced eighteen times, so the next legitimate replacement would have reddened CI blaming
+   the wrong migration — for exactly the change rule #23 asks for. The filename assertion is gone;
+   the semantic one (the live definition calls the measure) stays, and the supersede mechanics are
+   covered against synthetic migration text in a `tmp_path`. And
+   `test_every_pg_backed_numeric_filter_declares_a_unit` scoped itself with `and f.pg_column`,
+   cutting the guarded population from 47 to 32 — where the two it hid were precisely the two with
+   no declaration. Scope removed; `floor_band` and `price_change_count_min` declared.
+
+**The census now names its own blind spots**, in the module docstring and in
+`docs/architecture.md` § rule 23, rather than claiming it "reds on the next one, whatever it is".
+That claim was false, and it was written into the two documents every future session is told to
+trust — worse than no rail, because a green run reads as proof. What remains uncovered, on
+purpose and in writing: closed-vocabulary spelling (`price_czk / sqm`, `amount / area_m2`, a unit
+assembled at runtime), a division routed through a helper, and the fact that the SQL half is a
+census of `migrations/` **on disk, not of the database** — dynamic DDL inside plpgsql (migrations
+283/299/371/376) and the `property_sources_mv` drift are unregisterable and unseen. Registry as
+hardened: **43 site-arms / 102 occurrences**, ~1.1 s.
+
 ### W9 — The plausibility gate
 **Scope test: T3. Migration 427.** After W4. **Parallel with W6/W7.**
 **Files:** `scripts/verify_pipeline.py` `_CHECKS` gains three keys (four as built) — `ppm2_median_shift` (per source × category_main × category_type, fail on an order-of-magnitude week-over-week median move), `ppm2_basis_floor_share` (fail when the share NULLed by the basis floor jumps), `area_vs_usable_divergence` (the direct mmreality detector: `area_m2 IS DISTINCT FROM usable_area` on a source where they should agree).

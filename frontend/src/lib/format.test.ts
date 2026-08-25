@@ -57,16 +57,21 @@ describe('fmtMeasuredPricePerM2', () => {
   it('gives each basis its own suffix, with a non-breaking space before it', () => {
     expect(fmtMeasuredPricePerM2(91_535, 'sale')).toBe(`91\u00a0535${NBSP}Kč/m²`);
     expect(fmtMeasuredPricePerM2(319, 'rent')).toBe(`319${NBSP}Kč/m²/měs`);
-    expect(fmtMeasuredPricePerM2(2_450, 'land')).toBe(`2\u00a0450${NBSP}Kč/m²`);
+    expect(fmtMeasuredPricePerM2(2_450, 'land')).toBe(`2\u00a0450${NBSP}Kč/m² pozemku`);
   });
 
-  /* The one distinction that carries all the weight: the same numeral under two
+  /* The distinction that carries all the weight: the same numeral under any two
    * bases must not render the same string. 319 Kč/m² (a capital price) and
-   * 319 Kč/m²/měs (a monthly rent) are 300x apart in meaning. */
-  it('never renders a rent and a sale figure identically', () => {
-    expect(fmtMeasuredPricePerM2(319, 'rent')).not.toBe(
-      fmtMeasuredPricePerM2(319, 'sale'),
+   * 319 Kč/m²/měs (a monthly rent) are 300x apart in meaning; a capital 2 450
+   * per m² of FLOOR and per m² of PLOT are different quantities too, and until
+   * W8 they rendered identically because `PPM2_UNIT.land` was a copy of
+   * `PPM2_UNIT.sale`. Asserting only rent-vs-sale is what let that stand, so
+   * this now checks every pair. */
+  it('never renders two different bases identically', () => {
+    const rendered = (['sale', 'rent', 'land'] as const).map((b) =>
+      fmtMeasuredPricePerM2(319, b),
     );
+    expect(new Set(rendered).size).toBe(rendered.length);
   });
 
   /* A mixed cohort has no unit, so it gets no number — printing one would be

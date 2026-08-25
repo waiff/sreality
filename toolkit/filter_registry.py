@@ -182,12 +182,15 @@ UNITLESS_NUMERIC_FILTERS: frozenset[str] = frozenset(
         "category_sub_cb",
         "locality_district_id",
         "locality_region_id",
+        # ordinal levels — a rank or a distance in ranks, not a dimension
+        "floor_band",
         # ordinal 1..5 condition ranks (rule #14)
         "building_condition_level_min",
         "building_condition_level_max",
         "apartment_condition_level_min",
         "apartment_condition_level_max",
         # counts of a named thing
+        "price_change_count_min",
         "min_parking_lots",
         "min_city_population",
         "max_city_population",

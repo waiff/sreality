@@ -246,8 +246,9 @@ incident history: `docs/architecture.md` § Architectural rules.
     unit** — sale ~91 535 Kč/m² vs rent ~319 Kč/m²/měs, 300x apart, and a mixed cohort has NO unit and must
     render a gap. The denominator is polymorphic (floor area; PLOT area for `pozemek` — `listings.area_basis`,
     migration 423). Three rails: required-argument signatures, the CI census
-    (`tests/test_measure_registry_census.py` + `toolkit.measures.REGISTERED_SITES`; a new site reds the build)
-    and `FilterDef.basis`. Full rationale: `docs/architecture.md` § rule 23.
+    (`tests/test_measure_registry_census.py` + `toolkit.measures.REGISTERED_SITES` — three arms over six
+    source trees + every migration statement; it names its own blind spots, so read them before trusting
+    a green run) and `FilterDef.basis`. Full rationale: `docs/architecture.md` § rule 23.
 
 Full rationale, edge cases, and incident history: read `docs/architecture.md` before modifying anything
 these rules touch.

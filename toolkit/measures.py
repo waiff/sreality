@@ -399,14 +399,20 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
         measure="ppm2",
         kind=KIND_DEBT,
         why="KNOWN DEBT, not legitimate. An ORPHAN function: zero callers in "
-        "api/, toolkit/, frontend/src/ and scripts/ (grep-verified), "
-        "superseded by browse_stats_properties (migration 378, moved onto the "
-        "measure in 425). It survives only because `drop function` is a "
-        "DESTRUCTIVE change and the database gate requires operator "
-        "confirmation plus a pg_dump. It computes eleven unfloored, "
-        "basis-blind per-m² expressions. OWNER: operator. BLOCKER: the drop "
-        "approval. Migration 083's own text is the restore script. When it is "
-        "dropped, delete this entry — the census will then require it.",
+        "api/, toolkit/, frontend/src/ and scripts/ (grep-verified), and no "
+        "function or view in the database references it either (pg_proc + "
+        "pg_get_viewdef, checked live). Superseded by browse_stats_properties "
+        "(migration 378, moved onto the measure in 425). It computes eleven "
+        "unfloored, basis-blind per-m² expressions. It was ALSO EXECUTE-granted "
+        "to `authenticated`, i.e. REACHABLE as a PostgREST RPC by any logged-in "
+        "SPA session — registering a reachable re-derivation as inert debt is "
+        "the one thing this census must never do, so migration 428 revokes that "
+        "grant (additive, so autonomous under the database gate). The definition "
+        "now stays on disk and in the catalog but is not reachable from the "
+        "perimeter. OWNER: operator. BLOCKER: approval for the `drop function` "
+        "itself, which is DESTRUCTIVE and needs a pg_dump; migration 083's own "
+        "text is the restore script. When it is dropped, delete this entry — "
+        "the census will then require it gone.",
     ),
     RegisteredSite(
         path="migrations/354_health_image_matviews_on_listing_id.sql"
@@ -649,8 +655,11 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
         hits=4,
         measure="ppm2",
         kind=KIND_GUARDS,
-        why="Pins that the three bases render three DISTINGUISHABLE strings "
-        "(so a capital 319 and a monthly 319 can never render alike), plus the "
+        why="Pins each basis to its exact rendered string, and — since W8 — "
+        "that all THREE render pairwise differently. It asserted only "
+        "rent-vs-sale before, which is how the land suffix sat as a "
+        "byte-for-byte copy of the sale one: a plot rate and a floor rate are "
+        "different denominators and must not share a label. Also pins the "
         "rounding and the non-breaking space.",
     ),
     RegisteredSite(
@@ -662,5 +671,205 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
         why="Pins the two canonical value labels on the choropleth series — "
         "the repo's original correct basis labels, which PPM2_VALUE_LABEL was "
         "lifted from verbatim.",
+    ),
+    # -- SQL: the one-shot statements ----------------------------------------
+    # Not object definitions and never superseded: they ran once, in order. The
+    # census scans them unconditionally, because a generated column, a backfill
+    # or an index expression is a second definition of the measure and a column
+    # comment is a label the database catalog publishes.
+    RegisteredSite(
+        path="migrations/104_region_disposition_annotations.sql::statements",
+        arm="unit",
+        hits=8,
+        measure="ppm2",
+        kind=KIND_LABELS,
+        why="The `insert into app_settings` that seeded the box-plot annotation "
+        "system prompt. A stored prompt is a render surface with a model as its "
+        "reader, and this one spells the unit eight times while telling the "
+        "model NOT to assume which basis it is on. Migration 426 later replaced "
+        "the row; both statements are registered, because the census reads what "
+        "is in migrations/, and migrations are append-only (rule #1).",
+    ),
+    RegisteredSite(
+        path="migrations/425_measure_price_per_m2.sql::statements",
+        arm="unit",
+        hits=4,
+        measure="ppm2",
+        kind=KIND_LABELS,
+        why="`comment on column` on the stored rate columns — the observation "
+        "rate, the two city-metric rates, the yield, and the three MF reference "
+        "rents. The catalog is a declared label surface of this program: these "
+        "are the canonical wordings, lifted from the yield docstring, and they "
+        "are what an operator reading the schema sees. A future migration "
+        "commenting a monthly column with the capital unit is exactly the "
+        "mislabel this arm exists to red.",
+    ),
+    RegisteredSite(
+        path="migrations/425_measure_price_per_m2.sql::statements",
+        arm="division",
+        hits=1,
+        measure=None,
+        kind=KIND_PROSE,
+        why="Not arithmetic: the `do $$` block stamps a `comment on function` "
+        "onto the superseded browse_stats, and that comment names the "
+        "re-derivation the program removed. Prose in a catalog comment, "
+        "describing the anti-pattern rather than performing it.",
+    ),
+    RegisteredSite(
+        path="migrations/426_cohort_entry_ppm2_basis.sql::statements",
+        arm="unit",
+        hits=3,
+        measure="ppm2",
+        kind=KIND_LABELS,
+        why="The `update app_settings` that replaced migration 104's prompt "
+        "with the basis-aware one. The three literals are the three basis "
+        "tokens mapped to the three unit strings, taught to the model as one "
+        "table — the same vocabulary PPM2_UNIT_CS holds, crossing into a "
+        "fourth territory that cannot import it.",
+    ),
+    # -- Prose the arms legitimately find ------------------------------------
+    RegisteredSite(
+        path="scraper/db.py",
+        arm="division",
+        hits=1,
+        measure=None,
+        kind=KIND_PROSE,
+        why="Not arithmetic: `_create_singleton_property`'s docstring names the "
+        "removed geo Tier-1 spatial probe by its three signals, slash-separated. "
+        "A sentence about a deleted matcher, in the module that refuses to match "
+        "at insert time (rule #15).",
+    ),
+    # -- The vocabulary arm: every file that CONSUMES the shared labels -------
+    # One entry per file, hits=1 by construction. This arm exists because the
+    # other two are spelling filters: a site that imports the label correctly and
+    # computes the number wrongly spells nothing, so neither arm sees it. Reading
+    # the vocabulary is therefore itself a census event, and the `why` has to say
+    # where the NUMBER beside the label comes from.
+    RegisteredSite(
+        path="toolkit/measures.py",
+        arm="vocab",
+        hits=1,
+        measure="ppm2",
+        kind=KIND_DEFINES,
+        why="The module that owns the vocabulary; every other consumer imports "
+        "from here or copies from here.",
+    ),
+    RegisteredSite(
+        path="frontend/src/lib/measure.ts",
+        arm="vocab",
+        hits=1,
+        measure="ppm2",
+        kind=KIND_DEFINES,
+        why="The SPA twin of the vocabulary. Value-pinned against the Python "
+        "table by the census, so the two cannot drift the way the land suffix "
+        "drifted before W8.",
+    ),
+    RegisteredSite(
+        path="frontend/src/lib/format.ts",
+        arm="vocab",
+        hits=1,
+        measure="ppm2",
+        kind=KIND_CALLS,
+        why="`fmtMeasuredPricePerM2` — THE renderer, and the only place the SPA "
+        "turns a server-computed figure plus its server-published basis into a "
+        "string. Its basis argument is required, which is part (a) of the rail.",
+    ),
+    RegisteredSite(
+        path="frontend/src/lib/growthChoropleth.ts",
+        arm="vocab",
+        hits=1,
+        measure="ppm2",
+        kind=KIND_LABELS,
+        why="The choropleth legend reads the shared value labels for its two "
+        "rate series; the numbers themselves are the server's growth columns, "
+        "not a client-side ratio.",
+    ),
+    RegisteredSite(
+        path="frontend/src/components/BrowseStats.tsx",
+        arm="vocab",
+        hits=1,
+        measure="ppm2",
+        kind=KIND_LABELS,
+        why="The Browse stats tile labels the RPC's aggregate with the cohort "
+        "basis the server resolved, and renders an empty unit — a visible gap — "
+        "when the cohort has none.",
+    ),
+    RegisteredSite(
+        path="frontend/src/components/Filters.tsx",
+        arm="vocab",
+        hits=1,
+        measure="ppm2",
+        kind=KIND_LABELS,
+        why="The sidebar's per-m² bound suffix, resolved from the cohort the "
+        "filter spec pins rather than from a row — the spec reading of an "
+        "unpinned category, which refuses to label rather than guessing.",
+    ),
+    RegisteredSite(
+        path="frontend/src/components/ListingMap.tsx",
+        arm="vocab",
+        hits=1,
+        measure="ppm2",
+        kind=KIND_LABELS,
+        why="Map pins and the rent-map legend label the server's published "
+        "figure with the server's published basis token; the map never divides "
+        "anything itself.",
+    ),
+    RegisteredSite(
+        path="frontend/src/components/estimation/RunPanel.tsx",
+        arm="vocab",
+        hits=1,
+        measure="fond_per_m2",
+        kind=KIND_LABELS,
+        why="The fond oprav + SVJ input. W8 fixed it: the field carried the "
+        "CAPITAL suffix on a MONTHLY charge, twelve times wrong, while the "
+        "extension already rendered the same field with the monthly one. It now "
+        "reads the rent-basis string from the shared map.",
+    ),
+    RegisteredSite(
+        path="frontend/src/components/region/DispositionBoxPlots.tsx",
+        arm="vocab",
+        hits=1,
+        measure="ppm2",
+        kind=KIND_LABELS,
+        why="The box-plot axis caption, and the refusal path that removes the "
+        "axis entirely when the cohort spans more than one basis.",
+    ),
+    RegisteredSite(
+        path="frontend/src/pages/Datasets.tsx",
+        arm="vocab",
+        hits=1,
+        measure="ppm2",
+        kind=KIND_LABELS,
+        why="The city-metrics table headers, which must distinguish the capital "
+        "column from the monthly one: both hold stored rates computed upstream "
+        "by the price-stats job, not by this page.",
+    ),
+    RegisteredSite(
+        path="frontend/src/pages/WatchdogManage.tsx",
+        arm="vocab",
+        hits=1,
+        measure="ppm2",
+        kind=KIND_LABELS,
+        why="A saved watchdog filter's per-m² bound, labelled from the cohort "
+        "that filter pins — and spelled out in words when the cohort spans both "
+        "deal types, since rule 16 makes Watchdog and Browse share one matcher.",
+    ),
+    RegisteredSite(
+        path="frontend/src/lib/measure.test.ts",
+        arm="vocab",
+        hits=1,
+        measure="ppm2",
+        kind=KIND_GUARDS,
+        why="The vocabulary's own pinning test; it consumes every table in the "
+        "module in order to assert their exact contents.",
+    ),
+    RegisteredSite(
+        path="frontend/src/lib/growthChoropleth.test.ts",
+        arm="vocab",
+        hits=1,
+        measure="ppm2",
+        kind=KIND_GUARDS,
+        why="Pins that the choropleth legend still reads the shared value "
+        "labels rather than a local copy of them.",
     ),
 )

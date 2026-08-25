@@ -1217,18 +1217,44 @@ renumber.** Navigate by area:
     `fmtMeasuredPricePerM2(value, basis)` makes the old two-number call a TypeScript error under
     the already-blocking `tsc --noEmit` (pinned by `@ts-expect-error` cases in `format.test.ts`,
     which fail the build if the unsafe call ever starts compiling);
-    (b) **the census** — `tests/test_measure_registry_census.py` scans six source trees AND the
-    effective (highest-numbered, undropped) SQL definition of every database object for a
-    price-over-area division and for a per-m² unit literal, and fails unless every occurrence is
-    declared in `toolkit.measures.REGISTERED_SITES`. Two arms because one is provably not enough:
-    `scraper/price_stats_metrics.py`'s `12.0 * rent_per_m2_month / sale_per_m2` names no area, so
-    only the unit arm sees it. Comments are stripped, string literals and docstrings are not — a
-    comment is prose about the code, a string is something the program can emit;
+    (b) **the census** — `tests/test_measure_registry_census.py` scans six source trees AND
+    `migrations/` (both the effective — highest-numbered, undropped — definition of each database
+    object AND, unconditionally, every statement that is not one of the five tracked `create`
+    forms: generated columns, DML backfills, index expressions, `comment on`, `grant`, `do`
+    blocks, none of which anything supersedes), and fails unless every occurrence is declared in
+    `toolkit.measures.REGISTERED_SITES`. **Three arms**, because each is provably insufficient
+    alone: `division` (a price-ish expression over an area-ish one, both operands resolved by a
+    bracket-balanced walk so aggregates, subscripts and wrapped operands land, not just bare
+    identifiers) cannot see `scraper/price_stats_metrics.py`'s `12.0 * rent_per_m2_month /
+    sale_per_m2`, which names no area; `unit` (a per-m² literal) catches that and every render
+    surface, but goes silent exactly where this rule succeeds, because a well-behaved surface
+    IMPORTS the label instead of spelling it; so `vocab` registers every file that reads
+    `PPM2_UNIT` / `PPM2_UNIT_CS` / `PPM2_VALUE_LABEL` / `PPM2_BASIS_TOKEN`, one per file, making
+    "labels correctly, computes the number itself" a census event too. Comments are stripped,
+    string literals and docstrings are not — a comment is prose about the code, a string is
+    something the program can emit; a prose match is registered as `kind="prose"`, never reworded
+    away. Two value-comparing tests sit beside the three arms, because the census counts
+    occurrences and is otherwise blind to what they SAY: they pin the SPA's `PPM2_UNIT` and the
+    extension's copied monthly suffix against `PPM2_UNIT_CS` basis-for-basis. (That is how W8
+    found the land basis carrying the sale suffix in the SPA — one measure with two labels.)
     (c) **`FilterDef.basis`** beside `FilterDef.unit`, because `CZK/m²` alone is two labels 300x
-    apart and the registry reaches agents that never see the cohort.
-    The census allows exactly the enumerated population and reds on the next one, whatever it is;
-    a registered site that is NOT legitimate is marked `kind="debt"` and must name an owner and a
-    blocker. The whole program is written up in `docs/design/ppm2-measure-unification.md`.
+    apart and the registry reaches agents that never see the cohort; every numeric filter must
+    declare a unit or be named in `UNITLESS_NUMERIC_FILTERS`, so silence is not a legal answer.
+
+    **What the census does NOT see**, stated because a rail that oversells itself is worse than
+    none — the next session reads the guarantee as proof. Both value arms are closed-vocabulary
+    spelling filters: `price_czk / sqm`, `amount / area_m2`, a unit assembled at runtime
+    (`'Kč' + '/m²'`) and a division routed through a helper (`np.divide(price, area)`) all pass.
+    `ruian_*` / `area_km2` / `area_ha` are exempt by name on the denominator. And the SQL half is
+    a census of `migrations/` **on disk, not of the database**: an object created by dynamic DDL
+    inside plpgsql (migrations 283 / 299 / 371 / 376) or one that drifted into production with no
+    numbered create statement (`property_sources_mv`) is unregisterable and unseen. The full list
+    is in the test module's own docstring, and it is the first thing to extend when a new shape
+    gets through. A registered site that is NOT legitimate is marked `kind="debt"` and must name
+    an owner and a blocker — and `debt` may not mean *reachable*: migration 083's `browse_stats`
+    was registered as inert while still EXECUTE-granted to `authenticated`, so migration 428
+    revokes that grant (additive) and the drop itself stays with the operator. The whole program
+    is written up in `docs/design/ppm2-measure-unification.md`.
 
 
 ## Broker identity merges — auto-merge and the suppression rail

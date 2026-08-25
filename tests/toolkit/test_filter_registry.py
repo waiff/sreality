@@ -441,13 +441,21 @@ def test_every_pg_backed_numeric_filter_declares_a_unit() -> None:
     legal answer: a filter either carries a `unit` or is recorded in
     `UNITLESS_NUMERIC_FILTERS` — identifiers, ordinal ranks, and counts/index
     scores whose scale is named in the description. Both are DECLARATIONS.
+
+    EVERY numeric filter, not just the column-backed ones. The first draft added
+    `and f.pg_column`, which cut the guarded population from 47 to 32 — and the
+    two it hid (`floor_band`, `price_change_count_min`) were precisely the two
+    with no declaration, i.e. the restriction was load-bearing for green rather
+    than principled. It would also have exempted the case that matters most:
+    a derived per-m² bound served from an RPC rather than a column, which would
+    reach `GET /admin/filter-schema` with no unit and no basis at all.
     """
     numeric = [
         f
         for f in fr.all_filters()
-        if f.type in (fr.FilterType.INT, fr.FilterType.FLOAT) and f.pg_column
+        if f.type in (fr.FilterType.INT, fr.FilterType.FLOAT)
     ]
-    assert numeric, "expected some column-backed numeric filters"
+    assert numeric, "expected some numeric filters"
 
     undeclared = [
         f.id for f in numeric if not f.unit and f.id not in fr.UNITLESS_NUMERIC_FILTERS
