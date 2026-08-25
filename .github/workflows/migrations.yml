@@ -179,7 +179,7 @@ jobs:
       #
       # The behavioural rail parks the matview and substitutes a real table — you cannot
       # INSERT into a materialized view, and CI's replayed copy is empty.
-      - name: Broker leaderboard ranks before it hydrates (migrations 434, 435)
+      - name: Broker leaderboard ranks before it hydrates (migration 435)
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
           DB_RAILS_REQUIRED: "1"

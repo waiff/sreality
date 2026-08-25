@@ -170,7 +170,7 @@ on conflict (name) do nothing;
 --
 -- NOTHING FROM _ADMIN_ONLY_RELATIONS MAY EVER APPEAR IN THIS STATEMENT. CI's
 -- test_new_admin_objects_embed_the_gate substring-matches the whole CREATE VIEW text
--- against that frozenset, and nine of the fifteen matviews this registry will eventually
+-- against that frozenset, and seven of the twelve matviews this registry will eventually
 -- cover are on it by name. Artifact names belong in seed INSERTs (which the scanner does
 -- not inspect), never in the view body.
 create or replace view public.derived_artifacts_public as

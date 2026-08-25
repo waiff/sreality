@@ -1390,7 +1390,9 @@ One line each: flag · trigger · evidence needed to close · filing wave.
   dropped in W3: the revert restores migration 421's bodies and needs it · **trigger:** W7,
   once the rollup has run unreverted for a full traffic period · **evidence:**
   `pg_stat_user_indexes.idx_scan` over that period · filed W3.
-- **`derived_artifacts` covers 3 of ~17 derived artifacts.** The catalog-diff rail goes RED
-  only for *newly created* artifacts; the 15 pre-existing matviews plus `browse_list` sit in
+- **`derived_artifacts` covers 1 real row of 14 derived artifacts** (the public view
+  publishes 3, the other two adapted from `browse_read_model_state`). The catalog-diff rail
+  goes RED only for *newly created* artifacts; the 12 pre-existing matviews plus `browse_list`
+  — 13, counted against the live catalog after W0b's teardown removed three — sit in
   an explicit `_W7_BACKLOG` set whose docstring says so · **trigger:** W7 · **evidence:**
   emptying that set · filed W3.
