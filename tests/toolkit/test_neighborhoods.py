@@ -60,10 +60,51 @@ def test_query_omits_category_clauses_when_none():
         lat=50.0, lng=14.0, radius_m=1000, max_age_days=7,
         category_main=None, category_type=None,
     )
-    assert "category_main" not in sql
-    assert "category_type" not in sql
+    # Both columns are ARGUMENTS to the measure and its label (migration 425),
+    # so their names appear regardless; only the filter clauses must be absent.
+    assert "AND l.category_main = %(category_main)s" not in sql
+    assert "AND l.category_type = %(category_type)s" not in sql
     assert "category_main" not in params
     assert "category_type" not in params
+
+
+def test_price_stats_cohort_is_gated_on_the_measure_not_on_price_and_area():
+    """All five numbers in a block must describe ONE set of listings.
+
+    Gating on `price_czk IS NOT NULL AND area_m2 > 0` counts rows the measure
+    withheld a number from (a price below its basis floor), so `n`,
+    `median_price_czk` and `median_area_m2` would describe a larger sample than
+    the three percentiles beside them — three overlapping cohorts reported as
+    one.
+    """
+    from toolkit.measures import per_m2_sql
+
+    sql, _ = build_query(
+        lat=50.0, lng=14.0, radius_m=1000, max_age_days=7,
+        category_main=None, category_type=None,
+    )
+    price_stats = sql.split("price_stats AS")[1].split("SELECT\n  (SELECT count(*)")[0]
+    assert "AND price_per_m2 IS NOT NULL" in price_stats
+    assert "price_czk IS NOT NULL" not in price_stats
+    assert "area_m2 > 0" not in price_stats
+    # The measure itself, four-argument, never `l.price_per_m2` (a 42703 here).
+    assert f"{per_m2_sql('l')} AS price_per_m2" in sql
+    assert "l.price_per_m2 " not in sql
+
+
+def test_each_price_block_carries_the_basis_its_percentiles_are_in():
+    """Category is OPTIONAL on this tool, so one disposition can hold sale and
+    rental rows at once — then the block says `mixed`, never a blanket unit."""
+    from toolkit.measures import BASIS_MIXED, per_m2_basis_sql
+
+    sql, _ = build_query(
+        lat=50.0, lng=14.0, radius_m=1000, max_age_days=7,
+        category_main=None, category_type=None,
+    )
+    assert f"{per_m2_basis_sql('l')} AS price_per_m2_basis" in sql
+    assert "CASE WHEN count(DISTINCT price_per_m2_basis) = 1" in sql
+    assert f"ELSE '{BASIS_MIXED}' END AS ppm2_basis" in sql
+    assert "'price_per_m2_basis', ppm2_basis" in sql
 
 
 def test_query_has_disposition_building_condition_groupby_via_ctes():
@@ -187,6 +228,7 @@ def test_envelope_shape_with_typical_response():
                 "p25_price_per_m2": 340.0,
                 "p75_price_per_m2": 420.0,
                 "median_area_m2": 50.0,
+                "price_per_m2_basis": "rent_monthly_czk_m2",
             },
             {
                 "disposition": "3+kk",
@@ -196,6 +238,7 @@ def test_envelope_shape_with_typical_response():
                 "p25_price_per_m2": 330.0,
                 "p75_price_per_m2": 400.0,
                 "median_area_m2": 70.0,
+                "price_per_m2_basis": "mixed",
             },
         ],
         7, 25, 2, 8,
@@ -227,6 +270,10 @@ def test_envelope_shape_with_typical_response():
     assert ps["2+kk"]["n"] == 23
     assert ps["2+kk"]["median_price_czk"] == 18000
     assert ps["2+kk"]["p25_price_per_m2"] == 340.0
+    # The unit rides through the envelope beside the numbers it labels, and a
+    # block whose rows disagree says so rather than borrowing its neighbour's.
+    assert ps["2+kk"]["price_per_m2_basis"] == "rent_monthly_czk_m2"
+    assert ps["3+kk"]["price_per_m2_basis"] == "mixed"
 
     assert d["trend"] == {
         "new_listings_last_7_days": 7,

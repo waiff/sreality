@@ -21,6 +21,11 @@ interface Props {
    * disposition label. Optional: the chart renders fully without them. */
   annotations?: Record<string, string>;
   annotationsLoading?: boolean;
+  /* Shown INSTEAD of the annotations when the server declined to write any —
+   * a mixed sale+rent cohort has no single Kč/m² unit, so there is no factual
+   * sentence to write about its boxes. Without this the paragraphs would just
+   * vanish, which reads as a bug rather than a refusal. */
+  annotationsNote?: string | null;
 }
 
 const MIN_BOX_N = 5;
@@ -87,6 +92,7 @@ export default function DispositionBoxPlots({
   rows,
   annotations,
   annotationsLoading = false,
+  annotationsNote = null,
 }: Props) {
   const data = useMemo<RenderRow[]>(
     () => rows.map((r) => ({ disposition: r.disposition, n: r.n, box: r.ppm2_box })),
@@ -224,6 +230,7 @@ export default function DispositionBoxPlots({
         rows={renderable}
         annotations={annotations}
         loading={annotationsLoading}
+        note={annotationsNote}
       />
     </div>
   );
@@ -237,10 +244,12 @@ function Annotations({
   rows,
   annotations,
   loading,
+  note,
 }: {
   rows: Array<RenderRow & { box: Ppm2Box }>;
   annotations?: Record<string, string>;
   loading: boolean;
+  note?: string | null;
 }) {
   const hasAny =
     annotations != null &&
@@ -253,7 +262,16 @@ function Annotations({
       </p>
     );
   }
-  if (!hasAny) return null;
+  if (!hasAny) {
+    if (note) {
+      return (
+        <p className="border-t border-[var(--color-rule-soft)] pt-3 text-[0.75rem] leading-relaxed text-[var(--color-ink-3)]">
+          {note}
+        </p>
+      );
+    }
+    return null;
+  }
 
   return (
     <dl className="space-y-2.5 border-t border-[var(--color-rule-soft)] pt-3">

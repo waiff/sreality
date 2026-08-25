@@ -558,6 +558,58 @@ def test_post_with_mode_agent_does_not_500(client, monkeypatch):
     assert inserted["estimated_sale_price_czk"] is None
 
 
+def test_agent_basis_refusal_lands_a_failed_run_not_a_500(client, monkeypatch):
+    """The agent's basis gate must fail the RUN, the way the deterministic
+    path's 422 does — a green run row with a mislabelled number is the outcome
+    the gate exists to prevent, and a 500 would lose the reason."""
+    state = _patch_persistence(monkeypatch)
+
+    def fake_update(conn, run_id: int, **fields: Any) -> None:
+        state.inserts[run_id].update(fields)
+
+    monkeypatch.setattr(er, "_update_run_terminal", fake_update)
+
+    from api import agent as agent_mod
+    from api import skills as sk
+    from toolkit.measures import MeasureBasisError
+
+    def _raise(*a: Any, **kw: Any) -> Any:
+        raise MeasureBasisError(
+            "per-m² basis 'sale_capital_czk_m2' cannot be scaled into a rent figure"
+        )
+
+    monkeypatch.setattr(agent_mod, "run_agent_estimation", _raise)
+    monkeypatch.setattr(
+        sk, "load_skill",
+        lambda conn, name: sk.Skill(
+            name=name, description="", system_prompt="",
+            allowed_tools=["record_estimate"],
+            preferred_model={"anthropic": "x", "gemini": "y"},
+            limits=sk.SkillLimits(
+                max_iterations=5, max_cost_usd=1.0,
+                wall_clock_timeout_s=60.0,
+            ),
+        ),
+    )
+
+    res = client.post(
+        "/estimations",
+        json={
+            "mode": "agent",
+            "spec": {
+                "lat": 50.0, "lng": 14.0, "area_m2": 50.0,
+                "disposition": "2+kk",
+            },
+        },
+    )
+    assert res.status_code == 200
+    assert res.json()["status"] == "failed"
+    inserted = state.inserts[1]
+    assert inserted["status"] == "failed"
+    assert "MeasureBasisError" in inserted["error_message"]
+    assert inserted.get("estimated_monthly_rent_czk") is None
+
+
 def test_post_rent_estimate_on_sale_listing_derives_purchase_price(
     client, monkeypatch,
 ):

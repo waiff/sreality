@@ -317,6 +317,85 @@ def test_tool_summary_compare_images():
     assert out["cache_hit"] is True
 
 
+def test_tool_summary_describe_neighborhood_reads_the_keys_the_tool_publishes():
+    """This summary is ALL the agent sees of the tool in the trace.
+
+    It read `active_listings` and a cohort-wide `median_price_per_m2` for
+    months; the tool publishes `active_listing_count` and a per-DISPOSITION
+    block, so both were silently None on every run. Nothing noticed because
+    nothing asserted it.
+    """
+    out = agent_mod._tool_summary(
+        "describe_neighborhood",
+        {
+            "data": {
+                "active_listing_count": 137,
+                "price_stats_by_disposition": {
+                    "2+kk": {
+                        "n": 23, "median_price_per_m2": 380.0,
+                        "price_per_m2_basis": "rent_monthly_czk_m2",
+                    },
+                    "3+kk": {
+                        "n": 30, "median_price_per_m2": 360.0,
+                        "price_per_m2_basis": "mixed",
+                    },
+                },
+            },
+            "metadata": {},
+        },
+    )
+    assert out["n"] == 137
+    by_disp = out["median_price_per_m2_by_disposition"]
+    assert by_disp["2+kk"] == {
+        "n": 23, "median_price_per_m2": 380.0,
+        "basis": "rent_monthly_czk_m2",
+    }
+    # A block whose rows disagree carries `mixed` through, not a blanket unit.
+    assert by_disp["3+kk"]["basis"] == "mixed"
+
+
+def test_tool_summary_describe_neighborhood_survives_an_empty_block():
+    out = agent_mod._tool_summary(
+        "describe_neighborhood",
+        {"data": {"active_listing_count": 0}, "metadata": {}},
+    )
+    assert out == {"n": 0, "median_price_per_m2_by_disposition": {}}
+
+
+def test_tool_summary_outliers_counts_the_cohort_from_the_two_id_lists():
+    """`n` is not a key this envelope publishes — it always read None."""
+    out = agent_mod._tool_summary(
+        "find_distribution_outliers",
+        {
+            "data": {
+                "basis": "sale_capital_czk_m2",
+                "outliers": [{"listing_id": 1}, {"listing_id": 2}],
+                "non_outlier_ids": [3, 4, 5, 6],
+            },
+            "metadata": {},
+        },
+    )
+    assert out["basis"] == "sale_capital_czk_m2"
+    assert out["n_outliers"] == 2
+    assert out["n_total"] == 6
+
+
+def test_tool_summary_analyze_distribution_never_reports_percentiles_unitless():
+    out = agent_mod._tool_summary(
+        "analyze_distribution",
+        {
+            "data": {
+                "basis": "mixed", "n": 40,
+                "median": 500.0, "p25": 400.0, "p75": 600.0,
+            },
+            "metadata": {"filters_used": {"field": "price_per_m2"}},
+        },
+    )
+    assert out["basis"] == "mixed"
+    assert out["field"] == "price_per_m2"
+    assert out["median"] == 500.0
+
+
 # --- Gate-2: handlers accept the surrogate listing_id --------------------
 
 def test_listing_velocity_handler_forwards_listing_id(monkeypatch):

@@ -89,6 +89,19 @@ actually saw.
 The point estimate is `median(price_per_m2) * area_m2`; the range
 is the IQR.
 
+`price_per_m2` is ONE named measure, and every tool that returns it
+also returns its `basis` — the unit it is in:
+`rent_monthly_czk_m2` (Kč/m² per MONTH), `sale_capital_czk_m2`
+(Kč/m² of floor area) or `land_capital_czk_m2` (Kč/m² of PLOT).
+Multiplying by area gives a monthly rent only on the rent basis;
+on either capital basis the same multiplication gives a purchase
+price. Read the basis before you multiply, and carry it into every
+figure you quote. A basis of `mixed` means the cohort holds both
+sale and rental listings and the percentiles have no single unit;
+`unknown` means nothing labelled them. In both cases say so and do
+not quote a per-m² number — never guess the unit, and never assume
+sale.
+
 ### When the ideal isn't available — how to compromise
 
 The ideal cohort is rare. You'll usually have to trade on one of
@@ -200,7 +213,8 @@ How to combine on the first cohort call:
    listing looks like a price outlier, `summarize_listing` is
    cheap and usually explains the gap (condition, furnishing, data
    error). Reserve `compare_listing_images` for cases where two
-   cohort listings have a ≥ 25% price-per-m² gap that the text
+   cohort listings have a ≥ 25% price-per-m² gap — measured on the
+   same basis — that the text
    summary couldn't explain. Both ids must already be in the
    cohort. Max two vision pairs per estimate.
 
@@ -241,9 +255,10 @@ what fits the target and what you find as you go.
 
 - **Distribution + tail check.** `analyze_distribution`
   (`field="price_per_m2"`) then `find_distribution_outliers` on
-  the same field. Decide whether each flagged listing belongs in
-  the final cohort or should be set aside (record the decision
-  either way).
+  the same field. Both report the same `basis`; check it agrees
+  with what you are estimating before you use either result.
+  Decide whether each flagged listing belongs in the final cohort
+  or should be set aside (record the decision either way).
 
 - **Investigate a stuck outlier.** When `find_distribution_outliers`
   flags a listing that materially moves p75, call

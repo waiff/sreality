@@ -36,6 +36,7 @@ from api.providers import (
 )
 from api.skills import Skill, SkillLimits
 from toolkit.comparables import ComparableFilters, TargetSpec
+from toolkit.measures import MeasureBasisError
 from tests.api._fakes import _FakeConn, _ScriptedProvider
 
 
@@ -98,21 +99,33 @@ def _completion_with_tool(
     )
 
 
-def _cohort_envelope() -> dict[str, Any]:
+def _cohort_envelope(
+    basis: str | None = "rent_monthly_czk_m2",
+) -> dict[str, Any]:
+    """A rental cohort, carrying the LABEL beside every number.
+
+    `price_per_m2_basis` is not decoration: find_comparables projects the
+    measure and its label together, so a fixture that drops the label is a
+    cohort that cannot be scaled into anything (`_finalise` refuses it, exactly
+    as it would refuse a real number nobody can name).
+    """
     return {
         "data": {
             "listings": [
                 {
                     "listing_id": 900100, "sreality_id": 100, "price_czk": 30000, "area_m2": 60,
-                    "price_per_m2": 500, "latest_snapshot_id": 1,
+                    "price_per_m2": 500, "price_per_m2_basis": basis,
+                    "latest_snapshot_id": 1,
                 },
                 {
                     "listing_id": 900101, "sreality_id": 101, "price_czk": 32000, "area_m2": 60,
-                    "price_per_m2": 533, "latest_snapshot_id": 2,
+                    "price_per_m2": 533, "price_per_m2_basis": basis,
+                    "latest_snapshot_id": 2,
                 },
                 {
                     "listing_id": 900102, "sreality_id": 102, "price_czk": 28000, "area_m2": 60,
-                    "price_per_m2": 467, "latest_snapshot_id": 3,
+                    "price_per_m2": 467, "price_per_m2_basis": basis,
+                    "latest_snapshot_id": 3,
                 },
             ],
             "relaxation_trace": [],
@@ -147,7 +160,21 @@ def _patch_toolkit(monkeypatch):
     )
     monkeypatch.setattr(
         agent_mod, "describe_neighborhood",
-        lambda conn, **kw: {"data": {"active_listings": 50, "median_price_per_m2": 510}, "metadata": {}},
+        # The keys the tool ACTUALLY publishes (`active_listing_count`, a
+        # per-disposition block). The old spelling was the one `_tool_summary`
+        # read for months and always got None from.
+        lambda conn, **kw: {
+            "data": {
+                "active_listing_count": 50,
+                "price_stats_by_disposition": {
+                    "2+kk": {
+                        "n": 12, "median_price_per_m2": 510,
+                        "price_per_m2_basis": "rent_monthly_czk_m2",
+                    },
+                },
+            },
+            "metadata": {},
+        },
     )
     monkeypatch.setattr(
         agent_mod, "verify_listing_freshness",
@@ -244,6 +271,188 @@ def test_happy_path_records_estimate(monkeypatch, provider_name):
     assert all(
         row["params"][9] == 42 for row in conn.llm_calls_rows
     )
+
+
+# ---------------------------------------------------------------------------
+# the per-m² basis gate (agent mode)
+# ---------------------------------------------------------------------------
+
+def _run_to_terminator(monkeypatch, *, cohort_basis_value: str | None):
+    """Drive one full loop whose cohort carries `cohort_basis_value`."""
+    monkeypatch.setattr(
+        agent_mod, "find_comparables_relaxed",
+        lambda conn, target, filters, **kw: _cohort_envelope(cohort_basis_value),
+    )
+    monkeypatch.setattr(
+        agent_mod, "analyze_distribution",
+        lambda listings, field="price_per_m2": _distribution_envelope(),
+    )
+    conn = _FakeConn(app_settings={})
+    completions = [
+        _completion_with_tool(
+            "find_comparables_relaxed", {"radius_m": 1000, "min_results": 5},
+        ),
+        _completion_with_tool(
+            "record_estimate",
+            {
+                "estimated_monthly_rent_czk": 30000,
+                "rent_p25_czk": 28000,
+                "rent_p75_czk": 32000,
+                "confidence": "medium",
+                "comparables_used": [100, 101, 102],
+                "warnings": [],
+            },
+        ),
+    ]
+    prov = _ScriptedProvider(
+        "anthropic", completions,
+        prices={"claude-sonnet-4-5": ModelPrice(3.0, 15.0)},
+    )
+    return agent_mod.run_agent_estimation(
+        conn, sreality_client=None, llm_client=LLMClient(conn, providers={"anthropic": prov}),
+        target=_target(), filters=_filters(),
+        purchase_price_czk=None,
+        skill=_make_skill(), provider="anthropic",
+        recorder=TraceRecorder(), estimation_run_id=42,
+    )
+
+
+def test_a_sale_cohort_cannot_be_recorded_as_a_monthly_rent(monkeypatch):
+    """The defect this gate exists for.
+
+    `category_type` is in `_FCR_OVERRIDE_FIELDS`, so an agent widening a thin
+    rental cohort may pin `prodej` mid-run. The MODEL then multiplies a purchase
+    Kč/m² by the area and reports it through `record_estimate` — the agent never
+    calls `estimate_yield._scale`, so nothing else refuses it, and the run would
+    land `status='success'` with a sale price labelled as a monthly rent.
+    """
+    with pytest.raises(MeasureBasisError, match="cannot be scaled"):
+        _run_to_terminator(monkeypatch, cohort_basis_value="sale_capital_czk_m2")
+
+
+def test_a_mixed_cohort_cannot_be_recorded_at_all(monkeypatch):
+    monkeypatch.setattr(
+        agent_mod, "find_comparables_relaxed",
+        lambda conn, target, filters, **kw: {
+            "data": {
+                "listings": [
+                    {
+                        "listing_id": 900100, "sreality_id": 100,
+                        "price_czk": 30000, "area_m2": 60, "price_per_m2": 500,
+                        "price_per_m2_basis": "rent_monthly_czk_m2",
+                        "latest_snapshot_id": 1,
+                    },
+                    {
+                        "listing_id": 900101, "sreality_id": 101,
+                        "price_czk": 4_000_000, "area_m2": 60,
+                        "price_per_m2": 66_667,
+                        "price_per_m2_basis": "sale_capital_czk_m2",
+                        "latest_snapshot_id": 2,
+                    },
+                ],
+                "relaxation_trace": [],
+            },
+            "metadata": {"result_count": 2},
+        },
+    )
+    conn = _FakeConn(app_settings={})
+    completions = [
+        _completion_with_tool("find_comparables_relaxed", {"radius_m": 1000}),
+        _completion_with_tool(
+            "record_estimate",
+            {
+                "estimated_monthly_rent_czk": 30000, "confidence": "low",
+                "comparables_used": [100, 101], "warnings": [],
+            },
+        ),
+    ]
+    prov = _ScriptedProvider(
+        "anthropic", completions, prices={"claude-sonnet-4-5": ModelPrice(3.0, 15.0)},
+    )
+    with pytest.raises(MeasureBasisError, match="no single per-m"):
+        agent_mod.run_agent_estimation(
+            conn, sreality_client=None,
+            llm_client=LLMClient(conn, providers={"anthropic": prov}),
+            target=_target(), filters=_filters(), purchase_price_czk=None,
+            skill=_make_skill(), provider="anthropic",
+            recorder=TraceRecorder(), estimation_run_id=42,
+        )
+
+
+def test_a_rental_cohort_records_normally(monkeypatch):
+    """The gate must not fire on the path it is meant to protect."""
+    result = _run_to_terminator(
+        monkeypatch, cohort_basis_value="rent_monthly_czk_m2",
+    )
+    assert result.metadata["stop_reason"] == "record_estimate"
+    assert result.data["estimated_monthly_rent_czk"] == 30000
+
+
+def test_a_number_with_no_label_is_refused_rather_than_assumed_to_be_rent(
+    monkeypatch,
+):
+    with pytest.raises(MeasureBasisError, match="no single per-m"):
+        _run_to_terminator(monkeypatch, cohort_basis_value=None)
+
+
+def test_an_empty_cohort_is_not_turned_into_a_basis_error(monkeypatch):
+    """"No comparables" must stay "no comparables".
+
+    Nothing produced a per-m² number, so there is none to mislabel — the same
+    carve-out `estimate_yield._scale` makes for an empty distribution.
+    """
+    monkeypatch.setattr(
+        agent_mod, "find_comparables_relaxed",
+        lambda conn, target, filters, **kw: {
+            "data": {"listings": [], "relaxation_trace": []},
+            "metadata": {"result_count": 0},
+        },
+    )
+    conn = _FakeConn(app_settings={})
+    completions = [
+        _completion_with_tool("find_comparables_relaxed", {"radius_m": 1000}),
+        _completion_with_tool(
+            "record_estimate",
+            {
+                "estimated_monthly_rent_czk": 30000, "confidence": "low",
+                "comparables_used": [], "warnings": ["no comparables"],
+            },
+        ),
+    ]
+    prov = _ScriptedProvider(
+        "anthropic", completions, prices={"claude-sonnet-4-5": ModelPrice(3.0, 15.0)},
+    )
+    result = agent_mod.run_agent_estimation(
+        conn, sreality_client=None,
+        llm_client=LLMClient(conn, providers={"anthropic": prov}),
+        target=_target(), filters=_filters(), purchase_price_czk=None,
+        skill=_make_skill(), provider="anthropic",
+        recorder=TraceRecorder(), estimation_run_id=42,
+    )
+    assert result.metadata["stop_reason"] == "record_estimate"
+
+
+def test_the_opening_message_never_names_a_unit_it_cannot_decide():
+    """`category_main=None` on a capital deal admits plots beside flats."""
+    import json
+
+    body = agent_mod._initial_user_message(
+        _target(),
+        ComparableFilters(category_main=None, category_type="prodej"),
+        purchase_price_czk=None,
+    )
+    payload = json.loads(body.split("\n\n", 1)[1])
+    assert payload["price_per_m2_basis"] is None
+    assert payload["price_per_m2_unit"] is None
+
+    body = agent_mod._initial_user_message(
+        _target(),
+        ComparableFilters(category_main="byt", category_type="pronajem"),
+        purchase_price_czk=None,
+    )
+    payload = json.loads(body.split("\n\n", 1)[1])
+    assert payload["price_per_m2_basis"] == "rent_monthly_czk_m2"
+    assert payload["price_per_m2_unit"] == "Kč/m²/měs"
 
 
 # ---------------------------------------------------------------------------

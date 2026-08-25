@@ -6,6 +6,12 @@ multi-axis runs aren't dominated by the variable with the largest
 absolute range, runs Lloyd's algorithm n_restarts times with
 deterministic seeds, picks the lowest-inertia result, then de-normalises
 centroids back to original units before returning.
+
+Centroids come back in ORIGINAL units, so a `price_per_m2` axis needs its unit
+named: `data["basis"]` is the basis of the rows that survived axis filtering, or
+None when no per-m² axis was requested. Caller-supplied listings carrying no
+basis degrade to 'unknown'; a cohort whose rows disagree reads 'mixed'. Neither
+is ever resolved into a unit.
 """
 
 from __future__ import annotations
@@ -15,7 +21,10 @@ import random
 import statistics
 from typing import Any, Literal
 
+from toolkit.measures import cohort_basis
+
 _AXIS = Literal["price_per_m2", "price_czk", "area_m2", "distance_m"]
+_PER_M2_AXIS = "price_per_m2"
 
 _MAX_K = 8
 
@@ -79,10 +88,16 @@ def cluster_comparables(
         )
         inertia_out = inertia
 
+    basis = (
+        cohort_basis([l for l, _ in viable])
+        if _PER_M2_AXIS in axes else None
+    )
+
     return {
         "data": {
             "n_clusters": k if viable else 0,
             "axes": list(axes),
+            "basis": basis,
             "inertia": inertia_out,
             "clusters": clusters_out,
         },
@@ -90,6 +105,7 @@ def cluster_comparables(
             "tool": "cluster_comparables",
             "filters_used": {
                 "axes": list(axes),
+                "basis": basis,
                 "n_clusters": n_clusters_requested,
                 "seed": seed,
                 "n_restarts": n_restarts,

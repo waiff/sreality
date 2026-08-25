@@ -275,11 +275,18 @@ class SummarizeRegionDispositionsIn(BaseModel):
     filter set; the server hashes it and caches the annotations per
     (region, calendar day) so repeat browser sessions don't re-bill.
     `dispositions` is the same `ppm2_box` payload that drives the chart.
+
+    `ppm2_basis` is the unit those boxes are in — one of migration 425's four
+    tokens, or the literal 'mixed' when the cohort spans sale and rental (rule
+    22 makes that the DEFAULT Browse cohort). 'mixed' is refused server-side.
+    Optional so a client that has not been taught to send it yet still works;
+    absent, the annotator is told the unit is unknown rather than guessing one.
     """
     region_key: str = Field(min_length=1, max_length=8192)
     dispositions: list[RegionDispositionIn] = Field(default_factory=list, max_length=40)
     ppm2_overall: dict[str, Any] | None = None
     region_label: str | None = Field(default=None, max_length=256)
+    ppm2_basis: str | None = Field(default=None, max_length=64)
     force_refresh: bool = False
 
 

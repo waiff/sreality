@@ -383,6 +383,13 @@ export interface RegionDispositionAnnotationsInput {
   }>;
   ppm2_overall?: { p25: number; p50: number; p75: number } | null;
   region_label?: string | null;
+  /* The unit those boxes are in — pass `BrowseStats.ppm2_basis` straight
+   * through. The annotator states it in the prompt instead of guessing, and
+   * REFUSES a `'mixed'` cohort outright (no LLM call, an explicit note): a box
+   * plot stacking monthly rents on purchase prices has no describable shape.
+   * Omitting it makes the annotator treat the unit as unknown, so it can no
+   * longer name Kč/m² even when the cohort is a plain sale cohort. */
+  ppm2_basis?: string | null;
 }
 
 export interface RegionDispositionAnnotationsResult {
@@ -392,8 +399,15 @@ export interface RegionDispositionAnnotationsResult {
     model: string;
     cost_usd: number | null;
     cache_hit: boolean;
+    /* Echo of the basis, and its Czech unit — null for a cohort with no
+     * single one, which is exactly when nothing may name a unit. */
+    ppm2_basis?: string | null;
+    ppm2_unit?: string | null;
   };
-  metadata: Record<string, unknown>;
+  /* `notes` says WHY `annotations` is empty when the server declined to write
+   * any (today: a mixed cohort). Rendering it is the difference between an
+   * explained refusal and a blank panel. */
+  metadata: Record<string, unknown> & { notes?: string[] };
 }
 
 export const fetchRegionDispositionAnnotations = (

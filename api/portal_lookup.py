@@ -61,9 +61,11 @@ if TYPE_CHECKING:
 # legacy /listing/{sreality_id} route and NULL post-Gate-2.
 _LISTING_COLS: tuple[str, ...] = (
     "sreality_id", "listing_id", "property_id",
-    "category_main", "category_type", "area_m2", "price_czk", "disposition", "subtype",
+    "category_main", "category_type", "area_m2", "area_basis",
+    "price_czk", "price_per_m2", "price_per_m2_basis",
+    "disposition", "subtype",
     "district", "locality", "is_active", "last_seen_at",
-    "mf_reference_rent_czk", "mf_gross_yield_pct",
+    "mf_reference_rent_czk", "mf_reference_rent_per_m2_czk", "mf_gross_yield_pct",
 )
 
 _MARKET_SQL = """
@@ -75,11 +77,34 @@ SELECT
     l.sreality_id, l.id AS listing_id, l.property_id, l.source_url,
     l.category_main, l.category_type, l.area_m2, l.price_czk, l.disposition, l.subtype,
     l.district, l.locality, l.is_active, l.last_seen_at,
+    -- THE measure and its label (migration 425), listing-grain: the panel is
+    -- overlaid on ONE portal advert, so the number must be that advert's.
+    -- `area_basis` (migration 423) rides along because the denominator is
+    -- polymorphic — 905 m² of plot and 905 m² of floor are not the same
+    -- denominator, and only this stamp says which one was used.
+    measure_price_per_m2(l.price_czk::numeric, l.area_m2::numeric,
+                         l.category_main, l.category_type) AS price_per_m2,
+    measure_price_per_m2_basis(l.category_main, l.category_type) AS price_per_m2_basis,
+    l.area_basis,
     -- MF figures are PROPERTY-grain (the golden record), so every portal's advert
     -- of one flat shows the SAME number. coalesce to the listing's own value only
     -- for the brief pre-attach window (property_id NULL ~5 min) — a fresh listing
     -- is a singleton, whose golden record already equals its own per-listing value.
     coalesce(pr.mf_reference_rent_czk, l.mf_reference_rent_czk) AS mf_reference_rent_czk,
+    -- The SAME reference rent, per m², computed AT THE GRAIN OF ITS NUMERATOR:
+    -- a CASE, not a coalesce of two ratios, so the numerator and the denominator
+    -- always come from one row. The extension divided the property-grain rent by
+    -- the listing-grain area, which is wrong for every merged group.
+    -- Routed through the named measure on an EXPLICIT rent basis: this is a
+    -- monthly rent, so it takes the rent floor (< 1000 Kč -> no number). Reading
+    -- the basis off the listing would resolve `prodej` and apply the 100 000 Kč
+    -- sale floor, withholding every reference rent there is.
+    case when pr.mf_reference_rent_czk is not null
+         then measure_price_per_m2(pr.mf_reference_rent_czk::numeric,
+                                   pr.area_m2::numeric, 'byt', 'pronajem')
+         else measure_price_per_m2(l.mf_reference_rent_czk::numeric,
+                                   l.area_m2::numeric, 'byt', 'pronajem')
+    end AS mf_reference_rent_per_m2_czk,
     coalesce(pr.mf_gross_yield_pct,    l.mf_gross_yield_pct)    AS mf_gross_yield_pct
 FROM req
 LEFT JOIN listings l
