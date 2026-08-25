@@ -1,0 +1,13 @@
+-- 434_revert_brokers_active_id_index.sql
+--
+-- REVERT for 434_brokers_active_id_index.sql. SHIPPED UNAPPLIED.
+--
+-- Lives in migrations/reverts/ because the CI schema replay applies
+-- `ls migrations/*.sql | sort` (NOT recursive) and tests/test_migration_numbers.py globs
+-- the same non-recursively — a revert beside its forward migration would be applied right
+-- after it and would silently undo the change in every replayed environment.
+--
+-- Additive index; dropping it costs only the semi-join's plan (it falls back to the 1,776-
+-- block seq scan of brokers). CONCURRENTLY is available here because DROP INDEX
+-- CONCURRENTLY is only forbidden inside a transaction, and this file is applied by hand.
+drop index concurrently if exists public.brokers_active_id_idx;
