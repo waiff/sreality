@@ -154,7 +154,21 @@ export interface PortalListing {
   category_main: string | null;
   category_type: string | null;
   area_m2: number | null;
+  /* WHICH area `area_m2` holds, as stamped by the parser that wrote it
+   * (migration 423): usable | floor | total | plot | unknown. `area_m2` is
+   * polymorphic — on `pozemek` it IS the parcel — so no surface may render or
+   * multiply it without consulting this. Null on a row stamped before the
+   * column existed. */
+  area_basis: string | null;
   price_czk: number | null;
+  /* THE per-m² measure (migration 425) and its label, computed server-side at
+   * LISTING grain. Never re-derive the quotient here: the measure carries
+   * its own per-basis validity floors, so a row it withheld a number from must
+   * render a gap, not a quotient. `price_per_m2_basis` is one of
+   * 'sale_capital_czk_m2' | 'rent_monthly_czk_m2' | 'land_capital_czk_m2' |
+   * null, and names the unit the number is in. */
+  price_per_m2: number | null;
+  price_per_m2_basis: string | null;
   disposition: string | null;
   /* Portal-agnostic property sub-type (migration 152): the meaningful "kind"
    * for commercial/houses where disposition is NULL. */
@@ -168,7 +182,19 @@ export interface PortalListing {
   is_active: boolean | null;
   last_seen_at: string | null;
   mf_reference_rent_czk: number | null;
+  /* The SAME reference rent per m², computed by the server AT THE GRAIN OF ITS
+   * OWN NUMERATOR. `mf_reference_rent_czk` is PROPERTY-grain (the golden
+   * record) while `area_m2` is LISTING-grain, so dividing one by the other
+   * here mixed two grains and was wrong for every merged multi-portal group.
+   * A MONTHLY figure: render it in the monthly unit, never the capital one. */
+  mf_reference_rent_per_m2_czk: number | null;
   mf_gross_yield_pct: number | null;
+  /* The default service charge (fond oprav + SVJ) to seed the yield panel
+   * with, in Kč per m² of floor area per MONTH — resolved server-side from
+   * THIS subject's denominator. `null` means a fond cannot apply at all (the
+   * area is a parcel). The one definition of the number lives in
+   * api/schemas.DEFAULT_FOND_CZK_PER_M2; the extension keeps no copy. */
+  fond_per_m2_czk_default: number | null;
   latest_estimation: {
     estimation_id: number;
     estimate_kind: 'rent' | 'sale' | null;
@@ -196,7 +222,16 @@ export interface PortalLookupItem {
 export type ApiMessage =
   | { type: 'lookup_listings'; items: PortalLookupItem[] }
   | { type: 'patch_scenario'; run_id: number; body: YieldScenarioUpdate }
-  | { type: 'create_estimation'; url: string }
+  /* `estimate_kind` + `category_main` are OPTIONAL and additive: an older
+   * content bundle that sends neither still lands on the server's historical
+   * defaults (rent, byt). Sending them is what stops the panel firing an
+   * apartment monthly per-m² comparable table at a house or a plot. */
+  | {
+      type: 'create_estimation';
+      url: string;
+      estimate_kind?: 'rent' | 'sale';
+      category_main?: string | null;
+    }
   | { type: 'get_estimation'; run_id: number }
   | { type: 'add_pipeline_card'; property_id: number }
   | { type: 'remove_pipeline_card'; property_id: number }

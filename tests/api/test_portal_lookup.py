@@ -228,6 +228,52 @@ def test_lookup_preserves_request_order_even_if_db_reorders() -> None:
     assert [d["source_id"] for d in out["data"]] == ["a", "b"]
 
 
+def test_fond_default_is_withheld_wherever_the_denominator_is_a_parcel() -> None:
+    """The fond rate is multiplied by `area_m2`, so it inherits that basis.
+
+    A monthly Kč/m² service charge levied on 905 m² of PLOT manufactures
+    ~9 050 Kč/month of cost that a yield then subtracts from the rent — enough
+    to turn the figure negative. Both stamps that name the denominator are
+    consulted, because `measure_price_per_m2_basis` cannot do this job: it
+    resolves RENT-FIRST, so the plot-to-let row below labels
+    `rent_monthly_czk_m2` and would slip a land-basis test.
+    """
+    rows = [
+        # A flat for sale: floor area, a fond genuinely applies.
+        _mk_market_row("sreality", "flat", True, listing_id=1,
+                       category_main="byt", category_type="prodej",
+                       area_m2=Decimal("65.0"), area_basis="usable"),
+        # A plot for sale: area_m2 IS the parcel.
+        _mk_market_row("sreality", "plot", True, listing_id=2,
+                       category_main="pozemek", category_type="prodej",
+                       area_m2=Decimal("905.0"), area_basis="plot"),
+        # A plot TO LET — the rent-first trap: no area_basis stamp at all, so
+        # only `category_main` says the denominator is a parcel.
+        _mk_market_row("sreality", "plot-rent", True, listing_id=3,
+                       category_main="pozemek", category_type="pronajem",
+                       area_m2=Decimal("905.0"), area_basis=None),
+        # Not in our DB: nothing is known that says a fond doesn't apply.
+        _mk_market_row("idnes", "unknown", False),
+    ]
+    out = pl.lookup_portal_listings(
+        _FakeConn(rows), _FakeConn([]),
+        _items(("sreality", "flat"), ("sreality", "plot"),
+               ("sreality", "plot-rent"), ("idnes", "unknown")),
+    )
+    served = [d["fond_per_m2_czk_default"] for d in out["data"]]
+    assert served == [s.DEFAULT_FOND_CZK_PER_M2, None, None,
+                      s.DEFAULT_FOND_CZK_PER_M2]
+
+
+def test_fond_default_is_served_for_an_item_with_no_row_at_all() -> None:
+    """The panel seeds its fond field from this key alone (it holds no literal),
+    so the defensive no-row shape must carry it too or the field goes blank."""
+    out = pl.lookup_portal_listings(
+        _FakeConn([]), _FakeConn([]), _items(("sreality", "nothing")),
+    )
+    assert out["data"][0]["fond_per_m2_czk_default"] == s.DEFAULT_FOND_CZK_PER_M2
+
+
 # ----------------------------------------------------------------------
 # Route: POST /listings/lookup
 # ----------------------------------------------------------------------

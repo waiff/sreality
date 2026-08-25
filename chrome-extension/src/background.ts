@@ -93,7 +93,10 @@ async function handleMessage(
     case 'patch_scenario':
       return patchScenario(message.run_id, message.body);
     case 'create_estimation':
-      return createEstimation(message.url);
+      return createEstimation(message.url, {
+        estimate_kind: message.estimate_kind,
+        category_main: message.category_main,
+      });
     case 'get_estimation':
       return getEstimation(message.run_id);
     case 'add_pipeline_card':

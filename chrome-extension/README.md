@@ -44,6 +44,38 @@ The editable estimation block still shares its scenario state (rent / fond
 oprav / listing price) with the SPA's `/estimation/:id` page via the
 `scenario` JSONB column on `estimation_runs`.
 
+### Per-m² figures carry their basis (measure sprint W7)
+
+"One measure, one definition, one label" — the panel **reads** per-m² numbers,
+it never derives them:
+
+- The MF ledger line renders the server's `mf_reference_rent_per_m2_czk`
+  (the named measure, migration 425). It used to divide `mf_reference_rent_czk`
+  by `area_m2` in the browser, which mixed grains — the rent is
+  **property**-grain (the golden record) and the area is **listing**-grain, so
+  the quotient was wrong for every merged multi-portal group.
+- Both monthly per-m² figures (the MF reference rent and the *Fond oprav + SVJ*
+  rate) are labelled **Kč/m²/měs**, the same unit string
+  `toolkit/measures.PPM2_UNIT_CS` uses. A bare `Kč/m²` is the *capital* unit.
+- The subject's area shows **which** area it is — `905 m² (pozemek)`,
+  `65 m² (užitná)` — from `listings.area_basis` (migration 423). `area_m2` is
+  polymorphic, so the bare number cannot say whether it is a flat or a field.
+- The fond is **not multiplied by a parcel**. When `area_basis` is `plot` the
+  rate is inert and the hint says so; otherwise a 10 Kč per m² monthly charge
+  against a 905 m² plot would manufacture ~9 050 Kč/month of cost, which the
+  yield subtracts from the rent and which can turn the figure negative.
+- The default fond rate is **served per subject** by `POST /listings/lookup`
+  (`fond_per_m2_czk_default`) from the one definition in
+  `api/schemas.DEFAULT_FOND_CZK_PER_M2`; the extension holds no copy of the
+  number. `null` there means "no fond can apply to this subject".
+- `POST /estimations` is **category-aware**: the panel sends the subject's
+  `category_main` and picks `estimate_kind` from it (a subject being sold needs
+  a rent, one already let needs a sale price, land is never estimated as a
+  rent). It previously sent a flat `estimate_kind:'rent'` and nothing else,
+  which — the server's `category_main` defaulting to `byt` — searched an
+  apartments-for-rent comparable cohort for houses, commercial units and plots
+  alike.
+
 > **Backend dependency:** needs the `POST /listings/lookup` endpoint
 > (shipped in the `feature/portal-mf-lookup` PR). Make sure that's deployed
 > to the Railway API before loading this build.

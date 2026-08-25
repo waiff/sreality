@@ -124,23 +124,36 @@ export async function patchScenario(
 }
 
 /* POST /estimations — kicks off a new estimation for the listing the
- * operator is currently viewing. Defaults match the SPA's "rent" path
- * since that's the most common ask from the listing page; we surface
- * the resulting row id and the panel polls until it lands. */
+ * operator is currently viewing. We surface the resulting row id and the panel
+ * polls until it lands.
+ *
+ * The subject's CATEGORY decides what may be estimated. This used to send a
+ * flat `estimate_kind:'rent'` for everything and nothing else, which — because
+ * the server's `category_main` defaults to 'byt' and `category_type` follows
+ * the kind — fired an APARTMENTS-FOR-RENT comparable cohort at houses,
+ * commercial units and plots alike, i.e. a monthly per-m² table read against a
+ * subject whose per-m² measure is capital. Both knobs are now passed through
+ * from the caller; omitting either keeps the server's historical default. */
 export async function createEstimation(
   url: string,
+  opts: { estimate_kind?: 'rent' | 'sale'; category_main?: string | null } = {},
 ): Promise<ApiResult<EstimationRun>> {
+  const body: Record<string, unknown> = {
+    url,
+    source: 'extension',
+    estimate_kind: opts.estimate_kind ?? 'rent',
+    // mode:'agent' is the metered path (Wave 1) — this is what the "(zbývá X)"
+    // quota counts. The server enforces the monthly quota atomically and 429s
+    // when it's exhausted; the panel surfaces that as an upgrade prompt.
+    mode: 'agent',
+  };
+  // Only when we actually know it: a null would PIN "every category", which is
+  // not what an unknown subject means (and yields a cohort with no single
+  // per-m² basis). Absent = the server's 'byt' default, exactly as before.
+  if (opts.category_main != null) body.category_main = opts.category_main;
   return request<EstimationRun>('/estimations', {
     method: 'POST',
-    body: JSON.stringify({
-      url,
-      source: 'extension',
-      estimate_kind: 'rent',
-      // mode:'agent' is the metered path (Wave 1) — this is what the "(zbývá X)"
-      // quota counts. The server enforces the monthly quota atomically and 429s
-      // when it's exhausted; the panel surfaces that as an upgrade prompt.
-      mode: 'agent',
-    }),
+    body: JSON.stringify(body),
   });
 }
 

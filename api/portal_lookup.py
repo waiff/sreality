@@ -46,7 +46,9 @@ from typing import TYPE_CHECKING, Any
 
 from psycopg.rows import dict_row
 
+from api.schemas import DEFAULT_FOND_CZK_PER_M2
 from toolkit.filter_registry import subtype_label_cs
+from toolkit.measures import LAND_CATEGORY_MAIN
 
 if TYPE_CHECKING:
     import uuid
@@ -165,6 +167,40 @@ LEFT JOIN LATERAL (
 """
 
 
+# The `listings.area_basis` stamp (migration 423) that says `area_m2` IS the
+# parcel — the one denominator a monthly per-m² service charge cannot be levied
+# on.
+_PLOT_AREA_BASIS = "plot"
+
+
+def _fond_default_czk_per_m2(row: dict[str, Any]) -> float | None:
+    """The default service charge to offer for THIS subject; None where none can apply.
+
+    A fond (fond oprav + SVJ) is a monthly CZK per m² of a dwelling's FLOOR
+    area. `area_m2` is polymorphic (migration 423): on `pozemek` it IS the
+    parcel, so offering a rate there lets a panel multiply 10 CZK/m² by 905 m²
+    of land and subtract ~9 050 CZK/month from the rent in a yield numerator —
+    enough to drive a computed yield negative.
+
+    Deliberately NOT gated on `measure_price_per_m2_basis`: that resolves
+    RENT-FIRST, so a plot to let (pozemek + pronajem) labels
+    `rent_monthly_czk_m2` and would slip through a land-basis test. The two
+    stamps that actually name the DENOMINATOR are `area_basis` and
+    `category_main`, and either one saying "parcel" is enough.
+
+    A listing we don't have (`found=false`) gets the plain default: nothing is
+    known that would say a fond doesn't apply, and withholding it would only
+    blank a field the operator then retypes.
+    """
+    if not row["found"]:
+        return DEFAULT_FOND_CZK_PER_M2
+    if row["area_basis"] == _PLOT_AREA_BASIS:
+        return None
+    if row["category_main"] == LAND_CATEGORY_MAIN:
+        return None
+    return DEFAULT_FOND_CZK_PER_M2
+
+
 def _clean(value: Any) -> Any:
     if isinstance(value, Decimal):
         return float(value)
@@ -220,6 +256,10 @@ def lookup_portal_listings(
             "found": bool(row["found"]),
         }
         entry.update({col: _clean(row[col]) for col in _LISTING_COLS})
+        # Derived, not projected: the panel's default service charge, resolved
+        # from this subject's denominator (see `_fond_default_czk_per_m2`).
+        # Served so the extension holds no copy of the number.
+        entry["fond_per_m2_czk_default"] = _fond_default_czk_per_m2(row)
         # The display "kind": the subtype label (commercial/houses) else the
         # disposition (apartments). Computed server-side from the one canonical
         # label source so the extension needs no slug dictionary of its own.
@@ -262,5 +302,6 @@ def lookup_portal_listings(
     fallback = lambda it: {  # noqa: E731 — tiny shape for the (rare) missing row
         "source": it.source, "source_id": it.source_id, "found": False,
         "latest_estimation": None, "pipeline": None, "collection_ids": None,
+        "fond_per_m2_czk_default": DEFAULT_FOND_CZK_PER_M2,
     }
     return {"data": [by_key.get((it.source, it.source_id), fallback(it)) for it in items]}

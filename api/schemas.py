@@ -409,13 +409,24 @@ class CreateEstimationIn(BaseModel):
         return self
 
 
+# The default service charge (fond oprav + SVJ) a yield panel offers, in CZK
+# per m² of a DWELLING's floor area per MONTH. ONE definition, server-side: the
+# Chrome extension reads it per subject off POST /listings/lookup
+# (`fond_per_m2_czk_default`) instead of carrying its own copy of the number.
+# It is a default for an operator INPUT, not a measure — but it is multiplied by
+# `area_m2`, so it inherits that denominator's basis and must not be offered
+# where the area is a parcel (see api/portal_lookup._fond_default_czk_per_m2).
+DEFAULT_FOND_CZK_PER_M2 = 10.0
+
+
 class ScenarioUpdateIn(BaseModel):
     """Operator-tunable yield scenario for an estimation_runs row.
 
     All numeric fields are optional. Send only the fields the operator
     actually overrode; missing keys remain at the default (estimated
-    rent, 10 CZK/m², subject sale price, no renovation). Send a body
-    with every field null to clear overrides and re-render defaults.
+    rent, `DEFAULT_FOND_CZK_PER_M2` per m², subject sale price, no
+    renovation). Send a body with every field null to clear overrides
+    and re-render defaults.
 
     `renovation_czk` is a flat one-off renovation budget added to the
     listing price to form the total acquisition cost (the yield
