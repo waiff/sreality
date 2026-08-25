@@ -7,7 +7,15 @@ re-derive, not a refetch: these are the exact inputs the fixed parser sees.
 
 from __future__ import annotations
 
-from scripts.backfill_mmreality_areas import _COLS, changed_columns, derive
+from scripts.backfill_mmreality_areas import (
+    _COLS,
+    _COUNT_SQL,
+    _PAGE_IDS_SQL,
+    _PAYLOAD_SQL,
+    _RAW_KEYS,
+    changed_columns,
+    derive,
+)
 
 
 def _stored(**over):
@@ -115,3 +123,44 @@ def test_derive_reads_the_projected_string_shape():
     ))
     out = derive("dum", raw)
     assert (out["area_m2"], out["estate_area"], out["garden_area"]) == (130.0, 905.0, 320.0)
+
+
+def _payload_select_list() -> list[str]:
+    """The output column aliases of _PAYLOAD_SQL, in order."""
+    body = _PAYLOAD_SQL.split("SELECT", 1)[1].split("FROM", 1)[0]
+    out = []
+    for item in body.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        out.append(item.split(" AS ")[-1].strip() if " AS " in item
+                   else item.split(".")[-1].strip())
+    return out
+
+
+def test_payload_projection_matches_the_positional_unpacking():
+    # main() slices the payload row positionally: row[3:8] -> _COLS,
+    # row[8:13] -> _RAW_KEYS, row[13] -> the resume marker. Nothing else pins
+    # that mapping, and getting it wrong would silently write one area column's
+    # value into another. Re-ordering the SELECT must fail here, loudly.
+    cols = _payload_select_list()
+    assert cols[:3] == ["id", "category_main", "property_id"]
+    assert tuple(cols[3:8]) == _COLS
+    assert tuple(cols[8:13]) == tuple(f"raw_{k}" for k in _RAW_KEYS)
+    assert cols[13] == "marker"
+    assert len(cols) == 14
+
+
+def test_page_ids_query_touches_no_wide_column():
+    # The whole point of the two-statement page: step 1 must not name raw_json,
+    # or the planner is free to detoast the corpus before the LIMIT applies —
+    # which is exactly what got the single-statement form cancelled in prod.
+    assert "raw_json" not in _PAGE_IDS_SQL
+    assert "ORDER BY l.id" in _PAGE_IDS_SQL
+    assert "LIMIT" in _PAGE_IDS_SQL
+
+
+def test_corpus_count_does_not_filter_on_the_marker():
+    # Counting the un-stamped set costs a full detoast of every mmreality row;
+    # that count(*) is what the first live dispatch died on.
+    assert "area_reparse_v2" not in _COUNT_SQL
