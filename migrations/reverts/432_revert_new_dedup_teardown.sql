@@ -204,12 +204,24 @@ grant select on public.property_sources_mv to authenticated;
 -- CAVEAT: the jobid will NOT be 8 again — it is sequence-assigned. Anything keying on
 -- `jobid = 8` must key on jobname instead.
 -- ---------------------------------------------------------------------------
-select cron.schedule(
-  'dedup-funnel-mv-refresh',
-  '*/15 * * * *',
-  $$set statement_timeout='300s';
+-- Guarded, for the same reason migration 432's unschedule is: the CI replay container has
+-- no pg_cron extension at all, so an unguarded `cron.schedule` aborts the whole revert with
+-- `schema "cron" does not exist` — which is exactly how the executed-once rollback gate
+-- first failed. to_regPROCEDURE, not to_regPROC: the latter takes a bare name and returns
+-- NULL for an overloaded one, which is the silent-skip bug 432 shipped with.
+do $$
+begin
+  if to_regprocedure('cron.schedule(text,text,text)') is not null then
+    perform cron.schedule(
+      'dedup-funnel-mv-refresh',
+      '*/15 * * * *',
+      $cmd$set statement_timeout='300s';
       refresh materialized view concurrently dedup_funnel_resolutions_mv;
-      refresh materialized view concurrently dedup_llm_cost_by_category_mv;$$
-);
+      refresh materialized view concurrently dedup_llm_cost_by_category_mv;$cmd$
+    );
+  else
+    raise notice 'pg_cron absent — job not rescheduled (expected in the CI replay)';
+  end if;
+end $$;
 
 commit;
