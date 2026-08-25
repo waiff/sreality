@@ -15,7 +15,8 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { CSS } from '@dnd-kit/utilities';
 import { useDraggable } from '@dnd-kit/core';
-import { fmtArea, fmtCzk } from '@/lib/format';
+import { fmtArea, fmtCzk, fmtMeasuredPricePerM2 } from '@/lib/format';
+import { ppm2BasisFromToken } from '@/lib/measure';
 import { listingKindLabel } from '@/lib/enums';
 import { listingRowPath } from '@/lib/listingUrl';
 import { placePrimary } from '@/lib/placeLabel';
@@ -88,9 +89,18 @@ export function CardFace({
     okres: card.okres,
     street: card.street,
   });
+  /* The per-m² measure with the basis the server published beside it, so a
+     rent card and a sale card in the same column are readable against each
+     other. fmtMeasuredPricePerM2 renders an em-dash when either half is
+     missing; the dims line drops it rather than showing a bare dash. */
+  const ppm2 = fmtMeasuredPricePerM2(
+    card.price_per_m2,
+    ppm2BasisFromToken(card.price_per_m2_basis),
+  );
   const dims = [
     listingKindLabel(card),
     card.area_m2 != null ? fmtArea(card.area_m2) : null,
+    ppm2 === '—' ? null : ppm2,
   ]
     .filter(Boolean)
     .join(' · ');
@@ -116,6 +126,12 @@ export function CardFace({
             >
               {fmtCzk(card.price_czk)}
             </Link>
+            {/* The board is deal-agnostic (rule 22), so a monthly rent and a
+                capital sum sit in one column. Same marker the Browse table and
+                the Browse cards use. */}
+            {card.category_type === 'pronajem' && card.price_czk != null && (
+              <span className="text-[var(--color-ink-4)] text-[0.7rem]">/měs</span>
+            )}
             <PriceDelta
               pct={card.total_price_change_pct}
               changes={card.price_change_count}

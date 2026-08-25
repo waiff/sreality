@@ -11,7 +11,8 @@
  * valid strip (photos + price + whatever facts exist), never a broken box. */
 import { useMemo } from 'react';
 import ImageCarousel from '@/components/ImageCarousel';
-import { fmtArea, fmtCzk, fmtPricePerM2 } from '@/lib/format';
+import { fmtArea, fmtCzk, fmtMeasuredPricePerM2 } from '@/lib/format';
+import { areaKindOf, ppm2BasisFromToken } from '@/lib/measure';
 import { listingKindParts } from '@/lib/enums';
 import { imageSrc, type ImageRef } from '@/lib/imageUrl';
 import { AmenityChips, buildAmenities } from '@/lib/listingFacts';
@@ -35,13 +36,16 @@ export default function OriginPropertyPanel({
 
   const kindParts = listingKindParts(listing);
   const kind = kindParts.length > 0 ? kindParts.join(' · ') : '—';
-  const area = fmtArea(listing.area_m2);
+  const area = fmtArea(listing.area_m2, areaKindOf(listing.category_main));
   // Mirror the listing-detail Header exactly: a null price is real seller state
   // ("on request"), not missing data; rentals carry a "/ měsíc" unit.
   const hasPrice = listing.price_czk != null;
   const price = hasPrice ? fmtCzk(listing.price_czk) : 'Cena na vyžádání';
   const unit = hasPrice && listing.price_unit ? ` / ${listing.price_unit}` : '';
-  const ppm = fmtPricePerM2(listing.price_czk, listing.area_m2);
+  const ppm = fmtMeasuredPricePerM2(
+    listing.price_per_m2,
+    ppm2BasisFromToken(listing.price_per_m2_basis),
+  );
 
   return (
     <div className="shrink-0 border-b border-[var(--color-rule)] bg-[var(--color-paper-2)] px-6 py-3">

@@ -166,9 +166,14 @@ export interface ListingFilters {
    * (price_czk IS NULL) instead of dropping them via SQL three-valued
    * logic. A no-op when no bound is set. Browse + Watchdog only. */
   includeNoPrice: boolean;
-  /* Price per m² bounds (price_czk / area_m2). Computed on
-   * listings_public; toolkit / matcher re-derive from the raw columns.
-   * NULL area_m2 rows fall out when either bound is set. */
+  /* Bounds on THE per-m² measure — `price_per_m2`, i.e. migration 425's
+   * measure_price_per_m2(price, area, category_main, category_type),
+   * basis-resolved and floored. Every consumer reads that one published
+   * column; nothing re-derives price_czk / area_m2 any more, which is why a
+   * row under its basis floor is excluded here as well as blank on screen.
+   * Rows with no measure (NULL area_m2, or below the floor) fall out when
+   * either bound is set. The UNIT of the bound follows the cohort: capital
+   * Kč/m² on a sale cohort, Kč/m²/měs on a rent one — see the sidebar hint. */
   pricePerM2Min: number | null;
   pricePerM2Max: number | null;
   /* MF gross rental yield % bounds (migration 133). Sale apartments only;

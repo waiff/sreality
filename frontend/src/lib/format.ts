@@ -1,6 +1,8 @@
 /* Czech-locale formatters. Centralised so a price, area, count, or
  * timestamp looks the same wherever it appears. */
 
+import { PPM2_UNIT, type AreaKind, type Ppm2Basis } from './measure';
+
 const NBSP = ' ';
 const THIN_SPACE = ' ';
 
@@ -57,8 +59,18 @@ export const fmtUsd = (n: number | null | undefined): string =>
 export const fmtUsdPerCall = (n: number | null | undefined): string =>
   n == null ? '—' : n >= 0.1 ? usdCurrency.format(n) : `$${n.toFixed(4)}`;
 
-export const fmtArea = (n: number | null | undefined): string =>
-  n == null ? '—' : `${czNumber.format(Math.round(n))}${NBSP}m²`;
+/* `areaKind` names the DENOMINATOR, not the unit: `area_m2` is polymorphic by
+ * design (floor area for byt/dum/komerční, PLOT area for pozemek — the Option-A
+ * fork), so a surface with room to disambiguate passes 'plot' and gets
+ * "1 200 m² pozemku". Omitting it renders exactly what it always did, which is
+ * what the dense grids (table cells, card footers) still want. */
+export const fmtArea = (
+  n: number | null | undefined,
+  areaKind?: AreaKind,
+): string =>
+  n == null
+    ? '—'
+    : `${czNumber.format(Math.round(n))}${NBSP}m²${areaKind === 'plot' ? `${NBSP}pozemku` : ''}`;
 
 /* THE percentage formatter. Czech typography puts a NON-BREAKING space before
  * the sign (`4,2 %`, never `4.2%`) and uses a comma decimal separator — this
@@ -93,25 +105,28 @@ export const fmtPP = (n: number | null | undefined, digits = 2): string =>
         maximumFractionDigits: digits,
       })}${NBSP}pp`;
 
-export const fmtPricePerM2 = (
-  price: number | null | undefined,
-  area: number | null | undefined,
-): string => {
-  if (price == null || area == null || area <= 0) return '—';
-  return `${czNumber.format(Math.round(price / area))}${NBSP}Kč/m²`;
-};
-
-/* Renders the SERVER measure (migration 425: measure_price_per_m2, basis-resolved
- * and floored), never a client-side re-derivation. Browse must use this one: the
- * table and the cards sort and filter on the published `price_per_m2` column, so
- * dividing price by area in the cell would print a figure the sort and the filter
- * say does not exist — a 136 Kč commercial "rental" renders "1 Kč/m²" while the
- * measure is NULL and the row is excluded by any Kč/m² bound. NULL means the
- * measure withheld the figure; show the gap, don't guess it. */
+/* THE per-m² renderer. Two arguments, both required, because the north star is
+ * that no surface renders the number without its basis label — a bare Kč/m²
+ * cannot be read: sale runs ~91 535, rent ~319, a 300x difference that a shared
+ * suffix would hide.
+ *
+ * `value` is the SERVER measure (migration 425: basis-resolved and floored),
+ * never a client-side price/area. The `fmtPricePerM2(price, area)` this replaced
+ * did exactly that re-derivation and is deleted: Browse sorts and filters on the
+ * published `price_per_m2` column, so dividing in the cell printed figures the
+ * cohort said did not exist — a 136 Kč commercial "rental" rendered "1 Kč/m²"
+ * while the measure was NULL and the row was excluded by any Kč/m² bound.
+ *
+ * NULL value, NULL basis and 'mixed' all render the gap. 'mixed' especially:
+ * a cohort spanning sale and rent has no single unit, and printing the number
+ * anyway is the category error this program exists to end. */
 export const fmtMeasuredPricePerM2 = (
   value: number | null | undefined,
+  basis: Ppm2Basis | null,
 ): string =>
-  value == null ? '—' : `${czNumber.format(Math.round(value))}${NBSP}Kč/m²`;
+  value == null || basis == null || basis === 'mixed'
+    ? '—'
+    : `${czNumber.format(Math.round(value))}${NBSP}${PPM2_UNIT[basis]}`;
 
 const SEC = 1, MIN = 60, HOUR = 3600, DAY = 86400;
 

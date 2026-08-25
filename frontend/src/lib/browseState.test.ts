@@ -129,3 +129,37 @@ describe('browseUrlFromState ↔ fromSearchParams round-trip', () => {
     expect(url).toContain('rentvk=3');
   });
 });
+
+/* The map's Kč/m² toggle is a VIEW knob on MapOverlayState: URL-serialised so
+ * the view is shareable, and deliberately outside preset identity so flipping it
+ * can never mark a saved preset dirty. */
+describe('priceMetric on the map overlay', () => {
+  const state = (priceMetric: 'total' | 'per_m2') => ({
+    filters: DEFAULT_FILTERS,
+    sort: DEFAULT_SORT,
+    tab: 'map' as const,
+    overlay: { ...DEFAULT_OVERLAY, priceMetric },
+  });
+
+  it('defaults to the total price', () => {
+    expect(DEFAULT_OVERLAY.priceMetric).toBe('total');
+  });
+
+  it('serialises per_m2 into the shareable URL under `pm`', () => {
+    expect(browseUrlFromState(state('per_m2'))).toContain('pm=per_m2');
+  });
+
+  /* The default must not appear in the URL — a default-state map has to
+   * serialise to the plain /browse link, like every other overlay knob. */
+  it('leaves the URL untouched at the default', () => {
+    expect(browseUrlFromState(state('total'))).not.toContain('pm=');
+  });
+
+  /* `pm` is a view knob, NOT a cohort filter: it must not reach the filter
+   * spec, or a shared Kč/m² map would look like a different search. */
+  it('is invisible to the filter parser', () => {
+    const withPm = fromSearchParams(new URLSearchParams('pm=per_m2'));
+    const without = fromSearchParams(new URLSearchParams(''));
+    expect(withPm).toEqual(without);
+  });
+});

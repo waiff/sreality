@@ -5,6 +5,7 @@
  * expression itself; this module owns the ramps, the metric config, the
  * feature-collection builder, and the sparsity rule. */
 import type { PriceStatGrowthRow, PriceStatSeriesRow } from './priceStats';
+import { PPM2_VALUE_LABEL } from './measure';
 
 export type GrowthMetric = 'rent_cagr_pct' | 'sale_cagr_pct' | 'yield_change_pp_pa';
 
@@ -184,9 +185,12 @@ export function buildHoverData(rows: PriceStatSeriesRow[], metric: GrowthMetric)
   const isYield = metric === 'yield_change_pp_pa';
   return {
     byObec, xMin, xMax, yMin, yMax,
+    /* These two were the repo's ONLY correct per-m² basis labels; they are now
+     * the shared PPM2_VALUE_LABEL every surface renders, so the choropleth
+     * legend and a Browse pin cannot drift apart. */
     valueLabel:
-      metric === 'rent_cagr_pct' ? 'Nájem Kč/m²/měs'
-      : metric === 'sale_cagr_pct' ? 'Cena Kč/m²'
+      metric === 'rent_cagr_pct' ? PPM2_VALUE_LABEL.rent
+      : metric === 'sale_cagr_pct' ? PPM2_VALUE_LABEL.sale
       : 'Gross yield %',
     format: isYield ? (v) => `${v.toFixed(1)} %` : (v) => Math.round(v).toLocaleString('cs-CZ'),
   };

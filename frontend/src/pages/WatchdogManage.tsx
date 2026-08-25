@@ -12,6 +12,7 @@ import {
 } from '@/lib/api';
 import { watchdogKeys } from '@/lib/queries';
 import { fmtAbsolute, fmtCount, fmtRelative } from '@/lib/format';
+import { PPM2_UNIT, ppm2BasisOfCohort } from '@/lib/measure';
 import type { WatchdogFilterSpec, WatchdogSubscription } from '@/lib/types';
 
 export default function WatchdogManage() {
@@ -316,6 +317,22 @@ function summariseFilter(spec: WatchdogFilterSpec): string {
     const lo = spec.min_price_czk != null ? `${spec.min_price_czk.toLocaleString()}` : '0';
     const hi = spec.max_price_czk != null ? `${spec.max_price_czk.toLocaleString()}` : '∞';
     bits.push(`${lo}–${hi} Kč${spec.include_no_price ? ' (+ no price)' : ''}`);
+  }
+  /* The per-m² bounds were the ONE numeric filter this summary silently
+   * dropped: two watchdogs differing only in their Kč/m² band read as the same
+   * subscription. The unit comes from the subscription's own deal type — rule 16
+   * means this spec matches on THE measure, so the summary has to say which
+   * basis that measure is on. */
+  if (spec.min_price_per_m2 != null || spec.max_price_per_m2 != null) {
+    const basis = ppm2BasisOfCohort({
+      categoryMain: spec.category_main_in ?? [],
+      categoryType: spec.category_type ?? null,
+    });
+    const lo = spec.min_price_per_m2 != null ? spec.min_price_per_m2.toLocaleString() : '0';
+    const hi = spec.max_price_per_m2 != null ? spec.max_price_per_m2.toLocaleString() : '∞';
+    const unit =
+      basis == null || basis === 'mixed' ? 'per m² (mixed basis)' : PPM2_UNIT[basis];
+    bits.push(`${lo}–${hi} ${unit}`);
   }
   if (spec.min_area_m2 != null || spec.max_area_m2 != null) {
     const lo = spec.min_area_m2 != null ? `${spec.min_area_m2}` : '0';

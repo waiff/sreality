@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 
 import { DEFAULT_FILTERS } from './filters';
 import {
+  BROWSE_SELECT_COLUMNS,
   applyPrefilters,
   districtsFilterClause,
   effectiveBbox,
@@ -415,6 +416,24 @@ describe('portal-mirror mode selection', () => {
     }
   });
 
+  /* Migration 425 put `listing_feed_public.price_per_m2` on the ROUNDED measure
+   * for exactly this lane: mirror mode passes price_per_m2 through untouched, so
+   * the keyset cursor sends `price_per_m2.eq.<float64>` as its equal-value
+   * tiebreaker at the page seam. An unrounded numeric does not round-trip
+   * through a JS Number, the equality never matches, and rows are silently
+   * skipped between pages. Pinned here because remapping it (the way
+   * first_seen_at is remapped) would move the sort onto a column the cursor is
+   * not built from. */
+  it('passes price_per_m2 through in mirror mode — the keyset cursor depends on it', () => {
+    const mirror = withPortals(['bazos']);
+    expect(effectiveSort(mirror, { field: 'price_per_m2', direction: 'desc' })).toEqual({
+      field: 'price_per_m2', direction: 'desc',
+    });
+    expect(effectiveSort(mirror, { field: 'price_per_m2', direction: 'asc' })).toEqual({
+      field: 'price_per_m2', direction: 'asc',
+    });
+  });
+
   it('never remaps the sort when the mirror is off', () => {
     expect(effectiveSort(DEFAULT_FILTERS, { field: 'first_seen_at', direction: 'desc' }))
       .toEqual({ field: 'first_seen_at', direction: 'desc' });
@@ -486,5 +505,27 @@ describe('pipelineCardBroker', () => {
       has_email: false,
       has_phone: false,
     });
+  });
+});
+
+/* The measure travels with its PUBLISHED LABEL on every Browse lane, or the
+ * number arrives unlabelable. All six migration-425 relations publish
+ * `price_per_m2_basis` — including `browse_list` and `properties_map_mv`, whose
+ * rebuilds run inside the migration and whose column presence § 9 asserts
+ * before it commits — so no surface re-derives the basis in TypeScript.
+ * `category_main` / `category_type` ride along for what the basis token does
+ * not say: the denominator (plot vs floor area) and the monthly period on the
+ * absolute price. */
+describe('Browse select-lists carry the measure with its published basis', () => {
+  const cols = (list: string): string[] => list.split(',');
+
+  it('selects the measure, its published basis, and both category columns', () => {
+    for (const [lane, list] of Object.entries(BROWSE_SELECT_COLUMNS)) {
+      const c = cols(list);
+      expect(c, `${lane}: price_per_m2`).toContain('price_per_m2');
+      expect(c, `${lane}: price_per_m2_basis`).toContain('price_per_m2_basis');
+      expect(c, `${lane}: category_main`).toContain('category_main');
+      expect(c, `${lane}: category_type`).toContain('category_type');
+    }
   });
 });

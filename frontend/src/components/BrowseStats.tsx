@@ -1,6 +1,14 @@
 import type { ReactNode } from 'react';
 import type { BrowseStats } from '@/lib/queries';
 import { fmtCount, fmtCzk } from '@/lib/format';
+import {
+  MIXED_BASIS_HINT,
+  PPM2_UNIT,
+  PRICE_PERIOD_UNIT,
+  mixedBasisCause,
+  pricePeriodOfCohort,
+  type Ppm2Basis,
+} from '@/lib/measure';
 import DispositionBoxPlots from '@/components/region/DispositionBoxPlots';
 import PriceBandVelocity from '@/components/PriceBandVelocity';
 
@@ -8,6 +16,15 @@ interface Props {
   stats: BrowseStats | null;
   isLoading: boolean;
   isEmpty: boolean;
+  /* The cohort's per-m² basis, resolved server-side (BrowseStats.ppm2_basis).
+   * Required, not optional: a Kč/m² percentile without one cannot be read.
+   * 'mixed' / null withhold the figures rather than labelling them wrongly. */
+  basis: Ppm2Basis | null;
+  /* The cohort SPEC — the two filter fields that decide (a) whether an absolute
+   * price is a monthly rent or a capital sum and (b) WHY a mixed basis is mixed.
+   * Neither is answerable from `basis`: it is computed only over rows that HAVE
+   * a measure, and its 'mixed' does not say which of the two mixes fired. */
+  cohort: { categoryMain: ReadonlyArray<string>; categoryType: string | null };
   /* Per-disposition box-plot annotations (summarize-1), keyed by
    * disposition. Optional — the view renders fully without them. */
   annotations?: Record<string, string>;
@@ -20,6 +37,8 @@ export default function BrowseStatsView({
   stats,
   isLoading,
   isEmpty,
+  basis,
+  cohort,
   annotations,
   annotationsLoading,
   annotationsNote,
@@ -27,6 +46,9 @@ export default function BrowseStatsView({
   if (isLoading && !stats) return <Skeleton />;
   if (!stats) return null;
   if (isEmpty) return <Empty />;
+
+  /* The absolute price's PERIOD, from the cohort's deal type alone. */
+  const period = pricePeriodOfCohort(cohort.categoryType);
 
   return (
     <div className="space-y-5">
@@ -41,16 +63,39 @@ export default function BrowseStatsView({
             {fmtCount(stats.total)}
           </p>
         </Card>
+        {/* The absolute-price card was hardcoded "Kč / mo" — right for the
+            default rent cohort, wrong for every sale one. Its period comes from
+            the cohort's DEAL TYPE, deliberately NOT from the per-m² basis: that
+            basis is computed only over rows that have a measure, so a rent
+            cohort whose rows are all under the 1 000 Kč rent floor (or carry a
+            NULL area) publishes a NULL basis while its prices are still monthly.
+            A capital sale price and a capital land price pool perfectly well
+            here — only a monthly rent stacked on a capital sum does not, and
+            that is exactly what a null categoryType (the "Vše" pill) produces. */}
         <PercentileCard
           label="Price"
-          unit="Kč / mo"
-          pct={stats.price}
+          unit={period == null || period === 'mixed' ? '' : PRICE_PERIOD_UNIT[period]}
+          pct={period == null || period === 'mixed' ? null : stats.price}
+          empty={
+            period === 'mixed'
+              ? MIXED_BASIS_HINT.deal
+              : period == null
+                ? '— neznámý typ nabídky'
+                : undefined
+          }
           fmt={(n) => fmtCzk(n).replace(/ Kč$/, '')}
         />
+        {/* A mixed cohort's Kč/m² percentiles pool two denominators into one
+            distribution — the median of ~91 535 and ~319 is not a price, it is
+            an artefact of the mix. Withhold it, and say WHICH mix to clear:
+            sale+rent needs one deal type, sale+land needs the pozemky out. */}
         <PercentileCard
           label="Price per m²"
-          unit="Kč / m²"
-          pct={stats.ppm2}
+          unit={basis == null || basis === 'mixed' ? '' : PPM2_UNIT[basis]}
+          pct={basis == null || basis === 'mixed' ? null : stats.ppm2}
+          empty={
+            basis === 'mixed' ? MIXED_BASIS_HINT[mixedBasisCause(cohort)] : undefined
+          }
           fmt={(n) => fmtCount(n)}
         />
       </div>
@@ -67,6 +112,8 @@ export default function BrowseStatsView({
           Tukey 1.5×IQR whiskers clipped to min/max. Median in copper. Hover a box for the full numeric breakdown.
         </p>
         <DispositionBoxPlots
+          basis={basis}
+          mixedCause={mixedBasisCause(cohort)}
           rows={stats.dispositions.map((r) => ({
             disposition: r.disposition,
             n: r.n,
@@ -132,16 +179,20 @@ function PercentileCard({
   unit,
   pct,
   fmt,
+  empty,
 }: {
   label: string;
   unit: string;
   pct: { p25: number; p50: number; p75: number } | null;
   fmt: (n: number) => string;
+  /* Replaces the "no priced listings" line when the figures are withheld for a
+   * reason the operator can act on, rather than simply being absent. */
+  empty?: string;
 }) {
   return (
     <Card label={`${label} percentiles`}>
       {pct == null ? (
-        <p className="text-sm text-[var(--color-ink-4)]">— no priced listings</p>
+        <p className="text-sm text-[var(--color-ink-4)]">{empty ?? '— no priced listings'}</p>
       ) : (
         <div className="grid grid-cols-3 gap-2">
           <PctCell tier="p25" value={fmt(pct.p25)} />

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtPct, fmtPP } from './format';
+import { fmtArea, fmtMeasuredPricePerM2, fmtPct, fmtPP } from './format';
 
 const NBSP = ' ';
 
@@ -48,5 +48,56 @@ describe('fmtPP', () => {
   it('em-dashes absent input', () => {
     expect(fmtPP(null)).toBe('—');
     expect(fmtPP(NaN)).toBe('—');
+  });
+});
+
+/* The per-m² renderer is where the north star is enforced at the last inch: a
+ * number reaches the screen only WITH its basis label. */
+describe('fmtMeasuredPricePerM2', () => {
+  it('gives each basis its own suffix, with a non-breaking space before it', () => {
+    expect(fmtMeasuredPricePerM2(91_535, 'sale')).toBe(`91\u00a0535${NBSP}Kč/m²`);
+    expect(fmtMeasuredPricePerM2(319, 'rent')).toBe(`319${NBSP}Kč/m²/měs`);
+    expect(fmtMeasuredPricePerM2(2_450, 'land')).toBe(`2\u00a0450${NBSP}Kč/m²`);
+  });
+
+  /* The one distinction that carries all the weight: the same numeral under two
+   * bases must not render the same string. 319 Kč/m² (a capital price) and
+   * 319 Kč/m²/měs (a monthly rent) are 300x apart in meaning. */
+  it('never renders a rent and a sale figure identically', () => {
+    expect(fmtMeasuredPricePerM2(319, 'rent')).not.toBe(
+      fmtMeasuredPricePerM2(319, 'sale'),
+    );
+  });
+
+  /* A mixed cohort has no unit, so it gets no number — printing one would be
+   * exactly the category error the measure exists to prevent. */
+  it('renders the gap for a mixed basis, however good the number is', () => {
+    expect(fmtMeasuredPricePerM2(91_535, 'mixed')).toBe('—');
+  });
+
+  it('renders the gap for a null basis and for a null measure', () => {
+    // NULL measure = below its basis floor, or basis undecidable. The server
+    // withheld it on purpose; the cell shows the gap rather than guessing.
+    expect(fmtMeasuredPricePerM2(null, 'sale')).toBe('—');
+    expect(fmtMeasuredPricePerM2(undefined, 'sale')).toBe('—');
+    expect(fmtMeasuredPricePerM2(91_535, null)).toBe('—');
+  });
+
+  it('rounds to whole crowns', () => {
+    expect(fmtMeasuredPricePerM2(318.62, 'rent')).toBe(`319${NBSP}Kč/m²/měs`);
+  });
+});
+
+describe('fmtArea', () => {
+  it('is unchanged without an area kind', () => {
+    expect(fmtArea(62)).toBe(`62${NBSP}m²`);
+    expect(fmtArea(null)).toBe('—');
+  });
+
+  /* area_m2 is polymorphic (Option A): the same column is floor area for a byt
+   * and PLOT area for a pozemek. A surface with room says which. */
+  it('names the plot denominator when asked', () => {
+    expect(fmtArea(1_200, 'plot')).toBe(`1\u00a0200${NBSP}m²${NBSP}pozemku`);
+    expect(fmtArea(62, 'usable')).toBe(`62${NBSP}m²`);
   });
 });

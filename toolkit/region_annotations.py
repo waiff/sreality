@@ -18,22 +18,20 @@ outright: its box plot stacks monthly rents on top of purchase prices, so there
 is no factual sentence to write about it and no unit to name. No LLM call, no
 cache write, an explicit note instead.
 
-The basis is NOT in the cache key, and the residual is named rather than denied:
-the SPA sends the basis `browse_stats_properties` resolved from the cohort's own
-rows, so one `region_key` can in principle see it change within a day (a cohort
-that was single-basis at 09:00 gains one rental row and reads `mixed` at 16:00),
-and the second caller would get the first caller's text under its own unit. Two
-things keep that narrow — the day-scoped key means the window is one day, and a
-cohort crossing a basis boundary intraday needs a genuinely new kind of listing
-in the region. Folding the basis into the hash costs one extra miss per basis
-per region per day and closes the class outright; it is the fix if this is ever
-seen in the wild.
+The basis IS part of the cache key. The SPA sends the basis
+`browse_stats_properties` resolved from the cohort's own rows, so one
+`region_key` can see it change within a day (a cohort that was single-basis at
+09:00 gains one rental row and reads `mixed` at 16:00), and a second caller
+would otherwise get the first caller's text under its own unit. Hashing the
+basis alongside the key costs at most one extra miss per basis per region per
+day and closes that class outright; a caller that sends no basis still hashes
+to the pre-basis value, so existing cache rows keep hitting.
 
 Cache lives in `region_disposition_annotations`, keyed on
 (region_hash, day): a region's annotations are generated once per calendar
 day so repeat browser sessions don't re-bill the API. region_hash is the
-sha256 of `region_key`, the caller's deterministic serialization of the
-active Browse filter set. The next day's first view regenerates, picking
+sha256 of `region_key` (plus the basis, when one is sent), the caller's
+deterministic serialization of the active Browse filter set. The next day's first view regenerates, picking
 up the day's data drift.
 
 Write-allowed exception per CLAUDE.md toolkit rule #5: same rationale as
@@ -128,7 +126,10 @@ def summarize_region_dispositions(
     from toolkit import _now_iso
 
     renderable = _renderable_dispositions(dispositions, min_box_n)
-    region_hash = _region_hash(region_key)
+    # The basis is part of the cache identity: one region_key could in principle
+    # be summarized on two different bases, and a cached sentence about capital
+    # Kc/m2 is false about a monthly one.
+    region_hash = _region_hash(region_key, ppm2_basis)
 
     # Nothing to annotate: no LLM call, no cache write.
     if not renderable:
@@ -345,8 +346,11 @@ def _extract_tool_call(
     return out
 
 
-def _region_hash(region_key: str) -> str:
-    return hashlib.sha256(region_key.encode("utf-8")).hexdigest()
+def _region_hash(region_key: str, ppm2_basis: str | None = None) -> str:
+    # No basis -> the pre-basis hash, byte for byte, so an existing cache row
+    # and any caller that does not send one keep resolving to the same entry.
+    material = region_key if not ppm2_basis else f"{region_key}\x1f{ppm2_basis}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _cache_lookup(

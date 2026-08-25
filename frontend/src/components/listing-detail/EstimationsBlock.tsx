@@ -40,7 +40,7 @@ import type {
   EstimationListResponse,
   EstimationRun,
   ListingPublic,
-  MfReferenceRent,
+  ReferenceRent,
 } from '@/lib/types';
 
 export default function EstimationsBlock({
@@ -61,7 +61,7 @@ export default function EstimationsBlock({
    * subject advert's per-listing mf_* so every portal's advert of one flat
    * shows the SAME MF; null until the property row loads (then the listing's
    * own value is the fallback). */
-  propertyMf?: { mf_reference_rent: MfReferenceRent | null; mf_gross_yield_pct: number | null } | null;
+  propertyMf?: { mf_reference_rent: ReferenceRent | null; mf_gross_yield_pct: number | null } | null;
   /* Active siblings advertised at a price != the canonical one the MF/estimate
    * use — surfaced as a note so the operator sees the flat is on the market at
    * more than one price. Null when every active advert agrees. */

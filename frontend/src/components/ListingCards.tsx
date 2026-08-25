@@ -31,6 +31,7 @@ import {
   fmtArea, fmtCzk, fmtMeasuredPricePerM2,
   fmtShortDate, fmtTomDays,
 } from '@/lib/format';
+import { ppm2BasisFromToken } from '@/lib/measure';
 import { listingTypeLabel } from '@/lib/enums';
 import { portalLabel } from '@/lib/portals';
 import { placePrimary } from '@/lib/placeLabel';
@@ -655,7 +656,9 @@ function Card({
             />
           </p>
           <p className="text-[0.62rem] text-[var(--color-ink-4)] tabular-nums whitespace-nowrap">
-            {fmtMeasuredPricePerM2(r.price_per_m2)}
+            {/* Basis per CARD, not per grid — the cohort can hold both. Read
+                from the published label, never re-derived. */}
+            {fmtMeasuredPricePerM2(r.price_per_m2, ppm2BasisFromToken(r.price_per_m2_basis))}
           </p>
         </div>
         {r.mf_gross_yield_pct != null && (

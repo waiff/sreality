@@ -11,6 +11,7 @@ import {
   fmtCount, fmtArea, fmtCzk, fmtMeasuredPricePerM2, fmtRelative, fmtAbsolute,
   fmtFurnished, fmtOwnership, fmtParkingLots,
 } from '@/lib/format';
+import { ppm2BasisFromToken } from '@/lib/measure';
 import type { Furnished, Ownership } from '@/lib/types';
 import { placePrimary } from '@/lib/placeLabel';
 import { listingKindLabel } from '@/lib/enums';
@@ -268,6 +269,12 @@ function Row({
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink)]">
         <span className="inline-flex items-baseline justify-end gap-1.5">
           {fmtCzk(row.price_czk)}
+          {/* A rental price is a MONTHLY figure and the cards have always said
+              so; the table printed the same number bare, so a 18 000 Kč rent and
+              an 18 000 Kč (absurd) sale read identically. */}
+          {row.category_type === 'pronajem' && row.price_czk != null && (
+            <span className="text-[var(--color-ink-4)] text-[0.7rem]">/měs</span>
+          )}
           {/* Same component the cards and the pipeline board use. */}
           <PriceDelta
             pct={row.total_price_change_pct}
@@ -277,7 +284,11 @@ function Row({
         </span>
       </td>
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
-        {fmtMeasuredPricePerM2(row.price_per_m2)}
+        {/* Basis resolved PER ROW, never per table: the default Browse cohort
+            can be `deal=any`, so a sale row and a rent row sit in the same
+            column and must carry different units. The label is the one the
+            server published next to the measure, not a re-derivation. */}
+        {fmtMeasuredPricePerM2(row.price_per_m2, ppm2BasisFromToken(row.price_per_m2_basis))}
       </td>
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
         {row.parking_lots == null

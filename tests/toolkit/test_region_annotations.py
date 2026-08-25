@@ -254,6 +254,37 @@ def test_region_hash_is_sha256_of_key():
     assert ra._region_hash("hello") == hashlib.sha256(b"hello").hexdigest()
 
 
+def test_region_hash_separates_bases_but_keeps_the_basis_less_key():
+    # A caller that sends no basis must resolve to the pre-basis hash, so an
+    # existing cache row keeps hitting.
+    assert ra._region_hash("hello", None) == hashlib.sha256(b"hello").hexdigest()
+    sale = ra._region_hash("hello", "sale_capital_czk_m2")
+    rent = ra._region_hash("hello", "rent_monthly_czk_m2")
+    assert sale != rent != ra._region_hash("hello")
+
+
+# ---- Basis reaches the prompt ---------------------------------------------
+
+
+def test_basis_names_the_unit_and_the_period_in_the_payload():
+    """The seam the SPA sends `ppm2_basis` across. A bare Kc/m2 number cannot be
+    narrated: sale medians run ~91 535 against rent's ~319."""
+    renderable = [{"disposition": "2+kk", "box": _box(n=30)}]
+    rent = ra._build_payload(
+        "byt · pronajem · Praha", renderable,
+        {"p25": 250, "p50": 319, "p75": 410},
+        "rent_monthly_czk_m2",
+    )
+    assert "Kč/m²/měs" in rent
+    land = ra._build_payload("pozemky", renderable, None, "land_capital_czk_m2")
+    assert "Kč/m² pozemku" in land
+    # An absent or unknown basis names no unit at all, never a guess about
+    # which one it is.
+    plain = ra._build_payload("x", renderable, None, None)
+    assert "Kč/m²/měs" not in plain and "Kč/m² pozemku" not in plain
+    assert "UNKNOWN" in plain
+
+
 # ---- Envelope -------------------------------------------------------------
 
 

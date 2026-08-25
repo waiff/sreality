@@ -94,6 +94,15 @@ interface FilterFormProps {
   /** Override widget labels. Keyed by filter id; falls back to a
    *  prettified id. */
   labels?: Record<string, string>;
+  /** Override the registry's static `unit` string, keyed by filter id.
+   *  The registry declares ONE unit per filter, which is right for a
+   *  filter whose unit is a constant (m², %, days) and wrong for one
+   *  whose unit depends on the cohort: `min/max_price_per_m2` matches
+   *  THE measure (migration 425), whose basis is capital Kč/m² on a sale
+   *  cohort and monthly Kč/m²/měs on a rent one — a ~300x difference in
+   *  what a typed bound means. A host that knows its cohort passes the
+   *  resolved unit here rather than letting the static one through. */
+  units?: Record<string, string>;
   /** When true, render filters as a flat row list without the
    *  per-category `<ControlGroup>` wrappers. Useful when the host page
    *  already provides its own group container. */
@@ -114,6 +123,7 @@ export function FilterForm({
   exclude,
   includeOnly,
   labels,
+  units,
   flat,
   customWidgets,
 }: FilterFormProps) {
@@ -188,6 +198,7 @@ export function FilterForm({
         maxValue={maxDef ? state[maxDef.id] : undefined}
         emit={onChange}
         label={labels?.[f.id] ?? prettifyPair(f.id, maxDef?.id)}
+        unit={units?.[f.id] ?? f.unit ?? null}
       />
     );
   };
@@ -293,6 +304,7 @@ function FilterRow({
   maxValue,
   emit,
   label,
+  unit,
 }: {
   def: FilterDef;
   maxDef: FilterDef | null;
@@ -300,6 +312,10 @@ function FilterRow({
   maxValue: unknown;
   emit: (updates: ReadonlyArray<FilterUpdate>) => void;
   label: string;
+  /* The unit actually rendered — the host's cohort-resolved override when it
+   * supplied one, else the registry's static string. Never read `def.unit`
+   * directly below: that is how a rent cohort ended up labelled CZK/m². */
+  unit: string | null;
 }) {
   // Single-filter helper: most rows fire one update at a time. Paired
   // ranges below build a 2-element update array directly so both
@@ -342,7 +358,7 @@ function FilterRow({
                 { id: maxDef.id, value: hi },
               ])
             }
-            unit={def.unit ?? undefined}
+            unit={unit ?? undefined}
             ariaLabel={label}
           />
         </Section>
@@ -363,7 +379,7 @@ function FilterRow({
           ariaLabelMin={`${label} min`}
           ariaLabelMax={`${label} max`}
         />
-        {def.unit ? <UnitHint unit={def.unit} /> : null}
+        {unit ? <UnitHint unit={unit} /> : null}
       </Section>
     );
   }
@@ -423,7 +439,7 @@ function FilterRow({
           <BufferedNumberInput
             value={(value as number | null) ?? null}
             coerce={def.type === 'int' ? 'int' : 'float'}
-            placeholder={def.unit ? `value ${def.unit}` : 'value'}
+            placeholder={unit ? `value ${unit}` : 'value'}
             onChange={onChange}
             ariaLabel={label}
           />
@@ -440,7 +456,7 @@ function FilterRow({
             onChange={onChange}
             ariaLabel={label}
           />
-          {def.unit ? <UnitHint unit={def.unit} /> : null}
+          {unit ? <UnitHint unit={unit} /> : null}
         </Section>
       );
 

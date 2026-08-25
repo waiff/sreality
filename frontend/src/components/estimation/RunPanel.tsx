@@ -33,9 +33,10 @@ import {
   fmtAbsolute,
   fmtArea,
   fmtCzk,
-  fmtPricePerM2,
+  fmtMeasuredPricePerM2,
   fmtRelative,
 } from '@/lib/format';
+import { ppm2BasisFromToken } from '@/lib/measure';
 import { listingKindLabel } from '@/lib/enums';
 import {
   ApiError,
@@ -1249,7 +1250,10 @@ function ComparableRow({
   summariesLoading: boolean;
 }) {
   const ppm = listing
-    ? fmtPricePerM2(listing.price_czk, listing.area_m2)
+    ? fmtMeasuredPricePerM2(
+        listing.price_per_m2,
+        ppm2BasisFromToken(listing.price_per_m2_basis),
+      )
     : null;
   const locText =
     summary?.summary?.location_summary ??
