@@ -852,10 +852,11 @@ Same ledger, same rules, plus what this build's evidence earned:
 | Wave | Content | PR | State |
 | --- | --- | --- | --- |
 | RN | `verify_pipeline` credit-outage matcher | [#1161](https://github.com/waiff/sreality/pull/1161) | ✅ merged |
-| W0a | F1 location index + F2 autovacuum | — | in progress |
+| W0a | F1 location index + F2 autovacuum (migs 429, 430) | [#1164](https://github.com/waiff/sreality/pull/1164) | ✅ merged |
 | W0b | F3 teardown (destructive gate) | — | |
-| W1 | Item 4 — admin gate hoist | — | |
-| W2 | Item 1a — `_check_daily_cost` spelling | [#1163](https://github.com/waiff/sreality/pull/1163) | open |
+| W1a | Item 4 — admin gate hoist, 10 policies (mig 431) | #1165 | open |
+| W1b | Item 4 — 36 view/function wraps (uniform spelling) | — | |
+| W2 | Item 1a — `_check_daily_cost` spelling | [#1163](https://github.com/waiff/sreality/pull/1163) | ✅ merged |
 | W3 | Item 1b — hour rollup + watermark + F5-minimal registry | — | |
 | W4 | Item 3 — broker deferred join | — | |
 | W5 | Item 2 — city-quality, keyed on `obec_id` | — | |
@@ -968,6 +969,86 @@ string in a method body this statement was invisible to it (verified: it now app
 UTC here is deliberate and scoped to matching the index. The page's *displayed* day is a
 separate question with one declared zone, decided in W3.
 
+### W1a — the admin gate, hoisted (migration 431)
+
+**The commissioned item was a measurement artifact; the real defect was next door.** The
+ledger recorded the gate at "~332 blocks". That was a once-per-backend catcache warm-up:
+every Supabase-MCP call opens a fresh backend, PostgREST pools. Warm the gate costs ~2
+blocks. **Item 4 as commissioned is not a north-star violation.**
+
+The defect that *is* one, unnamed in the ledger: in all **10 tenancy policies** the gate
+sits inside an `OR` with column references, which destroys the pseudoconstancy Postgres
+would otherwise exploit — so the executor calls a **SECURITY DEFINER function once per
+candidate row**, including on `llm_calls` at 293,551 rows.
+
+Measured live, through the real RLS path (`set local role authenticated`):
+
+```
+before   Filter: (... OR ((account_id = '000…0'::uuid) AND is_platform_admin()))
+after    InitPlan 2 -> Result
+         Filter: (... OR ((account_id = '000…0'::uuid) AND (InitPlan 2).col1))
+```
+
+Semantics are bit-identical: the function is already STABLE and argument-less, so one
+evaluation per statement is exactly what STABLE promises. It still reads live — **no cache,
+no TTL, no memo, revocation stays instantaneous.** Row counts verified identical after.
+
+**Three proposal premises corrected against the live catalog:**
+
+1. **The `session_user` premise is HALF WRONG, and the memory note it told us to retire is
+   right.** The proposal says the gate "keys on the JWT sub, not `session_user`", and that
+   `[[admin-gate-session-user-pattern]]` predates migs 329/330 and should be corrected.
+   The live function has **two arms**: claims present → `admins` keyed on JWT `sub`;
+   claims **absent** → `current_setting('role') = 'none'` **and**
+   `pg_roles.rolbypassrls` for `session_user`. That fallback arm is live, and the memory
+   is the record *of* it. **It was not corrected.** Operational consequence worth keeping:
+   psycopg, psql, pg_cron **and the Supabase MCP itself** all hit the `pg_roles` arm — so
+   *every MCP measurement of this gate exercises a different branch than browser traffic
+   does*.
+2. **"~35 views/functions" → 36** (27 views + 9 functions), and **10 policies → 11 edit
+   sites**, not 10: `manual_rental_estimates_admin_update` carries the gate in **both**
+   `USING` *and* `WITH CHECK`.
+3. **`ALTER POLICY`, not DROP + CREATE.** The proposal's design replayed policies and
+   argued the transaction was needed because "replaying policies transiently drops them".
+   `ALTER POLICY` swaps the expression in place, so there is no drop window at all — and,
+   decisively, **it cannot lose `TO authenticated`**. A `DROP` + `CREATE` that omits the
+   role clause silently defaults the policy to `PUBLIC`. That is privilege escalation
+   inside a security replay, and it is now structurally impossible here.
+
+**Split from the 36 cosmetic wraps, deliberately.** The views/functions call the gate
+*standing alone* — already one evaluation, zero measured gain, wrapped only for uniform
+spelling. Bundling them would have put **46 `ACCESS EXCLUSIVE` locks in one transaction**
+across 9 continuously-written tables, and `CREATE OR REPLACE` carries hazards `ALTER
+POLICY` does not (it resets view `reloptions`, and drops any function attribute not
+restated — `SECURITY DEFINER`, `SET search_path`). W1a's lock set is 9 tables, held for a
+catalog update, under `lock_timeout='3s'`.
+
+**The in-migration rail earned its place on its first run.** It asserts completeness (no
+bare call survives), coverage (exactly 10 policies / 11 sites), attribute stability
+(permissive + role list), and that the four `*_tenant_rw` policies did **not** gain an
+admin arm in `with_check`. On the first apply it **failed and rolled the whole thing
+back** — the coverage count read 22 for 11 sites, because the deparser renders the wrapper
+as `( SELECT is_platform_admin() AS is_platform_admin)` and the name appears twice, once as
+the call and once as the alias. Production was verified untouched. Because the rail runs
+*inside* the transaction, a wrong rail costs nothing and the error text is the diagnosis.
+
+**`_admin_gate_shape.py` is deliberately NOT extended to `pg_policy`.** Its
+`_GATE_OR_EVASION` rule rejects any `or … is_platform_admin` — which is the exact shape all
+10 legitimate tenancy policies have, because a tenancy policy *is* an OR of "my rows" and
+"platform rows". Pointing that guard at policies would force it to be weakened to pass, and
+its own docstring records two earlier regex generations that were weakened and then
+accepted gate-defeating forms.
+
+**Bounded win, stated:** on `llm_calls` the gate is inside a *correlated* `EXISTS`. The
+wrap hoists the gate out of the inner loop, but the `EXISTS` itself still runs per
+`llm_calls` row.
+
+Filed, not done: `procost 100` and — larger — **`proparallel = 'u'` (PARALLEL UNSAFE) on
+both `is_platform_admin()` and `current_account_ids()`**, which forces every RLS-bound read
+on these 9 tables to run serially. Marking them PARALLEL SAFE would likely dwarf the hoist.
+Both are planner inputs and do not belong in a security replay whose whole discipline is
+verbatim-with-wrapper.
+
 ### STOP 1 — the T0 baseline, captured 2026-08-25 05:37 UTC
 
 Captured **at the moment F1 landed**, because the "before" window is the *past* 24 h and
@@ -1017,3 +1098,13 @@ One line each: flag · trigger · evidence needed to close · filing wave.
 - `llm_calls` carries 64 MB of index on a 76 MB heap; `called_for`/`provider` leading keys
   look unused · **trigger:** credits restored and a full traffic period captured ·
   **evidence:** `pg_stat_user_indexes` over that period · filed W2.
+- `procost 100` on `is_platform_admin()` is decorative · **trigger:** the next migration
+  that touches the function body · **evidence:** a before/after plan check · filed W1a.
+- **`proparallel = 'u'` (PARALLEL UNSAFE) on `is_platform_admin()` AND
+  `current_account_ids()`** — every RLS-bound read on the 9 tenancy tables is forced
+  serial; this likely dwarfs the InitPlan hoist · **trigger:** a wave that can own a
+  planner change with its own plan gate · **evidence:** parallel-plan EXPLAIN on
+  `llm_calls` / `estimation_runs` before and after · filed W1a.
+- The claims-absent fallback arm (`pg_roles` / `rolbypassrls`) inside a security primitive
+  · **trigger:** an inventory of every raw-connection reader of a gated relation ·
+  **evidence:** that inventory · filed W1a.

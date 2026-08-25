@@ -298,6 +298,28 @@ column predicate.** Three cases, don't conflate them:
   combined case to a one-time `InitPlan` (211 buffers instead of 172k). It is the rescue for
   case 2, not a requirement for case 1.
 
+**The same three cases apply to RLS POLICY predicates, and case 2 lived there unnoticed
+until migration 431.** All 10 tenancy policies spell the gate as
+`... OR (account_id IS NULL AND is_platform_admin())` — an OR with column references, i.e.
+case 2 — so the gate ran once per candidate row, on `llm_calls` at 293,551 rows. 431 wraps
+all 11 sites. Two policy-specific rules that do not arise for views:
+- **Use `ALTER POLICY`, never `DROP` + `CREATE`.** `ALTER POLICY` swaps the expression in
+  place: no window where the table is unpoliced, and it **cannot lose `TO authenticated`**.
+  A `CREATE POLICY` that omits the role clause silently defaults to `PUBLIC` — privilege
+  escalation with no test to catch it.
+- **Never point `tests/_admin_gate_shape.py` at `pg_policy`.** Its `_GATE_OR_EVASION` rule
+  rejects any `or … is_platform_admin`, which is the exact shape every legitimate tenancy
+  policy has (a tenancy policy *is* an OR of "my rows" and "platform rows"). It would have
+  to be weakened to pass, and its docstring records two earlier weakenings that then let
+  gate-defeating forms ship green. Guard policies behaviourally instead
+  (`tests/test_admin_gate_policies_live.py`).
+
+**`is_platform_admin()` has TWO arms, and which one you measure depends on how you connect.**
+Claims present (a browser JWT through PostgREST) → `admins` keyed on the JWT `sub`. Claims
+absent → `current_setting('role') = 'none'` AND `pg_roles.rolbypassrls` for `session_user`.
+psycopg, psql, pg_cron **and the Supabase MCP** all take the second arm — so an MCP
+measurement of this gate exercises a different branch than production browser traffic.
+
 So: wrap a gate that sits alongside a column predicate; a standalone gate is already O(1).
 
 **Stored blocking keys**: `listings.street_name_key` (migration 256) and
