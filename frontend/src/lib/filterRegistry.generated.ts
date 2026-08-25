@@ -1703,7 +1703,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "float",
       "pg_column": "price_per_m2",
       "default": null,
-      "description": "Lower bound on price per square metre (`price_czk / area_m2`). Inclusive. Listings with NULL area_m2 fall out when this bound is set. Useful for sale filtering where absolute price varies wildly with size but unit price is the comparable metric.",
+      "description": "Lower bound on THE per-m2 measure -- `price_per_m2`, i.e. measure_price_per_m2(price, area, category_main, category_type) from migration 425. Inclusive. NOT a price_czk / area_m2 re-derivation: the measure is basis-resolved and floored, so listings with NULL area_m2 and listings under their basis floor both fall out when this bound is set. The UNIT depends on the cohort -- capital CZK/m2 for prodej / drazba / podil (of PLOT area for pozemek), CZK/m2 per MONTH for pronajem -- so a bound only means one thing once a category_type is chosen.",
       "category": "Property",
       "ui_control": "range_inputs",
       "agendas": [
@@ -1733,7 +1733,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "float",
       "pg_column": "price_per_m2",
       "default": null,
-      "description": "Upper bound on price per square metre. See `min_price_per_m2`. Inclusive.",
+      "description": "Upper bound on THE per-m2 measure (`price_per_m2`). See `min_price_per_m2` for the basis and the unit. Inclusive.",
       "category": "Property",
       "ui_control": "range_inputs",
       "agendas": [

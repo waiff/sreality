@@ -71,8 +71,15 @@ exception per Toolkit rule #5. System prompts and model IDs are operator-tunable
   `region_disposition_annotations`) — a one-to-two-sentence factual annotation per
   per-disposition Kč/m² box plot in Browse > Stats, from the same `ppm2_box` payload that
   drives the chart. Cached per `(region_hash, day)` — invalidates by calendar day, not by
-  snapshot. Powers the `summarize-1` annotated-charts feature; FACTS not opinions (toolkit
-  rule #1) — it describes the distribution, never recommends a price.
+  snapshot; `region_hash` folds in the `basis` when one is sent, so a capital and a monthly
+  reading of the same cohort can never share a cached sentence. Powers the `summarize-1`
+  annotated-charts feature; FACTS not opinions (toolkit rule #1) — it describes the
+  distribution, never recommends a price.
+  **`basis` is required in practice** (migration 425's vocabulary:
+  `sale_capital_czk_m2` / `rent_monthly_czk_m2` / `land_capital_czk_m2`): the prompt payload
+  names the unit AND the period from it, and without one the model narrates bare Kč/m² and
+  cannot tell a ~91 535 capital figure from a ~319 monthly one. Browse skips the call
+  entirely for a cohort whose basis is mixed rather than sending an unlabelled payload.
 - `enrich_listing_description` (`toolkit/bazos_enrichment.py`) — pulls structured fields out of
   a free-text portal description (bazos above all, whose ads carry no field grid). Driven by
   `scripts/enrich_listing_descriptions.py` (sync) or the Batches lane

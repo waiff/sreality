@@ -55,7 +55,7 @@ import type {
   MergesResponse,
   MergedPropertiesResponse,
 } from './types';
-import type { Ppm2RowBasis } from './measure';
+import type { Ppm2BasisToken } from './measure';
 import type { PresetSpec } from './filters';
 import { supabase } from './supabase';
 
@@ -383,14 +383,19 @@ export interface RegionDispositionAnnotationsInput {
     ppm2_box: Ppm2Box | null;
   }>;
   ppm2_overall?: { p25: number; p50: number; p75: number } | null;
-  /* The basis every figure in this payload is on (migration 425's vocabulary,
-   * narrowed to the render-side union). The caller never sends 'mixed' or null:
+  /* The basis every figure in this payload is on, spelled in migration 425's
+   * own vocabulary (`sale_capital_czk_m2` | `rent_monthly_czk_m2` |
+   * `land_capital_czk_m2`). The caller never sends 'mixed' or null:
    * BrowseExperience skips the request entirely for a cohort with no single
    * basis, because prose about sale and rent Kč/m² stacked together would be
-   * wrong in every sentence. Carried so the annotator can name the unit; the
-   * cache key (`region_key`) already encodes the category + deal type, so this
-   * cannot make two bases share one cached annotation. */
-  basis?: Ppm2RowBasis | null;
+   * wrong in every sentence.
+   *
+   * The server half is live: SummarizeRegionDispositionsIn.basis accepts it,
+   * toolkit/region_annotations threads it into the prompt payload so the model
+   * is told the unit AND the period, and it is folded into the per-day cache
+   * identity beside region_hash. Change one half and the other stops meaning
+   * anything, so they move together. */
+  basis?: Ppm2BasisToken | null;
   region_label?: string | null;
 }
 

@@ -11,7 +11,7 @@ import {
   fmtCount, fmtArea, fmtCzk, fmtMeasuredPricePerM2, fmtRelative, fmtAbsolute,
   fmtFurnished, fmtOwnership, fmtParkingLots,
 } from '@/lib/format';
-import { ppm2Basis } from '@/lib/measure';
+import { ppm2BasisFromToken } from '@/lib/measure';
 import type { Furnished, Ownership } from '@/lib/types';
 import { placePrimary } from '@/lib/placeLabel';
 import { listingKindLabel } from '@/lib/enums';
@@ -286,8 +286,9 @@ function Row({
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
         {/* Basis resolved PER ROW, never per table: the default Browse cohort
             can be `deal=any`, so a sale row and a rent row sit in the same
-            column and must carry different units. */}
-        {fmtMeasuredPricePerM2(row.price_per_m2, ppm2Basis(row.category_main, row.category_type))}
+            column and must carry different units. The label is the one the
+            server published next to the measure, not a re-derivation. */}
+        {fmtMeasuredPricePerM2(row.price_per_m2, ppm2BasisFromToken(row.price_per_m2_basis))}
       </td>
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
         {row.parking_lots == null

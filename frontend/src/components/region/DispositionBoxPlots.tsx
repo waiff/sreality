@@ -13,7 +13,13 @@
 
 import { useMemo, useState } from 'react';
 import type { Ppm2Box, RegionDispositionRow } from '@/lib/types';
-import { PPM2_UNIT, type Ppm2Basis, type Ppm2RowBasis } from '@/lib/measure';
+import {
+  MIXED_BASIS_HINT,
+  PPM2_UNIT,
+  type MixedBasisCause,
+  type Ppm2Basis,
+  type Ppm2RowBasis,
+} from '@/lib/measure';
 import { fmtMeasuredPricePerM2 } from '@/lib/format';
 
 interface Props {
@@ -22,6 +28,12 @@ interface Props {
    * horizontal scale, so the scale itself only means something if every row is
    * on the same basis. 'mixed' and null are refused rather than drawn. */
   basis: Ppm2Basis | null;
+  /* WHY a 'mixed' basis is mixed — the server only reports THAT it is. The
+   * refusal has to name the mix the operator can actually clear: a cohort that
+   * has already fixed one deal type and merely spans pozemek + byt is told to
+   * exclude the pozemky, not to "choose one deal type" (which would be a
+   * no-op instruction and leave the tab blank with no way out). */
+  mixedCause: MixedBasisCause;
   /* Per-disposition natural-language annotations of the Kč/m²
    * distribution, generated server-side (summarize-1). Keyed by
    * disposition label. Optional: the chart renders fully without them. */
@@ -90,6 +102,7 @@ interface RenderRow {
 export default function DispositionBoxPlots({
   rows,
   basis,
+  mixedCause,
   annotations,
   annotationsLoading = false,
 }: Props) {
@@ -106,13 +119,16 @@ export default function DispositionBoxPlots({
    * here shares one horizontal scale by design ("so visual comparison is
    * honest"), and pooling sale (~91 535 Kč/m²) with rent (~319 Kč/m²/měs) on it
    * would squash every rent box to a hairline against the sale range and invite
-   * the reader to compare them. There is no honest way to draw this chart
-   * without a single basis. */
+   * the reader to compare them. The land mix is the same failure one order
+   * down: a plot at 850 Kč/m² of PLOT against a flat at 91 535 Kč/m² of FLOOR
+   * is not a comparison, it is two denominators on one axis. There is no honest
+   * way to draw this chart without a single basis — but the refusal must name
+   * which of the two mixes fired, or it reads as an unactionable dead end. */
   if (basis == null || basis === 'mixed') {
     return (
       <p className="text-sm text-[var(--color-ink-3)] italic">
         {basis === 'mixed'
-          ? 'Smíšený základ (prodej + pronájem) — zvolte jeden typ nabídky, aby měla osa Kč/m² jednotku.'
+          ? `${MIXED_BASIS_HINT[mixedCause]}, aby měla osa Kč/m² jednotku.`
           : 'Bez rozpoznaného základu Kč/m² pro tuto skupinu.'}
       </p>
     );

@@ -13,7 +13,7 @@ import type { CenterRadius, MapBounds } from '@/lib/filters';
 import { groupForPicker, indexLabel, pinnedFirst } from '@/lib/cityIndexes';
 import { legendGradient, mapRampStops, normalizeIndexValue } from '@/lib/cityIndexScale';
 import { fmtCzk, fmtArea, fmtMeasuredPricePerM2, fmtRelative, fmtAbsolute } from '@/lib/format';
-import { PPM2_UNIT, areaKindOf, ppm2Basis } from '@/lib/measure';
+import { PPM2_UNIT, areaKindOf, ppm2BasisFromToken } from '@/lib/measure';
 import type { PriceMetric } from '@/lib/browseState';
 import { listingKindLabel } from '@/lib/enums';
 import type { PriceStatDataset, PriceStatGrowthRow, PriceStatGrowthShape } from '@/lib/priceStats';
@@ -91,8 +91,24 @@ const PRAGUE = { lng: 14.4378, lat: 50.0755, zoom: 9.5 };
 /* Below this zoom only the round point dot is shown; at and above it
  * each listing's price label is also drawn. Tuned so the labels appear
  * roughly when a single city block is on screen — close enough that the
- * labels don't pile up but far enough to still see a neighbourhood. */
-const PRICE_LABEL_MIN_ZOOM = 13;
+ * labels don't pile up but far enough to still see a neighbourhood.
+ *
+ * It is CLUSTERING, not this constant, that sets the true threshold: the
+ * `listings` source clusters through `clusterMaxZoom: 13`, so at z13 every
+ * feature is still inside a cluster and the label layer (which filters on
+ * `!has point_count`) matches nothing. The first zoom at which any label can
+ * exist is therefore 14, and both numbers are derived from one source below so
+ * they cannot drift apart. This matters because the "Ceny" control bakes its
+ * labels into the feature properties: at the zooms Browse OPENS at (the fit is
+ * capped at 14 for a country-wide cohort and typically lands around z6-7; the
+ * no-rows fallback is Prague z9.5) flipping it re-clusters up to 50 000
+ * features and changes nothing on screen. The control says so rather than
+ * reading as broken. */
+const CLUSTER_MAX_ZOOM = 13;
+const PRICE_LABEL_MIN_ZOOM = CLUSTER_MAX_ZOOM;
+/* The lowest zoom at which an unclustered point — and therefore a label —
+ * can exist. */
+const PIN_LABEL_VISIBLE_ZOOM = CLUSTER_MAX_ZOOM + 1;
 
 const czPriceCompact = new Intl.NumberFormat('cs-CZ', {
   notation: 'compact',
@@ -107,8 +123,9 @@ const czPriceCompact = new Intl.NumberFormat('cs-CZ', {
  * a sale/rent choice (rule 22: `deal=any` is a first-class cohort), so a single
  * screen can hold a sale pin and a rent pin at once. Their medians are ~91 535
  * Kč/m² and ~319 Kč/m²/měs — a 300x gap — so one map-wide unit would be a
- * category error on every pin of the other basis. Each feature resolves its own
- * basis from its own (category_main, category_type) and carries its own suffix.
+ * category error on every pin of the other basis. Each feature carries its own
+ * suffix, resolved from the `price_per_m2_basis` the server published beside
+ * the measure on that same row.
  *
  * A pin whose measure is NULL — below its basis floor, or no decidable basis —
  * blanks its label and KEEPS its dot: exactly what a missing price already does,
@@ -119,8 +136,8 @@ const formatPriceLabel = (r: MapRow, metric: PriceMetric): string => {
   if (metric === 'total') {
     return r.price_czk == null ? '' : `${czPriceCompact.format(r.price_czk)} Kč`;
   }
-  const basis = ppm2Basis(r.category_main, r.category_type);
-  if (r.price_per_m2 == null || basis == null) return '';
+  const basis = ppm2BasisFromToken(r.price_per_m2_basis);
+  if (r.price_per_m2 == null || basis == null || basis === 'mixed') return '';
   return `${czPriceCompact.format(r.price_per_m2)}\u00a0${PPM2_UNIT[basis]}`;
 };
 
@@ -553,6 +570,11 @@ export default function ListingMap({
    * the current callback without needing to rebind. */
   const onBoundsChangeRef = useRef(onBoundsChange);
   onBoundsChangeRef.current = onBoundsChange;
+  /* Whether pin labels can be on screen at all right now. Drives the "Ceny"
+   * control's hint: without it the operator clicks a toggle at the zoom Browse
+   * opens at, waits through a re-cluster of the whole cohort, and sees no
+   * pixel change anywhere — a control that reads as broken. */
+  const [labelsVisible, setLabelsVisible] = useState(false);
   /* Same ref trick for the hover emitter — the maplibre listeners
    * are registered once at mount and must keep reading the latest
    * callback without rebinding. */
@@ -846,7 +868,7 @@ export default function ListingMap({
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
         cluster: true,
-        clusterMaxZoom: 13,
+        clusterMaxZoom: CLUSTER_MAX_ZOOM,
         clusterRadius: 48,
       });
 
@@ -1168,6 +1190,16 @@ export default function ListingMap({
         didInitialFitRef.current = true;
       }
     });
+
+    /* Zoom is read back out of the map rather than tracked alongside it: a
+     * fitBounds, a cluster click and a scroll all change it, and only the map
+     * knows the result. `zoomend` fires for every one of them, programmatic
+     * included. Setting the same boolean is a no-op re-render in React, so this
+     * costs nothing while the operator pans within one label regime. */
+    const syncLabelVisibility = () => {
+      setLabelsVisible(map.getZoom() >= PIN_LABEL_VISIBLE_ZOOM);
+    };
+    map.on('zoomend', syncLabelVisibility);
 
     /* Only user-driven moveends propagate to the URL. Programmatic
      * fitBounds / easeTo calls produce events with `originalEvent ===
@@ -1558,6 +1590,7 @@ export default function ListingMap({
         <PriceMetricControls
           priceMetric={priceMetric}
           onPriceMetricChange={onPriceMetricChange}
+          labelsVisible={labelsVisible}
         />
         {cities && cities.length > 0 && (
           <CityMapControls
@@ -1915,35 +1948,57 @@ function CityMapControls({
 function PriceMetricControls({
   priceMetric,
   onPriceMetricChange,
+  labelsVisible,
 }: {
   priceMetric: PriceMetric;
   onPriceMetricChange?: (next: PriceMetric) => void;
+  /* False while the map is zoomed out far enough that every point is still
+   * inside a cluster. The control stays LIVE (the choice is URL state and
+   * survives the zoom that reveals it) but says its effect is not on screen
+   * yet — disabling it would make a shareable `?pm=per_m2` link unsettable
+   * from the view the link opens at. */
+  labelsVisible: boolean;
 }) {
   const opts: ReadonlyArray<{ value: PriceMetric; label: string }> = [
     { value: 'total', label: 'Celkem' },
     { value: 'per_m2', label: PPM2_UNIT.sale },
   ];
+  const hint = labelsVisible
+    ? 'Popisky pinů: celková cena nebo cena za m²'
+    : `Popisky pinů se zobrazí po přiblížení (od úrovně ${PIN_LABEL_VISIBLE_ZOOM})`;
   return (
-    <div className="pointer-events-auto flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)] text-[0.75rem]">
-      <span className="text-[var(--color-ink-2)] font-medium">Ceny:</span>
-      <div className="inline-flex rounded-[var(--radius-sm)] border border-[var(--color-rule)] overflow-hidden">
-        {opts.map((o) => (
-          <button
-            key={o.value}
-            type="button"
-            aria-pressed={priceMetric === o.value}
-            onClick={() => onPriceMetricChange?.(o.value)}
-            className={[
-              'px-2 py-0.5 text-[0.72rem] transition-colors',
-              priceMetric === o.value
-                ? 'bg-[var(--color-ink)] text-[var(--color-paper)]'
-                : 'bg-[var(--color-paper-2)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)]',
-            ].join(' ')}
-          >
-            {o.label}
-          </button>
-        ))}
+    <div className="pointer-events-auto flex flex-col gap-1 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)] text-[0.75rem]">
+      <div className="flex items-center gap-2">
+        <span className="text-[var(--color-ink-2)] font-medium">Ceny:</span>
+        <div
+          role="group"
+          aria-label="Popisky pinů"
+          className="inline-flex gap-0.5 p-0.5 rounded-[var(--radius-sm)] border border-[var(--color-rule)]"
+        >
+          {opts.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              aria-pressed={priceMetric === o.value}
+              title={hint}
+              onClick={() => onPriceMetricChange?.(o.value)}
+              className={[
+                'px-2 py-0.5 text-[0.72rem] rounded-[var(--radius-xs)] transition-colors',
+                priceMetric === o.value
+                  ? 'bg-[var(--color-ink)] text-[var(--color-paper)]'
+                  : 'bg-[var(--color-paper-2)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)]',
+              ].join(' ')}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
       </div>
+      {!labelsVisible && (
+        <span className="text-[0.65rem] text-[var(--color-ink-4)]">
+          Přibližte pro popisky
+        </span>
+      )}
     </div>
   );
 }
@@ -1965,7 +2020,7 @@ function popupHtml(r: MapRow): string {
    * label can be read next to the figure it was derived from. */
   const ppm = fmtMeasuredPricePerM2(
     r.price_per_m2,
-    ppm2Basis(r.category_main, r.category_type),
+    ppm2BasisFromToken(r.price_per_m2_basis),
   );
   const disposition = listingKindLabel(r) ?? '—';
   const district = r.district ?? '';

@@ -101,17 +101,16 @@ export const CARD_PAGE_SIZE = 24;
  * The map has no keyset tiebreaker column, so it carries `property_id` explicitly
  * (Table/Cards get it from withKeysetColumns / CARD_COLS) for the final null-safe
  * `?property=` detail-link fallback. */
-/* `price_per_m2` is the SERVER measure (migration 425); `category_main` +
- * `category_type` are what the pin resolves its BASIS from, per feature. They
- * are NOT a convenience: Browse never forces a sale/rent choice (rule 22 —
- * `deal=any` is a first-class cohort), so one map can hold a sale pin and a rent
- * pin at once, and a map-wide unit would be wrong on one of them by ~300x.
- * Deliberately NOT selecting the published `price_per_m2_basis` column: it lives
- * on browse_projection but only reaches `properties_map_mv` when that matview's
- * rebuild runs, so asking for it would 400 the whole map until then. The two
- * category columns are on BOTH map relations today, and ppm2Basis() mirrors the
- * same SQL function over them. */
-const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat,lng,price_czk,price_per_m2,category_main,category_type,disposition,subtype,area_m2,district,last_seen_at,is_active,tom_days';
+/* `price_per_m2` is the SERVER measure (migration 425) and `price_per_m2_basis`
+ * is the SERVER label for it — both published on properties_map_mv and on the
+ * portal-mirror relation, so the pin reads the basis rather than re-deriving it.
+ * Reading it PER FEATURE is not a convenience: Browse never forces a sale/rent
+ * choice (rule 22 — `deal=any` is a first-class cohort), so one map can hold a
+ * sale pin and a rent pin at once, and a map-wide unit would be wrong on one of
+ * them by ~300x. `category_main` stays for what the basis does not say: whether
+ * this row's area_m2 is floor area or PLOT area (the popup says so), and
+ * `category_type` for the monthly period on the total-price label. */
+const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat,lng,price_czk,price_per_m2,price_per_m2_basis,category_main,category_type,disposition,subtype,area_m2,district,last_seen_at,is_active,tom_days';
 /* `property_id` is listed explicitly rather than arriving via withKeysetColumns:
  * it used to come free because the tiebreak was ALWAYS property_id, but the
  * portal-mirror lane tiebreaks on listing_id, which would have left
@@ -124,27 +123,33 @@ const TABLE_COLS =
    * was built from. withKeysetColumns dedupes, so naming it here is safe even
    * when it is also the active sort field. */
   'price_per_m2,' +
-  /* The two BASIS inputs of the measure, the same pair the cards already
-   * select. Without them the Kč/m² cell has a number and no unit, and the
-   * Price cell cannot tell a monthly rent from a purchase price.
+  /* The published BASIS label of that measure, plus the two columns that feed
+   * it. Without the label the Kč/m² cell has a number and no unit. Without
+   * category_type the Price cell cannot tell a monthly rent from a purchase
+   * price. browse_list carries all three (migration 425 asserts the basis
+   * column is present before it commits).
    * NOTE for future editors: tests/test_browse_read_path_guardrail.py parses
-   * this constant by naive single-quote pairing, so an apostrophe anywhere in
-   * these comments splits the select-list into nonsense. Keep them out. */
-  'category_main,category_type,' +
+   * this constant by naive single-quote pairing AND stops at the first
+   * semicolon, so an apostrophe or a semicolon anywhere in these comments
+   * truncates the select-list into nonsense. Keep both out. */
+  'price_per_m2_basis,category_main,category_type,' +
   'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type,total_price_change_pct,price_change_count';
 const CARD_COLS =
   'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
   /* Same server measure the table cell reads (migration 425) — see TABLE_COLS. */
   'price_per_m2,' +
+  /* The published BASIS label — see TABLE_COLS. category_main also names the
+   * denominator (plot vs floor area) for surfaces with room to say so. */
+  'price_per_m2_basis,category_main,category_type,' +
   /* The two price-history columns back <PriceDelta>. Both were already on
    * browse_list (migrations 276/343/363) and simply never selected — they
    * existed only as filter inputs, never as anything displayed. */
-  'category_main,category_type,mf_gross_yield_pct,total_price_change_pct,price_change_count';
+  'mf_gross_yield_pct,total_price_change_pct,price_change_count';
 
-/* The four select-lists, grouped for one purpose: a test can assert that the
- * measure's BASIS INPUTS travel with the measure on every lane. `price_per_m2`
- * without `category_main` + `category_type` is a number nothing can label, and
- * the failure mode is silent — a rent renders under a sale unit. */
+/* The three Browse select-lists, grouped for one purpose: a test can assert
+ * that the measure's published LABEL travels with the measure on every lane.
+ * `price_per_m2` without `price_per_m2_basis` is a number nothing can label,
+ * and the failure mode is silent — a rent renders under a sale unit. */
 export const BROWSE_SELECT_COLUMNS = {
   map: MAP_COLS,
   table: TABLE_COLS,
@@ -526,10 +531,13 @@ export interface MapRow {
   lat: number;
   lng: number;
   price_czk: number | null;
-  /* The SERVER measure + the two inputs its basis is resolved from. The map
-   * label switches between price_czk and price_per_m2 (the "Ceny" control), and
-   * the unit is decided PER PIN — see MAP_COLS. */
+  /* The SERVER measure and the SERVER label for it. The map label switches
+   * between price_czk and price_per_m2 (the "Ceny" control), and the unit is
+   * decided PER PIN from `price_per_m2_basis` — see MAP_COLS. `category_main`
+   * names the denominator (plot vs floor area) in the popup; `category_type`
+   * carries the monthly period onto the absolute price. */
   price_per_m2: number | null;
+  price_per_m2_basis: string | null;
   category_main: string | null;
   category_type: string | null;
   disposition: string | null;
@@ -878,7 +886,10 @@ export interface TableRow {
    * column the Kč/m² sort and filter read, so the cell can never contradict
    * the cohort. */
   price_per_m2: number | null;
-  /* The measure's basis inputs — see TABLE_COLS. */
+  /* The measure's published basis label + the two columns behind it — see
+   * TABLE_COLS. The cell renders the label; the /měs marker on the absolute
+   * price reads category_type. */
+  price_per_m2_basis: string | null;
   category_main: string | null;
   category_type: string | null;
   first_seen_at: string;
@@ -1028,8 +1039,10 @@ export interface CardRow {
   subtype: string | null;
   area_m2: number | null;
   price_czk: number | null;
-  /* The per-m² MEASURE (migration 425) — see TableRow.price_per_m2. */
+  /* The per-m² MEASURE (migration 425) — see TableRow.price_per_m2 — and its
+   * published basis label, which is what the footer suffixes the figure with. */
   price_per_m2: number | null;
+  price_per_m2_basis: string | null;
   first_seen_at: string;
   last_seen_at: string;
   is_active: boolean;

@@ -1,11 +1,13 @@
 /* The frontend half of the per-m² measure: which basis a figure is on.
  *
  * `ppm2Basis` is a hand-written mirror of migration 425's
- * `measure_price_per_m2_basis(category_main, category_type)`, and it exists only
- * because the two Browse read models (`browse_list`, `properties_map_mv`) do not
- * carry the published `price_per_m2_basis` column until their rebuild runs. The
- * SQL truth table below is therefore the SPEC, not a convenience: if these cases
- * ever disagree with Postgres, every Kč/m² label on Browse is wrong.
+ * `measure_price_per_m2_basis(category_main, category_type)`. Every RELATION
+ * publishes `price_per_m2_basis` — all six, the two Browse read models
+ * included — so every row surface reads the published token through
+ * `ppm2BasisFromToken` instead. The mirror survives for the one caller with no
+ * column to read: the estimation trace panel, whose rounds are a JSONB filter
+ * spec. The SQL truth table below is therefore the SPEC, not a convenience: if
+ * these cases ever disagree with Postgres, that panel is wrong.
  */
 import { describe, expect, it } from 'vitest';
 import { pipelineViewFilters } from './filters';
@@ -17,6 +19,10 @@ import {
   ppm2Basis,
   ppm2BasisFromToken,
   ppm2BasisOfCohort,
+  MIXED_BASIS_HINT,
+  PRICE_PERIOD_UNIT,
+  mixedBasisCause,
+  pricePeriodOfCohort,
   type Ppm2RowBasis,
 } from './measure';
 
@@ -185,5 +191,59 @@ describe('areaKindOf', () => {
     expect(areaKindOf('byt')).toBe('usable');
     expect(areaKindOf('dum')).toBe('usable');
     expect(areaKindOf(null)).toBe('usable');
+  });
+});
+
+
+/* The ABSOLUTE price's period. Deliberately a different function from
+ * ppm2BasisOfCohort: a capital sale price and a capital land price pool fine,
+ * a monthly rent and a capital sum never do. */
+describe('pricePeriodOfCohort', () => {
+  it('is monthly for a rent cohort and capital for every capital deal type', () => {
+    expect(pricePeriodOfCohort('pronajem')).toBe('monthly');
+    expect(pricePeriodOfCohort('prodej')).toBe('capital');
+    expect(pricePeriodOfCohort('drazba')).toBe('capital');
+    expect(pricePeriodOfCohort('podil')).toBe('capital');
+  });
+
+  it('does NOT go mixed just because the cohort spans pozemek and byt', () => {
+    // The per-m² basis IS mixed there (plot area vs floor area) — the absolute
+    // price is not: both asks are plain capital Kč.
+    expect(ppm2BasisOfCohort({ categoryMain: ['byt', 'pozemek'], categoryType: 'prodej' }))
+      .toBe('mixed');
+    expect(pricePeriodOfCohort('prodej')).toBe('capital');
+  });
+
+  it('is mixed for the deal=any cohort and undecidable for an unknown type', () => {
+    expect(pricePeriodOfCohort(null)).toBe('mixed');
+    expect(pricePeriodOfCohort('barter')).toBeNull();
+  });
+
+  it('names a unit for both decidable periods, and marks the rent one', () => {
+    expect(PRICE_PERIOD_UNIT.capital).toBe('Kč');
+    expect(PRICE_PERIOD_UNIT.monthly).toContain('měs');
+  });
+});
+
+/* WHY a cohort is mixed decides what the operator is told to do about it. */
+describe('mixedBasisCause', () => {
+  it('blames the deal type only when the cohort has not fixed one', () => {
+    expect(mixedBasisCause({ categoryMain: [], categoryType: null })).toBe('deal');
+    expect(mixedBasisCause({ categoryMain: ['byt'], categoryType: null })).toBe('deal');
+  });
+
+  it('blames the denominator once a single deal type is chosen', () => {
+    // The unactionable case the copy used to hit: "choose one deal type" to an
+    // operator who already has.
+    expect(mixedBasisCause({ categoryMain: [], categoryType: 'prodej' }))
+      .toBe('denominator');
+    expect(mixedBasisCause({ categoryMain: ['byt', 'pozemek'], categoryType: 'prodej' }))
+      .toBe('denominator');
+  });
+
+  it('gives each cause its own instruction', () => {
+    expect(MIXED_BASIS_HINT.deal).not.toBe(MIXED_BASIS_HINT.denominator);
+    expect(MIXED_BASIS_HINT.deal).toContain('nabídky');
+    expect(MIXED_BASIS_HINT.denominator).toContain('pozemk');
   });
 });

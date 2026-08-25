@@ -992,6 +992,13 @@ export interface PipelineBoardCard {
   /* properties.is_active rollup (bool_or over child listings, rule #15/#20) —
    * the same property-grain liveness signal Browse filters on. */
   is_active: boolean;
+  /* Migration 425 — the deal type, THE per-m² measure and its published basis
+   * label, all three added to pipeline_board_public for the board. The board
+   * spans deal types by rule 22, so the price line needs category_type for its
+   * monthly marker and the per-m² figure needs its own basis per card. */
+  category_type: string | null;
+  price_per_m2: number | null;
+  price_per_m2_basis: string | null;
   /* No image_url and no broker here on purpose. Both are DECORATIONS: they are
    * fetched by lib/hydration keyed on `listing_id` and reach the card through
    * CardHydrationProvider, so nothing on the board's critical path waits for

@@ -632,6 +632,7 @@ def post_summarize_region_dispositions(
             region_key=body.region_key,
             dispositions=[d.model_dump() for d in body.dispositions],
             ppm2_overall=body.ppm2_overall,
+            basis=body.basis,
             region_label=body.region_label,
             force_refresh=body.force_refresh,
         )

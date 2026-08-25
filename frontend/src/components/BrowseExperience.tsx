@@ -51,7 +51,7 @@ import {
   type ListingFilters,
 } from '@/lib/filters';
 import { usePageTitle } from '@/lib/pageTitle';
-import { ppm2BasisFromToken } from '@/lib/measure';
+import { PPM2_BASIS_TOKEN, ppm2BasisFromToken } from '@/lib/measure';
 import CreateWatchdogModal from '@/components/CreateWatchdogModal';
 import PresetBar from '@/components/PresetBar';
 import type { ListingEstimate } from '@/lib/types';
@@ -585,6 +585,17 @@ export default function BrowseExperience({
     () => ppm2BasisFromToken(statsQuery.data?.ppm2_basis),
     [statsQuery.data],
   );
+  /* `placeholderData: (prev) => prev` keeps the PREVIOUS cohort's payload on
+   * screen while the new one loads, so on the render where `filters` changes
+   * `regionKey` is already the new cohort while `statsQuery.data` is still the
+   * old one. Everything derived from the payload — the basis, the boxes — is
+   * therefore stale for that window, and the annotations query below must not
+   * act on it: an enabled=true computed from the OLD basis fires a paid LLM
+   * call whose body is the old distributions but whose region_key (and server
+   * cache key) is the new cohort, poisoning that cohort for the rest of the
+   * day. `enabled: false` does not cancel an in-flight v5 query, so the gate
+   * has to be on freshness, not on a later correction. */
+  const statsIsStale = statsQuery.isPlaceholderData;
   const boxDispositions = useMemo(
     () =>
       (statsQuery.data?.dispositions ?? []).filter(
@@ -599,9 +610,15 @@ export default function BrowseExperience({
         region_key: regionKey,
         region_label: regionLabelFromFilters(filters),
         ppm2_overall: statsQuery.data?.ppm2 ?? null,
-        /* The basis the numbers below are on. Without it the model is narrating
-         * bare Kč/m² and cannot know whether "319" is cheap or absurd. */
-        basis: statsBasis === 'mixed' ? null : statsBasis,
+        /* The basis the numbers below are on, in the migration-425 vocabulary —
+         * a service boundary carries the SQL token, not this app's render-side
+         * shorthand. Without it the model is narrating bare Kč/m² and cannot
+         * know whether "319" is cheap or absurd. `enabled` below guarantees a
+         * single row basis here, so the lookup is total. */
+        basis:
+          statsBasis == null || statsBasis === 'mixed'
+            ? null
+            : PPM2_BASIS_TOKEN[statsBasis],
         dispositions: boxDispositions.map((d) => ({
           disposition: d.disposition,
           n: d.n,
@@ -615,6 +632,7 @@ export default function BrowseExperience({
     enabled:
       tab === 'stats'
       && isApiConfigured()
+      && !statsIsStale
       && boxDispositions.length > 0
       && statsBasis != null
       && statsBasis !== 'mixed',
@@ -958,6 +976,10 @@ export default function BrowseExperience({
                 isLoading={statsQuery.isLoading}
                 isEmpty={!statsQuery.isLoading && (statsQuery.data?.total ?? 0) === 0}
                 basis={statsBasis}
+                cohort={{
+                  categoryMain: filters.categoryMain,
+                  categoryType: filters.categoryType,
+                }}
                 annotations={annotationsQuery.data?.data.annotations}
                 annotationsLoading={annotationsQuery.isFetching}
               />

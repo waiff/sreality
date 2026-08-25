@@ -508,29 +508,24 @@ describe('pipelineCardBroker', () => {
   });
 });
 
-/* The measure travels with its basis inputs on every Browse lane, or the number
- * arrives unlabelable. `browse_list` and `properties_map_mv` do NOT publish the
- * `price_per_m2_basis` column (they only gain it when their rebuild runs), so
- * (category_main, category_type) are how these lanes resolve the label — which
- * makes selecting them a correctness requirement, not a convenience. */
-describe('Browse select-lists carry the measure with its basis inputs', () => {
+/* The measure travels with its PUBLISHED LABEL on every Browse lane, or the
+ * number arrives unlabelable. All six migration-425 relations publish
+ * `price_per_m2_basis` — including `browse_list` and `properties_map_mv`, whose
+ * rebuilds run inside the migration and whose column presence § 9 asserts
+ * before it commits — so no surface re-derives the basis in TypeScript.
+ * `category_main` / `category_type` ride along for what the basis token does
+ * not say: the denominator (plot vs floor area) and the monthly period on the
+ * absolute price. */
+describe('Browse select-lists carry the measure with its published basis', () => {
   const cols = (list: string): string[] => list.split(',');
 
-  it('selects the measure and both basis inputs on the map, table and cards', () => {
+  it('selects the measure, its published basis, and both category columns', () => {
     for (const [lane, list] of Object.entries(BROWSE_SELECT_COLUMNS)) {
       const c = cols(list);
       expect(c, `${lane}: price_per_m2`).toContain('price_per_m2');
+      expect(c, `${lane}: price_per_m2_basis`).toContain('price_per_m2_basis');
       expect(c, `${lane}: category_main`).toContain('category_main');
       expect(c, `${lane}: category_type`).toContain('category_type');
-    }
-  });
-
-  /* Selecting a column that a read model has not picked up yet is a hard
-   * PostgREST 400 that takes the whole lane down, so the SPA stays off the
-   * published label on these two relations on purpose. */
-  it('does not ask the Browse read models for the published basis column', () => {
-    for (const [lane, list] of Object.entries(BROWSE_SELECT_COLUMNS)) {
-      expect(cols(list), `${lane}`).not.toContain('price_per_m2_basis');
     }
   });
 });

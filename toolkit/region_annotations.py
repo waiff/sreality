@@ -100,6 +100,7 @@ def summarize_region_dispositions(
     region_key: str,
     dispositions: list[dict[str, Any]],
     ppm2_overall: dict[str, Any] | None = None,
+    basis: str | None = None,
     region_label: str | None = None,
     min_box_n: int = DEFAULT_MIN_BOX_N,
     force_refresh: bool = False,
@@ -107,7 +108,10 @@ def summarize_region_dispositions(
     from toolkit import _now_iso
 
     renderable = _renderable_dispositions(dispositions, min_box_n)
-    region_hash = _region_hash(region_key)
+    # basis is part of the cache identity: one region_key could in principle be
+    # summarized on two different bases, and a cached sentence about capital
+    # Kc/m2 is false about a monthly one.
+    region_hash = _region_hash(region_key, basis)
 
     # Nothing to annotate: no LLM call, no cache write.
     if not renderable:
@@ -138,6 +142,7 @@ def summarize_region_dispositions(
                 region_label=region_label,
                 renderable=renderable,
                 ppm2_overall=ppm2_overall,
+                basis=basis,
             )
     else:
         annotations, model, cost_usd = _produce_annotations(
@@ -147,6 +152,7 @@ def summarize_region_dispositions(
             region_label=region_label,
             renderable=renderable,
             ppm2_overall=ppm2_overall,
+            basis=basis,
         )
 
     return _envelope(
@@ -170,8 +176,9 @@ def _produce_annotations(
     region_label: str | None,
     renderable: list[dict[str, Any]],
     ppm2_overall: dict[str, Any] | None,
+    basis: str | None = None,
 ) -> tuple[dict[str, str], str, float | None]:
-    payload = _build_payload(region_label, renderable, ppm2_overall)
+    payload = _build_payload(region_label, renderable, ppm2_overall, basis)
 
     system = llm_client.resolve_system_prompt(_SYSTEM_PROMPT_KEY)
     model = llm_client.resolve_model(_MODEL_KEY)
@@ -219,24 +226,40 @@ def _renderable_dispositions(
     return out
 
 
+# Migration 425's basis vocabulary -> how the payload names the unit. A per-m2
+# figure is unreadable without it: sale medians run ~91 535 against rent's ~319,
+# and land is a per-m2-of-PLOT figure, not per m2 of floor.
+# Spelled in Czech, like the unit this payload always carried, so the model is
+# not nudged into a different vocabulary than the chart it is annotating.
+_BASIS_UNIT: dict[str, str] = {
+    "sale_capital_czk_m2": "Kč/m² podlahové plochy (kupní cena)",
+    "rent_monthly_czk_m2": "Kč/m² podlahové plochy za MĚSÍC (nájemné)",
+    "land_capital_czk_m2": "Kč/m² plochy POZEMKU (kupní cena)",
+}
+_DEFAULT_UNIT = "Kč/m²"
+
+
 def _build_payload(
     region_label: str | None,
     renderable: list[dict[str, Any]],
     ppm2_overall: dict[str, Any] | None,
+    basis: str | None = None,
 ) -> str:
+    unit = _BASIS_UNIT.get(basis or "", _DEFAULT_UNIT)
     lines: list[str] = []
     lines.append(f"Region: {region_label or '(filtered cohort)'}")
+    lines.append(f"Unit of every figure below: {unit}")
     if ppm2_overall:
         p25 = ppm2_overall.get("p25")
         p50 = ppm2_overall.get("p50")
         p75 = ppm2_overall.get("p75")
         if p50 is not None:
             lines.append(
-                "Cohort-wide price per m² (Kč/m²): "
+                f"Cohort-wide price per m² ({unit}): "
                 f"p25={p25} median={p50} p75={p75}"
             )
     lines.append("")
-    lines.append("Per-disposition price-per-m² box statistics (Kč/m²):")
+    lines.append(f"Per-disposition price-per-m² box statistics ({unit}):")
     for r in renderable:
         b = r["box"]
         lines.append(
@@ -286,8 +309,11 @@ def _extract_tool_call(
     return out
 
 
-def _region_hash(region_key: str) -> str:
-    return hashlib.sha256(region_key.encode("utf-8")).hexdigest()
+def _region_hash(region_key: str, basis: str | None = None) -> str:
+    # No basis -> the pre-basis hash, byte for byte, so an existing cache row
+    # and any caller that does not send one keep resolving to the same entry.
+    material = region_key if not basis else f"{region_key}\x1f{basis}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _cache_lookup(

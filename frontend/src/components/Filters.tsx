@@ -15,6 +15,7 @@ import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { fetchNoPriceCount } from '@/lib/queries';
 import { FilterForm } from '@/components/FilterForm';
+import { PPM2_UNIT, ppm2BasisOfCohort } from '@/lib/measure';
 import CityIndexRulesPicker from '@/components/CityIndexRulesPicker';
 import MarketGrowthFilter from '@/components/MarketGrowthFilter';
 import {
@@ -180,6 +181,17 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
   // already use. The adapter in lib/filters bridges both directions
   // (tri-state amenities pivot bool|null ↔ 'any'|'yes'|'no' inside it).
   const registryView = listingFiltersToRegistryView(filters);
+  // The unit the Kč/m² bound is authored IN, resolved from the cohort the
+  // operator is currently looking at. A cohort spanning bases has no single
+  // unit, so the hint says so rather than picking one.
+  const ppm2CohortBasis = ppm2BasisOfCohort({
+    categoryMain: filters.categoryMain,
+    categoryType: filters.categoryType,
+  });
+  const ppm2UnitHint =
+    ppm2CohortBasis == null || ppm2CohortBasis === 'mixed'
+      ? 'per m² (smíšený základ)'
+      : PPM2_UNIT[ppm2CohortBasis];
   // Batched apply: every <FilterForm> emission ships an array of
   // updates, so paired range edits (min + max in one slider drag)
   // apply atomically. Without this, sequential id/value callbacks
@@ -398,6 +410,18 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
                 'price_change_count_min', 'price_change_window_days',
                 'total_price_change_pct',
               ]}
+              /* The ONE place the operator AUTHORS a Kč/m² bound, so it is the
+                 one place the unit must not be a static guess. The registry
+                 declares "CZK/m²" — correct on a sale cohort, wrong by ~300x on
+                 the DEFAULT Browse cohort (byt + pronájem), where the measure is
+                 a monthly rent per m² running ~319. Typing 90 000 there returns
+                 nothing and the old hint gave no clue why; the saved watchdog
+                 then summarised the same number as Kč/m²/měs, two surfaces
+                 describing one stored value two ways. */
+              units={{
+                min_price_per_m2: ppm2UnitHint,
+                max_price_per_m2: ppm2UnitHint,
+              }}
               labels={{
                 min_price_per_m2: 'Price / m²',
                 price_change_count_min: 'Price changed N+ times',
