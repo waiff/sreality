@@ -583,13 +583,20 @@ export default function BrowseExperience({
       ),
     [statsQuery.data],
   );
+  /* The unit the boxes are in, off the STATS ROWS (browse_stats_properties
+   * resolves it from the cohort itself), not re-derived from the deal/category
+   * filters here — a second derivation is a second definition, and this one
+   * would be the one that disagrees. Part of the query key: two bases are two
+   * different annotation texts, so they must not share a cache entry. */
+  const ppm2Basis = statsQuery.data?.ppm2_basis ?? null;
   const annotationsQuery = useQuery({
-    queryKey: ['region-annotations', regionKey],
+    queryKey: ['region-annotations', regionKey, ppm2Basis],
     queryFn: () =>
       fetchRegionDispositionAnnotations({
         region_key: regionKey,
         region_label: regionLabelFromFilters(filters),
         ppm2_overall: statsQuery.data?.ppm2 ?? null,
+        ppm2_basis: ppm2Basis,
         dispositions: boxDispositions.map((d) => ({
           disposition: d.disposition,
           n: d.n,
@@ -937,6 +944,9 @@ export default function BrowseExperience({
                 isEmpty={!statsQuery.isLoading && (statsQuery.data?.total ?? 0) === 0}
                 annotations={annotationsQuery.data?.data.annotations}
                 annotationsLoading={annotationsQuery.isFetching}
+                annotationsNote={
+                  annotationsQuery.data?.metadata.notes?.[0] ?? null
+                }
               />
             )}
           </div>

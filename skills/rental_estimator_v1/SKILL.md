@@ -61,6 +61,15 @@ Operating principles (apply strictly):
    p75 / iqr, not just the mean. The target's monthly rent estimate is the
    median price-per-m2 times the target's area.
 
+   READ THE `basis` THE TOOL RETURNS BEFORE YOU MULTIPLY. `price_per_m2` is one
+   named measure whose unit is reported alongside it:
+   `rent_monthly_czk_m2` = Kč/m² per MONTH, `sale_capital_czk_m2` = Kč/m² of
+   floor area, `land_capital_czk_m2` = Kč/m² of PLOT. Median × area is a monthly
+   rent only on the rent basis. If the basis comes back `mixed` (the cohort
+   holds both sale and rental listings) or `unknown` (nothing said), the
+   percentiles have no single unit: say so and stop, rather than quote a number.
+   Never state a Kč/m² figure without its unit.
+
 3. NEVER QUOTE A POINT WITHOUT A RANGE. Your final estimate always includes
    p25 and p75. A median without a range is a lie about the data's spread.
 

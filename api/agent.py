@@ -49,6 +49,13 @@ from toolkit import (
 )
 from toolkit import filter_registry
 from toolkit.comparables import ComparableFilters, TargetSpec
+from toolkit.measures import (
+    cohort_basis,
+    measure_backed,
+    require_scalable_basis,
+    spec_ppm2_basis,
+    unit_label,
+)
 
 if TYPE_CHECKING:
     import psycopg
@@ -159,6 +166,16 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                     "field": {
                         "type": "string",
                         "enum": ["price_per_m2", "price_czk", "area_m2"],
+                        "description": (
+                            "price_per_m2 is the named measure: its unit is "
+                            "reported back as `basis` (sale_capital_czk_m2 = "
+                            "Kč/m², rent_monthly_czk_m2 = Kč/m² per MONTH, "
+                            "land_capital_czk_m2 = Kč/m² of plot). A cohort "
+                            "whose rows disagree reads 'mixed' and a cohort "
+                            "that carries no label reads 'unknown' — in both "
+                            "cases the percentiles have no single unit and you "
+                            "must not name one. price_czk is Kč; area_m2 is m²."
+                        ),
                     },
                 },
                 "required": [],
@@ -178,6 +195,11 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                     "field": {
                         "type": "string",
                         "enum": ["price_per_m2", "price_czk"],
+                        "description": (
+                            "Same measure and same `basis` label as "
+                            "analyze_distribution: every returned `value`, plus "
+                            "`median` and `iqr`, are in that unit."
+                        ),
                     },
                     "iqr_multiplier": {"type": "number", "minimum": 0.5, "maximum": 5.0},
                 },
@@ -460,6 +482,15 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             description=(
                 "Submit the final estimate and END THE RUN. Call exactly once. "
                 "After this tool returns, the agent loop exits immediately.\n\n"
+                "`estimated_monthly_rent_czk` is a MONTHLY RENT, so the cohort "
+                "you built it from must be on the monthly rent basis "
+                "(rent_monthly_czk_m2). A cohort that is 'mixed', 'unknown', or "
+                "on a CAPITAL basis (sale_capital_czk_m2 / land_capital_czk_m2 "
+                "— purchase prices) cannot be scaled into a rent: multiplying "
+                "its Kč/m² by the area gives a purchase price, not a rent, and "
+                "the run is REFUSED server-side rather than recorded. If a "
+                "relaxation widened the cohort onto category_type='prodej', "
+                "narrow it back to 'pronajem' before recording.\n\n"
                 "You do NOT need to retype sreality_ids. The harness already "
                 "knows which listings find_comparables_relaxed returned and "
                 "treats every one as INCLUDED by default. If you want to set "
@@ -1016,7 +1047,7 @@ def _persist_cohort_entries(
         "INSERT INTO estimation_cohort_entries ("
         "  estimation_run_id, sreality_id, listing_id, first_seen_round_n,"
         "  last_seen_round_n, snapshot_id, distance_m, price_czk,"
-        "  area_m2, price_per_m2, disposition"
+        "  area_m2, price_per_m2, price_per_m2_basis, disposition"
         ") VALUES ("
         # listing_id is bound DIRECTLY, not resolved through the legacy key.
         # estimation_cohort_entries.listing_id is NOT NULL (it is half the PK
@@ -1026,7 +1057,8 @@ def _persist_cohort_entries(
         # `except` below, i.e. cohort provenance would vanish with a green run.
         "  %(run_id)s, %(sid)s, %(lid)s,"
         "  %(round)s, %(round)s,"
-        "  %(snap)s, %(dist)s, %(price)s, %(area)s, %(ppm2)s, %(disp)s"
+        "  %(snap)s, %(dist)s, %(price)s, %(area)s, %(ppm2)s, %(ppm2_basis)s,"
+        "  %(disp)s"
         # Arbiter is listing_id (R2 Phase C, estimation_cohort_entries_run_listing_id_key).
         ") ON CONFLICT (estimation_run_id, listing_id) DO UPDATE SET"
         "  last_seen_round_n = EXCLUDED.last_seen_round_n,"
@@ -1035,6 +1067,8 @@ def _persist_cohort_entries(
         "  price_czk         = COALESCE(EXCLUDED.price_czk, estimation_cohort_entries.price_czk),"
         "  area_m2           = COALESCE(EXCLUDED.area_m2, estimation_cohort_entries.area_m2),"
         "  price_per_m2      = COALESCE(EXCLUDED.price_per_m2, estimation_cohort_entries.price_per_m2),"
+        # NULL stays NULL for a pre-426 row: "basis unknown", not "sale".
+        "  price_per_m2_basis = COALESCE(EXCLUDED.price_per_m2_basis, estimation_cohort_entries.price_per_m2_basis),"
         "  disposition       = COALESCE(EXCLUDED.disposition, estimation_cohort_entries.disposition)"
     )
     try:
@@ -1052,6 +1086,7 @@ def _persist_cohort_entries(
                     "price": l.get("price_czk"),
                     "area": l.get("area_m2"),
                     "ppm2": l.get("price_per_m2"),
+                    "ppm2_basis": l.get("price_per_m2_basis"),
                     "disp": l.get("disposition"),
                 })
     except Exception as exc:
@@ -1360,20 +1395,39 @@ def _tool_summary(name: str, result: dict[str, Any]) -> dict[str, Any]:
     if name == "analyze_distribution":
         return {
             "field": md.get("filters_used", {}).get("field"),
+            # Never summarise the percentiles without the unit they are in.
+            "basis": data.get("basis"),
             "n": data.get("n"),
             "median": data.get("median"),
             "p25": data.get("p25"),
             "p75": data.get("p75"),
         }
     if name == "find_distribution_outliers":
+        outliers = data.get("outliers") or []
+        # `n` is not a key this envelope publishes — it always read None. The
+        # cohort size is the two id lists together.
         return {
-            "n_outliers": len(data.get("outliers") or []),
-            "n_total": data.get("n"),
+            "basis": data.get("basis"),
+            "n_outliers": len(outliers),
+            "n_total": len(outliers) + len(data.get("non_outlier_ids") or []),
         }
     if name == "describe_neighborhood":
+        # Both keys were wrong: describe_neighborhood publishes
+        # `active_listing_count` and a per-DISPOSITION price block, never a
+        # cohort-wide `median_price_per_m2`, so this summary has always shown
+        # the agent two Nones. It now reports the count that exists and the
+        # per-disposition medians WITH the basis each is in.
+        by_disposition = data.get("price_stats_by_disposition") or {}
         return {
-            "n": data.get("active_listings"),
-            "median_price_per_m2": data.get("median_price_per_m2"),
+            "n": data.get("active_listing_count"),
+            "median_price_per_m2_by_disposition": {
+                k: {
+                    "n": v.get("n"),
+                    "median_price_per_m2": v.get("median_price_per_m2"),
+                    "basis": v.get("price_per_m2_basis"),
+                }
+                for k, v in by_disposition.items()
+            },
         }
     if name == "verify_listing_freshness":
         return {
@@ -1484,6 +1538,40 @@ def _format_tool_result(name: str, result: dict[str, Any]) -> str:
 
 # --- finalisation ---------------------------------------------------------
 
+# What the agent's terminator is allowed to call its product. `record_estimate`
+# has exactly one headline field, `estimated_monthly_rent_czk`, so an agent run
+# always names a MONTHLY RENT — independent of the request's `estimate_kind`,
+# which only steers the deterministic path and the reference-rent lookup.
+_AGENT_ESTIMATE_KIND = "rent"
+
+
+def _require_cohort_scalable_into_rent(state: _LoopState) -> None:
+    """Refuse to record a rent the cohort's per-m² basis cannot support.
+
+    The deterministic path is gated inside `estimate_yield._scale`, which the
+    agent never calls: here the MODEL does the multiplication and reports the
+    product through `record_estimate`. Without this, an agent that widened a
+    thin rental cohort onto `category_type='prodej'` (it may — category_type is
+    in `_FCR_OVERRIDE_FIELDS`) reads a purchase Kč/m², multiplies by the area,
+    and the run lands `status='success'` with a monthly rent that is really a
+    sale price. Same refusal, same exception, at the point the agent's number
+    actually lands.
+
+    Gated on the SERVER-DERIVED cohort at terminator time — the same rows
+    `_finalise` default-includes into `comparables_used` — not on whatever the
+    model said. A cohort with no measure-backed row is not gated: no per-m²
+    number was ever produced for it, so there is none to mislabel, and failing
+    there would turn "no comparables" into an error (the same carve-out
+    `_scale` makes for an empty distribution).
+    """
+    backing = measure_backed(state.last_cohort)
+    if not backing:
+        return
+    require_scalable_basis(
+        cohort_basis(backing), estimate_kind=_AGENT_ESTIMATE_KIND,
+    )
+
+
 def _finalise(
     state: _LoopState,
     *,
@@ -1512,6 +1600,8 @@ def _finalise(
                 "skill": skill.name,
             },
         )
+
+    _require_cohort_scalable_into_rent(state)
 
     call = state.final_call
     estimate = _round_to_100(call.get("estimated_monthly_rent_czk"))
@@ -1690,6 +1780,12 @@ def _initial_user_message(
     subject_condition: dict[str, Any] | None = None,
 ) -> str:
     cond = subject_condition or {}
+    # The SPEC reading, not the row mirror: this message is written before any
+    # tool has run, so there are no rows to read. An unpinned `category_main` on
+    # a capital deal admits plots beside flats, i.e. two units — spec_ppm2_basis
+    # answers None there rather than stamping the whole run `sale_capital_czk_m2`
+    # while analyze_distribution later reports `mixed` off the same rows.
+    _basis = spec_ppm2_basis(filters.category_main, filters.category_type)
     payload = {
         "target": {
             "lat": target.lat,
@@ -1707,6 +1803,11 @@ def _initial_user_message(
             "category_main": filters.category_main,
             "category_type": filters.category_type,
         },
+        # The unit every Kč/m² number in this run will be in, named up front so
+        # the model never has to infer it from the category pins. null means the
+        # cohort has no single basis — then no per-m² figure may be labelled.
+        "price_per_m2_basis": _basis,
+        "price_per_m2_unit": unit_label(_basis),
         "purchase_price_czk": purchase_price_czk,
     }
     body = (

@@ -29,6 +29,13 @@ from toolkit.filter_registry import (
     OWNERSHIP_CANONICAL,
     UNKNOWN_FILTER_VALUE,
 )
+from toolkit.measures import (
+    cohort_basis,
+    measure_backed,
+    per_m2_basis_sql,
+    per_m2_sql,
+    spec_ppm2_basis,
+)
 
 if TYPE_CHECKING:
     import psycopg
@@ -73,8 +80,10 @@ class ComparableFilters:
     has_parking: bool | None = None
     min_price_czk: int | None = None
     max_price_czk: int | None = None
-    # Price per m² (computed: price_czk / NULLIF(area_m2, 0)). NULL area_m2
-    # falls out when either bound is set.
+    # Price per m²: THE measure (`measure_price_per_m2`, migration 425) --
+    # basis-resolved from (category_main, category_type) and withheld below its
+    # basis floor. Rows with no area, no price, an undecidable basis, or a
+    # sub-floor price fall out when either bound is set.
     min_price_per_m2: float | None = None
     max_price_per_m2: float | None = None
     # MF gross rental yield % (migration 133). Sale apartments only; NULL on
@@ -422,15 +431,17 @@ def _shared_filter_where(
     if filters.max_price_czk is not None:
         where.append("l.price_czk <= %(max_price_czk)s")
         params["max_price_czk"] = filters.max_price_czk
+    # ONE measure, one definition (migration 425). `l` is always the `listings`
+    # TABLE here -- the only three FROM clauses over _shared_filter_where are
+    # comparables, velocity and the transit corridor -- and `listings` has no
+    # price_per_m2 column, so the four-argument call is the only spelling that
+    # resolves. It also floors the cohort exactly where Browse and the Watchdog
+    # floor it, which is what rule #16 asks of an estimation cohort too.
     if filters.min_price_per_m2 is not None:
-        where.append(
-            "l.price_czk::numeric / NULLIF(l.area_m2, 0) >= %(min_price_per_m2)s"
-        )
+        where.append(f"{per_m2_sql('l')} >= %(min_price_per_m2)s")
         params["min_price_per_m2"] = filters.min_price_per_m2
     if filters.max_price_per_m2 is not None:
-        where.append(
-            "l.price_czk::numeric / NULLIF(l.area_m2, 0) <= %(max_price_per_m2)s"
-        )
+        where.append(f"{per_m2_sql('l')} <= %(max_price_per_m2)s")
         params["max_price_per_m2"] = filters.max_price_per_m2
     if filters.min_mf_gross_yield_pct is not None:
         where.append("l.mf_gross_yield_pct >= %(min_mf_gross_yield_pct)s")
@@ -624,7 +635,17 @@ def build_query(
         # column names from cur.description, so this flows into every comparable
         # dict with no mapping to update.
         "  l.id AS listing_id, l.sreality_id, l.price_czk, l.area_m2,\n"
-        "  (l.price_czk::numeric / NULLIF(l.area_m2, 0)) AS price_per_m2,\n"
+        # The measure AND its label, together. Every downstream consumer that
+        # has to name a unit -- analyze_distribution, find_distribution_outliers,
+        # cluster_comparables, estimate_yield's scaling step, the agent's cohort
+        # ledger -- reads the basis off these dicts, so projecting the number
+        # without the label would leave all of them guessing. category_main /
+        # category_type ride along as the label's inputs (and the LLM's cohort
+        # context); price_unit is projected as raw provenance ONLY -- it is a
+        # duplicate spelling of category_type and must never be read as a unit.
+        f"  {per_m2_sql('l')} AS price_per_m2,\n"
+        f"  {per_m2_basis_sql('l')} AS price_per_m2_basis,\n"
+        "  l.category_main, l.category_type, l.price_unit, l.area_basis,\n"
         "  l.disposition, l.district,\n"
         "  l.locality_district_id, l.locality_region_id,\n"
         "  l.floor, l.total_floors,\n"
@@ -673,7 +694,31 @@ def build_query(
     return sql, params
 
 
-def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, Any]:
+def _cohort_ppm2_basis(
+    filters: ComparableFilters,
+    listings: list[dict[str, Any]] | None,
+) -> str | None:
+    """The basis every per-m² number in this envelope is in.
+
+    Read off the ROWS whenever they exist, never off the pins: a filter spec
+    says what was asked for, and an unpinned `category_main` on a capital deal
+    admits plots (Kč/m² of PLOT) beside flats (Kč/m² of FLOOR). Labelling that
+    cohort from the spec is exactly the "one blanket unit for a mixed cohort"
+    this program exists to end — `cohort_basis` answers `mixed` there, and
+    `mixed` is a state every consumer already knows how to render as a gap.
+    Only the row-less caller (a spec echoed before any query ran) falls back to
+    `spec_ppm2_basis`, which returns None rather than guess.
+    """
+    if listings is None:
+        return spec_ppm2_basis(filters.category_main, filters.category_type)
+    return cohort_basis(measure_backed(listings))
+
+
+def _filters_used(
+    target: TargetSpec,
+    filters: ComparableFilters,
+    listings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {
         "target": {
             "lat": target.lat,
@@ -710,6 +755,11 @@ def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, A
         "max_price_czk": filters.max_price_czk,
         "min_price_per_m2": filters.min_price_per_m2,
         "max_price_per_m2": filters.max_price_per_m2,
+        # The unit the two bounds above are IN, and the unit every per-m² number
+        # in this envelope is in -- resolved from the ROWS that came back (see
+        # _cohort_ppm2_basis). `mixed`, `unknown` and None all mean the same
+        # thing to a consumer: render the gap, never a unit.
+        "price_per_m2_basis": _cohort_ppm2_basis(filters, listings),
         "min_mf_gross_yield_pct": filters.min_mf_gross_yield_pct,
         "max_mf_gross_yield_pct": filters.max_mf_gross_yield_pct,
         "category_main": filters.category_main,
@@ -759,7 +809,7 @@ def find_comparables(
         "data": {"listings": listings},
         "metadata": {
             "tool": "find_comparables",
-            "filters_used": _filters_used(target, filters),
+            "filters_used": _filters_used(target, filters, listings),
             "result_count": len(listings),
             "queried_at": _now_iso(),
             "data_freshness": _max_last_seen(listings),
@@ -896,7 +946,12 @@ def find_comparables_relaxed(
     trace.append({
         "step": 0,
         "action": None,
-        "filters_snapshot": _filters_used(target, current),
+        # Each snapshot is labelled by the rows THAT step returned: the trace is
+        # fed verbatim into the agent's prompt, so a step that widened into two
+        # bases must say so at the step that did it.
+        "filters_snapshot": _filters_used(
+            target, current, last_result["data"]["listings"],
+        ),
         "result_count": last_result["metadata"]["result_count"],
     })
 
@@ -909,7 +964,9 @@ def find_comparables_relaxed(
             trace.append({
                 "step": relaxations_applied,
                 "action": action,
-                "filters_snapshot": _filters_used(target, current),
+                "filters_snapshot": _filters_used(
+                    target, current, last_result["data"]["listings"],
+                ),
                 "result_count": last_result["metadata"]["result_count"],
             })
             if last_result["metadata"]["result_count"] >= min_results:
@@ -924,7 +981,7 @@ def find_comparables_relaxed(
         },
         "metadata": {
             "tool": "find_comparables_relaxed",
-            "filters_used": _filters_used(target, current),
+            "filters_used": _filters_used(target, current, listings),
             "result_count": len(listings),
             "queried_at": _now_iso(),
             "data_freshness": _max_last_seen(listings),

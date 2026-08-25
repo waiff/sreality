@@ -5,6 +5,11 @@ than reimplementing it. For each outlier, optionally calls compare_snapshots
 to surface price-trajectory and time-on-market evidence, and runs one batched
 query against listing_fetch_failures so a known-flaky listing is flagged.
 
+Every envelope carries `basis`: the unit `median`, `iqr` and each outlier
+`value` are in, read off the contributing rows (None for `field="price_czk"`,
+whose unit is unambiguously Kč). Caller-supplied listings that carry no basis
+degrade to 'unknown' — never a guess, never a default of sale.
+
 Reasons:
   - statistical_outlier   : always present for outliers (>iqr_multiplier × IQR)
   - stairstep_dropping    : compare_snapshots reported that pattern
@@ -17,11 +22,14 @@ from __future__ import annotations
 import statistics
 from typing import TYPE_CHECKING, Any, Literal
 
+from toolkit.measures import cohort_basis
+
 if TYPE_CHECKING:
     import psycopg
 
 
 _OutlierField = Literal["price_per_m2", "price_czk"]
+_PER_M2_FIELD = "price_per_m2"
 _LONG_TOM_DAYS = 60
 _MIN_SAMPLE = 5
 
@@ -35,21 +43,27 @@ def find_distribution_outliers(
 ) -> dict[str, Any]:
     from toolkit.distribution import _percentile
 
-    pairs = [
-        (l["sreality_id"], float(l[field]))
-        for l in listings
+    contributing = [
+        l for l in listings
         if l.get(field) is not None and l.get("sreality_id") is not None
     ]
+    pairs = [(l["sreality_id"], float(l[field])) for l in contributing]
     n = len(pairs)
+    # The unit `median`, `iqr` and every outlier `value` below are IN. Read off
+    # the contributing rows, never derived: this tool is reachable over HTTP with
+    # caller-supplied listings that carry no basis, and those must read
+    # 'unknown' rather than be assumed to be sale prices.
+    basis = cohort_basis(contributing) if field == _PER_M2_FIELD else None
     md_filters = {
         "field": field,
+        "basis": basis,
         "iqr_multiplier": iqr_multiplier,
         "investigate_history": investigate_history,
     }
 
     if n < _MIN_SAMPLE:
         return _envelope(
-            field=field, iqr_multiplier=iqr_multiplier,
+            field=field, basis=basis, iqr_multiplier=iqr_multiplier,
             median=None, iqr=None,
             outliers=[],
             non_outlier_ids=[sid for sid, _ in pairs],
@@ -116,7 +130,7 @@ def find_distribution_outliers(
         })
 
     return _envelope(
-        field=field, iqr_multiplier=iqr_multiplier,
+        field=field, basis=basis, iqr_multiplier=iqr_multiplier,
         median=median, iqr=iqr,
         outliers=outliers_out,
         non_outlier_ids=non_outlier_ids,
@@ -142,6 +156,7 @@ def _fetch_failure_attempts(
 def _envelope(
     *,
     field: str,
+    basis: str | None,
     iqr_multiplier: float,
     median: float | None,
     iqr: float | None,
@@ -165,6 +180,7 @@ def _envelope(
     return {
         "data": {
             "field": field,
+            "basis": basis,
             "iqr_multiplier": iqr_multiplier,
             "median": median,
             "iqr": iqr,
