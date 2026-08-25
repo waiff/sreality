@@ -214,3 +214,21 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_property_per_m2_source_live.py -q
+
+      # W4's whole claim is that SIX relations publish ONE number. Nothing else
+      # in CI can see that: the fake connections cannot evaluate SQL, and PREPARE
+      # type-checks a statement without ever computing a value -- so a view left
+      # on the UNROUNDED form compiles, passes the sweep, and silently skips rows
+      # at the SPA's keyset page seam (migration 200). This seeds one property and
+      # reads its Kc/m2 back through listings_public, properties_public,
+      # browse_projection, listing_feed_public, browse_stats_properties and
+      # pipeline_board_public, requiring byte identity -- plus the EXPLAIN
+      # assertions that measure_price_per_m2 still INLINES (a `SET search_path`
+      # added to it would turn every predicate into a per-row call) and that
+      # browse_list's covering indexes survived the rebuild. Executed against the
+      # replayed schema, in a transaction that always rolls back.
+      - name: One measure, one definition, one label (migration 425)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_measure_price_per_m2.py -q

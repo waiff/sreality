@@ -101,6 +101,18 @@ export const fmtPricePerM2 = (
   return `${czNumber.format(Math.round(price / area))}${NBSP}Kč/m²`;
 };
 
+/* Renders the SERVER measure (migration 425: measure_price_per_m2, basis-resolved
+ * and floored), never a client-side re-derivation. Browse must use this one: the
+ * table and the cards sort and filter on the published `price_per_m2` column, so
+ * dividing price by area in the cell would print a figure the sort and the filter
+ * say does not exist — a 136 Kč commercial "rental" renders "1 Kč/m²" while the
+ * measure is NULL and the row is excluded by any Kč/m² bound. NULL means the
+ * measure withheld the figure; show the gap, don't guess it. */
+export const fmtMeasuredPricePerM2 = (
+  value: number | null | undefined,
+): string =>
+  value == null ? '—' : `${czNumber.format(Math.round(value))}${NBSP}Kč/m²`;
+
 const SEC = 1, MIN = 60, HOUR = 3600, DAY = 86400;
 
 export const fmtRelative = (iso: string | null | undefined): string => {

@@ -47,8 +47,8 @@ every stored watchdog spec and saved preset, and breaking archived-run display (
 | --- | --- | --- | --- | --- |
 | W1 | Truth at the source: shared `derive_headline_area` across all 9 parsers, shared per-area price rail, per-basis floors | T3 | 423 | ✅ |
 | W2 | Heal stored damage: mmreality area + unit-price masquerade backfills | T3 | — | 🟨 code + dry-run |
-| W3 | Property-grain coherence: numerator and denominator from the same child | T1+T3 | 424 | ⬜ |
-| W4 | **Keystone** — `measure_price_per_m2` + `measure_price_per_m2_basis` in SQL; 6 relations repointed | T1+T2 | 425 | ⬜ |
+| W3 | Property-grain coherence: numerator and denominator from the same child | T1+T3 | 424 | ✅ |
+| W4 | **Keystone** — `measure_price_per_m2` + `measure_price_per_m2_basis` in SQL; 6 relations repointed | T1+T2 | 425 | ✅ |
 | W5 | Python + API call sites onto the named measure (`toolkit/measures.py`) | T1+T2 | 426 | ⬜ |
 | W6 | Frontend: one formatter, basis on every surface, the map Kč/m² toggle | T1+T2 | — | ⬜ |
 | W7 | Chrome extension: read the server's measure, name the month | T2 | — | ⬜ |
@@ -57,6 +57,59 @@ every stored watchdog spec and saved preset, and breaking archived-run display (
 
 Ordering: W1 ∥ W3 → W2; W3 → W4; W4 → {W5, W6, W9}; W5 → W7; everything → W8.
 
+### W4 as built — four deviations every later wave must inherit
+
+- **The capital `category_type` is an enumerated allowlist, not "everything that is not
+  `pronajem`".** Live `category_type` has FOUR values, not the two the charter assumed:
+  `drazba` (auction) and `podil` (co-ownership share) carry 10,595 active properties
+  between them. Both are capital transactions and resolve to `sale_capital_czk_m2`;
+  anything outside `('prodej','drazba','podil')` — including a NULL `category_type` —
+  resolves to NULL basis and NULL measure, a visible gap rather than a silent guess.
+  W5's `toolkit/measures.py` and W6's `frontend/src/lib/measure.ts` must use the same
+  four-value vocabulary, not a two-value one.
+- **Basis resolution is rent-first.** `pozemek` + `pronajem` (1,845 active properties) is a
+  MONTHLY figure and is labelled `rent_monthly_czk_m2`; only a capital land listing gets
+  `land_capital_czk_m2`. Resolving `category_main` first would put a rent under a capital
+  label — the exact confusion this program exists to end.
+- **`browse_stats(...)` was NOT dropped.** Dropping is destructive and this sprint carried
+  no operator sign-off for a destructive step, so 425 records the intent reversibly with
+  `COMMENT ON FUNCTION` (superseded, unreferenced, do not resurrect). **Follow-up needing
+  operator approval:** `drop function public.browse_stats(<083 signature>)` plus a pg_dump.
+
+- **Two consumers were repointed onto the measure in W4, not W5.** The Watchdog matcher
+  (`api/notifications.py._build_match_clauses`) hand-typed `price_czk / NULLIF(area_m2, 0)`
+  against `properties_public` — the very view 425 re-emits — so leaving it would have broken
+  architectural rule #16 (Watchdog and Browse share one definition of "matches") the moment
+  the floors landed: a saved `max_price_per_m2` would still fire on the ~2,092
+  komercni/pronajem 0.54 Kč/m² rows Browse now excludes. It reads `l.price_per_m2` now. The
+  Browse table and cards did the same division client-side
+  (`fmtPricePerM2(price_czk, area_m2)`) while sorting and filtering on the server column, so
+  ~2,900 rows displayed a figure the sort and the filter said did not exist; both cells now
+  read the selected `price_per_m2` through `fmtMeasuredPricePerM2`. **Neither change needs
+  migration 425 applied first** — `properties_public.price_per_m2` and
+  `browse_list.price_per_m2` both exist today; 425 only changes what they contain.
+  **Still deferred to W5**, and knowingly so: the estimation path re-derives the quotient
+  against `listings` (which publishes no measure column), at
+  `toolkit/comparables.py:427,432` (the `_shared_filter_where` bounds) and `:627` (the
+  `price_per_m2` projected into every comparable dict), `toolkit/transit_axis.py:313`, and
+  `toolkit/neighborhoods.py:103,106,109`. Those sites must move to
+  `measure_price_per_m2(l.price_czk::numeric, l.area_m2::numeric, l.category_main,
+  l.category_type)`, which is the first code that will REQUIRE 425 to be applied before it
+  merges — and it changes estimation output (comparables below their basis floor lose their
+  per-m² figure), so it wants its own gate. Until then the estimation trace's per-m² for a
+  listing disagrees with `listings_public.price_per_m2` for that same listing, by rounding
+  and by the floor.
+
+Migration 425 also repaired pre-existing prod/repo drift discovered while fetching the live
+bodies: `properties.all_sources` / `active_sources` (text[]) existed on production and were
+projected by the live `browse_projection`, with no migration file on any branch that reached
+`main` (migration 375's header flagged and deliberately deferred it). 425 adds both
+idempotently. Because `CREATE OR REPLACE VIEW` may append an output column but may never
+REPOSITION one, and the drift pair sits AHEAD of `home_city_id` on production while a fresh
+CI replay of migration 375 has neither, 425 guards the re-emission: on the narrow 375 shape
+only (i.e. on the replay) it drops `properties_map_mv` and `browse_projection` first, so the
+statement becomes a plain create at the right shape. On production the guard is inert.
+Nothing reads or writes the two columns.
 ### W2 open items
 
 The two backfills are written, tested and measured; the **write pass is the operator's**

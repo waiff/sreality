@@ -8,7 +8,7 @@ import {
   type SortField,
 } from '@/lib/queries';
 import {
-  fmtCount, fmtArea, fmtCzk, fmtPricePerM2, fmtRelative, fmtAbsolute,
+  fmtCount, fmtArea, fmtCzk, fmtMeasuredPricePerM2, fmtRelative, fmtAbsolute,
   fmtFurnished, fmtOwnership, fmtParkingLots,
 } from '@/lib/format';
 import type { Furnished, Ownership } from '@/lib/types';
@@ -277,7 +277,7 @@ function Row({
         </span>
       </td>
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
-        {fmtPricePerM2(row.price_czk, row.area_m2)}
+        {fmtMeasuredPricePerM2(row.price_per_m2)}
       </td>
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
         {row.parking_lots == null

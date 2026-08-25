@@ -108,9 +108,17 @@ const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat
  * TableRow.property_id undefined at runtime while still typed `number`. */
 const TABLE_COLS =
   'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
+  /* The Kč/m² cell reads the SERVER measure (migration 425), not price/area:
+   * the column is what the sort and the Kč/m² filter already use, so selecting
+   * it is what keeps the number on screen identical to the number the cohort
+   * was built from. withKeysetColumns dedupes, so naming it here is safe even
+   * when it is also the active sort field. */
+  'price_per_m2,' +
   'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type,total_price_change_pct,price_change_count';
 const CARD_COLS =
   'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
+  /* Same server measure the table cell reads (migration 425) — see TABLE_COLS. */
+  'price_per_m2,' +
   /* The two price-history columns back <PriceDelta>. Both were already on
    * browse_list (migrations 276/343/363) and simply never selected — they
    * existed only as filter inputs, never as anything displayed. */
@@ -832,6 +840,11 @@ export interface TableRow {
   subtype: string | null;
   area_m2: number | null;
   price_czk: number | null;
+  /* The per-m² MEASURE (migration 425), not price/area: basis-resolved from
+   * (category_main, category_type) and NULL below its basis floor. The same
+   * column the Kč/m² sort and filter read, so the cell can never contradict
+   * the cohort. */
+  price_per_m2: number | null;
   first_seen_at: string;
   last_seen_at: string;
   is_active: boolean;
@@ -979,6 +992,8 @@ export interface CardRow {
   subtype: string | null;
   area_m2: number | null;
   price_czk: number | null;
+  /* The per-m² MEASURE (migration 425) — see TableRow.price_per_m2. */
+  price_per_m2: number | null;
   first_seen_at: string;
   last_seen_at: string;
   is_active: boolean;

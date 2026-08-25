@@ -28,7 +28,7 @@ import {
   removePropertyFromCollection,
 } from '@/lib/api';
 import {
-  fmtArea, fmtCzk, fmtPricePerM2,
+  fmtArea, fmtCzk, fmtMeasuredPricePerM2,
   fmtShortDate, fmtTomDays,
 } from '@/lib/format';
 import { listingTypeLabel } from '@/lib/enums';
@@ -655,7 +655,7 @@ function Card({
             />
           </p>
           <p className="text-[0.62rem] text-[var(--color-ink-4)] tabular-nums whitespace-nowrap">
-            {fmtPricePerM2(r.price_czk, r.area_m2)}
+            {fmtMeasuredPricePerM2(r.price_per_m2)}
           </p>
         </div>
         {r.mf_gross_yield_pct != null && (
