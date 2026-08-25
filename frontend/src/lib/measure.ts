@@ -61,11 +61,20 @@ export const PPM2_BASIS_TOKEN: Record<Ppm2RowBasis, Ppm2BasisToken> = {
 /* THE unit strings. Lifted verbatim from growthChoropleth's value labels — the
  * one place in this repo that already spelled the rent period correctly — so
  * the choropleth legend, a Browse pin, a table cell and a box-plot axis all say
- * the same thing. 'mixed' has NO unit on purpose: it is the absence of one. */
+ * the same thing. 'mixed' has NO unit on purpose: it is the absence of one.
+ *
+ * THREE BASES, THREE DISTINGUISHABLE STRINGS. `land` carried the bare capital
+ * suffix until W8, i.e. the same string as `sale`, so a plot at 2 450 and a
+ * flat at 91 535 rendered in the same unit while `PPM2_VALUE_LABEL.land`,
+ * `fmtArea(n, 'plot')` and toolkit/measures.PPM2_UNIT_CS all said 'pozemku'.
+ * That was drift, not a register: the denominator really is a different thing
+ * (PLOT area, the Option-A fork), and this map is the twin of PPM2_UNIT_CS —
+ * tests/test_measure_registry_census.py now compares the two VALUE by VALUE,
+ * so they cannot part again. */
 export const PPM2_UNIT: Record<Ppm2RowBasis, string> = {
   sale: 'Kč/m²',
   rent: 'Kč/m²/měs',
-  land: 'Kč/m²',
+  land: 'Kč/m² pozemku',
 };
 
 /* The unit with the noun in front, for axis/legend captions that name the

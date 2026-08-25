@@ -71,6 +71,13 @@ export interface FilterDef {{
   agendas: Agenda[];
   constraints: Record<string, unknown> | null;
   unit: string | null;
+  /** For a filter whose number is a per-m² RATE, the measure that says which
+   *  unit it is in — the `unit` string alone is a capital price on a sale
+   *  cohort and a MONTHLY rent on a rental one, ~300x apart.
+   *  `"depends_on_category"` means the selected category resolves it; null
+   *  means the number is an absolute and `unit` labels it completely. See
+   *  FilterDef.basis in toolkit/filter_registry.py and CLAUDE.md rule #23. */
+  basis: string | null;
   enum_values: EnumOption[] | null;
   aliases: string[];
   /** NULL is a legal "no constraint" value, and the UI must offer a way to

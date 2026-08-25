@@ -42,9 +42,13 @@ jobs:
         run: pytest -q
 
   vitest:
-    # Frontend pure-function tests (vite/vitest, no jsdom yet).
-    # Covers filter state plumbing, the registry adapter, and the
-    # centre+radius spatial helpers in lib/queries.
+    # Frontend tests (vitest, jsdom — see frontend/vite.config.ts).
+    # Covers filter state plumbing, the registry adapter, the centre+radius
+    # spatial helpers in lib/queries, and component behaviour.
+    # The `Type-check` step below is load-bearing, not hygiene: it is part (a)
+    # of the per-m² rail (CLAUDE.md rule #23) — format.test.ts's
+    # `@ts-expect-error` cases fail the BUILD if a basis-blind
+    # fmtMeasuredPricePerM2 call ever starts compiling.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -479,6 +479,7 @@ renumber.** Navigate by area:
 - **Dedup + canonical properties:** #15 (design context: `docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md`)
 - **Notifications / city-quality / operator state / pipeline:** #16 #17 #18 #22
 - **Scraper framework & cadence:** #19 #20 #21
+- **Measures & labels:** #23 (program charter: `docs/design/ppm2-measure-unification.md`)
 
 1. **The schema in `migrations/` is append-only.** Never modify an existing migration.
    Schema changes go in a new numbered file (`002_*.sql`, `003_*.sql`...) and are applied
@@ -1170,6 +1171,90 @@ renumber.** Navigate by area:
     filter-preset save modal, the tag pickers, and this stage editor — the single colour-picking
     control app-wide; don't re-inline a swatch grid), and the entry-star / "konec" (terminal)
     controls carry `<InfoIcon>` (i) hints (native `title=`, the codebase's tooltip convention).
+23. **One measure, one definition, one label.** Every per-m² figure the platform computes or
+    renders — in SQL, in Python, in the SPA, in the Chrome extension — resolves from ONE named
+    measure carrying its own numerator, denominator, unit and validity bounds. No consumer
+    re-derives the formula; no surface renders the number without its basis label.
+
+    **The measure** is `public.measure_price_per_m2(price, area, category_main, category_type)`
+    and its label `public.measure_price_per_m2_basis(category_main, category_type)` (migration
+    425), both `IMMUTABLE PARALLEL SAFE` single-expression SQL with no `SET search_path`, so the
+    planner inlines them and a predicate over the measure is not a full scan. Numerator: the
+    asking price in CZK, monthly on the rent basis and capital otherwise, exactly as the portal
+    published it. Denominator: `area_m2`, **polymorphic by design** — floor area for byt / dum /
+    komercni, PLOT area for pozemek (the "Option A" fork; `listings.area_basis`, migration 423,
+    records which). Bounds: a NULL price, a NULL or non-positive area, an undecidable basis, or a
+    price below its per-basis floor (sale 100 000 CZK, rent 1 000 CZK, land deliberately
+    unfloored) all yield NULL — a visible gap, never a guess. Rounded to 2dp so all six
+    publishing relations return byte-identical figures.
+
+    **The basis is resolved from `(category_main, category_type)`, rent-first, and NEVER from
+    `listings.price_unit`** — that column is four legacy spellings of two concepts across nine
+    portals, a duplicate of `category_type`, not a per-area unit. The three tokens
+    (`sale_capital_czk_m2`, `rent_monthly_czk_m2`, `land_capital_czk_m2`) are published as
+    `price_per_m2_basis` on all six read relations, so a render surface READS the label rather
+    than recomputing it. Two states a *cohort* can be in are not bases and get no unit at all:
+    `mixed` (rule #22 makes a sale+rent cohort one click away — sale medians run ~91 535 Kč/m²
+    against rent's ~319 Kč/m²/měs, a 300x category error if they share an axis or a suffix) and
+    `unknown` (client-supplied rows carry no basis; the honest answer is not a default of sale).
+
+    **The faces.** `toolkit/measures.py` renders the SQL (`per_m2_sql(alias)`), mirrors the
+    resolution order for rows that never touched Postgres, and owns the vocabulary, the floors and
+    the unit strings; `frontend/src/lib/measure.ts` is its SPA twin and reads the server-published
+    token wherever a column exists; the Chrome extension, which can import neither, copies the one
+    unit string VERBATIM. `api/estimate_yield._scale` may not multiply a per-m² percentile by an
+    area without `require_scalable_basis` agreeing that the product may be CALLED what the caller
+    intends — the arithmetic is identical for a monthly and a capital rate, which is exactly why
+    an unlabelled one is dangerous rather than merely untidy.
+
+    **Why a rail and not a rule.** The program that unified this found **64 live call sites** —
+    nine SQL definitions, five Python-emitted statements bypassing every view, six client-side
+    re-derivations, twelve render surfaces, and `region_stats`, whose signature had no category
+    arguments at all, pooling sale flats, monthly rentals, houses and land into one distribution.
+    They were not written by careless people; they were written one at a time, each locally
+    reasonable. So W8 installed three interlocking mechanisms rather than a paragraph:
+    (a) **required-argument signatures** — `per_m2_sql(alias)` has no zero-arg fallback and
+    `fmtMeasuredPricePerM2(value, basis)` makes the old two-number call a TypeScript error under
+    the already-blocking `tsc --noEmit` (pinned by `@ts-expect-error` cases in `format.test.ts`,
+    which fail the build if the unsafe call ever starts compiling);
+    (b) **the census** — `tests/test_measure_registry_census.py` scans six source trees AND
+    `migrations/` (both the effective — highest-numbered, undropped — definition of each database
+    object AND, unconditionally, every statement that is not one of the five tracked `create`
+    forms: generated columns, DML backfills, index expressions, `comment on`, `grant`, `do`
+    blocks, none of which anything supersedes), and fails unless every occurrence is declared in
+    `toolkit.measures.REGISTERED_SITES`. **Three arms**, because each is provably insufficient
+    alone: `division` (a price-ish expression over an area-ish one, both operands resolved by a
+    bracket-balanced walk so aggregates, subscripts and wrapped operands land, not just bare
+    identifiers) cannot see `scraper/price_stats_metrics.py`'s `12.0 * rent_per_m2_month /
+    sale_per_m2`, which names no area; `unit` (a per-m² literal) catches that and every render
+    surface, but goes silent exactly where this rule succeeds, because a well-behaved surface
+    IMPORTS the label instead of spelling it; so `vocab` registers every file that reads
+    `PPM2_UNIT` / `PPM2_UNIT_CS` / `PPM2_VALUE_LABEL` / `PPM2_BASIS_TOKEN`, one per file, making
+    "labels correctly, computes the number itself" a census event too. Comments are stripped,
+    string literals and docstrings are not — a comment is prose about the code, a string is
+    something the program can emit; a prose match is registered as `kind="prose"`, never reworded
+    away. Two value-comparing tests sit beside the three arms, because the census counts
+    occurrences and is otherwise blind to what they SAY: they pin the SPA's `PPM2_UNIT` and the
+    extension's copied monthly suffix against `PPM2_UNIT_CS` basis-for-basis. (That is how W8
+    found the land basis carrying the sale suffix in the SPA — one measure with two labels.)
+    (c) **`FilterDef.basis`** beside `FilterDef.unit`, because `CZK/m²` alone is two labels 300x
+    apart and the registry reaches agents that never see the cohort; every numeric filter must
+    declare a unit or be named in `UNITLESS_NUMERIC_FILTERS`, so silence is not a legal answer.
+
+    **What the census does NOT see**, stated because a rail that oversells itself is worse than
+    none — the next session reads the guarantee as proof. Both value arms are closed-vocabulary
+    spelling filters: `price_czk / sqm`, `amount / area_m2`, a unit assembled at runtime
+    (`'Kč' + '/m²'`) and a division routed through a helper (`np.divide(price, area)`) all pass.
+    `ruian_*` / `area_km2` / `area_ha` are exempt by name on the denominator. And the SQL half is
+    a census of `migrations/` **on disk, not of the database**: an object created by dynamic DDL
+    inside plpgsql (migrations 283 / 299 / 371 / 376) or one that drifted into production with no
+    numbered create statement (`property_sources_mv`) is unregisterable and unseen. The full list
+    is in the test module's own docstring, and it is the first thing to extend when a new shape
+    gets through. A registered site that is NOT legitimate is marked `kind="debt"` and must name
+    an owner and a blocker — and `debt` may not mean *reachable*: migration 083's `browse_stats`
+    was registered as inert while still EXECUTE-granted to `authenticated`, so migration 428
+    revokes that grant (additive) and the drop itself stays with the operator. The whole program
+    is written up in `docs/design/ppm2-measure-unification.md`.
 
 
 ## Broker identity merges — auto-merge and the suppression rail

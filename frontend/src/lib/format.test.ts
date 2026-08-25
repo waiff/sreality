@@ -57,16 +57,21 @@ describe('fmtMeasuredPricePerM2', () => {
   it('gives each basis its own suffix, with a non-breaking space before it', () => {
     expect(fmtMeasuredPricePerM2(91_535, 'sale')).toBe(`91\u00a0535${NBSP}Kč/m²`);
     expect(fmtMeasuredPricePerM2(319, 'rent')).toBe(`319${NBSP}Kč/m²/měs`);
-    expect(fmtMeasuredPricePerM2(2_450, 'land')).toBe(`2\u00a0450${NBSP}Kč/m²`);
+    expect(fmtMeasuredPricePerM2(2_450, 'land')).toBe(`2\u00a0450${NBSP}Kč/m² pozemku`);
   });
 
-  /* The one distinction that carries all the weight: the same numeral under two
+  /* The distinction that carries all the weight: the same numeral under any two
    * bases must not render the same string. 319 Kč/m² (a capital price) and
-   * 319 Kč/m²/měs (a monthly rent) are 300x apart in meaning. */
-  it('never renders a rent and a sale figure identically', () => {
-    expect(fmtMeasuredPricePerM2(319, 'rent')).not.toBe(
-      fmtMeasuredPricePerM2(319, 'sale'),
+   * 319 Kč/m²/měs (a monthly rent) are 300x apart in meaning; a capital 2 450
+   * per m² of FLOOR and per m² of PLOT are different quantities too, and until
+   * W8 they rendered identically because `PPM2_UNIT.land` was a copy of
+   * `PPM2_UNIT.sale`. Asserting only rent-vs-sale is what let that stand, so
+   * this now checks every pair. */
+  it('never renders two different bases identically', () => {
+    const rendered = (['sale', 'rent', 'land'] as const).map((b) =>
+      fmtMeasuredPricePerM2(319, b),
     );
+    expect(new Set(rendered).size).toBe(rendered.length);
   });
 
   /* A mixed cohort has no unit, so it gets no number — printing one would be
@@ -85,6 +90,27 @@ describe('fmtMeasuredPricePerM2', () => {
 
   it('rounds to whole crowns', () => {
     expect(fmtMeasuredPricePerM2(318.62, 'rent')).toBe(`319${NBSP}Kč/m²/měs`);
+  });
+
+  /* PART (a) OF THE PERMANENT RAIL, enforced by the compiler rather than by the
+   * runner. `npx tsc --noEmit` is already a blocking CI step, and
+   * `@ts-expect-error` inverts it: each line below must FAIL to type-check, and
+   * the moment one of them stops failing — the basis made optional, or a number
+   * accepted for it again, i.e. the deleted `fmtPricePerM2(price, area)` — the
+   * directive itself becomes the compile error (TS2578, verified).
+   *
+   * This is the half of the rail that stops the NEXT developer at the keyboard,
+   * before the census in tests/test_measure_registry_census.py is ever
+   * consulted. The calls sit in a never-invoked closure: the point is the
+   * compile, and the values are meaningless. */
+  it('cannot be called without a basis (checked by tsc, not at runtime)', () => {
+    const neverRun = () => {
+      // @ts-expect-error — the basis is REQUIRED: a bare per-m² number has no unit.
+      fmtMeasuredPricePerM2(91_535);
+      // @ts-expect-error — an area is not a basis (the old two-number signature).
+      fmtMeasuredPricePerM2(4_500_000, 62);
+    };
+    expect(typeof neverRun).toBe('function');
   });
 });
 

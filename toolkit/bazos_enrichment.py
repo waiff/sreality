@@ -12,7 +12,7 @@ tool_choice so a prose answer can't burn the call), caches the extraction in
 so a new snapshot OR a model upgrade auto-invalidates; a no-extraction miss is
 cached too, else it re-bills every run forever), and fills ONLY
 the listings columns that are currently NULL — the deterministic HTML-parsed
-fields (price / area / disposition) are authoritative and never overwritten.
+fields (price, area, disposition) are authoritative and never overwritten.
 
 Write-allowed exception (CLAUDE.md toolkit rule #5): caches an LLM fact and fills
 gap columns; the LLM is the source, the table is the mirror. Only high/medium

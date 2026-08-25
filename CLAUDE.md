@@ -183,26 +183,17 @@ incident history: `docs/architecture.md` § Architectural rules.
     coarse `condition_assessment`.
 15. **Multi-portal listings sit behind a thin `properties` parent (migration 091); grouping is out-of-band,
     never inline at insert (new rows get a singleton property).** What is LIVE today is only the **link
-    mechanics**: `toolkit/property_identity.py` (`merge_properties` / `unmerge_group` /
-    `split_property_to_singletons`) is the single merge chokepoint — it re-points `listings.property_id`,
-    soft-retires the loser (`properties.status='merged_away'`), logs `property_merge_events` (so unmerge is
-    a deterministic replay), carries operator state (rule #18) + the deal pipeline (rule #22) onto the
-    survivor, re-syncs the browse read model, and enforces **category compatibility**
-    (`room_taxonomy.category_main_compatible`: sale≠rent, flat≠house — except the one sanctioned
-    **dům↔komerční** cross-type). `db.mark_inactive` / `active_count` are source-scoped. Merges are ordered
-    **only by the operator** (Browse mergeMode → `POST /properties/merge`; ledger + unmerge under
-    `/properties/merges*`); asset links (migration 224) still link different units in one building without
-    collapsing them.
-    **The automatic decision engine was REMOVED wholesale (2026-08, the "NEW DEDUP" cutoff)** — no
-    pHash/CLIP/vision decision path, no dedup queues or scheduled dedup runs, no publication gate; nothing
-    auto-merges, and duplicates accumulate in Browse until the replacement ships. Signal producers stay
-    live (image pHash, CLIP tagging + embeddings, the `/labeling` label store). The replacement is being
-    rebuilt **simulation-first**: `docs/design/new-dedup/PROGRAM.md` (waves, gates, decisions ledger) with
-    `docs/design/new-dedup/CUTOFF.md` recording exactly what was cut. **Never resurrect or consult the
-    removed engine, its comments, or its design docs** (they live only in git history + branch
-    `backup/pre-new-dedup-2026-08`); the operator owns all merge/no-merge logic. Applies to anything
-    touching `listings.property_id`, `properties` rollups, or the merge chokepoint. Fuller rationale:
-    `docs/architecture.md` § rule 15.
+    mechanics**: `toolkit/property_identity.py` is the single merge chokepoint — it re-points
+    `listings.property_id`, soft-retires the loser, logs `property_merge_events` (so unmerge is a
+    deterministic replay), carries operator state (rule #18) + the deal pipeline (rule #22) onto the
+    survivor, re-syncs the browse read model, and enforces **category compatibility** (sale≠rent,
+    flat≠house — except the sanctioned **dům↔komerční**). `db.mark_inactive` / `active_count` are
+    source-scoped. **Merges are ordered ONLY by the operator.** **The automatic decision engine was
+    REMOVED wholesale (2026-08, the "NEW DEDUP" cutoff)** — nothing auto-merges and duplicates accumulate
+    in Browse until the replacement ships; signal producers (pHash, CLIP, `/labeling`) stay live, and the
+    replacement is being rebuilt **simulation-first** (`docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md`).
+    **Never resurrect or consult the removed engine or its design docs**; the operator owns all
+    merge/no-merge logic. Full detail: `docs/architecture.md` § rule 15.
 16. **Watchdog + Browse share one definition of "matches"** (`_shared_filter_where` + `_city_quality_clauses`).
     `notification_dispatches` is the unified, property-grain, append-only event table with **two producers**
     (`watchdog` + `collection_monitor`), a per-event `dedupe_key` (`:new:` once-ever, `:price_drop:{snapshot_id}`
@@ -237,22 +228,27 @@ incident history: `docs/architecture.md` § Architectural rules.
 22. **The deal pipeline is single-valued, property-grain operator state** (migration 205): `property_pipeline`
     holds ≤1 card per property at one `pipeline_stages` stage (a TABLE, not an enum); "bookmark" == presence of
     a row at the entry stage. It has its OWN merge reconciler (`reconcile_pipeline_on_merge`, TERMINAL-AWARE — a
-    live stage always beats a closed one; snapshots to `property_pipeline_events`) + lossless unmerge. Writes
-    through the bearer-gated API — one hook (`lib/usePipelineCard`) over ONE cache policy (`lib/pipelineCache`:
-    optimistic, rollback from `onSettled`, never `onError`). The shared `<PipelineMark>` (funnel + stage badge) is
-    the affordance on EVERY surface (Browse card + table row, listing header, kanban, extension) and MEANS one
-    thing: out → a click adds at the entry stage; in → the shared `<PipelineStageMenu>` (move, or remove behind a
-    two-step confirm). **Never a remove toggle** — `remove_card` DELETEs the row, re-adding restamps `added_at`;
-    close deals into a terminal stage. Kanban moves are drag-only; stages operator-curated (API-enforced). The badge is
-    `pipeline_stages.code` (migration 377) — operator-owned, nullable, NOT unique, falling back to the stage's
-    ordinal at render time; never derived from `position` (the live board codes three closed stages "9") and
-    never parsed out of the label. Browse can be scoped to the pipeline (`?pipeline=any|<stage ids>`): a
-    property-id prefilter like tags, mirrored into `browse_stats_properties.property_ids_filter` (migration 378)
-    so Stats can't diverge, and deliberately OUTSIDE preset identity so it never dirties a loaded preset. The
-    chip LOADS A VIEW (neutral cohort + scope, preset deselected, one atomic write) — it is not a modifier;
-    the sidebar's Curation → Pipeline control is. That needs `category_type` nullable (`?deal=any`, the "Vše"
-    pill, `FilterDef.nullable`) — NULL has always meant "no constraint" to comparables, the watchdog matcher
-    and browse_stats; never spell it as an `any` enum member (it would reach the estimation agent).
+    live stage always beats a closed one) + lossless unmerge. Writes through the bearer-gated API — one hook
+    (`lib/usePipelineCard`) over ONE cache policy (`lib/pipelineCache`). The shared `<PipelineMark>` is the
+    affordance on EVERY surface and MEANS one thing: out → a click adds at the entry stage; in → the shared
+    `<PipelineStageMenu>` (move, or remove behind a two-step confirm). **Never a remove toggle** — close deals
+    into a terminal stage. Kanban moves are drag-only; stages operator-curated (API-enforced). The badge is
+    `pipeline_stages.code` (migration 377) — never derived from `position`, never parsed out of the label.
+    Browse's pipeline scope (`?pipeline=any|<stage ids>`) is a property-id prefilter mirrored into
+    `browse_stats_properties.property_ids_filter` (migration 378) and OUTSIDE preset identity; the chip LOADS
+    A VIEW, the sidebar's Curation → Pipeline control modifies. That needs `category_type` nullable
+    (`?deal=any`, the "Vše" pill, `FilterDef.nullable`) — NULL has always meant "no constraint" to comparables,
+    the watchdog matcher and browse_stats; never an `any` enum member (it would reach the estimation agent).
+23. **One measure, one definition, one label — every per-m² figure resolves from
+    `public.measure_price_per_m2` / `measure_price_per_m2_basis`** (migration 425; `toolkit/measures.py` +
+    `frontend/src/lib/measure.ts` are its Python and SPA faces). No consumer re-derives `price / area` in SQL,
+    Python, the SPA or the extension, and **no surface renders the number without the basis that names its
+    unit** — sale ~91 535 Kč/m² vs rent ~319 Kč/m²/měs, 300x apart, and a mixed cohort has NO unit and must
+    render a gap. The denominator is polymorphic (floor area; PLOT area for `pozemek` — `listings.area_basis`,
+    migration 423). Three rails: required-argument signatures, the CI census
+    (`tests/test_measure_registry_census.py` + `toolkit.measures.REGISTERED_SITES` — three arms over six
+    source trees + every migration statement; it names its own blind spots, so read them before trusting
+    a green run) and `FilterDef.basis`. Full rationale: `docs/architecture.md` § rule 23.
 
 Full rationale, edge cases, and incident history: read `docs/architecture.md` before modifying anything
 these rules touch.

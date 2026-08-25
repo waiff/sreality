@@ -46,13 +46,13 @@ every stored watchdog spec and saved preset, and breaking archived-run display (
 | Wave | Purpose | Test | Migration | Status |
 | --- | --- | --- | --- | --- |
 | W1 | Truth at the source: shared `derive_headline_area` across all 9 parsers, shared per-area price rail, per-basis floors | T3 | 423 | ✅ |
-| W2 | Heal stored damage: mmreality area + unit-price masquerade backfills | T3 | — | 🟨 code + dry-run |
+| W2 | Heal stored damage: mmreality area + unit-price masquerade backfills | T3 | — | 🟨 code + dry-run; **write pass is the operator's, still not run** |
 | W3 | Property-grain coherence: numerator and denominator from the same child | T1+T3 | 424 | ✅ |
 | W4 | **Keystone** — `measure_price_per_m2` + `measure_price_per_m2_basis` in SQL; 6 relations repointed | T1+T2 | 425 | ✅ |
 | W5 | Python + API call sites onto the named measure (`toolkit/measures.py`) | T1+T2 | 426 | ✅ |
-| W6 | Frontend: one formatter, basis on every surface, the map Kč/m² toggle | T1+T2 | — | ⬜ |
-| W7 | Chrome extension: read the server's measure, name the month | T2 | — | ⬜ |
-| W8 | **The permanent rail** — required-arg signatures + census CI gate + `FilterDef.basis` | T1 | — | ⬜ |
+| W6 | Frontend: one formatter, basis on every surface, the map Kč/m² toggle | T1+T2 | — | ✅ |
+| W7 | Chrome extension: read the server's measure, name the month | T2 | — | ✅ |
+| W8 | **The permanent rail** — required-arg signatures + census CI gate + `FilterDef.basis` | T1 | — | ✅ |
 | W9 | Plausibility gate: per-source drift detection the null-checks are blind to | T3 | 427 | ✅ |
 
 Ordering: W1 ∥ W3 → W2; W3 → W4; W4 → {W5, W6, W9}; W5 → W7; everything → W8.
@@ -281,6 +281,127 @@ Still open after the write pass:
   reader, which is W9's plausibility-gate ground, not a backfill's.
 - A whole-fleet `area_basis` backfill. W2 stamps mmreality's 11,218 rows because it is
   re-deriving them anyway; the other eight portals are still NULL.
+
+### W8 as built — the rail, and the one site the sweep had missed
+
+**All nine waves are shipped.** W8 installs the mechanism that makes a 65th unit-blind site
+fail CI rather than merely be absent today. Three interlocking parts, none sufficient alone:
+
+- **(a) Required-argument signatures.** `toolkit.measures.per_m2_sql(alias)` /
+  `per_m2_basis_sql(alias)` have no zero-arg fallback (pinned by a `TypeError` test), and
+  `fmtMeasuredPricePerM2(value, basis)` makes the deleted `fmtPricePerM2(price, area)` a
+  TypeScript error. That second half is now PINNED: `format.test.ts` carries two
+  `@ts-expect-error` cases, so if the basis ever becomes optional — or accepts a number again —
+  the directive itself becomes a TS2578 compile error under CI's already-blocking
+  `npx tsc --noEmit`. Verified by making one call valid and watching the build go red.
+- **(b) The census.** `tests/test_measure_registry_census.py` + `toolkit.measures.REGISTERED_SITES`
+  — offline, no DB, no new dependency, ~1.1 s inside the existing `pytest -q`. It scans
+  `scraper/ toolkit/ api/ scripts/ frontend/src/ chrome-extension/src/` **and `migrations/`** —
+  both the EFFECTIVE (highest-numbered, undropped) definition of each database object AND,
+  unconditionally, every statement that is not one of the five tracked `create` forms. **Three
+  arms**, each of which the other two would miss something without:
+  - `division` — a price-ish expression over an area-ish one. Both operands are resolved by a
+    bracket-balanced walk outward from the operator, so `sum(l.price_czk)::numeric /
+    nullif(sum(l.area_m2), 0)`, `r["price_czk"] / r["area_m2"]`, `coalesce(price_czk, 0) /
+    area_m2` and `price // area_m2` all land — not only bare identifiers. `ruian_*` and
+    `area_km2`/`area_ha` are exempt on the DENOMINATOR (polygon area is a name collision).
+  - `unit` — a per-m² unit literal. It is the arm that catches
+    `price_stats_metrics.gross_yield_pct`'s `12.0 * rent_per_m2_month / sale_per_m2`, which
+    names no area at all.
+  - `vocab` — every file that reads `PPM2_UNIT` / `PPM2_UNIT_CS` / `PPM2_VALUE_LABEL` /
+    `PPM2_BASIS_TOKEN`, one hit per FILE. The other two are spelling filters, and this rule
+    teaches developers to IMPORT the label rather than spell it — so a site that labels
+    correctly and computes the number itself spells no unit and names no price identifier, and
+    walks through both. Consuming the vocabulary is therefore a census event too.
+
+  Comments are stripped, string literals and docstrings are not — a comment is prose about the
+  code, a string is something the program can emit; a prose match is registered as
+  `kind="prose"`, never reworded away. The registry declares **43 site-arms / 102 occurrences**,
+  plus three MEASURES (`ppm2`, `fond_per_m2`, `gross_yield_pct`) each carrying its own
+  numerator, denominator, unit and validity bounds. Two VALUE-comparing tests sit beside the
+  three counting arms, because the census counts occurrences and is otherwise blind to what they
+  say: the SPA's `PPM2_UNIT` and the extension's copied monthly suffix are pinned against
+  `PPM2_UNIT_CS` basis-for-basis.
+
+  Proven red on every shape: subscripted and aggregate divisions, a `generated always as`
+  column, a `comment on column` mislabel, and the "labels correctly, computes wrongly"
+  combination that walked through the two-arm draft. Also proven NOT red on a legitimate future
+  `create or replace view listings_public` that calls the measure — the earlier draft pinned
+  that view to migration `425_` by filename and would have reddened the nineteenth replacement
+  of the most-churned object in the schema, blaming the wrong migration.
+
+  **The census names its own blind spots** in the module docstring and in
+  `docs/architecture.md` § rule 23, because a rail that oversells itself is worse than no rail:
+  both value arms are closed-vocabulary spelling filters (`price_czk / sqm` passes), a division
+  routed through a helper has no operator to walk out from, and the SQL half is a census of
+  `migrations/` **on disk, not of the database** — dynamic DDL inside plpgsql and the
+  `property_sources_mv` drift are unregisterable and unseen.
+- **(c) `FilterDef.basis`** beside the existing `unit` (27 uses, previously **zero** test
+  coverage), set to `depends_on_category` on `min/max_price_per_m2`, serialised into
+  `/admin/filter-schema` and `filterRegistry.generated.ts`. Three new tests:
+  `test_every_pg_backed_numeric_filter_declares_a_unit` (silence is no longer legal — a numeric
+  filter carries a `unit` or is recorded in the new `UNITLESS_NUMERIC_FILTERS`, which also fails
+  on stale ids), `test_per_m2_filters_declare_a_basis` (and the converse: an absolute must NOT
+  claim one), and a payload test so the field cannot stop at the dataclass boundary. The unit
+  test guards **all 47** numeric filters, not the 32 column-backed ones: the first draft scoped
+  it with `and f.pg_column`, and the two filters that restriction hid (`floor_band`,
+  `price_change_count_min`) were exactly the two with no declaration — the scope was
+  load-bearing for green rather than principled, and it would have exempted the case that
+  matters most, a derived per-m² bound served from an RPC rather than a column.
+
+**Two illegitimate sites, found here and fixed here.** `RunPanel.tsx`'s "Fond oprav + SVJ"
+field carried `suffix="Kč/m²"` — the CAPITAL label on a MONTHLY charge, off by a factor of
+twelve, and the same field in the Chrome extension already rendered `Kč/m²/měs` via W7's
+`CZK_PER_M2_MONTH`. It was site #27 of the charter's inventory and W6 missed it. It now reads
+`PPM2_UNIT.rent` from the shared map.
+
+And **the SPA's land basis was a byte-for-byte copy of its sale basis** — `PPM2_UNIT.land`
+spelled the bare floor-area unit while `toolkit.measures.PPM2_UNIT_CS`, the SPA's own
+`PPM2_VALUE_LABEL.land` and `fmtArea(n, 'plot')` all said *pozemku*. One measure with two
+labels, in the two modules the registry calls twins. The census could not see it — both
+spellings are legal strings, and it counts occurrences rather than comparing them. `PPM2_UNIT`
+and `PPM2_UNIT_CS` are now compared VALUE by VALUE by the rail, the extension's copied suffix
+alongside them (that territory has no test job at all, so this is the only thing between it and
+a silent 12x mislabel), and `format.test.ts` asserts all three bases render pairwise
+differently rather than only rent-vs-sale — which is how the drift stood.
+
+Also here: **CLAUDE.md rule #23** (the sprint's own conclusion, as a hard rule) — landable only
+after reclaiming 13 lines from rules #15 and #22, whose full prose already lived in
+`docs/architecture.md`; CLAUDE.md is 295/300. `docs/architecture.md` gains a § rule 23 with the
+measure's definition, why the basis is never read from `price_unit`, and why a rail rather than
+a rule.
+
+## What remains OPEN after W1–W9 — three items, none of them quietly dropped
+
+1. **The W2 backfill WRITE passes have not been run** (`--write` is the operator's, one portal
+   at a time): `scripts/backfill_mmreality_areas.py` and
+   `scripts/backfill_unit_price_masquerade.py`. Live 2026-08-25: mmreality dum/prodej still
+   reads a median **5 701 Kč/m² on a 905.0 m² median area** across 3 601 active rows, against
+   **48 325 Kč/m²** for the same cell on every other portal. Nothing downstream can fix this —
+   the measure is faithfully dividing a real price by a plot area stored in a floor-area column.
+2. **`area_basis` is a young stamp, and NOTHING carries the plot token yet.** Migration 423 ships
+   no backfill; the column fills as rows are detail-drained. Live 2026-08-25: **24.1% of 701 698
+   listings** populated (up from ~14.6% at W7), tokens `floor` / `usable` / `unknown` — and
+   **zero rows anywhere carry `plot`**. So any gate written on `area_basis` ALONE is inert today
+   and will read "not land" for every plot in the database. **Gate on `category_main = 'pozemek'`
+   as well**, exactly as `measure_price_per_m2` itself does.
+3. **`drop function public.browse_stats(<083 signature>)` still needs operator approval + a
+   pg_dump.** Verified still present on production 2026-08-25. It is an orphan — zero callers in
+   `api/ toolkit/ frontend/src/ scripts/`, and no function or view in the database references it
+   either — superseded by `browse_stats_properties`, and it holds eleven unfloored, basis-blind
+   per-m² expressions, the largest single cluster left in the schema.
+
+   **It was not inert, though, and the census had registered it as if it were.** Live check:
+   `has_function_privilege('authenticated', 'public.browse_stats', 'EXECUTE')` was **true**
+   (`anon` false). The SPA runs as `authenticated` once a Supabase Auth user JWT is in hand, so
+   the function was reachable as `POST /rest/v1/rpc/browse_stats` by any logged-in session —
+   i.e. the platform could still be asked for exactly the numbers rule #23 says it no longer
+   produces. Registering a *reachable* re-derivation as inert debt is the one thing this census
+   must not do. **`migrations/428_revoke_browse_stats_execute.sql`** revokes that grant — a
+   privilege change, additive and autonomous under the database gate, no pg_dump, and a single
+   `grant` reverses it. **NOT YET APPLIED: the operator applies it via the Supabase MCP.** The
+   `drop` itself is still destructive and still needs approval; the debt entry now says both
+   things. Delete the registry entry when the function goes and the census will REQUIRE it gone.
 
 ## Next after this program
 

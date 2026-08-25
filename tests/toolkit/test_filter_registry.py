@@ -428,3 +428,96 @@ def test_nullable_reaches_the_generated_payload() -> None:
     assert by_id["category_type"]["nullable"] is True
     # Default-off everywhere else — this is opt-in, not a blanket relaxation.
     assert by_id["category_main_in"]["nullable"] is False
+
+
+# --- units and bases: the label's home (CLAUDE.md rule #23) ----------------
+
+
+def test_every_pg_backed_numeric_filter_declares_a_unit() -> None:
+    """A number an agent reads verbatim must say what it is counted in.
+
+    `unit` had 27 uses and ZERO test coverage until W8, so a new numeric filter
+    could ship unlabelled by nothing more than omission. Silence is no longer a
+    legal answer: a filter either carries a `unit` or is recorded in
+    `UNITLESS_NUMERIC_FILTERS` — identifiers, ordinal ranks, and counts/index
+    scores whose scale is named in the description. Both are DECLARATIONS.
+
+    EVERY numeric filter, not just the column-backed ones. The first draft added
+    `and f.pg_column`, which cut the guarded population from 47 to 32 — and the
+    two it hid (`floor_band`, `price_change_count_min`) were precisely the two
+    with no declaration, i.e. the restriction was load-bearing for green rather
+    than principled. It would also have exempted the case that matters most:
+    a derived per-m² bound served from an RPC rather than a column, which would
+    reach `GET /admin/filter-schema` with no unit and no basis at all.
+    """
+    numeric = [
+        f
+        for f in fr.all_filters()
+        if f.type in (fr.FilterType.INT, fr.FilterType.FLOAT)
+    ]
+    assert numeric, "expected some numeric filters"
+
+    undeclared = [
+        f.id for f in numeric if not f.unit and f.id not in fr.UNITLESS_NUMERIC_FILTERS
+    ]
+    assert not undeclared, (
+        f"numeric filters with neither a `unit` nor a place in "
+        f"UNITLESS_NUMERIC_FILTERS: {undeclared}. If the number is in CZK, "
+        f"metres, m², days or percent, give it a unit — the exemption set is "
+        f"for identifiers, 1..5 ranks and bare counts only."
+    )
+
+    both = [f.id for f in numeric if f.unit and f.id in fr.UNITLESS_NUMERIC_FILTERS]
+    assert not both, f"declared unitless AND given a unit: {both}"
+
+    known = {f.id for f in fr.all_filters()}
+    stale = sorted(fr.UNITLESS_NUMERIC_FILTERS - known)
+    assert not stale, (
+        f"UNITLESS_NUMERIC_FILTERS names filters that no longer exist: {stale}. "
+        f"An exemption list nobody prunes stops being a declaration."
+    )
+
+
+def test_per_m2_filters_declare_a_basis() -> None:
+    """`unit='CZK/m²'` is not a label — it is two labels ~300x apart.
+
+    The same string means a capital price on a sale cohort and a MONTHLY rent on
+    a rental one, and the registry is read verbatim by agents that never see the
+    cohort. Every per-m² filter therefore carries `basis` as well, from the
+    vocabulary `measure_price_per_m2_basis` publishes plus the one state only a
+    filter can be in: authored before the category that decides its unit.
+    """
+    per_m2 = [
+        f
+        for f in fr.all_filters()
+        if "per_m2" in f.id or "per_m2" in (f.pg_column or "")
+    ]
+    assert per_m2, "expected the min/max_price_per_m2 filters to exist"
+
+    for f in per_m2:
+        assert f.basis, (
+            f"{f.id} is a per-m² filter with no `basis`. Its `unit` alone cannot "
+            f"say whether the bound is a capital price or a monthly rent."
+        )
+        assert f.basis in fr.FILTER_BASES, (
+            f"{f.id}: basis {f.basis!r} is not in the published vocabulary "
+            f"{sorted(fr.FILTER_BASES)} — never invent a fourth spelling."
+        )
+
+    # And the converse: an absolute number must NOT claim a per-m² basis.
+    for f in fr.all_filters():
+        if f.basis and f not in per_m2:
+            raise AssertionError(
+                f"{f.id} declares basis={f.basis!r} but is not a per-m² filter; "
+                f"`basis` labels a rate, not an absolute."
+            )
+
+
+def test_basis_reaches_the_generated_payload() -> None:
+    """The SPA and `GET /admin/filter-schema` read the serialised registry, so a
+    field that stops at the dataclass boundary labels nothing."""
+    payload = fr.registry_to_json()
+    by_id = {f["id"]: f for f in payload["filters"]}
+    assert by_id["min_price_per_m2"]["basis"] == fr.BASIS_DEPENDS_ON_CATEGORY
+    assert by_id["max_price_per_m2"]["basis"] == fr.BASIS_DEPENDS_ON_CATEGORY
+    assert by_id["min_price_czk"]["basis"] is None
