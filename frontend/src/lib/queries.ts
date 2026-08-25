@@ -86,8 +86,18 @@ export const effectiveBbox = (f: ListingFilters): MapBounds | null => {
   return f.bounds;
 };
 
-/* Maplibre-gl renders a GeoJSON source via WebGL with clustering, so
- * the bottleneck is wire-bytes, not DOM. 50k features ≈ 0.3 MB gzipped. */
+/* Maplibre-gl renders a GeoJSON source via WebGL with clustering, so the bottleneck is
+ * wire-bytes, not DOM.
+ *
+ * MEASURED 2026-08-25, because the figure this comment used to carry ("50k features
+ * ≈ 0.3 MB gzipped") was the stated justification for the cap and was off by roughly an
+ * order of magnitude: the default cohort's 50,000 rows serialise to 22.66 MB raw,
+ * 453 B per row.
+ *
+ * THIS IS NOT THE ONLY CAP. PostgREST clamps server-side at the same 50,000 via
+ * `pgrst.db_max_rows` on the `authenticator` role (migration 394, verified live), so
+ * deleting the `.limit()` below would not lift the truncation -- it would only stop the
+ * client from knowing about it. Both have to move together. */
 export const MAP_CAP = 50_000;
 export const TABLE_PAGE_SIZE = 50;
 export const CARD_PAGE_SIZE = 24;
@@ -112,7 +122,12 @@ export const CARD_PAGE_SIZE = 24;
  * them by ~300x. `category_main` stays for what the basis does not say: whether
  * this row's area_m2 is floor area or PLOT area (the popup says so), and
  * `category_type` for the monthly period on the total-price label. */
-const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat,lng,price_czk,price_per_m2,price_per_m2_basis,category_main,category_type,disposition,subtype,area_m2,district,last_seen_at,is_active,tom_days';
+/* Every column here is serialised into a GeoJSON feature property for EVERY pin, so
+ * an unread column is pure wire cost. `subtype` (0 of 50,000 non-NULL in the default
+ * cohort) and `tom_days` (fully populated, read nowhere) were both dropped in W6a --
+ * ~1.5 MB of the measured 22.66 MB. Add a column here only if ListingMap actually
+ * renders it. */
+const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat,lng,price_czk,price_per_m2,price_per_m2_basis,category_main,category_type,disposition,area_m2,district,last_seen_at,is_active';
 /* `property_id` is listed explicitly rather than arriving via withKeysetColumns:
  * it used to come free because the tiebreak was ALWAYS property_id, but the
  * portal-mirror lane tiebreaks on listing_id, which would have left
@@ -543,17 +558,20 @@ export interface MapRow {
   category_main: string | null;
   category_type: string | null;
   disposition: string | null;
-  subtype: string | null;
   area_m2: number | null;
   district: string | null;
   last_seen_at: string;
   is_active: boolean;
-  tom_days: number | null;
 }
 
 export interface MapResult {
   rows: MapRow[];
   total: number | null;
+  /* The read reached the ceiling, so the cohort is larger than what is plotted.
+   * It CANNOT distinguish "exactly MAP_CAP matches" from "more than MAP_CAP" --
+   * PostgREST clamps at the same number, so a 50,001st row is unobservable from
+   * here. The pill therefore states truncation from `cohortTotal > total`, which
+   * IS decidable, and uses this only to explain WHY. */
   capped: boolean;
 }
 
@@ -897,7 +915,7 @@ export const fetchListingsForMap = async (
     rows,
     total: rows.length,
     capped: rows.length >= MAP_CAP,
-  };
+  };  // see MapResult.capped: at exactly MAP_CAP this is indistinguishable from a full cohort
 };
 
 export interface TableRow {

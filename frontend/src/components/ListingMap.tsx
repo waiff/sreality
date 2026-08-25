@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
 import { createMap } from '@/lib/basemap';
 import { useMapFeatureHover } from '@/lib/useMapFeatureHover';
+import { MAP_CAP } from '@/lib/queries';
 import type {
   CityIndexDefinition,
   CuratedCity,
@@ -1567,8 +1568,22 @@ export default function ListingMap({
                 ? `${total.toLocaleString('cs-CZ')} of ${cohortTotalApprox ? '~' : ''}${cohortTotal.toLocaleString('cs-CZ')} mapped`
                 : `${total.toLocaleString('cs-CZ')} ${total === 1 ? 'listing' : 'listings'}`}
           {capped && (
-            <span className="ml-2 text-[var(--color-ochre)]">
-              · capped at 50 000 — refine filters
+            /* Corollary F: a surface that cannot render its whole cohort must say so IN
+             * THE COHORT'S OWN TERMS. The count above is honest about the SIZE of what is
+             * missing and silent about its KIND -- the cap is applied with no ORDER BY, so
+             * the plotted pins are whatever the index scan reached first (in practice the
+             * southernmost matches), not a spread across the cohort. Saying "capped" alone
+             * invites reading the pins as a representative sample. The number comes from
+             * MAP_CAP so the copy cannot drift from the constant it describes. */
+            <span
+              className="ml-2 text-[var(--color-ochre)]"
+              title={
+                `The ${MAP_CAP.toLocaleString('cs-CZ')}-row cap is applied without an ordering, ` +
+                'so these pins are an arbitrary slice of the cohort — geographically clustered, ' +
+                'not a sample of it. Narrow the filters to see a cohort that fits.'
+              }
+            >
+              · capped at {MAP_CAP.toLocaleString('cs-CZ')} — an arbitrary slice, not a sample
             </span>
           )}
         </Pill>
