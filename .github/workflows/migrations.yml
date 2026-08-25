@@ -29,6 +29,11 @@ on:
       - "scripts/ci_db_bootstrap.sql"
       - "pyproject.toml"
       - ".github/workflows/migrations.yml"
+      # Not a Python path, but tests/test_llm_cost_zone_literals.py asserts that this
+      # file names 'Europe/Prague' exactly once and that the literal matches the three
+      # database spellings. That rail lives in THIS lane, so without this entry a
+      # frontend-only PR could change the zone and never run the rail that guards it.
+      - "frontend/src/lib/llmCosts.ts"
   pull_request:
     paths:
       - "**/*.py"
@@ -36,6 +41,11 @@ on:
       - "scripts/ci_db_bootstrap.sql"
       - "pyproject.toml"
       - ".github/workflows/migrations.yml"
+      # Not a Python path, but tests/test_llm_cost_zone_literals.py asserts that this
+      # file names 'Europe/Prague' exactly once and that the literal matches the three
+      # database spellings. That rail lives in THIS lane, so without this entry a
+      # frontend-only PR could change the zone and never run the rail that guards it.
+      - "frontend/src/lib/llmCosts.ts"
   workflow_dispatch:
 
 jobs:

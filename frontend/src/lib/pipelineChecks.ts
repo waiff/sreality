@@ -14,6 +14,7 @@ const CHECK_LABELS: Record<string, string> = {
   llm_errors: 'LLM errors',
   llm_liveness: 'LLM liveness',
   llm_burn_rate: 'LLM burn rate',
+  long_open_transaction: 'Oldest open transaction',
   db_saturation: 'DB saturation',
   worker_liveness: 'Worker liveness',
   dual_write_parity: 'Dual-write parity',
