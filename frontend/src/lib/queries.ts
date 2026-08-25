@@ -49,6 +49,7 @@ import type {
   ScraperHealthChecks,
 } from './types';
 import type { BorderCase, ImageAnnotation, TrainingExample } from './api';
+import { CITY_QUALITY_LEGACY } from './cityQualityLegacy';
 
 /* Circle → bounding box approximation. Used when the operator picks
  * the centre+radius mode on the map: PostgREST has no native
@@ -597,10 +598,40 @@ async function resolveTagPrefilter(
  * 3s timeout). Only the flexible any-index rule list + the legacy centroid
  * near_city_proximity still need the spatial RPC. */
 const hasCityQualityFilter = (f: ListingFilters): boolean =>
-  f.cityIndexRules.length > 0
-  || f.nearCityProximity != null;
+  f.cityIndexRules.length > 0;
 
-async function resolveCityQualityPrefilter(
+/* Curated-city obec allowlist (migration 436). ONE SQL function owns rule evaluation and
+ * every consumer reduces to `obec_id = ANY(...)`. <= 206 ids, ~1.5 kB, one round trip, no
+ * paging — the whole point of W5 is that a Browse read path never fetches a market-scaled
+ * id list again. (The path this replaces asked for 84k–262k listing ids and threw
+ * FetchAllOverflowError before the SQL speed ever mattered.)
+ *
+ * Wire shape verified against live PostgREST: `RETURNS SETOF bigint` comes back as a bare
+ * JSON array of numbers, e.g. [584495, 554782, …] — not an array of objects. */
+const MAX_CURATED_OBEC_IDS = 512;   // 206 today; a band, not the count
+
+async function resolveCityQualityObecPrefilter(
+  f: ListingFilters,
+): Promise<number[] | null> {
+  if (!hasCityQualityFilter(f)) return null;
+  const { data, error } = await supabase.rpc('curated_cities_matching', {
+    p_index_rules: f.cityIndexRules,
+  });
+  if (error) throw error;
+  const ids = (data ?? []) as unknown as number[];
+  if (!Array.isArray(ids) || ids.some((n) => typeof n !== 'number')) {
+    throw new Error('curated_cities_matching: unexpected wire shape');
+  }
+  if (ids.length > MAX_CURATED_OBEC_IDS) {
+    throw new Error(
+      `curated_cities_matching returned ${ids.length} ids (max ${MAX_CURATED_OBEC_IDS}) — `
+      + 'the curated-city set is meant to be operator-sized, not market-sized',
+    );
+  }
+  return ids;
+}
+
+async function resolveCityQualityPrefilterLegacy(
   f: ListingFilters,
 ): Promise<number[] | null> {
   if (!hasCityQualityFilter(f)) return null;
@@ -735,7 +766,7 @@ const intersectPrefilters = (
  * matched nothing, so the caller can short-circuit to zero results without
  * issuing the main query. Shared by the Map / Table / Cards fetchers. */
 export interface BrowsePrefilters {
-  listingIds: number[] | null;    // city-quality (surrogate listing_id, migration 351)
+  listingIds: number[] | null;    // LEGACY city-quality path only (?cityQualityLegacy=1); W7 deletes this field
   obecIds: number[] | null;       // market growth (price-stats datasets)
   propertyIds: number[] | null;   // tags ∩ with-estimates (property grain)
   empty: boolean;
@@ -744,10 +775,11 @@ export interface BrowsePrefilters {
 async function resolveBrowsePrefilters(
   f: ListingFilters,
 ): Promise<BrowsePrefilters> {
-  const [tagProps, cityIds, growthObec, estimateProps, pipelineProps] =
+  const [tagProps, cityObec, cityLegacyIds, growthObec, estimateProps, pipelineProps] =
     await Promise.all([
       resolveTagPrefilter(f),
-      resolveCityQualityPrefilter(f),
+      CITY_QUALITY_LEGACY ? Promise.resolve(null) : resolveCityQualityObecPrefilter(f),
+      CITY_QUALITY_LEGACY ? resolveCityQualityPrefilterLegacy(f) : Promise.resolve(null),
       resolvePriceGrowthPrefilter(f),
       resolveEstimatesPrefilter(f),
       resolvePipelinePrefilter(f),
@@ -760,11 +792,14 @@ async function resolveBrowsePrefilters(
     intersectPrefilters(tagProps, estimateProps),
     pipelineProps,
   );
+  // City-quality and market-growth are BOTH obec-grain now, and applyPrefilters applies
+  // .in('obec_id', …) once — so they must be intersected here, not applied twice.
+  const obecIds = intersectPrefilters(cityObec, growthObec);
   const empty =
-    (cityIds != null && cityIds.length === 0)
-    || (growthObec != null && growthObec.length === 0)
+    (obecIds != null && obecIds.length === 0)
+    || (cityLegacyIds != null && cityLegacyIds.length === 0)
     || (propertyIds != null && propertyIds.length === 0);
-  return { listingIds: cityIds, obecIds: growthObec, propertyIds, empty };
+  return { listingIds: cityLegacyIds, obecIds, propertyIds, empty };
 }
 
 /* Exported for queries.test.ts — pins that the city-quality allowlist filters on
@@ -1168,6 +1203,12 @@ export const fetchBrowseStats = async (
    * qualifies (the RPC's `= any('{}')` then yields total 0). Keeps Stats
    * aligned with Map/Table. */
   const growthObec = await resolvePriceGrowthPrefilter(f);
+  /* City-quality is obec-grain now and feeds the SAME obec_ids_filter parameter, so the two
+   * allowlists intersect here exactly as they do on the cohort reads. Under the legacy flag
+   * the rules travel as city_index_rules instead — browse_stats_properties still accepts the
+   * parameter and routes it through curated_cities_matching(), so BOTH spellings resolve to
+   * one definition (rule 16). W7 drops the parameter. */
+  const cityObec = CITY_QUALITY_LEGACY ? null : await resolveCityQualityObecPrefilter(f);
   /* Deal-pipeline allowlist (property_ids); same contract as growthObec above —
    * null = scope off, [] = an empty pipeline (the RPC's `= any('{}')` then
    * yields total 0). Without this the Stats tab would keep counting the whole
@@ -1235,10 +1276,12 @@ export const fetchBrowseStats = async (
      * accepts. Migration 080 added these four params to browse_stats
      * so Stats counts stay aligned with Map / Table when a city-
      * quality filter is active. */
-    city_index_rules:        f.cityIndexRules.length === 0 ? null : f.cityIndexRules,
+    city_index_rules:        CITY_QUALITY_LEGACY && f.cityIndexRules.length > 0
+                               ? f.cityIndexRules
+                               : null,
     city_pop_min:            f.minCityPopulation,
     city_pop_max:            f.maxCityPopulation,
-    city_proximity:          f.nearCityProximity,
+    city_proximity:          null,   // retired (W5); the RPC raises on a non-null value
     /* Migration 142/143 — fast polygon-edge proximity precomputed columns. */
     near_pop_5km_min:        f.nearPop5kmMin,
     near_pop_15km_min:       f.nearPop15kmMin,
@@ -1269,7 +1312,7 @@ export const fetchBrowseStats = async (
     /* Migration 118 — filter the Stats cohort by source portal. */
     portal_filter:           f.portals.length ? f.portals : null,
     /* Migration 162 — market-growth obec allowlist (price-stats datasets). */
-    obec_ids_filter:         growthObec,
+    obec_ids_filter:         intersectPrefilters(cityObec, growthObec),
     /* Migration 378 — generic property-id allowlist; carries the deal-pipeline
      * scope (rule #22) today, and is the seam any future property-grain
      * prefilter should reuse instead of growing another bespoke param. */

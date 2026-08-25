@@ -28,7 +28,6 @@ export type UiControl =
   | "boolean"
   | "location"
   | "city_index_rules"
-  | "near_city_rule"
   | "pipeline_scope";
 
 export type FilterType =
@@ -39,7 +38,6 @@ export type FilterType =
   | "int"
   | "int_list"
   | "location"
-  | "near_city_proximity"
   | "pipeline_scope"
   | "string"
   | "string_list";
@@ -115,7 +113,6 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
     "boolean",
     "location",
     "city_index_rules",
-    "near_city_rule",
     "pipeline_scope"
   ],
   "filters": [
@@ -2195,7 +2192,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "city_index_rule_list",
       "pg_column": null,
       "default": null,
-      "description": "Filter listings to those located in a curated city whose qualitative indexes meet every rule in the list. Each rule is `{index_name: str, op: '>='|'<=', value: float}`. Rules are AND'd. `index_name` is a slug from `city_index_definitions_public` (e.g. `bezpecnost`, `prakticti_lekari`). Listings outside the curated city set (matched via ST_DWithin to the nearest curated city's centroid using its `default_radius_m`) are excluded when this filter is active.",
+      "description": "Filter listings to those located in a curated city whose qualitative indexes meet every rule in the list. Each rule is `{index_name: str, op: '>='|'<='|'>'|'<'|'=='|'!=', value: float}`; an unrecognised op falls back to `>=`. Rules are AND'd. `index_name` is a slug from `city_index_definitions_public` (e.g. `bezpecnost`, `prakticti_lekari`). A listing matches when its MUNICIPALITY (`listings.obec_id`) is one of the curated cities whose indexes satisfy every rule — resolved once by `curated_cities_matching()` (migration 436). Listings with no municipality are excluded.",
       "category": "City quality",
       "ui_control": "city_index_rules",
       "agendas": [
@@ -2257,25 +2254,6 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "maxCityPopulation"
       ],
-      "nullable": false
-    },
-    {
-      "id": "near_city_proximity",
-      "type": "near_city_proximity",
-      "pg_column": null,
-      "default": null,
-      "description": "Restrict listings to those within `radius_km` km of any curated city matching the inner index rules and the optional population minimum. Composite shape: `{index_rules: [{index_name, op, value}, ...], population_min: int|null, radius_km: int}`. Index rules are AND'd. Implementation uses `ST_DWithin(listing.geom, ST_Union(matching_cities.centroid), radius_km*1000)`.",
-      "category": "City quality",
-      "ui_control": "near_city_rule",
-      "agendas": [
-        "browse",
-        "watchdog"
-      ],
-      "constraints": null,
-      "unit": null,
-      "basis": null,
-      "enum_values": null,
-      "aliases": [],
       "nullable": false
     },
     {

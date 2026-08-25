@@ -24,6 +24,8 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
+from psycopg.types.json import Jsonb
+
 from toolkit.filter_registry import (
     FURNISHED_CANONICAL,
     OWNERSHIP_CANONICAL,
@@ -180,54 +182,71 @@ _DISPOSITION_LOOSE: dict[str, tuple[str, ...]] = {
 _HARD_LIMIT = 500
 
 
-_ALLOWED_OPS: frozenset[str] = frozenset({">=", "<=", "==", "!=", ">", "<"})
+# ---------------------------------------------------------------------------
+# Rule 17 rail.
+#
+# Until W5 the SCHEMA enforced rule 17 for free: `listings` has no `home_city_id`,
+# so a city-quality clause on a listings-grain query died at parse with 42703
+# before a row was read. W5 (migration 436) re-keys membership onto `l.obec_id`
+# -- a column `listings` DOES have -- so the identical bypass would now plan,
+# execute, and silently return an estimate narrowed by operator-curated,
+# revision-versioned, SUBJECTIVE city scores, with a `status='success'` row in
+# `estimation_runs` and a full trace. Nothing would fail.
+#
+# This function IS that former schema rail. It is deliberately a raise and not an
+# inert branch: rendering nothing would be exactly the silent failure W5 exists to
+# prevent.
+#
+# NOTE the direction. The design proposal claimed the obec rewrite removes this
+# latent failure "structurally". It is the reverse -- the rewrite converts a LOUD
+# failure into a silent one.
+# ---------------------------------------------------------------------------
+_CITY_QUALITY_FIELDS: tuple[str, ...] = (
+    "city_index_rules",
+    "min_city_population",
+    "max_city_population",
+    "near_city_proximity",
+    "near_pop_5km_min", "near_pop_15km_min",
+    "near_jobs_5km_min", "near_jobs_15km_min",
+    "near_youth_5km_min", "near_youth_15km_min",
+    "near_overall_5km_min", "near_overall_15km_min",
+)
 
 
-def _index_rule_predicate(
-    alias: str,
-    rule: dict[str, Any],
-    pname_idx: str,
-    pname_val: str,
-) -> str:
-    """Render one index-rule predicate against a city_index_values_public alias.
-
-    `rule['op']` is sanitised against `_ALLOWED_OPS`; defaults to `>=`.
-    Both rule values are bound; only the operator token is inlined.
-    """
-    op = rule.get("op", ">=")
-    if op not in _ALLOWED_OPS:
-        op = ">="
-    return (
-        f"EXISTS ("
-        f"SELECT 1 FROM city_index_values_public {alias} "
-        f"WHERE {alias}.city_id = c.city_id "
-        f"AND {alias}.index_name = %({pname_idx})s "
-        f"AND {alias}.value {op} %({pname_val})s)"
-    )
+def _assert_no_city_quality(filters: ComparableFilters) -> None:
+    """Raise if any city-quality field is set on a listings-grain call."""
+    populated = [
+        name
+        for name in _CITY_QUALITY_FIELDS
+        if getattr(filters, name, None) not in (None, [], {})
+    ]
+    if populated:
+        raise ValueError(
+            "rule 17 violation: city-quality filters "
+            f"({', '.join(populated)}) reached _shared_filter_where. Its callers are "
+            "FROM listings l and feed estimation; these filters are BROWSE + WATCHDOG "
+            "only (filter_registry agendas) and would make an estimate depend on a "
+            "city_index_* revision. The Watchdog matcher calls _city_quality_clauses "
+            "directly (api/notifications.py) and does not pass through here."
+        )
 
 
 def _city_quality_clauses(
     filters: ComparableFilters,
 ) -> tuple[list[str], dict[str, Any]]:
-    """Render the Phase QUAL clauses (city quality, population, proximity).
+    """Render the Phase QUAL clauses against a properties_public-grain alias.
 
-    Three concerns, one helper, isolated from the rest of
-    `_shared_filter_where` so the Watchdog matcher can reuse the same
-    code path. Returns the clause list + parameter additions.
+    Its ONLY caller is the Watchdog matcher (`api/notifications.py`), which is that
+    grain (`home_obec_pop`, `near_*`, `obec_id`).
 
-    Every predicate here reads a properties_public-grain column
-    (`home_obec_pop`, `near_*`, `home_city_id`, and the listing point built
-    from `l.lng`/`l.lat`) — properties_public projects lat/lng (ST_Y/ST_X of
-    the geom) but NOT the raw geom, so the proximity branch builds the point
-    from lat/lng rather than referencing `l.geom` (which would throw
-    `column l.geom does not exist` against properties_public, silently
-    zeroing every proximity watchdog). The city-quality (`rules`) branch
-    doesn't need a point at all — curated-city membership is precomputed
-    onto `home_city_id` (migration 375) — only the proximity branch still
-    does a live radius search, since that radius is chosen per-rule at query
-    time and isn't precomputable the same way. The listings-grain callers via
-    `_shared_filter_where` never set these filters, so the whole helper is
-    inert for them.
+    `_shared_filter_where` no longer calls this. Its callers are `FROM listings l`
+    and feed estimation, and since W5 (migration 436) re-keyed membership onto
+    `l.obec_id` -- a column `listings` HAS -- a stray call would resolve and
+    silently narrow an estimate instead of throwing 42703. `_shared_filter_where`
+    raises via `_assert_no_city_quality` instead.
+
+    Rule evaluation itself is owned by `curated_cities_matching()` (migration 436);
+    this function renders one `obec_id = ANY(...)` predicate and nothing else.
     """
     where: list[str] = []
     params: dict[str, Any] = {}
@@ -266,57 +285,33 @@ def _city_quality_clauses(
             params[attr] = val
 
     if rules:
-        # Membership in a curated city is precomputed onto
-        # properties_public.home_city_id (migration 375, recompute_home_city())
-        # -- the SAME column Browse's listings_with_city_quality RPC and
-        # browse_stats_properties join against, so all three "does this row
-        # belong to a qualifying curated city" consumers share one source of
-        # truth (CLAUDE.md rule 16) instead of each re-running the
-        # ST_Covers(admin boundary) / ST_DWithin(centroid, radius) containment
-        # test live. Prior to migration 375 this ran that containment test
-        # inline per row; live EXPLAIN on the Browse-grain equivalent showed a
-        # cost in the billions at ~500k-row scale (Watchdog's cohorts are
-        # normally much smaller, which is why this was never observed here,
-        # but there's no reason to keep the slower, divergence-prone form).
-        sub_where: list[str] = ["c.city_id = l.home_city_id"]
-        for i, rule in enumerate(rules):
-            idx_p, val_p = f"ciq_rule_{i}_name", f"ciq_rule_{i}_val"
-            sub_where.append(_index_rule_predicate(f"viq_{i}", rule, idx_p, val_p))
-            params[idx_p] = rule["index_name"]
-            params[val_p] = rule["value"]
+        # ONE SQL function owns rule evaluation (migration 436). All three consumers --
+        # Browse (a client-resolved obec array), Stats (the same call inside
+        # browse_stats_properties) and this matcher -- reduce to `obec_id = ANY(...)`,
+        # a form with nothing left to diverge on (rule 16). Migration 374's own header
+        # records two divergences found between the three hand-maintained copies this
+        # replaces, including an operator-chosen op silently re-interpreted as >=.
+        #
+        # ARRAY(SELECT ...) forces a once-per-statement InitPlan; `IN (SELECT ...)` can
+        # degrade into a per-row correlated SubPlan -- the exact shape that made this
+        # predicate cost 1,778,259 blocks.
+        #
+        # Nothing is string-interpolated any more: the operator whitelist lives in the
+        # function's CASE, whose else-arm is `>=`. That is strictly safer than the old
+        # inline-the-operator-token approach.
         where.append(
-            "l.home_city_id IS NOT NULL AND EXISTS (SELECT 1 FROM curated_cities_public c "
-            "WHERE "
-            + " AND ".join(sub_where)
-            + ")"
+            "l.obec_id = ANY (ARRAY(SELECT curated_cities_matching("
+            "%(city_index_rules)s::jsonb)))"
         )
+        params["city_index_rules"] = Jsonb(rules)
 
-    prox = filters.near_city_proximity
-    if prox:
-        prox_rules = prox.get("index_rules") or []
-        radius_km = prox.get("radius_km")
-        if not isinstance(radius_km, (int, float)) or radius_km <= 0:
-            raise ValueError("near_city_proximity.radius_km must be > 0")
-        sub_where = [
-            "ST_DWithin("
-            "ST_SetSRID(ST_MakePoint(l.lng, l.lat), 4326)::geography, "
-            "ST_SetSRID(ST_MakePoint(c.lng, c.lat), 4326)::geography, "
-            "%(near_city_radius_m)s)"
-        ]
-        params["near_city_radius_m"] = int(radius_km) * 1000
-        for i, rule in enumerate(prox_rules):
-            idx_p, val_p = f"ciq_prox_{i}_name", f"ciq_prox_{i}_val"
-            sub_where.append(_index_rule_predicate(f"vp_{i}", rule, idx_p, val_p))
-            params[idx_p] = rule["index_name"]
-            params[val_p] = rule["value"]
-        prox_pop_min = prox.get("population_min")
-        if prox_pop_min is not None:
-            sub_where.append("c.population >= %(near_city_population_min)s")
-            params["near_city_population_min"] = prox_pop_min
-        where.append(
-            "EXISTS (SELECT 1 FROM curated_cities_public c WHERE "
-            + " AND ".join(sub_where)
-            + ")"
+    if filters.near_city_proximity is not None:
+        raise ValueError(
+            "near_city_proximity is retired (W5, migration 436): no UI widget ever set "
+            "it, 0 of 7 filter_presets and 0 of 2 notification_subscriptions carry a "
+            "value, and it was never load-tested (migration 375's own header flags it as "
+            "~33 s EXTRAPOLATED, CPU-bound ST_DWithin on scalars no index can serve). "
+            "Use the migration-142 near_*_min columns."
         )
 
     return where, params
@@ -551,9 +546,9 @@ def _shared_filter_where(
         )
         params["first_seen_min_days"] = filters.first_seen_min_days
 
-    city_clauses, city_params = _city_quality_clauses(filters)
-    where.extend(city_clauses)
-    params.update(city_params)
+    # NOT an inert branch: rendering nothing here would be the silent failure W5
+    # exists to prevent. See _assert_no_city_quality.
+    _assert_no_city_quality(filters)
 
     if not filters.include_unreliable:
         # Stays sreality-keyed: listing_fetch_failures is a queue table, not an R2

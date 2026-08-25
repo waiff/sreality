@@ -71,7 +71,6 @@ class UiControl(StrEnum):
     BOOLEAN = "boolean"                # plain checkbox
     LOCATION = "location"              # composite: districts + map + dot/radius
     CITY_INDEX_RULES = "city_index_rules"  # repeatable {index, op, threshold} rows
-    NEAR_CITY_RULE = "near_city_rule"  # city_index_rules + radius_km + population
     PIPELINE_SCOPE = "pipeline_scope"  # in-pipeline toggle + optional stage checkboxes
 
 
@@ -86,7 +85,6 @@ class FilterType(StrEnum):
     LOCATION = "location"            # composite — only used with UiControl.LOCATION
     DISTRICT_CHIP_LIST = "district_chip_list"  # list of {name, context|null} — Browse/Watchdog districts
     CITY_INDEX_RULE_LIST = "city_index_rule_list"  # list of {index_name, op, value} — Browse/Watchdog city quality
-    NEAR_CITY_PROXIMITY = "near_city_proximity"   # composite {index_rules, population_min, radius_km}
     PIPELINE_SCOPE = "pipeline_scope"             # composite {stage_ids} — deal-pipeline membership
 
 
@@ -1536,14 +1534,15 @@ def _build_registry() -> dict[str, FilterDef]:
             default=None,
             description=(
                 "Filter listings to those located in a curated city whose "
-                "qualitative indexes meet every rule in the list. Each "
-                "rule is `{index_name: str, op: '>='|'<=', value: float}`. "
-                "Rules are AND'd. `index_name` is a slug from "
-                "`city_index_definitions_public` (e.g. `bezpecnost`, "
-                "`prakticti_lekari`). Listings outside the curated city "
-                "set (matched via ST_DWithin to the nearest curated "
-                "city's centroid using its `default_radius_m`) are "
-                "excluded when this filter is active."
+                "qualitative indexes meet every rule in the list. Each rule is "
+                "`{index_name: str, op: '>='|'<='|'>'|'<'|'=='|'!=', value: float}`; "
+                "an unrecognised op falls back to `>=`. Rules are AND'd. "
+                "`index_name` is a slug from `city_index_definitions_public` "
+                "(e.g. `bezpecnost`, `prakticti_lekari`). A listing matches when "
+                "its MUNICIPALITY (`listings.obec_id`) is one of the curated "
+                "cities whose indexes satisfy every rule — resolved once by "
+                "`curated_cities_matching()` (migration 436). Listings with no "
+                "municipality are excluded."
             ),
             category=CATEGORY_CITY_QUALITY,
             ui_control=UiControl.CITY_INDEX_RULES,
@@ -1583,26 +1582,6 @@ def _build_registry() -> dict[str, FilterDef]:
             constraints={"min": 0, "max": 1500000, "step": 1000},
             aliases=("maxCityPopulation",),
         ),
-        FilterDef(
-            id="near_city_proximity",
-            type=FilterType.NEAR_CITY_PROXIMITY,
-            pg_column=None,
-            default=None,
-            description=(
-                "Restrict listings to those within `radius_km` km of "
-                "any curated city matching the inner index rules and "
-                "the optional population minimum. Composite shape: "
-                "`{index_rules: [{index_name, op, value}, ...], "
-                "population_min: int|null, radius_km: int}`. Index "
-                "rules are AND'd. Implementation uses "
-                "`ST_DWithin(listing.geom, ST_Union(matching_cities."
-                "centroid), radius_km*1000)`."
-            ),
-            category=CATEGORY_CITY_QUALITY,
-            ui_control=UiControl.NEAR_CITY_RULE,
-            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
-        ),
-
         # --- fast polygon-edge proximity (migration 142) -----------------
         # Precomputed columns on `properties`: each stores the MAX metric
         # found within a FIXED radius (5 / 15 km) of the listing, measured to

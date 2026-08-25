@@ -21,6 +21,16 @@ from toolkit import filter_registry as fr
 # --- shape invariants -----------------------------------------------------
 
 
+# Fields kept on the models purely so an OLD SAVED filter_spec / preset blob still
+# deserialises, but deliberately absent from the registry because the filter is retired.
+# A retired filter must not be offerable to any agenda; the code paths raise on a
+# non-null value rather than silently ignoring it (silently ignoring a retired filter
+# WIDENS the cohort). W7 removes the fields themselves.
+_RETIRED_BUT_DESERIALISABLE = {
+    "near_city_proximity",   # W5 / migration 436: 0 UI widgets, 0 presets, 0 subscriptions
+}
+
+
 def test_registry_is_nonempty() -> None:
     assert len(fr.REGISTRY) > 0
 
@@ -144,6 +154,8 @@ def test_comparable_filters_fields_covered_by_registry() -> None:
 
     registry_ids = set(fr.REGISTRY.keys())
     for f in dc_fields(ComparableFilters):
+        if f.name in _RETIRED_BUT_DESERIALISABLE:
+            continue
         assert f.name in registry_ids, (
             f"ComparableFilters.{f.name} has no entry in REGISTRY — "
             f"add it to toolkit/filter_registry.py"
@@ -164,6 +176,8 @@ def test_watchdog_filter_spec_fields_covered_by_registry() -> None:
         # `dispositions`, `districts`, lat/lng/radius_m are watchdog
         # specifics; lat/lng/radius_m are sub-fields of the composite
         # `location` filter, so allow them.
+        if name in _RETIRED_BUT_DESERIALISABLE:
+            continue
         if name in {"lat", "lng", "radius_m"}:
             assert "location" in registry_ids, (
                 "WatchdogFilterSpec uses a center+radius spatial "
