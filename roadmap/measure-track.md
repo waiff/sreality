@@ -387,6 +387,40 @@ a rule.
    and will read "not land" for every plot in the database. **Gate on `category_main = 'pozemek'`
    as well**, exactly as `measure_price_per_m2` itself does.
 
+   **THE PREMISE WAS WRONG, and a live backfill crash is what exposed it (2026-08-25).**
+   `plot` was not merely un-backfilled — it was **FORBIDDEN**. The live
+   `listings_area_basis_check` reads `('usable','floor','total','unknown')`; migration 423
+   specifies five tokens, and `properties_area_basis_check` — created by that *same* migration —
+   carries all five. `listings` was missing exactly one. 423 guards each `ALTER` with
+   `if not exists (… where conname = …)`, and a constraint of that name already existed on
+   `listings` from W1 development, built before the land branch was inverted to return `plot`.
+   The guard saw the name, skipped, and kept the stale definition. An idempotent guard is the
+   right default; this is its one failure mode — **it cannot tell "already done" from "done
+   differently."** In hindsight the tell was there: *exactly* zero, rather than merely low, is
+   the signature of a constraint, not of a missing backfill.
+
+   **It was also a latent production hazard, not just a backfill blocker.**
+   `derive_headline_area` returns `(value, 'plot')` for every `pozemek` row carrying any
+   measure; `area_basis` is in `db.LISTING_COLUMNS` and is NOT preserve-if-null, so it is
+   written as `EXCLUDED.area_basis` on every detail write. Any land listing **with an area**
+   fails the constraint the moment the detail drain reaches it — and the drain writes a
+   **batched** upsert, so one such row takes its whole batch with it. It had not fired only by
+   luck of ordering: the land rows re-drained since W1 are the ones with no area at all
+   (sreality and bezrealitky carry the parcel in `estate_area` and leave `area_m2` NULL), and
+   the 442 `pozemek` snapshots in the preceding 24h were index-walk writes, which never touch
+   the area columns. 30,632 rows were queued in `listing_detail_queue`.
+
+   **`migrations/438_listings_area_basis_check_plot.sql`** widens the constraint to the repo's
+   five tokens. Strict superset, so no existing row can be invalidated. Added `not valid` and
+   validated in a **separate** statement — `add constraint … check` would otherwise hold ACCESS
+   EXCLUSIVE through a full validation scan of an 11 GB table. Applying it is genuinely hard:
+   `listings` carries rolling multi-minute readers, a `*/15` `rebuild_browse_list()` that holds
+   AccessShare for 5–10 minutes, and autovacuum, so a 6 s `lock_timeout` loses the race
+   repeatedly. **Keep the timeout at 6 s and retry into a gap** rather than lengthening it —
+   the `authenticated` role's `statement_timeout` is 8 s, so a longer head-block turns SPA reads
+   into errors instead of waits. Autovacuum is not a real blocker (Postgres auto-cancels it for
+   a conflicting DDL request); the long analytical readers are.
+
    **DECIDED: a script calling `derive_headline_area`, not a forward migration**
    (`scripts/backfill_area_basis.py` + `backfill_area_basis.yml`). The stamp is a claim about a
    value already stored, so the backfill must PROVE which arm won, never infer it. The script
