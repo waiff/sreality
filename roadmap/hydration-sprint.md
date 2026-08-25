@@ -858,8 +858,8 @@ Same ledger, same rules, plus what this build's evidence earned:
 | W1b | Item 4 — 36 view/function wraps (uniform spelling) | — | |
 | W2 | Item 1a — `_check_daily_cost` spelling | [#1163](https://github.com/waiff/sreality/pull/1163) | ✅ merged |
 | W3 | Item 1b — hour rollup + watermark + F5-minimal registry | — | |
-| W4 | Item 3 — broker deferred join (mig 435) | [#1171](https://github.com/waiff/sreality/pull/1171) | open |
-| W5 | Item 2 — city-quality, keyed on `obec_id` | — | |
+| W4 | Item 3 — broker deferred join (mig 435) | [#1171](https://github.com/waiff/sreality/pull/1171) | ✅ merged |
+| W5 | Item 2 — city-quality, keyed on `obec_id` (mig 436) | #1172 | open |
 | W6 | Item 5 — map cluster RPC | — | |
 | W7 | Retirements + registry completion (destructive gate) | — | |
 
@@ -1127,6 +1127,89 @@ and of 19,200 merged-away brokers **717 carry a metric at or above the default c
 The tiebreaker ships here too: **seven brokers tie at the default limit-100 boundary**, and
 once the LIMIT is under the join an unstable sort decides *membership*, not position.
 
+### W5 — city-quality on the obec key (migration 436)
+
+**The commissioned framing was wrong about the defect.** The city side is 206 rows joined to
+6,798. Evaluated **once** it costs 971 blocks. The entire **1,778,259**-block failure is that
+it was evaluated **282,214 times** — a correlated SubPlan at ~4.4 blocks a row. Nothing was
+missing except a shape the planner can execute once. **1,831×.**
+
+**And a second, independent hard failure a SQL fix alone would not have touched:**
+`resolveCityQualityPrefilter` called `fetchAllRows(..., expectMax: 100_000)` against an
+allowlist of **84k–262k listing ids** for every practical threshold, so it threw
+`FetchAllOverflowError` *regardless of SQL speed*. Fixing only the plan would have traded a
+timeout toast for an overflow toast. **The feature was broken, not merely slow.**
+
+**This is a KEY CHANGE, not a re-expression** — recorded plainly because the design's own
+language obscured it. The live predicate never touched `admin_boundary_id`; it keyed
+`curated_cities.id` against `browse_list.home_city_id`. "One SQL function owning the same
+rule evaluation" is true of the *rules* and false of the *membership test*.
+
+#### Decision #8 was taken on numbers that do not reproduce
+
+| | proposal | re-measured |
+| --- | --- | --- |
+| gain | +1,979 | **+1,960**, of which **1,916 (97.8%) have NULL lat/lng** |
+| genuine key disagreements | — | **+44** |
+| loss | −49 "stale home_city_id corrections" | **−30 dropped** + **19 re-attributed** — two different things collapsed into one number |
+
+The worked examples were wrong (Praha→Černošice is **1** row, not 6; Hradec Králové→Beroun is
+**3**, not 4), and **the "stale Praha" characterisation is unsupported**. The real loss pattern
+is *curated town vs adjacent small obec* — Znojmo→Nový Šaldorf-Sedlešovice ×5, České
+Budějovice→Planá ×3, Ústí→Trmice ×3 — all 43 distinct obec ids at `level='obec'`. Those are
+cases where the obec key **drops** a property from the town cohort it plausibly belongs to:
+the opposite of the justification given.
+
+**Decided by the north star, after the operator handed it back.** Option "don't swap the key"
+fails outright — it leaves the overflow, so the surface still cannot render its cohort, at
+34,050 blocks instead of 971. Between keeping and dropping the `lat/lng` guard the **cost is
+identical**, so the cost clause does not discriminate — **Corollary F does.** That guard
+exists only because the same function also served `near_city_proximity`, which this migration
+retires. A listing in Brno with no coordinates is still in Brno. Keeping it would deliberately
+preserve a silent under-render of the cohort for the sake of a feature being deleted in the
+same statement. **The 1,916 are admitted; the −30 are filed as a data defect, not used as
+justification.**
+
+#### Rule 17 inverts, and the repair is in Python
+
+Until now the **schema** enforced rule 17 for free: `listings` has no `home_city_id`, so a
+city-quality clause on a listings-grain query died at parse with `42703` before a row was
+read. Re-keying onto `l.obec_id` — a column `listings` **has** — means the identical bypass
+would now plan, execute, and **silently** return an estimate narrowed by operator-curated,
+revision-versioned, subjective city scores, with a `status='success'` row and a full trace.
+The proposal claimed the rewrite removes this failure "structurally". **It is the reverse.**
+
+Two facts made it urgent rather than theoretical: **nothing tested the agenda gate for these
+filters** (deleting it turned nothing red), and **the old safety argument was a docstring** —
+*"the listings-grain callers never set these filters, so the whole helper is inert for them"* —
+an assumption about caller behaviour with no mechanism, while `_shared_filter_where` called
+the helper unconditionally with no grain argument and no guard.
+
+`_assert_no_city_quality` is that former schema rail, and it is a **raise, not an inert
+branch**: rendering nothing would be exactly the silent failure W5 exists to prevent.
+
+#### Two latent correctness bugs ride along
+
+- **`city_index_values_public` filtered on a GLOBAL max revision.** One partial upload (a
+  single corrected city at revision 3) would make the view return **33 rows instead of
+  6,798** — a 99.5% collapse, every other city silently failing every rule, no error
+  anywhere. Both historical uploads were full re-uploads, so it has never fired; one partial
+  upload arms it. Correct spelling is latest-per-`(city_id, index_name)`, via `NOT EXISTS`
+  rather than `DISTINCT ON` (which would block qual pushdown and, if ever pushed, let an
+  older revision win).
+- **The `city_index_rules` FilterDef description** still described `ST_DWithin` to a centroid
+  with `default_radius_m`. Stale since migration 375, and now wrong twice over.
+
+#### The most dangerous detail in the migration
+
+`curated_cities` and `city_index_values` are **RLS-on with zero policies**. A `SECURITY
+INVOKER` function reading the **base** tables returns **zero rows** for `authenticated` —
+silently, not as an error — collapsing every city-quality cohort to empty. `curated_cities_matching()`
+reads the `_public` views deliberately, and a rail asserts it.
+
+Wire shape **verified against live PostgREST** rather than assumed: `RETURNS SETOF bigint`
+comes back as a bare JSON array of numbers (`[584495, 554782, …]`), not an array of objects.
+
 ### STOP 1 — the T0 baseline, captured 2026-08-25 05:37 UTC
 
 Captured **at the moment F1 landed**, because the "before" window is the *past* 24 h and
@@ -1186,3 +1269,14 @@ One line each: flag · trigger · evidence needed to close · filing wave.
 - The claims-absent fallback arm (`pg_roles` / `rolbypassrls`) inside a security primitive
   · **trigger:** an inventory of every raw-connection reader of a gated relation ·
   **evidence:** that inventory · filed W1a.
+- **`properties.home_city_id` and `listings.obec_id` disagree on 49 rows** (30 dropped, 19
+  re-attributed) — two geometry-derived columns answering the same containment question
+  differently, e.g. Znojmo vs Nový Šaldorf-Sedlešovice ×5, Benešov vs Sušice ×5, Třebíč vs
+  Praha ×3. **NOT "stale corrections"** — a genuine data defect · **trigger:** any work on
+  `recompute_home_city` or the RÚIAN boundary set · **evidence:** which of the two columns is
+  wrong per case · filed W5.
+- **`NOT NULL` on `curated_cities.admin_boundary_id`** is not shippable as designed: it breaks
+  `scripts/seed_curated_cities.py` (INSERTs without the column, fills it in a later pass) and
+  `scripts/ingest_boundaries.py` (whose `wipe_table` depends on the FK's `ON DELETE SET NULL`).
+  Enforcement ships instead as the migration's DO block + the live rail · **trigger:** an
+  `ingest_boundaries` restructure to load-into-staging + swap · filed W5.

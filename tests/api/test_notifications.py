@@ -86,32 +86,50 @@ def test_build_clauses_emits_spatial_when_set() -> None:
     assert params["radius_m"] == 1500
 
 
-def test_build_clauses_city_quality_uses_latlng_not_geom() -> None:
-    """Near-city proximity watchdogs scan properties_public, which projects
-    lat/lng but NOT the raw geom column. Every point in the near_city_proximity
-    branch of _city_quality_clauses must be built from l.lng/l.lat — a stray
-    `l.geom` throws `column l.geom does not exist`, caught by the
-    per-subscription try/except, so those watchdogs silently NEVER match
-    (the Wave 3 detection fix; this guards against a geom regression).
-    city_index_rules no longer needs a point at all: curated-city membership
-    is precomputed onto properties_public.home_city_id (migration 375), so
-    that branch is a plain indexed equality join, not a live spatial test."""
+def test_build_clauses_city_quality_is_one_obec_predicate() -> None:
+    """W5 (migration 436): the matcher renders ONE `obec_id = ANY(...)` predicate.
+
+    Before W5 this branch built a nested EXISTS tree against `curated_cities_public`
+    joined on the precomputed `home_city_id`, and the same rule was implemented three
+    times over (here, in `browse_stats_properties`, and in the SPA prefilter RPC).
+    Migration 374's own header records two divergences found between those copies,
+    including an operator-chosen op silently re-interpreted as `>=`.
+
+    Now one SQL function owns rule evaluation and every consumer reduces to the same
+    form — a form with nothing left to diverge on (rule 16).
+
+    `ARRAY(SELECT ...)` and not `IN (SELECT ...)`: the former forces a
+    once-per-statement InitPlan, the latter can degrade into the per-row correlated
+    SubPlan that made this predicate cost 1,778,259 blocks.
+    """
     spec = WatchdogFilterSpec(
         city_index_rules=[{"index_name": "safety", "value": 60, "op": ">="}],
-        near_city_proximity={"radius_km": 10, "index_rules": []},
     )
     where, params = _build_match_clauses(spec)
-    city = [w for w in where if "curated_cities_public" in w]
-    # both branches emitted: one EXISTS for city_index_rules, one for near_city_proximity
-    assert len(city) == 2
-    joined = " ".join(city)
-    assert "l.geom" not in joined
-    assert "ST_MakePoint(l.lng, l.lat)" in joined
-    # city_index_rules branch joins the precomputed column, not a live containment test
-    assert "l.home_city_id IS NOT NULL" in joined
-    assert "c.city_id = l.home_city_id" in joined
-    assert "ST_Covers" not in joined
-    assert params["near_city_radius_m"] == 10000
+    city = [w for w in where if "curated_cities_matching" in w]
+    assert len(city) == 1, f"expected exactly one city-quality predicate, got {city}"
+    clause = city[0]
+    assert "l.obec_id = ANY (ARRAY(SELECT curated_cities_matching(" in clause
+    # The whole point: no nested EXISTS tree, no per-rule subquery, no interpolated op.
+    assert "EXISTS" not in clause
+    assert "curated_cities_public" not in clause
+    assert "home_city_id" not in clause
+    # The rules travel as ONE bound jsonb parameter, nothing string-interpolated.
+    assert params["city_index_rules"].obj == [
+        {"index_name": "safety", "value": 60, "op": ">="}
+    ]
+
+
+def test_build_clauses_near_city_proximity_is_retired_loudly() -> None:
+    """A retired filter that silently returns everything is worse than one that errors.
+
+    `near_city_proximity` had zero UI widgets, 0 of 7 filter_presets and 0 of 2
+    notification_subscriptions, and was never load-tested. Dropping the branch without
+    a raise would WIDEN every cohort that still carried the value.
+    """
+    spec = WatchdogFilterSpec(near_city_proximity={"radius_km": 10, "index_rules": []})
+    with pytest.raises(ValueError, match="near_city_proximity is retired"):
+        _build_match_clauses(spec)
 
 
 def test_build_clauses_property_grain_derived_predicates() -> None:
