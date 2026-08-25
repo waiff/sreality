@@ -34,6 +34,16 @@ import type {
 import { APP_NAME } from '../../frontend/src/lib/brand';
 
 const DEFAULT_RENOVATION_CZK = 0;
+/* Back-compat ONLY, never a second live definition of the fond rate: the value
+ * to seed when the lookup response carries no `fond_per_m2_czk_default` KEY at
+ * all — a bundle built from this tree talking to an API deployed before W7
+ * (build-extension.yml uploads a dist/ on every PR, so that pairing is the
+ * normal way this branch gets reviewed). Without it an absent key reads as
+ * "no fond applies", the yield returns null and the panel's headline figure
+ * silently disappears for every subject. The live definition is the server's
+ * `api/schemas.DEFAULT_FOND_CZK_PER_M2`, served per subject; delete this once
+ * no pre-W7 API can be reached. */
+const LEGACY_FOND_FALLBACK_CZK_PER_M2 = 10;
 const PATCH_DEBOUNCE_MS = 500;
 const POLL_INTERVAL_MS = 2000;
 // Agent estimates (Wave 1) run the LLM comparable search and may drain via the
@@ -396,10 +406,19 @@ function subjectArea(state: PanelState): SubjectArea {
  * never levied on a parcel, so when the denominator is a plot the rate must not
  * be multiplied by it at all: 10 Kč per m² × 905 m² of land manufactures ~9 050
  * Kč/month of cost, which the yield then subtracts from the rent — enough to
- * drive the figure negative. An unstamped area keeps the historical behaviour;
- * only a basis that positively says "parcel" switches the fond off. */
-function fondApplies(area: SubjectArea): boolean {
-  return area.basis !== PLOT_AREA_BASIS;
+ * drive the figure negative.
+ *
+ * WHERE that decision is made is the whole point. The server makes it once
+ * (`api/portal_lookup._fond_default_czk_per_m2`) and states it by serving a
+ * present-but-NULL rate; this reads that answer. Re-deriving it here from
+ * `area_basis` would be a second definition of "does a fond apply", and the two
+ * would disagree: the server tests `area_basis == 'plot'` OR
+ * `category_main == 'pozemek'`, and migration 423 added `area_basis` with no
+ * backfill — so a land row not yet re-scraped is `area_basis` NULL while it is
+ * plainly a parcel. An ABSENT field is an API predating W7: assume a fond
+ * applies, exactly as the panel did before. */
+function fondApplies(state: PanelState): boolean {
+  return state.listing?.fond_per_m2_czk_default !== null;
 }
 
 function defaultPrice(state: PanelState): number | null {
@@ -413,13 +432,16 @@ function defaultPrice(state: PanelState): number | null {
 
 /* The starting service charge, SERVED BY THE SERVER per subject
  * (api/schemas.DEFAULT_FOND_CZK_PER_M2, resolved through the lookup). The
- * extension deliberately holds no copy of the number: a literal here and a
- * literal there is two definitions of one rate. `null` is a real answer — the
- * server returns it when the subject's area is a parcel, i.e. when no fond can
- * apply — and it is also what a failed lookup leaves behind, where an empty
- * field is the honest state. */
+ * extension deliberately holds no live copy of the number.
+ *
+ * A served `null` is a real answer — no fond can apply to this subject — and
+ * an empty field is then the honest state. An ABSENT key is a different thing
+ * entirely: an API that predates W7, or no lookup row at all. Collapsing the
+ * two with `?? null` is what would blank the field, make `fond` null and drop
+ * the yield to "—" for every listing, so they are branched apart explicitly. */
 function defaultFond(state: PanelState): number | null {
-  return state.listing?.fond_per_m2_czk_default ?? null;
+  const served = state.listing?.fond_per_m2_czk_default;
+  return served === undefined ? LEGACY_FOND_FALLBACK_CZK_PER_M2 : served;
 }
 
 function defaultRent(state: PanelState): number | null {
@@ -436,7 +458,7 @@ function computeYield(state: PanelState): number | null {
   /* Not-applicable is ZERO, not null: a plot genuinely carries no fond, so the
    * yield is still rent × 12 ÷ acquisition and must keep rendering. Null stays
    * reserved for "a fond applies but we can't size it" (no rate, no area). */
-  const fond = !fondApplies(area)
+  const fond = !fondApplies(state)
     ? 0
     : costPerM2 != null && area.value != null
       ? costPerM2 * area.value
@@ -456,8 +478,14 @@ function computeYield(state: PanelState): number | null {
 function fondHint(state: PanelState): string {
   const area = subjectArea(state);
   /* Say WHY the field is inert rather than leaving the operator to wonder why
-   * their typed rate changes nothing. */
-  if (!fondApplies(area)) return 'Neuplatní se — plocha je pozemek.';
+   * their typed rate changes nothing. The DECISION came from the server; the
+   * `area_basis` stamp is used only to word it, and is absent for a land row
+   * the server recognised by `category_main` alone. */
+  if (!fondApplies(state)) {
+    return area.basis === PLOT_AREA_BASIS
+      ? 'Neuplatní se — plocha je pozemek.'
+      : 'Neuplatní se u tohoto typu nemovitosti.';
+  }
   if (state.costPerM2 == null || area.value == null) return '';
   return `= ${fmtCzk(Math.round(state.costPerM2 * area.value))}/měs`;
 }
@@ -513,7 +541,11 @@ function onToggleMinimize(): void {
 function bodyFromState(state: PanelState): YieldScenarioUpdate {
   return {
     rent_czk: state.rentTouched ? state.rent : null,
-    fond_per_m2_czk: state.costTouched ? state.costPerM2 : null,
+    /* `estimation_runs.scenario` is ONE persisted value shared with the SPA's
+     * RunPanel, which applies whatever it finds there. Writing a rate this
+     * panel has just declared inert would hand the same run two yields — ours
+     * with fond 0, the SPA's with the rate × a parcel. Never persist one. */
+    fond_per_m2_czk: state.costTouched && fondApplies(state) ? state.costPerM2 : null,
     price_czk: state.priceTouched ? state.price : null,
     renovation_czk: state.renovationTouched ? state.renovation : null,
   };
@@ -1341,6 +1373,9 @@ function mountPanel(): {
       key: 'cost', label: 'Fond oprav + SVJ', suffix: CZK_PER_M2_MONTH,
       value: state.costPerM2, onInput: (v) => onEdit('cost', v),
       hint: fondHint(state),
+      /* An editable field that changes nothing is a lie — and a typed rate
+       * would still reach `estimation_runs.scenario` for the SPA to apply. */
+      disabled: !fondApplies(state),
     }));
     fields.appendChild(buildField({
       key: 'price', label: 'Cena', suffix: 'Kč',
@@ -1393,6 +1428,7 @@ function mountPanel(): {
     value: number | null;
     onInput: (v: number | null) => void;
     hint?: string;
+    disabled?: boolean;
   }): HTMLElement {
     const wrap = document.createElement('div');
     wrap.className = 'field';
@@ -1407,6 +1443,7 @@ function mountPanel(): {
     input.inputMode = 'decimal';
     input.className = 'field-input';
     input.value = formatNumber(opts.value);
+    input.disabled = opts.disabled === true;
     input.dataset.key = opts.key;
     input.addEventListener('focus', () => { lastFocusedKey = opts.key; });
     input.addEventListener('blur', () => {

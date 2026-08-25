@@ -639,6 +639,12 @@
   transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
+.field-input:disabled {
+  color: var(--ink-4);
+  background: transparent;
+  cursor: not-allowed;
+}
+
 .field-input:focus {
   outline: none;
   border-color: var(--copper);

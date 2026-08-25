@@ -191,10 +191,19 @@ export interface PortalListing {
   mf_gross_yield_pct: number | null;
   /* The default service charge (fond oprav + SVJ) to seed the yield panel
    * with, in Kč per m² of floor area per MONTH — resolved server-side from
-   * THIS subject's denominator. `null` means a fond cannot apply at all (the
-   * area is a parcel). The one definition of the number lives in
-   * api/schemas.DEFAULT_FOND_CZK_PER_M2; the extension keeps no copy. */
-  fond_per_m2_czk_default: number | null;
+   * THIS subject's denominator. THREE distinct states, and collapsing any two
+   * of them blanks the panel's headline yield:
+   *   a number — the rate to seed;
+   *   `null`   — no fond can apply to this subject at all (its area is a
+   *              parcel). This is the server's ANSWER, and the one definition
+   *              of that decision — no consumer re-derives it;
+   *   absent   — the API predates W7 and knows nothing of the field.
+   * Optional on the wire for exactly that last reason: `api.ts` sends no
+   * version header, so a bundle built here can meet an older deployment, and
+   * the compiler must force that case to be handled (see `defaultFond` /
+   * LEGACY_FOND_FALLBACK_CZK_PER_M2 in content.ts). The one definition of the
+   * NUMBER lives in api/schemas.DEFAULT_FOND_CZK_PER_M2. */
+  fond_per_m2_czk_default?: number | null;
   latest_estimation: {
     estimation_id: number;
     estimate_kind: 'rent' | 'sale' | null;
