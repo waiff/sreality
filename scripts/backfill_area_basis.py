@@ -132,8 +132,14 @@ _UPDATE_SQL = """
 # underneath it just makes both slower.
 _REBUILD_ACTIVE_SQL = """
     SELECT count(*) FROM pg_stat_activity
-    WHERE state = 'active' AND query LIKE '%rebuild\\_%' AND pid <> pg_backend_pid()
+    WHERE state = 'active' AND query LIKE %(pattern)s AND pid <> pg_backend_pid()
 """
+
+# Bound as a VALUE, not spelled into the query: a literal `%` in an executed SQL
+# string is a psycopg placeholder hazard, and `tests/test_sql_placeholders.py`
+# guards against exactly that. `\_` escapes the underscore so this matches
+# `rebuild_browse_list` / `rebuild_properties_map_mv` and not `rebuildXlist`.
+_REBUILD_LIKE = r"%rebuild\_%"
 
 _STATEMENT_TIMEOUT_SQL = "SET statement_timeout = '600s'"
 
@@ -213,7 +219,7 @@ def main() -> int:
         with db.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(_STATEMENT_TIMEOUT_SQL)
-                cur.execute(_REBUILD_ACTIVE_SQL)
+                cur.execute(_REBUILD_ACTIVE_SQL, {"pattern": _REBUILD_LIKE})
                 active = int(cur.fetchone()[0])
                 if active and not args.ignore_rebuild:
                     LOG.warning("BACKFILL refusing to start: %d rebuild_%% "
