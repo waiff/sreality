@@ -18,6 +18,15 @@ refills. Land Kč/m² spreads 387→6 377 across portals. Land `estate_area` cov
 ~100% on sreality/idnes/bezrealitky/maxima but 0.1% / 1.2% / 3.1% on realitymix /
 mmreality / remax — the measurement that decided the fork in §2.2.
 
+**STATUS: COMPLETE — W1–W9 all shipped (2026-08-25).** The rail is live: required-argument
+signatures, the offline CI census (`tests/test_measure_registry_census.py` +
+`toolkit.measures.REGISTERED_SITES`) and `FilterDef.basis`. **Three items remain OPEN and are
+the operator's**, tracked in [roadmap/measure-track.md](../../roadmap/measure-track.md): the two
+W2 backfill WRITE passes (mmreality dum/prodej still reads a median 5 701 Kč/m² on a 905.0 m²
+median area, live 2026-08-25), the `area_basis` stamp's coverage (24.1% of listings, and **zero**
+rows carry the `plot` token — gate on `category_main` as well, never on `area_basis` alone), and
+`drop function public.browse_stats(…)` (approval + pg_dump).
+
 **Branch:** `feature/ppm2-measure-registry` (verified current with `origin/main`, zero commits ahead).
 **Next free migration number: 423** — verified: local and `origin/main` both top out at `422_pipeline_checks_public_loose_index_scan.sql`. Every "migration 405" and "migration 169" in the upstream lens material is wrong and would collide with merged files. Numbers below are claimed **in merge order**; a wave that merges out of order takes the then-next free number and never edits a merged file.
 
@@ -268,6 +277,62 @@ Offline Python, no DB, no new dependency, runs on every push via the existing `p
 
 **Also here:** `CLAUDE.md` rule #23 — "Every per-m² figure resolves from `measure_price_per_m2` / `measure_price_per_m2_basis`; no consumer re-derives the formula and no surface renders the number without its basis label." Plus a `docs/architecture.md` § entry.
 **Proves it correct:** the census must be GREEN against the post-W7 tree with a registry listing exactly the 64 sites; then add a bare `price_czk / area_m2` in a scratch file and confirm RED, and remove it. Also fix the stale comment at `test.yml:46-48` ("no jsdom yet") — `frontend/vite.config.ts:29` sets `environment: 'jsdom'`.
+
+**SHIPPED. Six corrections to the plan above.**
+
+1. **"A registry listing exactly the 64 sites" was the wrong shape, and would have been a lie.**
+   The 64 are the *consumer inventory* — the code locations the program had to CHANGE. What the
+   census counts is what survives AFTERWARDS, and the two sets barely overlap: most of the 64 are
+   gone (they now call the measure and spell nothing), while the census legitimately finds things
+   that were never on the list at all — pinning tests, prompt strings, a `jsonb` health `detail`
+   listing five column names. The registry as built declares **25 site-arms / 72 occurrences**,
+   keyed on `(file-or-database-object, arm)` with an exact COUNT rather than line numbers: line
+   numbers rot on every edit above them, a count moves only when the population does. Each entry
+   carries a `kind` (`defines` / `calls` / `labels` / `guards` / `prose` / `debt`) and a `why`.
+   Above it sit three `MEASURES` — `ppm2`, `fond_per_m2`, `gross_yield_pct` — each declaring
+   numerator, denominator, unit and validity bounds, which is the "every registered measure
+   declares…" half of the gate.
+2. **Comments are stripped; string literals and docstrings are not.** This line is the whole
+   design, and it is forced by the plan's own example: `price_stats_metrics.py`'s two units live
+   in a DOCSTRING, so a scanner that stripped all prose would miss the site the second arm exists
+   to catch. Scanning comments too would have registered ~30 explanatory `/* … */` blocks in the
+   SPA and made a reworded comment a CI failure. The rule that separates them: a comment is prose
+   ABOUT the code; a string is something the program can EMIT, and a unit inside one is a label a
+   user or a model will read. One consequence, documented at the registry: the `why` texts
+   deliberately DESCRIBE units rather than spelling them, so editing a justification cannot move
+   its own file's count.
+3. **Both regexes had to be rewritten for catastrophic backtracking.** The first draft's
+   `\s*(?:…| |\s)*` around the unit slash, and three consecutive `\s*` separated by optional
+   groups in the division arm, took the six-tree scan to **53 seconds** (5 s on a single 2 000-line
+   module). One star per gap over non-overlapping alternatives: **2.5 s**. A gate nobody will wait
+   for is a gate that gets switched off.
+4. **"Effective SQL definition" needs DROP tracking, not just the highest number.**
+   `properties_map_mv`'s newest `create` is migration 273's basis-blind one — dead history, since
+   425 drops it and `rebuild_properties_map_mv()` rebuilds it from `browse_projection`. Without
+   the drop pass the census would have been permanently red on a definition that does not exist.
+   A migration that drops-then-recreates in the same file (083, 425) is a redefinition, so the
+   comparison is strictly `drop_num > create_num`.
+5. **`test_every_pg_backed_numeric_filter_declares_a_unit` cannot pass as literally written.**
+   18 of the 32 column-backed numeric filters carry no unit, and 7 of those genuinely have none
+   (three identifiers, four 1..5 condition ranks). Inventing eleven agent-facing unit strings in a
+   per-m² wave is unreviewed metadata churn. Shipped instead: an explicit
+   `UNITLESS_NUMERIC_FILTERS` set, so *silence* is illegal while "this has no unit" stays a legal,
+   recorded answer — and the test also fails on a stale id in the set, and on a filter that is in
+   both. The charter's `max=500000 / step=1000` rescaling was NOT done: those constraints are
+   correct for a sale cohort and only the basis makes them ambiguous, which `basis` now states.
+6. **The sweep had missed one of the twelve W6 label sites — a real, live defect.**
+   `RunPanel.tsx`'s "Fond oprav + SVJ" input (charter site #27) still carried `suffix="Kč/m²"` on
+   a MONTHLY charge — off by twelve, and contradicted by the Chrome extension, where W7 renders
+   the same field with `CZK_PER_M2_MONTH`. Found by the census, fixed here: it reads
+   `PPM2_UNIT.rent` from the shared map. This is the census's first catch, before it had ever run
+   in CI.
+
+**Red/green proof, both ways.** GREEN against the post-W7 tree with the registry above. RED on a
+scratch file carrying `price_czk / area_m2` and `"Kč/m²"` — both arms fire, printing file, line,
+source text and instructions. RED again on an extra unit literal added to an already-registered
+file, as `COUNT MOVED`, printing the registered justification to re-read before bumping the
+number. Part (a) proven the same way: making one `@ts-expect-error` call valid turns the
+directive itself into a TS2578 build failure.
 
 ### W9 — The plausibility gate
 **Scope test: T3. Migration 427.** After W4. **Parallel with W6/W7.**

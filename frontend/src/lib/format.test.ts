@@ -86,6 +86,27 @@ describe('fmtMeasuredPricePerM2', () => {
   it('rounds to whole crowns', () => {
     expect(fmtMeasuredPricePerM2(318.62, 'rent')).toBe(`319${NBSP}Kč/m²/měs`);
   });
+
+  /* PART (a) OF THE PERMANENT RAIL, enforced by the compiler rather than by the
+   * runner. `npx tsc --noEmit` is already a blocking CI step, and
+   * `@ts-expect-error` inverts it: each line below must FAIL to type-check, and
+   * the moment one of them stops failing — the basis made optional, or a number
+   * accepted for it again, i.e. the deleted `fmtPricePerM2(price, area)` — the
+   * directive itself becomes the compile error (TS2578, verified).
+   *
+   * This is the half of the rail that stops the NEXT developer at the keyboard,
+   * before the census in tests/test_measure_registry_census.py is ever
+   * consulted. The calls sit in a never-invoked closure: the point is the
+   * compile, and the values are meaningless. */
+  it('cannot be called without a basis (checked by tsc, not at runtime)', () => {
+    const neverRun = () => {
+      // @ts-expect-error — the basis is REQUIRED: a bare per-m² number has no unit.
+      fmtMeasuredPricePerM2(91_535);
+      // @ts-expect-error — an area is not a basis (the old two-number signature).
+      fmtMeasuredPricePerM2(4_500_000, 62);
+    };
+    expect(typeof neverRun).toBe('function');
+  });
 });
 
 describe('fmtArea', () => {

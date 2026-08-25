@@ -479,6 +479,7 @@ renumber.** Navigate by area:
 - **Dedup + canonical properties:** #15 (design context: `docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md`)
 - **Notifications / city-quality / operator state / pipeline:** #16 #17 #18 #22
 - **Scraper framework & cadence:** #19 #20 #21
+- **Measures & labels:** #23 (program charter: `docs/design/ppm2-measure-unification.md`)
 
 1. **The schema in `migrations/` is append-only.** Never modify an existing migration.
    Schema changes go in a new numbered file (`002_*.sql`, `003_*.sql`...) and are applied
@@ -1170,6 +1171,64 @@ renumber.** Navigate by area:
     filter-preset save modal, the tag pickers, and this stage editor — the single colour-picking
     control app-wide; don't re-inline a swatch grid), and the entry-star / "konec" (terminal)
     controls carry `<InfoIcon>` (i) hints (native `title=`, the codebase's tooltip convention).
+23. **One measure, one definition, one label.** Every per-m² figure the platform computes or
+    renders — in SQL, in Python, in the SPA, in the Chrome extension — resolves from ONE named
+    measure carrying its own numerator, denominator, unit and validity bounds. No consumer
+    re-derives the formula; no surface renders the number without its basis label.
+
+    **The measure** is `public.measure_price_per_m2(price, area, category_main, category_type)`
+    and its label `public.measure_price_per_m2_basis(category_main, category_type)` (migration
+    425), both `IMMUTABLE PARALLEL SAFE` single-expression SQL with no `SET search_path`, so the
+    planner inlines them and a predicate over the measure is not a full scan. Numerator: the
+    asking price in CZK, monthly on the rent basis and capital otherwise, exactly as the portal
+    published it. Denominator: `area_m2`, **polymorphic by design** — floor area for byt / dum /
+    komercni, PLOT area for pozemek (the "Option A" fork; `listings.area_basis`, migration 423,
+    records which). Bounds: a NULL price, a NULL or non-positive area, an undecidable basis, or a
+    price below its per-basis floor (sale 100 000 CZK, rent 1 000 CZK, land deliberately
+    unfloored) all yield NULL — a visible gap, never a guess. Rounded to 2dp so all six
+    publishing relations return byte-identical figures.
+
+    **The basis is resolved from `(category_main, category_type)`, rent-first, and NEVER from
+    `listings.price_unit`** — that column is four legacy spellings of two concepts across nine
+    portals, a duplicate of `category_type`, not a per-area unit. The three tokens
+    (`sale_capital_czk_m2`, `rent_monthly_czk_m2`, `land_capital_czk_m2`) are published as
+    `price_per_m2_basis` on all six read relations, so a render surface READS the label rather
+    than recomputing it. Two states a *cohort* can be in are not bases and get no unit at all:
+    `mixed` (rule #22 makes a sale+rent cohort one click away — sale medians run ~91 535 Kč/m²
+    against rent's ~319 Kč/m²/měs, a 300x category error if they share an axis or a suffix) and
+    `unknown` (client-supplied rows carry no basis; the honest answer is not a default of sale).
+
+    **The faces.** `toolkit/measures.py` renders the SQL (`per_m2_sql(alias)`), mirrors the
+    resolution order for rows that never touched Postgres, and owns the vocabulary, the floors and
+    the unit strings; `frontend/src/lib/measure.ts` is its SPA twin and reads the server-published
+    token wherever a column exists; the Chrome extension, which can import neither, copies the one
+    unit string VERBATIM. `api/estimate_yield._scale` may not multiply a per-m² percentile by an
+    area without `require_scalable_basis` agreeing that the product may be CALLED what the caller
+    intends — the arithmetic is identical for a monthly and a capital rate, which is exactly why
+    an unlabelled one is dangerous rather than merely untidy.
+
+    **Why a rail and not a rule.** The program that unified this found **64 live call sites** —
+    nine SQL definitions, five Python-emitted statements bypassing every view, six client-side
+    re-derivations, twelve render surfaces, and `region_stats`, whose signature had no category
+    arguments at all, pooling sale flats, monthly rentals, houses and land into one distribution.
+    They were not written by careless people; they were written one at a time, each locally
+    reasonable. So W8 installed three interlocking mechanisms rather than a paragraph:
+    (a) **required-argument signatures** — `per_m2_sql(alias)` has no zero-arg fallback and
+    `fmtMeasuredPricePerM2(value, basis)` makes the old two-number call a TypeScript error under
+    the already-blocking `tsc --noEmit` (pinned by `@ts-expect-error` cases in `format.test.ts`,
+    which fail the build if the unsafe call ever starts compiling);
+    (b) **the census** — `tests/test_measure_registry_census.py` scans six source trees AND the
+    effective (highest-numbered, undropped) SQL definition of every database object for a
+    price-over-area division and for a per-m² unit literal, and fails unless every occurrence is
+    declared in `toolkit.measures.REGISTERED_SITES`. Two arms because one is provably not enough:
+    `scraper/price_stats_metrics.py`'s `12.0 * rent_per_m2_month / sale_per_m2` names no area, so
+    only the unit arm sees it. Comments are stripped, string literals and docstrings are not — a
+    comment is prose about the code, a string is something the program can emit;
+    (c) **`FilterDef.basis`** beside `FilterDef.unit`, because `CZK/m²` alone is two labels 300x
+    apart and the registry reaches agents that never see the cohort.
+    The census allows exactly the enumerated population and reds on the next one, whatever it is;
+    a registered site that is NOT legitimate is marked `kind="debt"` and must name an owner and a
+    blocker. The whole program is written up in `docs/design/ppm2-measure-unification.md`.
 
 
 ## Broker identity merges — auto-merge and the suppression rail

@@ -11,7 +11,8 @@ consumer needs:
 - a UI control hint (so the React `<FilterForm>` can render the right
   widget without per-filter case statements),
 - optional constraints (min / max / step / enum / list length),
-- optional unit (`m`, `%`, `days`, `m²`, `CZK`),
+- optional unit (`m`, `%`, `days`, `m²`, `CZK`) and, for a filter whose
+  number is a per-m² RATE, the `basis` that says which unit it is in,
 - optional enum value list with Czech + English labels,
 - legacy aliases so older field names stay readable.
 
@@ -33,6 +34,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
+
+from toolkit.measures import PPM2_BASES
 
 if TYPE_CHECKING:
     import psycopg
@@ -131,6 +134,14 @@ class FilterDef:
     agendas: frozenset[Agenda]
     constraints: dict[str, Any] = field(default_factory=dict)
     unit: str | None = None
+    # The per-m² MEASURE this filter's number is expressed in (CLAUDE.md rule
+    # #23). `unit` alone cannot label a rate: `CZK/m²` is a capital price on a
+    # sale cohort and a MONTHLY rent on a rental one, ~300x apart, and the
+    # registry is read verbatim by agents that never see the cohort. `basis`
+    # names which — or says, in one recorded word, that the cohort decides.
+    # None for every filter whose number is an absolute (a price, an area, a
+    # count): those are fully labelled by `unit`.
+    basis: str | None = None
     enum_values: tuple[EnumOption, ...] | None = None
     aliases: tuple[str, ...] = ()
     # True when NULL is a legal, meaningful value meaning "no constraint on this
@@ -142,6 +153,55 @@ class FilterDef:
     # estimation agent, where "any deal type" silently mixes rent and sale
     # comparables into one valuation.
     nullable: bool = False
+
+
+# --- the per-m² basis vocabulary (rule #23) --------------------------------
+# `toolkit.measures` owns the three row-level bases; a FILTER can additionally
+# be in the one state a row never is — authored before the cohort that decides
+# its unit exists. `min_price_per_m2` is typed once, then applied to whatever
+# category_type is selected, so the honest declaration is that the category
+# resolves it (`measure_price_per_m2_basis(category_main, category_type)`), not
+# a guess of `sale`.
+BASIS_DEPENDS_ON_CATEGORY = "depends_on_category"
+FILTER_BASES: frozenset[str] = frozenset({BASIS_DEPENDS_ON_CATEGORY, *PPM2_BASES})
+
+# Numeric, column-backed filters whose number carries NO unit, recorded here
+# rather than left to silence: `test_every_pg_backed_numeric_filter_declares_a_unit`
+# accepts a filter only if it declares a `unit` or appears below, so a new
+# numeric filter cannot ship unlabelled by omission. Three kinds live here, and
+# nothing else may:
+#   * identifiers — a code, not a quantity (no arithmetic is valid on them);
+#   * ordinal levels — a 1..5 rank, where "5 units" is meaningless;
+#   * bare counts and 0–10 index scores, where the counted noun / the scale is
+#     the label and the description already states it.
+# It is NOT an escape hatch for a dimensioned quantity. If the number is in
+# CZK, metres, m², days or percent, give it a `unit`.
+UNITLESS_NUMERIC_FILTERS: frozenset[str] = frozenset(
+    {
+        # identifiers
+        "category_sub_cb",
+        "locality_district_id",
+        "locality_region_id",
+        # ordinal 1..5 condition ranks (rule #14)
+        "building_condition_level_min",
+        "building_condition_level_max",
+        "apartment_condition_level_min",
+        "apartment_condition_level_max",
+        # counts of a named thing
+        "min_parking_lots",
+        "min_city_population",
+        "max_city_population",
+        "near_pop_5km_min",
+        "near_pop_15km_min",
+        # curated 0–10 city-quality index scores (rule #17)
+        "near_jobs_5km_min",
+        "near_jobs_15km_min",
+        "near_youth_5km_min",
+        "near_youth_15km_min",
+        "near_overall_5km_min",
+        "near_overall_15km_min",
+    }
+)
 
 
 # --- enum value tables ----------------------------------------------------
@@ -604,7 +664,7 @@ def _build_registry() -> dict[str, FilterDef]:
                 "Restrict to properties whose content changed in the last N "
                 "days (`last_change_at >= now() - N days`, where last_change_at "
                 "is the newest content snapshot across the property's children "
-                "— a price / area / description / attribute change, not a mere "
+                "— a price, area, description or attribute change, not a mere "
                 "re-sighting). Preset buckets: 1 (today), 3, 7, 14, 30."
             ),
             category=CATEGORY_STATUS,
@@ -1182,20 +1242,22 @@ def _build_registry() -> dict[str, FilterDef]:
             description=(
                 "Lower bound on THE per-m2 measure -- `price_per_m2`, i.e. "
                 "measure_price_per_m2(price, area, category_main, "
-                "category_type) from migration 425. Inclusive. NOT a "
-                "price_czk / area_m2 re-derivation: the measure is "
-                "basis-resolved and floored, so listings with NULL area_m2 "
-                "and listings under their basis floor both fall out when "
-                "this bound is set. The UNIT depends on the cohort -- "
-                "capital CZK/m2 for prodej / drazba / podil (of PLOT area "
-                "for pozemek), CZK/m2 per MONTH for pronajem -- so a bound "
-                "only means one thing once a category_type is chosen."
+                "category_type) from migration 425. Inclusive. It is the "
+                "measure that is compared, never a re-derivation from the "
+                "raw price and area columns: the measure is basis-resolved "
+                "and floored, so listings with NULL area_m2 and listings "
+                "under their basis floor both fall out when this bound is "
+                "set. The UNIT depends on the cohort -- capital CZK per m2 "
+                "for prodej / drazba / podil (of PLOT area for pozemek), "
+                "CZK per m2 per MONTH for pronajem -- so a bound only means "
+                "one thing once a category_type is chosen; see `basis`."
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.RANGE_INPUTS,
             agendas=_ALL_AGENDAS,
             constraints={"min": 0, "max": 500_000, "step": 1_000},
             unit="CZK/m²",
+            basis=BASIS_DEPENDS_ON_CATEGORY,
             aliases=("price_per_m2_min", "pricePerM2Min"),
         ),
         FilterDef(
@@ -1212,6 +1274,7 @@ def _build_registry() -> dict[str, FilterDef]:
             agendas=_ALL_AGENDAS,
             constraints={"min": 0, "max": 500_000, "step": 1_000},
             unit="CZK/m²",
+            basis=BASIS_DEPENDS_ON_CATEGORY,
             aliases=("price_per_m2_max", "pricePerM2Max"),
         ),
         FilterDef(
@@ -1865,6 +1928,7 @@ def _filter_to_json(f: FilterDef) -> dict[str, Any]:
         "agendas": sorted(str(a) for a in f.agendas),
         "constraints": dict(f.constraints) if f.constraints else None,
         "unit": f.unit,
+        "basis": f.basis,
         "enum_values": (
             [_enum_to_json(e) for e in f.enum_values]
             if f.enum_values else None

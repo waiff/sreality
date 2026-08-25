@@ -36,7 +36,7 @@ import {
   fmtMeasuredPricePerM2,
   fmtRelative,
 } from '@/lib/format';
-import { ppm2BasisFromToken } from '@/lib/measure';
+import { PPM2_UNIT, ppm2BasisFromToken } from '@/lib/measure';
 import { listingKindLabel } from '@/lib/enums';
 import {
   ApiError,
@@ -625,7 +625,13 @@ function YieldBlock({
           label="Fond oprav + SVJ"
           value={costPerM2}
           step="1"
-          suffix="Kč/m²"
+          /* A fond is levied per m² per MONTH — the yield formula one card up
+             subtracts it from the monthly rent before annualising. The bare
+             capital `Kč/m²` this carried misnamed it by a factor of twelve, and
+             disagreed with the extension, which renders the same field with
+             `CZK_PER_M2_MONTH`. Sourced from the shared map rather than retyped
+             so the two territories cannot drift again. */
+          suffix={PPM2_UNIT.rent}
           onChange={setCostTouching}
           hint={
             fondOprav != null

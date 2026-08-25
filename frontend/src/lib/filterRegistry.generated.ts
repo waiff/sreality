@@ -62,6 +62,13 @@ export interface FilterDef {
   agendas: Agenda[];
   constraints: Record<string, unknown> | null;
   unit: string | null;
+  /** For a filter whose number is a per-m² RATE, the measure that says which
+   *  unit it is in — the `unit` string alone is a capital price on a sale
+   *  cohort and a MONTHLY rent on a rental one, ~300x apart.
+   *  `"depends_on_category"` means the selected category resolves it; null
+   *  means the number is an absolute and `unit` labels it completely. See
+   *  FilterDef.basis in toolkit/filter_registry.py and CLAUDE.md rule #23. */
+  basis: string | null;
   enum_values: EnumOption[] | null;
   aliases: string[];
   /** NULL is a legal "no constraint" value, and the UI must offer a way to
@@ -126,6 +133,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -144,6 +152,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -168,6 +177,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "max": 10000
       },
       "unit": "m",
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -192,6 +202,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 0.05
       },
       "unit": "%",
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -218,6 +229,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         ]
       },
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "exact",
@@ -256,6 +268,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "max": 20
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -280,6 +293,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "max": 365
       },
       "unit": "days",
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -306,6 +320,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         ]
       },
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "active",
@@ -345,6 +360,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         ]
       },
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "any",
@@ -386,6 +402,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         ]
       },
       "unit": "days",
+      "basis": null,
       "enum_values": [
         {
           "value": 1,
@@ -421,7 +438,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "int",
       "pg_column": null,
       "default": null,
-      "description": "Restrict to properties whose content changed in the last N days (`last_change_at >= now() - N days`, where last_change_at is the newest content snapshot across the property's children — a price / area / description / attribute change, not a mere re-sighting). Preset buckets: 1 (today), 3, 7, 14, 30.",
+      "description": "Restrict to properties whose content changed in the last N days (`last_change_at >= now() - N days`, where last_change_at is the newest content snapshot across the property's children — a price, area, description or attribute change, not a mere re-sighting). Preset buckets: 1 (today), 3, 7, 14, 30.",
       "category": "Status",
       "ui_control": "single_select",
       "agendas": [
@@ -437,6 +454,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         ]
       },
       "unit": "days",
+      "basis": null,
       "enum_values": [
         {
           "value": 1,
@@ -484,6 +502,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "min": 0
       },
       "unit": "days",
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -505,6 +524,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "min": 0
       },
       "unit": "days",
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -526,6 +546,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "min": 0
       },
       "unit": "days",
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -547,6 +568,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "min": 0
       },
       "unit": "days",
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -568,6 +590,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "min": 0
       },
       "unit": "days",
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -589,6 +612,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "min": 0
       },
       "unit": "days",
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -618,6 +642,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         ]
       },
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "byt",
@@ -662,6 +687,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "byt",
@@ -718,6 +744,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         ]
       },
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "pronajem",
@@ -762,6 +789,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -780,6 +808,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "1+kk",
@@ -849,6 +878,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "rodinny_dum",
@@ -993,6 +1023,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "sreality",
@@ -1057,6 +1088,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "novostavba",
@@ -1107,6 +1139,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "cihla",
@@ -1166,6 +1199,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "cihla",
@@ -1206,6 +1240,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "A",
@@ -1268,6 +1303,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "max": 5
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "buildingConditionLevelMin"
@@ -1296,6 +1332,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "max": 5
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "apartmentConditionLevelMin"
@@ -1324,6 +1361,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "max": 5
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "buildingConditionLevelMax"
@@ -1352,6 +1390,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "max": 5
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "apartmentConditionLevelMax"
@@ -1377,6 +1416,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "ano",
@@ -1421,6 +1461,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": [
         {
           "value": "osobni",
@@ -1465,6 +1506,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "balcony"
@@ -1490,6 +1532,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "lift"
@@ -1515,6 +1558,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "parking"
@@ -1540,6 +1584,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -1563,6 +1608,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -1586,6 +1632,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -1611,6 +1658,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "min": 0
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "parking_lots_min",
@@ -1641,6 +1689,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 500
       },
       "unit": "CZK",
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "price_min",
@@ -1671,6 +1720,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 500
       },
       "unit": "CZK",
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "price_max",
@@ -1692,6 +1742,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "includeNoPrice"
@@ -1703,7 +1754,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "float",
       "pg_column": "price_per_m2",
       "default": null,
-      "description": "Lower bound on THE per-m2 measure -- `price_per_m2`, i.e. measure_price_per_m2(price, area, category_main, category_type) from migration 425. Inclusive. NOT a price_czk / area_m2 re-derivation: the measure is basis-resolved and floored, so listings with NULL area_m2 and listings under their basis floor both fall out when this bound is set. The UNIT depends on the cohort -- capital CZK/m2 for prodej / drazba / podil (of PLOT area for pozemek), CZK/m2 per MONTH for pronajem -- so a bound only means one thing once a category_type is chosen.",
+      "description": "Lower bound on THE per-m2 measure -- `price_per_m2`, i.e. measure_price_per_m2(price, area, category_main, category_type) from migration 425. Inclusive. It is the measure that is compared, never a re-derivation from the raw price and area columns: the measure is basis-resolved and floored, so listings with NULL area_m2 and listings under their basis floor both fall out when this bound is set. The UNIT depends on the cohort -- capital CZK per m2 for prodej / drazba / podil (of PLOT area for pozemek), CZK per m2 per MONTH for pronajem -- so a bound only means one thing once a category_type is chosen; see `basis`.",
       "category": "Property",
       "ui_control": "range_inputs",
       "agendas": [
@@ -1721,6 +1772,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 1000
       },
       "unit": "CZK/m²",
+      "basis": "depends_on_category",
       "enum_values": null,
       "aliases": [
         "price_per_m2_min",
@@ -1751,6 +1803,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 1000
       },
       "unit": "CZK/m²",
+      "basis": "depends_on_category",
       "enum_values": null,
       "aliases": [
         "price_per_m2_max",
@@ -1776,6 +1829,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 0.1
       },
       "unit": "%",
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "mf_gross_yield_pct_min",
@@ -1801,6 +1855,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 0.1
       },
       "unit": "%",
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "mf_gross_yield_pct_max",
@@ -1826,6 +1881,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 5
       },
       "unit": "m²",
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "area_min",
@@ -1851,6 +1907,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 5
       },
       "unit": "m²",
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "area_max",
@@ -1881,6 +1938,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 50
       },
       "unit": "m²",
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "estate_min"
@@ -1910,6 +1968,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 50
       },
       "unit": "m²",
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "estate_max"
@@ -1939,6 +1998,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 5
       },
       "unit": "m²",
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "usable_min"
@@ -1968,6 +2028,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 5
       },
       "unit": "m²",
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "usable_max"
@@ -1997,6 +2058,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 50
       },
       "unit": "m²",
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -2024,6 +2086,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 50
       },
       "unit": "m²",
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -2044,6 +2107,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -2064,6 +2128,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -2082,6 +2147,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -2099,6 +2165,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -2116,6 +2183,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "withEstimates"
@@ -2136,6 +2204,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -2158,6 +2227,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 1000
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "minCityPopulation"
@@ -2182,6 +2252,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 1000
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "maxCityPopulation"
@@ -2202,6 +2273,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
@@ -2224,6 +2296,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 10000
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "nearPop5kmMin"
@@ -2248,6 +2321,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 10000
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "nearPop15kmMin"
@@ -2272,6 +2346,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 0.5
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "nearJobs5kmMin"
@@ -2296,6 +2371,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 0.5
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "nearJobs15kmMin"
@@ -2320,6 +2396,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 0.5
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "nearYouth5kmMin"
@@ -2344,6 +2421,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 0.5
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "nearYouth15kmMin"
@@ -2368,6 +2446,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 0.5
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "nearOverall5kmMin"
@@ -2392,6 +2471,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 0.5
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "nearOverall15kmMin"
@@ -2414,6 +2494,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "min": 1
       },
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "priceChangeCountMin"
@@ -2440,6 +2521,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         ]
       },
       "unit": "days",
+      "basis": null,
       "enum_values": [
         {
           "value": 30,
@@ -2476,6 +2558,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": "%",
+      "basis": null,
       "enum_values": null,
       "aliases": [
         "totalPriceChangePct"
@@ -2497,6 +2580,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "constraints": null,
       "unit": null,
+      "basis": null,
       "enum_values": null,
       "aliases": [],
       "nullable": false
