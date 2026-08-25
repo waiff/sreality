@@ -854,7 +854,7 @@ Same ledger, same rules, plus what this build's evidence earned:
 | RN | `verify_pipeline` credit-outage matcher | [#1161](https://github.com/waiff/sreality/pull/1161) | ✅ merged |
 | W0a | F1 location index + F2 autovacuum (migs 429, 430) | [#1164](https://github.com/waiff/sreality/pull/1164) | ✅ merged |
 | W0b | F3 teardown (destructive gate) | — | |
-| W1a | Item 4 — admin gate hoist, 10 policies (mig 431) | #1165 | open |
+| W1a | Item 4 — admin gate hoist, 10 policies (mig 431) | [#1166](https://github.com/waiff/sreality/pull/1166) | open |
 | W1b | Item 4 — 36 view/function wraps (uniform spelling) | — | |
 | W2 | Item 1a — `_check_daily_cost` spelling | [#1163](https://github.com/waiff/sreality/pull/1163) | ✅ merged |
 | W3 | Item 1b — hour rollup + watermark + F5-minimal registry | — | |
