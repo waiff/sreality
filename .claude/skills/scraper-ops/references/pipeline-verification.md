@@ -50,8 +50,8 @@ because the tail runs on every sweep. Fail sits between ONE missed night (48h + 
 spread in when a run finishes = ~50.5h, deliberately only a warn — the skipped sweep's own red
 run already emails) and TWO (~69.5h). A NULL (no finished full run on record) is skipped, not
 red — only the missing LAP stamp is the deploy-day warn.
-Three **per-m² plausibility** checks joined in W9 of the measure-unification program
-(migration 427, view `measure_plausibility_by_source`, one read per run shared by all three;
+Four **per-m² plausibility** checks joined in W9 of the measure-unification program
+(migration 427, view `measure_plausibility_by_source`, one read per run shared by all four;
 they run on the 6-hourly `verify_pipeline.yml` lane only, NOT the hourly acute lane — a 12 s
 scan of the active corpus for a slow-moving signal). They exist because
 `data_quality_by_source` tests 29 fields for `IS NOT NULL` and nothing else, so it was
@@ -61,7 +61,11 @@ column and a per-m² unit price sitting in `price_czk` are 100% non-NULL. Grain 
 a category alone pools a broken portal with eight healthy ones. Each has a stock arm and a
 trailing-7-day arm and alarms on the worse: the stock arm indicts a defect that has been
 standing for months, the fresh arm catches a regression the week it ships instead of waiting
-for the corpus to churn.
+for the corpus to churn. **Every share is a ratio over rows that HAVE the inputs**, so a cell
+with nothing to measure scores no arm — and a skipped arm would otherwise be indistinguishable
+from a clean one. Two rails close that: `ppm2_measure_coverage` watches the denominator, and a
+check that scored NO arm at all reports `warn` with `value` null ("verified NOTHING"), never
+`ok`. If you ever see all four amber at once, the measure's inputs stopped being written.
 `area_vs_usable_divergence` — share of rows carrying BOTH areas that differ by >10% (the view's
 material band). Only rows with both: bazos populates `usable_area` on 0 of 10 409 dum rows and
 must read silent, not divergent, so the charter's literal `area_m2 IS DISTINCT FROM usable_area`
@@ -75,6 +79,19 @@ An absolute LEVEL, not the "jump" the charter asked for: the unit-price masquera
 it has been standing for the life of the portals carrying it. Live: ceskereality komercni/pronajem
 20.0%, realitymix 19.0%, remax 11.3%, bazos 6.7% — against idnes and sreality at 0.5% in the same
 cell, which is exactly the split between portals with and without a per-area price guard.
+`ppm2_measure_coverage` — share of a cell's active rows the measure has NO INPUT for (no price,
+or no positive area), skipping cells whose basis is undecidable (there an absent measure is the
+specified answer). Rows the floor rejected are NOT counted — they have their inputs and
+`ppm2_basis_floor_share` already indicts them. This is the axis that sees what the other three
+structurally cannot: live, sreality publishes 27 174 active `pozemek` rows with `area_m2` NULL on
+all of them (plot size is in `estate_area`), so those four cells produce no measure at all while
+every other axis skips them and reads clean — and `data_quality_by_source` can't see it either,
+grouping by (source, field) with no category grain (sreality `area_m2` reads 71.7% populated).
+Severity splits by ARM: the stock arm can only **warn** (a standing, sanctioned gap nobody clears
+today — warn 0.95, the five live dark cells are 0.995-1.000 and the next cell down is 0.894),
+while the 7-day arm **fails** at 0.90 (that share among this week's arrivals is a parser
+regression in flight; worst live scored 7d gap is 0.358). It is also the anti-silencing rail: a
+portal that started writing NULL `area_m2` would make the divergence and floor axes go QUIET.
 `ppm2_median_shift` — each cell's own median area and median Kč/m² against ITSELF a week ago,
 read from this check's own `pipeline_check_results.details` row from 6-14 days back (no new table).
 Deliberately NOT a cross-portal comparison: measured live, portal medians legitimately differ by up
@@ -82,10 +99,15 @@ to 19x on mix (idnes' rural land is 8.5x the peer Kč/m²), so a peer arm cannot
 a catalogue. It cannot see a defect older than its baseline — that is what the two direct detectors
 are for — but it fires at 3x on any new basis flip, and it will fire when the W2 backfill heals
 mmreality (6.96x on area, 7.45x on the measure). Thresholds are sized on the noisiest real weekly
-move measurable today, 1.90x. No baseline is `ok` for the first week after deploy and `warn` after,
-so a check that has been erroring for a fortnight cannot read as green; an empty view read (the
+move measurable today, 1.90x. Each median is gated on **its own support in both weeks** — the rows
+carrying that value, never `n_active`: 64 cells clear `n_active >= 200` but only 58/56 clear it on
+area/Kč-m² support, and bezrealitky pozemek/prodej is 1 643 active rows with NINE areas whose spread
+is 17.6x, so gating on cell size would red the tile and ring the bell on two ordinary delistings.
+No baseline is `ok` for the first week after deploy and `warn` after,
+so a check that has been erroring for a fortnight cannot read as green; a baseline that matched
+nothing is `warn` ("compared NOTHING"), not a stable 1.00x; an empty view read (the
 `is_platform_admin()` gate failing for the job's role) or an unreadable one (migration 427 not
-applied yet) is `warn` naming the cause, never `ok` and never three red tiles.
+applied yet) is `warn` naming the cause, never `ok` and never four red tiles.
 
 The six dedup-specific checks (street/geo debt, eligibility funnel,
 merge latency, engine health, merge-precision sample) went with the engine, along with their

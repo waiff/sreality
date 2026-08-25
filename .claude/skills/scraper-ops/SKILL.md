@@ -407,10 +407,12 @@ Two lanes: `llm_health.yml` hourly (the acute checks, `--only ... --exit-nonzero
 `fail` also reds the run and emails) and `verify_pipeline.yml` 6-hourly (everything). Live checks:
 `llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`, `worker_liveness`,
 `dual_write_parity`, `property_maintenance`, `broker_resolution_freshness`,
-`broker_merge_suppression`, and — 6-hourly only, from the per-m² measure program's W9 — the three
-plausibility checks `ppm2_median_shift`, `ppm2_basis_floor_share` and `area_vs_usable_divergence`
-over `measure_plausibility_by_source` (migration 427), which watch what a value IS where
-`data_quality_by_source` only tests that it exists. Thresholds live in
+`broker_merge_suppression`, and — 6-hourly only, from the per-m² measure program's W9 — the four
+plausibility checks `ppm2_median_shift`, `ppm2_basis_floor_share`, `area_vs_usable_divergence` and
+`ppm2_measure_coverage` over `measure_plausibility_by_source` (migration 427), which watch what a
+value IS where `data_quality_by_source` only tests that it exists — the fourth watching whether
+there is anything to measure at all, since the other three are ratios that skip a cell with no
+inputs and would read clean on a corpus gone dark. Thresholds live in
 `app_settings.pipeline_check_thresholds` over code defaults in `DEFAULT_THRESHOLDS`.
 **Per-check rationale, incident history and threshold sizing:
 `.claude/skills/scraper-ops/references/pipeline-verification.md`.**

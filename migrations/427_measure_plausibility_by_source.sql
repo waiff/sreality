@@ -72,6 +72,23 @@
 -- medians, where its job is to catch the NEXT regression on the day it ships
 -- rather than to re-derive one that is already standing.
 --
+-- EVERY RATIO ABOVE IS BLIND TO A CELL WITH NO INPUTS, so the view also publishes
+-- the DENOMINATORS. This is not a refinement, it is the difference between a gate
+-- and a decoration: a share over rows that have the inputs is skipped when there
+-- are none, and a skipped arm scores exactly like a clean one. Live today,
+-- `sreality` publishes 27 174 active `pozemek` rows with `area_m2` NULL on all
+-- 27 174 of them (the plot size is in `estate_area`), so all four sreality land
+-- cells report n_floor_eligible 0, n_area_pairs 0 and both medians NULL -- and
+-- every arm above calls them healthy while the measure does not exist for ~7% of
+-- the active corpus. `data_quality_by_source` cannot see it either: it groups by
+-- (source, field) with no category grain, so sreality's `area_m2` reads 71.7%
+-- populated -- mild patchiness, not a category sitting at zero. There was no
+-- "elsewhere" for this to surface at; `measure_input_gap_share` is that elsewhere.
+-- The same blindness is what would make a FUTURE parser regression quieter rather
+-- than louder: if mmreality started writing NULL instead of the plot area, its
+-- n_area_pairs would fall to 0 and today's 99.7% divergence FAIL would flip to a
+-- green skip. With the coverage arm it flips to a coverage alarm instead.
+--
 -- THE 7-DAY ARMS EXIST FOR DETECTION LATENCY. A regression introduced today only
 -- reaches the stock share as fast as the corpus churns -- weeks. The same
 -- regression is ~100% of the rows that arrived since it shipped. Live proof that
@@ -141,7 +158,43 @@ select * from (
          (count(*) filter (where area_pair and is_recent
              and abs(area_m2 - usable_area) / greatest(area_m2, usable_area) > 0.10))::numeric
            / nullif(count(*) filter (where area_pair and is_recent), 0)
-           as area_divergence_share_7d
+           as area_divergence_share_7d,
+         -- COVERAGE. Every column above is a ratio over rows that HAVE the inputs, so
+         -- a cell with no inputs at all scores no arm and is skipped -- which reads
+         -- exactly like a clean one. The four columns below are the denominators that
+         -- make "nothing to measure" say so. `n_area_valued` / `n_ppm2_valued` are the
+         -- SUPPORT of the two medians (percentile_cont ignores NULLs), never n_active:
+         -- bezrealitky pozemek/prodej has 1 643 active rows and 9 areas, so its median
+         -- rests on 9 values and must not be gated on 1 643.
+         (count(area_m2))::bigint                                  as n_area_valued,
+         (count(price_per_m2))::bigint                             as n_ppm2_valued,
+         (count(*) filter (where is_recent))::bigint               as n_active_7d,
+         -- The share of active rows for which the measure has NO INPUT -- no price, or
+         -- no positive area. Deliberately NOT `price_per_m2 is null`: a row the basis
+         -- floor rejected has its inputs and is already indicted by floor_null_share,
+         -- and pooling the two would bill one portal twice for one defect. NULL when
+         -- the basis itself is undecidable, because there the absent measure is the
+         -- specified answer (charter: a visible gap, never a guess) and not a gap.
+         --
+         -- IT IS `total MINUS eligible`, NEVER `filter (where not floor_eligible)`, and
+         -- the difference is the whole column. `floor_eligible` is `price is not null
+         -- AND area_m2 > 0 AND ...`; with `area_m2` NULL the comparison is NULL, so the
+         -- conjunction is NULL, and `not NULL` is NULL -- which a FILTER clause drops.
+         -- The rows this column exists to count are exactly the rows with a NULL area,
+         -- so the negated spelling reports 0.484 where the truth is 1.000 and hides all
+         -- 27 174 sreality land rows. Measured both ways against production before this
+         -- line was written this way.
+         case when measure_price_per_m2_basis(category_main, category_type) is null
+              then null
+              else (count(*) - count(*) filter (where floor_eligible))::numeric
+                   / count(*)
+         end                                                       as measure_input_gap_share,
+         case when measure_price_per_m2_basis(category_main, category_type) is null
+              then null
+              else (count(*) filter (where is_recent)
+                    - count(*) filter (where floor_eligible and is_recent))::numeric
+                   / nullif(count(*) filter (where is_recent), 0)
+         end                                                       as measure_input_gap_share_7d
     from rows
    group by source, category_main, category_type
 ) __admin_gate
@@ -156,8 +209,12 @@ comment on view public.measure_plausibility_by_source is
   'presence only and is structurally blind to a populated-but-wrong value. Divergence is '
   'measured ONLY over rows carrying both areas (n_area_pairs) and only above a 10% '
   'relative band; for category_main = ''pozemek'' area_m2 is the PLOT by design (Option A) '
-  'so divergence there is expected and the check skips those cells. ~12 s sequential scan: '
-  'read it once per run, never per-row.';
+  'so divergence there is expected and the check skips those cells. Also publishes the '
+  'DENOMINATORS every one of those ratios is blind to: n_area_valued / n_ppm2_valued are '
+  'the support of the two medians (gate a median on its own support, never on n_active), '
+  'and measure_input_gap_share is the share of active rows the measure has no input for -- '
+  'the arm that makes a cell with nothing to measure say so instead of reading clean. '
+  '~12 s sequential scan: read it once per run, never per-row.';
 
 -- Live ACL target, identical to data_quality_by_source and pipeline_checks_public:
 -- authenticated SELECT (behind the in-body admin gate), service_role full, anon dark.
@@ -197,3 +254,25 @@ commit;
 --   -- area_divergence_share 0.000 -- and ppm2_median_shift must have FIRED on the
 --   -- run that followed the backfill: 6.96x on area, 7.45x on the measure, both
 --   -- far above the 3.0x fail ratio. A silent heal means the shift check is inert.
+--
+--   -- COVERAGE (the arm that closes the fail-open hole). Expect exactly 5 cells at
+--   -- or above 0.95 on 2026-08-25 -- sreality pozemek prodej/podil/pronajem/drazba
+--   -- at 1.000 (0 of 20 484 / 5 825 / 459 / 406 rows carry an area_m2 at all) and
+--   -- bezrealitky pozemek/prodej at 0.995 (9 of 1 643). The next cell down is
+--   -- realitymix ostatni/pronajem at 0.894, so the 0.95 warn separates "this cell
+--   -- has no measure" from ordinary portal incompleteness with 5.6pp of headroom.
+--   SELECT source, category_main, category_type, n_active, n_ppm2_valued,
+--          round(measure_input_gap_share, 3), n_active_7d,
+--          round(measure_input_gap_share_7d, 3)
+--     FROM measure_plausibility_by_source
+--    WHERE n_active >= 200 AND measure_input_gap_share >= 0.50
+--    ORDER BY measure_input_gap_share DESC;
+--
+--   -- Median SUPPORT vs cell size: the gap this view exists to expose. 64 cells
+--   -- clear n_active >= 200; only 58 clear it on area support and 56 on Kc/m2
+--   -- support, so 6 and 8 cells would be compared week-over-week on a median
+--   -- resting on as few as 9 values if the check gated on n_active.
+--   SELECT count(*) FILTER (WHERE n_active >= 200)      AS gate_on_n_active,
+--          count(*) FILTER (WHERE n_area_valued >= 200) AS gate_on_area_support,
+--          count(*) FILTER (WHERE n_ppm2_valued >= 200) AS gate_on_ppm2_support
+--     FROM measure_plausibility_by_source;

@@ -30,6 +30,7 @@ describe('pipelineCheckLabel', () => {
   it('names the three per-m\u00b2 plausibility checks', () => {
     expect(pipelineCheckLabel('ppm2_basis_floor_share')).toBe('K\u010d/m\u00b2 price floor');
     expect(pipelineCheckLabel('area_vs_usable_divergence')).toBe('Area vs usable area');
+    expect(pipelineCheckLabel('ppm2_measure_coverage')).toBe('K\u010d/m\u00b2 coverage');
   });
 });
 
@@ -49,6 +50,10 @@ describe('pipelineCheckValueLabel', () => {
     // "20.03" reads as a count; the share it actually is has to say so.
     expect(pipelineCheckValueLabel(20.03, 'ppm2_basis_floor_share')).toBe('20.03%');
     expect(pipelineCheckValueLabel(7.455, 'ppm2_median_shift')).toBe('7.46\u00d7');
+    expect(pipelineCheckValueLabel(99.45, 'ppm2_measure_coverage')).toBe('99.45%');
+    /* A check that measured nothing reports value null, and the tile must render the
+     * em-dash rather than a 0 that reads as a real measurement. */
+    expect(pipelineCheckValueLabel(null, 'ppm2_median_shift')).toBe('\u2014');
     expect(pipelineCheckValueLabel(1351.76, 'llm_burn_rate')).toBe('1351.76');
     expect(pipelineCheckValueLabel(1351.76)).toBe('1351.76');
   });
