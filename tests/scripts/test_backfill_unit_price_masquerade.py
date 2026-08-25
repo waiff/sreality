@@ -126,12 +126,20 @@ class _FakeCursor:
         params = params or {}
         if "GROUP BY source" in sql:
             self._rows = [("ceskereality", len(self._conn.corpus))]
+        elif "l.id = ANY(" in sql:
+            # Step 2 of the page: payload by primary key, for exactly the ids
+            # step 1 returned. Checked BEFORE the step-1 branch — both name
+            # `FROM listings l`.
+            wanted = set(params["ids"])
+            self._rows = [r for r in self._conn.corpus if r[0] in wanted]
         elif "FROM listings l" in sql:
+            # Step 1 of the page: ids only, no wide column.
             if self._conn.raise_on_select:
                 raise RuntimeError("statement timeout")
             after, page = params["after"], params["page"]
-            self._rows = [r for r in self._conn.corpus if r[0] > after][:page]
-            self._conn.pages.append(len(self._rows))
+            rows = [r for r in self._conn.corpus if r[0] > after][:page]
+            self._conn.pages.append(len(rows))
+            self._rows = [(r[0],) for r in rows]
         elif "UPDATE listings" in sql:
             self._conn.quarantined.append(params["id"])
             self._rows = []
@@ -222,3 +230,44 @@ def test_a_cancelled_statement_still_reports_counts_and_a_cursor(
             mod.main()
     assert "BACKFILL done examined=0" in caplog.text
     assert "BACKFILL INCOMPLETE" in caplog.text
+
+
+def test_page_ids_query_touches_no_wide_column():
+    # The whole point of the two-statement page. `listings` carries 9.1 GB of
+    # TOAST; naming raw_json here lets the planner detoast ahead of the LIMIT,
+    # which is what cancelled page 8 of the first live dispatch 35,000 rows in.
+    assert "raw_json" not in mod._PAGE_IDS_SQL
+    assert "ORDER BY l.id" in mod._PAGE_IDS_SQL
+    assert "LIMIT" in mod._PAGE_IDS_SQL
+
+
+def test_payload_query_is_keyed_by_id_and_carries_no_limit():
+    # Step 2 must fetch exactly the ids step 1 chose — never re-filter, never
+    # re-LIMIT, or the two halves of a page could disagree about which rows the
+    # cursor has passed and the sweep would skip inventory silently.
+    assert "l.id = ANY(" in mod._PAYLOAD_SQL
+    assert "LIMIT" not in mod._PAYLOAD_SQL
+    assert "%(after)s" not in mod._PAYLOAD_SQL
+
+
+def test_payload_projection_matches_the_positional_unpacking():
+    # main() unpacks the payload row into nine names positionally. Nothing else
+    # pins that order, and swapping two would mis-attribute a verdict.
+    body = mod._PAYLOAD_SQL.split("SELECT", 1)[1].split("FROM", 1)[0]
+    depth, cur, items = 0, "", []
+    for ch in body:                      # split on top-level commas only —
+        if ch == "(":                    # the CASE arm contains none, but a
+            depth += 1                   # future edit might.
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            items.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    items.append(cur.strip())
+    names = [i.split(" AS ")[-1].strip() if " AS " in i else i.split(".")[-1].strip()
+             for i in items]
+    assert names == ["id", "source", "source_id_native", "category_main",
+                     "category_type", "property_id", "price_czk", "area_m2",
+                     "raw_price_text"]
