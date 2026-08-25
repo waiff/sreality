@@ -370,3 +370,47 @@ def test_bare_plocha_alone_is_a_total_not_an_uzitna():
         html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
     )
     assert (listing.area_m2, listing.area_basis) == (58.0, "total")
+
+
+def _with_cena(cell_text: str) -> str:
+    spec = '<div class="i-info"><span class="i-info__title">Cena</span>' \
+           '<span class="i-info__value"> {} </span></div>'
+    return DETAIL_HTML.replace(
+        '<dl class="g-info">', '<dl class="g-info">' + spec.format(cell_text),
+    )
+
+
+def test_jsonld_offer_is_vetoed_by_a_per_area_cena_cell():
+    # The JSON-LD offer is a bare NUMBER, and ceskereality puts the RATE there
+    # verbatim: production carries `"price":100` beside `100 Kč za m²/měsíc`.
+    # W1's parse-time rail only guarded the fallback path, so the primary path
+    # walked 1,254+ per-m² rows straight into price_czk. Measured 2026-08-24.
+    listing = parse_detail(
+        _with_cena("100 Kč za m²/měsíc"), source_url=_DETAIL_URL,
+        category_main="komercni", category_type="pronajem",
+    )
+    assert listing.price_czk is None
+
+
+def test_jsonld_offer_survives_an_ordinary_cena_cell():
+    listing = parse_detail(
+        _with_cena("6 999 000 Kč"), source_url=_DETAIL_URL,
+        category_main="byt", category_type="prodej",
+    )
+    assert listing.price_czk == 6_999_000
+
+
+def test_jsonld_offer_survives_a_per_area_note_beside_the_total():
+    listing = parse_detail(
+        _with_cena("6 999 000 Kč (170 707 Kč/m²)"), source_url=_DETAIL_URL,
+        category_main="byt", category_type="prodej",
+    )
+    assert listing.price_czk == 6_999_000
+
+
+def test_jsonld_offer_survives_when_the_page_has_no_cena_cell_at_all():
+    listing = parse_detail(
+        DETAIL_HTML, source_url=_DETAIL_URL,
+        category_main="byt", category_type="prodej",
+    )
+    assert listing.price_czk == 6_999_000

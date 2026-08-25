@@ -45,9 +45,9 @@ every stored watchdog spec and saved preset, and breaking archived-run display (
 
 | Wave | Purpose | Test | Migration | Status |
 | --- | --- | --- | --- | --- |
-| W1 | Truth at the source: shared `derive_headline_area` across all 9 parsers, shared per-area price rail, per-basis floors | T3 | 423 | ⬜ |
-| W2 | Heal stored damage: mmreality area + unit-price masquerade backfills | T3 | — | ⬜ |
-| W3 | Property-grain coherence: numerator and denominator from the same child | T1+T3 | 424 | ⬜ |
+| W1 | Truth at the source: shared `derive_headline_area` across all 9 parsers, shared per-area price rail, per-basis floors | T3 | 423 | ✅ |
+| W2 | Heal stored damage: mmreality area + unit-price masquerade backfills | T3 | — | 🟨 code + dry-run |
+| W3 | Property-grain coherence: numerator and denominator from the same child | T1+T3 | 424 | ✅ |
 | W4 | **Keystone** — `measure_price_per_m2` + `measure_price_per_m2_basis` in SQL; 6 relations repointed | T1+T2 | 425 | ✅ |
 | W5 | Python + API call sites onto the named measure (`toolkit/measures.py`) | T1+T2 | 426 | ⬜ |
 | W6 | Frontend: one formatter, basis on every surface, the map Kč/m² toggle | T1+T2 | — | ⬜ |
@@ -141,6 +141,38 @@ That is a **standing, sanctioned gap** (the charter's "a visible gap, never a gu
 regression — which is why the stock arm can only amber, while the same share among a week's new
 arrivals fails. Teaching the measure to read `estate_area` for `pozemek` is the obvious follow-up
 and is deliberately NOT part of W9: this wave makes the hole visible, it does not fill it.
+### W2 open items
+
+The two backfills are written, tested and measured; the **write pass is the operator's**
+(`--write`, one portal at a time). W2 also found three live holes W1 believed it had closed —
+all now fixed with a failing-first test, all of which the heal depended on, because a
+quarantine the next drain cycle undoes is not a heal:
+
+- **ceskereality's JSON-LD offer bypassed the per-area rail.** `parse_detail` trusted
+  `offers.price` first, and the portal puts the RATE there verbatim (`"price":100` beside
+  `100 Kč za m²/měsíc`). The rail only ever guarded the fallback path. The "Cena" spec cell
+  now VETOES the offer rather than merely standing in for it when absent.
+- **realitymix brackets its marker** (`45 Kč / (za m²)`), and the anchored test could not
+  open a bracket, so it walked past every one of ~1,880 confirmed rows.
+- **The shared anchor knew only Kč, and could not survive a decimal amount.** Both portals
+  also quote in EUR — ceskereality stages `16 EUR za m²/měsíc` verbatim, realitymix renders
+  `12,00 € / (za m²/měsíc)` and its amount scanner (an integer run, like every portal's)
+  stops at the comma, so the slice reaching the rail began `,00 € …`. These rows were not
+  merely missed, they were affirmatively decided `keep — no per-area marker`. The anchor now
+  accepts `eur`/`€` and absorbs a leading decimal fraction, which adds **336 ceskereality**
+  (1,015 → **1,351**, 1,336 active) and **~281 realitymix** (260 active) confirmed rows. A
+  EUR *total* (`6 500 EUR za měsíc`, 46 ceskereality rows) is a currency bug, not a unit
+  masquerade, and is still read as a total — the anchor's negatives are unchanged.
+
+Still open after the write pass:
+
+- **bazos is unrecoverable by design.** Across all 26,592 priced active bazos rows, ZERO
+  carry a per-area marker anywhere in structured state — the cell is a bare `170 Kč` and
+  the m² basis lives only in the prose description. The confirmed damage (Karlín offices at
+  `432 Kč` on 635 m²) is real and is left untouched. Reaching it needs a description-level
+  reader, which is W9's plausibility-gate ground, not a backfill's.
+- A whole-fleet `area_basis` backfill. W2 stamps mmreality's 11,218 rows because it is
+  re-deriving them anyway; the other eight portals are still NULL.
 
 ## Next after this program
 
