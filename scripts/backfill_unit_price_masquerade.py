@@ -54,14 +54,23 @@ rewrite.
 The read is KEYSET-PAGINATED and exhaustive by construction. The three portals
 hold 220,456 priced rows, so a single capped `LIMIT` would stop short of the
 corpus and — because the order is `id ASC` — the block it skipped would be the
-NEWEST inventory, while the log still read like a clean finish. Each page is one
-short statement (`id > cursor ORDER BY id LIMIT --batch-size`): the ceskereality
-and bazos arms detoast `raw_json` per row, and the cluster's `statement_timeout`
-is 120s, so a whole-corpus statement is also a real cancellation risk. The run
-walks pages until one comes back short, `--max-seconds` is checked BETWEEN pages
-(not only inside one), and the summary + resume cursor are emitted from a
-`finally`, so an aborted or Ctrl-C'd pass still tells the operator where it got
-to. A pass that stopped early logs `BACKFILL INCOMPLETE` — silence means done.
+NEWEST inventory, while the log still read like a clean finish.
+
+Each page is TWO statements, and that split is load-bearing. `listings` carries
+9.1 GB of TOAST and the ceskereality and bazos arms detoast `raw_json` per row,
+so a page that both SELECTS and PROJECTS in one statement runs against the
+cluster's 120s `statement_timeout` — measured on the first live dispatch:
+`--batch-size 5000` took ~60s per page and was cancelled on page 8, 35,000 of
+ceskereality's 70,560 rows in. So page one asks for IDS ONLY (`id > cursor ORDER
+BY id LIMIT --batch-size`, naming no wide column) and page two fetches the
+payload for exactly those ids by primary key. `--batch-size` therefore bounds
+the detoast per statement, and its default is 1000.
+
+The run walks pages until one comes back short, `--max-seconds` is checked
+BETWEEN pages (not only inside one), and the summary + resume cursor are emitted
+from a `finally`, so an aborted or Ctrl-C'd pass still tells the operator where
+it got to. A pass that stopped early logs `BACKFILL INCOMPLETE` — silence means
+done.
 
 Usage:  python -m scripts.backfill_unit_price_masquerade --dry-run
         python -m scripts.backfill_unit_price_masquerade --source realitymix --write
@@ -106,13 +115,19 @@ _FRAGMENT_PATTERN = {
 
 QUARANTINE, KEEP, UNCONFIRMED = "quarantine", "keep", "unconfirmed"
 
-_SELECT_SQL = """
-    SELECT l.id, l.source, l.source_id_native, l.category_main,
-           l.category_type, l.property_id, l.price_czk, l.area_m2,
-           CASE l.source
-               WHEN 'ceskereality' THEN l.raw_json->'params'->>'cena'
-               WHEN 'bazos'        THEN l.raw_json->>'price_text'
-           END AS raw_price_text
+# TWO statements per page, and the split is load-bearing. `listings` carries
+# 9.1 GB of TOAST, so the payload's `raw_json` projection detoasts one object per
+# row. The single-statement form this replaced asked for `--batch-size` of those
+# inside one statement and ran right at the cluster's 120 s `statement_timeout`:
+# on the first live dispatch, pages 2-6 took ~60 s each and page 8 was cancelled,
+# 35 000 of ceskereality's 70 560 rows in.
+#
+# Step 1 asks for IDS ONLY, naming no wide column, so the planner can serve it
+# id-ordered and stop at the page size. Step 2 fetches the payload for exactly
+# those ids by primary key. Each statement is then bounded by the page rather
+# than by whatever the planner decided to detoast first.
+_PAGE_IDS_SQL = """
+    SELECT l.id
     FROM listings l
     WHERE l.source = ANY(%(sources)s::text[])
       AND l.price_czk IS NOT NULL
@@ -120,6 +135,23 @@ _SELECT_SQL = """
     ORDER BY l.id
     LIMIT %(page)s::int
 """
+
+_PAYLOAD_SQL = """
+    SELECT l.id, l.source, l.source_id_native, l.category_main,
+           l.category_type, l.property_id, l.price_czk, l.area_m2,
+           CASE l.source
+               WHEN 'ceskereality' THEN l.raw_json->'params'->>'cena'
+               WHEN 'bazos'        THEN l.raw_json->>'price_text'
+           END AS raw_price_text
+    FROM listings l
+    WHERE l.id = ANY(%(ids)s::bigint[])
+    ORDER BY l.id
+"""
+
+# One-off maintenance headroom over the cluster's 120 s interactive default.
+# Session-level, not SET LOCAL: db.connect() is autocommit, where SET LOCAL
+# would silently no-op. Insurance only — the paging above is the fix.
+_STATEMENT_TIMEOUT_SQL = "SET statement_timeout = '600s'"
 
 _COUNT_SQL = """
     SELECT source, count(*) FROM listings
@@ -206,9 +238,11 @@ def main() -> int:
                         help="Restrict to one portal; repeatable. Default: all three.")
     parser.add_argument("--limit", type=int, default=None,
                         help="Max listings examined this run. Default: the whole corpus.")
-    parser.add_argument("--batch-size", type=int, default=5000,
-                        help="Rows per keyset page. Keeps each statement well "
-                             "inside the cluster's 120s statement_timeout.")
+    parser.add_argument("--batch-size", type=int, default=1000,
+                        help="Rows per keyset page. Each page detoasts roughly "
+                             "this many raw_json objects, so it is what keeps "
+                             "every statement inside the cluster's 120s "
+                             "statement_timeout. 5000 was cancelled in prod.")
     parser.add_argument("--after", type=int, default=0,
                         help="Resume from this listings.id cursor (exclusive).")
     parser.add_argument("--max-seconds", type=float, default=None,
@@ -243,6 +277,7 @@ def main() -> int:
     try:
         with db.connect() as conn:
             with conn.cursor() as cur:
+                cur.execute(_STATEMENT_TIMEOUT_SQL)
                 cur.execute(_COUNT_SQL, {"sources": sources})
                 for source, n in cur.fetchall():
                     LOG.info("BACKFILL priced_rows source=%-14s %7d", source, n)
@@ -252,12 +287,15 @@ def main() -> int:
                 if page == 0:
                     break
                 with conn.cursor() as cur:
-                    cur.execute(_SELECT_SQL, {"sources": sources, "page": page,
-                                              "after": cursor})
-                    rows = cur.fetchall()
-                if not rows:
+                    cur.execute(_PAGE_IDS_SQL, {"sources": sources, "page": page,
+                                                "after": cursor})
+                    ids = [r[0] for r in cur.fetchall()]
+                if not ids:
                     exhausted = True
                     break
+                with conn.cursor() as cur:
+                    cur.execute(_PAYLOAD_SQL, {"ids": ids})
+                    rows = cur.fetchall()
 
                 dirty: list[int] = []
                 for row in rows:
@@ -297,7 +335,7 @@ def main() -> int:
                 LOG.info("BACKFILL progress examined=%d quarantine=%d cursor=%d",
                          examined, sum(quarantined.values()), cursor)
 
-                if len(rows) < page:
+                if len(ids) < page:
                     exhausted = True
                     break
                 if args.max_seconds and time.monotonic() - start > args.max_seconds:
