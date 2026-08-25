@@ -29,6 +29,11 @@ on:
       - "scripts/ci_db_bootstrap.sql"
       - "pyproject.toml"
       - ".github/workflows/migrations.yml"
+      # Not a Python path, but tests/test_llm_cost_zone_literals.py asserts that this
+      # file names 'Europe/Prague' exactly once and that the literal matches the three
+      # database spellings. That rail lives in THIS lane, so without this entry a
+      # frontend-only PR could change the zone and never run the rail that guards it.
+      - "frontend/src/lib/llmCosts.ts"
   pull_request:
     paths:
       - "**/*.py"
@@ -36,6 +41,11 @@ on:
       - "scripts/ci_db_bootstrap.sql"
       - "pyproject.toml"
       - ".github/workflows/migrations.yml"
+      # Not a Python path, but tests/test_llm_cost_zone_literals.py asserts that this
+      # file names 'Europe/Prague' exactly once and that the literal matches the three
+      # database spellings. That rail lives in THIS lane, so without this entry a
+      # frontend-only PR could change the zone and never run the rail that guards it.
+      - "frontend/src/lib/llmCosts.ts"
   workflow_dispatch:
 
 jobs:
@@ -169,7 +179,7 @@ jobs:
       #
       # The behavioural rail parks the matview and substitutes a real table — you cannot
       # INSERT into a materialized view, and CI's replayed copy is empty.
-      - name: Broker leaderboard ranks before it hydrates (migrations 434, 435)
+      - name: Broker leaderboard ranks before it hydrates (migration 435)
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
           DB_RAILS_REQUIRED: "1"
@@ -182,10 +192,54 @@ jobs:
       # index it (42P17). Revert either view and the index stops matching silently: the
       # plan falls back to the seq scan that discarded 231,189 rows for 93, with nothing
       # else failing. Only the replayed schema can see that the two still agree.
-      - name: /costs rollups stay indexable (migration 421)
+      #
+      # Migration 437 adds the value half: the rollup stores the UNROUNDED hourly sum, and
+      # round() happens once at each view's outer projection. Storing the rounded hour and
+      # summing 24 of them corrupted 74 of 331 daily groups when measured over all history
+      # — money wrong in the fourth decimal, every row count and every type still perfect.
+      # Only executing the views against seeded rows can see that.
+      - name: /costs rollups stay indexable and unrounded (migrations 421, 437)
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
         run: pytest tests/test_llm_cost_rollup_indexable.py -q
+
+      # The three-zone-literal rail. Change 'Europe/Prague' to 'Europe/Berlin' in any ONE
+      # of the daily view, the expression index or llm_cost_today_usd() and every number on
+      # /costs stays identical (the zones have shared offsets since 1980) while the index
+      # silently stops matching the view. Lowercase it and the same thing happens. Nothing
+      # else in CI — and no user-visible symptom — can see either mutation.
+      - name: The /costs day boundary is spelled once, in four places (migration 437)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: pytest tests/test_llm_cost_zone_literals.py -q
+
+      # /costs now reads [rollup: bucket_hour < W] UNION ALL [live: called_at >= W]. That is
+      # an exact partition only for an hour-aligned W: flip the rollup branch to `<=` and the
+      # boundary hour is counted twice, flip the live branch to `>` and it is dropped —
+      # forever, with every row type and count still plausible. The views compile either way,
+      # so the PREPARE sweep passes and the fake connections cannot evaluate SQL at all. Only
+      # executing the seam against rows straddling real boundaries can tell them apart. Same
+      # file covers convergence: three refreshes must leave a byte-identical table, a phantom
+      # group must be deleted, and a '-infinity' repair must reach a 10-day-old bucket (the
+      # assertion that fails under GREATEST).
+      - name: The rollup/live seam is an exact partition (migration 437)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: pytest tests/test_llm_cost_watermark_union.py -q
+
+      # Corollary E's catalog diff: a new materialized view or rollup table with no
+      # derived_artifacts row goes RED here, which is the only place that can notice. It also
+      # pins the two columns migration 437 deliberately does NOT have — last_error and
+      # last_started_at — because a plpgsql handler's write cannot survive its own re-raise,
+      # so a published has_error could only ever read 'false', including during an outage.
+      - name: Every derived artifact declares its freshness (migration 437)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: pytest tests/test_derived_artifacts_registry.py -q
 
       # 422 replaced /health's `distinct on` with a recursive key-hop, which is subtle in
       # ways a shape assertion cannot see: the hop terminates by emitting a NULL, the seek

@@ -15,6 +15,7 @@ import {
   buildHourlySeries,
   colorTokenFor,
   computeKpis,
+  COST_DAY_TZ,
   featureLabel,
   summarizeByFeature,
   summarizeByModel,
@@ -28,7 +29,13 @@ import GrainToggle, { type Grain } from '@/components/GrainToggle';
 
 /* Operator dashboard for LLM spend — aggregates of the `llm_calls` audit
  * table via `llm_cost_daily_public` (migration 280) and its hour-grain
- * twin `llm_cost_hourly_public` (migration 281). Read-only, anon. */
+ * twin `llm_cost_hourly_public` (migration 281). Read-only, anon.
+ *
+ * The page has three day labels — the "Today" tile, the daily chart's axis and
+ * its tooltip — and since migration 437 all three mean the SAME civil day
+ * (COST_DAY_TZ, which is also chartAxis's CHART_TZ). The header sub-line names
+ * that zone once, for all of them. Hour buckets stay UTC hour starts and are
+ * rendered in the same zone, so a 00:00Z bucket ticks as 02:00. */
 
 const CHART_DAYS = 30;
 const CHART_HOURS = 48;
@@ -62,7 +69,8 @@ export default function Costs() {
           <h1 className="text-2xl leading-tight">LLM costs</h1>
           <p className="text-sm text-[var(--color-ink-2)] mt-0.5">
             Spend across every LLM call, from the <span className="font-mono">llm_calls</span> audit
-            table{dataUpdatedAt ? <> · refreshed {fmtRelative(new Date(dataUpdatedAt).toISOString())}</> : null}
+            table · days in <span className="font-mono">{COST_DAY_TZ}</span>
+            {dataUpdatedAt ? <> · refreshed {fmtRelative(new Date(dataUpdatedAt).toISOString())}</> : null}
           </p>
         </div>
       </div>

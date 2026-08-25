@@ -22,6 +22,7 @@ import {
   fetchWorkflowFailureSummary,
   fetchScraperHealthChecks,
   fetchPipelineChecks,
+  fetchDerivedArtifacts,
   type WorkflowFailureSummaryRow,
   type PipelineCheckRow,
 } from '@/lib/queries';
@@ -33,12 +34,23 @@ import {
   summarizePipelineChecks,
   type PipelineCheckStatus,
 } from '@/lib/pipelineChecks';
+import {
+  derivedArtifactLabel,
+  derivedArtifactStatus,
+  derivedArtifactTitle,
+  derivedArtifactValueLabel,
+  sortDerivedArtifacts,
+  summarizeDerivedArtifacts,
+  type DerivedArtifactStatus,
+  type DerivedArtifactsSummary,
+} from '@/lib/derivedArtifacts';
 import { categoryMainLabelPlural, categoryTypeLabel } from '@/lib/enums';
 import GrainToggle from '@/components/GrainToggle';
 import type {
   BrowseReadModelState,
   CategoryTrend,
   CategoryTrendPoint,
+  DerivedArtifactRow,
   HealthSummary,
   HealthSnapBucket,
   HealthFreshnessRow,
@@ -70,12 +82,17 @@ const STALE_HOURS_WARN = 36;
 // The pg_cron loop refreshes the Health matviews every 10 min; 25 min of
 // silence means it has missed two cycles — likely dead, not just slow.
 const HEALTH_DATA_STALE_MIN = 25;
-// browse_list rebuilds every 5 min, properties_map_mv every 30 min
-// (migration 277); a stalled list_rebuilt_at/map_rebuilt_at is also what a
-// failed anon-grant self-check inside either rebuild function looks like
-// from the outside (migration 374 — the RAISE rolls back the whole tick, so
-// the timestamp simply stops advancing instead of the object going missing).
-const BROWSE_LIST_STALE_MIN = 15;
+// browse_list rebuilds every 15 min (migration 413 moved it off */5) and
+// properties_map_mv every 30 min (migration 277); both thresholds are ~3x and
+// 2x their cadence, so a single slow tick is not an alarm. 15 min here was 3x
+// the OLD cadence and became 1x it — which false-fired for 1-3 minutes on
+// every healthy tick until this was corrected.
+//
+// A stalled list_rebuilt_at/map_rebuilt_at is also what a failed anon-grant
+// self-check inside either rebuild function looks like from the outside
+// (migration 374 — the RAISE rolls back the whole tick, so the timestamp
+// simply stops advancing instead of the object going missing).
+const BROWSE_LIST_STALE_MIN = 45;
 const BROWSE_MAP_STALE_MIN = 60;
 
 function categoryLabel(c: { category_main: string; category_type: string }): string {
@@ -169,6 +186,8 @@ function Body({ data }: { data: HealthSummary }) {
   return (
     <div className="mt-5 space-y-6">
       <PipelineChecksSection />
+
+      <DerivedArtifactsSection />
 
       <PortalLedger />
 
@@ -843,6 +862,159 @@ function PipelineChecksPanel({
               title={c.run_at ? fmtAbsolute(c.run_at) : undefined}
             >
               {c.run_at ? fmtRelative(c.run_at) : '—'}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Derived-artifact registry (migration 437) — every matview / rollup table     */
+/* with its producer, host, cadence and staleness budget, and how long ago it   */
+/* last succeeded.                                                             */
+/*                                                                             */
+/* Deliberately a ROSTER, not another StaleHealthDataBanner. A banner is binary */
+/* and silent while healthy, so an artifact nobody remembers exists is          */
+/* invisible right up until it breaks — which is exactly the gap this registry  */
+/* closes. Every registered artifact is listed on every render, healthy or not. */
+/*                                                                             */
+/* The view publishes no error text on purpose (last_error can carry table and  */
+/* column names), so the whole signal is last_succeeded_at against the budget;  */
+/* lib/derivedArtifacts owns that derivation.                                   */
+/* -------------------------------------------------------------------------- */
+
+const ARTIFACT_DOT: Record<DerivedArtifactStatus, string> = {
+  ok: 'var(--color-sage)',
+  stale: 'var(--color-brick)',
+  never: 'var(--color-ochre)',
+  unknown: 'var(--color-ochre)',
+  paused: 'var(--color-ink-4)',
+};
+
+function DerivedArtifactsSection() {
+  const artifactsQuery = useQuery<DerivedArtifactRow[], Error>({
+    queryKey: ['derived-artifacts'],
+    queryFn: fetchDerivedArtifacts,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+  // One instant for the badge and the rows, so they can never disagree.
+  const now = new Date();
+  const summary = summarizeDerivedArtifacts(artifactsQuery.data ?? [], now);
+
+  return (
+    <section>
+      <SectionHeading>Derived data</SectionHeading>
+      <div className="mt-3">
+        <Card
+          label="Derived artifacts"
+          accessory={
+            <DerivedArtifactsBadge
+              summary={summary}
+              hasData={(artifactsQuery.data?.length ?? 0) > 0}
+            />
+          }
+        >
+          <DerivedArtifactsPanel
+            rows={artifactsQuery.data}
+            now={now}
+            isLoading={artifactsQuery.isLoading}
+            error={artifactsQuery.error}
+          />
+        </Card>
+      </div>
+    </section>
+  );
+}
+
+function DerivedArtifactsBadge({
+  summary,
+  hasData,
+}: {
+  summary: DerivedArtifactsSummary;
+  hasData: boolean;
+}) {
+  if (!hasData) return null;
+  const base =
+    'inline-flex items-center px-1.5 py-0.5 rounded-[var(--radius-xs)] text-[0.6rem] uppercase tracking-wide font-medium ';
+  if (summary.stale > 0) {
+    return (
+      <span className={base + 'bg-[var(--color-brick-soft)] text-[var(--color-brick)]'}>
+        {summary.stale} stale
+      </span>
+    );
+  }
+  // Never-produced and unparsed-budget rows are both "we cannot say it is
+  // fresh" — one watch count, not two competing badges. A paused artifact is
+  // switched off on purpose and never colours the badge.
+  const watch = summary.never + summary.unknown;
+  if (watch > 0) {
+    return (
+      <span className={base + 'bg-[var(--color-ochre-soft)] text-[var(--color-ochre)]'}>
+        {watch} watch
+      </span>
+    );
+  }
+  return <span className={base + 'bg-[var(--color-sage-soft)] text-[var(--color-sage)]'}>OK</span>;
+}
+
+function DerivedArtifactsPanel({
+  rows,
+  now,
+  isLoading,
+  error,
+}: {
+  rows: DerivedArtifactRow[] | undefined;
+  now: Date;
+  isLoading: boolean;
+  error: Error | null;
+}) {
+  if (error) {
+    return (
+      <p className="text-sm text-[var(--color-brick)]">
+        derived_artifacts failed: {error.message}
+      </p>
+    );
+  }
+  if (isLoading && !rows) {
+    return <p className="text-sm text-[var(--color-ink-4)]">Loading…</p>;
+  }
+  if (!rows || rows.length === 0) {
+    return (
+      <p className="text-sm text-[var(--color-ink-4)]">
+        No derived artifacts registered yet.
+      </p>
+    );
+  }
+
+  const sorted = sortDerivedArtifacts(rows, now);
+  return (
+    <ul className="space-y-1.5">
+      {sorted.map((a) => {
+        const st = derivedArtifactStatus(a, now);
+        return (
+          <li key={a.name} className="flex items-center gap-3 text-sm">
+            <span
+              className="h-2 w-2 rounded-full shrink-0"
+              style={{ backgroundColor: ARTIFACT_DOT[st] }}
+              title={st}
+            />
+            <span
+              className="text-[var(--color-ink)] flex-1 truncate cursor-help"
+              title={derivedArtifactTitle(a, now)}
+            >
+              {derivedArtifactLabel(a.name)}
+            </span>
+            <span className="font-mono tabular-nums text-[var(--color-ink-2)] whitespace-nowrap">
+              {derivedArtifactValueLabel(a)}
+            </span>
+            <span
+              className="shrink-0 tabular-nums text-[0.7rem] text-[var(--color-ink-4)] w-16 text-right cursor-help"
+              title={a.last_succeeded_at ? fmtAbsolute(a.last_succeeded_at) : undefined}
+            >
+              {a.last_succeeded_at ? fmtRelative(a.last_succeeded_at) : '—'}
             </span>
           </li>
         );

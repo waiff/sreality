@@ -3663,6 +3663,7 @@
       "paths": [
         "**/*.py",
         ".github/workflows/migrations.yml",
+        "frontend/src/lib/llmCosts.ts",
         "migrations/**",
         "pyproject.toml",
         "scripts/ci_db_bootstrap.sql"

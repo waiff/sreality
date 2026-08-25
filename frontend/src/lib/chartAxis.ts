@@ -238,11 +238,16 @@ export function timeLabelFull(t: number | string, unit: TimeUnit, tz: string = C
 }
 
 /* Bucket keys arrive as epoch ms, full ISO timestamps, or bare 'YYYY-MM-DD'
- * days (which JS would otherwise read as UTC midnight and, west of Greenwich,
- * render as the previous day). */
+ * days. A bare day is pinned to NOON UTC, not to `T00:00:00`: per ECMA-262 a
+ * date-ONLY form parses as UTC but a date-TIME form with no offset parses as
+ * browser-local, so the old bare append was the SOLE source of browser
+ * dependence in this module — the formatter below is pinned to CHART_TZ, so
+ * any viewer east of it (UTC+3 while Prague is on CEST) rendered the PREVIOUS
+ * day on every tick and every tooltip. Noon UTC lands on the same civil date
+ * in every zone from UTC-11 to UTC+11. */
 function toMs(t: number | string): number | null {
   if (typeof t === 'number') return Number.isFinite(t) ? t : null;
-  const iso = /^\d{4}-\d{2}-\d{2}$/.test(t) ? `${t}T00:00:00` : t;
+  const iso = /^\d{4}-\d{2}-\d{2}$/.test(t) ? `${t}T12:00:00Z` : t;
   const ms = Date.parse(iso);
   return Number.isNaN(ms) ? null : ms;
 }

@@ -3,7 +3,10 @@
  * unit-tested without the DB or React. */
 
 export interface LlmCostDailyRow {
-  day: string; // 'YYYY-MM-DD'
+  /* 'YYYY-MM-DD' — a CIVIL day in COST_DAY_TZ since migration 437 (it was a
+   * UTC calendar day before). Every comparison below is lexicographic on this
+   * string, so the client must key its own days in the same zone. */
+  day: string;
   called_for: string;
   provider: string;
   model: string;
@@ -67,12 +70,33 @@ const FEATURE_LABELS: Record<string, string> = {
 export const featureLabel = (feature: string): string =>
   FEATURE_LABELS[feature] ?? feature;
 
-const isoDay = (d: Date): string => d.toISOString().slice(0, 10);
+/* The ONE zone spelling on the client. It must equal the zone in
+ * llm_cost_daily_public's `day` expression, llm_cost_hour_rollup_prague_day_idx
+ * and llm_cost_today_usd() (migration 437) — with all four spelled the same,
+ * the "Today" tile, the chart axis and the spend guard mean one calendar day.
+ * Rail: tests/test_llm_cost_zone_literals.py counts this literal, so it must
+ * stay the only occurrence in this file. */
+export const COST_DAY_TZ = 'Europe/Prague';
 
+/* en-CA gives YYYY-MM-DD, which is what preserves the lexicographic string
+ * comparisons (`r.day > d7`) every consumer below relies on. */
+const dayFmt = new Intl.DateTimeFormat('en-CA', {
+  timeZone: COST_DAY_TZ,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+const isoDay = (d: Date): string => dayFmt.format(d);
+
+/* Civil-calendar arithmetic in a UTC carrier — the idiom chartAxis.ts already
+ * uses for its tick ladder. Subtracting n × 24 h from the INSTANT is off by one
+ * across Prague's 23- and 25-hour DST days (an instant step shifts the local
+ * time-of-day by an hour, which crosses midnight near it); stepping the civil
+ * date is exact. */
 const daysAgo = (now: Date, n: number): string => {
-  const d = new Date(now);
-  d.setUTCDate(d.getUTCDate() - n);
-  return isoDay(d);
+  const [y, m, d] = isoDay(now).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d - n)).toISOString().slice(0, 10);
 };
 
 export interface CostKpis {

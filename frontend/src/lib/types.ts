@@ -260,6 +260,31 @@ export interface HealthCategoryBlock {
   failures_given_up: number;
 }
 
+/* One row per derived artifact (matview / rollup table) from
+ * `derived_artifacts_public` (migration 437) — who produces it, on what
+ * cadence, how stale it is allowed to get, and when it last succeeded.
+ *
+ * Two shapes to know before consuming it:
+ *   · `staleness_budget` is a Postgres interval and PostgREST hands it over as
+ *     a STRING ('01:00:00', '45 mins', 'PT1H' depending on IntervalStyle), not
+ *     a number — lib/derivedArtifacts parses it, defensively.
+ *   · There is deliberately NO error column. The base table keeps `last_error`
+ *     (it can carry table and column names) and the view does not publish it,
+ *     so the only failure signal here is `last_succeeded_at` falling behind
+ *     `staleness_budget`. Don't reference `last_error` or `has_error`. */
+export interface DerivedArtifactRow {
+  name: string;
+  producer: string;
+  host: string;
+  cadence: string;
+  staleness_budget: string | null;
+  complete_through: string | null;
+  last_succeeded_at: string | null;
+  last_duration_ms: number | null;
+  last_rows: number | null;
+  is_serving: boolean;
+}
+
 export interface BrowseReadModelState {
   list_rebuilt_at: string | null;
   list_duration_ms: number | null;

@@ -32,6 +32,7 @@ import { fetchGrowth } from './priceStats';
 import type {
   BrowseReadModelState,
   CategoryTrend,
+  DerivedArtifactRow,
   HealthSummary,
   ImageFailureRow,
   ImagePublic,
@@ -1997,6 +1998,38 @@ export const fetchPipelineChecks = async (): Promise<PipelineCheckRow[]> => {
     .order('check_key', { ascending: true });
   if (error) throw error;
   return (data ?? []) as PipelineCheckRow[];
+};
+
+/* Migration 437 — the derived-artifact registry: one row per matview / rollup
+ * table with its producer, cadence and staleness budget. Columns are listed
+ * explicitly rather than '*' so a later column (W7 widens this view) can't
+ * arrive unnoticed, and because `last_error` deliberately isn't published —
+ * asking for a named set keeps that contract visible here.
+ *
+ * `last_duration_ms` / `last_rows` are integer/bigint, which PostgREST hands
+ * over as strings on some paths — coerce both once, here, the way the cost
+ * fetchers above do. `staleness_budget` stays a string on purpose;
+ * lib/derivedArtifacts parses the interval. */
+export const fetchDerivedArtifacts = async (): Promise<DerivedArtifactRow[]> => {
+  const { data, error } = await supabase
+    .from('derived_artifacts_public')
+    .select(
+      'name,producer,host,cadence,staleness_budget,complete_through,last_succeeded_at,last_duration_ms,last_rows,is_serving',
+    )
+    .order('name', { ascending: true });
+  if (error) throw error;
+  return (data ?? []).map((r: Record<string, unknown>) => ({
+    name: String(r.name),
+    producer: String(r.producer),
+    host: String(r.host),
+    cadence: String(r.cadence),
+    staleness_budget: r.staleness_budget == null ? null : String(r.staleness_budget),
+    complete_through: r.complete_through == null ? null : String(r.complete_through),
+    last_succeeded_at: r.last_succeeded_at == null ? null : String(r.last_succeeded_at),
+    last_duration_ms: r.last_duration_ms == null ? null : Number(r.last_duration_ms),
+    last_rows: r.last_rows == null ? null : Number(r.last_rows),
+    is_serving: Boolean(r.is_serving),
+  }));
 };
 
 /* Migration 178 — failed GitHub Actions runs recorded by the 30-min poller

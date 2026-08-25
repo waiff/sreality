@@ -111,6 +111,30 @@ _ADMIN_GATE_ALLOWLIST: list[str] = [
     # The pg_cron refresher itself: SECURITY DEFINER, not executable by a browser
     # role, and it must run without a JWT context to rebuild the health matviews.
     "refresh_health_matviews",
+    # The internal union source behind llm_cost_{daily,hourly}_public (migration 437).
+    # Verified live at merge: relacl is {postgres,service_role} only -- no anon, no
+    # authenticated, no PUBLIC -- and has_table_privilege is false for BOTH browser
+    # roles, so it is unreachable over supabase-js. It is ungated ON PURPOSE: the gate
+    # belongs in the OUTERMOST scope of each public wrapper, where is_platform_admin()
+    # (STABLE, zero-arg) renders as a One-Time Filter on a Result node above the Append
+    # and short-circuits the whole plan. Pushed into the union's branches it would be
+    # evaluated per branch and would stop hoisting; it would also silently couple
+    # llm_cost_today_usd() -- SECURITY INVOKER, and the API's spend guard -- to the
+    # admin gate, which is exactly the kind of invisible dependency that makes a guard
+    # go deaf without raising.
+    #
+    # NOTE the asymmetry that put it here: this test's FUNCTION arm filters candidates
+    # by has_function_privilege('authenticated', ...), but its VIEW arm does not filter
+    # by has_table_privilege -- so a zero-grant view is still flagged. That is defensible
+    # conservatism rather than a bug (pg_default_acl grants `authenticated=r` on objects
+    # postgres creates in public, so a recreated view can silently acquire a grant), and
+    # it is deliberately NOT "fixed" here: loosening a security rail to make new code
+    # pass is how a real exposure ships. The reason this entry is safe is the ACL, not
+    # the annotation -- so the ACL is asserted by a rail rather than left to review:
+    # tests/test_llm_cost_rollup_indexable.py::test_rollups_are_admin_only_not_anon_readable
+    # fails the moment either browser role gains SELECT on it. Do not delete that rail
+    # without deleting this entry.
+    "llm_cost_hour_union",
 ]
 
 # The 19 user-state tables migrations 290-294 (+ entitlements, 298) scope per account.
