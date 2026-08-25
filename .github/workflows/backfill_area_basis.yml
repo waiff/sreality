@@ -15,8 +15,9 @@ name: Backfill area_basis (the provenance stamp migration 423 never filled)
 # one column, so a match there would fabricate a provenance claim on ~183k rows.
 # Writes nothing but `listings.area_basis`, which is out of every content hash —
 # so NO snapshot, no value change, and neither trigger on `listings` fires. DML,
-# not DDL: no ACCESS EXCLUSIVE, so it cannot head-block a writer; it still
-# refuses to start while a read-model rebuild is active. Keyset-paginated over a
+# not DDL: no ACCESS EXCLUSIVE, so it cannot head-block a writer; it waits for a
+# read-model rebuild gap before starting, bounded, then proceeds anyway since the
+# contention is I/O and never a lock conflict. Keyset-paginated over a
 # narrow projection that detoasts nothing; idempotent without a marker, and
 # `--after` resumes. NOT a portal ingest workflow, so it carries no `# portal:`
 # tag.
@@ -56,8 +57,13 @@ on:
         required: false
         default: ""
         type: string
+      rebuild_wait_seconds:
+        description: How long to wait for a read-model rebuild gap before starting anyway
+        required: false
+        default: ""
+        type: string
       ignore_rebuild:
-        description: Start even while a read-model rebuild is active
+        description: Start immediately, without waiting for a rebuild gap at all
         required: false
         default: false
         type: boolean
@@ -97,6 +103,7 @@ jobs:
           if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
           if [ -n "${{ inputs.max_seconds }}" ]; then ARGS="$ARGS --max-seconds ${{ inputs.max_seconds }}"; fi
           if [ "${{ inputs.write }}" = "true" ]; then ARGS="$ARGS --write"; fi
+          if [ -n "${{ inputs.rebuild_wait_seconds }}" ]; then ARGS="$ARGS --rebuild-wait-seconds ${{ inputs.rebuild_wait_seconds }}"; fi
           if [ "${{ inputs.ignore_rebuild }}" = "true" ]; then ARGS="$ARGS --ignore-rebuild"; fi
           if [ "${{ inputs.verbose }}" = "true" ]; then ARGS="$ARGS --verbose"; fi
           python -m scripts.backfill_area_basis $ARGS

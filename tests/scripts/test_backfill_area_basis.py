@@ -8,6 +8,9 @@ of `derive_headline_area` won, and everything else has to decline.
 
 from __future__ import annotations
 
+import logging
+import pathlib
+
 import pytest
 
 from scraper.area import AREA_BASES
@@ -156,3 +159,74 @@ def test_the_selection_reaches_the_wrongly_stamped_land_rows():
     # `area_basis IS NULL` alone would walk straight past the 8 anomalies.
     assert "IS DISTINCT FROM 'plot'" in _SELECT_SQL
     assert "IS DISTINCT FROM 'plot'" in _COUNT_SQL
+
+
+# --- the rebuild gap: wait, never refuse ------------------------------------
+#
+# The first live dispatch exited 3 because a rebuild_% was running, which paints
+# a red X on correct behaviour. rebuild_browse_list() runs every 15 minutes and
+# holds its locks for 5-10 of them, so refusing outright means colliding about
+# half the time and never running.
+
+import scripts.backfill_area_basis as mod
+
+
+class _FakeRebuildCursor:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+    def execute(self, sql, params=None):
+        self._conn.polls += 1
+
+    def fetchone(self):
+        # Report `active` from the scripted sequence, then 0 for ever after.
+        seq = self._conn.active_sequence
+        return (seq.pop(0) if seq else 0,)
+
+
+class _FakeRebuildConn:
+    def __init__(self, active_sequence):
+        self.active_sequence = list(active_sequence)
+        self.polls = 0
+
+    def cursor(self):
+        return _FakeRebuildCursor(self)
+
+
+def test_it_starts_immediately_when_no_rebuild_is_running():
+    conn = _FakeRebuildConn([0])
+    assert mod.wait_for_rebuild_gap(conn, 900.0) is True
+    assert conn.polls == 1
+
+
+def test_it_waits_for_the_gap_then_proceeds(monkeypatch):
+    slept = []
+    monkeypatch.setattr(mod.time, "sleep", slept.append)
+    conn = _FakeRebuildConn([1, 1, 0])
+    assert mod.wait_for_rebuild_gap(conn, 900.0) is True
+    assert conn.polls == 3
+    assert slept == [mod._REBUILD_POLL_SECONDS] * 2
+
+
+def test_an_expired_budget_proceeds_anyway_rather_than_failing(monkeypatch, caplog):
+    # The contention is I/O only — this backfill takes no lock a rebuild can
+    # block on — so a busy cluster must not mean the work never happens.
+    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
+    conn = _FakeRebuildConn([1] * 50)
+    with caplog.at_level(logging.WARNING, logger=mod.LOG.name):
+        assert mod.wait_for_rebuild_gap(conn, 0.0) is False
+    assert "starting anyway" in caplog.text
+
+
+def test_the_wait_never_returns_a_nonzero_exit_path():
+    # Pins the contract change: the helper reports whether it found a gap, and
+    # main() proceeds either way. Reintroducing `return 3` would make a routine
+    # 15-minute rebuild look like a failed backfill.
+    src = pathlib.Path(mod.__file__).read_text()
+    assert "return 3" not in src
