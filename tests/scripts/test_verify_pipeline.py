@@ -727,3 +727,372 @@ def test_carrier_skip_is_applied_by_counting_and_by_updating() -> None:
         for legacy, new in carrier["cols"]:
             for repair in (False, True):
                 assert f"NOT ({skip})" in _predicate(new, legacy, repair, skip)
+
+
+# --- per-m2 measure plausibility (W9) --------------------------------------
+#
+# Every cell below is a LIVE measurement of production taken 2026-08-25, before the
+# W2 backfill healed either defect. The point of the wave is that the existing health
+# surfaces are structurally blind to both — data_quality_by_source tests 29 fields for
+# IS NOT NULL and both defects produce 100% non-NULL values — so these tests pin that
+# the new checks see what the null-checks cannot, and equally that they stay quiet on
+# the eight portals that were fine all along.
+
+
+def _cell(
+    source: str, cat: str | None, typ: str | None, **kw: Any
+) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "source": source, "category_main": cat, "category_type": typ,
+        "price_per_m2_basis": None, "n_active": 1000.0,
+        "median_area_m2": None, "median_usable_area": None, "median_price_per_m2": None,
+        "n_floor_eligible": None, "floor_null_share": None,
+        "n_floor_eligible_7d": None, "floor_null_share_7d": None,
+        "n_area_pairs": None, "area_divergence_share": None,
+        "n_area_pairs_7d": None, "area_divergence_share_7d": None,
+    }
+    base.update(kw)
+    return base
+
+
+class _PlausibilityConn:
+    """Serves measure_plausibility_by_source rows + the week-old baseline row."""
+
+    def __init__(
+        self, cells: list[dict[str, Any]],
+        baseline: dict[str, Any] | None = None,
+        history_days: float | None = None,
+    ) -> None:
+        self._cells, self._baseline, self._history = cells, baseline, history_days
+        self.executed: list[str] = []
+        self._rows: list[tuple[Any, ...]] = []
+        self._one: tuple[Any, ...] | None = None
+
+    def cursor(self) -> "_PlausibilityConn":
+        return self
+
+    def transaction(self) -> "_PlausibilityConn":
+        return self
+
+    def __enter__(self) -> "_PlausibilityConn":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        if sql.startswith("SET LOCAL"):
+            return
+        self.executed.append(sql)
+        if "measure_plausibility_by_source" in sql:
+            from scripts.verify_pipeline import _PLAUSIBILITY_COLS
+
+            self._rows = [tuple(c[k] for k in _PLAUSIBILITY_COLS) for c in self._cells]
+        elif "baseline_cells" in sql:
+            self._one = (self._baseline, self._history)
+
+    def fetchall(self) -> Any:
+        return self._rows
+
+    def fetchone(self) -> Any:
+        return self._one
+
+
+def _fresh(conn: "_PlausibilityConn") -> "_PlausibilityConn":
+    """The per-run cache is cleared by run_checks; a direct check call must clear it too."""
+    import scripts.verify_pipeline as vp
+
+    vp._PLAUSIBILITY_CACHE.clear()
+    return conn
+
+
+# Live 2026-08-25, dum/prodej, every portal that populates both area fields. mmreality
+# wrote the PLOT into the floor-area column: median area_m2 905.0 against median
+# usable_area 130.0 on the same 3 588 rows.
+_LIVE_DUM_CELLS = [
+    _cell("mmreality", "dum", "prodej", n_active=3601.0, median_area_m2=905.0,
+          median_usable_area=130.0, median_price_per_m2=5701.0,
+          n_area_pairs=3588.0, area_divergence_share=0.9967,
+          n_area_pairs_7d=113.0, area_divergence_share_7d=1.0),
+    _cell("sreality", "dum", "prodej", n_active=20152.0, median_area_m2=150.0,
+          median_usable_area=150.0, median_price_per_m2=45990.0,
+          n_area_pairs=19082.0, area_divergence_share=0.0,
+          n_area_pairs_7d=420.0, area_divergence_share_7d=0.0),
+    _cell("idnes", "dum", "prodej", n_active=28757.0, median_area_m2=163.0,
+          median_usable_area=163.0, n_area_pairs=28757.0, area_divergence_share=0.0,
+          n_area_pairs_7d=610.0, area_divergence_share_7d=0.0),
+    # bazos populates usable_area on 0 of 10 409 rows — nothing to compare, so it must
+    # be SILENT, not 100% divergent. `area_m2 IS DISTINCT FROM usable_area` taken
+    # literally (the charter's wording) would have scored it 100% and fired on it.
+    _cell("bazos", "dum", "prodej", n_active=10409.0, median_area_m2=165.0,
+          median_usable_area=None, n_area_pairs=0.0, area_divergence_share=None,
+          n_area_pairs_7d=0.0, area_divergence_share_7d=None),
+]
+
+
+def _divergence(cells: list[dict[str, Any]]) -> dict[str, Any]:
+    from scripts.verify_pipeline import check_area_vs_usable_divergence
+
+    return check_area_vs_usable_divergence(_fresh(_PlausibilityConn(cells)), T)
+
+
+def test_area_divergence_catches_the_mmreality_plot_area_defect() -> None:
+    res = _divergence(_LIVE_DUM_CELLS)
+    assert res["status"] == "fail"
+    assert res["value"] == 100.0  # the 7d arm: 113 of 113 pairs
+    named = " ".join(res["details"]["offenders"])
+    assert "mmreality/dum/prodej" in named
+    for clean in ("sreality", "idnes", "bazos"):
+        assert clean not in named
+
+
+def test_area_divergence_is_silent_on_a_portal_publishing_only_one_area() -> None:
+    """bazos alone: no pairs at all must read ok, never 'divergent on 100%'."""
+    res = _divergence([c for c in _LIVE_DUM_CELLS if c["source"] == "bazos"])
+    assert res["status"] == "ok" and res["details"]["offenders"] == []
+
+
+def test_area_divergence_tolerates_the_realitymix_field_convention() -> None:
+    """Live: realitymix byt diverges on 10.5% of pairs (16.5% over the trailing week)
+    at a MEDIAN relative difference of 9.6% — a balcony/rounding convention, not a
+    different physical quantity, and decaying legacy stock post-W1. Amber it and the
+    operator learns to dismiss the axis that has to catch the next mmreality."""
+    res = _divergence([
+        _cell("realitymix", "byt", "prodej", n_active=11000.0,
+              n_area_pairs=8708.0, area_divergence_share=0.105,
+              n_area_pairs_7d=237.0, area_divergence_share_7d=0.165),
+    ])
+    assert res["status"] == "ok"
+
+
+def test_area_divergence_skips_land_where_the_areas_are_meant_to_differ() -> None:
+    """Option A: area_m2 IS the plot for pozemek, so divergence from usable_area is
+    the correct answer there. Scoring it would red the check on healthy data forever."""
+    res = _divergence([
+        _cell("sreality", "pozemek", "prodej", n_active=9000.0,
+              n_area_pairs=4000.0, area_divergence_share=1.0,
+              n_area_pairs_7d=300.0, area_divergence_share_7d=1.0),
+    ])
+    assert res["status"] == "ok"
+
+
+def test_area_divergence_ignores_cells_below_the_row_floor() -> None:
+    res = _divergence([
+        _cell("maxima", "dum", "prodej", n_active=83.0,
+              n_area_pairs=40.0, area_divergence_share=1.0),
+    ])
+    assert res["status"] == "ok"
+
+
+# Live 2026-08-25: the unit-price masquerade. A per-m2 UNIT price written into
+# price_czk (136 Kc for a commercial rental) is 100% non-NULL and correctly typed —
+# only the per-basis floor inside measure_price_per_m2 rejects it.
+_LIVE_FLOOR_CELLS = [
+    _cell("ceskereality", "komercni", "pronajem", n_active=8852.0,
+          n_floor_eligible=5656.0, floor_null_share=0.2003,
+          n_floor_eligible_7d=169.0, floor_null_share_7d=0.112),
+    _cell("realitymix", "komercni", "pronajem", n_active=6838.0,
+          n_floor_eligible=4500.0, floor_null_share=0.1896,
+          n_floor_eligible_7d=85.0, floor_null_share_7d=0.094),
+    _cell("realitymix", "pozemek", "pronajem", n_active=246.0,
+          n_floor_eligible=115.0, floor_null_share=0.1565),
+    _cell("remax", "komercni", "pronajem", n_active=593.0,
+          n_floor_eligible=275.0, floor_null_share=0.1127),
+    _cell("bazos", "komercni", "pronajem", n_active=3912.0,
+          n_floor_eligible=2689.0, floor_null_share=0.0666,
+          n_floor_eligible_7d=436.0, floor_null_share_7d=0.067),
+    # The two portals that already carry a per-area price guard, same cell.
+    _cell("idnes", "komercni", "pronajem", n_active=11041.0,
+          n_floor_eligible=8444.0, floor_null_share=0.0054),
+    _cell("sreality", "komercni", "pronajem", n_active=13984.0,
+          n_floor_eligible=9529.0, floor_null_share=0.0049),
+]
+
+
+def _floor(cells: list[dict[str, Any]]) -> dict[str, Any]:
+    from scripts.verify_pipeline import check_ppm2_basis_floor_share
+
+    return check_ppm2_basis_floor_share(_fresh(_PlausibilityConn(cells)), T)
+
+
+def test_basis_floor_share_catches_the_unit_price_masquerade() -> None:
+    res = _floor(_LIVE_FLOOR_CELLS)
+    assert res["status"] == "fail"
+    assert res["value"] == 20.03
+    named = " ".join(res["details"]["offenders"])
+    for guilty in ("ceskereality/komercni/pronajem", "realitymix/komercni/pronajem",
+                   "realitymix/pozemek/pronajem", "remax/komercni/pronajem",
+                   "bazos/komercni/pronajem"):
+        assert guilty in named
+    # ...and the two portals with a working guard are not accused, in the same cell.
+    assert "idnes" not in named and "sreality" not in named
+
+
+def test_basis_floor_share_pozemek_is_scored_unlike_the_divergence_check() -> None:
+    """Land is exempt from the AREA check (area_m2 is the plot by design) but not from
+    the PRICE floor — realitymix pozemek/pronajem loses 15.7% of its prices and that is
+    a defect on any basis."""
+    res = _floor([c for c in _LIVE_FLOOR_CELLS if c["category_main"] == "pozemek"])
+    assert res["status"] == "fail"
+
+
+def test_basis_floor_share_fresh_arm_fires_before_the_stock_arm_can() -> None:
+    """A regression shipped this week is ~100% of what arrived since, but only churn-
+    fraction of the stock. Without the 7d arm, detection latency is weeks."""
+    res = _floor([
+        _cell("maxima", "komercni", "pronajem", n_active=5000.0,
+              n_floor_eligible=4000.0, floor_null_share=0.004,
+              n_floor_eligible_7d=300.0, floor_null_share_7d=0.98),
+    ])
+    assert res["status"] == "fail"
+    assert "first seen in 7d" in " ".join(res["details"]["offenders"])
+
+
+def _shift(
+    cells: list[dict[str, Any]], baseline: dict[str, Any] | None,
+    history_days: float | None = 30.0,
+) -> dict[str, Any]:
+    from scripts.verify_pipeline import check_ppm2_median_shift
+
+    return check_ppm2_median_shift(
+        _fresh(_PlausibilityConn(cells, baseline, history_days)), T)
+
+
+def test_median_shift_fires_when_the_w2_backfill_heals_mmreality() -> None:
+    """The mmreality defect predates any baseline, so this axis cannot indict it —
+    area_vs_usable_divergence does that. What it MUST do is notice the correction:
+    905.0 -> 130.0 is 6.96x and 5 701 -> 42 500 is 7.45x, both far above the 3.0x fail
+    ratio. A heal this size passing silently would prove the axis inert."""
+    res = _shift(
+        [_cell("mmreality", "dum", "prodej", n_active=3601.0,
+               median_area_m2=130.0, median_price_per_m2=42500.0)],
+        {"mmreality/dum/prodej": {"n": 3588, "area": 905.0, "ppm2": 5701.0}},
+    )
+    assert res["status"] == "fail"
+    assert res["value"] == 7.455
+    named = " ".join(res["details"]["offenders"])
+    assert "median area_m2" in named and "median Kc/m2" in named
+
+
+def test_median_shift_tolerates_the_noisiest_real_weekly_move() -> None:
+    """Measured live across 21 cells with >= 200 new listings in both of two
+    consecutive weeks — the new-arrival cohort, which swings far harder than the stock
+    medians this check actually compares: worst 1.47x on area, 1.90x on Kc/m2."""
+    res = _shift(
+        [_cell("sreality", "byt", "prodej", n_active=40000.0,
+               median_area_m2=147.0, median_price_per_m2=95000.0)],
+        {"sreality/byt/prodej": {"n": 39000, "area": 100.0, "ppm2": 50000.0}},
+    )
+    assert res["status"] == "ok"
+
+
+def test_median_shift_no_baseline_is_ok_while_young_and_warn_once_stale() -> None:
+    """A missing baseline in the first week after deploy is the expected state and the
+    operator can do nothing about it. Two weeks of history with still no baseline means
+    the check has been erroring or not running — that must not read as green."""
+    cells = [_cell("sreality", "byt", "prodej", n_active=40000.0,
+                   median_area_m2=100.0, median_price_per_m2=50000.0)]
+    assert _shift(cells, None, history_days=3.0)["status"] == "ok"
+    assert _shift(cells, None, history_days=None)["status"] == "ok"
+    assert _shift(cells, None, history_days=20.0)["status"] == "warn"
+
+
+def test_median_shift_skips_a_cell_too_small_in_either_week() -> None:
+    small_now = _shift(
+        [_cell("maxima", "dum", "prodej", n_active=83.0,
+               median_area_m2=900.0, median_price_per_m2=5000.0)],
+        {"maxima/dum/prodej": {"n": 4000, "area": 150.0, "ppm2": 45000.0}},
+    )
+    small_then = _shift(
+        [_cell("maxima", "dum", "prodej", n_active=4000.0,
+               median_area_m2=900.0, median_price_per_m2=5000.0)],
+        {"maxima/dum/prodej": {"n": 83, "area": 150.0, "ppm2": 45000.0}},
+    )
+    assert small_now["status"] == "ok" and small_then["status"] == "ok"
+
+
+def test_median_shift_baseline_round_trips_through_its_own_details() -> None:
+    """The baseline is this check's own result row from a week ago — no new table. If
+    the snapshot's keys and the reader's cell keys ever disagree the axis silently
+    never compares anything, so pin the round trip."""
+    cells = [_cell("mmreality", "dum", "prodej", n_active=3601.0,
+                   median_area_m2=905.0, median_price_per_m2=5701.0)]
+    written = _shift(cells, None, history_days=1.0)["details"]["cells"]
+    assert written == {"mmreality/dum/prodej": {"n": 3601, "area": 905.0, "ppm2": 5701.0}}
+    healed = [_cell("mmreality", "dum", "prodej", n_active=3601.0,
+                    median_area_m2=130.0, median_price_per_m2=42500.0)]
+    assert _shift(healed, written)["status"] == "fail"
+
+
+def test_measure_checks_share_one_read_of_the_plausibility_view() -> None:
+    """The view is a ~12 s sequential scan of the active corpus. Three checks, one read."""
+    import scripts.verify_pipeline as vp
+
+    conn = _PlausibilityConn(_LIVE_DUM_CELLS + _LIVE_FLOOR_CELLS, None, 1.0)
+    results = run_checks(
+        conn, T,
+        only={"ppm2_median_shift", "ppm2_basis_floor_share", "area_vs_usable_divergence"},
+    )
+    assert len(results) == 3
+    assert sum("measure_plausibility_by_source" in s for s in conn.executed) == 1
+    assert not vp._PLAUSIBILITY_CACHE or "cells" in vp._PLAUSIBILITY_CACHE
+
+
+def test_run_checks_clears_the_plausibility_cache_between_runs() -> None:
+    """A stale corpus would make every measure check certify last run's data."""
+    first = _PlausibilityConn(_LIVE_DUM_CELLS, None, 1.0)
+    run_checks(first, T, only={"area_vs_usable_divergence"})
+    healed = [dict(c, area_divergence_share=0.0, area_divergence_share_7d=0.0)
+              for c in _LIVE_DUM_CELLS]
+    second = _PlausibilityConn(healed, None, 1.0)
+    out = run_checks(second, T, only={"area_vs_usable_divergence"})
+    assert out[0]["status"] == "ok"
+
+
+def test_empty_plausibility_view_is_warn_never_ok() -> None:
+    """The view is gated on is_platform_admin(); read it from a role that fails the
+    gate and it returns zero rows. That is an INERT check, not a clean bill of health —
+    exactly the db_saturation precedent."""
+    from scripts.verify_pipeline import (
+        check_area_vs_usable_divergence, check_ppm2_basis_floor_share,
+        check_ppm2_median_shift,
+    )
+
+    for fn in (check_area_vs_usable_divergence, check_ppm2_basis_floor_share,
+               check_ppm2_median_shift):
+        res = fn(_fresh(_PlausibilityConn([])), T)
+        assert res["status"] == "warn" and "INERT" in res["message"]
+
+
+class _BrokenViewConn(_PlausibilityConn):
+    """migration 427 not applied yet — the relation simply is not there."""
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        if "measure_plausibility_by_source" in sql:
+            raise RuntimeError('relation "measure_plausibility_by_source" does not exist')
+        super().execute(sql, params)
+
+
+def test_missing_view_is_warn_and_names_the_migration_not_three_red_tiles() -> None:
+    """Between merging this PR and applying migration 427 the view does not exist. Three
+    checks red with `relation does not exist` are indistinguishable from three real
+    defects, so the read is reported, never raised — the db_saturation precedent."""
+    results = run_checks(
+        _BrokenViewConn([]), T,
+        only={"ppm2_median_shift", "ppm2_basis_floor_share", "area_vs_usable_divergence"},
+    )
+    assert [r["status"] for r in results] == ["warn", "warn", "warn"]
+    for r in results:
+        assert "INERT" in r["message"] and "427" in r["message"]
+        assert "does not exist" in r["details"]["skipped"]
+
+
+def test_every_measure_threshold_has_a_code_default() -> None:
+    """load_thresholds merges app_settings OVER the defaults, so a key the seed lacks
+    must still resolve — a KeyError here is a check that fails on every run."""
+    for key in ("ppm2_median_shift_warn_ratio", "ppm2_median_shift_fail_ratio",
+                "ppm2_median_shift_min_rows", "ppm2_basis_floor_share_warn",
+                "ppm2_basis_floor_share_fail", "ppm2_basis_floor_min_rows",
+                "area_divergence_share_warn", "area_divergence_share_fail",
+                "area_divergence_min_rows"):
+        assert key in DEFAULT_THRESHOLDS

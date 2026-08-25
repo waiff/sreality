@@ -400,49 +400,20 @@ wrapped in a scalar subquery, not called bare — see the `database` skill's Ini
 **Pipeline verification harness** (`scripts/verify_pipeline.py`, migration 274, PR #703) — a
 scheduled job that writes one `pipeline_check_results` row per health metric (`ok`/`warn`/`fail`)
 and is the origin of the notification system's third producer, `system_health` (see
-`docs/architecture.md` rule #16) — a `fail` status rings the same in-app bell the SPA nav badge
-polls. A `SECURITY DEFINER` dead-man-switch pg_cron function fires if the hourly job itself stops
-running (the migration-136 exception-guarded pg_cron pattern). This exists because the pipeline
-stalled silently for two days in 2026-07 (Anthropic credit exhaustion, 38k+ failed LLM calls) and
-the only alarm was a failing GH Actions cron the operator happened to miss. The live checks are
+`docs/architecture.md` rule #16) — a `fail` rings the same in-app bell the SPA nav badge polls,
+on state TRANSITIONS only. Born from the 2026-07 two-day silent stall (Anthropic credit
+exhaustion, 38k+ failed LLM calls) whose only alarm was a cron the operator happened to miss.
+Two lanes: `llm_health.yml` hourly (the acute checks, `--only ... --exit-nonzero-on-fail`, so a
+`fail` also reds the run and emails) and `verify_pipeline.yml` 6-hourly (everything). Live checks:
 `llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`, `worker_liveness`,
-`dual_write_parity`, `property_maintenance` (last-complete-sweep stamp age + oldest
-dirty-queue row — the 2026-08-06 sweep-death/stranded-lease incident; both axes O(1) reads,
-never a properties scan) and `broker_resolution_freshness` (**three** axes over
-`app_settings.broker_resolution_last_complete`, `broker_resolution_runs.ended_at` and
-`dirty_broker_listings` — the 2026-08-12
-E2E review found the daily broker sweep truncating on its budget every day while exiting 0)
-and `broker_merge_suppression` (migration 401): active `broker_merge_suppressions` rows whose two
-identities share one broker — the invariant the suppression rail exists to hold. `fail` on the
-first violation, no warn tier. An operator NO (unmerge / dismissing a `contact_bridge_review`
-candidate) writes a suppression row keyed on the durable identity pair; the sweep loads the active
-set once and it gates BOTH `decide_merges` (the pair reaches neither auto-merge nor review —
-including through the oversized-component downgrade) and `_apply_merges` (a whole component that
-would newly co-locate a suppressed pair is dropped and logged — the transitive chain the pure layer
-cannot see; the set is re-read inside that write transaction so a NO landing mid-sweep still binds).
-An explicit operator merge LIFTS the suppressions it *brings together* (never deletes, and never a
-pair already co-located — that would erase evidence of a bypass); `POST
-/broker-review/suppressions/{id}/lift` is the manual counterpart and `GET
-/broker-review/suppressions` the ledger. Per-sweep counts land in
-`broker_resolution_runs.suppressed_pairs` (pairs, not merges: the rail blocks before grading) and
-the `RESOLVE full merge done … suppressed=N` line. Kill switch: `broker_auto_merge_enabled`=false.
-Note the broker sweep axis measures a rotation **lap**, not one run: attribution routinely
-spends its whole `--max-seconds` budget, so `resolve_brokers` carries cumulative coverage in
-`app_settings.broker_sweep_cursor` (`last_id` / `lap_swept` / `lap_started_at`) and stamps
-completion when the lap closes; with no lap closed yet the check ages the OPEN lap, so a
-rotation that never gets round reds instead of parking on the missing-stamp warn.
-The third axis exists because that lap stamp is written right after attribution, ~17-25 min
-BEFORE the tail (the auto-merge step, the three rollups, the matview, candidates,
-`_finalize`'s dirty-clear), so a sweep whose tail dies still leaves a minutes-old stamp while
-the leaderboard and rollups silently stop: `broker_finished_{warn,fail}_hours` (30/60) age the
-last full run that actually reached `ended_at`, tighter than the lap's deliberately wide 52/84
-because the tail runs on every sweep. Fail sits between ONE missed night (48h + the ~2.5h
-spread in when a run finishes = ~50.5h, deliberately only a warn — the skipped sweep's own red
-run already emails) and TWO (~69.5h). A NULL (no finished full run on record) is skipped, not
-red — only the missing LAP stamp is the deploy-day warn.
-The six dedup-specific checks (street/geo debt, eligibility funnel,
-merge latency, engine health, merge-precision sample) went with the engine, along with their
-`pipeline_check_thresholds` rows.
+`dual_write_parity`, `property_maintenance`, `broker_resolution_freshness`,
+`broker_merge_suppression`, and — 6-hourly only, from the per-m² measure program's W9 — the three
+plausibility checks `ppm2_median_shift`, `ppm2_basis_floor_share` and `area_vs_usable_divergence`
+over `measure_plausibility_by_source` (migration 427), which watch what a value IS where
+`data_quality_by_source` only tests that it exists. Thresholds live in
+`app_settings.pipeline_check_thresholds` over code defaults in `DEFAULT_THRESHOLDS`.
+**Per-check rationale, incident history and threshold sizing:
+`.claude/skills/scraper-ops/references/pipeline-verification.md`.**
 
 ## Reading the logs
 
