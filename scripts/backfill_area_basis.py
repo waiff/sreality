@@ -54,9 +54,13 @@ geom, obec_id, category_main, category_type`. It also does not touch
 there is nothing for a property recompute to pick up.
 
 This is DML, never DDL — no ACCESS EXCLUSIVE, so it cannot head-block a writer
-the way an `alter table` on this table can. It still declines to start while a
-`rebuild_%` is active, so it is not competing with the read-model rebuilds for
-I/O on the same table.
+the way an `alter table` on this table can. It still WAITS for a `rebuild_%` gap
+before starting, so it is not competing with the read-model rebuilds for I/O on
+the same table — but only for a bounded `--rebuild-wait-seconds`, after which it
+proceeds anyway. `rebuild_browse_list()` runs every 15 minutes and holds its
+locks for 5-10 of them, so refusing outright would mean colliding about half the
+time and never running; and since this takes no lock a rebuild can block on,
+overlapping is merely slow, never incorrect.
 
 The read is KEYSET-PAGINATED and narrow — id, source, category_main, area_m2,
 usable_area, area_basis — naming no wide column, so unlike its two W2 siblings
@@ -143,6 +147,36 @@ _REBUILD_LIKE = r"%rebuild\_%"
 
 _STATEMENT_TIMEOUT_SQL = "SET statement_timeout = '600s'"
 
+_REBUILD_POLL_SECONDS = 30.0
+
+
+def wait_for_rebuild_gap(conn, budget_seconds: float) -> bool:
+    """Poll until no `rebuild_%` statement is running, up to a budget.
+
+    `rebuild_browse_list()` runs every 15 minutes and holds its locks for 5-10
+    of them, so refusing outright means colliding roughly half the time and
+    never running. Waiting is the right move — and if the budget expires this
+    proceeds anyway rather than failing, because the contention is I/O only:
+    this backfill takes no lock a rebuild can block on, so overlapping is slow,
+    never incorrect.
+    """
+    deadline = time.monotonic() + budget_seconds
+    while True:
+        with conn.cursor() as cur:
+            cur.execute(_REBUILD_ACTIVE_SQL, {"pattern": _REBUILD_LIKE})
+            active = int(cur.fetchone()[0])
+        if not active:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            LOG.warning("BACKFILL starting anyway: %d rebuild_%% statement(s) "
+                        "still active after %.0fs. This is I/O contention, not "
+                        "a lock conflict.", active, budget_seconds)
+            return False
+        LOG.info("BACKFILL waiting for a rebuild gap: %d active, %.0fs of "
+                 "budget left", active, remaining)
+        time.sleep(min(_REBUILD_POLL_SECONDS, remaining))
+
 
 def provable_basis(
     source: str | None,
@@ -193,8 +227,12 @@ def main() -> int:
                         help="Report what would change; write nothing (the default).")
     parser.add_argument("--write", dest="dry_run", action="store_false",
                         help="Actually write. Without it this script only reports.")
+    parser.add_argument("--rebuild-wait-seconds", type=float, default=900.0,
+                        help="How long to wait for a read-model rebuild to "
+                             "finish before starting anyway.")
     parser.add_argument("--ignore-rebuild", action="store_true",
-                        help="Start even while a read-model rebuild is active.")
+                        help="Start immediately, without waiting for a rebuild "
+                             "gap at all.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -219,13 +257,9 @@ def main() -> int:
         with db.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(_STATEMENT_TIMEOUT_SQL)
-                cur.execute(_REBUILD_ACTIVE_SQL, {"pattern": _REBUILD_LIKE})
-                active = int(cur.fetchone()[0])
-                if active and not args.ignore_rebuild:
-                    LOG.warning("BACKFILL refusing to start: %d rebuild_%% "
-                                "statement(s) active. Retry later, or pass "
-                                "--ignore-rebuild.", active)
-                    return 3
+            if not args.ignore_rebuild:
+                wait_for_rebuild_gap(conn, args.rebuild_wait_seconds)
+            with conn.cursor() as cur:
                 cur.execute(_COUNT_SQL)
                 pending = int(cur.fetchone()[0])
             LOG.info("BACKFILL pending=%d batch=%d after=%d dry_run=%s",
