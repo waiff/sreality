@@ -51,26 +51,30 @@ kept row is re-examined and kept again at zero writes. `--after` resumes from a
 `listings.id` cursor. That spares ~136k unchanged rows a pointless raw_json
 rewrite.
 
-The read is KEYSET-PAGINATED and exhaustive by construction. The three portals
-hold 220,456 priced rows, so a single capped `LIMIT` would stop short of the
-corpus and — because the order is `id ASC` — the block it skipped would be the
-NEWEST inventory, while the log still read like a clean finish.
+The read is an ID LIST fetched once, then payload pages by primary key — two
+shapes that both had to be measured against production before they held.
 
-Each page is TWO statements, and that split is load-bearing. `listings` carries
-9.1 GB of TOAST and the ceskereality and bazos arms detoast `raw_json` per row,
-so a page that both SELECTS and PROJECTS in one statement runs against the
-cluster's 120s `statement_timeout` — measured on the first live dispatch:
-`--batch-size 5000` took ~60s per page and was cancelled on page 8, 35,000 of
-ceskereality's 70,560 rows in. So page one asks for IDS ONLY (`id > cursor ORDER
-BY id LIMIT --batch-size`, naming no wide column) and page two fetches the
-payload for exactly those ids by primary key. `--batch-size` therefore bounds
-the detoast per statement, and its default is 1000.
+`listings` carries 9.1 GB of TOAST and the ceskereality and bazos arms detoast
+`raw_json` per row, so the payload must be paged: a single statement projecting
+5,000 of them took ~60s and was cancelled on page 8, 35,000 of ceskereality's
+70,560 rows in. `--batch-size` (default 1000) bounds that detoast.
 
-The run walks pages until one comes back short, `--max-seconds` is checked
-BETWEEN pages (not only inside one), and the summary + resume cursor are emitted
-from a `finally`, so an aborted or Ctrl-C'd pass still tells the operator where
-it got to. A pass that stopped early logs `BACKFILL INCOMPLETE` — silence means
-done.
+Getting the ids is the harder half. There is no `(source, id)` index, so a
+keyset `… AND id > cursor ORDER BY id LIMIT n` makes the planner walk
+`listings_pkey` filtering on source — and the portals are not spread evenly
+across the id space (ids 1..365,204 are a dense block holding about half the
+table, with only 3,935 ceskereality priced rows and zero realitymix ones). The
+first page from `id > 0` therefore scans ~400k rows and is cancelled. Removing
+the LIMIT removes the incentive: the planner must return every match, so it
+bitmap-scans the source index and sorts — 32.7s for all 220,623 ids, measured.
+So `--limit` is applied to the LIST, in Python; putting it back into the SQL
+restores the pathological plan.
+
+Because the list IS the whole population, exhaustion is exact rather than
+inferred from a short page. `--max-seconds` is checked BETWEEN pages, and the
+summary + resume cursor are emitted from a `finally`, so an aborted or Ctrl-C'd
+pass still tells the operator where it got to. A pass that stopped early — or
+one that `--limit` cut short — logs `BACKFILL INCOMPLETE`; silence means done.
 
 Usage:  python -m scripts.backfill_unit_price_masquerade --dry-run
         python -m scripts.backfill_unit_price_masquerade --source realitymix --write
@@ -115,25 +119,34 @@ _FRAGMENT_PATTERN = {
 
 QUARANTINE, KEEP, UNCONFIRMED = "quarantine", "keep", "unconfirmed"
 
-# TWO statements per page, and the split is load-bearing. `listings` carries
-# 9.1 GB of TOAST, so the payload's `raw_json` projection detoasts one object per
-# row. The single-statement form this replaced asked for `--batch-size` of those
-# inside one statement and ran right at the cluster's 120 s `statement_timeout`:
-# on the first live dispatch, pages 2-6 took ~60 s each and page 8 was cancelled,
-# 35 000 of ceskereality's 70 560 rows in.
+# The id list is fetched ONCE for the whole run, and the absence of a LIMIT is
+# the entire reason it works. There is no `(source, id)` index, so with a LIMIT
+# the planner picks `Limit -> Index Scan using listings_pkey, Filter: source =
+# ANY(...)` and walks the table in id order looking for matches. That is
+# catastrophic here because the portals are not spread evenly across the id
+# space: ids 1..365,204 are a dense block holding roughly half the table and
+# only 3,935 ceskereality priced rows, and zero realitymix ones. Asking for the
+# first 5,000 matches from `id > 0` therefore scans ~400k rows and is cancelled
+# by the 120 s statement_timeout — measured, twice, on two different page shapes.
 #
-# Step 1 asks for IDS ONLY, naming no wide column, so the planner can serve it
-# id-ordered and stop at the page size. Step 2 fetches the payload for exactly
-# those ids by primary key. Each statement is then bounded by the page rather
-# than by whatever the planner decided to detoast first.
-_PAGE_IDS_SQL = """
+# Drop the LIMIT and the incentive disappears: the planner must return every
+# match, so it bitmap-scans `listings_first_seen_source_idx (source, …)` and
+# sorts. Measured on production for all three sources at once:
+#
+#   Bitmap Index Scan  4.2 s -> Bitmap Heap Scan 32.6 s -> Sort (quicksort, 6 MB)
+#   Execution Time: 32,739 ms for 220,623 ids
+#
+# — bounded by the portals' own row count rather than by the table, and well
+# inside the timeout. 220k bigints is ~2 MB in Python, so holding the whole list
+# costs nothing. `--limit` is therefore applied to the LIST, in Python: putting
+# it back into the SQL would restore the pathological plan.
+_ALL_IDS_SQL = """
     SELECT l.id
     FROM listings l
     WHERE l.source = ANY(%(sources)s::text[])
       AND l.price_czk IS NOT NULL
       AND l.id > %(after)s::bigint
     ORDER BY l.id
-    LIMIT %(page)s::int
 """
 
 _PAYLOAD_SQL = """
@@ -205,11 +218,6 @@ def decide(source: str, price_text: str | None, stored_price: int | None) -> tup
     return QUARANTINE, "per-area marker"
 
 
-def page_size(limit: int | None, examined: int, batch: int) -> int:
-    """Rows to ask for next: the batch, trimmed by whatever `--limit` has left."""
-    if limit is None:
-        return batch
-    return max(0, min(batch, limit - examined))
 
 
 def _log_summary(quarantined: Counter[str], unconfirmed: Counter[str],
@@ -282,17 +290,17 @@ def main() -> int:
                 for source, n in cur.fetchall():
                     LOG.info("BACKFILL priced_rows source=%-14s %7d", source, n)
 
-            while True:
-                page = page_size(args.limit, examined, args.batch_size)
-                if page == 0:
-                    break
-                with conn.cursor() as cur:
-                    cur.execute(_PAGE_IDS_SQL, {"sources": sources, "page": page,
-                                                "after": cursor})
-                    ids = [r[0] for r in cur.fetchall()]
-                if not ids:
-                    exhausted = True
-                    break
+            with conn.cursor() as cur:
+                cur.execute(_ALL_IDS_SQL, {"sources": sources, "after": args.after})
+                all_ids = [r[0] for r in cur.fetchall()]
+            truncated = args.limit is not None and len(all_ids) > args.limit
+            if truncated:
+                all_ids = all_ids[:args.limit]
+            LOG.info("BACKFILL id_list=%d rows above after=%d truncated=%s",
+                     len(all_ids), args.after, truncated)
+
+            for offset in range(0, len(all_ids), args.batch_size):
+                ids = all_ids[offset:offset + args.batch_size]
                 with conn.cursor() as cur:
                     cur.execute(_PAYLOAD_SQL, {"ids": ids})
                     rows = cur.fetchall()
@@ -335,12 +343,16 @@ def main() -> int:
                 LOG.info("BACKFILL progress examined=%d quarantine=%d cursor=%d",
                          examined, sum(quarantined.values()), cursor)
 
-                if len(ids) < page:
-                    exhausted = True
-                    break
                 if args.max_seconds and time.monotonic() - start > args.max_seconds:
                     LOG.info("BACKFILL stopping: --max-seconds reached after=%d", cursor)
                     break
+            else:
+                # The for-loop ran to completion, so every id the list held was
+                # examined. Exhaustion is now EXACT rather than inferred from a
+                # short page — the list IS the whole population by construction.
+                # Unless --limit cut the list short, in which case rows above the
+                # cursor were never fetched and the run must say so.
+                exhausted = not truncated
     finally:
         _log_summary(quarantined, unconfirmed, verdicts, cursor, exhausted, args.dry_run)
     return 0

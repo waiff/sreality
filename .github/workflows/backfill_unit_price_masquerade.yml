@@ -54,9 +54,9 @@ on:
         default: "0"
         type: string
       batch_size:
-        description: Rows per keyset page
+        description: Rows per payload page (blank = the script's own default)
         required: false
-        default: "5000"
+        default: ""
         type: string
       max_seconds:
         description: Wall-clock budget in seconds (blank = no budget)
@@ -95,7 +95,8 @@ jobs:
 
       - name: Quarantine unit prices
         run: |
-          ARGS="--after ${{ inputs.after || '0' }} --batch-size ${{ inputs.batch_size || '5000' }}"
+          ARGS="--after ${{ inputs.after || '0' }}"
+          if [ -n "${{ inputs.batch_size }}" ]; then ARGS="$ARGS --batch-size ${{ inputs.batch_size }}"; fi
           if [ -n "${{ inputs.source }}" ]; then ARGS="$ARGS --source ${{ inputs.source }}"; fi
           if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
           if [ -n "${{ inputs.max_seconds }}" ]; then ARGS="$ARGS --max-seconds ${{ inputs.max_seconds }}"; fi
