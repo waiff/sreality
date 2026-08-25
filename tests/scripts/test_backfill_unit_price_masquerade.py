@@ -96,3 +96,129 @@ def test_realitymix_fragment_round_trips_through_the_portal_extractor():
 def test_a_missing_fragment_yields_no_text():
     assert price_text_from_fragment("realitymix", None) is None
     assert price_text_from_fragment("ceskereality", "<tr><td>x</td></tr>") is None
+
+
+# --- the read loop: exhaustive by construction, and never silently truncated --
+#
+# The three portals hold 220,456 priced rows. A single capped `LIMIT` swept the
+# first N by `id ASC` and then logged like a clean finish, so the block it
+# skipped was the NEWEST inventory — and because the whole set came back in one
+# statement, the cluster's 120s statement_timeout could cancel the pass with no
+# counts and no resume cursor. Both are loop shape, so both are tested here.
+
+import logging
+
+from scripts import backfill_unit_price_masquerade as mod
+
+
+class _FakeCursor:
+    def __init__(self, conn: "_FakeConn") -> None:
+        self._conn = conn
+        self._rows: list[tuple] = []
+
+    def __enter__(self) -> "_FakeCursor":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: dict | None = None) -> None:
+        params = params or {}
+        if "GROUP BY source" in sql:
+            self._rows = [("ceskereality", len(self._conn.corpus))]
+        elif "FROM listings l" in sql:
+            if self._conn.raise_on_select:
+                raise RuntimeError("statement timeout")
+            after, page = params["after"], params["page"]
+            self._rows = [r for r in self._conn.corpus if r[0] > after][:page]
+            self._conn.pages.append(len(self._rows))
+        elif "UPDATE listings" in sql:
+            self._conn.quarantined.append(params["id"])
+            self._rows = []
+        else:
+            self._rows = []
+
+    def fetchall(self) -> list[tuple]:
+        return self._rows
+
+    def fetchone(self) -> tuple | None:
+        return self._rows[0] if self._rows else None
+
+
+class _FakeConn:
+    def __init__(self, corpus: list[tuple], raise_on_select: bool = False) -> None:
+        self.corpus = corpus
+        self.raise_on_select = raise_on_select
+        self.pages: list[int] = []
+        self.quarantined: list[int] = []
+
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor(self)
+
+    def __enter__(self) -> "_FakeConn":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def _corpus(n: int) -> list[tuple]:
+    # Every other row carries the anchored marker, so the quarantine count is a
+    # direct read-out of how much of the corpus the loop actually reached.
+    return [
+        (i, "ceskereality", str(i), "komercni", "pronajem", 900 + i, 100, 310.0,
+         "100 Kč za m²/měsíc" if i % 2 else "968 Kč za měsíc")
+        for i in range(1, n + 1)
+    ]
+
+
+def _run(monkeypatch, corpus: list[tuple], argv: list[str],
+         raise_on_select: bool = False) -> tuple[_FakeConn, list[str]]:
+    conn = _FakeConn(corpus, raise_on_select=raise_on_select)
+    monkeypatch.setattr(mod.db, "connect", lambda *a, **k: conn)
+    monkeypatch.setattr(mod.db, "mark_properties_dirty", lambda *a, **k: None)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgres://x")
+    monkeypatch.setattr(mod.sys, "argv", ["backfill", *argv])
+    return conn, []
+
+
+def test_page_size_trims_to_whatever_limit_has_left() -> None:
+    assert mod.page_size(None, 199_000, 5000) == 5000
+    assert mod.page_size(200_000, 199_000, 5000) == 1000
+    assert mod.page_size(200_000, 200_000, 5000) == 0
+
+
+def test_the_sweep_walks_past_the_batch_boundary(monkeypatch) -> None:
+    conn, _ = _run(monkeypatch, _corpus(12), ["--batch-size", "5", "--write"])
+    assert mod.main() == 0
+    assert conn.pages == [5, 5, 2]
+    assert conn.quarantined == [1, 3, 5, 7, 9, 11]
+
+
+def test_a_run_capped_by_limit_says_so(monkeypatch, caplog) -> None:
+    conn, _ = _run(monkeypatch, _corpus(12), ["--batch-size", "5", "--limit", "5"])
+    with caplog.at_level(logging.WARNING, logger=mod.LOG.name):
+        assert mod.main() == 0
+    assert sum(conn.pages) == 5
+    assert "BACKFILL INCOMPLETE" in caplog.text
+    assert "--after 5" in caplog.text
+
+
+def test_an_exhaustive_run_does_not_cry_incomplete(monkeypatch, caplog) -> None:
+    _run(monkeypatch, _corpus(12), ["--batch-size", "5"])
+    with caplog.at_level(logging.WARNING, logger=mod.LOG.name):
+        assert mod.main() == 0
+    assert "BACKFILL INCOMPLETE" not in caplog.text
+
+
+def test_a_cancelled_statement_still_reports_counts_and_a_cursor(
+    monkeypatch, caplog
+) -> None:
+    # A statement_timeout kill used to propagate before any summary line ran, so
+    # the operator got a bare traceback with no counts and nothing to resume from.
+    _run(monkeypatch, _corpus(12), ["--batch-size", "5"], raise_on_select=True)
+    with caplog.at_level(logging.INFO, logger=mod.LOG.name):
+        with pytest.raises(RuntimeError):
+            mod.main()
+    assert "BACKFILL done examined=0" in caplog.text
+    assert "BACKFILL INCOMPLETE" in caplog.text

@@ -60,8 +60,8 @@ Ordering: W1 ∥ W3 → W2; W3 → W4; W4 → {W5, W6, W9}; W5 → W7; everythin
 ### W2 open items
 
 The two backfills are written, tested and measured; the **write pass is the operator's**
-(`--write`, one portal at a time). W2 also found two live holes W1 believed it had closed —
-both now fixed with a failing-first test, both of which the heal depended on, because a
+(`--write`, one portal at a time). W2 also found three live holes W1 believed it had closed —
+all now fixed with a failing-first test, all of which the heal depended on, because a
 quarantine the next drain cycle undoes is not a heal:
 
 - **ceskereality's JSON-LD offer bypassed the per-area rail.** `parse_detail` trusted
@@ -70,6 +70,15 @@ quarantine the next drain cycle undoes is not a heal:
   now VETOES the offer rather than merely standing in for it when absent.
 - **realitymix brackets its marker** (`45 Kč / (za m²)`), and the anchored test could not
   open a bracket, so it walked past every one of ~1,880 confirmed rows.
+- **The shared anchor knew only Kč, and could not survive a decimal amount.** Both portals
+  also quote in EUR — ceskereality stages `16 EUR za m²/měsíc` verbatim, realitymix renders
+  `12,00 € / (za m²/měsíc)` and its amount scanner (an integer run, like every portal's)
+  stops at the comma, so the slice reaching the rail began `,00 € …`. These rows were not
+  merely missed, they were affirmatively decided `keep — no per-area marker`. The anchor now
+  accepts `eur`/`€` and absorbs a leading decimal fraction, which adds **336 ceskereality**
+  (1,015 → **1,351**, 1,336 active) and **~281 realitymix** (260 active) confirmed rows. A
+  EUR *total* (`6 500 EUR za měsíc`, 46 ceskereality rows) is a currency bug, not a unit
+  masquerade, and is still read as a total — the anchor's negatives are unchanged.
 
 Still open after the write pass:
 

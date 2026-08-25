@@ -29,6 +29,7 @@ from scraper.ceskereality_parser import _parse_price as ceskereality_price
 from scraper.idnes_parser import _parse_price as idnes_price
 from scraper.maxima_parser import _parse_price as maxima_price
 from scraper.realitymix_parser import _parse_price as realitymix_price
+from scraper.price_text import is_per_area_price
 from scraper.remax_parser import _detail_price as remax_price
 
 # Every portal whose price arrives as TEXT. One shared parse rail, so the same
@@ -52,6 +53,13 @@ PER_AREA_CELLS = [
     # straight past 1,147 confirmed per-m² rows. Measured 2026-08-24.
     "45 Kč / (za m 2 )",
     "850 Kč /(za m2)",
+    # EUR-denominated, both real cells. ceskereality stages the string verbatim
+    # (336 priced rows); realitymix's is a DECIMAL, and every portal's amount
+    # scanner is an integer run, so the slice reaching the rail starts `,00 € …`
+    # — the anchor has to survive both the fraction and a non-Kč currency or
+    # 611 confirmed per-m² rows are reported clean. Measured 2026-08-25.
+    "16 EUR za m²/měsíc",
+    "12,00 € / (za m 2 /měsíc)",
     "18 500 Kč / m²",
     "2 500 Kč za m²",
     "1 200 Kč/m²/rok",
@@ -74,6 +82,19 @@ TOTAL_CELLS = [
     ("14 160 Kč/měsíc", 14_160),
     ("4 990 000 Kč (4 008 Kč/m² )", 4_990_000),
     ("3 190 000 Kč", 3_190_000),
+]
+
+# The after-amount slices the widened anchor must still REFUSE. `EUR za měsíc`
+# is a real ceskereality shape (46 priced rows) and a CURRENCY bug, not a unit
+# masquerade — convicting it would NULL a real price. remax's `_detail_price`
+# reads its digits only from the part before a literal `CZK`, so a EUR cell can
+# never ride the six-portal parametrization; the rail is where it belongs.
+NON_PER_AREA_SLICES = [
+    " EUR za měsíc",
+    " EUR Spočítat hypotéku",
+    " Kč (4 008 Kč/m²)",
+    ",- Kč",
+    "€ za měsíc",
 ]
 
 
@@ -111,3 +132,8 @@ def test_the_unit_is_never_mistaken_for_an_agenda(cell: str) -> None:
     # and must never be pressed into service as an area unit (migration 423).
     assert idnes_price(cell, "pronajem")[1] == "za mesic"
     assert idnes_price(cell, "prodej")[1] == "za nemovitost"
+
+
+@pytest.mark.parametrize("slice_", NON_PER_AREA_SLICES)
+def test_the_anchor_still_refuses_a_non_per_area_slice(slice_: str) -> None:
+    assert is_per_area_price(slice_) is False

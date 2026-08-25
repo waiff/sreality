@@ -51,6 +51,18 @@ kept row is re-examined and kept again at zero writes. `--after` resumes from a
 `listings.id` cursor. That spares ~136k unchanged rows a pointless raw_json
 rewrite.
 
+The read is KEYSET-PAGINATED and exhaustive by construction. The three portals
+hold 220,456 priced rows, so a single capped `LIMIT` would stop short of the
+corpus and — because the order is `id ASC` — the block it skipped would be the
+NEWEST inventory, while the log still read like a clean finish. Each page is one
+short statement (`id > cursor ORDER BY id LIMIT --batch-size`): the ceskereality
+and bazos arms detoast `raw_json` per row, and the cluster's `statement_timeout`
+is 120s, so a whole-corpus statement is also a real cancellation risk. The run
+walks pages until one comes back short, `--max-seconds` is checked BETWEEN pages
+(not only inside one), and the summary + resume cursor are emitted from a
+`finally`, so an aborted or Ctrl-C'd pass still tells the operator where it got
+to. A pass that stopped early logs `BACKFILL INCOMPLETE` — silence means done.
+
 Usage:  python -m scripts.backfill_unit_price_masquerade --dry-run
         python -m scripts.backfill_unit_price_masquerade --source realitymix --write
 Required: SUPABASE_DB_URL.
@@ -106,7 +118,7 @@ _SELECT_SQL = """
       AND l.price_czk IS NOT NULL
       AND l.id > %(after)s::bigint
     ORDER BY l.id
-    LIMIT %(limit)s::int
+    LIMIT %(page)s::int
 """
 
 _COUNT_SQL = """
@@ -161,12 +173,42 @@ def decide(source: str, price_text: str | None, stored_price: int | None) -> tup
     return QUARANTINE, "per-area marker"
 
 
+def page_size(limit: int | None, examined: int, batch: int) -> int:
+    """Rows to ask for next: the batch, trimmed by whatever `--limit` has left."""
+    if limit is None:
+        return batch
+    return max(0, min(batch, limit - examined))
+
+
+def _log_summary(quarantined: Counter[str], unconfirmed: Counter[str],
+                 verdicts: Counter[str], cursor: int, exhausted: bool,
+                 dry_run: bool) -> None:
+    for key, n in sorted(quarantined.items(), key=lambda kv: -kv[1]):
+        LOG.info("BACKFILL quarantine %-46s %6d", key, n)
+    for key, n in sorted(unconfirmed.items(), key=lambda kv: -kv[1]):
+        LOG.info("BACKFILL left_alone  %-46s %6d", key, n)
+    for key, n in sorted(verdicts.items()):
+        LOG.info("BACKFILL verdict     %-46s %6d", key, n)
+    LOG.info("BACKFILL done examined=%d quarantine=%d unconfirmed=%d kept=%d "
+             "cursor=%d exhausted=%s dry_run=%s",
+             sum(verdicts.values()), sum(quarantined.values()),
+             sum(unconfirmed.values()),
+             sum(n for k, n in verdicts.items() if k.endswith(f":{KEEP}")),
+             cursor, exhausted, dry_run)
+    if not exhausted:
+        LOG.warning("BACKFILL INCOMPLETE — rows above id=%d were never examined; "
+                    "resume with --after %d", cursor, cursor)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", action="append", choices=SOURCES,
                         help="Restrict to one portal; repeatable. Default: all three.")
-    parser.add_argument("--limit", type=int, default=200000,
-                        help="Max listings examined this run.")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Max listings examined this run. Default: the whole corpus.")
+    parser.add_argument("--batch-size", type=int, default=5000,
+                        help="Rows per keyset page. Keeps each statement well "
+                             "inside the cluster's 120s statement_timeout.")
     parser.add_argument("--after", type=int, default=0,
                         help="Resume from this listings.id cursor (exclusive).")
     parser.add_argument("--max-seconds", type=float, default=None,
@@ -188,77 +230,81 @@ def main() -> int:
         return 2
 
     sources = list(args.source or SOURCES)
+    LOG.info("BACKFILL start sources=%s batch=%d limit=%s after=%d dry_run=%s",
+             ",".join(sources), args.batch_size, args.limit, args.after, args.dry_run)
     start = time.monotonic()
     verdicts: Counter[str] = Counter()
     quarantined: Counter[str] = Counter()
     unconfirmed: Counter[str] = Counter()
     cursor = args.after
+    examined = 0
+    exhausted = False
 
-    with db.connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(_COUNT_SQL, {"sources": sources})
-            for source, n in cur.fetchall():
-                LOG.info("BACKFILL priced_rows source=%-14s %7d", source, n)
+    try:
+        with db.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_COUNT_SQL, {"sources": sources})
+                for source, n in cur.fetchall():
+                    LOG.info("BACKFILL priced_rows source=%-14s %7d", source, n)
 
-        with conn.cursor() as cur:
-            cur.execute(_SELECT_SQL, {"sources": sources, "limit": args.limit,
-                                      "after": args.after})
-            rows = cur.fetchall()
-        LOG.info("BACKFILL examining=%d dry_run=%s", len(rows), args.dry_run)
-
-        dirty: list[int] = []
-        for i, row in enumerate(rows):
-            if args.max_seconds and time.monotonic() - start > args.max_seconds:
-                LOG.info("BACKFILL stopping: --max-seconds reached after=%d", cursor)
-                break
-            (listing_id, source, native, cmain, ctype, prop_id,
-             price_czk, area_m2, price_text) = row
-            cursor = listing_id
-
-            if source in _FRAGMENT_PATTERN:
+            while True:
+                page = page_size(args.limit, examined, args.batch_size)
+                if page == 0:
+                    break
                 with conn.cursor() as cur:
-                    cur.execute(_FRAGMENT_SQL, {"pattern": _FRAGMENT_PATTERN[source],
-                                                "source": source, "native": native})
-                    frag = cur.fetchone()
-                price_text = price_text_from_fragment(source, frag[0] if frag else None)
+                    cur.execute(_SELECT_SQL, {"sources": sources, "page": page,
+                                              "after": cursor})
+                    rows = cur.fetchall()
+                if not rows:
+                    exhausted = True
+                    break
 
-            verdict, reason = decide(source, price_text, price_czk)
-            verdicts[f"{source}:{verdict}"] += 1
-            if verdict == UNCONFIRMED:
-                unconfirmed[f"{source}:{reason}"] += 1
-            elif verdict == QUARANTINE:
-                quarantined[f"{source}:{cmain}:{ctype}"] += 1
-                LOG.debug("BACKFILL would quarantine id=%d %s price=%s area=%s text=%r",
-                          listing_id, source, price_czk, area_m2, price_text)
-                if not args.dry_run:
-                    with conn.cursor() as cur:
-                        cur.execute(_QUARANTINE_SQL, {"id": listing_id, "old_price": price_czk,
-                                                      "price_text": price_text})
-                    if prop_id is not None:
-                        dirty.append(prop_id)
+                dirty: list[int] = []
+                for row in rows:
+                    (listing_id, source, native, cmain, ctype, prop_id,
+                     price_czk, area_m2, price_text) = row
+                    cursor = listing_id
+                    examined += 1
 
-            if len(dirty) >= 500:
-                db.mark_properties_dirty(conn, dirty)
-                dirty = []
-            if (i + 1) % 2000 == 0:
-                LOG.info("BACKFILL progress=%d/%d quarantine=%d after=%d",
-                         i + 1, len(rows), sum(quarantined.values()), cursor)
+                    if source in _FRAGMENT_PATTERN:
+                        with conn.cursor() as cur:
+                            cur.execute(_FRAGMENT_SQL,
+                                        {"pattern": _FRAGMENT_PATTERN[source],
+                                         "source": source, "native": native})
+                            frag = cur.fetchone()
+                        price_text = price_text_from_fragment(
+                            source, frag[0] if frag else None)
 
-        if dirty and not args.dry_run:
-            db.mark_properties_dirty(conn, dirty)
+                    verdict, reason = decide(source, price_text, price_czk)
+                    verdicts[f"{source}:{verdict}"] += 1
+                    if verdict == UNCONFIRMED:
+                        unconfirmed[f"{source}:{reason}"] += 1
+                    elif verdict == QUARANTINE:
+                        quarantined[f"{source}:{cmain}:{ctype}"] += 1
+                        LOG.debug("BACKFILL would quarantine id=%d %s price=%s "
+                                  "area=%s text=%r",
+                                  listing_id, source, price_czk, area_m2, price_text)
+                        if not args.dry_run:
+                            with conn.cursor() as cur:
+                                cur.execute(_QUARANTINE_SQL,
+                                            {"id": listing_id, "old_price": price_czk,
+                                             "price_text": price_text})
+                            if prop_id is not None:
+                                dirty.append(prop_id)
 
-    for key, n in sorted(quarantined.items(), key=lambda kv: -kv[1]):
-        LOG.info("BACKFILL quarantine %-46s %6d", key, n)
-    for key, n in sorted(unconfirmed.items(), key=lambda kv: -kv[1]):
-        LOG.info("BACKFILL left_alone  %-46s %6d", key, n)
-    for key, n in sorted(verdicts.items()):
-        LOG.info("BACKFILL verdict     %-46s %6d", key, n)
-    LOG.info("BACKFILL done examined=%d quarantine=%d unconfirmed=%d kept=%d "
-             "cursor=%d dry_run=%s",
-             sum(verdicts.values()), sum(quarantined.values()),
-             sum(unconfirmed.values()),
-             sum(n for k, n in verdicts.items() if k.endswith(f":{KEEP}")),
-             cursor, args.dry_run)
+                if dirty:
+                    db.mark_properties_dirty(conn, dirty)
+                LOG.info("BACKFILL progress examined=%d quarantine=%d cursor=%d",
+                         examined, sum(quarantined.values()), cursor)
+
+                if len(rows) < page:
+                    exhausted = True
+                    break
+                if args.max_seconds and time.monotonic() - start > args.max_seconds:
+                    LOG.info("BACKFILL stopping: --max-seconds reached after=%d", cursor)
+                    break
+    finally:
+        _log_summary(quarantined, unconfirmed, verdicts, cursor, exhausted, args.dry_run)
     return 0
 
 
