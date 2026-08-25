@@ -232,3 +232,17 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_measure_price_per_m2.py -q
+
+      # W5's five per-m2 call sites are the one executed-SQL family the sweep
+      # above CANNOT see: all five are assembled by in-function concatenation
+      # into a local variable, so sql_corpus discovery reaches none of them
+      # (verified: 760 discovered items, zero containing the per-m2 expression;
+      # comparables.py -> 0 items, neighborhoods.py -> 0). `l.price_per_m2`
+      # against the `listings` TABLE, which has no such column, is a 42703 that
+      # no fake connection can raise -- it would ship green. This PREPAREs each
+      # rendered statement against the replayed schema.
+      - name: Per-m2 call sites PREPARE against the schema (W5)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_measure_sql_prepare.py -q

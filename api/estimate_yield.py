@@ -13,6 +13,16 @@ direction change:
     expected_monthly_rent_czk × 12 / estimated_sale_price_czk (caller
     supplies the expected rent).
 
+"Identical pipeline, different label" is exactly the hazard: `median × area` is
+the same multiplication either way, so the ONLY thing that decides whether the
+product is a monthly rent or a purchase price is the basis of the percentile.
+That definition now lives in `toolkit/measures.py`, which this module's
+scaling step is required to consult — `_scale` takes the cohort's basis as a
+keyword-only argument and raises `MeasureBasisError` rather than scale a mixed,
+unknown, or contradicting cohort. The `price_czk`-percentile branch (no target
+area) is deliberately NOT gated: those percentiles are already in Kč and need
+no per-m² basis to be meaningful.
+
 The endpoint does NOT call verify_listing_freshness on every comparable
 (that would multiply load). It surfaces freshness statistics for the
 cohort instead, so the agent can decide which comparables to verify.
@@ -36,6 +46,7 @@ from toolkit import (
     analyze_distribution,
     find_comparables,
 )
+from toolkit.measures import require_scalable_basis, unit_label
 
 if TYPE_CHECKING:
     import psycopg
@@ -80,18 +91,23 @@ def estimate_yield(
         dist = analyze_distribution(listings, field=field)
         d = dist["data"]
         step.set_summary({
-            k: d.get(k) for k in ("n", "median", "p25", "p75", "iqr")
+            **{k: d.get(k) for k in ("n", "median", "p25", "p75", "iqr")},
+            "basis": d.get("basis"),
         })
         step.set_full_output(dist)
+    basis = d.get("basis")
 
     scale_label = (
-        f"scale per-m² by target area ({estimate_kind})"
+        f"scale per-m² by target area ({estimate_kind}, basis={basis})"
         if target.area_m2 is not None
         else f"use price_czk percentiles directly ({estimate_kind})"
     )
     if target.area_m2 is not None:
         with rec.computation(scale_label) as step:
-            estimated, p25, p75 = _scale(d, target.area_m2)
+            estimated, p25, p75 = _scale(
+                d, target.area_m2,
+                basis=basis, estimate_kind=estimate_kind,
+            )
             step.set_summary({"estimated": estimated, "p25": p25, "p75": p75})
     else:
         with rec.computation(scale_label) as step:
@@ -137,6 +153,11 @@ def estimate_yield(
             "result_count": sample_size,
             "queried_at": _now_iso(),
             "data_freshness": cohort_md.get("data_freshness"),
+            # The unit the cohort's per-m² percentiles were in, and its label.
+            # None on the price_czk branch — that path never touches a per-m²
+            # number, so claiming a basis for it would be the same lie in reverse.
+            "price_per_m2_basis": basis,
+            "price_per_m2_unit": unit_label(basis),
             "underlying": {
                 "find_comparables_count": cohort_md["result_count"],
                 "analyze_distribution": dist["metadata"],
@@ -208,14 +229,28 @@ def _yield_inputs(
 
 
 def _scale(
-    dist_data: dict[str, Any], area_m2: float
+    dist_data: dict[str, Any],
+    area_m2: float,
+    *,
+    basis: str | None,
+    estimate_kind: EstimateKind,
 ) -> tuple[int | None, int | None, int | None]:
-    """Multiply per-m² percentiles by target area to get point estimates."""
+    """Multiply per-m² percentiles by target area to get point estimates.
+
+    Both keywords are required and neither has a default: the multiplication is
+    identical for a monthly Kč/m² and a capital Kč/m², so the caller must say
+    which it has AND what it intends to call the product. Raises
+    MeasureBasisError on a mixed / unknown / contradicting cohort rather than
+    emit a number whose unit nobody can name. An EMPTY cohort short-circuits
+    first — there is no number to mislabel, and failing there would turn "no
+    comparables" into an error.
+    """
     median_v = dist_data.get("median")
     p25 = dist_data.get("p25")
     p75 = dist_data.get("p75")
     if median_v is None:
         return None, None, None
+    require_scalable_basis(basis, estimate_kind=estimate_kind)
     estimated = int(round(median_v * area_m2))
     r25 = int(round(p25 * area_m2)) if p25 is not None else None
     r75 = int(round(p75 * area_m2)) if p75 is not None else None
@@ -229,6 +264,12 @@ def _to_int(v: Any) -> int | None:
 def _gross_yield(
     rent_czk: int | None, price_czk: int | None
 ) -> float | None:
+    """Gross annual yield %. Both arguments are TOTALS in Kč, never per-m².
+
+    The ×12 is what converts the monthly rent to an annual one, so the two
+    per-m² denominators never enter — `_scale` has already multiplied them out
+    against the subject's area, and it refuses to do that without a basis.
+    """
     if rent_czk is None or not price_czk or price_czk <= 0:
         return None
     return round((rent_czk * 12) / price_czk * 100, 2)

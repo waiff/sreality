@@ -49,6 +49,95 @@ def test_no_renderable_dispositions_skips_llm_and_db():
     assert res["metadata"]["result_count"] == 0
 
 
+# ---- Mixed-basis refusal --------------------------------------------------
+
+
+def test_mixed_basis_refuses_without_calling_the_llm_or_touching_the_cache():
+    """A `'mixed'` cohort has no unit, so it has no describable distribution.
+
+    Rule 22 makes this the DEFAULT Browse cohort (sale + rent), so this is the
+    arm that fires most often, not a corner. Every part of the refusal matters:
+    an LLM call would bill for a paragraph about numbers whose meaning changes
+    row to row, and a cache write would serve it to everyone else all day.
+    """
+    conn = _make_conn([])  # any DB access raises: the plan is empty
+    llm = _FakeLLM([])     # any LLM call raises: there are no responses
+
+    res = ra.summarize_region_dispositions(
+        conn, llm,  # type: ignore[arg-type]
+        region_key="praha|mixed",
+        dispositions=[{"disposition": "2+kk", "n": 30, "ppm2_box": _box(n=30)}],
+        ppm2_basis="mixed",
+    )
+
+    assert llm.calls == []
+    assert conn.cursor_obj.executed == []
+    assert conn.transactions_opened == 0
+    assert res["data"]["annotations"] == {}
+    assert res["data"]["cache_hit"] is False
+    assert res["data"]["ppm2_basis"] == "mixed"
+    # No unit is named for a cohort that has two.
+    assert res["data"]["ppm2_unit"] is None
+    assert res["metadata"]["notes"] == [
+        "cohort mixes sale and rental listings, so its Kč/m² figures "
+        "have no single unit; refusing to characterise it"
+    ]
+
+
+def test_a_single_basis_is_not_refused_and_reaches_the_llm_with_its_unit():
+    """The other side of the gate: a plain sale cohort keeps its Kč/m²."""
+    plan = [("fetchone", None), ("execute_write", None)]
+    conn = _make_conn(plan)
+    llm = _FakeLLM([_llm_response({"2+kk": "Clusters tightly."})])
+
+    res = ra.summarize_region_dispositions(
+        conn, llm,  # type: ignore[arg-type]
+        region_key="praha|byt|prodej",
+        dispositions=[{"disposition": "2+kk", "n": 30, "ppm2_box": _box(n=30)}],
+        ppm2_basis="sale_capital_czk_m2",
+    )
+
+    assert len(llm.calls) == 1
+    payload = llm.calls[0]["messages"][0]["content"]
+    assert "Price-per-m² basis: sale_capital_czk_m2 — unit is Kč/m²" in payload
+    assert "UNKNOWN" not in payload
+    assert res["data"]["ppm2_unit"] == "Kč/m²"
+    assert res["data"]["annotations"] == {"2+kk": "Clusters tightly."}
+
+
+def test_an_absent_basis_tells_the_model_the_unit_is_unknown():
+    """No basis supplied is not a licence to assume sale."""
+    plan = [("fetchone", None), ("execute_write", None)]
+    conn = _make_conn(plan)
+    llm = _FakeLLM([_llm_response({"2+kk": "Clusters tightly."})])
+
+    ra.summarize_region_dispositions(
+        conn, llm,  # type: ignore[arg-type]
+        region_key="k",
+        dispositions=[{"disposition": "2+kk", "n": 30, "ppm2_box": _box(n=30)}],
+    )
+
+    payload = llm.calls[0]["messages"][0]["content"]
+    assert "the unit of every number below is UNKNOWN" in payload
+    assert "(Kč/m²)" not in payload
+
+
+def test_a_rent_cohort_is_labelled_monthly_not_capital():
+    plan = [("fetchone", None), ("execute_write", None)]
+    conn = _make_conn(plan)
+    llm = _FakeLLM([_llm_response({"2+kk": "x"})])
+
+    res = ra.summarize_region_dispositions(
+        conn, llm,  # type: ignore[arg-type]
+        region_key="k",
+        dispositions=[{"disposition": "2+kk", "n": 30, "ppm2_box": _box(n=30)}],
+        ppm2_basis="rent_monthly_czk_m2",
+    )
+
+    assert "unit is Kč/m²/měs" in llm.calls[0]["messages"][0]["content"]
+    assert res["data"]["ppm2_unit"] == "Kč/m²/měs"
+
+
 # ---- Cache hit path -------------------------------------------------------
 
 
@@ -178,7 +267,7 @@ def test_region_hash_separates_bases_but_keeps_the_basis_less_key():
 
 
 def test_basis_names_the_unit_and_the_period_in_the_payload():
-    """The seam the SPA sends `basis` across. A bare Kc/m2 number cannot be
+    """The seam the SPA sends `ppm2_basis` across. A bare Kc/m2 number cannot be
     narrated: sale medians run ~91 535 against rent's ~319."""
     renderable = [{"disposition": "2+kk", "box": _box(n=30)}]
     rent = ra._build_payload(
@@ -186,29 +275,14 @@ def test_basis_names_the_unit_and_the_period_in_the_payload():
         {"p25": 250, "p50": 319, "p75": 410},
         "rent_monthly_czk_m2",
     )
-    assert "MĚSÍC" in rent
+    assert "Kč/m²/měs" in rent
     land = ra._build_payload("pozemky", renderable, None, "land_capital_czk_m2")
-    assert "POZEMKU" in land
-    # An absent or unknown basis degrades to the pre-basis wording, never to a
-    # guess about which one it is.
+    assert "Kč/m² pozemku" in land
+    # An absent or unknown basis names no unit at all, never a guess about
+    # which one it is.
     plain = ra._build_payload("x", renderable, None, None)
-    assert "MĚSÍC" not in plain and "POZEMKU" not in plain
-
-
-def test_basis_travels_from_the_call_into_the_llm_payload():
-    plan = [("fetchone", None), ("execute_write", None)]
-    conn = _make_conn(plan)
-    llm = _FakeLLM([_llm_response({"2+kk": "x"})])
-
-    ra.summarize_region_dispositions(
-        conn, llm,  # type: ignore[arg-type]
-        region_key="praha|byt|pronajem",
-        dispositions=[{"disposition": "2+kk", "n": 30, "ppm2_box": _box(n=30)}],
-        basis="rent_monthly_czk_m2",
-    )
-
-    content = llm.calls[0]["messages"][0]["content"]
-    assert "MĚSÍC" in content
+    assert "Kč/m²/měs" not in plain and "Kč/m² pozemku" not in plain
+    assert "UNKNOWN" in plain
 
 
 # ---- Envelope -------------------------------------------------------------
@@ -225,7 +299,8 @@ def test_envelope_metadata_shape():
     md = res["metadata"]
     assert md["tool"] == "summarize_region_dispositions"
     assert md["filters_used"] == {
-        "region_key": "k", "min_box_n": 5, "force_refresh": False,
+        "region_key": "k", "min_box_n": 5,
+        "ppm2_basis": None, "force_refresh": False,
     }
     assert md["result_count"] == 1
     assert md["data_freshness"] is None

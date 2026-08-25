@@ -10,7 +10,9 @@ price cell that quotes a unit price must yield NULL, not the unit price.
 The test is ANCHORED to the text immediately after the amount, never a
 substring search: `4 990 000 Kč (4 008 Kč/m²)` is a total with a per-m2 NOTE,
 and a substring search would throw the real price away. `Kč/měsíc` is likewise
-not a per-area marker — the `m` must be followed by `2`/`²`.
+not a per-area marker — the `m` must be followed by `2`/`²`, so a EUR-priced
+`16 EUR za m²/měsíc` is refused while `EUR za měsíc` (a currency bug, not a unit
+masquerade) still reads as a total.
 
 Callers pass the slice of the price text that FOLLOWS the amount they parsed.
 """
@@ -23,11 +25,22 @@ import unicodedata
 # Matched against NFKD-folded text, so `Kč`->`Kc`, `m²`->`m2`, `měsíc`->`mesic`
 # and the alternatives stay small. `_G` is the thin / no-break / zero-width gap
 # the Czech portals sprinkle between amount, currency and unit. Currency and
-# separator are optional because the portals spell the same cell four ways:
-# `Kč/m²`, `Kč za m²`, `CZK/ za m2`, and a bare `/m²`.
+# separator are optional because the portals spell the same cell six ways:
+# `Kč/m²`, `Kč za m²`, `CZK/ za m2`, a bare `/m²`, realitymix's bracketed
+# `45 Kč / (za m²)` — the bracket is why the marker must be allowed to open one
+# — and a EUR-denominated `16 EUR za m²/měsíc`. `€` has to be spelled literally
+# because NFKD does not fold it to `EUR`.
+#
+# The leading `(?:[.,]\d+)?` absorbs a decimal fraction: every portal's amount
+# scanner is an integer run (`\d[\d\s]*`), so on realitymix's real cell
+# `12,00 € / (za m²/měsíc)` it stops at the comma and the slice handed here
+# starts `,00 € …`. Without it the anchor can never reach a decimal cell's marker.
+# It stays anchored regardless: `4 990 000 Kč (4 008 Kč/m²)` is a total with a
+# per-m² NOTE, and the `m2` right after the optional bracket is what refuses it.
 _G = r"[\s\u200b-\u200d\u2060]"
 _PER_AREA_RE = re.compile(
-    rf"^{_G}*(?:kc|czk)?{_G}*(?:/{_G}*)?(?:za{_G}+)?(?:m{_G}*2(?!\w)|metr)",
+    rf"^(?:[.,]\d+)?{_G}*(?:kc|czk|eur|€)?{_G}*(?:/{_G}*)?"
+    rf"(?:[(\[]{_G}*)?(?:za{_G}+)?(?:m{_G}*2(?!\w)|metr)",
     re.IGNORECASE,
 )
 

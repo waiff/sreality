@@ -94,6 +94,7 @@ from toolkit import (
     verify_listing_freshness,
 )
 from toolkit.image_similarity import ImageCompareError
+from toolkit.measures import MeasureBasisError
 from toolkit.region_annotations import RegionAnnotationError
 from toolkit.rent_map import compute_reference_rent
 from toolkit.summaries import SummarizeError
@@ -632,8 +633,8 @@ def post_summarize_region_dispositions(
             region_key=body.region_key,
             dispositions=[d.model_dump() for d in body.dispositions],
             ppm2_overall=body.ppm2_overall,
-            basis=body.basis,
             region_label=body.region_label,
+            ppm2_basis=body.ppm2_basis,
             force_refresh=body.force_refresh,
         )
     except RegionAnnotationError as exc:
@@ -1227,11 +1228,20 @@ def post_estimate_yield(
         apartment_condition_level_min=body.apartment_condition_level_min,
         apartment_condition_level_max=body.apartment_condition_level_max,
     )
-    result = estimate_yield(
-        conn, target, filters, body.purchase_price_czk,
-        estimate_kind=body.estimate_kind,
-        expected_monthly_rent_czk=body.expected_monthly_rent_czk,
-    )
+    try:
+        result = estimate_yield(
+            conn, target, filters, body.purchase_price_czk,
+            estimate_kind=body.estimate_kind,
+            expected_monthly_rent_czk=body.expected_monthly_rent_czk,
+        )
+    except MeasureBasisError as exc:
+        # A cohort with no single per-m² basis (or one contradicting
+        # estimate_kind) is a bad REQUEST, not a server fault: the caller pinned
+        # a category set whose Kč/m² has no one unit, and scaling it would
+        # return a confident number nobody can name. The two run-backed callers
+        # (POST /estimations, the watchdog auto-estimate) already record this as
+        # a failed run; this ad-hoc route has no run to fail, so it answers 422.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     # Secondary MF Cenová mapa reference (rent only). Best-effort: the
     # amenity filters double as the subject's attributes for this ad-hoc
     # surface (the /estimations flow reads the real subject listing).

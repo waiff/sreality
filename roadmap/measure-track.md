@@ -45,15 +45,15 @@ every stored watchdog spec and saved preset, and breaking archived-run display (
 
 | Wave | Purpose | Test | Migration | Status |
 | --- | --- | --- | --- | --- |
-| W1 | Truth at the source: shared `derive_headline_area` across all 9 parsers, shared per-area price rail, per-basis floors | T3 | 423 | ⬜ |
-| W2 | Heal stored damage: mmreality area + unit-price masquerade backfills | T3 | — | ⬜ |
-| W3 | Property-grain coherence: numerator and denominator from the same child | T1+T3 | 424 | ⬜ |
+| W1 | Truth at the source: shared `derive_headline_area` across all 9 parsers, shared per-area price rail, per-basis floors | T3 | 423 | ✅ |
+| W2 | Heal stored damage: mmreality area + unit-price masquerade backfills | T3 | — | 🟨 code + dry-run |
+| W3 | Property-grain coherence: numerator and denominator from the same child | T1+T3 | 424 | ✅ |
 | W4 | **Keystone** — `measure_price_per_m2` + `measure_price_per_m2_basis` in SQL; 6 relations repointed | T1+T2 | 425 | ✅ |
-| W5 | Python + API call sites onto the named measure (`toolkit/measures.py`) | T1+T2 | 426 | ⬜ |
+| W5 | Python + API call sites onto the named measure (`toolkit/measures.py`) | T1+T2 | 426 | ✅ |
 | W6 | Frontend: one formatter, basis on every surface, the map Kč/m² toggle | T1+T2 | — | ⬜ |
 | W7 | Chrome extension: read the server's measure, name the month | T2 | — | ⬜ |
 | W8 | **The permanent rail** — required-arg signatures + census CI gate + `FilterDef.basis` | T1 | — | ⬜ |
-| W9 | Plausibility gate: per-source drift detection the null-checks are blind to | T3 | 427 | ⬜ |
+| W9 | Plausibility gate: per-source drift detection the null-checks are blind to | T3 | 427 | ✅ |
 
 Ordering: W1 ∥ W3 → W2; W3 → W4; W4 → {W5, W6, W9}; W5 → W7; everything → W8.
 
@@ -110,6 +110,177 @@ CI replay of migration 375 has neither, 425 guards the re-emission: on the narro
 only (i.e. on the replay) it drops `properties_map_mv` and `browse_projection` first, so the
 statement becomes a plain create at the right shape. On production the guard is inert.
 Nothing reads or writes the two columns.
+
+### W9 as built — what the operator will see, and what it says about the data
+
+Migration 427 adds `measure_plausibility_by_source` (per source × category_main × category_type,
+active listings: the medians, the share the basis floor NULLs, the share where `area_m2` diverges
+from `usable_area` by >10%, and the coverage denominators) and `scripts/verify_pipeline.py` gains
+four checks over it — `ppm2_median_shift`, `ppm2_basis_floor_share`, `area_vs_usable_divergence`,
+`ppm2_measure_coverage` — on the 6-hourly lane,
+sharing one read per run. They exist because `data_quality_by_source` tests 29 fields for
+`IS NOT NULL` only, and both defects this program fixed produce 100% non-NULL values.
+
+Measured against production the day before W2's backfill, both checks indict the real defect and
+stay silent on the healthy portals in the same cell: `area_vs_usable_divergence` reads **99.7%** on
+mmreality dum/prodej (`area_m2` 905.0 vs `usable_area` 130.0 on 3 588 rows) against **0.0%** on
+every other portal, and `ppm2_basis_floor_share` reads **20.0% / 19.0% / 15.7% / 11.3% / 6.7%** on
+ceskereality, realitymix ×2, remax and bazos against **0.5%** on idnes and sreality. So **/health
+shows two red tiles from the moment this deploys**, and that is the correct reading — they go green
+when W1's parser rail and W2's backfill have worked through the stock, which is exactly the signal
+the operator has never had. The five deviations from the charter's plan (why the divergence test
+is not `IS DISTINCT FROM`, why the floor share is a level and not a jump, why there is no
+cross-portal peer arm, why a fourth coverage check was needed, why each median is gated on its own
+support) are recorded in the design doc's W9 section and migration 427's header.
+
+**A third tile is AMBER on day one, and it is also correct.** `ppm2_measure_coverage` reports that
+sreality's four `pozemek` cells (20 484 + 5 825 + 459 + 406 active rows) and bezrealitky's
+(1 643) have no per-m² measure at all: land plot size lives in `estate_area`, which
+`measure_price_per_m2` does not read, so `area_m2` is NULL on 27 174 of 27 174 sreality land rows.
+That is a **standing, sanctioned gap** (the charter's "a visible gap, never a guess"), not a
+regression — which is why the stock arm can only amber, while the same share among a week's new
+arrivals fails. Teaching the measure to read `estate_area` for `pozemek` is the obvious follow-up
+and is deliberately NOT part of W9: this wave makes the hole visible, it does not fill it.
+### W5 as built — what changed, and three deviations
+
+`toolkit/measures.py` is the Python face of the measure: `per_m2_sql(alias)` /
+`per_m2_basis_sql(alias)` (both alias-required, so a unit-blind call cannot be written), the
+four-token vocabulary plus `mixed` / `unknown`, the per-basis PRICE floors, the three Czech
+unit strings, `ppm2_basis()` (a mirror of the SQL label for rows that never touched Postgres),
+`spec_ppm2_basis()` (the same vocabulary read off a FILTER SPEC, where `None` means
+UNCONSTRAINED), `cohort_basis()` and `require_scalable_basis()`. Nine consumers moved onto it. The five
+estimation-path statements W4 deferred (`comparables.py` ×3, `transit_axis.py`,
+`neighborhoods.py`) now call `measure_price_per_m2(...)`, which **changes estimation output**:
+a comparable below its basis floor loses its per-m² figure and drops out of the cohort's
+percentiles. Live count on `listings` today: **2,843 of 312,224** active priced-and-sized rows
+(0.91%), of which 2,295 are `komercni`/`pronajem` under the 1,000 Kč rent floor and 188 have no
+resolvable basis at all.
+
+- **The Watchdog and comparables clauses are NOT byte-identical, and cannot be.** The charter
+  asked for a byte-identity test between `notifications._build_match_clauses` and
+  `comparables._shared_filter_where`. They run against different relations: the matcher reads
+  `properties_public`, which PUBLISHES `price_per_m2` as the measure, while
+  `_shared_filter_where`'s only three FROM clauses (`comparables.py`, `velocity.py`,
+  `transit_axis.py`) are the `listings` TABLE, which has no such column — `l.price_per_m2`
+  there is a 42703 at PREPARE. The invariant that IS enforceable is "neither derives the
+  formula, both resolve to `measure_price_per_m2`", and that is what
+  `tests/api/test_watchdog_browse_one_measure.py` pins, including a source-text guard against
+  a fifth hand-typed copy.
+- **`_scale` needs the estimate_kind as well as the basis.** The charter specified
+  `_scale(..., *, basis)`. A basis alone cannot detect the error worth detecting: `median ×
+  area` is the same multiplication for a monthly Kč/m² and a capital Kč/m², so the check is
+  whether the basis agrees with what the product will be CALLED. `_scale` takes both, and
+  `POST /estimate_yield` maps the resulting `MeasureBasisError` to 422 (the two run-backed
+  callers already record it as a failed run). The `price_czk`-percentile branch is not gated.
+- **`describe_neighborhood`'s agent summary read two keys that do not exist.**
+  `agent.py`'s `_summarise_tool_result` asked for `active_listings` and a cohort-wide
+  `median_price_per_m2`; the tool publishes `active_listing_count` and a per-DISPOSITION block,
+  so the agent has always been handed two `None`s. It could not be made basis-aware without
+  being made correct first, so it now reports the count that exists and the per-disposition
+  medians each with its own basis.
+
+Also in W5: `neighborhoods`' per-disposition stats are gated on the MEASURE rather than on
+price+area, so `n`, `median_price_czk` and `median_area_m2` describe the same rows the
+percentiles do; `portal_lookup` serves `price_per_m2`, `price_per_m2_basis`, `area_basis` and a
+new `mf_reference_rent_per_m2_czk` computed at the grain of its own numerator (a CASE, not a
+coalesce of two ratios — the extension divides a property-grain rent by a listing-grain area
+today, which is wrong for every merged group); `analyze_distribution` /
+`find_distribution_outliers` / `cluster_comparables` carry `basis` in their envelopes and
+degrade to `'unknown'` for the caller-supplied rows `POST /tools/analyze_distribution` accepts;
+`summarize_region_dispositions` takes `ppm2_basis`, states the unit in the payload, and REFUSES
+a `'mixed'` cohort outright (no LLM call, no cache write). Migration 426 adds
+`estimation_cohort_entries.price_per_m2_basis` (nullable; historical rows stay NULL =
+"basis unknown, pre-426", never backfilled — rules 8 and 12) and supersedes migration 104's
+region-annotator prompt, guarded on `updated_by = 'seed'` (verified still `seed` on production).
+
+### W5 review pass — five corrections
+
+- **A cohort's unit is read off its ROWS, never off its filter pins.** `_filters_used` fed the
+  filter spec to `ppm2_basis()`, a per-ROW mirror where `None` means "this row has no
+  category" — but to a spec it means UNCONSTRAINED. `category_main=null, category_type='prodej'`
+  is a legal request, and it stamped the whole envelope `sale_capital_czk_m2` while the cohort
+  really held plots (Kč/m² of PLOT) beside flats (Kč/m² of FLOOR): the exact blanket unit this
+  program exists to end, in the field the wave added to prevent it. `find_comparables` /
+  `find_comparables_relaxed` now label the envelope AND every relaxation-trace snapshot with
+  `cohort_basis()` over the rows that step returned, so a rung that widens into two bases says
+  `mixed` at the rung that did it. The row-less path (the agent's opening message, written
+  before any tool runs) uses `spec_ppm2_basis()`, which answers None rather than guess.
+- **Agent mode is gated too.** `require_scalable_basis` lived only in `estimate_yield._scale`,
+  which the agent never calls — and the SPA's default rent path IS agent mode. There the model
+  does the multiplication and reports it through `record_estimate`, so an agent that widened a
+  thin rental cohort onto `prodej` (`category_type` is in `_FCR_OVERRIDE_FIELDS`) could land
+  `status='success'` with a purchase Kč/m² × area rendered as a monthly rent.
+  `agent._require_cohort_scalable_into_rent` runs the same check on the server-derived cohort
+  at terminator time, before `_finalise` persists anything; the run fails with the reason
+  instead. A cohort with no measure-backed row is not gated — nothing produced a per-m² number
+  there, so there is none to mislabel (the carve-out `_scale` already makes for an empty
+  distribution). **This is a server-side gate, so it holds regardless of the two drifted
+  `skills` rows below** — the prose fix was unreachable, the code one is not.
+- **There is a SIXTH per-m² statement.** `api/portal_lookup._MARKET_SQL` gained three measure
+  expressions and `l.area_basis`, and no gate could reach it: `sql_corpus.discover()` DOES find
+  it, then `_is_format_template` skips it over its `{values}` slot, while
+  `tests/test_measure_sql_prepare.py` hard-asserted the set was exactly five. A typo there is a
+  42703 that ships green and 500s `POST /listings/lookup` — the Chrome extension's only
+  market-data route. It is now the sixth entry, and the SKILL.md rule says a `*_SQL` constant is
+  not evidence of coverage.
+- **The client half of the basis handoff landed here, not in W6.** `_build_payload` now declares
+  the unit UNKNOWN when no basis is supplied, so shipping the server half alone would have
+  stripped the correct `Kč/m²` from every single-basis annotation for the whole W5→W6 window.
+  `BrowseExperience` passes `BrowseStats.ppm2_basis` — the basis `browse_stats_properties`
+  already resolves from the cohort's own rows (migration 425), not a second derivation off the
+  filters — through `fetchRegionDispositionAnnotations`, and it is part of the React Query key.
+  **Consequence, now rather than at W6: a mixed cohort's Stats annotations disappear** —
+  verified on production, the DEFAULT Browse cohort reads `mixed` (rule 22), a `deal=prodej`
+  one reads `sale_capital_czk_m2`. So the server's `metadata.notes` is now RENDERED in the
+  annotations' place ("cohort mixes sale and rental listings…"): the paragraphs vanishing with
+  no explanation would read as a bug rather than as the refusal it is.
+- **Three behaviour changes shipped with no test.** The `'mixed'` refusal, the measure-gated
+  neighborhoods cohort, and the `_tool_summary` key fixes could each be reverted with the suite
+  still green. Each is now pinned (and each pin was mutation-checked against its own revert),
+  alongside a new `tests/toolkit/test_measures.py` covering the full
+  (category_main × category_type) matrix against migration 425's CASE, the `cohort_basis` /
+  `require_scalable_basis` edges, and the floors read out of the migration file itself.
+
+**Operator action still outstanding — the two live `skills` rows.** The charter asked for a
+`PUT /admin/skills/{name}` alongside the SKILL.md edits. Both live rows have DRIFTED from their
+files and in opposite directions: `rental_estimator_v1` is at 4,741 characters against a 5,931-
+character file body (version 1, `seed` — git moved on without a re-import), and
+`rental_estimator_full_v1` is at 12,426 against 12,080 (version 8, `settings_ui` — seven
+operator revisions). Pushing either file wholesale would clobber real edits, so W5 changed the
+git canon only. The per-m² sentences are identical in both copies, so the live rows can be
+patched surgically from Settings; the diff is in the PR body.
+### W2 open items
+
+The two backfills are written, tested and measured; the **write pass is the operator's**
+(`--write`, one portal at a time). W2 also found three live holes W1 believed it had closed —
+all now fixed with a failing-first test, all of which the heal depended on, because a
+quarantine the next drain cycle undoes is not a heal:
+
+- **ceskereality's JSON-LD offer bypassed the per-area rail.** `parse_detail` trusted
+  `offers.price` first, and the portal puts the RATE there verbatim (`"price":100` beside
+  `100 Kč za m²/měsíc`). The rail only ever guarded the fallback path. The "Cena" spec cell
+  now VETOES the offer rather than merely standing in for it when absent.
+- **realitymix brackets its marker** (`45 Kč / (za m²)`), and the anchored test could not
+  open a bracket, so it walked past every one of ~1,880 confirmed rows.
+- **The shared anchor knew only Kč, and could not survive a decimal amount.** Both portals
+  also quote in EUR — ceskereality stages `16 EUR za m²/měsíc` verbatim, realitymix renders
+  `12,00 € / (za m²/měsíc)` and its amount scanner (an integer run, like every portal's)
+  stops at the comma, so the slice reaching the rail began `,00 € …`. These rows were not
+  merely missed, they were affirmatively decided `keep — no per-area marker`. The anchor now
+  accepts `eur`/`€` and absorbs a leading decimal fraction, which adds **336 ceskereality**
+  (1,015 → **1,351**, 1,336 active) and **~281 realitymix** (260 active) confirmed rows. A
+  EUR *total* (`6 500 EUR za měsíc`, 46 ceskereality rows) is a currency bug, not a unit
+  masquerade, and is still read as a total — the anchor's negatives are unchanged.
+
+Still open after the write pass:
+
+- **bazos is unrecoverable by design.** Across all 26,592 priced active bazos rows, ZERO
+  carry a per-area marker anywhere in structured state — the cell is a bare `170 Kč` and
+  the m² basis lives only in the prose description. The confirmed damage (Karlín offices at
+  `432 Kč` on 635 m²) is real and is left untouched. Reaching it needs a description-level
+  reader, which is W9's plausibility-gate ground, not a backfill's.
+- A whole-fleet `area_basis` backfill. W2 stamps mmreality's 11,218 rows because it is
+  re-deriving them anyway; the other eight portals are still NULL.
 
 ## Next after this program
 

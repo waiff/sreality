@@ -51,7 +51,7 @@ import {
   type ListingFilters,
 } from '@/lib/filters';
 import { usePageTitle } from '@/lib/pageTitle';
-import { PPM2_BASIS_TOKEN, ppm2BasisFromToken } from '@/lib/measure';
+import { ppm2BasisFromToken } from '@/lib/measure';
 import CreateWatchdogModal from '@/components/CreateWatchdogModal';
 import PresetBar from '@/components/PresetBar';
 import type { ListingEstimate } from '@/lib/types';
@@ -603,8 +603,14 @@ export default function BrowseExperience({
       ),
     [statsQuery.data],
   );
+  /* The unit the boxes are in, off the STATS ROWS (browse_stats_properties
+   * resolves it from the cohort itself), not re-derived from the deal/category
+   * filters here — a second derivation is a second definition, and this one
+   * would be the one that disagrees. Part of the query key: two bases are two
+   * different annotation texts, so they must not share a cache entry. */
+  const ppm2Basis = statsQuery.data?.ppm2_basis ?? null;
   const annotationsQuery = useQuery({
-    queryKey: ['region-annotations', regionKey],
+    queryKey: ['region-annotations', regionKey, ppm2Basis],
     queryFn: () =>
       fetchRegionDispositionAnnotations({
         region_key: regionKey,
@@ -615,10 +621,7 @@ export default function BrowseExperience({
          * shorthand. Without it the model is narrating bare Kč/m² and cannot
          * know whether "319" is cheap or absurd. `enabled` below guarantees a
          * single row basis here, so the lookup is total. */
-        basis:
-          statsBasis == null || statsBasis === 'mixed'
-            ? null
-            : PPM2_BASIS_TOKEN[statsBasis],
+        ppm2_basis: ppm2Basis,
         dispositions: boxDispositions.map((d) => ({
           disposition: d.disposition,
           n: d.n,
@@ -982,6 +985,9 @@ export default function BrowseExperience({
                 }}
                 annotations={annotationsQuery.data?.data.annotations}
                 annotationsLoading={annotationsQuery.isFetching}
+                annotationsNote={
+                  annotationsQuery.data?.metadata.notes?.[0] ?? null
+                }
               />
             )}
           </div>

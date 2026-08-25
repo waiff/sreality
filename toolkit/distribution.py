@@ -4,6 +4,13 @@ Pure function. No DB connection. Works on a list of dicts shaped like
 the rows returned by find_comparables. Returns plain stdlib statistics
 (no opinionated heuristics) so every number is rederivable in a
 spreadsheet.
+
+Every envelope carries `basis`: the unit the percentiles are IN when `field`
+is the per-m² measure, and None for the two fields whose unit is unambiguous
+(`price_czk` is Kč, `area_m2` is m²). It is READ off the rows, never derived
+here — `POST /tools/analyze_distribution` accepts caller-supplied listings that
+need carry no basis at all, and those degrade to 'unknown'. Guessing, or
+defaulting to sale, would put a confident unit on a number that has none.
 """
 
 from __future__ import annotations
@@ -11,7 +18,11 @@ from __future__ import annotations
 import statistics
 from typing import Any, Literal
 
+from toolkit.measures import cohort_basis
+
 _FIELD = Literal["price_czk", "price_per_m2", "area_m2"]
+
+_PER_M2_FIELD = "price_per_m2"
 
 
 def analyze_distribution(
@@ -20,13 +31,14 @@ def analyze_distribution(
 ) -> dict[str, Any]:
     from toolkit import _max_last_seen, _now_iso
 
-    pairs = [
-        (l.get("sreality_id"), l.get(field))
-        for l in listings
-        if l.get(field) is not None
-    ]
+    contributing = [l for l in listings if l.get(field) is not None]
+    pairs = [(l.get("sreality_id"), l.get(field)) for l in contributing]
     values = [float(v) for _, v in pairs]
     n = len(values)
+
+    # Only the rows that BACK the percentiles carry their unit; a row dropped
+    # for a NULL value contributes no basis.
+    basis = cohort_basis(contributing) if field == _PER_M2_FIELD else None
 
     if n == 0:
         data = _empty(field)
@@ -34,12 +46,13 @@ def analyze_distribution(
         data = _small_sample(field, values)
     else:
         data = _full_stats(field, values, pairs)
+    data["basis"] = basis
 
     return {
         "data": data,
         "metadata": {
             "tool": "analyze_distribution",
-            "filters_used": {"field": field},
+            "filters_used": {"field": field, "basis": basis},
             "result_count": n,
             "queried_at": _now_iso(),
             "data_freshness": _max_last_seen(listings),

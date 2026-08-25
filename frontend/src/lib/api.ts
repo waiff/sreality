@@ -55,7 +55,6 @@ import type {
   MergesResponse,
   MergedPropertiesResponse,
 } from './types';
-import type { Ppm2BasisToken } from './measure';
 import type { PresetSpec } from './filters';
 import { supabase } from './supabase';
 
@@ -383,20 +382,16 @@ export interface RegionDispositionAnnotationsInput {
     ppm2_box: Ppm2Box | null;
   }>;
   ppm2_overall?: { p25: number; p50: number; p75: number } | null;
-  /* The basis every figure in this payload is on, spelled in migration 425's
-   * own vocabulary (`sale_capital_czk_m2` | `rent_monthly_czk_m2` |
-   * `land_capital_czk_m2`). The caller never sends 'mixed' or null:
-   * BrowseExperience skips the request entirely for a cohort with no single
-   * basis, because prose about sale and rent Kč/m² stacked together would be
-   * wrong in every sentence.
-   *
-   * The server half is live: SummarizeRegionDispositionsIn.basis accepts it,
-   * toolkit/region_annotations threads it into the prompt payload so the model
-   * is told the unit AND the period, and it is folded into the per-day cache
-   * identity beside region_hash. Change one half and the other stops meaning
-   * anything, so they move together. */
-  basis?: Ppm2BasisToken | null;
   region_label?: string | null;
+  /* The unit those boxes are in — pass `BrowseStats.ppm2_basis` straight
+   * through, spelled in migration 425's own vocabulary. The annotator states it
+   * in the prompt instead of guessing, and REFUSES a `'mixed'` cohort outright
+   * (no LLM call, an explicit note): a box plot stacking monthly rents on
+   * purchase prices has no describable shape. Omitting it makes the annotator
+   * treat the unit as unknown, so it can no longer name Kč/m² even when the
+   * cohort is a plain sale cohort. It is also part of the server's per-day
+   * cache identity beside region_hash, so two bases never share one entry. */
+  ppm2_basis?: string | null;
 }
 
 export interface RegionDispositionAnnotationsResult {
@@ -406,8 +401,15 @@ export interface RegionDispositionAnnotationsResult {
     model: string;
     cost_usd: number | null;
     cache_hit: boolean;
+    /* Echo of the basis, and its Czech unit — null for a cohort with no
+     * single one, which is exactly when nothing may name a unit. */
+    ppm2_basis?: string | null;
+    ppm2_unit?: string | null;
   };
-  metadata: Record<string, unknown>;
+  /* `notes` says WHY `annotations` is empty when the server declined to write
+   * any (today: a mixed cohort). Rendering it is the difference between an
+   * explained refusal and a blank panel. */
+  metadata: Record<string, unknown> & { notes?: string[] };
 }
 
 export const fetchRegionDispositionAnnotations = (

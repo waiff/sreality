@@ -13,6 +13,12 @@ import pytest
 
 from api import estimate_yield as ey
 from toolkit import ComparableFilters, TargetSpec
+from toolkit.measures import (
+    RENT_MONTHLY_CZK_M2,
+    SALE_CAPITAL_CZK_M2,
+    MeasureBasisError,
+    cohort_basis,
+)
 
 
 def _listing(
@@ -23,10 +29,15 @@ def _listing(
     data_age_days: int = 1,
     latest_snapshot_id: int = 100,
     last_freshness_check_at: Any = None,
+    price_per_m2_basis: str | None = RENT_MONTHLY_CZK_M2,
 ) -> dict[str, Any]:
     return {
         "sreality_id": sreality_id,
         "price_per_m2": price_per_m2,
+        # find_comparables projects the measure and its label together
+        # (migration 425); a fake cohort that dropped the label would let a
+        # unit-blind scaling regress silently.
+        "price_per_m2_basis": price_per_m2_basis,
         "price_czk": price_czk,
         "area_m2": area_m2,
         "data_age_days": data_age_days,
@@ -50,8 +61,14 @@ def _patch(monkeypatch, listings, dist_data=None, dist_md=None):
     monkeypatch.setattr(ey, "find_comparables", fake_find)
 
     def fake_dist(_listings, field):
+        # Mirror the real tool: the basis is READ off the rows that back the
+        # percentiles, never invented here.
+        contributing = [l for l in _listings if l.get(field) is not None]
+        basis = cohort_basis(contributing) if field == "price_per_m2" else None
         if dist_data is not None:
-            return {"data": dist_data, "metadata": dist_md or {}}
+            data = {**dist_data}
+            data.setdefault("basis", basis)
+            return {"data": data, "metadata": dist_md or {}}
         # default: pretend stats are computed from input
         values = [l.get(field) for l in _listings if l.get(field) is not None]
         n = len(values)
@@ -62,12 +79,13 @@ def _patch(monkeypatch, listings, dist_data=None, dist_md=None):
                     "mean": None, "median": None,
                     "p10": None, "p25": None, "p75": None, "p90": None,
                     "stddev": None, "iqr": None, "outlier_ids": [],
+                    "basis": basis,
                 },
                 "metadata": {},
             }
         return {
             "data": {
-                "n": n, "field": field,
+                "n": n, "field": field, "basis": basis,
                 "min": min(values), "max": max(values),
                 "mean": sum(values) / n, "median": sorted(values)[n // 2],
                 "p10": values[0], "p25": sorted(values)[max(0, n // 4)],
@@ -357,7 +375,11 @@ def test_route_wired_via_app(monkeypatch):
 
 
 def test_sale_kind_emits_sale_keys_and_reverse_yield(monkeypatch):
-    listings = [_listing(i, price_per_m2=120_000.0) for i in range(20)]
+    listings = [
+        _listing(i, price_per_m2=120_000.0,
+                 price_per_m2_basis=SALE_CAPITAL_CZK_M2)
+        for i in range(20)
+    ]
     _patch(
         monkeypatch, listings,
         dist_data={
@@ -389,7 +411,11 @@ def test_sale_kind_emits_sale_keys_and_reverse_yield(monkeypatch):
 
 
 def test_sale_kind_without_expected_rent_skips_yield(monkeypatch):
-    listings = [_listing(i, price_per_m2=120_000.0) for i in range(20)]
+    listings = [
+        _listing(i, price_per_m2=120_000.0,
+                 price_per_m2_basis=SALE_CAPITAL_CZK_M2)
+        for i in range(20)
+    ]
     _patch(
         monkeypatch, listings,
         dist_data={
@@ -433,3 +459,105 @@ def test_rent_kind_default_unchanged_signature(monkeypatch):
     assert d["estimate_kind"] == "rent"
     assert d["estimated_monthly_rent_czk"] is not None
     assert d["estimated_sale_price_czk"] is None
+
+
+# --- the basis gate on _scale ---------------------------------------------
+# `median × area` is the same multiplication for a monthly Kč/m² and a capital
+# Kč/m²; only the basis decides what the product is. These pin that the gate
+# fires rather than let the pipeline emit a confidently wrong headline number.
+
+
+def test_scaling_a_mixed_cohort_raises(monkeypatch):
+    """Rule 22 puts a sale+rent cohort one click away; it has no single unit."""
+    listings = [
+        _listing(i, price_per_m2=400.0,
+                 price_per_m2_basis=(
+                     RENT_MONTHLY_CZK_M2 if i % 2 else SALE_CAPITAL_CZK_M2
+                 ))
+        for i in range(20)
+    ]
+    _patch(monkeypatch, listings)
+    with pytest.raises(MeasureBasisError) as exc:
+        ey.estimate_yield(
+            conn=None,
+            target=TargetSpec(lat=50.0, lng=14.0, area_m2=50.0),
+            filters=ComparableFilters(),
+        )
+    assert "mixed" in str(exc.value)
+
+
+def test_scaling_an_unlabelled_cohort_raises(monkeypatch):
+    """Absent labels degrade to 'unknown' — never to a default of sale."""
+    listings = [
+        _listing(i, price_per_m2=400.0, price_per_m2_basis=None)
+        for i in range(20)
+    ]
+    _patch(monkeypatch, listings)
+    with pytest.raises(MeasureBasisError):
+        ey.estimate_yield(
+            conn=None,
+            target=TargetSpec(lat=50.0, lng=14.0, area_m2=50.0),
+            filters=ComparableFilters(),
+        )
+
+
+def test_scaling_a_rent_cohort_into_a_sale_price_raises(monkeypatch):
+    """A monthly Kč/m² times an area is a monthly rent, never a sale price."""
+    listings = [
+        _listing(i, price_per_m2=400.0, price_per_m2_basis=RENT_MONTHLY_CZK_M2)
+        for i in range(20)
+    ]
+    _patch(monkeypatch, listings)
+    with pytest.raises(MeasureBasisError):
+        ey.estimate_yield(
+            conn=None,
+            target=TargetSpec(lat=50.0, lng=14.0, area_m2=50.0),
+            filters=ComparableFilters(),
+            estimate_kind="sale",
+            expected_monthly_rent_czk=25_000,
+        )
+
+
+def test_price_czk_branch_is_never_basis_gated(monkeypatch):
+    """No target area -> Kč percentiles, which need no per-m² basis at all.
+
+    This branch must NOT be made to fail: an unlabelled cohort is fine here
+    because nothing per-m² is being multiplied.
+    """
+    listings = [
+        _listing(i, price_czk=20_000 + i, price_per_m2_basis=None)
+        for i in range(20)
+    ]
+    _patch(monkeypatch, listings)
+    res = ey.estimate_yield(
+        conn=None,
+        target=TargetSpec(lat=50.0, lng=14.0),
+        filters=ComparableFilters(),
+    )
+    assert res["data"]["estimated_monthly_rent_czk"] is not None
+    assert res["metadata"]["price_per_m2_basis"] is None
+    assert res["metadata"]["price_per_m2_unit"] is None
+
+
+def test_empty_cohort_is_a_gap_not_an_error(monkeypatch):
+    """"No comparables" must stay "no comparables", not become a basis error."""
+    _patch(monkeypatch, [])
+    res = ey.estimate_yield(
+        conn=None,
+        target=TargetSpec(lat=50.0, lng=14.0, area_m2=50.0),
+        filters=ComparableFilters(),
+    )
+    assert res["data"]["estimated_monthly_rent_czk"] is None
+    assert res["data"]["sample_size"] == 0
+
+
+def test_metadata_names_the_unit_of_the_scaled_estimate(monkeypatch):
+    listings = [_listing(i, price_per_m2=400.0 + i) for i in range(20)]
+    _patch(monkeypatch, listings)
+    res = ey.estimate_yield(
+        conn=None,
+        target=TargetSpec(lat=50.0, lng=14.0, area_m2=50.0),
+        filters=ComparableFilters(),
+    )
+    assert res["metadata"]["price_per_m2_basis"] == RENT_MONTHLY_CZK_M2
+    assert res["metadata"]["price_per_m2_unit"] == "Kč/m²/měs"

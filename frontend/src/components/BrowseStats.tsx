@@ -29,6 +29,8 @@ interface Props {
    * disposition. Optional — the view renders fully without them. */
   annotations?: Record<string, string>;
   annotationsLoading?: boolean;
+  /* Why there are no annotations, when the server declined to write any. */
+  annotationsNote?: string | null;
 }
 
 export default function BrowseStatsView({
@@ -39,6 +41,7 @@ export default function BrowseStatsView({
   cohort,
   annotations,
   annotationsLoading,
+  annotationsNote,
 }: Props) {
   if (isLoading && !stats) return <Skeleton />;
   if (!stats) return null;
@@ -121,6 +124,7 @@ export default function BrowseStatsView({
           }))}
           annotations={annotations}
           annotationsLoading={annotationsLoading}
+          annotationsNote={annotationsNote}
         />
       </Card>
 

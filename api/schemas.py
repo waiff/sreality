@@ -276,17 +276,19 @@ class SummarizeRegionDispositionsIn(BaseModel):
     (region, calendar day) so repeat browser sessions don't re-bill.
     `dispositions` is the same `ppm2_box` payload that drives the chart.
 
-    `basis` is migration 425's per-m2 basis token for every figure in the
-    payload -- sale_capital_czk_m2 / rent_monthly_czk_m2 /
-    land_capital_czk_m2. Without it the model narrates bare Kc/m2 numbers and
-    cannot tell a ~91 535 capital figure from a ~319 monthly one. The caller
-    sends exactly one token or nothing; it is part of the cache identity.
+    `ppm2_basis` is the unit those boxes are in — one of migration 425's four
+    tokens, or the literal 'mixed' when the cohort spans sale and rental (rule
+    22 makes that the DEFAULT Browse cohort). 'mixed' is refused server-side.
+    Optional so a client that has not been taught to send it yet still works;
+    absent, the annotator is told the unit is unknown rather than guessing one.
+    It is also part of the cache identity: a cached sentence about a ~91 535
+    capital figure is false about a ~319 monthly one.
     """
     region_key: str = Field(min_length=1, max_length=8192)
     dispositions: list[RegionDispositionIn] = Field(default_factory=list, max_length=40)
     ppm2_overall: dict[str, Any] | None = None
-    basis: str | None = Field(default=None, max_length=64)
     region_label: str | None = Field(default=None, max_length=256)
+    ppm2_basis: str | None = Field(default=None, max_length=64)
     force_refresh: bool = False
 
 

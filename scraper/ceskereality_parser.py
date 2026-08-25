@@ -175,6 +175,20 @@ def _parse_total(html: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _spec_is_per_area(text: str | None) -> bool:
+    """True when the "Cena" spec cell marks a per-m² rate, vetoing the JSON-LD offer.
+
+    The offer is a bare NUMBER — it cannot say whether it is a total or a rate,
+    and ceskereality puts the rate there verbatim (`"price":100` beside
+    `100 Kč za m²/měsíc`). The spec cell is the only place the basis is spelled,
+    so it has to VETO the offer, not merely stand in for it when absent.
+    """
+    if not text:
+        return False
+    m = _PRICE_RUN_RE.search(text)
+    return bool(m and is_per_area_price(text[m.end():]))
+
+
 def _parse_price(text: str | None, category_type: str | None) -> tuple[int | None, str | None]:
     unit = "za mesic" if category_type == "pronajem" else "za nemovitost"
     if not text:
@@ -516,7 +530,9 @@ def parse_detail(
 
     # Price: the JSON-LD offer is the clean source; fall back to the "Cena" spec.
     price_czk: int | None = None
-    if isinstance(offers.get("price"), (int, float)):
+    if isinstance(offers.get("price"), (int, float)) and not _spec_is_per_area(
+        params.get("cena")
+    ):
         value = int(offers["price"])
         price_czk = value if 0 < value <= _PRICE_MAX else None
     price_unit = "za mesic" if category_type == "pronajem" else "za nemovitost"
