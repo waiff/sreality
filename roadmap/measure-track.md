@@ -50,9 +50,9 @@ every stored watchdog spec and saved preset, and breaking archived-run display (
 | W3 | Property-grain coherence: numerator and denominator from the same child | T1+T3 | 424 | ✅ |
 | W4 | **Keystone** — `measure_price_per_m2` + `measure_price_per_m2_basis` in SQL; 6 relations repointed | T1+T2 | 425 | ✅ |
 | W5 | Python + API call sites onto the named measure (`toolkit/measures.py`) | T1+T2 | 426 | ⬜ |
-| W6 | Frontend: one formatter, basis on every surface, the map Kč/m² toggle | T1+T2 | — | ✅ |
-| W7 | Chrome extension: read the server's measure, name the month | T2 | — | ✅ |
-| W8 | **The permanent rail** — required-arg signatures + census CI gate + `FilterDef.basis` | T1 | — | ✅ |
+| W6 | Frontend: one formatter, basis on every surface, the map Kč/m² toggle | T1+T2 | — | ⬜ |
+| W7 | Chrome extension: read the server's measure, name the month | T2 | — | ⬜ |
+| W8 | **The permanent rail** — required-arg signatures + census CI gate + `FilterDef.basis` | T1 | — | ⬜ |
 | W9 | Plausibility gate: per-source drift detection the null-checks are blind to | T3 | 427 | ⬜ |
 
 Ordering: W1 ∥ W3 → W2; W3 → W4; W4 → {W5, W6, W9}; W5 → W7; everything → W8.
