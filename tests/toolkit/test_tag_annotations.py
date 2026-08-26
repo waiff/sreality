@@ -76,7 +76,7 @@ def test_rename_tag_leaves_every_dependent_row_untouched(conn: _FakeConn) -> Non
     assert [sql for sql, _ in conn.executed] == [
         " ".join(
             "UPDATE tag_taxonomy SET label = %s WHERE id = %s "
-            "RETURNING id, label, family, active, created_at".split()
+            "RETURNING id, label, family, active, priority, ready_for_training, created_at".split()
         )
     ]
     assert conn.states_for(tag["id"]) == {1: "positive"}
@@ -132,6 +132,54 @@ def test_remove_tag_cascades_its_annotations_only(conn: _FakeConn) -> None:
 def test_remove_tag_unknown_id_raises(conn: _FakeConn) -> None:
     with pytest.raises(KeyError):
         ta.remove_tag(conn, tag_id=999)
+
+
+# --- set_tag_flags -----------------------------------------------------------
+
+
+def test_add_tag_defaults_both_flags_false(conn: _FakeConn) -> None:
+    row = ta.add_tag(conn, label="a")
+    assert row["priority"] is False
+    assert row["ready_for_training"] is False
+
+
+def test_set_tag_flags_sets_priority_only(conn: _FakeConn) -> None:
+    tag = ta.add_tag(conn, label="a")
+    row = ta.set_tag_flags(conn, tag_id=tag["id"], priority=True)
+    assert row["priority"] is True
+    assert row["ready_for_training"] is False  # untouched, not clobbered
+
+
+def test_set_tag_flags_sets_ready_for_training_only(conn: _FakeConn) -> None:
+    tag = ta.add_tag(conn, label="a")
+    row = ta.set_tag_flags(conn, tag_id=tag["id"], ready_for_training=True)
+    assert row["ready_for_training"] is True
+    assert row["priority"] is False
+
+
+def test_set_tag_flags_sets_both_at_once(conn: _FakeConn) -> None:
+    tag = ta.add_tag(conn, label="a")
+    row = ta.set_tag_flags(conn, tag_id=tag["id"], priority=True, ready_for_training=True)
+    assert row["priority"] is True
+    assert row["ready_for_training"] is True
+
+
+def test_set_tag_flags_can_clear_a_flag(conn: _FakeConn) -> None:
+    tag = ta.add_tag(conn, label="a")
+    ta.set_tag_flags(conn, tag_id=tag["id"], priority=True)
+    row = ta.set_tag_flags(conn, tag_id=tag["id"], priority=False)
+    assert row["priority"] is False
+
+
+def test_set_tag_flags_rejects_a_no_op_call(conn: _FakeConn) -> None:
+    tag = ta.add_tag(conn, label="a")
+    with pytest.raises(ValueError, match="nothing to update"):
+        ta.set_tag_flags(conn, tag_id=tag["id"])
+
+
+def test_set_tag_flags_unknown_id_raises(conn: _FakeConn) -> None:
+    with pytest.raises(KeyError):
+        ta.set_tag_flags(conn, tag_id=999, priority=True)
 
 
 # --- get_or_create_tag_id ---------------------------------------------------
@@ -343,6 +391,101 @@ def test_list_images_for_tag_orders_newest_first_with_a_stable_tiebreaker(
     conn.add_to_sample(4, added_at="t2")
     rows = ta.list_images_for_tag(conn, tag_id=tag["id"])
     assert [r["image_id"] for r in rows] == [4, 3, 2, 1]
+
+
+# --- list_tags_for_image -----------------------------------------------------
+
+
+def test_list_tags_for_image_lists_every_active_tag(conn: _FakeConn) -> None:
+    # The mirror of list_images_for_tag: fixed image, varying tag.
+    kitchen = ta.add_tag(conn, label="kuchyne", family="interier")
+    living = ta.add_tag(conn, label="obyvak", family="interier")
+    ta.set_state(conn, image_id=1, tag_id=kitchen["id"], state="positive")
+    ta.set_state(conn, image_id=1, tag_id=living["id"], state="excluded")
+
+    rows = {r["label"]: r for r in ta.list_tags_for_image(conn, image_id=1)}
+    assert rows["kuchyne"]["state"] == "positive"
+    assert rows["obyvak"]["state"] == "excluded"
+
+
+def test_list_tags_for_image_shows_untouched_for_a_tag_with_no_row(conn: _FakeConn) -> None:
+    ta.add_tag(conn, label="a")
+    rows = ta.list_tags_for_image(conn, image_id=99)
+    assert rows == [{"id": 1, "label": "a", "family": None, "state": "untouched", "updated_at": None}]
+
+
+def test_list_tags_for_image_excludes_inactive_tags(conn: _FakeConn) -> None:
+    a = ta.add_tag(conn, label="a")
+    ta.add_tag(conn, label="b")
+    conn.tag_taxonomy[a["id"]]["active"] = False
+    labels = [r["label"] for r in ta.list_tags_for_image(conn, image_id=1)]
+    assert labels == ["b"]
+
+
+def test_list_tags_for_image_groups_by_family_nulls_last(conn: _FakeConn) -> None:
+    ta.add_tag(conn, label="standalone")
+    ta.add_tag(conn, label="obyvak", family="interier")
+    ta.add_tag(conn, label="fasada", family="exterier")
+    families = [r["family"] for r in ta.list_tags_for_image(conn, image_id=1)]
+    # Families sort before the NULL/standalone tail; alphabetical within each.
+    assert families == ["exterier", "interier", None]
+
+
+def test_list_tags_for_image_is_scoped_to_the_requested_image(conn: _FakeConn) -> None:
+    tag = ta.add_tag(conn, label="a")
+    ta.set_state(conn, image_id=1, tag_id=tag["id"], state="positive")
+    rows = ta.list_tags_for_image(conn, image_id=2)
+    assert rows == [{"id": tag["id"], "label": "a", "family": None, "state": "untouched", "updated_at": None}]
+
+
+# --- list_positive_tags_for_images -------------------------------------------
+
+
+def test_list_positive_tags_for_images_batches_the_lookup(conn: _FakeConn) -> None:
+    kitchen = ta.add_tag(conn, label="kuchyne")
+    garage = ta.add_tag(conn, label="garaz")
+    ta.set_state(conn, image_id=1, tag_id=kitchen["id"], state="positive")
+    ta.set_state(conn, image_id=1, tag_id=garage["id"], state="positive")
+    ta.set_state(conn, image_id=2, tag_id=kitchen["id"], state="positive")
+
+    rows = ta.list_positive_tags_for_images(conn, image_ids=[1, 2])
+    by_image: dict[int, list[str]] = {}
+    for r in rows:
+        by_image.setdefault(r["image_id"], []).append(r["label"])
+    assert by_image[1] == ["garaz", "kuchyne"]  # ordered by label within an image
+    assert by_image[2] == ["kuchyne"]
+
+
+def test_list_positive_tags_for_images_excludes_non_positive_states(conn: _FakeConn) -> None:
+    tag = ta.add_tag(conn, label="a")
+    ta.set_state(conn, image_id=1, tag_id=tag["id"], state="negative")
+    ta.set_state(conn, image_id=2, tag_id=tag["id"], state="excluded")
+    assert ta.list_positive_tags_for_images(conn, image_ids=[1, 2]) == []
+
+
+def test_list_positive_tags_for_images_ignores_images_outside_the_batch(conn: _FakeConn) -> None:
+    tag = ta.add_tag(conn, label="a")
+    ta.set_state(conn, image_id=1, tag_id=tag["id"], state="positive")
+    ta.set_state(conn, image_id=2, tag_id=tag["id"], state="positive")
+    rows = ta.list_positive_tags_for_images(conn, image_ids=[1])
+    assert [r["image_id"] for r in rows] == [1]
+
+
+def test_list_positive_tags_for_images_dedupes_ids(conn: _FakeConn) -> None:
+    tag = ta.add_tag(conn, label="a")
+    ta.set_state(conn, image_id=1, tag_id=tag["id"], state="positive")
+    rows = ta.list_positive_tags_for_images(conn, image_ids=[1, 1, 1])
+    assert len(rows) == 1
+
+
+def test_list_positive_tags_for_images_empty_selection_is_a_no_op(conn: _FakeConn) -> None:
+    assert ta.list_positive_tags_for_images(conn, image_ids=[]) == []
+    assert conn.executed == []
+
+
+def test_list_positive_tags_for_images_caps_batch_size(conn: _FakeConn) -> None:
+    with pytest.raises(ValueError, match="at most"):
+        ta.list_positive_tags_for_images(conn, image_ids=list(range(ta.BATCH_IMAGE_MAX + 1)))
 
 
 # --- tag_overview -----------------------------------------------------------

@@ -49,6 +49,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     addNewDedupTag: vi.fn(),
     renameNewDedupTag: vi.fn(),
     removeNewDedupTag: vi.fn(),
+    setNewDedupTagFlags: vi.fn(),
     growNewDedupSample: vi.fn(),
     listNewDedupProposals: vi.fn(),
     setNewDedupProposalState: vi.fn(),
@@ -57,6 +58,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     setNewDedupTagAnnotation: vi.fn(),
     bulkSetNewDedupTagAnnotation: vi.fn(),
     listNewDedupImageTags: vi.fn(),
+    listNewDedupPositiveTagsForImages: vi.fn(),
     listNewDedupSettings: vi.fn(),
     setBorderCase: vi.fn(),
     deleteBorderCase: vi.fn(),
@@ -99,6 +101,7 @@ const SETTINGS: NewDedupSetting[] = [
 function tag(over: Partial<NewDedupTag> = {}): NewDedupTag {
   return {
     id: 1, label: 'interier - kuchyne', family: 'interier', active: true,
+    priority: false, ready_for_training: false,
     created_at: '2026-08-01T00:00:00Z',
     positive_count: 12, gate_count: 12, border_case_count: 0,
     negative_count: 8, excluded_count: 5,
@@ -178,6 +181,7 @@ describe('<NewDedupLabeling>', () => {
     vi.mocked(api.listNewDedupProposals).mockResolvedValue({ data: PROPOSALS });
     vi.mocked(api.listNewDedupTagImages).mockResolvedValue({ data: [] });
     vi.mocked(api.listNewDedupImageTags).mockResolvedValue({ data: [] });
+    vi.mocked(api.listNewDedupPositiveTagsForImages).mockResolvedValue({ data: [] });
     vi.mocked(queries.fetchImagesByImageIds).mockResolvedValue(new Map([[101, IMAGE]]));
     vi.mocked(queries.fetchBorderCasesByImageIds).mockResolvedValue(new Set());
     vi.mocked(api.setBorderCase).mockResolvedValue({
@@ -332,6 +336,60 @@ describe('<NewDedupLabeling>', () => {
     expect(screen.getByText(/25 annotations go with it/)).toBeInTheDocument();
     fireEvent.click(screen.getByText('Remove'));
     await waitFor(() => expect(api.removeNewDedupTag).toHaveBeenCalledWith(1));
+  });
+
+  it('pins a priority tag to the top of the manage modal, marked in red', async () => {
+    const TWO: NewDedupLabelingOverview = {
+      sample_size: 42,
+      tags: [
+        tag({ id: 1, label: 'aaa - first alphabetically' }),
+        tag({ id: 2, label: 'zzz - last alphabetically', priority: true }),
+      ],
+    };
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({ data: TWO });
+    renderPage();
+    await screen.findByRole('button', { name: 'aaa - first alphabetically' });
+    fireEvent.click(screen.getByText('Modify labels'));
+    const modal = within(await screen.findByRole('dialog', { name: /Modify Taxonomy/ }));
+    const names = modal.getAllByTitle(/alphabetically/).map((el) => el.textContent);
+    // Priority pins to the top even though it sorts last alphabetically.
+    expect(names).toEqual(['zzz - last alphabetically', 'aaa - first alphabetically']);
+    expect(modal.getByText('zzz - last alphabetically')).toHaveClass('text-[var(--color-brick)]');
+    expect(modal.getByText('aaa - first alphabetically')).not.toHaveClass('text-[var(--color-brick)]');
+  });
+
+  it('toggles a tag\'s priority and ready-for-training flags from the manage modal', async () => {
+    vi.mocked(api.setNewDedupTagFlags).mockResolvedValue({ data: tag({ priority: true }) });
+    renderPage();
+    await screen.findByRole('button', { name: 'interier - kuchyne' });
+    fireEvent.click(screen.getByText('Modify labels'));
+    const modal = within(await screen.findByRole('dialog', { name: /Modify Taxonomy/ }));
+
+    fireEvent.click(modal.getByRole('button', { name: 'Priority' }));
+    await waitFor(() =>
+      expect(api.setNewDedupTagFlags).toHaveBeenCalledWith(1, { priority: true }),
+    );
+
+    fireEvent.click(modal.getByRole('button', { name: 'Ready for training' }));
+    await waitFor(() =>
+      expect(api.setNewDedupTagFlags).toHaveBeenCalledWith(1, { ready_for_training: true }),
+    );
+  });
+
+  it('clearing a flag sends an explicit false, not an omitted field', async () => {
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: { sample_size: 42, tags: [tag({ priority: true })] },
+    });
+    vi.mocked(api.setNewDedupTagFlags).mockResolvedValue({ data: tag({ priority: false }) });
+    renderPage();
+    await screen.findByRole('button', { name: 'interier - kuchyne' });
+    fireEvent.click(screen.getByText('Modify labels'));
+    const modal = within(await screen.findByRole('dialog', { name: /Modify Taxonomy/ }));
+
+    fireEvent.click(modal.getByRole('button', { name: 'Priority' }));
+    await waitFor(() =>
+      expect(api.setNewDedupTagFlags).toHaveBeenCalledWith(1, { priority: false }),
+    );
   });
 
   it('renaming an unrelated tag in the manage modal never hijacks the active filter', async () => {
@@ -833,6 +891,113 @@ describe('<NewDedupLabeling>', () => {
     );
     // Sizing tiles here must never reshape the listing cards on Browse.
     expect(localStorage.getItem('sreality.browse.cardImageLarge')).toBeNull();
+  });
+
+  // --- assigned tags, shown below the image --------------------------------
+
+  it('shows the tags already assigned to an image below its photo', async () => {
+    vi.mocked(api.listNewDedupPositiveTagsForImages).mockResolvedValue({
+      data: [
+        { image_id: 101, tag_id: 1, label: 'interier - kuchyne' },
+        { image_id: 101, tag_id: 7, label: 'exterier - fasada' },
+      ],
+    });
+    renderPage();
+    await screen.findByRole('button', { name: 'Open photo 101' });
+    const list = await screen.findByRole('list', { name: 'Assigned tags' });
+    expect(within(list).getByText('interier - kuchyne')).toBeInTheDocument();
+    expect(within(list).getByText('exterier - fasada')).toBeInTheDocument();
+    // One batched call for the whole visible grid, not one per tile.
+    expect(vi.mocked(api.listNewDedupPositiveTagsForImages).mock.calls).toHaveLength(1);
+    expect(api.listNewDedupPositiveTagsForImages).toHaveBeenCalledWith([101]);
+  });
+
+  it('renders nothing under an untouched image, to keep the tile clean', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: 'Open photo 101' });
+    expect(screen.queryByRole('list', { name: 'Assigned tags' })).not.toBeInTheDocument();
+  });
+
+  it('adds a tile\'s own tag to its assigned-tags row the moment it is set positive', async () => {
+    // On Pending, deciding a tile drops it from view — the All tab is what
+    // patches in place, so it's the one that can show the row updating.
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({ data: [PROPOSALS[0]] });
+    vi.mocked(api.setNewDedupProposalState).mockResolvedValue({ data: stateResult() });
+    renderPage();
+    fireEvent.click(await screen.findByRole('tab', { name: 'All' }));
+    await screen.findAllByRole('group', { name: 'Tag state' });
+    expect(screen.queryByRole('list', { name: 'Assigned tags' })).not.toBeInTheDocument();
+
+    setStateOn(0, 'positive');
+    await waitFor(() => expect(api.setNewDedupProposalState).toHaveBeenCalled());
+
+    // Patched from the mutation response, not a refetch of the batch endpoint.
+    const list = await screen.findByRole('list', { name: 'Assigned tags' });
+    expect(within(list).getByText('interier - kuchyne')).toBeInTheDocument();
+    expect(vi.mocked(api.listNewDedupPositiveTagsForImages).mock.calls).toHaveLength(1);
+  });
+
+  it('drops a tag from the assigned-tags row when it is set back off positive', async () => {
+    vi.mocked(api.listNewDedupPositiveTagsForImages).mockResolvedValue({
+      data: [{ image_id: 101, tag_id: 1, label: 'interier - kuchyne' }],
+    });
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({
+      data: [{ ...PROPOSALS[0], status: 'confirmed', current_state: 'positive' }],
+    });
+    vi.mocked(api.setNewDedupProposalState).mockResolvedValue({
+      data: {
+        image_id: 101, model: MODEL, label: PROPOSALS[0].label, state: 'negative',
+        status: 'dismissed', proposed_label: PROPOSALS[0].label, corrected: false,
+      },
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('tab', { name: 'Confirmed' }));
+    await screen.findByRole('list', { name: 'Assigned tags' });
+
+    setStateOn(0, 'negative');
+    await waitFor(() =>
+      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'negative', undefined),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole('list', { name: 'Assigned tags' })).not.toBeInTheDocument(),
+    );
+  });
+
+  it('shows assigned tags in Sample mode tiles too', async () => {
+    vi.mocked(api.listNewDedupTagImages).mockResolvedValue({ data: [tagImage()] });
+    vi.mocked(api.listNewDedupPositiveTagsForImages).mockResolvedValue({
+      data: [{ image_id: 101, tag_id: 1, label: 'interier - kuchyne' }],
+    });
+    renderPage();
+    await screen.findByRole('button', { name: 'interier - kuchyne' });
+    fireEvent.click(screen.getByRole('button', { name: 'Sample' }));
+    fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'interier - kuchyne' } });
+    const list = await screen.findByRole('list', { name: 'Assigned tags' });
+    expect(within(list).getByText('interier - kuchyne')).toBeInTheDocument();
+  });
+
+  it('updates the assigned-tags row from the detail panel', async () => {
+    vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
+      data: [
+        { id: 7, label: 'interier - obyvak', family: 'interier', state: 'untouched', updated_at: null },
+      ],
+    });
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue({
+      data: { image_id: 101, tag_id: 7, state: 'positive', updated_at: 't' },
+    });
+    renderPage();
+    await screen.findByRole('button', { name: 'Open photo 101' });
+    expect(screen.queryByRole('list', { name: 'Assigned tags' })).not.toBeInTheDocument();
+
+    fireEvent.click(await screen.findByText('all tags'));
+    const panel = await screen.findByRole('dialog', { name: 'All tags on this image' });
+    const group = await within(panel).findByRole('group', { name: 'Tag state' });
+    fireEvent.click(stateBtn(group, 'positive'));
+
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(7, 101, 'positive'));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    const list = await screen.findByRole('list', { name: 'Assigned tags' });
+    expect(within(list).getByText('interier - obyvak')).toBeInTheDocument();
   });
 
   // --- border cases (image-grain, independent of every tag's state) --------

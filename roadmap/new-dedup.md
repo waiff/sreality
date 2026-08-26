@@ -72,6 +72,9 @@ W1 (shared prerequisites + labeling program):
       dependency. Operator still needs to run several labeling rounds to reach Gate 1 (150 positive
       images/tag) — the tool is built, the labeling itself is ongoing curation work. The per-tag
       trainer itself (docs/design/clip-linear-probe.md) is a separate, not-yet-built follow-up.
+      Follow-up same day: every tile shows its image's already-assigned tags in one batched call
+      (`list_positive_tags_for_images`), and "Modify labels" gained two operator flags — `priority`
+      (pins + reddens a tag needing attention) and `ready_for_training` (migration 443).
 - [x] RunPod client (`scripts/runpod_client.py`, #972/#975/#977) — launch/poll/terminate an
       on-demand pod, live cheapest-GPU catalog lookup, capacity fallback. Guaranteed teardown
       verified across 4 real live dispatches (3 zero-cost, 1 real ~1.7¢ pod rental).

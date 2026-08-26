@@ -5,6 +5,12 @@ Status: in progress, 2026-08-26. Supersedes the training-set half of migration 3
 `docs/design/new-dedup/PROGRAM.md` (the labeling program this grew out of) and
 `docs/design/clip-linear-probe.md` (the not-yet-built trainer this is substrate for).
 
+**Waves A and B shipped together, same day, PR #1185** — the doc/roadmap updates
+originally planned for Wave C rode along with that PR instead, because retiring
+ClipAudit already stopped every write to the three superseded tables then, not just
+at the eventual DROP. Wave C (below) is now DDL-only: dropping tables nothing writes
+to any more. See "Since Wave A/B shipped" below for two follow-up additions.
+
 ## North star
 
 One permanent, per-(image, tag) annotation table is the single ground truth every
@@ -152,6 +158,27 @@ Drop `image_training_examples`, `image_tag_annotations`, `phash_pair_notes`,
 Doc updates ride here: `docs/architecture.md` rule 15's signal-producers list,
 `roadmap/new-dedup.md`'s labeling-program bullet, a status note (not a rewrite) on
 `docs/design/clip-linear-probe.md` pointing at the new table as its future input.
+
+## Since Wave A/B shipped
+
+Two operator-requested additions, same data model, no new tables beyond one migration:
+
+- **Assigned-tags row.** A tile only ever showed the ONE tag it was reviewing — with
+  multi-label images now real, that stopped being the same thing as "everything this
+  image is positive on." `tag_annotations.list_positive_tags_for_images` (one query,
+  capped at `BATCH_IMAGE_MAX`) batches the lookup for a whole visible grid instead of
+  one call per tile; the frontend accumulates it the same way it accumulates photos
+  (never-seen ids only) and patches it locally from every mutation's own response
+  (`patchPositiveTags`) rather than refetching. Renders as a small chip row directly
+  under the photo, nothing when empty.
+- **Tag flags, migration 443** (`tag_taxonomy.priority`, `tag_taxonomy.ready_for_training`,
+  both `boolean not null default false`) — two operator-only signals surfaced in the
+  "Modify labels" popup: `priority` pins a tag to the top of that list and marks it red
+  (an attention flag, not a training input); `ready_for_training` is the operator's own
+  call that a tag's set is solid enough for the eventual per-tag trainer to consume —
+  independent of Gate 1, which only says a tag is LABELED enough, not reviewed.
+  `tag_annotations.set_tag_flags` updates only the field(s) actually passed, so toggling
+  one from the popup never clobbers the other.
 
 ## Explicitly deferred, not silently dropped
 

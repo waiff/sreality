@@ -36,6 +36,11 @@ class RenameTagIn(BaseModel):
     label: str
 
 
+class TagFlagsIn(BaseModel):
+    priority: bool | None = None
+    ready_for_training: bool | None = None
+
+
 class GrowSampleIn(BaseModel):
     count: int
     category_main: str | None = None
@@ -65,6 +70,10 @@ class SetAnnotationIn(BaseModel):
 class BulkSetAnnotationIn(BaseModel):
     image_ids: list[int]
     state: str
+
+
+class ImageIdsIn(BaseModel):
+    image_ids: list[int]
 
 
 def _check_state(state: str) -> None:
@@ -113,6 +122,25 @@ def delete_tag(tag_id: int, conn: Any = Depends(deps.get_db_conn)) -> dict[str, 
         return {"data": tag_annotations.remove_tag(conn, tag_id=tag_id)}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
+
+
+@router.patch("/taxonomy/{tag_id}/flags")
+def patch_tag_flags(
+    tag_id: int, body: TagFlagsIn, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Set one or both operator flags (priority, ready_for_training) on a
+    tag — only the fields actually sent."""
+    try:
+        return {
+            "data": tag_annotations.set_tag_flags(
+                conn, tag_id=tag_id, priority=body.priority,
+                ready_for_training=body.ready_for_training,
+            )
+        }
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/sample/grow")
@@ -190,6 +218,22 @@ def get_tags_for_image(image_id: int, conn: Any = Depends(deps.get_db_conn)) -> 
     """Image-centric view for the detail panel: every active tag with this
     image's current state, grouped by family."""
     return {"data": tag_annotations.list_tags_for_image(conn, image_id=image_id)}
+
+
+@router.post("/images/tags/batch")
+def post_positive_tags_for_images(
+    body: ImageIdsIn, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Every positive tag on each of several images, one query for the whole
+    visible grid — the "what's already assigned" line under each tile."""
+    try:
+        return {
+            "data": tag_annotations.list_positive_tags_for_images(
+                conn, image_ids=body.image_ids,
+            )
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/tags/{tag_id}/images")

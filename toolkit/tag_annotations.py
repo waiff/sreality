@@ -35,6 +35,16 @@ def clean_label(label: str) -> str:
 
 # --- taxonomy -------------------------------------------------------------
 
+_TAG_COLUMNS = "id, label, family, active, priority, ready_for_training, created_at"
+
+
+def _tag_dict(r: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": r[0], "label": r[1], "family": r[2], "active": r[3],
+        "priority": r[4], "ready_for_training": r[5], "created_at": r[6],
+    }
+
+
 def add_tag(
     conn: psycopg.Connection, *, label: str, family: str | None = None,
     created_by: str = "operator",
@@ -44,14 +54,13 @@ def add_tag(
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO tag_taxonomy (label, family, created_by) "
-                "VALUES (%s,%s,%s) "
-                "RETURNING id, label, family, active, created_at",
+                f"VALUES (%s,%s,%s) RETURNING {_TAG_COLUMNS}",
                 (clean, (family or "").strip() or None, created_by),
             )
             r = cur.fetchone()
     except psycopg.errors.UniqueViolation as exc:
         raise ValueError(f"tag {clean!r} already exists") from exc
-    return {"id": r[0], "label": r[1], "family": r[2], "active": r[3], "created_at": r[4]}
+    return _tag_dict(r)
 
 
 def rename_tag(conn: psycopg.Connection, *, tag_id: int, new_label: str) -> dict[str, Any]:
@@ -62,8 +71,7 @@ def rename_tag(conn: psycopg.Connection, *, tag_id: int, new_label: str) -> dict
     with conn.cursor() as cur:
         try:
             cur.execute(
-                "UPDATE tag_taxonomy SET label = %s WHERE id = %s "
-                "RETURNING id, label, family, active, created_at",
+                f"UPDATE tag_taxonomy SET label = %s WHERE id = %s RETURNING {_TAG_COLUMNS}",
                 (clean, tag_id),
             )
         except psycopg.errors.UniqueViolation as exc:
@@ -71,7 +79,40 @@ def rename_tag(conn: psycopg.Connection, *, tag_id: int, new_label: str) -> dict
         row = cur.fetchone()
         if row is None:
             raise KeyError(tag_id)
-    return {"id": row[0], "label": row[1], "family": row[2], "active": row[3], "created_at": row[4]}
+    return _tag_dict(row)
+
+
+def set_tag_flags(
+    conn: psycopg.Connection, *, tag_id: int,
+    priority: bool | None = None, ready_for_training: bool | None = None,
+) -> dict[str, Any]:
+    """Update one or both operator flags on a tag — only the fields actually
+    passed, so toggling one from the Modify labels popup never clobbers the
+    other. `priority` pins a tag to the top of that popup and marks it red;
+    `ready_for_training` is the operator's own call that a tag's set is solid
+    enough for the (not yet built) per-tag trainer to consume — independent
+    of Gate 1, which only says a tag is LABELED enough, not reviewed."""
+    if priority is None and ready_for_training is None:
+        raise ValueError("nothing to update")
+    sets = []
+    params: list[Any] = []
+    if priority is not None:
+        sets.append("priority = %s")
+        params.append(priority)
+    if ready_for_training is not None:
+        sets.append("ready_for_training = %s")
+        params.append(ready_for_training)
+    params.append(tag_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE tag_taxonomy SET {', '.join(sets)} WHERE id = %s "
+            f"RETURNING {_TAG_COLUMNS}",
+            params,
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise KeyError(tag_id)
+    return _tag_dict(row)
 
 
 def remove_tag(conn: psycopg.Connection, *, tag_id: int) -> dict[str, Any]:
@@ -219,6 +260,37 @@ def list_tags_for_image(conn: psycopg.Connection, *, image_id: int) -> list[dict
     ]
 
 
+BATCH_IMAGE_MAX = 200
+
+_LIST_POSITIVE_TAGS_FOR_IMAGES_SQL = """
+    SELECT itl.image_id, t.id, t.label
+    FROM image_tag_labels itl
+    JOIN tag_taxonomy t ON t.id = itl.tag_id
+    WHERE itl.state = 'positive' AND itl.image_id = ANY(%(image_ids)s)
+    ORDER BY itl.image_id, t.label
+"""
+
+
+def list_positive_tags_for_images(
+    conn: psycopg.Connection, *, image_ids: list[int],
+) -> list[dict[str, Any]]:
+    """Every positive tag on each of several images, in one query — the
+    labeling grid's "what's already assigned to this image" line under each
+    tile. A tile only shows the one tag it's reviewing; with multi-label
+    images now possible, that's not the same as everything the image is
+    already positive on, so this batches the lookup instead of one query per
+    visible tile."""
+    ids = list(dict.fromkeys(int(i) for i in image_ids))
+    if not ids:
+        return []
+    if len(ids) > BATCH_IMAGE_MAX:
+        raise ValueError(f"at most {BATCH_IMAGE_MAX} images per batch")
+    with conn.cursor() as cur:
+        cur.execute(_LIST_POSITIVE_TAGS_FOR_IMAGES_SQL, {"image_ids": ids})
+        rows = cur.fetchall()
+    return [{"image_id": r[0], "tag_id": r[1], "label": r[2]} for r in rows]
+
+
 def list_images_for_tag(
     conn: psycopg.Connection, *, tag_id: int, state: str | None = None, limit: int = 100,
 ) -> list[dict[str, Any]]:
@@ -251,7 +323,7 @@ def list_images_for_tag(
 # not subtracted client-side, so the gate predicate has one definition.
 _OVERVIEW_SQL = """
     SELECT
-      t.id, t.label, t.family, t.active, t.created_at,
+      t.id, t.label, t.family, t.active, t.priority, t.ready_for_training, t.created_at,
       COALESCE(c.positive_count, 0) AS positive_count,
       COALESCE(c.gate_count, 0) AS gate_count,
       COALESCE(c.border_case_count, 0) AS border_case_count,
@@ -294,10 +366,11 @@ def tag_overview(conn: psycopg.Connection) -> dict[str, Any]:
         rows = cur.fetchall()
     tags = [
         {
-            "id": r[0], "label": r[1], "family": r[2], "active": r[3], "created_at": r[4],
-            "positive_count": r[5], "gate_count": r[6], "border_case_count": r[7],
-            "negative_count": r[8], "excluded_count": r[9],
-            "pending_count": r[10], "dismissed_count": r[11],
+            "id": r[0], "label": r[1], "family": r[2], "active": r[3],
+            "priority": r[4], "ready_for_training": r[5], "created_at": r[6],
+            "positive_count": r[7], "gate_count": r[8], "border_case_count": r[9],
+            "negative_count": r[10], "excluded_count": r[11],
+            "pending_count": r[12], "dismissed_count": r[13],
         }
         for r in rows
     ]
