@@ -858,10 +858,13 @@ Same ledger, same rules, plus what this build's evidence earned:
 | W1b | Item 4 — 34 wraps **declined**; the hazard railed instead | [#1181](https://github.com/waiff/sreality/pull/1181) | ✅ merged |
 | W2 | Item 1a — `_check_daily_cost` spelling | [#1163](https://github.com/waiff/sreality/pull/1163) | ✅ merged |
 | W3 | Item 1b — hour rollup + watermark + F5-minimal registry (mig 437) | [#1174](https://github.com/waiff/sreality/pull/1174) | ✅ merged |
+| W6a | Item 5a — map payload + the Corollary F copy | [#1175](https://github.com/waiff/sreality/pull/1175) | ✅ merged |
 | W4 | Item 3 — broker deferred join (mig 435) | [#1171](https://github.com/waiff/sreality/pull/1171) | ✅ merged |
 | W5 | Item 2 — city-quality, keyed on `obec_id` (mig 436) | [#1173](https://github.com/waiff/sreality/pull/1173) | ✅ merged |
-| W6 | Item 5 — map cluster RPC | — | |
-| W7 | Retirements + registry completion (destructive gate) | — | |
+| W6b | Item 5 — map cluster RPC (mig 439) | [#1180](https://github.com/waiff/sreality/pull/1180) | ✅ merged |
+| W7a | Registry completion (mig 440) | [#1182](https://github.com/waiff/sreality/pull/1182) | ✅ merged |
+| W7a-2 | Producer instrumentation (mig 441) | [#1183](https://github.com/waiff/sreality/pull/1183) | open |
+| W7b | `recompute_home_city` cadence; drops DEFERRED | [#1184](https://github.com/waiff/sreality/pull/1184) | open |
 
 ### W0a — the index that was 36.7% of all disk reads (migrations 429, 430)
 
@@ -1519,6 +1522,86 @@ either attribute. Verified against production before shipping: **9 discovered, 0
 That is strictly more valuable than the wraps: it protects against *any* future migration
 that replays one of these, not just against this one that will now never run.
 
+### W6b — the map renders its whole cohort (migration 439)
+
+| read | plan, by node name | blocks | result |
+| --- | --- | --- | --- |
+| before | `Limit` → `Index Scan using properties_map_mv_cover` | 3,938 | 50,000 of 104,232 rows, 22.66 MB |
+| after | `HashAggregate` → `Index Only Scan`, **`Heap Fetches: 0`** | **1,627** | **104,232 of 104,232**, 170 cells, ~9 KB |
+
+**Justified on correctness, not load, and the ledger should say so.** Measured traffic on
+this surface is ~9 map loads/day, so 3,938 → 1,627 blocks is a rounding error on this
+database. The defect was the cohort: an unordered `.limit(50000)` over a `(lat, lng)` index
+returned the **southernmost** 52.0 percent and dropped everything north of lat 50.025.
+
+Three calls worth keeping: **no PostGIS** (no geometry column; a per-row `ST_MakePoint`
+forfeits the index-only scan the result rests on); **out-of-extent rows are neither clamped
+nor dropped** — 105 rows sit outside the CZ box, clamping invents a location and dropping
+repeats the defect, so they aggregate into one `off_grid` group inside `total`, which is
+also why the result is bounded with **no `LIMIT` anywhere in the function**; and **one
+shared parameter builder** so the map and Stats cannot drift client-side.
+
+**Still truncating, filed:** `mapRelation()` switches to `listing_feed_public` in
+portal-mirror mode. That relation has no matview twin and no cover index, so it stays on the
+unordered point read — idnes is ~110k.
+
+#### The rail failed CI, and the reason was a GUC interaction, not the schema
+
+First cut disabled `enable_seqscan`, `enable_bitmapscan` **and** `enable_indexscan` to force
+an index-only plan. But **`enable_indexonlyscan` has no effect when `enable_indexscan` is
+off** — an index-only scan is a *variant* of an index scan — so the planner had no scan
+method at all and took the least-penalised one: a `Seq Scan` priced at 1e10. Dropping the
+third GUC is necessary but not sufficient: CI's replayed matview is empty, `relallvisible`
+is 0, and at zero visible pages index-only is priced identically to index scan, so the
+preference is a coin flip.
+
+The property that actually yields `Heap Fetches: 0` is **containment** — every column the
+aggregate projects must be in the cover index's key or INCLUDE list. Decidable from the
+catalog, no rows, no statistics, no planner, cannot flip. Verified both directions against
+production's real index: shipped projects `{lat, lng}` → green; add `l.obec_id` → red.
+
+### W7a / W7a-2 — the registry declares AND observes (migrations 440, 441)
+
+W7a cut both Browse rebuilds over to `derived_artifacts`, seeded the remaining artifacts,
+removed 437's temporary adapter and dropped `browse_read_model_state`. `_W7_BACKLOG` is
+empty — which is what made the catalog-diff rail load-bearing: with the old backlog **all 13
+unregistered artifacts passed unnoticed**.
+
+W7a-2 closed the half that was left: only three producers stamped, so **11 of 14 rows
+declared a budget with nothing observing them**. One `stamp_derived_artifact()` helper,
+called from five producers. Unstamped **11 → 5**; the remaining five are GitHub-Actions and
+API-request producers that stamp on their next scheduled run.
+
+**A rationale in the brief was wrong and the correction is worth keeping.** Six individual
+stamps were justified as "a fan-out that dies partway leaves the successful ones correctly
+stamped". False: a plpgsql function with no `BEGIN..EXCEPTION` opens no subtransaction, so
+all six REFRESHes *and* their stamps share one transaction. The shape survives on a
+different benefit, which is load-bearing: six real per-matview durations, because
+`clock_timestamp()` advances inside a transaction. It paid off at once — **`health_summary_mv`
+is 72.3 s of the fan-out's 132.9 s**, never previously published.
+
+### W7b — the cadence cut; the drops DEFERRED, with a reason
+
+**Deferred, not skipped.** Dropping `listings_with_city_quality()` and
+`properties.home_city_id` also deletes the `?cityQualityLegacy=1` escape hatch — the
+documented revert path for W5's obec-key swap, whose own source says *"a revert, and W7
+deletes it together with `listings_with_city_quality`"*. W5 merged **15 hours** before W7b
+came up; it changed which properties appear in a city-quality cohort (+1,960 / −49); and the
+49-row disagreement it surfaced is **still an open, unexplained data defect**. Verified: the
+function is still `EXECUTE`-able by `authenticated`, so the hatch is live. Deleting a safety
+mechanism fifteen hours into the window it covers, for a change with an open defect, is not
+a box to tick.
+
+**What did ship.** `recompute_home_city` measured at **85,020 blocks/call = 680 MB**, hourly,
+≈ **15 GB/day** of buffer traffic on an instance with 1 GB of `shared_buffers`, for a column
+with **zero serving-path readers** (migration 436 moved city-quality onto `listings.obec_id`;
+only `properties_public` and `browse_projection` still project it). Cadence hourly → daily:
+**~96 percent of the burn returned**, escape hatch at most 24 h stale, reversible in one line.
+
+The reconnaissance recommended unscheduling it outright. Rejected: that freezes the column,
+and a revert flipped weeks later would silently under-match every property ingested since.
+A frozen escape hatch fails quietly; a 24-hour-stale one does not.
+
 ### Filed with a trigger
 
 One line each: flag · trigger · evidence needed to close · filing wave.
@@ -1547,6 +1630,30 @@ One line each: flag · trigger · evidence needed to close · filing wave.
   `scripts/ingest_boundaries.py` (whose `wipe_table` depends on the FK's `ON DELETE SET NULL`).
   Enforcement ships instead as the migration's DO block + the live rail · **trigger:** an
   `ingest_boundaries` restructure to load-into-staging + swap · filed W5.
+- **W7b's drops: `listings_with_city_quality()`, `properties.home_city_id`,
+  `home_city_computed_at`, `properties_home_city_id_idx`, `recompute_home_city()` and the
+  workflow.** Deferred only because they delete the `?cityQualityLegacy=1` revert path 15 h
+  after the change it covers · **trigger:** the legacy window elapsing (≥1 week from
+  2026-08-25) with no city-quality complaint, AND the filed 49-row `home_city_id` ↔
+  `obec_id` disagreement explained · **evidence:** zero `listings_with_city_quality` calls
+  in `pg_stat_statements` over that period, and the frontend flag removed first so it
+  deploys ahead of the drop · **archive first:** `properties_home_city_archive` (id,
+  home_city_id, home_city_computed_at) — ~5 MB, and the ONLY surviving copy of the
+  disagreement evidence · filed W7b.
+- **The rebuild functions' live text says `(see migration 374)` where disk says `376`** —
+  376 is correct. Carried forward verbatim in migration 440 so the published md5s verify;
+  folding a cosmetic fix into a body replay is exactly how migration 371 shipped an anon
+  grant · **trigger:** any future replay of either function · **evidence:** none needed, it
+  is a one-word forward migration · filed W7a.
+- **The portal-mirror map lane still truncates.** `listing_feed_public` has no matview twin
+  and no cover index, so single-portal mode keeps the unordered point read; idnes is ~110k ·
+  **trigger:** a complaint about a portal-mirror map, or W6's consolidation into
+  `browse_stats_properties` · **evidence:** the same hidden-fraction measurement W6b ran on
+  the main lane · filed W6b.
+- **`health_summary_mv` is 72.3 s of `refresh_health_matviews`' 132.9 s** — now visible per
+  artifact for the first time. The obvious first target if that job needs to fit its 300 s
+  budget · **trigger:** F6, or the next health-fan-out timeout · **evidence:** the registry's
+  own `last_duration_ms` over a week · filed W7a-2.
 - **`llm_calls_utc_day_rollup_idx` (2,224 kB) goes to zero scans under migration 437** — the
   daily view no longer predicates a UTC day on `llm_calls`. Its sibling
   `llm_calls_utc_hour_rollup_idx` is **still live** (the hourly view's open edge uses it), so

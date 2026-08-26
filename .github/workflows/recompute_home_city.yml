@@ -1,11 +1,24 @@
-name: "Jobs: recompute home city (hourly)"
+name: "Jobs: recompute home city (daily)"
 
-# Recompute properties.home_city_id (migration 374) so the Browse city-quality
-# RPC (listings_with_city_quality), browse_stats_properties, and Watchdog's
-# _city_quality_clauses all join a plain indexed column instead of each
-# running a live ST_Covers/ST_DWithin containment test against every curated
-# city per row. Incremental hourly run fills newly-ingested properties within
-# the hour; the same function rebuilds everything after a curated_cities /
+# Recompute properties.home_city_id (migration 374).
+#
+# DAILY, NOT HOURLY, since 2026-08-26 (Cardinality Doctrine W7b). Migration 436
+# re-keyed city-quality membership onto listings.obec_id via
+# curated_cities_matching(), so browse_stats_properties and Watchdog's
+# _city_quality_clauses NO LONGER read this column. Its only remaining reader is
+# listings_with_city_quality(), which is reachable solely through the
+# ?cityQualityLegacy=1 revert flag -- an escape hatch, not a serving path.
+#
+# The cost was not small. Measured on production: 85,020 shared blocks per call
+# = 680 MB, ~24 calls/day = ~15 GB/day of buffer traffic on an instance with 1 GB
+# of shared_buffers, for a column nothing on the serving path reads. Daily keeps
+# the escape hatch at most 24 h stale while returning ~96 percent of that.
+#
+# NOT unscheduled outright, deliberately: that freezes the column, and a revert
+# flipped weeks later would silently under-match every property ingested since.
+# Restore `45 * * * *` below if the legacy path is ever actually used.
+#
+# The same function rebuilds everything after a curated_cities /
 # admin_boundaries change.
 #
 # Dispatch with full=true after adding/editing a curated city or its RUIAN
@@ -16,7 +29,9 @@ name: "Jobs: recompute home city (hourly)"
 
 on:
   schedule:
-    - cron: "45 * * * *"
+    # Daily, not hourly -- see the header. Offset off the hour to avoid the
+    # :00 and :30 cron pile-ups.
+    - cron: "45 3 * * *"
   workflow_dispatch:
     inputs:
       full:
