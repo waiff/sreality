@@ -49,21 +49,29 @@ W1 (shared prerequisites + labeling program):
       review/tune every decided default ahead of any wave consuming it.
 - [ ] Dashboard skeleton (funnel + cost table) — still just PR-2's placeholder; genuinely no data
       to show until W2+ produces candidates/decisions. Revisit once W2 lands.
-- [x] Labeling page — `dedup_sim.taxonomy_labels`/`labeling_sample`/`label_proposals` (migration
-      373), `toolkit/dedup_sim_labeling.py`, `/new-dedup/labeling/*` API, and
-      `frontend/src/pages/NewDedupLabeling.tsx`: Taxonomy v1 add/rename/remove, sample grow,
-      proposal review (single + batch confirm/dismiss) with a new-vs-original tag toggle, a
-      per-tile tag picker to correct a wrong suggestion (#993), and review ergonomics (#994):
-      collapsible chart, tag + coverage filters, an All tab, and a grid that holds its order
-      instead of refetching on every confirm. A "Border case" flag on every tile (#1113) closes the
-      last gap against /clip-audit — shared with that page through `lib/useBorderCases`. Gate 1
-      counts only UNPARKED images (operator decision, 2026-08-21): a border case stops counting
-      until its flag is cleared, and the coverage chart shows the parked remainder beside the bar.
-      Secondary-CLIP scoring (`scraper/label_proposal_tagger.py` +
+- [x] Labeling page, tri-state rework (docs/design/tag-annotation-matrix.md, 2026-08-26) — the
+      taxonomy and the confirmed ground truth are now PERMANENT tables outside `dedup_sim`:
+      `tag_taxonomy` + `image_tag_labels` (migration 442, one positive/negative/excluded row per
+      (image, tag) — every independent per-tag classifier head's future training set), promoted
+      because `dedup_sim` is planned to drop wholesale at Wave 8 and a real surrogate key replaces
+      the old text-keyed rename cascade. `dedup_sim.labeling_sample`/`label_proposals` stay as the
+      transient machine-suggestion queue (`toolkit/dedup_sim_labeling.py`). `/new-dedup/labeling/*`
+      API + `frontend/src/pages/NewDedupLabeling.tsx`: tag-centric batch review of proposals by
+      default (a tri-state control replaces Confirm/Dismiss), a Sample browse mode that reaches
+      every image in the pool for one tag/state (including ones no model ever proposed — answers
+      "show me every image where kitchen = excluded"), an image-centric detail panel for the
+      multi-tag-on-one-photo case, keyboard shortcuts (arrows/j-k + 1/2/3, none existed before),
+      and per-tag positive/negative/excluded counts. **ClipAudit retired outright** (frontend page,
+      `TrainControl`, and every backend route/table exclusive to it — `image_tag_annotations` and
+      `phash_pair_notes` had zero live callers already); `image_training_examples` is superseded
+      but not yet dropped (separately-gated destructive migration). "Border case" (#1113) is
+      unaffected — still a whole-image flag orthogonal to any tag's state, still excluded from
+      Gate 1 the same way. Secondary-CLIP scoring (`scraper/label_proposal_tagger.py` +
       `scripts/label_proposal_backfill.py`, dispatch-only GH Actions workflow) is separate infra
       from the DINOv2/RunPod embeddings path below — a stronger CLIP checkpoint, CPU, no RunPod
-      dependency. Operator still needs to run several labeling rounds to reach Gate 1 (150
-      confirmed images/tag) — the tool is built, the labeling itself is ongoing curation work.
+      dependency. Operator still needs to run several labeling rounds to reach Gate 1 (150 positive
+      images/tag) — the tool is built, the labeling itself is ongoing curation work. The per-tag
+      trainer itself (docs/design/clip-linear-probe.md) is a separate, not-yet-built follow-up.
 - [x] RunPod client (`scripts/runpod_client.py`, #972/#975/#977) — launch/poll/terminate an
       on-demand pod, live cheapest-GPU catalog lookup, capacity fallback. Guaranteed teardown
       verified across 4 real live dispatches (3 zero-cost, 1 real ~1.7¢ pod rental).

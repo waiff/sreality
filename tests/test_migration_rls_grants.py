@@ -305,12 +305,20 @@ def _rls_exempt_tables(sql: str) -> set[str]:
 # _ADMIN_ONLY_RELATIONS — add a new admin table/matview to BOTH. listings/
 # properties/images are deliberately absent (shared-market data behind many
 # legitimately open views); see that file for the full reasoning.
+#
+# tag_taxonomy + image_tag_labels (migration 442) replace image_training_examples
+# here: they are the tag ground truth now, and — like dedup_sim.taxonomy_labels /
+# label_proposals before them, and unlike migration 309 — they are backend-only,
+# with NO `_public` view. image_tag_annotations / phash_pair_notes came out with
+# image_training_examples: no app code reads or writes any of the three since the
+# tag-annotation-matrix cutover (docs/design/tag-annotation-matrix.md); the tables
+# themselves are dropped by that design's Wave C.
 _ADMIN_ONLY_RELATIONS = frozenset({
     "dedup_engine_runs", "dedup_scan_state", "dedup_vision_bakeoff_results",
     "dedup_decision_feedback", "property_identity_candidates", "property_merge_events",
     "listing_detail_queue", "listing_fetch_failures", "detail_queue_completions",
-    "llm_calls", "parsed_url_cache", "phash_pair_notes", "pipeline_check_results",
-    "image_border_cases", "image_tag_annotations", "image_training_examples",
+    "llm_calls", "parsed_url_cache", "pipeline_check_results",
+    "image_border_cases", "tag_taxonomy", "image_tag_labels",
     "workflow_failures", "workflow_run_health",
     "scrape_runs", "worker_heartbeats",
     "health_summary_mv", "portal_health_mv", "scraper_health_checks_mv",

@@ -1,13 +1,13 @@
-"""NEW DEDUP Labeling program (docs/design/new-dedup/PROGRAM.md, Wave 1) —
-taxonomy CRUD, sample management, and proposal review over
-`toolkit/dedup_sim_labeling.py`.
+"""NEW DEDUP Labeling program (docs/design/new-dedup/PROGRAM.md, Wave 1;
+docs/design/tag-annotation-matrix.md, Wave A/B) — tag taxonomy CRUD, sample
+management, and the tri-state (positive/negative/excluded) annotation matrix
+over `toolkit/tag_annotations.py` and `toolkit/dedup_sim_labeling.py`.
 
 Mounted under `/new-dedup/labeling/*`, admin-gated. The live consumer is the
-Labeling page (a ClipAudit clone minus the dedup block, plus a "new tag vs
-original tag" toggle, sample management, and tag add/rename/remove + batch
-tooling). Separate module from `api/routes/new_dedup.py` (settings CRUD) —
-same split as `api/labeling.py` vs `api/property_merge.py`: one file per
-concern.
+Labeling page (`frontend/src/pages/NewDedupLabeling.tsx`) — tag-centric batch
+review by default, with an image-centric detail view for the multi-tag-on-
+one-photo case. Separate module from `api/routes/new_dedup.py` (settings
+CRUD) — same split as `api/labeling.py` (border cases) vs this file.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from api import dependencies as deps
 from toolkit import dedup_sim_labeling as dsl
+from toolkit import tag_annotations
 
 router = APIRouter(
     prefix="/new-dedup/labeling", tags=["new-dedup-labeling"],
@@ -26,12 +27,12 @@ router = APIRouter(
 )
 
 
-class AddTaxonomyLabelIn(BaseModel):
+class AddTagIn(BaseModel):
     label: str
     family: str | None = None
 
 
-class RenameTaxonomyLabelIn(BaseModel):
+class RenameTagIn(BaseModel):
     label: str
 
 
@@ -40,63 +41,78 @@ class GrowSampleIn(BaseModel):
     category_main: str | None = None
 
 
-class ProposalActionIn(BaseModel):
+class ProposalStateIn(BaseModel):
     image_id: int
     model: str
-    # Set when the operator corrects a wrong suggestion before accepting it —
-    # this label lands in the training set instead of the proposed one. Unset
-    # (or blank) accepts the proposal as-is. Ignored by the dismiss route.
+    state: str
+    # Set when the operator corrects a wrong suggestion before deciding —
+    # the decision lands on this tag instead of the proposed one. Unset (or
+    # blank) decides against the proposal's own label.
     label: str | None = None
 
 
-class BulkProposalActionIn(BaseModel):
+class BulkProposalStateIn(BaseModel):
     model: str
     image_ids: list[int]
+    state: str
+
+
+class SetAnnotationIn(BaseModel):
+    image_id: int
+    state: str
+
+
+class BulkSetAnnotationIn(BaseModel):
+    image_ids: list[int]
+    state: str
+
+
+def _check_state(state: str) -> None:
+    if state not in tag_annotations.STATES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"state must be one of {', '.join(tag_annotations.STATES)}",
+        )
 
 
 @router.get("/overview")
 def get_overview(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
-    """Every taxonomy label with confirmed/pending/dismissed counts, plus
-    the current sample size — the single call the page's coverage strip
-    renders from."""
-    return {"data": dsl.taxonomy_overview(conn)}
+    """Every tag with its tri-state counts, plus the current sample size —
+    the single call the page's coverage strip renders from."""
+    return {"data": tag_annotations.tag_overview(conn)}
 
 
 @router.post("/taxonomy")
-def post_taxonomy_label(
-    body: AddTaxonomyLabelIn, conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    """Add one label to the Taxonomy v1 vocabulary."""
+def post_tag(body: AddTagIn, conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
+    """Add one tag to the vocabulary."""
     try:
-        return {"data": dsl.add_taxonomy_label(conn, label=body.label, family=body.family)}
+        return {"data": tag_annotations.add_tag(conn, label=body.label, family=body.family)}
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.put("/taxonomy/{label_id}")
-def put_taxonomy_label(
-    label_id: int, body: RenameTaxonomyLabelIn, conn: Any = Depends(deps.get_db_conn),
+@router.put("/taxonomy/{tag_id}")
+def put_tag(
+    tag_id: int, body: RenameTagIn, conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
-    """Rename a taxonomy label — cascades to every training example and
-    proposal currently carrying the old text."""
+    """Rename a tag. image_tag_labels rows reference tag_id, not label text,
+    so this is a single-row update — no cascade rewrite."""
     try:
-        return {"data": dsl.rename_taxonomy_label(conn, label_id=label_id, new_label=body.label)}
+        return {"data": tag_annotations.rename_tag(conn, tag_id=tag_id, new_label=body.label)}
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"taxonomy label {label_id} not found") from exc
+        raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.delete("/taxonomy/{label_id}")
-def delete_taxonomy_label(
-    label_id: int, conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    """Remove a taxonomy label — its training examples and proposals go
-    with it; the images themselves are untouched."""
+@router.delete("/taxonomy/{tag_id}")
+def delete_tag(tag_id: int, conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
+    """Remove a tag — its annotations go with it; the images themselves are
+    untouched."""
     try:
-        return {"data": dsl.remove_taxonomy_label(conn, label_id=label_id)}
+        return {"data": tag_annotations.remove_tag(conn, tag_id=tag_id)}
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"taxonomy label {label_id} not found") from exc
+        raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
 
 
 @router.post("/sample/grow")
@@ -120,10 +136,9 @@ def get_proposals(
     status: str | None = None, label: str | None = None, limit: int = 100,
     conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
-    """List proposals, optionally filtered by status ('all' / 'pending' /
-    'confirmed' / 'dismissed') and/or label. An unknown status is a 422
-    rather than a silent unfiltered listing — a typo'd tab would otherwise
-    read as "every proposal" and look like a working filter."""
+    """List proposals — the machine-suggestion queue — optionally filtered
+    by status ('all' / 'pending' / 'confirmed' / 'dismissed') and/or label.
+    An unknown status is a 422 rather than a silent unfiltered listing."""
     if status is not None and status not in dsl.LIST_STATUSES:
         raise HTTPException(
             status_code=422,
@@ -132,16 +147,19 @@ def get_proposals(
     return {"data": dsl.list_proposals(conn, status=status, label=label, limit=limit)}
 
 
-@router.post("/proposals/confirm")
-def post_confirm_proposal(
-    body: ProposalActionIn, conn: Any = Depends(deps.get_db_conn),
+@router.post("/proposals/state")
+def post_proposal_state(
+    body: ProposalStateIn, conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
-    """Accept a proposal into the confirmed training set
-    (image_training_examples), optionally under a corrected label."""
+    """Record the operator's tri-state verdict on one proposal: positive
+    writes it into image_tag_labels and marks the proposal confirmed;
+    negative/excluded do the same with that state and mark it dismissed."""
+    _check_state(body.state)
     try:
         return {
-            "data": dsl.confirm_proposal(
-                conn, image_id=body.image_id, model=body.model, label=body.label,
+            "data": dsl.set_proposal_state(
+                conn, image_id=body.image_id, model=body.model,
+                state=body.state, label=body.label,
             )
         }
     except KeyError as exc:
@@ -150,43 +168,84 @@ def post_confirm_proposal(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.post("/proposals/dismiss")
-def post_dismiss_proposal(
-    body: ProposalActionIn, conn: Any = Depends(deps.get_db_conn),
+@router.post("/proposals/bulk-state")
+def post_bulk_proposal_state(
+    body: BulkProposalStateIn, conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
-    """Reject a proposal."""
-    try:
-        return {"data": dsl.dismiss_proposal(conn, image_id=body.image_id, model=body.model)}
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="proposal not found") from exc
-
-
-@router.post("/proposals/bulk-confirm")
-def post_bulk_confirm_proposals(
-    body: BulkProposalActionIn, conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    """Accept many pending proposals for one model at once — the review
-    queue's batch action."""
+    """Batch version of /proposals/state — the review queue's "take the
+    whole batch" action."""
+    _check_state(body.state)
     try:
         return {
-            "data": dsl.bulk_confirm_proposals(
-                conn, model=body.model, image_ids=body.image_ids,
+            "data": dsl.bulk_set_proposal_state(
+                conn, model=body.model, image_ids=body.image_ids, state=body.state,
             )
         }
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.post("/proposals/bulk-dismiss")
-def post_bulk_dismiss_proposals(
-    body: BulkProposalActionIn, conn: Any = Depends(deps.get_db_conn),
+@router.get("/images/{image_id}/tags")
+def get_tags_for_image(image_id: int, conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
+    """Image-centric view for the detail panel: every active tag with this
+    image's current state, grouped by family."""
+    return {"data": tag_annotations.list_tags_for_image(conn, image_id=image_id)}
+
+
+@router.get("/tags/{tag_id}/images")
+def get_images_for_tag(
+    tag_id: int, state: str | None = None, limit: int = 100,
+    conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
-    """Reject many pending proposals for one model at once."""
+    """Tag-centric browse: every image in the labeling sample with its
+    current state for this one tag. Backs "kitchen = excluded" filtering —
+    unlike /proposals, this reaches images the model never proposed this
+    tag for."""
     try:
         return {
-            "data": dsl.bulk_dismiss_proposals(
-                conn, model=body.model, image_ids=body.image_ids,
+            "data": tag_annotations.list_images_for_tag(
+                conn, tag_id=tag_id, state=state, limit=limit,
             )
         }
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/tags/{tag_id}/annotations")
+def post_annotation(
+    tag_id: int, body: SetAnnotationIn, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Set one (image, tag) cell directly — the image-centric detail view's
+    write path, and the tag-centric grid's write path when a tile has no
+    backing proposal."""
+    _check_state(body.state)
+    return {
+        "data": tag_annotations.set_state(
+            conn, image_id=body.image_id, tag_id=tag_id, state=body.state,
+        )
+    }
+
+
+@router.post("/tags/{tag_id}/annotations/bulk")
+def post_bulk_annotation(
+    tag_id: int, body: BulkSetAnnotationIn, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Batch version of the direct annotation write — the labeling UI's
+    main throughput lever."""
+    _check_state(body.state)
+    try:
+        return {
+            "data": tag_annotations.bulk_set_state(
+                conn, image_ids=body.image_ids, tag_id=tag_id, state=body.state,
+            )
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/tags/{tag_id}/annotations/{image_id}")
+def delete_annotation(
+    tag_id: int, image_id: int, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Revert one cell to untouched."""
+    return {"data": tag_annotations.clear_state(conn, image_id=image_id, tag_id=tag_id)}

@@ -21,8 +21,8 @@
  *     asking the multi-image read for `perId: 1` is exactly the fetch-everything-
  *     then-discard W4 measured at 901 rows and 3,995 buffers for 44 cards.
  *   - `fetchImagesByListingIds` (keyed on sreality_id) survives in lib/queries
- *     for the callers whose upstream read model carries no surrogate id —
- *     /clip-audit's property feed and the frozen pre-#879 estimation runs.
+ *     for the callers whose upstream read model carries no surrogate id — the
+ *     frozen pre-#879 estimation runs.
  *     Flipping it in place would be a silent half-swap: the id spaces overlap,
  *     so a sreality_id fed into an `IN listing_id` matches a DIFFERENT listing.
  *     Moving those needs a backend change to their payloads, not a rename. */

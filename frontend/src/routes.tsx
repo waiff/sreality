@@ -26,7 +26,6 @@ import Notifications from './pages/Notifications';
 // session never downloads them.
 const Health = lazyChunk(() => import('./pages/Health'));
 const Costs = lazyChunk(() => import('./pages/Costs'));
-const ClipAudit = lazyChunk(() => import('./pages/ClipAudit'));
 const Scrapers = lazyChunk(() => import('./pages/Scrapers'));
 const Settings = lazyChunk(() => import('./pages/Settings'));
 const Datasets = lazyChunk(() => import('./pages/Datasets'));
@@ -105,7 +104,6 @@ export const routes: RouteObject[] = [
       { path: 'watchdog/manage', element: <WatchdogManage />, handle: { title: 'Watchdogs · Manage' } },
       { path: 'watchdog/:id/edit', element: <WatchdogEdit />, handle: { title: 'Edit watchdog' } },
       { path: 'notifications', element: <Notifications />, handle: { title: 'Notifications' } },
-      { path: 'clip-audit', element: <AdminPage><ClipAudit /></AdminPage>, handle: { title: 'CLIP Audit' } },
       { path: 'location-quality', element: <AdminPage><LocationQuality /></AdminPage>, handle: { title: 'Location quality' } },
       { path: 'settings', element: <AdminPage><Settings /></AdminPage>, handle: { title: 'Settings' } },
       { path: 'new-dedup', element: <AdminPage><NewDedupDashboard /></AdminPage>, handle: { title: 'NEW DEDUP' } },

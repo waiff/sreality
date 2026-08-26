@@ -69,11 +69,10 @@ export function listingUrlRows(
           new Date(b.last_seen_at).getTime() - new Date(a.last_seen_at).getTime(),
       )
       .map((s) => ({
-        // s.id is the surrogate (property_sources_public.id) — NEVER null on
-        // a real row (only optional in the type for ClipAudit's synthetic
-        // fallback). s.sreality_id still drives the sreality URL below since
+        // s.id is the surrogate (property_sources_public.id) — NEVER null on a
+        // real row. s.sreality_id still drives the sreality URL below since
         // that's a portal-native id, not an internal identity key.
-        id: s.id as number,
+        id: s.id,
         source: s.source,
         url: portalListingUrl(s.source, s.source_url, s.sreality_id, srealityCategory),
         isActive: s.is_active,

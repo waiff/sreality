@@ -2,19 +2,23 @@ import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   getNewDedupLabelingOverview,
-  addNewDedupTaxonomyLabel,
-  renameNewDedupTaxonomyLabel,
-  removeNewDedupTaxonomyLabel,
+  addNewDedupTag,
+  renameNewDedupTag,
+  removeNewDedupTag,
   growNewDedupSample,
   listNewDedupProposals,
-  confirmNewDedupProposal,
-  dismissNewDedupProposal,
-  bulkConfirmNewDedupProposals,
-  bulkDismissNewDedupProposals,
+  setNewDedupProposalState,
+  bulkSetNewDedupProposalState,
+  listNewDedupTagImages,
+  setNewDedupTagAnnotation,
+  bulkSetNewDedupTagAnnotation,
+  listNewDedupImageTags,
   listNewDedupSettings,
-  setTrainingExample,
-  type NewDedupTaxonomyLabel,
+  TAG_STATES,
+  type TagState,
+  type NewDedupTag,
   type NewDedupLabelProposal,
+  type NewDedupTagImage,
 } from '@/lib/api';
 import { fetchImagesByImageIds } from '@/lib/queries';
 import { imageSrc } from '@/lib/imageUrl';
@@ -35,6 +39,7 @@ import type { ImagePublic } from '@/lib/types';
 
 const OVERVIEW_KEY = ['new-dedup', 'labeling', 'overview'];
 const PROPOSALS_KEY = ['new-dedup', 'labeling', 'proposals'];
+const TAG_IMAGES_KEY = ['new-dedup', 'labeling', 'tag-images'];
 const SETTINGS_KEY = ['new-dedup', 'settings'];
 
 /* 'all' is the union of the other three — the tab to work in when you want the
@@ -48,6 +53,22 @@ const STATUS_TABS: ReadonlyArray<{ key: TabKey; label: string }> = [
   { key: 'dismissed', label: 'Dismissed' },
 ];
 
+/* The two review workflows this page supports (decided 2026-08-26): tag-centric
+ * batch review of the secondary-CLIP's SUGGESTIONS (the default — fast, because
+ * each screen only asks about one tag), and a Sample browse that reaches every
+ * image in the labeling pool for one tag, including ones the model never
+ * proposed it for — the only way to answer "show me every image where kitchen =
+ * excluded" for images outside the suggestion queue. */
+type Mode = 'proposals' | 'sample';
+type SampleStateFilter = TagState | 'untouched' | 'all';
+const SAMPLE_STATE_OPTIONS: ReadonlyArray<{ key: SampleStateFilter; label: string }> = [
+  { key: 'all', label: 'All' },
+  { key: 'untouched', label: 'Untouched' },
+  { key: 'positive', label: 'Positive' },
+  { key: 'negative', label: 'Negative' },
+  { key: 'excluded', label: 'Excluded' },
+];
+
 type ProposalsPage = { data: NewDedupLabelProposal[] };
 
 /* Photo size for the review grid, remembered per browser. Its OWN key, not
@@ -57,12 +78,7 @@ const IMAGE_LARGE_KEY = 'sreality.newDedupLabeling.imageLarge';
 
 /* The two --tile-min values a review tile can be. "large" is exactly double
  * "small" — the same rule Browse's cards follow (CARD_IMAGE_MIN) — so the
- * shared small/large switch means the same thing on both pages. "small" is
- * today's density: against this page's own max-w-5xl a 14rem track floor
- * flows to the same four columns the fixed md:grid-cols-4 gave, and it
- * degrades to 3/2/1 on narrower windows instead of cramming four in. The
- * tile's aspect-[4/3] frame is untouched, so doubling the width doubles the
- * photo; the fixed-rem buttons and tag picker below it do not change. */
+ * shared small/large switch means the same thing on both pages. */
 const TILE_MIN = { sm: '14rem', lg: '28rem' } as const;
 
 /* One key shape for everything the page holds per TILE — the staged tag edit,
@@ -72,52 +88,176 @@ const TILE_MIN = { sm: '14rem', lg: '28rem' } as const;
 const rowKey = (imageId: number, model: string) => `${imageId}:${model}`;
 const draftKey = (p: NewDedupLabelProposal) => rowKey(p.image_id, p.model);
 
+const STATE_META: Record<
+  TagState,
+  { label: string; icon: string; activeClass: string; hotkey: string }
+> = {
+  positive: {
+    label: 'Positive — this tag applies',
+    icon: '✓',
+    activeClass: 'bg-[var(--color-sage)] text-[var(--color-paper)] border-[var(--color-sage)]',
+    hotkey: '1',
+  },
+  negative: {
+    label: 'Negative — this tag does not apply',
+    icon: '–',
+    activeClass: 'bg-[var(--color-ink-3)] text-[var(--color-paper)] border-[var(--color-ink-3)]',
+    hotkey: '2',
+  },
+  excluded: {
+    label: 'Excluded — ambiguous, do not train this tag on this image',
+    icon: '⊘',
+    activeClass: 'bg-[var(--color-copper)] text-[var(--color-paper)] border-[var(--color-copper)]',
+    hotkey: '3',
+  },
+};
+
+/* Three visually distinct states at a glance (colour + icon), plus a fourth
+ * "untouched" rendering of the same three buttons — a dashed outline on the
+ * negative slot, since untouched defaults to negative — so an explicit
+ * decision is never confused with the unreviewed default. One control, never
+ * two widgets for "is it positive" and "is it excluded". */
+function TriStateControl({
+  state,
+  onChange,
+  disabled,
+  focused,
+}: {
+  state: TagState | 'untouched';
+  onChange: (state: TagState) => void;
+  disabled?: boolean;
+  focused?: boolean;
+}) {
+  return (
+    <div role="group" aria-label="Tag state" className="flex items-center gap-0.5 shrink-0">
+      {TAG_STATES.map((s) => {
+        const meta = STATE_META[s];
+        const active = state === s;
+        const implied = state === 'untouched' && s === 'negative';
+        return (
+          <button
+            key={s}
+            type="button"
+            aria-pressed={active}
+            disabled={disabled}
+            onClick={() => onChange(s)}
+            title={`${meta.label}${implied ? ' (defaulted — not yet reviewed)' : ''} [${meta.hotkey}]`}
+            className={[
+              'flex h-6 w-6 items-center justify-center rounded-[var(--radius-xs)] border text-[0.8rem] leading-none transition-colors disabled:opacity-40',
+              focused ? 'ring-2 ring-[var(--color-copper)] ring-offset-1' : '',
+              active
+                ? meta.activeClass
+                : implied
+                  ? 'border-dashed border-[var(--color-ink-3)] text-[var(--color-ink-3)]'
+                  : 'border-[var(--color-rule)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]',
+            ].join(' ')}
+          >
+            {meta.icon}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* Keyboard review for a flat list of `n` tiles: arrow keys / j-k move a
+ * focused index, 1/2/3 (or p/n/x) set that tile's state and auto-advance —
+ * "assign primary tag, next image" in one keystroke. Attached to the grid
+ * container (tabIndex=0), not the window, so it never fights a text input
+ * elsewhere on the page (the tag combobox, the sample-size field). */
+function useGridKeyboardReview(n: number, onSetState: (index: number, state: TagState) => void) {
+  const [focused, setFocused] = useState<number | null>(null);
+  useEffect(() => {
+    if (focused != null && focused >= n) setFocused(n > 0 ? n - 1 : null);
+  }, [n, focused]);
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (n === 0) return;
+    const key = e.key.toLowerCase();
+    const cur = focused ?? 0;
+    if (key === 'arrowright' || key === 'arrowdown' || key === 'j') {
+      e.preventDefault();
+      setFocused(Math.min(n - 1, cur + 1));
+      return;
+    }
+    if (key === 'arrowleft' || key === 'arrowup' || key === 'k') {
+      e.preventDefault();
+      setFocused(Math.max(0, focused == null ? 0 : cur - 1));
+      return;
+    }
+    const byHotkey = (Object.entries(STATE_META) as Array<[TagState, (typeof STATE_META)[TagState]]>).find(
+      ([, meta]) => meta.hotkey === key,
+    );
+    const byLetter: TagState | null = key === 'p' ? 'positive' : key === 'x' ? 'excluded' : null;
+    const state = byHotkey?.[0] ?? byLetter;
+    if (state && focused != null) {
+      e.preventDefault();
+      onSetState(focused, state);
+      setFocused(Math.min(n - 1, focused + 1));
+    }
+  };
+  return { focused, setFocused, onKeyDown };
+}
+
 export default function NewDedupLabeling() {
   const qc = useQueryClient();
   const overviewQ = useQuery({ queryKey: OVERVIEW_KEY, queryFn: getNewDedupLabelingOverview });
   const settingsQ = useQuery({ queryKey: SETTINGS_KEY, queryFn: listNewDedupSettings });
 
+  const [mode, setMode] = useState<Mode>('proposals');
   const [labelFilter, setLabelFilter] = useState<string | null>(null);
-  // Coverage ceiling for the TAG list (not the images): with dozens of labels,
+  // Coverage ceiling for the TAG list (not the images): with dozens of tags,
   // "which tags are still short of Gate 1" is the question that decides what to
   // label next, and the full chart buries it. '' = no ceiling.
   const [maxTrained, setMaxTrained] = useState('');
   const [manageOpen, setManageOpen] = useState(false);
   const [tab, setTab] = useState<TabKey>('pending');
+  const [sampleState, setSampleState] = useState<SampleStateFilter>('untouched');
   const [showOriginal, setShowOriginal] = useState(false);
   const imageLarge = usePersistedFlag(IMAGE_LARGE_KEY, false);
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
-  // confirmMut/dismissMut below are ONE shared mutation instance for the
-  // whole grid — TanStack Query's observer only ever reflects the MOST
-  // RECENT .mutate() call's isPending/variables, so a second tile's click
-  // would make an earlier tile's still-in-flight action look finished.
-  // Track per-tile pending state locally instead, keyed by row (image, model)
-  // so one model's in-flight action can't disable another model's tile for
-  // the same image on the All tab.
   const [pendingRowKeys, setPendingRowKeys] = useState<ReadonlySet<string>>(new Set());
-  // Staged tag edits, held HERE rather than inside the tile: the batch
-  // actions below send image ids only (the bulk endpoint takes no per-image
-  // labels), so the page has to know which tiles carry an unsaved correction
-  // in order to keep them out of a batch — otherwise "Confirm selected" would
-  // silently write the model's label over the operator's fix. Page-level also
-  // survives a background refetch replacing the proposals array mid-edit.
-  // Keyed by `draftKey` above.
   const [drafts, setDrafts] = useState<ReadonlyMap<string, string>>(new Map());
+  const [detailImageId, setDetailImageId] = useState<number | null>(null);
+
+  const allTags = useMemo(() => overviewQ.data?.data.tags ?? [], [overviewQ.data]);
+  const tagByLabel = useMemo(() => new Map(allTags.map((t) => [t.label, t])), [allTags]);
+  const activeTagId = labelFilter ? (tagByLabel.get(labelFilter)?.id ?? null) : null;
 
   const proposalsKey = useMemo(() => [...PROPOSALS_KEY, tab, labelFilter], [tab, labelFilter]);
   const proposalsQ = useQuery({
     queryKey: proposalsKey,
     queryFn: () =>
       listNewDedupProposals({ status: tab, label: labelFilter ?? undefined, limit: 200 }),
+    enabled: mode === 'proposals',
   });
   const proposals = useMemo(() => proposalsQ.data?.data ?? [], [proposalsQ.data]);
-  const imageIds = useMemo(() => proposals.map((p) => p.image_id), [proposals]);
 
-  // Photos ACCUMULATE across tabs and actions rather than being re-fetched per
-  // grid. Keying the image query on the current id list meant every confirm —
-  // which changes that list — swapped in an empty cache entry, so every tile in
-  // the grid lost its photo and re-rendered at once. Only never-seen ids are
-  // ever requested; a tile that's already on screen never blinks again.
+  const tagImagesKey = useMemo(
+    () => [...TAG_IMAGES_KEY, activeTagId, sampleState],
+    [activeTagId, sampleState],
+  );
+  const tagImagesQ = useQuery({
+    queryKey: tagImagesKey,
+    queryFn: () =>
+      listNewDedupTagImages(activeTagId as number, {
+        state: sampleState === 'all' ? undefined : sampleState,
+        limit: 200,
+      }),
+    enabled: mode === 'sample' && activeTagId != null,
+  });
+  const tagImages = useMemo(() => tagImagesQ.data?.data ?? [], [tagImagesQ.data]);
+
+  const imageIds = useMemo(
+    () => (mode === 'proposals' ? proposals.map((p) => p.image_id) : tagImages.map((r) => r.image_id)),
+    [mode, proposals, tagImages],
+  );
+
+  // Photos ACCUMULATE across tabs/modes/actions rather than being re-fetched
+  // per grid. Keying the image query on the current id list meant every
+  // confirm — which changes that list — swapped in an empty cache entry, so
+  // every tile in the grid lost its photo and re-rendered at once. Only
+  // never-seen ids are ever requested; a tile that's already on screen never
+  // blinks again.
   const [imageCache, setImageCache] = useState<ReadonlyMap<number, ImagePublic>>(new Map());
   const missingIds = useMemo(
     () => [...new Set(imageIds.filter((id) => !imageCache.has(id)))],
@@ -144,42 +284,34 @@ export default function NewDedupLabeling() {
     });
   }, [imagesQ.data]);
 
-  /* "Border case" is image-grain and independent of the review verdict, so it
-   * lives outside the proposal row: two tiles for the same photo (two models)
-   * share one flag and flip together, and toggling it patches the store rather
-   * than the grid — no tile moves. */
+  /* "Border case" is image-grain and independent of every tag's tri-state, so
+   * it lives outside both grids: toggling it patches the store rather than
+   * either grid — no tile moves. */
   const borderCases = useBorderCases(imageIds);
 
-  /* The review grid doubles as a gallery: clicking a tile enlarges it in the
-   * SHARED ImageLightbox (the same modal /clip-audit and listing detail open)
-   * and the arrow keys walk the rest of the grid from there — judging a tag
-   * usually needs the photo bigger than a four-up tile. Parallel to
-   * `proposals`, minus rows whose photo hasn't arrived yet (nothing to
-   * enlarge), so one position is one TILE, not one image: two models'
-   * proposals on the same photo are two stops, exactly as they are two tiles,
-   * and each stop can therefore carry its own proposed tag. */
-  const gallery = useMemo(
-    () =>
-      proposals.flatMap((p) => {
+  /* Both grids double as a gallery: clicking a tile enlarges it in the SHARED
+   * ImageLightbox and the arrow keys walk the rest of the grid from there. */
+  const gallery = useMemo(() => {
+    if (mode === 'proposals') {
+      return proposals.flatMap((p) => {
         const image = imageCache.get(p.image_id);
-        return image ? [{ key: draftKey(p), image, proposal: p }] : [];
-      }),
-    [proposals, imageCache],
-  );
+        return image ? [{ key: draftKey(p), image, tag: p.label as string | null, confidence: p.confidence }] : [];
+      });
+    }
+    return tagImages.flatMap((r) => {
+      const image = imageCache.get(r.image_id);
+      return image ? [{ key: String(r.image_id), image, tag: null, confidence: null }] : [];
+    });
+  }, [mode, proposals, tagImages, imageCache]);
   const galleryImages = useMemo(() => gallery.map((g) => g.image), [gallery]);
-  const galleryIndex = useMemo(
-    () => new Map(gallery.map((g, i) => [g.key, i])),
-    [gallery],
-  );
+  const galleryIndex = useMemo(() => new Map(gallery.map((g, i) => [g.key, i])), [gallery]);
   const [lightboxAt, setLightboxAt] = useState<number | null>(null);
 
   useEffect(() => {
     setSelected(new Set());
     setDrafts(new Map());
-    // The modal is a view OF the current grid — a new grid invalidates the
-    // position it was opened at.
     setLightboxAt(null);
-  }, [tab, labelFilter]);
+  }, [tab, labelFilter, mode, sampleState]);
   useEffect(() => {
     const ids = new Set(imageIds);
     setSelected((prev) => {
@@ -187,9 +319,7 @@ export default function NewDedupLabeling() {
       return next.size === prev.size ? prev : next;
     });
     setDrafts((prev) => {
-      const next = new Map(
-        [...prev].filter(([key]) => ids.has(Number(key.split(':')[0]))),
-      );
+      const next = new Map([...prev].filter(([key]) => ids.has(Number(key.split(':')[0]))));
       return next.size === prev.size ? prev : next;
     });
   }, [imageIds]);
@@ -200,28 +330,23 @@ export default function NewDedupLabeling() {
   const secondaryModel = settingValue('labeling_secondary_model') as string | undefined;
 
   const invalidateOverview = () => qc.invalidateQueries({ queryKey: OVERVIEW_KEY });
-  // A taxonomy rename/remove rewrites labels across EVERY tab (it cascades in
-  // one transaction server-side), so that one really does have to refetch the
-  // visible grid — unlike reviewing a single proposal, which patches in place.
   const invalidateProposals = () => qc.invalidateQueries({ queryKey: PROPOSALS_KEY });
+  const invalidateTagImages = () => qc.invalidateQueries({ queryKey: TAG_IMAGES_KEY });
   // Only the tabs the operator ISN'T looking at. Invalidating the visible one
-  // would refetch it and re-render every tile — the churn this page is built to
-  // avoid (see patchRows). The others are marked stale so they're correct the
-  // moment they're opened; none of them is mounted, so nothing refetches now.
+  // would refetch it and re-render every tile — the churn this page is built
+  // to avoid (see patchRows / patchTagImages). None of the others is
+  // mounted, so nothing refetches now; they're just correct when opened.
   const invalidateOtherTabs = () =>
     qc.invalidateQueries({
       predicate: (q) => {
         const k = q.queryKey as unknown[];
-        return (
-          k[0] === 'new-dedup' && k[1] === 'labeling' && k[2] === 'proposals' && k[3] !== tab
-        );
+        return k[0] === 'new-dedup' && k[1] === 'labeling' && k[2] === 'proposals' && k[3] !== tab;
       },
     });
 
-  /* The review grid is patched IN PLACE, never invalidated. A refetch re-runs
-   * the query and re-renders every tile, which on a page you work through
-   * image-by-image reads as "the whole grid jumped". `patch` is either 'drop'
-   * (the row belongs to another tab now) or a mapper over the row. */
+  /* Both grids are patched IN PLACE, never invalidated, for the same reason:
+   * a refetch re-renders every tile, which on a page worked through
+   * image-by-image reads as "the whole grid jumped". */
   const patchRows = (
     ids: ReadonlyArray<number>,
     model: string,
@@ -243,19 +368,27 @@ export default function NewDedupLabeling() {
         : old,
     );
   };
+  const patchTagImages = (ids: ReadonlyArray<number>, state: TagState) => {
+    const set = new Set(ids);
+    qc.setQueryData<{ data: NewDedupTagImage[] }>(tagImagesKey, (old) =>
+      old
+        ? {
+            ...old,
+            data:
+              sampleState === 'all' || sampleState === state
+                ? old.data.map((r) => (set.has(r.image_id) ? { ...r, state } : r))
+                : old.data.filter((r) => !set.has(r.image_id)),
+          }
+        : old,
+    );
+  };
 
-  // On Pending a reviewed row leaves for its new tab (the others keep their
-  // order); anywhere else it stays exactly where it is and greys out.
   const applyReview = (
     ids: ReadonlyArray<number>,
     model: string,
     patch: (p: NewDedupLabelProposal) => NewDedupLabelProposal,
   ) => {
     patchRows(ids, model, tab === 'pending' ? 'drop' : patch);
-    // A tile reviewed through its OWN button while checkbox-selected has to
-    // leave the selection too. On Pending the row is gone and the imageIds
-    // effect prunes it, but on All it stays on screen — and a later "Confirm
-    // selected" would then re-send an id that's no longer pending.
     setSelected((prev) => {
       const next = new Set([...prev].filter((id) => !ids.includes(id)));
       return next.size === prev.size ? prev : next;
@@ -264,46 +397,39 @@ export default function NewDedupLabeling() {
     invalidateOverview();
   };
 
-  // The taxonomy IS the option list for correcting a wrong suggestion —
-  // same shape the /clip-audit combobox uses (label + its current training
-  // count), so a mis-tagged proposal is fixed by picking the right tag
-  // rather than dismissing and re-labelling elsewhere. Free text still
-  // creates a new label, matching that page. Deliberately the WHOLE
-  // vocabulary, never narrowed by the coverage ceiling below: that filter
-  // picks what to work on, it doesn't restrict what a tag can be corrected to.
-  const allLabels = useMemo(() => overviewQ.data?.data.labels ?? [], [overviewQ.data]);
+  // The taxonomy IS the option list for correcting a wrong suggestion — free
+  // text still creates a new tag. Deliberately the WHOLE vocabulary, never
+  // narrowed by the coverage ceiling below: that filter picks what to work
+  // on, it doesn't restrict what a tag can be corrected to.
   const labelOptions: LabelOption[] = useMemo(
     () =>
-      allLabels
-        .map((l) => ({ value: l.label, label: l.label, count: l.gate_count }))
+      allTags
+        .map((t) => ({ value: t.label, label: t.label, count: t.gate_count }))
         .sort((a, b) => a.label.localeCompare(b.label, 'cs')),
-    [allLabels],
+    [allTags],
   );
 
   const maxTrainedNum =
     maxTrained.trim() === '' || !Number.isFinite(Number(maxTrained)) || Number(maxTrained) < 0
       ? null
       : Number(maxTrained);
-  const visibleLabels = useMemo(
-    () =>
-      maxTrainedNum == null
-        ? allLabels
-        : allLabels.filter((l) => l.gate_count <= maxTrainedNum),
-    [allLabels, maxTrainedNum],
+  const visibleTags = useMemo(
+    () => (maxTrainedNum == null ? allTags : allTags.filter((t) => t.gate_count <= maxTrainedNum)),
+    [allTags, maxTrainedNum],
   );
   const filterOptions = useMemo(
-    () => [...visibleLabels].sort((a, b) => a.label.localeCompare(b.label, 'cs')),
-    [visibleLabels],
+    () => [...visibleTags].sort((a, b) => a.label.localeCompare(b.label, 'cs')),
+    [visibleTags],
   );
 
   // --- taxonomy ---------------------------------------------------------
 
   const [newLabelText, setNewLabelText] = useState('');
   const addLabelMut = useMutation({
-    mutationFn: () => addNewDedupTaxonomyLabel(newLabelText.trim()),
+    mutationFn: () => addNewDedupTag(newLabelText.trim()),
     onSuccess: () => {
       setNewLabelText('');
-      pushToast('ok', 'Label added.');
+      pushToast('ok', 'Tag added.');
       invalidateOverview();
     },
     onError: (err: Error) => pushToast('err', err.message),
@@ -311,28 +437,25 @@ export default function NewDedupLabeling() {
 
   const renameLabelMut = useMutation({
     mutationFn: ({ id, label }: { id: number; oldLabel: string; label: string }) =>
-      renameNewDedupTaxonomyLabel(id, label),
+      renameNewDedupTag(id, label),
     onSuccess: (_res, vars) => {
       pushToast('ok', 'Renamed.');
-      // Only follow the filter if it was pointed at THIS label — renaming an
-      // unrelated row must never hijack whichever label the operator has
-      // the proposals grid currently filtered to.
       setLabelFilter((cur) => (cur === vars.oldLabel ? vars.label : cur));
       invalidateOverview();
       invalidateProposals();
+      invalidateTagImages();
     },
     onError: (err: Error) => pushToast('err', err.message),
   });
 
   const removeLabelMut = useMutation({
-    mutationFn: ({ id }: { id: number; oldLabel: string }) => removeNewDedupTaxonomyLabel(id),
+    mutationFn: ({ id }: { id: number; oldLabel: string }) => removeNewDedupTag(id),
     onSuccess: (_res, vars) => {
       pushToast('ok', 'Removed.');
-      // Clear the filter if it was pointed at the label just deleted —
-      // otherwise the banner keeps naming a label that no longer exists.
       setLabelFilter((cur) => (cur === vars.oldLabel ? null : cur));
       invalidateOverview();
       invalidateProposals();
+      invalidateTagImages();
     },
     onError: (err: Error) => pushToast('err', err.message),
   });
@@ -341,14 +464,7 @@ export default function NewDedupLabeling() {
 
   const [growCount, setGrowCount] = useState('200');
   const [growCategory, setGrowCategory] = useState('');
-  // The API's count field is an int (Pydantic) — a fractional value like
-  // "2.5" would 422 server-side with an unreadable toast, so validate
-  // integer-ness client-side too, not just positivity.
   const growCountValid = Number.isInteger(Number(growCount)) && Number(growCount) > 0;
-  // A toast alone is easy to miss on a slow connection or a big count (1000+
-  // candidate images still take a real network round-trip) — the operator
-  // reported clicking "Grow sample" and seeing nothing happen. Surface the
-  // result inline, next to the button itself, not just in a corner toast.
   const [lastGrow, setLastGrow] = useState<{ requested: number; added: number } | null>(null);
   const growMut = useMutation({
     mutationFn: () => growNewDedupSample(Number(growCount), growCategory || null),
@@ -382,96 +498,66 @@ export default function NewDedupLabeling() {
       return next;
     });
 
-  const confirmMut = useMutation({
+  const setStateMut = useMutation({
     mutationFn: ({
       imageId,
       model,
+      state,
       label,
     }: {
       imageId: number;
       model: string;
+      state: TagState;
       label?: string;
-    }) => confirmNewDedupProposal(imageId, model, label),
+    }) => setNewDedupProposalState(imageId, model, state, label),
     onSuccess: (res, vars) => {
-      if (res.data.corrected) {
-        pushToast('ok', `Corrected to “${res.data.label}”.`);
-      }
+      if (res.data.corrected) pushToast('ok', `Set “${res.data.label}” to ${res.data.state}.`);
       clearDraft(vars.imageId, vars.model);
       applyReview([vars.imageId], vars.model, (p) => ({
         ...p,
-        status: 'confirmed',
+        status: res.data.status,
         label: res.data.label,
-        trained_label: res.data.label,
+        current_state: res.data.state,
         reviewed_by: 'operator',
       }));
     },
     onError: (err: Error) => pushToast('err', err.message),
     onSettled: (_data, _err, vars) => endAction(vars.imageId, vars.model),
   });
-
-  // Relabelling an image that's ALREADY in the training set is a plain
-  // image_training_examples upsert — the same endpoint /clip-audit's Train
-  // CTA uses. It deliberately does NOT touch label_proposals: the proposal
-  // row records what the model predicted, and the Confirmed tab reads the
-  // label live from image_training_examples, so this shows up immediately.
-  const relabelMut = useMutation({
-    mutationFn: ({ imageId, label }: { imageId: number; model: string; label: string }) =>
-      setTrainingExample({ image_id: imageId, label }),
-    onSuccess: (res, vars) => {
-      pushToast('ok', `Relabelled to “${res.data.label}”.`);
-      clearDraft(vars.imageId, vars.model);
-      // Stays on whichever tab it's on — it was already confirmed, only its
-      // text changed — so this patches in place even on Pending.
-      patchRows([vars.imageId], vars.model, (p) => ({
+  const bulkStateMut = useMutation({
+    mutationFn: ({ model, state }: { model: string; state: TagState }) =>
+      bulkSetNewDedupProposalState(model, [...selected], state),
+    onSuccess: (res) => {
+      pushToast('ok', `Set ${res.data.updated} to ${res.data.state}.`);
+      setSelected(new Set());
+      applyReview(res.data.image_ids, res.data.model, (p) => ({
         ...p,
-        label: res.data.label,
-        trained_label: res.data.label,
+        status: res.data.state === 'positive' ? 'confirmed' : 'dismissed',
+        current_state: res.data.state,
+        reviewed_by: 'operator',
       }));
-      invalidateOtherTabs();
+    },
+    onError: (err: Error) => pushToast('err', err.message),
+  });
+
+  const setTagAnnotationMut = useMutation({
+    mutationFn: ({ imageId, state }: { imageId: number; state: TagState }) =>
+      setNewDedupTagAnnotation(activeTagId as number, imageId, state),
+    onSuccess: (res, vars) => {
+      patchTagImages([vars.imageId], res.data.state);
       invalidateOverview();
     },
     onError: (err: Error) => pushToast('err', err.message),
-    onSettled: (_data, _err, vars) => endAction(vars.imageId, vars.model),
+    onSettled: (_d, _e, vars) => endAction(vars.imageId, 'sample'),
   });
-  const dismissMut = useMutation({
-    mutationFn: ({ imageId, model }: { imageId: number; model: string }) =>
-      dismissNewDedupProposal(imageId, model),
-    onSuccess: (_res, vars) => {
-      applyReview([vars.imageId], vars.model, (p) => ({
-        ...p,
-        status: 'dismissed',
-        reviewed_by: 'operator',
-      }));
-    },
-    onError: (err: Error) => pushToast('err', err.message),
-    onSettled: (_data, _err, vars) => endAction(vars.imageId, vars.model),
-  });
-  const bulkConfirmMut = useMutation({
-    mutationFn: (model: string) => bulkConfirmNewDedupProposals(model, [...selected]),
-    onSuccess: (res, model) => {
-      pushToast('ok', `Confirmed ${res.data.confirmed}.`);
+  const bulkTagAnnotationMut = useMutation({
+    mutationFn: (state: TagState) =>
+      bulkSetNewDedupTagAnnotation(activeTagId as number, [...selected], state),
+    onSuccess: (res) => {
+      pushToast('ok', `Set ${res.data.updated} to ${res.data.state}.`);
       setSelected(new Set());
-      // Each row keeps its OWN label (the batch writes per-proposal labels,
-      // it isn't a relabel-everything-to-one-value action).
-      applyReview(res.data.image_ids, model, (p) => ({
-        ...p,
-        status: 'confirmed',
-        trained_label: p.label,
-        reviewed_by: 'operator',
-      }));
-    },
-    onError: (err: Error) => pushToast('err', err.message),
-  });
-  const bulkDismissMut = useMutation({
-    mutationFn: (model: string) => bulkDismissNewDedupProposals(model, [...selected]),
-    onSuccess: (res, model) => {
-      pushToast('ok', `Dismissed ${res.data.dismissed}.`);
-      setSelected(new Set());
-      applyReview(res.data.image_ids, model, (p) => ({
-        ...p,
-        status: 'dismissed',
-        reviewed_by: 'operator',
-      }));
+      patchTagImages(res.data.image_ids, res.data.state);
+      invalidateOverview();
     },
     onError: (err: Error) => pushToast('err', err.message),
   });
@@ -489,10 +575,6 @@ export default function NewDedupLabeling() {
     const d = draftFor(p);
     return d.trim() !== '' && d !== p.label;
   };
-  // Editing a tag takes that tile out of the batch: the batch endpoint writes
-  // each proposal's OWN label, so leaving a corrected tile selected would
-  // discard the correction without telling anyone. It gets confirmed through
-  // its own button instead.
   const setDraft = (p: NewDedupLabelProposal, label: string) => {
     setDrafts((prev) => {
       const next = new Map(prev);
@@ -510,23 +592,41 @@ export default function NewDedupLabeling() {
   };
 
   // Only PENDING rows under the CURRENT secondary model batch together — an
-  // older model's leftover pending rows (from before a model config change)
-  // still review one at a time via the per-tile buttons. Row-level, not
-  // tab-level, so the batch bar works on All too. Corrected tiles are excluded
-  // for the reason above.
+  // older model's leftover pending rows still review one at a time via the
+  // per-tile control. Corrected tiles are excluded from the batch for the
+  // reason above.
   const selectableIds = useMemo(
     () =>
-      secondaryModel
-        ? proposals
-            .filter(
-              (p) => p.status === 'pending' && p.model === secondaryModel && !isCorrected(p),
-            )
-            .map((p) => p.image_id)
-        : [],
+      mode === 'proposals'
+        ? secondaryModel
+          ? proposals
+              .filter((p) => p.status === 'pending' && p.model === secondaryModel && !isCorrected(p))
+              .map((p) => p.image_id)
+          : []
+        : tagImages.map((r) => r.image_id),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [proposals, secondaryModel, drafts],
+    [mode, proposals, tagImages, secondaryModel, drafts],
   );
   const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
+
+  const proposalKeyboard = useGridKeyboardReview(proposals.length, (i, state) => {
+    const p = proposals[i];
+    if (!p || p.status !== 'pending') return;
+    beginAction(p.image_id, p.model);
+    setStateMut.mutate({
+      imageId: p.image_id,
+      model: p.model,
+      state,
+      label: isCorrected(p) ? draftFor(p) : undefined,
+    });
+  });
+  const sampleKeyboard = useGridKeyboardReview(tagImages.length, (i, state) => {
+    const r = tagImages[i];
+    if (!r || activeTagId == null) return;
+    beginAction(r.image_id, 'sample');
+    setTagAnnotationMut.mutate({ imageId: r.image_id, state });
+  });
+  const keyboard = mode === 'proposals' ? proposalKeyboard : sampleKeyboard;
 
   return (
     <div className="px-6 py-12 max-w-5xl mx-auto">
@@ -537,19 +637,19 @@ export default function NewDedupLabeling() {
         NEW DEDUP · Labeling
       </h1>
       <p className="mt-3 text-sm text-[var(--color-ink-2)] leading-relaxed max-w-2xl">
-        Build the Taxonomy v1 training set: a secondary, stronger CLIP encoder proposes tags
-        for images in the sample below; confirming a proposal writes it into the real training
-        set, dismissing it doesn't. "Border case" is neither verdict — it parks a photo that is
-        unclear even to a human, independently of whatever tag it carries. Gate 1 needs{' '}
-        {gate1Target} images per active tag, counting only the ones that are NOT parked: a border
-        case starts counting again the moment its flag is cleared.
+        Build the tag annotation matrix every per-tag classifier head trains from: each image ×
+        tag cell is positive, negative, or excluded (ambiguous — dropped from that head's
+        training set entirely). An untouched cell defaults to negative. "Border case" is a
+        separate, whole-image flag — a photo unclear even to a human — independent of any tag's
+        state. Gate 1 needs {gate1Target} positive images per active tag, counting only the ones
+        that are NOT parked as a border case.
       </p>
 
       {overviewQ.error && <ErrorBanner message={(overviewQ.error as Error).message} />}
 
       <TaxonomyBarChart
-        labels={visibleLabels}
-        totalLabels={allLabels.length}
+        tags={visibleTags}
+        totalTags={allTags.length}
         sampleSize={overviewQ.data?.data.sample_size}
         loading={!overviewQ.data && !overviewQ.error}
         gate1Target={gate1Target}
@@ -563,7 +663,7 @@ export default function NewDedupLabeling() {
 
       {manageOpen && (
         <TaxonomyManageModal
-          labels={allLabels}
+          labels={allTags}
           onClose={() => setManageOpen(false)}
           newLabelText={newLabelText}
           onNewLabelTextChange={setNewLabelText}
@@ -626,25 +726,33 @@ export default function NewDedupLabeling() {
         )}
 
         <p className="mt-2 text-xs text-[var(--color-ink-4)] leading-relaxed">
-          Adds newest not-yet-sampled images to the pool the relabel job scores — this only grows
-          membership, it does NOT run scoring itself and no new pending proposals appear here yet.
-          Scoring runs separately via the "NEW DEDUP — Labeling secondary-CLIP proposals" GitHub
-          Actions workflow (model: {secondaryModel ?? '…'}).
+          Adds newest not-yet-sampled images to the pool. Scoring runs separately via the "NEW
+          DEDUP — Labeling secondary-CLIP proposals" GitHub Actions workflow (model:{' '}
+          {secondaryModel ?? '…'}).
         </p>
       </section>
 
       <section className="mt-8">
         <div className="flex items-center justify-between flex-wrap gap-3">
-          <Tabs tabs={STATUS_TABS} active={tab} onChange={setTab} />
+          <div className="flex items-center gap-1">
+            <ToggleButton active={mode === 'proposals'} onClick={() => setMode('proposals')}>
+              Proposals
+            </ToggleButton>
+            <ToggleButton active={mode === 'sample'} onClick={() => setMode('sample')}>
+              Sample
+            </ToggleButton>
+          </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <div className="flex items-center gap-1">
-              <ToggleButton active={!showOriginal} onClick={() => setShowOriginal(false)}>
-                New tag
-              </ToggleButton>
-              <ToggleButton active={showOriginal} onClick={() => setShowOriginal(true)}>
-                Original tag
-              </ToggleButton>
-            </div>
+            {mode === 'proposals' && (
+              <div className="flex items-center gap-1">
+                <ToggleButton active={!showOriginal} onClick={() => setShowOriginal(false)}>
+                  New tag
+                </ToggleButton>
+                <ToggleButton active={showOriginal} onClick={() => setShowOriginal(true)}>
+                  Original tag
+                </ToggleButton>
+              </div>
+            )}
             <ImageSizeToggle
               large={imageLarge.value}
               onChange={imageLarge.set}
@@ -665,16 +773,13 @@ export default function NewDedupLabeling() {
             onChange={(e) => setLabelFilter(e.target.value || null)}
             className="px-2 py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)] max-w-[18rem]"
           >
-            <option value="">All tags</option>
-            {/* The current filter always stays selectable, even when the
-              * coverage ceiling would hide it — otherwise the select would
-              * read "All tags" while the grid stayed filtered. */}
-            {labelFilter && !filterOptions.some((l) => l.label === labelFilter) && (
+            <option value="">{mode === 'sample' ? 'Choose a tag…' : 'All tags'}</option>
+            {labelFilter && !filterOptions.some((t) => t.label === labelFilter) && (
               <option value={labelFilter}>{labelFilter}</option>
             )}
-            {filterOptions.map((l) => (
-              <option key={l.id} value={l.label}>
-                {l.label} ({l.gate_count})
+            {filterOptions.map((t) => (
+              <option key={t.id} value={t.label}>
+                {t.label} ({t.gate_count})
               </option>
             ))}
           </select>
@@ -689,103 +794,180 @@ export default function NewDedupLabeling() {
           )}
           {maxTrainedNum != null && (
             <span className="text-[var(--color-ink-4)]">
-              {filterOptions.length} of {allLabels.length} tags (≤ {maxTrainedNum} training
-              images)
+              {filterOptions.length} of {allTags.length} tags (≤ {maxTrainedNum} training images)
             </span>
           )}
+          {mode === 'sample' && (
+            <>
+              <span className="h-4 w-px bg-[var(--color-rule)]" aria-hidden />
+              <label htmlFor="labeling-sample-state" className="text-[var(--color-ink-3)]">
+                State
+              </label>
+              <select
+                id="labeling-sample-state"
+                value={sampleState}
+                onChange={(e) => setSampleState(e.target.value as SampleStateFilter)}
+                className="px-2 py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)]"
+              >
+                {SAMPLE_STATE_OPTIONS.map((o) => (
+                  <option key={o.key} value={o.key}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
         </div>
+
+        {mode === 'proposals' && (
+          <div className="mt-3">
+            <Tabs tabs={STATUS_TABS} active={tab} onChange={setTab} />
+          </div>
+        )}
 
         {selectableIds.length > 0 && (
           <div className="mt-3 flex items-center gap-3 flex-wrap">
             <button
               type="button"
-              onClick={() =>
-                setSelected(allSelected ? new Set() : new Set(selectableIds))
-              }
+              onClick={() => setSelected(allSelected ? new Set() : new Set(selectableIds))}
               className="px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]"
             >
               {allSelected ? 'Deselect all' : 'Select all'}
             </button>
             <span className="text-xs text-[var(--color-ink-3)]">{selected.size} selected</span>
-            <button
-              type="button"
-              disabled={selected.size === 0 || bulkConfirmMut.isPending || !secondaryModel}
-              onClick={() => secondaryModel && bulkConfirmMut.mutate(secondaryModel)}
-              className="px-2.5 py-1 text-xs rounded-[var(--radius-xs)] bg-[var(--color-sage-soft)] text-[var(--color-sage)] disabled:opacity-40"
-            >
-              Confirm selected
-            </button>
-            <button
-              type="button"
-              disabled={selected.size === 0 || bulkDismissMut.isPending || !secondaryModel}
-              onClick={() => secondaryModel && bulkDismissMut.mutate(secondaryModel)}
-              className="px-2.5 py-1 text-xs rounded-[var(--radius-xs)] bg-[var(--color-brick-soft)] text-[var(--color-brick)] disabled:opacity-40"
-            >
-              Dismiss selected
-            </button>
+            {TAG_STATES.map((s) => (
+              <button
+                key={s}
+                type="button"
+                disabled={
+                  selected.size === 0 ||
+                  bulkStateMut.isPending ||
+                  bulkTagAnnotationMut.isPending ||
+                  (mode === 'proposals' && !secondaryModel)
+                }
+                onClick={() =>
+                  mode === 'proposals'
+                    ? secondaryModel && bulkStateMut.mutate({ model: secondaryModel, state: s })
+                    : bulkTagAnnotationMut.mutate(s)
+                }
+                className={[
+                  'px-2.5 py-1 text-xs rounded-[var(--radius-xs)] disabled:opacity-40',
+                  STATE_META[s].activeClass,
+                ].join(' ')}
+              >
+                Set selected: {s}
+              </button>
+            ))}
           </div>
         )}
 
-        {proposalsQ.error && <ErrorBanner message={(proposalsQ.error as Error).message} />}
-        {!proposalsQ.data && !proposalsQ.error && (
-          <p className="mt-6 text-sm text-[var(--color-ink-3)]">Loading proposals…</p>
-        )}
-        {proposalsQ.data && proposals.length === 0 && (
-          <p className="mt-6 text-sm text-[var(--color-ink-3)]">
-            {`No ${tab === 'all' ? '' : `${tab} `}proposals.`}
-          </p>
-        )}
+        <p className="mt-2 text-[0.68rem] text-[var(--color-ink-4)]">
+          Keyboard: click a tile to focus it, then ← → (or j/k) to move, 1/2/3 to set
+          positive/negative/excluded and advance to the next.
+        </p>
 
-        <div
-          className="mt-4 grid gap-3 grid-cols-[repeat(auto-fill,minmax(min(var(--tile-min),100%),1fr))]"
-          style={{ '--tile-min': imageLarge.value ? TILE_MIN.lg : TILE_MIN.sm } as CSSProperties}
-        >
-          {proposals.map((p) => (
-            <ProposalTile
-              key={`${p.image_id}:${p.model}`}
-              proposal={p}
-              image={imageCache.get(p.image_id)}
-              showOriginal={showOriginal}
-              selectable={
-                p.status === 'pending' && p.model === secondaryModel && !isCorrected(p)
-              }
-              selected={selected.has(p.image_id)}
-              onToggleSelect={() => toggle(p.image_id)}
-              labelOptions={labelOptions}
-              borderCases={borderCases}
-              draft={draftFor(p)}
-              onDraftChange={(label) => setDraft(p, label)}
-              corrected={isCorrected(p)}
-              // On the mixed tab, anything already dealt with — tagged into the
-              // training set, or dismissed — recedes, so the bright tiles are
-              // exactly what's still waiting on the operator.
-              dimmed={tab === 'all' && (p.trained_label != null || p.status !== 'pending')}
-              onOpen={() => setLightboxAt(galleryIndex.get(draftKey(p)) ?? null)}
-              onConfirm={(label) => {
-                beginAction(p.image_id, p.model);
-                confirmMut.mutate({
-                  imageId: p.image_id,
-                  model: p.model,
-                  // Only an actual correction travels: an untouched Confirm
-                  // sends no label, so the server uses the proposal's CURRENT
-                  // stored label rather than whatever this (possibly stale)
-                  // page last rendered — a taxonomy rename in between must
-                  // not be undone by echoing the old spelling back.
-                  label: isCorrected(p) ? label : undefined,
-                });
-              }}
-              onDismiss={() => {
-                beginAction(p.image_id, p.model);
-                dismissMut.mutate({ imageId: p.image_id, model: p.model });
-              }}
-              onRelabel={(label) => {
-                beginAction(p.image_id, p.model);
-                relabelMut.mutate({ imageId: p.image_id, model: p.model, label });
-              }}
-              actionPending={pendingRowKeys.has(rowKey(p.image_id, p.model))}
-            />
-          ))}
-        </div>
+        {mode === 'proposals' ? (
+          <>
+            {proposalsQ.error && <ErrorBanner message={(proposalsQ.error as Error).message} />}
+            {!proposalsQ.data && !proposalsQ.error && (
+              <p className="mt-6 text-sm text-[var(--color-ink-3)]">Loading proposals…</p>
+            )}
+            {proposalsQ.data && proposals.length === 0 && (
+              <p className="mt-6 text-sm text-[var(--color-ink-3)]">
+                {`No ${tab === 'all' ? '' : `${tab} `}proposals.`}
+              </p>
+            )}
+
+            <div
+              className="mt-4 grid gap-3 grid-cols-[repeat(auto-fill,minmax(min(var(--tile-min),100%),1fr))]"
+              style={{ '--tile-min': imageLarge.value ? TILE_MIN.lg : TILE_MIN.sm } as CSSProperties}
+              onKeyDown={keyboard.onKeyDown}
+              tabIndex={0}
+            >
+              {proposals.map((p, i) => (
+                <ProposalTile
+                  key={`${p.image_id}:${p.model}`}
+                  proposal={p}
+                  image={imageCache.get(p.image_id)}
+                  showOriginal={showOriginal}
+                  selectable={p.status === 'pending' && p.model === secondaryModel && !isCorrected(p)}
+                  selected={selected.has(p.image_id)}
+                  onToggleSelect={() => toggle(p.image_id)}
+                  labelOptions={labelOptions}
+                  borderCases={borderCases}
+                  draft={draftFor(p)}
+                  onDraftChange={(label) => setDraft(p, label)}
+                  corrected={isCorrected(p)}
+                  dimmed={tab === 'all' && p.status !== 'pending'}
+                  focused={keyboard.focused === i}
+                  onFocusTile={() => keyboard.setFocused(i)}
+                  onOpen={() => {
+                    keyboard.setFocused(i);
+                    setLightboxAt(galleryIndex.get(draftKey(p)) ?? null);
+                  }}
+                  onOpenDetail={() => setDetailImageId(p.image_id)}
+                  onSetState={(state) => {
+                    beginAction(p.image_id, p.model);
+                    setStateMut.mutate({
+                      imageId: p.image_id,
+                      model: p.model,
+                      state,
+                      label: isCorrected(p) ? draftFor(p) : undefined,
+                    });
+                  }}
+                  actionPending={pendingRowKeys.has(rowKey(p.image_id, p.model))}
+                />
+              ))}
+            </div>
+          </>
+        ) : (
+          <>
+            {activeTagId == null && (
+              <p className="mt-6 text-sm text-[var(--color-ink-3)]">
+                Choose a tag above to browse its sample.
+              </p>
+            )}
+            {activeTagId != null && tagImagesQ.error && (
+              <ErrorBanner message={(tagImagesQ.error as Error).message} />
+            )}
+            {activeTagId != null && !tagImagesQ.data && !tagImagesQ.error && (
+              <p className="mt-6 text-sm text-[var(--color-ink-3)]">Loading sample…</p>
+            )}
+            {activeTagId != null && tagImagesQ.data && tagImages.length === 0 && (
+              <p className="mt-6 text-sm text-[var(--color-ink-3)]">No images match.</p>
+            )}
+            {activeTagId != null && (
+              <div
+                className="mt-4 grid gap-3 grid-cols-[repeat(auto-fill,minmax(min(var(--tile-min),100%),1fr))]"
+                style={{ '--tile-min': imageLarge.value ? TILE_MIN.lg : TILE_MIN.sm } as CSSProperties}
+                onKeyDown={keyboard.onKeyDown}
+                tabIndex={0}
+              >
+                {tagImages.map((r, i) => (
+                  <TagImageTile
+                    key={r.image_id}
+                    row={r}
+                    image={imageCache.get(r.image_id)}
+                    selected={selected.has(r.image_id)}
+                    onToggleSelect={() => toggle(r.image_id)}
+                    borderCases={borderCases}
+                    focused={keyboard.focused === i}
+                    onOpen={() => {
+                      keyboard.setFocused(i);
+                      setLightboxAt(galleryIndex.get(String(r.image_id)) ?? null);
+                    }}
+                    onOpenDetail={() => setDetailImageId(r.image_id)}
+                    onSetState={(state) => {
+                      beginAction(r.image_id, 'sample');
+                      setTagAnnotationMut.mutate({ imageId: r.image_id, state });
+                    }}
+                    actionPending={pendingRowKeys.has(rowKey(r.image_id, 'sample'))}
+                  />
+                ))}
+              </div>
+            )}
+          </>
+        )}
       </section>
 
       {lightboxAt != null && (
@@ -793,20 +975,16 @@ export default function NewDedupLabeling() {
           images={galleryImages}
           startIndex={lightboxAt}
           onClose={() => setLightboxAt(null)}
-          // In "New tag" mode the tiles badge the PROPOSED tag, not the image
-          // row's own CLIP call — the enlarged photo has to say the same thing
-          // or the modal would quietly contradict the grid it was opened from.
-          // In "Original tag" mode that call IS the badge, which is the
-          // lightbox's own default.
           tagAt={
-            showOriginal
+            showOriginal || mode === 'sample'
               ? undefined
-              : (i) => ({
-                  tag: gallery[i]?.proposal.label ?? null,
-                  confidence: gallery[i]?.proposal.confidence ?? null,
-                })
+              : (i) => ({ tag: gallery[i]?.tag ?? null, confidence: gallery[i]?.confidence ?? null })
           }
         />
+      )}
+
+      {detailImageId != null && (
+        <ImageTagDetailPanel imageId={detailImageId} onClose={() => setDetailImageId(null)} />
       )}
     </div>
   );
@@ -838,21 +1016,12 @@ function ToggleButton({
   );
 }
 
-/* Ranked horizontal bar chart, most confirmed training images first — the
- * training set IS the point of this page, so its size per label is the
- * primary view; managing the vocabulary (add/rename/remove) moves to the
- * "Modify labels" modal, sorted alphabetically instead (see
- * TaxonomyManageModal). Single hue (sage = confirmed/good, matching the old
- * per-row progress fill); the currently-filtered label switches to the
- * app's accent (copper) — color follows the one selected entity, not rank.
- *
- * Collapsible (persisted, same localStorage scheme as the settings pages'
- * sections) because with a full taxonomy the chart pushes the review grid off
- * screen. Its header stays visible when folded, so the coverage ceiling — which
- * also drives the grid's tag filter — is always reachable. */
+/* Ranked horizontal bar chart, most positive images first. Collapsible
+ * (persisted) because with a full taxonomy the chart pushes the review grid
+ * off screen. */
 function TaxonomyBarChart({
-  labels,
-  totalLabels,
+  tags,
+  totalTags,
   sampleSize,
   loading,
   gate1Target,
@@ -863,8 +1032,8 @@ function TaxonomyBarChart({
   onFilter,
   onOpenManage,
 }: {
-  labels: NewDedupTaxonomyLabel[];
-  totalLabels: number;
+  tags: NewDedupTag[];
+  totalTags: number;
   sampleSize: number | undefined;
   loading: boolean;
   gate1Target: number;
@@ -876,15 +1045,10 @@ function TaxonomyBarChart({
   onOpenManage: () => void;
 }) {
   const [open, toggle] = useCollapsed('new-dedup-labeling-taxonomy', true);
-  const sorted = useMemo(
-    () => [...labels].sort((a, b) => b.gate_count - a.gate_count),
-    [labels],
-  );
-  // Bars scale to whichever is bigger — the Gate 1 target or the current
-  // leader — so the target tick is always on-chart, not off the right edge.
-  const domainMax = Math.max(gate1Target, ...sorted.map((l) => l.gate_count), 1);
+  const sorted = useMemo(() => [...tags].sort((a, b) => b.gate_count - a.gate_count), [tags]);
+  const domainMax = Math.max(gate1Target, ...sorted.map((t) => t.gate_count), 1);
   const gatePct = Math.min(100, (gate1Target / domainMax) * 100);
-  const filtered = labels.length !== totalLabels;
+  const filtered = tags.length !== totalTags;
 
   return (
     <section className="mt-8">
@@ -897,7 +1061,7 @@ function TaxonomyBarChart({
         >
           <Chevron open={open} />
           <span className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] group-hover:text-[var(--color-ink-2)] transition-colors">
-            Taxonomy v1 ({filtered ? `${labels.length} of ${totalLabels}` : totalLabels} labels
+            Taxonomy v1 ({filtered ? `${tags.length} of ${totalTags}` : totalTags} tags
             {sampleSize != null ? `, ${sampleSize} sampled` : ''})
           </span>
         </button>
@@ -936,50 +1100,50 @@ function TaxonomyBarChart({
             <p className="text-sm text-[var(--color-ink-3)]">
               {filtered
                 ? 'No tag is under that many training images.'
-                : 'No labels yet — add the first one via "Modify labels".'}
+                : 'No tags yet — add the first one via "Modify labels".'}
             </p>
           )}
 
           {sorted.length > 0 && (
             <>
               <p className="text-[0.7rem] text-[var(--color-ink-4)]">
-                Bars are training images that count toward Gate 1 — border cases excluded —
+                Bars are positive images that count toward Gate 1 — border cases excluded —
                 scaled to its target of {gate1Target} (marked ▏below).
               </p>
               <div className="mt-3 space-y-2">
-                {sorted.map((l) => {
-                  const pct = Math.min(100, (l.gate_count / domainMax) * 100);
-                  const active = activeLabel === l.label;
+                {sorted.map((t) => {
+                  const pct = Math.min(100, (t.gate_count / domainMax) * 100);
+                  const active = activeLabel === t.label;
                   return (
-                    <div key={l.id}>
-                      <div className="flex items-baseline gap-1.5 min-w-0">
+                    <div key={t.id}>
+                      <div className="flex items-baseline gap-1.5 min-w-0 flex-wrap">
                         <button
                           type="button"
-                          onClick={() => onFilter(l.label)}
-                          title="Filter proposals to this label"
+                          onClick={() => onFilter(t.label)}
+                          title="Filter to this tag"
                           className={[
                             'min-w-0 truncate font-mono text-[0.76rem] hover:text-[var(--color-copper-2)]',
                             active ? 'text-[var(--color-copper)]' : 'text-[var(--color-ink-2)]',
                           ].join(' ')}
                         >
-                          {l.label}
+                          {t.label}
                         </button>
-                        {l.pending_count > 0 && (
+                        {t.pending_count > 0 && (
                           <span className="shrink-0 text-[0.68rem] text-[var(--color-ink-4)]">
-                            · {l.pending_count}/{proposalTarget} pending
+                            · {t.pending_count}/{proposalTarget} pending
                           </span>
                         )}
-                        {/* Border cases sit OUTSIDE the bar — they don't count
-                          * toward Gate 1 until the flag is cleared. Shown anyway
-                          * because a tag can be sitting on a pile of parked
-                          * images, which is a signal about the TAG (too vague to
-                          * label against), not just about those photos. */}
-                        {l.border_case_count > 0 && (
+                        {(t.negative_count > 0 || t.excluded_count > 0) && (
+                          <span className="shrink-0 text-[0.68rem] text-[var(--color-ink-4)]">
+                            · {t.negative_count} neg · {t.excluded_count} excl
+                          </span>
+                        )}
+                        {t.border_case_count > 0 && (
                           <span
                             className="shrink-0 text-[0.68rem] text-[var(--color-brick)]"
-                            title={`${l.border_case_count} more image${l.border_case_count === 1 ? ' is' : 's are'} labelled ${l.label} but parked as border cases — not counted toward Gate 1 until the flag is cleared (${l.confirmed_count} labelled in total)`}
+                            title={`${t.border_case_count} more positive image${t.border_case_count === 1 ? ' is' : 's are'} parked as border cases — not counted toward Gate 1 until the flag is cleared (${t.positive_count} positive in total)`}
                           >
-                            · {l.border_case_count} parked
+                            · {t.border_case_count} parked
                           </span>
                         )}
                       </div>
@@ -995,17 +1159,12 @@ function TaxonomyBarChart({
                           />
                           <div
                             className="absolute top-0 bottom-0 w-px bg-[var(--color-ink)]/40"
-                            // `left: N%` at N=100 places the whole 1px line just past
-                            // the track's right edge, invisible under overflow-hidden
-                            // (confirmed visually — the leader's bar hits the target
-                            // and the tick vanished). Inset by the line's own width so
-                            // it stays on-screen at every position, including 100%.
                             style={{ left: `calc(${gatePct}% - 1px)` }}
                             aria-hidden
                           />
                         </div>
                         <span className="w-8 shrink-0 text-right font-mono text-[0.7rem] tabular-nums text-[var(--color-ink-3)]">
-                          {l.gate_count}
+                          {t.gate_count}
                         </span>
                       </div>
                     </div>
@@ -1033,10 +1192,11 @@ function ProposalTile({
   onDraftChange,
   corrected,
   dimmed,
+  focused,
+  onFocusTile,
   onOpen,
-  onConfirm,
-  onDismiss,
-  onRelabel,
+  onOpenDetail,
+  onSetState,
   actionPending,
 }: {
   proposal: NewDedupLabelProposal;
@@ -1047,40 +1207,29 @@ function ProposalTile({
   onToggleSelect: () => void;
   labelOptions: LabelOption[];
   borderCases: BorderCaseStore;
-  /** The tag the operator intends for this image — seeded from the
-   * suggestion, owned by the page (see the `drafts` map there). */
   draft: string;
   onDraftChange: (label: string) => void;
   corrected: boolean;
   dimmed: boolean;
-  /** Enlarge this tile's photo in the page's lightbox. */
+  focused: boolean;
+  onFocusTile: () => void;
   onOpen: () => void;
-  onConfirm: (label: string) => void;
-  onDismiss: () => void;
-  onRelabel: (label: string) => void;
+  onOpenDetail: () => void;
+  onSetState: (state: TagState) => void;
   actionPending: boolean;
 }) {
-  const badgeTag = showOriginal ? image?.clip_fine_tag ?? null : proposal.label;
-  const badgeConfidence = showOriginal ? image?.clip_confidence ?? null : proposal.confidence;
+  const badgeTag = showOriginal ? (image?.clip_fine_tag ?? null) : proposal.label;
+  const badgeConfidence = showOriginal ? (image?.clip_confidence ?? null) : proposal.confidence;
 
-  const changed = corrected;
-  const isDismissed = proposal.status === 'dismissed';
-  // Row-level, not tab-level: on the All tab a pending row still gets its
-  // Confirm/Dismiss buttons while its already-reviewed neighbours don't.
-  const reviewed = proposal.status !== 'pending';
-
-  // NB: the card must NOT be overflow-hidden — the tag picker's dropdown is
-  // absolutely positioned and would be clipped away by it. Only the photo is
-  // clipped (to round its top corners).
   return (
     <div
       className={[
-        'border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper)] transition-opacity',
-        // Still fully interactive — hovering brings it back, so a greyed tile
-        // can be re-tagged without leaving the tab.
+        'border rounded-[var(--radius-sm)] bg-[var(--color-paper)] transition-opacity',
+        focused ? 'border-[var(--color-copper)]' : 'border-[var(--color-rule)]',
         dimmed ? 'opacity-45 hover:opacity-100 focus-within:opacity-100' : '',
       ].join(' ')}
       data-dimmed={dimmed || undefined}
+      onMouseEnter={onFocusTile}
     >
       <div className="relative aspect-[4/3] overflow-hidden rounded-t-[var(--radius-sm)] bg-[var(--color-inset)]">
         {selectable && (
@@ -1092,8 +1241,6 @@ function ProposalTile({
             aria-label="Select for batch action"
           />
         )}
-        {/* The badge below is pointer-events-none, so this hit area covers the
-          * whole photo including it; the checkbox sits above on z-10. */}
         {image && (
           <button
             type="button"
@@ -1101,102 +1248,216 @@ function ProposalTile({
             aria-label={`Open photo ${image.id}`}
             className="absolute inset-0 block h-full w-full cursor-zoom-in focus:outline-none focus-visible:border focus-visible:border-[var(--color-copper)]"
           >
-            <img
-              src={imageSrc(image)}
-              alt=""
-              loading="lazy"
-              className="h-full w-full object-cover"
-            />
+            <img src={imageSrc(image)} alt="" loading="lazy" className="h-full w-full object-cover" />
           </button>
         )}
-        <ImageTagBadge
-          tag={badgeTag}
-          confidence={badgeConfidence}
-          className="absolute bottom-1.5 left-1.5"
+        <ImageTagBadge tag={badgeTag} confidence={badgeConfidence} className="absolute bottom-1.5 left-1.5" />
+      </div>
+
+      <div className="px-2 py-1.5 flex items-center justify-between gap-1.5">
+        <TriStateControl
+          state={proposal.current_state ?? 'untouched'}
+          onChange={onSetState}
+          disabled={actionPending}
+          focused={focused}
         />
+        <button
+          type="button"
+          onClick={onOpenDetail}
+          title="Every tag on this image"
+          className="text-[0.65rem] text-[var(--color-ink-3)] underline decoration-dotted underline-offset-2 hover:text-[var(--color-copper-2)]"
+        >
+          all tags
+        </button>
       </div>
 
-      <div className="px-2 py-1.5 flex items-center justify-between gap-1">
-        {!reviewed ? (
-          <>
-            <button
-              type="button"
-              onClick={() => onConfirm(draft)}
-              disabled={actionPending || draft.trim() === ''}
-              title={
-                changed
-                  ? `Confirm as “${draft}” instead of the suggested “${proposal.label}”`
-                  : undefined
-              }
-              // Same text either way — the label can't grow, so it still fits
-              // the narrowest (2-column) tile. Copper marks "this writes your
-              // correction, not the suggestion".
-              className={[
-                'min-w-0 flex-1 truncate px-1.5 py-1 text-[0.7rem] rounded-[var(--radius-xs)] disabled:opacity-40',
-                changed
-                  ? 'bg-[var(--color-copper)] text-[var(--color-paper)]'
-                  : 'bg-[var(--color-sage-soft)] text-[var(--color-sage)]',
-              ].join(' ')}
-            >
-              Confirm
-            </button>
-            <button
-              type="button"
-              onClick={onDismiss}
-              disabled={actionPending}
-              className="flex-1 px-1.5 py-1 text-[0.7rem] rounded-[var(--radius-xs)] bg-[var(--color-brick-soft)] text-[var(--color-brick)] disabled:opacity-40"
-            >
-              Dismiss
-            </button>
-          </>
-        ) : changed ? (
-          // Already in the training set — an edited tag saves in place rather
-          // than going back through the confirm flow.
-          <>
-            <button
-              type="button"
-              onClick={() => onRelabel(draft)}
-              disabled={actionPending}
-              className="flex-1 px-1.5 py-1 text-[0.7rem] rounded-[var(--radius-xs)] bg-[var(--color-copper)] text-[var(--color-paper)] disabled:opacity-40"
-            >
-              Save tag
-            </button>
-            <button
-              type="button"
-              onClick={() => onDraftChange(proposal.label)}
-              disabled={actionPending}
-              className="px-1.5 py-1 text-[0.7rem] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] disabled:opacity-40"
-            >
-              Cancel
-            </button>
-          </>
-        ) : (
-          <span className="text-[0.65rem] text-[var(--color-ink-4)] font-mono truncate">
-            {proposal.status} · {proposal.reviewed_by ?? '—'}
-          </span>
-        )}
-      </div>
-
-      {/* Picker sits BELOW the action row on purpose: its dropdown is
-        * absolutely positioned and opens downward, so above the buttons it
-        * would paint over them and swallow the first click aimed at Confirm.
-        * A dismissed proposal isn't in the training set, so it has no label to
-        * correct and gets no picker at all — but it can still be a border case,
-        * so the row itself always renders. "Border case" sits BESIDE the picker
-        * (the arrangement /clip-audit uses) rather than under it, for the same
-        * dropdown reason. */}
       <div className="px-2 pb-2 flex items-center gap-1.5">
-        {!isDismissed && (
-          <div className="min-w-0 flex-1">
-            <LabelCombobox
-              value={draft}
-              onChange={onDraftChange}
-              options={labelOptions}
-              placeholder="tag…"
-            />
-          </div>
-        )}
+        <div className="min-w-0 flex-1">
+          <LabelCombobox value={draft} onChange={onDraftChange} options={labelOptions} placeholder="tag…" />
+        </div>
         <BorderCaseButton imageId={proposal.image_id} store={borderCases} />
+      </div>
+      {corrected && (
+        <p className="px-2 pb-1.5 text-[0.65rem] text-[var(--color-copper)]">
+          will decide against “{draft}”, not “{proposal.label}”
+        </p>
+      )}
+    </div>
+  );
+}
+
+/* Sample-mode tile: no proposal, no label picker (the tag is already fixed by
+ * the page's tag filter) — just the photo, the tri-state control for THAT
+ * tag, and border case. */
+function TagImageTile({
+  row,
+  image,
+  selected,
+  onToggleSelect,
+  borderCases,
+  focused,
+  onOpen,
+  onOpenDetail,
+  onSetState,
+  actionPending,
+}: {
+  row: NewDedupTagImage;
+  image: ImagePublic | undefined;
+  selected: boolean;
+  onToggleSelect: () => void;
+  borderCases: BorderCaseStore;
+  focused: boolean;
+  onOpen: () => void;
+  onOpenDetail: () => void;
+  onSetState: (state: TagState) => void;
+  actionPending: boolean;
+}) {
+  return (
+    <div
+      className={[
+        'border rounded-[var(--radius-sm)] bg-[var(--color-paper)]',
+        focused ? 'border-[var(--color-copper)]' : 'border-[var(--color-rule)]',
+      ].join(' ')}
+    >
+      <div className="relative aspect-[4/3] overflow-hidden rounded-t-[var(--radius-sm)] bg-[var(--color-inset)]">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggleSelect}
+          className="absolute top-1.5 left-1.5 z-10 h-4 w-4"
+          aria-label="Select for batch action"
+        />
+        {image && (
+          <button
+            type="button"
+            onClick={onOpen}
+            aria-label={`Open photo ${image.id}`}
+            className="absolute inset-0 block h-full w-full cursor-zoom-in focus:outline-none focus-visible:border focus-visible:border-[var(--color-copper)]"
+          >
+            <img src={imageSrc(image)} alt="" loading="lazy" className="h-full w-full object-cover" />
+          </button>
+        )}
+        {image && (
+          <ImageTagBadge
+            tag={image.clip_fine_tag ?? null}
+            confidence={image.clip_confidence ?? null}
+            className="absolute bottom-1.5 left-1.5"
+          />
+        )}
+      </div>
+      <div className="px-2 py-1.5 flex items-center justify-between gap-1.5">
+        <TriStateControl
+          state={row.state}
+          onChange={onSetState}
+          disabled={actionPending}
+          focused={focused}
+        />
+        <button
+          type="button"
+          onClick={onOpenDetail}
+          title="Every tag on this image"
+          className="text-[0.65rem] text-[var(--color-ink-3)] underline decoration-dotted underline-offset-2 hover:text-[var(--color-copper-2)]"
+        >
+          all tags
+        </button>
+      </div>
+      <div className="px-2 pb-2 flex items-center justify-between gap-1.5">
+        <BorderCaseButton imageId={row.image_id} store={borderCases} />
+      </div>
+    </div>
+  );
+}
+
+/* Image-centric detail: every active tag on ONE image, grouped by family,
+ * each with the same tri-state control — the "open kitchen-living room"
+ * case (kitchen positive, living_room excluded, everything else negative)
+ * needs to be set in one sitting without hunting through per-tag screens. */
+function ImageTagDetailPanel({ imageId, onClose }: { imageId: number; onClose: () => void }) {
+  const qc = useQueryClient();
+  const key = ['new-dedup', 'labeling', 'image-tags', imageId];
+  const q = useQuery({ queryKey: key, queryFn: () => listNewDedupImageTags(imageId) });
+  const grouped = useMemo(() => {
+    const rows = q.data?.data ?? [];
+    const groups = new Map<string, typeof rows>();
+    for (const r of rows) {
+      const family = r.family ?? '—';
+      groups.set(family, [...(groups.get(family) ?? []), r]);
+    }
+    return [...groups.entries()];
+  }, [q.data]);
+  const rows = q.data?.data ?? [];
+
+  const setMut = useMutation({
+    mutationFn: ({ tagId, state }: { tagId: number; state: TagState }) =>
+      setNewDedupTagAnnotation(tagId, imageId, state),
+    onSuccess: (res, vars) => {
+      qc.setQueryData<{ data: typeof rows }>(key, (old) =>
+        old
+          ? { ...old, data: old.data.map((r) => (r.id === vars.tagId ? { ...r, state: res.data.state } : r)) }
+          : old,
+      );
+      qc.invalidateQueries({ queryKey: OVERVIEW_KEY });
+      qc.invalidateQueries({ queryKey: TAG_IMAGES_KEY });
+    },
+    onError: (err: Error) => pushToast('err', err.message),
+  });
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-[var(--color-ink)]/40 px-4 pt-[10vh]"
+      onClick={onClose}
+      role="presentation"
+    >
+      <div
+        className="flex max-h-[78vh] w-full max-w-lg flex-col rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-5 shadow-lg"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="All tags on this image"
+      >
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg leading-tight" style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}>
+            Image {imageId} — all tags
+          </h2>
+          <button type="button" onClick={onClose} aria-label="Close" className="text-[var(--color-ink-3)] hover:text-[var(--color-ink)]">
+            ✕
+          </button>
+        </div>
+
+        {q.isLoading && <p className="mt-4 text-sm text-[var(--color-ink-3)]">Loading…</p>}
+        {q.error && <ErrorBanner message={(q.error as Error).message} />}
+
+        <div className="mt-3 flex-1 space-y-4 overflow-y-auto">
+          {grouped.map(([family, tags]) => (
+            <div key={family}>
+              <p className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)] mb-1.5">
+                {family}
+              </p>
+              <div className="space-y-1">
+                {tags.map((t) => (
+                  <div key={t.id} className="flex items-center justify-between gap-2 py-0.5">
+                    <span className="min-w-0 truncate font-mono text-sm text-[var(--color-ink-2)]">
+                      {t.label}
+                    </span>
+                    <TriStateControl
+                      state={t.state}
+                      onChange={(state) => setMut.mutate({ tagId: t.id, state })}
+                      disabled={setMut.isPending && setMut.variables?.tagId === t.id}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
