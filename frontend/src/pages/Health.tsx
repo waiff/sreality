@@ -12,7 +12,6 @@ import {
   YAxis,
 } from 'recharts';
 import {
-  fetchBrowseReadModelState,
   fetchCategoryTrends,
   fetchHealthSummary,
   fetchImageStorageOverview,
@@ -47,7 +46,6 @@ import {
 import { categoryMainLabelPlural, categoryTypeLabel } from '@/lib/enums';
 import GrainToggle from '@/components/GrainToggle';
 import type {
-  BrowseReadModelState,
   CategoryTrend,
   CategoryTrendPoint,
   DerivedArtifactRow,
@@ -82,18 +80,11 @@ const STALE_HOURS_WARN = 36;
 // The pg_cron loop refreshes the Health matviews every 10 min; 25 min of
 // silence means it has missed two cycles — likely dead, not just slow.
 const HEALTH_DATA_STALE_MIN = 25;
-// browse_list rebuilds every 15 min (migration 413 moved it off */5) and
-// properties_map_mv every 30 min (migration 277); both thresholds are ~3x and
-// 2x their cadence, so a single slow tick is not an alarm. 15 min here was 3x
-// the OLD cadence and became 1x it — which false-fired for 1-3 minutes on
-// every healthy tick until this was corrected.
-//
-// A stalled list_rebuilt_at/map_rebuilt_at is also what a failed anon-grant
-// self-check inside either rebuild function looks like from the outside
-// (migration 374 — the RAISE rolls back the whole tick, so the timestamp
-// simply stops advancing instead of the object going missing).
-const BROWSE_LIST_STALE_MIN = 45;
-const BROWSE_MAP_STALE_MIN = 60;
+// The two hard-coded browse_list / properties_map_mv staleness thresholds that
+// used to live here are gone (migration 440). Both artifacts now declare their
+// own `staleness_budget` in `derived_artifacts` and are rendered by
+// <DerivedArtifactsSection/> below alongside the other twelve — one row per
+// artifact, budget owned by the database rather than duplicated in the client.
 
 function categoryLabel(c: { category_main: string; category_type: string }): string {
   return `${categoryMainLabelPlural(c.category_main)} · ${categoryTypeLabel(c.category_type).toLowerCase()}`;
@@ -106,13 +97,6 @@ export default function Health() {
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
-  const { data: browseState } = useQuery<BrowseReadModelState, Error>({
-    queryKey: ['browse-read-model-state'],
-    queryFn: fetchBrowseReadModelState,
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
-
   return (
     <div className="px-6 pt-5 pb-8 max-w-screen-2xl mx-auto">
       <header className="flex items-baseline justify-between gap-4">
@@ -137,20 +121,6 @@ export default function Health() {
 
       {data && <StaleHealthDataBanner generatedAt={data.generated_at ?? null} />}
       {data && <StaleScrapeBanner lastScrapeAt={data.last_scrape_at} />}
-      {browseState && (
-        <StaleHealthDataBanner
-          generatedAt={browseState.list_rebuilt_at}
-          staleMin={BROWSE_LIST_STALE_MIN}
-          label="Browse list je zastaralý (rebuild_browse_list možná selhává)"
-        />
-      )}
-      {browseState && (
-        <StaleHealthDataBanner
-          generatedAt={browseState.map_rebuilt_at}
-          staleMin={BROWSE_MAP_STALE_MIN}
-          label="Browse mapa je zastaralá (rebuild_properties_map_mv možná selhává)"
-        />
-      )}
 
       {isLoading && !data ? (
         <Skeleton />

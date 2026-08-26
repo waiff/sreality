@@ -32,14 +32,24 @@ makes this a rail on the code rather than on a copy of it. The WHERE is the test
 (one cohort, two literals): the fragile half is the projection, and pinning the predicate
 too would just re-assert migration 436's text.
 
-WHY enable_indexscan = off AS WELL as seqscan and bitmapscan. CI's replayed
-properties_map_mv is EMPTY, and at zero rows `relallvisible` is 0, which prices an
-index-only scan exactly the same as an index scan -- so on this table "the planner
-preferred index-only" is a coin flip that has nothing to do with the defect. Disabling the
-plain index scan removes the coin flip and asks the question that actually matters: CAN
-this index serve this exact projection without the heap? With an off-index column in the
-list, no index-only path exists at all and the plan comes back as `Index Scan` (verified
-against production, both directions).
+WHY THIS IS A CATALOG ASSERTION AND NOT A PLAN ONE. The first cut of this rail EXPLAINed
+the extracted projection with seqscan, bitmapscan AND indexscan disabled, and asserted the
+node came back `Index Only Scan`. It went RED in CI with a `Seq Scan` priced at 1e10 -- and
+the reason is documented Postgres behaviour, not a CI artefact: **`enable_indexonlyscan`
+has no effect when `enable_indexscan` is off**, because an index-only scan is a variant of
+an index scan. Disabling all three left the planner with no scan method at all, so it took
+the least-penalised one. Removing that third GUC is necessary but not sufficient: CI's
+replayed matview is EMPTY, `relallvisible` is 0, and at zero visible pages an index-only
+scan is priced identically to an index scan -- so "the planner preferred index-only" on
+this table is a coin flip that has nothing to do with the defect.
+
+The property that actually produces `Heap Fetches: 0` is not a preference at all. It is
+containment: every column the aggregate projects off `properties_map_mv` must live in the
+cover index's key or INCLUDE list. That is decidable from the catalog, needs no rows, no
+statistics and no planner, and it cannot flip. So it is asserted directly -- against the
+SHIPPED function body, not a transcription of it -- and the plan-shape half of the claim
+stays where it can be measured honestly: against production, recorded in the PR body
+(HashAggregate -> Index Only Scan, Heap Fetches: 0, 1,627 blocks).
 
 Skip posture, per the Cardinality Doctrine's standing rule that a skipped rail must never
 be mistaken for a green one: the migrations lane sets DB_RAILS_REQUIRED=1, so a lane that
@@ -48,7 +58,6 @@ loses its TEST_DATABASE_URL goes RED instead of reporting a green skip.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 
@@ -116,68 +125,42 @@ def _aggregate_target_list(conn) -> str:
     return target
 
 
-def _nodes(node):
-    yield node
-    for child in node.get("Plans", []):
-        yield from _nodes(child)
-
-
-@pytest.fixture(scope="module")
-def plan(conn) -> dict:
-    stmt = (
-        "select " + _aggregate_target_list(conn)
-        + " from properties_map_mv l"
-        + " where l.category_main = any(array['byt']) and l.category_type = 'pronajem'"
-        + " group by 1, 2"
-    )
+def _cover_index_columns(conn) -> set[str]:
+    """Every column the cover index can serve without a heap fetch: its key AND its
+    INCLUDE list. Read from the catalog rather than transcribed, so a rebuild that
+    changes the index is reflected here automatically."""
     with conn.cursor() as cur:
-        # Plain SET, not SET LOCAL: this connection is autocommit, and outside a
-        # transaction SET LOCAL is a silent no-op — the plan comes back as a Seq Scan and
-        # the rail fails for a reason that has nothing to do with the projection.
-        cur.execute("set enable_seqscan = off")
-        cur.execute("set enable_bitmapscan = off")
-        cur.execute("set enable_indexscan = off")
-        cur.execute("EXPLAIN (FORMAT JSON) " + stmt)
-        return json.loads(json.dumps(cur.fetchone()[0]))[0]["Plan"]
+        cur.execute("select indexdef from pg_indexes where indexname = %s", (_INDEX,))
+        row = cur.fetchone()
+    assert row, f"{_INDEX} does not exist — rebuild_properties_map_mv() no longer creates it"
+    return {
+        col.strip().strip('"')
+        for group in re.findall(r"\(([^()]*)\)", row[0])
+        for col in group.split(",")
+    }
 
 
-def test_the_grid_aggregate_is_served_without_the_heap(plan):
-    """The scan under the aggregate must be an INDEX ONLY Scan on the cover index.
+def test_the_grid_aggregate_projects_only_index_resident_columns(conn):
+    """No column outside the cover index may appear in the grid aggregate's projection.
 
-    RED by: adding `l.obec_id`, `l.property_id`, `l.source` or `l.listing_id` to the
-    aggregate's target list in migration 439 — none is in the cover index, so no
-    index-only path exists and the node comes back as `Index Scan` (verified against
-    production in both directions). Also RED if a future rebuild drops lat/lng out of
-    the index.
+    This is what makes `Heap Fetches: 0` reachable, and it is the whole basis of the
+    1,627-block figure against a 433 MB matview. `obec_id`, `property_id`, `source` and
+    `listing_id` are the four an editor is most likely to reach for; none is in the index.
+
+    RED by: adding `l.obec_id` (or any other off-index column) to the aggregate's target
+    list in migration 439 — verified against production, where doing so turns the
+    Index Only Scan into a plain Index Scan.
     """
-    scans = [
-        n for n in _nodes(plan)
-        if n.get("Relation Name") == "properties_map_mv"
-    ]
-    assert scans, f"the plan never scans properties_map_mv: {plan}"
-    assert [n["Node Type"] for n in scans] == ["Index Only Scan"], (
-        "migration 439's grid aggregate no longer reads properties_map_mv index-only. "
-        "Every column in its target list must be in properties_map_mv_cover's key or "
-        f"INCLUDE list. Plan: {scans}"
-    )
-    assert scans[0].get("Index Name") == _INDEX, (
-        f"the aggregate is served by {scans[0].get('Index Name')!r}, not {_INDEX!r} — the "
-        "block counts W6b claims were measured on the cover index."
-    )
-
-
-def test_the_cohort_predicate_reaches_the_index(plan):
-    """category_main + category_type must land as an Index Cond, not a post-scan Filter.
-
-    RED by: reordering the cover index so it no longer leads on
-    (category_main, category_type) — every cohort read then scans the whole matview and
-    filters, which is the shape the 3,938-block measurement was taken against.
-    """
-    scan = next(n for n in _nodes(plan) if n.get("Relation Name") == "properties_map_mv")
-    cond = scan.get("Index Cond", "")
-    assert "category_main" in cond and "category_type" in cond, (
-        f"the cohort predicate is not an Index Cond on {_INDEX}: Index Cond={cond!r}, "
-        f"Filter={scan.get('Filter')!r}"
+    target = _aggregate_target_list(conn)
+    projected = {m.group(1) for m in re.finditer(r"\bl\.([a-z_][a-z0-9_]*)", target)}
+    assert projected, f"no l.<column> references found in the target list: {target!r}"
+    resident = _cover_index_columns(conn)
+    off_index = sorted(projected - resident)
+    assert off_index == [], (
+        "migration 439's grid aggregate projects column(s) that are not in "
+        f"{_INDEX}'s key or INCLUDE list: {off_index}. The scan can no longer be served "
+        "without the heap, so W6b's 1,627-block claim no longer holds. Index serves: "
+        f"{sorted(resident)}"
     )
 
 

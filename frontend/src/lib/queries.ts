@@ -30,7 +30,6 @@ import {
 } from './keyset';
 import { fetchGrowth } from './priceStats';
 import type {
-  BrowseReadModelState,
   CategoryTrend,
   DerivedArtifactRow,
   HealthSummary,
@@ -928,7 +927,8 @@ interface MapGrid {
  * carries properties_public's full FILTERABLE surface, so applyFilters /
  * applyPrefilters are a drop-in (only the source differs). Rebuilt from
  * browse_projection by rebuild_properties_map_mv() (pg_cron, 7,37 past the hour —
- * migration 277); freshness readable off browse_read_model_state_public.
+ * migration 277); freshness readable off derived_artifacts_public, one row per
+ * artifact (migration 440).
  *
  * Single-portal mode reads the listing-grain feed here instead (see the PORTAL
  * MIRROR block). It has no matview twin, so that is a live indexed read of
@@ -2093,22 +2093,6 @@ export const fetchHealthSummary = async (): Promise<HealthSummary> => {
   const { data, error } = await supabase.rpc('health_summary');
   if (error) throw error;
   return data as HealthSummary;
-};
-
-/* browse_read_model_state_public (migration 276) — the blue-green rebuild's
- * only refresh evidence, since the DROP+CREATE cycle destroys pg_stat
- * history on every swap. Written by rebuild_browse_list()/
- * rebuild_properties_map_mv() themselves; a RAISE inside either (migration
- * 374's anon-grant self-check) rolls back the whole tick, so a stalled
- * list_rebuilt_at/map_rebuilt_at here is exactly the signal that a rebuild
- * has started failing — surfaced on Health via StaleHealthDataBanner. */
-export const fetchBrowseReadModelState = async (): Promise<BrowseReadModelState> => {
-  const { data, error } = await supabase
-    .from('browse_read_model_state_public')
-    .select('list_rebuilt_at, list_duration_ms, list_rows, map_rebuilt_at, map_duration_ms, map_rows')
-    .single();
-  if (error) throw error;
-  return data as BrowseReadModelState;
 };
 
 export const fetchRecentScrapeRuns = async (
