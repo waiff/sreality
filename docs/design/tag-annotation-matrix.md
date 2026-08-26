@@ -9,7 +9,7 @@ Status: in progress, 2026-08-26. Supersedes the training-set half of migration 3
 originally planned for Wave C rode along with that PR instead, because retiring
 ClipAudit already stopped every write to the three superseded tables then, not just
 at the eventual DROP. Wave C (below) is now DDL-only: dropping tables nothing writes
-to any more. See "Since Wave A/B shipped" below for two follow-up additions.
+to any more. See "Since Wave A/B shipped" below for follow-up additions.
 
 ## North star
 
@@ -179,6 +179,19 @@ Two operator-requested additions, same data model, no new tables beyond one migr
   independent of Gate 1, which only says a tag is LABELED enough, not reviewed.
   `tag_annotations.set_tag_flags` updates only the field(s) actually passed, so toggling
   one from the popup never clobbers the other.
+- **Priority tags in red on the coverage chart too**, not just the popup — matching color,
+  the active-filter copper highlight still wins if both apply.
+- **Batch-set inside the "all tags" detail panel** (`tag_annotations.bulk_set_state_for_image`,
+  the mirror of `bulk_set_state` — fixes the image, varies the tags). Motivating case: a
+  fitness-room image is genuinely negative on every room tag, but deciding 49 tags one at a
+  time isn't practical, and leaving the rest implicit (untouched-defaults-negative) isn't
+  auditable — did the operator actually look, or did nobody touch it yet? "Select all
+  untouched" + "Set selected: negative/positive/excluded" closes out everything not already
+  hand-decided in one action, without silently overwriting the couple of tags already set via
+  their own tri-state control (a row leaves the batch the moment it's decided individually).
+- **Named the tag a proposal tile's tri-state control is deciding**, directly above the
+  buttons — operator feedback that it wasn't obvious the control acts on ONE tag (the
+  proposal's own label, or a typed correction), not every tag on the image.
 
 ## Explicitly deferred, not silently dropped
 

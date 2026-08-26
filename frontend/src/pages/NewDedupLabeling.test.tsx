@@ -58,6 +58,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     setNewDedupTagAnnotation: vi.fn(),
     bulkSetNewDedupTagAnnotation: vi.fn(),
     listNewDedupImageTags: vi.fn(),
+    bulkSetNewDedupImageTags: vi.fn(),
     listNewDedupPositiveTagsForImages: vi.fn(),
     listNewDedupSettings: vi.fn(),
     setBorderCase: vi.fn(),
@@ -530,6 +531,24 @@ describe('<NewDedupLabeling>', () => {
     expect(buttons.map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'false']);
     expect(buttons[1].className).toContain('border-dashed');
     expect(buttons[1].getAttribute('title')).toMatch(/defaulted/);
+  });
+
+  it('names the tag the tri-state control is deciding, right above the buttons', async () => {
+    // The buttons act on ONE tag (the proposal's own label, or a correction
+    // typed into the picker) — never every tag on the image. Naming it right
+    // above the controls removes the ambiguity a bare row of buttons has.
+    renderPage();
+    await screen.findAllByRole('group', { name: 'Tag state' });
+    expect(screen.getByTitle('Setting the state of "interier - kuchyne"')).toHaveTextContent(
+      'interier - kuchyne',
+    );
+
+    // Correcting the tag before deciding updates the label too — the
+    // combobox only commits a typed correction on blur.
+    const picker = screen.getByPlaceholderText('tag…');
+    fireEvent.change(picker, { target: { value: 'garaz' } });
+    fireEvent.blur(picker);
+    expect(screen.getByTitle('Setting the state of "garaz"')).toBeInTheDocument();
   });
 
   it('marks the decided state as pressed once the row carries one', async () => {
@@ -1358,6 +1377,74 @@ describe('<NewDedupLabeling>', () => {
         .toEqual(['false', 'false', 'true']),
     );
     expect(vi.mocked(api.listNewDedupImageTags).mock.calls).toHaveLength(1);
+  });
+
+  it('selects all untouched tags and sets them negative in one action', async () => {
+    // The fitness-room case: a handful of tags decided one at a time, the
+    // rest closed out explicitly instead of left as an implicit default.
+    vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
+      data: [
+        { id: 1, label: 'interier - kuchyne', family: 'interier', state: 'positive', updated_at: 't' },
+        { id: 2, label: 'interier - obyvak', family: 'interier', state: 'untouched', updated_at: null },
+        { id: 3, label: 'exterier - fasada', family: 'exterier', state: 'untouched', updated_at: null },
+      ],
+    });
+    vi.mocked(api.bulkSetNewDedupImageTags).mockResolvedValue({
+      data: { updated: 2, image_id: 101, state: 'negative', tag_ids: [2, 3] },
+    });
+    renderPage();
+    fireEvent.click(await screen.findByText('all tags'));
+    const panel = await screen.findByRole('dialog', { name: 'All tags on this image' });
+    await within(panel).findAllByRole('group', { name: 'Tag state' });
+
+    // The already-positive tag is not offered by "select all" — only the
+    // two untouched ones are, so it can never be silently overwritten.
+    fireEvent.click(within(panel).getByRole('button', { name: 'Select all untouched' }));
+    expect(within(panel).getByText('2 selected')).toBeInTheDocument();
+    expect(
+      within(panel).getByLabelText('Select interier - kuchyne for batch action'),
+    ).not.toBeChecked();
+    expect(
+      within(panel).getByLabelText('Select interier - obyvak for batch action'),
+    ).toBeChecked();
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Set selected: negative' }));
+    await waitFor(() =>
+      expect(api.bulkSetNewDedupImageTags).toHaveBeenCalledWith(101, [2, 3], 'negative'),
+    );
+    // Patched in place, and the selection clears once applied.
+    expect(within(panel).queryByText('2 selected')).not.toBeInTheDocument();
+    const groups = within(panel).getAllByRole('group', { name: 'Tag state' });
+    expect(stateBtn(groups[1], 'negative')).toHaveAttribute('aria-pressed', 'true');
+    expect(stateBtn(groups[2], 'negative')).toHaveAttribute('aria-pressed', 'true');
+    expect(vi.mocked(api.listNewDedupImageTags).mock.calls).toHaveLength(1);
+  });
+
+  it('drops a tag from the selection once it is decided individually', async () => {
+    vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
+      data: [
+        { id: 1, label: 'a', family: null, state: 'untouched', updated_at: null },
+        { id: 2, label: 'b', family: null, state: 'untouched', updated_at: null },
+      ],
+    });
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue({
+      data: { image_id: 101, tag_id: 1, state: 'positive', updated_at: 't' },
+    });
+    renderPage();
+    fireEvent.click(await screen.findByText('all tags'));
+    const panel = await screen.findByRole('dialog', { name: 'All tags on this image' });
+    const groups = await within(panel).findAllByRole('group', { name: 'Tag state' });
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Select all untouched' }));
+    expect(within(panel).getByText('2 selected')).toBeInTheDocument();
+
+    fireEvent.click(stateBtn(groups[0], 'positive'));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(1, 101, 'positive'));
+
+    // Tag "a" is no longer untouched — it must not still be in the batch.
+    expect(within(panel).getByText('1 selected')).toBeInTheDocument();
+    expect(within(panel).getByLabelText('Select a for batch action')).not.toBeChecked();
+    expect(within(panel).getByLabelText('Select b for batch action')).toBeChecked();
   });
 
   it('closes the detail panel on Escape', async () => {

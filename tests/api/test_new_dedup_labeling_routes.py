@@ -57,6 +57,7 @@ _RESPONSES: dict[str, Any] = {
     ],
     "set_state": {"image_id": 1, "tag_id": 2, "state": "positive", "updated_at": "t"},
     "bulk_set_state": {"updated": 2, "tag_id": 2, "state": "negative", "image_ids": [1, 2]},
+    "bulk_set_state_for_image": {"updated": 2, "image_id": 1, "state": "negative", "tag_ids": [2, 3]},
     "clear_state": {"image_id": 1, "tag_id": 2, "deleted": True},
     "grow_sample": {"added": 10},
     "list_proposals": [
@@ -71,7 +72,8 @@ _RESPONSES: dict[str, Any] = {
 
 _PATCHED = {
     ta: ["add_tag", "rename_tag", "remove_tag", "set_tag_flags", "list_images_for_tag",
-         "set_state", "bulk_set_state", "clear_state", "list_tags_for_image",
+         "set_state", "bulk_set_state", "bulk_set_state_for_image", "clear_state",
+         "list_tags_for_image",
          "list_positive_tags_for_images"],
     dsl: ["grow_sample", "list_proposals", "set_proposal_state", "bulk_set_proposal_state"],
 }
@@ -422,6 +424,36 @@ def test_get_tags_for_image(client, calls):
     assert res.status_code == 200
     assert res.json()["data"][0]["label"] == "a"
     assert calls["list_tags_for_image"] == {"image_id": 1}
+
+
+def test_post_bulk_set_image_tags(client, calls):
+    res = client.post(
+        "/new-dedup/labeling/images/1/tags/bulk",
+        json={"tag_ids": [2, 3], "state": "negative"},
+    )
+    assert res.status_code == 200
+    assert res.json()["data"]["updated"] == 2
+    assert calls["bulk_set_state_for_image"] == {"image_id": 1, "tag_ids": [2, 3], "state": "negative"}
+
+
+def test_post_bulk_set_image_tags_rejects_an_unknown_state(client, calls):
+    res = client.post(
+        "/new-dedup/labeling/images/1/tags/bulk",
+        json={"tag_ids": [2], "state": "maybe"},
+    )
+    assert res.status_code == 422
+    assert "bulk_set_state_for_image" not in calls
+
+
+def test_post_bulk_set_image_tags_over_max_422s(client, monkeypatch):
+    monkeypatch.setattr(
+        ta, "bulk_set_state_for_image", _raises(ValueError("at most 200 tags per batch")),
+    )
+    res = client.post(
+        "/new-dedup/labeling/images/1/tags/bulk",
+        json={"tag_ids": [2], "state": "positive"},
+    )
+    assert res.status_code == 422
 
 
 def test_post_positive_tags_for_images(client, calls):
