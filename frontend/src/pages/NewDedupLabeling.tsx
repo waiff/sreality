@@ -8,6 +8,7 @@ import {
   setNewDedupTagFlags,
   growNewDedupSample,
   listNewDedupProposals,
+  listNewDedupOriginalTags,
   setNewDedupProposalState,
   bulkSetNewDedupProposalState,
   listNewDedupTagImages,
@@ -216,6 +217,13 @@ export default function NewDedupLabeling() {
   const [tab, setTab] = useState<TabKey>('pending');
   const [sampleState, setSampleState] = useState<SampleStateFilter>('untouched');
   const [showOriginal, setShowOriginal] = useState(false);
+  // The "Original tag" view filters by the production CLIP tagger's own
+  // fine_tag — a different, fixed vocabulary from Taxonomy v1 (`labelFilter`
+  // above), so it gets its own independent filter state rather than
+  // reinterpreting labelFilter. Both are remembered across toggles, so
+  // switching back restores whichever tag was picked in that view.
+  const [originalTagFilter, setOriginalTagFilter] = useState<string | null>(null);
+  const usingOriginalTagFilter = mode === 'proposals' && showOriginal;
   const imageLarge = usePersistedFlag(IMAGE_LARGE_KEY, false);
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
   const [pendingRowKeys, setPendingRowKeys] = useState<ReadonlySet<string>>(new Set());
@@ -226,11 +234,33 @@ export default function NewDedupLabeling() {
   const tagByLabel = useMemo(() => new Map(allTags.map((t) => [t.label, t])), [allTags]);
   const activeTagId = labelFilter ? (tagByLabel.get(labelFilter)?.id ?? null) : null;
 
-  const proposalsKey = useMemo(() => [...PROPOSALS_KEY, tab, labelFilter], [tab, labelFilter]);
+  const originalTagsQ = useQuery({
+    queryKey: ['new-dedup', 'labeling', 'original-tags'],
+    queryFn: listNewDedupOriginalTags,
+    enabled: usingOriginalTagFilter,
+    staleTime: Infinity, // a fixed, static vocabulary — never goes stale
+  });
+  const originalTagOptions = originalTagsQ.data?.data ?? [];
+
+  // Keyed and fetched off the EFFECTIVE filter values, not off
+  // usingOriginalTagFilter itself — flipping New/Original is a display-only
+  // toggle (which badge shows) and must never blink the grid on its own; it
+  // only changes the result set when it actually drops a filter that was set.
+  const effectiveLabel = usingOriginalTagFilter ? null : labelFilter;
+  const effectiveOriginalTag = usingOriginalTagFilter ? originalTagFilter : null;
+  const proposalsKey = useMemo(
+    () => [...PROPOSALS_KEY, tab, effectiveLabel, effectiveOriginalTag],
+    [tab, effectiveLabel, effectiveOriginalTag],
+  );
   const proposalsQ = useQuery({
     queryKey: proposalsKey,
     queryFn: () =>
-      listNewDedupProposals({ status: tab, label: labelFilter ?? undefined, limit: 200 }),
+      listNewDedupProposals({
+        status: tab,
+        label: effectiveLabel ?? undefined,
+        original_tag: effectiveOriginalTag ?? undefined,
+        limit: 200,
+      }),
     enabled: mode === 'proposals',
   });
   const proposals = useMemo(() => proposalsQ.data?.data ?? [], [proposalsQ.data]);
@@ -365,7 +395,7 @@ export default function NewDedupLabeling() {
     setSelected(new Set());
     setDrafts(new Map());
     setLightboxAt(null);
-  }, [tab, labelFilter, mode, sampleState]);
+  }, [tab, labelFilter, originalTagFilter, mode, sampleState]);
   useEffect(() => {
     const ids = new Set(imageIds);
     setSelected((prev) => {
@@ -841,32 +871,61 @@ export default function NewDedupLabeling() {
           <label htmlFor="labeling-tag-filter" className="text-[var(--color-ink-3)]">
             Tag
           </label>
-          <select
-            id="labeling-tag-filter"
-            value={labelFilter ?? ''}
-            onChange={(e) => setLabelFilter(e.target.value || null)}
-            className="px-2 py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)] max-w-[18rem]"
-          >
-            <option value="">{mode === 'sample' ? 'Choose a tag…' : 'All tags'}</option>
-            {labelFilter && !filterOptions.some((t) => t.label === labelFilter) && (
-              <option value={labelFilter}>{labelFilter}</option>
-            )}
-            {filterOptions.map((t) => (
-              <option key={t.id} value={t.label}>
-                {t.label} ({t.gate_count})
-              </option>
-            ))}
-          </select>
-          {labelFilter && (
-            <button
-              type="button"
-              onClick={() => setLabelFilter(null)}
-              className="underline decoration-dotted underline-offset-2 text-[var(--color-ink-3)] hover:text-[var(--color-copper-2)]"
+          {usingOriginalTagFilter ? (
+            // The production CLIP tagger's own fixed vocabulary — a
+            // completely different set from Taxonomy v1 below, so it gets
+            // its own option list rather than reusing filterOptions.
+            <select
+              id="labeling-tag-filter"
+              value={originalTagFilter ?? ''}
+              onChange={(e) => setOriginalTagFilter(e.target.value || null)}
+              className="px-2 py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)] max-w-[18rem]"
             >
-              clear
-            </button>
+              <option value="">All original tags</option>
+              {originalTagOptions.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <select
+              id="labeling-tag-filter"
+              value={labelFilter ?? ''}
+              onChange={(e) => setLabelFilter(e.target.value || null)}
+              className="px-2 py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)] max-w-[18rem]"
+            >
+              <option value="">{mode === 'sample' ? 'Choose a tag…' : 'All tags'}</option>
+              {labelFilter && !filterOptions.some((t) => t.label === labelFilter) && (
+                <option value={labelFilter}>{labelFilter}</option>
+              )}
+              {filterOptions.map((t) => (
+                <option key={t.id} value={t.label}>
+                  {t.label} ({t.gate_count})
+                </option>
+              ))}
+            </select>
           )}
-          {maxTrainedNum != null && (
+          {usingOriginalTagFilter
+            ? originalTagFilter && (
+                <button
+                  type="button"
+                  onClick={() => setOriginalTagFilter(null)}
+                  className="underline decoration-dotted underline-offset-2 text-[var(--color-ink-3)] hover:text-[var(--color-copper-2)]"
+                >
+                  clear
+                </button>
+              )
+            : labelFilter && (
+                <button
+                  type="button"
+                  onClick={() => setLabelFilter(null)}
+                  className="underline decoration-dotted underline-offset-2 text-[var(--color-ink-3)] hover:text-[var(--color-copper-2)]"
+                >
+                  clear
+                </button>
+              )}
+          {!usingOriginalTagFilter && maxTrainedNum != null && (
             <span className="text-[var(--color-ink-4)]">
               {filterOptions.length} of {allTags.length} tags (≤ {maxTrainedNum} training images)
             </span>

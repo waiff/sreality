@@ -236,6 +236,34 @@ def test_get_proposals_all(client, calls):
     assert calls["list_proposals"]["status"] == "all"
 
 
+def test_get_proposals_filters_by_original_tag(client, calls):
+    # A real, deterministic value from list_original_tags — not mocked, since
+    # it has no DB dependency (see toolkit test coverage for the vocabulary
+    # itself).
+    res = client.get("/new-dedup/labeling/proposals?original_tag=kitchen")
+    assert res.status_code == 200
+    assert calls["list_proposals"]["original_tag"] == "kitchen"
+
+
+def test_get_proposals_rejects_an_unknown_original_tag(client, calls):
+    res = client.get("/new-dedup/labeling/proposals?original_tag=not-a-real-tag")
+    assert res.status_code == 422
+    assert "list_proposals" not in calls
+
+
+def test_get_original_tags(client):
+    res = client.get("/new-dedup/labeling/original-tags")
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert "kitchen" in data
+    assert "bathroom" in data
+
+
+def test_get_original_tags_requires_admin(client):
+    api_main.app.dependency_overrides.pop(deps.require_admin, None)
+    assert client.get("/new-dedup/labeling/original-tags").status_code == 401
+
+
 def test_get_proposals_rejects_an_unknown_status(client, calls):
     # Silently ignoring it would list EVERY proposal while the tab claims to
     # be filtered — the failure mode is invisible, so make it loud.
