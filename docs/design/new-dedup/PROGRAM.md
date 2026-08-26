@@ -32,7 +32,9 @@ until the whole stack is approved end-to-end. Other rules:
 | Clique guard | **PARKED** — operator runs separate location data-quality sessions; candidate audit ships pin/clique statistics only |
 | Family semantics | First-shared-family vs waterfall = settings **toggle**, per level (pHash and embeddings separately); **default waterfall** |
 | pHash | Global default ≤11 + per-tag overrides (drawing-tag risk) |
-| Embeddings | DINOv2 on RunPod, **candidate-scoped** (embed only images of listings in candidate pairs), vectors in Supabase; ≥0.98 starting threshold, expect recalibration |
+| Embeddings | DINOv2 on RunPod, **candidate-scoped** (embed only images of listings in candidate pairs), vectors in Supabase; ≥0.98 starting threshold, expect recalibration. **Unchanged by path B** — B generates candidates from the existing CLIP vectors; DINOv2 stays the L3 decision signal |
+| Candidate path B (2026-08-27) | **Image-similarity candidate generation runs in parallel with path A**, all property types: batch k-NN over per-type priority **same-tag** image embeddings proposes pairs, using the **existing corpus-wide CLIP 512-d vectors** (already stored — no new backfill) once W3's retag supplies the new tags. Same downstream levels; same guards (category compatibility, sale≠rent, byt floor ±2 when both known). k / similarity floor = exposed settings, calibrated with the operator at the W3 gate. Anti-catalog safeguards = **operator decision**, see Open items. Upgrade B to DINOv2 vectors only if audit C shows CLIP recall is insufficient |
+| Probe scope (2026-08-27) | **v1 trains ~10–15 target tags only** — the union of the per-type priority families + a pooled `interiér – ostatní` + an `other` sink (concrete 13-tag proposal in the 2026-08-27 ledger entry; operator confirms at the next labeling round). Gate 1 applies to target tags only; existing granular labels fold in via the training-time collapse map; non-target images stay proposal/zero-shot-labeled. More tags later = the same create→sample→train loop |
 | RunPod | Set up in Wave 1; serverless/on-demand only, **<$1/day** run-rate; may reuse PR #804 harness |
 | Vision | GPT-5-mini, manual batches only; qwen pluggable later |
 | Taxonomy v1 | The operator-curated `image_training_examples` label set (49 labels: `interier -*`, `exterier -*`, `podklad -*`, standalone garáž/technické zařízení/other); "katastr" ≙ `podklad - katastrální mapa`; tag-family defaults reconfirmed at training-set finalization |
@@ -44,7 +46,8 @@ until the whole stack is approved end-to-end. Other rules:
 Schema `dedup_sim` (droppable wholesale). Two-tier recompute:
 
 - **Evidence tier (expensive, computed once, reused across runs):** candidate pairs from L0
-  (keyed by listing pair + path + inputs), and per `(pair, tag_family)` image-comparison
+  (keyed by listing pair + path + inputs; paths = A1 street / A2 geo+dispo / A3 geo+area and,
+  from W3, B image-similarity), and per `(pair, tag_family)` image-comparison
   evidence — best/qualifying pHash distances + pair counts, later best/qualifying DINOv2
   similarities. Evidence rows carry the image-set fingerprint so stale rows recompute when a
   listing's images/tags change. Additive columns expected as criteria evolve.
@@ -73,28 +76,39 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   page** = ClipAudit clone minus dedup block, plus: "new tag vs original tag" toggle, sample
   management, tag add/rename/remove + batch tooling. Secondary CLIP (stronger encoder) relabels
   growing samples over taxonomy v1 into a sim-side proposal store (never `image_clip_tags` —
-  gallery-flip hazard); iterate sample until 300 proposals for ≥50% of categories, then assess
-  coverage with operator. Operator confirms/dismisses into the training set. ⛳ per sample round.
-  **Gate 1: 150 training images per active tag.**
+  gallery-flip hazard); iterate sample until 300 proposals for ≥50% of the **target** categories,
+  then assess coverage with operator. Operator confirms/dismisses into the training set. ⛳ per
+  sample round.
+  **Gate 1: 150 training images per probe-target tag (~10–15 tags — see Probe scope).**
 - **W2 — Level 0: candidate selection.** Primary path + 2 fallbacks + byt floor rule, sim
-  candidate store, **Candidate audit page** (type × path matrix; missing-field tables overall +
-  per portal per type; pin/clique statistics). Recall diagnostic vs legacy manual merges only if
+  candidate store, **Candidate audit page** (type × path matrix, **with a path-B column from day
+  one** — empty until W3; missing-field tables overall + per portal per type; pin/clique
+  statistics). Recall diagnostic vs legacy manual merges only if
   granted (**bold request** at that moment). ⛳ after mechanics, after audit page.
-  **Gate 2: operator satisfied no rightful candidates are lost to data quality.**
-- **W3 — Linear probe + full retag.** Train probe on the gated training set (grouped splits,
-  pinned encoder, versioned artifact); validate on the Labeling page; campaign-retag the corpus
-  into the sim tag store. **Gate 3: operator accepts tag quality; per-type default tag-family
-  orders reconfirmed against final taxonomy.**
-- **W4 — Level 2: pHash.** Evidence computation over candidates; decision tier; settings
+  **Gate 2: operator satisfied path A loses no rightful candidates to data quality (poor-geo
+  gaps explicitly covered later by path B + the operator's parallel location-DQ work).**
+- **W3 — Linear probe + full retag + candidate path B.** Train probe on the gated training set
+  (grouped splits, pinned encoder, versioned artifact); validate on the Labeling page;
+  campaign-retag the corpus into the sim tag store. Then **path B generation**: a batch k-NN job
+  over per-type priority same-tag images on the existing CLIP vectors (off-DB, e.g. FAISS on a
+  pod/runner; writes candidate pairs + best-similarity evidence into the sim store; candidate
+  audit + funnel gain their B numbers; k / similarity-floor settings calibrated with the
+  operator). **Gate 3: operator accepts tag quality; per-type default tag-family orders
+  reconfirmed against final taxonomy; path B volume/quality reviewed and its safeguard option
+  chosen (see Open items).**
+- **W4 — Level 2: pHash.** Evidence computation over candidates (A ∪ B, per-path safeguard
+  settings honored); decision tier; settings
   (threshold 11 + per-tag overrides, pairs required =1, family toggle, drag-priorities per
   type); **pHash audit page** (side-by-side pairs, filter by type/tag/hamming/result);
   **Browse-as-if page** (BrowseExperience reduced-feature adapter over sim groups);
   **Suspicious-properties page** (concurrent price divergence; ≥N listings merged, default 6;
   best-pair-vs-next-tag divergence filter). ⛳ evidence / decisions / each page.
   **Gate 4: visual validation — no easy merges missed, no strong signal underused, threshold calibrated.**
-- **W5 — Level 3: embeddings.** DINOv2 on RunPod (candidate-scoped), vectors in Supabase;
+- **W5 — Level 3: embeddings.** DINOv2 on RunPod (candidate-scoped — path B does not widen this;
+  it reads the CLIP vectors), vectors in Supabase;
   evidence + decisions; audit A (pHash-style with similarity), B (click-an-image search),
-  C (all-candidates pHash-vs-embeddings comparison); dismiss-decision validation; DINOv2 audit
+  C (all-candidates pHash-vs-embeddings comparison — also the evidence for whether path B should
+  upgrade to DINOv2 vectors); dismiss-decision validation; DINOv2 audit
   page. **Gate 5: measurable lift over pHash; similarity calibrated; dismiss confidence decided.**
 - **W6 — Level 4: vision.** Batch selector (cohort filters, model routing), robust prompt +
   3-outcome contract, decision counts per type (all operator-editable in settings); results/
@@ -112,7 +126,12 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 ## Parked / open items
 
 - Clique guard (operator location-DQ sessions running in parallel; revisit before W2 gate).
-- Embedding-search candidate rung for poor-geo listings (evaluate after W5).
+- **Path B safeguards (operator decision at the W3 gate):** without a location anchor, identical
+  marketing photos (developer catalogs, stock/staged interiors, reused renders across a project's
+  units) become candidate pairs — and L2 as configured merges on a single identical same-tag
+  pair. Settings-shaped options, combinable: (i) per-path override of required pHash pairs (e.g.
+  B-originated pairs need ≥2); (ii) geo-contradiction veto (both coords present and > X km apart
+  → dismiss or flag, X an input); (iii) route B pairs past L2 straight to L3/L4. None pre-chosen.
 - Qwen vision provider route (W6).
 - Near-duplicate training labels flagged 2026-08-05 (operator cleanup via batch reassign).
 - Interim unmerge has no UI home (API-only) until W8.
@@ -120,6 +139,28 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-08-27 — **Plan updated on two operator edits** (docs only, no engine code; challenges
+  raised and recorded). **(1) Candidate path B** — previously only a parked poor-geo idea — is
+  now a first-class selection path in parallel with A for all types (ledger row added; W2's audit
+  is B-ready; B builds in **W3**, not W5: it needs the new tags but NOT DINOv2, because it runs
+  on the existing corpus-wide CLIP 512-d vectors — so the candidate-scoped DINOv2 decision stands
+  and no ~35 GB corpus backfill returns). Challenge raised, parked as an operator decision at the
+  W3 gate: B has no location anchor, so developer-catalog/stock photos would merge at L2 on one
+  identical pair — safeguard options under Open items. **(2) Probe v1 narrowed to ~10–15 target
+  tags** (was: the whole ~49-label taxonomy). Gate 1 re-scoped to target tags (border-case
+  exclusion from 2026-08-21 unchanged); existing granular interior labels fold into a pooled
+  class via the training-time collapse map, so prior labeling effort still counts. Proposed
+  target list (13 — operator confirms at the next labeling round): interier - kuchyně · interier
+  - koupelna se sprchovým koutem · interier - koupelna s vanou · interier - koupelna · technické
+  zařízení / místnost · exterier - fasáda · podklad - půdorys · podklad - katastrální mapa ·
+  podklad - letecký snímek s ohraničením subjektu · garáž · exterier - parkoviště · interiér –
+  ostatní (pooled: all other interior rooms; serves ostatní's any-two-interior rule) · other
+  (non-interior OOD sink). Follow-up promoted from low-severity (2026-08-06) to real W1 work:
+  `taxonomy_labels` needs a non-destructive **probe-target flag** so the coverage strip + Gate-1
+  bar track target tags only (today the only lever is the cascading DELETE). Also noting for the
+  record: the W0 teardown migration (the long-open "PR-3" blocker) **landed 2026-08-25 via
+  #1167 (mig 432, cardinality W0b)** — Gate 0's remaining item is done. Next session: implement
+  the probe-target flag + scope the coverage UI to it; then labeling rounds continue.
 - 2026-08-21 (part 2) — **Gate 1 stops counting border cases** (operator decision, reversing the
   call recorded in part 1 below — which had deliberately left `confirmed_count` alone rather than
   redefine the gate metric unilaterally). Operator's rule, verbatim: *"border case does not count
