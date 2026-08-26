@@ -1147,6 +1147,10 @@ def _refresh_matview(conn: Any) -> None:
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = 0")
         cur.execute("REFRESH MATERIALIZED VIEW broker_region_type_stats")
+        # Joins the refresh's own transaction, so the stamp commits if and only if the
+        # refresh did — this matview is otherwise unobservable (a non-concurrent REFRESH
+        # swaps the heap, zeroing pg_stat_user_tables).
+        db.stamp_derived_artifact(conn, "broker_region_type_stats")
 
 
 _CANDIDATE_BROKERS = """

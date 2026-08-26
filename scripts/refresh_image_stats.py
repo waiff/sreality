@@ -55,8 +55,12 @@ def main() -> int:
                 # verified live; ObjectNotInPrerequisiteState kept for kinship.
                 with conn.cursor() as cur:
                     cur.execute(f"refresh materialized view {mv}")
+                db.stamp_derived_artifact(conn, mv)
                 LOG.info("REFRESH done mv=%s (first populate, non-concurrent)", mv)
                 continue
+            # Both success paths stamp; the UndefinedTable path above deliberately does
+            # not, so a matview that does not exist yet reads as stale rather than fresh.
+            db.stamp_derived_artifact(conn, mv)
             LOG.info("REFRESH done mv=%s", mv)
     return 0
 

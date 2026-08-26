@@ -274,6 +274,26 @@ jobs:
           DB_RAILS_REQUIRED: "1"
         run: pytest tests/test_derived_artifacts_registry.py -q
 
+      # ...and the other half of Corollary E: that freshness is OBSERVED. Migration 441
+      # added one helper, public.stamp_derived_artifact(), and called it from the five
+      # producers that were silent — 11 of the 14 rows had last_succeeded_at IS NULL.
+      #
+      # The helper's UPDATE is deliberately a silent no-op on an unregistered name (a
+      # producer must never fail because a metadata row is missing), which buys exactly one
+      # hole: a typo'd name stamps nothing forever and reads on the panel as a dead
+      # artifact — indistinguishable from the condition the registry exists to detect.
+      # These rails close it offline, by extracting every artifact-name literal from BOTH
+      # the repo tree AND pg_proc.prosrc and requiring each to exist; by pinning the one
+      # call site whose name is computed; by checking every row's `producer` resolves to a
+      # real function or a real file; and by asserting the health fan-out stamps its six
+      # matviews INDIVIDUALLY, each immediately after its own REFRESH (collapsing them to
+      # one stamp at the end is the mutation this goes RED on).
+      - name: Every stamp names a real artifact (migration 441)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: pytest tests/test_derived_artifacts_stamping.py -q
+
       # 422 replaced /health's `distinct on` with a recursive key-hop, which is subtle in
       # ways a shape assertion cannot see: the hop terminates by emitting a NULL, the seek
       # is a strict `>`, and an empty table must yield no rows rather than error. Executed
