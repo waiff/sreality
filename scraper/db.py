@@ -516,6 +516,28 @@ def run_resilient(
     raise last_exc
 
 
+_STAMP_DERIVED_ARTIFACT_SQL = "select public.stamp_derived_artifact(%s, %s, %s)"
+
+
+def stamp_derived_artifact(
+    conn: psycopg.Connection,
+    name: str,
+    *,
+    rows: int | None = None,
+    duration_ms: int | None = None,
+) -> None:
+    """Record a successful production of one derived artifact (migration 441).
+
+    The ONE call shape every Python producer uses; the SQL-side function is the ONE
+    write shape the registry has. A name with no registry row is a silent no-op by
+    design (a producer must never fail because a metadata row is missing) — the typo
+    that would hide behind that is caught in CI by
+    tests/test_derived_artifacts_stamping.py, not here.
+    """
+    with conn.cursor() as cur:
+        cur.execute(_STAMP_DERIVED_ARTIFACT_SQL, (name, rows, duration_ms))
+
+
 def upsert_listing(
     conn: psycopg.Connection,
     row: dict[str, Any],

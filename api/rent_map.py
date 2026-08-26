@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import requests
 
+from scraper import db as scraper_db
 from toolkit.rent_map import (
     ParsedRentMap,
     parse_rent_map_xlsx,
@@ -129,6 +130,11 @@ def insert_revision(
                 ))
 
         cur.execute("refresh materialized view rent_map_choropleth")
+        # Inside the ingest's own transaction, so a rolled-back ingest cannot leave a
+        # stamp claiming freshness the matview does not have. Corollary E's exhibit: this
+        # artifact's freshness depends on someone loading a page, and the registry says so
+        # (host = 'api-request'); the non-concurrent REFRESH above leaves no other trace.
+        scraper_db.stamp_derived_artifact(conn, "rent_map_choropleth")
 
     LOG.info("rent map: ingested revision %d (%d territories, %d adjustments)",
              revision, territory_count, len(parsed.adjustments))

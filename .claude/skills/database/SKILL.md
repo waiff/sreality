@@ -308,6 +308,24 @@ is `last_succeeded_at` against `staleness_budget`, which is correct precisely *b
 rolls back with the failed run. **Never add an error column to a registry a producer writes
 inside its own transaction.**
 
+**Every producer stamps through the ONE helper, `public.stamp_derived_artifact(name, rows,
+duration_ms)`** (migration 441) — SECURITY DEFINER, `set search_path = public`, EXECUTE
+revoked from `public` *and* `anon`/`authenticated` (PostgreSQL's built-in default grants
+EXECUTE to PUBLIC, so revoking only the named roles leaves it callable). Python producers
+call `scraper.db.stamp_derived_artifact(conn, name)`; SQL producers `perform` it. **Its
+UPDATE is deliberately a silent no-op on an unregistered name** — a producer must never fail
+because a metadata row is missing — so a typo'd name stamps nothing forever and reads on the
+Health panel exactly like a dead artifact; that hole is closed offline by
+`tests/test_derived_artifacts_stamping.py`, which extracts every name literal from both the
+repo tree and `pg_proc.prosrc`, checks every `producer` resolves to a real function or file,
+and pins the health fan-out to **six individual stamps, each right after its own REFRESH**
+(that buys six real per-matview `last_duration_ms` values, since `clock_timestamp()` advances
+inside a transaction). Two artifacts have **no other freshness signal in existence** —
+`price_stat_choropleth` and `rent_map_choropleth` are refreshed non-concurrently, which swaps
+the heap so `pg_stat_user_tables` reads zero, and `pg_stat_file` is denied on this instance.
+`llm_cost_hour_rollup` keeps its own inline UPDATE because it must pass its own watermark as
+`complete_through`; don't unify it onto the helper without a fourth parameter.
+
 **A `SECURITY DEFINER` gate in a view's WHERE is per-row ONLY when it is combined with a
 column predicate.** Three cases, don't conflate them:
 - **Standalone** (`WHERE is_platform_admin()`) — the qual references no column, so it is a
