@@ -12,8 +12,8 @@ cannot distinguish from ordinary tables) and requires a registry row for each.
 
 WHAT MAKES IT RED: `create materialized view foo_mv as select 1;` in a new migration with no
 `derived_artifacts` row. That is the whole point — the check fires on the NEXT artifact, not
-on the backlog. `_W7_BACKLOG` names what already existed when the registry shipped, and W7's
-job is literally to empty that frozenset.
+on the backlog. `_W7_BACKLOG` named what already existed when the registry shipped; migration
+440 (W7a) registered all thirteen and emptied it, so the diff now runs with no exemptions.
 
 It also pins the two DELIBERATE ABSENCES, because both are the kind of column a later
 session would "helpfully" add back:
@@ -51,24 +51,16 @@ pytestmark = pytest.mark.skipif(
 # new rollup joins by hand, which is the same one-line cost as its registry row.
 _ROLLUP_TABLES = frozenset({"browse_list", "llm_cost_hour_rollup"})
 
-# Everything that already existed, unregistered, when the registry shipped (the public
-# matviews live on this instance on 2026-08-25, plus the browse read model). W7 empties this
-# set; nothing may be ADDED to it — a new artifact gets a registry row instead.
-_W7_BACKLOG = frozenset({
-    "broker_region_type_stats",
-    "browse_list",
-    "category_trends_mv",
-    "health_mv_refresh_stamp",
-    "health_summary_mv",
-    "image_storage_overview_mv",
-    "images_failure_overview_mv",
-    "portal_health_mv",
-    "price_stat_choropleth",
-    "properties_map_mv",
-    "rent_map_choropleth",
-    "scraper_health_checks_mv",
-    "snapshot_churn_24h_mv",
-})
+# EMPTIED BY MIGRATION 440 (W7a), which is the wave's entire definition of done. This set
+# named the thirteen artifacts that already existed, unregistered, when the registry shipped;
+# all thirteen now carry a `derived_artifacts` row, so the catalog diff below is a full
+# check with no exemptions left.
+#
+# NOTHING MAY EVER BE ADDED HERE AGAIN. The set exists only to have been emptied — it was
+# the backlog of what predated the registry, and that backlog is closed. A new materialized
+# view or rollup table gets a seed INSERT in the migration that creates it; putting its name
+# here instead would silence the one check that can notice it.
+_W7_BACKLOG: frozenset[str] = frozenset()
 
 _PUBLIC_VIEW_COLUMNS = [
     "name", "producer", "host", "cadence", "staleness_budget", "complete_through",
@@ -184,6 +176,80 @@ def test_the_unwritable_columns_stay_absent(conn, column):
     assert column not in _columns(conn, "public.derived_artifacts_public"), (
         f"derived_artifacts_public publishes {column}, which can only ever read as "
         "'nothing is wrong'"
+    )
+
+
+@pytest.mark.parametrize(
+    "function,artifact",
+    [("rebuild_browse_list", "browse_list"),
+     ("rebuild_properties_map_mv", "properties_map_mv")],
+)
+def test_both_blue_green_rebuilds_stamp_the_registry(conn, function, artifact):
+    """RED by: restoring either rebuild function's `update browse_read_model_state ...`
+    stamp — which is exactly what a copy-paste from migration 276/277/299/371/376 does.
+
+    Migration 371 already shipped one silent regression by rebuilding these bodies from an
+    outdated source (it re-added an `anon` grant and migration 277's narrow indexes while
+    claiming no behaviour change). The stamp is the same hazard with a quieter failure: an
+    `update` against a dropped table raises inside `exception when others then
+    pg_advisory_unlock(...); raise;`, which rolls the WHOLE rebuild back — so browse_list
+    silently stops being republished and only its staleness gives it away.
+
+    The offline gate in tests/test_browse_grant_drift.py reads migration TEXT; this reads the
+    catalog, so it also catches a body replaced directly against the database outside any
+    migration file.
+    """
+    with conn.cursor() as cur:
+        cur.execute("select prosrc from pg_proc where proname = %s", (function,))
+        row = cur.fetchone()
+    assert row is not None, f"{function}() is missing from the catalog entirely"
+    body = row[0]
+
+    assert "browse_read_model_state" not in body, (
+        f"{function}() still stamps browse_read_model_state, which migration 440 dropped. "
+        "The next pg_cron tick will raise, roll back the entire rebuild, and stop "
+        "republishing the read model. Stamp public.derived_artifacts instead."
+    )
+    assert "derived_artifacts" in body and artifact in body, (
+        f"{function}() no longer stamps derived_artifacts for '{artifact}' — its freshness "
+        "would silently never advance and the Health panel would show it permanently stale"
+    )
+
+
+def test_the_singleton_state_table_is_gone(conn):
+    """RED by: re-creating browse_read_model_state (or its _public view) in a later migration.
+
+    Two relations describing the freshness of the same two artifacts is how the registry
+    stops being a registry. Migration 437 carried a TEMPORARY union branch that adapted the
+    singleton; 440 deleted the branch and the table together, and the SPA reader with them.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "select to_regclass('public.browse_read_model_state'), "
+            "       to_regclass('public.browse_read_model_state_public')"
+        )
+        table, view = cur.fetchone()
+    assert table is None, (
+        "browse_read_model_state is back. The registry is the single freshness relation; "
+        "a second one re-creates the two-artifact special case W7a removed."
+    )
+    assert view is None, "browse_read_model_state_public is back — see above"
+
+
+def test_the_public_view_has_no_union_adapter(conn):
+    """RED by: re-adding the `union all` branch migration 437 shipped as TEMPORARY.
+
+    While both the base rows and the adapter existed, `browse_list` and `properties_map_mv`
+    appeared TWICE in derived_artifacts_public and the Health panel double-rendered them.
+    The column list stays identical either way, so the column-contract test above cannot see
+    this; only the view definition can.
+    """
+    with conn.cursor() as cur:
+        cur.execute("select pg_get_viewdef('public.derived_artifacts_public'::regclass)")
+        viewdef = cur.fetchone()[0].lower()
+    assert "union" not in viewdef, (
+        "derived_artifacts_public grew a UNION branch again — every artifact it adapts is "
+        "published twice, once from its own registry row and once from the adapter"
     )
 
 

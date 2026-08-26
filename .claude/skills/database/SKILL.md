@@ -276,21 +276,30 @@ function body (`pg_get_functiondef`), never from an old migration file or a desi
 emergency-rollback snippet. Both functions now also self-check after granting
 (`if has_table_privilege('anon', ..., 'SELECT') then raise exception`) — a regression RAISEs,
 rolling back the whole tick so the last known-good object stays published instead of a
-mis-permissioned one, and `browse_read_model_state_public.list_rebuilt_at`/`map_rebuilt_at`
-(surfaced on the Health page) stops advancing within one cycle. `tests/test_browse_grant_drift.py`
+mis-permissioned one, and the artifact's `derived_artifacts.last_succeeded_at` (surfaced on
+the Health page, migration 440) stops advancing within one cycle. `tests/test_browse_grant_drift.py`
 is the matching OFFLINE gate — it reaches inside `EXECUTE`-embedded DDL for these two relations
 specifically, unlike `test_migration_rls_grants.py`'s scanner, which treats dollar-quoted
 function bodies as opaque by design.
 
-**Every derived artifact declares its own freshness in `derived_artifacts`** (migration 437) —
-one row per artifact carrying `producer` / `host` / `cadence` / `staleness_budget`, plus
-`complete_through`, `last_succeeded_at`, `last_duration_ms`, `last_rows`. It generalizes the
-singleton `browse_read_model_state` (whose two artifacts it currently adapts through a UNION
-branch that W7 removes). Same posture as 276: RLS on with zero policies, everything revoked,
-published through `derived_artifacts_public` (enumerated columns, `authenticated` only, not
-`security_invoker` — owner rights are what read through the RLS wall). **A new derived
-artifact needs a registry row**, and `tests/test_derived_artifacts_registry.py` goes RED
-without one; the pre-existing matviews sit in an explicit `_W7_BACKLOG` set.
+**Every derived artifact declares its own freshness in `derived_artifacts`** (migration 437,
+completed by 440) — one row per artifact carrying `producer` / `host` / `cadence` /
+`staleness_budget`, plus `complete_through`, `last_succeeded_at`, `last_duration_ms`,
+`last_rows`. It **replaced** the singleton `browse_read_model_state`, which migration 440
+dropped along with its `_public` view, 437's temporary UNION adapter, and the SPA reader —
+all 14 artifacts (12 matviews + `browse_list` + `llm_cost_hour_rollup`) are ordinary rows now.
+Same posture as 276: RLS on with zero policies, everything revoked, published through
+`derived_artifacts_public` (enumerated columns, `authenticated` only, not `security_invoker` —
+owner rights are what read through the RLS wall). **A new derived artifact needs a registry
+row**, and `tests/test_derived_artifacts_registry.py` goes RED without one — its `_W7_BACKLOG`
+exemption set is now empty and **nothing may be added to it**. Two budgets are deliberately
+NOT their cadence and 440's header carries the measurements: the six health matviews get
+45 min (not 10 — the 30d p95 gap is 15.8 min and a 10-min budget reads red on the healthy
+case), and `broker_region_type_stats` gets 30 h (not 24 — its daily sweep itself runs up to
+2h01m, so 24 h alarms on every healthy run). `rent_map_choropleth`'s `host` is honestly
+`api-request`: it is refreshed inside a FastAPI request handler — don't launder it into a
+cron string. `llm_cost_rollup_state` is a watermark FOR an artifact, not an artifact, and is
+deliberately unregistered.
 There is deliberately **no `last_error` column**: a plpgsql `exception when others then
 update …; raise;` handler cannot persist its write (the re-raise unwinds the subtransaction
 it ran in — verified live), so such a column could only ever be NULL and would publish

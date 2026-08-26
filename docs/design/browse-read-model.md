@@ -245,7 +245,12 @@ validation — recorded here so the doc matches reality:
    in-DB (`*/5` / `7,37 * * * *`) — the `refresh_health_matviews` precedent.
    GH Actions cron is throttled/jittered (~2× measured); a pure-DB rebuild has
    no business on an external runner. `scripts/refresh_map_mv.py` + its
-   workflow are retired; rebuild stamps live in `browse_read_model_state`.
+   workflow are retired. **Rebuild stamps moved (migration 440):** both
+   functions now stamp `derived_artifacts` — one row per artifact, keyed by
+   name, carrying `last_succeeded_at` / `complete_through` /
+   `last_duration_ms` / `last_rows` plus a declared `cadence` and
+   `staleness_budget`. The singleton `browse_read_model_state` and its
+   `_public` view were dropped in the same migration.
 3. **Lean index set instead of replicating the live table's index zoo.** The
    snapshot is physically ordered `(category_main, category_type,
    first_seen_at)`, so any within-category query reads a contiguous band —
