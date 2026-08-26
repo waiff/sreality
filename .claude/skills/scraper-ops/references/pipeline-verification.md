@@ -150,3 +150,78 @@ Before W0.2 this lifecycle was copy-pasted into nine `*_main.py` files and final
 mirror-image bug (`_finalize` returned early on an empty agg) wrote nothing at all. That is why the
 six portals that fell over on 2026-08-26 showed no error count anywhere
 (`docs/design/reliability-program.md`). Never re-add a per-portal copy.
+
+## The three self-rules (W0 of the reliability program, 2026-08-27)
+
+`docs/design/reliability-program.md` W0.1/W0.3/W0.4. All three came out of a single finding:
+**the health system was not silent during the outages it was built for — it was loudly wrong.**
+
+**1. Silence is not recovery.** `llm_errors` derives `currently_failing` purely from state:
+`last_ok_at < last_err_at`. It used to additionally `and` in a 90-minute staleness window
+(`min_live_at`), on the theory that a lone old error with no traffic since is not a live
+outage. That is backwards. The producers here have circuit breakers — the enrichment loop
+aborts at exactly 5 consecutive errors — so once an outage is *total* the traffic stops, the
+last error ages out of the window, and the check reads `ok`. Measured: OpenAI was
+credit-exhausted for 11 days (63,547 error rows, **zero** successful calls) and the check read
+`ok` for most of it, flipping `fail` at 14:02 and `ok` at 14:58 on unchanged inputs. Because
+alerting is edge-triggered, that produced **114 alerts alternating onset with a literal
+"✓ Recovered: llm_errors is healthy again"** for an outage that never recovered. Any
+recency-window detector downstream of a circuit breaker is sampling a duty cycle, not a state.
+Generalise it: a failure is superseded only by a newer success.
+
+The symmetric pathology from the same edge-triggered rule: `property_maintenance` was `fail`
+continuously from 2026-08-20 13:08 UTC with its last alert at 11:37 UTC — six days red, six
+days silent. One rule produces both. The re-escalation ladder that fixes it belongs in
+`toolkit/system_alerts.emit_transition_alerts`, where all checks inherit it (W3.4), not in any
+one check.
+
+**2. A zero is ambiguous — name the arm.** `llm_burn_rate` had only upper arms ($90 warn /
+$150 fail), and `_record_failure` writes `cost_usd=0.0`, so a **total outage drives 24h spend
+to the maximally healthy number**: it reported `ok value=0.0` throughout the 11-day outage. It
+now carries `details.arm`:
+- `starved` → `fail`: a `called_for` lane with `attempts > 0 AND successes == 0 AND spend == 0`.
+- `idle` → `ok`: nothing attempted at all. Silence is `llm_liveness`'s axis, not this one.
+- `runaway`/`ok`: the pre-existing spend arms.
+
+**Evaluated per `called_for`, and that is load-bearing.** A 24h aggregate arm is defeated by a
+single unrelated cheap success — verified: one `summarize_region_dispositions` call held the
+aggregate at $0.01 for ~24 of 30 sampled hours while the only recurring lane was completely
+dead. The upper arms are separately **parked as currently unreachable** (they were sized for
+dedup-vision burn deleted 2026-08-06; 24h spend is ~$0.01), recorded rather than silently left
+as arms that cannot fire.
+
+**3. The acute lane must degrade, not vanish.** `run_checks` computed *all* results before
+`write_results` persisted *any*, inside `llm_health.yml`'s `timeout-minutes: 5`. A timeout
+therefore wrote **zero rows and fired zero alerts** — blinding `db_saturation` and
+`worker_liveness` at precisely the moment DB saturation would make checks slow. Now each
+result is inserted and alerted the instant its check returns (the transition baseline,
+`latest_statuses`, is captured once before the first write, so per-check
+`emit_transition_alerts` calls stay equivalent to the old batch call). Budgets:
+`_CHECK_BUDGET_S` (45s) per check, capped by whatever remains of `_LANE_BUDGET_S` (**120s of
+the job's 300s** — the rest is headroom for W2/W3's checks; this wave owns the number).
+Enforcement is **server-side** via `SET LOCAL statement_timeout`: the connection is autocommit
+and shared by every check, so a thread we cannot cancel or a signal raised mid-query would
+leave it wedged for everyone downstream. Postgres cancelling its own query is the only
+mechanism that returns the connection clean. An overrun is `warn` "timed out", an unreached
+check is `warn` "not run" — "I could not measure this" is a different claim from "this is
+broken", and fail-on-timeout would manufacture a wall of false reds exactly when the operator
+needs to read the real one.
+
+**`workflow_poller_liveness`** (W0.1) closes the matching blind spot on the other ops surface.
+`record_workflow_failures.py` deliberately excludes its own runs from `workflow_failures`, so a
+dead poller cannot appear in the table it feeds — it simply stops accumulating rows, which is
+byte-identical to a quiet week. The check keys on the age of
+`app_settings.workflow_failures_cursor`: warn > 6h, fail > 12h, sized to clear the worst
+observed inter-poll gap (the cron is `*/30` but the Actions throttle really runs it 80–256 min
+apart). A missing cursor row is `warn`, not `fail` — it is also the legitimate first-run state,
+and a check that is red the day it ships teaches the operator to ignore every check. Registered
+in the 6h lane only; promote it into `llm_health.yml`'s `--only` list after a soak.
+
+Same wave, on the poller itself: when the page cap was hit, the cursor advanced to
+`min(completions)`. Pages arrive newest-first, so hitting the cap means every run seen is
+*newer* than `since` and the skipped runs are older than all of them — the next poll's
+`completed_at < since` filter then dropped them **permanently**, which is why only 2 of the 6
+portals that failed on 2026-08-26 were ever recorded. The in-code comment claiming it "crawls
+to oldest-seen so the gap is picked up next poll" was false. The cursor now advances *only* on
+a poll that reached back past `since`, and the page budget doubled to 10 pages / 1,000 runs
+(≤10 Actions API requests per poll against a 1,000/hour per-repo budget).

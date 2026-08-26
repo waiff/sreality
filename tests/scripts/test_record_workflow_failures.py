@@ -6,12 +6,15 @@ filter is clean.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from scripts.record_workflow_failures import (
     CANCELLED_MIN_DURATION_MINUTES,
+    MAX_PAGES,
     MONITOR_WORKFLOW_NAME,
+    PER_PAGE,
+    _advance_cursor,
     _read_cursor,
     _write_cursor,
     parse_ts,
@@ -201,3 +204,36 @@ def test_cursor_read_write_roundtrip():
     ts = datetime(2026, 7, 9, 21, 50, tzinfo=timezone.utc)
     _write_cursor(conn, ts)
     assert _read_cursor(conn) == ts
+
+
+# --- W0.1: the high-water mark only advances over a window it actually covered
+
+
+def test_cursor_jumps_to_newest_when_the_window_was_fully_covered():
+    completions = [SINCE, SINCE + timedelta(minutes=30), SINCE + timedelta(minutes=90)]
+    assert _advance_cursor(completions, reached_since=True) == SINCE + timedelta(minutes=90)
+
+
+def test_cursor_is_held_when_the_page_cap_was_hit_first():
+    """The permanent-loss bug. Pages come back newest-first, so hitting the cap means
+    every completion seen is NEWER than `since` and the runs that were skipped are older
+    than all of them. The old code advanced to min(completions) — believing it was
+    "crawling to oldest-seen" — and the next poll's `completed_at < since` filter then
+    dropped the skipped runs forever. Only 2 of the 6 portals that failed on 2026-08-26
+    were ever recorded."""
+    newest = SINCE + timedelta(minutes=200)
+    oldest_seen = SINCE + timedelta(minutes=120)
+    completions = [oldest_seen, newest]
+    # The dangerous answer is anything that moves the mark past `since`.
+    assert _advance_cursor(completions, reached_since=False) is None
+
+
+def test_cursor_untouched_when_nothing_completed():
+    assert _advance_cursor([], reached_since=True) is None
+    assert _advance_cursor([], reached_since=False) is None
+
+
+def test_page_budget_covers_the_worst_observed_inter_poll_gap():
+    """The cron is */30 but the Actions throttle really runs it 80-256 min apart, so the
+    budget has to hold a 256-minute window's worth of completed runs."""
+    assert MAX_PAGES * PER_PAGE >= 1000
