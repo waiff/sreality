@@ -76,6 +76,11 @@ class ImageIdsIn(BaseModel):
     image_ids: list[int]
 
 
+class BulkSetImageTagsIn(BaseModel):
+    tag_ids: list[int]
+    state: str
+
+
 def _check_state(state: str) -> None:
     if state not in tag_annotations.STATES:
         raise HTTPException(
@@ -218,6 +223,23 @@ def get_tags_for_image(image_id: int, conn: Any = Depends(deps.get_db_conn)) -> 
     """Image-centric view for the detail panel: every active tag with this
     image's current state, grouped by family."""
     return {"data": tag_annotations.list_tags_for_image(conn, image_id=image_id)}
+
+
+@router.post("/images/{image_id}/tags/bulk")
+def post_bulk_set_image_tags(
+    image_id: int, body: BulkSetImageTagsIn, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Set many tags on ONE image to the same state at once — the detail
+    panel's "set selected" action, the mirror of a tag-scoped bulk annotate."""
+    _check_state(body.state)
+    try:
+        return {
+            "data": tag_annotations.bulk_set_state_for_image(
+                conn, image_id=image_id, tag_ids=body.tag_ids, state=body.state,
+            )
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/images/tags/batch")

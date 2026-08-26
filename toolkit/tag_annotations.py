@@ -204,6 +204,34 @@ def bulk_set_state(
     return {"updated": len(ids), "tag_id": tag_id, "state": state, "image_ids": ids}
 
 
+def bulk_set_state_for_image(
+    conn: psycopg.Connection, *, image_id: int, tag_ids: list[int], state: str,
+    created_by: str = "operator",
+) -> dict[str, Any]:
+    """Batch version of set_state for one image across many tags — the
+    mirror of bulk_set_state (which fixes the tag and varies the image).
+    Backs the detail panel's "set selected" action: an image the operator
+    has actually looked at (e.g. a fitness room, clearly none of the room
+    tags) can be closed out in one click instead of leaving 49 tags
+    implicitly-but-not-explicitly negative."""
+    if state not in STATES:
+        raise ValueError(f"state must be one of {STATES}")
+    ids = list(dict.fromkeys(int(i) for i in tag_ids))
+    if not ids:
+        raise ValueError("no tags selected")
+    if len(ids) > BULK_STATE_MAX:
+        raise ValueError(f"at most {BULK_STATE_MAX} tags per batch")
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO image_tag_labels (image_id, tag_id, state, created_by) "
+            "VALUES (%s,%s,%s,%s) "
+            "ON CONFLICT (image_id, tag_id) DO UPDATE SET "
+            "  state = excluded.state, updated_at = now()",
+            [(image_id, tag_id, state, created_by) for tag_id in ids],
+        )
+    return {"updated": len(ids), "image_id": image_id, "state": state, "tag_ids": ids}
+
+
 def clear_state(conn: psycopg.Connection, *, image_id: int, tag_id: int) -> dict[str, Any]:
     """Revert a cell to untouched by deleting its explicit row."""
     with conn.cursor() as cur:

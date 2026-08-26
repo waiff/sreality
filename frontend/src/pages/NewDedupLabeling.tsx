@@ -14,6 +14,7 @@ import {
   setNewDedupTagAnnotation,
   bulkSetNewDedupTagAnnotation,
   listNewDedupImageTags,
+  bulkSetNewDedupImageTags,
   listNewDedupPositiveTagsForImages,
   listNewDedupSettings,
   TAG_STATES,
@@ -1372,6 +1373,16 @@ function ProposalTile({
 
       <AssignedTagsRow tags={assignedTags} />
 
+      {/* The tri-state control only ever decides THIS ONE tag (the proposal's
+        * own label, or the correction typed into the picker below) — never
+        * every tag on the image. Naming it right above the buttons makes that
+        * unambiguous without hunting for the picker underneath. */}
+      <p
+        className="px-2 pt-1.5 truncate text-[0.65rem] text-[var(--color-ink-3)] font-mono"
+        title={`Setting the state of "${draft.trim() || proposal.label}"`}
+      >
+        {draft.trim() || proposal.label}
+      </p>
       <div className="px-2 py-1.5 flex items-center justify-between gap-1.5">
         <TriStateControl
           state={proposal.current_state ?? 'untouched'}
@@ -1505,16 +1516,33 @@ function ImageTagDetailPanel({
   const qc = useQueryClient();
   const key = ['new-dedup', 'labeling', 'image-tags', imageId];
   const q = useQuery({ queryKey: key, queryFn: () => listNewDedupImageTags(imageId) });
+  const rows = useMemo(() => q.data?.data ?? [], [q.data]);
   const grouped = useMemo(() => {
-    const rows = q.data?.data ?? [];
     const groups = new Map<string, typeof rows>();
     for (const r of rows) {
       const family = r.family ?? '—';
       groups.set(family, [...(groups.get(family) ?? []), r]);
     }
     return [...groups.entries()];
-  }, [q.data]);
-  const rows = q.data?.data ?? [];
+  }, [rows]);
+  const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
+  const toggleSelect = (tagId: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(tagId)) next.delete(tagId);
+      else next.add(tagId);
+      return next;
+    });
+  // "Select all" targets untouched tags — the actual use case (close out
+  // everything an operator hasn't looked at yet on this image) — without
+  // silently overwriting tags already decided one at a time. Any row can
+  // still be checked or unchecked by hand regardless.
+  const untouchedIds = useMemo(
+    () => rows.filter((r) => r.state === 'untouched').map((r) => r.id),
+    [rows],
+  );
+  const allUntouchedSelected =
+    untouchedIds.length > 0 && untouchedIds.every((id) => selected.has(id));
 
   const setMut = useMutation({
     mutationFn: (vars: { tagId: number; label: string; state: TagState }) =>
@@ -1526,6 +1554,38 @@ function ImageTagDetailPanel({
           : old,
       );
       onTagStateChange(vars.label, res.data.state);
+      // No longer untouched — drop it from the batch selection so a later
+      // "Set selected" can't silently re-decide a tile already handled
+      // one at a time.
+      setSelected((prev) => {
+        if (!prev.has(vars.tagId)) return prev;
+        const next = new Set(prev);
+        next.delete(vars.tagId);
+        return next;
+      });
+      qc.invalidateQueries({ queryKey: OVERVIEW_KEY });
+      qc.invalidateQueries({ queryKey: TAG_IMAGES_KEY });
+    },
+    onError: (err: Error) => pushToast('err', err.message),
+  });
+
+  const bulkSetMut = useMutation({
+    mutationFn: (state: TagState) => bulkSetNewDedupImageTags(imageId, [...selected], state),
+    onSuccess: (res) => {
+      const changedIds = new Set(res.data.tag_ids);
+      qc.setQueryData<{ data: typeof rows }>(key, (old) =>
+        old
+          ? {
+              ...old,
+              data: old.data.map((r) => (changedIds.has(r.id) ? { ...r, state: res.data.state } : r)),
+            }
+          : old,
+      );
+      for (const r of rows) {
+        if (changedIds.has(r.id)) onTagStateChange(r.label, res.data.state);
+      }
+      setSelected(new Set());
+      pushToast('ok', `Set ${res.data.updated} to ${res.data.state}.`);
       qc.invalidateQueries({ queryKey: OVERVIEW_KEY });
       qc.invalidateQueries({ queryKey: TAG_IMAGES_KEY });
     },
@@ -1565,6 +1625,36 @@ function ImageTagDetailPanel({
         {q.isLoading && <p className="mt-4 text-sm text-[var(--color-ink-3)]">Loading…</p>}
         {q.error && <ErrorBanner message={(q.error as Error).message} />}
 
+        {rows.length > 0 && (
+          <div className="mt-3 flex items-center gap-3 flex-wrap">
+            <button
+              type="button"
+              onClick={() =>
+                setSelected(allUntouchedSelected ? new Set() : new Set(untouchedIds))
+              }
+              disabled={untouchedIds.length === 0}
+              className="px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] disabled:opacity-40"
+            >
+              {allUntouchedSelected ? 'Deselect all' : 'Select all untouched'}
+            </button>
+            <span className="text-xs text-[var(--color-ink-3)]">{selected.size} selected</span>
+            {TAG_STATES.map((s) => (
+              <button
+                key={s}
+                type="button"
+                disabled={selected.size === 0 || bulkSetMut.isPending}
+                onClick={() => bulkSetMut.mutate(s)}
+                className={[
+                  'px-2.5 py-1 text-xs rounded-[var(--radius-xs)] disabled:opacity-40',
+                  STATE_META[s].activeClass,
+                ].join(' ')}
+              >
+                Set selected: {s}
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="mt-3 flex-1 space-y-4 overflow-y-auto">
           {grouped.map(([family, tags]) => (
             <div key={family}>
@@ -1573,8 +1663,15 @@ function ImageTagDetailPanel({
               </p>
               <div className="space-y-1">
                 {tags.map((t) => (
-                  <div key={t.id} className="flex items-center justify-between gap-2 py-0.5">
-                    <span className="min-w-0 truncate font-mono text-sm text-[var(--color-ink-2)]">
+                  <div key={t.id} className="flex items-center gap-2 py-0.5">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(t.id)}
+                      onChange={() => toggleSelect(t.id)}
+                      className="h-3.5 w-3.5 shrink-0"
+                      aria-label={`Select ${t.label} for batch action`}
+                    />
+                    <span className="min-w-0 flex-1 truncate font-mono text-sm text-[var(--color-ink-2)]">
                       {t.label}
                     </span>
                     <TriStateControl

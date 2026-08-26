@@ -899,6 +899,19 @@ export const listNewDedupImageTags = (
     jwt: true,
   });
 
+/* Sets many tags on ONE image to the same state at once — the detail
+ * panel's "set selected" action (the mirror of bulkSetNewDedupTagAnnotation,
+ * which fixes the tag and varies the image). */
+export const bulkSetNewDedupImageTags = (
+  imageId: number,
+  tagIds: number[],
+  state: TagState,
+): Promise<{ data: { updated: number; image_id: number; state: TagState; tag_ids: number[] } }> =>
+  request<{ data: { updated: number; image_id: number; state: TagState; tag_ids: number[] } }>(
+    `/new-dedup/labeling/images/${imageId}/tags/bulk`,
+    { method: 'POST', json: { tag_ids: tagIds, state }, jwt: true },
+  );
+
 export interface NewDedupPositiveTag {
   image_id: number;
   tag_id: number;

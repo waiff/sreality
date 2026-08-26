@@ -292,6 +292,56 @@ def test_bulk_set_state_rejects_an_unknown_state(conn: _FakeConn) -> None:
     assert conn.image_tag_labels == {}
 
 
+def test_bulk_set_state_for_image_writes_every_tag_on_one_image(conn: _FakeConn) -> None:
+    a = ta.add_tag(conn, label="a")
+    b = ta.add_tag(conn, label="b")
+    c = ta.add_tag(conn, label="c")
+    out = ta.bulk_set_state_for_image(
+        conn, image_id=7, tag_ids=[a["id"], b["id"], c["id"]], state="negative",
+    )
+    assert out == {
+        "updated": 3, "image_id": 7, "state": "negative",
+        "tag_ids": [a["id"], b["id"], c["id"]],
+    }
+    assert conn.image_tag_labels[(7, a["id"])]["state"] == "negative"
+    assert conn.image_tag_labels[(7, b["id"])]["state"] == "negative"
+    assert conn.image_tag_labels[(7, c["id"])]["state"] == "negative"
+
+
+def test_bulk_set_state_for_image_never_touches_other_images(conn: _FakeConn) -> None:
+    tag = ta.add_tag(conn, label="a")
+    ta.set_state(conn, image_id=8, tag_id=tag["id"], state="positive")
+    ta.bulk_set_state_for_image(conn, image_id=7, tag_ids=[tag["id"]], state="negative")
+    assert conn.image_tag_labels[(8, tag["id"])]["state"] == "positive"
+
+
+def test_bulk_set_state_for_image_dedupes_tag_ids(conn: _FakeConn) -> None:
+    tag = ta.add_tag(conn, label="a")
+    out = ta.bulk_set_state_for_image(
+        conn, image_id=7, tag_ids=[tag["id"], tag["id"]], state="positive",
+    )
+    assert out["updated"] == 1
+    assert out["tag_ids"] == [tag["id"]]
+
+
+def test_bulk_set_state_for_image_rejects_an_empty_selection(conn: _FakeConn) -> None:
+    with pytest.raises(ValueError):
+        ta.bulk_set_state_for_image(conn, image_id=7, tag_ids=[], state="positive")
+
+
+def test_bulk_set_state_for_image_caps_batch_size(conn: _FakeConn) -> None:
+    with pytest.raises(ValueError):
+        ta.bulk_set_state_for_image(
+            conn, image_id=7, tag_ids=list(range(ta.BULK_STATE_MAX + 1)), state="positive",
+        )
+
+
+def test_bulk_set_state_for_image_rejects_an_unknown_state(conn: _FakeConn) -> None:
+    with pytest.raises(ValueError):
+        ta.bulk_set_state_for_image(conn, image_id=7, tag_ids=[1], state="maybe")
+    assert conn.image_tag_labels == {}
+
+
 def test_clear_state_reverts_a_cell_to_untouched(conn: _FakeConn) -> None:
     tag = ta.add_tag(conn, label="a")
     ta.set_state(conn, image_id=7, tag_id=tag["id"], state="positive")
