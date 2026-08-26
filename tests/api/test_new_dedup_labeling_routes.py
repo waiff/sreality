@@ -1,5 +1,6 @@
-"""Tests for /new-dedup/labeling/* — Taxonomy v1 CRUD, sample management,
-proposal review. Admin-gated (require_admin); happy-path tests override it."""
+"""Tests for /new-dedup/labeling/* — tag taxonomy CRUD, sample management,
+proposal review, and the tri-state annotation matrix. Admin-gated
+(require_admin); happy-path tests override it."""
 
 from __future__ import annotations
 
@@ -12,13 +13,16 @@ TestClient = pytest.importorskip("fastapi.testclient").TestClient
 
 from api import dependencies as deps
 from api import main as api_main
+from toolkit import dedup_sim_labeling as dsl
+from toolkit import tag_annotations as ta
 
 
 class _FakeConn:
     """Minimal stand-in exercising the same toolkit functions the routes
-    call — not a SQL fake (see tests/toolkit/test_dedup_sim_labeling.py for
-    that); here we monkeypatch the toolkit module itself so the route layer
-    (status codes, error mapping) is what's under test."""
+    call — not a SQL fake (see tests/toolkit/test_tag_annotations.py and
+    tests/toolkit/test_dedup_sim_labeling.py for that); here we monkeypatch the
+    toolkit modules themselves so the route layer (status codes, argument
+    plumbing, error mapping) is what's under test."""
 
 
 @pytest.fixture()
@@ -34,265 +38,349 @@ def client(fake_conn: _FakeConn):
     api_main.app.dependency_overrides.clear()
 
 
+_RESPONSES: dict[str, Any] = {
+    "tag_overview": {"sample_size": 3, "tags": [{"id": 1, "label": "a"}]},
+    "add_tag": {"id": 1, "label": "a", "family": None, "active": True, "created_at": "t"},
+    "rename_tag": {"id": 1, "label": "b", "family": None, "active": True, "created_at": "t"},
+    "remove_tag": {"label": "a", "deleted_annotations": 2},
+    "list_images_for_tag": [
+        {"image_id": 1, "storage_path": "img/1.jpg", "state": "untouched",
+         "updated_at": None, "created_by": None},
+    ],
+    "set_state": {"image_id": 1, "tag_id": 2, "state": "positive", "updated_at": "t"},
+    "bulk_set_state": {"updated": 2, "tag_id": 2, "state": "negative", "image_ids": [1, 2]},
+    "clear_state": {"image_id": 1, "tag_id": 2, "deleted": True},
+    "grow_sample": {"added": 10},
+    "list_proposals": [
+        {"image_id": 1, "model": "m", "label": "a", "confidence": 0.9, "proposed_at": "t",
+         "status": "pending", "reviewed_at": None, "reviewed_by": None, "current_state": None},
+    ],
+    "set_proposal_state": {"image_id": 1, "model": "m", "label": "a", "state": "positive",
+                           "status": "confirmed", "proposed_label": "a", "corrected": False},
+    "bulk_set_proposal_state": {"updated": 2, "model": "m", "state": "negative",
+                                "image_ids": [1, 2]},
+}
+
+_PATCHED = {
+    ta: ["add_tag", "rename_tag", "remove_tag", "list_images_for_tag", "set_state",
+         "bulk_set_state", "clear_state"],
+    dsl: ["grow_sample", "list_proposals", "set_proposal_state", "bulk_set_proposal_state"],
+}
+
+
 @pytest.fixture(autouse=True)
-def _patch_toolkit(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    from toolkit import dedup_sim_labeling as dsl
+def calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Every toolkit entry point the routes call, replaced by a recorder that
+    returns a canned payload. The dict maps name -> the kwargs it was handed."""
+    recorded: dict[str, Any] = {}
 
-    calls: dict[str, Any] = {}
-
-    def _record(name):
-        def _fn(conn, **kwargs):
-            calls[name] = kwargs
+    def _record(name: str):
+        def _fn(conn: Any, **kwargs: Any) -> Any:
+            recorded[name] = kwargs
             return _RESPONSES[name]
         return _fn
 
-    _RESPONSES = {
-        "taxonomy_overview": {"sample_size": 3, "labels": [{"id": 1, "label": "a"}]},
-        "add_taxonomy_label": {"id": 1, "label": "a", "family": None, "active": True,
-                                "created_at": "t"},
-        "rename_taxonomy_label": {"id": 1, "label": "b", "family": None, "active": True,
-                                   "created_at": "t"},
-        "remove_taxonomy_label": {"label": "a", "deleted_training_examples": 2,
-                                   "deleted_proposals": 1},
-        "grow_sample": {"added": 10},
-        "list_proposals": [{"image_id": 1, "model": "m", "label": "a", "confidence": 0.9,
-                             "proposed_at": "t", "status": "pending", "reviewed_at": None,
-                             "reviewed_by": None}],
-        "confirm_proposal": {"image_id": 1, "model": "m", "label": "a", "status": "confirmed"},
-        "dismiss_proposal": {"image_id": 1, "model": "m", "label": "a", "status": "dismissed"},
-        "bulk_confirm_proposals": {"confirmed": 2, "model": "m", "image_ids": [1, 2]},
-        "bulk_dismiss_proposals": {"dismissed": 2, "model": "m", "image_ids": [1, 2]},
-    }
-
+    for module, names in _PATCHED.items():
+        for name in names:
+            monkeypatch.setattr(module, name, _record(name))
+    # tag_overview takes the connection only — no kwargs to record.
     monkeypatch.setattr(
-        dsl, "taxonomy_overview",
-        lambda conn: (calls.setdefault("taxonomy_overview", True), _RESPONSES["taxonomy_overview"])[1],
+        ta, "tag_overview",
+        lambda conn: (recorded.setdefault("tag_overview", {}), _RESPONSES["tag_overview"])[1],
     )
-    monkeypatch.setattr(dsl, "add_taxonomy_label", _record("add_taxonomy_label"))
-    monkeypatch.setattr(dsl, "rename_taxonomy_label", _record("rename_taxonomy_label"))
-    monkeypatch.setattr(dsl, "remove_taxonomy_label", _record("remove_taxonomy_label"))
-    monkeypatch.setattr(dsl, "grow_sample", _record("grow_sample"))
-    monkeypatch.setattr(
-        dsl, "list_proposals",
-        lambda conn, **kw: (calls.setdefault("list_proposals", kw), _RESPONSES["list_proposals"])[1],
-    )
-    monkeypatch.setattr(dsl, "confirm_proposal", _record("confirm_proposal"))
-    monkeypatch.setattr(dsl, "dismiss_proposal", _record("dismiss_proposal"))
-    monkeypatch.setattr(dsl, "bulk_confirm_proposals", _record("bulk_confirm_proposals"))
-    monkeypatch.setattr(dsl, "bulk_dismiss_proposals", _record("bulk_dismiss_proposals"))
-    return calls
+    return recorded
 
 
-def test_get_overview(client):
+def _raises(exc: Exception):
+    def _fn(conn: Any, **kwargs: Any) -> Any:
+        raise exc
+    return _fn
+
+
+# --- overview ---------------------------------------------------------------
+
+
+def test_get_overview(client, calls):
     res = client.get("/new-dedup/labeling/overview")
     assert res.status_code == 200
-    assert res.json()["data"]["sample_size"] == 3
+    body = res.json()["data"]
+    assert body["sample_size"] == 3
+    assert body["tags"][0]["label"] == "a"
 
 
-def test_post_taxonomy_label(client, _patch_toolkit):
-    res = client.post("/new-dedup/labeling/taxonomy", json={"label": "interier - kuchyne"})
+# --- taxonomy ---------------------------------------------------------------
+
+
+def test_post_tag(client, calls):
+    res = client.post(
+        "/new-dedup/labeling/taxonomy",
+        json={"label": "interier - kuchyne", "family": "interier"},
+    )
     assert res.status_code == 200
     assert res.json()["data"]["label"] == "a"  # fixture return value
-    assert _patch_toolkit["add_taxonomy_label"]["label"] == "interier - kuchyne"
+    assert calls["add_tag"] == {"label": "interier - kuchyne", "family": "interier"}
 
 
-def test_post_taxonomy_label_duplicate_422s(client, monkeypatch):
-    from toolkit import dedup_sim_labeling as dsl
-
-    def _raise(conn, **kw):
-        raise ValueError("taxonomy label 'a' already exists")
-
-    monkeypatch.setattr(dsl, "add_taxonomy_label", _raise)
-    res = client.post("/new-dedup/labeling/taxonomy", json={"label": "a"})
-    assert res.status_code == 422
+def test_post_tag_family_is_optional(client, calls):
+    assert client.post("/new-dedup/labeling/taxonomy", json={"label": "a"}).status_code == 200
+    assert calls["add_tag"]["family"] is None
 
 
-def test_put_taxonomy_label_rename(client, _patch_toolkit):
+def test_post_tag_duplicate_422s(client, monkeypatch):
+    monkeypatch.setattr(ta, "add_tag", _raises(ValueError("tag 'a' already exists")))
+    assert client.post("/new-dedup/labeling/taxonomy", json={"label": "a"}).status_code == 422
+
+
+def test_put_tag_rename(client, calls):
     res = client.put("/new-dedup/labeling/taxonomy/1", json={"label": "b"})
     assert res.status_code == 200
-    assert _patch_toolkit["rename_taxonomy_label"] == {"label_id": 1, "new_label": "b"}
+    assert calls["rename_tag"] == {"tag_id": 1, "new_label": "b"}
 
 
-def test_put_taxonomy_label_unknown_404s(client, monkeypatch):
-    from toolkit import dedup_sim_labeling as dsl
-
-    def _raise(conn, **kw):
-        raise KeyError(999)
-
-    monkeypatch.setattr(dsl, "rename_taxonomy_label", _raise)
-    res = client.put("/new-dedup/labeling/taxonomy/999", json={"label": "b"})
-    assert res.status_code == 404
+def test_put_tag_unknown_404s(client, monkeypatch):
+    monkeypatch.setattr(ta, "rename_tag", _raises(KeyError(999)))
+    assert client.put("/new-dedup/labeling/taxonomy/999", json={"label": "b"}).status_code == 404
 
 
-def test_put_taxonomy_label_duplicate_422s(client, monkeypatch):
-    from toolkit import dedup_sim_labeling as dsl
-
-    def _raise(conn, **kw):
-        raise ValueError("taxonomy label 'b' already exists")
-
-    monkeypatch.setattr(dsl, "rename_taxonomy_label", _raise)
-    res = client.put("/new-dedup/labeling/taxonomy/1", json={"label": "b"})
-    assert res.status_code == 422
+def test_put_tag_duplicate_422s(client, monkeypatch):
+    monkeypatch.setattr(ta, "rename_tag", _raises(ValueError("tag 'b' already exists")))
+    assert client.put("/new-dedup/labeling/taxonomy/1", json={"label": "b"}).status_code == 422
 
 
-def test_delete_taxonomy_label(client, _patch_toolkit):
+def test_delete_tag(client, calls):
     res = client.delete("/new-dedup/labeling/taxonomy/1")
     assert res.status_code == 200
-    assert res.json()["data"]["deleted_training_examples"] == 2
+    assert res.json()["data"]["deleted_annotations"] == 2
+    assert calls["remove_tag"] == {"tag_id": 1}
 
 
-def test_delete_taxonomy_label_unknown_404s(client, monkeypatch):
-    from toolkit import dedup_sim_labeling as dsl
-
-    def _raise(conn, **kw):
-        raise KeyError(999)
-
-    monkeypatch.setattr(dsl, "remove_taxonomy_label", _raise)
-    res = client.delete("/new-dedup/labeling/taxonomy/999")
-    assert res.status_code == 404
+def test_delete_tag_unknown_404s(client, monkeypatch):
+    monkeypatch.setattr(ta, "remove_tag", _raises(KeyError(999)))
+    assert client.delete("/new-dedup/labeling/taxonomy/999").status_code == 404
 
 
-def test_post_grow_sample(client, _patch_toolkit):
+def test_taxonomy_routes_key_on_a_numeric_tag_id(client):
+    # tag_id is the surrogate key (migration 442), not label text — a non-numeric
+    # path segment must be a 422, never a lookup by name.
+    assert client.delete("/new-dedup/labeling/taxonomy/kuchyne").status_code == 422
+
+
+# --- sample -----------------------------------------------------------------
+
+
+def test_post_grow_sample(client, calls):
     res = client.post("/new-dedup/labeling/sample/grow", json={"count": 50})
     assert res.status_code == 200
     assert res.json()["data"]["added"] == 10
-    assert _patch_toolkit["grow_sample"] == {"count": 50, "category_main": None}
+    assert calls["grow_sample"] == {"count": 50, "category_main": None}
 
 
 def test_post_grow_sample_rejects_bad_count(client, monkeypatch):
-    from toolkit import dedup_sim_labeling as dsl
-
-    def _raise(conn, **kw):
-        raise ValueError("count must be at least 1")
-
-    monkeypatch.setattr(dsl, "grow_sample", _raise)
-    res = client.post("/new-dedup/labeling/sample/grow", json={"count": 0})
-    assert res.status_code == 422
+    monkeypatch.setattr(dsl, "grow_sample", _raises(ValueError("count must be at least 1")))
+    assert client.post(
+        "/new-dedup/labeling/sample/grow", json={"count": 0},
+    ).status_code == 422
 
 
-def test_get_proposals(client, _patch_toolkit):
+# --- proposals --------------------------------------------------------------
+
+
+def test_get_proposals(client, calls):
     res = client.get("/new-dedup/labeling/proposals?status=pending")
     assert res.status_code == 200
     assert res.json()["data"][0]["image_id"] == 1
-    assert _patch_toolkit["list_proposals"]["status"] == "pending"
+    assert calls["list_proposals"]["status"] == "pending"
 
 
-def test_get_proposals_all(client, _patch_toolkit):
-    res = client.get("/new-dedup/labeling/proposals?status=all")
-    assert res.status_code == 200
-    assert _patch_toolkit["list_proposals"]["status"] == "all"
+def test_get_proposals_all(client, calls):
+    assert client.get("/new-dedup/labeling/proposals?status=all").status_code == 200
+    assert calls["list_proposals"]["status"] == "all"
 
 
-def test_get_proposals_rejects_an_unknown_status(client, _patch_toolkit):
+def test_get_proposals_rejects_an_unknown_status(client, calls):
     # Silently ignoring it would list EVERY proposal while the tab claims to
     # be filtered — the failure mode is invisible, so make it loud.
-    res = client.get("/new-dedup/labeling/proposals?status=pendign")
-    assert res.status_code == 422
-    assert "list_proposals" not in _patch_toolkit
+    assert client.get("/new-dedup/labeling/proposals?status=pendign").status_code == 422
+    assert "list_proposals" not in calls
 
 
-def test_post_confirm_proposal(client, _patch_toolkit):
-    res = client.post("/new-dedup/labeling/proposals/confirm", json={"image_id": 1, "model": "m"})
+def test_post_proposal_state(client, calls):
+    res = client.post(
+        "/new-dedup/labeling/proposals/state",
+        json={"image_id": 1, "model": "m", "state": "positive"},
+    )
     assert res.status_code == 200
     assert res.json()["data"]["status"] == "confirmed"
-    # An omitted label means "accept the suggestion as-is".
-    assert _patch_toolkit["confirm_proposal"]["label"] is None
+    # An omitted label means "decide against the suggestion as-is".
+    assert calls["set_proposal_state"] == {
+        "image_id": 1, "model": "m", "state": "positive", "label": None,
+    }
 
 
-def test_post_confirm_proposal_passes_a_corrected_label_through(client, _patch_toolkit):
+def test_post_proposal_state_passes_a_corrected_label_through(client, calls):
     res = client.post(
-        "/new-dedup/labeling/proposals/confirm",
-        json={"image_id": 1, "model": "m", "label": "interier - loznice"},
+        "/new-dedup/labeling/proposals/state",
+        json={"image_id": 1, "model": "m", "state": "positive",
+              "label": "interier - loznice"},
     )
     assert res.status_code == 200
-    assert _patch_toolkit["confirm_proposal"]["label"] == "interier - loznice"
+    assert calls["set_proposal_state"]["label"] == "interier - loznice"
 
 
-def test_post_confirm_proposal_bad_label_422s(client, monkeypatch):
-    from toolkit import dedup_sim_labeling as dsl
-
-    def _raise(conn, **kw):
-        raise ValueError("a taxonomy label is at most 100 characters")
-
-    monkeypatch.setattr(dsl, "confirm_proposal", _raise)
+@pytest.mark.parametrize("state", ["positive", "negative", "excluded"])
+def test_post_proposal_state_accepts_every_tri_state_value(client, calls, state):
     res = client.post(
-        "/new-dedup/labeling/proposals/confirm",
-        json={"image_id": 1, "model": "m", "label": "x" * 101},
+        "/new-dedup/labeling/proposals/state",
+        json={"image_id": 1, "model": "m", "state": state},
+    )
+    assert res.status_code == 200
+    assert calls["set_proposal_state"]["state"] == state
+
+
+def test_post_proposal_state_rejects_an_unknown_state(client, calls):
+    res = client.post(
+        "/new-dedup/labeling/proposals/state",
+        json={"image_id": 1, "model": "m", "state": "confirmed"},
+    )
+    assert res.status_code == 422
+    # Rejected at the route boundary, before any write is attempted.
+    assert "set_proposal_state" not in calls
+
+
+def test_post_proposal_state_bad_label_422s(client, monkeypatch):
+    monkeypatch.setattr(
+        dsl, "set_proposal_state", _raises(ValueError("a tag label is at most 100 characters")),
+    )
+    res = client.post(
+        "/new-dedup/labeling/proposals/state",
+        json={"image_id": 1, "model": "m", "state": "positive", "label": "x" * 101},
     )
     assert res.status_code == 422
 
 
-def test_post_confirm_proposal_unknown_404s(client, monkeypatch):
-    from toolkit import dedup_sim_labeling as dsl
-
-    def _raise(conn, **kw):
-        raise KeyError((1, "m"))
-
-    monkeypatch.setattr(dsl, "confirm_proposal", _raise)
-    res = client.post("/new-dedup/labeling/proposals/confirm", json={"image_id": 1, "model": "m"})
+def test_post_proposal_state_unknown_404s(client, monkeypatch):
+    monkeypatch.setattr(dsl, "set_proposal_state", _raises(KeyError((1, "m"))))
+    res = client.post(
+        "/new-dedup/labeling/proposals/state",
+        json={"image_id": 1, "model": "m", "state": "positive"},
+    )
     assert res.status_code == 404
 
 
-def test_post_dismiss_proposal(client, _patch_toolkit):
-    res = client.post("/new-dedup/labeling/proposals/dismiss", json={"image_id": 1, "model": "m"})
-    assert res.status_code == 200
-    assert res.json()["data"]["status"] == "dismissed"
-
-
-def test_post_dismiss_proposal_unknown_404s(client, monkeypatch):
-    from toolkit import dedup_sim_labeling as dsl
-
-    def _raise(conn, **kw):
-        raise KeyError((1, "m"))
-
-    monkeypatch.setattr(dsl, "dismiss_proposal", _raise)
-    res = client.post("/new-dedup/labeling/proposals/dismiss", json={"image_id": 1, "model": "m"})
-    assert res.status_code == 404
-
-
-def test_post_bulk_confirm_proposals(client, _patch_toolkit):
+def test_post_bulk_proposal_state(client, calls):
     res = client.post(
-        "/new-dedup/labeling/proposals/bulk-confirm",
-        json={"model": "m", "image_ids": [1, 2]},
+        "/new-dedup/labeling/proposals/bulk-state",
+        json={"model": "m", "image_ids": [1, 2], "state": "negative"},
     )
     assert res.status_code == 200
-    assert res.json()["data"]["confirmed"] == 2
-    assert _patch_toolkit["bulk_confirm_proposals"] == {"model": "m", "image_ids": [1, 2]}
+    assert res.json()["data"]["updated"] == 2
+    assert calls["bulk_set_proposal_state"] == {
+        "model": "m", "image_ids": [1, 2], "state": "negative",
+    }
 
 
-def test_post_bulk_confirm_proposals_rejects_empty(client, monkeypatch):
-    from toolkit import dedup_sim_labeling as dsl
-
-    def _raise(conn, **kw):
-        raise ValueError("no proposals selected")
-
-    monkeypatch.setattr(dsl, "bulk_confirm_proposals", _raise)
+def test_post_bulk_proposal_state_rejects_an_unknown_state(client, calls):
     res = client.post(
-        "/new-dedup/labeling/proposals/bulk-confirm", json={"model": "m", "image_ids": []},
+        "/new-dedup/labeling/proposals/bulk-state",
+        json={"model": "m", "image_ids": [1], "state": "dismissed"},
+    )
+    assert res.status_code == 422
+    assert "bulk_set_proposal_state" not in calls
+
+
+def test_post_bulk_proposal_state_rejects_empty(client, monkeypatch):
+    monkeypatch.setattr(
+        dsl, "bulk_set_proposal_state", _raises(ValueError("no proposals selected")),
+    )
+    res = client.post(
+        "/new-dedup/labeling/proposals/bulk-state",
+        json={"model": "m", "image_ids": [], "state": "positive"},
     )
     assert res.status_code == 422
 
 
-def test_post_bulk_dismiss_proposals(client, _patch_toolkit):
+# --- the annotation matrix --------------------------------------------------
+
+
+def test_get_images_for_tag(client, calls):
+    res = client.get("/new-dedup/labeling/tags/2/images?state=excluded&limit=25")
+    assert res.status_code == 200
+    assert res.json()["data"][0]["image_id"] == 1
+    assert calls["list_images_for_tag"] == {"tag_id": 2, "state": "excluded", "limit": 25}
+
+
+def test_get_images_for_tag_state_is_optional(client, calls):
+    assert client.get("/new-dedup/labeling/tags/2/images").status_code == 200
+    assert calls["list_images_for_tag"] == {"tag_id": 2, "state": None, "limit": 100}
+
+
+def test_get_images_for_tag_bad_state_422s(client, monkeypatch):
+    # 'untouched' is a valid filter here but not a storable state, so the
+    # validation lives in the toolkit, not in the route's _check_state.
+    monkeypatch.setattr(
+        ta, "list_images_for_tag", _raises(ValueError("state must be one of ...")),
+    )
+    assert client.get("/new-dedup/labeling/tags/2/images?state=maybe").status_code == 422
+
+
+def test_post_annotation(client, calls):
     res = client.post(
-        "/new-dedup/labeling/proposals/bulk-dismiss",
-        json={"model": "m", "image_ids": [1, 2]},
+        "/new-dedup/labeling/tags/2/annotations",
+        json={"image_id": 1, "state": "positive"},
     )
     assert res.status_code == 200
-    assert res.json()["data"]["dismissed"] == 2
+    assert res.json()["data"]["state"] == "positive"
+    assert calls["set_state"] == {"image_id": 1, "tag_id": 2, "state": "positive"}
 
 
-def test_post_bulk_dismiss_proposals_rejects_empty(client, monkeypatch):
-    from toolkit import dedup_sim_labeling as dsl
-
-    def _raise(conn, **kw):
-        raise ValueError("no proposals selected")
-
-    monkeypatch.setattr(dsl, "bulk_dismiss_proposals", _raise)
+def test_post_annotation_rejects_an_unknown_state(client, calls):
     res = client.post(
-        "/new-dedup/labeling/proposals/bulk-dismiss", json={"model": "m", "image_ids": []},
+        "/new-dedup/labeling/tags/2/annotations",
+        json={"image_id": 1, "state": "untouched"},
     )
     assert res.status_code == 422
+    # "untouched" is the ABSENCE of a row — it is cleared, never written.
+    assert "set_state" not in calls
+
+
+def test_post_bulk_annotation(client, calls):
+    res = client.post(
+        "/new-dedup/labeling/tags/2/annotations/bulk",
+        json={"image_ids": [1, 2], "state": "negative"},
+    )
+    assert res.status_code == 200
+    assert res.json()["data"]["updated"] == 2
+    assert calls["bulk_set_state"] == {"image_ids": [1, 2], "tag_id": 2, "state": "negative"}
+
+
+def test_post_bulk_annotation_rejects_an_unknown_state(client, calls):
+    res = client.post(
+        "/new-dedup/labeling/tags/2/annotations/bulk",
+        json={"image_ids": [1], "state": "maybe"},
+    )
+    assert res.status_code == 422
+    assert "bulk_set_state" not in calls
+
+
+def test_post_bulk_annotation_over_max_422s(client, monkeypatch):
+    monkeypatch.setattr(
+        ta, "bulk_set_state", _raises(ValueError("at most 200 images per batch")),
+    )
+    res = client.post(
+        "/new-dedup/labeling/tags/2/annotations/bulk",
+        json={"image_ids": [1], "state": "positive"},
+    )
+    assert res.status_code == 422
+
+
+def test_delete_annotation(client, calls):
+    res = client.delete("/new-dedup/labeling/tags/2/annotations/1")
+    assert res.status_code == 200
+    assert res.json()["data"]["deleted"] is True
+    assert calls["clear_state"] == {"image_id": 1, "tag_id": 2}
+
+
+# --- the gate ---------------------------------------------------------------
 
 
 def test_new_dedup_labeling_requires_admin(client):

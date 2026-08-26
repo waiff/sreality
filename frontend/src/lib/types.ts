@@ -192,8 +192,8 @@ export interface ImagePublic {
   /* CLIP render-vs-photo score 0..1 (migration 239): >= ~0.65 is a 3D render /
    * visualization (excluded from the byt merge signal). NULL until scored. */
   clip_render_score: number | null;
-  /* 64-bit dHash perceptual hash (migration 308), as Postgres's signed bigint — a
-   * display value for the /clip-audit and /phash-audit pages. NULL until hashed. */
+  /* 64-bit dHash perceptual hash (migration 308), as Postgres's signed bigint —
+   * a display value for image-audit surfaces. NULL until hashed. */
   phash: number | null;
 }
 
@@ -1650,9 +1650,8 @@ export interface PropertySource {
   /* The child listing's SURROGATE id (property_sources_public.id = listings.id,
    * migration 334). NEVER null on rows read from property_sources_public — the
    * R2 resolver-chain keys child loaders (snapshots, sibling links) on this
-   * instead of sreality_id, which a post-Gate-2 non-sreality row may not have.
-   * Optional only so ClipAudit's synthetic single-source fallback still types. */
-  id?: number;
+   * instead of sreality_id, which a post-Gate-2 non-sreality row may not have. */
+  id: number;
   sreality_id: number;
   source: string;
   source_url: string | null;

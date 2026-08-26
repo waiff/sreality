@@ -6,12 +6,12 @@
 
 import { useEffect, useState } from 'react';
 
-import type { NewDedupTaxonomyLabel } from '@/lib/api';
+import type { NewDedupTag } from '@/lib/api';
 import { TrashIcon } from '@/components/icons';
 import Spinner from '@/components/Spinner';
 
 export interface TaxonomyManageModalProps {
-  labels: NewDedupTaxonomyLabel[];
+  labels: NewDedupTag[];
   onClose: () => void;
   newLabelText: string;
   onNewLabelTextChange: (v: string) => void;
@@ -133,7 +133,7 @@ function ManageRow({
   onRemove,
   removePending,
 }: {
-  label: NewDedupTaxonomyLabel;
+  label: NewDedupTag;
   onRename: (next: string) => void;
   renamePending: boolean;
   onRemove: () => void;
@@ -171,7 +171,7 @@ function ManageRow({
             </span>
           )}
           <span className="mt-0.5 block text-[0.65rem] font-mono tabular-nums text-[var(--color-ink-4)]">
-            {`${label.confirmed_count} confirmed · ${label.pending_count} pending`}
+            {`${label.positive_count} positive · ${label.negative_count} negative · ${label.excluded_count} excluded`}
           </span>
         </div>
 
@@ -223,10 +223,10 @@ function ManageRow({
       {confirmingRemove && (
         <div className="mt-2 flex items-center gap-3 border-t border-[var(--color-rule-soft)] pt-2 text-xs text-[var(--color-brick)]">
           <span>
-            Remove {label.label}? {label.confirmed_count} training example
-            {label.confirmed_count === 1 ? '' : 's'} and {label.pending_count + label.dismissed_count}{' '}
-            proposal{label.pending_count + label.dismissed_count === 1 ? '' : 's'} go with it
-            (images stay).
+            Remove {label.label}?{' '}
+            {label.positive_count + label.negative_count + label.excluded_count} annotation
+            {label.positive_count + label.negative_count + label.excluded_count === 1 ? '' : 's'}{' '}
+            go with it (images and any pending proposals stay).
           </span>
           <button
             type="button"

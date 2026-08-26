@@ -1,5 +1,5 @@
 /* ImageLightbox — the ONE full-screen photo modal (listing detail's gallery,
- * /clip-audit, NEW DEDUP labeling). Pins the contract those three share:
+ * NEW DEDUP labeling's two review grids). Pins the contract they share:
  * keyboard nav + Escape, the scroll lock, whose tag the badge reports, and that
  * a grid shrinking underneath an open modal can't blank it out.
  */

@@ -6,11 +6,11 @@ import { fetchBorderCasesByImageIds } from '@/lib/queries';
 
 /* The "Border case" flag (migration 310) for a WHOLE grid of images — the one
  * read path, write path and stability policy behind every labeling surface
- * (/clip-audit's feed + label browser, NEW DEDUP Labeling's review grid). It is
- * a hook rather than per-page state because the flag is image-grain: the same
- * photo can be two tiles at once (two models' proposals) and both must flip
- * together, and a per-page copy of this logic is exactly how /clip-audit and the
- * Labeling page drifted apart before (see TrainControl's own history).
+ * (NEW DEDUP Labeling's proposal grid and its tag-sample grid). It is a hook
+ * rather than per-page state because the flag is image-grain: the same photo
+ * can be two tiles at once (two models' proposals) and both must flip
+ * together, and a per-surface copy of this logic is exactly how the labeling
+ * surfaces drifted apart before.
  *
  * Three properties are load-bearing:
  *

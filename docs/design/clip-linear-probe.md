@@ -6,6 +6,19 @@ verified against production that day. Supersedes the tagging half of
 `clip-visual-embeddings.md` (whose ONNX/torch-free and pgvector-wall assumptions did not survive
 the build — see "Corrected assumptions").
 
+**2026-08-26 update — the label store this doc assumes has moved, and gained a capability this
+doc doesn't yet account for.** `image_training_examples` (one free-text label per image, cited
+throughout below) is superseded by `tag_taxonomy` + `image_tag_labels` (migration 442,
+docs/design/tag-annotation-matrix.md): a permanent, per-(image, tag) tri-state fact —
+positive/negative/excluded — that a real per-tag head can train on directly (excluded rows drop
+out of that head's set; negative is an explicit, informative example, not just "not the labeled
+class"). This doc's v1 (below) still assumes ONE multinomial head over ~10–11 logical classes
+with multi-head "deferred" — the new table is exactly that deferred step's data substrate, not a
+competing design. Anything below that reads counts off `image_training_examples` (the 2026-07-22
+ground truth section, the corpus-skew numbers) is a historical snapshot of the OLD store, not
+live. Reconciling this doc's trainer plan with the new table (v1 scope, multi-head timing, how
+`excluded` interacts with the "OOD sink" idea) is follow-up work, not done here.
+
 ## Verdict
 
 - **Viable, entirely on GitHub Actions. Railway has no role.** Training is seconds of CPU;

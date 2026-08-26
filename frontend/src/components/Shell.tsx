@@ -40,7 +40,6 @@ type MenuItem = { to: string; label: string; end?: boolean };
 // Grouped under the "Settings" dropdown trigger — all admin-only, so the
 // whole group renders (or not) alongside the other admin-gated nav items.
 const settingsItems: ReadonlyArray<MenuItem> = [
-  { to: '/clip-audit', label: 'CLIP Audit' },
   { to: '/health',   label: 'Health' },
   { to: '/costs',    label: 'LLM Costs' },
   { to: '/location-quality', label: 'Location Quality' },

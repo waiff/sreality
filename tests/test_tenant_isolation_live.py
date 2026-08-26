@@ -91,8 +91,17 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
     "dedup_engine_runs", "dedup_scan_state", "dedup_vision_bakeoff_results",
     "dedup_decision_feedback", "property_identity_candidates", "property_merge_events",
     "listing_detail_queue", "listing_fetch_failures", "detail_queue_completions",
-    "llm_calls", "parsed_url_cache", "phash_pair_notes", "pipeline_check_results",
-    "image_border_cases", "image_tag_annotations", "image_training_examples",
+    "llm_calls", "parsed_url_cache", "pipeline_check_results",
+    # tag_taxonomy + image_tag_labels (migration 442) replace image_training_examples:
+    # the tag ground truth now, and — like dedup_sim.taxonomy_labels / label_proposals
+    # before them, unlike migration 309 — backend-only, with NO `_public` view, so they
+    # are registered here and NOT in _ADMIN_GATED_VIEWS / _SEEDED_ADMIN_VIEWS below.
+    # image_tag_annotations / phash_pair_notes came out alongside
+    # image_training_examples: no app code touches any of the three since the
+    # tag-annotation-matrix cutover (docs/design/tag-annotation-matrix.md), and that
+    # design's Wave C drops the tables. Their still-live `_public` views keep their
+    # structural + behavioural gate assertions below until then.
+    "image_border_cases", "tag_taxonomy", "image_tag_labels",
     "workflow_failures", "workflow_run_health",
     # Added by migration 340: the audit found scrape_runs_public/recent_scrape_runs()
     # ungated and browser-readable because this list was seeded from migration 318's

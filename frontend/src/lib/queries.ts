@@ -48,7 +48,7 @@ import type {
   ScrapeRun,
   ScraperHealthChecks,
 } from './types';
-import type { BorderCase, ImageAnnotation, TrainingExample } from './api';
+import type { BorderCase } from './api';
 import { CITY_QUALITY_LEGACY } from './cityQualityLegacy';
 import { MAP_LEGACY } from './mapLegacy';
 
@@ -1903,87 +1903,10 @@ export const fetchPropertySourcesByPropertyIds = async (
   return out;
 };
 
-/* /clip-audit: the property feed — newest-first within ONE property type. Reads
- * browse_list, same read model as Browse. `category_main` is REQUIRED (no "all
- * types" option): browse_list's only covering index is `(category_main,
- * category_type, first_seen_at desc, property_id desc)` — measured live, a plain
- * `ORDER BY first_seen_at DESC` with no category filter falls back to a parallel
- * seq scan + sort (~3.5s cold on the full active cohort, over the anon 3s budget);
- * filtered by category_main it's a sub-ms index scan. Same keyset machinery as the
- * Browse table (lib/keyset) so paging behaves identically and stays index-matched. */
-export interface ClipAuditPropertyRow {
-  property_id: number;
-  sreality_id: number;
-  category_main: string;
-  category_type: string | null;
-  first_seen_at: string;
-}
-
-const CLIP_AUDIT_COLS = 'property_id,sreality_id,category_main,category_type,first_seen_at';
-const CLIP_AUDIT_SORT: SortSpec = { field: 'first_seen_at', direction: 'desc' };
-export const CLIP_AUDIT_PAGE_SIZE = 24;
-
-export const fetchClipAuditProperties = async (
-  categoryMain: string,
-  cursor: KeysetCursor | null,
-): Promise<{ rows: ClipAuditPropertyRow[]; nextCursor: KeysetCursor | null }> => {
-  const base = supabase
-    .from('browse_list')
-    .select(withKeysetColumns(CLIP_AUDIT_COLS, CLIP_AUDIT_SORT))
-    .eq('category_main', categoryMain);
-  const keyed = applyKeyset(
-    base as unknown as KeysetBuilder, CLIP_AUDIT_SORT, cursor,
-  ) as unknown as typeof base;
-  const { data, error } = await keyed.limit(CLIP_AUDIT_PAGE_SIZE);
-  if (error) throw error;
-  const rows = (data ?? []) as unknown as ClipAuditPropertyRow[];
-  return {
-    rows,
-    nextCursor: nextCursorFrom(rows as unknown as Record<string, unknown>[], CLIP_AUDIT_SORT),
-  };
-};
-
-/* /clip-audit: the operator's per-image correction/note (migration
- * 308), batched by the on-screen image ids. Keyed on image_id for O(1) lookup while
- * rendering the photo grid. */
-export const fetchImageAnnotationsByImageIds = async (
-  ids: ReadonlyArray<number>,
-): Promise<Map<number, ImageAnnotation>> => {
-  if (ids.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('image_tag_annotations_public')
-    .select('image_id,tag_flagged,render_flagged,note,updated_at')
-    .in('image_id', ids as number[]);
-  if (error) throw error;
-  const out = new Map<number, ImageAnnotation>();
-  for (const row of (data ?? []) as unknown as ImageAnnotation[]) {
-    out.set(row.image_id, row);
-  }
-  return out;
-};
-
-/* /clip-audit "Train": the operator's linear-probe training-set label per image
- * (migration 309), batched by the on-screen image ids. Also used to seed the label
- * combobox's "labels currently in use" suggestion list, alongside the CLIP taxonomy. */
-export const fetchTrainingExamplesForImageIds = async (
-  ids: ReadonlyArray<number>,
-): Promise<Map<number, TrainingExample>> => {
-  if (ids.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('image_training_examples_public')
-    .select('image_id,label,updated_at')
-    .in('image_id', ids as number[]);
-  if (error) throw error;
-  const out = new Map<number, TrainingExample>();
-  for (const row of (data ?? []) as unknown as TrainingExample[]) {
-    out.set(row.image_id, row);
-  }
-  return out;
-};
-
-/* The "Border case" button's flagged/unflagged state, batched per page-group —
- * same shape/read path as fetchTrainingExamplesForImageIds, just image_id-keyed
- * with no other payload (a border case carries no value of its own). */
+/* The "Border case" button's flagged/unflagged state, batched per page-group.
+ * image_id-keyed with no other payload — a border case carries no value of its
+ * own; it is the whole-image quarantine flag, independent of any tag's
+ * tri-state in the annotation matrix. */
 export const fetchBorderCasesByImageIds = async (
   ids: ReadonlyArray<number>,
 ): Promise<Set<number>> => {
@@ -1996,31 +1919,8 @@ export const fetchBorderCasesByImageIds = async (
   return new Set((data ?? []).map((r) => (r as BorderCase).image_id));
 };
 
-/* /clip-audit training-label browser: every image filed under ONE training label,
- * newest edit first. The property feed can't express this — a label's images are
- * scattered across the whole corpus (any category, any property, most of them far
- * past the loaded page), so auditing a label as a CLASS needs its own flat read.
- *
- * The cap is deliberately the SAME 500 as the bulk-relabel endpoint's batch cap, so
- * "select all" on a fully-loaded class can never be rejected as too large. The page
- * says so when a label actually hits it (biggest class today: 86). */
-export const TRAINING_LABEL_PAGE_MAX = 500;
-
-export const fetchTrainingExamplesByLabel = async (
-  label: string,
-): Promise<TrainingExample[]> => {
-  const { data, error } = await supabase
-    .from('image_training_examples_public')
-    .select('image_id,label,updated_at')
-    .eq('label', label)
-    .order('updated_at', { ascending: false })
-    .limit(TRAINING_LABEL_PAGE_MAX);
-  if (error) throw error;
-  return (data ?? []) as unknown as TrainingExample[];
-};
-
-/* The images behind those examples. Sibling of fetchImagesByListingIds — same view
- * and columns, keyed on the image's own id instead of its listing's. */
+/* The images behind a set of annotations. Sibling of fetchImagesByListingIds —
+ * same view and columns, keyed on the image's own id instead of its listing's. */
 export const fetchImagesByImageIds = async (
   ids: ReadonlyArray<number>,
 ): Promise<Map<number, ImagePublic>> => {
@@ -2033,40 +1933,6 @@ export const fetchImagesByImageIds = async (
   const out = new Map<number, ImagePublic>();
   for (const row of (data ?? []) as unknown as ImagePublic[]) out.set(row.id, row);
   return out;
-};
-
-export interface TrainingLabelCount {
-  label: string;
-  count: number;
-}
-
-/* /clip-audit's "Jen v trénovací sadě" Tag row: how many examples exist per label —
- * lets the operator judge class coverage ("is this one big enough yet?") while
- * building the set. A GLOBAL count (the whole training set), not scoped to the
- * current Hamming-range/outcome/category filters — coverage is a property of the
- * training set itself, not of whichever window is currently being browsed. Same
- * underlying read as fetchDistinctTrainingLabels (see its comment re: bound), just
- * aggregated client-side instead of deduped, since the table is still small. */
-export const fetchTrainingLabelCounts = async (): Promise<TrainingLabelCount[]> => {
-  /* Exhaustive — the labeling program grows this daily (1,198 rows when the
-   * old silent `.limit(2000)` was replaced; it was the nearest-term casualty). */
-  const rows = await fetchAllRows<{ image_id: number; label: string }>({
-    relation: 'image_training_examples_public',
-    build: () =>
-      supabase
-        .from('image_training_examples_public')
-        .select('image_id,label', { count: 'exact' }),
-    orderBy: [{ column: 'image_id' }],
-    key: ['image_id'],
-    expectMax: 250_000,
-  });
-  const counts = new Map<string, number>();
-  for (const row of rows) {
-    counts.set(row.label, (counts.get(row.label) ?? 0) + 1);
-  }
-  return [...counts.entries()]
-    .map(([label, count]) => ({ label, count }))
-    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'cs'));
 };
 
 /* Keyed on listing_id, not sreality_id (R2 Phase C resolver-chain cutover;

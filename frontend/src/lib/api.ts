@@ -723,66 +723,69 @@ export const resetNewDedupSetting = (key: string): Promise<NewDedupSetting> =>
     jwt: true,
   });
 
-// NEW DEDUP Labeling program (Wave 1, docs/design/new-dedup/PROGRAM.md) — the
-// operator-curated Taxonomy v1 vocabulary, the relabel sample, and the
-// secondary-CLIP proposal review queue. Distinct from the /labeling/* group
-// above: those write image_training_examples/image_border_cases/etc
-// directly (the confirmed store + the flat CLIP-audit annotations);
-// everything here lives in dedup_sim and only ever REACHES
-// image_training_examples via confirmNewDedupProposal/bulkConfirm — never
+// Tag annotation matrix (docs/design/tag-annotation-matrix.md) — the
+// operator-curated tag taxonomy, the relabel sample, and the tri-state
+// (positive/negative/excluded) ground truth every per-tag classifier head
+// trains from. `image_tag_labels` is the single source of truth; a proposal
+// (below) is just a machine SUGGESTION pending review, never written to
 // image_clip_tags (gallery-flip hazard).
-export interface NewDedupTaxonomyLabel {
+export type TagState = 'positive' | 'negative' | 'excluded';
+export const TAG_STATES: readonly TagState[] = ['positive', 'negative', 'excluded'];
+
+export interface NewDedupTag {
   id: number;
   label: string;
   family: string | null;
   active: boolean;
   created_at: string;
-  /* Every training row under this label — the inventory number (what a taxonomy
+  /* Positive annotations for this tag — the inventory number (what a tag
    * REMOVE deletes). It is `gate_count + border_case_count`. */
-  confirmed_count: number;
-  /* What GATE 1 counts: training rows NOT flagged as border cases. An image
-   * nobody could classify is not evidence a tag is learnable, so it doesn't move
-   * the tag toward its target — clearing the flag makes it count again, with no
-   * relabelling. Every coverage surface (bar, ≤N ceiling, picker counts) reads
-   * THIS, never confirmed_count. */
+  positive_count: number;
+  /* What GATE 1 counts: positive annotations NOT flagged as border cases. An
+   * image nobody could classify is not evidence a tag is learnable, so it
+   * doesn't move the tag toward its target — clearing the flag makes it
+   * count again, with no relabelling. Every coverage surface (bar, ≤N
+   * ceiling, picker counts) reads THIS, never positive_count. */
   gate_count: number;
   /* The parked remainder, excluded from gate_count. */
   border_case_count: number;
+  negative_count: number;
+  excluded_count: number;
   pending_count: number;
   dismissed_count: number;
 }
 export interface NewDedupLabelingOverview {
   sample_size: number;
-  labels: NewDedupTaxonomyLabel[];
+  tags: NewDedupTag[];
 }
 export const getNewDedupLabelingOverview = (): Promise<{ data: NewDedupLabelingOverview }> =>
   request<{ data: NewDedupLabelingOverview }>('/new-dedup/labeling/overview', { jwt: true });
 
-export const addNewDedupTaxonomyLabel = (
+export const addNewDedupTag = (
   label: string,
   family?: string | null,
-): Promise<{ data: NewDedupTaxonomyLabel }> =>
-  request<{ data: NewDedupTaxonomyLabel }>('/new-dedup/labeling/taxonomy', {
+): Promise<{ data: NewDedupTag }> =>
+  request<{ data: NewDedupTag }>('/new-dedup/labeling/taxonomy', {
     method: 'POST',
     json: { label, family: family ?? null },
     jwt: true,
   });
 
-export const renameNewDedupTaxonomyLabel = (
-  labelId: number,
+export const renameNewDedupTag = (
+  tagId: number,
   label: string,
-): Promise<{ data: NewDedupTaxonomyLabel }> =>
-  request<{ data: NewDedupTaxonomyLabel }>(`/new-dedup/labeling/taxonomy/${labelId}`, {
+): Promise<{ data: NewDedupTag }> =>
+  request<{ data: NewDedupTag }>(`/new-dedup/labeling/taxonomy/${tagId}`, {
     method: 'PUT',
     json: { label },
     jwt: true,
   });
 
-export const removeNewDedupTaxonomyLabel = (
-  labelId: number,
-): Promise<{ data: { label: string; deleted_training_examples: number; deleted_proposals: number } }> =>
-  request<{ data: { label: string; deleted_training_examples: number; deleted_proposals: number } }>(
-    `/new-dedup/labeling/taxonomy/${labelId}`,
+export const removeNewDedupTag = (
+  tagId: number,
+): Promise<{ data: { label: string; deleted_annotations: number } }> =>
+  request<{ data: { label: string; deleted_annotations: number } }>(
+    `/new-dedup/labeling/taxonomy/${tagId}`,
     { method: 'DELETE', jwt: true },
   );
 
@@ -805,17 +808,13 @@ export interface NewDedupLabelProposal {
   status: 'pending' | 'confirmed' | 'dismissed';
   reviewed_at: string | null;
   reviewed_by: string | null;
-  /* The image's CURRENT image_training_examples label, or null when it isn't in
-   * the training set at all — how the All tab tells an already-tagged image
-   * from one still waiting, without a second query. Not the same as `label`:
-   * a pending row's label is the model's suggestion, and a dismissed row's is
-   * what got rejected. */
-  trained_label: string | null;
+  /* This image's tri-state decision for the proposal's OWN label, or null
+   * when untouched (defaults to negative for display/training). Not the
+   * same as `label`: a pending row's label is the model's suggestion. */
+  current_state: TagState | null;
 }
-/* `status` is 'all' | 'pending' | 'confirmed' | 'dismissed' — 'all' being the
- * union of the other three (proposals of every status plus training examples
- * that never had a proposal). An unknown value is a 422, not a silent
- * unfiltered listing. */
+/* `status` is 'all' | 'pending' | 'confirmed' | 'dismissed'. An unknown
+ * value is a 422, not a silent unfiltered listing. */
 export const listNewDedupProposals = (params: {
   status?: string;
   label?: string;
@@ -826,134 +825,108 @@ export const listNewDedupProposals = (params: {
     jwt: true,
   });
 
-/* Confirm echoes back what actually landed in the training set: `label` is the
- * final one, `proposed_label` what the model had suggested, and `corrected` is
- * true when the operator overrode it. */
-export interface NewDedupConfirmResult {
+/* Echoes back what actually landed: `label` is the tag it was decided
+ * against (the corrected one if any), `proposed_label` what the model
+ * suggested, `corrected` true when the operator overrode it. */
+export interface NewDedupProposalStateResult {
   image_id: number;
   model: string;
   label: string;
-  status: 'confirmed';
+  state: TagState;
+  status: 'confirmed' | 'dismissed';
   proposed_label: string;
   corrected: boolean;
 }
 
-/* `label` corrects a wrong suggestion before accepting it — that label lands in
- * the training set instead of the proposed one (the proposal row keeps the
- * model's own prediction either way). Omit to accept the proposal as-is. */
-export const confirmNewDedupProposal = (
+/* `label` corrects a wrong suggestion before deciding — the decision lands on
+ * that tag instead of the proposed one (the proposal row keeps the model's
+ * own prediction either way). Omit to decide against the proposal as-is. */
+export const setNewDedupProposalState = (
   imageId: number,
   model: string,
+  state: TagState,
   label?: string,
-): Promise<{ data: NewDedupConfirmResult }> =>
-  request<{ data: NewDedupConfirmResult }>('/new-dedup/labeling/proposals/confirm', {
+): Promise<{ data: NewDedupProposalStateResult }> =>
+  request<{ data: NewDedupProposalStateResult }>('/new-dedup/labeling/proposals/state', {
     method: 'POST',
-    json: { image_id: imageId, model, label: label ?? null },
+    json: { image_id: imageId, model, state, label: label ?? null },
     jwt: true,
   });
 
-export const dismissNewDedupProposal = (
+export const bulkSetNewDedupProposalState = (
+  model: string,
+  imageIds: number[],
+  state: TagState,
+): Promise<{ data: { updated: number; model: string; state: TagState; image_ids: number[] } }> =>
+  request<{ data: { updated: number; model: string; state: TagState; image_ids: number[] } }>(
+    '/new-dedup/labeling/proposals/bulk-state',
+    { method: 'POST', json: { model, image_ids: imageIds, state }, jwt: true },
+  );
+
+export interface NewDedupImageTag {
+  id: number;
+  label: string;
+  family: string | null;
+  state: TagState | 'untouched';
+  updated_at: string | null;
+}
+/* Image-centric view for the detail panel: every active tag with this
+ * image's current state, grouped by family — the mirror of
+ * listNewDedupTagImages, for the "one photo, several tags at once" case. */
+export const listNewDedupImageTags = (
   imageId: number,
-  model: string,
-): Promise<{ data: NewDedupLabelProposal }> =>
-  request<{ data: NewDedupLabelProposal }>('/new-dedup/labeling/proposals/dismiss', {
-    method: 'POST',
-    json: { image_id: imageId, model },
+): Promise<{ data: NewDedupImageTag[] }> =>
+  request<{ data: NewDedupImageTag[] }>(`/new-dedup/labeling/images/${imageId}/tags`, {
     jwt: true,
   });
 
-export const bulkConfirmNewDedupProposals = (
-  model: string,
+export interface NewDedupTagImage {
+  image_id: number;
+  storage_path: string | null;
+  state: TagState | 'untouched';
+  updated_at: string | null;
+  created_by: string | null;
+}
+/* Tag-centric browse: every image in the labeling sample with its state for
+ * ONE tag — reaches images the model never proposed this tag for, and backs
+ * "kitchen = excluded" filtering (state='untouched' shows the defaulted
+ * remainder). */
+export const listNewDedupTagImages = (
+  tagId: number,
+  params: { state?: TagState | 'untouched'; limit?: number } = {},
+): Promise<{ data: NewDedupTagImage[] }> =>
+  request<{ data: NewDedupTagImage[] }>(`/new-dedup/labeling/tags/${tagId}/images`, {
+    query: params,
+    jwt: true,
+  });
+
+export const setNewDedupTagAnnotation = (
+  tagId: number,
+  imageId: number,
+  state: TagState,
+): Promise<{ data: { image_id: number; tag_id: number; state: TagState; updated_at: string } }> =>
+  request<{ data: { image_id: number; tag_id: number; state: TagState; updated_at: string } }>(
+    `/new-dedup/labeling/tags/${tagId}/annotations`,
+    { method: 'POST', json: { image_id: imageId, state }, jwt: true },
+  );
+
+export const bulkSetNewDedupTagAnnotation = (
+  tagId: number,
   imageIds: number[],
-): Promise<{ data: { confirmed: number; model: string; image_ids: number[] } }> =>
-  request<{ data: { confirmed: number; model: string; image_ids: number[] } }>(
-    '/new-dedup/labeling/proposals/bulk-confirm',
-    { method: 'POST', json: { model, image_ids: imageIds }, jwt: true },
+  state: TagState,
+): Promise<{ data: { updated: number; tag_id: number; state: TagState; image_ids: number[] } }> =>
+  request<{ data: { updated: number; tag_id: number; state: TagState; image_ids: number[] } }>(
+    `/new-dedup/labeling/tags/${tagId}/annotations/bulk`,
+    { method: 'POST', json: { image_ids: imageIds, state }, jwt: true },
   );
 
-export const bulkDismissNewDedupProposals = (
-  model: string,
-  imageIds: number[],
-): Promise<{ data: { dismissed: number; model: string; image_ids: number[] } }> =>
-  request<{ data: { dismissed: number; model: string; image_ids: number[] } }>(
-    '/new-dedup/labeling/proposals/bulk-dismiss',
-    { method: 'POST', json: { model, image_ids: imageIds }, jwt: true },
-  );
-
-// /clip-audit: flag one image's CLIP tag and/or render score as wrong, with a note.
-export type ImageAnnotation = {
-  image_id: number;
-  tag_flagged: boolean;
-  render_flagged: boolean;
-  note: string | null;
-  updated_at: string;
-};
-export const setImageAnnotation = (body: {
-  image_id: number;
-  tag_flagged?: boolean;
-  render_flagged?: boolean;
-  note?: string | null;
-}): Promise<{ data: ImageAnnotation }> =>
-  request<{ data: ImageAnnotation }>('/labeling/image-annotation', {
-    method: 'POST',
-    json: body,
-    jwt: true,
-  });
-export const deleteImageAnnotation = (
-  image_id: number,
-): Promise<{ data: { deleted: boolean } }> =>
-  request<{ data: { deleted: boolean } }>('/labeling/image-annotation', {
-    method: 'DELETE',
-    query: { image_id },
-    jwt: true,
-  });
-
-// /clip-audit "Train": one image's linear-probe training-set label (migration 309).
-// Data-collection only — nothing reads this table yet.
-export type TrainingExample = {
-  image_id: number;
-  label: string;
-  updated_at: string;
-};
-export const setTrainingExample = (body: {
-  image_id: number;
-  label: string;
-}): Promise<{ data: TrainingExample }> =>
-  request<{ data: TrainingExample }>('/labeling/training-example', {
-    method: 'POST',
-    json: body,
-    jwt: true,
-  });
-export const deleteTrainingExample = (
-  image_id: number,
-): Promise<{ data: { deleted: boolean } }> =>
-  request<{ data: { deleted: boolean } }>('/labeling/training-example', {
-    method: 'DELETE',
-    query: { image_id },
-    jwt: true,
-  });
-
-// /clip-audit summary-chip trash: remove EVERY training example under one label.
-// Only the training assignments go — the images stay. A custom label disappears
-// with its rows; a taxonomy label just drops to zero coverage.
-export const deleteTrainingLabel = (
-  label: string,
-): Promise<{ data: { deleted: number; label: string } }> =>
-  request<{ data: { deleted: number; label: string } }>(
-    '/labeling/training-examples/by-label',
-    { method: 'DELETE', query: { label }, jwt: true },
-  );
-
-// /clip-audit batch relabel: move a whole checked selection under one label in a
-// single statement (server-side dedupe + a 500-per-batch cap). Same upsert
-// semantics as setTrainingExample — an image not yet in the set gets added.
-export const bulkSetTrainingExamples = (body: {
-  image_ids: number[];
-  label: string;
-}): Promise<{ data: { updated: number; label: string; image_ids: number[] } }> =>
-  request<{ data: { updated: number; label: string; image_ids: number[] } }>(
-    '/labeling/training-examples/bulk',
-    { method: 'POST', json: body, jwt: true },
+export const clearNewDedupTagAnnotation = (
+  tagId: number,
+  imageId: number,
+): Promise<{ data: { image_id: number; tag_id: number; deleted: boolean } }> =>
+  request<{ data: { image_id: number; tag_id: number; deleted: boolean } }>(
+    `/new-dedup/labeling/tags/${tagId}/annotations/${imageId}`,
+    { method: 'DELETE', jwt: true },
   );
 
 // "Border case" flag (migration 310): even a human isn't confident about this

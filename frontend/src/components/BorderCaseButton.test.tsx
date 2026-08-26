@@ -1,5 +1,5 @@
-/* BorderCaseButton — the shared quarantine toggle rendered by /clip-audit's
- * TrainControl and the NEW DEDUP Labeling review tile.
+/* BorderCaseButton — the shared quarantine toggle rendered by the NEW DEDUP
+ * Labeling review tiles (both the proposal grid and the tag-sample grid).
  *
  * Presentational: it reads and calls the store, nothing else. Pins the two
  * states, that a click delegates with THIS tile's image id, and that an

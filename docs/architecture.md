@@ -741,16 +741,22 @@ renumber.** Navigate by area:
     `GET /properties/merges`, `POST /properties/merges/{group}/unmerge` and
     `GET /properties/merged` (`api/property_merge.py`). Labeling / annotation CRUD that the old
     dedup page carried — training examples, border cases, image annotations, pHash pair notes —
-    re-homed under `/labeling/*` (`api/labeling.py`) because it is the new design's training
-    input, not an engine decision. Interim caveat: the unmerge *button* lived on the deleted
-    Dedup page, so until the rebuild gives it a home, unmerge is API-only.
+    first re-homed under `/labeling/*` (`api/labeling.py`), then (docs/design/tag-annotation-matrix.md,
+    2026-08) superseded: the confirmed-training-set half moved to a permanent, per-(image, tag)
+    tri-state ground truth (`tag_taxonomy` + `image_tag_labels`, migration 442, managed under
+    `/new-dedup/labeling/*`) that every independent per-tag classifier head will train from, and
+    the old ClipAudit page (its only other consumer) was retired outright. `/labeling/*` now
+    carries only border-case flagging (`image_border_cases`) — `image_tag_annotations` and
+    `phash_pair_notes` had zero live callers even before the cutover. `image_training_examples`
+    itself is superseded but not yet dropped (a separately-gated destructive migration).
+    Interim caveat: the unmerge *button* lived on the deleted Dedup page, so until the rebuild
+    gives it a home, unmerge is API-only.
     **Signal producers keep running** — they are the substrate the new engine will consume, and
     stopping them would leave a cold start: image pHash (`compute_image_phash.yml`), the
     self-hosted CLIP tagger and its embeddings (`clip_tag.yml` / `clip_retag.yml`, writing
     `image_clip_tags` + `image_clip_embeddings`), and the operator's labeling corpus
-    (`image_training_examples`, `image_border_cases`, `image_tag_annotations`,
-    `phash_pair_notes`). `listing_image_comparisons` (the agent-facing
-    `compare_listing_images` tool) is unrelated to dedup and unaffected.
+    (`tag_taxonomy`, `image_tag_labels`, `image_border_cases`). `listing_image_comparisons`
+    (the agent-facing `compare_listing_images` tool) is unrelated to dedup and unaffected.
 16. **Watchdog and Browse share one definition of "matches."** Saved watchdog filters live
     in `notification_subscriptions` (migration 056); the background matcher in
     `api/notifications.py` builds its WHERE clauses from the **same** logic Browse uses

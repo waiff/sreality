@@ -2,12 +2,12 @@ import { TrashIcon } from '@/components/icons';
 
 // A toggle-style filter pill: on/off, an optional trailing count badge (omit
 // `count` for the plain form). Used wherever a surface needs a row of
-// single-select text filters (source, property type, training label).
+// single-select text filters (source, property type, tag).
 //
 // `onRemove` (optional) splits the pill into two buttons — the toggle and a small
-// trailing trash — for chips that are also deletable things, not just filters
-// (/clip-audit's training-set labels). Omitted, the markup is the classic single
-// button, unchanged for every existing call site.
+// trailing trash — for chips that are also deletable things, not just filters.
+// Omitted, the markup is the classic single button, unchanged for every existing
+// call site.
 export default function FilterChip({
   on,
   label,
