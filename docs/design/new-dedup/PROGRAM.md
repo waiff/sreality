@@ -28,6 +28,7 @@ until the whole stack is approved end-to-end. Other rules:
 | Legacy marking | DB-only: `property_merge_events.generation='legacy'` backfill |
 | Old DB objects | Queues dropped; decision ledger + golden + LLM verdict caches kept frozen |
 | L0 fields | street=`street`/`street_name_key`, geo=`geom` 75 m, dispo=`disposition`, floor=`floor` ±2 (byt only), area=`usable_area` (`estate_area` for pozemek) |
+| L0 path B (2026-08-26) | **Parallel geo-free candidate path, evaluated against path A** (the original three-layer path, now named path A): block on town+disposition, falling back to town+area where disposition is absent; byt floor ±2 disqualifier with an explicit floor-missing fallback; everything else per path A. Born from the remax location sampling — see the W2 wave entry + the 2026-08-26 progress-ledger entry |
 | Area tolerance | **5% general, 2% pozemek** (exposed settings) |
 | Clique guard | **PARKED** — operator runs separate location data-quality sessions; candidate audit ships pin/clique statistics only |
 | Family semantics | First-shared-family vs waterfall = settings **toggle**, per level (pHash and embeddings separately); **default waterfall** |
@@ -76,11 +77,36 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   gallery-flip hazard); iterate sample until 300 proposals for ≥50% of categories, then assess
   coverage with operator. Operator confirms/dismisses into the training set. ⛳ per sample round.
   **Gate 1: 150 training images per active tag.**
-- **W2 — Level 0: candidate selection.** Primary path + 2 fallbacks + byt floor rule, sim
-  candidate store, **Candidate audit page** (type × path matrix; missing-field tables overall +
-  per portal per type; pin/clique statistics). Recall diagnostic vs legacy manual merges only if
-  granted (**bold request** at that moment). ⛳ after mechanics, after audit page.
-  **Gate 2: operator satisfied no rightful candidates are lost to data quality.**
+- **W2 — Level 0: candidate selection — TWO parallel paths, built and evaluated against each
+  other** (operator directive 2026-08-26). Sim candidate store keyed by path, so every pair
+  records which path(s) produced it and the **Candidate audit page** (type × path matrix;
+  missing-field tables overall + per portal per type; pin/clique statistics) can compare the
+  paths side by side, including pair volume per path. Recall diagnostic vs legacy manual merges
+  only if granted (**bold request** at that moment). ⛳ after mechanics, after audit page.
+  **Gate 2: operator satisfied no rightful candidates are lost to data quality, and the
+  path A vs path B evaluation is read and ruled on.**
+  - **Path A (the original):** the three-layer fallback — street+geo+dispo → geo+dispo →
+    geo+area — with `geom` 75 m, the byt floor rule, and the tolerances per the 2026-08-05
+    ledger rows above.
+  - **Path B (2026-08-26):** no layered fallback structure. Block on **town + disposition**;
+    where disposition is unavailable, **town + area** (area tolerance as path A: 5% general,
+    2% pozemek). **Byt-only floor rule applies at each stage**: (I) floor present on both sides
+    and differing by more than ±2 → disqualify the pair; (II) floor unavailable on either side
+    → the pair proceeds without the floor check. Everything else — category compatibility,
+    sale↔rent never pairing, same-portal pairs valid, no `is_active` filter, field mappings —
+    follows path A's instructions unchanged.
+    *Why path B exists:* the 2026-08-26 remax location-validation sampling found portal pins
+    that are **specific but false** (remax 420430: a dům pinned in an open field — only
+    satellite imagery could catch it, and we are not building that), on top of the known
+    town-centroid cliques. A duplicate pair where one side carries false geo can never meet
+    through any geo- or street-anchored layer, so path A structurally misses exactly the
+    cross-portal duplicates dedup exists to find.
+    *Known caveat the evaluation must watch:* "town" is the normalized obec, and today
+    `listings.obec_id` is itself derived from the pin — so path B survives parcel-wrong and
+    centroid pins (the dominant failure mode: the false pin still lands inside the right obec)
+    but not a pin wrong past a town boundary. The audit page should surface how often that
+    residual occurs, and the type × path matrix must show per-path pair counts so path B's
+    candidate volume (town × disposition blocks are large) is measured, not guessed.
 - **W3 — Linear probe + full retag.** Train probe on the gated training set (grouped splits,
   pinned encoder, versioned artifact); validate on the Labeling page; campaign-retag the corpus
   into the sim tag store. **Gate 3: operator accepts tag quality; per-type default tag-family
@@ -119,6 +145,18 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 - CLAUDE.md "psql" guidance inoperable in cloud-only mode — fix text in W0 docs pass.
 
 ## Progress ledger (update every session, newest first)
+
+- 2026-08-26 — **L0 grows a parallel candidate path (path B) — operator directive from the
+  remax location-validation sampling.** While hand-checking 20 random remax listings against
+  their live pages (location program, per-portal validation), the operator found a pin that is
+  *specific but false* — remax 420430, a dům pinned in an open field, indistinguishable from a
+  good pin without satellite imagery — on top of the already-known centroid cliques. The dedup
+  consequence: a duplicate pair where one side carries false geo never meets through street- or
+  geo-anchored blocking, on any layer. Path B (spec in the amended W2 wave entry + a new
+  decisions-ledger row): town+disposition, falling back to town+area, the byt floor ±2
+  disqualifier with an explicit floor-missing fallback, everything else per path A; built
+  alongside path A and compared on the candidate audit page, with the ruling folded into
+  Gate 2. Recorded now so W2's build starts from two paths, not one.
 
 - 2026-08-21 (part 2) — **Gate 1 stops counting border cases** (operator decision, reversing the
   call recorded in part 1 below — which had deliberately left `confirmed_count` alone rather than

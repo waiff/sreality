@@ -83,6 +83,12 @@ W1 (shared prerequisites + labeling program):
 
 Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
 
+2026-08-26: W2's candidate selection now specifies **two parallel paths** — the original
+street/geo-anchored path A and a geo-free path B (town+disposition → town+area, byt floor ±2
+with a floor-missing fallback) — added by operator directive after the remax location sampling
+surfaced *specific-but-false* GPS pins that no geo-anchored layer can survive. Both paths are
+built and compared on the candidate audit page; the ruling lands at Gate 2 (PROGRAM.md).
+
 ## Data-quality prerequisite (operator-run, parallel to the code work)
 
 Flagged during W0 recon (2026-08-05): **122,920 listings sit on 4,206 coordinate pins shared by
