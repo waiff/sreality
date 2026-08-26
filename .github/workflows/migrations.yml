@@ -235,7 +235,17 @@ jobs:
       # pins the two columns migration 437 deliberately does NOT have — last_error and
       # last_started_at — because a plpgsql handler's write cannot survive its own re-raise,
       # so a published has_error could only ever read 'false', including during an outage.
-      - name: Every derived artifact declares its freshness (migration 437)
+      #
+      # Migration 440 emptied the `_W7_BACKLOG` exemption set, so the diff now covers all 14
+      # artifacts with nothing excused, and adds three catalog rails the offline scanners
+      # cannot see: that BOTH blue-green rebuild functions stamp derived_artifacts and no
+      # longer reference the dropped browse_read_model_state (restoring that stamp makes
+      # every tick raise inside its own handler and silently stop republishing browse_list),
+      # that the singleton and its _public view stay dropped, and that 437's temporary UNION
+      # adapter stays out (with it, two artifacts are published twice and the panel
+      # double-renders — the column contract is identical either way, so only the view
+      # definition can tell).
+      - name: Every derived artifact declares its freshness (migrations 437, 440)
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
           DB_RAILS_REQUIRED: "1"
