@@ -178,3 +178,52 @@ def test_the_gate_still_reads_live(conn):
         "is_platform_admin() gained an argument — it would no longer be pseudoconstant "
         "and the (select ...) hoist would stop being valid"
     )
+
+
+def test_every_gated_function_keeps_definer_and_a_pinned_search_path(conn):
+    """The nine admin-gated reporting functions must not lose their attributes.
+
+    This is the rail that replaced wave W1b rather than performing it. W1b would have
+    rewritten 34 objects (25 views + these 9 functions) to spell the gate as
+    `(select is_platform_admin())` for uniformity. Measured, that buys **nothing**: in all
+    34 the gate stands alone, so it is already a pseudoconstant the planner emits as a
+    One-Time Filter — one evaluation per statement either way. The hoist only pays where
+    the gate sits in an `OR` with a column reference, which is the ten POLICIES migration
+    431 already fixed.
+
+    What it would have cost is real. `CREATE OR REPLACE FUNCTION` silently drops every
+    attribute the new text does not restate. Measured live: all nine of these are
+    `SECURITY DEFINER` **and** all nine pin `SET search_path=public`. A replay that forgets
+    either turns a definer-rights function loose on a caller-controlled search_path — the
+    textbook escalation shape — and nothing else in the suite would have noticed, because
+    the rows returned are identical.
+
+    So the hazard is guarded permanently instead of being taken once for no gain: any
+    future migration that replays one of these and drops an attribute goes RED here.
+
+    RED by: removing `SECURITY DEFINER` or the `SET search_path` clause from any one of
+    them, which is exactly what a careless `CREATE OR REPLACE` does.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "select p.proname, p.prosecdef, coalesce(array_to_string(p.proconfig, ','), '') "
+            "  from pg_proc p join pg_namespace n on n.oid = p.pronamespace "
+            " where n.nspname = 'public' and p.prosrc ~ '\\mis_platform_admin\\M' "
+            "   and p.proname <> 'is_platform_admin' "
+            " order by p.proname"
+        )
+        rows = cur.fetchall()
+
+    assert rows, (
+        "no admin-gated functions found — the discovery predicate stopped matching, so "
+        "this rail would pass vacuously"
+    )
+    offenders = [
+        f"{name} (secdef={secdef}, config={config or 'none'})"
+        for name, secdef, config in rows
+        if not secdef or "search_path=" not in config
+    ]
+    assert offenders == [], (
+        "admin-gated function(s) lost SECURITY DEFINER or their pinned search_path — a "
+        f"definer-rights function on a caller-controlled search_path: {offenders}"
+    )

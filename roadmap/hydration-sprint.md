@@ -855,7 +855,7 @@ Same ledger, same rules, plus what this build's evidence earned:
 | W0a | F1 location index + F2 autovacuum (migs 429, 430) | [#1164](https://github.com/waiff/sreality/pull/1164) | ✅ merged |
 | W0b | F3 teardown — 5 objects + jobid 8 (mig 432) | [#1167](https://github.com/waiff/sreality/pull/1167) | ✅ merged |
 | W1a | Item 4 — admin gate hoist, 10 policies (mig 431) | [#1166](https://github.com/waiff/sreality/pull/1166) | ✅ merged |
-| W1b | Item 4 — 36 view/function wraps (uniform spelling) | — | |
+| W1b | Item 4 — 34 wraps **declined**; the hazard railed instead | [#1181](https://github.com/waiff/sreality/pull/1181) | ✅ merged |
 | W2 | Item 1a — `_check_daily_cost` spelling | [#1163](https://github.com/waiff/sreality/pull/1163) | ✅ merged |
 | W3 | Item 1b — hour rollup + watermark + F5-minimal registry (mig 437) | [#1174](https://github.com/waiff/sreality/pull/1174) | ✅ merged |
 | W4 | Item 3 — broker deferred join (mig 435) | [#1171](https://github.com/waiff/sreality/pull/1171) | ✅ merged |
@@ -1488,6 +1488,36 @@ still pinned at 900.6 s against the 900 s budget. And the structural defect F6 t
 untouched by any of this — `refresh_health_matviews` is a **six-matview sequential fan-out
 with no per-matview error handling**, so one slow matview still kills the other five. Specify
 it, as resilience work rather than an outage fix.
+
+### W1b — declined, and the hazard railed instead (no migration)
+
+**The earn-test said don't.** W1b would have rewritten **34 objects** (25 views + 9
+functions, re-counted live — the ledger's "27 views" predates W3/W5) to spell the gate as
+`(select is_platform_admin())` for uniform spelling. In all 34 the gate **stands alone**, so
+it is already a pseudoconstant the planner emits as a One-Time Filter: **one evaluation per
+statement, before and after.** The hoist only pays where the gate sits in an `OR` with a
+column reference — which is exactly the ten policies W1a already fixed. Zero blocks, zero
+rows, no claim to make.
+
+**And the cost was not zero.** One hazard I expected turned out not to apply and one did:
+
+- `CREATE OR REPLACE VIEW` resets `reloptions`, which would silently drop
+  `security_invoker=on`. Measured: **none of the 25 views carries reloptions at all.** Not a
+  live hazard. Recorded because the W1a entry cites it as a reason for the split.
+- `CREATE OR REPLACE FUNCTION` drops every attribute the new text does not restate.
+  Measured: **all 9 gated functions are `SECURITY DEFINER` AND all 9 pin
+  `SET search_path=public`.** A replay that forgets either turns a definer-rights function
+  loose on a caller-controlled search_path — the textbook escalation shape — and **nothing
+  in the suite would have caught it**, because the rows returned are identical.
+
+So the wave is declined and its risk converted into a permanent guard:
+`test_every_gated_function_keeps_definer_and_a_pinned_search_path` discovers the set from
+`pg_proc.prosrc` (not a hand-list, so a tenth function is covered the day it appears),
+asserts the set is non-empty so it cannot pass vacuously, and fails if any member loses
+either attribute. Verified against production before shipping: **9 discovered, 0 offenders.**
+
+That is strictly more valuable than the wraps: it protects against *any* future migration
+that replays one of these, not just against this one that will now never run.
 
 ### Filed with a trigger
 
