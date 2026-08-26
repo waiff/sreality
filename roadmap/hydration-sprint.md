@@ -1313,6 +1313,43 @@ the OpenAI credit outage since 2026-08-15 has driven `llm_calls` to ~59 rows/day
 comparison (~1,250 → ~70–100) is the honest one for the hourly grain. The daily 10,439 → 47
 is not affected, because its cost was always in the rollup scan, not the live edge.
 
+### W6a — the map payload, before the map read is rewritten (no migration)
+
+Split out of W6 so the RPC's diff is only about the read shape. Three defects, all in
+the client, none needing a schema change.
+
+**Two columns nobody reads.** `subtype` is **0 of 50,000 non-NULL** in the default cohort
+and appears nowhere in `ListingMap.tsx`; `tom_days` is fully populated and equally unread.
+Every column in `MAP_COLS` is serialised into a GeoJSON feature property for **every pin**,
+so an unread column is pure wire cost. Measured on the live cohort: **25,357,862 →
+23,621,798 bytes, −1.66 MB (6.8 percent)**. (Measured with `json_build_object`, whose output
+is close to but not byte-identical with PostgREST's serialiser — the delta is the claim, not
+the absolute.)
+
+**The comment that justified the cap was off by ~an order of magnitude.** `queries.ts` said
+*"50k features ≈ 0.3 MB gzipped"*. The real payload is **22.66 MB raw / 453 B per row**. That
+sentence was the whole stated rationale for `MAP_CAP`.
+
+**And the cap is not the only cap.** `authenticator` carries `pgrst.db_max_rows=50000`
+(migration 394, verified live), so PostgREST truncates server-side at the same number.
+Deleting the client `.limit()` would not lift the truncation — it would only stop the client
+knowing about it. Both have to move together, and W6's designed rail ("no cohort read applies
+`.limit()` without `.order()`") would have gone **green on a read that still truncates**.
+
+**Corollary F, applied to the copy.** The pill read `50 000 of 106 173 mapped · capped at
+50 000 — refine filters`. That is arithmetically correct, which is exactly why the defect
+survived: it is honest about the SIZE of what is missing and silent about its KIND. The cap
+is applied with **no ORDER BY**, so the plotted pins are whatever the index scan reached first
+— in practice the southernmost matches — and "capped" alone invites reading them as a
+representative sample. Now: `· capped at 50 000 — an arbitrary slice, not a sample`, with the
+mechanism in the title attribute, and the number derived from `MAP_CAP` so the copy cannot
+drift from the constant it describes.
+
+`capped` itself is left as `rows.length >= MAP_CAP` and **documented as undecidable at the
+boundary**: PostgREST clamps at the same 50,000, so a 50,001st row is unobservable from the
+client. The pill states truncation from `cohortTotal > total`, which *is* decidable, and uses
+`capped` only to explain why.
+
 ### STOP 1 — the T0 baseline, captured 2026-08-25 05:37 UTC
 
 Captured **at the moment F1 landed**, because the "before" window is the *past* 24 h and
