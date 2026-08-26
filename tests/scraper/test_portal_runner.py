@@ -539,3 +539,177 @@ def test_run_resilient_closes_self_opened_conn_on_exhaustion(monkeypatch):
 
     assert original.closed                         # broken original closed in-loop
     assert opened and all(c.closed for c in opened)  # every self-opened conn closed
+
+
+# --- run_phase: scrape_runs lifecycle + honest crash accounting -------------
+#
+# W0.2. This lifecycle used to be copy-pasted into every `*_main.py`, and the
+# `finally: _finalize(run_id, {}, drain=True)` in all nine copies is why the six
+# portals that crashed on 2026-08-26 recorded `scrape_runs.errors = 0`.
+
+
+class _PhaseRecorder:
+    """Captures what run_phase writes to scrape_runs, via the db seam."""
+
+    def __init__(self, monkeypatch, *, run_id: int | None = 42) -> None:
+        self.starts: list[tuple[str, str]] = []
+        self.finals: list[tuple[int, dict[str, Any]]] = []
+        self.bumps: list[tuple[int, dict[str, Any]]] = []
+        monkeypatch.setattr(portal_runner.db, "connect", lambda: _Conn())
+        monkeypatch.setattr(
+            portal_runner.db, "scrape_run_start",
+            lambda _c, run_type, source: (
+                self.starts.append((run_type, source)) or run_id),
+        )
+        monkeypatch.setattr(
+            portal_runner.db, "scrape_run_finalize",
+            lambda _c, rid, **kw: self.finals.append((rid, kw)),
+        )
+        monkeypatch.setattr(
+            portal_runner.db, "bump_scrape_run_counts",
+            lambda _c, rid, **kw: self.bumps.append((rid, kw)),
+        )
+
+
+def test_run_phase_finalizes_a_clean_index_run(monkeypatch):
+    rec = _PhaseRecorder(monkeypatch)
+    rc = portal_runner.run_phase(
+        _FakePortal(), "index",
+        lambda portal, dry_run, **kw: (0, {"index_pages": 4, "errors": 0}), False,
+    )
+    assert rc == 0
+    assert rec.starts == [("index", "fake")]        # source comes off the portal
+    assert rec.finals[0][1]["index_pages"] == 4
+    assert rec.finals[0][1]["errors"] == 0
+    assert rec.bumps == []                          # nothing crashed
+
+
+def test_run_phase_crash_bumps_errors_and_leaves_ended_at_unstamped(monkeypatch):
+    """The regression this wave exists for: a drain that dies mid-flight must not
+    be recorded as a finished run with errors=0."""
+    rec = _PhaseRecorder(monkeypatch)
+
+    def _crash(portal, dry_run, **kw):
+        raise psycopg.errors.CheckViolation(
+            'new row for relation "listings" violates check constraint '
+            '"listings_area_basis_check"'
+        )
+
+    monkeypatch.setattr(portal_runner, "run_detail_drain", _crash)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        portal_runner.run_phase(_FakePortal(), "detail", _crash, False)
+
+    assert rec.bumps == [(42, {"errors": 1})]   # the run says it failed
+    assert rec.finals == []                     # and never claims it completed
+
+
+def test_run_phase_crash_on_the_index_lane_is_recorded_too(monkeypatch):
+    rec = _PhaseRecorder(monkeypatch)
+
+    def _crash(portal, dry_run, **kw):
+        raise RuntimeError("index walk fell over")
+
+    with pytest.raises(RuntimeError):
+        portal_runner.run_phase(_FakePortal(), "index", _crash, False)
+    # The index lane previously returned early from _finalize on an empty agg, so a
+    # crashed walk wrote nothing at all — not even an error.
+    assert rec.bumps == [(42, {"errors": 1})]
+    assert rec.finals == []
+
+
+def test_run_phase_records_the_crash_before_the_exception_propagates(monkeypatch):
+    """Ordering matters: the process may be dying, so the error has to be on the
+    row before the exception leaves run_phase."""
+    _PhaseRecorder(monkeypatch)
+    seen: list[str] = []
+    monkeypatch.setattr(
+        portal_runner.db, "bump_scrape_run_counts",
+        lambda _c, rid, **kw: seen.append("bumped"),
+    )
+
+    def _crash(portal, dry_run, **kw):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        portal_runner.run_phase(_FakePortal(), "detail", _crash, False)
+        seen.append("propagated")
+    assert seen == ["bumped"]
+
+
+def test_run_phase_uses_drain_finalize_semantics_only_for_the_drain(monkeypatch):
+    rec = _PhaseRecorder(monkeypatch)
+    p = _FakePortal()
+    monkeypatch.setattr(
+        portal_runner, "run_detail_drain",
+        lambda portal, dry_run, **kw: (0, {"listings_updated": 3}),
+    )
+    portal_runner.run_phase(
+        p, "index", lambda portal, dry_run, **kw: (0, {"index_pages": 1}), False)
+    portal_runner.run_phase(p, "detail", portal_runner.run_detail_drain, False)
+    # The drain persists counters per chunk, so its finalize must not re-write them.
+    assert [kw["bump_already_applied"] for _rid, kw in rec.finals] == [False, True]
+
+
+def test_run_phase_dry_run_touches_no_scrape_run(monkeypatch):
+    rec = _PhaseRecorder(monkeypatch)
+    rc = portal_runner.run_phase(
+        _FakePortal(), "index",
+        lambda portal, dry_run, **kw: (0, {"index_pages": 2}), True)
+    assert rc == 0
+    assert rec.starts == [] and rec.finals == [] and rec.bumps == []
+
+
+def test_run_phase_dry_run_crash_records_nothing(monkeypatch):
+    rec = _PhaseRecorder(monkeypatch)
+
+    def _crash(portal, dry_run, **kw):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        portal_runner.run_phase(_FakePortal(), "detail", _crash, True)
+    assert rec.bumps == []
+
+
+def test_run_phase_survives_a_failed_scrape_run_start(monkeypatch):
+    """No run row (a DB hiccup at start) must not become a crash of its own."""
+    rec = _PhaseRecorder(monkeypatch)
+    monkeypatch.setattr(
+        portal_runner.db, "scrape_run_start",
+        lambda _c, run_type, source: (_ for _ in ()).throw(RuntimeError("no db")),
+    )
+    rc = portal_runner.run_phase(
+        _FakePortal(), "index",
+        lambda portal, dry_run, **kw: (0, {"index_pages": 1}), False)
+    assert rc == 0
+    assert rec.finals == []          # run_id is None -> nothing to finalize
+    assert rec.bumps == []
+
+
+def test_run_phase_crash_recording_failure_never_masks_the_real_exception(monkeypatch):
+    """Bookkeeping is best-effort: if the DB is the thing that is down, the caller
+    must still see the ORIGINAL error, not a secondary one from the bump."""
+    _PhaseRecorder(monkeypatch)
+    monkeypatch.setattr(
+        portal_runner.db, "bump_scrape_run_counts",
+        lambda *_a, **_k: (_ for _ in ()).throw(psycopg.OperationalError("db gone")),
+    )
+
+    def _crash(portal, dry_run, **kw):
+        raise ValueError("the real problem")
+
+    with pytest.raises(ValueError, match="the real problem"):
+        portal_runner.run_phase(_FakePortal(), "detail", _crash, False)
+
+
+def test_run_phase_passes_run_id_and_kwargs_through_to_the_runner(monkeypatch):
+    _PhaseRecorder(monkeypatch)
+    seen: dict[str, Any] = {}
+
+    def _runner(portal, dry_run, **kw):
+        seen.update(kw)
+        return (0, {})
+
+    portal_runner.run_phase(
+        _FakePortal(), "detail", _runner, False, max_claims=17, detail_workers=3)
+    assert seen["run_id"] == 42
+    assert seen["max_claims"] == 17 and seen["detail_workers"] == 3
