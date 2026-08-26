@@ -267,11 +267,24 @@ rules. Identify which one a task belongs to before you start.
   registries) — these MUST go through `frontend/src/lib/fetchAllRows.ts`
   (complete-or-throw paging, correct under any `db-max-rows`; ESLint bans `.range()`
   everywhere else); or a *bounded* read with an explicit `.limit()` and, where "more
-  exists" matters, a communicated flag (the map's `MAP_CAP` + `capped` pattern).
+  exists" matters, a communicated flag (the `MAP_CAP` + `capped` pattern).
   PostgREST's server clamp is itself VERSIONED config — migration 394 pins
   `pgrst.db_max_rows = 50000` (= `MAP_CAP`) on the `authenticator` role, after the
   unversioned dashboard value shipped two silent-truncation bugs at 1,000 and was then
   lifted out-of-band; keep the dashboard "Max Rows" field agreeing with the migration.
+  **A bounded read needs an `ORDER BY` to be a contract, and W6b (migration 439) is why
+  that is a rule and not a preference.** The Browse map's `.limit(MAP_CAP)` had none, so
+  "the first 50,000" meant "the 50,000 southernmost", and 52 percent of the default
+  cohort — everything north of ~lat 50.025 — was silently absent: *a `LIMIT` without an
+  `ORDER BY` is a sample, and a sample chosen by the planner is not a contract*
+  (Corollary F). The fix was not a bigger cap but a fourth shape, an *aggregate* read
+  (`browse_map_cells`): the server answers with a result whose SIZE IS BOUNDED BY
+  CONSTRUCTION — a 20 x 13 integer-division grid over `properties_map_mv`, no `LIMIT`
+  anywhere — and reports the cohort's exact total alongside it. Reach for that shape
+  whenever a surface renders a summary of many rows rather than the rows themselves;
+  reach for `.limit()` + `capped` only when the rows themselves are the point AND the
+  read is ordered. Two lanes still read the map unbounded on purpose: the portal mirror
+  (`listing_feed_public` has no matview twin) and the `?map=legacy` bisect hatch.
 - **All code-splitting goes through `frontend/src/lib/lazyChunk.ts`**, never React's bare
   `lazy` (ESLint bans it outside that file — the SPA's second such chokepoint after
   `fetchAllRows`). Every deploy rotates every hashed chunk filename (measured: 30 of 30

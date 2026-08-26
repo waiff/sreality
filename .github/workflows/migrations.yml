@@ -187,6 +187,29 @@ jobs:
           pytest tests/test_broker_leaderboard_plan_shape.py \
                  tests/test_broker_leaderboard_live.py -q
 
+      # W6b's map RPC makes two claims a real schema is the only thing that can check.
+      #
+      # PLAN: the grid aggregate reads properties_map_mv INDEX-ONLY (1,627 blocks for the
+      # whole default cohort, against 3,938 to ship half of it). That rests entirely on
+      # every aggregated column being inside properties_map_mv_cover — adding obec_id,
+      # property_id or source turns it into an Index Scan over a 433 MB matview and
+      # changes no result anywhere, so nothing else goes red. The rail reads the target
+      # list OUT of the shipped function and EXPLAINs it.
+      #
+      # BEHAVIOUR: the cell count is bounded BY CONSTRUCTION (there is no LIMIT in the
+      # function — a LIMIT is what W6b exists to remove), and every mappable row is
+      # counted exactly once, in a cell or in off_grid. Deleting the edge clamp or the
+      # extent guard leaves every count correct and only unbounds the payload. The
+      # behavioural rail parks the matview and substitutes a real table -- you cannot
+      # INSERT into a materialized view, and CI's replayed copy is empty.
+      - name: The map grid stays index-only and bounded (migration 439)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: |
+          pytest tests/test_browse_map_cells_plan.py \
+                 tests/test_browse_map_cells_live.py -q
+
       # The /costs rollups are only indexable because their bucket expressions name a
       # zone explicitly — a bare `called_at::date` is STABLE, and Postgres refuses to
       # index it (42P17). Revert either view and the index stops matching silently: the

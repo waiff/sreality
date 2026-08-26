@@ -6,6 +6,7 @@ import { MAP_CAP } from '@/lib/queries';
 import type {
   CityIndexDefinition,
   CuratedCity,
+  MapCell,
   MapRow,
   RentMapKraj,
   RentMapPolygon,
@@ -157,6 +158,34 @@ const toFeatureCollection = (rows: MapRow[], metric: PriceMetric): FC => ({
     id: r.listing_id,
     geometry: { type: 'Point', coordinates: [r.lng, r.lat] },
     properties: { ...r, price_label: formatPriceLabel(r, metric) },
+  })),
+});
+
+/* W6b — SERVER-side grid cells (migration 439), used instead of `rows` when the
+ * cohort is too large to plot point-by-point. They are NOT fed to the `listings`
+ * source: that source has `cluster: true`, so supercluster would re-cluster the
+ * cells and count CELLS rather than listings — a bubble reading "8" over 40,000
+ * properties, with no error anywhere. They get their own unclustered source, and
+ * the two are mutually exclusive by construction (fetchListingsForMap returns
+ * points or cells, never both). */
+type CellFeatureProps = { n: number; n_label: string };
+type CellFC = GeoJSON.FeatureCollection<GeoJSON.Point, CellFeatureProps>;
+
+/* maplibre generates `point_count_abbreviated` for its own clusters; a
+ * pre-aggregated cell has to bring its own. Same thresholds as supercluster's. */
+const abbreviateCount = (n: number): string =>
+  n >= 10_000 ? `${Math.round(n / 1000)}k`
+    : n >= 1_000 ? `${(n / 1000).toFixed(1)}k`
+      : String(n);
+
+const toCellFeatureCollection = (cells: MapCell[]): CellFC => ({
+  type: 'FeatureCollection',
+  features: cells.map((c) => ({
+    type: 'Feature',
+    /* No stable id: a cell is an aggregate, not a listing, so it is never a
+     * setFeatureState / hover-sync target. */
+    geometry: { type: 'Point', coordinates: [c.lng, c.lat] },
+    properties: { n: c.n, n_label: abbreviateCount(c.n) },
   })),
 });
 
@@ -366,8 +395,18 @@ const rentPopupHtml = (p: RentFeatureProps): string => {
 
 interface Props {
   rows: MapRow[];
+  /* W6b — server-side grid cells instead of pins, when the cohort is larger than
+   * MAP_POINT_BUDGET. Non-null and `rows` empty, or null and `rows` populated;
+   * never both. Zooming in shrinks the cohort (the viewport is a filter) until it
+   * fits, at which point real pins come back. */
+  cells?: MapCell[] | null;
+  /* Properties in the cohort whose coordinates fall outside the grid extent, so
+   * they are counted but not drawn. Reported rather than folded onto an edge
+   * cell — see MapResult.offGrid. */
+  offGrid?: number;
   /* Mappable cohort size — properties with coordinates (the map query filters
-   * lat/lng NOT NULL). This is a SUBSET of cohortTotal, not a rival total. */
+   * lat/lng NOT NULL). This is a SUBSET of cohortTotal, not a rival total.
+   * In cluster mode this is the server's exact count of the WHOLE cohort. */
   total: number | null;
   /* The full cohort total (incl. coordinate-less properties), from the one
    * canonical count. When it exceeds `total` the pill shows "X of Y mapped"
@@ -484,6 +523,8 @@ interface Props {
 
 export default function ListingMap({
   rows,
+  cells = null,
+  offGrid = 0,
   total,
   cohortTotal,
   cohortTotalApprox,
@@ -730,7 +771,7 @@ export default function ListingMap({
        * later-registered one replaced the listing popup with the city /
        * rent popup ("I clicked a listing and got city info"). */
       const listingUnderCursor = (p: maplibregl.PointLike): boolean =>
-        map.queryRenderedFeatures(p, { layers: ['point', 'clusters'] })
+        map.queryRenderedFeatures(p, { layers: ['point', 'clusters', 'cells'] })
           .length > 0;
 
       map.on('mouseenter', 'rent-map-fill', () => {
@@ -911,6 +952,75 @@ export default function ListingMap({
         paint: {
           'text-color': '#ffffff',
         },
+      });
+
+      /* W6b — the server-aggregated grid. Its OWN source, deliberately
+       * `cluster: false`: handing pre-aggregated cells to the clustering
+       * `listings` source would make supercluster count cells, not listings.
+       * Empty whenever the map is in point mode, so the two never overlap. */
+      map.addSource('map-cells', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+
+      /* Same step ramp as `clusters` above, read off `n` instead of
+       * `point_count`, so a server cell and a client cluster are visually the
+       * same object — which is what they are. */
+      map.addLayer({
+        id: 'cells',
+        type: 'circle',
+        source: 'map-cells',
+        paint: {
+          'circle-color': [
+            'step', ['get', 'n'],
+            'rgba(60, 110, 99, 0.35)',  10,
+            'rgba(60, 110, 99, 0.55)',  50,
+            'rgba(47, 87, 80, 0.75)',  200,
+            'rgba(47, 87, 80, 0.90)',
+          ],
+          'circle-radius': [
+            'step', ['get', 'n'],
+            14, 10,
+            18, 50,
+            24, 200,
+            32,
+          ],
+          'circle-stroke-color': 'rgba(60, 110, 99, 1)',
+          'circle-stroke-width': 1,
+        },
+      });
+
+      map.addLayer({
+        id: 'cell-count',
+        type: 'symbol',
+        source: 'map-cells',
+        layout: {
+          'text-field': ['get', 'n_label'],
+          'text-font': ['Noto Sans Regular'],
+          'text-size': 11,
+        },
+        paint: {
+          'text-color': '#ffffff',
+        },
+      });
+
+      /* A cell has no expansion zoom to ask for (there is no client-side
+       * cluster tree behind it), so clicking one zooms in two levels and lets
+       * the viewport-as-filter shrink the cohort. Enough zooming drops it under
+       * MAP_POINT_BUDGET and the pins come back on their own. */
+      map.on('click', 'cells', (e) => {
+        const geom = e.features?.[0]?.geometry;
+        if (!geom || geom.type !== 'Point') return;
+        map.easeTo({
+          center: geom.coordinates as [number, number],
+          zoom: Math.min(map.getZoom() + 2, 16),
+        });
+      });
+      map.on('mouseenter', 'cells', () => {
+        map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', 'cells', () => {
+        map.getCanvas().style.cursor = '';
       });
 
       map.addLayer({
@@ -1436,6 +1546,26 @@ export default function ListingMap({
      * repaint. It never re-fits: the operator's viewport is theirs. */
   }, [rows, ready, priceMetric]);
 
+  /* W6b — the same contract for the cell source. Runs unconditionally (not only
+   * when `cells` is non-null) so that switching back to point mode CLEARS the
+   * cells: leaving them would draw both layers at once and double-count the
+   * cohort on screen. */
+  useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    const src = mapRef.current.getSource('map-cells') as GeoJSONSource | undefined;
+    if (!src) return;
+    src.setData(toCellFeatureCollection(cells ?? []));
+
+    if (!cells || cells.length === 0 || didInitialFitRef.current) return;
+    /* Same one-shot fit the rows effect does — it keys on the same ref, so a
+     * cohort that arrives as cells and later resolves to points is fitted once,
+     * not twice, and the operator's own pan/zoom is never overridden. */
+    const b = new maplibregl.LngLatBounds();
+    for (const c of cells) b.extend([c.lng, c.lat]);
+    mapRef.current.fitBounds(b, { padding: 56, maxZoom: 14, duration: 700 });
+    didInitialFitRef.current = true;
+  }, [cells, ready]);
+
   /* Imperative flyTo on each new command (identity-based via ts).
    * Marks didInitialFitRef so the rows-effect doesn't subsequently
    * fitBounds-over the freshly-flown viewport. The rows refetch from
@@ -1584,6 +1714,39 @@ export default function ListingMap({
               }
             >
               · capped at {MAP_CAP.toLocaleString('cs-CZ')} — an arbitrary slice, not a sample
+            </span>
+          )}
+          {cells != null && (
+            /* Corollary F again, but for the OPPOSITE situation: nothing is
+             * missing here, and the operator must not read grouped bubbles as
+             * the old truncation. Every property in the cohort is counted in
+             * exactly one bubble, so this says what changed (grain) rather than
+             * apologising for a loss that did not happen. */
+            <span
+              className="ml-2 text-[var(--color-ink-2)]"
+              title={
+                'The cohort is larger than the map plots pin-by-pin, so the server grouped it '
+                + `into ${cells.length.toLocaleString('cs-CZ')} cells. Every matching property is `
+                + 'counted in exactly one of them — nothing is cut. Zoom in (the viewport is part '
+                + 'of the filter) and individual pins return once the cohort fits.'
+              }
+            >
+              · grouped into {cells.length.toLocaleString('cs-CZ')} cells — complete, zoom in for pins
+            </span>
+          )}
+          {offGrid > 0 && (
+            /* These rows ARE in `total` and are NOT drawn: their coordinates
+             * fall outside the grid extent (the data holds lng values from -118
+             * to +125). Placing them on an edge cell would invent a location. */
+            <span
+              className="ml-2 text-[var(--color-ochre)]"
+              title={
+                'These properties match the filters and carry coordinates, but those coordinates '
+                + 'fall outside the mapped extent, so they are counted and not drawn. Putting them '
+                + 'on the edge of the map would invent a location for them.'
+              }
+            >
+              · {offGrid.toLocaleString('cs-CZ')} outside the mapped extent
             </span>
           )}
         </Pill>

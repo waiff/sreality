@@ -51,6 +51,7 @@ import type {
 } from './types';
 import type { BorderCase, ImageAnnotation, TrainingExample } from './api';
 import { CITY_QUALITY_LEGACY } from './cityQualityLegacy';
+import { MAP_LEGACY } from './mapLegacy';
 
 /* Circle → bounding box approximation. Used when the operator picks
  * the centre+radius mode on the map: PostgREST has no native
@@ -564,14 +565,42 @@ export interface MapRow {
   is_active: boolean;
 }
 
+/* One grid cell from `browse_map_cells` (migration 439). `lat`/`lng` are the MEAN
+ * position of the points in the cell, not the cell's centre, so a bubble sits on
+ * the settlement rather than on a lattice vertex. `n` is an exact count. */
+export interface MapCell {
+  lat: number;
+  lng: number;
+  n: number;
+}
+
 export interface MapResult {
+  /* Individual pins. Empty in cluster mode -- `cells` is populated instead, and
+   * the two are never both non-empty. */
   rows: MapRow[];
+  /* Non-null when the cohort was too large to plot point-by-point and the server
+   * returned a bounded grid aggregate instead. `null` means "these are points". */
+  cells: MapCell[] | null;
+  /* The MAPPABLE cohort size — properties carrying coordinates. Deliberately
+   * smaller than the header's cohortTotal, which counts coordinate-less rows
+   * too (106,173 vs 104,232 on the default cohort, measured 2026-08-26). In
+   * cluster mode this is the server's exact count of the whole cohort, not of
+   * what was shipped. */
   total: number | null;
+  /* Rows inside the cohort whose coordinates fall OUTSIDE the grid extent, so
+   * they are counted but not drawn (105 of 104,232 on the default cohort: the
+   * data holds lng values from -118 to +125). Folding them into an edge cell
+   * would invent a location, and dropping them silently would repeat the defect
+   * W6b exists to fix — so they are reported. Always 0 in point mode and
+   * whenever a bbox is set (the extent is then the bbox itself). */
+  offGrid: number;
   /* The read reached the ceiling, so the cohort is larger than what is plotted.
    * It CANNOT distinguish "exactly MAP_CAP matches" from "more than MAP_CAP" --
    * PostgREST clamps at the same number, so a 50,001st row is unobservable from
    * here. The pill therefore states truncation from `cohortTotal > total`, which
-   * IS decidable, and uses this only to explain WHY. */
+   * IS decidable, and uses this only to explain WHY.
+   * ONLY REACHABLE on the two lanes that still read points unbounded: the
+   * portal mirror and `?map=legacy`. The cluster lane cannot truncate. */
   capped: boolean;
 }
 
@@ -874,28 +903,45 @@ export const fetchNoPriceCount = async (f: ListingFilters): Promise<number> => {
  * function's plan, making browse_stats_properties perf-equivalent to the
  * listing-grain browse_stats. Migration 173 carries the merged price-change
  * predicates, the condition-level bounds, and the with-estimates flag. */
-export const fetchListingsForMap = async (
+/* Above this many MAPPABLE rows the map asks the server to aggregate; at or
+ * below it, today's per-point read is already correct and is what runs. Measured
+ * 2026-08-26 on the live default cohort: a 2,000-row point read is 153 blocks and
+ * ~906 KB, which is the ceiling this threshold buys. The server applies it (it is
+ * the one that knows the count), and this constant is what it is told. */
+export const MAP_POINT_BUDGET = 2_000;
+
+interface MapGrid {
+  clustered: boolean;
+  cells: MapCell[] | null;
+  total: number;
+  off_grid: number;
+}
+
+/* The per-point read — today's path, unchanged, and still the right one for a
+ * cohort that fits. Split out of fetchListingsForMap so the cluster lane and the
+ * two point lanes (portal mirror, ?map=legacy) cannot drift in how they filter.
+ *
+ * It reads `properties_map_mv` (migration 254), NOT `properties_public`. Shipping
+ * up to MAP_CAP points off the live, churned `properties` table was cold-fragile
+ * (>3s, the anon statement_timeout) — the matview is a clean, all-visible, cached
+ * copy of the same columns, so the identical scan stays robust cold (~200ms). It
+ * carries properties_public's full FILTERABLE surface, so applyFilters /
+ * applyPrefilters are a drop-in (only the source differs). Rebuilt from
+ * browse_projection by rebuild_properties_map_mv() (pg_cron, 7,37 past the hour —
+ * migration 277); freshness readable off browse_read_model_state_public.
+ *
+ * Single-portal mode reads the listing-grain feed here instead (see the PORTAL
+ * MIRROR block). It has no matview twin, so that is a live indexed read of
+ * `listings` rather than the cached copy — acceptable because plotting one
+ * portal's own listings is the entire point: property-grain pins would silently
+ * relocate a listing to a sibling portal's coordinates.
+ *
+ * The `.limit(MAP_CAP)` here is UNORDERED, and that is the W6b defect — kept only
+ * on the lanes above, which is why it is not the general path any more. */
+const fetchMapPoints = async (
   f: ListingFilters,
-): Promise<MapResult> => {
-  const pre = await resolveBrowsePrefilters(f);
-  if (pre.empty) return { rows: [], total: 0, capped: false };
-  /* The map reads `properties_map_mv` (migration 254), NOT `properties_public`.
-   * Shipping up to MAP_CAP points off the live, churned `properties` table was
-   * cold-fragile (>3s, the anon statement_timeout) — the matview is a clean,
-   * all-visible, cached copy of the same columns, so the identical scan stays
-   * robust cold (~200ms). It carries properties_public's full FILTERABLE surface,
-   * so applyFilters / applyPrefilters are a drop-in (only the source differs).
-   * Rebuilt from browse_projection by rebuild_properties_map_mv() (pg_cron,
-   * every 30 min — migration 277); freshness readable off
-   * browse_read_model_state_public. */
-  /* Single-portal mode reads the listing-grain feed here too (see the PORTAL
-   * MIRROR block). It has no matview twin, so this is a live indexed read of
-   * `listings` rather than the cached copy — acceptable because the mirror
-   * cohort is bounded by one portal (largest is idnes at ~110k active rows,
-   * measured 1.2s for a full uncapped 50k-point fetch, inside the anon 3s
-   * budget) and because plotting one portal's own listings is the entire point:
-   * property-grain pins would silently relocate a listing to a sibling
-   * portal's coordinates. */
+  pre: BrowsePrefilters,
+): Promise<MapRow[]> => {
   const base = supabase
     .from(mapRelation(f))
     .select(MAP_COLS)
@@ -904,18 +950,92 @@ export const fetchListingsForMap = async (
   const scoped = applyPrefilters(applyFilters(base, f), pre);
   const { data, error } = await scoped.limit(MAP_CAP);
   if (error) throw error;
-  const rows = (data ?? []) as unknown as MapRow[];
-  /* The cohort total (which also counts coordinate-less listings) comes from
-   * fetchBrowseCount; the map only needs how many points it actually plotted
-   * and whether it hit the cap. Counting the whole cohort here too was a
-   * redundant O(cohort) exact count — the heaviest part of the map fetch,
-   * left over from before fetchBrowseCount existed. `total` is now the
-   * plotted-point count; `capped` is whether more points exist than shown. */
+  return (data ?? []) as unknown as MapRow[];
+};
+
+export const fetchListingsForMap = async (
+  f: ListingFilters,
+): Promise<MapResult> => {
+  const pre = await resolveBrowsePrefilters(f);
+  if (pre.empty) return { rows: [], cells: null, total: 0, offGrid: 0, capped: false };
+
+  /* W6b. Two lanes still read points unbounded, and both are deliberate:
+   *
+   *  - PORTAL MIRROR reads `listing_feed_public`, a live listing-grain view over
+   *    `listings` with no matview twin and no cover index to aggregate against.
+   *    Pointing browse_map_cells at it would need a second copy of the predicate
+   *    inside one function AND would silently swap the mirror's grain. The
+   *    mirror's largest cohort (idnes) exceeds MAP_CAP, so it can still truncate
+   *    — the pill says so, and closing it is FILED, not attempted here.
+   *  - ?map=legacy is the bisect hatch (lib/mapLegacy.ts).
+   *
+   * Everything else asks the server for a bounded answer first. */
+  if (MAP_LEGACY || isPortalMirror(f)) {
+    const rows = await fetchMapPoints(f, pre);
+    return {
+      rows,
+      cells: null,
+      total: rows.length,
+      offGrid: 0,
+      capped: rows.length >= MAP_CAP,
+    };
+  }
+
+  /* migration 439. Same named parameters as browse_stats_properties (one
+   * builder, so the two cohorts cannot diverge) with four deliberate overrides:
+   *
+   *   tag_ids / with_estimates / city_index_rules are already RESOLVED into the
+   *   three allowlists below by resolveBrowsePrefilters — the same resolution the
+   *   point read uses. Passing them again would apply each predicate twice
+   *   (idempotent, but the tag one is a GROUP BY ... HAVING subquery, so it is
+   *   not free), and, worse, would put two resolution paths in one fetcher.
+   *
+   *   listing_ids_filter is the third id space applyPrefilters emits `.in()` on.
+   *   browse_stats_properties has no such parameter because the legacy
+   *   city-quality path reaches it as city_index_rules instead; the map resolves
+   *   it to listing ids, and an RPC carrying only obec_id and property_id would
+   *   drop it silently. Live whenever ?cityQualityLegacy=1 is in localStorage. */
+  const { data, error } = await supabase.rpc('browse_map_cells', {
+    ...buildBrowseStatsArgs(f, {
+      obec_ids_filter: pre.obecIds,
+      property_ids_filter: pre.propertyIds,
+    }),
+    tag_ids: null,
+    with_estimates: false,
+    city_index_rules: null,
+    listing_ids_filter: pre.listingIds,
+    point_budget: MAP_POINT_BUDGET,
+  });
+  if (error) throw error;
+  const grid = data as MapGrid;
+
+  if (grid.clustered) {
+    /* The cluster lane cannot truncate: the cell count is bounded by the grid
+     * (20 x 13) by construction, with no LIMIT anywhere in the function. */
+    return {
+      rows: [],
+      cells: grid.cells ?? [],
+      total: grid.total,
+      offGrid: grid.off_grid,
+      capped: false,
+    };
+  }
+
+  /* Under the budget: a second round trip, on the cheap side of the threshold,
+   * to get the pins themselves. Deliberate — the alternative (serialising
+   * MAP_COLS inside the RPC) would put the map's select-list in two places, and
+   * the alternative to THAT (probing with a limited point read first) spends
+   * ~906 KB on every zoomed-out load to save a round trip on the zoomed-in one. */
+  const rows = await fetchMapPoints(f, pre);
   return {
     rows,
-    total: rows.length,
+    cells: null,
+    /* The server's count, not rows.length: it is the authority on how many of
+     * the cohort are mappable, and the pill's "X of Y mapped" is built on it. */
+    total: grid.total,
+    offGrid: grid.off_grid,
     capped: rows.length >= MAP_CAP,
-  };  // see MapResult.capped: at exactly MAP_CAP this is indistinguishable from a full cohort
+  };
 };
 
 export interface TableRow {
@@ -1207,9 +1327,31 @@ export interface BrowseStats {
   price_band_velocity: ReadonlyArray<PriceBandVelocityRow>;
 }
 
-export const fetchBrowseStats = async (
+/* The two id allowlists the caller has already resolved over the network. They
+ * are arguments rather than derived here because the two consumers resolve them
+ * from different places: Stats intersects city-quality with market-growth and
+ * adds the pipeline scope, while the map hands over whatever
+ * resolveBrowsePrefilters produced for the cohort reads. */
+export interface BrowseStatsResolvedFilters {
+  obec_ids_filter: number[] | null;
+  property_ids_filter: number[] | null;
+}
+
+/* The ~74-key argument object `browse_stats_properties` takes.
+ *
+ * ONE builder, because there are now TWO callers: fetchBrowseStats and
+ * fetchListingsForMap's `browse_map_cells` read (migration 439), which takes the
+ * SAME named parameters plus two of its own. Built inline in each caller, this
+ * object is the single richest opportunity for the Stats cohort and the map
+ * cohort to silently disagree — a new filter wired into one literal and not the
+ * other produces a map and a Stats tab describing different sets of properties,
+ * with no error anywhere. Extracting it collapses that surface to zero.
+ *
+ * Pure: every value comes from `f` or from `resolved`. Exported for queries.test.ts. */
+export const buildBrowseStatsArgs = (
   f: ListingFilters,
-): Promise<BrowseStats> => {
+  resolved: BrowseStatsResolvedFilters,
+): Record<string, unknown> => {
   const triToBool = (t: typeof f.hasBalcony): boolean | null =>
     t === 'any' ? null : t === 'yes';
 
@@ -1218,24 +1360,8 @@ export const fetchBrowseStats = async (
     : null;
 
   const effBbox = effectiveBbox(f);
-  /* Market-growth allowlist (obec_ids); null = no active rule, [] = no obec
-   * qualifies (the RPC's `= any('{}')` then yields total 0). Keeps Stats
-   * aligned with Map/Table. */
-  const growthObec = await resolvePriceGrowthPrefilter(f);
-  /* City-quality is obec-grain now and feeds the SAME obec_ids_filter parameter, so the two
-   * allowlists intersect here exactly as they do on the cohort reads. Under the legacy flag
-   * the rules travel as city_index_rules instead — browse_stats_properties still accepts the
-   * parameter and routes it through curated_cities_matching(), so BOTH spellings resolve to
-   * one definition (rule 16). W7 drops the parameter. */
-  const cityObec = CITY_QUALITY_LEGACY ? null : await resolveCityQualityObecPrefilter(f);
-  /* Deal-pipeline allowlist (property_ids); same contract as growthObec above —
-   * null = scope off, [] = an empty pipeline (the RPC's `= any('{}')` then
-   * yields total 0). Without this the Stats tab would keep counting the whole
-   * market while Cards/Table/Map/Count show only the pipeline: the exact
-   * count-vs-list divergence migration 351 was written to close. */
-  const pipelineProps = await resolvePipelinePrefilter(f);
 
-  const { data, error } = await supabase.rpc('browse_stats_properties', {
+  return {
     category_main_filter:    f.categoryMain.length ? f.categoryMain : null,
     category_type_filter:    f.categoryType,
     districts_filter:        f.districts.length ? f.districts.map((d) => d.name) : null,
@@ -1330,13 +1456,42 @@ export const fetchBrowseStats = async (
     apartment_condition_level_max: f.apartmentConditionLevelMax,
     /* Migration 118 — filter the Stats cohort by source portal. */
     portal_filter:           f.portals.length ? f.portals : null,
-    /* Migration 162 — market-growth obec allowlist (price-stats datasets). */
-    obec_ids_filter:         intersectPrefilters(cityObec, growthObec),
-    /* Migration 378 — generic property-id allowlist; carries the deal-pipeline
+    /* Migration 162 — market-growth obec allowlist (price-stats datasets).
+     * Migration 378 — generic property-id allowlist; carries the deal-pipeline
      * scope (rule #22) today, and is the seam any future property-grain
-     * prefilter should reuse instead of growing another bespoke param. */
-    property_ids_filter:     pipelineProps,
-  });
+     * prefilter should reuse instead of growing another bespoke param.
+     * Both are resolved over the network by the caller — see the interface. */
+    ...resolved,
+  };
+};
+
+export const fetchBrowseStats = async (
+  f: ListingFilters,
+): Promise<BrowseStats> => {
+  /* Market-growth allowlist (obec_ids); null = no active rule, [] = no obec
+   * qualifies (the RPC's `= any('{}')` then yields total 0). Keeps Stats
+   * aligned with Map/Table. */
+  const growthObec = await resolvePriceGrowthPrefilter(f);
+  /* City-quality is obec-grain now and feeds the SAME obec_ids_filter parameter, so the two
+   * allowlists intersect here exactly as they do on the cohort reads. Under the legacy flag
+   * the rules travel as city_index_rules instead — browse_stats_properties still accepts the
+   * parameter and routes it through curated_cities_matching(), so BOTH spellings resolve to
+   * one definition (rule 16). W7 drops the parameter. */
+  const cityObec = CITY_QUALITY_LEGACY ? null : await resolveCityQualityObecPrefilter(f);
+  /* Deal-pipeline allowlist (property_ids); same contract as growthObec above —
+   * null = scope off, [] = an empty pipeline (the RPC's `= any('{}')` then
+   * yields total 0). Without this the Stats tab would keep counting the whole
+   * market while Cards/Table/Map/Count show only the pipeline: the exact
+   * count-vs-list divergence migration 351 was written to close. */
+  const pipelineProps = await resolvePipelinePrefilter(f);
+
+  const { data, error } = await supabase.rpc(
+    'browse_stats_properties',
+    buildBrowseStatsArgs(f, {
+      obec_ids_filter: intersectPrefilters(cityObec, growthObec),
+      property_ids_filter: pipelineProps,
+    }),
+  );
   if (error) throw error;
   return data as BrowseStats;
 };
