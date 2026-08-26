@@ -46,7 +46,7 @@ every stored watchdog spec and saved preset, and breaking archived-run display (
 | Wave | Purpose | Test | Migration | Status |
 | --- | --- | --- | --- | --- |
 | W1 | Truth at the source: shared `derive_headline_area` across all 9 parsers, shared per-area price rail, per-basis floors | T3 | 423 | ✅ |
-| W2 | Heal stored damage: mmreality area + unit-price masquerade backfills | T3 | — | 🟨 code + dry-run; **write pass is the operator's, still not run** |
+| W2 | Heal stored damage: mmreality area + unit-price masquerade backfills | T3 | — | 🟨 all 4 dry-runs clean; **ceskereality quarantine WRITTEN**; realitymix + mmreality pending (see below) |
 | W3 | Property-grain coherence: numerator and denominator from the same child | T1+T3 | 424 | ✅ |
 | W4 | **Keystone** — `measure_price_per_m2` + `measure_price_per_m2_basis` in SQL; 6 relations repointed | T1+T2 | 425 | ✅ |
 | W5 | Python + API call sites onto the named measure (`toolkit/measures.py`) | T1+T2 | 426 | ✅ |
@@ -372,14 +372,36 @@ after reclaiming 13 lines from rules #15 and #22, whose full prose already lived
 measure's definition, why the basis is never read from `price_unit`, and why a rail rather than
 a rule.
 
-## What remains OPEN after W1–W9 — three items, none of them quietly dropped
+## What remains OPEN after W1–W9 — worked 2026-08-25/26, all three now operator-gated
 
-1. **The W2 backfill WRITE passes have not been run** (`--write` is the operator's, one portal
-   at a time): `scripts/backfill_mmreality_areas.py` and
-   `scripts/backfill_unit_price_masquerade.py`. Live 2026-08-25: mmreality dum/prodej still
-   reads a median **5 701 Kč/m² on a 905.0 m² median area** across 3 601 active rows, against
-   **48 325 Kč/m²** for the same cell on every other portal. Nothing downstream can fix this —
-   the measure is faithfully dividing a real price by a plot area stored in a floor-area column.
+1. **The W2 backfill write passes — one of four done (2026-08-26).**
+
+   **The scripts had never been run, and none of them worked.** The stall was not the
+   operator's attention: W2 shipped both scripts *without their runner workflows*
+   (`backfill_idnes_areas.py`, the precedent both were cloned from, has one), so the only way
+   to run them was a local shell holding `SUPABASE_DB_URL` — a credential that lives in
+   GitHub Actions. Once dispatched they failed three separate ways, all invisible to CI
+   because the tests exercise the pure decision functions. See
+   `#1162` (runners), `#1165` and `#1169` (the timeout defects) and
+   [docs/design/ppm2-measure-unification.md](../docs/design/ppm2-measure-unification.md) § 7.
+
+   | portal | dry-run | write |
+   | --- | --- | --- |
+   | ceskereality | 1 351 quarantine / 0 unconfirmed / 70 560 examined | ✅ **1 350 written**; `priced` 70 564 → 69 214 exactly, **zero snapshots appended** |
+   | realitymix | 2 222 quarantine / 0 unconfirmed / 62 398 examined | ⏳ pending (~2.5 h — the per-row `portal_raw_pages` read dominates) |
+   | bazos | **0 of 88 241**, by design | — nothing to write |
+   | mmreality areas | 3 601 `area_m2` fixes, `estate_area` 0 → 3 601, 11 205 stamps | ⛔ **blocked on migration 438** |
+
+   The bazos zero is the script working, not failing: its price cell is a bare amount and the
+   m² basis lives only in the prose description, so it confirms nothing and quarantines
+   nothing. Reaching that damage needs a description-level reader.
+
+   Live 2026-08-26, still true until the mmreality write lands: mmreality dum/prodej reads a
+   median **5 701 Kč/m² on a 905.0 m² median area** across 3 601 active rows, against
+   **48 325 Kč/m²** for the same cell on every other portal. Nothing downstream can fix it —
+   the measure is faithfully dividing a real price by a plot area stored in a floor-area
+   column. Expected after the heal: **~42 500 Kč/m² on 130.0 m²**, within 12% of the
+   cross-portal median.
 2. **`area_basis` is a young stamp, and NOTHING carries the plot token yet.** Migration 423 ships
    no backfill; the column fills as rows are detail-drained. Live 2026-08-25: **24.1% of 701 704
    listings** populated (up from ~14.6% at W7) — `usable` 146 687, `unknown` 22 560, `floor` **1**,
@@ -503,6 +525,31 @@ a rule.
    `pg_proc.prosrc` is the same md5 over the same length. Postgres stores a function body
    verbatim, so re-running 083 reproduces the definition exactly. That is a stronger guarantee
    than a dump, since it also proves the repo has not drifted from production here.
+
+## HANDOFF — what a future session must do, and what it must not retry
+
+Three actions remain, all requiring the operator; none of them is code.
+
+1. **Apply `migrations/438_listings_area_basis_check_plot.sql`.** Merged, NOT applied. It
+   gates the mmreality heal AND the `area_basis` write pass, and it closes a latent drain
+   hazard (a land listing with an area fails its batched upsert the moment the drain reaches
+   it). **Do not retry this with a loop** — 223 lock races were lost across five loops at
+   6 s / 10 s / 20 s with every guard shape. `listings` has NO quiet window: it carries
+   multi-minute readers from Actions workflows and the realtime worker, not just cron, so
+   pausing pg_cron alone does not create one. It needs a real window — pause pg_cron jobids
+   1/6/7, stop the realtime worker, let in-flight Actions drain (~2 min) — after which the
+   DDL takes milliseconds. Running it from a Railway service does not help: same lock queue
+   from any client, and the worker is itself one of the blockers.
+2. **Apply `migrations/433_drop_browse_stats.sql`.** Merged, NOT applied; the destructive-DDL
+   gate blocks it from the agent side, so it runs in the Supabase SQL editor. Not urgent —
+   migration 428 IS applied, so the function is already unreachable from the perimeter
+   (`anon` and `authenticated` both false).
+3. **Run the realitymix quarantine write:**
+   `gh workflow run backfill_unit_price_masquerade.yml -f source=realitymix -f write=true`.
+   Independent of 438 — it touches only `price_czk` and `raw_json`.
+
+Then re-check the per-basis p05/median/p95 from `properties_map_mv` and confirm mmreality
+dum/prodej no longer reads ~5 701 Kč/m² on a ~905 m² median area.
 
 ## Next after this program
 
