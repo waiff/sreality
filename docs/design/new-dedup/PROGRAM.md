@@ -12,6 +12,10 @@ entire database and **ignoring all legacy merge decisions**. Nothing writes to p
 until the whole stack is approved end-to-end. Other rules:
 
 - Operator owns ALL merge/no-merge logic; Claude never invents thresholds/weights/rules.
+- **The operator must be able to hold every step of the pipeline in their head** (operator
+  instruction 2026-08-27): no new rules, safeguards, or decision mechanisms enter this plan
+  until the operator asks for them. Claude surfaces risks and spec gaps as flagged questions
+  only — never as designed options.
 - Legacy code/comments/design docs (backup branch) are never consulted.
 - Legacy manual decisions usable only as diagnostics, **per-case, requested in bold**, expect
   declines (operator prefers fresh manual review). Automatic legacy merges: never.
@@ -33,8 +37,8 @@ until the whole stack is approved end-to-end. Other rules:
 | Family semantics | First-shared-family vs waterfall = settings **toggle**, per level (pHash and embeddings separately); **default waterfall** |
 | pHash | Global default ≤11 + per-tag overrides (drawing-tag risk) |
 | Embeddings | DINOv2 on RunPod, **candidate-scoped** (embed only images of listings in candidate pairs), vectors in Supabase; ≥0.98 starting threshold, expect recalibration. **Unchanged by path B** — B generates candidates from the existing CLIP vectors; DINOv2 stays the L3 decision signal |
-| Candidate path B (2026-08-27) | **Image-similarity candidate generation runs in parallel with path A**, all property types: batch k-NN over per-type priority **same-tag** image embeddings proposes pairs, using the **existing corpus-wide CLIP 512-d vectors** (already stored — no new backfill) once W3's retag supplies the new tags. Same downstream levels; same guards (category compatibility, sale≠rent, byt floor ±2 when both known). k / similarity floor = exposed settings, calibrated with the operator at the W3 gate. Anti-catalog safeguards = **operator decision**, see Open items. Upgrade B to DINOv2 vectors only if audit C shows CLIP recall is insufficient |
-| Probe scope (2026-08-27) | **v1 trains ~10–15 target tags only** — the union of the per-type priority families + a pooled `interiér – ostatní` + an `other` sink (concrete 13-tag proposal in the 2026-08-27 ledger entry; operator confirms at the next labeling round). Gate 1 applies to target tags only; existing granular labels fold in via the training-time collapse map; non-target images stay proposal/zero-shot-labeled. More tags later = the same create→sample→train loop |
+| Candidate path B (2026-08-27) | **Image-similarity candidate generation runs in parallel with path A**, all property types: batch k-NN over per-type priority **same-tag** image embeddings proposes pairs, using the **existing corpus-wide CLIP 512-d vectors** (already stored — no new backfill) once W3's retag supplies the new tags. **B is only another way to FIND pairs** — everything downstream (levels, rules, settings) is identical to A; nothing B-specific exists. B's two search parameters (neighbor count, minimum similarity to propose a pair) are not yet specified — the operator is asked at build time. Audit C (W5) shows whether CLIP vectors suffice or B should read DINOv2 vectors — operator decides |
+| Probe scope (2026-08-27) | **v1 trains exactly the 11 tags the operator's spec names** in the per-type priority families (list in the 2026-08-27 part-2 ledger entry; operator confirms at the next labeling round). Gate 1 applies to target tags only; existing granular labels fold in via the training-time collapse map; non-target images stay proposal/zero-shot-labeled. Open operator question: how ostatní's any-two-interior rule is represented at labeling time. More tags later = the same create→sample→train loop, when the operator asks |
 | RunPod | Set up in Wave 1; serverless/on-demand only, **<$1/day** run-rate; may reuse PR #804 harness |
 | Vision | GPT-5-mini, manual batches only; qwen pluggable later |
 | Taxonomy v1 | The operator-curated `image_training_examples` label set (49 labels: `interier -*`, `exterier -*`, `podklad -*`, standalone garáž/technické zařízení/other); "katastr" ≙ `podklad - katastrální mapa`; tag-family defaults reconfirmed at training-set finalization |
@@ -79,7 +83,7 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   gallery-flip hazard); iterate sample until 300 proposals for ≥50% of the **target** categories,
   then assess coverage with operator. Operator confirms/dismisses into the training set. ⛳ per
   sample round.
-  **Gate 1: 150 training images per probe-target tag (~10–15 tags — see Probe scope).**
+  **Gate 1: 150 training images per probe-target tag (the 11 spec-named tags — see Probe scope).**
 - **W2 — Level 0: candidate selection.** Primary path + 2 fallbacks + byt floor rule, sim
   candidate store, **Candidate audit page** (type × path matrix, **with a path-B column from day
   one** — empty until W3; missing-field tables overall + per portal per type; pin/clique
@@ -92,12 +96,10 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   campaign-retag the corpus into the sim tag store. Then **path B generation**: a batch k-NN job
   over per-type priority same-tag images on the existing CLIP vectors (off-DB, e.g. FAISS on a
   pod/runner; writes candidate pairs + best-similarity evidence into the sim store; candidate
-  audit + funnel gain their B numbers; k / similarity-floor settings calibrated with the
-  operator). **Gate 3: operator accepts tag quality; per-type default tag-family orders
-  reconfirmed against final taxonomy; path B volume/quality reviewed and its safeguard option
-  chosen (see Open items).**
-- **W4 — Level 2: pHash.** Evidence computation over candidates (A ∪ B, per-path safeguard
-  settings honored); decision tier; settings
+  audit + funnel gain their B numbers; B's two search parameters asked of the operator at build
+  time). **Gate 3: operator accepts tag quality; per-type default tag-family orders
+  reconfirmed against final taxonomy; path B volume/quality reviewed with the operator.**
+- **W4 — Level 2: pHash.** Evidence computation over candidates (A ∪ B); decision tier; settings
   (threshold 11 + per-tag overrides, pairs required =1, family toggle, drag-priorities per
   type); **pHash audit page** (side-by-side pairs, filter by type/tag/hamming/result);
   **Browse-as-if page** (BrowseExperience reduced-feature adapter over sim groups);
@@ -126,12 +128,11 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 ## Parked / open items
 
 - Clique guard (operator location-DQ sessions running in parallel; revisit before W2 gate).
-- **Path B safeguards (operator decision at the W3 gate):** without a location anchor, identical
-  marketing photos (developer catalogs, stock/staged interiors, reused renders across a project's
-  units) become candidate pairs — and L2 as configured merges on a single identical same-tag
-  pair. Settings-shaped options, combinable: (i) per-path override of required pHash pairs (e.g.
-  B-originated pairs need ≥2); (ii) geo-contradiction veto (both coords present and > X km apart
-  → dismiss or flag, X an input); (iii) route B pairs past L2 straight to L3/L4. None pre-chosen.
+- **Path B risk, noted only — no mechanism designed (no-invented-rules instruction):** B has no
+  location anchor, so identical marketing photos (developer catalogs, staged/stock interiors,
+  reused renders across a project's units) can become candidate pairs and would merge at L2
+  under the operator's current rules. The W3/W4 audits will make this visible; whether any rule
+  is wanted is entirely the operator's call, made then.
 - Qwen vision provider route (W6).
 - Near-duplicate training labels flagged 2026-08-05 (operator cleanup via batch reassign).
 - Interim unmerge has no UI home (API-only) until W8.
@@ -139,8 +140,25 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
-- 2026-08-27 — **Plan updated on two operator edits** (docs only, no engine code; challenges
-  raised and recorded). **(1) Candidate path B** — previously only a parked poor-geo idea — is
+- 2026-08-27 (part 2) — **Course correction (operator instruction): no invented rules.** The
+  operator's standing principle, now in the non-negotiables: the pipeline must stay simple
+  enough to hold in one head; NO new rules, safeguards, or mechanisms enter the plan until the
+  operator asks. Retracted from part 1 accordingly: the three path-B anti-catalog safeguard
+  options (the RISK stays noted under Open items with no mechanism attached); W4's "per-path
+  safeguard settings" clause; and the two Claude-added tag classes (pooled `interiér – ostatní`,
+  `other` sink). The probe target list is now **exactly the 11 tags the operator's spec names**:
+  interier - kuchyně · interier - koupelna se sprchovým koutem · interier - koupelna s vanou ·
+  interier - koupelna · technické zařízení / místnost · exterier - fasáda · podklad - půdorys ·
+  podklad - katastrální mapa · podklad - letecký snímek s ohraničením subjektu · garáž ·
+  exterier - parkoviště. Open operator questions carried (answered whenever the operator
+  chooses; nothing is designed around them meanwhile): (a) how "interior" is recognized for
+  ostatní's any-two-interior rule at labeling/probe time; (b) path B's two search parameters
+  (neighbor count, minimum similarity to propose) at W3 build time. Images matching none of the
+  11 classes are handled inside implementation space (abstain — no trained class, no operator
+  labeling budget) unless the operator directs otherwise.
+- 2026-08-27 — **[PARTLY SUPERSEDED by part 2 above — the safeguard options and the two added
+  tag classes described here were retracted; read part 2 first.]** Plan updated on two operator
+  edits (docs only, no engine code; challenges raised and recorded). **(1) Candidate path B** — previously only a parked poor-geo idea — is
   now a first-class selection path in parallel with A for all types (ledger row added; W2's audit
   is B-ready; B builds in **W3**, not W5: it needs the new tags but NOT DINOv2, because it runs
   on the existing corpus-wide CLIP 512-d vectors — so the candidate-scoped DINOv2 decision stands
