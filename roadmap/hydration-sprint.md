@@ -1392,6 +1392,103 @@ full ≥24 h re-measurement still runs (it decides W5/W6's shape), and W1–W4 p
 under amended Corollary D, whose whole point is that block counts do not need a quiet
 instance to be honest.
 
+### STOP 1 / F4 — the re-measurement, 2026-08-26 04:45 UTC (T0 + 23 h 08 m)
+
+**Window caveat first:** F1 landed 2026-08-25 05:25, so this is **23 h 20 m of index, not
+the full 24 h** the gate specified. The cron figures use a clean `now() - 24 h` window; the
+`pg_stat_*` deltas span T0→now. The numbers are decisive by margins far larger than 40
+minutes could move, so the gate is called on them rather than re-run.
+
+**W0b had landed** — jobid 8 is gone from `cron.job` (6 jobs, `jobid8_present = false`), so
+34,399 s/day leaves the comparison *by design* and is not credited to F1.
+
+#### The scheduler
+
+| jobid | job | T0 runs/failed | now runs/failed | T0 avg → now | T0 total → now |
+| --- | --- | --- | --- | --- | --- |
+| 6 | browse-list-rebuild | 110 / 31 (**28.2%**) | 96 / 8 (**8.3%**) | 388.3 s → **289.7 s** | 42,713 → **27,815 s** |
+| 1 | refresh-health-dashboard | 109 / 38 (**34.9%**) | 127 / 17 (**13.4%**) | 348.1 s → **226.9 s** | 37,594 → **28,822 s** |
+| 7 | browse-map-rebuild | 25 of 48 (**47.9% launch loss**) | 43 of 48 (**10.4%**), 0 failed | — | → 10,713 s |
+| 8 | dedup-funnel-mv-refresh | 89 / 3, 34,399 s | **gone (W0b)** | — | → 0 |
+| 14 | llm-cost-rollup-refresh (W3) | — | 37 / 0 | 0.1 s | → **5 s** |
+
+**Total scheduler wall-clock 122,946 → 68,887 s/day; duty cycle 142% → 79.7%.** The
+instance is no longer oversubscribed. Of the 54,059 s/day returned, **34,399 is W0b by
+design** and ~19,660 is F1/F2 relief on jobs 6 and 1 — while jobid 7 *added* ~2,500 s
+because it now actually launches. W3's new job came in at **5 s/day against a predicted
+~5 s/day**.
+
+**Every failure in both jobs is a statement-timeout kill** (`job6_timeout_kills = 8` of 8,
+`job1_timeout_kills = 17` of 17) — none is an error. That distinction drives (b) and (d).
+
+#### F1 itself — the one unambiguous win
+
+| | T0 (cumulative) | delta over the window |
+| --- | --- | --- |
+| location drain read | 39,488 calls / 2,737,573,584 blocks = **69,327 blk/call** | 2,528 calls / **12,769 blocks = 5.05 blk/call** |
+
+Corroborated independently: `llc_property_listing` shows **2,633 scans / 8,743 tuples read**
+(≈3.3 tuples per scan), which is exactly the shape that costs ~5 buffers. **Better than the
+434-block warm EXPLAIN predicted**, because the average production call passes a far smaller
+`property_id` array than the shape that was EXPLAINed — the EXPLAIN measured a heavy call,
+not a typical one. F2 also hit its target: `listing_location_current` dead tuples
+**14.0% → 0.3%**.
+
+#### But the three rebuilds do exactly the same work
+
+| statement | T0 blk/call | delta blk/call | |
+| --- | --- | --- | --- |
+| `rebuild_browse_list` | 2,798,853 | **2,924,421** | +4.5% |
+| `refresh_health_matviews` | 1,646,537 | **1,788,343** | +8.6% |
+| `rebuild_properties_map_mv` | 2,624,152 | **2,736,083** | +4.3% |
+
+All three got *slightly more expensive*, consistent with the database growing 138 → 140 GB.
+Their wall-clock fell 23–35% and their failure rates collapsed — **that is contention relief,
+not less work.**
+
+#### (a) Did F1 restore cache residency? — NO at the instance level
+
+Cumulative hit ratio **88.98% → 88.63%**; `blks_read` +327.7 M and temp +82.5 GB over the
+window. F1 removed an enormous *source* of reads without moving the ratio, and the reason is
+structural: **`shared_buffers` is 1 GB against a 140 GB database**, and the ratio is dominated
+by three rebuilds that each read ~2.7–2.9 M blocks by full scan and can never be resident.
+
+So the ledger's open thread (a) — *"same rebuild 10 s on a quiet day vs 419 s on a bad one"* —
+is **partly refuted as stated**. The variance did narrow sharply, but the mechanism is
+freed I/O and freed worker slots, not a warmer cache. Recording the correction rather than
+claiming the win: the hypothesis was "F1's evictions cause the variance"; the evidence says
+"F1's *concurrency* caused the variance, and the cache was never going to be the lever."
+
+*Methodology note for the next gate:* T0 recorded `cache_hit_pct` and `blks_read` but **not
+`blks_hit`**, so a marginal (window-only) hit ratio can only be back-derived from a 2-dp
+percentage and is not trustworthy. Recorded now for next time: `blks_hit = 38,520,452,534`,
+`blks_read = 4,939,827,066`.
+
+#### (b) Incremental `browse_list` — STILL REQUIRED, and now top of the list
+
+F1 made it **fail less, not cost less**: 2,924,421 blocks/call, unchanged; 96 runs/day;
+**8 timeout kills at the 600 s budget**; 27,815 s/day, the largest remaining single consumer
+after the health job. Nothing about F1 makes an incremental rebuild unnecessary or smaller.
+**Specify it.**
+
+#### (c) Item 5 ships against `properties_map_mv`, with the interim fourth predicate copy
+
+The proposal's rule was "move straight into `browse_stats_properties` **if F4 clears
+`browse_list`**". **F4 did not clear it** — it is still the heaviest per-call statement on the
+instance and still timing out. So W6 ships as designed. Independently corroborated by the W6
+reconnaissance: the map matview's cover index yields `Heap Fetches: 0` at **1,621 blocks**,
+which a 433 MB CTAS-rebuilt unlogged table cannot match. **Filed:** consolidate the fourth
+copy into `browse_stats_properties` once (b) lands.
+
+#### (d) F6 — STILL NEEDED, but rescoped from firefight to resilience
+
+jobid 1's failure rate **34.9% → 13.4%**, so roughly two-thirds of it *was* an F1/contention
+symptom — the design's suspicion was right. It is not gone: **17 timeout kills in 24 h**, max
+still pinned at 900.6 s against the 900 s budget. And the structural defect F6 targets is
+untouched by any of this — `refresh_health_matviews` is a **six-matview sequential fan-out
+with no per-matview error handling**, so one slow matview still kills the other five. Specify
+it, as resilience work rather than an outage fix.
+
 ### Filed with a trigger
 
 One line each: flag · trigger · evidence needed to close · filing wave.
