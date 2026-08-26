@@ -94,6 +94,42 @@ def test_list_proposals_filters(conn: _FakeConn) -> None:
     assert by_label[0]["image_id"] == 2
 
 
+def test_list_proposals_filters_by_original_tag(conn: _FakeConn) -> None:
+    # A different, fixed vocabulary from `label` — the production CLIP
+    # tagger's own fine_tag, not the operator-curated Taxonomy v1 tag.
+    conn.add_proposal(1, "m1", "a", proposed_at="t2")
+    conn.add_proposal(2, "m1", "a", proposed_at="t1")
+    conn.set_original_tag(1, "kitchen")
+    conn.set_original_tag(2, "bathroom")
+
+    rows = dsl.list_proposals(conn, original_tag="kitchen")
+    assert [r["image_id"] for r in rows] == [1]
+
+
+def test_list_proposals_original_tag_and_label_combine(conn: _FakeConn) -> None:
+    conn.add_proposal(1, "m1", "a", proposed_at="t2")
+    conn.add_proposal(2, "m1", "b", proposed_at="t1")
+    conn.set_original_tag(1, "kitchen")
+    conn.set_original_tag(2, "kitchen")
+
+    rows = dsl.list_proposals(conn, label="a", original_tag="kitchen")
+    assert [r["image_id"] for r in rows] == [1]
+
+
+def test_list_proposals_original_tag_excludes_images_with_no_production_tag(
+    conn: _FakeConn,
+) -> None:
+    conn.add_proposal(1, "m1", "a")
+    assert dsl.list_proposals(conn, original_tag="kitchen") == []
+
+
+def test_list_original_tags_is_the_fixed_clip_vocabulary(conn: _FakeConn) -> None:
+    tags = dsl.list_original_tags()
+    assert "kitchen" in tags
+    assert "bathroom" in tags
+    assert tags == sorted(tags)
+
+
 def test_list_proposals_all_is_the_union_of_the_three_tabs(conn: _FakeConn) -> None:
     conn.add_proposal(1, "m1", "a", proposed_at="t3")
     conn.add_proposal(2, "m1", "b", status="confirmed", proposed_at="t2")

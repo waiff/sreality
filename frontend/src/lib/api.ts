@@ -837,12 +837,21 @@ export interface NewDedupLabelProposal {
 export const listNewDedupProposals = (params: {
   status?: string;
   label?: string;
+  /* The production CLIP tagger's own fine_tag — a different, fixed
+   * vocabulary from `label` (Taxonomy v1). Only meaningful in the
+   * "Original tag" view; mutually exclusive with `label` in practice. */
+  original_tag?: string;
   limit?: number;
 }): Promise<{ data: NewDedupLabelProposal[] }> =>
   request<{ data: NewDedupLabelProposal[] }>('/new-dedup/labeling/proposals', {
     query: params,
     jwt: true,
   });
+
+/* The production CLIP tagger's fixed fine-tag vocabulary (data/clip_taxonomy.json's
+ * prompt anchors) — the option list for the "Original tag" view's own tag filter. */
+export const listNewDedupOriginalTags = (): Promise<{ data: string[] }> =>
+  request<{ data: string[] }>('/new-dedup/labeling/original-tags', { jwt: true });
 
 /* Echoes back what actually landed: `label` is the tag it was decided
  * against (the corrected one if any), `proposed_label` what the model

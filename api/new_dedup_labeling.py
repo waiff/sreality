@@ -166,18 +166,34 @@ def post_grow_sample(
 
 @router.get("/proposals")
 def get_proposals(
-    status: str | None = None, label: str | None = None, limit: int = 100,
-    conn: Any = Depends(deps.get_db_conn),
+    status: str | None = None, label: str | None = None, original_tag: str | None = None,
+    limit: int = 100, conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
     """List proposals — the machine-suggestion queue — optionally filtered
-    by status ('all' / 'pending' / 'confirmed' / 'dismissed') and/or label.
-    An unknown status is a 422 rather than a silent unfiltered listing."""
+    by status ('all' / 'pending' / 'confirmed' / 'dismissed'), by the
+    Taxonomy v1 `label`, and/or by the production CLIP tagger's own
+    `original_tag` (a different, fixed vocabulary — see list_original_tags).
+    An unknown status or original_tag is a 422 rather than a silent
+    unfiltered listing."""
     if status is not None and status not in dsl.LIST_STATUSES:
         raise HTTPException(
             status_code=422,
             detail=f"status must be one of {', '.join(dsl.LIST_STATUSES)}",
         )
-    return {"data": dsl.list_proposals(conn, status=status, label=label, limit=limit)}
+    if original_tag is not None and original_tag not in dsl.list_original_tags():
+        raise HTTPException(status_code=422, detail=f"unknown original_tag {original_tag!r}")
+    return {
+        "data": dsl.list_proposals(
+            conn, status=status, label=label, original_tag=original_tag, limit=limit,
+        )
+    }
+
+
+@router.get("/original-tags")
+def get_original_tags() -> dict[str, Any]:
+    """The production CLIP tagger's fixed fine-tag vocabulary — the option
+    list for the "Original tag" view's own tag filter."""
+    return {"data": dsl.list_original_tags()}
 
 
 @router.post("/proposals/state")

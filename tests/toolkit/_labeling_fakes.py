@@ -236,6 +236,10 @@ class _Cur:
                     continue
                 if kw["label"] is not None and p["label"] != kw["label"]:
                     continue
+                if kw["original_tag"] is not None and (
+                    c.original_clip_tags.get(p["image_id"]) != kw["original_tag"]
+                ):
+                    continue
                 tag = c.tag_by_label(p["label"])
                 cell = c.image_tag_labels.get((p["image_id"], tag["id"])) if tag else None
                 rows.append((
@@ -304,6 +308,11 @@ class _FakeConn:
         # storage_path IS NOT NULL, so every fixture image gets one.
         self.images: dict[int, str] = {}
         self.image_category: dict[int, str] = {}
+        # image_clip_tags.fine_tag — the production tagger's own vocabulary
+        # (a different, fixed vocabulary from tag_taxonomy). Simplified to
+        # one fine_tag per image_id: the fake models "latest model wins",
+        # and every real writer today is the single production model.
+        self.original_clip_tags: dict[int, str] = {}
         # image_border_cases (migration 310) — the operator's "unclear even to a
         # human" flag. Written elsewhere (api/labeling.py); the overview only
         # reads it, to say how much of a tag's coverage is uncertain.
@@ -335,6 +344,9 @@ class _FakeConn:
     def add_images(self, *image_ids: int) -> None:
         for image_id in image_ids:
             self.images[image_id] = f"img/{image_id}.jpg"
+
+    def set_original_tag(self, image_id: int, fine_tag: str) -> None:
+        self.original_clip_tags[image_id] = fine_tag
 
     def add_to_sample(
         self, image_id: int, *, added_by: str = "operator", added_at: str | None = None,

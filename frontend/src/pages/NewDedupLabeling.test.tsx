@@ -52,6 +52,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     setNewDedupTagFlags: vi.fn(),
     growNewDedupSample: vi.fn(),
     listNewDedupProposals: vi.fn(),
+    listNewDedupOriginalTags: vi.fn(),
     setNewDedupProposalState: vi.fn(),
     bulkSetNewDedupProposalState: vi.fn(),
     listNewDedupTagImages: vi.fn(),
@@ -180,6 +181,9 @@ describe('<NewDedupLabeling>', () => {
     vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({ data: OVERVIEW });
     vi.mocked(api.listNewDedupSettings).mockResolvedValue({ data: SETTINGS });
     vi.mocked(api.listNewDedupProposals).mockResolvedValue({ data: PROPOSALS });
+    vi.mocked(api.listNewDedupOriginalTags).mockResolvedValue({
+      data: ['bathroom', 'kitchen', 'living_room'],
+    });
     vi.mocked(api.listNewDedupTagImages).mockResolvedValue({ data: [] });
     vi.mocked(api.listNewDedupImageTags).mockResolvedValue({ data: [] });
     vi.mocked(api.listNewDedupPositiveTagsForImages).mockResolvedValue({ data: [] });
@@ -869,6 +873,85 @@ describe('<NewDedupLabeling>', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open photo 101' }));
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText('kuchyně')).toBeInTheDocument();
+  });
+
+  // --- filtering by the original CLIP tag ----------------------------------
+
+  it('offers the CLIP tagger\'s own vocabulary in the Tag dropdown on "Original tag"', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: 'interier - kuchyne' });
+    fireEvent.click(screen.getByText('Original tag'));
+    const select = screen.getByLabelText('Tag') as HTMLSelectElement;
+    await waitFor(() =>
+      expect([...select.options].map((o) => o.textContent)).toEqual([
+        'All original tags', 'bathroom', 'kitchen', 'living_room',
+      ]),
+    );
+  });
+
+  it('filters proposals by the original tag, not the Taxonomy v1 label', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: 'interier - kuchyne' });
+    fireEvent.click(screen.getByText('Original tag'));
+    await screen.findByRole('option', { name: 'kitchen' });
+    const callsBefore = vi.mocked(api.listNewDedupProposals).mock.calls.length;
+
+    fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'kitchen' } });
+
+    await waitFor(() =>
+      expect(api.listNewDedupProposals).toHaveBeenCalledWith(
+        expect.objectContaining({ original_tag: 'kitchen', label: undefined }),
+      ),
+    );
+    expect(vi.mocked(api.listNewDedupProposals).mock.calls.length).toBe(callsBefore + 1);
+  });
+
+  it('toggling New/Original alone never refetches the grid', async () => {
+    // A display-only toggle (which badge shows) must not blink the grid —
+    // the same invariant the page holds everywhere else.
+    renderPage();
+    await screen.findByRole('button', { name: 'interier - kuchyne' });
+    const callsBefore = vi.mocked(api.listNewDedupProposals).mock.calls.length;
+
+    fireEvent.click(screen.getByText('Original tag'));
+    fireEvent.click(screen.getByText('New tag'));
+
+    expect(vi.mocked(api.listNewDedupProposals).mock.calls.length).toBe(callsBefore);
+  });
+
+  it('switching to Original tag drops an active Taxonomy v1 filter and does refetch', async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'interier - kuchyne' }));
+    await waitFor(() =>
+      expect(api.listNewDedupProposals).toHaveBeenCalledWith(
+        expect.objectContaining({ label: 'interier - kuchyne' }),
+      ),
+    );
+
+    fireEvent.click(screen.getByText('Original tag'));
+    await waitFor(() =>
+      expect(api.listNewDedupProposals).toHaveBeenLastCalledWith(
+        expect.objectContaining({ label: undefined, original_tag: undefined }),
+      ),
+    );
+  });
+
+  it('remembers each vocabulary\'s own filter independently across toggles', async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'interier - kuchyne' }));
+    await waitFor(() =>
+      expect((screen.getByLabelText('Tag') as HTMLSelectElement).value).toBe('interier - kuchyne'),
+    );
+
+    fireEvent.click(screen.getByText('Original tag'));
+    await screen.findByRole('option', { name: 'kitchen' });
+    fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'kitchen' } });
+    await waitFor(() =>
+      expect((screen.getByLabelText('Tag') as HTMLSelectElement).value).toBe('kitchen'),
+    );
+
+    fireEvent.click(screen.getByText('New tag'));
+    expect((screen.getByLabelText('Tag') as HTMLSelectElement).value).toBe('interier - kuchyne');
   });
 
   it('walks the whole grid from the lightbox, in tile order', async () => {

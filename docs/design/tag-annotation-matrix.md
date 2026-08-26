@@ -192,6 +192,18 @@ Two operator-requested additions, same data model, no new tables beyond one migr
 - **Named the tag a proposal tile's tri-state control is deciding**, directly above the
   buttons — operator feedback that it wasn't obvious the control acts on ONE tag (the
   proposal's own label, or a typed correction), not every tag on the image.
+- **Filter proposals by the "Original tag" too** (`dsl.list_original_tags` +
+  `list_proposals(..., original_tag=...)`). The page's New-tag/Original-tag toggle
+  already swapped which badge a tile shows; the Tag filter dropdown hadn't followed —
+  it stayed on Taxonomy v1 (`label`) even while the badges displayed the production
+  CLIP tagger's OWN fine_tag, a completely different, fixed 19-value vocabulary
+  (`data/clip_taxonomy.json`'s prompt anchors, zero DB cost to serve). The dropdown
+  now swaps its whole option list with the toggle, `original_tag` joins
+  `image_clip_tags` "latest model wins" (matching `images_public`'s own resolution,
+  so the filter always agrees with what the badge shows), and the two filters are
+  remembered independently so flipping the toggle back restores whichever tag was
+  picked in that view. The toggle itself still never refetches the grid on its own —
+  only actually dropping a set filter does.
 
 ## Explicitly deferred, not silently dropped
 

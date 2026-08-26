@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 
+from scraper.clip_tagger import load_taxonomy
 from toolkit import tag_annotations
 
 if TYPE_CHECKING:
@@ -31,6 +32,15 @@ if TYPE_CHECKING:
 GROW_SAMPLE_MAX = 2000
 PROPOSAL_LIST_MAX = 200
 BULK_PROPOSAL_MAX = tag_annotations.BULK_STATE_MAX
+
+
+def list_original_tags() -> list[str]:
+    """The production CLIP tagger's fixed fine-tag vocabulary
+    (data/clip_taxonomy.json's prompt anchors) — a static, closed list,
+    unrelated to the operator-curated Taxonomy v1 (`tag_taxonomy`). Backs
+    the "Original tag" view's own tag filter, which has to offer a
+    completely different vocabulary than the "New tag" one."""
+    return sorted(load_taxonomy()["prompts"])
 
 
 # --- sample ---------------------------------------------------------------
@@ -93,8 +103,16 @@ _LIST_PROPOSALS_SQL = """
     FROM dedup_sim.label_proposals lp
     LEFT JOIN tag_taxonomy tt ON tt.label = lp.label
     LEFT JOIN image_tag_labels itl ON itl.image_id = lp.image_id AND itl.tag_id = tt.id
+    LEFT JOIN LATERAL (
+      SELECT ict.fine_tag
+      FROM image_clip_tags ict
+      WHERE ict.image_id = lp.image_id
+      ORDER BY ict.tagged_at DESC
+      LIMIT 1
+    ) oc ON true
     WHERE (%(status)s::text IS NULL OR %(status)s = 'all' OR lp.status = %(status)s)
       AND (%(label)s::text IS NULL OR lp.label = %(label)s)
+      AND (%(original_tag)s::text IS NULL OR oc.fine_tag = %(original_tag)s)
     ORDER BY lp.proposed_at DESC, lp.image_id DESC
     LIMIT %(limit)s
 """
@@ -104,17 +122,23 @@ LIST_STATUSES = ("all", "pending", "confirmed", "dismissed")
 
 def list_proposals(
     conn: psycopg.Connection, *, status: str | None = None, label: str | None = None,
-    limit: int = 100,
+    original_tag: str | None = None, limit: int = 100,
 ) -> list[dict[str, Any]]:
     """List proposals for the review grid — the machine-suggestion queue.
     Every row carries `current_state`: the image's tri-state decision for
     the proposal's own label (None = untouched), so the caller can grey an
-    already-decided tile without a second query."""
+    already-decided tile without a second query.
+
+    `original_tag` filters by the PRODUCTION CLIP tagger's fine_tag —
+    "latest model wins" per image, the same resolution `images_public`
+    uses for the badge this filter has to agree with — never the Taxonomy
+    v1 `label` filtered by `label` above; the two are different
+    vocabularies and only one is meaningful in the "Original tag" view."""
     limit = min(max(1, limit), PROPOSAL_LIST_MAX)
     with conn.cursor() as cur:
         cur.execute(
             _LIST_PROPOSALS_SQL,
-            {"status": status, "label": label, "limit": limit},
+            {"status": status, "label": label, "original_tag": original_tag, "limit": limit},
         )
         rows = cur.fetchall()
     return [
