@@ -227,6 +227,32 @@ describe('<NewDedupLabeling>', () => {
     expect(await screen.findByText('· 8 neg · 5 excl')).toBeInTheDocument();
   });
 
+  it('shows a priority tag\'s bar and label in red, unless it is the active filter', async () => {
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: {
+        sample_size: 42,
+        tags: [
+          tag({ id: 1, label: 'interier - kuchyne', priority: true }),
+          tag({ id: 2, label: 'exterier - fasada', priority: false,
+            pending_count: 0, negative_count: 0, excluded_count: 0 }),
+        ],
+      },
+    });
+    renderPage();
+    const priorityBtn = await screen.findByRole('button', { name: 'interier - kuchyne' });
+    const otherBtn = screen.getByRole('button', { name: 'exterier - fasada' });
+    expect(priorityBtn).toHaveClass('text-[var(--color-brick)]');
+    expect(otherBtn).not.toHaveClass('text-[var(--color-brick)]');
+    const priorityBar = priorityBtn.closest('div')!.nextElementSibling!.querySelector('[aria-hidden]')!;
+    expect(priorityBar).toHaveClass('bg-[var(--color-brick)]');
+
+    // Filtering to it takes precedence over the priority color — the active
+    // highlight is the more immediate "you're looking at this now" signal.
+    fireEvent.click(priorityBtn);
+    await waitFor(() => expect(priorityBtn).toHaveClass('text-[var(--color-copper)]'));
+    expect(priorityBtn).not.toHaveClass('text-[var(--color-brick)]');
+  });
+
   it('measures Gate 1 on the unparked images, not the whole positive set', async () => {
     vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
       data: {

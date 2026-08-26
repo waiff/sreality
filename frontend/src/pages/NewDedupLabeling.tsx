@@ -1202,7 +1202,11 @@ function TaxonomyBarChart({
                           title="Filter to this tag"
                           className={[
                             'min-w-0 truncate font-mono text-[0.76rem] hover:text-[var(--color-copper-2)]',
-                            active ? 'text-[var(--color-copper)]' : 'text-[var(--color-ink-2)]',
+                            active
+                              ? 'text-[var(--color-copper)]'
+                              : t.priority
+                                ? 'text-[var(--color-brick)]'
+                                : 'text-[var(--color-ink-2)]',
                           ].join(' ')}
                         >
                           {t.label}
@@ -1231,7 +1235,11 @@ function TaxonomyBarChart({
                           <div
                             className={[
                               'h-full rounded-r-[var(--radius-sm)] transition-[width]',
-                              active ? 'bg-[var(--color-copper)]' : 'bg-[var(--color-sage)]',
+                              active
+                                ? 'bg-[var(--color-copper)]'
+                                : t.priority
+                                  ? 'bg-[var(--color-brick)]'
+                                  : 'bg-[var(--color-sage)]',
                             ].join(' ')}
                             style={{ width: `${pct}%` }}
                             aria-hidden
