@@ -3947,14 +3947,14 @@
     },
     {
       "filename": "recompute_home_city.yml",
-      "name": "Jobs: recompute home city (hourly)",
-      "description": "Recompute properties.home_city_id (migration 374) so the Browse city-quality RPC (listings_with_city_quality), browse_stats_properties, and Watchdog's _city_quality_clauses all join a plain indexed column instead of each running a live ST_Covers/ST_DWithin containment test against every curated city per row. Incremental hourly run fills newly-ingested properties within the hour; the same function rebuilds everything after a curated_cities / admin_boundaries change.",
+      "name": "Jobs: recompute home city (daily)",
+      "description": "Recompute properties.home_city_id (migration 374).",
       "portal": null,
       "manual": true,
       "schedules": [
         {
-          "cron": "45 * * * *",
-          "human": "Every hour at :45"
+          "cron": "45 3 * * *",
+          "human": "Daily at 03:45 UTC"
         }
       ],
       "onPush": false,
