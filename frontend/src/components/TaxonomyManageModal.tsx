@@ -10,6 +10,11 @@ import type { NewDedupTag } from '@/lib/api';
 import { TrashIcon } from '@/components/icons';
 import Spinner from '@/components/Spinner';
 
+export interface TagFlags {
+  priority?: boolean;
+  ready_for_training?: boolean;
+}
+
 export interface TaxonomyManageModalProps {
   labels: NewDedupTag[];
   onClose: () => void;
@@ -21,6 +26,8 @@ export interface TaxonomyManageModalProps {
   renamePending: boolean;
   onRemove: (id: number, oldLabel: string) => void;
   removePending: boolean;
+  onSetFlags: (id: number, flags: TagFlags) => void;
+  flagsPending: boolean;
 }
 
 export default function TaxonomyManageModal({
@@ -34,6 +41,8 @@ export default function TaxonomyManageModal({
   renamePending,
   onRemove,
   removePending,
+  onSetFlags,
+  flagsPending,
 }: TaxonomyManageModalProps) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -43,7 +52,12 @@ export default function TaxonomyManageModal({
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  const sorted = [...labels].sort((a, b) => a.label.localeCompare(b.label, 'cs'));
+  // Priority tags pin to the top (operator's "needs attention now" flag);
+  // alphabetical within each group, same as before.
+  const sorted = [...labels].sort((a, b) => {
+    if (a.priority !== b.priority) return a.priority ? -1 : 1;
+    return a.label.localeCompare(b.label, 'cs');
+  });
 
   return (
     <div
@@ -103,7 +117,7 @@ export default function TaxonomyManageModal({
         </div>
 
         <p className="mt-3 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-          {sorted.length} label{sorted.length === 1 ? '' : 's'}, A–Z
+          {sorted.length} label{sorted.length === 1 ? '' : 's'} — priority pinned to top, then A–Z
         </p>
 
         <div className="mt-1.5 flex-1 space-y-1.5 overflow-y-auto">
@@ -118,6 +132,8 @@ export default function TaxonomyManageModal({
               renamePending={renamePending}
               onRemove={() => onRemove(l.id, l.label)}
               removePending={removePending}
+              onSetFlags={(flags) => onSetFlags(l.id, flags)}
+              flagsPending={flagsPending}
             />
           ))}
         </div>
@@ -132,12 +148,16 @@ function ManageRow({
   renamePending,
   onRemove,
   removePending,
+  onSetFlags,
+  flagsPending,
 }: {
   label: NewDedupTag;
   onRename: (next: string) => void;
   renamePending: boolean;
   onRemove: () => void;
   removePending: boolean;
+  onSetFlags: (flags: TagFlags) => void;
+  flagsPending: boolean;
 }) {
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(label.label);
@@ -166,13 +186,51 @@ function ManageRow({
               className="w-full px-1.5 py-0.5 text-sm font-mono rounded-[var(--radius-xs)] border border-[var(--color-rule-strong)] bg-[var(--color-paper-2)]"
             />
           ) : (
-            <span className="block truncate font-mono text-sm" title={label.label}>
+            <span
+              className={[
+                'block truncate font-mono text-sm',
+                label.priority ? 'text-[var(--color-brick)]' : '',
+              ].join(' ')}
+              title={label.label}
+            >
               {label.label}
             </span>
           )}
           <span className="mt-0.5 block text-[0.65rem] font-mono tabular-nums text-[var(--color-ink-4)]">
             {`${label.positive_count} positive · ${label.negative_count} negative · ${label.excluded_count} excluded`}
           </span>
+          <div className="mt-1 flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => onSetFlags({ priority: !label.priority })}
+              disabled={flagsPending}
+              aria-pressed={label.priority}
+              title="Needs attention now — pins this tag to the top of this list"
+              className={[
+                'px-1.5 py-0.5 text-[0.65rem] rounded-[var(--radius-xs)] border disabled:opacity-40',
+                label.priority
+                  ? 'border-[var(--color-brick)] bg-[var(--color-brick-soft)] text-[var(--color-brick)]'
+                  : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
+              ].join(' ')}
+            >
+              Priority
+            </button>
+            <button
+              type="button"
+              onClick={() => onSetFlags({ ready_for_training: !label.ready_for_training })}
+              disabled={flagsPending}
+              aria-pressed={label.ready_for_training}
+              title="Operator call: this tag's set is solid enough for the per-tag trainer"
+              className={[
+                'px-1.5 py-0.5 text-[0.65rem] rounded-[var(--radius-xs)] border disabled:opacity-40',
+                label.ready_for_training
+                  ? 'border-[var(--color-sage)] bg-[var(--color-sage-soft)] text-[var(--color-sage)]'
+                  : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
+              ].join(' ')}
+            >
+              Ready for training
+            </button>
+          </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-2">

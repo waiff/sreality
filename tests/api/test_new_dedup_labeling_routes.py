@@ -43,9 +43,17 @@ _RESPONSES: dict[str, Any] = {
     "add_tag": {"id": 1, "label": "a", "family": None, "active": True, "created_at": "t"},
     "rename_tag": {"id": 1, "label": "b", "family": None, "active": True, "created_at": "t"},
     "remove_tag": {"label": "a", "deleted_annotations": 2},
+    "set_tag_flags": {"id": 1, "label": "a", "family": None, "active": True,
+                      "priority": True, "ready_for_training": False, "created_at": "t"},
     "list_images_for_tag": [
         {"image_id": 1, "storage_path": "img/1.jpg", "state": "untouched",
          "updated_at": None, "created_by": None},
+    ],
+    "list_tags_for_image": [
+        {"id": 1, "label": "a", "family": None, "state": "positive", "updated_at": "t"},
+    ],
+    "list_positive_tags_for_images": [
+        {"image_id": 1, "tag_id": 2, "label": "a"},
     ],
     "set_state": {"image_id": 1, "tag_id": 2, "state": "positive", "updated_at": "t"},
     "bulk_set_state": {"updated": 2, "tag_id": 2, "state": "negative", "image_ids": [1, 2]},
@@ -62,8 +70,9 @@ _RESPONSES: dict[str, Any] = {
 }
 
 _PATCHED = {
-    ta: ["add_tag", "rename_tag", "remove_tag", "list_images_for_tag", "set_state",
-         "bulk_set_state", "clear_state"],
+    ta: ["add_tag", "rename_tag", "remove_tag", "set_tag_flags", "list_images_for_tag",
+         "set_state", "bulk_set_state", "clear_state", "list_tags_for_image",
+         "list_positive_tags_for_images"],
     dsl: ["grow_sample", "list_proposals", "set_proposal_state", "bulk_set_proposal_state"],
 }
 
@@ -152,6 +161,34 @@ def test_delete_tag(client, calls):
     assert res.status_code == 200
     assert res.json()["data"]["deleted_annotations"] == 2
     assert calls["remove_tag"] == {"tag_id": 1}
+
+
+def test_patch_tag_flags_priority_only(client, calls):
+    res = client.patch("/new-dedup/labeling/taxonomy/1/flags", json={"priority": True})
+    assert res.status_code == 200
+    assert res.json()["data"]["priority"] is True
+    assert calls["set_tag_flags"] == {"tag_id": 1, "priority": True, "ready_for_training": None}
+
+
+def test_patch_tag_flags_both(client, calls):
+    res = client.patch(
+        "/new-dedup/labeling/taxonomy/1/flags",
+        json={"priority": True, "ready_for_training": True},
+    )
+    assert res.status_code == 200
+    assert calls["set_tag_flags"] == {"tag_id": 1, "priority": True, "ready_for_training": True}
+
+
+def test_patch_tag_flags_unknown_404s(client, monkeypatch):
+    monkeypatch.setattr(ta, "set_tag_flags", _raises(KeyError(999)))
+    res = client.patch("/new-dedup/labeling/taxonomy/999/flags", json={"priority": True})
+    assert res.status_code == 404
+
+
+def test_patch_tag_flags_no_op_422s(client, monkeypatch):
+    monkeypatch.setattr(ta, "set_tag_flags", _raises(ValueError("nothing to update")))
+    res = client.patch("/new-dedup/labeling/taxonomy/1/flags", json={})
+    assert res.status_code == 422
 
 
 def test_delete_tag_unknown_404s(client, monkeypatch):
@@ -378,6 +415,33 @@ def test_delete_annotation(client, calls):
     assert res.status_code == 200
     assert res.json()["data"]["deleted"] is True
     assert calls["clear_state"] == {"image_id": 1, "tag_id": 2}
+
+
+def test_get_tags_for_image(client, calls):
+    res = client.get("/new-dedup/labeling/images/1/tags")
+    assert res.status_code == 200
+    assert res.json()["data"][0]["label"] == "a"
+    assert calls["list_tags_for_image"] == {"image_id": 1}
+
+
+def test_post_positive_tags_for_images(client, calls):
+    res = client.post(
+        "/new-dedup/labeling/images/tags/batch", json={"image_ids": [1, 2]},
+    )
+    assert res.status_code == 200
+    assert res.json()["data"][0] == {"image_id": 1, "tag_id": 2, "label": "a"}
+    assert calls["list_positive_tags_for_images"] == {"image_ids": [1, 2]}
+
+
+def test_post_positive_tags_for_images_over_max_422s(client, monkeypatch):
+    monkeypatch.setattr(
+        ta, "list_positive_tags_for_images",
+        _raises(ValueError("at most 200 images per batch")),
+    )
+    res = client.post(
+        "/new-dedup/labeling/images/tags/batch", json={"image_ids": [1]},
+    )
+    assert res.status_code == 422
 
 
 # --- the gate ---------------------------------------------------------------

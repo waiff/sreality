@@ -21,7 +21,10 @@ import pytest
 
 
 def _tag_row(t: dict[str, Any]) -> tuple[Any, ...]:
-    return (t["id"], t["label"], t["family"], t["active"], t["created_at"])
+    return (
+        t["id"], t["label"], t["family"], t["active"],
+        t["priority"], t["ready_for_training"], t["created_at"],
+    )
 
 
 class _Cur:
@@ -77,6 +80,26 @@ class _Cur:
             else:
                 row["label"] = new_label
                 self._rows, self.rowcount = [_tag_row(row)], 1
+
+        elif s.startswith("UPDATE tag_taxonomy SET priority") or s.startswith(
+            "UPDATE tag_taxonomy SET ready_for_training",
+        ):
+            # set_tag_flags builds its SET list dynamically (one or both
+            # fields); the last param is always tag_id, the rest line up
+            # with whichever "field = %s" fragments the SQL text names.
+            *values, tag_id = params
+            row = c.tag_taxonomy.get(tag_id)
+            if row is None:
+                self._rows = []
+            else:
+                # Scoped to the SET clause only — RETURNING always lists both
+                # column names, so checking the whole string would wrongly
+                # "detect" a field that wasn't actually being written.
+                set_clause = s.split(" WHERE ", 1)[0]
+                fields = [f for f in ("priority", "ready_for_training") if f in set_clause]
+                for field, value in zip(fields, values):
+                    row[field] = value
+                self._rows = [_tag_row(row)]
 
         elif s.startswith("DELETE FROM tag_taxonomy WHERE id"):
             (tag_id,) = params
@@ -137,14 +160,44 @@ class _Cur:
             rows.sort(key=lambda r: (r[5], r[0]), reverse=True)
             self._rows = [r[:5] for r in rows[: kw["limit"]]]
 
-        elif s.startswith("SELECT t.id, t.label, t.family, t.active, t.created_at"):
+        elif s.startswith("SELECT t.id, t.label, t.family, itl.state, itl.updated_at"):
+            image_id = params["image_id"]
+            rows = []
+            for t in c.tag_taxonomy.values():
+                if not t["active"]:
+                    continue
+                cell = c.image_tag_labels.get((image_id, t["id"]))
+                rows.append((
+                    t["id"], t["label"], t["family"],
+                    cell["state"] if cell else None,
+                    cell["updated_at"] if cell else None,
+                    t["family"] or "￿",  # NULLS LAST sort key
+                ))
+            rows.sort(key=lambda r: (r[5], r[1]))
+            self._rows = [r[:5] for r in rows]
+
+        elif s.startswith("SELECT itl.image_id, t.id, t.label"):
+            image_ids = set(params["image_ids"])
+            rows = []
+            for (image_id, tag_id), cell in c.image_tag_labels.items():
+                if cell["state"] != "positive" or image_id not in image_ids:
+                    continue
+                tag = c.tag_taxonomy.get(tag_id)
+                if tag is None:
+                    continue
+                rows.append((image_id, tag_id, tag["label"]))
+            rows.sort(key=lambda r: (r[0], r[2]))
+            self._rows = rows
+
+        elif s.startswith("SELECT t.id, t.label, t.family, t.active, t.priority"):
             rows = []
             for t in sorted(c.tag_taxonomy.values(), key=lambda t: t["label"]):
                 cells = [v for v in c.image_tag_labels.values() if v["tag_id"] == t["id"]]
                 positive = [v for v in cells if v["state"] == "positive"]
                 border = [v for v in positive if v["image_id"] in c.border_cases]
                 rows.append((
-                    t["id"], t["label"], t["family"], t["active"], t["created_at"],
+                    t["id"], t["label"], t["family"], t["active"],
+                    t["priority"], t["ready_for_training"], t["created_at"],
                     len(positive), len(positive) - len(border), len(border),
                     sum(1 for v in cells if v["state"] == "negative"),
                     sum(1 for v in cells if v["state"] == "excluded"),
@@ -270,6 +323,7 @@ class _FakeConn:
         self.next_tag_id += 1
         row = {
             "id": self.next_tag_id, "label": label, "family": family, "active": True,
+            "priority": False, "ready_for_training": False,
             "created_at": "2026-08-26T00:00:00Z", "created_by": created_by,
         }
         self.tag_taxonomy[row["id"]] = row

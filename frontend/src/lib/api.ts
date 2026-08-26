@@ -737,6 +737,13 @@ export interface NewDedupTag {
   label: string;
   family: string | null;
   active: boolean;
+  /* Needs attention now — pins this tag to the top of the "Modify labels"
+   * popup and marks it there. */
+  priority: boolean;
+  /* Operator's own call that this tag's set is solid enough for the (not
+   * yet built) per-tag trainer — independent of Gate 1, which only says a
+   * tag is LABELED enough, not reviewed. */
+  ready_for_training: boolean;
   created_at: string;
   /* Positive annotations for this tag — the inventory number (what a tag
    * REMOVE deletes). It is `gate_count + border_case_count`. */
@@ -788,6 +795,18 @@ export const removeNewDedupTag = (
     `/new-dedup/labeling/taxonomy/${tagId}`,
     { method: 'DELETE', jwt: true },
   );
+
+/* Sets one or both operator flags — only the fields actually passed, so
+ * toggling one from the Modify labels popup never clobbers the other. */
+export const setNewDedupTagFlags = (
+  tagId: number,
+  flags: { priority?: boolean; ready_for_training?: boolean },
+): Promise<{ data: NewDedupTag }> =>
+  request<{ data: NewDedupTag }>(`/new-dedup/labeling/taxonomy/${tagId}/flags`, {
+    method: 'PATCH',
+    json: flags,
+    jwt: true,
+  });
 
 export const growNewDedupSample = (
   count: number,
@@ -877,6 +896,24 @@ export const listNewDedupImageTags = (
   imageId: number,
 ): Promise<{ data: NewDedupImageTag[] }> =>
   request<{ data: NewDedupImageTag[] }>(`/new-dedup/labeling/images/${imageId}/tags`, {
+    jwt: true,
+  });
+
+export interface NewDedupPositiveTag {
+  image_id: number;
+  tag_id: number;
+  label: string;
+}
+/* Every positive tag on each of several images, one call for a whole visible
+ * grid — the "what's already assigned" line under each tile. A tile only
+ * shows the one tag it's reviewing; with multi-label images that's not the
+ * same as everything the image is already positive on. */
+export const listNewDedupPositiveTagsForImages = (
+  imageIds: number[],
+): Promise<{ data: NewDedupPositiveTag[] }> =>
+  request<{ data: NewDedupPositiveTag[] }>('/new-dedup/labeling/images/tags/batch', {
+    method: 'POST',
+    json: { image_ids: imageIds },
     jwt: true,
   });
 

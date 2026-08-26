@@ -5,6 +5,7 @@ import {
   addNewDedupTag,
   renameNewDedupTag,
   removeNewDedupTag,
+  setNewDedupTagFlags,
   growNewDedupSample,
   listNewDedupProposals,
   setNewDedupProposalState,
@@ -13,6 +14,7 @@ import {
   setNewDedupTagAnnotation,
   bulkSetNewDedupTagAnnotation,
   listNewDedupImageTags,
+  listNewDedupPositiveTagsForImages,
   listNewDedupSettings,
   TAG_STATES,
   type TagState,
@@ -284,6 +286,57 @@ export default function NewDedupLabeling() {
     });
   }, [imagesQ.data]);
 
+  /* Assigned (positive) tags per image — batched the same way photos are
+   * (accumulate for never-seen ids), then patched in place as tri-state
+   * decisions land (see patchPositiveTags), never refetched. A tile only
+   * shows the one tag it's reviewing; with multi-label images now possible
+   * that's not the same as everything the image is already positive on. */
+  const [positiveTagsCache, setPositiveTagsCache] = useState<ReadonlyMap<number, string[]>>(
+    new Map(),
+  );
+  const missingTagIds = useMemo(
+    () => [...new Set(imageIds.filter((id) => !positiveTagsCache.has(id)))],
+    [imageIds, positiveTagsCache],
+  );
+  const positiveTagsQ = useQuery({
+    queryKey: ['new-dedup', 'labeling', 'positive-tags', missingTagIds.join(',')],
+    queryFn: async () => {
+      const res = await listNewDedupPositiveTagsForImages(missingTagIds);
+      return { requestedIds: missingTagIds, rows: res.data };
+    },
+    enabled: missingTagIds.length > 0,
+  });
+  useEffect(() => {
+    const result = positiveTagsQ.data;
+    if (!result) return;
+    setPositiveTagsCache((prev) => {
+      const next = new Map(prev);
+      for (const id of result.requestedIds) next.set(id, next.get(id) ?? []);
+      for (const row of result.rows) {
+        const cur = next.get(row.image_id) ?? [];
+        if (!cur.includes(row.label)) next.set(row.image_id, [...cur, row.label]);
+      }
+      return next;
+    });
+  }, [positiveTagsQ.data]);
+  const patchPositiveTags = (imageId: number, label: string, state: TagState) => {
+    setPositiveTagsCache((prev) => {
+      const cur = prev.get(imageId) ?? [];
+      const has = cur.includes(label);
+      if (state === 'positive' && !has) {
+        const next = new Map(prev);
+        next.set(imageId, [...cur, label].sort((a, b) => a.localeCompare(b, 'cs')));
+        return next;
+      }
+      if (state !== 'positive' && has) {
+        const next = new Map(prev);
+        next.set(imageId, cur.filter((l) => l !== label));
+        return next;
+      }
+      return prev;
+    });
+  };
+
   /* "Border case" is image-grain and independent of every tag's tri-state, so
    * it lives outside both grids: toggling it patches the store rather than
    * either grid — no tile moves. */
@@ -460,6 +513,13 @@ export default function NewDedupLabeling() {
     onError: (err: Error) => pushToast('err', err.message),
   });
 
+  const setFlagsMut = useMutation({
+    mutationFn: ({ id, flags }: { id: number; flags: { priority?: boolean; ready_for_training?: boolean } }) =>
+      setNewDedupTagFlags(id, flags),
+    onSuccess: () => invalidateOverview(),
+    onError: (err: Error) => pushToast('err', err.message),
+  });
+
   // --- sample -------------------------------------------------------------
 
   const [growCount, setGrowCount] = useState('200');
@@ -520,6 +580,7 @@ export default function NewDedupLabeling() {
         current_state: res.data.state,
         reviewed_by: 'operator',
       }));
+      patchPositiveTags(vars.imageId, res.data.label, res.data.state);
     },
     onError: (err: Error) => pushToast('err', err.message),
     onSettled: (_data, _err, vars) => endAction(vars.imageId, vars.model),
@@ -536,6 +597,12 @@ export default function NewDedupLabeling() {
         current_state: res.data.state,
         reviewed_by: 'operator',
       }));
+      // Each row keeps its own proposed label — look it up from the batch
+      // that was on screen before this response arrived.
+      for (const imageId of res.data.image_ids) {
+        const p = proposals.find((row) => row.image_id === imageId && row.model === res.data.model);
+        if (p) patchPositiveTags(imageId, p.label, res.data.state);
+      }
     },
     onError: (err: Error) => pushToast('err', err.message),
   });
@@ -545,6 +612,7 @@ export default function NewDedupLabeling() {
       setNewDedupTagAnnotation(activeTagId as number, imageId, state),
     onSuccess: (res, vars) => {
       patchTagImages([vars.imageId], res.data.state);
+      if (labelFilter) patchPositiveTags(vars.imageId, labelFilter, res.data.state);
       invalidateOverview();
     },
     onError: (err: Error) => pushToast('err', err.message),
@@ -557,6 +625,9 @@ export default function NewDedupLabeling() {
       pushToast('ok', `Set ${res.data.updated} to ${res.data.state}.`);
       setSelected(new Set());
       patchTagImages(res.data.image_ids, res.data.state);
+      if (labelFilter) {
+        for (const imageId of res.data.image_ids) patchPositiveTags(imageId, labelFilter, res.data.state);
+      }
       invalidateOverview();
     },
     onError: (err: Error) => pushToast('err', err.message),
@@ -673,6 +744,8 @@ export default function NewDedupLabeling() {
           renamePending={renameLabelMut.isPending}
           onRemove={(id, oldLabel) => removeLabelMut.mutate({ id, oldLabel })}
           removePending={removeLabelMut.isPending}
+          onSetFlags={(id, flags) => setFlagsMut.mutate({ id, flags })}
+          flagsPending={setFlagsMut.isPending}
         />
       )}
 
@@ -895,6 +968,7 @@ export default function NewDedupLabeling() {
                   onToggleSelect={() => toggle(p.image_id)}
                   labelOptions={labelOptions}
                   borderCases={borderCases}
+                  assignedTags={positiveTagsCache.get(p.image_id) ?? []}
                   draft={draftFor(p)}
                   onDraftChange={(label) => setDraft(p, label)}
                   corrected={isCorrected(p)}
@@ -951,6 +1025,7 @@ export default function NewDedupLabeling() {
                     selected={selected.has(r.image_id)}
                     onToggleSelect={() => toggle(r.image_id)}
                     borderCases={borderCases}
+                    assignedTags={positiveTagsCache.get(r.image_id) ?? []}
                     focused={keyboard.focused === i}
                     onOpen={() => {
                       keyboard.setFocused(i);
@@ -984,7 +1059,11 @@ export default function NewDedupLabeling() {
       )}
 
       {detailImageId != null && (
-        <ImageTagDetailPanel imageId={detailImageId} onClose={() => setDetailImageId(null)} />
+        <ImageTagDetailPanel
+          imageId={detailImageId}
+          onClose={() => setDetailImageId(null)}
+          onTagStateChange={(label, state) => patchPositiveTags(detailImageId, label, state)}
+        />
       )}
     </div>
   );
@@ -1179,6 +1258,33 @@ function TaxonomyBarChart({
   );
 }
 
+/* The tags currently assigned (positive) to one image — "below the image"
+ * per the operator's ask, since a tile only shows the ONE tag it's
+ * reviewing and that's not the same as everything the image is already
+ * positive on now that multi-label images are possible. Renders nothing
+ * when empty, to keep an untouched tile clean. */
+function AssignedTagsRow({ tags }: { tags: string[] }) {
+  if (tags.length === 0) return null;
+  return (
+    <div
+      role="list"
+      aria-label="Assigned tags"
+      className="px-2 pt-1.5 flex flex-wrap gap-1"
+    >
+      {tags.map((label) => (
+        <span
+          key={label}
+          role="listitem"
+          className="px-1.5 py-0.5 rounded-[var(--radius-xs)] bg-[var(--color-sage-soft)] text-[var(--color-sage)] text-[0.65rem] font-mono truncate max-w-full"
+          title={label}
+        >
+          {label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function ProposalTile({
   proposal,
   image,
@@ -1188,6 +1294,7 @@ function ProposalTile({
   onToggleSelect,
   labelOptions,
   borderCases,
+  assignedTags,
   draft,
   onDraftChange,
   corrected,
@@ -1207,6 +1314,7 @@ function ProposalTile({
   onToggleSelect: () => void;
   labelOptions: LabelOption[];
   borderCases: BorderCaseStore;
+  assignedTags: string[];
   draft: string;
   onDraftChange: (label: string) => void;
   corrected: boolean;
@@ -1254,6 +1362,8 @@ function ProposalTile({
         <ImageTagBadge tag={badgeTag} confidence={badgeConfidence} className="absolute bottom-1.5 left-1.5" />
       </div>
 
+      <AssignedTagsRow tags={assignedTags} />
+
       <div className="px-2 py-1.5 flex items-center justify-between gap-1.5">
         <TriStateControl
           state={proposal.current_state ?? 'untouched'}
@@ -1295,6 +1405,7 @@ function TagImageTile({
   selected,
   onToggleSelect,
   borderCases,
+  assignedTags,
   focused,
   onOpen,
   onOpenDetail,
@@ -1306,6 +1417,7 @@ function TagImageTile({
   selected: boolean;
   onToggleSelect: () => void;
   borderCases: BorderCaseStore;
+  assignedTags: string[];
   focused: boolean;
   onOpen: () => void;
   onOpenDetail: () => void;
@@ -1345,6 +1457,7 @@ function TagImageTile({
           />
         )}
       </div>
+      <AssignedTagsRow tags={assignedTags} />
       <div className="px-2 py-1.5 flex items-center justify-between gap-1.5">
         <TriStateControl
           state={row.state}
@@ -1372,7 +1485,15 @@ function TagImageTile({
  * each with the same tri-state control — the "open kitchen-living room"
  * case (kitchen positive, living_room excluded, everything else negative)
  * needs to be set in one sitting without hunting through per-tag screens. */
-function ImageTagDetailPanel({ imageId, onClose }: { imageId: number; onClose: () => void }) {
+function ImageTagDetailPanel({
+  imageId,
+  onClose,
+  onTagStateChange,
+}: {
+  imageId: number;
+  onClose: () => void;
+  onTagStateChange: (label: string, state: TagState) => void;
+}) {
   const qc = useQueryClient();
   const key = ['new-dedup', 'labeling', 'image-tags', imageId];
   const q = useQuery({ queryKey: key, queryFn: () => listNewDedupImageTags(imageId) });
@@ -1388,14 +1509,15 @@ function ImageTagDetailPanel({ imageId, onClose }: { imageId: number; onClose: (
   const rows = q.data?.data ?? [];
 
   const setMut = useMutation({
-    mutationFn: ({ tagId, state }: { tagId: number; state: TagState }) =>
-      setNewDedupTagAnnotation(tagId, imageId, state),
+    mutationFn: (vars: { tagId: number; label: string; state: TagState }) =>
+      setNewDedupTagAnnotation(vars.tagId, imageId, vars.state),
     onSuccess: (res, vars) => {
       qc.setQueryData<{ data: typeof rows }>(key, (old) =>
         old
           ? { ...old, data: old.data.map((r) => (r.id === vars.tagId ? { ...r, state: res.data.state } : r)) }
           : old,
       );
+      onTagStateChange(vars.label, res.data.state);
       qc.invalidateQueries({ queryKey: OVERVIEW_KEY });
       qc.invalidateQueries({ queryKey: TAG_IMAGES_KEY });
     },
@@ -1449,7 +1571,7 @@ function ImageTagDetailPanel({ imageId, onClose }: { imageId: number; onClose: (
                     </span>
                     <TriStateControl
                       state={t.state}
-                      onChange={(state) => setMut.mutate({ tagId: t.id, state })}
+                      onChange={(state) => setMut.mutate({ tagId: t.id, label: t.label, state })}
                       disabled={setMut.isPending && setMut.variables?.tagId === t.id}
                     />
                   </div>
