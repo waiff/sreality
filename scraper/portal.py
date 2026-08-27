@@ -19,8 +19,9 @@ baked-in code default.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Literal
 
 LOG = logging.getLogger(__name__)
 
@@ -149,6 +150,48 @@ def price_changed(
     if prev is None or new is None or prev <= 0 or min_change_pct <= 0:
         return True
     return abs(new - prev) / prev >= min_change_pct
+
+
+IndexVerdict = Literal["new", "changed", "unchanged"]
+
+
+def classify_index_sighting(
+    prev: Mapping[str, Any] | None,
+    index_price_czk: int | None,
+    min_change_pct: float = 0.0,
+) -> IndexVerdict:
+    """What an index sighting tells us about a listing we may already hold.
+
+    ONE definition for all nine portals (rule #21): the index row is the only
+    evidence a walk has, and it carries exactly three verdicts.
+
+    The load-bearing case is the middle one. An index card with no price —
+    "Cena na dotaz" / "Info o ceně u RK" — is MISSING EVIDENCE, not evidence of
+    change, and must read `unchanged`. Six portals used to fall through to
+    `changed` there, which enqueued those listings on every single walk forever:
+    they became 85% of sreality's refresh queue and 91% of ceskereality's, and
+    the resulting flood is what starved new listings for nine days (2026-08-17).
+    Because that class is re-created by the *act of walking*, its size tracked
+    walk frequency rather than market activity — so making the walk faster made
+    the platform ingest less. bazos and remax already got this right and were
+    measurably the healthiest portals in the fleet; this makes it universal.
+
+    Known gap, deliberately not closed here: a price-on-request listing whose
+    DETAIL price moves while its index card still shows nothing is not detected.
+    That is the pre-existing contract for every listing — an unchanged index
+    price never triggers a refetch either — not a regression introduced by this
+    function. Closing it needs a staleness lane keyed on a real last-detail-fetch
+    timestamp, which the schema does not yet carry.
+    """
+    if prev is None:
+        return "new"
+    if index_price_czk is None:
+        return "unchanged"
+    return (
+        "changed"
+        if price_changed(prev["price_czk"], index_price_czk, min_change_pct)
+        else "unchanged"
+    )
 
 
 # The generic baseline (a portal with no specific tuning). Per-portal baked

@@ -43,7 +43,7 @@ from scraper.portal import (
     PortalConfig,
     default_config,
     load_portal_config,
-    price_changed,
+    classify_index_sighting,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -216,9 +216,9 @@ class MaximaPortal:
             prev = existing.get(nid)
             if prev is None:
                 continue
-            if walk.price_map.get(nid) is not None and not price_changed(
-                prev["price_czk"], walk.price_map[nid], self._price_change_min_pct,
-            ):
+            if classify_index_sighting(
+                prev, walk.price_map.get(nid), self._price_change_min_pct,
+            ) == "unchanged":
                 unchanged_pks.append(prev["id"])
             else:
                 changed.append(nid)

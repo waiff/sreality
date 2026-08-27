@@ -48,7 +48,7 @@ from scraper.portal import (
     PortalConfig,
     default_config,
     load_portal_config,
-    price_changed,
+    classify_index_sighting,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -316,9 +316,9 @@ class CeskerealityPortal:
             prev = existing.get(nid)
             if prev is None:
                 continue
-            if price_map.get(nid) is not None and not price_changed(
-                prev["price_czk"], price_map[nid], self._price_change_min_pct,
-            ):
+            if classify_index_sighting(
+                prev, price_map.get(nid), self._price_change_min_pct,
+            ) == "unchanged":
                 unchanged_pks.append(prev["id"])
             else:
                 changed.append(nid)
@@ -396,11 +396,12 @@ class CeskerealityPortal:
             unchanged_pks: list[int] = []
             for nid, ref, price in rows:
                 prev = existing.get(nid)
-                if prev is None:
+                verdict = classify_index_sighting(
+                    prev, price, self._price_change_min_pct,
+                )
+                if verdict == "new":
                     new_entries.append((nid, ref, price, db.QUEUE_PRIORITY_NEW))
-                elif price is None or price_changed(
-                    prev["price_czk"], price, self._price_change_min_pct,
-                ):
+                elif verdict == "changed":
                     changed_entries.append(
                         (nid, ref, price, db.QUEUE_PRIORITY_CHANGED))
                 else:

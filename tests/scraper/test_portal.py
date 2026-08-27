@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from scraper import portal
 from scraper.portal import (
     PortalConfig,
     PortalLimits,
@@ -373,3 +374,63 @@ def test_price_change_min_pct_resolves_through_limit_chain():
         _Conn((True, [{"x": 1}], None, {"price_change_min_pct": "lots"})), "idnes"
     )
     assert cfg.limits.price_change_min_pct == 0.005
+
+
+# --- classify_index_sighting: one verdict rule for all nine portals ---------
+
+
+def test_absent_index_price_reads_unchanged_not_changed():
+    """The 2026-08-17 regression, pinned.
+
+    An index card with no price ("Cena na dotaz") carries no evidence about the
+    price. Six portals used to read that as `changed`, re-enqueueing the listing
+    on every walk forever — 85% of sreality's refresh queue, 91% of
+    ceskereality's — which starved new listings for nine days.
+    """
+    assert portal.classify_index_sighting({"price_czk": 4_550_000}, None) == "unchanged"
+    # ...and it stays unchanged however wide the jitter tolerance is.
+    assert portal.classify_index_sighting({"price_czk": 4_550_000}, None, 0.05) == "unchanged"
+
+
+def test_unseen_listing_is_new():
+    assert portal.classify_index_sighting(None, 4_550_000) == "new"
+    assert portal.classify_index_sighting(None, None) == "new"
+
+
+def test_matching_price_is_unchanged_and_a_move_is_changed():
+    assert portal.classify_index_sighting({"price_czk": 100}, 100) == "unchanged"
+    assert portal.classify_index_sighting({"price_czk": 100}, 90) == "changed"
+
+
+def test_a_price_appearing_is_still_a_change():
+    """Absence of an index price is not news; a price ARRIVING is. A listing that
+    was price-on-request and now shows a number must be refetched."""
+    assert portal.classify_index_sighting({"price_czk": None}, 4_550_000) == "changed"
+
+
+def test_jitter_below_the_portal_tolerance_is_unchanged():
+    # idnes's FX-converted foreign inventory drifts ~0.04-0.08% daily.
+    assert portal.classify_index_sighting({"price_czk": 1_000_000}, 1_000_500, 0.01) == "unchanged"
+    assert portal.classify_index_sighting({"price_czk": 1_000_000}, 1_020_000, 0.01) == "changed"
+
+
+def test_no_portal_module_classifies_index_sightings_itself():
+    """One definition, not nine (rule #21).
+
+    This bug existed in six portal modules and not in two, because each carried
+    its own copy of the comparison. A portal that reaches for `price_changed`
+    directly is re-deriving the verdict and can drift again; the shared
+    classifier is the only sanctioned caller.
+    """
+    from pathlib import Path
+
+    scraper_dir = Path(portal.__file__).parent
+    offenders = [
+        p.name for p in sorted(scraper_dir.glob("*_main.py"))
+        if "price_changed(" in p.read_text(encoding="utf-8")
+    ]
+    if (scraper_dir / "main.py").read_text(encoding="utf-8").count("price_changed(") > 0:
+        offenders.append("main.py")
+    assert offenders == [], (
+        f"{offenders} call price_changed directly; use classify_index_sighting"
+    )

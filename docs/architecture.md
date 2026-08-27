@@ -886,6 +886,19 @@ renumber.** Navigate by area:
     batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`
     (`scraper.main --index-only`, `run_type='index'`) walks the full index, `touch_listings` +
     `mark_inactive` (under the completeness guard, rule #3), and **enqueues** new/price-changed
+    ids — classified by the ONE shared verdict rule, `portal.classify_index_sighting`, which
+    every portal including sreality routes through (a rail in `tests/scraper/test_portal.py`
+    fails any `*_main.py` that calls `price_changed` directly). Its load-bearing clause: **an
+    index card with no price is missing evidence, not evidence of change, and reads
+    `unchanged`.** Six portals used to fall through to `changed` there, re-enqueueing every
+    "Cena na dotaz" listing on every walk forever — 85% of sreality's refresh queue, 91% of
+    ceskereality's. That made refresh volume a function of WALK FREQUENCY rather than market
+    activity, so doubling the walk rate on 2026-08-15 doubled the busywork and starved
+    acquisition. bazos and remax already had the correct rule and were measurably the fleet's
+    healthiest portals. Known gap, deliberate: a price-on-request listing whose detail price
+    moves behind an unchanged index card is not detected — the same contract every listing has
+    always had, not a regression; closing it needs a last-detail-fetch timestamp the schema
+    does not carry. Enqueues
     ids into one of two service classes — ACQUISITION (`QUEUE_PRIORITY_NEW`, never fetched) or
     REFRESH (everything else, ranked failure-retry > price-changed > refetch-cohort).
     `detail_drain.yml` (`--drain-only`, `run_type='detail'`) claims a bounded slice

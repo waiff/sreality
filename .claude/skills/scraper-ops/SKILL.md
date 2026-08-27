@@ -272,7 +272,9 @@ not a bundled module — see `docs/architecture.md`); CI's `--check` guards drif
 from the slow "download each ad" write:
 - **`index_walk.yml` (fast, frequent).** Walks the **entire** index of every category pair (no
   `--limit`), `touch_listings` bumps `last_seen_at` on still-listed ids, `mark_inactive` flips
-  delisted ones (under the completeness guard), and new + price-changed ids are **enqueued** into
+  delisted ones (under the completeness guard), and new + price-changed ids — classified by the
+  one shared rule `portal.classify_index_sighting`, where **an index card with no price reads
+  `unchanged`, never `changed`** — are **enqueued** into
   `listing_detail_queue` in one of two service classes — ACQUISITION (never fetched) or REFRESH
   (failure-retry > price-changed > the location refetch lane). The drain reserves half of every
   claim for acquisition, so an unbounded refresh backlog can no longer starve new listings; unused
