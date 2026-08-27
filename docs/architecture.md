@@ -167,6 +167,22 @@ page — and is only accepted when idnes *says* it is empty ("momentálně tu ne
 `IndexPage.empty_confirmed`); ceskereality, which publishes no such string, has to confirm a zero
 by reading the page twice instead. The page-capped realtime probe keeps the flat national walk,
 since slicing would scatter the newest-first head it exists to read.
+**Un-parking is a scheduled decision, not a human one** (`coverage_gate.yml` → `scripts/
+coverage_gate.py`, cron `15 3,9,15,21`, three hours after each walk cycle). Both parked portals
+were parked for the same reason — the flag was a standing claim someone typed once, and the walks
+stopped matching it — so flipping it back by hand would recreate exactly that. The gate instead
+re-asks two questions from data every cycle: **covered** (every slice of every *declared* category
+finished inside 30h — the declared count is the denominator, or a portal could pass by walking a
+subset perfectly, which is precisely idnes's failure) and **stable** (that held on three
+consecutive evaluations with the delist-candidate count steady between them — a walk that reaches
+every slice but enumerates a different population each time is sampling, not covering, and that
+difference is invisible in a coverage percentage). Both pass → `supports_complete_walk` returns to
+true; either fails → it stays down. Every evaluation is appended to `portal_coverage_gate`
+(migration 455), holds included. **It is safe unattended not because the gate is certain to be
+right, but because a wrong verdict cannot execute**: un-parking only makes a sweep *eligible*, and
+the flip cap (rule #3's third rail) still refuses anything over 10% of a category, latches and
+alarms — idnes's backlog is ~37% of its rows, so the one failure this gate could cause is exactly
+the one the layer beneath it is built to catch.
 The detail URL carries the category
 (`/detail/{sale}/{cat}/…`), so the drain derives each listing's category from its own URL —
 one config (the `portals` row, migrations 110/111) walks many categories (byty + domy ×

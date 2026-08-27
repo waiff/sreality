@@ -201,7 +201,18 @@ is sliced into the 14 kraje + the abroad bucket and each slice's outcome is reco
 of restarting at page 1; inspect coverage with
 `select category_main, category_type, slice_key, outcome, walked_at from portal_index_slices
 where source='idnes' order by walked_at` — a category is fully covered only when all 15 of its
-slices read `exhausted` inside one window) feeds `idnes_detail_drain.yml` ("Scraping: iDNES Reality detail drain", `--drain-only`,
+slices read `exhausted` inside one window) feeds `idnes_detail_drain.yml`. **`coverage_gate.yml`**
+("Ops: index coverage gate", `scripts/coverage_gate.py`, cron `15 3,9,15,21` — three hours after
+each walk cycle, so it never reads a half-written ledger) is what UN-PARKS a portal: it holds
+unless every slice of every DECLARED category finished inside 30h, on three consecutive
+evaluations, with the delist-candidate count steady between them; then it sets
+`supports_complete_walk` back to true. Every evaluation is written to `portal_coverage_gate`
+(migration 455), holds and passes alike — the holds are the interesting ones while a portal is
+parked. Safe to leave unattended because a wrong verdict cannot execute: un-parking only makes a
+sweep *eligible*, and the flip cap (451/452) still refuses anything over 10% of a category and
+latches. Only idnes feeds the slice ledger today, so ceskereality and mmreality report
+`no slice ledger` rather than a false 0%. Dry-run:
+`gh workflow run coverage_gate.yml -f dry_run=true` ("Scraping: iDNES Reality detail drain", `--drain-only`,
 hourly cron `30 * * * *`, bounded by a `--max-seconds` wall-clock budget; with
 `SCRAPE_CHAIN_TOKEN` it re-dispatches itself while the queue has work, for near-continuous
 backlog drains). There is no combined bazos/idnes fallback workflow anymore — sreality's

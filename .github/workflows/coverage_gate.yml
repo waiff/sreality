@@ -1,0 +1,74 @@
+name: "Ops: index coverage gate"
+
+# Decides, from evidence, whether a portal whose delisting is PARKED
+# (supports_complete_walk = false) has earned it back.
+#
+# Two portals are parked: ceskereality (migration 449) and idnes (453). Both for
+# the same reason -- the flag was a standing claim someone typed once, and the
+# walks stopped matching it. Un-parking by hand would recreate exactly that, so
+# this re-asks the question on a timer and writes the answer down every time
+# (portal_coverage_gate, migration 455).
+#
+# TIMING. It runs three hours after each index-walk cycle starts, so a walk that
+# began at :15 has finished writing its slice outcomes before the gate reads
+# them. Reading mid-walk would see a half-written ledger and score a hold, which
+# is harmless but noisy -- and would reset a streak that had done nothing wrong.
+#   idnes        index walk  15 */6   -> 00:15 06:15 12:15 18:15
+#   ceskereality index walk  25 */6   -> 00:25 06:25 12:25 18:25
+#   THIS         gate        15 3/6   -> 03:15 09:15 15:15 21:15
+#
+# WHY THIS IS SAFE UNATTENDED. Not because the gate is certain to be right --
+# because a wrong verdict cannot execute. Un-parking only makes a sweep
+# ELIGIBLE; the flip cap (migrations 451/452) still refuses any sweep over 10%
+# of a category, latches, and records the refusal. The one failure this gate
+# could cause is precisely the one the layer underneath is built to catch.
+#
+# Required secret: SUPABASE_DB_URL.
+
+on:
+  schedule:
+    - cron: "15 3,9,15,21 * * *"
+  workflow_dispatch:
+    inputs:
+      source:
+        description: evaluate one portal only (blank = every parked portal)
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: evaluate and report, but write nothing and un-park nothing
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: coverage-gate
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Evaluate the coverage gate
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          GATE_SOURCE: ${{ inputs.source }}
+          GATE_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          if [ -n "$GATE_SOURCE" ]; then ARGS="$ARGS --source $GATE_SOURCE"; fi
+          if [ "$GATE_DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          echo "python -m scripts.coverage_gate $ARGS"
+          eval "python -m scripts.coverage_gate $ARGS"
