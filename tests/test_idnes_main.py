@@ -280,8 +280,8 @@ def test_walk_category_walks_all_fifteen_slices(monkeypatch):
 
     class _Spy(_IdxClient):
         def fetch_index(self, sale_type, category, page=None, *, locality=None,
-                        abroad=False):
-            asked.append((locality, abroad))
+                        sl=None, price_min=None, price_max=None):
+            asked.append((locality, sl))
             return ("<html>", 200)
 
     nid = "6a18deadbeefdeadbeef0001"
@@ -301,12 +301,14 @@ def test_walk_category_walks_all_fifteen_slices(monkeypatch):
     _portal().walk_category(
         {"sale_type": "prodej", "category": "byty"}, _Conn(), False, _Limiter(), None)
 
-    localities = [loc for loc, ab in asked if loc is not None]
+    localities = [loc for loc, sl in asked if loc is not None]
     assert set(localities) == set(portal_mod.CZ_KRAJ_SLUGS)
-    assert sum(1 for _loc, ab in asked if ab) == 1        # exactly one abroad slice
+    # Exactly one abroad slice, and it is selected by ?s-l=, not a path segment:
+    # idnes has no /zahranici/ spelling at all.
+    assert [sl for _loc, sl in asked if sl] == [idnes_main.ABROAD_SL]
     assert set(recorded) == set(portal_mod.CZ_KRAJ_SLUGS) | {portal_mod.ABROAD_SLICE}
     # The first call is the national cross-check: neither a kraj nor abroad.
-    assert asked[0] == (None, False)
+    assert asked[0] == (None, None)
 
 
 def test_one_unfinished_slice_forces_the_whole_category_incomplete(monkeypatch):
@@ -314,7 +316,7 @@ def test_one_unfinished_slice_forces_the_whole_category_incomplete(monkeypatch):
     purposes of delisting — it is a walk with a hole in it."""
     class _Flaky(_IdxClient):
         def fetch_index(self, sale_type, category, page=None, *, locality=None,
-                        abroad=False):
+                        sl=None, price_min=None, price_max=None):
             if locality == "zlinsky-kraj":
                 raise RuntimeError("connection reset")
             return ("<html>", 200)
@@ -381,8 +383,8 @@ def test_the_page_capped_probe_keeps_the_flat_national_walk(monkeypatch):
 
     class _Spy(_IdxClient):
         def fetch_index(self, sale_type, category, page=None, *, locality=None,
-                        abroad=False):
-            asked.append((locality, abroad))
+                        sl=None, price_min=None, price_max=None):
+            asked.append((locality, sl))
             return ("<html>", 200)
 
     nid = "6a18deadbeefdeadbeef0001"
@@ -402,7 +404,7 @@ def test_the_page_capped_probe_keeps_the_flat_national_walk(monkeypatch):
     portal.set_index_page_cap(2)
     _seen, _c, _n, _p, complete = portal.walk_category(
         {"sale_type": "prodej", "category": "byty"}, _Conn(), False, _Limiter(), None)
-    assert asked == [(None, False)]     # one flat national request, no slicing
+    assert asked == [(None, None)]      # one flat national request, no slicing
     assert complete is False
 
 
@@ -582,3 +584,243 @@ def test_the_empty_marker_cannot_override_a_page_that_has_results(monkeypatch):
         national_total=1)
     assert seen == {nid}
     assert set(outcomes.values()) == {"exhausted"}
+
+
+# --- descending into a slice that paging cannot enumerate --------------------
+#
+# idnes's result ordering is not stable between requests, so successive pages of
+# one query overlap and the loss compounds with page count. Measured live:
+#
+#     stredocesky-kraj (67 pages)   1,675 / 1,675   exact
+#     praha            (154 pages)  2,948 / 3,839   27% of slots were repeats
+#
+# Paging harder does not help — the pager genuinely ends there. Descending does,
+# but only if the PARENT walk is kept as well:
+#
+#     parent praha alone      2,948 / 3,840   76.8%   fails
+#     its ten obvody alone    3,777 / 3,840   98.4%   fails
+#     the union of both       3,830 / 3,840   99.74%  passes
+#
+# The children are individually near-exact but cannot hold a listing whose
+# address is too vague to file under any obvod; the parent walk is what does.
+
+
+class _Hierarchy(_IdxClient):
+    """A place with more rows than its own pages can enumerate, plus children
+    that hold most of them and a remainder only the parent can see."""
+
+    # Mirrors the live shape. Of ten listings, the parent's own pages reach eight
+    # (overlap eats the rest) and the two children hold nine between them — but
+    # #10's address is too vague to file under either child, so ONLY the parent
+    # ever sees it. Neither side alone clears the bar; the union does.
+    #   parent alone    8/10 = 80%   children alone  9/10 = 90%   union 10/10
+    PARENT_IDS = [f"6a18deadbeefdeadbeef{i:04d}" for i in list(range(1, 8)) + [10]]
+    CHILD_IDS = {"praha-1": [f"6a18deadbeefdeadbeef{i:04d}" for i in range(1, 6)],
+                 "praha-2": [f"6a18deadbeefdeadbeef{i:04d}" for i in range(6, 10)]}
+    DECLARED = 10
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.asked: list[str | None] = []
+
+    def fetch_index(self, sale_type, category, page=None, *, locality=None,
+                    sl=None, price_min=None, price_max=None):
+        self.asked.append(locality if locality else sl)
+        return (locality or sl or "__national__", 200)
+
+
+def _hier_parse(marker):
+    # "__national__" is the category-level cross-check the walk fetches first; it
+    # and the parent slice both advertise the true total of ten.
+    parentish = marker in ("__national__", "praha")
+    ids = (_Hierarchy.PARENT_IDS if parentish
+           else _Hierarchy.CHILD_IDS.get(marker, []))
+    total = _Hierarchy.DECLARED if parentish else len(ids)
+    return SimpleNamespace(
+        total=total, next_offset=None, empty_confirmed=False,
+        items=[SimpleNamespace(
+            source_id_native=n,
+            detail_path=f"https://reality.idnes.cz/detail/prodej/byt/x/{n}/",
+            price_text="5 000 000 Kč") for n in ids])
+
+
+def _descend_walk(monkeypatch, children=("praha-1", "praha-2")):
+    client_box: dict[str, Any] = {}
+
+    def _make(*a, **k):
+        c = _Hierarchy()
+        client_box["c"] = c
+        return c
+
+    monkeypatch.setattr(idnes_main, "IdnesClient", _make)
+    monkeypatch.setattr(idnes_main, "parse_index", _hier_parse)
+    monkeypatch.setattr(idnes_main, "sub_places",
+                        lambda html, s, c, exclude=(): (list(children), []))
+    monkeypatch.setattr(idnes_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(idnes_main.db, "enqueue_detail", lambda *a, **k: 0)
+    outcomes: dict[str, str] = {}
+    monkeypatch.setattr(idnes_main.db, "record_index_slice",
+                        lambda *a, **k: outcomes.__setitem__(k["slice_key"], k["outcome"]))
+    portal = _portal()
+    portal.SLICES = ("praha",)
+    result = portal.walk_category(
+        {"sale_type": "prodej", "category": "byty"}, _Conn(), False, _Limiter(), None)
+    return outcomes, result, client_box["c"]
+
+
+def test_a_short_slice_descends_and_the_union_completes_it(monkeypatch):
+    outcomes, (seen, _c, _n, _p, complete), client = _descend_walk(monkeypatch)
+    assert len(seen) == 10                    # 7 from the parent + 3 only children had
+    assert outcomes["praha"] == "exhausted"
+    assert complete is True
+    assert "praha-1" in client.asked and "praha-2" in client.asked
+
+
+def test_the_parent_rows_are_kept_not_replaced(monkeypatch):
+    """The measurement that decided the design: the children alone miss the rows
+    whose address is too vague to file under any of them."""
+    _o, (seen, _c, _n, _p, _complete), _cl = _descend_walk(monkeypatch)
+    child_only = set(_Hierarchy.CHILD_IDS["praha-1"]) | set(_Hierarchy.CHILD_IDS["praha-2"])
+    parent_only = set(_Hierarchy.PARENT_IDS) - child_only
+    assert parent_only                        # the fixture really does have some
+    assert parent_only <= seen                # …and the walk kept them
+
+
+def test_a_slice_with_no_children_stays_incomplete(monkeypatch):
+    """Fail closed. Nothing to descend into is not evidence of completeness."""
+    outcomes, (_s, _c, _n, _p, complete), _cl = _descend_walk(monkeypatch, children=())
+    assert outcomes["praha"] == "incomplete"
+    assert complete is False
+
+
+def test_an_exhausted_slice_never_descends(monkeypatch):
+    """The descent roughly doubles a slice's cost, so it must only run when
+    paging actually fell short."""
+    monkeypatch.setattr(idnes_main, "sub_places",
+                        lambda *a, **k: pytest.fail("descended from a complete slice"))
+    nid = "6a18deadbeefdeadbeef0001"
+    monkeypatch.setattr(idnes_main, "parse_index", lambda _h: SimpleNamespace(
+        total=1, next_offset=None, empty_confirmed=False,
+        items=[SimpleNamespace(
+            source_id_native=nid,
+            detail_path=f"https://reality.idnes.cz/detail/prodej/byt/x/{nid}/",
+            price_text="5 000 000 Kč")]))
+    monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
+    monkeypatch.setattr(idnes_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(idnes_main.db, "enqueue_detail", lambda *a, **k: 0)
+    monkeypatch.setattr(idnes_main.db, "record_index_slice", lambda *a, **k: None)
+    _portal().walk_category(
+        {"sale_type": "prodej", "category": "byty"}, _Conn(), False, _Limiter(), None)
+
+
+def test_an_all_duplicates_page_no_longer_ends_the_walk(monkeypatch):
+    """The exact bug the live run exposed. The old loop also stopped when a page
+    added nothing new — a guard against idnes clamping an out-of-range ?page to
+    the last page. With unstable ordering a legitimate mid-walk page can be all
+    repeats, and that guard ended Prague at 594 of 3,839."""
+    nid = "6a18deadbeefdeadbeef0001"
+    other = "6a18deadbeefdeadbeef0002"
+    pages = iter([
+        ([nid], 1),        # page 1
+        ([nid], 2),        # page 2 — entirely a repeat, must NOT stop the walk
+        ([other], None),   # page 3 — the pager ends here
+    ])
+
+    def _parse(_h):
+        ids, nxt = next(pages)
+        return SimpleNamespace(
+            total=2, next_offset=nxt, empty_confirmed=False,
+            items=[SimpleNamespace(
+                source_id_native=n,
+                detail_path=f"https://reality.idnes.cz/detail/prodej/byt/x/{n}/",
+                price_text="5 000 000 Kč") for n in ids])
+
+    monkeypatch.setattr(idnes_main, "parse_index", _parse)
+    monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
+    portal = _portal()
+    rows, declared, npages, outcome, _html = portal._walk_place(
+        _IdxClient(), "prodej", "byty", locality="praha", sl=None,
+        deadline=None, label="praha")
+    assert npages == 3                        # it did not stop on the repeat page
+    assert {r[0] for r in rows} == {nid, other}
+    assert outcome == "exhausted"
+
+
+def test_price_bands_are_the_fallback_when_a_place_has_no_sub_places(monkeypatch):
+    """Spain: 8,613 flats for sale over 345 pages, and it advertises no regions
+    at all. Without a second axis that slice could never finish, and one
+    unfinished slice holds its whole category open forever."""
+    asked: list[tuple[Any, Any, Any]] = []
+
+    class _Spy(_IdxClient):
+        def fetch_index(self, sale_type, category, page=None, *, locality=None,
+                        sl=None, price_min=None, price_max=None):
+            asked.append((sl, price_min, price_max))
+            return ("<html>", 200)
+
+    nid = "6a18deadbeefdeadbeef0001"
+    monkeypatch.setattr(idnes_main, "parse_index", lambda _h: SimpleNamespace(
+        total=100, next_offset=None, empty_confirmed=False,
+        items=[SimpleNamespace(
+            source_id_native=nid,
+            detail_path=f"https://reality.idnes.cz/detail/prodej/byt/x/{nid}/",
+            price_text="5 000 000 Kč")]))
+    monkeypatch.setattr(idnes_main, "IdnesClient", _Spy)
+    monkeypatch.setattr(idnes_main, "sub_places", lambda *a, **k: ([], []))
+
+    portal = _portal()
+    rows, declared, pages, outcome = portal._walk_tree(
+        _Spy(), "prodej", "byty", locality=None, sl="STAT-ES", label="STAT-ES",
+        deadline=None, depth=1, visited=set())
+    banded = [(lo, hi) for _sl, lo, hi in asked if lo is not None or hi is not None]
+    assert banded, "a place with no sub-places must fall back to price bands"
+    assert (None, 1_000_000) in banded          # the ladder's open bottom
+    assert (50_000_000, None) in banded         # …and its open top
+    assert all(sl == "STAT-ES" for sl, _lo, _hi in asked)   # same place, narrowed
+
+
+def test_the_unfiltered_walk_is_kept_alongside_the_bands(monkeypatch):
+    """Price bands are NOT a partition: a listing with no price falls outside
+    every one of them (6 of Spain's 8,613, 110 of Prague's 3,840). The parent's
+    own unfiltered walk is what holds that remainder, so it must always run."""
+    asked: list[tuple[Any, Any]] = []
+
+    class _Spy(_IdxClient):
+        def fetch_index(self, sale_type, category, page=None, *, locality=None,
+                        sl=None, price_min=None, price_max=None):
+            asked.append((price_min, price_max))
+            return ("<html>", 200)
+
+    nid = "6a18deadbeefdeadbeef0001"
+    monkeypatch.setattr(idnes_main, "parse_index", lambda _h: SimpleNamespace(
+        total=100, next_offset=None, empty_confirmed=False,
+        items=[SimpleNamespace(
+            source_id_native=nid,
+            detail_path=f"https://reality.idnes.cz/detail/prodej/byt/x/{nid}/",
+            price_text="5 000 000 Kč")]))
+    monkeypatch.setattr(idnes_main, "IdnesClient", _Spy)
+    monkeypatch.setattr(idnes_main, "sub_places", lambda *a, **k: ([], []))
+    portal = _portal()
+    portal._walk_tree(_Spy(), "prodej", "byty", locality=None, sl="STAT-ES",
+                      label="STAT-ES", deadline=None, depth=1, visited=set())
+    assert asked[0] == (None, None), "the unfiltered walk must come first"
+
+
+def test_a_band_that_is_still_too_big_splits_again() -> None:
+    """Geometric, not arithmetic: prices are log-distributed, so an arithmetic
+    midpoint would leave nearly everything on one side."""
+    lo, hi = 7_000_000, 10_000_000
+    kids = idnes_main._price_children(lo, hi)
+    assert len(kids) == 2 and kids[0][0] == lo and kids[1][1] == hi
+    mid = kids[0][1]
+    assert lo < mid < hi
+    assert mid < (lo + hi) // 2          # geometric sits below the arithmetic mean
+
+
+def test_the_ladder_covers_the_open_ends() -> None:
+    """A closed ladder would silently drop the cheapest and the priciest rows."""
+    ladder = idnes_main._price_children(None, None)
+    assert ladder[0][0] is None          # nothing below the bottom band
+    assert ladder[-1][1] is None         # nothing above the top band
+    edges = [hi for _lo, hi in ladder[:-1]]
+    assert edges == [lo for lo, _hi in ladder[1:]], "the ladder must not have gaps"

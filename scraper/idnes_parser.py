@@ -16,6 +16,8 @@ normalised to the same canonical labels the sreality parser emits (e.g.
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -207,6 +209,50 @@ _EMPTY_MARKERS: tuple[str, ...] = (
 def _is_empty_result(text: str) -> bool:
     flat = " ".join(_strip_diacritics(text).lower().split())
     return any(m in flat for m in _EMPTY_MARKERS)
+
+
+# --- descending into a slice that could not be enumerated ---------------------
+#
+# A search page advertises the places one level below whatever it is showing: a
+# kraj page links its okresy (and Prague links its ten obvody), and the abroad
+# page links one `s-l` value per country. That is the descent path when a slice
+# is too big to page through reliably.
+#
+# The list is SCRAPED rather than declared, which on ceskereality would be a
+# mistake (its rendered facet block is a top-10-by-popularity list, not a
+# partition). It is safe here for one specific reason: the descent PROVES ITSELF
+# against the parent's declared total. A missing child leaves the union short and
+# the slice stays incomplete; a spurious child can only add rows from the same
+# category, which cannot push the union past the declared count. Either way the
+# arithmetic catches it, so the link list never has to be trusted.
+#
+# The non-place vocabularies that share the same URL shape — condition, project
+# stage, and the `pokoj`/`atypicke` dispositions — are excluded by name. The
+# numeric dispositions (`3+kk`) exclude themselves: `+` is outside the slug
+# character class.
+_NON_PLACE_SLUGS: frozenset[str] = frozenset({
+    "novostavby", "projekty", "ve-vystavbe",
+    "dobry-stav", "udrzovane", "spatny-stav", "k-demolici",
+    "po-rekonstrukci", "v-rekonstrukci", "pred-rekonstrukci",
+    "atypicke", "pokoj",
+})
+
+_SL_RE = re.compile(r'href="/s/[^"/]+/[^"/]+/\?s-l=([A-Za-z0-9_-]+)"')
+
+
+def sub_places(
+    html: str, sale_type: str, category: str, *, exclude: Collection[str] = (),
+) -> tuple[list[str], list[str]]:
+    """(path children, s-l children) advertised by this search page.
+
+    `exclude` should carry the slice we are already looking at plus its siblings,
+    so a kraj page's links to the other thirteen kraje are not read as children.
+    """
+    skip = set(exclude) | _NON_PLACE_SLUGS
+    pat = re.compile(rf'href="/s/{re.escape(sale_type)}/{re.escape(category)}/([a-z0-9-]+)/"')
+    paths = sorted({m for m in pat.findall(html) if m not in skip})
+    sls = sorted({m for m in _SL_RE.findall(html) if m not in skip})
+    return paths, sls
 
 
 def _strip_diacritics(text: str) -> str:

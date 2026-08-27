@@ -33,12 +33,18 @@ _GONE_MARKERS: tuple[str, ...] = (
 )
 
 
-# idnes exposes "abroad" as a QUERY PARAMETER, not a path segment: there is no
-# /s/prodej/byty/zahranici/ (every spelling 404s), only ?s-l=STAT-XX. It matters
-# far more than a URL quirk: the 14 kraj slices sum to 15,319 of the 27,372 flats
-# for sale, and the missing 12,053 (44%) are all here. A slice set built from the
-# region nav alone would report 56% of the portal as 100% of it.
-ABROAD_QUERY = "s-l=STAT-XX"
+# idnes addresses a place in TWO ways, and both are needed.
+#
+#   * a PATH segment  -- /s/prodej/byty/praha/ , and one level down
+#                        /s/prodej/byty/praha-4/ , /s/prodej/byty/okres-kladno/
+#   * the `s-l` QUERY parameter -- ?s-l=STAT-XX is "abroad", and one level down
+#                        ?s-l=STAT-ES , ?s-l=STAT-IT , ... one value per country
+#
+# Abroad has no path spelling at all (every /zahranici/ variant 404s) and it is
+# not a curiosity: the 14 kraj slices sum to 15,319 of the 27,372 flats for sale,
+# and the missing 12,053 (44%) all live behind ?s-l=STAT-XX. A slice set built
+# from the region nav alone would report 56% of the portal as 100% of it.
+ABROAD_SL = "STAT-XX"
 
 
 def index_url(
@@ -47,24 +53,39 @@ def index_url(
     page: int | None = None,
     *,
     locality: str | None = None,
-    abroad: bool = False,
+    sl: str | None = None,
+    price_min: int | None = None,
+    price_max: int | None = None,
 ) -> str:
     """Build a search URL. idnes paging is offset-style: the bare URL is page 1,
     and `?page=N` is the (N+1)-th page (the pager's "next" link carries the literal
     N to use). `page=None` -> the bare first page; otherwise `?page={page}`.
 
-    `locality` is a kraj slug (a path segment); `abroad` selects the foreign
-    bucket instead (a query parameter). They are mutually exclusive — together
-    they would ask for a region and its complement at once.
+    `locality` selects a place by path segment (a kraj, or one level down an okres
+    or a Prague obvod); `sl` selects one by the `s-l` parameter (`STAT-XX` for
+    abroad, `STAT-ES` and friends for individual countries). They are mutually
+    exclusive — together they would ask for a place and a different place at once.
+
+    `price_min` / `price_max` narrow whichever place is selected. They are the
+    fallback axis for a place that is too big to page through and has no sub-
+    places to descend into — Spain holds 8,613 flats for sale across 345 pages
+    and advertises no regions at all. Price bands are NOT a partition (a listing
+    with no price falls outside every band, ~3% on the slices measured), which is
+    exactly why the unfiltered walk of the same place is always kept alongside
+    them: it is what holds the price-less remainder.
     """
-    if abroad and locality:
-        raise ValueError("index_url: locality and abroad are mutually exclusive")
+    if sl and locality:
+        raise ValueError("index_url: locality and sl are mutually exclusive")
     url = f"{BASE_URL}/s/{sale_type}/{category}/"
     if locality:
         url += f"{urllib.parse.quote(locality.strip('/'))}/"
     params = []
-    if abroad:
-        params.append(ABROAD_QUERY)
+    if sl:
+        params.append(f"s-l={urllib.parse.quote(sl)}")
+    if price_min is not None:
+        params.append(f"f%5BpriceMin%5D={int(price_min)}")
+    if price_max is not None:
+        params.append(f"f%5BpriceMax%5D={int(price_max)}")
     if page is not None and page >= 1:
         params.append(f"page={page}")
     if params:
@@ -111,10 +132,13 @@ class IdnesClient(BasePortalClient):
         page: int | None = None,
         *,
         locality: str | None = None,
-        abroad: bool = False,
+        sl: str | None = None,
+        price_min: int | None = None,
+        price_max: int | None = None,
     ) -> tuple[str, int]:
         response = self._request(
-            index_url(sale_type, category, page, locality=locality, abroad=abroad)
+            index_url(sale_type, category, page, locality=locality, sl=sl,
+                      price_min=price_min, price_max=price_max)
         )
         return response.text, response.status_code
 

@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from scraper import db, portal_runner
-from scraper.idnes_client import IdnesClient, detail_url
+from scraper.idnes_client import ABROAD_SL, IdnesClient, detail_url
 from scraper.idnes_parser import (
     CATEGORY_MAIN,
     SALE_TYPE,
@@ -41,6 +41,7 @@ from scraper.idnes_parser import (
     index_price,
     parse_detail,
     parse_index,
+    sub_places,
 )
 from scraper.portal import (
     ABROAD_SLICE,
@@ -74,6 +75,51 @@ INACTIVE_MIN_UNSEEN_HOURS = 12
 # budget — idnes clamps an out-of-range ?page to the last page and serves it
 # again, so a pager bug could otherwise page forever against a live URL.
 _MAX_SLICE_PAGES = 400
+
+# How many levels a slice may descend when paging cannot reach its own tail.
+# Two, because one is not always enough: kraj -> okres suffices for the Czech
+# side, but the abroad bucket is three times Prague's size, so it splits by
+# country and a large country may need splitting again. Deeper than that and the
+# request cost stops being worth the rows.
+_DESCENT_DEPTH = 3
+
+# The fallback axis, for a place too big to page through that advertises no
+# sub-places at all. Spain holds 8,613 flats for sale over 345 pages and links no
+# regions; without this its slice could never be enumerated, and one unfinished
+# slice holds its whole category open forever.
+#
+# These are NOT a partition and must never be treated as one: a listing with no
+# price falls outside every band. Measured on Spain, 6 of 8,613 (and 110 of
+# 3,840 in Prague). That is exactly why the unfiltered walk of the same place is
+# always kept alongside its children — it is what holds the price-less remainder,
+# the same property that made the place descent work.
+_PRICE_LADDER: tuple[tuple[int | None, int | None], ...] = (
+    (None, 1_000_000), (1_000_000, 2_000_000), (2_000_000, 3_000_000),
+    (3_000_000, 5_000_000), (5_000_000, 7_000_000), (7_000_000, 10_000_000),
+    (10_000_000, 15_000_000), (15_000_000, 25_000_000),
+    (25_000_000, 50_000_000), (50_000_000, None),
+)
+
+
+def _price_children(
+    lo: int | None, hi: int | None,
+) -> list[tuple[int | None, int | None]]:
+    """Sub-bands of a price range. The whole range opens into the ladder; a band
+    that is itself too big splits in half — geometrically, because prices are
+    log-distributed and an arithmetic midpoint would leave everything on one
+    side."""
+    if lo is None and hi is None:
+        return list(_PRICE_LADDER)
+    if lo is None:
+        return [(None, hi // 2), (hi // 2, hi)] if hi and hi > 1 else []
+    if hi is None:
+        return [(lo, lo * 4), (lo * 4, None)]
+    if hi - lo < 2:
+        return []
+    mid = int((lo * hi) ** 0.5) or (lo + hi) // 2
+    if mid <= lo or mid >= hi:
+        mid = (lo + hi) // 2
+    return [(lo, mid), (mid, hi)]
 
 
 @dataclass(frozen=True)
@@ -200,84 +246,192 @@ class IdnesPortal:
     # between runs (portal_index_slices, migration 454) so coverage accumulates.
     SLICES: tuple[str, ...] = CZ_KRAJ_SLUGS + (ABROAD_SLICE,)
 
-    def _walk_slice(
-        self, client: IdnesClient, sale_type: str, cat: str, slice_key: str,
-        *, deadline: float | None,
-    ) -> "SliceWalk":
-        """Walk ONE slice to its own declared tail.
+    def _place(self, slice_key: str) -> tuple[str | None, str | None]:
+        """(locality, sl) for a top-level slice key."""
+        return (None, ABROAD_SL) if slice_key == ABROAD_SLICE else (slice_key, None)
 
-        `exhausted` is the only positive outcome; everything else is missing
-        evidence and forces the whole category incomplete (rule #3).
+    def _walk_place(
+        self, client: IdnesClient, sale_type: str, cat: str, *,
+        locality: str | None, sl: str | None, deadline: float | None,
+        label: str, price_min: int | None = None, price_max: int | None = None,
+    ) -> tuple[list[tuple[str, str, int | None]], int | None, int, str, str | None]:
+        """Page one place to its own tail.
+
+        Returns (rows, declared_total, pages, outcome, first_page_html). The HTML
+        is kept because it advertises the places one level down, which is the
+        descent path when this one cannot be enumerated.
         """
-        abroad = slice_key == ABROAD_SLICE
-        locality = None if abroad else slice_key
         rows: list[tuple[str, str, int | None]] = []
         ref: set[str] = set()
         declared: int | None = None
+        first_html: str | None = None
         pages = 0
         page: int | None = None
         while True:
             if deadline_reached(deadline):
-                LOG.info(
-                    "SLICE deadline cm=%s ct=%s slice=%s pages=%d collected=%d "
-                    "declared=%s; stopping incomplete",
-                    cat, sale_type, slice_key, pages, len(rows), declared,
-                )
-                return SliceWalk(slice_key, rows, declared, pages, "deadline")
+                LOG.info("SLICE deadline cm=%s ct=%s place=%s pages=%d collected=%d",
+                         cat, sale_type, label, pages, len(rows))
+                return rows, declared, pages, "deadline", first_html
             try:
                 html, _ = client.fetch_index(
-                    sale_type, cat, page, locality=locality, abroad=abroad,
-                )
-            except Exception as exc:  # noqa: BLE001 - one slice must not kill the walk
-                # NOT a clean finish: a fetch that failed is missing evidence.
-                LOG.warning("SLICE error cm=%s ct=%s slice=%s page=%s: %s",
-                            cat, sale_type, slice_key, page, exc)
-                return SliceWalk(slice_key, rows, declared, pages, "error")
+                    sale_type, cat, page, locality=locality, sl=sl,
+                    price_min=price_min, price_max=price_max)
+            except Exception as exc:  # noqa: BLE001 - one place must not kill the walk
+                LOG.warning("SLICE error cm=%s ct=%s place=%s page=%s: %s",
+                            cat, sale_type, label, page, exc)
+                return rows, declared, pages, "error", first_html
             parsed = parse_index(html)
             pages += 1
+            if first_html is None:
+                first_html = html
             if declared is None:
                 declared = parsed.total
-                # A slice with nothing in it publishes no count, so `total` is
-                # None — exactly what a degraded page returns. The difference is
-                # that idnes SAYS SO ("momentálně tu není žádný inzerát"), and a
-                # confirmed zero is a real measurement: an empty slice IS
-                # complete. Without this, every legitimately empty slice would
-                # read as missing evidence and hold its whole category
-                # incomplete forever.
                 if declared is None and parsed.empty_confirmed:
-                    declared = 0
-                    LOG.info(
-                        "SLICE cm=%s ct=%s slice=%s declared=0 collected=0 pages=1 "
-                        "outcome=exhausted (empty, confirmed by the page itself)",
-                        cat, sale_type, slice_key,
-                    )
-                    return SliceWalk(slice_key, rows, 0, pages, "exhausted")
-            new_on_page = 0
+                    # An empty place publishes no count — identical to a degraded
+                    # page — so it only counts as finished when idnes says so.
+                    return rows, 0, pages, "exhausted", first_html
             for item in parsed.items:
                 nid = item.source_id_native
                 if nid not in ref:
                     ref.add(nid)
                     rows.append((nid, detail_url(item.detail_path),
                                  db.sane_price_czk(index_price(item.price_text))))
-                    new_on_page += 1
             if pages >= _MAX_SLICE_PAGES:
-                LOG.warning("SLICE ceiling cm=%s ct=%s slice=%s at %d pages "
-                            "(declared=%s) — refusing to loop",
-                            cat, sale_type, slice_key, pages, declared)
-                return SliceWalk(slice_key, rows, declared, pages, "ceiling")
-            # An empty page, no "next" link, or a page that added nothing new.
-            # The last matters: idnes CLAMPS an out-of-range ?page to the final
-            # page and serves it again with next=None, so a walk that trusted
-            # only the pager could re-read the tail forever.
-            if not parsed.items or parsed.next_offset is None or new_on_page == 0:
+                LOG.warning("SLICE ceiling cm=%s ct=%s place=%s at %d pages",
+                            cat, sale_type, label, pages)
+                return rows, declared, pages, "ceiling", first_html
+            # STOP ONLY WHEN THE PAGER SAYS SO. An earlier version also stopped on
+            # a page that added nothing new, to defend against idnes clamping an
+            # out-of-range ?page to the last page. That guard is wrong here:
+            # idnes's result ordering is UNSTABLE between requests, so pages
+            # overlap, and a legitimately mid-walk page can be entirely rows we
+            # already hold. It fired on page 26 of Prague and ended the slice at
+            # 594 of 3,839. `next_offset is None` is the reliable terminator (the
+            # clamped page reports it), and _MAX_SLICE_PAGES is the loop backstop.
+            if not parsed.items or parsed.next_offset is None:
                 break
             page = parsed.next_offset
         verdict = walk_coverage(len(rows), declared, stopped_early=False)
-        # `unknown` (no declared total) is missing evidence, not success: a
-        # throttled or malformed page renders a shell with no count and no cards,
-        # which is byte-for-byte an empty slice. It must never read as finished.
         outcome = "exhausted" if verdict == "complete" else (
             "degraded" if verdict == "unknown" else "incomplete")
+        return rows, declared, pages, outcome, first_html
+
+    def _walk_tree(
+        self, client: IdnesClient, sale_type: str, cat: str, *,
+        locality: str | None, sl: str | None, label: str,
+        deadline: float | None, depth: int,
+        visited: set[tuple[str | None, str | None]],
+        price_min: int | None = None, price_max: int | None = None,
+    ) -> tuple[list[tuple[str, str, int | None]], int | None, int, str]:
+        """Walk a place, descending if paging alone cannot reach its tail.
+
+        Two descent axes, tried in that order. PLACE first, because it is the
+        site's own hierarchy and (on the Czech side) very nearly a partition:
+        a kraj links its okresy, Prague links its ten obvody, the abroad bucket
+        links one `s-l` value per country — and those 38 countries sum EXACTLY to
+        the abroad total. PRICE second, as the fallback for a place that has no
+        sub-places at all: Spain is 8,613 flats over 345 pages and advertises no
+        regions, so without it that slice could never finish, and one unfinished
+        slice holds its whole category open forever.
+
+        The parent's own rows are always kept. That is not an optimisation, it is
+        what makes either axis work: neither axis is a true partition, and the
+        unfiltered walk is what holds the remainder each one drops — the 60
+        Prague listings too vaguely addressed for any obvod, the 6 Spanish ones
+        with no price at all.
+
+        Returns (rows, declared, pages, outcome).
+        """
+        visited.add((locality, sl))
+        rows, declared, pages, outcome, html = self._walk_place(
+            client, sale_type, cat, locality=locality, sl=sl,
+            deadline=deadline, label=label,
+            price_min=price_min, price_max=price_max)
+        # Descend ONLY on `incomplete` — we paged to the pager's own end and came
+        # up short, which is the shortfall a finer query can actually fix. An
+        # `error` is a transport failure and a `degraded` page carries no total to
+        # measure a union against; descending on either just multiplies failed
+        # requests and would relabel a fetch problem as a coverage one.
+        if outcome != "incomplete" or depth <= 0:
+            return rows, declared, pages, outcome
+
+        children: list[tuple[str | None, str | None, int | None, int | None, str]] = []
+        if html is not None and price_min is None and price_max is None:
+            paths, sls = sub_places(html, sale_type, cat, exclude=set(self.SLICES))
+            children = (
+                [(c, None, None, None, c) for c in paths if (c, None) not in visited]
+                + [(None, c, None, None, c) for c in sls if (None, c) not in visited]
+            )
+        if not children:
+            children = [
+                (locality, sl, lo, hi, f"{lo or 0}-{hi or 'max'}")
+                for lo, hi in _price_children(price_min, price_max)
+            ]
+        if not children:
+            return rows, declared, pages, outcome
+
+        LOG.info("SLICE descend cm=%s ct=%s place=%s collected=%d declared=%s "
+                 "-> %d children (depth %d)",
+                 cat, sale_type, label, len(rows), declared, len(children), depth)
+        merged = {r[0]: r for r in rows}
+        for c_loc, c_sl, c_lo, c_hi, c_label in children:
+            if deadline_reached(deadline):
+                return list(merged.values()), declared, pages, "deadline"
+            c_rows, _cd, c_pages, _co = self._walk_tree(
+                client, sale_type, cat, locality=c_loc, sl=c_sl,
+                label=f"{label}/{c_label}", deadline=deadline,
+                depth=depth - 1, visited=visited,
+                price_min=c_lo, price_max=c_hi)
+            pages += c_pages
+            for r in c_rows:
+                merged.setdefault(r[0], r)
+        rows = list(merged.values())
+        verdict = walk_coverage(len(rows), declared, stopped_early=False)
+        outcome = "exhausted" if verdict == "complete" else (
+            "degraded" if verdict == "unknown" else "incomplete")
+        return rows, declared, pages, outcome
+
+    def _walk_slice(
+        self, client: IdnesClient, sale_type: str, cat: str, slice_key: str,
+        *, deadline: float | None,
+    ) -> SliceWalk:
+        """Walk one slice, descending where paging alone cannot reach its tail.
+
+        WHY A DESCENT IS NEEDED AT ALL. idnes's result ordering is not stable
+        between requests, so successive pages of one query overlap, and the loss
+        compounds with page count. Measured live: stredocesky-kraj (67 pages)
+        returned its declared 1,675 EXACTLY, while praha (154 pages) returned
+        2,948 of 3,839 — 27% of page slots were rows already seen. Paging harder
+        does not help; the pager genuinely ends there.
+
+        WHY THE PARENT WALK IS KEPT rather than replaced by its children. Neither
+        alone is enough, and this is the measurement that decided the design:
+
+            parent praha alone      2,948 / 3,840   76.8%   FAILS
+            its ten obvody alone    3,777 / 3,840   98.4%   FAILS
+            the UNION of both       3,830 / 3,840   99.74%  PASSES
+
+        The children are individually near-exact but cannot hold a listing whose
+        address is too vague to file under any obvod (60 such in Prague); the
+        parent walk is the catch-all that does. It is the same shape one level
+        up, where the 14 kraje miss the 44% that only ?s-l=STAT-XX holds.
+
+        The descent recurses (`_DESCENT_DEPTH`) because one level is not always
+        enough — the abroad bucket is three times Prague's size, so it splits by
+        country and a large country may need splitting again. `visited` stops a
+        page that links back to its parent from walking it twice.
+
+        The child list is SCRAPED, not declared, which on ceskereality would be a
+        mistake (its facet block is a top-10-by-popularity list, not a partition).
+        It is safe here only because the arithmetic checks it: a missing child
+        leaves the union short and the slice stays incomplete, and a spurious
+        child can only add rows of the same category, which cannot push the union
+        past the declared total. The link list never has to be trusted.
+        """
+        locality, sl = self._place(slice_key)
+        rows, declared, pages, outcome = self._walk_tree(
+            client, sale_type, cat, locality=locality, sl=sl, label=slice_key,
+            deadline=deadline, depth=_DESCENT_DEPTH, visited=set())
         LOG.info("SLICE cm=%s ct=%s slice=%s declared=%s collected=%d pages=%d outcome=%s",
                  cat, sale_type, slice_key, declared, len(rows), pages, outcome)
         return SliceWalk(slice_key, rows, declared, pages, outcome)
