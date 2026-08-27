@@ -70,6 +70,7 @@ import importlib
 import logging
 import os
 import signal
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -97,6 +98,10 @@ IMAGES_WORKERS = 8
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 IDLE_WAIT_SECONDS = 60.0
 LANE_RESTART_SECONDS = 30.0
+# Ceiling on ONE lane pass. The drain lane legitimately loops eight portals at
+# up to DRAIN_MAX_SECONDS each (~16 min worst case), so this sits well above any
+# healthy pass and far below the nine-hour wedge it exists to bound.
+LANE_PASS_TIMEOUT_SECONDS = 1800
 
 # maintenance lane: the incremental property-maintenance pass (straggler attach
 # + dirty-set recompute — scripts.recompute_property_stats.
@@ -403,11 +408,56 @@ def _claimable_by_source() -> dict[str, int]:
 
 def _record_pass(state: dict[str, Any], lane: str, last: dict[str, Any]) -> None:
     prev = state["lanes"].get(lane, {})
+    started = prev.get("started_at")
+    duration: float | None = None
+    if started:
+        with contextlib.suppress(ValueError):
+            duration = round(
+                (datetime.now(timezone.utc) - datetime.fromisoformat(started)).total_seconds(), 1
+            )
     state["lanes"][lane] = {
         "last_pass_at": datetime.now(timezone.utc).isoformat(),
         "passes": int(prev.get("passes", 0)) + 1,
+        "last_duration_s": duration,
+        # Cleared here: a lane with started_at set in the heartbeat is a pass
+        # STILL RUNNING, which is the whole point of recording it.
+        "started_at": None,
+        # Carried, not reset. A lane that alternates fail/succeed would otherwise
+        # report zero failures whenever the most recent pass happened to work --
+        # hiding exactly the flapping this instrument exists to expose.
+        "failed_passes": int(prev.get("failed_passes", 0)),
+        "last_failure_at": prev.get("last_failure_at"),
         "last": last,
     }
+
+
+def _record_pass_failed(state: dict[str, Any], lane: str, duration: float) -> None:
+    """A pass that raised. Counted separately from a completed one so a lane that
+    is crash-looping (fails fast, forever) cannot be mistaken for one that is
+    working, nor for one that is hung."""
+    prev = dict(state["lanes"].get(lane, {}))
+    prev["started_at"] = None
+    prev["last_duration_s"] = duration
+    prev["failed_passes"] = int(prev.get("failed_passes", 0)) + 1
+    prev["last_failure_at"] = datetime.now(timezone.utc).isoformat()
+    state["lanes"][lane] = prev
+
+
+def _record_pass_start(state: dict[str, Any], lane: str) -> None:
+    """Stamp that a pass BEGAN.
+
+    Passes were previously recorded only on completion, so a lane wedged inside
+    run_pass() was indistinguishable from a lane that had simply never been
+    scheduled — both showed the same stale counter. That is exactly the state the
+    drain lane was found in (one pass in nine hours while the images lane managed
+    486), and nothing in the system could say whether it was blocked, slow, or
+    idle. `_lane_loop` awaits run_pass() with no timeout and `_supervised` catches
+    exceptions rather than hangs, so an unbounded await is invisible AND
+    unrecoverable without a redeploy.
+    """
+    prev = dict(state["lanes"].get(lane, {}))
+    prev["started_at"] = datetime.now(timezone.utc).isoformat()
+    state["lanes"][lane] = prev
 
 
 async def _probe_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
@@ -848,6 +898,28 @@ async def _estimation_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> 
     _record_pass(state, "estimation", last)
 
 
+def _lane_snapshot(lanes: dict[str, Any]) -> dict[str, Any]:
+    """The lane state as written to the heartbeat, with elapsed time resolved.
+
+    `in_flight_s` is computed HERE rather than left to the reader: it is the one
+    number that separates "this lane is working" from "this lane is wedged", and
+    a value only derivable by arithmetic over an ISO string is a value nothing
+    will alarm on.
+    """
+    now = datetime.now(timezone.utc)
+    out: dict[str, Any] = {}
+    for lane, info in lanes.items():
+        entry = dict(info)
+        started = entry.get("started_at")
+        elapsed: float | None = None
+        if started:
+            with contextlib.suppress(ValueError):
+                elapsed = round((now - datetime.fromisoformat(started)).total_seconds(), 1)
+        entry["in_flight_s"] = elapsed
+        out[lane] = entry
+    return out
+
+
 def _beat_sync(state: dict[str, Any]) -> None:
     conn = db.connect()
     try:
@@ -855,7 +927,7 @@ def _beat_sync(state: dict[str, Any]) -> None:
             cur.execute(_HEARTBEAT_SQL, {
                 "worker": WORKER_NAME,
                 "started_at": state["started_at"],
-                "details": Jsonb(state["lanes"]),
+                "details": Jsonb(_lane_snapshot(state["lanes"])),
             })
     finally:
         with contextlib.suppress(Exception):
@@ -874,6 +946,7 @@ async def _lane_loop(
     stop_event: asyncio.Event,
     read_interval: Callable[[], float],
     run_pass: Callable[[], Awaitable[None]],
+    state: dict[str, Any],
     *,
     default_interval: float,
     idle_seconds: float = IDLE_WAIT_SECONDS,
@@ -897,10 +970,33 @@ async def _lane_loop(
             else:
                 break
 
+        _record_pass_start(state, name)
+        started = time.monotonic()
         try:
-            await run_pass()
+            # CONTAINMENT, not a diagnosis. run_pass() was awaited unbounded, so a
+            # single wedged call froze its lane until the next redeploy -- the
+            # drain lane managed ONE pass in nine hours while images managed 486.
+            # The timeout does not say WHY a pass hangs; it stops one hang from
+            # costing every subsequent pass. The instrumentation above is what
+            # will say why.
+            #
+            # Honest limit: a pass that is blocked inside asyncio.to_thread keeps
+            # running after the cancellation -- Python cannot kill a thread. This
+            # frees the LANE, and a leak shows up as repeated timeouts on the same
+            # lane, which is itself the diagnosis we currently lack.
+            await asyncio.wait_for(run_pass(), timeout=LANE_PASS_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            LOG.error(
+                "%s lane pass exceeded %ss and was abandoned; the lane continues "
+                "(a thread blocked inside it may still be running)",
+                name, LANE_PASS_TIMEOUT_SECONDS,
+            )
+            _record_pass_failed(state, name, round(time.monotonic() - started, 1))
         except Exception:  # noqa: BLE001 - a pass failure never kills the lane
             LOG.exception("%s lane pass failed", name)
+            # A pass that raised never reaches _record_pass, so clear the
+            # in-flight stamp here or a failing lane reads as a hung one forever.
+            _record_pass_failed(state, name, round(time.monotonic() - started, 1))
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval)
@@ -954,30 +1050,37 @@ async def _amain() -> int:
         ("probe", lambda: _lane_loop(
             "probe", stop_event, _read_probe_interval,
             lambda: _probe_pass(stop_event, state),
+            state,
             default_interval=PROBE_INTERVAL_DEFAULT)),
         ("drain", lambda: _lane_loop(
             "drain", stop_event, _read_drain_interval,
             lambda: _drain_pass(stop_event, state),
+            state,
             default_interval=DRAIN_INTERVAL_DEFAULT)),
         ("images", lambda: _lane_loop(
             "images", stop_event, _read_images_interval,
             lambda: _images_pass(stop_event, state),
+            state,
             default_interval=IMAGES_INTERVAL_DEFAULT)),
         ("count_probe", lambda: _lane_loop(
             "count_probe", stop_event, _read_count_probe_interval,
             lambda: _count_probe_pass(stop_event, state),
+            state,
             default_interval=COUNT_PROBE_INTERVAL_DEFAULT)),
         ("maintenance", lambda: _lane_loop(
             "maintenance", stop_event, _read_maintenance_interval,
             lambda: _maintenance_pass(stop_event, state),
+            state,
             default_interval=MAINTENANCE_INTERVAL_DEFAULT)),
         ("estimation", lambda: _lane_loop(
             "estimation", stop_event, _read_estimation_interval,
             lambda: _estimation_pass(stop_event, state),
+            state,
             default_interval=ESTIMATION_INTERVAL_DEFAULT)),
         ("heartbeat", lambda: _lane_loop(
             "heartbeat", stop_event, lambda: HEARTBEAT_INTERVAL_SECONDS,
             lambda: _heartbeat_pass(state),
+            state,
             default_interval=HEARTBEAT_INTERVAL_SECONDS)),
     ]
     tasks = [

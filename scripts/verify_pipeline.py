@@ -82,6 +82,12 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # How many of the newest migrations to probe. 25 spans several weeks of this
     # repo's cadence, so a drift is caught long before the window rolls past it,
     # while keeping the probe to a few hundred catalog lookups.
+    # The drain lane legitimately loops eight portals at up to DRAIN_MAX_SECONDS
+    # (120 s) each, so ~16 min is a normal long pass. Warn above that, fail at an
+    # hour — no lane has a legitimate reason to spend an hour in one pass, and
+    # the observed wedge sat for NINE HOURS.
+    "worker_lane_stall_warn_seconds": 1200,
+    "worker_lane_stall_fail_seconds": 3600,
     "migration_drift_window": 25,
     "walk_coverage_warn_gap": 0.05,
     "walk_coverage_fail_gap": 0.15,
@@ -1909,6 +1915,85 @@ def check_migration_drift(conn: Any, thresholds: dict[str, Any]) -> dict[str, An
     }
 
 
+# --- worker lanes: alive is not the same as working -------------------------
+#
+# `worker_liveness` already catches a DEAD worker (stale heartbeat). It cannot
+# catch a live worker with a wedged lane, which is what actually happened: the
+# realtime worker beat every 30 s for nine hours while its detail-drain lane
+# completed ONE pass and its images lane completed 486. `_lane_loop` awaits
+# run_pass() with no timeout and `_supervised` catches exceptions rather than
+# hangs, so an unbounded await inside a pass is both invisible and unrecoverable
+# short of a redeploy. The worker now stamps when a pass BEGINS and publishes
+# `in_flight_s`; this is the check that reads it.
+_WORKER_LANE_SQL = """
+select h.worker, l.key as lane,
+       (l.value->>'in_flight_s')::numeric as in_flight_s,
+       (l.value->>'passes')::int as passes,
+       (l.value->>'failed_passes')::int as failed_passes,
+       (l.value->>'last_duration_s')::numeric as last_duration_s,
+       extract(epoch from (now() - h.started_at)) / 60.0 as worker_uptime_min
+  from worker_heartbeats h, lateral jsonb_each(h.details) l
+ where h.beat_at > now() - interval '10 minutes'
+   and jsonb_typeof(l.value) = 'object'
+"""
+
+
+def check_worker_lane_stall(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Is any always-on worker lane stuck inside a single pass?"""
+    with conn.cursor() as cur:
+        cur.execute(_WORKER_LANE_SQL)
+        rows = cur.fetchall()
+
+    warn_s = float(thresholds["worker_lane_stall_warn_seconds"])
+    fail_s = float(thresholds["worker_lane_stall_fail_seconds"])
+    lanes: dict[str, Any] = {}
+    offenders: list[str] = []
+    status = "ok"
+    worst = 0.0
+    for worker, lane, in_flight, passes, failed, last_duration, uptime in rows:
+        elapsed = float(in_flight) if in_flight is not None else None
+        lanes[f"{worker}.{lane}"] = {
+            "in_flight_s": elapsed,
+            "passes": int(passes or 0),
+            "failed_passes": int(failed or 0),
+            "last_duration_s": float(last_duration) if last_duration is not None else None,
+            "worker_uptime_min": round(float(uptime or 0), 1),
+        }
+        if elapsed is None:
+            continue
+        worst = max(worst, elapsed)
+        if elapsed >= fail_s:
+            status = "fail"
+            offenders.append(f"{worker}.{lane} stuck {elapsed / 60:.0f}min")
+        elif elapsed >= warn_s:
+            if status != "fail":
+                status = "warn"
+            offenders.append(f"{worker}.{lane} running {elapsed / 60:.0f}min")
+
+    if not rows:
+        # No beating worker at all is worker_liveness's job, not this check's.
+        # Saying "ok" here would be a lie; saying "fail" would double-alarm.
+        return {
+            "check_key": "worker_lane_stall", "status": "warn", "value": None,
+            "details": {"lanes": {}},
+            "message": "No worker heartbeat in the last 10 minutes — see worker_liveness.",
+        }
+    if offenders:
+        message = (
+            "Worker lane(s) stuck inside a single pass: " + "; ".join(offenders)
+            + " -- run_pass() has no timeout, so this will not clear without a redeploy."
+        )
+    else:
+        message = f"All {len(lanes)} worker lane(s) idle or mid-pass within budget."
+    return {
+        "check_key": "worker_lane_stall",
+        "status": status,
+        "value": round(worst, 1),
+        "details": {"lanes": lanes, "offenders": offenders},
+        "message": message,
+    }
+
+
 _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("llm_errors", check_llm_errors),
     ("llm_liveness", check_llm_liveness),
@@ -1927,6 +2012,7 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("acquisition_lag", check_acquisition_lag),
     ("walk_coverage", check_walk_coverage),
     ("migration_drift", check_migration_drift),
+    ("worker_lane_stall", check_worker_lane_stall),
 ]
 
 # --weekly stays a valid (currently empty) lane so the scheduled invocation keeps
