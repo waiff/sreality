@@ -1,5 +1,14 @@
-"""The ceskereality region × dynamic-facet split (the cap beater) + the opt-in
-residential proxy."""
+"""The ceskereality 14-kraj index partition + the opt-in residential proxy.
+
+What this file used to test — a 7-subdomain × rendered-facet fan-out capped at 12
+pages — was the defect, not the contract: the facet block is a top-10-by-popularity
+list, so whole okresy were never visited and the walk collected 7,566 of a declared
+8,828 while the completeness gate suppressed every delisting sweep. The 12-page cap
+turned out to belong to UNFILTERED category URLs only. The walk now partitions on
+the 14 DECLARED kraje, pages each slice to its own declared tail (up to the site's
+real 99-page ceiling on a filtered URL), and descends onto the subtype axis when a
+kraj needs more than that.
+"""
 
 from __future__ import annotations
 
@@ -10,14 +19,18 @@ import pytest
 
 from scraper import ceskereality_main as m
 from scraper import portal as m_portal
-from scraper.ceskereality_client import REGION_HOSTS, CeskerealityClient
-from scraper.ceskereality_parser import extract_facet_slugs
+from scraper.ceskereality_client import (
+    KRAJ_SLUGS,
+    SUBTYPE_SLUGS,
+    CeskerealityClient,
+    search_url,
+)
 from scraper.portal import default_config
 
 
 def _page_html(
     total: int | None, ids: list[str], facets: tuple[str, ...] = (),
-    next_page: int | None = None,
+    next_page: int | None = None, heading: str | None = None,
 ) -> str:
     cards = "".join(
         '<article class="i-estate">'
@@ -31,7 +44,57 @@ def _page_html(
         f'<a class="pagination-arrow --next" href="/x/?strana={next_page}"></a>'
         if next_page else ""
     )
-    return f"<html><head>{meta}</head><body>{cards}{facet_links}{pager}</body></html>"
+    h1 = f"<h1>{heading}</h1>" if heading else ""
+    return (
+        f"<html><head>{meta}</head><body>{h1}{cards}{facet_links}{pager}</body></html>"
+    )
+
+
+def _kraj_of(url: str) -> str | None:
+    """The kraj segment of a slice URL, for asserting what a walk actually touched."""
+    for slug in KRAJ_SLUGS:
+        if f"/{slug}/" in url:
+            return slug
+    return None
+
+
+class _PartitionClient:
+    """A whole category as a dict of {kraj: declared_count}, paged 20 to a page
+    with ids derived from (kraj, page) — i.e. a real partition, so the union over
+    the 14 kraje is exactly the sum of their counts."""
+
+    def __init__(self, counts: dict[str, int], national: int | None = None) -> None:
+        self.urls: list[str] = []
+        self._counts = counts
+        self._national = national if national is not None else sum(counts.values())
+
+    def fetch_search(self, url):  # noqa: ANN001
+        self.urls.append(url)
+        kraj = _kraj_of(url)
+        total = self._counts.get(kraj, 0)
+        pg = _page_num(url)
+        if total == 0:
+            # The verified empty-slice signature: 200, a correct H1, zero cards,
+            # and NO "Máme tady N" phrase anywhere on the page.
+            return _page_html(None, [], heading=f"Prodej bytů {kraj}"), 200
+        first = (pg - 1) * 20
+        ids = [str(1_000_000 + KRAJ_SLUGS.index(kraj) * 100_000 + first + k)
+               for k in range(max(0, min(20, total - first)))]
+        last = max(1, -(-total // 20))
+        return _page_html(
+            total, ids, next_page=pg + 1 if pg < last else None,
+            heading=f"Prodej bytů {kraj}"), 200
+
+    def fetch_index(self, sale_type, cat, page):  # noqa: ANN001
+        return _page_html(self._national, []), 200
+
+
+def _walk(portal, client, monkeypatch, **kw):
+    monkeypatch.setattr(m, "CeskerealityClient", lambda **k: client)
+    return portal.walk_category(
+        {"sale_type": "prodej", "category": "byty"},
+        conn=None, dry_run=True, limiter=None, **kw,
+    )
 
 
 def _page_num(url: str) -> int:
@@ -39,164 +102,274 @@ def _page_num(url: str) -> int:
     return int(mm.group(1)) if mm else 1
 
 
-def test_extract_facet_slugs_drops_pure_filters():
-    html = (
-        '<a href="/prodej/byty/byty-3-1/">x</a>'
-        '<a href="/prodej/byty/kladno/">x</a>'
-        '<a href="/prodej/byty/pouze-rk/">x</a>'      # pure filter -> dropped
-        '<a href="/prodej/byty/bez-realitky/">x</a>'  # pure filter -> dropped
-        '<a href="/prodej/byty/kladno/">dup</a>'      # de-duped
-        '<a href="/prodej/rodinne-domy/vily/">x</a>'  # other category -> ignored
-    )
-    assert extract_facet_slugs(html, "prodej", "byty") == ["byty-3-1", "kladno"]
+# --- the declared partition ------------------------------------------------
 
 
-class _FacetClient:
-    """A region's bare page advertises two district facets (kladno, beroun); each
-    district slice returns its own listings. Unique ids per page-1 fetch."""
-
-    def __init__(self) -> None:
-        self.urls: list[str] = []
-        self._n = 0
-
-    def _nid(self) -> str:
-        self._n += 1
-        return str(4_000_000 + self._n)
-
-    def fetch_search(self, url):  # noqa: ANN001
-        self.urls.append(url)
-        if "strana=" in url:
-            return _page_html(50, []), 200            # page 2 -> empty, slice ends
-        if "/kladno/" in url:
-            return _page_html(50, [self._nid(), self._nid()]), 200
-        if "/beroun/" in url:
-            return _page_html(50, [self._nid()]), 200
-        # the bare region page: advertises the facets + one region-wide listing
-        return _page_html(50, [self._nid()], facets=("kladno", "beroun")), 200
-
-    def fetch_index(self, sale_type, cat, page):  # nationwide total  # noqa: ANN001
-        return _page_html(50, ["9000001"]), 200
+def test_kraj_table_is_declared_complete_and_spells_vysocina_irregularly():
+    # 14 modern kraje, DECLARED — never scraped off a page. The two traps this
+    # pins: kraj-vysocina's irregular slug (vysocina-kraj and vysocina both 404),
+    # and the LEGACY 7-region vocabulary, which double-counts if mixed in.
+    assert len(KRAJ_SLUGS) == len(set(KRAJ_SLUGS)) == 14
+    assert "kraj-vysocina" in KRAJ_SLUGS
+    assert "vysocina-kraj" not in KRAJ_SLUGS and "vysocina" not in KRAJ_SLUGS
+    for legacy in ("severocesky", "vychodocesky", "zapadocesky", "severomoravsky",
+                   "jihomoravsky", "stredocesky"):
+        assert legacy not in KRAJ_SLUGS, f"legacy region {legacy} would double-count"
+    assert "zahranicni" not in KRAJ_SLUGS
 
 
-def test_walk_category_discovers_and_walks_facets(monkeypatch):
-    fake = _FacetClient()
-    monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: fake)
-    portal = m.CeskerealityPortal(
-        default_config("ceskereality"), regions=("stredo.ceskereality.cz",))
-
-    seen, _counts, _total, _pages, _complete = portal.walk_category(
-        {"sale_type": "prodej", "category": "byty"},
-        conn=None, dry_run=True, limiter=None,
-    )
-
-    # both advertised districts were walked, on the region subdomain
-    assert any("stredo.ceskereality.cz/prodej/byty/kladno/" in u for u in fake.urls)
-    assert any("stredo.ceskereality.cz/prodej/byty/beroun/" in u for u in fake.urls)
-    # union: 1 region-wide backstop + 2 kladno + 1 beroun = 4 distinct listings
-    assert len(seen) == 4
-
-
-class _CappedClient:
-    """A dense slice: every page full + a "next" arrow, total far over 240 — the
-    walk must stop at page 12 and mark it incomplete (never request the 404 page 13)."""
-
-    def __init__(self) -> None:
-        self.pages: list[int] = []
-
-    def fetch_search(self, url):  # noqa: ANN001
-        pg = _page_num(url)
-        self.pages.append(pg)
-        ids = [str(5_000_000 + pg * 100 + k) for k in range(20)]
-        return _page_html(300, ids, next_page=pg + 1), 200
-
-
-def test_walk_slice_caps_at_12_pages_never_requests_404_page13():
+def test_full_walk_visits_all_fourteen_kraje_and_no_foreign_tree(monkeypatch):
+    counts = {k: 40 for k in KRAJ_SLUGS}
+    fake = _PartitionClient(counts)
     portal = m.CeskerealityPortal(default_config("ceskereality"))
-    fake = _CappedClient()
-    rows, _pages, total, complete = portal._walk_slice(
-        fake, "stredo.ceskereality.cz", "prodej", "byty", "kladno")
-    assert max(fake.pages) == 12        # page 13 (the 404) is NEVER requested
-    assert total == 300
-    assert complete is False            # capped -> suppresses mark_inactive
-    assert len(rows) == 12 * 20
+    seen, _counts, total, _pages, complete = _walk(portal, fake, monkeypatch)
+
+    assert {_kraj_of(u) for u in fake.urls if _kraj_of(u)} == set(KRAJ_SLUGS)
+    assert len(seen) == 14 * 40
+    assert total == 14 * 40
+    assert complete is True
+    # never the foreign tree, never a legacy region, never a macro subdomain
+    for u in fake.urls:
+        assert "zahranicni" not in u
+        assert "severo." not in u and "vychodo." not in u and "moravskereality" not in u
 
 
-def test_region_scope_suppresses_completeness(monkeypatch):
-    fake = _FacetClient()
-    monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: fake)
+def test_a_slice_pages_far_past_twelve(monkeypatch):
+    # /prodej/byty/praha/?strana=93 returns the declared tail: the 12-page cap
+    # was never a law about filtered URLs, and the old code stopped at 12.
+    counts = {k: 20 for k in KRAJ_SLUGS}
+    counts["praha"] = 1843
+    fake = _PartitionClient(counts)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    seen, _c, _t, pages, complete = _walk(portal, fake, monkeypatch)
+
+    praha_pages = [_page_num(u) for u in fake.urls if "/praha/" in u]
+    assert max(praha_pages) == 93            # ceil(1843/20), the declared tail
+    assert 94 not in praha_pages             # ...and never the 404 past it
+    assert len(seen) == 1843 + 13 * 20
+    assert pages >= 93
+    assert complete is True
+
+
+def test_a_kraj_with_no_listings_is_a_valid_slice(monkeypatch):
+    # Reproduced live on pronajem/chaty-chalupy in karlovarsky + olomoucky: 200,
+    # a correct H1, zero cards, and no "Máme tady N" phrase AT ALL. Read as a
+    # fetch failure it would suppress every sweep forever.
+    counts = {k: 40 for k in KRAJ_SLUGS}
+    counts["karlovarsky-kraj"] = 0
+    counts["olomoucky-kraj"] = 0
+    fake = _PartitionClient(counts)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    seen, _c, _t, _p, complete = _walk(portal, fake, monkeypatch)
+
+    assert len(seen) == 12 * 40
+    assert complete is True                  # empty is an ANSWER, not a failure
+    empty = portal._walk_slice(fake, "prodej", "byty", "karlovarsky-kraj")
+    assert (empty.outcome, empty.declared_total, empty.rows) == ("exhausted", 0, [])
+
+
+class _DegradedClient(_PartitionClient):
+    """The real throttle vector: a 200 with zero cards and no total — but the H1
+    does NOT name the kraj we asked for, because the page is not that slice."""
+
+    def fetch_search(self, url):  # noqa: ANN001
+        if _kraj_of(url) == "ustecky-kraj":
+            self.urls.append(url)
+            return _page_html(None, [], heading="Reality na prodej"), 200
+        return super().fetch_search(url)
+
+
+def test_degraded_zero_card_page_is_not_a_finished_slice(monkeypatch):
+    fake = _DegradedClient({k: 40 for k in KRAJ_SLUGS})
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    seen, _c, _t, _p, complete = _walk(portal, fake, monkeypatch)
+
+    bad = portal._walk_slice(fake, "prodej", "byty", "ustecky-kraj")
+    assert bad.outcome == "degraded"
+    assert bad.positive is False
+    assert len(seen) == 13 * 40              # the other 13 kraje still collected
+    assert complete is False                 # ...but the category is unproven
+
+
+class _MidSliceBlankClient(_PartitionClient):
+    """A slice that serves a correct page 1 and then a blank 200 mid-slice — the
+    same throttle, arriving after the H1 has already been proven."""
+
+    def fetch_search(self, url):  # noqa: ANN001
+        if _kraj_of(url) == "praha" and _page_num(url) == 3:
+            self.urls.append(url)
+            return _page_html(None, [], heading="Prodej bytů praha"), 200
+        return super().fetch_search(url)
+
+
+def test_blank_page_mid_slice_is_degraded_not_the_end(monkeypatch):
+    counts = {k: 40 for k in KRAJ_SLUGS}
+    counts["praha"] = 200
+    fake = _MidSliceBlankClient(counts)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    r = portal._walk_slice(fake, "prodej", "byty", "praha")
+    assert r.outcome == "degraded"
+    assert len(r.rows) == 40                 # pages 1-2 kept, the slice unproven
+    _seen, _c, _t, _p, complete = _walk(portal, fake, monkeypatch)
+    assert complete is False
+
+
+class _BoomClient(_PartitionClient):
+    def fetch_search(self, url):  # noqa: ANN001
+        if _kraj_of(url) == "zlinsky-kraj":
+            raise RuntimeError("connection reset")
+        return super().fetch_search(url)
+
+
+def test_a_fetch_exception_is_an_error_not_a_clean_finish(monkeypatch):
+    fake = _BoomClient({k: 40 for k in KRAJ_SLUGS})
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    r = portal._walk_slice(fake, "prodej", "byty", "zlinsky-kraj")
+    assert r.outcome == "error" and r.positive is False
+    _seen, _c, _t, _p, complete = _walk(portal, fake, monkeypatch)
+    assert complete is False
+
+
+def test_a_missing_kraj_forces_incomplete(monkeypatch):
+    fake = _PartitionClient({k: 40 for k in KRAJ_SLUGS})
     portal = m.CeskerealityPortal(
-        default_config("ceskereality"), regions=("stredo.ceskereality.cz",))
-    _seen, _counts, _total, _pages, complete = portal.walk_category(
-        {"sale_type": "prodej", "category": "byty"},
+        default_config("ceskereality"), kraje=("praha", "zlinsky-kraj"))
+    seen, _c, _t, _p, complete = _walk(portal, fake, monkeypatch)
+    assert {_kraj_of(u) for u in fake.urls if _kraj_of(u)} == {"praha", "zlinsky-kraj"}
+    assert len(seen) == 80
+    assert complete is False                 # 2 of 14 is never a full walk
+
+
+def test_union_short_of_the_national_total_forces_incomplete(monkeypatch):
+    # Every slice exhausted and their declared sum reconciles — but the nationwide
+    # probe says the category is far bigger, so the partition is not trusted.
+    fake = _PartitionClient({k: 40 for k in KRAJ_SLUGS}, national=5000)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    _seen, _c, total, _p, complete = _walk(portal, fake, monkeypatch)
+    assert total == 5000
+    assert complete is False
+
+
+# --- the subtype descent (a kraj past the site's 99-page ceiling) ------------
+
+
+def test_a_slice_over_the_page_ceiling_descends_onto_subtypes(monkeypatch):
+    """/prodej/rodinne-domy/stredocesky-kraj/ is 2,312 rows = 116 pages, and a
+    FILTERED url 404s at ?strana=100 — so 332 rows are unreachable on the kraj
+    axis alone. The subtype slugs are declared (the rendered facet block omits
+    zero-count subtypes) and sum to the kraj total exactly."""
+    subs = SUBTYPE_SLUGS["rodinne-domy"]
+    per_sub = {s: 240 for s in subs}
+    per_sub[subs[0]] = 2312 - 240 * (len(subs) - 1)
+
+    class _CeilingClient:
+        """Path shape: /{sale}/{cat}[/{subtype}]/{kraj}/ — the segment BETWEEN the
+        category and the kraj is the subtype (and only that segment)."""
+
+        def __init__(self) -> None:
+            self.urls: list[str] = []
+
+        @staticmethod
+        def _parts(url):  # noqa: ANN001
+            segs = url.split("?")[0].split("/prodej/rodinne-domy/")[1].strip("/")
+            segs = segs.split("/") if segs else []
+            return (segs[-2] if len(segs) == 2 else None), (segs[-1] if segs else None)
+
+        def fetch_search(self, url):  # noqa: ANN001
+            self.urls.append(url)
+            sub, kraj = self._parts(url)
+            pg = _page_num(url)
+            if kraj != "stredocesky-kraj":
+                total = 4 if sub else 40
+            else:
+                total = per_sub[sub] if sub else 2312
+            first = (pg - 1) * 20
+            n = max(0, min(20, total - first))
+            base = 3_000_000 + 100_000 * (subs.index(sub) if sub else 99)
+            ids = [str(base + 1_000 * KRAJ_SLUGS.index(kraj) + first + k)
+                   for k in range(n)]
+            last = max(1, -(-total // 20))
+            return _page_html(total, ids, next_page=pg + 1 if pg < last else None,
+                              heading=f"Domy {kraj}"), 200
+
+        def fetch_index(self, sale_type, cat, page):  # noqa: ANN001
+            return _page_html(2312 + 13 * 40, []), 200
+
+    fake = _CeilingClient()
+    monkeypatch.setattr(m, "CeskerealityClient", lambda **k: fake)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    seen, _c, _t, _p, complete = portal.walk_category(
+        {"sale_type": "prodej", "category": "rodinne-domy"},
         conn=None, dry_run=True, limiter=None,
     )
-    assert complete is False            # a one-region test is never a full walk
+
+    # the over-ceiling kraj bailed at page 1 and was re-walked per subtype...
+    stredo = [u for u in fake.urls if _kraj_of(u) == "stredocesky-kraj"]
+    assert max(_page_num(u) for u in stredo) <= 99   # never asks for the 404
+    for slug in subs:
+        assert any(f"/{slug}/stredocesky-kraj/" in u for u in fake.urls), slug
+    assert len(seen) == 2312 + 13 * 40
+    assert complete is True
 
 
-def test_full_walk_visits_all_seven_regions(monkeypatch):
-    fake = _FacetClient()
-    monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: fake)
-    portal = m.CeskerealityPortal(default_config("ceskereality"))   # no region scope
-    portal.walk_category(
-        {"sale_type": "prodej", "category": "byty"},
-        conn=None, dry_run=True, limiter=None,
-    )
-    for host in REGION_HOSTS:
-        assert any(host in u for u in fake.urls), f"{host} not walked"
+def test_a_descent_that_loses_the_residue_reports_incomplete(monkeypatch):
+    """Self-verification: if the children's declared totals do not add back up to
+    the parent's, the category reads incomplete rather than silently dropping the
+    difference."""
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    parent = m.SliceResult("stredocesky-kraj", None, [], 2312, 1, "ceiling")
+
+    class _ThinClient:
+        def fetch_search(self, url):  # noqa: ANN001
+            pg = _page_num(url)
+            ids = [str(9_100_000 + pg * 20 + k) for k in range(20)]
+            return _page_html(100, ids, next_page=pg + 1 if pg < 5 else None,
+                              heading="Domy stredocesky-kraj"), 200
+
+    monkeypatch.setattr(m, "SUBTYPE_SLUGS", {"rodinne-domy": ("vily",)})
+    kids = portal._descend_slice(_ThinClient(), "prodej", "rodinne-domy", parent)
+    assert any(k.outcome == "ceiling" for k in kids)   # residue surfaced
+    assert not all(k.positive for k in kids)
 
 
-class _ClockClient:
-    """Every slice looks complete (tiny total, no next arrow) and the nationwide
-    total is unavailable — so only the clock runs out. `trip_after` fetches, the
-    fake monotonic clock jumps past the deadline."""
+# --- the deadline + the unmeasurable total ----------------------------------
 
-    def __init__(self, clock: dict, trip_after: int) -> None:
-        self.urls: list[str] = []
+
+class _ClockClient(_PartitionClient):
+    """`trip_after` fetches, the fake monotonic clock jumps past the deadline."""
+
+    def __init__(self, counts, clock: dict, trip_after: int) -> None:  # noqa: ANN001
+        super().__init__(counts)
         self._clock = clock
         self._trip_after = trip_after
-        self._n = 0
 
     def fetch_search(self, url):  # noqa: ANN001
-        self.urls.append(url)
-        self._n += 1
-        if self._n >= self._trip_after:
+        out = super().fetch_search(url)
+        if len(self.urls) >= self._trip_after:
             self._clock["t"] = 9_999.0
-        return _page_html(2, [str(6_000_000 + self._n)], facets=("kladno",)), 200
-
-    def fetch_index(self, sale_type, cat, page):  # noqa: ANN001
-        raise RuntimeError("nationwide total unavailable")
+        return out
 
 
 def test_deadline_stops_walk_and_forces_incomplete(monkeypatch):
-    """A walk cut short by the wall-clock budget must NEVER report complete=True.
-    No slice capped here, so the deadline (passed to the shared verdict as
-    stopped_early=) is what stops mark_inactive from delisting the six regions the
-    walk never reached (rule #3)."""
+    """A walk cut short by the wall-clock budget must NEVER report complete=True —
+    the kraje it never reached hold listings it never saw (rule #3)."""
     clock = {"t": 0.0}
     monkeypatch.setattr(
         m_portal, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
-    fake = _ClockClient(clock, trip_after=3)
-    monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: fake)
-    portal = m.CeskerealityPortal(default_config("ceskereality"))   # full walk
+    fake = _ClockClient({k: 40 for k in KRAJ_SLUGS}, clock, trip_after=1)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
 
-    seen, _counts, total, _pages, complete = portal.walk_category(
-        {"sale_type": "prodej", "category": "byty"},
-        conn=None, dry_run=True, limiter=None, deadline=10.0,
-    )
+    seen, _counts, _total, _pages, complete = _walk(
+        portal, fake, monkeypatch, deadline=10.0)
 
-    # The old local _walk_complete() returned True for an unmeasurable total —
-    # that fail-open was the DEFECT, not the spec. Under the shared verdict an
-    # unknown total is "unknown", so this walk is now doubly suppressed.
-    assert total is None
-    assert seen                         # rows collected before the stop are kept
-    assert complete is False            # the deadline poisons the whole verdict
-    # stopped promptly: only the first region was touched, not all seven
-    assert len({h for h in REGION_HOSTS if any(h in u for u in fake.urls)}) == 1
+    assert seen                             # rows collected before the stop are kept
+    assert complete is False                # the deadline poisons the whole verdict
+    assert {_kraj_of(u) for u in fake.urls if _kraj_of(u)} == {KRAJ_SLUGS[0]}
 
 
 class _NoTotalClient:
-    """Every slice completes (tiny page, no next arrow, no facets), but the
-    nationwide-total probe raises — exactly ceskereality's live failure mode."""
+    """Cards on the page but no "Máme tady N" and no H1 — unmeasurable, which is
+    ceskereality's live failure mode and now reads degraded, not complete."""
 
     def __init__(self) -> None:
         self._n = 0
@@ -210,33 +383,34 @@ class _NoTotalClient:
 
 
 def test_unmeasurable_total_is_unknown_not_complete(monkeypatch):
-    """A full, uncapped, un-deadlined walk whose total probe FAILED must still not
+    """A full, un-deadlined walk whose totals are unreadable must still not
     authorise a sweep: an unmeasurable walk is 'unknown', never 'complete'
     (rule #3). The old fail-open said complete=True and delisted on a guess."""
-    monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: _NoTotalClient())
-    portal = m.CeskerealityPortal(default_config("ceskereality"))   # full walk
+    fake = _NoTotalClient()
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    _seen, _counts, total, _pages, complete = _walk(portal, fake, monkeypatch)
 
-    seen, _counts, total, _pages, complete = portal.walk_category(
-        {"sale_type": "prodej", "category": "byty"},
-        conn=None, dry_run=True, limiter=None,
-    )
-
-    assert total is None
-    assert seen                         # rows were collected...
-    assert complete is False            # ...but coverage is unprovable
+    assert total == 0                       # nothing measurable to reconcile against
+    assert complete is False                # ...so coverage is unprovable
 
 
-def test_walk_slice_reports_incomplete_when_budget_already_spent(monkeypatch):
-    """The page loop's own guard: budget spent -> no request, complete=False."""
+def test_walk_slice_reports_deadline_when_budget_already_spent(monkeypatch):
+    """The page loop's own guard: budget spent -> no request at all."""
     monkeypatch.setattr(
         m_portal, "time", SimpleNamespace(monotonic=lambda: 100.0))
-    fake = _CappedClient()
-    rows, pages, _total, complete = m.CeskerealityPortal(
-        default_config("ceskereality"))._walk_slice(
-            fake, "stredo.ceskereality.cz", "prodej", "byty", "kladno",
-            deadline=1.0)
-    assert fake.pages == []             # not one more request past the budget
-    assert (rows, pages, complete) == ([], 0, False)
+    fake = _PartitionClient({"praha": 400})
+    r = m.CeskerealityPortal(default_config("ceskereality"))._walk_slice(
+        fake, "prodej", "byty", "praha", deadline=1.0)
+    assert fake.urls == []                  # not one request past the budget
+    assert (r.rows, r.pages, r.outcome, r.positive) == ([], 0, "deadline", False)
+
+
+def test_search_url_puts_subtype_before_kraj():
+    # live-verified: /prodej/byty/byty-2-1/stredocesky-kraj/ is correctly filtered
+    assert search_url("prodej", "byty", kraj="stredocesky-kraj", subtype="byty-2-1") == (
+        "https://www.ceskereality.cz/prodej/byty/byty-2-1/stredocesky-kraj/")
+    assert search_url("prodej", "byty", kraj="praha", page=93) == (
+        "https://www.ceskereality.cz/prodej/byty/praha/?strana=93")
 
 
 # --- cross-slice delisting sweep ('rodinne-domy' + 'chaty-chalupy' -> dum) ---
@@ -433,3 +607,75 @@ def test_client_no_proxy_when_env_unset(monkeypatch):
     monkeypatch.delenv("SCRAPER_PROXY_URL", raising=False)
     c = CeskerealityClient()
     assert not c._session.proxies            # falls back to the direct IP
+
+
+# --- the laundered kraj: a throttled slice must not read as an empty one -----
+#
+# Found by adversarial review of the first cut of this walk, and REPRODUCED: a
+# throttled page renders the shell with a correct H1, zero cards and no count
+# phrase — byte-for-byte the shape of a genuinely empty kraj, because the count
+# comes from the same query as the cards and vanishes with them. With the
+# national cross-check written fail-open, that produced complete=True while a
+# whole kraj was missing: 5,200 of 5,600 rows collected, and the walk claimed a
+# clean sweep. Throttling is correlated, so the national probe is degraded at
+# exactly the moment the slices are.
+
+
+class _LaunderedKrajClient(_PartitionClient):
+    """One kraj is throttled: it answers 200 with a correct H1 and no results,
+    exactly as a real empty kraj does. Every other kraj is healthy."""
+
+    def __init__(self, counts, throttled: str, national=None, stay_empty=True):
+        super().__init__(counts, national=national)
+        self._throttled = throttled
+        self._stay_empty = stay_empty
+        self.rereads = 0
+
+    def fetch_search(self, url):  # noqa: ANN001
+        kraj = _kraj_of(url)
+        if kraj == self._throttled:
+            self.urls.append(url)
+            if not self._stay_empty and self.rereads:
+                # A transient throttle: the re-read succeeds and the real page
+                # comes back. The walk must NOT have called it empty.
+                return super().fetch_search(url)
+            self.rereads += 1
+            return _page_html(None, [], heading=f"Prodej bytů {kraj}"), 200
+        return super().fetch_search(url)
+
+
+def test_a_throttled_kraj_cannot_launder_itself_into_an_empty_one(monkeypatch):
+    counts = {k: 400 for k in KRAJ_SLUGS}
+    fake = _LaunderedKrajClient(counts, throttled="zlinsky-kraj")
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    _seen, _c, _t, _pages, complete = _walk(portal, fake, monkeypatch)
+    assert complete is False, (
+        "a throttled kraj was accepted as empty - the exact path that "
+        "reproduced complete=True with a whole kraj missing"
+    )
+
+
+def test_an_empty_slice_is_confirmed_by_a_second_read(monkeypatch):
+    """The mechanism: a genuinely empty kraj is stable across two reads, a
+    throttle is not. One extra request, only for one-page slices."""
+    counts = {k: 400 for k in KRAJ_SLUGS}
+    counts["zlinsky-kraj"] = 0
+    fake = _PartitionClient(counts)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    _seen, _c, _t, _pages, complete = _walk(portal, fake, monkeypatch)
+    assert complete is True
+    empty_reads = [u for u in fake.urls if "zlinsky-kraj" in u]
+    assert len(empty_reads) >= 2, "the empty slice was accepted on a single read"
+
+
+def test_an_unmeasurable_national_probe_cannot_prove_completeness(monkeypatch):
+    """The cross-check read `national is None or ...`, so a FAILED probe asserted
+    completeness. Throttling is correlated - the national probe degrades at
+    exactly the moment the slices do, so the rail was weakest when needed."""
+    counts = {k: 400 for k in KRAJ_SLUGS}
+    fake = _PartitionClient(counts)
+    monkeypatch.setattr(
+        m.CeskerealityPortal, "_nationwide_total", lambda *a, **k: None)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    _seen, _c, _t, _pages, complete = _walk(portal, fake, monkeypatch)
+    assert complete is False

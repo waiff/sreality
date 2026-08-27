@@ -37,8 +37,8 @@ on:
         required: false
         default: ""
         type: string
-      region:
-        description: limit the walk to ONE region subdomain (e.g. stredo.ceskereality.cz) for a proxy test. Blank = all 7.
+      kraj:
+        description: limit the walk to ONE kraj (e.g. stredocesky-kraj) for an ad-hoc partial run; suppresses mark_inactive. Blank = all 14.
         required: false
         default: ""
         type: string
@@ -80,10 +80,10 @@ jobs:
           SCRAPER_PROXY_URL: ${{ secrets.SCRAPER_PROXY_URL }}
           MAX_PAGES: ${{ inputs.max_pages }}
           MAX_SECONDS: ${{ inputs.max_seconds || '9000' }}
-          REGION: ${{ inputs.region }}
+          KRAJ: ${{ inputs.kraj }}
         run: |
           ARGS="--index-only --max-seconds $MAX_SECONDS"
           if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
-          if [ -n "$REGION" ]; then ARGS="$ARGS --region $REGION"; fi
+          if [ -n "$KRAJ" ]; then ARGS="$ARGS --kraj $KRAJ"; fi
           echo "python -m scraper.ceskereality_main $ARGS"
           eval "python -m scraper.ceskereality_main $ARGS"

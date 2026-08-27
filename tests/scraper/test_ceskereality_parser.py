@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from scraper.ceskereality_parser import (
     _norm_building_type,
+    extract_facet_slugs,
+    heading_names_kraj,
+    index_heading,
     _norm_condition,
     _norm_ownership,
     category_from_url,
@@ -414,3 +417,80 @@ def test_jsonld_offer_survives_when_the_page_has_no_cena_cell_at_all():
         category_main="byt", category_type="prodej",
     )
     assert listing.price_czk == 6_999_000
+
+
+# --- the empty-slice discriminator + the demoted facet scraper ---------------
+
+
+def _slice_page(heading: str, *, cards: bool = False, total: int | None = None) -> str:
+    card = (
+        '<article class="i-estate">'
+        '<a class="i-estate__image-link" href="/prodej/byty/x/y-3754200.html"></a>'
+        "</article>" if cards else ""
+    )
+    meta = f'<meta name="description" content="Máme tady {total} bytů">' if total else ""
+    return (
+        f'<html><head>{meta}</head><body>'
+        f'<h1 class="base-header__heading base-h1">{heading}</h1>{card}</body></html>'
+    )
+
+
+def test_heading_names_kraj_accepts_the_live_h1_shapes():
+    # Live H1s, 2026-08-27. The kraj-vysocina and praha forms are the awkward
+    # ones: the slug order is inverted in one and the H1 says "okres" in the other
+    # (/prodej/byty/praha/ 301s to /praha-hlavni-mesto/).
+    assert heading_names_kraj(
+        _slice_page("Prodej bytů Středočeský kraj"), "stredocesky-kraj")
+    assert heading_names_kraj(
+        _slice_page("Prodej bytů Kraj Vysočina"), "kraj-vysocina")
+    assert heading_names_kraj(_slice_page("Prodej bytů v okrese Praha"), "praha")
+    assert heading_names_kraj(
+        _slice_page("Rekreační objekty k pronájmu Karlovarský kraj"),
+        "karlovarsky-kraj")
+    # a subtype slice: the H1 spells the subtype in prose, so only the kraj counts
+    assert heading_names_kraj(
+        _slice_page("Ostatní domy na prodej Středočeský kraj"), "stredocesky-kraj")
+
+
+def test_heading_names_kraj_rejects_another_page():
+    # This is the ONLY thing standing between "this kraj is genuinely empty" and
+    # "we were served a degraded 200" — both are HTTP 200, zero cards, no total.
+    assert not heading_names_kraj(
+        _slice_page("Prodej bytů Středočeský kraj"), "zlinsky-kraj")
+    assert not heading_names_kraj(_slice_page("Reality na prodej"), "ustecky-kraj")
+    assert not heading_names_kraj("<html><body>no heading</body></html>", "praha")
+
+
+def test_index_heading_reads_the_h1_text():
+    assert index_heading(_slice_page("Prodej bytů  Zlínský kraj")) == (
+        "Prodej bytů Zlínský kraj")
+    assert index_heading("<html><body></body></html>") is None
+
+
+def test_extract_facet_slugs_drops_pure_filters():
+    # KEPT but DEMOTED: this is no longer the walk's partition (it is a
+    # top-10-by-popularity list that omits whole okresy AND every zero-count
+    # facet) — it is only the fallback input to the over-99-page subtype descent,
+    # which verifies the children's declared sum against the parent's.
+    html = (
+        '<a href="/prodej/byty/byty-3-1/">x</a>'
+        '<a href="/prodej/byty/kladno/">x</a>'
+        '<a href="/prodej/byty/pouze-rk/">x</a>'      # pure filter -> dropped
+        '<a href="/prodej/byty/bez-realitky/">x</a>'  # pure filter -> dropped
+        '<a href="/prodej/byty/kladno/">dup</a>'      # de-duped
+        '<a href="/prodej/rodinne-domy/vily/">x</a>'  # other category -> ignored
+    )
+    assert extract_facet_slugs(html, "prodej", "byty") == ["byty-3-1", "kladno"]
+
+
+def test_the_walk_no_longer_reaches_the_facet_scraper():
+    # The defect was walking this list as if it were a partition. Nothing in the
+    # index walk may call it except the descent.
+    import inspect
+
+    from scraper import ceskereality_main
+
+    src = inspect.getsource(ceskereality_main.CeskerealityPortal.walk_category)
+    assert "extract_facet_slugs" not in src
+    assert "extract_facet_slugs" in inspect.getsource(
+        ceskereality_main.CeskerealityPortal._descend_slice)

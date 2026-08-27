@@ -52,8 +52,9 @@ fetch:
       min_interval_s: 10
       archive: true
       cadence: "weekly"
-      robots_note: "500 markers in one request; a bbox partition would also sidestep the
-        12-page anonymous cap that forces the current 7-subdomain fan-out [live-C §1.5]."
+      robots_note: "500 markers in one request; the index walk itself no longer needs a
+        fan-out — the 12-page cap applies to UNFILTERED category URLs only, and the walk
+        partitions on the 14 declared kraj slugs [live-C §1.5; re-measured 2026-08-27]."
 
 persistence:
   # What this portal's body carries that changes without the listing changing —
@@ -346,7 +347,8 @@ extractions:
     licence_class: portal
     blur_evidence: none
     required: best_effort
-    notes: "1 of 7 macro-region subdomains [live-C §1.2]."
+    notes: "1 of 7 macro-region subdomains [live-C §1.2]. Detail-page evidence only —
+      the index walk stopped using the subdomains as its axis on 2026-08-27."
 
   - id: cr.det.slug_street
     locator_kind: url_slug

@@ -169,13 +169,13 @@ INDEX_ARCHIVERS: dict[str, CallSite] = {
     "ceskereality": CallSite(
         module="ceskereality_main.py",
         state=STATE_GATED,
-        call_site="scraper/ceskereality_main.py:202 (_walk_slice)",
-        gate="ceskereality_main.py:200 `if fresh_keys is None or key not in fresh_keys` — "
-             "the skip set is loaded in walk_category and passed down",
+        call_site="scraper/ceskereality_main.py:191 (_archive_index_page)",
+        gate="ceskereality_main.py:189 `if fresh_keys is None or key not in fresh_keys` — "
+             "the skip set is loaded in walk_category and passed down through _walk_slice",
         intentional_skips=(
-            "ceskereality_main.py:183 `if conn is not None and archive_week is not None:` — "
+            "ceskereality_main.py:274 `if conn is not None and archive_week is not None:` — "
             "a dry run has no connection to stage into and no week to key by",
-            "ceskereality_main.py:399 `client.fetch_search(url)` in probe_category fetches "
+            "ceskereality_main.py:570 `client.fetch_search(url)` in probe_category fetches "
             "index pages off the /nejnovejsi/ sort slug and never archives — discovery only, "
             "by design, exactly as sreality's probe is",
         ),

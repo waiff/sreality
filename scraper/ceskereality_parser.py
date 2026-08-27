@@ -334,10 +334,14 @@ _FACET_EXCLUDE: frozenset[str] = frozenset({"pouze-rk", "bez-realitky"})
 
 def extract_facet_slugs(html: str, sale_type: str, category: str) -> list[str]:
     """The distinct `/{sale}/{category}/{slug}/` narrowing-facet slugs a search page
-    links to (districts + dispositions + types), in page order, minus pure filters.
-    The split walks the union of these per region to stay under the 12-page cap;
-    district is a complete partition (every listing has one), so the union covers
-    nearly all of a region's inventory."""
+    links to, in page order, minus pure filters.
+
+    NOT A PARTITION, and never treated as one: the rendered block is a
+    top-10-by-popularity list (whole okresy — Třebíč, Blansko, Kroměříž — never
+    appear) and it OMITS zero-count facets. The index walk partitions on the
+    declared `KRAJ_SLUGS` instead; this survives only as the fallback input to the
+    over-99-page subtype descent, which verifies its children's declared sum
+    against the parent's before believing any of it."""
     pat = re.compile(
         rf'href="/{re.escape(sale_type)}/{re.escape(category)}/([a-z][a-z0-9-]+)/"')
     out: list[str] = []
@@ -348,6 +352,43 @@ def extract_facet_slugs(html: str, sale_type: str, category: str) -> list[str]:
         seen.add(slug)
         out.append(slug)
     return out
+
+
+_H1_RE = re.compile(r"<h1[^>]*>(.*?)</h1>", re.S | re.I)
+
+
+def index_heading(html: str) -> str | None:
+    """The search page's H1 ("Prodej bytů Středočeský kraj"), or None."""
+    m = _H1_RE.search(html)
+    if not m:
+        return None
+    txt = re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", m.group(1)))).strip()
+    return txt or None
+
+
+def heading_names_kraj(html: str, kraj: str) -> bool:
+    """Does this page's H1 name the kraj we asked for?
+
+    The ONLY discriminator between a genuinely empty slice and a degraded 200.
+    An empty slice serves HTTP 200, a correct H1 naming the category AND the
+    region, zero cards, and NO "Máme tady N" phrase at all — so `_parse_total`
+    reads None and the arithmetic alone cannot tell it from a throttled page.
+    Every non-"kraj" token of the slug must appear in the diacritics-stripped
+    H1: `stredocesky-kraj` -> "Prodej bytů Středočeský kraj"; `kraj-vysocina` ->
+    "Prodej bytů Kraj Vysočina"; `praha` -> "Prodej bytů v okrese Praha".
+    The subtype is NOT checked — the H1 spells it in prose ("Ostatní domy na
+    prodej Středočeský kraj"), not as the slug.
+
+    UNVALIDATED AGAINST A REAL DEGRADED RESPONSE (2026-08-27: could not
+    manufacture one). The second rail is the category verdict's cross-check
+    against the nationwide total, which a laundered "empty" kraj fails.
+    """
+    heading = index_heading(html)
+    if not heading:
+        return False
+    hay = _strip_diacritics(heading).lower()
+    tokens = [t for t in _strip_diacritics(kraj).lower().split("-") if t != "kraj"]
+    return bool(tokens) and all(t in hay for t in tokens)
 
 
 def _jsonld_product(html: str) -> dict[str, Any]:
