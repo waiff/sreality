@@ -566,7 +566,17 @@ renumber.** Navigate by area:
    photos. The `images` table tracks per-image download state via `storage_path`,
    `download_attempts`, and `last_download_attempt_at`. Image-download is a separate phase
    after the scrape phase; it's a no-op if R2 env vars are missing, so a partial deploy
-   never breaks the scrape.
+   never breaks the scrape. **The bucket key must be unique per `images` ROW** —
+   `img/{listing_id}/{images.id}.jpg` (`scraper/image_storage.image_key`). Both earlier
+   schemes keyed the prefix on a non-unique value out of ONE numeric namespace
+   (`{sreality_id}/{seq:04d}` then `{listings.id}/{seq:04d}`), so a new listing whose
+   surrogate id equalled an older listing's `sreality_id` minted the same key and its upload
+   silently overwrote the older listing's photo — leaving that row rendering a different
+   property while still carrying the pHash of bytes it no longer owned (16 objects / 32
+   rows; found 2026-08-05, repaired by migration 371). Legacy keys stay serveable forever
+   (nothing recomputes a key for a stored row), so `api/routes/images.py` `_KEY_RE`
+   enumerates all three shapes — and must stay anchored, or it starts presigning the
+   operator-private `custom-attachments/` uploads that share the bucket.
 7. **No new dependencies without justification.** Each entry in `pyproject.toml` should
    have a clear reason. Prefer the stdlib.
 8. **Latest-wins data model with snapshot history.** The `listings` table always reflects
