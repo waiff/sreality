@@ -33,7 +33,7 @@ import sys
 from decimal import Decimal
 from typing import Any, Callable
 
-from scraper.db import connect
+from scraper.db import QUEUE_PRIORITY_NEW, connect
 from toolkit.listing_identity import R2_CARRIERS as _PARITY_CARRIERS
 from toolkit.system_alerts import emit_transition_alerts, latest_statuses
 
@@ -61,6 +61,24 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "db_cron_fail_rate_fail": 0.5,
     "worker_stale_fail_minutes": 5,
     "verification_stale_hours": 24,
+    # Ingestion. Measured on the QUEUE, so these are portal-size-independent: a
+    # healthy drain keeps the oldest never-fetched listing at minutes whatever the
+    # portal. Warn at 6h is well above the 6-hourly walk cadence (a listing found
+    # right after a drain legitimately waits until the next one) and far below the
+    # scale of a real fault; fail at 24h means a full day of a portal's new
+    # inventory is missing from Browse, the watchdog and every estimate. Under the
+    # 2026-08-17 starvation sreality reached 216h.
+    "acquisition_lag_warn_hours": 6,
+    "acquisition_lag_fail_hours": 24,
+    # Walk coverage against the portal's own advertised total. Healthy portals sit
+    # at 0.0-0.2% (measured 2026-08-27: sreality 0.00%, realitymix 0.00%, bazos
+    # 0.16%). Warn at 5% is ~25x the observed noise floor. Fail at 15% is a portal
+    # whose delisting rail is ALSO suppressed by the same completeness gate, so a
+    # coverage hole that deep silently stops history as well as intake --
+    # ceskereality sits at 9.96% today, which is the known facet-partition gap and
+    # should read amber, not red, until that is fixed on its own merits.
+    "walk_coverage_warn_gap": 0.05,
+    "walk_coverage_fail_gap": 0.15,
     # Property maintenance (2026-08-06 incident: 4 days of silently dead daily
     # sweeps + a stranded lease freezing every maintenance lane). The sweep
     # stamps app_settings.property_sweep_last_complete ONLY on a complete
@@ -1580,6 +1598,189 @@ def check_ppm2_median_shift(conn: Any, thresholds: dict[str, Any]) -> dict[str, 
     }
 
 
+# --- ingestion: the axis nothing watched until 2026-08-27 --------------------
+#
+# Sixteen scraper health checks existed and fifteen compared our data to our own
+# data; all of them rendered as a dot on a page nobody is required to open. So a
+# portal could ingest ZERO new listings for nine days -- sreality did, 2026-08-17
+# to 08-27, while 15,064 discovered listings sat unfetched -- without a single
+# signal leaving the database. These two checks are the push half.
+
+# Deliberately keyed on the QUEUE, not on listings.first_seen_at. A "no new rows
+# in N hours" check needs a historical baseline, and the outage itself erodes
+# that baseline: nine days of zeros makes "zero is normal" the expected value,
+# so the guard goes quiet exactly when it should scream. The oldest unclaimed
+# never-fetched row has no such feedback loop -- a healthy drain keeps it at
+# minutes whatever the portal's size, and a starved one grows without bound.
+_ACQUISITION_LAG_SQL = """
+select source,
+       count(*) as waiting,
+       max(extract(epoch from (now() - enqueued_at)) / 3600.0) as oldest_hours,
+       percentile_cont(0.5) within group (
+         order by extract(epoch from (now() - enqueued_at)) / 3600.0
+       ) as median_hours
+  from listing_detail_queue
+ where priority = %s and claimed_at is null and given_up = false
+ group by source
+"""
+
+
+def check_acquisition_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """How long a DISCOVERED but never-fetched listing has been waiting, per portal."""
+    with conn.cursor() as cur:
+        cur.execute(_ACQUISITION_LAG_SQL, (QUEUE_PRIORITY_NEW,))
+        rows = cur.fetchall()
+
+    warn_h = thresholds["acquisition_lag_warn_hours"]
+    fail_h = thresholds["acquisition_lag_fail_hours"]
+    per_source: dict[str, Any] = {}
+    offenders: list[str] = []
+    status = "ok"
+    worst = 0.0
+    for source, waiting, oldest_hours, median_hours in rows:
+        oldest = float(oldest_hours or 0.0)
+        per_source[source] = {
+            "waiting": int(waiting),
+            "oldest_hours": round(oldest, 2),
+            "median_hours": round(float(median_hours or 0.0), 2),
+        }
+        worst = max(worst, oldest)
+        if oldest >= fail_h:
+            status = "fail"
+            offenders.append(f"{source} {oldest:.1f}h ({waiting} waiting)")
+        elif oldest >= warn_h:
+            if status != "fail":
+                status = "warn"
+            offenders.append(f"{source} {oldest:.1f}h ({waiting} waiting)")
+
+    if offenders:
+        message = (
+            "New listings are queued but not being fetched: " + "; ".join(offenders)
+            + " -- the drain is not reaching its acquisition class. Check the detail-drain "
+            "runs and the realtime worker's drain lane."
+        )
+    else:
+        message = (
+            f"Acquisition healthy (oldest never-fetched listing {worst:.1f}h across "
+            f"{len(per_source)} portals)."
+        )
+    return {
+        "check_key": "acquisition_lag",
+        "status": status,
+        "value": round(worst, 2),
+        "details": {"per_source": per_source, "offenders": offenders},
+        "message": message,
+    }
+
+
+# The one comparison the platform makes against EXTERNAL truth: what the portal
+# says it has vs what the walk collected. It was already being recorded per
+# category in scrape_runs.by_category and read by nothing that can raise an alarm.
+#
+# `max_categories` is the portal's own recent best rather than portals.categories:
+# that registry row is stale for sreality (6 pairs on record, 20 walked in code),
+# so config would false-fire. Self-baselining also makes a TRUNCATED walk visible
+# -- categories a budget-stopped run never reached leave no by_category entry at
+# all, which otherwise makes the coverage number look BETTER by shrinking the
+# population it averages over.
+_WALK_COVERAGE_SQL = """
+with latest as (
+  select distinct on (source) source, started_at, by_category
+    from scrape_runs
+   where run_type = 'index' and ended_at is not null and by_category is not null
+     and started_at > now() - interval '48 hours'
+   order by source, started_at desc
+),
+best as (
+  select source, max(jsonb_array_length(by_category)) as max_categories
+    from scrape_runs
+   where run_type = 'index' and ended_at is not null and by_category is not null
+     and started_at > now() - interval '7 days'
+   group by source
+)
+select l.source,
+       jsonb_array_length(l.by_category) as categories_walked,
+       b.max_categories,
+       extract(epoch from (now() - l.started_at)) / 3600.0 as age_hours,
+       sum((c->>'collected')::bigint) filter (
+         where (c->>'sreality_result_size') is not null) as collected,
+       sum((c->>'sreality_result_size')::bigint) filter (
+         where (c->>'sreality_result_size') is not null) as portal_total
+  from latest l
+  join best b on b.source = l.source
+  left join lateral jsonb_array_elements(l.by_category) c on true
+ group by l.source, l.by_category, l.started_at, b.max_categories
+"""
+
+# These portals derive their "advertised total" as len(seen) -- the number they
+# just collected -- so their gap is 0% BY CONSTRUCTION and proves nothing.
+# mmreality reports no total at all. Reporting them as 100% covered would be the
+# worst kind of green: a number that cannot be wrong is not a measurement.
+_SELF_CERTIFYING_TOTALS = frozenset({"remax", "maxima"})
+
+
+def check_walk_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Collected vs portal-advertised inventory on the most recent index walk."""
+    with conn.cursor() as cur:
+        cur.execute(_WALK_COVERAGE_SQL)
+        rows = cur.fetchall()
+
+    warn_gap = thresholds["walk_coverage_warn_gap"]
+    fail_gap = thresholds["walk_coverage_fail_gap"]
+    per_source: dict[str, Any] = {}
+    offenders: list[str] = []
+    unverified: list[str] = []
+    status = "ok"
+    worst = 0.0
+    for source, walked, max_cats, age_hours, collected, portal_total in rows:
+        entry: dict[str, Any] = {
+            "categories_walked": int(walked),
+            "categories_best_7d": int(max_cats or 0),
+            "age_hours": round(float(age_hours or 0.0), 2),
+            "collected": int(collected or 0),
+            "portal_total": int(portal_total) if portal_total is not None else None,
+        }
+        if int(walked) < int(max_cats or 0):
+            entry["truncated"] = True
+            offenders.append(
+                f"{source} walked {walked}/{max_cats} categories (truncated run)"
+            )
+            status = "fail" if status == "fail" else "warn"
+        if source in _SELF_CERTIFYING_TOTALS or not portal_total:
+            entry["gap_pct"] = None
+            entry["verifiable"] = False
+            unverified.append(source)
+        else:
+            gap = max(0.0, (float(portal_total) - float(collected or 0)) / float(portal_total))
+            entry["gap_pct"] = round(gap * 100, 2)
+            entry["verifiable"] = True
+            worst = max(worst, gap)
+            if gap >= fail_gap:
+                status = "fail"
+                offenders.append(f"{source} missing {gap * 100:.1f}% of its inventory")
+            elif gap >= warn_gap:
+                if status != "fail":
+                    status = "warn"
+                offenders.append(f"{source} missing {gap * 100:.1f}% of its inventory")
+        per_source[source] = entry
+
+    if offenders:
+        message = "Index walks are under-collecting: " + "; ".join(offenders) + "."
+    else:
+        message = (
+            f"Walk coverage healthy (worst verifiable gap {worst * 100:.1f}%; "
+            f"{len(unverified)} portal(s) cannot be verified: {', '.join(sorted(unverified)) or 'none'})."
+        )
+    return {
+        "check_key": "walk_coverage",
+        "status": status,
+        "value": round(worst * 100, 2),
+        "details": {"per_source": per_source, "offenders": offenders,
+                    "unverified": sorted(unverified)},
+        "message": message,
+    }
+
+
 _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("llm_errors", check_llm_errors),
     ("llm_liveness", check_llm_liveness),
@@ -1595,6 +1796,8 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("ppm2_basis_floor_share", check_ppm2_basis_floor_share),
     ("area_vs_usable_divergence", check_area_vs_usable_divergence),
     ("ppm2_measure_coverage", check_ppm2_measure_coverage),
+    ("acquisition_lag", check_acquisition_lag),
+    ("walk_coverage", check_walk_coverage),
 ]
 
 # --weekly stays a valid (currently empty) lane so the scheduled invocation keeps
