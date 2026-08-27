@@ -679,3 +679,82 @@ def test_an_unmeasurable_national_probe_cannot_prove_completeness(monkeypatch):
     portal = m.CeskerealityPortal(default_config("ceskereality"))
     _seen, _c, _t, _pages, complete = _walk(portal, fake, monkeypatch)
     assert complete is False
+
+
+# --- the slice ledger (migration 454) ----------------------------------------
+#
+# ceskereality has been parked since migration 449 and, until this, had NO WAY
+# BACK: the coverage gate un-parks a portal on ledger evidence, and this walk
+# wrote none. The gate reported "no slice ledger for this portal" every cycle,
+# forever.
+
+
+def _portal_for_ledger():
+    return m.CeskerealityPortal(default_config("ceskereality"))
+
+
+def _record(monkeypatch, results, *, kraje=("praha", "stredocesky-kraj")):
+    written: list[dict] = []
+    monkeypatch.setattr(
+        m.db, "record_index_slice",
+        lambda _conn, **kw: written.append(kw))
+    _portal_for_ledger()._record_slices(
+        object(), {"sale_type": "prodej", "category": "byty"},
+        list(kraje), results, False)
+    return written
+
+
+def _sr(kraj, outcome, *, subtype=None, declared=100, ids=("a",), pages=4):
+    return m.SliceResult(
+        kraj=kraj, subtype=subtype,
+        rows=[(i, f"https://x/{i}", None) for i in ids],
+        declared_total=declared, pages=pages, outcome=outcome)
+
+
+def test_one_row_per_kraj_not_per_subtype(monkeypatch):
+    """The aggregation that keeps the ledger's key set stable. A kraj past the
+    page ceiling is re-walked per subtype and comes back as several results; if
+    those were recorded individually, the `kraj/subtype-*` rows would linger the
+    first time that kraj stopped needing the descent — never re-walked, ageing
+    forever, and one permanently stale row holds the portal parked for good."""
+    written = _record(monkeypatch, [
+        _sr("praha", "exhausted", subtype="byty-2-1", declared=60, ids=("a", "b")),
+        _sr("praha", "exhausted", subtype="byty-3-1", declared=40, ids=("c",)),
+        _sr("stredocesky-kraj", "exhausted", declared=100, ids=("d",)),
+    ])
+    assert [w["slice_key"] for w in written] == ["praha", "stredocesky-kraj"]
+    praha = written[0]
+    assert praha["declared_total"] == 100          # children partition the parent
+    assert praha["collected"] == 3                 # union of their rows
+    assert praha["pages"] == 8
+
+
+def test_a_kraj_is_exhausted_only_if_every_part_is(monkeypatch):
+    """Fourteen good subtypes and one that failed is not 93% of a kraj — it is a
+    kraj with a hole, and mark_inactive would read the hole as 'these are gone'."""
+    written = _record(monkeypatch, [
+        _sr("praha", "exhausted", subtype="byty-2-1"),
+        _sr("praha", "ceiling", subtype="byty-3-1"),
+    ])
+    assert len(written) == 1
+    assert written[0]["outcome"] == "ceiling"
+
+
+def test_a_kraj_the_deadline_never_reached_is_not_written(monkeypatch):
+    """It must keep its OLD timestamp so it sorts first next run. Writing a fresh
+    row for a kraj we never walked would make the stalest slice look the newest —
+    the exact inversion db.slice_staleness treats absence as infinity to avoid."""
+    written = _record(monkeypatch, [_sr("praha", "exhausted")],
+                      kraje=("praha", "stredocesky-kraj", "jihocesky-kraj"))
+    assert [w["slice_key"] for w in written] == ["praha"]
+
+
+def test_a_dry_run_writes_nothing(monkeypatch):
+    written: list[dict] = []
+    monkeypatch.setattr(
+        m.db, "record_index_slice",
+        lambda _conn, **kw: written.append(kw))
+    _portal_for_ledger()._record_slices(
+        None, {"sale_type": "prodej", "category": "byty"},
+        ["praha"], [_sr("praha", "exhausted")], False)
+    assert written == []

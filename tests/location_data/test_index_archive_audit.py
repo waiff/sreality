@@ -321,6 +321,15 @@ def test_the_registry_call_site_line_is_one_the_parser_actually_found() -> None:
         assert int(lineno) in found, f"{source}: cites {lineno}, calls are at {sorted(found)}"
 
 
+def _enclosing_def(lines: list[str], lineno: int) -> str | None:
+    """Name of the innermost `def` at or above `lineno` (1-indexed)."""
+    for i in range(lineno - 1, -1, -1):
+        m = re.match(r"\s*def (\w+)\(", lines[i])
+        if m:
+            return m.group(1)
+    return None
+
+
 def test_every_line_the_registry_quotes_still_reads_that_way() -> None:
     """A file:line in prose rots the moment anything above it moves, and rots
     silently — the operator follows it to whatever happens to sit there now.
@@ -343,6 +352,27 @@ def test_every_line_the_registry_quotes_still_reads_that_way() -> None:
             assert any(frag.strip() in line for frag in frags), (
                 f"{source}: {module}:{lineno} is {line!r}, not any of {frags}"
             )
+            # …and when the prose says the fragment is IN a function — the exact
+            # shape "`<fragment>` in <fn>" — the cited line must actually be in it.
+            #
+            # The fragment check alone is not enough, and that is not
+            # hypothetical: `client.fetch_search(url)` appears three times in
+            # ceskereality_main.py, so a re-point that mechanically took the
+            # FIRST occurrence moved this citation from probe_category to
+            # _confirm_slice_is_empty — a wrong citation this test accepted,
+            # because the fragment did sit at the line it now named.
+            #
+            # Only that shape counts. Prose like "the skip set is loaded in
+            # walk_category and passed down" names a function without claiming
+            # the cited line is inside it, and reading those as location claims
+            # would make the check reject correct entries.
+            claimed = re.search(r"`[^`]+`\s+in\s+`?(\w+)`?", text)
+            if claimed and any(f"def {claimed.group(1)}(" in ln for ln in lines):
+                enclosing = _enclosing_def(lines, int(lineno))
+                assert enclosing == claimed.group(1), (
+                    f"{source}: {module}:{lineno} sits in {enclosing!r}, but the "
+                    f"text says the fragment is in {claimed.group(1)!r}"
+                )
             checked += 1
     assert checked >= 6, "every gated portal should have a gate and its skips checked"
 
