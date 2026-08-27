@@ -1,4 +1,16 @@
--- 449_tag_candidates.sql
+-- 450_tag_candidates.sql
+--
+-- RENUMBERED FROM 449 (2026-08-27). This shipped as 449 and #1209 shipped
+-- 449_ceskereality_delisting_parked the same afternoon; the collision check runs
+-- at authoring time, and 449 was free then. Renumbered per the guard's own rule
+-- -- the newer migration takes the next free number -- so main goes green again.
+-- It was already APPLIED to production under the ledger name '449_tag_candidates'
+-- and is NOT re-applied: the objects below already exist. The ledger name and
+-- this filename therefore disagree, which is cosmetic. Nothing keys on it:
+-- check_migration_drift probes the live catalog for the objects a migration
+-- DECLARES and explicitly refuses to treat supabase_migrations.schema_migrations
+-- as the oracle (scripts/verify_pipeline.py, and scripts/migration_objects.py
+-- for why ledger names cannot be matched reliably).
 --
 -- The candidate store: which images are QUEUED for review on which tag, and WHY
 -- each one was drawn. PURELY ADDITIVE -- no DROP, no DELETE, no destructive
@@ -155,7 +167,7 @@ comment on table image_tag_labels is
   'ruling, 2026-08-27, superseding migration 442''s pool-scoped default-negative). '
   'An image never reviewed for a tag must stay distinguishable from one reviewed '
   'and judged not-that-tag; membership of the tag_candidates review queue '
-  '(migration 449) confers no label of any kind. excluded rows are dropped at '
+  '(migration 450) confers no label of any kind. excluded rows are dropped at '
   'training time by definition, not by a separate flag. Backend-only, admin-gated.';
 
 commit;

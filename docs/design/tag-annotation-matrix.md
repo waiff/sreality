@@ -110,7 +110,7 @@ alter table image_tag_labels enable row level security;
 ```
 
 One row per explicit decision. No row = UNTOUCHED, and untouched never trains as
-negative (operator ruling 2026-08-27, superseding the ledger row above; migration 449
+negative (operator ruling 2026-08-27, superseding the ledger row above; migration 450
 restates it as a fresh `comment on table`, since migrations cannot be edited).
 `excluded` rows are dropped at training time by definition, not by a separate flag.
 Backend-only, admin-gated, same as `tag_taxonomy`.
@@ -277,7 +277,7 @@ counts positives that actually carry an embedding, so it can be lower than the o
 **The workbench does not depend on `dedup_sim`.** The gallery ("what this tag ACTUALLY
 contains") reads `image_tag_labels JOIN images` directly through
 `tag_definitions.list_positive_images`, not `tag_annotations.list_images_for_tag` — that one
-is driven by the tag's REVIEW QUEUE (`tag_candidates` since migration 449; before that,
+is driven by the tag's REVIEW QUEUE (`tag_candidates` since migration 450; before that,
 `dedup_sim.labeling_sample`), which is a work list rather than "every positive", and whose
 rows carry no label semantics at all. This page is permanent, and it is about what a tag
 contains, not about what is queued for review.
@@ -398,7 +398,7 @@ instead of a near-miss of it.
 **unchanged** and still include the backfill rows; `backfill_count` is what makes that inventory
 legible. Narrowing them is the deletion PR's decision, not this one's.
 
-## Candidate retrieval (migration 449)
+## Candidate retrieval (migration 450)
 
 **The problem.** `dedup_sim.labeling_sample` was 1,200 images picked as "the 2,000 newest
 with a storage_path" — untargeted, ONE pool shared by all 51 tags, and 943 of them never
@@ -416,7 +416,7 @@ reason the table has NO state column, NO reviewed flag and NO status. A candidat
 image somebody should LOOK at for this tag — not a positive, not a negative, not a
 default. Whether one has been DECIDED is derived by joining `image_tag_labels`, the only
 place a decision has ever lived. There is deliberately nothing there for a future reader
-to mistake for a label; `tests/test_migration_449_tag_candidates.py` asserts the absence
+to mistake for a label; `tests/test_migration_450_tag_candidates.py` asserts the absence
 of those column names, because the shape is the guarantee.
 
 **Every row records why it was drawn** — `draw` (which rank band), `category_main` (which

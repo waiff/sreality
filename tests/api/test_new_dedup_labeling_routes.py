@@ -42,7 +42,7 @@ def client(fake_conn: _FakeConn):
 
 _RESPONSES: dict[str, Any] = {
     "tag_overview": {
-        # `sample_size` is gone with migration 449 — one pool shared by every tag
+        # `sample_size` is gone with migration 450 — one pool shared by every tag
         # no longer exists. `candidate_image_count` is distinct images queued for
         # at least one tag, a different quantity with a different denominator.
         "candidate_image_count": 3, "ambiguity_threshold": 0.15,
@@ -871,7 +871,7 @@ def test_delete_annotation_takes_no_provenance_arguments(client, calls):
     assert calls["clear_state"] == {"image_id": 1, "tag_id": 2}
 
 
-# --- candidate retrieval (migration 449) ------------------------------------
+# --- candidate retrieval (migration 450) ------------------------------------
 
 
 def test_get_tag_candidates(client, calls):

@@ -10,7 +10,7 @@
  *   - Proposals — the secondary-CLIP suggestion queue. A tile's tri-state
  *     control writes through setNewDedupProposalState, which ALSO flips the
  *     proposal's bookkeeping status.
- *   - Candidates — ONE tag's review queue (migration 449) plus everything
+ *   - Candidates — ONE tag's review queue (migration 450) plus everything
  *     already decided for that tag, including images no model ever proposed it
  *     for. Writes through setNewDedupTagAnnotation, which is a plain idempotent
  *     upsert on image_tag_labels.
@@ -120,7 +120,7 @@ function tag(over: Partial<NewDedupTag> = {}): NewDedupTag {
     positive_count: 12, gate_count: 12, border_case_count: 0,
     negative_count: 8, excluded_count: 5,
     pending_count: 3, dismissed_count: 1,
-    /* The tag's own review queue (migration 449). A count of WORK, never of
+    /* The tag's own review queue (migration 450). A count of WORK, never of
      * evidence — no test may read these as labels. */
     candidate_count: 0, candidate_open_count: 0, last_drawn_at: null,
     /* Provenance (migration 446). The default fixture is an all-human tag with
@@ -693,7 +693,7 @@ describe('<NewDedupLabeling>', () => {
     expect((screen.getByLabelText('Tag') as HTMLSelectElement).value).toBe('');
   });
 
-  // --- the candidate queue (migration 449) ---------------------------------
+  // --- the candidate queue (migration 450) ---------------------------------
 
   /* Selects the default tag so the queue readout has something to read. Stays
    * in Proposals mode — the readout is about the QUEUE, not the grid, and has

@@ -4,7 +4,7 @@ verified separately, live).
 Models the four tables `toolkit/tag_annotations.py` and
 `toolkit/dedup_sim_labeling.py` write (`tag_taxonomy`, `image_tag_labels`,
 `dedup_sim.labeling_sample`, `dedup_sim.label_proposals`) plus the three they only
-read (`images`, `image_border_cases`, and — since migration 449 — `tag_candidates`,
+read (`images`, `image_border_cases`, and — since migration 450 — `tag_candidates`,
 the per-tag review queue the tag browse and the overview now read), dispatching on
 the exact SQL those modules issue. `dedup_sim.labeling_sample` stays modelled:
 `grow_sample` still writes it for the secondary-CLIP proposal lane.
@@ -179,7 +179,7 @@ class _Cur:
             self.rowcount = 1 if c.image_tag_labels.pop((image_id, tag_id), None) else 0
 
         elif s.startswith("SELECT q.image_id, i.storage_path, itl.state"):
-            # The migration-449 browse: arm one is this tag's candidate queue, arm
+            # The migration-450 browse: arm one is this tag's candidate queue, arm
             # two every image already DECIDED for the tag but never drawn as a
             # candidate (without it the legacy positives would look deleted).
             kw = params
@@ -306,7 +306,7 @@ class _Cur:
                     ),
                     c.count_proposals(t["label"], "pending"),
                     c.count_proposals(t["label"], "dismissed"),
-                    # The migration-449 aggregate: how big this tag's review queue
+                    # The migration-450 aggregate: how big this tag's review queue
                     # is and how much of it nobody has decided yet. `open` is a
                     # JOIN onto image_tag_labels — the queue stores no state.
                     *c.candidate_counts(t["id"]),
@@ -416,7 +416,7 @@ class _FakeConn:
         self.active_definitions: dict[int, int] = {}
         self.proposals: dict[tuple[int, str], dict[str, Any]] = {}
         self.sample: dict[int, dict[str, Any]] = {}
-        # tag_candidates (migration 449), keyed (tag_id, image_id) like the PK. A
+        # tag_candidates (migration 450), keyed (tag_id, image_id) like the PK. A
         # review queue: no state column here either, on purpose.
         self.tag_candidates: dict[tuple[int, int], dict[str, Any]] = {}
         # images: id -> storage_path. grow_sample's real SQL requires

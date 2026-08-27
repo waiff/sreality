@@ -41,7 +41,7 @@ UPDATE public.portals
 COMMENT ON COLUMN public.portals.supports_complete_walk IS
     'Can this portal prove a near-complete index walk? Gates mark_inactive (architectural '
     'rule #3): a portal that cannot prove completeness never delists from index absence. '
-    'ceskereality was parked false in migration 449 while its walk was rebuilt onto the '
+    'ceskereality was parked false in migration 450 while its walk was rebuilt onto the '
     '14-kraj partition -- not because the portal cannot prove a walk, but because the rebuild '
     'makes ~29,400 rows delist-eligible in one pass and that correction must be verified '
     'per-listing by fetch, not inferred from one run of new code.';

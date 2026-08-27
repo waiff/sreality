@@ -1,4 +1,4 @@
-"""Offline guard over migration 449's TEXT — the candidate store's shape, its
+"""Offline guard over migration 450's TEXT — the candidate store's shape, its
 backend-only posture, and the one property the whole design rests on: a row in
 `tag_candidates` is NOT a label.
 
@@ -18,7 +18,7 @@ from pathlib import Path
 from toolkit import tag_candidates as tc
 
 MIGRATION = (
-    Path(__file__).resolve().parent.parent / "migrations" / "449_tag_candidates.sql"
+    Path(__file__).resolve().parent.parent / "migrations" / "450_tag_candidates.sql"
 )
 
 
@@ -51,7 +51,7 @@ def test_the_migration_is_purely_additive() -> None:
         "drop table", "drop column", "drop index", "drop view", "drop function",
         "drop schema", "delete from", "truncate", "alter column", "rename to",
     ):
-        assert forbidden not in sql, f"449 must not contain {forbidden!r}"
+        assert forbidden not in sql, f"450 must not contain {forbidden!r}"
 
 
 def test_the_migration_leaves_dedup_sim_alone() -> None:
@@ -59,7 +59,7 @@ def test_the_migration_leaves_dedup_sim_alone() -> None:
     # schema: the secondary-CLIP proposal lane still writes labeling_sample and
     # still reads label_proposals. The prose explains that; no STATEMENT touches it.
     for statement in _statements():
-        assert "dedup_sim" not in statement, f"449 must not touch dedup_sim: {statement[:80]}"
+        assert "dedup_sim" not in statement, f"450 must not touch dedup_sim: {statement[:80]}"
 
 
 # --- the anti-label guard -----------------------------------------------------
@@ -80,7 +80,7 @@ def test_the_table_declares_no_column_a_reader_could_mistake_for_a_label() -> No
 
 def test_the_migration_restates_the_standing_negative_semantics() -> None:
     # Migration 442's table comment still asserts the rule the operator overturned,
-    # and migrations are append-only, so 449 re-comments the table instead. A
+    # and migrations are append-only, so 450 re-comments the table instead. A
     # catalog comment that contradicts the standing rule is a trap.
     sql = _norm()
     assert "comment on table image_tag_labels is" in sql

@@ -74,7 +74,7 @@ const STATUS_TABS: ReadonlyArray<{ key: TabKey; label: string }> = [
 /* The two review workflows this page supports (decided 2026-08-26): tag-centric
  * batch review of the secondary-CLIP's SUGGESTIONS (the default — fast, because
  * each screen only asks about one tag), and a Candidates browse over ONE tag's
- * own review queue (migration 449) plus everything already decided for it —
+ * own review queue (migration 450) plus everything already decided for it —
  * including images the model never proposed the tag for, which is the only way
  * to answer "show me every image where kitchen = excluded".
  *
