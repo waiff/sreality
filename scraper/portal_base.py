@@ -71,11 +71,19 @@ class BasePortalClient:
     # None = the shared browser UA. A per-portal fetcher concern, not a default.
     USER_AGENT: str | None = None
     # Opt-in: route every request through the residential proxy in the
-    # SCRAPER_PROXY_URL env var. For portals fronted by an anti-bot edge that
-    # throttles our datacenter (GitHub-Actions) IP — ceskereality, mmreality.
-    # Unset env or False = direct (our IP), so the default for every other portal
-    # is unchanged and free.
+    # SCRAPER_PROXY_URL env var, for portals whose edge punishes our datacenter
+    # (GitHub-Actions / Railway) IP. Unset env or False = direct (our IP), so the
+    # default for every other portal is unchanged and free.
     USE_PROXY: bool = False
+    # …and there are TWO ways an edge punishes us, which callers must not confuse.
+    # ceskereality and mmreality HARD-403 the datacenter IP: without the proxy
+    # they return nothing at all, so running them unproxied only burns requests
+    # (the realtime worker skips them entirely — `_skip_for_proxy`). idnes instead
+    # SOFT-throttles it — every page still arrives, roughly 13x slower — so
+    # skipping it would trade degraded data for NO data, which is strictly worse.
+    # Hence: USE_PROXY says "route through it when available"; PROXY_REQUIRED says
+    # "without it, do not bother". Default True preserves the two incumbents.
+    PROXY_REQUIRED: bool = True
     PROXY_ENV = "SCRAPER_PROXY_URL"
 
     def __init__(

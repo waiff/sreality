@@ -59,6 +59,29 @@ def detail_url(path_or_url: str) -> str:
 
 class IdnesClient(BasePortalClient):
     ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    # Route every request through the residential proxy in SCRAPER_PROXY_URL.
+    #
+    # idnes does not block our datacenter (GitHub Actions) IP the way ceskereality
+    # and mmreality do — it SOFT-throttles it, which is worse, because nothing in
+    # the response says so. MEASURED 2026-08-27 on the 08-26 13:17 walk: pages
+    # arrive in ~2.3s each for exactly 20 requests, then one request stalls for
+    # ~390 SECONDS and returns 200. No 429, no 403, no retry, no penalize() — the
+    # client cannot see it, so every rail we have stays quiet. Twenty-four such
+    # stalls ate 143 of that run's 160 minutes, and the walk covered 2 of 10
+    # categories. Effective throughput 0.047 pages/s against 0.62 measured from a
+    # residential IP over 26 consecutive requests with no stall at all, and 0.59
+    # measured through this proxy on ceskereality's 2,497-page walk.
+    #
+    # That is a 13x difference between "cannot finish in a day" and "finishes in
+    # one run", bought with no extra request rate — the politeness ceiling is
+    # unchanged, we simply stop being punished for our egress address. Unset env
+    # = direct IP (logs a warn), which is the throttled-but-working status quo,
+    # so a missing secret degrades rather than breaks.
+    USE_PROXY = True
+    # …and unlike ceskereality/mmreality, the direct IP still WORKS here — every
+    # page arrives, just 13x slower. So the realtime worker must keep probing
+    # idnes when the proxy is absent: skipping it would trade slow data for none.
+    PROXY_REQUIRED = False
 
     def fetch_index(
         self,

@@ -344,11 +344,18 @@ def _build_portal(source: str, config: PortalConfig) -> Any:
 
 
 def _skip_for_proxy(source: str) -> bool:
-    """True when the portal's client rides the residential proxy (USE_PROXY)
-    and the proxy env is unset — a direct request would only burn a WAF 403."""
+    """True when the portal REQUIRES the residential proxy and the env is unset —
+    a direct request would only burn a WAF 403.
+
+    A portal that merely prefers the proxy (`PROXY_REQUIRED = False`, i.e. the
+    direct IP is throttled but functional) must still run: skipping it would
+    trade slow data for no data.
+    """
     mod_name, cls_name = _CLIENT_CLASSES[source]
     cls = getattr(importlib.import_module(mod_name), cls_name)
     if not getattr(cls, "USE_PROXY", False):
+        return False
+    if not getattr(cls, "PROXY_REQUIRED", True):
         return False
     env = getattr(cls, "PROXY_ENV", "SCRAPER_PROXY_URL")
     if os.environ.get(env):
