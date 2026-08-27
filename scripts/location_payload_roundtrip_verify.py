@@ -13,6 +13,33 @@ only that two decoders agree. The archived artefact is bytes, the gate says "byt
 and the backfill reads its source through this identical expression — so the two sides are
 symmetric by construction rather than by two matching assumptions.
 
+THE SOURCE IS MUTABLE AND THE COMPARISON KNOWS IT. `portal_raw_pages` is latest-wins: a
+live drain overwrites `html` on every refetch, while the payload store's 7-day append
+floor refuses BY DESIGN to chase that churn (`location_data/payloads.py`). So on a
+churning portal the live source legitimately diverges from the stored copy for up to a
+week, and a verifier that reads "differs from the live source" as "lossy migration"
+cannot pass while any portal is being scraped — which is exactly how the first
+full-corpus run (32090281321, 2026-08-18) failed 31/1000 with every failure on a
+live-drain portal, refetched 5-13h after storage. The verdict on a byte difference is
+therefore two-staged: first the decoded body is re-hashed against the row's own
+write-time `body_sha256` — a disagreement THERE is real damage (the store no longer
+holds what its writer hashed) and always fails — and only an internally-faithful body
+whose source row was refetched AFTER the payload was stored is classed `stale_source`:
+reported with its own counter and rows, never silently, but not a gate failure. A body
+that differs while its source was never refetched fails as before; there is no benign
+story for that. The re-hash also closes the post-write corruption gap for R2-spilled
+bodies: content-addressed keys prove key⇒content at WRITE time, and this is the only
+place the object is re-checked after it.
+
+THE EXEMPTION IS EXACTLY AS WIDE AS THE PORTAL'S CHURN, and the report says so rather
+than letting a PASS imply more than it proves. Copy-side damage — the writer faithfully
+hashing the WRONG bytes — is internally consistent by construction, so on a page whose
+source churned before the verify ran it is indistinguishable from benign drift. `ok` is
+therefore the strictly-verified count and the only number carrying the fidelity claim;
+on a high-churn portal it will be a minority of the sample, and closing that honestly
+needs a like-for-like draw (compare each payload against the source bytes AS OF its own
+`fetched_at`), which no stable substrate exists for today — the source is latest-wins.
+
 Sampling draws the scope's ID POOL and picks from it client-side. Not `TABLESAMPLE SYSTEM`:
 that picks whole heap PAGES, and pages cluster by insert order, which clusters by portal —
 a page-sampled "random 1,000" can be most of one portal and none of another, exactly the
@@ -95,13 +122,14 @@ SELECT id, source, source_id_native, page_kind, convert_to(html, 'UTF8'), fetche
 # shrink the sample instead of failing the gate.
 _PAYLOADS_SQL = """
 SELECT k.page_id, p.id, p.content_encoding, p.body, p.body_r2_key, p.byte_size,
-       (p.body_sha256 = k.body_sha256) AS hash_matches, p.version_seq, p.first_observed_at
+       (p.body_sha256 = k.body_sha256) AS hash_matches, p.version_seq,
+       p.first_observed_at, p.fetched_at, p.body_sha256
   FROM unnest(%(page_id)s::bigint[], %(source)s::text[], %(source_id_native)s::text[],
               %(page_kind)s::text[], %(body_sha256)s::bytea[])
     AS k(page_id, source, source_id_native, page_kind, body_sha256)
   LEFT JOIN LATERAL (
       SELECT pp.id, pp.content_encoding, pp.body, pp.body_r2_key, pp.byte_size,
-             pp.body_sha256, pp.version_seq, pp.first_observed_at
+             pp.body_sha256, pp.version_seq, pp.first_observed_at, pp.fetched_at
         FROM portal_raw_payloads pp
        WHERE pp.source = k.source
          AND pp.source_id_native = k.source_id_native
@@ -136,13 +164,30 @@ class Report:
     missing: int = 0
     mismatch: int = 0
     unreadable: int = 0
+    unverifiable: int = 0
+    stale_source: int = 0
     from_r2: int = 0
     bytes_compared: int = 0
     failures: list[Verdict] = field(default_factory=list)
+    stale: list[Verdict] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
-        return self.sampled > 0 and self.ok == self.sampled
+        """Stale-source rows do not fail the gate — the store is internally faithful and
+        the divergence is the SOURCE moving after storage, which the append floor
+        guarantees will happen on any churning portal. They are still reported in full:
+        a PASS carrying stale rows says so in its own counter, never as a bare tick.
+
+        And a PASS is exactly as wide as `ok`: a stale-source row proves the store still
+        holds what its writer hashed (self-consistency), NOT that the writer read the
+        right bytes in the first place — copy-side damage on a page that churned before
+        the verify ran is indistinguishable from benign drift. `ok` is the
+        strictly-verified count and it alone carries the fidelity claim; the printed
+        summary and the JSON both say so."""
+        return (self.sampled > 0
+                and self.ok + self.stale_source == self.sampled
+                and self.missing == 0 and self.mismatch == 0
+                and self.unreadable == 0 and self.unverifiable == 0)
 
     @property
     def shortfall(self) -> int:
@@ -161,6 +206,8 @@ class Report:
             "pool_truncated": self.pool_truncated,
             "ok": self.ok, "missing": self.missing,
             "mismatch": self.mismatch, "unreadable": self.unreadable,
+            "unverifiable": self.unverifiable,
+            "stale_source": self.stale_source,
             "from_r2": self.from_r2, "bytes_compared": self.bytes_compared,
             "passed": self.passed,
             "failures": [
@@ -168,6 +215,12 @@ class Report:
                  "source_id_native": v.source_id_native, "page_kind": v.page_kind,
                  "status": v.status, "detail": v.detail}
                 for v in self.failures
+            ],
+            "stale": [
+                {"page_id": v.page_id, "source": v.source,
+                 "source_id_native": v.source_id_native, "page_kind": v.page_kind,
+                 "status": v.status, "detail": v.detail}
+                for v in self.stale
             ],
         }
 
@@ -238,7 +291,7 @@ def verify(
             cur.execute(_PAYLOADS_SQL, keys)
             found = {int(r[0]): r[1:] for r in cur.fetchall()}
 
-        for page_id, page_source, native, page_kind, _raw_body, _fetched_at in pages:
+        for page_id, page_source, native, page_kind, _raw_body, page_fetched_at in pages:
             raw = bodies[int(page_id)]
             report.sampled += 1
             report.bytes_compared += len(raw)
@@ -249,9 +302,12 @@ def verify(
                 row = None
             verdict = _compare(
                 raw, row, store=store, page_id=int(page_id), source=page_source,
-                native=native, page_kind=page_kind, report=report)
+                native=native, page_kind=page_kind, page_fetched_at=page_fetched_at,
+                report=report)
             if verdict.status == "ok":
                 report.ok += 1
+            elif verdict.status == "stale_source":
+                report.stale.append(verdict)
             else:
                 report.failures.append(verdict)
 
@@ -271,6 +327,7 @@ def _compare(
     source: str,
     native: str,
     page_kind: str,
+    page_fetched_at: Any,
     report: Report,
 ) -> Verdict:
     def verdict(status: str, detail: str = "") -> Verdict:
@@ -280,7 +337,8 @@ def _compare(
         report.missing += 1
         return verdict("missing", "no portal_raw_payloads row for this page's key")
 
-    payload_id, encoding, body, r2_key, byte_size, hash_matches, version_seq, first_at = row
+    (payload_id, encoding, body, r2_key, byte_size, hash_matches, version_seq,
+     first_at, payload_fetched_at, body_sha256) = row
     stored: bytes
     if body is not None:
         stored = bytes(body)
@@ -307,22 +365,79 @@ def _compare(
         report.unreadable += 1
         return verdict("unreadable", f"payload {payload_id} would not decode: {exc}")
 
-    if decoded != raw:
-        report.mismatch += 1
-        # `hash_matches=False` with a row present means the store holds a DIFFERENT body
-        # for this page — a later live-path version rather than a lossy copy — and
-        # version_seq / first_observed_at are what tell those two apart.
-        return verdict(
-            "mismatch",
-            f"payload {payload_id}: {len(raw)} source bytes vs {len(decoded)} decoded "
-            f"(byte_size={byte_size}, hash_matches={bool(hash_matches)}, "
-            f"version_seq={version_seq}, first_observed_at={first_at}, "
-            f"first_diff={_first_diff(raw, decoded)})")
-    if byte_size is not None and int(byte_size) != len(raw):
+    # `byte_size` labels the STORED body (its decoded length, migration 403), so
+    # `len(decoded)` is the operand in every case — and the check runs before the
+    # divergence branch, or it would be skipped on exactly the churning rows where the
+    # store does the most work. `byte_size` is nullable and a NULL skips this check:
+    # a missing LABEL check, not a missing fidelity check — the body_sha256 oracle
+    # below covers content.
+    if byte_size is not None and int(byte_size) != len(decoded):
         report.mismatch += 1
         return verdict("mismatch",
-                       f"payload {payload_id}: body round-trips but byte_size={byte_size} "
-                       f"disagrees with the {len(raw)} bytes it holds")
+                       f"payload {payload_id}: byte_size={byte_size} disagrees with the "
+                       f"{len(decoded)} bytes the stored body decodes to")
+
+    # The store's own write-time hash is the fidelity oracle, not the live source: a body
+    # whose decoded bytes no longer hash to its row's `body_sha256` is damaged no matter
+    # what the source says, and for an R2-spilled body this is the only post-write check
+    # the object ever gets (the content-addressed key proved key⇒content at write time).
+    # A NULL hash is reachable by schema (403 adds the column without NOT NULL) and means
+    # NO oracle — which is not the same thing as the oracle disagreeing.
+    oracle = bytes(body_sha256) if body_sha256 is not None else None
+    internally_faithful = (oracle is not None
+                           and hashlib.sha256(decoded).digest() == oracle)
+
+    if decoded != raw:
+        if oracle is None:
+            # Without the write-time hash there is no way to tell store-side damage from
+            # benign drift, and a sign-off gate fails closed on what it cannot judge.
+            report.unverifiable += 1
+            return verdict(
+                "unverifiable",
+                f"payload {payload_id}: differs from the live source and carries no "
+                f"body_sha256 to judge fidelity against (source "
+                f"fetched_at={page_fetched_at}, stored fetched_at={payload_fetched_at}, "
+                f"version_seq={version_seq})")
+        if not internally_faithful:
+            report.mismatch += 1
+            return verdict(
+                "mismatch",
+                f"payload {payload_id}: decoded body does not hash to its own "
+                f"body_sha256 — store-side damage (byte_size={byte_size}, "
+                f"version_seq={version_seq}, first_observed_at={first_at})")
+        source_moved = (page_fetched_at is not None and payload_fetched_at is not None
+                        and page_fetched_at > payload_fetched_at)
+        if source_moved:
+            # The source row was refetched after this payload was stored, and the append
+            # floor (location_data/payloads.py) deliberately does not chase refetch churn
+            # — the live bytes drifting off the stored copy is the designed behaviour,
+            # not a lossy migration. Reported, never failed — but see `passed`: what this
+            # row proves is self-consistency, not that the right bytes were copied.
+            report.stale_source += 1
+            return verdict(
+                "stale_source",
+                f"payload {payload_id}: source refetched at {page_fetched_at}, "
+                f"{len(raw)} live bytes vs {len(decoded)} stored "
+                f"(stored fetched_at={payload_fetched_at}, version_seq={version_seq}, "
+                f"first_diff={_first_diff(raw, decoded)})")
+        report.mismatch += 1
+        return verdict(
+            "mismatch",
+            f"payload {payload_id}: {len(raw)} source bytes vs {len(decoded)} decoded, "
+            f"and the source was never refetched after storage — no benign story "
+            f"(byte_size={byte_size}, hash_matches={bool(hash_matches)}, "
+            f"version_seq={version_seq}, first_observed_at={first_at}, "
+            f"source fetched_at={page_fetched_at}, "
+            f"stored fetched_at={payload_fetched_at}, "
+            f"first_diff={_first_diff(raw, decoded)})")
+    if oracle is not None and not internally_faithful:
+        report.mismatch += 1
+        return verdict("mismatch",
+                       f"payload {payload_id}: body round-trips against the source but "
+                       f"does not hash to its own body_sha256 — the row mislabels the "
+                       f"body it holds")
+    # decoded == raw with no oracle: the byte-for-byte round trip itself is proven, which
+    # is the claim this gate makes; only the label check had nothing to check.
     return verdict("ok")
 
 
@@ -352,25 +467,46 @@ def _print(report: Report) -> None:
         print(f"!! ID POOL TRUNCATED at {MAX_ID_POOL} — the draw is a prefix of the id "
               f"space, not a uniform sample.\n")
     print(f"{'requested':>11}{'sampled':>9}{'ok':>8}{'missing':>9}{'mismatch':>10}"
-          f"{'unreadable':>12}{'from_r2':>9}{'MB':>10}")
+          f"{'unreadable':>12}{'unverif':>9}{'stale_src':>11}{'from_r2':>9}{'MB':>10}")
     print(f"{report.requested:>11}{report.sampled:>9}{report.ok:>8}{report.missing:>9}"
-          f"{report.mismatch:>10}{report.unreadable:>12}{report.from_r2:>9}"
+          f"{report.mismatch:>10}{report.unreadable:>12}{report.unverifiable:>9}"
+          f"{report.stale_source:>11}{report.from_r2:>9}"
           f"{report.bytes_compared / 1e6:>10.1f}")
     if report.failures:
         print("\nfailures (first 25):")
         for v in report.failures[:25]:
             print(f"  page {v.page_id} {v.source}/{v.source_id_native} [{v.page_kind}] "
                   f"{v.status}: {v.detail}")
+    if report.stale:
+        print(f"\nstale-source (informational, {report.stale_source} total — the source "
+              "row was refetched after storage and the append floor by design does not "
+              "chase refetch churn; first 10):")
+        for v in report.stale[:10]:
+            print(f"  page {v.page_id} {v.source}/{v.source_id_native} [{v.page_kind}] "
+                  f"{v.detail}")
     print()
     if report.sampled == 0:
         print("NO ROWS SAMPLED — the archive is empty for this scope; nothing was verified.")
     elif report.passed:
-        scope = (f"{report.ok} of the {report.requested} requested" if report.shortfall
-                 else f"all {report.ok}")
-        print(f"PASS — {scope} sampled pages round-trip byte-for-byte (06 W2a gate (a)).")
+        if report.stale_source:
+            # The fidelity claim is exactly as wide as `ok`. A stale-source row proves
+            # the store still holds what its writer hashed — NOT that the writer read
+            # the right bytes before the source churned away. Say the known half.
+            print(f"PASS — {report.ok} of {report.sampled} sampled pages round-trip "
+                  f"byte-for-byte (06 W2a gate (a)); the fidelity claim covers those "
+                  f"{report.ok}. The {report.stale_source} stale-source rows above are "
+                  f"verified for self-consistency only — their sources churned after "
+                  f"storage, so copy-time fidelity is not decidable from here.")
+        else:
+            scope = (f"{report.ok} of the {report.requested} requested"
+                     if report.shortfall else f"all {report.ok}")
+            print(f"PASS — {scope} sampled pages round-trip byte-for-byte "
+                  f"(06 W2a gate (a)).")
     else:
-        print(f"FAIL — {report.sampled - report.ok} of {report.sampled} sampled pages did "
-              "not round-trip.")
+        failed = (report.missing + report.mismatch + report.unreadable
+                  + report.unverifiable)
+        print(f"FAIL — {failed} of {report.sampled} sampled pages did not round-trip "
+              "or could not be judged.")
 
 
 def main(argv: list[str] | None = None) -> int:

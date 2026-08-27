@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from scripts import location_payload_roundtrip_verify as verifier
@@ -102,12 +102,14 @@ class _Conn:
                 row = self.payloads.get(int(page_id))
                 if row is None:
                     # The LATERAL missed: an all-NULL right side, not an absent row.
-                    out.append((page_id, None, None, None, None, None, None, None, None))
+                    out.append((page_id, None, None, None, None, None, None, None, None,
+                                None, None))
                     continue
                 out.append((
                     page_id, row.get("id", page_id), row.get("content_encoding", "gzip"),
                     row.get("body"), row.get("body_r2_key"), row.get("byte_size"),
                     row.get("body_sha256") == params["body_sha256"][pos], 1, BASE_TS,
+                    row.get("fetched_at", BASE_TS), row.get("body_sha256"),
                 ))
             cur._result = out
             return
@@ -188,6 +190,139 @@ def test_bytes_that_differ_are_reported_as_a_mismatch_with_the_offset() -> None:
     assert report.mismatch == 1
     assert "first_diff=" in report.failures[0].detail
     assert "hash_matches=False" in report.failures[0].detail
+
+
+def test_a_source_refetched_after_storage_is_stale_source_not_a_failure() -> None:
+    """The 2026-08-18 finding (run 32090281321): `portal_raw_pages` is latest-wins and the
+    append floor deliberately does not chase refetch churn, so on a churning portal the
+    live source drifts off the stored copy for up to a week. That is designed behaviour —
+    it must be REPORTED (own counter, own rows) but it must not fail the gate, or the
+    gate cannot pass while any portal is being scraped."""
+    old, new = b"<html>as archived</html>", b"<html>as refetched TODAY</html>"
+    conn = _Conn({1: new},
+                 {1: _archived(old, fetched_at=BASE_TS - timedelta(hours=6))})
+
+    report = verifier.verify(conn, size=10)
+
+    assert report.passed is True
+    assert (report.ok, report.stale_source, report.mismatch) == (0, 1, 0)
+    assert report.failures == []
+    assert report.stale[0].status == "stale_source"
+    assert "source refetched at" in report.stale[0].detail
+    assert report.as_dict()["stale_source"] == 1
+    assert report.as_dict()["stale"][0]["page_id"] == 1
+
+
+def test_a_diverging_body_whose_source_never_moved_still_fails() -> None:
+    """Same byte difference, but the source was NOT refetched after storage — there is no
+    benign story for that, and stale-source classification must not swallow it."""
+    old, new = b"<html>as archived</html>", b"<html>different</html>"
+    conn = _Conn({1: new}, {1: _archived(old, fetched_at=BASE_TS)})
+
+    report = verifier.verify(conn, size=10)
+
+    assert report.passed is False
+    assert (report.stale_source, report.mismatch) == (0, 1)
+    assert "never refetched after storage" in report.failures[0].detail
+
+
+def test_store_side_damage_fails_even_when_the_source_moved() -> None:
+    """A moved source excuses a divergence only when the store still holds exactly what
+    its writer hashed. A body that no longer hashes to its own `body_sha256` is damage,
+    and a refetch happening afterwards must not launder it into stale-source."""
+    old, new = b"<html>as archived</html>", b"<html>as refetched</html>"
+    # Same length as `old` on purpose: rot that also changed the length is caught by the
+    # byte_size check; this test isolates the re-hash.
+    row = _archived(old, fetched_at=BASE_TS - timedelta(hours=6),
+                    body=gzip.compress(b"<html>as damaged!</html>", mtime=0))
+    conn = _Conn({1: new}, {1: row})
+
+    report = verifier.verify(conn, size=10)
+
+    assert report.passed is False
+    assert (report.stale_source, report.mismatch) == (0, 1)
+    assert "store-side damage" in report.failures[0].detail
+
+
+def test_an_r2_object_that_rotted_after_write_is_caught_by_the_rehash() -> None:
+    """Content-addressed keys prove key⇒content at WRITE time; this is the read-back
+    re-check. The object decodes cleanly and the source moved — only the re-hash against
+    `body_sha256` can tell this from a benign stale-source row."""
+    old, new = b"<html>as archived</html>", b"<html>as refetched</html>"
+    key = "payloads/bazos/ab/" + "ab" * 32 + ".gz"
+    row = _archived(old, fetched_at=BASE_TS - timedelta(hours=6),
+                    body=None, body_r2_key=key)
+    conn = _Conn({1: new}, {1: row})
+    # Same length as `old`: isolates the re-hash from the byte_size check.
+    store = _FakeR2({key: gzip.compress(b"<html>as damaged!</html>", mtime=0)})
+
+    report = verifier.verify(conn, size=10, store=store)
+
+    assert report.passed is False
+    assert (report.stale_source, report.mismatch) == (0, 1)
+    assert "store-side damage" in report.failures[0].detail
+
+
+def test_a_null_body_sha256_on_a_round_tripping_body_is_ok_not_convicted() -> None:
+    """Migration 403 adds `body_sha256` without NOT NULL, so a NULL is reachable by
+    schema. On a body that round-trips byte-for-byte the gate's own claim is proven —
+    'no oracle exists' must not be read as 'the oracle disagrees'."""
+    raw = b"<html>page</html>"
+    conn = _Conn({1: raw}, {1: _archived(raw, body_sha256=None)})
+
+    report = verifier.verify(conn, size=10)
+
+    assert report.passed is True
+    assert (report.ok, report.mismatch, report.unverifiable) == (1, 0, 0)
+
+
+def test_a_null_body_sha256_on_a_diverged_body_is_unverifiable_and_fails() -> None:
+    """Without the write-time hash there is no way to tell store-side damage from benign
+    drift — and a sign-off gate fails closed on what it cannot judge, even when the
+    source moved and the drift story is available."""
+    old, new = b"<html>as archived</html>", b"<html>as refetched</html>"
+    conn = _Conn({1: new},
+                 {1: _archived(old, body_sha256=None,
+                               fetched_at=BASE_TS - timedelta(hours=6))})
+
+    report = verifier.verify(conn, size=10)
+
+    assert report.passed is False
+    assert (report.stale_source, report.mismatch, report.unverifiable) == (0, 0, 1)
+    assert report.failures[0].status == "unverifiable"
+    assert "no body_sha256" in report.failures[0].detail
+    assert report.as_dict()["unverifiable"] == 1
+
+
+def test_byte_size_is_checked_on_stale_source_rows_too() -> None:
+    """`byte_size` labels the STORED body, so `len(decoded)` is the operand and the check
+    runs before the divergence branch — otherwise it would be skipped on exactly the
+    churning rows where the store does the most work."""
+    old, new = b"<html>as archived</html>", b"<html>as refetched</html>"
+    conn = _Conn({1: new},
+                 {1: _archived(old, byte_size=len(old) + 5,
+                               fetched_at=BASE_TS - timedelta(hours=6))})
+
+    report = verifier.verify(conn, size=10)
+
+    assert report.passed is False
+    assert (report.stale_source, report.mismatch) == (0, 1)
+    assert "decodes to" in report.failures[0].detail
+
+
+def test_a_round_tripping_body_with_a_wrong_body_sha256_label_fails() -> None:
+    """decoded == source is not enough on its own: a row whose `body_sha256` disagrees
+    with the body it holds mislabels the store's own index, and every content-addressed
+    read after this one trusts that label."""
+    raw = b"<html>page</html>"
+    conn = _Conn({1: raw},
+                 {1: _archived(raw, body_sha256=hashlib.sha256(b"other").digest())})
+
+    report = verifier.verify(conn, size=10)
+
+    assert report.passed is False
+    assert report.mismatch == 1
+    assert "mislabels" in report.failures[0].detail
 
 
 def test_a_byte_size_that_disagrees_with_the_body_it_labels_fails() -> None:
