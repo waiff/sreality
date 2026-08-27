@@ -46,16 +46,35 @@ def test_leaderboard_threads_firm_ids_into_the_rpc_call() -> None:
     conn = _Conn([{"broker_id": 1}])
     brokers.leaderboard(conn, firm_ids=[5, 9])
     sql, params = conn.cur.seen[0]
-    assert "broker_leaderboard(%s, %s, %s, %s, %s, %s, %s, %s)" in sql
-    assert params == (None, None, None, None, None, "active_property_count", 100, [5, 9])
+    assert "broker_leaderboard(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)" in sql
+    assert params == (
+        None, None, None, None, None, "active_property_count", 100, [5, 9], None, False)
 
 
 def test_leaderboard_omits_firm_ids_when_not_given() -> None:
     conn = _Conn([{"broker_id": 1}])
     out = brokers.leaderboard(conn)
     _, params = conn.cur.seen[0]
-    assert params[-1] is None
+    assert params[7] is None  # firm_ids position
     assert out["metadata"]["filters_used"]["firm_ids"] == []
+
+
+def test_leaderboard_threads_min_price_czk_and_include_unpriced() -> None:
+    conn = _Conn([{"broker_id": 1}])
+    out = brokers.leaderboard(conn, min_price_czk=5_000_000, include_unpriced=True)
+    _, params = conn.cur.seen[0]
+    assert params[-2:] == (5_000_000, True)
+    assert out["metadata"]["filters_used"]["min_price_czk"] == 5_000_000
+    assert out["metadata"]["filters_used"]["include_unpriced"] is True
+
+
+def test_leaderboard_defaults_min_price_czk_none_and_include_unpriced_false() -> None:
+    conn = _Conn([{"broker_id": 1}])
+    out = brokers.leaderboard(conn)
+    _, params = conn.cur.seen[0]
+    assert params[-2:] == (None, False)
+    assert out["metadata"]["filters_used"]["min_price_czk"] is None
+    assert out["metadata"]["filters_used"]["include_unpriced"] is False
 
 
 def test_listing_broker_prefers_the_surrogate_id() -> None:

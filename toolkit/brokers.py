@@ -154,29 +154,42 @@ def leaderboard(conn: Any, *, region_ids: list[int] | None = None,
                 okres_ids: list[int] | None = None, obec_ids: list[int] | None = None,
                 category_main: str | None = None, category_type: str | None = None,
                 metric: str = "active_property_count", limit: int = 100,
-                firm_ids: list[int] | None = None) -> dict[str, Any]:
+                firm_ids: list[int] | None = None, min_price_czk: int | None = None,
+                include_unpriced: bool = False) -> dict[str, Any]:
     """Top brokers by a chosen metric, optionally scoped to admin regions +
-    category + one or more companies (firm_ids, migration 410).
+    category + one or more companies (firm_ids, migration 410) + a minimum
+    property value (min_price_czk, migration 445).
 
     Thin wrapper over the broker_leaderboard RPC (the same one Browse calls), so the
     agent and Browse never disagree on the ranking. Empty id arrays = national /
     every company.
+
+    `min_price_czk` reads `listings.price_czk` directly — same column, same ">="
+    semantics as Browse's own min_price_czk filter (toolkit.comparables), unit-for-unit
+    (total price for a sale, monthly rent for a rental; migration 445's header has the
+    full rationale for why this is a live query rather than a precomputed one).
+    `include_unpriced` only has an effect once `min_price_czk` is set — it decides
+    whether a listing with no price ("cena na vyžádání", i.e. price_czk IS NULL) counts
+    as meeting the threshold. Defaults to excluding it: an unknown value should not be
+    assumed to clear a numeric floor.
     """
     if metric not in _VALID_METRICS:
         metric = "active_property_count"
     limit = max(1, min(int(limit), 2000))
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT * FROM broker_leaderboard(%s, %s, %s, %s, %s, %s, %s, %s)",
+            "SELECT * FROM broker_leaderboard(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (region_ids or None, okres_ids or None, obec_ids or None,
-             category_main, category_type, metric, limit, firm_ids or None))
+             category_main, category_type, metric, limit, firm_ids or None,
+             min_price_czk, include_unpriced))
         rows = cur.fetchall()
     return _envelope(
         "broker_leaderboard", rows,
         {"region_ids": region_ids or [], "okres_ids": okres_ids or [],
          "obec_ids": obec_ids or [], "category_main": category_main,
          "category_type": category_type, "metric": metric, "limit": limit,
-         "firm_ids": firm_ids or []},
+         "firm_ids": firm_ids or [], "min_price_czk": min_price_czk,
+         "include_unpriced": include_unpriced},
         len(rows), None)
 
 

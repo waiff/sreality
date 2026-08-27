@@ -17,7 +17,8 @@ import {
 } from '../lib/brokers';
 import type { DistrictChip } from '../lib/filters';
 import { LocationTypeahead } from '../components/filter-controls/LocationTypeahead';
-import { PickButton } from '../components/controls';
+import { PickButton, Switch } from '../components/controls';
+import { BufferedNumberInput } from '../components/FilterForm';
 import { fmtCount } from '../lib/format';
 
 const CATEGORY_OPTIONS: ReadonlyArray<{ value: string | null; label: string }> = [
@@ -51,6 +52,22 @@ export default function Brokers() {
   const [categoryType, setCategoryType] = useState<string | null>('prodej');
   const [metric, setMetric] = useState<LeaderMetric>('active_property_count');
   const [limit, setLimit] = useState<number>(100);
+  const [minPriceCzk, setMinPriceCzk] = useState<number | null>(null);
+  const [includeUnpriced, setIncludeUnpriced] = useState(false);
+
+  // price_czk means something different per offer type (total price for a sale,
+  // monthly rent for a rental — same dual meaning Browse's own price filter has), so
+  // a value typed for one scale is meaningless on another: "Vše" mixes all four
+  // offer types under one number, and even Prodej<->Pronájem directly would silently
+  // reinterpret e.g. "5000000" from a sale price into an absurd monthly rent. Clear on
+  // any ACTUAL change (guarded so re-clicking the already-selected pill is a no-op).
+  const handleCategoryTypeChange = (next: string | null) => {
+    if (next !== categoryType) {
+      setMinPriceCzk(null);
+      setIncludeUnpriced(false);
+    }
+    setCategoryType(next);
+  };
 
   const geo = useMemo(() => chipsToGeoArrays(districts), [districts]);
 
@@ -80,10 +97,13 @@ export default function Brokers() {
     queryKey: [
       'broker-leaderboard',
       geo.regionIds, geo.okresIds, geo.obecIds,
-      categoryMain, categoryType, metric, limit, firmIds,
+      categoryMain, categoryType, metric, limit, firmIds, minPriceCzk, includeUnpriced,
     ],
     queryFn: () =>
-      fetchBrokerLeaderboard({ ...geo, categoryMain, categoryType, metric, limit, firmIds }),
+      fetchBrokerLeaderboard({
+        ...geo, categoryMain, categoryType, metric, limit, firmIds,
+        minPriceCzk, includeUnpriced,
+      }),
     staleTime: 60_000,
     // Every filter control (region, type, metric, firm) changes this query's
     // key. Without this, each click blanked the whole ledger back to
@@ -136,7 +156,38 @@ export default function Brokers() {
             <Segmented options={CATEGORY_OPTIONS} value={categoryMain} onChange={setCategoryMain} />
           </Field>
           <Field label="Nabídka">
-            <Segmented options={OFFER_OPTIONS} value={categoryType} onChange={setCategoryType} />
+            <Segmented options={OFFER_OPTIONS} value={categoryType} onChange={handleCategoryTypeChange} />
+          </Field>
+          <Field label="Min. cena">
+            {categoryType == null ? (
+              <p className="text-xs text-[var(--color-ink-4)] py-1.5 max-w-[9rem]">
+                Zvolte Prodej nebo Pronájem
+              </p>
+            ) : (
+              <div className="flex items-center gap-2">
+                <div className="w-28">
+                  <BufferedNumberInput
+                    value={minPriceCzk}
+                    coerce="int"
+                    placeholder={categoryType === 'pronajem' ? 'Kč/měsíc' : 'Kč'}
+                    onChange={setMinPriceCzk}
+                    ariaLabel="Minimální cena"
+                  />
+                </div>
+                <label
+                  className="flex items-center gap-1.5 text-xs text-[var(--color-ink-3)] cursor-pointer select-none"
+                  title="Počítat i nabídky s cenou na vyžádání, jako by minimální cenu splňovaly."
+                >
+                  <Switch
+                    on={includeUnpriced}
+                    onChange={setIncludeUnpriced}
+                    disabled={minPriceCzk == null}
+                    ariaLabel="Počítat nabídky bez ceny"
+                  />
+                  bez ceny
+                </label>
+              </div>
+            )}
           </Field>
           <Field label="Řadit dle">
             <Segmented options={METRIC_OPTIONS} value={metric} onChange={setMetric} />
@@ -164,7 +215,11 @@ export default function Brokers() {
             {(boardQ.error as Error).message}
           </p>
         ) : rows.length === 0 ? (
-          <Empty placeLabel={placeLabel} hasFirmFilter={firmIds.length > 0} />
+          <Empty
+            placeLabel={placeLabel}
+            hasFirmFilter={firmIds.length > 0}
+            hasValueFilter={minPriceCzk != null}
+          />
         ) : (
           <>
             {boardQ.isFetching && (
@@ -474,15 +529,26 @@ function Count({
   );
 }
 
-function Empty({ placeLabel, hasFirmFilter }: { placeLabel: string; hasFirmFilter: boolean }) {
+function Empty({
+  placeLabel,
+  hasFirmFilter,
+  hasValueFilter,
+}: {
+  placeLabel: string;
+  hasFirmFilter: boolean;
+  hasValueFilter: boolean;
+}) {
+  const extras = [hasFirmFilter && 'firmu', hasValueFilter && 'cenu']
+    .filter((x): x is string => Boolean(x));
+  const hint = extras.length === 0
+    ? 'Zkuste jiný typ nemovitosti nebo nabídku.'
+    : `Zkuste jiný typ nemovitosti, nabídku nebo ${extras.join(' a ')}.`;
   return (
     <div className="mt-6 border border-dashed border-[var(--color-rule-strong)] rounded-[var(--radius-md)] p-8 text-center">
       <p className="text-sm text-[var(--color-ink-2)]">
         Žádní makléři pro tento výběr v {placeLabel}.
       </p>
-      <p className="mt-1 text-xs text-[var(--color-ink-3)]">
-        Zkuste jiný typ nemovitosti{hasFirmFilter ? ', nabídku nebo firmu' : ' nebo nabídku'}.
-      </p>
+      <p className="mt-1 text-xs text-[var(--color-ink-3)]">{hint}</p>
     </div>
   );
 }
