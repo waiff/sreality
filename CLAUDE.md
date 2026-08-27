@@ -145,7 +145,9 @@ incident history: `docs/architecture.md` § Architectural rules.
    appending a `listing_snapshots` row when it differs from that listing's latest snapshot. Every write
    path into `listings`.
 3. **Never delete; delist via `is_active=false`.** History is sacred. Infer inactive ONLY after a
-   ~complete index walk (≥99.5%, `INDEX_MIN_COMPLETENESS` — sreality included since W5a) AND only for
+   ~complete index walk (`scraper.portal.walk_coverage` — the ONE verdict for all nine portals;
+   ≥99.5% AND ≤1.02x of the portal's declared total, and an UNMEASURABLE total is `unknown`,
+   never complete — sreality included since W5a) AND only for
    rows additionally unseen for a cadence-scaled staleness window (`min_unseen_hours`: 12h on the 6h
    portals, 3h on sreality) — the two rails together, so a single truncated walk can't false-delist;
    partial walks (`--limit` / `--detail-only` / `--max-pages`) must never flip rows; a false flip

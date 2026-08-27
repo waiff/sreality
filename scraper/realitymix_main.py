@@ -40,6 +40,7 @@ from scraper.portal import (
     deadline_reached,
     load_portal_config,
     classify_index_sighting,
+    walk_is_complete,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -57,12 +58,6 @@ LOG = logging.getLogger(__name__)
 SOURCE = "realitymix"
 PER_PAGE = 20  # realitymix renders 20 results per ?stranka page
 
-# An index walk that collected at least this fraction of the page-reported total
-# is treated as complete enough to drive mark_inactive (the framework standard,
-# rule #3); the INACTIVE_MIN_UNSEEN_HOURS staleness rail below is the second,
-# stronger guard. Not operator-tunable. Mirrors bazos_main / idnes_main.
-INDEX_MIN_COMPLETENESS = 0.995
-
 # Only flip rows unseen for 12h+ — ~2 full walk cadences at the 6h schedule.
 # last_seen_at is bumped for unchanged rows each walk (touch_listings) and for
 # changed rows on a successful drain fetch — so a churn-missed live row is
@@ -71,12 +66,6 @@ INDEX_MIN_COMPLETENESS = 0.995
 # EXPLICITLY on every sweep: db.mark_inactive_native applies NO rail by default.
 # Tightened 24->12h for the real-time delisting SLO.
 INACTIVE_MIN_UNSEEN_HOURS = 12
-
-
-def _walk_complete(collected: int, total: int | None) -> bool:
-    if not total or total <= 0:
-        return True
-    return collected >= total * INDEX_MIN_COMPLETENESS
 
 
 class RealitymixPortal:
@@ -147,7 +136,8 @@ class RealitymixPortal:
         while True:
             if deadline_reached(deadline):
                 # Rule #3: a budget-truncated walk must never authorise delisting,
-                # so poison `complete` below rather than just leaving the loop.
+                # so record it and hand it to walk_is_complete(stopped_early=...)
+                # below rather than just leaving the loop.
                 stopped_early = True
                 LOG.info(
                     "INDEX deadline reached sale_type=%s category=%s page=%d "
@@ -229,10 +219,8 @@ class RealitymixPortal:
             "ENQUEUE source=realitymix new=%d changed=%d unchanged=%d enqueued=%d",
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        complete = (
-            (not stopped_early)
-            and (not self._max_pages)
-            and _walk_complete(len(seen), total)
+        complete = (not self._max_pages) and walk_is_complete(
+            len(seen), total, stopped_early=stopped_early,
         )
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
 

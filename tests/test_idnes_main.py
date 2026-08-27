@@ -194,14 +194,22 @@ def test_walk_category_classifies_new_changed_unchanged(monkeypatch):
 
 def test_walk_complete_requires_near_full_walk():
     # mark_inactive only after a ~complete walk (architectural rule #3); the bar
-    # is hardcoded (INDEX_MIN_COMPLETENESS=0.995, tolerating mid-walk churn), not
-    # operator-tunable — a genuinely truncated walk still reads incomplete.
-    assert idnes_main._walk_complete(100, 100) is True
-    assert idnes_main._walk_complete(996, 1000) is True   # 0.4% deficit = churn
-    assert idnes_main._walk_complete(994, 1000) is False  # 0.6% deficit = truncated
-    assert idnes_main._walk_complete(99, 100) is False
-    assert idnes_main._walk_complete(90, 100) is False
-    assert idnes_main._walk_complete(0, None) is True   # unknown total → trust the walk
+    # is hardcoded (portal.INDEX_MIN_COMPLETENESS=0.995, tolerating mid-walk
+    # churn), not operator-tunable — a genuinely truncated walk reads incomplete.
+    assert idnes_main.walk_is_complete(100, 100) is True
+    assert idnes_main.walk_is_complete(996, 1000) is True   # 0.4% deficit = churn
+    assert idnes_main.walk_is_complete(994, 1000) is False  # 0.6% deficit = truncated
+    assert idnes_main.walk_is_complete(99, 100) is False
+    assert idnes_main.walk_is_complete(90, 100) is False
+    # An unmeasurable total is "unknown", never "complete". The old local
+    # _walk_complete returned True here and this test asserted it — that
+    # expectation was the DEFECT, not the spec: it let a walk that measured
+    # nothing authorise mark_inactive to delist everything it never reached.
+    assert idnes_main.walk_is_complete(0, None) is False
+    assert idnes_main.walk_is_complete(500, 1000, stopped_early=True) is False
+    # Over-collection means the denominator is wrong (overlapping slices or
+    # foreign stock), so contamination must not read as completeness either.
+    assert idnes_main.walk_is_complete(1030, 1000) is False
 
 
 def test_walk_category_max_pages_suppresses_complete(monkeypatch):
@@ -262,7 +270,7 @@ def test_walk_category_deadline_stops_walk_and_suppresses_complete(monkeypatch):
     assert pages == 2            # stopped before fetching page 3
     assert len(seen) == 2        # what it did reach is still enqueued
     assert total == 2
-    assert idnes_main._walk_complete(len(seen), total) is True  # the bar alone says complete
+    assert idnes_main.walk_is_complete(len(seen), total) is True  # the bar alone says complete
     assert complete is False     # ...the deadline stop overrides it (never mark_inactive)
 
 

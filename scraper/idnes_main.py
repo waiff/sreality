@@ -47,6 +47,7 @@ from scraper.portal import (
     load_portal_config,
     classify_index_sighting,
     deadline_reached,
+    walk_is_complete,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -56,16 +57,6 @@ from scraper.rate_limit import RateLimiter
 LOG = logging.getLogger(__name__)
 SOURCE = "idnes"
 
-# An index walk must collect ~the FULL page-reported total before it drives
-# mark_inactive (rule #3). 100% is statistically unreachable on large
-# categories — listings churn mid-walk, with observed real-walk deficits up to
-# 0.24% — so a 1.0 bar suppressed every healthy sweep. 99.5% passes every
-# healthy walk with 2x margin while a genuinely truncated walk (e.g.
-# rate-limited 1,029/7,000) still reads incomplete; the
-# INACTIVE_MIN_UNSEEN_HOURS staleness rail is the second, stronger guard.
-# Not operator-tunable. Mirrors bazos_main / bezrealitky_main.
-INDEX_MIN_COMPLETENESS = 0.995
-
 # Only flip rows unseen for 12h+ — ~2 full walk cadences at the 6h schedule.
 # last_seen_at is bumped for unchanged rows each walk (touch_listings) and for
 # changed rows on a successful drain fetch — so a churn-missed live row is
@@ -73,12 +64,6 @@ INDEX_MIN_COMPLETENESS = 0.995
 # flip self-heals on the next index sighting (touch_listings reactivates).
 # Tightened 24->12h for the real-time delisting SLO.
 INACTIVE_MIN_UNSEEN_HOURS = 12
-
-
-def _walk_complete(collected: int, total: int | None) -> bool:
-    if not total or total <= 0:
-        return True
-    return collected >= total * INDEX_MIN_COMPLETENESS
 
 
 class IdnesPortal:
@@ -229,9 +214,8 @@ class IdnesPortal:
             "ENQUEUE source=idnes new=%d changed=%d unchanged=%d enqueued=%d",
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        complete = (
-            (not self._max_pages) and (not truncated)
-            and _walk_complete(len(seen), total)
+        complete = (not self._max_pages) and walk_is_complete(
+            len(seen), total, stopped_early=truncated,
         )
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
 

@@ -217,6 +217,50 @@ def test_mark_inactive_skips_incomplete_agenda(monkeypatch):
     assert called["n"] == 0
 
 
+def test_mark_inactive_skips_unmeasurable_agenda(monkeypatch):
+    # The index parsed but its total never did (total=None). The old shared
+    # _walk_complete FAILED OPEN here — "no total, so assume complete" — which
+    # authorised delisting every id the walk had not reached. That expectation
+    # was the bug, not the spec: an unmeasurable walk is "unknown", and rule #3
+    # delists only from a PROVEN-complete one.
+    base = "https://nemovitosti.maxima.cz/nemovitosti/"
+    items = [
+        SimpleNamespace(source_id_native=n, detail_path=f"{base}{n}/",
+                        price_text="5 000 000 Kč", title="Prodej bytu")
+        for n in ("b1", "b2")
+    ]
+    portal = _portal()
+    _walk_one_agenda(monkeypatch, portal, total=None, items=items)
+    called = {"n": 0}
+    monkeypatch.setattr(
+        maxima_main.db, "mark_inactive_agenda",
+        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or 0,
+    )
+    assert portal.mark_inactive(object(), _CATEGORIES[0], {"b1", "b2"}) == 0
+    assert called["n"] == 0
+
+
+def test_mark_inactive_skips_overcollected_agenda(monkeypatch):
+    # Collected 4 against a declared total of 2: the denominator is wrong
+    # (overlapping slices or foreign stock), so contamination must not read as
+    # completeness — no delisting from a walk we cannot trust.
+    base = "https://nemovitosti.maxima.cz/nemovitosti/"
+    items = [
+        SimpleNamespace(source_id_native=n, detail_path=f"{base}{n}/",
+                        price_text="5 000 000 Kč", title="Prodej bytu")
+        for n in ("b1", "b2", "b3", "b4")
+    ]
+    portal = _portal()
+    _walk_one_agenda(monkeypatch, portal, total=2, items=items)
+    called = {"n": 0}
+    monkeypatch.setattr(
+        maxima_main.db, "mark_inactive_agenda",
+        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or 0,
+    )
+    assert portal.mark_inactive(object(), _CATEGORIES[0], {"b1", "b2", "b3", "b4"}) == 0
+    assert called["n"] == 0
+
+
 class _IdxClient:
     """A fake MaximaClient that hands back a per-agenda page sequence and records
     how many times the agenda was actually fetched (to prove the cache works)."""

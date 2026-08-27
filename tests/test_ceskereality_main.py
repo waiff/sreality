@@ -169,9 +169,9 @@ class _ClockClient:
 
 def test_deadline_stops_walk_and_forces_incomplete(monkeypatch):
     """A walk cut short by the wall-clock budget must NEVER report complete=True.
-    Here the nationwide total is unknown and no slice capped, so every other rail
-    says 'complete' — only the deadline flag stops mark_inactive from delisting
-    the six regions the walk never reached (rule #3)."""
+    No slice capped here, so the deadline (passed to the shared verdict as
+    stopped_early=) is what stops mark_inactive from delisting the six regions the
+    walk never reached (rule #3)."""
     clock = {"t": 0.0}
     monkeypatch.setattr(
         m_portal, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
@@ -184,11 +184,46 @@ def test_deadline_stops_walk_and_forces_incomplete(monkeypatch):
         conn=None, dry_run=True, limiter=None, deadline=10.0,
     )
 
-    assert total is None                # _walk_complete() alone would say True
+    # The old local _walk_complete() returned True for an unmeasurable total —
+    # that fail-open was the DEFECT, not the spec. Under the shared verdict an
+    # unknown total is "unknown", so this walk is now doubly suppressed.
+    assert total is None
     assert seen                         # rows collected before the stop are kept
     assert complete is False            # the deadline poisons the whole verdict
     # stopped promptly: only the first region was touched, not all seven
     assert len({h for h in REGION_HOSTS if any(h in u for u in fake.urls)}) == 1
+
+
+class _NoTotalClient:
+    """Every slice completes (tiny page, no next arrow, no facets), but the
+    nationwide-total probe raises — exactly ceskereality's live failure mode."""
+
+    def __init__(self) -> None:
+        self._n = 0
+
+    def fetch_search(self, url):  # noqa: ANN001
+        self._n += 1
+        return _page_html(None, [str(8_000_000 + self._n)]), 200
+
+    def fetch_index(self, sale_type, cat, page):  # noqa: ANN001
+        raise RuntimeError("nationwide total unavailable")
+
+
+def test_unmeasurable_total_is_unknown_not_complete(monkeypatch):
+    """A full, uncapped, un-deadlined walk whose total probe FAILED must still not
+    authorise a sweep: an unmeasurable walk is 'unknown', never 'complete'
+    (rule #3). The old fail-open said complete=True and delisted on a guess."""
+    monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: _NoTotalClient())
+    portal = m.CeskerealityPortal(default_config("ceskereality"))   # full walk
+
+    seen, _counts, total, _pages, complete = portal.walk_category(
+        {"sale_type": "prodej", "category": "byty"},
+        conn=None, dry_run=True, limiter=None,
+    )
+
+    assert total is None
+    assert seen                         # rows were collected...
+    assert complete is False            # ...but coverage is unprovable
 
 
 def test_walk_slice_reports_incomplete_when_budget_already_spent(monkeypatch):

@@ -146,8 +146,8 @@ INDEX_ARCHIVERS: dict[str, CallSite] = {
     "sreality": CallSite(
         module="main.py",
         state=STATE_GATED,
-        call_site="scraper/main.py:1391 (_index_page_archiver.archive)",
-        gate="main.py:1388 `if key in fresh:` returning on the next line — the set is "
+        call_site="scraper/main.py:1383 (_index_page_archiver.archive)",
+        gate="main.py:1380 `if key in fresh:` returning on the next line — the set is "
              "db.fresh_index_page_keys(hours=INDEX_ARCHIVE_REFRESH_HOURS), read before the upsert",
         intentional_skips=(
             "main.py:926 `def probe_category(` fetches index pages via fetch_index_page and "
@@ -169,13 +169,13 @@ INDEX_ARCHIVERS: dict[str, CallSite] = {
     "ceskereality": CallSite(
         module="ceskereality_main.py",
         state=STATE_GATED,
-        call_site="scraper/ceskereality_main.py:209 (_walk_slice)",
-        gate="ceskereality_main.py:207 `if fresh_keys is None or key not in fresh_keys` — "
+        call_site="scraper/ceskereality_main.py:202 (_walk_slice)",
+        gate="ceskereality_main.py:200 `if fresh_keys is None or key not in fresh_keys` — "
              "the skip set is loaded in walk_category and passed down",
         intentional_skips=(
-            "ceskereality_main.py:190 `if conn is not None and archive_week is not None:` — "
+            "ceskereality_main.py:183 `if conn is not None and archive_week is not None:` — "
             "a dry run has no connection to stage into and no week to key by",
-            "ceskereality_main.py:404 `client.fetch_search(url)` in probe_category fetches "
+            "ceskereality_main.py:399 `client.fetch_search(url)` in probe_category fetches "
             "index pages off the /nejnovejsi/ sort slug and never archives — discovery only, "
             "by design, exactly as sreality's probe is",
         ),
