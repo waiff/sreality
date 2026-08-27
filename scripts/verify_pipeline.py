@@ -29,7 +29,9 @@ import datetime as _dt
 import json
 import logging
 import os
+import re
 import sys
+from pathlib import Path
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -77,6 +79,10 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # coverage hole that deep silently stops history as well as intake --
     # ceskereality sits at 9.96% today, which is the known facet-partition gap and
     # should read amber, not red, until that is fixed on its own merits.
+    # How many of the newest migrations to probe. 25 spans several weeks of this
+    # repo's cadence, so a drift is caught long before the window rolls past it,
+    # while keeping the probe to a few hundred catalog lookups.
+    "migration_drift_window": 25,
     "walk_coverage_warn_gap": 0.05,
     "walk_coverage_fail_gap": 0.15,
     # Property maintenance (2026-08-06 incident: 4 days of silently dead daily
@@ -1781,6 +1787,128 @@ def check_walk_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]
     }
 
 
+# --- migration drift: merged is not applied (2026-08-25 outage) -------------
+#
+# Applying a migration is a SEPARATE act from merging it, and nothing connected
+# the two. Migration 438 merged at 17:12 and was applied 29 hours later; in
+# between, every write on six portals violated a CHECK constraint the code
+# assumed existed, and scrape_runs.errors read 0 the whole time. CI proves a
+# migration REPLAYS against an empty database; it says nothing about production.
+#
+# This asks the live catalog directly: for each of the newest migrations, do the
+# objects it declares actually exist? The ledger (supabase_migrations.
+# schema_migrations) is deliberately NOT the oracle — see scripts/
+# migration_objects.py for why its names cannot be matched reliably.
+
+_MIGRATION_OBJECT_PROBE_SQL = """
+select o.kind, o.ident,
+  case o.kind
+    when 'relation' then to_regclass(o.ident) is not null
+    when 'function' then exists (
+      select 1 from pg_proc p
+        join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'public'
+         and p.proname = split_part(o.ident, '.', greatest(
+               array_length(string_to_array(o.ident, '.'), 1), 1)))
+    when 'column' then exists (
+      select 1 from information_schema.columns c
+       where c.table_schema = 'public'
+         and c.table_name = split_part(o.ident, '.', 1)
+         and c.column_name = split_part(o.ident, '.', 2))
+    when 'constraint' then exists (
+      select 1 from pg_constraint k
+        join pg_class rel on rel.oid = k.conrelid
+        join pg_namespace n on n.oid = rel.relnamespace
+       where n.nspname = 'public'
+         and rel.relname = split_part(o.ident, '.', 1)
+         and k.conname = split_part(o.ident, '.', 2))
+    when 'policy' then exists (
+      select 1 from pg_policies pl
+       where pl.schemaname = 'public'
+         and pl.tablename = split_part(o.ident, '.', 1)
+         and pl.policyname = split_part(o.ident, '.', 2))
+  end as present
+from unnest(%(kinds)s::text[], %(idents)s::text[]) as o(kind, ident)
+"""
+
+# to_regclass raises on a malformed identifier rather than returning NULL, so an
+# ident that survived parsing but is not a plain dotted name never reaches SQL.
+_SAFE_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_$]*(?:\.[a-zA-Z_][a-zA-Z0-9_$]*)?$")
+
+
+def check_migration_drift(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Are the newest merged migrations actually present in this database?"""
+    from scripts.migration_objects import load_migrations
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    newest = int(thresholds["migration_drift_window"])
+    migrations = load_migrations(Path(root) / "migrations", newest=newest)
+
+    probes: list[tuple[str, str]] = []
+    for mig in migrations:
+        for obj in mig.objects:
+            if _SAFE_IDENT.match(obj.ident):
+                probes.append((obj.kind, obj.ident))
+    present: dict[tuple[str, str], bool] = {}
+    if probes:
+        with conn.cursor() as cur:
+            cur.execute(_MIGRATION_OBJECT_PROBE_SQL, {
+                "kinds": [k for k, _ in probes], "idents": [i for _, i in probes],
+            })
+            for kind, ident, is_present in cur.fetchall():
+                present[(kind, ident)] = bool(is_present)
+
+    missing_all: list[str] = []   # merged and demonstrably not applied
+    partial: list[str] = []       # some objects landed, some did not
+    unverifiable: list[str] = []  # declares nothing this parser can probe
+    for mig in migrations:
+        checkable = [o for o in mig.objects if _SAFE_IDENT.match(o.ident)]
+        if not checkable:
+            unverifiable.append(mig.filename)
+            continue
+        absent = [o for o in checkable if not present.get((o.kind, o.ident), False)]
+        if len(absent) == len(checkable):
+            missing_all.append(f"{mig.filename} ({checkable[0]} absent)")
+        elif absent:
+            partial.append(f"{mig.filename} ({len(absent)}/{len(checkable)} absent: {absent[0]})")
+
+    if missing_all:
+        status = "fail"
+        message = (
+            "Merged migrations are NOT applied to this database: "
+            + "; ".join(missing_all)
+            + " -- code that assumes this schema will fail on every write. Apply them."
+        )
+    elif partial:
+        status = "warn"
+        message = (
+            "Migrations only partly present: " + "; ".join(partial)
+            + " -- either a half-applied migration, or the object parser mis-read the file."
+        )
+    else:
+        status = "ok"
+        message = (
+            f"All {len(migrations) - len(unverifiable)} checkable of the newest "
+            f"{len(migrations)} migrations are present."
+        )
+    return {
+        "check_key": "migration_drift",
+        "status": status,
+        "value": len(missing_all),
+        "details": {
+            "window": newest,
+            "missing_entirely": missing_all,
+            "partially_missing": partial,
+            # Surfaced, not swallowed: these declare only grants, drops, data
+            # updates or cron changes, which this probe cannot see. A guard whose
+            # blind spot is invisible is worse than no guard.
+            "unverifiable": unverifiable,
+            "objects_probed": len(probes),
+        },
+        "message": message,
+    }
+
+
 _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("llm_errors", check_llm_errors),
     ("llm_liveness", check_llm_liveness),
@@ -1798,6 +1926,7 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("ppm2_measure_coverage", check_ppm2_measure_coverage),
     ("acquisition_lag", check_acquisition_lag),
     ("walk_coverage", check_walk_coverage),
+    ("migration_drift", check_migration_drift),
 ]
 
 # --weekly stays a valid (currently empty) lane so the scheduled invocation keeps
