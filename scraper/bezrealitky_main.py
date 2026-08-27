@@ -276,7 +276,8 @@ class BezrealitkyPortal:
                     content_type="application/json",
                 )
             pk, result = db.ingest_scraped_listing(
-                conn, listing, discovery_seq=it.discovery_seq)
+                conn, listing, discovery_seq=it.discovery_seq,
+                discovered_at=it.discovered_at)
             image_urls = listing.raw.get("image_urls") or []
             inserted = db.record_media(conn, pk, image_urls)
             if result in counts:

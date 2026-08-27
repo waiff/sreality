@@ -931,6 +931,17 @@ renumber.** Navigate by area:
     **once**, never on a later re-fetch (`COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq)`,
     the same shape as `source_id_native`'s preserve-if-set rail). It is the true relative-discovery-order
     signal; `first_seen_at` (this rule's write-time stamp) is display-only going forward.
+    **`listings.discovered_at` (migration 444) is its companion in TIME** — the same claimed row's
+    `enqueued_at`, carried on the same path, written once by the same COALESCE. `discovery_seq`
+    answers "in what order did we discover this", `discovered_at` answers "when". The pair exists
+    because `first_seen_at` has always meant *when the drain wrote the row*, and that was
+    indistinguishable from discovery only while the queue was healthy: during the 2026-08-17
+    starvation the gap opened to **nine days**, so days-on-market, listing velocity, the price-drop
+    baseline and the watchdog's `:new:` event were all silently reading queue latency as market
+    behaviour. **`discovered_at` is deliberately NOT backfilled from `first_seen_at`** — that would
+    restate the queue delay as a market fact, which is precisely the false statement that hid the
+    outage. NULL is the truthful value for a row whose discovery time was not retained; only the
+    tail seeded from `detail_queue_completions` is populated for history.
 20. **Property maintenance is dirty-set incremental (Phase 3), not a full-table recompute.**
     The writers that change a property's children — `write_detail_batch` (a content change →
     new snapshot), `mark_inactive` / `mark_listing_inactive` (delisting), `touch_listings`

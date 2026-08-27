@@ -12,6 +12,7 @@ first-discovery fact, not something a later fetch should ever be allowed to corr
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from scraper import db
@@ -178,3 +179,74 @@ def test_ingest_scraped_listing_defaults_discovery_seq_to_none(monkeypatch) -> N
     # never raise, for callers outside the queue-driven drain.
     db.ingest_scraped_listing(conn, _Listing("idnes", "xyz"))
     assert captured["discovery_seq"] is None
+
+
+# --- discovered_at (migration 444): the same set-once contract, in time ------
+#
+# discovery_seq answers "in what ORDER did we discover this"; discovered_at
+# answers "WHEN". Both are pipeline-assigned from the claimed queue row, both are
+# set-once. The pair exists because first_seen_at means "when the drain WROTE
+# it", which diverged from discovery by nine days during the 2026-08-17
+# starvation and silently biased every series built on it.
+
+
+def test_upsert_listing_sql_inserts_and_set_once_preserves_discovered_at() -> None:
+    conn = _UpsertConn(fetchone_results=[(True, 1), None])
+    stamp = datetime(2026, 8, 25, 15, 39, tzinfo=timezone.utc)
+    db.upsert_listing(
+        conn,
+        row={"sreality_id": 1, "discovered_at": stamp},
+        raw_json={"id": 1},
+        content_hash="h1",
+    )
+    upsert_sql, upsert_params = conn.cur.executed[0]
+    assert "%(discovered_at)s" in upsert_sql
+    assert (
+        "discovered_at = COALESCE(listings.discovered_at, EXCLUDED.discovered_at)"
+        in upsert_sql
+    )
+    assert upsert_params["discovered_at"] == stamp
+
+
+def test_upsert_listing_defaults_discovered_at_to_none_when_absent() -> None:
+    conn = _UpsertConn(fetchone_results=[(True, 1), None])
+    db.upsert_listing(conn, row={"sreality_id": 1}, raw_json={}, content_hash="h1")
+    _, upsert_params = conn.cur.executed[0]
+    assert upsert_params["discovered_at"] is None
+
+
+def test_batch_upsert_sql_declares_and_set_once_preserves_discovered_at() -> None:
+    assert "discovered_at timestamptz" in db._BATCH_UPSERT_SQL
+    assert "j.discovered_at" in db._BATCH_UPSERT_SQL
+    assert (
+        "discovered_at = COALESCE(listings.discovered_at, EXCLUDED.discovered_at)"
+        in db._BATCH_UPSERT_SQL
+    )
+
+
+def test_discovered_at_is_not_a_listing_column() -> None:
+    """Pipeline-assigned, never parsed from portal content — so it stays out of
+    LISTING_COLUMNS exactly like discovery_seq (published_at, which IS parsed
+    from the page, is the deliberate contrast)."""
+    assert "discovered_at" not in db.LISTING_COLUMNS
+    assert "published_at" in db.LISTING_COLUMNS
+
+
+def test_ingest_scraped_listing_threads_discovered_at_into_row(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_upsert_listing(conn, row, raw_json, content_hash):
+        captured.update(row)
+        return "new"
+
+    monkeypatch.setattr(db, "upsert_listing", _fake_upsert_listing)
+    monkeypatch.setattr(db, "_ensure_property", lambda *a, **k: None)
+    monkeypatch.setattr(db, "_gate2_null_sreality_id_enabled", lambda conn: True)
+
+    stamp = datetime(2026, 8, 25, 15, 39, tzinfo=timezone.utc)
+    conn = _NewCurEachTimeConn(fetchone_results=[None, (7,)])
+    _listing_id, result = db.ingest_scraped_listing(
+        conn, _Listing("bazos", "abc"), discovery_seq=777, discovered_at=stamp,
+    )
+    assert result == "new"
+    assert captured["discovered_at"] == stamp

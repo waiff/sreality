@@ -1011,7 +1011,7 @@ def _drain_patches(monkeypatch, claim_batches, fetch_kind):
 def test_detail_drain_batches_and_completes(monkeypatch):
     cap = _drain_patches(
         monkeypatch,
-        [[("1", None, None, None), ("2", None, None, None), ("3", None, None, None)]],
+        [[("1", None, None, None, None), ("2", None, None, None, None), ("3", None, None, None, None)]],
         lambda s: "ok",
     )
     rc, agg = scraper_main._run_detail_drain(max_claims=None, dry_run=False, detail_workers=1)
@@ -1025,7 +1025,7 @@ def test_detail_drain_routes_gone_and_error(monkeypatch):
     kinds = {10: "ok", 11: "gone", 12: "error"}
     cap = _drain_patches(
         monkeypatch,
-        [[("10", None, None, None), ("11", None, None, None), ("12", None, None, None)]],
+        [[("10", None, None, None, None), ("11", None, None, None, None), ("12", None, None, None, None)]],
         lambda s: kinds[s],
     )
     rc, agg = scraper_main._run_detail_drain(max_claims=None, dry_run=False, detail_workers=1)
@@ -1040,7 +1040,7 @@ def test_detail_drain_routes_gone_and_error(monkeypatch):
 
 
 def test_detail_drain_respects_max_claims_cap(monkeypatch):
-    cap = _drain_patches(monkeypatch, [[("1", None, None, None), ("2", None, None, None)]], lambda s: "ok")
+    cap = _drain_patches(monkeypatch, [[("1", None, None, None, None), ("2", None, None, None, None)]], lambda s: "ok")
     scraper_main._run_detail_drain(max_claims=2, dry_run=False, detail_workers=1)
     # First claim is sized to the cap and, once met, the loop stops (one claim).
     assert cap["claim_n"] == [2]

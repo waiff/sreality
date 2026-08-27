@@ -84,6 +84,8 @@ def test_refresh_flood_cannot_starve_new_listings(conn, source):
     claimed = db.claim_detail_batch(conn, source, 200)
 
     assert len(claimed) == 200
+    # (native_id, detail_ref, index_price_czk, discovery_seq, enqueued_at)
+    assert all(len(row) == 5 for row in claimed)
     by_priority = _claimed_priorities(conn, source)
     assert by_priority[db.QUEUE_PRIORITY_NEW] == 100
     assert by_priority[db.QUEUE_PRIORITY_CHANGED] == 100
@@ -147,7 +149,7 @@ def test_acquisition_is_claimed_oldest_first(conn, source):
 
     claimed = db.claim_detail_batch(conn, source, 2)
 
-    assert f"{source}-0-7" in {nid for nid, _ref, _price, _seq in claimed}
+    assert f"{source}-0-7" in {nid for nid, _ref, _price, _seq, _enq in claimed}
 
 
 def test_claimed_rows_are_not_reclaimed_by_a_concurrent_drain(conn, source):
@@ -155,8 +157,8 @@ def test_claimed_rows_are_not_reclaimed_by_a_concurrent_drain(conn, source):
     _seed(conn, source, db.QUEUE_PRIORITY_NEW, 100)
     _seed(conn, source, db.QUEUE_PRIORITY_CHANGED, 100)
 
-    first = {nid for nid, _r, _p, _s in db.claim_detail_batch(conn, source, 100)}
-    second = {nid for nid, _r, _p, _s in db.claim_detail_batch(conn, source, 100)}
+    first = {nid for nid, _r, _p, _s, _e in db.claim_detail_batch(conn, source, 100)}
+    second = {nid for nid, _r, _p, _s, _e in db.claim_detail_batch(conn, source, 100)}
 
     assert len(first) == 100
     assert len(second) == 100

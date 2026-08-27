@@ -48,7 +48,7 @@ def test_write_details_records_media_on_the_surrogate(monkeypatch):
     monkeypatch.setattr(realitymix_main.db, "upsert_portal_raw_page", lambda *a, **k: 9)
     monkeypatch.setattr(
         realitymix_main.db, "ingest_scraped_listing",
-        lambda _c, _l, discovery_seq=None: (8201, "new"))
+        lambda _c, _l, discovery_seq=None, discovered_at=None: (8201, "new"))
     monkeypatch.setattr(realitymix_main.db, "mark_portal_page_parsed", lambda *a, **k: None)
     seen: dict[str, Any] = {}
     monkeypatch.setattr(
