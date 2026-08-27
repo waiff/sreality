@@ -47,6 +47,13 @@ class GrowSampleIn(BaseModel):
     category_main: str | None = None
 
 
+# `source` (migration 446) is deliberately NOT a request field on any model
+# below. This router is admin-gated and human-driven, so every write through it
+# is a human decision; the toolkit's default — or dedup_sim_labeling's
+# confirm-vs-correct derivation — is the only thing allowed to set it. A browser
+# that could name its own provenance could corrupt the very record 445 exists to
+# protect. `excluded_reason` is a request field because only the operator knows
+# whether a cell was genuinely ambiguous or deliberately pruned.
 class ProposalStateIn(BaseModel):
     image_id: int
     model: str
@@ -55,22 +62,28 @@ class ProposalStateIn(BaseModel):
     # the decision lands on this tag instead of the proposed one. Unset (or
     # blank) decides against the proposal's own label.
     label: str | None = None
+    # Only meaningful with state='excluded'. Unset means 'ambiguous' is chosen by
+    # the client; the server does not guess one.
+    excluded_reason: str | None = None
 
 
 class BulkProposalStateIn(BaseModel):
     model: str
     image_ids: list[int]
     state: str
+    excluded_reason: str | None = None
 
 
 class SetAnnotationIn(BaseModel):
     image_id: int
     state: str
+    excluded_reason: str | None = None
 
 
 class BulkSetAnnotationIn(BaseModel):
     image_ids: list[int]
     state: str
+    excluded_reason: str | None = None
 
 
 class ImageIdsIn(BaseModel):
@@ -80,6 +93,7 @@ class ImageIdsIn(BaseModel):
 class BulkSetImageTagsIn(BaseModel):
     tag_ids: list[int]
     state: str
+    excluded_reason: str | None = None
 
 
 class DoesNotCountIn(BaseModel):
@@ -110,6 +124,26 @@ def _check_state(state: str) -> None:
         raise HTTPException(
             status_code=422,
             detail=f"state must be one of {', '.join(tag_annotations.STATES)}",
+        )
+
+
+def _check_excluded_reason(state: str, reason: str | None) -> None:
+    """Loud at the edge (a 422 on a frontend bug); silently normalised in the
+    toolkit, so the DB CHECK can never surface as a 500."""
+    if reason is None:
+        return
+    if reason not in tag_annotations.EXCLUDED_REASONS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "excluded_reason must be one of "
+                f"{', '.join(tag_annotations.EXCLUDED_REASONS)}"
+            ),
+        )
+    if state != "excluded":
+        raise HTTPException(
+            status_code=422,
+            detail="excluded_reason is only valid with state='excluded'",
         )
 
 
@@ -228,11 +262,13 @@ def post_proposal_state(
     writes it into image_tag_labels and marks the proposal confirmed;
     negative/excluded do the same with that state and mark it dismissed."""
     _check_state(body.state)
+    _check_excluded_reason(body.state, body.excluded_reason)
     try:
         return {
             "data": dsl.set_proposal_state(
                 conn, image_id=body.image_id, model=body.model,
                 state=body.state, label=body.label,
+                excluded_reason=body.excluded_reason,
             )
         }
     except KeyError as exc:
@@ -248,10 +284,12 @@ def post_bulk_proposal_state(
     """Batch version of /proposals/state — the review queue's "take the
     whole batch" action."""
     _check_state(body.state)
+    _check_excluded_reason(body.state, body.excluded_reason)
     try:
         return {
             "data": dsl.bulk_set_proposal_state(
                 conn, model=body.model, image_ids=body.image_ids, state=body.state,
+                excluded_reason=body.excluded_reason,
             )
         }
     except ValueError as exc:
@@ -272,10 +310,12 @@ def post_bulk_set_image_tags(
     """Set many tags on ONE image to the same state at once — the detail
     panel's "set selected" action, the mirror of a tag-scoped bulk annotate."""
     _check_state(body.state)
+    _check_excluded_reason(body.state, body.excluded_reason)
     try:
         return {
             "data": tag_annotations.bulk_set_state_for_image(
                 conn, image_id=image_id, tag_ids=body.tag_ids, state=body.state,
+                excluded_reason=body.excluded_reason,
             )
         }
     except ValueError as exc:
@@ -325,11 +365,16 @@ def post_annotation(
     write path, and the tag-centric grid's write path when a tile has no
     backing proposal."""
     _check_state(body.state)
-    return {
-        "data": tag_annotations.set_state(
-            conn, image_id=body.image_id, tag_id=tag_id, state=body.state,
-        )
-    }
+    _check_excluded_reason(body.state, body.excluded_reason)
+    try:
+        return {
+            "data": tag_annotations.set_state(
+                conn, image_id=body.image_id, tag_id=tag_id, state=body.state,
+                excluded_reason=body.excluded_reason,
+            )
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/tags/{tag_id}/annotations/bulk")
@@ -339,10 +384,12 @@ def post_bulk_annotation(
     """Batch version of the direct annotation write — the labeling UI's
     main throughput lever."""
     _check_state(body.state)
+    _check_excluded_reason(body.state, body.excluded_reason)
     try:
         return {
             "data": tag_annotations.bulk_set_state(
                 conn, image_ids=body.image_ids, tag_id=tag_id, state=body.state,
+                excluded_reason=body.excluded_reason,
             )
         }
     except ValueError as exc:
@@ -357,7 +404,7 @@ def delete_annotation(
     return {"data": tag_annotations.clear_state(conn, image_id=image_id, tag_id=tag_id)}
 
 
-# --- tag definitions (migration 445) ----------------------------------------
+# --- tag definitions (migration 446) ----------------------------------------
 
 
 @router.get("/definitions")

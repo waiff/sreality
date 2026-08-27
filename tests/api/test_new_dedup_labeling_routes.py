@@ -40,7 +40,12 @@ def client(fake_conn: _FakeConn):
 
 
 _RESPONSES: dict[str, Any] = {
-    "tag_overview": {"sample_size": 3, "tags": [{"id": 1, "label": "a"}]},
+    "tag_overview": {
+        "sample_size": 3, "ambiguity_threshold": 0.15, "ambiguity_min_decisions": 20,
+        "tags": [{"id": 1, "label": "a", "human_count": 2, "machine_count": 0,
+                  "backfill_count": 41, "ambiguous_count": 1, "pruned_count": 0,
+                  "decided_count": 3, "ambiguity_rate": 0.3333, "ambiguity_alert": True}],
+    },
     "add_tag": {"id": 1, "label": "a", "family": None, "active": True, "created_at": "t"},
     "rename_tag": {"id": 1, "label": "b", "family": None, "active": True, "created_at": "t"},
     "remove_tag": {"label": "a", "deleted_annotations": 2},
@@ -48,27 +53,36 @@ _RESPONSES: dict[str, Any] = {
                       "priority": True, "ready_for_training": False, "created_at": "t"},
     "list_images_for_tag": [
         {"image_id": 1, "storage_path": "img/1.jpg", "state": "untouched",
-         "updated_at": None, "created_by": None},
+         "updated_at": None, "created_by": None, "source": None,
+         "excluded_reason": None},
     ],
     "list_tags_for_image": [
-        {"id": 1, "label": "a", "family": None, "state": "positive", "updated_at": "t"},
+        {"id": 1, "label": "a", "family": None, "state": "positive", "updated_at": "t",
+         "source": "human", "excluded_reason": None},
     ],
     "list_positive_tags_for_images": [
         {"image_id": 1, "tag_id": 2, "label": "a"},
     ],
-    "set_state": {"image_id": 1, "tag_id": 2, "state": "positive", "updated_at": "t"},
-    "bulk_set_state": {"updated": 2, "tag_id": 2, "state": "negative", "image_ids": [1, 2]},
-    "bulk_set_state_for_image": {"updated": 2, "image_id": 1, "state": "negative", "tag_ids": [2, 3]},
+    "set_state": {"image_id": 1, "tag_id": 2, "state": "positive", "source": "human",
+                  "excluded_reason": None, "definition_id": 9, "verified_at": "t",
+                  "updated_at": "t", "applied": True},
+    "bulk_set_state": {"updated": 2, "tag_id": 2, "state": "negative", "source": "human",
+                       "excluded_reason": None, "image_ids": [1, 2]},
+    "bulk_set_state_for_image": {"updated": 2, "image_id": 1, "state": "negative",
+                                 "source": "human", "excluded_reason": None,
+                                 "tag_ids": [2, 3]},
     "clear_state": {"image_id": 1, "tag_id": 2, "deleted": True},
     "grow_sample": {"added": 10},
     "list_proposals": [
         {"image_id": 1, "model": "m", "label": "a", "confidence": 0.9, "proposed_at": "t",
-         "status": "pending", "reviewed_at": None, "reviewed_by": None, "current_state": None},
+         "status": "pending", "reviewed_at": None, "reviewed_by": None,
+         "current_state": None, "current_excluded_reason": None},
     ],
     "set_proposal_state": {"image_id": 1, "model": "m", "label": "a", "state": "positive",
-                           "status": "confirmed", "proposed_label": "a", "corrected": False},
+                           "status": "confirmed", "proposed_label": "a", "corrected": False,
+                           "excluded_reason": None},
     "bulk_set_proposal_state": {"updated": 2, "model": "m", "state": "negative",
-                                "image_ids": [1, 2]},
+                                "excluded_reason": None, "image_ids": [1, 2]},
     "list_definition_status": [
         {"tag_id": 1, "definition_id": 9, "version": 2, "means": "A kitchen.",
          "created_at": "t"},
@@ -326,6 +340,7 @@ def test_post_proposal_state(client, calls):
     # An omitted label means "decide against the suggestion as-is".
     assert calls["set_proposal_state"] == {
         "image_id": 1, "model": "m", "state": "positive", "label": None,
+        "excluded_reason": None,
     }
 
 
@@ -388,6 +403,7 @@ def test_post_bulk_proposal_state(client, calls):
     assert res.json()["data"]["updated"] == 2
     assert calls["bulk_set_proposal_state"] == {
         "model": "m", "image_ids": [1, 2], "state": "negative",
+        "excluded_reason": None,
     }
 
 
@@ -442,7 +458,9 @@ def test_post_annotation(client, calls):
     )
     assert res.status_code == 200
     assert res.json()["data"]["state"] == "positive"
-    assert calls["set_state"] == {"image_id": 1, "tag_id": 2, "state": "positive"}
+    assert calls["set_state"] == {
+        "image_id": 1, "tag_id": 2, "state": "positive", "excluded_reason": None,
+    }
 
 
 def test_post_annotation_rejects_an_unknown_state(client, calls):
@@ -462,7 +480,9 @@ def test_post_bulk_annotation(client, calls):
     )
     assert res.status_code == 200
     assert res.json()["data"]["updated"] == 2
-    assert calls["bulk_set_state"] == {"image_ids": [1, 2], "tag_id": 2, "state": "negative"}
+    assert calls["bulk_set_state"] == {
+        "image_ids": [1, 2], "tag_id": 2, "state": "negative", "excluded_reason": None,
+    }
 
 
 def test_post_bulk_annotation_rejects_an_unknown_state(client, calls):
@@ -506,7 +526,9 @@ def test_post_bulk_set_image_tags(client, calls):
     )
     assert res.status_code == 200
     assert res.json()["data"]["updated"] == 2
-    assert calls["bulk_set_state_for_image"] == {"image_id": 1, "tag_ids": [2, 3], "state": "negative"}
+    assert calls["bulk_set_state_for_image"] == {
+        "image_id": 1, "tag_ids": [2, 3], "state": "negative", "excluded_reason": None,
+    }
 
 
 def test_post_bulk_set_image_tags_rejects_an_unknown_state(client, calls):
@@ -549,7 +571,7 @@ def test_post_positive_tags_for_images_over_max_422s(client, monkeypatch):
     assert res.status_code == 422
 
 
-# --- tag definitions (migration 445) ----------------------------------------
+# --- tag definitions (migration 446) ----------------------------------------
 
 
 _SAVE_BODY = {
@@ -721,6 +743,103 @@ def test_get_tag_neighbours_empty_is_a_200_not_an_error(client, monkeypatch):
     res = client.get("/new-dedup/labeling/tags/1/neighbours")
     assert res.status_code == 200
     assert res.json()["data"] == []
+
+
+# --- provenance plumbing (migration 446) ------------------------------------
+#
+# `source` is deliberately NOT a request field on ANY model in this router: every
+# write from an admin-gated, human-driven UI is a human decision, and a browser
+# that could name its own provenance could corrupt the record migration 446
+# exists to protect. The tests below assert the reason plumbing and the 422s; the
+# absence of `source` is asserted directly.
+
+
+_REASON_ROUTES = [
+    ("/new-dedup/labeling/proposals/state",
+     {"image_id": 1, "model": "m"}, "set_proposal_state"),
+    ("/new-dedup/labeling/proposals/bulk-state",
+     {"model": "m", "image_ids": [1]}, "bulk_set_proposal_state"),
+    ("/new-dedup/labeling/tags/2/annotations",
+     {"image_id": 1}, "set_state"),
+    ("/new-dedup/labeling/tags/2/annotations/bulk",
+     {"image_ids": [1]}, "bulk_set_state"),
+    ("/new-dedup/labeling/images/1/tags/bulk",
+     {"tag_ids": [2]}, "bulk_set_state_for_image"),
+]
+
+
+@pytest.mark.parametrize("path,body,call", _REASON_ROUTES)
+def test_every_write_route_plumbs_the_exclusion_reason_through(client, calls, path, body, call):
+    res = client.post(path, json={**body, "state": "excluded", "excluded_reason": "pruned"})
+    assert res.status_code == 200
+    assert calls[call]["excluded_reason"] == "pruned"
+
+
+@pytest.mark.parametrize("path,body,call", _REASON_ROUTES)
+def test_an_unknown_exclusion_reason_is_a_422_before_any_write(client, calls, path, body, call):
+    res = client.post(path, json={**body, "state": "excluded", "excluded_reason": "dunno"})
+    assert res.status_code == 422
+    assert call not in calls
+
+
+@pytest.mark.parametrize("path,body,call", _REASON_ROUTES)
+def test_a_reason_on_a_non_excluded_state_is_a_422(client, calls, path, body, call):
+    # 'ambiguous' and 'pruned' mean nothing on a positive row, and the DB CHECK
+    # forbids the combination outright — so it is caught loudly at the edge (a
+    # frontend bug) rather than silently normalised into a lie.
+    res = client.post(path, json={**body, "state": "positive", "excluded_reason": "ambiguous"})
+    assert res.status_code == 422
+    assert "only valid with state='excluded'" in res.json()["detail"]
+    assert call not in calls
+
+
+@pytest.mark.parametrize("path,body,call", _REASON_ROUTES)
+def test_omitting_the_reason_sends_null_not_a_guess(client, calls, path, body, call):
+    # The server never picks a reason on the operator's behalf; the client says
+    # which one it means (the UI defaults ⊘ to ambiguous).
+    res = client.post(path, json={**body, "state": "excluded"})
+    assert res.status_code == 200
+    assert calls[call]["excluded_reason"] is None
+
+
+@pytest.mark.parametrize("path,body,call", _REASON_ROUTES)
+def test_no_write_route_lets_the_client_name_its_own_source(client, calls, path, body, call):
+    res = client.post(path, json={**body, "state": "positive", "source": "human_confirmed"})
+    assert res.status_code == 200
+    # pydantic ignores the unknown field; what matters is that it never reaches
+    # the toolkit, whose default (or dedup_sim_labeling's derivation) decides.
+    assert "source" not in calls[call]
+
+
+def test_post_annotation_maps_a_rejected_vocabulary_to_a_422(client, monkeypatch):
+    # This was the one write route in the file with no ValueError handler, and
+    # set_state can now raise for a bad source/reason — a 500 would be wrong.
+    monkeypatch.setattr(ta, "set_state", _raises(ValueError("source must be one of ...")))
+    res = client.post(
+        "/new-dedup/labeling/tags/2/annotations",
+        json={"image_id": 1, "state": "positive"},
+    )
+    assert res.status_code == 422
+
+
+def test_the_overview_carries_the_ambiguity_signal_and_its_threshold(client, calls):
+    # The route is unchanged — the new fields ride inside tag_overview's dict, so
+    # the SPA renders "above 15 percent" without a second hardcoded copy.
+    res = client.get("/new-dedup/labeling/overview")
+    assert res.status_code == 200
+    body = res.json()["data"]
+    assert body["ambiguity_threshold"] == 0.15
+    assert body["ambiguity_min_decisions"] == 20
+    assert body["tags"][0]["ambiguity_alert"] is True
+    assert body["tags"][0]["backfill_count"] == 41
+
+
+def test_delete_annotation_takes_no_provenance_arguments(client, calls):
+    # Clearing a cell is recorded by the migration-445 trigger; no parameter can
+    # reach it, so the route and the toolkit signature both stay as they were.
+    res = client.delete("/new-dedup/labeling/tags/2/annotations/1")
+    assert res.status_code == 200
+    assert calls["clear_state"] == {"image_id": 1, "tag_id": 2}
 
 
 # --- the gate ---------------------------------------------------------------

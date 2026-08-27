@@ -443,3 +443,143 @@ def test_bulk_set_proposal_state_rejects_an_unknown_state(conn: _FakeConn) -> No
         dsl.bulk_set_proposal_state(conn, model="m1", image_ids=[1], state="maybe")
     assert conn.proposals[(1, "m1")]["status"] == "pending"
     assert conn.image_tag_labels == {}
+
+
+# --- provenance on a reviewed proposal (migration 446) -----------------------
+
+
+def _cell(conn: _FakeConn, label: str, image_id: int) -> dict[str, object]:
+    return conn.image_tag_labels[(image_id, conn.tag_by_label(label)["id"])]
+
+
+def test_confirming_a_proposal_records_human_confirmed_and_credits_the_model(
+    conn: _FakeConn,
+) -> None:
+    """Machine proposed, human affirmed. That is STRONGER evidence than a cold
+    human click, and it is the denominator for "has this tag earned machine
+    autonomy yet" — which is why it is its own source value and not
+    source='machine' plus a verified_at anybody could forget to check."""
+    conn.add_proposal(1, "m1", "a")
+    dsl.set_proposal_state(conn, image_id=1, model="m1", state="positive")
+    cell = _cell(conn, "a", 1)
+    assert cell["source"] == ta.SOURCE_HUMAN_CONFIRMED
+    assert cell["model"] == "m1"
+    assert cell["verified_at"] is not None
+
+
+def test_correcting_a_proposal_records_a_plain_human_decision_and_credits_nobody(
+    conn: _FakeConn,
+) -> None:
+    """A correction is not a confirmation: the machine did NOT propose the state
+    that landed, so no model is credited with it. The disagreement is not lost —
+    it survives in image_tag_label_events, which is what an append-only history is
+    for — so there is deliberately no fifth 'human_corrected' source."""
+    conn.add_proposal(1, "m1", "a")
+    dsl.set_proposal_state(conn, image_id=1, model="m1", state="positive", label="b")
+    cell = _cell(conn, "b", 1)
+    assert cell["source"] == ta.SOURCE_HUMAN
+    assert cell["model"] is None
+
+
+def test_set_proposal_state_threads_the_exclusion_reason_through(conn: _FakeConn) -> None:
+    conn.add_proposal(1, "m1", "a")
+    result = dsl.set_proposal_state(
+        conn, image_id=1, model="m1", state="excluded",
+        excluded_reason=ta.EXCLUDED_PRUNED,
+    )
+    assert result["excluded_reason"] == "pruned"
+    assert _cell(conn, "a", 1)["excluded_reason"] == "pruned"
+
+
+def test_set_proposal_state_reports_no_reason_on_a_non_excluded_verdict(
+    conn: _FakeConn,
+) -> None:
+    conn.add_proposal(1, "m1", "a")
+    result = dsl.set_proposal_state(
+        conn, image_id=1, model="m1", state="positive",
+        excluded_reason=ta.EXCLUDED_AMBIGUOUS,
+    )
+    assert result["excluded_reason"] is None
+    assert _cell(conn, "a", 1)["excluded_reason"] is None
+
+
+def test_bulk_taking_the_batch_is_a_confirmation(conn: _FakeConn) -> None:
+    # The batch path cannot correct a label, so a POSITIVE batch is the operator
+    # taking the machine's own suggestion: human_confirmed with the model on it.
+    conn.add_proposal(1, "m1", "a")
+    conn.add_proposal(2, "m1", "b")
+    dsl.bulk_set_proposal_state(conn, model="m1", image_ids=[1, 2], state="positive")
+    assert _cell(conn, "a", 1)["source"] == ta.SOURCE_HUMAN_CONFIRMED
+    assert _cell(conn, "a", 1)["model"] == "m1"
+    assert _cell(conn, "b", 2)["source"] == ta.SOURCE_HUMAN_CONFIRMED
+
+
+@pytest.mark.parametrize("state", ["negative", "excluded"])
+def test_rejecting_a_proposal_is_a_plain_human_decision(conn: _FakeConn, state: str) -> None:
+    """The operator pressing ✗ on a tile is the machine being WRONG. Recording it
+    as human_confirmed with the model credited would invert the meaning of the one
+    column per-tag machine autonomy is measured from — agreement would read 100%
+    however bad the encoder is, and the only surviving trace of the disagreement
+    would be dedup_sim.label_proposals.status, in the schema PROGRAM.md drops at
+    Wave 8."""
+    conn.add_proposal(1, "m1", "a")
+    dsl.set_proposal_state(conn, image_id=1, model="m1", state=state)
+    cell = _cell(conn, "a", 1)
+    assert cell["source"] == ta.SOURCE_HUMAN
+    assert cell["model"] is None
+    # ...and the proposal row agrees: dismissed, not confirmed.
+    assert conn.proposals[(1, "m1")]["status"] == "dismissed"
+
+
+@pytest.mark.parametrize("state", ["negative", "excluded"])
+def test_a_batch_rejection_is_not_200_confirmations(conn: _FakeConn, state: str) -> None:
+    """"Set selected: negative" over a batch is the operator rejecting every row in
+    it. The batch path takes `state` as a parameter, so it cannot assume agreement."""
+    conn.add_proposal(1, "m1", "a")
+    conn.add_proposal(2, "m1", "a")
+    dsl.bulk_set_proposal_state(conn, model="m1", image_ids=[1, 2], state=state)
+    for image_id in (1, 2):
+        assert _cell(conn, "a", image_id)["source"] == ta.SOURCE_HUMAN
+        assert _cell(conn, "a", image_id)["model"] is None
+        assert conn.proposals[(image_id, "m1")]["status"] == "dismissed"
+
+
+def test_bulk_set_proposal_state_threads_the_exclusion_reason_through(
+    conn: _FakeConn,
+) -> None:
+    conn.add_proposal(1, "m1", "a")
+    conn.add_proposal(2, "m1", "a")
+    result = dsl.bulk_set_proposal_state(
+        conn, model="m1", image_ids=[1, 2], state="excluded",
+        excluded_reason=ta.EXCLUDED_AMBIGUOUS,
+    )
+    assert result["excluded_reason"] == "ambiguous"
+    assert _cell(conn, "a", 1)["excluded_reason"] == "ambiguous"
+    assert _cell(conn, "a", 2)["excluded_reason"] == "ambiguous"
+
+
+def test_list_proposals_carries_the_current_exclusion_reason(conn: _FakeConn) -> None:
+    # The grid renders the reason chip on an already-excluded tile without a
+    # second query — the same reason `current_state` is on the row.
+    tag = ta.add_tag(conn, label="a")
+    conn.add_proposal(1, "m1", "a")
+    conn.add_proposal(2, "m1", "a")
+    ta.set_state(
+        conn, image_id=1, tag_id=tag["id"], state="excluded",
+        excluded_reason=ta.EXCLUDED_PRUNED,
+    )
+    rows = {r["image_id"]: r for r in dsl.list_proposals(conn)}
+    assert rows[1]["current_excluded_reason"] == "pruned"
+    assert rows[2]["current_excluded_reason"] is None
+
+
+def test_a_review_still_lands_on_a_cell_the_backfill_manufactured(conn: _FakeConn) -> None:
+    """A human_confirmed write is not a machine write, so the human-wins rail never
+    stands between the operator and one of migration 442's fictions."""
+    tag = ta.add_tag(conn, label="a")
+    conn.seed_cell(1, tag["id"], "negative", source=ta.SOURCE_BACKFILL_442,
+                   created_by="backfill:image_training_examples")
+    conn.add_proposal(1, "m1", "a")
+    dsl.set_proposal_state(conn, image_id=1, model="m1", state="positive")
+    assert _cell(conn, "a", 1)["state"] == "positive"
+    assert _cell(conn, "a", 1)["source"] == ta.SOURCE_HUMAN_CONFIRMED

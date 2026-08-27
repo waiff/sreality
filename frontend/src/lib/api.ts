@@ -732,6 +732,21 @@ export const resetNewDedupSetting = (key: string): Promise<NewDedupSetting> =>
 export type TagState = 'positive' | 'negative' | 'excluded';
 export const TAG_STATES: readonly TagState[] = ['positive', 'negative', 'excluded'];
 
+/* Only meaningful on an excluded cell. Same effect on training, opposite
+ * diagnostic meaning: 'ambiguous' means nobody could decide (and a tag with too
+ * many of them has a DEFINITION problem); 'pruned' means the operator
+ * deliberately removed the image from the training set. Pruned exclusions are
+ * excluded from the ambiguity rate's numerator AND denominator, so pruning can
+ * never dilute the signal. */
+export type TagExcludedReason = 'ambiguous' | 'pruned';
+export const TAG_EXCLUDED_REASONS: readonly TagExcludedReason[] = ['ambiguous', 'pruned'];
+
+/* Who or what decided a cell. 'human_confirmed' (machine proposed, human
+ * affirmed) is deliberately NOT the same evidence as 'machine' (nobody checked).
+ * 'backfill_442' is migration 442's manufactured one-hot fiction — 72,058 rows
+ * awaiting a separate gated deletion; never treat one as a decision. */
+export type TagSource = 'human' | 'human_confirmed' | 'machine' | 'backfill_442';
+
 export interface NewDedupTag {
   id: number;
   label: string;
@@ -760,9 +775,38 @@ export interface NewDedupTag {
   excluded_count: number;
   pending_count: number;
   dismissed_count: number;
+  /* Provenance inventory. These sum to the tag's full row count and are the
+   * honest breakdown of the positive/negative/excluded counts above, which
+   * deliberately still include backfill rows. */
+  human_count: number;
+  machine_count: number;
+  backfill_count: number;
+  /* Every ambiguous exclusion on the tag (an excluded cell with no reason at
+   * all counts here — a deliberate prune always names itself). */
+  ambiguous_count: number;
+  /* The ambiguity rate's NUMERATOR — the human-decided slice of the above.
+   * Render this against decided_count; ambiguous_count is a different
+   * population and pairing the two would state a fraction nobody computed. */
+  ambiguous_decided_count: number;
+  pruned_count: number;
+  /* The ambiguity rate's denominator: positive + negative + ambiguous
+   * exclusions, counting only what a human decided — the rate measures human
+   * indecision, so unverified machine rows and backfill rows are both out. */
+  decided_count: number;
+  /* null (never 0) when decided_count is 0 — no decisions means unknown, not
+   * healthy. */
+  ambiguity_rate: number | null;
+  /* Computed SERVER-side against ambiguity_threshold and
+   * ambiguity_min_decisions, so the threshold has one definition. Never
+   * recompute it in the SPA. */
+  ambiguity_alert: boolean;
 }
 export interface NewDedupLabelingOverview {
   sample_size: number;
+  /* 0.15 today. Echoed so the SPA renders "above 15 percent" without a second
+   * hardcoded copy of the number. */
+  ambiguity_threshold: number;
+  ambiguity_min_decisions: number;
   tags: NewDedupTag[];
 }
 export const getNewDedupLabelingOverview = (): Promise<{ data: NewDedupLabelingOverview }> =>
@@ -831,6 +875,9 @@ export interface NewDedupLabelProposal {
    * when untouched (defaults to negative for display/training). Not the
    * same as `label`: a pending row's label is the model's suggestion. */
   current_state: TagState | null;
+  /* Why that cell is excluded, when it is — so the grid can render the reason
+   * chip on an already-excluded tile instead of making the operator guess. */
+  current_excluded_reason: TagExcludedReason | null;
 }
 /* `status` is 'all' | 'pending' | 'confirmed' | 'dismissed'. An unknown
  * value is a 422, not a silent unfiltered listing. */
@@ -864,20 +911,30 @@ export interface NewDedupProposalStateResult {
   status: 'confirmed' | 'dismissed';
   proposed_label: string;
   corrected: boolean;
+  excluded_reason: TagExcludedReason | null;
 }
 
 /* `label` corrects a wrong suggestion before deciding — the decision lands on
  * that tag instead of the proposed one (the proposal row keeps the model's
- * own prediction either way). Omit to decide against the proposal as-is. */
+ * own prediction either way). Omit to decide against the proposal as-is.
+ * `excludedReason` is only meaningful with state='excluded'; the server 422s a
+ * reason sent with any other state rather than silently dropping it. */
 export const setNewDedupProposalState = (
   imageId: number,
   model: string,
   state: TagState,
   label?: string,
+  excludedReason?: TagExcludedReason | null,
 ): Promise<{ data: NewDedupProposalStateResult }> =>
   request<{ data: NewDedupProposalStateResult }>('/new-dedup/labeling/proposals/state', {
     method: 'POST',
-    json: { image_id: imageId, model, state, label: label ?? null },
+    json: {
+      image_id: imageId,
+      model,
+      state,
+      label: label ?? null,
+      excluded_reason: excludedReason ?? null,
+    },
     jwt: true,
   });
 
@@ -885,11 +942,21 @@ export const bulkSetNewDedupProposalState = (
   model: string,
   imageIds: number[],
   state: TagState,
-): Promise<{ data: { updated: number; model: string; state: TagState; image_ids: number[] } }> =>
-  request<{ data: { updated: number; model: string; state: TagState; image_ids: number[] } }>(
-    '/new-dedup/labeling/proposals/bulk-state',
-    { method: 'POST', json: { model, image_ids: imageIds, state }, jwt: true },
-  );
+  excludedReason?: TagExcludedReason | null,
+): Promise<{
+  data: {
+    updated: number;
+    model: string;
+    state: TagState;
+    excluded_reason: TagExcludedReason | null;
+    image_ids: number[];
+  };
+}> =>
+  request('/new-dedup/labeling/proposals/bulk-state', {
+    method: 'POST',
+    json: { model, image_ids: imageIds, state, excluded_reason: excludedReason ?? null },
+    jwt: true,
+  });
 
 export interface NewDedupImageTag {
   id: number;
@@ -897,6 +964,8 @@ export interface NewDedupImageTag {
   family: string | null;
   state: TagState | 'untouched';
   updated_at: string | null;
+  source: TagSource | null;
+  excluded_reason: TagExcludedReason | null;
 }
 /* Image-centric view for the detail panel: every active tag with this
  * image's current state, grouped by family — the mirror of
@@ -915,11 +984,21 @@ export const bulkSetNewDedupImageTags = (
   imageId: number,
   tagIds: number[],
   state: TagState,
-): Promise<{ data: { updated: number; image_id: number; state: TagState; tag_ids: number[] } }> =>
-  request<{ data: { updated: number; image_id: number; state: TagState; tag_ids: number[] } }>(
-    `/new-dedup/labeling/images/${imageId}/tags/bulk`,
-    { method: 'POST', json: { tag_ids: tagIds, state }, jwt: true },
-  );
+  excludedReason?: TagExcludedReason | null,
+): Promise<{
+  data: {
+    updated: number;
+    image_id: number;
+    state: TagState;
+    excluded_reason: TagExcludedReason | null;
+    tag_ids: number[];
+  };
+}> =>
+  request(`/new-dedup/labeling/images/${imageId}/tags/bulk`, {
+    method: 'POST',
+    json: { tag_ids: tagIds, state, excluded_reason: excludedReason ?? null },
+    jwt: true,
+  });
 
 export interface NewDedupPositiveTag {
   image_id: number;
@@ -945,6 +1024,8 @@ export interface NewDedupTagImage {
   state: TagState | 'untouched';
   updated_at: string | null;
   created_by: string | null;
+  source: TagSource | null;
+  excluded_reason: TagExcludedReason | null;
 }
 /* Tag-centric browse: every image in the labeling sample with its state for
  * ONE tag — reaches images the model never proposed this tag for, and backs
@@ -963,21 +1044,47 @@ export const setNewDedupTagAnnotation = (
   tagId: number,
   imageId: number,
   state: TagState,
-): Promise<{ data: { image_id: number; tag_id: number; state: TagState; updated_at: string } }> =>
-  request<{ data: { image_id: number; tag_id: number; state: TagState; updated_at: string } }>(
-    `/new-dedup/labeling/tags/${tagId}/annotations`,
-    { method: 'POST', json: { image_id: imageId, state }, jwt: true },
-  );
+  excludedReason?: TagExcludedReason | null,
+): Promise<{
+  data: {
+    image_id: number;
+    tag_id: number;
+    state: TagState;
+    source: TagSource;
+    excluded_reason: TagExcludedReason | null;
+    definition_id: number | null;
+    verified_at: string | null;
+    updated_at: string;
+    /* false when a machine write was refused because a human had already
+     * decided this cell. Always true for writes from this UI. */
+    applied: boolean;
+  };
+}> =>
+  request(`/new-dedup/labeling/tags/${tagId}/annotations`, {
+    method: 'POST',
+    json: { image_id: imageId, state, excluded_reason: excludedReason ?? null },
+    jwt: true,
+  });
 
 export const bulkSetNewDedupTagAnnotation = (
   tagId: number,
   imageIds: number[],
   state: TagState,
-): Promise<{ data: { updated: number; tag_id: number; state: TagState; image_ids: number[] } }> =>
-  request<{ data: { updated: number; tag_id: number; state: TagState; image_ids: number[] } }>(
-    `/new-dedup/labeling/tags/${tagId}/annotations/bulk`,
-    { method: 'POST', json: { image_ids: imageIds, state }, jwt: true },
-  );
+  excludedReason?: TagExcludedReason | null,
+): Promise<{
+  data: {
+    updated: number;
+    tag_id: number;
+    state: TagState;
+    excluded_reason: TagExcludedReason | null;
+    image_ids: number[];
+  };
+}> =>
+  request(`/new-dedup/labeling/tags/${tagId}/annotations/bulk`, {
+    method: 'POST',
+    json: { image_ids: imageIds, state, excluded_reason: excludedReason ?? null },
+    jwt: true,
+  });
 
 export const clearNewDedupTagAnnotation = (
   tagId: number,
@@ -988,7 +1095,7 @@ export const clearNewDedupTagAnnotation = (
     { method: 'DELETE', jwt: true },
   );
 
-/* Tag definitions (migration 445) — the versioned written meaning of a
+/* Tag definitions (migration 446) — the versioned written meaning of a
  * tag_taxonomy row. Supersede, never overwrite: every save creates a new
  * version and retires the previous one, so `version` only ever goes up and old
  * versions are readable forever.

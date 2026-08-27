@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   getNewDedupLabelingOverview,
@@ -20,6 +21,8 @@ import {
   listNewDedupSettings,
   TAG_STATES,
   type TagState,
+  type TagExcludedReason,
+  type TagSource,
   type NewDedupTag,
   type NewDedupLabelProposal,
   type NewDedupTagImage,
@@ -109,67 +112,207 @@ const STATE_META: Record<
     hotkey: '2',
   },
   excluded: {
-    label: 'Excluded — ambiguous, do not train this tag on this image',
+    label: "Excluded — ambiguous (dropped from this tag's training set)",
     icon: '⊘',
     activeClass: 'bg-[var(--color-copper)] text-[var(--color-paper)] border-[var(--color-copper)]',
     hotkey: '3',
   },
 };
 
+/* WHY a cell is excluded. Identical effect on training, opposite meaning for
+ * diagnostics — only 'ambiguous' counts toward a tag's ambiguity rate, and
+ * 'pruned' is kept out of that rate's DENOMINATOR too, so pruning can never
+ * dilute the signal.
+ *
+ * Colour follows that difference rather than decorating it: ambiguous inherits
+ * COPPER, the same hue the ⊘ button already wears, because the reason refines
+ * the excluded state rather than introducing a new one; pruned is deliberately
+ * colourless, because it is bookkeeping and carries no diagnostic weight. */
+const EXCLUDED_REASON_META: Record<
+  TagExcludedReason,
+  { label: string; title: string; className: string }
+> = {
+  ambiguous: {
+    label: 'ambiguous',
+    title:
+      "Nobody could decide. Counts toward this tag's ambiguity rate — a high rate means the DEFINITION needs fixing, not more labeling. Click to mark it pruned instead.",
+    className: 'bg-[var(--color-copper-soft)] text-[var(--color-copper)]',
+  },
+  pruned: {
+    label: 'pruned',
+    title:
+      'Deliberately removed from the training set. Same effect on training as ambiguous, opposite meaning — pruned cells are excluded from the ambiguity rate entirely. Click to mark it ambiguous instead.',
+    // Neutral, not a hue: pruning carries no diagnostic weight, and the
+    // absence of colour beside a copper "ambiguous" IS the difference. ink-2
+    // rather than the quieter ink-3 because 0.6rem type on a 5%-tint ground
+    // still has to be readable.
+    className: 'bg-[var(--color-rule-soft)] text-[var(--color-ink-2)]',
+  },
+};
+
+/* A cell manufactured by migration 442's one-hot backfill is NOT a decision
+ * anybody made, and on screen it is otherwise indistinguishable from an
+ * operator's negative — precisely the confusion the provenance work exists to
+ * end. Rendered with the same dashed treatment an untouched cell already uses
+ * for "defaulted, not decided", so it needs no new visual vocabulary and no
+ * room in the tile. */
+const isManufactured = (source: TagSource | null | undefined) => source === 'backfill_442';
+
+/* The threshold arrives with the overview payload, so it is briefly undefined
+ * on first paint — rendered the way this page already renders a not-yet-loaded
+ * setting (`{secondaryModel ?? '…'}`) rather than by hardcoding a second copy
+ * of the number. */
+const pctLabel = (rate: number | undefined) =>
+  rate == null ? '…' : `${Math.round(rate * 100)}%`;
+
 /* Three visually distinct states at a glance (colour + icon), plus a fourth
  * "untouched" rendering of the same three buttons — a dashed outline on the
  * negative slot, since untouched defaults to negative — so an explicit
  * decision is never confused with the unreviewed default. One control, never
- * two widgets for "is it positive" and "is it excluded". */
+ * two widgets for "is it positive" and "is it excluded".
+ *
+ * Two things ride alongside the three buttons without joining them, because
+ * neither is a fourth state: the exclusion-reason chip (why, once the cell IS
+ * excluded) and the dashed treatment for a 442-manufactured cell (which state
+ * it is in, and that nobody put it there). The chip sits OUTSIDE the
+ * `role="group"` deliberately — the group means "which of the three states",
+ * the chip means "why excluded". */
 function TriStateControl({
   state,
   onChange,
   disabled,
   focused,
+  excludedReason,
+  onChangeReason,
+  source,
 }: {
   state: TagState | 'untouched';
-  onChange: (state: TagState) => void;
+  /* ⊘ ALONE always means ambiguous — one click, no prompt, no modifier. The
+   * fast path is a sweep of positives and negatives; exclusions are the rare
+   * case and ambiguity is overwhelmingly the common one among them, so the
+   * default is also the safe default. Pruning gets its own visible affordance
+   * (the chip below, the batch bar, the 4 key) rather than a hidden one. */
+  onChange: (state: TagState, excludedReason?: TagExcludedReason | null) => void;
   disabled?: boolean;
   focused?: boolean;
+  excludedReason?: TagExcludedReason | null;
+  onChangeReason?: (reason: TagExcludedReason) => void;
+  source?: TagSource | null;
 }) {
+  const manufactured = isManufactured(source);
+  /* An excluded row with no reason — a legacy row predating the column, or any
+   * non-SPA writer — reads as ambiguous. A deliberate prune always names itself,
+   * so an unexplained exclusion is "nobody could decide"; that matches what ⊘
+   * means everywhere else on this page AND how the ambiguity rate counts it
+   * (tag_annotations._OVERVIEW_SQL), which is the point — the two must not
+   * disagree about the same cell. */
+  const reason: TagExcludedReason = excludedReason ?? 'ambiguous';
+  const reasonMeta = EXCLUDED_REASON_META[reason];
+  const other: TagExcludedReason = reason === 'ambiguous' ? 'pruned' : 'ambiguous';
+
   return (
-    <div role="group" aria-label="Tag state" className="flex items-center gap-0.5 shrink-0">
-      {TAG_STATES.map((s) => {
-        const meta = STATE_META[s];
-        const active = state === s;
-        const implied = state === 'untouched' && s === 'negative';
-        return (
-          <button
-            key={s}
-            type="button"
-            aria-pressed={active}
-            disabled={disabled}
-            onClick={() => onChange(s)}
-            title={`${meta.label}${implied ? ' (defaulted — not yet reviewed)' : ''} [${meta.hotkey}]`}
-            className={[
-              'flex h-6 w-6 items-center justify-center rounded-[var(--radius-xs)] border text-[0.8rem] leading-none transition-colors disabled:opacity-40',
-              focused ? 'ring-2 ring-[var(--color-copper)] ring-offset-1' : '',
-              active
-                ? meta.activeClass
-                : implied
+    <div className="flex items-center gap-1.5 shrink-0">
+      <div role="group" aria-label="Tag state" className="flex items-center gap-0.5 shrink-0">
+        {TAG_STATES.map((s) => {
+          const meta = STATE_META[s];
+          const active = state === s;
+          const implied = state === 'untouched' && s === 'negative';
+          // A manufactured cell IS in this state, so it stays pressed — but it
+          // is drawn as the default it really is, not as a decision.
+          const fiction = active && manufactured;
+          return (
+            <button
+              key={s}
+              type="button"
+              aria-pressed={active}
+              disabled={disabled}
+              onClick={() => onChange(s, s === 'excluded' ? 'ambiguous' : null)}
+              title={[
+                meta.label,
+                implied ? ' (defaulted — not yet reviewed)' : '',
+                fiction
+                  ? " (manufactured by migration 442's backfill — not a decision anybody made)"
+                  : '',
+                ` [${meta.hotkey}]`,
+              ].join('')}
+              className={[
+                'flex h-6 w-6 items-center justify-center rounded-[var(--radius-xs)] border text-[0.8rem] leading-none transition-colors disabled:opacity-40',
+                focused ? 'ring-2 ring-[var(--color-copper)] ring-offset-1' : '',
+                fiction
                   ? 'border-dashed border-[var(--color-ink-3)] text-[var(--color-ink-3)]'
-                  : 'border-[var(--color-rule)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]',
-            ].join(' ')}
-          >
-            {meta.icon}
-          </button>
-        );
-      })}
+                  : active
+                    ? meta.activeClass
+                    : implied
+                      ? 'border-dashed border-[var(--color-ink-3)] text-[var(--color-ink-3)]'
+                      : 'border-[var(--color-rule)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]',
+              ].join(' ')}
+            >
+              {meta.icon}
+            </button>
+          );
+        })}
+      </div>
+      {/* Only exists once the cell IS excluded: nothing new on screen on the
+        * cold path, no layout shift, and the reason is never a state you set
+        * and then cannot see. */}
+      {state === 'excluded' && onChangeReason && (
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => onChangeReason(other)}
+          aria-label={`Exclusion reason: ${reasonMeta.label}. Change to ${other}.`}
+          title={reasonMeta.title}
+          className={[
+            'shrink-0 rounded-[var(--radius-xs)] px-1.5 py-0.5 text-[0.6rem] leading-none transition-colors disabled:opacity-40',
+            reasonMeta.className,
+          ].join(' ')}
+        >
+          {reasonMeta.label}
+        </button>
+      )}
     </div>
   );
 }
 
+/* The batch bar's buttons. "All of these are fine" stays ONE click — the two
+ * exclusion reasons are two one-click buttons, not one button plus a follow-up
+ * prompt. A prompt would tax the path the operator uses most on a hard tag,
+ * which is exactly what a batch bar exists to avoid. */
+const BATCH_ACTIONS: ReadonlyArray<{
+  key: string;
+  state: TagState;
+  reason: TagExcludedReason | null;
+  label: string;
+}> = [
+  { key: 'positive', state: 'positive', reason: null, label: 'positive' },
+  { key: 'negative', state: 'negative', reason: null, label: 'negative' },
+  { key: 'excl-amb', state: 'excluded', reason: 'ambiguous', label: 'excluded · ambiguous' },
+  { key: 'excl-prn', state: 'excluded', reason: 'pruned', label: 'excluded · pruned' },
+];
+
 /* Keyboard review for a flat list of `n` tiles: arrow keys / j-k move a
- * focused index, 1/2/3 (or p/n/x) set that tile's state and auto-advance —
- * "assign primary tag, next image" in one keystroke. Attached to the grid
- * container (tabIndex=0), not the window, so it never fights a text input
- * elsewhere on the page (the tag combobox, the sample-size field). */
-function useGridKeyboardReview(n: number, onSetState: (index: number, state: TagState) => void) {
+ * focused index, 1/2/3 (or p/x) set that tile's state and auto-advance —
+ * "assign primary tag, next image" in one keystroke. 4 is excluded·pruned,
+ * the one exclusion reason ⊘ does not give you; it sits beside the other
+ * digits and auto-advances the same way, so the rare case costs one keystroke
+ * rather than a click-and-hunt. Attached to the grid container (tabIndex=0),
+ * not the window, so it never fights a text input elsewhere on the page (the
+ * tag combobox, the sample-size field). */
+const KEYBOARD_ACTIONS: ReadonlyArray<{
+  keys: readonly string[];
+  state: TagState;
+  reason: TagExcludedReason | null;
+}> = [
+  { keys: ['1', 'p'], state: 'positive', reason: null },
+  { keys: ['2'], state: 'negative', reason: null },
+  { keys: ['3', 'x'], state: 'excluded', reason: 'ambiguous' },
+  { keys: ['4'], state: 'excluded', reason: 'pruned' },
+];
+
+function useGridKeyboardReview(
+  n: number,
+  onSetState: (index: number, state: TagState, excludedReason: TagExcludedReason | null) => void,
+) {
   const [focused, setFocused] = useState<number | null>(null);
   useEffect(() => {
     if (focused != null && focused >= n) setFocused(n > 0 ? n - 1 : null);
@@ -188,14 +331,10 @@ function useGridKeyboardReview(n: number, onSetState: (index: number, state: Tag
       setFocused(Math.max(0, focused == null ? 0 : cur - 1));
       return;
     }
-    const byHotkey = (Object.entries(STATE_META) as Array<[TagState, (typeof STATE_META)[TagState]]>).find(
-      ([, meta]) => meta.hotkey === key,
-    );
-    const byLetter: TagState | null = key === 'p' ? 'positive' : key === 'x' ? 'excluded' : null;
-    const state = byHotkey?.[0] ?? byLetter;
-    if (state && focused != null) {
+    const action = KEYBOARD_ACTIONS.find((a) => a.keys.includes(key));
+    if (action && focused != null) {
       e.preventDefault();
-      onSetState(focused, state);
+      onSetState(focused, action.state, action.reason);
       setFocused(Math.min(n - 1, focused + 1));
     }
   };
@@ -408,6 +547,12 @@ export default function NewDedupLabeling() {
     });
   }, [imageIds]);
 
+  /* Both numbers come from the server so the threshold has exactly ONE
+   * definition — the SPA renders it, never decides it, and never recomputes
+   * `ambiguity_alert` from the rate. */
+  const ambiguityThreshold = overviewQ.data?.data.ambiguity_threshold;
+  const ambiguityMinDecisions = overviewQ.data?.data.ambiguity_min_decisions;
+
   const settingValue = (key: string) => settingsQ.data?.data.find((s) => s.key === key)?.value;
   const gate1Target = (settingValue('labeling_gate1_target_per_tag') as number) ?? 150;
   const proposalTarget = (settingValue('labeling_target_proposals_per_category') as number) ?? 300;
@@ -452,15 +597,31 @@ export default function NewDedupLabeling() {
         : old,
     );
   };
-  const patchTagImages = (ids: ReadonlyArray<number>, state: TagState) => {
+  const patchTagImages = (
+    ids: ReadonlyArray<number>,
+    state: TagState,
+    excludedReason: TagExcludedReason | null,
+  ) => {
     const set = new Set(ids);
+    // The reason is patched alongside the state, and CLEARED on any
+    // non-excluded state — otherwise a cell moved from excluded to negative
+    // would keep showing a reason chip for a decision it no longer carries.
+    // `source` follows too: the operator just decided this cell, so whatever
+    // it was before (a 442 backfill row, most likely) it is a human decision
+    // now and must stop being drawn as manufactured.
+    const patch = (r: NewDedupTagImage): NewDedupTagImage => ({
+      ...r,
+      state,
+      source: 'human',
+      excluded_reason: state === 'excluded' ? excludedReason : null,
+    });
     qc.setQueryData<{ data: NewDedupTagImage[] }>(tagImagesKey, (old) =>
       old
         ? {
             ...old,
             data:
               sampleState === 'all' || sampleState === state
-                ? old.data.map((r) => (set.has(r.image_id) ? { ...r, state } : r))
+                ? old.data.map((r) => (set.has(r.image_id) ? patch(r) : r))
                 : old.data.filter((r) => !set.has(r.image_id)),
           }
         : old,
@@ -595,12 +756,14 @@ export default function NewDedupLabeling() {
       model,
       state,
       label,
+      excludedReason,
     }: {
       imageId: number;
       model: string;
       state: TagState;
       label?: string;
-    }) => setNewDedupProposalState(imageId, model, state, label),
+      excludedReason: TagExcludedReason | null;
+    }) => setNewDedupProposalState(imageId, model, state, label, excludedReason),
     onSuccess: (res, vars) => {
       if (res.data.corrected) pushToast('ok', `Set “${res.data.label}” to ${res.data.state}.`);
       clearDraft(vars.imageId, vars.model);
@@ -609,6 +772,7 @@ export default function NewDedupLabeling() {
         status: res.data.status,
         label: res.data.label,
         current_state: res.data.state,
+        current_excluded_reason: res.data.excluded_reason,
         reviewed_by: 'operator',
       }));
       patchPositiveTags(vars.imageId, res.data.label, res.data.state);
@@ -617,8 +781,15 @@ export default function NewDedupLabeling() {
     onSettled: (_data, _err, vars) => endAction(vars.imageId, vars.model),
   });
   const bulkStateMut = useMutation({
-    mutationFn: ({ model, state }: { model: string; state: TagState }) =>
-      bulkSetNewDedupProposalState(model, [...selected], state),
+    mutationFn: ({
+      model,
+      state,
+      excludedReason,
+    }: {
+      model: string;
+      state: TagState;
+      excludedReason: TagExcludedReason | null;
+    }) => bulkSetNewDedupProposalState(model, [...selected], state, excludedReason),
     onSuccess: (res) => {
       pushToast('ok', `Set ${res.data.updated} to ${res.data.state}.`);
       setSelected(new Set());
@@ -626,6 +797,7 @@ export default function NewDedupLabeling() {
         ...p,
         status: res.data.state === 'positive' ? 'confirmed' : 'dismissed',
         current_state: res.data.state,
+        current_excluded_reason: res.data.excluded_reason,
         reviewed_by: 'operator',
       }));
       // Each row keeps its own proposed label — look it up from the batch
@@ -639,10 +811,17 @@ export default function NewDedupLabeling() {
   });
 
   const setTagAnnotationMut = useMutation({
-    mutationFn: ({ imageId, state }: { imageId: number; state: TagState }) =>
-      setNewDedupTagAnnotation(activeTagId as number, imageId, state),
+    mutationFn: ({
+      imageId,
+      state,
+      excludedReason,
+    }: {
+      imageId: number;
+      state: TagState;
+      excludedReason: TagExcludedReason | null;
+    }) => setNewDedupTagAnnotation(activeTagId as number, imageId, state, excludedReason),
     onSuccess: (res, vars) => {
-      patchTagImages([vars.imageId], res.data.state);
+      patchTagImages([vars.imageId], res.data.state, res.data.excluded_reason);
       if (labelFilter) patchPositiveTags(vars.imageId, labelFilter, res.data.state);
       invalidateOverview();
     },
@@ -650,12 +829,17 @@ export default function NewDedupLabeling() {
     onSettled: (_d, _e, vars) => endAction(vars.imageId, 'sample'),
   });
   const bulkTagAnnotationMut = useMutation({
-    mutationFn: (state: TagState) =>
-      bulkSetNewDedupTagAnnotation(activeTagId as number, [...selected], state),
+    mutationFn: ({
+      state,
+      excludedReason,
+    }: {
+      state: TagState;
+      excludedReason: TagExcludedReason | null;
+    }) => bulkSetNewDedupTagAnnotation(activeTagId as number, [...selected], state, excludedReason),
     onSuccess: (res) => {
       pushToast('ok', `Set ${res.data.updated} to ${res.data.state}.`);
       setSelected(new Set());
-      patchTagImages(res.data.image_ids, res.data.state);
+      patchTagImages(res.data.image_ids, res.data.state, res.data.excluded_reason);
       if (labelFilter) {
         for (const imageId of res.data.image_ids) patchPositiveTags(imageId, labelFilter, res.data.state);
       }
@@ -711,7 +895,7 @@ export default function NewDedupLabeling() {
   );
   const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
 
-  const proposalKeyboard = useGridKeyboardReview(proposals.length, (i, state) => {
+  const proposalKeyboard = useGridKeyboardReview(proposals.length, (i, state, excludedReason) => {
     const p = proposals[i];
     if (!p || p.status !== 'pending') return;
     beginAction(p.image_id, p.model);
@@ -720,13 +904,14 @@ export default function NewDedupLabeling() {
       model: p.model,
       state,
       label: isCorrected(p) ? draftFor(p) : undefined,
+      excludedReason,
     });
   });
-  const sampleKeyboard = useGridKeyboardReview(tagImages.length, (i, state) => {
+  const sampleKeyboard = useGridKeyboardReview(tagImages.length, (i, state, excludedReason) => {
     const r = tagImages[i];
     if (!r || activeTagId == null) return;
     beginAction(r.image_id, 'sample');
-    setTagAnnotationMut.mutate({ imageId: r.image_id, state });
+    setTagAnnotationMut.mutate({ imageId: r.image_id, state, excludedReason });
   });
   const keyboard = mode === 'proposals' ? proposalKeyboard : sampleKeyboard;
 
@@ -740,11 +925,14 @@ export default function NewDedupLabeling() {
       </h1>
       <p className="mt-3 text-sm text-[var(--color-ink-2)] leading-relaxed max-w-2xl">
         Build the tag annotation matrix every per-tag classifier head trains from: each image ×
-        tag cell is positive, negative, or excluded (ambiguous — dropped from that head's
-        training set entirely). An untouched cell defaults to negative. "Border case" is a
-        separate, whole-image flag — a photo unclear even to a human — independent of any tag's
+        tag cell is positive, negative, or excluded (dropped from that head's training set
+        entirely). An untouched cell defaults to negative. "Border case" is a separate,
+        whole-image flag — a photo unclear even to a human — independent of any tag's
         state. Gate 1 needs {gate1Target} positive images per active tag, counting only the ones
-        that are NOT parked as a border case.
+        that are NOT parked as a border case. Excluding an image asks why: ambiguous (nobody
+        could decide) or pruned (deliberately out of the training set). Only ambiguous counts
+        toward a tag's ambiguity rate — above {pctLabel(ambiguityThreshold)}, go fix the tag's
+        definition instead of labeling more.
       </p>
 
       {overviewQ.error && <ErrorBanner message={(overviewQ.error as Error).message} />}
@@ -756,6 +944,8 @@ export default function NewDedupLabeling() {
         loading={!overviewQ.data && !overviewQ.error}
         gate1Target={gate1Target}
         proposalTarget={proposalTarget}
+        ambiguityThreshold={ambiguityThreshold}
+        ambiguityMinDecisions={ambiguityMinDecisions}
         activeLabel={labelFilter}
         maxTrained={maxTrained}
         onMaxTrainedChange={setMaxTrained}
@@ -968,9 +1158,9 @@ export default function NewDedupLabeling() {
               {allSelected ? 'Deselect all' : 'Select all'}
             </button>
             <span className="text-xs text-[var(--color-ink-3)]">{selected.size} selected</span>
-            {TAG_STATES.map((s) => (
+            {BATCH_ACTIONS.map((a) => (
               <button
-                key={s}
+                key={a.key}
                 type="button"
                 disabled={
                   selected.size === 0 ||
@@ -980,15 +1170,25 @@ export default function NewDedupLabeling() {
                 }
                 onClick={() =>
                   mode === 'proposals'
-                    ? secondaryModel && bulkStateMut.mutate({ model: secondaryModel, state: s })
-                    : bulkTagAnnotationMut.mutate(s)
+                    ? secondaryModel &&
+                      bulkStateMut.mutate({
+                        model: secondaryModel,
+                        state: a.state,
+                        excludedReason: a.reason,
+                      })
+                    : bulkTagAnnotationMut.mutate({ state: a.state, excludedReason: a.reason })
                 }
+                title={a.reason ? EXCLUDED_REASON_META[a.reason].title : undefined}
                 className={[
                   'px-2.5 py-1 text-xs rounded-[var(--radius-xs)] disabled:opacity-40',
-                  STATE_META[s].activeClass,
+                  STATE_META[a.state].activeClass,
+                  // The two exclusion buttons share a colour because they share
+                  // a state; the lighter one is the one that carries no
+                  // diagnostic weight.
+                  a.reason === 'pruned' ? 'opacity-80' : '',
                 ].join(' ')}
               >
-                Set selected: {s}
+                Set selected: {a.label}
               </button>
             ))}
           </div>
@@ -996,7 +1196,8 @@ export default function NewDedupLabeling() {
 
         <p className="mt-2 text-[0.68rem] text-[var(--color-ink-4)]">
           Keyboard: click a tile to focus it, then ← → (or j/k) to move, 1/2/3 to set
-          positive/negative/excluded and advance to the next.
+          positive/negative/excluded (ambiguous), 4 for excluded (pruned), and advance to the
+          next.
         </p>
 
         {mode === 'proposals' ? (
@@ -1040,13 +1241,14 @@ export default function NewDedupLabeling() {
                     setLightboxAt(galleryIndex.get(draftKey(p)) ?? null);
                   }}
                   onOpenDetail={() => setDetailImageId(p.image_id)}
-                  onSetState={(state) => {
+                  onSetState={(state, excludedReason) => {
                     beginAction(p.image_id, p.model);
                     setStateMut.mutate({
                       imageId: p.image_id,
                       model: p.model,
                       state,
                       label: isCorrected(p) ? draftFor(p) : undefined,
+                      excludedReason: excludedReason ?? null,
                     });
                   }}
                   actionPending={pendingRowKeys.has(rowKey(p.image_id, p.model))}
@@ -1092,9 +1294,13 @@ export default function NewDedupLabeling() {
                       setLightboxAt(galleryIndex.get(String(r.image_id)) ?? null);
                     }}
                     onOpenDetail={() => setDetailImageId(r.image_id)}
-                    onSetState={(state) => {
+                    onSetState={(state, excludedReason) => {
                       beginAction(r.image_id, 'sample');
-                      setTagAnnotationMut.mutate({ imageId: r.image_id, state });
+                      setTagAnnotationMut.mutate({
+                        imageId: r.image_id,
+                        state,
+                        excludedReason: excludedReason ?? null,
+                      });
                     }}
                     actionPending={pendingRowKeys.has(rowKey(r.image_id, 'sample'))}
                   />
@@ -1155,6 +1361,100 @@ function ToggleButton({
   );
 }
 
+/* Who decided this tag's set. Only the non-zero parts render — the same
+ * conditional-chip idiom the counts beside it already use, so a tag whose set
+ * is entirely operator work stays a single quiet number.
+ *
+ * The positive/negative/excluded counts on this row deliberately still INCLUDE
+ * migration 442's manufactured rows; this chip is what makes that legible
+ * rather than silently wrong. Backfill is drawn in brick — the same alarm
+ * colour "parked" uses on this strip for a number that is not what it looks
+ * like. */
+function ProvenanceChip({ tag }: { tag: NewDedupTag }) {
+  return (
+    <>
+      {tag.human_count > 0 && (
+        <span
+          className="shrink-0 text-[0.68rem] text-[var(--color-ink-4)]"
+          title={`${tag.human_count} of this tag's annotations were decided by a person, or proposed by a machine and confirmed by one`}
+        >
+          · {tag.human_count} human
+        </span>
+      )}
+      {tag.machine_count > 0 && (
+        <span
+          className="shrink-0 text-[0.68rem] text-[var(--color-ink-4)]"
+          title={`${tag.machine_count} were decided by a machine that NOBODY has checked — not ground truth`}
+        >
+          · {tag.machine_count} machine
+        </span>
+      )}
+      {tag.backfill_count > 0 && (
+        <span
+          className="shrink-0 text-[0.68rem] text-[var(--color-brick)]"
+          title="manufactured by migration 442's one-hot backfill — not a decision anybody made; awaiting deletion"
+        >
+          · {tag.backfill_count} backfill
+        </span>
+      )}
+    </>
+  );
+}
+
+/* The "go fix the DEFINITION" signal. Encoded in FORM, not only in a number:
+ * over threshold it becomes a LINK — underlined, weighted, with a trailing
+ * arrow into that tag's definition workbench — while under threshold it is
+ * plain muted text with no affordance at all. Strip the colour and the two are
+ * still distinguishable.
+ *
+ * `ambiguity_alert` is computed server-side against the same threshold this
+ * renders, and is never recomputed here: one definition, one place.
+ *
+ * A null rate renders NOTHING rather than 0% — a tag with no decisions is
+ * unknown, not healthy, and its empty bar directly below already says so. */
+function AmbiguityChip({
+  tag,
+  threshold,
+  minDecisions,
+}: {
+  tag: NewDedupTag;
+  threshold: number | undefined;
+  minDecisions: number | undefined;
+}) {
+  if (tag.ambiguity_rate == null) return null;
+  const pct = Math.round(tag.ambiguity_rate * 100);
+  const belowFloor = minDecisions != null && tag.decided_count < minDecisions;
+  /* Both halves come from the SAME population the rate was computed from —
+   * ambiguous_count is the whole inventory (machine and backfill rows included)
+   * and pairing it with decided_count would state a fraction nobody computed. */
+  const head = `${tag.ambiguous_decided_count} of ${tag.decided_count} human decision${tag.decided_count === 1 ? '' : 's'} on this tag were left ambiguous.`;
+  const tail = ' (Pruned exclusions are not counted, in the rate or its denominator.)';
+  const title = tag.ambiguity_alert
+    ? `${head} Above ${pctLabel(threshold)} the tag's DEFINITION is the problem, not the labeling — click to open it.${tail}`
+    : belowFloor
+      ? `${head} Too few decisions to call yet — the ${pctLabel(threshold)} alert needs at least ${minDecisions}.${tail}`
+      : `${head} Under the ${pctLabel(threshold)} mark.${tail}`;
+  const text = `· ${pct}% ambiguous`;
+
+  if (!tag.ambiguity_alert) {
+    return (
+      <span className="shrink-0 text-[0.68rem] text-[var(--color-ink-4)]" title={title}>
+        {text}
+      </span>
+    );
+  }
+  return (
+    <Link
+      to={`/new-dedup/labeling/taxonomy?tag=${tag.id}`}
+      title={title}
+      aria-label={`Fix the definition for ${tag.label} — ${pct}% of its decisions are ambiguous`}
+      className="shrink-0 text-[0.68rem] font-medium text-[var(--color-brick)] underline decoration-dotted underline-offset-2 hover:text-[var(--color-copper-2)]"
+    >
+      {text} →
+    </Link>
+  );
+}
+
 /* Ranked horizontal bar chart, most positive images first. Collapsible
  * (persisted) because with a full taxonomy the chart pushes the review grid
  * off screen. */
@@ -1165,6 +1465,8 @@ function TaxonomyBarChart({
   loading,
   gate1Target,
   proposalTarget,
+  ambiguityThreshold,
+  ambiguityMinDecisions,
   activeLabel,
   maxTrained,
   onMaxTrainedChange,
@@ -1177,6 +1479,10 @@ function TaxonomyBarChart({
   loading: boolean;
   gate1Target: number;
   proposalTarget: number;
+  /* Server-owned, so they arrive with the payload and are undefined on the
+   * first paint — never defaulted to a literal here. */
+  ambiguityThreshold: number | undefined;
+  ambiguityMinDecisions: number | undefined;
   activeLabel: string | null;
   maxTrained: string;
   onMaxTrainedChange: (next: string) => void;
@@ -1289,6 +1595,12 @@ function TaxonomyBarChart({
                             · {t.border_case_count} parked
                           </span>
                         )}
+                        <ProvenanceChip tag={t} />
+                        <AmbiguityChip
+                          tag={t}
+                          threshold={ambiguityThreshold}
+                          minDecisions={ambiguityMinDecisions}
+                        />
                       </div>
                       <div className="mt-1 flex items-center gap-2">
                         <div className="relative h-3.5 flex-1 rounded-[var(--radius-xs)] bg-[var(--color-rule-soft)] overflow-hidden">
@@ -1391,7 +1703,7 @@ function ProposalTile({
   onFocusTile: () => void;
   onOpen: () => void;
   onOpenDetail: () => void;
-  onSetState: (state: TagState) => void;
+  onSetState: (state: TagState, excludedReason?: TagExcludedReason | null) => void;
   actionPending: boolean;
 }) {
   const badgeTag = showOriginal ? (image?.clip_fine_tag ?? null) : proposal.label;
@@ -1448,6 +1760,8 @@ function ProposalTile({
           onChange={onSetState}
           disabled={actionPending}
           focused={focused}
+          excludedReason={proposal.current_excluded_reason}
+          onChangeReason={(reason) => onSetState('excluded', reason)}
         />
         <button
           type="button"
@@ -1499,7 +1813,7 @@ function TagImageTile({
   focused: boolean;
   onOpen: () => void;
   onOpenDetail: () => void;
-  onSetState: (state: TagState) => void;
+  onSetState: (state: TagState, excludedReason?: TagExcludedReason | null) => void;
   actionPending: boolean;
 }) {
   return (
@@ -1542,6 +1856,9 @@ function TagImageTile({
           onChange={onSetState}
           disabled={actionPending}
           focused={focused}
+          excludedReason={row.excluded_reason}
+          onChangeReason={(reason) => onSetState('excluded', reason)}
+          source={row.source}
         />
         <button
           type="button"
@@ -1604,12 +1921,28 @@ function ImageTagDetailPanel({
     untouchedIds.length > 0 && untouchedIds.every((id) => selected.has(id));
 
   const setMut = useMutation({
-    mutationFn: (vars: { tagId: number; label: string; state: TagState }) =>
-      setNewDedupTagAnnotation(vars.tagId, imageId, vars.state),
+    mutationFn: (vars: {
+      tagId: number;
+      label: string;
+      state: TagState;
+      excludedReason: TagExcludedReason | null;
+    }) => setNewDedupTagAnnotation(vars.tagId, imageId, vars.state, vars.excludedReason),
     onSuccess: (res, vars) => {
       qc.setQueryData<{ data: typeof rows }>(key, (old) =>
         old
-          ? { ...old, data: old.data.map((r) => (r.id === vars.tagId ? { ...r, state: res.data.state } : r)) }
+          ? {
+              ...old,
+              data: old.data.map((r) =>
+                r.id === vars.tagId
+                  ? {
+                      ...r,
+                      state: res.data.state,
+                      source: res.data.source,
+                      excluded_reason: res.data.excluded_reason,
+                    }
+                  : r,
+              ),
+            }
           : old,
       );
       onTagStateChange(vars.label, res.data.state);
@@ -1629,14 +1962,24 @@ function ImageTagDetailPanel({
   });
 
   const bulkSetMut = useMutation({
-    mutationFn: (state: TagState) => bulkSetNewDedupImageTags(imageId, [...selected], state),
+    mutationFn: (vars: { state: TagState; excludedReason: TagExcludedReason | null }) =>
+      bulkSetNewDedupImageTags(imageId, [...selected], vars.state, vars.excludedReason),
     onSuccess: (res) => {
       const changedIds = new Set(res.data.tag_ids);
       qc.setQueryData<{ data: typeof rows }>(key, (old) =>
         old
           ? {
               ...old,
-              data: old.data.map((r) => (changedIds.has(r.id) ? { ...r, state: res.data.state } : r)),
+              data: old.data.map((r) =>
+                changedIds.has(r.id)
+                  ? {
+                      ...r,
+                      state: res.data.state,
+                      source: 'human' as const,
+                      excluded_reason: res.data.excluded_reason,
+                    }
+                  : r,
+              ),
             }
           : old,
       );
@@ -1697,18 +2040,20 @@ function ImageTagDetailPanel({
               {allUntouchedSelected ? 'Deselect all' : 'Select all untouched'}
             </button>
             <span className="text-xs text-[var(--color-ink-3)]">{selected.size} selected</span>
-            {TAG_STATES.map((s) => (
+            {BATCH_ACTIONS.map((a) => (
               <button
-                key={s}
+                key={a.key}
                 type="button"
                 disabled={selected.size === 0 || bulkSetMut.isPending}
-                onClick={() => bulkSetMut.mutate(s)}
+                onClick={() => bulkSetMut.mutate({ state: a.state, excludedReason: a.reason })}
+                title={a.reason ? EXCLUDED_REASON_META[a.reason].title : undefined}
                 className={[
                   'px-2.5 py-1 text-xs rounded-[var(--radius-xs)] disabled:opacity-40',
-                  STATE_META[s].activeClass,
+                  STATE_META[a.state].activeClass,
+                  a.reason === 'pruned' ? 'opacity-80' : '',
                 ].join(' ')}
               >
-                Set selected: {s}
+                Set selected: {a.label}
               </button>
             ))}
           </div>
@@ -1735,8 +2080,25 @@ function ImageTagDetailPanel({
                     </span>
                     <TriStateControl
                       state={t.state}
-                      onChange={(state) => setMut.mutate({ tagId: t.id, label: t.label, state })}
+                      onChange={(state, excludedReason) =>
+                        setMut.mutate({
+                          tagId: t.id,
+                          label: t.label,
+                          state,
+                          excludedReason: excludedReason ?? null,
+                        })
+                      }
                       disabled={setMut.isPending && setMut.variables?.tagId === t.id}
+                      excludedReason={t.excluded_reason}
+                      onChangeReason={(reason) =>
+                        setMut.mutate({
+                          tagId: t.id,
+                          label: t.label,
+                          state: 'excluded',
+                          excludedReason: reason,
+                        })
+                      }
+                      source={t.source}
                     />
                   </div>
                 ))}

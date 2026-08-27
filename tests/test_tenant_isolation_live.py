@@ -102,6 +102,9 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
     # design's Wave C drops the tables. Their still-live `_public` views keep their
     # structural + behavioural gate assertions below until then.
     "image_border_cases", "tag_taxonomy", "image_tag_labels",
+    # image_tag_label_events (migration 446): the append-only decision history
+    # behind image_tag_labels, same backend-only posture, no `_public` view.
+    "image_tag_label_events",
     "workflow_failures", "workflow_run_health",
     # Added by migration 340: the audit found scrape_runs_public/recent_scrape_runs()
     # ungated and browser-readable because this list was seeded from migration 318's

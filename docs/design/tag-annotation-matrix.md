@@ -205,7 +205,7 @@ Two operator-requested additions, same data model, no new tables beyond one migr
   picked in that view. The toggle itself still never refetches the grid on its own —
   only actually dropping a set filter does.
 
-## Tag definitions (migration 445)
+## Tag definitions (migration 446)
 
 The 51 tags are bare Czech strings. Two people looking at the same photo apply them
 differently, and neither is wrong, because nothing anywhere says what "interier - chodba"
@@ -220,7 +220,7 @@ Writing them is also the diagnostic that settles the taxonomy. If you cannot wri
 where that becomes undeniable instead of an argument. That is why this ships before any
 merge/split tooling: the tool would be guessing, the definitions produce the answer.
 
-**Supersede, never overwrite.** `tag_definitions` (migration 445) is the same latest-wins +
+**Supersede, never overwrite.** `tag_definitions` (migration 446) is the same latest-wins +
 append-only-history idiom `listings`/`listing_snapshots` already use. There are **no
 drafts**: every save inserts a row at `version = max(version) + 1` with `status = 'active'`
 and flips the previously-active row to `'superseded'`, in ONE transaction. Because there is
@@ -298,6 +298,102 @@ Deliberate non-additions: no definition lifecycle state machine (`active`/`super
 whole vocabulary), no merge/split execution, no bulk edit tools. The taxonomy is not settled
 yet; building tools to reshape it before the definitions exist would be building on the
 guesses this page is meant to replace.
+
+## Provenance and history (migration 446)
+
+Migration 442 left 73,499 rows in `image_tag_labels` and **72,000 of them — 98% — are not
+decisions anybody made.** Its backfill manufactured them from a one-hot assumption ("this
+image was labeled kitchen, therefore it is negative for the other 50 tags"), and the only
+thing separating them from operator work was a free-text `created_by`. This migration makes
+them precisely identifiable so the eventual deletion is exact, and so every consumer can
+exclude them starting now. **It deletes nothing** — no `DROP`, no `DELETE`, no destructive
+`ALTER`; the removal is a separate, gated, backed-up PR whose predicate is literally
+`WHERE source = 'backfill_442'`.
+
+**`created_by` alone cannot draw that line, and assuming it could would have destroyed the
+ground truth.** Migration 442 stamped *both* arms of its backfill with the same
+`backfill:image_training_examples` string — `442:82` writes one positive per image, `442:88`
+writes the N−1 one-hot negatives — and `created_by` is set on INSERT only, so no later
+operator write ever rewrote it. Only the second arm is fiction; the first *transcribed*
+`image_training_examples`, the operator's own hand-labels from `/phash-audit`'s "Train" CTA
+(migration 309), and those ~1,440 positives are the only ground truth the system has. So the
+backfill names the fiction by what it actually is: **a `negative`, backfill-stamped, that
+nobody has touched since** (442 wrote `created_at` and `updated_at` off one transaction clock,
+so `updated_at = created_at` is exactly "never re-decided" — and a cell the operator *has*
+re-decided is a decision, never deletable, whichever way it went). Everything else becomes
+`human`, with `verified_at` stamped from `updated_at`.
+
+Four fields land on the annotation itself. **`source`** has four values, and the split that
+matters is `human_confirmed` (a machine proposed it, a person affirmed it) versus `machine`
+(a machine decided it, **nobody has looked**) — not the same evidence, and training and every
+metric filter on this one column forever, so a single-column predicate has to express the
+whole distinction. `human_confirmed` requires **both** halves of agreement: the operator kept
+the machine's label *and* said yes. A human *overriding* a machine is plain `human`, and so is
+a human *rejecting* one — pressing ✗ on a proposal, or a batch "Set selected: negative", is the
+machine being wrong, and stamping that `human_confirmed` would drive measured per-tag agreement
+to 100% however bad the encoder is, destroying the one number this provenance exists to make
+measurable. `toolkit/dedup_sim_labeling.py` therefore keys the affirmation on the *same*
+predicate that marks the proposal `confirmed`, so the two rows it writes in one transaction
+cannot contradict each other. The disagreement is preserved in the event history rather than in
+a fifth source value. **`definition_id`** cites the `tag_definitions` version (444) the decision
+was made under — never a parameter, always resolved inside the INSERT by a subquery on the
+annotation's own `tag_id`, which is what makes "requeue exactly the annotations decided under
+the old wording" sound and citing another tag's definition structurally impossible. It is
+`ON DELETE SET NULL`, never RESTRICT: `tag_definitions` cascades off `tag_taxonomy`, and a
+RESTRICT would make the live `remove_tag` route start failing. **`verified_at`** is derived,
+never supplied (no caller knows better than `now()`), and carried forward with `coalesce` so
+a machine can never erase a human's verification. **`excluded_reason`** distinguishes
+`ambiguous` from `pruned` — identical effect on training, opposite meaning for diagnostics —
+and a CHECK, not a convention, makes it impossible on a non-excluded row.
+
+**The human-wins rail is in SQL, not in a convention.** The upsert's `DO UPDATE … WHERE`
+lets a machine write land only on a cell that is untouched, machine-written or backfill; a
+human write always lands. `set_state` reports `applied: false` when it was refused. Known
+limit, unchanged: the bulk paths use `executemany` and cannot report suppression per row —
+their `updated` has always been "cells submitted".
+
+**History is captured by a TRIGGER** (`image_tag_labels_log_event` → `image_tag_label_events`),
+not by application code. There are already four write paths and the machine-proposal loop will
+add more; the table's entire value is that it is COMPLETE, and a log every future writer must
+remember to append to is a log with holes. The alternative's failure mode is concrete and this
+repo has shipped it before (`scrape_runs errors=0 on crash`: nine hand-copied `finally` blocks,
+one missed). `clear_state` DELETEs, and reverting a cell to untouched **is** a decision — the
+trigger records it as an event with `state` NULL. Precedent here is migration 392's
+`properties_log_status_event`, down to the `event_at` / `created_at` split. The events table
+carries **no foreign keys at all**, deliberately: an audit log with `ON DELETE CASCADE`
+destroys the record it exists to keep, and RESTRICT would make `remove_tag` fail forever once
+any event existed — so bare `bigint`s plus a denormalized `tag_label` snapshot. Accepted cost:
+the trigger is invisible to `_FakeConn`, so `image_tag_label_events` has **no behavioural unit
+coverage** — its executing gate is CI's migration-replay job, backed by
+`tests/test_migration_445_tag_provenance.py`, which asserts what the migration DECLARES. Do not
+fake a trigger to manufacture coverage; a fake that models a trigger is a second, drifting
+implementation of it.
+
+**The ambiguity rate** is `ambiguous_decided / decided`, computed server-side in `_OVERVIEW_SQL`
+against two named constants (`AMBIGUITY_RATE_THRESHOLD = 0.15`, `AMBIGUITY_MIN_DECISIONS = 20`)
+bound as parameters and echoed in the overview payload, so no surface keeps a second copy of the
+number it renders. Four properties are the whole point. **Pruned exclusions sit outside both the
+numerator AND the denominator** — leaving them in would let pruning *dilute* the rate (prune a
+hundred images and a broken tag reads healthy), the exact corruption the two-reason split exists
+to prevent. **Both halves are scoped to what a human decided** (`source IN ('human',
+'human_confirmed')`): 72,000 manufactured `backfill_442` negatives would drive every tag to ~0
+and the signal would never fire once — the concrete reason this ships before any more labeling —
+and unverified `machine` rows would do the same thing for the same reason, so the loop this PR
+builds the substrate for cannot bury the signal it is measured by. The rate is about *human*
+indecision; "go fix the DEFINITION" is a human call. **An excluded cell with no reason at all
+counts as ambiguous**, never as a silent third bucket: a deliberate prune always names itself,
+so an unexplained exclusion is "nobody could decide" — which is also exactly what the grid
+renders for such a cell, and the store and the screen must not disagree about the same row.
+And **`decided = 0` yields NULL, never 0**, because a tag with no decisions is unknown, not
+healthy (`LLM health checks false-green`). Above the threshold the tag's DEFINITION is the
+problem, not the labeling, and the coverage strip's chip is a link straight into that tag's
+workbench. The payload publishes `ambiguous_decided_count` alongside the whole-inventory
+`ambiguous_count` so a surface can render the fraction the rate was actually computed from
+instead of a near-miss of it.
+
+`positive_count` / `gate_count` / `negative_count` / `excluded_count` are deliberately
+**unchanged** and still include the backfill rows; `backfill_count` is what makes that inventory
+legible. Narrowing them is the deletion PR's decision, not this one's.
 
 ## Explicitly deferred, not silently dropped
 
