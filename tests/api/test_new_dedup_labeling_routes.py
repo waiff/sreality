@@ -144,6 +144,14 @@ _RESPONSES: dict[str, Any] = {
         {"image_id": 11, "storage_path": "img/11.jpg",
          "sreality_url": "https://cdn/11.jpg", "updated_at": "t"},
     ],
+    "list_positive_images_outlier_first": {
+        "order": "outlier_first", "centroid_positives": 71, "min_positives": 5,
+        "images": [
+            {"image_id": 31, "storage_path": "img/31.jpg",
+             "sreality_url": "https://cdn/31.jpg", "updated_at": "t",
+             "centroid_distance": 0.266, "distance_rank": 1},
+        ],
+    },
     "nearest_tags": [
         {"tag_id": 2, "label": "b", "family": None,
          "embedded_positive_count": 31, "cosine_distance": 0.0412},
@@ -160,7 +168,7 @@ _PATCHED = {
     # (it records {}), so it needs no special case.
     td: ["list_definition_status", "get_active_definition", "save_definition",
          "list_definition_versions", "get_definition_version", "list_positive_images",
-         "nearest_tags"],
+         "list_positive_images_outlier_first", "nearest_tags"],
     tc: ["candidate_summary", "draw_candidates"],
 }
 
@@ -759,6 +767,51 @@ def test_get_positive_images_defaults_its_limit(client, calls):
     assert calls["list_positive_images"] == {"tag_id": 1, "limit": 200}
 
 
+def test_get_positive_images_defaults_to_the_recent_order(client, calls):
+    # The route is neutral; the taxonomy page is the opinionated caller. Every
+    # consumer that never heard of `order` keeps the answer it always got.
+    res = client.get("/new-dedup/labeling/tags/1/positive-images")
+    body = res.json()
+    assert body["order"] == "recent" and body["centroid_positives"] is None
+    assert body["min_positives"] == td.MIN_POSITIVES_FOR_CENTROID
+    assert "list_positive_images_outlier_first" not in calls
+
+
+def test_get_positive_images_outlier_first_calls_the_distance_read(client, calls):
+    res = client.get("/new-dedup/labeling/tags/1/positive-images?limit=50&order=outlier_first")
+    assert res.status_code == 200
+    assert calls["list_positive_images_outlier_first"] == {"tag_id": 1, "limit": 50}
+    assert "list_positive_images" not in calls
+    body = res.json()
+    assert body["data"][0]["centroid_distance"] == 0.266
+    assert body["data"][0]["distance_rank"] == 1
+    assert body["order"] == "outlier_first" and body["centroid_positives"] == 71
+
+
+def test_get_positive_images_reports_the_order_the_server_actually_applied(client, monkeypatch):
+    # Too few embedded human-verified positives to have a centroid degrades to
+    # the existing order — a 200 carrying the server's own verdict, never a 4xx
+    # and never a silent garbage sort. Mirrors nearest_tags' degrade-to-empty.
+    monkeypatch.setattr(
+        td, "list_positive_images_outlier_first",
+        lambda conn, **kw: {
+            "order": "recent", "centroid_positives": 3, "min_positives": 5, "images": [],
+        },
+    )
+    res = client.get("/new-dedup/labeling/tags/1/positive-images?order=outlier_first")
+    assert res.status_code == 200
+    assert res.json() == {
+        "data": [], "order": "recent", "centroid_positives": 3, "min_positives": 5,
+    }
+
+
+def test_an_unknown_positive_image_order_is_a_422(client, calls):
+    res = client.get("/new-dedup/labeling/tags/1/positive-images?order=nearest")
+    assert res.status_code == 422
+    assert "list_positive_images" not in calls
+    assert "list_positive_images_outlier_first" not in calls
+
+
 def test_get_tag_neighbours(client, calls):
     res = client.get("/new-dedup/labeling/tags/1/neighbours?limit=3")
     assert res.status_code == 200
@@ -970,6 +1023,7 @@ def test_new_dedup_labeling_requires_admin(client):
         "/new-dedup/labeling/tags/1/definition",
         "/new-dedup/labeling/tags/1/definition/versions",
         "/new-dedup/labeling/tags/1/positive-images",
+        "/new-dedup/labeling/tags/1/positive-images?order=outlier_first",
         "/new-dedup/labeling/tags/1/neighbours",
         "/new-dedup/labeling/tags/1/candidates",
     ],

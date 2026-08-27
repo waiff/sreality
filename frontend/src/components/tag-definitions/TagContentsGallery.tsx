@@ -11,6 +11,7 @@ import ImageLightbox from '@/components/ImageLightbox';
 import Spinner from '@/components/Spinner';
 import TagPicker from '@/components/tag-definitions/TagPicker';
 import type { ImagePublic } from '@/lib/types';
+import ContentsOrderControl, { OutlierRankBadge, type ContentsOrder } from './ContentsOrder';
 
 /* An image the operator took OUT of this tag during this sitting, kept so the
  * grid can say what happened and offer it back. `index` is where the row sat in
@@ -148,6 +149,16 @@ interface Props {
 
   onPutBackAll: () => void;
   putBackAllPending: boolean;
+  /* Which end of the tag is being read. The page hands `rows` already in this
+   * order — the gallery never sorts, it only says which order is on. */
+  order: ContentsOrder;
+  onOrderChange: (order: ContentsOrder) => void;
+  /* The SERVER's verdict, not a re-derivation: a tag under the centroid floor
+   * comes back 'recent' however it was asked, and then there is no distance to
+   * badge and nothing to sort by. */
+  outlierApplied: boolean;
+  centroidPositives: number | null;
+  minPositives: number;
 }
 
 /* 145 chips is a wall, not a receipt. */
@@ -182,6 +193,11 @@ export default function TagContentsGallery({
   onDismissBatchResult,
   onPutBackAll,
   putBackAllPending,
+  order,
+  onOrderChange,
+  outlierApplied,
+  centroidPositives,
+  minPositives,
 }: Props) {
   const [lightboxAt, setLightboxAt] = useState<number | null>(null);
   const examples = useMemo(() => new Set(exampleIds), [exampleIds]);
@@ -270,8 +286,27 @@ export default function TagContentsGallery({
         </span>
         {fetched >= limit && (
           <span className="text-[0.7rem] text-[var(--color-ink-4)]">
-            showing the {limit} most recent
+            showing the {limit}{' '}
+            {outlierApplied ? 'farthest from this tag’s centre' : 'most recent'}
           </span>
+        )}
+        {/* Never while the grid is still loading — the same guard the off-list
+            strip already uses, for the same reason: there is no server verdict
+            yet, so the floor note would flash "this tag has 0" at every tag
+            switch and the active button would flip under the operator. */}
+        {!loading && (
+          <ContentsOrderControl
+            order={order}
+            onOrderChange={onOrderChange}
+            outlierApplied={outlierApplied}
+            centroidPositives={centroidPositives}
+            minPositives={minPositives}
+            /* The same `fetched >= limit` fact the note above is keyed on: the
+               window was chosen by distance, so a time re-sort of it is the
+               newest OF THESE, not the tag's newest. */
+            truncated={fetched >= limit}
+            limit={limit}
+          />
         )}
         <button
           type="button"
@@ -679,6 +714,8 @@ export default function TagContentsGallery({
                     ⤢
                   </button>
                 )}
+
+                <OutlierRankBadge row={r} shown={outlierApplied} />
               </div>
             );
           })}

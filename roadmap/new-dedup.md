@@ -123,6 +123,26 @@ W1 (shared prerequisites + labeling program):
       naming that number only when it is above zero, and says accurately that recovery exists —
       `image_tag_label_events` keeps every destroyed decision with the label denormalised onto
       it, because that table has no foreign keys — as a hand-written SQL job, not a button.
+- [x] Outlier-first tag contents (no migration) — the workbench gallery now defaults to ordering a
+      tag's positives by cosine distance from that tag's OWN centroid, farthest first, so the
+      mis-filed images are the ones on screen instead of somewhere in a wall of 300 photos.
+      Measured on `exterier - fasáda` (71 positives): the 12 nearest are exterior_facade /
+      staircase_exterior, the 12 farthest are bathroom, document_text, energy_certificate and
+      garden. `list_positive_images_outlier_first` (centroid over `human`/`human_confirmed`
+      positives only, `MIN_POSITIVES_FOR_CENTROID` floored in a CASE so a tag under the floor can
+      still be told how many it has) + `?order=` on `GET /tags/{id}/positive-images`; below the
+      floor the route degrades to the existing order, reports `order:'recent'` and the page SAYS
+      why. **No threshold on the distance, ever** — inter-tag centroid distances span ~0.01 to
+      ~0.42, so only rank inside one tag transfers; the tile shows a distance and a rank, never a
+      score. One fetch per tag: "Newest first" is a client-side re-sort, so flipping the order
+      refetches nothing — and because the server LIMITs after the sort, a tag over the 300 cap
+      says "Newest of these 300" rather than promise a recency the window cannot hold. The
+      centroid's basis is on screen either side of the floor ("this tag's 71 human-verified
+      positives"), named that way because the overlap panel's identical floor counts a different
+      population; a count that was never taken is dropped, never drawn as 0. Same PR: the
+      all-tags panel's subject row now STATES the state it is in
+      (`✓ currently in this tag`) — four word buttons and a coloured fill read as "nothing is
+      checked" to the operator, because the ✓ they scan the list for is not there to be found.
 - [x] Annotation provenance + append-only history (migration 446) — every `image_tag_labels`
       cell now records WHO decided it (`source`: human / human_confirmed / machine /
       backfill_442), under WHICH `tag_definitions` version (`definition_id`, resolved at write

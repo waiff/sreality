@@ -274,6 +274,44 @@ CTE simply yields no rows, so there is no special case in Python. `embedded_posi
 counts positives that actually carry an embedding, so it can be lower than the overview's
 `positive_count`; it is named differently for exactly that reason.
 
+**Outlier-first contents.** The gallery's default order is cosine distance from the tag's OWN
+centroid, farthest first — measured on `exterier - fasáda` (71 positives), the 12 nearest tiles
+are exterior_facade/staircase_exterior and the 12 farthest are bathroom, document_text,
+energy_certificate and garden. `list_positive_images_outlier_first` builds that centroid from
+`source IN ('human','human_confirmed')` positives, the same predicate `tag_candidates` draws
+against — migration 446 stamped `backfill_442` on negatives only, so `state='positive'` already
+sheds every manufactured row and the source clause is the rail against an unreviewed machine
+positive defining the centre it would be measured against. `MIN_POSITIVES_FOR_CENTROID` floors
+it, applied in a `CASE` rather than a `HAVING` so a tag under the floor can still be told how
+many it has; below the floor every distance is NULL and the ORDER BY degrades to
+`list_positive_images`' own `updated_at DESC, image_id DESC`. **There is no threshold on the
+distance and never can be** — measured inter-tag centroid distances span ~0.01 to ~0.42, so only
+rank within one tag transfers, which is why the SPA renders a rank and a distance and never a
+score. The route ranks; the SPA's "Newest first" is a client-side re-sort of the same fetched
+rows, so flipping the order never refetches a visible grid.
+
+**The order is not the window.** `LIMIT` is applied AFTER the distance sort, so a tag holding more
+positives than `POSITIVE_IMAGE_LIST_MAX` comes back as the N *farthest* — and a time re-sort of
+those is the newest OF THOSE, not the tag's newest (a freshly labeled image, being typical for the
+tag, sits NEAR the centre and is exactly what the window drops). One fetch per tag is deliberate —
+a cache entry per order is a second thing every retag has to keep true, and flipping would blank
+the grid mid-sitting — so on a full page the SPA narrows the button's claim to "Newest of these N"
+instead. Below the cap the fetched rows are the whole tag and the button keeps its full promise.
+
+**Two floors, two populations, and never a fabricated count.** `centroid_positives` counts
+`human`/`human_confirmed` positives; the overlap panel's identical-looking floor runs off
+`nearest_tags`, whose centroid CTE has no source filter and counts every embedded positive
+(`machine` is a writable source, so these are not the same set by construction — they merely
+coincide while machine positives are near zero). The gallery's note therefore says
+*human-verified* in as many words, so two different counts of a same-sounding quantity cannot
+read as one contradiction. The basis is on screen whichever side of the floor the tag sits: a
+centroid over 5 images and one over 200 are otherwise indistinguishable in the UI, and at five
+each image is a fifth of the centre it is then measured against. `centroid_positives` is `null`
+when nothing was computed — a `recent` read, or a read that FAILED — which is not the fact "this
+tag has none", so the SPA drops the number from the sentence rather than rendering `0`, and a
+failed `/positive-images` read raises the page's error banner instead of a data-shaped diagnosis
+of a transport failure.
+
 **The workbench does not depend on `dedup_sim`.** The gallery ("what this tag ACTUALLY
 contains") reads `image_tag_labels JOIN images` directly through
 `tag_definitions.list_positive_images`, not `tag_annotations.list_images_for_tag` — that one
