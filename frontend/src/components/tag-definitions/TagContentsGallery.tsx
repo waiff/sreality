@@ -1,7 +1,15 @@
-import { useMemo, useState } from 'react';
-import type { TagExcludedReason, TagPositiveImage, TagState } from '@/lib/api';
+import { useEffect, useMemo, useState } from 'react';
+import type {
+  NewDedupTag,
+  TagExcludedReason,
+  TagPositiveImage,
+  TagState,
+} from '@/lib/api';
 import { imageSrc } from '@/lib/imageUrl';
+import { tagShortLabel } from '@/lib/tagFamily';
 import ImageLightbox from '@/components/ImageLightbox';
+import Spinner from '@/components/Spinner';
+import TagPicker from '@/components/tag-definitions/TagPicker';
 import type { ImagePublic } from '@/lib/types';
 
 /* An image the operator took OUT of this tag during this sitting, kept so the
@@ -26,15 +34,77 @@ const outcomeWord = (m: MovedOutImage): string =>
       ? 'belongs elsewhere'
       : "can't tell";
 
+/* What the SOURCE tag gets when a batch is filed under another tag. Three, not
+ * four: SUBJECT_ACTIONS minus "can't tell", because a batch being filed
+ * somewhere specific is by construction not undecidable, and manufacturing 145
+ * ambiguous exclusions at once would make the ambiguity rate report a broken
+ * definition that isn't. */
+export type BatchSourceOutcome = 'keeps' | 'not-this' | 'elsewhere';
+
+export interface BatchFileRequest {
+  destTagId: number;
+  /* Already narrowed to rows on screen, in grid order. */
+  imageIds: number[];
+  outcome: BatchSourceOutcome;
+}
+
+/* Never a thrown error: the batch mutation resolves with this for all four
+ * terminal cases, so partial failure has exactly one handler. */
+export interface BatchFileResult {
+  status: 'ok' | 'dest-failed' | 'source-failed';
+  destTagId: number;
+  destLabel: string;
+  outcome: BatchSourceOutcome;
+  requestedIds: number[];
+  destWrittenIds: number[];
+  /* [] for 'keeps' — that outcome has no source write at all. */
+  sourceWrittenIds: number[];
+  /* What "press Write again" must act on. dest-failed: requested − destWritten.
+   * source-failed: destWritten − sourceWritten. ok: []. */
+  unresolvedIds: number[];
+  /* The server's message, verbatim. */
+  message: string | null;
+}
+
+/* The default is `keeps` because it is both the SAFE answer and the motivating
+ * case: 145 images that genuinely are bathrooms-with-bathtubs AND bathrooms.
+ * "source becomes negative" is not a safe default — it would be a lie about
+ * those 145 and would poison the child head if the tag is ever revived. */
+const BATCH_OUTCOMES: ReadonlyArray<{
+  key: BatchSourceOutcome;
+  label: string;
+  helper: string;
+}> = [
+  {
+    key: 'keeps',
+    label: 'keeps it',
+    helper: 'They stay positive here too — a copy, nothing is removed.',
+  },
+  {
+    key: 'not-this',
+    label: 'not this tag',
+    helper: 'They were mis-filed here. A real negative the classifier learns from.',
+  },
+  {
+    key: 'elsewhere',
+    label: 'belongs elsewhere',
+    helper:
+      "The subject IS here, but the other tag fits better — excluded · pruned, never negative.",
+  },
+];
+
 /* "What this tag actually contains" — every image currently positive on it.
  * The point is the DRIFT: the operator writes the sentence with the tag's real
  * contents in view, so a label whose name stopped matching its images can't
  * survive the writing. Clicking a tile stages it as a canonical example; that
  * stages into the draft, like every other edit on this page, and writes nothing.
  *
- * The ONE exception is the "all tags" pill: a tri-state cell is ground truth
- * and has no draft, so moving an image out of this tag writes immediately. The
- * helper line says so before the operator ever opens the panel. */
+ * Two exceptions write immediately, and both say so. The "all tags" pill: a
+ * tri-state cell is ground truth and has no draft. And SELECTION MODE, which
+ * files a whole block of images under another tag — a mode rather than a
+ * modifier, because a tile click already means "stage as a canonical example"
+ * and shift-click would make one click mean two things. With the mode off the
+ * tile is byte-identical to what it has always been. */
 interface Props {
   rows: ReadonlyArray<TagPositiveImage>;
   photos: ReadonlyMap<number, ImagePublic>;
@@ -51,7 +121,37 @@ interface Props {
   movedOut: ReadonlyArray<MovedOutImage>;
   onPutBack: (imageId: number) => void;
   putBackPending: ReadonlySet<number>;
+
+  subjectTagId: number;
+  subjectLabel: string;
+  /* Active tags only: filing images onto a retired tag would put them where
+   * list_tags_for_image can no longer show them. */
+  destinationTags: ReadonlyArray<NewDedupTag>;
+
+  selecting: boolean;
+  onEnterSelection: () => void;
+  onLeaveSelection: () => void;
+  /* Already intersected with `rows` by the page — the gallery never has to
+   * defend against an id that has left the grid. */
+  selectedIds: ReadonlySet<number>;
+  onToggleSelect: (imageId: number) => void;
+  onSelectAll: () => void;
+  onClearSelection: () => void;
+
+  onBatchFile: (req: BatchFileRequest) => void;
+  batchPending: boolean;
+  /* Ids submitted so far by the in-flight write — the progress readout for a
+   * selection spanning more than one chunk. */
+  batchWritten: number;
+  batchResult: BatchFileResult | null;
+  onDismissBatchResult: () => void;
+
+  onPutBackAll: () => void;
+  putBackAllPending: boolean;
 }
+
+/* 145 chips is a wall, not a receipt. */
+const MOVED_OUT_CHIPS_MAX = 12;
 
 export default function TagContentsGallery({
   rows,
@@ -65,9 +165,43 @@ export default function TagContentsGallery({
   movedOut,
   onPutBack,
   putBackPending,
+  subjectTagId,
+  subjectLabel,
+  destinationTags,
+  selecting,
+  onEnterSelection,
+  onLeaveSelection,
+  selectedIds,
+  onToggleSelect,
+  onSelectAll,
+  onClearSelection,
+  onBatchFile,
+  batchPending,
+  batchWritten,
+  batchResult,
+  onDismissBatchResult,
+  onPutBackAll,
+  putBackAllPending,
 }: Props) {
   const [lightboxAt, setLightboxAt] = useState<number | null>(null);
   const examples = useMemo(() => new Set(exampleIds), [exampleIds]);
+
+  /* Transient form state, local by design: only the selection, the pending flag
+   * and the result are shared with the page. */
+  const [destTagId, setDestTagId] = useState<number | null>(null);
+  const [outcome, setOutcome] = useState<BatchSourceOutcome>('keeps');
+
+  /* This component is NOT remounted when the page switches tags (same branch,
+   * no key), so without this both values outlive the tag they were chosen for.
+   * The destination is the dangerous half: the natural next move after filing a
+   * batch is to open the destination tag and look at what arrived, which would
+   * leave the picker naming the tag now being read. The outcome is the quieter
+   * half — a fresh tag must start at `keeps`, the safe answer, not at whatever
+   * the previous sitting ended on. */
+  useEffect(() => {
+    setDestTagId(null);
+    setOutcome('keeps');
+  }, [subjectTagId]);
 
   /* Filtered against the live grid, so a background refetch that re-lists an
    * image can never show a tile and a "moved out" chip for the same one. */
@@ -106,6 +240,24 @@ export default function TagContentsGallery({
   const lightboxIndexOf = (imageId: number) =>
     lightboxImages.findIndex((p) => p.id === imageId);
 
+  /* GRID ORDER, so the chunks a batch is split into are deterministic and the
+   * payload can never name an id that is not currently positive on this tag. */
+  const orderedSelected = useMemo(
+    () => rows.filter((r) => selectedIds.has(r.image_id)).map((r) => r.image_id),
+    [rows, selectedIds],
+  );
+  const allShownSelected = rows.length > 0 && orderedSelected.length === rows.length;
+  const destTag = destinationTags.find((t) => t.id === destTagId) ?? null;
+  const destLabel = destTag ? tagShortLabel(destTag.label) : '';
+  const subjectShort = tagShortLabel(subjectLabel);
+  /* Belt to the reset effect's braces, and it carries the render the effect has
+   * not run on yet: a batch aimed at the tag it is reading would write positive
+   * and then negative on ONE tag, turning that tag's own positives into
+   * manufactured human negatives — the exact lie the outcome vocabulary exists
+   * to prevent. Derived, so the pre-write summary can never narrate it either. */
+  const destReady = destTagId != null && destTagId !== subjectTagId;
+  const canWrite = destReady && orderedSelected.length > 0 && !batchPending;
+
   return (
     <section className="mt-6 border-t border-[var(--color-rule)] pt-4">
       <div className="flex items-baseline gap-2 flex-wrap">
@@ -121,23 +273,214 @@ export default function TagContentsGallery({
             showing the {limit} most recent
           </span>
         )}
+        <button
+          type="button"
+          disabled={!selecting && rows.length === 0}
+          onClick={selecting ? onLeaveSelection : onEnterSelection}
+          className={[
+            'ml-auto px-2 py-1 text-[0.7rem] rounded-[var(--radius-xs)] border disabled:opacity-40',
+            selecting
+              ? 'border-[var(--color-copper)] text-[var(--color-copper)]'
+              : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
+          ].join(' ')}
+        >
+          {selecting ? 'Done selecting' : 'Select images'}
+        </button>
       </div>
-      <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)]">
-        Click a tile to mark it as a canonical example — staged, saved with the definition.
-      </p>
-      <p className="text-[0.7rem] text-[var(--color-ink-4)]">
-        Use “all tags” on a tile to fix an image that does not belong here. Unlike everything
-        else on this page, that writes immediately.
-      </p>
+
+      {selecting ? (
+        <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)]">
+          Click a tile to select it. Marking canonical examples is paused while you are
+          selecting.
+        </p>
+      ) : (
+        <>
+          <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)]">
+            Click a tile to mark it as a canonical example — staged, saved with the definition.
+          </p>
+          <p className="text-[0.7rem] text-[var(--color-ink-4)]">
+            Use “all tags” on a tile to fix an image that does not belong here. Unlike everything
+            else on this page, that writes immediately.
+          </p>
+        </>
+      )}
+
+      {selecting && (
+        <div className="mt-3 rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-inset)] p-2.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              disabled={rows.length === 0}
+              onClick={allShownSelected ? onClearSelection : onSelectAll}
+              className="px-2 py-0.5 text-[0.7rem] rounded-[var(--radius-xs)] border border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] disabled:opacity-40"
+            >
+              {allShownSelected ? 'Clear selection' : `Select all ${rows.length} shown`}
+            </button>
+            <span className="font-mono text-[0.7rem] tabular-nums text-[var(--color-ink-3)]">
+              {orderedSelected.length} of {rows.length} shown selected
+            </span>
+            {/* Select-all never claims to act on the whole tag. */}
+            {fetched >= limit && (
+              <span className="text-[0.7rem] text-[var(--color-ink-4)]">
+                · this tag has more than the {limit} shown
+              </span>
+            )}
+          </div>
+
+          <p className="mt-3 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+            File these images under another tag
+          </p>
+
+          <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+            <span className="text-[0.7rem] text-[var(--color-ink-3)]">Destination</span>
+            <TagPicker
+              value={destTagId}
+              onChange={setDestTagId}
+              tags={destinationTags}
+              excludeIds={[subjectTagId]}
+              allowEmpty={false}
+              ariaLabel="Destination tag"
+            />
+          </div>
+
+          <fieldset className="mt-2.5">
+            <legend className="text-[0.7rem] text-[var(--color-ink-3)]">
+              What happens to{' '}
+              <span className="font-mono text-[var(--color-ink-2)]">{subjectShort}</span>
+            </legend>
+            <div className="mt-1 space-y-1">
+              {BATCH_OUTCOMES.map((o) => (
+                <label key={o.key} className="flex items-start gap-1.5 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="batch-source-outcome"
+                    aria-label={o.label}
+                    aria-describedby={`batch-outcome-help-${o.key}`}
+                    checked={outcome === o.key}
+                    onChange={() => setOutcome(o.key)}
+                    className="mt-[0.2rem] h-3 w-3 shrink-0"
+                  />
+                  <span className="min-w-0">
+                    <span className="text-[0.72rem] text-[var(--color-ink-2)]">{o.label}</span>
+                    <span
+                      id={`batch-outcome-help-${o.key}`}
+                      className="block text-[0.68rem] leading-snug text-[var(--color-ink-4)]"
+                    >
+                      {o.helper}
+                    </span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
+          {/* Always on screen, never a tooltip: this is the one control where
+              the cheap wrong answer poisons a training head, and the operator
+              reading it has not read migration 446. */}
+          <p className="mt-2 text-[0.68rem] leading-snug text-[var(--color-ink-4)]">
+            “Not this tag” is a claim that the subject is not in these photos. If it IS there and
+            another tag simply fits better, choose “belongs elsewhere” — a wrong negative poisons
+            this tag's classifier, and nothing here can silently undo it.
+          </p>
+
+          {destReady && orderedSelected.length > 0 && (
+            <p className="mt-2 text-[0.7rem] leading-snug text-[var(--color-ink-2)]">
+              <strong className="font-medium tabular-nums">
+                {orderedSelected.length} image{orderedSelected.length === 1 ? '' : 's'}
+              </strong>{' '}
+              become positive on <strong className="font-medium">{destLabel}</strong>
+              {outcome === 'keeps' ? (
+                <>
+                  . They stay positive on <strong className="font-medium">{subjectShort}</strong> —
+                  nothing is removed.
+                </>
+              ) : outcome === 'not-this' ? (
+                <>
+                  , and negative on <strong className="font-medium">{subjectShort}</strong> —{' '}
+                  {subjectShort} loses all {orderedSelected.length} from its contents.
+                </>
+              ) : (
+                <>
+                  , and excluded · pruned on{' '}
+                  <strong className="font-medium">{subjectShort}</strong> — {subjectShort} loses
+                  all {orderedSelected.length} from its contents, without a negative that would
+                  poison its head.
+                </>
+              )}
+            </p>
+          )}
+
+          <div className="mt-2 flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              disabled={!canWrite}
+              onClick={() =>
+                canWrite &&
+                destTagId != null &&
+                onBatchFile({ destTagId, imageIds: orderedSelected, outcome })
+              }
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[0.72rem] rounded-[var(--radius-xs)] border border-[var(--color-copper)] bg-[var(--color-copper)] text-[var(--color-paper)] disabled:opacity-40"
+            >
+              {batchPending && <Spinner />}
+              Write {orderedSelected.length} image{orderedSelected.length === 1 ? '' : 's'}
+            </button>
+            {/* 300 ids over four sequential calls is otherwise seconds of nothing. */}
+            {batchPending && (
+              <span className="font-mono text-[0.68rem] tabular-nums text-[var(--color-ink-3)]">
+                {batchWritten} of {orderedSelected.length} written to {destLabel}
+                {outcome !== 'keeps' && batchWritten === orderedSelected.length
+                  ? ` · updating ${subjectShort}…`
+                  : ''}
+              </span>
+            )}
+          </div>
+
+          {/* Persists until the selection changes or the mode is left. A
+              shortfall that scrolls away in six seconds reads as "it just gave
+              me fewer", so this is never a toast. */}
+          {batchResult && (
+            <div
+              className={[
+                'mt-2 flex items-start gap-2 text-[0.7rem] leading-snug',
+                batchResult.status === 'ok'
+                  ? 'text-[var(--color-ink-2)]'
+                  : 'text-[var(--color-brick)]',
+              ].join(' ')}
+            >
+              <p className="min-w-0 flex-1">{batchResultLine(batchResult, subjectShort)}</p>
+              <button
+                type="button"
+                onClick={onDismissBatchResult}
+                className="shrink-0 text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]"
+              >
+                dismiss
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {movedOutShown.length > 0 && (
         <div className="mt-3 p-2 rounded-[var(--radius-xs)] bg-[var(--color-inset)]">
-          <p className="text-[0.7rem] text-[var(--color-ink-3)]">
-            {movedOutShown.length} image{movedOutShown.length === 1 ? '' : 's'} moved out of this
-            tag in this sitting.
-          </p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="text-[0.7rem] text-[var(--color-ink-3)]">
+              {movedOutShown.length} image{movedOutShown.length === 1 ? '' : 's'} moved out of
+              this tag in this sitting.
+            </p>
+            {movedOutShown.length > 1 && (
+              <button
+                type="button"
+                disabled={putBackAllPending}
+                onClick={onPutBackAll}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[0.68rem] rounded-[var(--radius-xs)] border border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-copper)] hover:border-[var(--color-copper)] disabled:opacity-40"
+              >
+                {putBackAllPending && <Spinner size={9} />}
+                Put all back
+              </button>
+            )}
+          </div>
           <div className="mt-1.5 flex flex-col gap-1">
-            {movedOutShown.map((m) => {
+            {movedOutShown.slice(0, MOVED_OUT_CHIPS_MAX).map((m) => {
               const id = m.row.image_id;
               const stagedExample = examples.has(id);
               return (
@@ -177,6 +520,11 @@ export default function TagContentsGallery({
                 </span>
               );
             })}
+            {movedOutShown.length > MOVED_OUT_CHIPS_MAX && (
+              <span className="text-[0.68rem] text-[var(--color-ink-4)]">
+                +{movedOutShown.length - MOVED_OUT_CHIPS_MAX} more
+              </span>
+            )}
           </div>
         </div>
       )}
@@ -236,6 +584,7 @@ export default function TagContentsGallery({
           {rows.map((r) => {
             const photo = photos.get(r.image_id);
             const isExample = examples.has(r.image_id);
+            const isSelected = selectedIds.has(r.image_id);
             return (
               <div
                 key={r.image_id}
@@ -246,12 +595,31 @@ export default function TagContentsGallery({
                     : 'border-[var(--color-rule)]',
                 ].join(' ')}
               >
+                {/* ONE meaning per click at any moment. In selection mode the
+                    tile selects; otherwise it stages a canonical example. The
+                    example ring and badge are drawn either way, so a staged
+                    example never loses its mark while a batch is built. */}
                 <button
                   type="button"
-                  onClick={() => onToggleExample(r.image_id)}
-                  aria-pressed={isExample}
-                  aria-label={`Toggle image ${r.image_id} as a canonical example`}
-                  className="block w-full"
+                  onClick={() =>
+                    selecting ? onToggleSelect(r.image_id) : onToggleExample(r.image_id)
+                  }
+                  aria-pressed={selecting ? isSelected : isExample}
+                  aria-label={
+                    selecting
+                      ? `Select image ${r.image_id}`
+                      : `Toggle image ${r.image_id} as a canonical example`
+                  }
+                  className={[
+                    'block w-full',
+                    /* Selection reads as DIMMING the rest, never a second ring:
+                       the copper ring is already the canonical-example mark, and
+                       a competing ring would either collide with it or need a
+                       hue this page does not have. */
+                    selecting && !isSelected ? 'opacity-45' : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
                 >
                   {/* The row already carries storage_path + sreality_url, so the
                       tile paints from the /positive-images answer itself — it
@@ -274,7 +642,9 @@ export default function TagContentsGallery({
                     read as one family; top-LEFT rather than bottom-left, which
                     is the "example" badge's slot (no control ever shares a
                     corner with a state badge). Neither is hover-revealed: a
-                    workbench scanned by eye must not hide its controls. */}
+                    workbench scanned by eye must not hide its controls. Both
+                    stay live in selection mode — inspecting one image while
+                    building a batch is exactly the workflow. */}
                 <button
                   type="button"
                   onClick={() => onOpenTags(r.image_id)}
@@ -288,6 +658,13 @@ export default function TagContentsGallery({
                 {isExample && (
                   <span className="absolute left-1 bottom-1 px-1 py-px text-[0.6rem] rounded-[var(--radius-xs)] bg-[var(--color-copper)] text-[var(--color-paper)]">
                     example
+                  </span>
+                )}
+
+                {/* The only free corner. */}
+                {selecting && isSelected && (
+                  <span className="absolute right-1 bottom-1 px-1 py-px text-[0.65rem] leading-none rounded-[var(--radius-xs)] border border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]">
+                    ✓
                   </span>
                 )}
 
@@ -317,4 +694,39 @@ export default function TagContentsGallery({
       )}
     </section>
   );
+}
+
+/* Every terminal case says what LANDED and what is still selected, because
+ * "press Write again" is the recovery and the operator has to know what it will
+ * act on. The overlap footnote rides on the success line: a batch moves both
+ * tags' centroids, and re-running a pgvector scan per write is not worth it —
+ * saying the distances are stale is. */
+function batchResultLine(r: BatchFileResult, subjectShort: string): string {
+  const n = r.requestedIds.length;
+  const u = r.unresolvedIds.length;
+  /* The result carries the FULL label (it is data, and a decision is never
+   * keyed on display text), but every readout on this page names a tag the way
+   * the list and the picker do — one vocabulary. */
+  const dest = tagShortLabel(r.destLabel);
+  if (r.status === 'dest-failed')
+    return (
+      `Stopped: ${r.destWrittenIds.length} of ${n} were written positive on ${dest}; ` +
+      `the rest failed (${r.message ?? 'unknown error'}). Nothing was changed in ` +
+      `${subjectShort}. The ${u} that did not land are still selected — press Write again to finish.`
+    );
+  if (r.status === 'source-failed')
+    return (
+      `All ${n} are positive on ${dest}. But ${u} of ${n} are still positive on ` +
+      `${subjectShort} — that step failed (${r.message ?? 'unknown error'}). Those ${u} are ` +
+      `still selected; pressing Write again re-runs both steps, which is safe.`
+    );
+  const tail = ' Overlap distances above were computed before this batch.';
+  if (r.outcome === 'keeps')
+    return (
+      `${n} image${n === 1 ? ' is' : 's are'} now positive on ${dest}. ` +
+      `They stay positive on ${subjectShort} — nothing was removed.${tail}`
+    );
+  if (r.outcome === 'not-this')
+    return `${n} image${n === 1 ? ' is' : 's are'} now positive on ${dest}, and negative on ${subjectShort}.${tail}`;
+  return `${n} image${n === 1 ? ' is' : 's are'} now positive on ${dest}, and excluded · pruned on ${subjectShort}.${tail}`;
 }

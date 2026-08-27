@@ -345,10 +345,96 @@ holding an abandoned label steals the focus from the click that re-selected the 
 Enter then commits a name nobody chose. That is precisely the accident the deliberate
 no-commit-on-blur already guards against, arriving by the other door.
 
-Deliberate non-additions: no definition lifecycle state machine (`active`/`superseded` is the
-whole vocabulary), no merge/split execution, no bulk edit tools. The taxonomy is not settled
-yet; building tools to reshape it before the definitions exist would be building on the
-guesses this page is meant to replace.
+Deliberate non-additions **as the page first shipped**: no definition lifecycle state machine
+(`active`/`superseded` is the whole vocabulary), no merge/split execution, no bulk edit tools.
+The taxonomy is not settled yet; building tools to reshape it before the definitions exist
+would be building on the guesses this page is meant to replace. The next section is where the
+last two were reconsidered — not because the taxonomy got settled, but because writing the
+definitions started producing collapse decisions, and executing those by hand in SQL turned
+out to be the larger risk.
+
+### Reshaping a tag from the workbench: filing a batch, and deleting
+
+Both surfaces are pure reuse — **no new route and no migration**. Filing a batch is
+`POST /tags/{tag_id}/annotations/bulk` called twice, destination then source; deleting is the
+`DELETE /taxonomy/{tag_id}` that already backed `TaxonomyManageModal` on the Labeling page,
+which is untouched.
+
+**The motivating case is the acceptance case.** The overlap evidence put `interier - koupelna`
+0.009 and 0.011 from its own two children (`… s vanou`, `… se sprchovým koutem`) — a parent
+competing with its children, measurably unlearnable. The operator's decision was to collapse
+them into the parent, and the first run of it was hand-written SQL: the 145 images positive on
+either child were set positive on the parent, `source='human'`, `verified_at = now()`, taking
+the parent from 19 to 164 human positives. Every one of those 145 carried a manufactured
+`backfill_442` negative on the parent, which the write replaced; not one carried a genuine
+human negative, so nothing real was overwritten. That is the shape the surface reproduces.
+
+**A batch has to answer two questions, and the second is the one a naive implementation gets
+wrong.** The destination obviously becomes positive. What happens to the SOURCE is a choice,
+and "source becomes negative" is NOT a safe default — those 145 images genuinely ARE
+bathrooms-with-bathtubs as well as bathrooms. So the source gets one of **three** outcomes,
+named in the same words the `ImageTagDetailPanel`'s four buttons use, one vocabulary learned
+once:
+- **`keeps it`** — the image legitimately belongs to both, which is the motivating case. There
+  is **no source write at all**: one API call, nothing removed, nothing patched out of the
+  grid. This is a copy, and the UI never calls it a move. It is also the default, because it
+  is simultaneously the safe answer and the common one.
+- **`not this tag`** — the image was mis-filed here. The source becomes `negative`: a true,
+  valuable negative the head learns from.
+- **`belongs elsewhere`** — the subject IS present but another tag fits better. `excluded` with
+  reason **`pruned`**, never negative. This is the operator's own rule ("never mark a tag
+  negative when its subject is clearly present — LEAVE IT OUT instead") wired into the batch.
+
+`can't tell` is deliberately absent: a batch being filed somewhere specific is by construction
+not undecidable, and manufacturing 145 `ambiguous` exclusions at once would make the ambiguity
+rate report a broken definition that isn't. One outcome applies to the whole batch — per-image
+choices would defeat the point of a batch — so the panel states, before the click, which one is
+about to be applied and to how many images, in a sentence that names both tags.
+
+**Ordering is destination first, always.** If the source were written first and the destination
+then failed, images would have left the source with nowhere to go. Destination-first means the
+worst case is a duplicate positive on both tags — precisely the safe `keeps` state, and
+recoverable by pressing Write again. Chunks are sequential (never `Promise.all`) at the
+server's `BULK_STATE_MAX`, so the failure point is deterministic, and every terminal case
+resolves into one result object rendered beside the button rather than a toast that scrolls
+away.
+
+**The destination may never be the tag being read.** Found in review, not in design: the
+batch form's two values live inside the gallery component, which the page does not remount on
+a tag switch, so after filing a batch the natural next move — open the destination tag and look
+at what arrived — left the picker naming the tag now on screen. Write would then have issued
+`positive` and `negative` for one tag over one id list, terminal state `negative`,
+`source='human'` on that tag's own positives: exactly the manufactured lie the three-outcome
+vocabulary exists to prevent, up to 200 images at a press. `bulk_set_state` is tag-scoped and
+cannot see it; the invariant belongs in the UI and is now derived (`destReady`), so it gates
+the write button, the click handler and the pre-write sentence together, with the picker and
+the outcome re-seeded to `null`/`keeps` whenever the subject changes.
+
+**Deleting a tag destroys every decision under it, and the honest number is not the row
+count.** `remove_tag` DELETEs every `image_tag_labels` row for the tag and then the tag itself.
+A typical tag carries ~1,300 manufactured `backfill_442` rows alongside a few dozen real human
+decisions, so a confirm reading "1,440 annotations" buries the only number that matters. The
+human count is therefore the headline in the largest type in the dialog, the manufactured
+remainder is a quieter second line, and the acknowledgement checkbox — which names that human
+count back — appears only when it is above zero, so it never decays into ritual. The dialog
+also states what the written definition loses: `tag_definitions` cascades, so the active
+definition and every stored version go too. That count comes from a per-tag query separate from
+the page-level status supplying the version number, so while it is unanswered the dialog says
+"every saved version of it" rather than printing a self-contradicting zero.
+
+**What survives a delete is the events history.** Since migration 446 the history trigger fires
+on DELETE as well as INSERT, and `image_tag_label_events` carries the tag's label denormalised
+onto the row — that table deliberately has **no foreign keys** precisely so a cascade cannot
+erase the record of its own deletion. `remove_tag` deletes the annotations before the tag, so
+the label subselect still resolves. Deletion is therefore recoverable, but by a hand-written
+SQL job, not a button: the dialog says exactly that and promises no restore that does not
+exist. Cross-tag references in other definitions are JSONB `tag_id`s, so they keep the
+reference and simply stop resolving to a name.
+
+Afterwards the page must not keep half-pointing at something gone: the overview and definition
+lists are patched rather than refetched, the four per-tag caches are `removeQueries`'d before
+the prefix invalidations, the definition form is reset, and the `?tag=` param is cleared — and
+a stale `?tag=` link from anywhere else says the tag is gone instead of surfacing a raw 404.
 
 ## Provenance and history (migration 446)
 

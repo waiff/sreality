@@ -9,7 +9,9 @@ import { FAMILY_FALLBACK, tagFamily, tagShortLabel } from '@/lib/tagFamily';
  * Rename is offered on the SELECTED row only. The workflow it serves is "I am
  * reading this tag's contents and its name is wrong", so the row is already
  * picked; 51 always-on rename buttons would be noise, and a hover-reveal is
- * undiscoverable and dead on touch. */
+ * undiscoverable and dead on touch. Delete follows the same rule one step
+ * further along the same workflow, drawn quieter than rename and opening a
+ * modal — the numbers it has to state do not fit in a 22rem row. */
 interface Props {
   tags: ReadonlyArray<NewDedupTag>;
   status: ReadonlyMap<number, TagDefinitionStatus>;
@@ -26,6 +28,10 @@ interface Props {
   renameError: string | null;
   /* Must be referentially stable — see the selection effect below. */
   onRenameErrorClear: () => void;
+  /* Offered on the SELECTED row only, beside rename — the same rule, one step
+   * further along the same workflow. Opens the page's confirm; this component
+   * never writes. */
+  onRequestDelete: (tagId: number) => void;
 }
 
 /* Mirrors toolkit.tag_annotations.LABEL_MAX_CHARS / migration 442's CHECK —
@@ -43,6 +49,7 @@ export default function TagDefinitionList({
   renamePending,
   renameError,
   onRenameErrorClear,
+  onRequestDelete,
 }: Props) {
   const grouped = useMemo(() => {
     const byFamily = new Map<string, NewDedupTag[]>();
@@ -278,6 +285,20 @@ export default function TagDefinitionList({
                             className="shrink-0 text-xs text-[var(--color-ink-3)] underline decoration-dotted underline-offset-2 hover:text-[var(--color-copper-2)]"
                           >
                             rename
+                          </button>
+                        )}
+
+                        {selected && (
+                          /* Deliberately weaker than rename (ink-4, not ink-3):
+                             the destructive act must not be the loudest thing
+                             on the row. The confirm carries the weight. */
+                          <button
+                            type="button"
+                            aria-label="Delete this tag"
+                            onClick={() => onRequestDelete(t.id)}
+                            className="shrink-0 text-xs text-[var(--color-ink-4)] underline decoration-dotted underline-offset-2 hover:text-[var(--color-brick)]"
+                          >
+                            delete
                           </button>
                         )}
                       </>

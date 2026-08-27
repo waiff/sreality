@@ -103,6 +103,26 @@ W1 (shared prerequisites + labeling program):
       untouched. `rename` on the selected row edits the label in place, losing neither the
       selection nor an unsaved definition draft (`PUT /taxonomy/{tag_id}`; every reference is by
       numeric id, so nothing rots). No new routes — the backend was already there.
+- [x] Reshaping a tag from the workbench: filing a BATCH under another tag, and DELETING a tag —
+      the two operations the definitions kept producing and that were being executed by hand in
+      SQL. Both are pure reuse: no new route, no migration. The batch is
+      `POST /tags/{tag_id}/annotations/bulk` twice, **destination first** (source-first would
+      strand images with nowhere to go), chunked sequentially at the server's 200 cap. Selection
+      is a MODE, not a modifier, because a tile click already means "stage as a canonical
+      example". What happens to the SOURCE is the choice a naive "move" gets wrong, so it has
+      **three** outcomes in the panel's own vocabulary: `keeps it` (a COPY — no source write at
+      all, the default, and the motivating case: 145 images that genuinely are
+      bathrooms-with-bathtubs AND bathrooms, so `koupelna` went 19 → 164 human positives with the
+      child untouched), `not this tag` (a real negative) and `belongs elsewhere` (excluded ·
+      pruned). No `can't tell`: a batch filed somewhere specific is not undecidable, and 145
+      manufactured ambiguous exclusions would make the ambiguity rate report a broken definition
+      that isn't. The destination can never be the tag being read (caught in review — it would
+      have written positive then negative on ONE tag, manufacturing human negatives over that
+      tag's own positives). Delete leads with the **human decisions**, not the row count that
+      buries them (~1,300 manufactured `backfill_442` rows vs a few dozen real ones), gates on
+      naming that number only when it is above zero, and says accurately that recovery exists —
+      `image_tag_label_events` keeps every destroyed decision with the label denormalised onto
+      it, because that table has no foreign keys — as a hand-written SQL job, not a button.
 - [x] Annotation provenance + append-only history (migration 446) — every `image_tag_labels`
       cell now records WHO decided it (`source`: human / human_confirmed / machine /
       backfill_442), under WHICH `tag_definitions` version (`definition_id`, resolved at write
