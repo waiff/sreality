@@ -133,10 +133,20 @@ estimation preview — a separate entry point that is unchanged by the scheduled
 coordinates from the page's embedded map config** (`"center":[lon,lat]`), so there is no
 geocoding step. Typed fields are normalised to the SAME canonical labels sreality stores
 (`panelová→panel`, `velmi dobrý stav→velmi_dobry`, `osobní→osobni`) for one cross-source
-vocabulary. Search pages carry a result total and have **no deep-pagination cap**, so a
-per-category walk is provable-complete: unlike bazos, idnes is **complete-walk capable**
-(`supports_complete_walk=true`) and the runner marks delisted listings inactive under the
-completeness guard, source-scoped (rules #3/#15). The detail URL carries the category
+vocabulary. Search pages carry a result total and have **no deep-pagination cap** — page 1,052
+of `prodej/byty` serves the declared tail exactly and 1,060 404s — so the catalogue is fully
+*reachable*. It has not been fully *reached*: **`supports_complete_walk` was parked to `false`
+in migration 453** because a portal cannot prove it saw everything if we have not. We hold
+109,908 active idnes rows (more than sreality) and 64% of them had gone unseen for over a week
+while the flag still authorised delisting; eleven of the last fourteen walks were killed by the
+job clock, and the one that finished covered 2 of 10 categories and 13% of the biggest.
+**The cause is a silent soft-throttle on our datacenter egress**, not portal size: pages arrive
+in ~2.3s each for exactly 20 requests, then one stalls for ~390 SECONDS and returns 200 — no
+429, no error, no retry, so every rail we own stays quiet. Twenty-four such stalls consumed 143
+of one 160-minute run. A residential IP shows no stall over 26 consecutive requests (0.62
+pages/s vs 0.047), so idnes now sets `USE_PROXY` like the two Cloudflare portals — but with
+`PROXY_REQUIRED = False`, because idnes only *degrades* without the proxy where they hard-403,
+and skipping a slow portal trades degraded data for none. The detail URL carries the category
 (`/detail/{sale}/{cat}/…`), so the drain derives each listing's category from its own URL —
 one config (the `portals` row, migrations 110/111) walks many categories (byty + domy ×
 prodej + pronájem today). Image-URL rows are recorded by the drain; the shared `images.yml`

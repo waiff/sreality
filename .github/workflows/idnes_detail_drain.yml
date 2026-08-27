@@ -73,6 +73,11 @@ jobs:
         id: drain
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # idnes soft-throttles our datacenter egress: ~2.3s/page for 20 requests,
+          # then a silent ~390s stall (no 429, no error). 24 stalls ate 143 of a
+          # 160-minute run. The residential exit removes it (0.047 -> ~0.6 pages/s)
+          # at an UNCHANGED request rate. Unset = direct IP, i.e. the slow status quo.
+          SCRAPER_PROXY_URL: ${{ secrets.SCRAPER_PROXY_URL }}
           # W2a payload archive: bodies live in R2, so a page-fetching lane needs the
           # bucket to archive one. Absent, the append warns and archives NOTHING while
           # the scrape stays green. Inert until payload_dual_write is enabled.
