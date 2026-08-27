@@ -1,4 +1,4 @@
-"""Candidate retrieval (migration 449) — per tag, WHICH images to look at next and
+"""Candidate retrieval (migration 450) — per tag, WHICH images to look at next and
 WHY each one was drawn.
 
 `tag_candidates` is a review queue and nothing else: membership carries no training
@@ -26,7 +26,7 @@ import psycopg
 
 from toolkit.tag_definitions import embedding_model
 
-# The whole draw vocabulary; mirrored by migration 449's CHECK on tag_candidates.draw.
+# The whole draw vocabulary; mirrored by migration 450's CHECK on tag_candidates.draw.
 DRAWS = ("centroid_head", "centroid_mid", "random")
 
 # head: measured precision@100 from a 30k pool is 72-100 percent (8-33x base rate),

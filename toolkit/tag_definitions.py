@@ -437,7 +437,7 @@ def list_positive_images(
     and its contents while writing the definition.
 
     Deliberately NOT tag_annotations.list_images_for_tag: that one is driven by
-    the tag's REVIEW QUEUE (tag_candidates, migration 449) — a work list, not
+    the tag's REVIEW QUEUE (tag_candidates, migration 450) — a work list, not
     "every positive" — and its rows carry no label semantics at all. This page is
     about what the tag contains, so it reads image_tag_labels directly."""
     limit = min(max(1, limit), POSITIVE_IMAGE_LIST_MAX)

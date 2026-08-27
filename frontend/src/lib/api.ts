@@ -775,7 +775,7 @@ export interface NewDedupTag {
   excluded_count: number;
   pending_count: number;
   dismissed_count: number;
-  /* This tag's own review queue (migration 449) — images CLIP retrieval drew
+  /* This tag's own review queue (migration 450) — images CLIP retrieval drew
    * for somebody to LOOK at, and how many of them are still undecided. Never a
    * label: being a candidate says nothing about whether the tag applies, and an
    * image nobody has reviewed is never trained as a negative. */
@@ -1030,7 +1030,7 @@ export const listNewDedupPositiveTagsForImages = (
     jwt: true,
   });
 
-/* Which band of a tag's ranked pool drew a candidate (migration 449).
+/* Which band of a tag's ranked pool drew a candidate (migration 450).
  * centroid_head = the nearest neighbours to the tag's centroid; centroid_mid =
  * a random sample from just below the head, where the confusion clusters live;
  * random = an unranked sample of the whole pool. A pure top-N would produce a
@@ -1131,7 +1131,7 @@ export interface NewDedupTagImage {
   category_main: string | null;
   pool_rank: number | null;
 }
-/* Tag-centric browse: this tag's candidate queue (migration 449) plus every
+/* Tag-centric browse: this tag's candidate queue (migration 450) plus every
  * image already decided for the tag, each with its state — reaches images the
  * model never proposed this tag for, and backs "kitchen = excluded" filtering.
  * state='untouched' is the undecided part of the queue, which is the work

@@ -360,7 +360,7 @@ def test_clear_state_reverts_a_cell_to_untouched(conn: _FakeConn) -> None:
 
 
 def test_list_images_for_tag_lists_this_tags_candidate_queue(conn: _FakeConn) -> None:
-    """Driven FROM tag_candidates (migration 449), not from the annotations — an
+    """Driven FROM tag_candidates (migration 450), not from the annotations — an
     image the secondary CLIP never proposed this tag for is still reachable, and
     the draw provenance rides along."""
     tag = ta.add_tag(conn, label="a")

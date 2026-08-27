@@ -1,4 +1,4 @@
-"""Top up per-tag candidate queues by CLIP centroid retrieval (migration 449).
+"""Top up per-tag candidate queues by CLIP centroid retrieval (migration 450).
 
 For each requested tag: skip it when its OPEN queue already reaches --target,
 skip it when it has fewer than MIN_VERIFIED_POSITIVES human-verified positives

@@ -414,7 +414,7 @@ def delete_annotation(
     return {"data": tag_annotations.clear_state(conn, image_id=image_id, tag_id=tag_id)}
 
 
-# --- candidate retrieval (migration 449) ------------------------------------
+# --- candidate retrieval (migration 450) ------------------------------------
 
 
 @router.get("/tags/{tag_id}/candidates")

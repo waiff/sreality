@@ -11,7 +11,7 @@ Two concerns:
   trains as negative (operator ruling 2026-08-27, superseding migration 442's
   pool-scoped default-negative): an image never reviewed for a tag must stay
   distinguishable from one reviewed and judged not-that-tag. Membership of the
-  `tag_candidates` review queue (migration 449) confers no label of any kind.
+  `tag_candidates` review queue (migration 450) confers no label of any kind.
 * Provenance (migration 446) — every decision also records WHO decided it
   (`source`), under WHICH written definition (`definition_id`, migration 445),
   when a human last checked it (`verified_at`) and, on an excluded cell, WHY
@@ -404,7 +404,7 @@ def clear_state(conn: psycopg.Connection, *, image_id: int, tag_id: int) -> dict
     return {"image_id": image_id, "tag_id": tag_id, "deleted": deleted}
 
 
-# The browse is TAG-SCOPED now: a tag's own candidate queue (migration 449),
+# The browse is TAG-SCOPED now: a tag's own candidate queue (migration 450),
 # not one global pool every tag shared. The second UNION arm is not optional —
 # without it, "show me every image where kitchen = positive" would return almost
 # nothing, because the 1,440 legacy positives were never drawn as candidates and
@@ -505,7 +505,7 @@ def list_positive_tags_for_images(
 def list_images_for_tag(
     conn: psycopg.Connection, *, tag_id: int, state: str | None = None, limit: int = 100,
 ) -> list[dict[str, Any]]:
-    """Tag-centric browse: this tag's candidate queue (migration 449) plus
+    """Tag-centric browse: this tag's candidate queue (migration 450) plus
     everything already decided for it, each row carrying its state for this one
     tag (state=None in the response means untouched).
 
@@ -664,7 +664,7 @@ def tag_overview(conn: psycopg.Connection) -> dict[str, Any]:
     rows; `backfill_count` is what makes that inventory legible. Narrowing them
     belongs to the separate, gated deletion PR.
 
-    `sample_size` is GONE, not repurposed (migration 449): it meant "images in the
+    `sample_size` is GONE, not repurposed (migration 450): it meant "images in the
     one pool every tag shared", and candidates are per tag. `candidate_image_count`
     is distinct images queued for at least one tag — a different quantity with a
     different denominator — and the per-tag `candidate_count` /

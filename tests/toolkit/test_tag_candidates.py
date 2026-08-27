@@ -1,4 +1,4 @@
-"""Candidate retrieval (migration 449) — the selection POLICY as pure functions,
+"""Candidate retrieval (migration 450) — the selection POLICY as pure functions,
 plus a local fake conn for the orchestration around it.
 
 WHAT THIS FILE CAN AND CANNOT PROVE. `select_candidates`, `allocate_counts` and
@@ -163,7 +163,7 @@ def test_allocate_counts_of_nothing_is_all_zeros() -> None:
 
 
 def test_the_band_mix_covers_exactly_the_draw_vocabulary() -> None:
-    # The DB CHECK mirrors DRAWS (migration 449); a band with no quota could never
+    # The DB CHECK mirrors DRAWS (migration 450); a band with no quota could never
     # be drawn, and a quota with no CHECK value would fail at INSERT time.
     assert set(tc.BAND_MIX) == set(tc.DRAWS)
     assert sum(tc.BAND_MIX.values()) == pytest.approx(1.0)

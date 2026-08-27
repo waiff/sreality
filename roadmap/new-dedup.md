@@ -109,7 +109,7 @@ W1 (shared prerequisites + labeling program):
       machine rows can bury it, and NULL (never 0) when nothing is decided.
       Above `AMBIGUITY_RATE_THRESHOLD` (0.15, with a 20-decision floor) the tag's DEFINITION is the
       problem, not the labeling.
-- [x] Candidate retrieval + the per-tag review queue (migration 449, `tag_candidates`) —
+- [x] Candidate retrieval + the per-tag review queue (migration 450, `tag_candidates`) —
       the review universe stops being `dedup_sim.labeling_sample` (1,200 untargeted images,
       one pool shared by all 51 tags, 943 of them never labeled) and becomes a PER-TAG queue
       filled by CLIP centroid retrieval: rare tags are a fraction of a percent of the corpus,
@@ -126,7 +126,7 @@ W1 (shared prerequisites + labeling program):
       Hamming-6 near-dup drop and a 2-per-property cap, so a head cannot look like it has 200
       examples when it has 40. **Queue membership carries no training semantics** — no state
       column, no reviewed flag, nothing to misread: absence is not a negative, which
-      overturns migration 442's ledger decision (449 restates it as a fresh table comment).
+      overturns migration 442's ledger decision (450 restates it as a fresh table comment).
       A tag under 15 human-verified positives is told so (`status='insufficient_positives'`,
       zero rows) rather than handed a garbage pool. Every band and category bucket also
       reports its YIELD (`positive` / `negative`), so the honesty rail is something the
