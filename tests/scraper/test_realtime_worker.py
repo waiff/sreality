@@ -73,7 +73,7 @@ def test_lane_loop_runs_pass_and_stops_cleanly():
             stop.set()
 
         await rw._lane_loop(
-            "t", stop, lambda: 300, run_pass, default_interval=300)
+            "t", stop, lambda: 300, run_pass, rw._new_state(), default_interval=300)
         return calls
 
     assert asyncio.run(scenario()) == [1]
@@ -88,7 +88,7 @@ def test_lane_loop_interval_zero_idles_without_pass():
             calls.append(1)
 
         task = asyncio.create_task(rw._lane_loop(
-            "t", stop, lambda: 0, run_pass,
+            "t", stop, lambda: 0, run_pass, rw._new_state(),
             default_interval=300, idle_seconds=0.01))
         await asyncio.sleep(0.05)
         stop.set()
@@ -110,7 +110,7 @@ def test_lane_loop_pass_exception_does_not_kill_the_lane():
             stop.set()
 
         await rw._lane_loop(
-            "t", stop, lambda: 0.01, run_pass, default_interval=0.01)
+            "t", stop, lambda: 0.01, run_pass, rw._new_state(), default_interval=0.01)
         return calls
 
     assert len(asyncio.run(scenario())) == 2
@@ -129,7 +129,7 @@ def test_lane_loop_falls_back_when_interval_read_fails():
             stop.set()
 
         await rw._lane_loop(
-            "t", stop, read_interval, run_pass, default_interval=300)
+            "t", stop, read_interval, run_pass, rw._new_state(), default_interval=300)
         return calls
 
     assert asyncio.run(scenario()) == [1]
@@ -755,3 +755,74 @@ def test_estimation_sync_claims_executes_and_clears_payload(monkeypatch):
     # payload cleared to NULL once terminal
     assert any("job_payload = null" in sql.lower() for sql, _ in conn.executed)
     assert conn.closed
+
+
+# --- lane observability: alive is not the same as working -------------------
+#
+# The realtime worker beat every 30s for nine hours while its drain lane
+# completed ONE pass and its images lane completed 486. Nothing could tell
+# whether that lane was blocked, slow, or simply never scheduled, because a pass
+# was recorded only on COMPLETION — so a wedged lane and an idle lane published
+# byte-identical state.
+
+
+def test_pass_start_is_recorded_so_an_in_flight_pass_is_visible():
+    state = rw._new_state()
+    rw._record_pass_start(state, "drain")
+    assert state["lanes"]["drain"]["started_at"] is not None
+    # ...and the heartbeat resolves it to an elapsed number, because a value only
+    # derivable by arithmetic over an ISO string is a value nothing alarms on.
+    snap = rw._lane_snapshot(state["lanes"])
+    assert snap["drain"]["in_flight_s"] >= 0
+
+
+def test_completing_a_pass_clears_in_flight_and_records_duration():
+    state = rw._new_state()
+    rw._record_pass_start(state, "drain")
+    rw._record_pass(state, "drain", {"new": 3})
+    lane = state["lanes"]["drain"]
+    assert lane["started_at"] is None
+    assert lane["passes"] == 1
+    assert lane["last_duration_s"] is not None
+    assert rw._lane_snapshot(state["lanes"])["drain"]["in_flight_s"] is None
+
+
+def test_a_raised_pass_clears_in_flight_rather_than_looking_hung():
+    """A crash-looping lane must not be mistaken for a wedged one — they need
+    different fixes, and both were previously invisible."""
+    state = rw._new_state()
+    rw._record_pass_start(state, "drain")
+    rw._record_pass_failed(state, "drain", 1.5)
+    lane = state["lanes"]["drain"]
+    assert lane["started_at"] is None
+    assert lane["failed_passes"] == 1
+    assert lane["last_failure_at"] is not None
+
+
+def test_a_hung_pass_is_abandoned_and_the_lane_keeps_going(monkeypatch):
+    """The containment. Before this, one unbounded await froze its lane until the
+    next redeploy; the lane must survive and run its NEXT pass."""
+    monkeypatch.setattr(rw, "LANE_PASS_TIMEOUT_SECONDS", 0.02)
+    state = rw._new_state()
+    calls: list[str] = []
+
+    async def scenario():
+        stop = asyncio.Event()
+
+        async def run_pass():
+            calls.append("start")
+            if len(calls) == 1:
+                await asyncio.sleep(5)  # the wedge
+            else:
+                rw._record_pass(state, "drain", {})  # a real pass ends this way
+                stop.set()
+
+        await rw._lane_loop(
+            "drain", stop, lambda: 0.01, run_pass, state, default_interval=0.01)
+
+    asyncio.run(scenario())
+    assert len(calls) >= 2, "the lane died on the hung pass instead of continuing"
+    lane = state["lanes"]["drain"]
+    assert lane["failed_passes"] >= 1, "the abandoned pass was not counted"
+    assert lane["passes"] >= 1, "the lane never completed a pass after the wedge"
+    assert lane["started_at"] is None

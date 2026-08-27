@@ -18,6 +18,7 @@ from scripts.verify_pipeline import (
     _SAFE_IDENT,
     check_acquisition_lag,
     check_migration_drift,
+    check_worker_lane_stall,
     check_walk_coverage,
     _status_for_cron,
     _status_for_burn,
@@ -1492,3 +1493,66 @@ def test_migration_drift_probes_only_safe_identifiers() -> None:
     check_migration_drift(conn, T)
     for _kind, ident in conn.probed:
         assert _SAFE_IDENT.match(ident), ident
+
+
+# --- worker_lane_stall: a live heartbeat with a wedged lane -----------------
+
+
+class _LaneConn:
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self._rows = rows
+
+    def cursor(self) -> "_LaneConn":
+        return self
+
+    def __enter__(self) -> "_LaneConn":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        return None
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return list(self._rows)
+
+
+def _lane(name, in_flight, passes=1, failed=0, last_dur=None, uptime=600.0):
+    return ("realtime-worker", name, in_flight, passes, failed, last_dur, uptime)
+
+
+def test_worker_lane_stall_ok_when_lanes_are_idle_or_briefly_busy() -> None:
+    out = check_worker_lane_stall(
+        _LaneConn([_lane("images", None, passes=486), _lane("drain", 42.0)]), T)
+    assert out["status"] == "ok"
+
+
+def test_worker_lane_stall_fails_on_the_observed_wedge() -> None:
+    """The live signature: heartbeat healthy, images lane at 486 passes, drain
+    lane stuck inside a single pass for hours. worker_liveness reads this as
+    perfectly fine, because the worker IS alive."""
+    out = check_worker_lane_stall(
+        _LaneConn([_lane("images", None, passes=486), _lane("drain", 9 * 3600.0, passes=1)]), T)
+    assert out["status"] == "fail"
+    assert any("drain" in o for o in out["details"]["offenders"])
+    assert not any("images" in o for o in out["details"]["offenders"])
+
+
+def test_worker_lane_stall_warns_before_it_fails() -> None:
+    out = check_worker_lane_stall(_LaneConn([_lane("drain", 1500.0)]), T)
+    assert out["status"] == "warn"
+
+
+def test_worker_lane_stall_tolerates_a_long_but_legitimate_drain_pass() -> None:
+    """Eight portals at up to DRAIN_MAX_SECONDS each is ~16 min of honest work."""
+    out = check_worker_lane_stall(_LaneConn([_lane("drain", 900.0)]), T)
+    assert out["status"] == "ok"
+
+
+def test_worker_lane_stall_does_not_double_alarm_a_dead_worker() -> None:
+    """No heartbeat at all is worker_liveness's job. Claiming ok would be a lie;
+    claiming fail would ring two bells for one fault."""
+    out = check_worker_lane_stall(_LaneConn([]), T)
+    assert out["status"] == "warn"
+    assert "worker_liveness" in out["message"]
