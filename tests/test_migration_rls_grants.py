@@ -319,6 +319,9 @@ _ADMIN_ONLY_RELATIONS = frozenset({
     "listing_detail_queue", "listing_fetch_failures", "detail_queue_completions",
     "llm_calls", "parsed_url_cache", "pipeline_check_results",
     "image_border_cases", "tag_taxonomy", "image_tag_labels",
+    # image_tag_label_events (migration 446) is the append-only decision history
+    # behind image_tag_labels — same backend-only posture, no `_public` view.
+    "image_tag_label_events",
     "workflow_failures", "workflow_run_health",
     "scrape_runs", "worker_heartbeats",
     "health_summary_mv", "portal_health_mv", "scraper_health_checks_mv",

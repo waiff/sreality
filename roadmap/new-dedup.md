@@ -75,7 +75,7 @@ W1 (shared prerequisites + labeling program):
       Follow-up same day: every tile shows its image's already-assigned tags in one batched call
       (`list_positive_tags_for_images`), and "Modify labels" gained two operator flags — `priority`
       (pins + reddens a tag needing attention) and `ready_for_training` (migration 443).
-- [x] Tag definitions store + operator workbench (migration 445, `tag_definitions`) — each tag now
+- [x] Tag definitions store + operator workbench (migration 446, `tag_definitions`) — each tag now
       gets a WRITTEN definition (means / counts / does_not_count / confusable_with + the visual
       tell / leave_out_when / example images), versioned supersede-never-overwrite with no drafts:
       one Save = one new active version, the previous one flipped to `superseded` in the same
@@ -91,6 +91,24 @@ W1 (shared prerequisites + labeling program):
       definitions is now the operator-side blocker**: labeling at scale and per-tag heads both wait
       on them, and the definitions are also the diagnostic that settles the taxonomy — two tags
       whose does_not_count lines can't be written apart are one tag.
+- [x] Annotation provenance + append-only history (migration 446) — every `image_tag_labels`
+      cell now records WHO decided it (`source`: human / human_confirmed / machine /
+      backfill_442), under WHICH `tag_definitions` version (`definition_id`, resolved at write
+      time, never a parameter), when a human last checked it (`verified_at`, derived) and — on an
+      excluded cell only, CHECK-enforced — WHY (`excluded_reason`: ambiguous vs pruned). This makes
+      the **72,000 rows migration 442 manufactured from a one-hot assumption** (98% of the table)
+      precisely identifiable; **nothing is deleted here** — the removal is a separate, gated,
+      backed-up PR keyed on `source = 'backfill_442'`. History lands in `image_tag_label_events`,
+      written by a TRIGGER rather than by any of the four (soon more) write paths, because a log
+      every future writer must remember to append to is a log with holes; clearing a cell back to
+      untouched is itself a recorded event. "Machine proposes, human disposes" is now a SQL rail
+      (the upsert's `DO UPDATE … WHERE`), not a convention. `tag_overview` gains the provenance
+      inventory and a per-tag **ambiguity rate** — ambiguous exclusions over decisions, with pruned
+      rows outside numerator AND denominator so pruning can't dilute the signal, both halves scoped
+      to what a HUMAN decided so neither the 72,000 backfill rows nor a future flood of unreviewed
+      machine rows can bury it, and NULL (never 0) when nothing is decided.
+      Above `AMBIGUITY_RATE_THRESHOLD` (0.15, with a 20-decision floor) the tag's DEFINITION is the
+      problem, not the labeling.
 - [x] RunPod client (`scripts/runpod_client.py`, #972/#975/#977) — launch/poll/terminate an
       on-demand pod, live cheapest-GPU catalog lookup, capacity fallback. Guaranteed teardown
       verified across 4 real live dispatches (3 zero-cost, 1 real ~1.7¢ pod rental).

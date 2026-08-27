@@ -99,7 +99,8 @@ def grow_sample(
 # time). NULL means untouched, same convention as list_images_for_tag.
 _LIST_PROPOSALS_SQL = """
     SELECT lp.image_id, lp.model, lp.label, lp.confidence, lp.proposed_at, lp.status,
-           lp.reviewed_at, lp.reviewed_by, itl.state AS current_state
+           lp.reviewed_at, lp.reviewed_by, itl.state AS current_state,
+           itl.excluded_reason AS current_excluded_reason
     FROM dedup_sim.label_proposals lp
     LEFT JOIN tag_taxonomy tt ON tt.label = lp.label
     LEFT JOIN image_tag_labels itl ON itl.image_id = lp.image_id AND itl.tag_id = tt.id
@@ -145,7 +146,7 @@ def list_proposals(
         {
             "image_id": r[0], "model": r[1], "label": r[2], "confidence": r[3],
             "proposed_at": r[4], "status": r[5], "reviewed_at": r[6], "reviewed_by": r[7],
-            "current_state": r[8],
+            "current_state": r[8], "current_excluded_reason": r[9],
         }
         for r in rows
     ]
@@ -158,6 +159,7 @@ def _proposal_status_for(state: str) -> str:
 def set_proposal_state(
     conn: psycopg.Connection, *, image_id: int, model: str, state: str,
     reviewed_by: str = "operator", label: str | None = None,
+    excluded_reason: str | None = None,
 ) -> dict[str, Any]:
     """Record the operator's tri-state verdict on one proposal: mark it
     confirmed (positive) or dismissed (negative/excluded) for bookkeeping,
@@ -175,7 +177,11 @@ def set_proposal_state(
     A correction typed freehand self-registers in tag_taxonomy in the same
     transaction (tag_annotations.get_or_create_tag_id) — without that, an
     off-taxonomy label would be invisible to the coverage chart and the tag
-    picker, both of which read tag_taxonomy, not image_tag_labels."""
+    picker, both of which read tag_taxonomy, not image_tag_labels.
+
+    `excluded_reason` ('ambiguous' | 'pruned') only means something with
+    state='excluded'; the toolkit drops it otherwise (tag_annotations
+    normalises it, so the DB CHECK can never be the thing that fires)."""
     if state not in tag_annotations.STATES:
         raise ValueError(f"state must be one of {tag_annotations.STATES}")
     corrected = tag_annotations.clean_label(label) if label is not None and label.strip() else None
@@ -194,18 +200,39 @@ def set_proposal_state(
         proposed = row[0]
         final = corrected or proposed
         tag_id = tag_annotations.get_or_create_tag_id(conn, label=final, created_by=reviewed_by)
+        corrected_here = final != proposed
+        # human_confirmed means the machine proposed it and a person AFFIRMED it —
+        # stronger evidence than either alone, and the substrate for measuring
+        # per-tag machine autonomy. Affirmation needs both halves, so this keys on
+        # the SAME predicate that marks the proposal confirmed: the two rows this
+        # transaction writes can then never contradict each other. A negative or
+        # excluded verdict is the operator REJECTING the proposal, and a correction
+        # lands on a tag the machine never proposed — both are plain human
+        # decisions crediting no model. Recording a rejection as human_confirmed
+        # would drive measured agreement to 100% however wrong the encoder is,
+        # which is the one number this provenance exists to make measurable. The
+        # disagreement survives in image_tag_label_events, not in a fifth source.
+        affirmed = proposal_status == "confirmed" and not corrected_here
         tag_annotations.set_state(
-            conn, image_id=image_id, tag_id=tag_id, state=state, created_by=reviewed_by,
+            conn, image_id=image_id, tag_id=tag_id, state=state,
+            created_by=reviewed_by,
+            source=(
+                tag_annotations.SOURCE_HUMAN_CONFIRMED if affirmed
+                else tag_annotations.SOURCE_HUMAN
+            ),
+            model=model if affirmed else None,
+            excluded_reason=excluded_reason,
         )
     return {
         "image_id": image_id, "model": model, "label": final, "state": state,
-        "status": proposal_status, "proposed_label": proposed, "corrected": final != proposed,
+        "status": proposal_status, "proposed_label": proposed, "corrected": corrected_here,
+        "excluded_reason": excluded_reason if state == "excluded" else None,
     }
 
 
 def bulk_set_proposal_state(
     conn: psycopg.Connection, *, model: str, image_ids: list[int], state: str,
-    reviewed_by: str = "operator",
+    reviewed_by: str = "operator", excluded_reason: str | None = None,
 ) -> dict[str, Any]:
     """Batch version of set_proposal_state for one model at once — the
     review queue's "looks right, take the whole batch" action. Each row
@@ -220,6 +247,11 @@ def bulk_set_proposal_state(
     if len(ids) > BULK_PROPOSAL_MAX:
         raise ValueError(f"at most {BULK_PROPOSAL_MAX} proposals per batch")
     proposal_status = _proposal_status_for(state)
+    # The batch path never corrects a label, so agreement turns entirely on the
+    # verdict: "take the whole batch" is an affirmation, "Set selected: negative"
+    # / "excluded" is a batch REJECTION and must not be stamped as the machine
+    # being right 200 times. Same predicate as the single-row path.
+    affirmed = proposal_status == "confirmed"
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "UPDATE dedup_sim.label_proposals SET status = %s, "
@@ -233,8 +265,15 @@ def bulk_set_proposal_state(
             tag_id = tag_annotations.get_or_create_tag_id(conn, label=label, created_by=reviewed_by)
             tag_annotations.set_state(
                 conn, image_id=image_id, tag_id=tag_id, state=state, created_by=reviewed_by,
+                source=(
+                    tag_annotations.SOURCE_HUMAN_CONFIRMED if affirmed
+                    else tag_annotations.SOURCE_HUMAN
+                ),
+                model=model if affirmed else None,
+                excluded_reason=excluded_reason,
             )
     return {
         "updated": len(rows), "model": model, "state": state,
+        "excluded_reason": excluded_reason if state == "excluded" else None,
         "image_ids": [r[0] for r in rows],
     }

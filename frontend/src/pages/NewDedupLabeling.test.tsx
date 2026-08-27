@@ -24,6 +24,7 @@
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import NewDedupLabeling from './NewDedupLabeling';
@@ -35,6 +36,7 @@ import type {
   NewDedupSetting,
   NewDedupTag,
   NewDedupTagImage,
+  TagExcludedReason,
   TagState,
 } from '@/lib/api';
 import * as api from '@/lib/api';
@@ -108,17 +110,30 @@ function tag(over: Partial<NewDedupTag> = {}): NewDedupTag {
     positive_count: 12, gate_count: 12, border_case_count: 0,
     negative_count: 8, excluded_count: 5,
     pending_count: 3, dismissed_count: 1,
+    /* Provenance (migration 446). The default fixture is an all-human tag with
+     * a healthy ambiguity rate — every test that cares about the signal states
+     * its own numbers. */
+    human_count: 25, machine_count: 0, backfill_count: 0,
+    ambiguous_count: 0, ambiguous_decided_count: 0, pruned_count: 0, decided_count: 25,
+    ambiguity_rate: 0, ambiguity_alert: false,
     ...over,
   };
 }
 
-const OVERVIEW: NewDedupLabelingOverview = { sample_size: 42, tags: [tag()] };
+function overview(over: Partial<NewDedupLabelingOverview> = {}): NewDedupLabelingOverview {
+  // Threshold and floor come from the SERVER, never from a literal in the SPA —
+  // so every fixture carries them and the page renders whatever it is told.
+  return { sample_size: 42, ambiguity_threshold: 0.15, ambiguity_min_decisions: 20, tags: [tag()], ...over };
+}
+
+const OVERVIEW: NewDedupLabelingOverview = overview();
 
 const PROPOSALS: NewDedupLabelProposal[] = [
   {
     image_id: 101, model: MODEL, label: 'interier - kuchyne',
     confidence: 0.87, proposed_at: '2026-08-06T00:00:00Z', status: 'pending',
     reviewed_at: null, reviewed_by: null, current_state: null,
+    current_excluded_reason: null,
   },
 ];
 
@@ -126,6 +141,31 @@ function stateResult(over: Partial<NewDedupProposalStateResult> = {}): NewDedupP
   return {
     image_id: 101, model: MODEL, label: 'interier - kuchyne', state: 'positive',
     status: 'confirmed', proposed_label: 'interier - kuchyne', corrected: false,
+    excluded_reason: null,
+    ...over,
+  };
+}
+
+/* The annotation endpoints echo the whole provenance envelope back; the page
+ * patches its caches from it rather than from what it sent. */
+function annotationResult(over: Partial<{
+  image_id: number; tag_id: number; state: TagState;
+  excluded_reason: TagExcludedReason | null; updated_at: string;
+}> = {}) {
+  return {
+    data: {
+      image_id: 101, tag_id: 1, state: 'positive' as TagState, source: 'human' as const,
+      excluded_reason: null as TagExcludedReason | null, definition_id: 7,
+      verified_at: '2026-08-27T00:00:00Z', updated_at: 't', applied: true,
+      ...over,
+    },
+  };
+}
+
+function imageTag(over: Partial<NewDedupImageTag> = {}): NewDedupImageTag {
+  return {
+    id: 1, label: 'interier - kuchyne', family: 'interier', state: 'untouched',
+    updated_at: null, source: null, excluded_reason: null,
     ...over,
   };
 }
@@ -139,7 +179,7 @@ const IMAGE: ImagePublic = {
 function tagImage(over: Partial<NewDedupTagImage> = {}): NewDedupTagImage {
   return {
     image_id: 101, storage_path: 'img/555/1.jpg', state: 'untouched',
-    updated_at: null, created_by: null,
+    updated_at: null, created_by: null, source: null, excluded_reason: null,
     ...over,
   };
 }
@@ -153,6 +193,12 @@ const stateBtn = (group: HTMLElement, state: TagState) =>
   within(group).getAllByRole('button')[STATE_ORDER.indexOf(state)];
 const setStateOn = (index: number, state: TagState) =>
   fireEvent.click(stateBtn(stateGroups()[index], state));
+/* The exclusion-reason chip lives BESIDE the "Tag state" group, not inside it:
+ * the group means "which of the three states", the chip means "why excluded".
+ * Keeping them separate is what lets every state assertion above keep indexing
+ * three buttons. */
+const reasonChip = (index = 0) =>
+  screen.queryAllByRole('button', { name: /^Exclusion reason:/ })[index] ?? null;
 /* Which tile the grid's keyboard cursor is on: the focused tile is the one
  * whose tri-state buttons carry the focus ring. */
 const focusedTile = () =>
@@ -162,10 +208,14 @@ function renderPage() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+  // A Router, because the over-threshold ambiguity chip is a <Link> into the
+  // definition workbench — the one-click route out of a broken tag.
   return render(
-    <QueryClientProvider client={qc}>
-      <NewDedupLabeling />
-    </QueryClientProvider>,
+    <MemoryRouter initialEntries={['/new-dedup/labeling']}>
+      <QueryClientProvider client={qc}>
+        <NewDedupLabeling />
+      </QueryClientProvider>
+    </MemoryRouter>,
   );
 }
 
@@ -199,8 +249,7 @@ describe('<NewDedupLabeling>', () => {
 
   it('renders the taxonomy bar chart sorted by gate count, most first', async () => {
     vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
-      data: {
-        sample_size: 42,
+      data: overview({
         tags: [
           tag({ id: 1, label: 'interier - kuchyne', positive_count: 12, gate_count: 12 }),
           tag({ id: 2, label: 'exterier - fasada', positive_count: 54, gate_count: 54,
@@ -208,7 +257,7 @@ describe('<NewDedupLabeling>', () => {
           tag({ id: 3, label: 'garaz', positive_count: 4, gate_count: 4,
             pending_count: 0, negative_count: 0, excluded_count: 0 }),
         ],
-      },
+      }),
     });
     renderPage();
     const bars = await screen.findAllByRole(
@@ -234,14 +283,13 @@ describe('<NewDedupLabeling>', () => {
 
   it('shows a priority tag\'s bar and label in red, unless it is the active filter', async () => {
     vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
-      data: {
-        sample_size: 42,
+      data: overview({
         tags: [
           tag({ id: 1, label: 'interier - kuchyne', priority: true }),
           tag({ id: 2, label: 'exterier - fasada', priority: false,
             pending_count: 0, negative_count: 0, excluded_count: 0 }),
         ],
-      },
+      }),
     });
     renderPage();
     const priorityBtn = await screen.findByRole('button', { name: 'interier - kuchyne' });
@@ -260,10 +308,9 @@ describe('<NewDedupLabeling>', () => {
 
   it('measures Gate 1 on the unparked images, not the whole positive set', async () => {
     vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
-      data: {
-        sample_size: 42,
+      data: overview({
         tags: [tag({ positive_count: 150, gate_count: 110, border_case_count: 40 })],
-      },
+      }),
     });
     renderPage();
     // 150 images are positive, but 40 are parked as border cases: the tag is at
@@ -276,15 +323,14 @@ describe('<NewDedupLabeling>', () => {
 
   it('narrows the coverage ceiling by the gate count, not the raw positive total', async () => {
     vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
-      data: {
-        sample_size: 42,
+      data: overview({
         tags: [
           tag({ id: 1, label: 'mostly parked',
             positive_count: 200, gate_count: 20, border_case_count: 180 }),
           tag({ id: 2, label: 'genuinely covered',
             positive_count: 200, gate_count: 200, border_case_count: 0 }),
         ],
-      },
+      }),
     });
     renderPage();
     await screen.findByRole('button', { name: 'genuinely covered' });
@@ -314,6 +360,104 @@ describe('<NewDedupLabeling>', () => {
 
     fireEvent.click(screen.getByRole('button', { expanded: false }));
     expect(await screen.findByRole('button', { name: 'interier - kuchyne' })).toBeInTheDocument();
+  });
+
+  // --- provenance + the ambiguity signal (migration 446) -------------------
+
+  it('breaks a tag\'s set down by who decided it, and calls out the 442 backfill', async () => {
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: overview({
+        tags: [tag({ human_count: 40, machine_count: 12, backfill_count: 1194 })],
+      }),
+    });
+    renderPage();
+    // positive/negative/excluded above still INCLUDE the manufactured rows —
+    // this is the chip that makes that legible rather than silently wrong.
+    expect(await screen.findByText('· 40 human')).toBeInTheDocument();
+    expect(screen.getByText('· 12 machine')).toBeInTheDocument();
+    const backfill = screen.getByText('· 1194 backfill');
+    // Brick: the same alarm colour "parked" uses on this strip for a number
+    // that is not what it looks like.
+    expect(backfill).toHaveClass('text-[var(--color-brick)]');
+    expect(backfill.getAttribute('title')).toMatch(/not a decision anybody made/);
+  });
+
+  it('hides the provenance parts that are zero, keeping an all-human tag quiet', async () => {
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: overview({ tags: [tag({ human_count: 40, machine_count: 0, backfill_count: 0 })] }),
+    });
+    renderPage();
+    expect(await screen.findByText('· 40 human')).toBeInTheDocument();
+    expect(screen.queryByText(/machine$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/backfill$/)).not.toBeInTheDocument();
+  });
+
+  it('reports an under-threshold ambiguity rate as plain muted text, with no route out', async () => {
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: overview({ tags: [tag({ ambiguous_count: 4, ambiguous_decided_count: 4,
+        decided_count: 100, ambiguity_rate: 0.04, ambiguity_alert: false })] }),
+    });
+    renderPage();
+    const chip = await screen.findByText('· 4% ambiguous');
+    // Under threshold there is no affordance AT ALL — not a quieter link, no
+    // link. Form, not just colour, separates the two cases.
+    expect(chip.tagName).toBe('SPAN');
+    expect(screen.queryByRole('link', { name: /Fix the definition/ })).not.toBeInTheDocument();
+    expect(chip).toHaveClass('text-[var(--color-ink-4)]');
+  });
+
+  it('flags an over-threshold tag and makes its definition one click away', async () => {
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: overview({ tags: [tag({ id: 3, label: 'interier - kuchyne',
+        ambiguous_count: 22, ambiguous_decided_count: 22, decided_count: 100,
+        ambiguity_rate: 0.22, ambiguity_alert: true })] }),
+    });
+    renderPage();
+    const link = await screen.findByRole('link', { name: /Fix the definition for interier - kuchyne/ });
+    expect(link).toHaveTextContent('· 22% ambiguous →');
+    // Above the threshold the DEFINITION is the problem, not the labeling —
+    // and the workbench for that tag is one click, deep-linked by tag id.
+    expect(link).toHaveAttribute('href', '/new-dedup/labeling/taxonomy?tag=3');
+    expect(link).toHaveClass('text-[var(--color-brick)]');
+    expect(link.getAttribute('title')).toMatch(/22 of 100 human decisions/);
+    expect(link.getAttribute('title')).toMatch(/Pruned exclusions are not counted/);
+  });
+
+  it('never recomputes the alert in the SPA — the server\'s verdict wins', async () => {
+    // A rate way over the printed threshold, but the server did not raise the
+    // alert (too few decisions to call). The SPA renders what it is told; a
+    // second copy of the rule here is how thresholds drift apart.
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: overview({ tags: [tag({ ambiguous_count: 3, ambiguous_decided_count: 3,
+        decided_count: 5, ambiguity_rate: 0.6, ambiguity_alert: false })] }),
+    });
+    renderPage();
+    const chip = await screen.findByText('· 60% ambiguous');
+    expect(chip.tagName).toBe('SPAN');
+    expect(chip.getAttribute('title')).toMatch(/Too few decisions to call yet/);
+    expect(chip.getAttribute('title')).toMatch(/needs at least 20/);
+  });
+
+  it('shows no ambiguity chip for a tag nothing has been decided on', async () => {
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: overview({ tags: [tag({ decided_count: 0, ambiguity_rate: null,
+        ambiguity_alert: false })] }),
+    });
+    renderPage();
+    await screen.findByRole('button', { name: 'interier - kuchyne' });
+    // Not "0% ambiguous": a tag with no decisions is UNKNOWN, not healthy, and
+    // its empty bar right below already says so.
+    expect(screen.queryByText(/% ambiguous/)).not.toBeInTheDocument();
+  });
+
+  it('renders the threshold the server sent, never a second hardcoded copy', async () => {
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: overview({ ambiguity_threshold: 0.4, tags: [tag()] }),
+    });
+    renderPage();
+    expect(
+      await screen.findByText(/above 40%, go fix the tag's definition/i),
+    ).toBeInTheDocument();
   });
 
   // --- taxonomy management -------------------------------------------------
@@ -370,13 +514,12 @@ describe('<NewDedupLabeling>', () => {
   });
 
   it('pins a priority tag to the top of the manage modal, marked in red', async () => {
-    const TWO: NewDedupLabelingOverview = {
-      sample_size: 42,
+    const TWO: NewDedupLabelingOverview = overview({
       tags: [
         tag({ id: 1, label: 'aaa - first alphabetically' }),
         tag({ id: 2, label: 'zzz - last alphabetically', priority: true }),
       ],
-    };
+    });
     vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({ data: TWO });
     renderPage();
     await screen.findByRole('button', { name: 'aaa - first alphabetically' });
@@ -409,7 +552,7 @@ describe('<NewDedupLabeling>', () => {
 
   it('clearing a flag sends an explicit false, not an omitted field', async () => {
     vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
-      data: { sample_size: 42, tags: [tag({ priority: true })] },
+      data: overview({ tags: [tag({ priority: true })] }),
     });
     vi.mocked(api.setNewDedupTagFlags).mockResolvedValue({ data: tag({ priority: false }) });
     renderPage();
@@ -424,14 +567,13 @@ describe('<NewDedupLabeling>', () => {
   });
 
   it('renaming an unrelated tag in the manage modal never hijacks the active filter', async () => {
-    const TWO: NewDedupLabelingOverview = {
-      sample_size: 42,
+    const TWO: NewDedupLabelingOverview = overview({
       tags: [
         tag(),
         tag({ id: 2, label: 'koupelna', family: null, positive_count: 0, gate_count: 0,
           negative_count: 0, excluded_count: 0, pending_count: 0, dismissed_count: 0 }),
       ],
-    };
+    });
     vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({ data: TWO });
     vi.mocked(api.renameNewDedupTag).mockResolvedValue({
       data: { ...TWO.tags[1], label: 'koupelna-v2' },
@@ -579,7 +721,7 @@ describe('<NewDedupLabeling>', () => {
       // An uncorrected decision sends NO label — the server then uses the
       // proposal's own stored label, so a rename landing between page load and
       // click can't be undone by echoing back a stale spelling.
-      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'positive', undefined),
+      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'positive', undefined, null),
     );
     // The decided tile leaves this tab — but by a local cache patch, not a
     // refetch. Refetching re-renders (and, on tied proposed_at values,
@@ -601,7 +743,7 @@ describe('<NewDedupLabeling>', () => {
     // the proposal's dismissed/confirmed bookkeeping would lose the one state
     // that means "drop this cell from training", not "this tag is wrong".
     await waitFor(() =>
-      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'excluded', undefined),
+      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'excluded', undefined, 'ambiguous'),
     );
   });
 
@@ -613,7 +755,7 @@ describe('<NewDedupLabeling>', () => {
     await screen.findAllByRole('group', { name: 'Tag state' });
     setStateOn(0, 'negative');
     await waitFor(() =>
-      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'negative', undefined),
+      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'negative', undefined, null),
     );
   });
 
@@ -632,7 +774,7 @@ describe('<NewDedupLabeling>', () => {
     setStateOn(0, 'positive');
     await waitFor(() =>
       expect(api.setNewDedupProposalState).toHaveBeenCalledWith(
-        101, MODEL, 'positive', 'interier - loznice',
+        101, MODEL, 'positive', 'interier - loznice', null,
       ),
     );
   });
@@ -677,6 +819,7 @@ describe('<NewDedupLabeling>', () => {
       data: {
         image_id: 101, model: MODEL, label: PROPOSALS[0].label, state: 'negative',
         status: 'dismissed', proposed_label: PROPOSALS[0].label, corrected: false,
+        excluded_reason: null,
       },
     });
     renderPage();
@@ -686,7 +829,7 @@ describe('<NewDedupLabeling>', () => {
     setStateOn(0, 'negative');
 
     await waitFor(() =>
-      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'negative', undefined),
+      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'negative', undefined, null),
     );
     // Stays on the Confirmed tab (only Pending drops a reviewed row) with its
     // new state reflected — a real overwrite, not a fake local change.
@@ -699,20 +842,25 @@ describe('<NewDedupLabeling>', () => {
 
   it('offers one batch button per state and sets the selection through the proposal endpoint', async () => {
     vi.mocked(api.bulkSetNewDedupProposalState).mockResolvedValue({
-      data: { updated: 1, model: MODEL, state: 'positive', image_ids: [101] },
+      data: { updated: 1, model: MODEL, state: 'positive', excluded_reason: null, image_ids: [101] },
     });
     renderPage();
     await screen.findByText('Select all');
+    // Four buttons, not three: "excluded" splits into its two REASONS, and both
+    // halves stay one click. Capturing why an image was excluded must not cost
+    // the batch path a second step.
     expect(screen.getByText('Set selected: positive')).toBeInTheDocument();
     expect(screen.getByText('Set selected: negative')).toBeInTheDocument();
-    expect(screen.getByText('Set selected: excluded')).toBeInTheDocument();
+    expect(screen.getByText('Set selected: excluded · ambiguous')).toBeInTheDocument();
+    expect(screen.getByText('Set selected: excluded · pruned')).toBeInTheDocument();
+    expect(screen.queryByText('Set selected: excluded')).not.toBeInTheDocument();
 
     const callsBefore = vi.mocked(api.listNewDedupProposals).mock.calls.length;
     fireEvent.click(screen.getByText('Select all'));
     fireEvent.click(screen.getByText('Set selected: positive'));
 
     await waitFor(() =>
-      expect(api.bulkSetNewDedupProposalState).toHaveBeenCalledWith(MODEL, [101], 'positive'),
+      expect(api.bulkSetNewDedupProposalState).toHaveBeenCalledWith(MODEL, [101], 'positive', null),
     );
     await waitFor(() => expect(screen.getByText('No pending proposals.')).toBeInTheDocument());
     expect(vi.mocked(api.listNewDedupProposals).mock.calls.length).toBe(callsBefore);
@@ -727,7 +875,7 @@ describe('<NewDedupLabeling>', () => {
       data: [PROPOSALS[0], { ...PROPOSALS[0], image_id: 102, label: 'exterier - fasada' }],
     });
     vi.mocked(api.bulkSetNewDedupProposalState).mockResolvedValue({
-      data: { updated: 1, model: MODEL, state: 'positive', image_ids: [102] },
+      data: { updated: 1, model: MODEL, state: 'positive', excluded_reason: null, image_ids: [102] },
     });
     renderPage();
     fireEvent.click(await screen.findByText('Select all'));
@@ -740,7 +888,7 @@ describe('<NewDedupLabeling>', () => {
     await waitFor(() => expect(screen.getByText('1 selected')).toBeInTheDocument());
     fireEvent.click(screen.getByText('Set selected: positive'));
     await waitFor(() =>
-      expect(api.bulkSetNewDedupProposalState).toHaveBeenCalledWith(MODEL, [102], 'positive'),
+      expect(api.bulkSetNewDedupProposalState).toHaveBeenCalledWith(MODEL, [102], 'positive', null),
     );
   });
 
@@ -749,7 +897,7 @@ describe('<NewDedupLabeling>', () => {
       data: [PROPOSALS[0], { ...PROPOSALS[0], image_id: 102, model: 'older-model' }],
     });
     vi.mocked(api.bulkSetNewDedupProposalState).mockResolvedValue({
-      data: { updated: 1, model: MODEL, state: 'negative', image_ids: [101] },
+      data: { updated: 1, model: MODEL, state: 'negative', excluded_reason: null, image_ids: [101] },
     });
     renderPage();
     fireEvent.click(await screen.findByText('Select all'));
@@ -758,8 +906,227 @@ describe('<NewDedupLabeling>', () => {
     expect(screen.getByText('1 selected')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Set selected: negative'));
     await waitFor(() =>
-      expect(api.bulkSetNewDedupProposalState).toHaveBeenCalledWith(MODEL, [101], 'negative'),
+      expect(api.bulkSetNewDedupProposalState).toHaveBeenCalledWith(MODEL, [101], 'negative', null),
     );
+  });
+
+  // --- exclusion reasons: ambiguous vs pruned (migration 446) --------------
+  //
+  // THE FAST PATH IS THE CONSTRAINT. "All of these are fine" must stay ONE
+  // action, and ⊘ must stay one click. So ⊘ alone always means AMBIGUOUS — the
+  // common case and the one the diagnostic cares about — and PRUNED gets its
+  // own visible one-click affordances (a second batch button, a chip on an
+  // already-excluded tile, the 4 key). Nothing anywhere gains a second step.
+
+  /* Into Sample mode on the default tag, with a chosen state filter — the mode
+   * where a cell's stored reason is visible without a proposal in the way. */
+  async function openSample(rows: NewDedupTagImage[], stateFilter?: string) {
+    vi.mocked(api.listNewDedupTagImages).mockResolvedValue({ data: rows });
+    const rendered = renderPage();
+    await screen.findByRole('button', { name: 'interier - kuchyne' });
+    fireEvent.click(screen.getByRole('button', { name: 'Sample' }));
+    fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'interier - kuchyne' } });
+    if (stateFilter) {
+      fireEvent.change(screen.getByLabelText('State'), { target: { value: stateFilter } });
+    }
+    await waitFor(() => expect(stateGroups()).toHaveLength(rows.length));
+    return rendered;
+  }
+
+  it('⊘ alone means ambiguous — one click, no prompt, no modifier', async () => {
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(
+      annotationResult({ state: 'excluded', excluded_reason: 'ambiguous' }),
+    );
+    await openSample([tagImage()]);
+
+    setStateOn(0, 'excluded');
+
+    await waitFor(() =>
+      expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(1, 101, 'excluded', 'ambiguous'),
+    );
+    // Nothing opened, nothing to confirm: the exclusion landed on the click.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('shows no reason chip until a cell is actually excluded', async () => {
+    // Cold path: nothing new on screen, no layout shift, no extra affordance to
+    // read past on a tile the operator is about to wave through.
+    await openSample([tagImage({ state: 'positive', source: 'human' })]);
+    expect(reasonChip()).toBeNull();
+  });
+
+  it('shows an excluded cell\'s reason on the tile, and toggles it in one click', async () => {
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(
+      annotationResult({ state: 'excluded', excluded_reason: 'pruned' }),
+    );
+    await openSample(
+      [tagImage({ state: 'excluded', excluded_reason: 'ambiguous', source: 'human' })],
+      'excluded',
+    );
+
+    // The reason is never a state you set and then cannot see.
+    const chip = reasonChip()!;
+    expect(chip).toHaveTextContent('ambiguous');
+    expect(chip.getAttribute('title')).toMatch(/ambiguity rate/);
+
+    fireEvent.click(chip);
+    await waitFor(() =>
+      expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(1, 101, 'excluded', 'pruned'),
+    );
+    // Patched in place from the response, never refetched.
+    await waitFor(() => expect(reasonChip()).toHaveTextContent('pruned'));
+    expect(vi.mocked(api.listNewDedupTagImages).mock.calls).toHaveLength(2); // the state re-filter only
+  });
+
+  it('reads a legacy excluded cell with no stored reason as ambiguous', async () => {
+    // The one pre-445 excluded row's reason is genuinely unknown. Ambiguous is
+    // what ⊘ means everywhere else on this page, so that is what it shows —
+    // and the operator can correct it in one click like any other.
+    await openSample([tagImage({ state: 'excluded', excluded_reason: null })], 'excluded');
+    expect(reasonChip()).toHaveTextContent('ambiguous');
+  });
+
+  it('clears the reason when an excluded cell is moved back to a decided state', async () => {
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(
+      annotationResult({ state: 'positive', excluded_reason: null }),
+    );
+    await openSample(
+      [tagImage({ state: 'excluded', excluded_reason: 'pruned', source: 'human' })],
+      'all',
+    );
+    expect(reasonChip()).toHaveTextContent('pruned');
+
+    setStateOn(0, 'positive');
+
+    await waitFor(() =>
+      expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(1, 101, 'positive', null),
+    );
+    // A stale reason chip on a positive cell would be a lie about a decision
+    // the cell no longer carries.
+    await waitFor(() => expect(reasonChip()).toBeNull());
+  });
+
+  it('batch-excludes a selection as ambiguous OR as pruned, each in one click', async () => {
+    vi.mocked(api.bulkSetNewDedupTagAnnotation).mockResolvedValue({
+      data: { updated: 2, tag_id: 1, state: 'excluded', excluded_reason: 'pruned',
+        image_ids: [101, 102] },
+    });
+    await openSample([tagImage(), tagImage({ image_id: 102 })]);
+
+    fireEvent.click(screen.getByText('Select all'));
+    fireEvent.click(screen.getByText('Set selected: excluded · pruned'));
+
+    // ONE click, not "excluded" then "which kind" — the batch bar exists to
+    // close out a screenful, and a follow-up question would tax exactly the
+    // path the operator uses most on a hard tag.
+    await waitFor(() =>
+      expect(api.bulkSetNewDedupTagAnnotation).toHaveBeenCalledWith(
+        1, [101, 102], 'excluded', 'pruned',
+      ),
+    );
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('keeps "all of these are fine" a single click, with a null reason', async () => {
+    vi.mocked(api.bulkSetNewDedupTagAnnotation).mockResolvedValue({
+      data: { updated: 2, tag_id: 1, state: 'positive', excluded_reason: null,
+        image_ids: [101, 102] },
+    });
+    await openSample([tagImage(), tagImage({ image_id: 102 })]);
+
+    fireEvent.click(screen.getByText('Select all'));
+    fireEvent.click(screen.getByText('Set selected: positive'));
+
+    await waitFor(() =>
+      expect(api.bulkSetNewDedupTagAnnotation).toHaveBeenCalledWith(1, [101, 102], 'positive', null),
+    );
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('sets excluded · pruned from the 4 key and advances, like every other digit', async () => {
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({
+      data: [PROPOSALS[0], { ...PROPOSALS[0], image_id: 102, label: 'exterier - fasada' }],
+    });
+    vi.mocked(api.setNewDedupProposalState).mockResolvedValue({
+      data: stateResult({ state: 'excluded', status: 'dismissed', excluded_reason: 'pruned' }),
+    });
+    const { container } = renderPage();
+    fireEvent.click(await screen.findByRole('tab', { name: 'All' }));
+    await waitFor(() => expect(stateGroups()).toHaveLength(2));
+
+    fireEvent.keyDown(grid(container), { key: 'k' });
+    fireEvent.keyDown(grid(container), { key: '4' });
+    await waitFor(() =>
+      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(
+        101, MODEL, 'excluded', undefined, 'pruned',
+      ),
+    );
+    // Advanced, so the rare reason costs one keystroke and keeps the loop.
+    expect(focusedTile()).toBe(1);
+
+    // …and 3 still means ambiguous on the next tile — the common case never
+    // moved.
+    fireEvent.keyDown(grid(container), { key: '3' });
+    await waitFor(() =>
+      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(
+        102, MODEL, 'excluded', undefined, 'ambiguous',
+      ),
+    );
+  });
+
+  it('advertises the 4 key beside the other digits', async () => {
+    renderPage();
+    expect(
+      await screen.findByText(/1\/2\/3 to set positive\/negative\/excluded \(ambiguous\), 4 for excluded \(pruned\)/),
+    ).toBeInTheDocument();
+  });
+
+  it('draws a 442-manufactured cell as the default it is, not as a decision', async () => {
+    await openSample(
+      [
+        tagImage({ image_id: 101, state: 'negative', source: 'backfill_442' }),
+        tagImage({ image_id: 102, state: 'negative', source: 'human' }),
+      ],
+      'negative',
+    );
+    const manufactured = stateBtn(stateGroups()[0], 'negative');
+    const decided = stateBtn(stateGroups()[1], 'negative');
+
+    // Both cells ARE negative, so both stay pressed — but one of them is
+    // migration 442's one-hot fiction, and on screen it was previously
+    // indistinguishable from an operator's work. Dashed is the vocabulary this
+    // control already uses for "defaulted, not decided".
+    expect(manufactured).toHaveAttribute('aria-pressed', 'true');
+    expect(manufactured.className).toContain('border-dashed');
+    expect(manufactured.getAttribute('title')).toMatch(/migration 442's backfill/);
+    expect(decided).toHaveAttribute('aria-pressed', 'true');
+    expect(decided.className).not.toContain('border-dashed');
+  });
+
+  it('splits the exclusion button in the all-tags panel too', async () => {
+    vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
+      data: [imageTag({ id: 2, state: 'untouched' })],
+    });
+    vi.mocked(api.bulkSetNewDedupImageTags).mockResolvedValue({
+      data: { updated: 1, image_id: 101, state: 'excluded', excluded_reason: 'ambiguous',
+        tag_ids: [2] },
+    });
+    renderPage();
+    fireEvent.click(await screen.findByText('all tags'));
+    const panel = await screen.findByRole('dialog', { name: 'All tags on this image' });
+    await within(panel).findAllByRole('group', { name: 'Tag state' });
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Select all untouched' }));
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Set selected: excluded · ambiguous' }),
+    );
+
+    await waitFor(() =>
+      expect(api.bulkSetNewDedupImageTags).toHaveBeenCalledWith(101, [2], 'excluded', 'ambiguous'),
+    );
+    // The panel is the same control on a different axis — it must not develop
+    // its own, quieter meaning for ⊘.
+    await waitFor(() => expect(reasonChip()).toHaveTextContent('ambiguous'));
   });
 
   // --- drafts + the tag picker --------------------------------------------
@@ -812,15 +1179,14 @@ describe('<NewDedupLabeling>', () => {
 
   it('leaves the per-tile tag picker offering the WHOLE taxonomy, ceiling or not', async () => {
     vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
-      data: {
-        sample_size: 42,
+      data: overview({
         tags: [
           tag({ id: 1, label: 'interier - kuchyne', family: null,
             positive_count: 12, gate_count: 12 }),
           tag({ id: 2, label: 'exterier - fasada', family: null,
             positive_count: 200, gate_count: 200 }),
         ],
-      },
+      }),
     });
     renderPage();
     await screen.findByRole('button', { name: 'exterier - fasada' });
@@ -1076,6 +1442,7 @@ describe('<NewDedupLabeling>', () => {
       data: {
         image_id: 101, model: MODEL, label: PROPOSALS[0].label, state: 'negative',
         status: 'dismissed', proposed_label: PROPOSALS[0].label, corrected: false,
+        excluded_reason: null,
       },
     });
     renderPage();
@@ -1084,7 +1451,7 @@ describe('<NewDedupLabeling>', () => {
 
     setStateOn(0, 'negative');
     await waitFor(() =>
-      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'negative', undefined),
+      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'negative', undefined, null),
     );
     await waitFor(() =>
       expect(screen.queryByRole('list', { name: 'Assigned tags' })).not.toBeInTheDocument(),
@@ -1107,12 +1474,10 @@ describe('<NewDedupLabeling>', () => {
   it('updates the assigned-tags row from the detail panel', async () => {
     vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
       data: [
-        { id: 7, label: 'interier - obyvak', family: 'interier', state: 'untouched', updated_at: null },
+        imageTag({ id: 7, label: 'interier - obyvak', family: 'interier', state: 'untouched', updated_at: null }),
       ],
     });
-    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue({
-      data: { image_id: 101, tag_id: 7, state: 'positive', updated_at: 't' },
-    });
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(annotationResult({ tag_id: 7 }));
     renderPage();
     await screen.findByRole('button', { name: 'Open photo 101' });
     expect(screen.queryByRole('list', { name: 'Assigned tags' })).not.toBeInTheDocument();
@@ -1122,7 +1487,7 @@ describe('<NewDedupLabeling>', () => {
     const group = await within(panel).findByRole('group', { name: 'Tag state' });
     fireEvent.click(stateBtn(group, 'positive'));
 
-    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(7, 101, 'positive'));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(7, 101, 'positive', null));
     fireEvent.keyDown(window, { key: 'Escape' });
     const list = await screen.findByRole('list', { name: 'Assigned tags' });
     expect(within(list).getByText('interier - obyvak')).toBeInTheDocument();
@@ -1204,13 +1569,13 @@ describe('<NewDedupLabeling>', () => {
 
     fireEvent.keyDown(grid(container), { key: '1' });
     await waitFor(() =>
-      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'positive', undefined),
+      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'positive', undefined, null),
     );
     expect(focusedTile()).toBe(1);
 
     fireEvent.keyDown(grid(container), { key: '3' });
     await waitFor(() =>
-      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(102, MODEL, 'excluded', undefined),
+      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(102, MODEL, 'excluded', undefined, 'ambiguous'),
     );
   });
 
@@ -1226,14 +1591,14 @@ describe('<NewDedupLabeling>', () => {
     fireEvent.keyDown(grid(container), { key: 'k' });
     fireEvent.keyDown(grid(container), { key: 'x' });
     await waitFor(() =>
-      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'excluded', undefined),
+      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(101, MODEL, 'excluded', undefined, 'ambiguous'),
     );
 
     // 'x' advanced the cursor onto the second tile, so 'p' decides THAT one —
     // the same one-key-per-image loop the digits give.
     fireEvent.keyDown(grid(container), { key: 'p' });
     await waitFor(() =>
-      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(102, MODEL, 'positive', undefined),
+      expect(api.setNewDedupProposalState).toHaveBeenCalledWith(102, MODEL, 'positive', undefined, null),
     );
   });
 
@@ -1253,7 +1618,7 @@ describe('<NewDedupLabeling>', () => {
     // the fast loop would quietly overwrite it with the model's own guess.
     await waitFor(() =>
       expect(api.setNewDedupProposalState).toHaveBeenCalledWith(
-        101, MODEL, 'positive', 'interier - loznice',
+        101, MODEL, 'positive', 'interier - loznice', null,
       ),
     );
   });
@@ -1302,9 +1667,7 @@ describe('<NewDedupLabeling>', () => {
     vi.mocked(queries.fetchImagesByImageIds).mockResolvedValue(
       new Map([[101, IMAGE], [102, { ...IMAGE, id: 102 }]]),
     );
-    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue({
-      data: { image_id: 101, tag_id: 1, state: 'positive', updated_at: 't' },
-    });
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(annotationResult());
     renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
     fireEvent.click(screen.getByRole('button', { name: 'Sample' }));
@@ -1315,7 +1678,7 @@ describe('<NewDedupLabeling>', () => {
 
     // Straight to image_tag_labels — no proposal row involved, so no pending
     // guard and no 404 on a re-decide.
-    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(1, 101, 'positive'));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(1, 101, 'positive', null));
     // The view is "untouched only", so a now-positive tile no longer belongs in
     // it — patched out in place, never by refetching the grid.
     await waitFor(() => expect(stateGroups()).toHaveLength(1));
@@ -1363,7 +1726,7 @@ describe('<NewDedupLabeling>', () => {
       data: [tagImage(), tagImage({ image_id: 102 })],
     });
     vi.mocked(api.bulkSetNewDedupTagAnnotation).mockResolvedValue({
-      data: { updated: 2, tag_id: 1, state: 'negative', image_ids: [101, 102] },
+      data: { updated: 2, tag_id: 1, state: 'negative', excluded_reason: null, image_ids: [101, 102] },
     });
     renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
@@ -1379,16 +1742,16 @@ describe('<NewDedupLabeling>', () => {
     // route to the TAG endpoint here — the proposal one would 404 on images
     // that have no proposal row at all.
     await waitFor(() =>
-      expect(api.bulkSetNewDedupTagAnnotation).toHaveBeenCalledWith(1, [101, 102], 'negative'),
+      expect(api.bulkSetNewDedupTagAnnotation).toHaveBeenCalledWith(1, [101, 102], 'negative', null),
     );
     expect(api.bulkSetNewDedupProposalState).not.toHaveBeenCalled();
   });
 
   it('sets a sample tile from the keyboard too', async () => {
     vi.mocked(api.listNewDedupTagImages).mockResolvedValue({ data: [tagImage()] });
-    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue({
-      data: { image_id: 101, tag_id: 1, state: 'excluded', updated_at: 't' },
-    });
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(
+      annotationResult({ state: 'excluded', excluded_reason: 'ambiguous' }),
+    );
     const { container } = renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
     fireEvent.click(screen.getByRole('button', { name: 'Sample' }));
@@ -1398,7 +1761,7 @@ describe('<NewDedupLabeling>', () => {
     fireEvent.keyDown(grid(container), { key: 'k' });
     fireEvent.keyDown(grid(container), { key: '3' });
     await waitFor(() =>
-      expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(1, 101, 'excluded'),
+      expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(1, 101, 'excluded', 'ambiguous'),
     );
   });
 
@@ -1416,9 +1779,9 @@ describe('<NewDedupLabeling>', () => {
   it('opens every active tag on one image, grouped by family', async () => {
     vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
       data: [
-        { id: 1, label: 'interier - kuchyne', family: 'interier', state: 'positive', updated_at: 't' },
-        { id: 2, label: 'interier - obyvak', family: 'interier', state: 'untouched', updated_at: null },
-        { id: 3, label: 'exterier - fasada', family: 'exterier', state: 'negative', updated_at: 't' },
+        imageTag({ id: 1, label: 'interier - kuchyne', family: 'interier', state: 'positive', updated_at: 't' }),
+        imageTag({ id: 2, label: 'interier - obyvak', family: 'interier', state: 'untouched', updated_at: null }),
+        imageTag({ id: 3, label: 'exterier - fasada', family: 'exterier', state: 'negative', updated_at: 't' }),
       ] satisfies NewDedupImageTag[],
     });
     renderPage();
@@ -1437,12 +1800,12 @@ describe('<NewDedupLabeling>', () => {
   it('sets one tag\'s state from the detail panel via the plain annotation endpoint', async () => {
     vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
       data: [
-        { id: 7, label: 'interier - obyvak', family: 'interier', state: 'positive', updated_at: 't' },
+        imageTag({ id: 7, label: 'interier - obyvak', family: 'interier', state: 'positive', updated_at: 't' }),
       ],
     });
-    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue({
-      data: { image_id: 101, tag_id: 7, state: 'excluded', updated_at: 't2' },
-    });
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(
+      annotationResult({ tag_id: 7, state: 'excluded', excluded_reason: 'ambiguous', updated_at: 't2' }),
+    );
     renderPage();
     fireEvent.click(await screen.findByText('all tags'));
     const panel = await screen.findByRole('dialog', { name: 'All tags on this image' });
@@ -1452,7 +1815,7 @@ describe('<NewDedupLabeling>', () => {
 
     // The panel writes image_tag_labels directly (it has a real tag_id already,
     // no proposal row involved), never through the proposal endpoint.
-    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(7, 101, 'excluded'));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(7, 101, 'excluded', 'ambiguous'));
     expect(api.setNewDedupProposalState).not.toHaveBeenCalled();
     // Patched in place — the panel doesn't blink through a refetch.
     await waitFor(() =>
@@ -1467,13 +1830,13 @@ describe('<NewDedupLabeling>', () => {
     // rest closed out explicitly instead of left as an implicit default.
     vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
       data: [
-        { id: 1, label: 'interier - kuchyne', family: 'interier', state: 'positive', updated_at: 't' },
-        { id: 2, label: 'interier - obyvak', family: 'interier', state: 'untouched', updated_at: null },
-        { id: 3, label: 'exterier - fasada', family: 'exterier', state: 'untouched', updated_at: null },
+        imageTag({ id: 1, label: 'interier - kuchyne', family: 'interier', state: 'positive', updated_at: 't' }),
+        imageTag({ id: 2, label: 'interier - obyvak', family: 'interier', state: 'untouched', updated_at: null }),
+        imageTag({ id: 3, label: 'exterier - fasada', family: 'exterier', state: 'untouched', updated_at: null }),
       ],
     });
     vi.mocked(api.bulkSetNewDedupImageTags).mockResolvedValue({
-      data: { updated: 2, image_id: 101, state: 'negative', tag_ids: [2, 3] },
+      data: { updated: 2, image_id: 101, state: 'negative', excluded_reason: null, tag_ids: [2, 3] },
     });
     renderPage();
     fireEvent.click(await screen.findByText('all tags'));
@@ -1493,7 +1856,7 @@ describe('<NewDedupLabeling>', () => {
 
     fireEvent.click(within(panel).getByRole('button', { name: 'Set selected: negative' }));
     await waitFor(() =>
-      expect(api.bulkSetNewDedupImageTags).toHaveBeenCalledWith(101, [2, 3], 'negative'),
+      expect(api.bulkSetNewDedupImageTags).toHaveBeenCalledWith(101, [2, 3], 'negative', null),
     );
     // Patched in place, and the selection clears once applied.
     expect(within(panel).queryByText('2 selected')).not.toBeInTheDocument();
@@ -1506,13 +1869,11 @@ describe('<NewDedupLabeling>', () => {
   it('drops a tag from the selection once it is decided individually', async () => {
     vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
       data: [
-        { id: 1, label: 'a', family: null, state: 'untouched', updated_at: null },
-        { id: 2, label: 'b', family: null, state: 'untouched', updated_at: null },
+        imageTag({ id: 1, label: 'a', family: null, state: 'untouched', updated_at: null }),
+        imageTag({ id: 2, label: 'b', family: null, state: 'untouched', updated_at: null }),
       ],
     });
-    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue({
-      data: { image_id: 101, tag_id: 1, state: 'positive', updated_at: 't' },
-    });
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(annotationResult());
     renderPage();
     fireEvent.click(await screen.findByText('all tags'));
     const panel = await screen.findByRole('dialog', { name: 'All tags on this image' });
@@ -1522,7 +1883,7 @@ describe('<NewDedupLabeling>', () => {
     expect(within(panel).getByText('2 selected')).toBeInTheDocument();
 
     fireEvent.click(stateBtn(groups[0], 'positive'));
-    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(1, 101, 'positive'));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(1, 101, 'positive', null));
 
     // Tag "a" is no longer untouched — it must not still be in the batch.
     expect(within(panel).getByText('1 selected')).toBeInTheDocument();
@@ -1566,15 +1927,14 @@ describe('<NewDedupLabeling>', () => {
 
   it('narrows both the chart and the tag select to tags still short of training images', async () => {
     vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
-      data: {
-        sample_size: 42,
+      data: overview({
         tags: [
           tag({ id: 1, label: 'interier - kuchyne', family: null,
             positive_count: 12, gate_count: 12, pending_count: 0 }),
           tag({ id: 2, label: 'exterier - fasada', family: null,
             positive_count: 200, gate_count: 200, pending_count: 0 }),
         ],
-      },
+      }),
     });
     renderPage();
     await screen.findByRole('button', { name: 'exterier - fasada' });
@@ -1600,11 +1960,10 @@ describe('<NewDedupLabeling>', () => {
 
   it('never hides the tag the grid is currently filtered to, whatever the ceiling', async () => {
     vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
-      data: {
-        sample_size: 42,
+      data: overview({
         tags: [tag({ id: 2, label: 'exterier - fasada', family: null,
           positive_count: 200, gate_count: 200 })],
-      },
+      }),
     });
     renderPage();
     // Wait for the taxonomy to land, else the select has no option to pick yet.

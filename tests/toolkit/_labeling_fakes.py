@@ -11,6 +11,14 @@ Shared by both test modules on purpose: `set_proposal_state` resolves a tag and
 writes a tri-state cell by calling into `tag_annotations` with the SAME
 connection, so the proposal tests exercise the real write path end to end rather
 than a mock that could drift from it.
+
+DELIBERATELY NOT MODELLED: migration 446's `image_tag_labels_log_event` trigger.
+A fake that modelled a trigger would be a second, drifting implementation of it,
+and would manufacture coverage the DB alone can give. `image_tag_label_events` is
+therefore untestable here — its gate is CI's migration-replay job. Same standing
+limit as CHECK / UNIQUE / FK violations, which this fake also cannot raise (see
+the "adversarial review vs fake-conn" note): assert on the SQL emitted or the
+shapes returned, never on the fake being permissive.
 """
 
 from __future__ import annotations
@@ -24,6 +32,14 @@ def _tag_row(t: dict[str, Any]) -> tuple[Any, ...]:
     return (
         t["id"], t["label"], t["family"], t["active"],
         t["priority"], t["ready_for_training"], t["created_at"],
+    )
+
+
+def _cell_row(v: dict[str, Any]) -> tuple[Any, ...]:
+    """The RETURNING / _READ_STATE_SQL column list, in order (migration 446)."""
+    return (
+        v["image_id"], v["tag_id"], v["state"], v["source"], v["excluded_reason"],
+        v["definition_id"], v["verified_at"], v["updated_at"],
     )
 
 
@@ -107,23 +123,46 @@ class _Cur:
 
         # --- image_tag_labels ---------------------------------------------
         elif s.startswith("INSERT INTO image_tag_labels"):
-            # Mirrors ON CONFLICT (image_id, tag_id) DO UPDATE SET state=...,
-            # updated_at=now() — created_by is set on first insert only, never
-            # rewritten by a later re-decision. The bulk path issues the same
-            # statement without RETURNING.
-            image_id, tag_id, state, created_by = params
+            # Mirrors ON CONFLICT (image_id, tag_id) DO UPDATE SET ... —
+            # created_by is set on first insert only, never rewritten by a later
+            # re-decision. Named parameters since migration 446 (tag_id appears
+            # twice: as a column value and inside the definition_id subquery).
+            # The bulk path issues the same statement without RETURNING.
+            kw = params
+            image_id, tag_id = kw["image_id"], kw["tag_id"]
             existing = c.image_tag_labels.get((image_id, tag_id))
-            row = {
-                "image_id": image_id, "tag_id": tag_id, "state": state,
-                "created_by": existing["created_by"] if existing else created_by,
-                "updated_at": c.tick(),
-            }
-            c.image_tag_labels[(image_id, tag_id)] = row
-            self.rowcount = 1
-            self._rows = (
-                [(row["image_id"], row["tag_id"], row["state"], row["updated_at"])]
-                if "RETURNING" in s else []
+            # The human-wins rail, the fake's copy of the DO UPDATE's WHERE: a
+            # machine write lands only on an untouched / machine / backfill cell.
+            suppressed = existing is not None and not (
+                kw["source"] != "machine"
+                or existing["source"] in ("machine", "backfill_442")
             )
+            if suppressed:
+                self.rowcount = 0
+                self._rows = []
+            else:
+                stamped = c.tick() if kw["verified"] else None
+                row = {
+                    "image_id": image_id, "tag_id": tag_id, "state": kw["state"],
+                    "created_by": existing["created_by"] if existing else kw["created_by"],
+                    "source": kw["source"],
+                    # resolved by the INSERT's own subquery on the annotation's
+                    # tag — never a parameter (see toolkit/tag_annotations.py).
+                    "definition_id": c.active_definitions.get(tag_id),
+                    "model": kw["model"],
+                    "excluded_reason": kw["excluded_reason"],
+                    # coalesce(excluded.verified_at, image_tag_labels.verified_at):
+                    # a machine write can never erase a human's verification.
+                    "verified_at": stamped or (existing["verified_at"] if existing else None),
+                    "updated_at": c.tick(),
+                }
+                c.image_tag_labels[(image_id, tag_id)] = row
+                self.rowcount = 1
+                self._rows = [_cell_row(row)] if "RETURNING" in s else []
+
+        elif s.startswith("SELECT image_id, tag_id, state, source, excluded_reason"):
+            row = c.image_tag_labels.get((params["image_id"], params["tag_id"]))
+            self._rows = [_cell_row(row)] if row else []
 
         elif s.startswith("DELETE FROM image_tag_labels WHERE tag_id"):
             (tag_id,) = params
@@ -155,10 +194,12 @@ class _Cur:
                     image_id, c.images[image_id], state,
                     cell["updated_at"] if cell else None,
                     cell["created_by"] if cell else None,
+                    cell["source"] if cell else None,
+                    cell["excluded_reason"] if cell else None,
                     sample["added_at"],
                 ))
-            rows.sort(key=lambda r: (r[5], r[0]), reverse=True)
-            self._rows = [r[:5] for r in rows[: kw["limit"]]]
+            rows.sort(key=lambda r: (r[7], r[0]), reverse=True)
+            self._rows = [r[:7] for r in rows[: kw["limit"]]]
 
         elif s.startswith("SELECT t.id, t.label, t.family, itl.state, itl.updated_at"):
             image_id = params["image_id"]
@@ -171,10 +212,12 @@ class _Cur:
                     t["id"], t["label"], t["family"],
                     cell["state"] if cell else None,
                     cell["updated_at"] if cell else None,
+                    cell["source"] if cell else None,
+                    cell["excluded_reason"] if cell else None,
                     t["family"] or "￿",  # NULLS LAST sort key
                 ))
-            rows.sort(key=lambda r: (r[5], r[1]))
-            self._rows = [r[:5] for r in rows]
+            rows.sort(key=lambda r: (r[7], r[1]))
+            self._rows = [r[:7] for r in rows]
 
         elif s.startswith("SELECT itl.image_id, t.id, t.label"):
             image_ids = set(params["image_ids"])
@@ -195,12 +238,45 @@ class _Cur:
                 cells = [v for v in c.image_tag_labels.values() if v["tag_id"] == t["id"]]
                 positive = [v for v in cells if v["state"] == "positive"]
                 border = [v for v in positive if v["image_id"] in c.border_cases]
+
+                def _pruned(v: dict[str, Any]) -> bool:
+                    return v["state"] == "excluded" and v["excluded_reason"] == "pruned"
+
+                def _ambiguous(v: dict[str, Any]) -> bool:
+                    # A NULL reason counts as ambiguous, never as a third silent
+                    # bucket — matching the grid's own fallback.
+                    return v["state"] == "excluded" and v["excluded_reason"] != "pruned"
+
+                real = [v for v in cells if v["source"] in ("human", "human_confirmed")]
+                # Pruned exclusions sit outside BOTH the numerator and the
+                # denominator; everything nobody verified (backfill_442 AND
+                # machine) sits outside the denominator — the rate measures human
+                # indecision.
+                ambiguous_decided = sum(1 for v in real if _ambiguous(v))
+                decided = sum(
+                    1 for v in real
+                    if v["state"] in ("positive", "negative") or _ambiguous(v)
+                )
+                # NULL, never 0: a tag with no decisions is unknown, not healthy.
+                rate = (ambiguous_decided / decided) if decided else None
                 rows.append((
                     t["id"], t["label"], t["family"], t["active"],
                     t["priority"], t["ready_for_training"], t["created_at"],
                     len(positive), len(positive) - len(border), len(border),
                     sum(1 for v in cells if v["state"] == "negative"),
                     sum(1 for v in cells if v["state"] == "excluded"),
+                    sum(1 for v in cells if v["source"] in ("human", "human_confirmed")),
+                    sum(1 for v in cells if v["source"] == "machine"),
+                    sum(1 for v in cells if v["source"] == "backfill_442"),
+                    sum(1 for v in cells if _ambiguous(v)),
+                    ambiguous_decided,
+                    sum(1 for v in cells if _pruned(v)),
+                    decided,
+                    rate,
+                    bool(
+                        decided >= params["min_decisions"]
+                        and rate is not None and rate > params["threshold"]
+                    ),
                     c.count_proposals(t["label"], "pending"),
                     c.count_proposals(t["label"], "dismissed"),
                 ))
@@ -246,6 +322,7 @@ class _Cur:
                     p["image_id"], p["model"], p["label"], p["confidence"], p["proposed_at"],
                     p["status"], p.get("reviewed_at"), p.get("reviewed_by"),
                     cell["state"] if cell else None,
+                    cell["excluded_reason"] if cell else None,
                 ))
             rows.sort(key=lambda r: (r[4], r[0]), reverse=True)
             self._rows = rows[: kw["limit"]]
@@ -302,6 +379,10 @@ class _FakeConn:
         self.tag_taxonomy: dict[int, dict[str, Any]] = {}
         self.next_tag_id = 0
         self.image_tag_labels: dict[tuple[int, int], dict[str, Any]] = {}
+        # tag_definitions (migration 445), modelled only as far as the annotation
+        # write path reads it: tag_id -> the id of that tag's ACTIVE definition.
+        # The versioning itself is tested in tests/toolkit/test_tag_definitions.py.
+        self.active_definitions: dict[int, int] = {}
         self.proposals: dict[tuple[int, str], dict[str, Any]] = {}
         self.sample: dict[int, dict[str, Any]] = {}
         # images: id -> storage_path. grow_sample's real SQL requires
@@ -337,6 +418,26 @@ class _FakeConn:
         }
         self.tag_taxonomy[row["id"]] = row
         return row
+
+    def seed_cell(
+        self, image_id: int, tag_id: int, state: str, *, source: str = "human",
+        created_by: str = "operator", excluded_reason: str | None = None,
+        model: str | None = None, definition_id: int | None = None,
+        verified_at: str | None = None,
+    ) -> None:
+        """Put a row into image_tag_labels WITHOUT going through the write path —
+        the only way to stand up rows the toolkit can no longer produce, i.e.
+        migration 442's manufactured `backfill_442` negatives."""
+        self.image_tag_labels[(image_id, tag_id)] = {
+            "image_id": image_id, "tag_id": tag_id, "state": state,
+            "created_by": created_by, "source": source,
+            "definition_id": definition_id, "model": model,
+            "excluded_reason": excluded_reason, "verified_at": verified_at,
+            "updated_at": self.tick(),
+        }
+
+    def set_active_definition(self, tag_id: int, definition_id: int) -> None:
+        self.active_definitions[tag_id] = definition_id
 
     def tag_by_label(self, label: str) -> dict[str, Any] | None:
         return next((t for t in self.tag_taxonomy.values() if t["label"] == label), None)
@@ -374,6 +475,12 @@ class _FakeConn:
     def states_for(self, tag_id: int) -> dict[int, str]:
         return {
             image_id: v["state"]
+            for (image_id, tid), v in self.image_tag_labels.items() if tid == tag_id
+        }
+
+    def sources_for(self, tag_id: int) -> dict[int, str]:
+        return {
+            image_id: v["source"]
             for (image_id, tid), v in self.image_tag_labels.items() if tid == tag_id
         }
 
