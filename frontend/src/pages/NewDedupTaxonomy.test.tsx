@@ -9,6 +9,12 @@
  *
  * Also pinned: a definition points at other tags BY ID, so the save payload
  * carries tag_ids and never label text.
+ *
+ * Two surfaces deliberately break the one-write rule, and their tests say so:
+ * retagging an image out of the tag being read (a tri-state cell is ground
+ * truth, not a draft) and renaming a tag in place. What is pinned for those is
+ * that the three ways an image can leave a tag never collapse into one, and
+ * that neither write refetches a visible list.
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
@@ -18,6 +24,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import NewDedupTaxonomy from './NewDedupTaxonomy';
 import type {
+  NewDedupImageTag,
   NewDedupLabelingOverview,
   NewDedupTag,
   TagDefinition,
@@ -28,6 +35,7 @@ import type {
 } from '@/lib/api';
 import * as api from '@/lib/api';
 import * as queries from '@/lib/queries';
+import * as toast from '@/lib/toast';
 import type { ImagePublic } from '@/lib/types';
 
 vi.mock('@/lib/api', async (importOriginal) => {
@@ -42,12 +50,24 @@ vi.mock('@/lib/api', async (importOriginal) => {
     getTagDefinitionVersion: vi.fn(),
     listTagPositiveImages: vi.fn(),
     listTagNeighbours: vi.fn(),
+    listNewDedupImageTags: vi.fn(),
+    setNewDedupTagAnnotation: vi.fn(),
+    bulkSetNewDedupImageTags: vi.fn(),
+    clearNewDedupTagAnnotation: vi.fn(),
+    renameNewDedupTag: vi.fn(),
   };
 });
 
 vi.mock('@/lib/queries', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/queries')>();
   return { ...actual, fetchImagesByImageIds: vi.fn() };
+});
+
+/* Mocked so "a field-scoped error is NOT also toasted" is assertable — the
+ * rename mutation owns its onError precisely to suppress the global toast. */
+vi.mock('@/lib/toast', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/toast')>();
+  return { ...actual, pushToast: vi.fn() };
 });
 
 function tag(over: Partial<NewDedupTag> = {}): NewDedupTag {
@@ -133,6 +153,60 @@ const IMAGE: ImagePublic = {
   clip_confidence: null, clip_render_score: null, phash: null,
 };
 
+/* The retag surface's fixtures. Three positives on FASADA (tag 3), because the
+ * point of every cache assertion below is that the OTHER two tiles hold still
+ * and keep their order when one is moved out. */
+const FASADA_POSITIVES: TagPositiveImage[] = [101, 209, 314].map((image_id, i) => ({
+  image_id,
+  storage_path: `img/555/${i}.jpg`,
+  sreality_url: `https://sdn.cz/${image_id}.jpg`,
+  updated_at: '2026-08-21T00:00:00Z',
+}));
+
+function imageTag(over: Partial<NewDedupImageTag> = {}): NewDedupImageTag {
+  return {
+    id: 1, label: 'interier - kuchyne', family: 'interier', state: 'untouched',
+    updated_at: null, source: null, excluded_reason: null,
+    ...over,
+  };
+}
+
+/* Every active tag on image 101, with FASADA — the tag being read — positive.
+ * That row is the subject: pinned at the top, never repeated in its family. */
+const IMAGE_TAGS: NewDedupImageTag[] = [
+  imageTag({ id: 1, label: 'interier - kuchyne', family: 'interier', state: 'untouched' }),
+  imageTag({ id: 2, label: 'interier - koupelna', family: 'interier', state: 'untouched' }),
+  imageTag({
+    id: 3, label: 'exterier - fasada', family: 'exterier',
+    state: 'positive', updated_at: 't', source: 'human',
+  }),
+];
+
+function annotationResult(
+  over: Partial<{
+    image_id: number; tag_id: number; state: api.TagState;
+    source: api.TagSource; excluded_reason: api.TagExcludedReason | null;
+  }> = {},
+) {
+  return {
+    data: {
+      image_id: 101, tag_id: 3, state: 'excluded' as api.TagState,
+      source: 'human' as api.TagSource,
+      excluded_reason: 'pruned' as api.TagExcludedReason | null,
+      definition_id: 7, verified_at: '2026-08-27T00:00:00Z', updated_at: 't', applied: true,
+      ...over,
+    },
+  };
+}
+
+/* The seven fields tag_annotations._tag_dict actually returns — no counts. A
+ * cache patch that spread this over a cached row would render NaN bars, which
+ * is exactly what the narrowed type and the merge-two-fields patch prevent. */
+const renamed = (id: number, label: string): api.NewDedupTagIdentity => ({
+  id, label, family: null, active: true,
+  priority: false, ready_for_training: false, created_at: '2026-08-01T00:00:00Z',
+});
+
 function renderPage() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -146,6 +220,42 @@ function renderPage() {
   );
 }
 
+/* main.tsx's REAL query defaults. The suite's client above leaves staleTime at
+ * 0, which refetches everything on remount and would let a cache this page
+ * mutilated pass as correct. The three tests that are about what the next visit
+ * to a tag SERVES have to run against the live numbers or they pin nothing. */
+function renderPageWithProductionCache() {
+  const qc = new QueryClient({
+    defaultOptions: {
+      queries: { staleTime: 60_000, gcTime: 5 * 60_000, refetchOnWindowFocus: false, retry: false },
+      mutations: { retry: false },
+    },
+  });
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={['/new-dedup/labeling/taxonomy']}>
+        <NewDedupTaxonomy />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+/* Per-tag positives, so a test can watch what a SECOND tag's gallery holds. */
+const positivesByTag = (map: Record<number, TagPositiveImage[]>) =>
+  vi.mocked(api.listTagPositiveImages).mockImplementation(async (tagId: number) => ({
+    data: map[tagId] ?? [],
+  }));
+const positiveCallsFor = (tagId: number) =>
+  vi.mocked(api.listTagPositiveImages).mock.calls.filter((c) => c[0] === tagId).length;
+
+/* Selection by row, waiting on the EDITOR HEADING rather than on `means`:
+ * flipping back to a tag already on screen leaves `means` mounted throughout,
+ * so only the heading proves the switch actually landed. */
+async function selectRow(match: RegExp, heading: string) {
+  fireEvent.click(await screen.findByRole('button', { name: match }));
+  await screen.findByRole('heading', { name: heading });
+}
+
 /* Selecting a tag is how every test past the first one starts: the right column
  * renders nothing until one is picked. */
 async function selectKuchyne() {
@@ -154,7 +264,34 @@ async function selectKuchyne() {
   await screen.findByLabelText('means');
 }
 
+/* The tag the operator is looking at in the live case this work came from:
+ * "exterier - fasáda", whose gallery is the wall of photos being read. */
+async function selectFasada() {
+  vi.mocked(api.listTagPositiveImages).mockResolvedValue({ data: FASADA_POSITIVES });
+  const row = await screen.findByRole('button', { name: /fasada/ });
+  fireEvent.click(row);
+  await screen.findByLabelText('means');
+  await screen.findByRole('button', { name: 'All tags on image 101' });
+}
+
+/* Opens the shared all-tags panel over one gallery tile. */
+async function openAllTags(imageId = 101) {
+  fireEvent.click(screen.getByRole('button', { name: `All tags on image ${imageId}` }));
+  const panel = await screen.findByRole('dialog', { name: 'All tags on this image' });
+  await within(panel).findByRole('group', { name: "This tag's state" });
+  return panel;
+}
+
+const outcome = (panel: HTMLElement, name: string) =>
+  within(within(panel).getByRole('group', { name: "This tag's state" })).getByRole('button', {
+    name,
+  });
+
 const saveBtn = () => screen.getByRole('button', { name: /^Save v/ });
+const tileSrcs = () =>
+  screen
+    .getAllByRole('button', { name: /^Toggle image \d+ as a canonical example$/ })
+    .map((b) => b.querySelector('img')?.getAttribute('src') ?? '');
 
 describe('<NewDedupTaxonomy>', () => {
   beforeEach(() => {
@@ -170,6 +307,14 @@ describe('<NewDedupTaxonomy>', () => {
     vi.mocked(api.listTagNeighbours).mockResolvedValue({ data: NEIGHBOURS });
     vi.mocked(api.saveTagDefinition).mockResolvedValue({
       data: { ...DEFINITION, version: 3 },
+    });
+    vi.mocked(api.listNewDedupImageTags).mockResolvedValue({ data: IMAGE_TAGS });
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(annotationResult());
+    vi.mocked(api.bulkSetNewDedupImageTags).mockResolvedValue({
+      data: { updated: 2, image_id: 101, state: 'negative', excluded_reason: null, tag_ids: [1, 2] },
+    });
+    vi.mocked(api.renameNewDedupTag).mockResolvedValue({
+      data: renamed(3, 'exterier - fasada a sokl'),
     });
     vi.mocked(queries.fetchImagesByImageIds).mockResolvedValue(new Map([[101, IMAGE]]));
   });
@@ -408,6 +553,39 @@ describe('<NewDedupTaxonomy>', () => {
     expect(vi.mocked(api.saveTagDefinition).mock.calls[0][1].example_image_ids).toHaveLength(24);
   });
 
+  it('keeps the truncation note true after an image is moved out', async () => {
+    // A fetch that came back holding the cap: the list IS truncated. Moving one
+    // image out drops the live count to 299, and if the note is read off THAT
+    // the page silently starts claiming the operator has seen everything — on
+    // the one surface whose entire claim is what a tag really holds.
+    const capped: TagPositiveImage[] = Array.from({ length: 300 }, (_, i) => ({
+      image_id: i === 0 ? 101 : 1000 + i,
+      storage_path: `img/9/${i}.jpg`,
+      sreality_url: 'https://sdn.cz/x.jpg',
+      updated_at: '2026-08-21T00:00:00Z',
+    }));
+    vi.mocked(api.listTagPositiveImages).mockResolvedValue({ data: capped });
+    renderPage();
+    await selectRow(/fasada/, 'exterier - fasada');
+    await screen.findByRole('button', { name: 'All tags on image 101' });
+    expect(screen.getByText('showing the 300 most recent')).toBeInTheDocument();
+
+    const panel = await openAllTags();
+    fireEvent.click(outcome(panel, 'belongs elsewhere'));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'Toggle image 101 as a canonical example' }),
+      ).toBeNull(),
+    );
+    expect(screen.getByText(/299 positive images/)).toBeInTheDocument();
+    expect(screen.getByText('showing the 300 most recent')).toBeInTheDocument();
+    // Hitting the cap is the point, so this renders 300 tiles plus the 51-row
+    // panel and re-renders them all on the move-out. That is ~5s in jsdom —
+    // genuinely heavy work, not a slow assertion — and it straddled the 5s
+    // default (5136ms passing, 5866ms failing on the same machine).
+  }, 20_000);
+
   it('shows the empty state when a tag has no positive images', async () => {
     vi.mocked(api.listTagPositiveImages).mockResolvedValue({ data: [] });
     renderPage();
@@ -459,5 +637,695 @@ describe('<NewDedupTaxonomy>', () => {
     expect(screen.getByText('No definition yet — saving writes v1.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save v1' })).toBeDisabled();
     expect(screen.queryByLabelText('Definition history')).not.toBeInTheDocument();
+  });
+
+  // --- retagging from the gallery: the affordance ---------------------------
+
+  it('offers an "all tags" control on every tile without hijacking the example click', async () => {
+    renderPage();
+    await selectFasada();
+
+    const tile = screen.getByRole('button', {
+      name: 'Toggle image 101 as a canonical example',
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'All tags on image 101' }));
+
+    await screen.findByRole('dialog', { name: 'All tags on this image' });
+    // The tile-wide "mark as example" click is untouched, and nothing staged.
+    expect(tile).toHaveAttribute('aria-pressed', 'false');
+    expect(api.saveTagDefinition).not.toHaveBeenCalled();
+  });
+
+  it('still stages a canonical example when the tile itself is clicked', async () => {
+    renderPage();
+    await selectFasada();
+
+    const tile = screen.getByRole('button', {
+      name: 'Toggle image 101 as a canonical example',
+    });
+    fireEvent.click(tile);
+
+    expect(tile).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByRole('dialog', { name: 'All tags on this image' })).toBeNull();
+  });
+
+  it('opens the panel on the tile that was clicked', async () => {
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags(209);
+
+    expect(api.listNewDedupImageTags).toHaveBeenCalledWith(209);
+    expect(within(panel).getByText('Image 209 — all tags')).toBeInTheDocument();
+  });
+
+  // --- retagging: the three outcomes must not collapse ----------------------
+
+  it('writes "belongs elsewhere" as excluded · pruned, never as a negative', async () => {
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+
+    fireEvent.click(outcome(panel, 'belongs elsewhere'));
+
+    await waitFor(() =>
+      expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(3, 101, 'excluded', 'pruned'),
+    );
+  });
+
+  it('writes "not this tag" as a real negative with no reason', async () => {
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(
+      annotationResult({ state: 'negative', excluded_reason: null }),
+    );
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+
+    fireEvent.click(outcome(panel, 'not this tag'));
+
+    await waitFor(() =>
+      expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(3, 101, 'negative', null),
+    );
+  });
+
+  it('writes "can\'t tell" as excluded · ambiguous', async () => {
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(
+      annotationResult({ state: 'excluded', excluded_reason: 'ambiguous' }),
+    );
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+
+    fireEvent.click(outcome(panel, "can't tell"));
+
+    await waitFor(() =>
+      expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(3, 101, 'excluded', 'ambiguous'),
+    );
+  });
+
+  it('cannot clear the cell back to untouched', async () => {
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+
+    // Four outcomes, and none of them is "forget that a human looked".
+    const group = within(panel).getByRole('group', { name: "This tag's state" });
+    expect(within(group).getAllByRole('button')).toHaveLength(4);
+    fireEvent.click(outcome(panel, 'belongs elsewhere'));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalled());
+    expect(api.clearNewDedupTagAnnotation).not.toHaveBeenCalled();
+  });
+
+  it('says what each outcome will do before it is clicked', async () => {
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+
+    // The rule, always on screen — no hover required.
+    expect(within(panel).getByText(/never negative/)).toBeInTheDocument();
+    expect(outcome(panel, 'belongs elsewhere')).toHaveAttribute(
+      'title',
+      expect.stringMatching(/another tag fits better/),
+    );
+    expect(outcome(panel, 'not this tag')).toHaveAttribute(
+      'title',
+      expect.stringMatching(/real, valuable negative/),
+    );
+  });
+
+  it('renders the tag being read exactly once — pinned, not repeated in its family', async () => {
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+
+    expect(within(panel).getAllByRole('group', { name: "This tag's state" })).toHaveLength(1);
+    // One control over one cell: the other two tags keep the three-glyph one,
+    // and "exterier" has no group of its own because fasada was its only row.
+    expect(within(panel).getAllByRole('group', { name: 'Tag state' })).toHaveLength(
+      IMAGE_TAGS.length - 1,
+    );
+    expect(within(panel).queryByText('exterier')).toBeNull();
+    expect(within(panel).getByText('interier')).toBeInTheDocument();
+  });
+
+  it('moves the image UNDER another tag from the same panel', async () => {
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(
+      annotationResult({ tag_id: 1, state: 'positive', excluded_reason: null }),
+    );
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+
+    const kuchyne = within(panel).getAllByRole('group', { name: 'Tag state' })[0];
+    fireEvent.click(within(kuchyne).getAllByRole('button')[0]);
+
+    await waitFor(() =>
+      expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(1, 101, 'positive', null),
+    );
+  });
+
+  it('keeps the batch action off the tag being read', async () => {
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Select all untouched' }));
+    expect(within(panel).getByText('2 selected')).toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Set selected: negative' }));
+
+    await waitFor(() =>
+      expect(api.bulkSetNewDedupImageTags).toHaveBeenCalledWith(101, [1, 2], 'negative', null),
+    );
+  });
+
+  it('draws a 442-manufactured positive as the default it is', async () => {
+    vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
+      data: IMAGE_TAGS.map((t) =>
+        t.id === 3 ? { ...t, source: 'backfill_442' as const } : t,
+      ),
+    });
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+
+    const keeps = outcome(panel, 'keeps it');
+    expect(keeps).toHaveAttribute('aria-pressed', 'true');
+    expect(keeps.className).toContain('border-dashed');
+    expect(keeps).toHaveAttribute('title', expect.stringMatching(/migration 442/));
+  });
+
+  it('says so when the tag being read is inactive, instead of omitting the block', async () => {
+    // GET /images/{id}/tags returns ACTIVE tags only, so an inactive subject is
+    // simply absent — a missing block would read as "not on this tag at all".
+    vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
+      data: IMAGE_TAGS.filter((t) => t.id !== 3),
+    });
+    renderPage();
+    await selectFasada();
+    fireEvent.click(screen.getByRole('button', { name: 'All tags on image 101' }));
+    const panel = await screen.findByRole('dialog', { name: 'All tags on this image' });
+
+    expect(
+      await within(panel).findByText(
+        'This tag is not in the active list, so its state cannot be set here.',
+      ),
+    ).toBeInTheDocument();
+    expect(within(panel).queryByRole('button', { name: 'belongs elsewhere' })).toBeNull();
+  });
+
+  // --- retagging: cache policy ---------------------------------------------
+
+  it('drops the tile from the grid without refetching the grid', async () => {
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+    fireEvent.click(outcome(panel, 'belongs elsewhere'));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'Toggle image 101 as a canonical example' }),
+      ).toBeNull(),
+    );
+    expect(screen.getByText(/2 positive images/)).toBeInTheDocument();
+    expect(vi.mocked(api.listTagPositiveImages).mock.calls).toHaveLength(1);
+  });
+
+  it('disturbs no other tile and reorders nothing', async () => {
+    renderPage();
+    await selectFasada();
+    const before = tileSrcs();
+    const panel = await openAllTags();
+    fireEvent.click(outcome(panel, 'belongs elsewhere'));
+
+    await waitFor(() => expect(tileSrcs()).toHaveLength(2));
+    expect(tileSrcs()).toEqual(before.slice(1));
+    for (const id of [209, 314]) {
+      expect(
+        screen.getByRole('button', { name: `Toggle image ${id} as a canonical example` }),
+      ).toHaveAttribute('aria-pressed', 'false');
+    }
+  });
+
+  it('takes the moved counts from the server rather than recomputing them', async () => {
+    // ambiguity_rate has exactly ONE definition, server-side. The overview is
+    // invalidated, never patched — so whatever the server says is what shows.
+    vi.mocked(api.getNewDedupLabelingOverview)
+      .mockResolvedValueOnce({ data: OVERVIEW })
+      .mockResolvedValue({
+        data: { ...OVERVIEW, tags: [KUCHYNE, KOUPELNA, { ...FASADA, positive_count: 99 }] },
+      });
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+    fireEvent.click(outcome(panel, 'belongs elsewhere'));
+
+    await waitFor(() =>
+      expect(vi.mocked(api.getNewDedupLabelingOverview).mock.calls.length).toBeGreaterThan(1),
+    );
+    const row = await screen.findByRole('button', { name: /fasada/ });
+    await waitFor(() => expect(within(row).getByText('99')).toBeInTheDocument());
+  });
+
+  it('does not refetch the overlap evidence for a state change', async () => {
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+    fireEvent.click(outcome(panel, 'belongs elsewhere'));
+
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalled());
+    expect(vi.mocked(api.listTagNeighbours).mock.calls).toHaveLength(1);
+  });
+
+  it('neither refetches nor dirties the definition', async () => {
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+    fireEvent.click(outcome(panel, 'belongs elsewhere'));
+
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalled());
+    expect(vi.mocked(api.getTagDefinition).mock.calls).toHaveLength(1);
+    expect(saveBtn()).toBeDisabled();
+    expect(screen.queryByText(/unsaved/)).not.toBeInTheDocument();
+  });
+
+  it('names what happened in a strip that can undo it', async () => {
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+    fireEvent.click(outcome(panel, 'belongs elsewhere'));
+
+    expect(await screen.findByText(/1 image moved out of this tag/)).toBeInTheDocument();
+    // The chip names the outcome in the same words the panel's button used.
+    expect(screen.getByText('· belongs elsewhere')).toBeInTheDocument();
+
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(
+      annotationResult({ state: 'positive', excluded_reason: null }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'put back' }));
+
+    await waitFor(() =>
+      expect(api.setNewDedupTagAnnotation).toHaveBeenLastCalledWith(3, 101, 'positive', null),
+    );
+    // Back at its ORIGINAL index — the grid does not reshuffle under the cursor.
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole('button', { name: /^Toggle image \d+ as a canonical example$/ })[0],
+      ).toHaveAccessibleName('Toggle image 101 as a canonical example'),
+    );
+    expect(screen.queryByText(/moved out of this tag/)).toBeNull();
+  });
+
+  it('puts the row back verbatim, with no refetch', async () => {
+    renderPage();
+    await selectFasada();
+    const before = tileSrcs();
+    const panel = await openAllTags();
+    fireEvent.click(outcome(panel, 'belongs elsewhere'));
+    await waitFor(() => expect(tileSrcs()).toHaveLength(2));
+
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(
+      annotationResult({ state: 'positive', excluded_reason: null }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'put back' }));
+
+    await waitFor(() => expect(tileSrcs()).toEqual(before));
+    expect(vi.mocked(api.listTagPositiveImages).mock.calls).toHaveLength(1);
+  });
+
+  it('leaves no other tag\'s gallery contradicting the count beside it', async () => {
+    // The panel's second half writes to tags that are NOT on screen. Their
+    // galleries are cached, and the overview refetch has already moved their
+    // counts in the list on the left — so the next visit must not serve a
+    // gallery this write contradicted.
+    positivesByTag({ 1: POSITIVES, 3: FASADA_POSITIVES });
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(
+      annotationResult({ tag_id: 1, state: 'positive', excluded_reason: null }),
+    );
+    renderPageWithProductionCache();
+    await selectRow(/kuchyne/, 'interier - kuchyne');
+    await screen.findByRole('button', { name: 'All tags on image 101' });
+    expect(positiveCallsFor(1)).toBe(1);
+
+    await selectRow(/fasada/, 'exterier - fasada');
+    // 314 is fasada's alone — image 101 sits in both galleries, so waiting on
+    // it would resolve against the grid this switch is still replacing.
+    await screen.findByRole('button', { name: 'All tags on image 314' });
+    const panel = await openAllTags();
+    const kuchyne = within(panel).getAllByRole('group', { name: 'Tag state' })[0];
+    fireEvent.click(within(kuchyne).getAllByRole('button')[0]);
+    await waitFor(() =>
+      expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(1, 101, 'positive', null),
+    );
+    fireEvent.click(within(panel).getByRole('button', { name: 'Close' }));
+
+    await selectRow(/kuchyne/, 'interier - kuchyne');
+    await waitFor(() => expect(positiveCallsFor(1)).toBe(2));
+    // Only the tag that was written to: the one being read is still patched in
+    // place, never refetched.
+    expect(positiveCallsFor(3)).toBe(1);
+  });
+
+  it('repairs the grid when a put-back lands after a tag switch', async () => {
+    positivesByTag({ 2: [], 3: FASADA_POSITIVES });
+    renderPageWithProductionCache();
+    await selectRow(/fasada/, 'exterier - fasada');
+    await screen.findByRole('button', { name: 'All tags on image 101' });
+    const panel = await openAllTags();
+    fireEvent.click(outcome(panel, 'belongs elsewhere'));
+    await waitFor(() => expect(tileSrcs()).toHaveLength(2));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Close' }));
+
+    // Hold the put-back open across the tag switch that empties the receipt
+    // strip — there is then no held row to splice back.
+    let release: () => void = () => {};
+    vi.mocked(api.setNewDedupTagAnnotation).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve(annotationResult({ state: 'positive', excluded_reason: null }).data);
+        }).then((data) => ({ data })) as ReturnType<typeof api.setNewDedupTagAnnotation>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'put back' }));
+    await selectRow(/koupelna/, 'interier - koupelna');
+    release();
+    await waitFor(() =>
+      expect(api.setNewDedupTagAnnotation).toHaveBeenLastCalledWith(3, 101, 'positive', null),
+    );
+
+    // The server holds image 101 positive again. The cached grid must not still
+    // be short of it, with no strip left to say why.
+    await selectRow(/fasada/, 'exterier - fasada');
+    await waitFor(() => expect(tileSrcs()).toHaveLength(3));
+  });
+
+  it('keeps the moved-out strip session-local', async () => {
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+    fireEvent.click(outcome(panel, 'belongs elsewhere'));
+    await screen.findByText(/1 image moved out of this tag/);
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+    fireEvent.click(screen.getByRole('button', { name: /koupelna/ }));
+    await waitFor(() => expect(api.getTagDefinition).toHaveBeenCalledWith(2));
+    fireEvent.click(screen.getByRole('button', { name: /fasada/ }));
+    await waitFor(() => expect(api.getTagDefinition).toHaveBeenLastCalledWith(3));
+
+    expect(screen.queryByText(/moved out of this tag/)).toBeNull();
+  });
+
+  it('never silently edits the draft when a staged example is moved out', async () => {
+    renderPage();
+    await selectFasada();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Toggle image 101 as a canonical example' }),
+    );
+    const panel = await openAllTags();
+    fireEvent.click(outcome(panel, 'belongs elsewhere'));
+
+    expect(await screen.findByText('still staged as a canonical example')).toBeInTheDocument();
+    expect(screen.getByText(/1 staged example not in this list/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.click(saveBtn());
+    await waitFor(() => expect(api.saveTagDefinition).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.saveTagDefinition).mock.calls[0][1].example_image_ids).toEqual([101]);
+  });
+
+  // --- renaming a tag in place ---------------------------------------------
+
+  it('offers rename on the selected tag only', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: /kuchyne/ });
+    expect(screen.queryByRole('button', { name: 'Rename this tag' })).toBeNull();
+
+    await selectKuchyne();
+    expect(screen.getAllByRole('button', { name: 'Rename this tag' })).toHaveLength(1);
+  });
+
+  it('seeds the field with the FULL label, family prefix included', async () => {
+    renderPage();
+    await selectKuchyne();
+    fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+
+    // The list renders "kuchyne"; seeding the field with that would silently
+    // destroy the family prefix and move the tag out of its group.
+    expect(screen.getByLabelText('New tag label')).toHaveValue('interier - kuchyne');
+    expect(screen.getByText(/is the family — changing it moves the tag/)).toBeInTheDocument();
+  });
+
+  it('commits the rename on Enter', async () => {
+    vi.mocked(api.renameNewDedupTag).mockResolvedValue({
+      data: renamed(1, 'interier - kuchynka'),
+    });
+    renderPage();
+    await selectKuchyne();
+    fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+
+    const field = screen.getByLabelText('New tag label');
+    fireEvent.change(field, { target: { value: 'interier - kuchynka' } });
+    fireEvent.keyDown(field, { key: 'Enter' });
+
+    await waitFor(() => expect(api.renameNewDedupTag).toHaveBeenCalledTimes(1));
+    expect(api.renameNewDedupTag).toHaveBeenCalledWith(1, 'interier - kuchynka');
+  });
+
+  it('commits from Save, and reverts from Cancel or Escape without writing', async () => {
+    renderPage();
+    await selectKuchyne();
+
+    for (const dismiss of ['Cancel', 'Escape'] as const) {
+      fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+      const field = screen.getByLabelText('New tag label');
+      fireEvent.change(field, { target: { value: 'interier - something else' } });
+      if (dismiss === 'Cancel') fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      else fireEvent.keyDown(field, { key: 'Escape' });
+      expect(screen.queryByLabelText('New tag label')).toBeNull();
+      expect(api.renameNewDedupTag).not.toHaveBeenCalled();
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+    fireEvent.change(screen.getByLabelText('New tag label'), {
+      target: { value: 'interier - kuchynka' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.renameNewDedupTag).toHaveBeenCalledWith(1, 'interier - kuchynka'));
+  });
+
+  it('does not re-open an abandoned rename, autofocused, on the next visit', async () => {
+    renderPage();
+    await selectKuchyne();
+    fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+    fireEvent.change(screen.getByLabelText('New tag label'), {
+      target: { value: 'interier - ABANDONED' },
+    });
+
+    // Clicked away, no Cancel and no Escape — which only HIDES the editor.
+    await selectRow(/koupelna/, 'interier - koupelna');
+    await selectRow(/kuchyne/, 'interier - kuchyne');
+
+    // Nothing holding the abandoned text, so the operator's next Enter cannot
+    // commit a label they walked away from — the same accident the deliberate
+    // no-commit-on-blur guards against, arriving by the other door.
+    expect(screen.queryByLabelText('New tag label')).toBeNull();
+    fireEvent.keyDown(document.body, { key: 'Enter' });
+    expect(api.renameNewDedupTag).not.toHaveBeenCalled();
+  });
+
+  it('does not carry a dead rename error back to the tag it came from', async () => {
+    vi.mocked(api.renameNewDedupTag).mockRejectedValue(new Error('BOOM already exists'));
+    renderPage();
+    await selectKuchyne();
+    fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+    fireEvent.change(screen.getByLabelText('New tag label'), {
+      target: { value: 'interier - koupelna' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('BOOM already exists')).toBeInTheDocument();
+
+    await selectRow(/koupelna/, 'interier - koupelna');
+    await selectRow(/kuchyne/, 'interier - kuchyne');
+
+    expect(screen.queryByText('BOOM already exists')).toBeNull();
+  });
+
+  it('refuses a blank or unchanged label', async () => {
+    renderPage();
+    await selectKuchyne();
+    fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+    const field = screen.getByLabelText('New tag label');
+
+    // Unchanged: a no-op write is not a write.
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    fireEvent.keyDown(field, { key: 'Enter' });
+
+    fireEvent.change(field, { target: { value: '   ' } });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    fireEvent.keyDown(field, { key: 'Enter' });
+
+    expect(api.renameNewDedupTag).not.toHaveBeenCalled();
+  });
+
+  it('enforces the server\'s label cap at the input', async () => {
+    renderPage();
+    await selectKuchyne();
+    fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+    // Mirrors toolkit.tag_annotations.LABEL_MAX_CHARS / migration 442's CHECK.
+    expect(screen.getByLabelText('New tag label')).toHaveAttribute('maxlength', '100');
+  });
+
+  it('surfaces a duplicate beside the field, keeps the typing, and does not toast', async () => {
+    vi.mocked(api.renameNewDedupTag).mockRejectedValue(
+      new Error("tag 'interier - koupelna' already exists"),
+    );
+    renderPage();
+    await selectKuchyne();
+    fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+    fireEvent.change(screen.getByLabelText('New tag label'), {
+      target: { value: 'interier - koupelna' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(
+      await screen.findByText("tag 'interier - koupelna' already exists"),
+    ).toBeInTheDocument();
+    // Still editing (the field, not the "rename" button, is what is on screen),
+    // still holding the typing, and the page still reads the OLD label.
+    expect(screen.getByLabelText('New tag label')).toHaveValue('interier - koupelna');
+    expect(screen.getByRole('heading', { name: 'interier - kuchyne' })).toBeInTheDocument();
+    // The field is on screen and focused — a toast six seconds away would be
+    // the same message said twice, so the mutation owns its onError.
+    expect(vi.mocked(toast.pushToast)).not.toHaveBeenCalled();
+  });
+
+  it('patches the visible list rather than refetching it', async () => {
+    renderPage();
+    await selectFasada();
+    fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+    fireEvent.change(screen.getByLabelText('New tag label'), {
+      target: { value: 'exterier - fasada a sokl' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(api.renameNewDedupTag).toHaveBeenCalled());
+    // Sidebar row (short label), editor heading (full label) — one patch, no
+    // refetch of a 51-row list.
+    expect(await screen.findByRole('button', { name: /fasada a sokl/ })).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: 'exterier - fasada a sokl' }),
+    ).toBeInTheDocument();
+    const picker = screen.getByLabelText('confusable with 1 tag');
+    expect(
+      within(picker).getAllByRole('option').map((o) => o.textContent),
+    ).toContain('fasada a sokl');
+    expect(vi.mocked(api.getNewDedupLabelingOverview).mock.calls).toHaveLength(1);
+  });
+
+  it('loses neither the operator\'s place nor their unsaved writing', async () => {
+    renderPage();
+    await selectFasada();
+    fireEvent.change(screen.getByLabelText('means'), {
+      target: { value: 'The street-facing wall of a building.' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+    fireEvent.change(screen.getByLabelText('New tag label'), {
+      target: { value: 'exterier - fasada a sokl' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.renameNewDedupTag).toHaveBeenCalled());
+
+    // The draft holds no label text — every tag reference is an id — so a
+    // rename cannot reload the form or move base_version.
+    expect(screen.getByLabelText('means')).toHaveValue('The street-facing wall of a building.');
+    expect(vi.mocked(api.getTagDefinition).mock.calls).toHaveLength(1);
+    expect(saveBtn()).toBeEnabled();
+    fireEvent.click(saveBtn());
+    await waitFor(() => expect(api.saveTagDefinition).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.saveTagDefinition).mock.calls[0][1].base_version).toBe(2);
+  });
+
+  it('leaves no stale label in the overlap evidence', async () => {
+    // The neighbours query is a centroid + pgvector scan, so it is NOT re-run
+    // for a text change; OverlapEvidence reads the label through the live
+    // taxonomy instead. (This fixture's neighbour is the selected tag itself —
+    // what matters is that the row's own `label` is not what renders.)
+    vi.mocked(api.renameNewDedupTag).mockResolvedValue({
+      data: renamed(2, 'interier - koupelna a wc'),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /koupelna/ }));
+    await screen.findByLabelText('means');
+    const overlapRow = (await screen.findByText('distance 0.123')).closest(
+      'li',
+    ) as HTMLElement;
+    expect(within(overlapRow).getByText('interier - koupelna')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+    fireEvent.change(screen.getByLabelText('New tag label'), {
+      target: { value: 'interier - koupelna a wc' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(within(overlapRow).getByText('interier - koupelna a wc')).toBeInTheDocument(),
+    );
+    expect(vi.mocked(api.listTagNeighbours).mock.calls).toHaveLength(1);
+  });
+
+  it('does not make the row ambiguous, and rename does not change the selection', async () => {
+    renderPage();
+    await selectFasada();
+
+    expect(screen.getAllByRole('button', { name: /fasada/ })).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+    // Still fasada's definition on screen; nothing re-selected, nothing refetched.
+    expect(vi.mocked(api.getTagDefinition).mock.calls).toHaveLength(1);
+    expect(api.getTagDefinition).toHaveBeenCalledWith(3);
+  });
+
+  it('never wipes the counts when patching from a partial rename response', async () => {
+    vi.mocked(api.renameNewDedupTag).mockResolvedValue({
+      data: renamed(1, 'interier - kuchynka'),
+    });
+    renderPage();
+    await selectKuchyne();
+    fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+    fireEvent.change(screen.getByLabelText('New tag label'), {
+      target: { value: 'interier - kuchynka' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    const row = await screen.findByRole('button', { name: /kuchynka/ });
+    // _tag_dict carries no counts: spreading the response would render NaN.
+    expect(within(row).getByText('12')).toBeInTheDocument();
+    expect(within(row).getByText('v2')).toBeInTheDocument();
+  });
+
+  // --- the two surfaces together -------------------------------------------
+
+  it('shows the new label in the all-tags panel after a rename', async () => {
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Close' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename this tag' }));
+    fireEvent.change(screen.getByLabelText('New tag label'), {
+      target: { value: 'exterier - fasada a sokl' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.renameNewDedupTag).toHaveBeenCalled());
+
+    vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
+      data: IMAGE_TAGS.map((t) => (t.id === 3 ? { ...t, label: 'exterier - fasada a sokl' } : t)),
+    });
+    const reopened = await openAllTags();
+
+    await waitFor(() =>
+      expect(vi.mocked(api.listNewDedupImageTags).mock.calls).toHaveLength(2),
+    );
+    expect(
+      within(reopened).getByText('exterier - fasada a sokl'),
+    ).toBeInTheDocument();
   });
 });

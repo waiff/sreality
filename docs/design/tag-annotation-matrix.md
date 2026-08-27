@@ -297,6 +297,54 @@ live rows, so the page derives the family from the `" - "` prefix in the label; 
 of `family` happens here** — that is a data change nobody asked for, and it would collide with
 the very taxonomy work this page exists to inform.
 
+**Two edits on that page write immediately, and the "one sitting, one write" rule above is
+about the DEFINITION only.** Reading a tag's contents is how drift gets caught, so the two
+fixes it provokes happen in place rather than by navigating away: an `all tags` pill on every
+gallery tile opens the **shared** `ImageTagDetailPanel` (`components/tag-annotations/`, used
+by the Labeling page too — extracted, never copied), and a `rename` control on the selected
+row edits the tag's label. Neither is part of the versioned document — a tri-state cell and a
+tag's name are ground truth with no draft to batch into — and neither touches the definition
+draft, its `base_version`, or `example_image_ids`. The gallery says so in as many words,
+because it is the one place this page's contract does not hold.
+
+Opened over a tag being read, the panel pins that tag above its family groups and offers
+**four word-labeled outcomes instead of the three glyphs**: `keeps it` (positive), `not this
+tag` (negative), `belongs elsewhere` (excluded · **pruned**) and `can't tell` (excluded ·
+ambiguous). That is the whole point of the surface. With `⊘` plus a reason chip, the
+DANGEROUS answer — a negative on an image whose subject really is present, which poisons that
+head and is what the operator's own "never mark a tag negative when its subject is clearly
+present, LEAVE IT OUT instead" rule forbids — costs one click, while the demanded answer costs
+two plus a hunt. Naming the four and pricing them identically inverts that, and none of them
+can clear the cell back to untouched: a human looked, and that fact is not discardable.
+Everything else stays patched-in-place — the tile leaves the grid and joins a session-local
+"moved out" strip with a `put back`, and the derived counts come from a re-fetched overview,
+never recomputed in the SPA.
+
+**Patch-in-place is a rule about the list ON SCREEN, and every escape from it is a place the
+page would otherwise lie about a tag's contents.** Three, all of them cheap:
+- A write lands on a tag that is *not* being read (the panel's second half is for exactly
+  that — moving an image UNDER another tag). Nothing is mounted to blink, but that tag's
+  gallery is cached and the overview refetch has already moved its count in the list on the
+  left. So its `positive-images` key is invalidated rather than ignored; inactive queries only
+  take the flag, and the refetch happens when the operator gets there. Skip it and, inside
+  `main.tsx`'s 60 s `staleTime`, selecting that tag serves a gallery the write contradicted —
+  a row reading 13 above twelve tiles.
+- A `put back` resolves *after* a tag switch. The receipt strip is session-local and the
+  switch empties it, so there is no held row to splice back and the cached grid is short of an
+  image the server has just restored, with nothing left on screen to explain the hole. The
+  restore reports whether it could patch; only the path where it could not falls back to an
+  invalidate.
+- The "showing the 300 most recent" note is read off the **fetched** length
+  (`rows + movedOutShown`), never off the live one. `rows` is the patched cache and shrinks as
+  images are moved out, so a truncated fetch of exactly 300 would quietly become 299 and drop
+  the note — telling an operator writing a definition that they have seen the whole tag.
+
+The rename has one rail of the same kind: **leaving a row clears the pending edit**, label and
+error both. Hiding an editor is not dismissing it, and a `<input autoFocus>` that comes back
+holding an abandoned label steals the focus from the click that re-selected the tag — one
+Enter then commits a name nobody chose. That is precisely the accident the deliberate
+no-commit-on-blur already guards against, arriving by the other door.
+
 Deliberate non-additions: no definition lifecycle state machine (`active`/`superseded` is the
 whole vocabulary), no merge/split execution, no bulk edit tools. The taxonomy is not settled
 yet; building tools to reshape it before the definitions exist would be building on the

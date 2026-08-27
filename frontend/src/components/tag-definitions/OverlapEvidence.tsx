@@ -46,10 +46,15 @@ export default function OverlapEvidence({
         <ul className="mt-3 space-y-1">
           {neighbours.map((n) => {
             const already = listed.has(n.tag_id);
+            /* Through the live taxonomy, not the neighbour row's own label: the
+             * neighbours query is a centroid + pgvector scan and is not worth
+             * re-running for a text change, so a rename would otherwise leave a
+             * stale name here. Correct for every neighbour, rename or not. */
+            const label = tagById.get(n.tag_id)?.label ?? n.label;
             return (
               <li key={n.tag_id} className="flex items-baseline gap-2">
                 <span
-                  title={n.label}
+                  title={label}
                   className={[
                     'min-w-0 flex-1 truncate font-mono text-[0.78rem]',
                     tagById.get(n.tag_id)?.priority
@@ -57,7 +62,7 @@ export default function OverlapEvidence({
                       : 'text-[var(--color-ink-2)]',
                   ].join(' ')}
                 >
-                  {n.label}
+                  {label}
                 </span>
                 <span className="shrink-0 font-mono text-[0.7rem] tabular-nums text-[var(--color-ink-3)]">
                   distance {n.cosine_distance.toFixed(3)}

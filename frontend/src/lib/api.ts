@@ -834,11 +834,21 @@ export const addNewDedupTag = (
     jwt: true,
   });
 
+/* The rename/add/flags routes return tag_annotations._tag_dict — identity and
+ * flags only, never the derived counts. Typed honestly so a cache patch can
+ * only ever merge onto a cached row, never replace it with undefined counts.
+ * (addNewDedupTag and setNewDedupTagFlags carry the same inaccuracy; both
+ * callers invalidate instead of patching, so they are left as they are.) */
+export type NewDedupTagIdentity = Pick<
+  NewDedupTag,
+  'id' | 'label' | 'family' | 'active' | 'priority' | 'ready_for_training' | 'created_at'
+>;
+
 export const renameNewDedupTag = (
   tagId: number,
   label: string,
-): Promise<{ data: NewDedupTag }> =>
-  request<{ data: NewDedupTag }>(`/new-dedup/labeling/taxonomy/${tagId}`, {
+): Promise<{ data: NewDedupTagIdentity }> =>
+  request<{ data: NewDedupTagIdentity }>(`/new-dedup/labeling/taxonomy/${tagId}`, {
     method: 'PUT',
     json: { label },
     jwt: true,

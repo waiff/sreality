@@ -91,6 +91,18 @@ W1 (shared prerequisites + labeling program):
       definitions is now the operator-side blocker**: labeling at scale and per-tag heads both wait
       on them, and the definitions are also the diagnostic that settles the taxonomy — two tags
       whose does_not_count lines can't be written apart are one tag.
+      Follow-up: **the two fixes reading a tag provokes now happen in place**, so noticing drift no
+      longer costs the operator their position. An `all tags` pill on every gallery tile opens the
+      image's full tri-state panel (`ImageTagDetailPanel` + `TriStateControl` EXTRACTED out of
+      NewDedupLabeling into `components/tag-annotations/` and used by both pages — a copy would
+      drift), and the tag being read is pinned above it with **four word-labeled outcomes**, not
+      three glyphs: `keeps it`, `not this tag` (a real negative), `belongs elsewhere` (excluded ·
+      pruned — the subject IS present but another tag fits, so a negative would poison this head)
+      and `can't tell` (excluded · ambiguous, which feeds the tag's ambiguity rate). Equal cost,
+      named consequences on screen before the click, and none of them can clear a cell back to
+      untouched. `rename` on the selected row edits the label in place, losing neither the
+      selection nor an unsaved definition draft (`PUT /taxonomy/{tag_id}`; every reference is by
+      numeric id, so nothing rots). No new routes — the backend was already there.
 - [x] Annotation provenance + append-only history (migration 446) — every `image_tag_labels`
       cell now records WHO decided it (`source`: human / human_confirmed / machine /
       backfill_442), under WHICH `tag_definitions` version (`definition_id`, resolved at write
