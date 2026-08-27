@@ -1994,6 +1994,58 @@ def check_worker_lane_stall(conn: Any, thresholds: dict[str, Any]) -> dict[str, 
     }
 
 
+# --- a refused delisting sweep is an operator decision, not a log line -------
+_DELIST_REFUSAL_SQL = """
+select source, category_main, category_type, candidates, active_rows, cap, refused_at
+  from delist_flip_refusals
+ where refused_at > now() - interval '7 days'
+ order by refused_at desc
+ limit 20
+"""
+
+
+def check_delist_flip_refused(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Did a sweep try to delist more of a category than the cap allows?
+
+    Expected cause is a completeness gate re-opening after a long block — which
+    is exactly when the sweep is least trustworthy, because absence from the
+    FIRST run of a repaired walk is the weakest evidence there is. This warns
+    rather than fails: nothing broke, a guard held, and the operator decides.
+    """
+    with conn.cursor() as cur:
+        cur.execute(_DELIST_REFUSAL_SQL)
+        rows = cur.fetchall()
+    if not rows:
+        return {
+            "check_key": "delist_flip_refused", "status": "ok", "value": 0,
+            "details": {"refusals": []},
+            "message": "No delisting sweep hit the per-category flip cap in 7 days.",
+        }
+    refusals = [
+        {"source": s, "category_main": cm, "category_type": ct,
+         "candidates": int(cand), "active_rows": int(act), "cap": int(cap),
+         "refused_at": ra.isoformat() if hasattr(ra, "isoformat") else str(ra)}
+        for s, cm, ct, cand, act, cap, ra in rows
+    ]
+    worst = max(r["candidates"] for r in refusals)
+    named = "; ".join(
+        f"{r['source']} {r['category_main']}/{r['category_type']} "
+        f"{r['candidates']} of {r['active_rows']} (cap {r['cap']})"
+        for r in refusals[:3]
+    )
+    return {
+        "check_key": "delist_flip_refused",
+        "status": "warn",
+        "value": worst,
+        "details": {"refusals": refusals},
+        "message": (
+            f"{len(refusals)} delisting sweep(s) refused by the flip cap: {named}. "
+            "Verify the listings by FETCHING them (a real 404/410) before raising "
+            "the cap -- absence from one walk is not proof a listing is gone."
+        ),
+    }
+
+
 _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("llm_errors", check_llm_errors),
     ("llm_liveness", check_llm_liveness),
@@ -2013,6 +2065,7 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("walk_coverage", check_walk_coverage),
     ("migration_drift", check_migration_drift),
     ("worker_lane_stall", check_worker_lane_stall),
+    ("delist_flip_refused", check_delist_flip_refused),
 ]
 
 # --weekly stays a valid (currently empty) lane so the scheduled invocation keeps

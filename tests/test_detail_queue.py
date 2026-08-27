@@ -41,6 +41,13 @@ class _Cur:
     def execute(self, sql: str, params: Any = None) -> None:
         s = " ".join(sql.split())
         self._conn.executed.append((s, params))
+        if "AS candidates" in s:
+            # migration 451's flip cap counts the scope before any sweep flips.
+            # (0, 0) sits below min_rows so the cap allows it, keeping these
+            # tests about the dirty-property bookkeeping they assert.
+            self._rows = [(0, 0)]
+            self.rowcount = 1
+            return
         for predicate, rows in self._conn.script:
             if predicate(s):
                 self._rows = list(rows)
@@ -584,7 +591,8 @@ def test_mark_inactive_is_source_scoped():
         (lambda s: _FLIP_SQL in s, []),
     ])
     db.mark_inactive(conn, "byt", "prodej", {1, 2}, source="sreality")
-    sql, params = conn.executed[0]
+    # The FLIP, not executed[0] — migration 451's cap counts the scope first.
+    sql, params = _find(conn.executed, "SET is_active = false")
     assert "AND source = %s" in sql
     assert params[0] == "sreality"          # source bound first
     assert params[1:3] == ("byt", "prodej")

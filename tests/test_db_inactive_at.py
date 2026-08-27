@@ -36,6 +36,12 @@ class _Cur:
     def execute(self, sql: str, params: Any = None) -> None:
         s = " ".join(sql.split())
         self._conn.executed.append((s, params))
+        if "AS candidates" in s:
+            # migration 450 flip cap: it counts the scope before it flips.
+            # (0, 0) is below min_rows, so the cap allows the sweep and these
+            # tests stay about the UPDATE they were written to assert.
+            self._rows = [(0, 0)]
+            return
         for predicate, rows in self._conn.script:
             if predicate(s):
                 self._rows = list(rows)

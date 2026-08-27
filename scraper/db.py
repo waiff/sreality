@@ -1407,6 +1407,175 @@ def _seen_without_nulls(seen: Collection[Any], label: str) -> list[Any] | None:
     return kept
 
 
+# --- the delisting flip cap (migration 451) ---------------------------------
+#
+# mark_inactive never had a ceiling: it flips every unseen active row of a
+# category in one statement, however many that is. That was survivable only
+# because the completeness gate kept the dangerous cases from running -- a
+# coincidence, not a safety property, and the coincidence ends every time we
+# repair a portal's walk. Fixing coverage is the SAME EVENT as authorising the
+# mass flip it unblocks.
+#
+# CALIBRATED AGAINST 60 DAYS OF REAL SWEEPS, not guessed. Over 11,763 sweeps
+# that flipped at least one row, the per-sweep share of a category is p95=1.8%,
+# p99=3.4%, and then the tail jumps straight to 86%: routine churn and genuine
+# incidents are two separate populations, and the gap between them is where the
+# ceiling belongs. At 2% the breaker would have tripped 446 times in 60 days --
+# on ordinary sreality and idnes rental churn -- which is not a breaker, it is
+# an outage generator. At 10% it trips on exactly the four real events in that
+# window (realitymix dum/prodej at 86%, ceskereality komercni/prodej at 30% and
+# 13.7%, sreality pozemek/podil at 18.7%).
+#
+# min_rows is a floor on CATEGORY SIZE, not on the ceiling. It is 2,000 because
+# the small categories are the churny ones: sreality pozemek/drazba holds ~600
+# live rows and legitimately turns over 6-39% of them in a sweep (auctions end
+# on a date), as does idnes dum/pronajem at ~630. Policing those is noise.
+_DELIST_CAP_DEFAULTS = {"fraction": 0.10, "min_rows": 2000}
+
+
+def _delist_cap(conn: psycopg.Connection) -> tuple[float, int, list[dict[str, Any]]]:
+    """Operator-tunable ceiling from app_settings, falling back to the baked
+    defaults so a settings hiccup can never REMOVE the guard.
+
+    Also returns the operator's release valve (`overrides`): see
+    `_delist_override_permits`. The valve lives in the SAME setting as the cap
+    so there is one knob to read, one to audit, and no second mechanism that
+    can drift out of step with the first.
+    """
+    fraction = float(_DELIST_CAP_DEFAULTS["fraction"])
+    min_rows = int(_DELIST_CAP_DEFAULTS["min_rows"])
+    overrides: list[dict[str, Any]] = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM app_settings WHERE key = 'delist_flip_cap'")
+            row = cur.fetchone()
+        if row and isinstance(row[0], dict):
+            fraction = float(row[0].get("fraction", fraction))
+            min_rows = int(row[0].get("min_rows", min_rows))
+            raw = row[0].get("overrides")
+            if isinstance(raw, list):
+                overrides = [o for o in raw if isinstance(o, dict)]
+    except Exception as exc:  # noqa: BLE001 - a broken knob must not disarm the cap
+        LOG.warning("delist cap: falling back to defaults (%s)", exc)
+        return (float(_DELIST_CAP_DEFAULTS["fraction"]),
+                int(_DELIST_CAP_DEFAULTS["min_rows"]), [])
+    return fraction, min_rows, overrides
+
+
+def _delist_override_permits(
+    overrides: list[dict[str, Any]],
+    *,
+    source: str,
+    category_main: str | None,
+    category_type: str | None,
+    subtype: str | None,
+    candidates: int,
+) -> dict[str, Any] | None:
+    """The operator's release valve for a breaker that has latched.
+
+    A refusal does not clear itself: the unswept rows keep aging, so the next
+    sweep proposes MORE and is refused again. That is correct breaker
+    behaviour -- an auto-reclosing breaker defeats the purpose -- but a breaker
+    with no reset is a permanent stall, so the operator needs a way to say "I
+    verified this one, let it through" that does not mean "raise the ceiling
+    everywhere".
+
+    An override is therefore SCOPED (it names the source, and may name the
+    category), BOUNDED (`max_rows` is a hard row count, so even a wildcard
+    override cannot authorise an unbounded flip), and EXPIRING (`until` is
+    required and must still be in the future). Anything missing, unparseable or
+    already expired is IGNORED -- the valve fails shut, like the cap it
+    releases.
+    """
+    for o in overrides:
+        try:
+            if o.get("source") != source:
+                continue
+            for key, actual in (("category_main", category_main),
+                                ("category_type", category_type),
+                                ("subtype", subtype)):
+                want = o.get(key)
+                if want is not None and want != actual:
+                    break
+            else:
+                until = datetime.fromisoformat(str(o["until"]).replace("Z", "+00:00"))
+                if until.tzinfo is None:
+                    until = until.replace(tzinfo=timezone.utc)
+                if until <= datetime.now(timezone.utc):
+                    continue
+                if candidates <= int(o["max_rows"]):
+                    return o
+        except Exception as exc:  # noqa: BLE001 - a malformed valve stays shut
+            LOG.warning("delist cap: ignoring malformed override %r (%s)", o, exc)
+    return None
+
+
+def _delist_flip_allowed(
+    conn: psycopg.Connection,
+    *,
+    source: str,
+    category_main: str | None,
+    category_type: str | None,
+    subtype: str | None,
+    candidates: int,
+    active_rows: int,
+) -> bool:
+    """May a sweep of this size proceed?
+
+    Refusing is safe in the direction that matters: an unswept stale row is
+    visible, queryable and self-heals the moment the listing is seen again
+    (touch_listings), while a wrongly-delisted live listing is invisible to
+    Browse, the watchdog and every estimate, and nothing re-surfaces it.
+
+    The refusal is RECORDED, not just logged: an Actions log expires, and the
+    lesson of this sprint is that a signal nothing can query is a signal nobody
+    receives.
+    """
+    fraction, min_rows, overrides = _delist_cap(conn)
+    if active_rows < min_rows:
+        # The cap polices catastrophes, not small categories. The small ones are
+        # the churny ones: sreality pozemek/drazba turns over 6-39% of its ~600
+        # live rows per sweep because auctions end on a date.
+        return True
+    cap = max(1, int(active_rows * fraction))
+    if candidates <= cap:
+        return True
+    permit = _delist_override_permits(
+        overrides, source=source, category_main=category_main,
+        category_type=category_type, subtype=subtype, candidates=candidates,
+    )
+    if permit is not None:
+        LOG.warning(
+            "DELIST OVERRIDE source=%s cm=%s ct=%s subtype=%s candidates=%d cap=%d "
+            "-- operator override in force until %s (%s)",
+            source, category_main, category_type, subtype, candidates, cap,
+            permit.get("until"), permit.get("reason", "no reason given"),
+        )
+        return True
+    LOG.error(
+        "DELIST REFUSED source=%s cm=%s ct=%s subtype=%s candidates=%d active=%d cap=%d "
+        "-- a sweep this large is a claim the market moved overnight. Verify by FETCHING the "
+        "listings, then release THIS scope with a bounded, expiring entry in "
+        "app_settings.delist_flip_cap.overrides; do not raise the ceiling for every portal",
+        source, category_main, category_type, subtype, candidates, active_rows, cap,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO delist_flip_refusals
+                    (source, category_main, category_type, subtype,
+                     candidates, active_rows, cap)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (source, category_main, category_type, subtype,
+                 candidates, active_rows, cap),
+            )
+    except Exception as exc:  # noqa: BLE001 - never let bookkeeping undo the refusal
+        LOG.warning("delist cap: could not record the refusal: %s", exc)
+    return False
+
+
 def mark_inactive(
     conn: psycopg.Connection,
     category_main: str,
@@ -1441,7 +1610,36 @@ def mark_inactive(
     if min_unseen_hours is not None:
         params.append(min_unseen_hours)
     params.append(ids)
+    stale_filter = (
+        "\n                  AND last_seen_at < now() - make_interval(hours => %s)"
+        if min_unseen_hours is not None else ""
+    )
+    count_params: list[Any] = [ids]
+    if min_unseen_hours is not None:
+        count_params.append(min_unseen_hours)
+    count_params += [source, category_main, category_type]
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT
+              count(*) FILTER (
+                WHERE sreality_id <> ALL(%s){stale_filter}) AS candidates,
+              count(*) AS active_rows
+            FROM listings
+            WHERE is_active = true
+              AND source = %s
+              AND category_main = %s
+              AND category_type = %s
+            """,
+            tuple(count_params),
+        )
+        candidates, active_rows = cur.fetchone()
+        if not _delist_flip_allowed(
+            conn, source=source, category_main=category_main,
+            category_type=category_type, subtype=None,
+            candidates=int(candidates), active_rows=int(active_rows),
+        ):
+            return 0
         cur.execute(
             f"""
             UPDATE listings
@@ -1539,7 +1737,40 @@ def mark_inactive_native(
     if min_unseen_hours is not None:
         params.append(min_unseen_hours)
     params.append(natives)
+    # The cap's count runs the SAME predicate, but with the natives array inside
+    # a FILTER, so its parameters bind in a different order.
+    stale_filter = (
+        "\n                  AND last_seen_at < now() - make_interval(hours => %s)"
+        if min_unseen_hours is not None else ""
+    )
+    count_params: list[Any] = [natives]
+    if min_unseen_hours is not None:
+        count_params.append(min_unseen_hours)
+    count_params += [source, category_main, category_type]
+    if scope_subtype:
+        count_params.append(subtype)
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT
+              count(*) FILTER (
+                WHERE source_id_native <> ALL(%s){stale_filter}) AS candidates,
+              count(*) AS active_rows
+            FROM listings
+            WHERE is_active = true
+              AND source = %s
+              AND category_main = %s
+              AND category_type = %s{sub_clause}
+            """,
+            tuple(count_params),
+        )
+        candidates, active_rows = cur.fetchone()
+        if not _delist_flip_allowed(
+            conn, source=source, category_main=category_main,
+            category_type=category_type, subtype=subtype if scope_subtype else None,
+            candidates=int(candidates), active_rows=int(active_rows),
+        ):
+            return 0
         cur.execute(
             f"""
             UPDATE listings
@@ -1604,7 +1835,35 @@ def mark_inactive_agenda(
     if min_unseen_hours is not None:
         params.append(min_unseen_hours)
     params.append(natives)
+    stale_filter = (
+        "\n                  AND last_seen_at < now() - make_interval(hours => %s)"
+        if min_unseen_hours is not None else ""
+    )
+    count_params: list[Any] = [natives]
+    if min_unseen_hours is not None:
+        count_params.append(min_unseen_hours)
+    count_params += [source, category_type]
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT
+              count(*) FILTER (
+                WHERE source_id_native <> ALL(%s){stale_filter}) AS candidates,
+              count(*) AS active_rows
+            FROM listings
+            WHERE is_active = true
+              AND source = %s
+              AND category_type = %s
+            """,
+            tuple(count_params),
+        )
+        candidates, active_rows = cur.fetchone()
+        if not _delist_flip_allowed(
+            conn, source=source, category_main=None,
+            category_type=category_type, subtype=None,
+            candidates=int(candidates), active_rows=int(active_rows),
+        ):
+            return 0
         cur.execute(
             f"""
             UPDATE listings
