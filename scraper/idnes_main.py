@@ -70,11 +70,13 @@ SOURCE = "idnes"
 # Tightened 24->12h for the real-time delisting SLO.
 INACTIVE_MIN_UNSEEN_HOURS = 12
 
-# No slice of any category is anywhere near this: the largest measured is
-# stredocesky-kraj's 171 pages of land for sale. It is a loop guard, not a
-# budget — idnes clamps an out-of-range ?page to the last page and serves it
-# again, so a pager bug could otherwise page forever against a live URL.
-_MAX_SLICE_PAGES = 400
+# A loop guard, not a budget: idnes clamps an out-of-range ?page to the last page
+# and serves it again, so a pager bug could otherwise page forever against a live
+# URL. It was 400 and that was too low — the abroad bucket is 12,054 rows over
+# 482 pages, so the guard fired mid-walk and, because a `ceiling` did not descend,
+# the slice ended at 10,400 with no attempt to split it. 600 clears the largest
+# real place with room to spare; anything beyond that is a bug, not a big region.
+_MAX_SLICE_PAGES = 600
 
 # How many levels a slice may descend when paging cannot reach its own tail.
 # Two, because one is not always enough: kraj -> okres suffices for the Czech
@@ -347,12 +349,16 @@ class IdnesPortal:
             client, sale_type, cat, locality=locality, sl=sl,
             deadline=deadline, label=label,
             price_min=price_min, price_max=price_max)
-        # Descend ONLY on `incomplete` — we paged to the pager's own end and came
-        # up short, which is the shortfall a finer query can actually fix. An
-        # `error` is a transport failure and a `degraded` page carries no total to
-        # measure a union against; descending on either just multiplies failed
-        # requests and would relabel a fetch problem as a coverage one.
-        if outcome != "incomplete" or depth <= 0:
+        # Descend on a COVERAGE shortfall, not on a fetch problem.
+        #   incomplete — paged to the pager's own end and came up short
+        #   ceiling    — too big to page through at all, which is the same
+        #                shortfall stated more emphatically
+        # Both have a declared total to measure a union against, and both are
+        # fixed by asking a narrower question. An `error` is a transport failure
+        # and a `degraded` page carries no total at all; descending on either
+        # would multiply failed requests and relabel a fetch problem as a
+        # coverage one.
+        if outcome not in ("incomplete", "ceiling") or depth <= 0:
             return rows, declared, pages, outcome
 
         children: list[tuple[str | None, str | None, int | None, int | None, str]] = []
