@@ -409,6 +409,49 @@ class CeskerealityPortal:
             children.append(replace(parent, rows=[], pages=0, outcome="ceiling"))
         return children
 
+    def _record_slices(
+        self, conn: Any, category: dict[str, Any], kraje: tuple[str, ...] | list[str],
+        results: list[SliceResult], deadline_hit: bool,
+    ) -> None:
+        """Write this category's coverage to the slice ledger, ONE ROW PER KRAJ.
+
+        The aggregation is the whole point. A kraj past the page ceiling is
+        re-walked per subtype, so it comes back as several SliceResults sharing
+        one kraj — and recording those individually would poison the ledger the
+        first time a kraj stopped needing the descent: the `kraj/subtype-*` rows
+        from the old shape would linger, never be re-walked, and age forever.
+        The gate reads "every slice of this category exhausted inside the
+        window", so one permanently stale row is enough to hold the portal parked
+        for good. Collapsing to the kraj — the axis that is actually stable —
+        means the ledger's key set never changes shape.
+
+        A kraj counts as exhausted only when EVERY result for it did; the union
+        of its rows is what it collected. A kraj the deadline never reached is
+        not written at all, so it keeps its old timestamp and sorts first next
+        run (see db.slice_staleness — absent means never walked, not fresh).
+        """
+        if conn is None:
+            return
+        cm, ct = self.category_labels(category)
+        if cm is None or ct is None:
+            return
+        by_kraj: dict[str, list[SliceResult]] = {}
+        for r in results:
+            by_kraj.setdefault(r.kraj, []).append(r)
+        for kraj, parts in by_kraj.items():
+            positive = all(p.positive for p in parts)
+            outcome = "exhausted" if positive else next(
+                (p.outcome for p in parts if not p.positive), "incomplete")
+            # Children partition their parent, so their declared totals sum; an
+            # un-descended kraj is the single-element case of the same sum.
+            declared = sum(p.declared_total or 0 for p in parts) or None
+            db.record_index_slice(
+                conn, source=SOURCE, category_main=cm, category_type=ct,
+                slice_key=kraj, outcome=outcome, declared_total=declared,
+                collected=len({x[0] for p in parts for x in p.rows}),
+                pages=sum(p.pages for p in parts),
+            )
+
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
         deadline: float | None = None,
@@ -466,6 +509,8 @@ class CeskerealityPortal:
                     native_ids.append(nid)
                 ref_map[nid] = ref
                 price_map[nid] = price
+
+        self._record_slices(conn, category, kraje, results, deadline_hit)
 
         pages = sum(r.pages for r in results)
         declared_sum = sum(r.declared_total or 0 for r in results if r.positive)

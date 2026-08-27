@@ -199,10 +199,25 @@ latches, and records the refusal in `delist_flip_refusals`. idnes's backlog is
 ~37% of its rows, so the single failure this gate could plausibly cause is the
 exact one the layer beneath it is built to catch. **Right-or-caught, not right.**
 
-Only idnes feeds the slice ledger today, so ceskereality and mmreality report
-`no slice ledger` rather than a misleading 0% — an absent instrument is a
-different statement from a failed walk. Wiring ceskereality's (already
-kraj-sliced) walk to `record_index_slice` is what would let the gate evaluate it.
+**ceskereality now feeds the ledger too.** It was parked in migration 449 with no
+way back: the gate un-parks on ledger evidence and its walk wrote none, so it
+reported `no slice ledger` every cycle, forever. Its walk was already kraj-sliced,
+so wiring it was one call — but with one non-obvious rule.
+
+**ONE LEDGER ROW PER KRAJ, not per subtype.** A kraj past the 99-page ceiling is
+re-walked per subtype and comes back as several `SliceResult`s sharing one kraj.
+Recording those individually would poison the ledger the first time a kraj stopped
+needing the descent: the `kraj/subtype-*` rows from the old shape would linger,
+never be re-walked, and age forever — and the gate reads "every slice of this
+category exhausted inside the window", so one permanently stale row holds the
+portal parked for good. Collapsing to the kraj keeps the key set stable. A kraj
+counts as exhausted only when every one of its parts did; a kraj the deadline
+never reached is not written at all, so it keeps its old timestamp and sorts first
+next run.
+
+mmreality still reports `no slice ledger` — an absent instrument is a different
+statement from a failed walk, and reading them alike makes an uninstrumented
+portal look broken.
 
 ```bash
 gh workflow run coverage_gate.yml -f dry_run=true      # decide, write nothing

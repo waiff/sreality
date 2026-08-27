@@ -175,7 +175,7 @@ INDEX_ARCHIVERS: dict[str, CallSite] = {
         intentional_skips=(
             "ceskereality_main.py:274 `if conn is not None and archive_week is not None:` — "
             "a dry run has no connection to stage into and no week to key by",
-            "ceskereality_main.py:570 `client.fetch_search(url)` in probe_category fetches "
+            "ceskereality_main.py:615 `client.fetch_search(url)` in probe_category fetches "
             "index pages off the /nejnovejsi/ sort slug and never archives — discovery only, "
             "by design, exactly as sreality's probe is",
         ),
