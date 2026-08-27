@@ -4,10 +4,12 @@ residential proxy."""
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 
 import pytest
 
 from scraper import ceskereality_main as m
+from scraper import portal as m_portal
 from scraper.ceskereality_client import REGION_HOSTS, CeskerealityClient
 from scraper.ceskereality_parser import extract_facet_slugs
 from scraper.portal import default_config
@@ -141,6 +143,65 @@ def test_full_walk_visits_all_seven_regions(monkeypatch):
     )
     for host in REGION_HOSTS:
         assert any(host in u for u in fake.urls), f"{host} not walked"
+
+
+class _ClockClient:
+    """Every slice looks complete (tiny total, no next arrow) and the nationwide
+    total is unavailable — so only the clock runs out. `trip_after` fetches, the
+    fake monotonic clock jumps past the deadline."""
+
+    def __init__(self, clock: dict, trip_after: int) -> None:
+        self.urls: list[str] = []
+        self._clock = clock
+        self._trip_after = trip_after
+        self._n = 0
+
+    def fetch_search(self, url):  # noqa: ANN001
+        self.urls.append(url)
+        self._n += 1
+        if self._n >= self._trip_after:
+            self._clock["t"] = 9_999.0
+        return _page_html(2, [str(6_000_000 + self._n)], facets=("kladno",)), 200
+
+    def fetch_index(self, sale_type, cat, page):  # noqa: ANN001
+        raise RuntimeError("nationwide total unavailable")
+
+
+def test_deadline_stops_walk_and_forces_incomplete(monkeypatch):
+    """A walk cut short by the wall-clock budget must NEVER report complete=True.
+    Here the nationwide total is unknown and no slice capped, so every other rail
+    says 'complete' — only the deadline flag stops mark_inactive from delisting
+    the six regions the walk never reached (rule #3)."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(
+        m_portal, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+    fake = _ClockClient(clock, trip_after=3)
+    monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: fake)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))   # full walk
+
+    seen, _counts, total, _pages, complete = portal.walk_category(
+        {"sale_type": "prodej", "category": "byty"},
+        conn=None, dry_run=True, limiter=None, deadline=10.0,
+    )
+
+    assert total is None                # _walk_complete() alone would say True
+    assert seen                         # rows collected before the stop are kept
+    assert complete is False            # the deadline poisons the whole verdict
+    # stopped promptly: only the first region was touched, not all seven
+    assert len({h for h in REGION_HOSTS if any(h in u for u in fake.urls)}) == 1
+
+
+def test_walk_slice_reports_incomplete_when_budget_already_spent(monkeypatch):
+    """The page loop's own guard: budget spent -> no request, complete=False."""
+    monkeypatch.setattr(
+        m_portal, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    fake = _CappedClient()
+    rows, pages, _total, complete = m.CeskerealityPortal(
+        default_config("ceskereality"))._walk_slice(
+            fake, "stredo.ceskereality.cz", "prodej", "byty", "kladno",
+            deadline=1.0)
+    assert fake.pages == []             # not one more request past the budget
+    assert (rows, pages, complete) == ([], 0, False)
 
 
 # --- cross-slice delisting sweep ('rodinne-domy' + 'chaty-chalupy' -> dum) ---

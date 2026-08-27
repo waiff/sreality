@@ -909,6 +909,19 @@ renumber.** Navigate by area:
     bounded by the market, so **any strict ordering that puts refresh first eventually stops
     ingesting new listings altogether** — it did, on 2026-08-17, for nine days and 15,064
     listings, with no alarm. `tests/test_detail_queue_fairness_live.py` holds the invariant.
+    **Every walk carries a wall-clock deadline, checked PER PAGE, and a walk that stops on it
+    MUST report `complete=False`.** `run_index_walk` builds the deadline from `--max-seconds`
+    and passes it into `walk_category` (the Portal protocol declares it); portals check it with
+    the one shared `portal.deadline_reached` — never an inline comparison, which is trivially
+    invertible into a walk that runs to the job timeout while looking correct. Checking only
+    BETWEEN categories is not enough and was the idnes failure: one idnes category is ~1,050
+    pages, so the outer check never came round and GitHub SIGKILLed the job at page 599 in 9 of
+    12 runs, each recording zero categories. Equally load-bearing is that the budget is actually
+    WIRED: when this shipped, seven of nine portals called `run_index_walk` without
+    `max_seconds` and sreality had no `--max-seconds` flag at all, so the checks were dead code
+    on those portals. `tests/scraper/test_walk_deadline_wiring.py` is a census over the real
+    modules that fails if any link in that chain — flag, forward, per-page check, protocol
+    parameter — is missing on any portal.
     It fetches, and writes **batched** via
     `db.write_detail_batch` (set-based `jsonb_to_recordset`; one transaction per ~100 listings;
     snapshot-on-change preserved via an `IS DISTINCT FROM` anti-join). The index-walk uses the

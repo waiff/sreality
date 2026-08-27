@@ -19,6 +19,7 @@ baked-in code default.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal
@@ -150,6 +151,20 @@ def price_changed(
     if prev is None or new is None or prev <= 0 or min_change_pct <= 0:
         return True
     return abs(new - prev) / prev >= min_change_pct
+
+
+def deadline_reached(deadline: float | None) -> bool:
+    """Has this walk spent its wall-clock budget?
+
+    ONE definition, because the comparison is easy to get backwards and a portal
+    that inverts it would run to the job timeout instead of stopping. `deadline`
+    is a time.monotonic() instant (never a duration, never wall-clock time —
+    monotonic is immune to NTP steps mid-walk); None means unbounded.
+
+    A page loop that returns True here MUST report complete=False. Stopping early
+    is not a complete walk, and rule #3 forbids delisting from an incomplete one.
+    """
+    return deadline is not None and time.monotonic() >= deadline
 
 
 IndexVerdict = Literal["new", "changed", "unchanged"]

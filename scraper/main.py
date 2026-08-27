@@ -46,6 +46,7 @@ from scraper import db, hashing, image_storage, media, parser, portal_runner
 from scraper.portal import (
     PortalLimits,
     classify_index_sighting,
+    deadline_reached,
     default_config,
     load_portal_config,
 )
@@ -279,6 +280,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.index_only:
             rc, scrape_agg = _run_index_walk(
                 dry_run=args.dry_run, index_rate=limits.index_rate, run_id=run_id,
+                max_seconds=args.max_seconds,
             )
         elif args.drain_only:
             rc, scrape_agg = _run_detail_drain(
@@ -587,6 +589,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "Phase 2: claim ids from listing_detail_queue, fetch their "
             "details, and write them in batches. Bounded by "
             "--max-detail-refetches (claims per run). Skips the index walk."
+        ),
+    )
+    p.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Wall-clock budget for the index walk. On expiry the walk stops "
+            "cleanly and reports the category INCOMPLETE, so mark_inactive is "
+            "suppressed (rule #3) rather than the job being SIGKILLed by the "
+            "CI timeout with nothing recorded."
         ),
     )
     p.add_argument("-v", "--verbose", action="store_true")
@@ -901,12 +914,13 @@ class SrealityPortal:
 
     def walk_category(
         self, category: tuple[int, int], conn: Any, dry_run: bool, limiter: RateLimiter,
+        deadline: float | None = None,
     ) -> tuple[set[int], dict[str, int], int | None, int, bool]:
         cm, ct = category
         return _walk_category_split(
             cm, ct, limiter=limiter, conn=conn, cat_limit=None, dry_run=dry_run,
             refetch_budget=[None], cat_refetch_cap=None, detail_workers=1,
-            enqueue_only=True,
+            enqueue_only=True, deadline=deadline,
         )
 
     def probe_category(
@@ -1040,10 +1054,13 @@ def _run_index_walk(
     dry_run: bool,
     index_rate: float = DEFAULT_DETAIL_RATE,
     run_id: int | None = None,
+    max_seconds: float | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Sreality index-walk via the generic portal_runner (Phase 4). Records
     run_type='index' with index_pages>0 so Health liveness keys off it."""
-    return portal_runner.run_index_walk(SrealityPortal(index_rate), dry_run, run_id)
+    return portal_runner.run_index_walk(
+        SrealityPortal(index_rate), dry_run, run_id, max_seconds=max_seconds,
+    )
 
 
 def _run_detail_drain(
@@ -1096,6 +1113,7 @@ def _walk_category_split(
     cat_refetch_cap: int | None,
     detail_workers: int,
     enqueue_only: bool = False,
+    deadline: float | None = None,
 ) -> tuple[set[int], dict[str, int], int | None, int, bool]:
     """Walk one category, splitting large ones by district (okres).
 
@@ -1146,7 +1164,15 @@ def _walk_category_split(
     pages = 0
     all_districts_complete = True
     cat_refetched = 0
-    for district in DISTRICT_IDS:
+    for walked, district in enumerate(DISTRICT_IDS):
+        if deadline_reached(deadline):
+            all_districts_complete = False
+            LOG.info(
+                "SPLIT cm=%s ct=%s stopping on the walk deadline after %d/%d "
+                "districts; category reported incomplete so no sweep runs",
+                cm_text, ct_text, walked, len(DISTRICT_IDS),
+            )
+            break
         district_cap = (
             None if cat_refetch_cap is None
             else max(0, cat_refetch_cap - cat_refetched)
@@ -1197,7 +1223,7 @@ def _walk_category_split(
     # remainder. The deep-pagination cap truncates it, but the union only grows
     # — it can never cause a false delisting, and the completeness guard still
     # compares the final union against the national probe below.
-    if not _walk_complete(len(union), result_size):
+    if not _walk_complete(len(union), result_size) and not deadline_reached(deadline):
         LOG.info(
             "SPLIT national-fallback cm=%s ct=%s union=%d result_size=%d",
             cm_text, ct_text, len(union), result_size,

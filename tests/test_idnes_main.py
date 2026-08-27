@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from scraper import idnes_main
+from scraper import portal as portal_mod
 from scraper.idnes_main import IdnesPortal
 from scraper.portal import PortalConfig
 from scraper.portal_base import ListingGoneError
@@ -221,6 +222,48 @@ def test_walk_category_max_pages_suppresses_complete(monkeypatch):
     )
     assert pages == 1
     assert complete is False     # max_pages => partial => never mark_inactive
+
+
+def test_walk_category_deadline_stops_walk_and_suppresses_complete(monkeypatch):
+    # One idnes category is ~1,050 pages, so run_index_walk's between-category
+    # budget check never got a turn: GitHub SIGKILLed the job mid-walk and 9 of
+    # 12 runs covered zero categories. The page loop now stops itself — and a
+    # walk cut short must read incomplete, or mark_inactive would delist the
+    # pages it never fetched (rule #3).
+    calls = {"n": 0}
+
+    def _page(_html):
+        # An UNDER-reported total (2) with pages still coming: len(seen) clears
+        # the 99.5% bar after page 2, so only the truncation flag can hold
+        # complete at False. Paging ends at 5 so a regressed walk terminates.
+        calls["n"] += 1
+        nid = f"6a18deadbeefdeadbeef{calls['n']:04d}"
+        return SimpleNamespace(
+            total=2, next_offset=(calls["n"] + 1 if calls["n"] < 5 else None),
+            items=[SimpleNamespace(
+                source_id_native=nid,
+                detail_path=f"https://reality.idnes.cz/detail/prodej/byt/x/{nid}/",
+                price_text="5 000 000 Kč")],
+        )
+
+    monkeypatch.setattr(idnes_main, "parse_index", _page)
+    monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
+    monkeypatch.setattr(idnes_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(idnes_main.db, "enqueue_detail", lambda *a, **k: 1)
+    # Budget spent between page 2 and page 3 (deadline_reached reads the clock
+    # once per iteration); scoped to scraper.portal so no global clock is faked.
+    ticks = iter([10.0, 20.0, 99.0])
+    monkeypatch.setattr(portal_mod, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+
+    seen, _counts, total, pages, complete = _portal().walk_category(
+        {"sale_type": "prodej", "category": "byty"}, object(), False, _Limiter(),
+        50.0,
+    )
+    assert pages == 2            # stopped before fetching page 3
+    assert len(seen) == 2        # what it did reach is still enqueued
+    assert total == 2
+    assert idnes_main._walk_complete(len(seen), total) is True  # the bar alone says complete
+    assert complete is False     # ...the deadline stop overrides it (never mark_inactive)
 
 
 def test_mark_inactive_source_scoped(monkeypatch):

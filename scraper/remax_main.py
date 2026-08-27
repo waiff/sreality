@@ -43,6 +43,7 @@ from scraper.portal import (
     default_config,
     load_portal_config,
     classify_index_sighting,
+    deadline_reached,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -72,7 +73,8 @@ class _AgendaWalk:
         self.total = total
         self.pages = pages
         # Did this walk reach the agenda's reported total? Gates agenda-grain
-        # delisting (mark_inactive). False on a capped/short walk → no flip.
+        # delisting (mark_inactive). False on a capped/short walk, or one cut
+        # short by the wall-clock deadline → no flip.
         self.complete = complete
 
 
@@ -125,6 +127,7 @@ class RemaxPortal:
 
     def _walk_agenda(
         self, sale: int, conn: Any, limiter: RateLimiter,
+        deadline: float | None = None,
     ) -> tuple[_AgendaWalk, int]:
         """Walk one offer-type's full mixed index once; cache it for the agenda's
         other category descriptors. Returns (walk, pages_fetched_this_call) so the
@@ -158,7 +161,15 @@ class RemaxPortal:
         total: int | None = None
         pages = 0
         page = 1
+        stopped_early = False
         while True:
+            if deadline_reached(deadline):
+                stopped_early = True
+                LOG.info(
+                    "INDEX deadline sale=%d stopping before page=%d pages=%d collected=%d total=%s",
+                    sale, page, pages, len(native_ids), total,
+                )
+                break
             html, status = client.fetch_index(sale=sale, stranka=page)
             key = f"{sale}/{page}/{week}"
             # W2a-0: the instrument's denominator is FETCHES, never archive
@@ -222,11 +233,15 @@ class RemaxPortal:
                 break
             page += 1
 
-        # Complete only if we walked the whole agenda (not page-capped) AND reached
-        # the portal-reported total — the gate for agenda-grain delisting.
+        # Complete only if we walked the whole agenda (not page-capped, not cut
+        # short by the wall-clock deadline) AND reached the portal-reported total
+        # — the gate for agenda-grain delisting. A deadline stop can leave the
+        # collected count above INDEX_MIN_COMPLETENESS, so it must force the flag
+        # False explicitly; the walk is cached, so the whole agenda (every one of
+        # its category descriptors) inherits the incomplete verdict.
         capped = bool(self._max_pages and pages >= self._max_pages)
         complete = (
-            not capped and total is not None and total > 0
+            not stopped_early and not capped and total is not None and total > 0
             and len(native_ids) >= total * INDEX_MIN_COMPLETENESS
         )
         walk = _AgendaWalk(native_ids, ref_map, price_map, cat_map, total, pages, complete)
@@ -244,10 +259,11 @@ class RemaxPortal:
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
+        deadline: float | None = None,
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         cm = category.get("category_main")
         sale = int(category.get("sale") or 1)
-        walk, pages = self._walk_agenda(sale, conn, limiter)
+        walk, pages = self._walk_agenda(sale, conn, limiter, deadline)
 
         native_ids = [n for n in walk.native_ids if self._belongs(walk.cat_map.get(n), cm)]
         seen = set(native_ids)
@@ -481,7 +497,10 @@ def main(argv: list[str] | None = None) -> int:
     # exist so a large backfill can be cadence-split like sreality/idnes.
     rc = 0
     if not args.drain_only:
-        rc = _run_phase(portal, "index", portal_runner.run_index_walk, args.dry_run)
+        rc = _run_phase(
+            portal, "index", portal_runner.run_index_walk, args.dry_run,
+            max_seconds=args.max_seconds,
+        )
     if rc == 0 and not args.index_only:
         rc = _run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,

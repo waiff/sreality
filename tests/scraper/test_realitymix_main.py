@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from scraper import portal as portal_mod
 from scraper import realitymix_main
 from scraper.portal import default_config
 from scraper.realitymix_main import RealitymixPortal
@@ -114,6 +115,71 @@ def test_max_pages_caps_walk_and_suppresses_completeness(monkeypatch):
     assert fake.requested == [1]              # capped at one page
     assert len(seen) == 20
     assert complete is False                  # a capped walk never drives mark_inactive
+
+
+# --- wall-clock deadline (--max-seconds): stop cleanly, never claim complete ---
+
+class _FakeClock:
+    """Stand-in for scraper.portal's `time`, advanced by the fake index fetch."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def _deadline_walk(monkeypatch, pages, deadline, *, per_page_seconds=10.0):
+    clock = _FakeClock()
+    monkeypatch.setattr(portal_mod, "time", clock)
+    fake = FakeClient(pages)
+    inner = fake.fetch_index
+
+    def fetch_index(sale_type, category, page):
+        clock.now += per_page_seconds
+        return inner(sale_type, category, page)
+
+    fake.fetch_index = fetch_index
+    monkeypatch.setattr(realitymix_main, "RealitymixClient", lambda limiter=None: fake)
+    portal = RealitymixPortal(default_config("realitymix"))
+    return fake, portal.walk_category(
+        {"sale_type": "prodej", "category": "byty"}, None, True, None, deadline,
+    )
+
+
+def test_deadline_mid_walk_stops_and_forces_incomplete(monkeypatch):
+    # 3 pages of a 60-item category, 10s each, 15s of budget -> stop after page 2.
+    pages = {
+        n: [_index_html(60, [str(n * 1000 + i) for i in range(20)])]
+        for n in (1, 2, 3)
+    }
+    fake, (seen, _counts, total, walked, complete) = _deadline_walk(
+        monkeypatch, pages, 15.0)
+    assert fake.requested == [1, 2]            # page 3 never fetched
+    assert walked == 2
+    assert len(seen) == 40 and total == 60
+    # The dangerous outcome would be complete=True here: mark_inactive would then
+    # delist the 20 listings the walk simply never reached (rule #3).
+    assert complete is False
+
+
+def test_deadline_already_spent_stops_before_the_first_page(monkeypatch):
+    pages = {1: [_index_html(20, [str(1000 + i) for i in range(20)])]}
+    fake, (seen, _counts, _total, walked, complete) = _deadline_walk(
+        monkeypatch, pages, -1.0)
+    assert fake.requested == []
+    assert walked == 0 and seen == set()
+    assert complete is False
+
+
+def test_no_deadline_walk_still_completes(monkeypatch):
+    pages = {
+        n: [_index_html(40, [str(n * 1000 + i) for i in range(20)])] for n in (1, 2)
+    }
+    _fake, (seen, _counts, total, walked, complete) = _deadline_walk(
+        monkeypatch, pages, None)
+    assert len(seen) == 40 and total == 40 and walked == 2
+    assert complete is True
 
 
 def test_category_labels():
