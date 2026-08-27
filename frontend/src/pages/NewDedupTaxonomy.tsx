@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
+  bulkSetNewDedupTagAnnotation,
   getNewDedupLabelingOverview,
   getTagDefinition,
   getTagDefinitionVersion,
@@ -9,6 +10,7 @@ import {
   listTagDefinitionVersions,
   listTagNeighbours,
   listTagPositiveImages,
+  removeNewDedupTag,
   renameNewDedupTag,
   saveTagDefinition,
   setNewDedupTagAnnotation,
@@ -18,7 +20,9 @@ import {
   type SaveTagDefinitionIn,
   type TagDefinition,
   type TagDefinitionStatus,
+  type TagExcludedReason,
   type TagPositiveImage,
+  type TagState,
 } from '@/lib/api';
 import { fetchImagesByImageIds } from '@/lib/queries';
 import { pushToast } from '@/lib/toast';
@@ -31,13 +35,17 @@ import DefinitionEditor, {
 import DefinitionReadOnly from '@/components/tag-definitions/DefinitionReadOnly';
 import OverlapEvidence from '@/components/tag-definitions/OverlapEvidence';
 import TagContentsGallery, {
+  type BatchFileRequest,
+  type BatchFileResult,
   type MovedOutImage,
 } from '@/components/tag-definitions/TagContentsGallery';
 import TagDefinitionList from '@/components/tag-definitions/TagDefinitionList';
+import TagDeleteConfirm from '@/components/tag-definitions/TagDeleteConfirm';
 import ImageTagDetailPanel, {
   type ImageTagChange,
 } from '@/components/tag-annotations/ImageTagDetailPanel';
 import {
+  NEW_DEDUP_CANDIDATES_KEY,
   NEW_DEDUP_OVERVIEW_KEY,
   NEW_DEDUP_PROPOSALS_KEY,
   NEW_DEDUP_TAG_IMAGES_KEY,
@@ -79,6 +87,12 @@ const versionKey = (tagId: number, v: number) => [
 ];
 const neighboursKey = (tagId: number) => ['new-dedup', 'labeling', 'neighbours', tagId];
 const photosKey = (ids: string) => ['new-dedup', 'taxonomy', 'photos', ids];
+/* Prefixes, for the writes that dirty EVERY tag's copy of a label-carrying
+ * read rather than one tag's. Local consts, not additions to newDedupKeys:
+ * nothing outside this page needs them, and the second one is already used
+ * inline by the rename path below. */
+const NEW_DEDUP_NEIGHBOURS_PREFIX = ['new-dedup', 'labeling', 'neighbours'];
+const NEW_DEDUP_IMAGE_TAGS_PREFIX = ['new-dedup', 'labeling', 'image-tags'];
 
 /* The server caps this list at 300; asking for exactly the cap is what makes
  * the grid's "showing the N most recent" note both reachable and truthful. */
@@ -92,6 +106,15 @@ const MIN_POSITIVES_FOR_CENTROID = 5;
  * whole document past it, so the 25th click has to be refused here rather than
  * turning a finished sitting into a 422. */
 const EXAMPLE_IMAGES_MAX = 24;
+/* Mirrors toolkit.tag_annotations.BULK_STATE_MAX — the server refuses a larger
+ * batch outright, and a select-all over a 300-row grid exceeds it. */
+const BULK_ANNOTATION_MAX = 200;
+
+const chunkIds = (ids: ReadonlyArray<number>, size: number): number[][] => {
+  const out: number[][] = [];
+  for (let i = 0; i < ids.length; i += size) out.push([...ids.slice(i, i + size)]);
+  return out;
+};
 
 const draftFrom = (def: TagDefinition | null | undefined): Draft =>
   def
@@ -303,10 +326,49 @@ export default function NewDedupTaxonomy() {
   const [movedOut, setMovedOut] = useState<ReadonlyArray<MovedOutImage>>([]);
   const movedOutRef = useRef<ReadonlyArray<MovedOutImage>>([]);
   movedOutRef.current = movedOut;
+
+  /* Batch-file state. Selection is a MODE, not a modifier: while it is on a
+   * tile click selects, while it is off a tile click stages a canonical
+   * example, and exactly one of those is true at any moment. */
+  const [selecting, setSelecting] = useState(false);
+  const [selectedImageIds, setSelectedImageIds] = useState<ReadonlySet<number>>(new Set());
+  const [batchResult, setBatchResult] = useState<BatchFileResult | null>(null);
+  const [batchWritten, setBatchWritten] = useState(0);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
   useEffect(() => {
     setMovedOut([]);
     setDetailImageId(null);
+    setSelecting(false);
+    setSelectedImageIds(new Set());
+    setBatchResult(null);
+    setBatchWritten(0);
+    setConfirmingDelete(false);
+    setDeleteError(null);
   }, [selectedTagId]);
+
+  /* The narrowing invariant: an image taken out through the all-tags panel
+   * mid-selection drops out of the batch on its own, the readout can never
+   * overcount, and no payload can name an id that is not currently positive on
+   * the source. One derived value kills a whole class of bug. */
+  const effectiveSelectedIds = useMemo(() => {
+    if (selectedImageIds.size === 0) return new Set<number>();
+    const next = new Set<number>();
+    for (const r of positiveRows) if (selectedImageIds.has(r.image_id)) next.add(r.image_id);
+    return next;
+  }, [positiveRows, selectedImageIds]);
+
+  const toggleSelectImage = useCallback(
+    (imageId: number) =>
+      setSelectedImageIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(imageId)) next.delete(imageId);
+        else next.add(imageId);
+        return next;
+      }),
+    [],
+  );
 
   /* Put the row back where it was, not at the top. The server orders by
    * `updated_at DESC` and a put-back genuinely moves the row, so it WILL float
@@ -332,6 +394,36 @@ export default function NewDedupTaxonomy() {
         },
       );
       return true;
+    },
+    [qc],
+  );
+
+  /* Batch sibling of restorePositiveRow: ONE setQueryData, splicing ASCENDING
+   * by held index — descending would land later rows at the wrong offsets.
+   * Returns the ids it could not place, which is what the caller has to repair
+   * some other way. */
+  const restorePositiveRows = useCallback(
+    (tagId: number, imageIds: ReadonlyArray<number>): number[] => {
+      const wanted = new Set(imageIds);
+      const held = movedOutRef.current
+        .filter((m) => wanted.has(m.row.image_id))
+        .sort((a, b) => a.index - b.index);
+      setMovedOut((prev) => prev.filter((m) => !wanted.has(m.row.image_id)));
+      const placed = new Set<number>();
+      qc.setQueryData<{ data: TagPositiveImage[] }>(
+        newDedupPositiveImagesKey(tagId),
+        (old) => {
+          if (!old) return old;
+          const next = [...old.data];
+          for (const h of held) {
+            if (next.some((r) => r.image_id === h.row.image_id)) continue;
+            next.splice(Math.min(h.index, next.length), 0, h.row);
+            placed.add(h.row.image_id);
+          }
+          return { ...old, data: next };
+        },
+      );
+      return [...imageIds].filter((id) => !placed.has(id));
     },
     [qc],
   );
@@ -430,6 +522,223 @@ export default function NewDedupTaxonomy() {
     [putBackMut.isPending, putBackMut.variables],
   );
 
+  // --- filing a batch under another tag -------------------------------------
+
+  /* Every annotation write moves the same nine derived numbers on both tags and
+   * dirties the same label-carrying reads on the OTHER page. One helper, so a
+   * batch and a single write can never disagree about what one decision dirties.
+   * NEW_DEDUP_PROPOSALS_KEY is deliberately NOT here — the single/bulk writes in
+   * ImageTagDetailPanel do not invalidate it either. */
+  const invalidateAnnotationReads = useCallback(() => {
+    qc.invalidateQueries({ queryKey: NEW_DEDUP_OVERVIEW_KEY });
+    qc.invalidateQueries({ queryKey: NEW_DEDUP_IMAGE_TAGS_PREFIX });
+    qc.invalidateQueries({ queryKey: NEW_DEDUP_TAG_IMAGES_KEY });
+    qc.invalidateQueries({ queryKey: NEW_DEDUP_CANDIDATES_KEY });
+  }, [qc]);
+
+  const batchMut = useMutation({
+    /* NEVER rejects. It resolves with a BatchFileResult for all four terminal
+     * cases, so partial failure has exactly one handler and no toast path.
+     *
+     * Destination FIRST, always. If the source were written first and the
+     * destination then failed, images would have left the source with nowhere
+     * to go; destination-first means the worst case is a duplicate positive on
+     * both tags — precisely the safe `keeps` state, and recoverable by pressing
+     * Write again. Chunks are sequential, never Promise.all: a deterministic
+     * failure point, and polite to a single-operator API. */
+    mutationFn: async (
+      vars: BatchFileRequest & { sourceTagId: number },
+    ): Promise<BatchFileResult> => {
+      const base = {
+        destTagId: vars.destTagId,
+        destLabel: tagById.get(vars.destTagId)?.label ?? `tag ${vars.destTagId}`,
+        outcome: vars.outcome,
+        requestedIds: [...vars.imageIds],
+      };
+      const chunks = chunkIds(vars.imageIds, BULK_ANNOTATION_MAX);
+      const destWritten: number[] = [];
+      setBatchWritten(0);
+
+      for (const c of chunks) {
+        try {
+          await bulkSetNewDedupTagAnnotation(vars.destTagId, c, 'positive', null);
+        } catch (err) {
+          const landed = new Set(destWritten);
+          return {
+            ...base,
+            status: 'dest-failed',
+            destWrittenIds: destWritten,
+            sourceWrittenIds: [],
+            unresolvedIds: base.requestedIds.filter((id) => !landed.has(id)),
+            message: (err as Error).message,
+          };
+        }
+        destWritten.push(...c);
+        setBatchWritten(destWritten.length);
+      }
+
+      if (vars.outcome === 'keeps')
+        return {
+          ...base,
+          status: 'ok',
+          destWrittenIds: destWritten,
+          sourceWrittenIds: [],
+          unresolvedIds: [],
+          message: null,
+        };
+
+      const state: TagState = vars.outcome === 'not-this' ? 'negative' : 'excluded';
+      const reason: TagExcludedReason | null = vars.outcome === 'not-this' ? null : 'pruned';
+      const sourceWritten: number[] = [];
+      for (const c of chunks) {
+        try {
+          await bulkSetNewDedupTagAnnotation(vars.sourceTagId, c, state, reason);
+        } catch (err) {
+          const done = new Set(sourceWritten);
+          return {
+            ...base,
+            status: 'source-failed',
+            destWrittenIds: destWritten,
+            sourceWrittenIds: sourceWritten,
+            unresolvedIds: destWritten.filter((id) => !done.has(id)),
+            message: (err as Error).message,
+          };
+        }
+        sourceWritten.push(...c);
+      }
+      return {
+        ...base,
+        status: 'ok',
+        destWrittenIds: destWritten,
+        sourceWrittenIds: sourceWritten,
+        unresolvedIds: [],
+        message: null,
+      };
+    },
+    onSuccess: (res, vars) => {
+      setBatchResult(res);
+      setBatchWritten(0);
+      /* The selection narrows to what "press Write again" must act on. On a
+       * clean run of `keeps` the rows never left, so the selection stays intact
+       * — filing the same block under a second tag is one picker change away. */
+      if (res.status !== 'ok') setSelectedImageIds(new Set(res.unresolvedIds));
+
+      /* Patched, never invalidated: an invalidate refetches up to 300 rows,
+       * re-renders every tile AND reorders by updated_at. The patch is not a
+       * guess — the server already agrees these rows are no longer positive. A
+       * `keeps` batch touches nothing here, and must not blink the grid. */
+      if (res.sourceWrittenIds.length > 0) {
+        const state: TagState = res.outcome === 'not-this' ? 'negative' : 'excluded';
+        const excludedReason: TagExcludedReason | null =
+          res.outcome === 'not-this' ? null : 'pruned';
+        const key = newDedupPositiveImagesKey(vars.sourceTagId);
+        const written = new Set(res.sourceWrittenIds);
+        const cached = qc.getQueryData<{ data: TagPositiveImage[] }>(key);
+        const held: MovedOutImage[] = [];
+        cached?.data.forEach((row, index) => {
+          if (written.has(row.image_id)) held.push({ row, index, state, excludedReason });
+        });
+        qc.setQueryData<{ data: TagPositiveImage[] }>(key, (old) =>
+          old ? { ...old, data: old.data.filter((r) => !written.has(r.image_id)) } : old,
+        );
+        /* The cache patch is right whatever is on screen — those rows really
+         * did leave. The receipt strip is session-local and a tag switch
+         * empties it, so a batch that resolves after one must not push chips
+         * describing a tag the operator is no longer reading. */
+        if (vars.sourceTagId === selectedTagId)
+          setMovedOut((prev) => [
+            ...prev,
+            ...held.filter((h) => !prev.some((p) => p.row.image_id === h.row.image_id)),
+          ]);
+      }
+
+      if (res.destWrittenIds.length === 0 && res.sourceWrittenIds.length === 0) return;
+      /* The destination gallery is not mounted, so nothing blinks — but it IS
+       * cached, and inside main.tsx's 60s staleTime selecting that tag would
+       * serve a gallery this write contradicted. */
+      if (res.destWrittenIds.length > 0)
+        qc.invalidateQueries({ queryKey: newDedupPositiveImagesKey(res.destTagId) });
+      invalidateAnnotationReads();
+    },
+  });
+
+  const putBackAllMut = useMutation({
+    mutationFn: async (vars: { tagId: number; imageIds: number[] }) => {
+      for (const c of chunkIds(vars.imageIds, BULK_ANNOTATION_MAX))
+        await bulkSetNewDedupTagAnnotation(vars.tagId, c, 'positive', null);
+      return vars;
+    },
+    onSuccess: (vars) => {
+      // One setQueryData for the whole strip; the refetch is the fallback for
+      // rows a tag switch already dropped, never the norm.
+      if (restorePositiveRows(vars.tagId, vars.imageIds).length > 0)
+        qc.invalidateQueries({ queryKey: newDedupPositiveImagesKey(vars.tagId) });
+      invalidateAnnotationReads();
+    },
+    onError: (err: Error) => pushToast('err', err.message),
+  });
+
+  // --- deleting a tag -------------------------------------------------------
+
+  const deleteMut = useMutation({
+    mutationFn: (tagId: number) => removeNewDedupTag(tagId),
+    onSuccess: (res, tagId) => {
+      setConfirmingDelete(false);
+      setDeleteError(null);
+
+      /* Patch, don't refetch: a 51-row VISIBLE list, and no OTHER tag's counts
+       * moved. But candidate_image_count (distinct images queued for ≥1 tag)
+       * can only be recomputed server-side, so the entry is flagged stale
+       * WITHOUT a refetch and corrects on the next mount or focus. That
+       * arithmetic is never invented here. */
+      qc.setQueryData<{ data: NewDedupLabelingOverview }>(NEW_DEDUP_OVERVIEW_KEY, (old) =>
+        old
+          ? { ...old, data: { ...old.data, tags: old.data.tags.filter((t) => t.id !== tagId) } }
+          : old,
+      );
+      qc.invalidateQueries({ queryKey: NEW_DEDUP_OVERVIEW_KEY, refetchType: 'none' });
+      // Also a visible list (the v-chips): no chip may survive its tag.
+      qc.setQueryData<{ data: TagDefinitionStatus[] }>(DEFINITIONS_KEY, (old) =>
+        old ? { ...old, data: old.data.filter((s) => s.tag_id !== tagId) } : old,
+      );
+
+      /* removeQueries, not invalidate — invalidating would fire a refetch for
+       * an entity that now 404s. This is what "the entity is gone" means. It
+       * runs BEFORE the prefix invalidates below, so those cannot re-match the
+       * dead tag's own entries. */
+      qc.removeQueries({ queryKey: definitionKey(tagId) });
+      qc.removeQueries({ queryKey: versionsKey(tagId) });
+      qc.removeQueries({ queryKey: neighboursKey(tagId) });
+      qc.removeQueries({ queryKey: newDedupPositiveImagesKey(tagId) });
+
+      // Other tags' cached neighbour lists still name it, and would keep
+      // offering a gone tag as confusable. Label-carrying reads on the other
+      // page are flagged for the same reason the rename path flags them.
+      qc.invalidateQueries({ queryKey: NEW_DEDUP_NEIGHBOURS_PREFIX });
+      qc.invalidateQueries({ queryKey: NEW_DEDUP_IMAGE_TAGS_PREFIX });
+      qc.invalidateQueries({ queryKey: NEW_DEDUP_TAG_IMAGES_KEY });
+      qc.invalidateQueries({ queryKey: NEW_DEDUP_PROPOSALS_KEY });
+      qc.invalidateQueries({ queryKey: NEW_DEDUP_CANDIDATES_KEY });
+
+      /* Reset the draft through the ONE loader, and drop the selection rather
+       * than auto-advancing to a neighbour — silently loading a different tag's
+       * document after a destructive act is how the next edit lands on the
+       * wrong one. selectTag's dirty-confirm deliberately does not apply: the
+       * modal already said the unsaved changes go too. */
+      loadedStamp.current = null;
+      loadForm(null);
+      setParams({}, { replace: true });
+      pushToast(
+        'ok',
+        `Deleted ${res.data.label} — ${res.data.deleted_annotations} annotations went with it.`,
+      );
+    },
+    /* Own onError, which suppresses main.tsx's global toast: the modal is still
+     * open and on screen, and a toast six seconds away would be the same
+     * message said twice. */
+    onError: (err: Error) => setDeleteError(err.message),
+  });
+
   // --- renaming a tag in place ---------------------------------------------
 
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -520,6 +829,23 @@ export default function NewDedupTaxonomy() {
 
   const loadError = overviewQ.error ?? statusQ.error ?? definitionQ.error;
 
+  /* Filing images onto a retired tag would put them where list_tags_for_image
+   * can no longer show them. */
+  const destinationTags = useMemo(() => tags.filter((t) => t.active), [tags]);
+  /* Exactly the strip the gallery renders: a row a background refetch has
+   * re-listed is not "moved out" any more and must not be re-written. */
+  const putBackAllIds = useMemo(
+    () =>
+      movedOut
+        .filter((m) => !positiveRows.some((r) => r.image_id === m.row.image_id))
+        .map((m) => m.row.image_id),
+    [movedOut, positiveRows],
+  );
+  /* The back button, and any stale link: without this the page leans on
+   * definitionQ's 404 banner to explain a tag that is simply gone. */
+  const selectedTagGone =
+    selectedTagId != null && overviewQ.data != null && tagById.get(selectedTagId) == null;
+
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-2xl mx-auto">
       <h1 className="text-2xl leading-tight">NEW DEDUP · Taxonomy</h1>
@@ -546,12 +872,20 @@ export default function NewDedupTaxonomy() {
           renamePending={renameMut.isPending}
           renameError={renameError}
           onRenameErrorClear={clearRenameError}
+          onRequestDelete={() => {
+            setDeleteError(null);
+            setConfirmingDelete(true);
+          }}
         />
 
         <div>
           {selectedTagId == null ? (
             <p className="text-sm text-[var(--color-ink-3)]">
               Pick a tag on the left to write its definition.
+            </p>
+          ) : selectedTagGone ? (
+            <p className="text-sm text-[var(--color-ink-3)]">
+              That tag no longer exists. Pick another on the left.
             </p>
           ) : (
             <>
@@ -723,6 +1057,36 @@ export default function NewDedupTaxonomy() {
                       putBackMut.mutate({ tagId: selectedTagId, imageId })
                     }
                     putBackPending={putBackPending}
+                    subjectTagId={selectedTagId}
+                    subjectLabel={selectedTag?.label ?? `tag ${selectedTagId}`}
+                    destinationTags={destinationTags}
+                    selecting={selecting}
+                    onEnterSelection={() => setSelecting(true)}
+                    onLeaveSelection={() => {
+                      setSelecting(false);
+                      setSelectedImageIds(new Set());
+                      setBatchResult(null);
+                    }}
+                    selectedIds={effectiveSelectedIds}
+                    onToggleSelect={toggleSelectImage}
+                    onSelectAll={() =>
+                      setSelectedImageIds(new Set(positiveRows.map((r) => r.image_id)))
+                    }
+                    onClearSelection={() => setSelectedImageIds(new Set())}
+                    onBatchFile={(req) =>
+                      batchMut.mutate({ ...req, sourceTagId: selectedTagId })
+                    }
+                    batchPending={batchMut.isPending}
+                    batchWritten={batchWritten}
+                    batchResult={batchResult}
+                    onDismissBatchResult={() => setBatchResult(null)}
+                    onPutBackAll={() =>
+                      putBackAllMut.mutate({
+                        tagId: selectedTagId,
+                        imageIds: putBackAllIds,
+                      })
+                    }
+                    putBackAllPending={putBackAllMut.isPending}
                   />
                   <OverlapEvidence
                     neighbours={neighboursQ.data?.data ?? []}
@@ -738,6 +1102,22 @@ export default function NewDedupTaxonomy() {
           )}
         </div>
       </div>
+
+      {confirmingDelete && selectedTag != null && (
+        <TagDeleteConfirm
+          tag={selectedTag}
+          definitionVersion={statusByTag.get(selectedTag.id)?.version ?? null}
+          savedVersionCount={versionsQ.data ? versions.length : null}
+          hasUnsavedDraft={dirty}
+          onCancel={() => {
+            setConfirmingDelete(false);
+            setDeleteError(null);
+          }}
+          onConfirm={() => deleteMut.mutate(selectedTag.id)}
+          pending={deleteMut.isPending}
+          error={deleteError}
+        />
+      )}
 
       {detailImageId != null && (
         <ImageTagDetailPanel

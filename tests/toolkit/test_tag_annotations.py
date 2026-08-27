@@ -1205,3 +1205,21 @@ def test_a_healthy_tag_does_not_alert(conn: _FakeConn) -> None:
     row = next(r for r in ta.tag_overview(conn)["tags"] if r["label"] == "a")
     assert row["ambiguity_rate"] < ta.AMBIGUITY_RATE_THRESHOLD
     assert row["ambiguity_alert"] is False
+
+
+def test_a_human_write_always_lands_on_a_backfill_442_cell() -> None:
+    """The taxonomy page's batch-file surface (file N images under another tag)
+    rests entirely on this disjunct: a UI write is source='human', and
+    'human' <> 'machine' is TRUE, so the DO UPDATE fires no matter what the
+    existing row is — including migration 442's manufactured negatives, which
+    is exactly what the collapse of a parent tag into its children replaces.
+    Drop the disjunct and that batch silently writes nothing.
+
+    Deliberately a SQL-TEXT assertion, not a behavioural one: _FakeConn cannot
+    evaluate an ON CONFLICT ... WHERE, so a behavioural test here would be
+    theatre (see the repo's adversarial-review finding on fake-conn limits).
+    """
+    for sql in (ta._UPSERT_STATE_SQL, ta._UPSERT_STATE_RETURNING_SQL):
+        assert "ON CONFLICT (image_id, tag_id) DO UPDATE SET" in sql
+        assert "WHERE excluded.source <> 'machine'" in sql
+        assert "OR image_tag_labels.source IN ('machine', 'backfill_442')" in sql
