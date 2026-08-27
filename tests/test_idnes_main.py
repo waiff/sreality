@@ -233,21 +233,15 @@ def test_walk_category_max_pages_suppresses_complete(monkeypatch):
 
 
 def test_walk_category_deadline_stops_walk_and_suppresses_complete(monkeypatch):
-    # One idnes category is ~1,050 pages, so run_index_walk's between-category
-    # budget check never got a turn: GitHub SIGKILLed the job mid-walk and 9 of
-    # 12 runs covered zero categories. The page loop now stops itself — and a
-    # walk cut short must read incomplete, or mark_inactive would delist the
-    # pages it never fetched (rule #3).
-    calls = {"n": 0}
-
+    # A walk cut short must read incomplete, or mark_inactive would delist the
+    # slices it never fetched (rule #3). Under the sliced walk the cut happens
+    # between slices as well as between pages, and BOTH must suppress complete:
+    # 14 of 15 slices walked is a walk with a hole in it, and a hole is exactly
+    # what the sweep would read as "these listings are gone".
     def _page(_html):
-        # An UNDER-reported total (2) with pages still coming: len(seen) clears
-        # the 99.5% bar after page 2, so only the truncation flag can hold
-        # complete at False. Paging ends at 5 so a regressed walk terminates.
-        calls["n"] += 1
-        nid = f"6a18deadbeefdeadbeef{calls['n']:04d}"
+        nid = "6a18deadbeefdeadbeef0001"
         return SimpleNamespace(
-            total=2, next_offset=(calls["n"] + 1 if calls["n"] < 5 else None),
+            total=1, next_offset=None,
             items=[SimpleNamespace(
                 source_id_native=nid,
                 detail_path=f"https://reality.idnes.cz/detail/prodej/byt/x/{nid}/",
@@ -258,20 +252,158 @@ def test_walk_category_deadline_stops_walk_and_suppresses_complete(monkeypatch):
     monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
     monkeypatch.setattr(idnes_main.db, "index_summary_native", lambda *a, **k: {})
     monkeypatch.setattr(idnes_main.db, "enqueue_detail", lambda *a, **k: 1)
-    # Budget spent between page 2 and page 3 (deadline_reached reads the clock
-    # once per iteration); scoped to scraper.portal so no global clock is faked.
-    ticks = iter([10.0, 20.0, 99.0])
-    monkeypatch.setattr(portal_mod, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+    monkeypatch.setattr(idnes_main.db, "record_index_slice", lambda *a, **k: None)
+    # The budget expires after a handful of deadline checks, mid-slice-list.
+    checks = {"n": 0}
 
-    seen, _counts, total, pages, complete = _portal().walk_category(
-        {"sale_type": "prodej", "category": "byty"}, object(), False, _Limiter(),
+    def _clock() -> float:
+        checks["n"] += 1
+        return 10.0 if checks["n"] < 6 else 999.0
+
+    monkeypatch.setattr(portal_mod, "time", SimpleNamespace(monotonic=_clock))
+
+    seen, _counts, national, pages, complete = _portal().walk_category(
+        {"sale_type": "prodej", "category": "byty"}, _Conn(), False, _Limiter(),
         50.0,
     )
-    assert pages == 2            # stopped before fetching page 3
-    assert len(seen) == 2        # what it did reach is still enqueued
-    assert total == 2
-    assert idnes_main.walk_is_complete(len(seen), total) is True  # the bar alone says complete
-    assert complete is False     # ...the deadline stop overrides it (never mark_inactive)
+    assert complete is False        # the whole point
+    assert seen                     # what it did reach is still enqueued
+    assert pages >= 1
+    assert national == 1
+
+
+def test_walk_category_walks_all_fifteen_slices(monkeypatch):
+    """14 kraje + the abroad bucket. Abroad is not a nicety: on idnes the kraj
+    slices sum to 15,319 of 27,372 flats for sale, so a slice set built from the
+    region nav alone would report 56% of the portal as 100% of it."""
+    asked: list[tuple[Any, bool]] = []
+
+    class _Spy(_IdxClient):
+        def fetch_index(self, sale_type, category, page=None, *, locality=None,
+                        abroad=False):
+            asked.append((locality, abroad))
+            return ("<html>", 200)
+
+    nid = "6a18deadbeefdeadbeef0001"
+    monkeypatch.setattr(idnes_main, "parse_index", lambda _h: SimpleNamespace(
+        total=1, next_offset=None,
+        items=[SimpleNamespace(
+            source_id_native=nid,
+            detail_path=f"https://reality.idnes.cz/detail/prodej/byt/x/{nid}/",
+            price_text="5 000 000 Kč")]))
+    monkeypatch.setattr(idnes_main, "IdnesClient", _Spy)
+    monkeypatch.setattr(idnes_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(idnes_main.db, "enqueue_detail", lambda *a, **k: 1)
+    recorded: list[str] = []
+    monkeypatch.setattr(idnes_main.db, "record_index_slice",
+                        lambda *a, **k: recorded.append(k["slice_key"]))
+
+    _portal().walk_category(
+        {"sale_type": "prodej", "category": "byty"}, _Conn(), False, _Limiter(), None)
+
+    localities = [loc for loc, ab in asked if loc is not None]
+    assert set(localities) == set(portal_mod.CZ_KRAJ_SLUGS)
+    assert sum(1 for _loc, ab in asked if ab) == 1        # exactly one abroad slice
+    assert set(recorded) == set(portal_mod.CZ_KRAJ_SLUGS) | {portal_mod.ABROAD_SLICE}
+    # The first call is the national cross-check: neither a kraj nor abroad.
+    assert asked[0] == (None, False)
+
+
+def test_one_unfinished_slice_forces_the_whole_category_incomplete(monkeypatch):
+    """Fourteen good slices and one that failed is not 93% coverage for the
+    purposes of delisting — it is a walk with a hole in it."""
+    class _Flaky(_IdxClient):
+        def fetch_index(self, sale_type, category, page=None, *, locality=None,
+                        abroad=False):
+            if locality == "zlinsky-kraj":
+                raise RuntimeError("connection reset")
+            return ("<html>", 200)
+
+    nid = "6a18deadbeefdeadbeef0001"
+    monkeypatch.setattr(idnes_main, "parse_index", lambda _h: SimpleNamespace(
+        total=1, next_offset=None,
+        items=[SimpleNamespace(
+            source_id_native=nid,
+            detail_path=f"https://reality.idnes.cz/detail/prodej/byt/x/{nid}/",
+            price_text="5 000 000 Kč")]))
+    monkeypatch.setattr(idnes_main, "IdnesClient", _Flaky)
+    monkeypatch.setattr(idnes_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(idnes_main.db, "enqueue_detail", lambda *a, **k: 1)
+    outcomes: dict[str, str] = {}
+    monkeypatch.setattr(idnes_main.db, "record_index_slice",
+                        lambda *a, **k: outcomes.__setitem__(k["slice_key"], k["outcome"]))
+
+    _seen, _c, _n, _p, complete = _portal().walk_category(
+        {"sale_type": "prodej", "category": "byty"}, _Conn(), False, _Limiter(), None)
+    assert complete is False
+    assert outcomes["zlinsky-kraj"] == "error"
+    assert outcomes["praha"] == "exhausted"
+
+
+def test_a_never_walked_slice_goes_first(monkeypatch):
+    """The starvation guard. A slice with no ledger row must sort as infinitely
+    stale, not as fresh — treating unknown as 0 hours would put exactly the
+    never-walked slices LAST, which is the behaviour the ledger exists to end."""
+    portal = _portal()
+    portal._staleness = {
+        ("byt", "prodej", k): 1.0 for k in portal.SLICES if k != "zlinsky-kraj"
+    }
+    portal._staleness[("byt", "prodej", "praha")] = 99.0
+    order = portal._slice_order("byt", "prodej")
+    assert order[0] == "zlinsky-kraj"   # never walked
+    assert order[1] == "praha"          # then the stalest known
+
+
+def test_the_stalest_category_is_walked_first(monkeypatch):
+    """Slice ordering alone is not enough: the runner walks categories in order,
+    so a category that eats the whole budget every run starves the rest however
+    its own slices are sorted. That is what left 8 of 10 idnes categories never
+    walked at all."""
+    cfg = PortalConfig(
+        source="idnes", supports_complete_walk=True,
+        categories=[{"sale_type": "prodej", "category": "byty"},
+                    {"sale_type": "pronajem", "category": "domy"}],
+        split_threshold=None,
+    )
+    portal = IdnesPortal(cfg)
+    # byty/prodej fully walked an hour ago; domy/pronajem missing one slice.
+    portal._staleness = {("byt", "prodej", k): 1.0 for k in portal.SLICES}
+    portal._staleness.update(
+        {("dum", "pronajem", k): 0.5 for k in portal.SLICES if k != "praha"})
+    assert portal.categories()[0]["sale_type"] == "pronajem"
+
+
+def test_the_page_capped_probe_keeps_the_flat_national_walk(monkeypatch):
+    """The realtime probe reads the newest-first head of the NATIONAL list.
+    Slicing would scatter that head across 15 requests and defeat it — and being
+    partial, it must never read as complete."""
+    asked: list[Any] = []
+
+    class _Spy(_IdxClient):
+        def fetch_index(self, sale_type, category, page=None, *, locality=None,
+                        abroad=False):
+            asked.append((locality, abroad))
+            return ("<html>", 200)
+
+    nid = "6a18deadbeefdeadbeef0001"
+    monkeypatch.setattr(idnes_main, "parse_index", lambda _h: SimpleNamespace(
+        total=9999, next_offset=None,
+        items=[SimpleNamespace(
+            source_id_native=nid,
+            detail_path=f"https://reality.idnes.cz/detail/prodej/byt/x/{nid}/",
+            price_text="5 000 000 Kč")]))
+    monkeypatch.setattr(idnes_main, "IdnesClient", _Spy)
+    monkeypatch.setattr(idnes_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(idnes_main.db, "enqueue_detail", lambda *a, **k: 1)
+    monkeypatch.setattr(idnes_main.db, "record_index_slice",
+                        lambda *a, **k: pytest.fail("a probe must not write the ledger"))
+
+    portal = _portal()
+    portal.set_index_page_cap(2)
+    _seen, _c, _n, _p, complete = portal.walk_category(
+        {"sale_type": "prodej", "category": "byty"}, _Conn(), False, _Limiter(), None)
+    assert asked == [(None, False)]     # one flat national request, no slicing
+    assert complete is False
 
 
 def test_mark_inactive_source_scoped(monkeypatch):
@@ -375,3 +507,78 @@ def test_mark_gone_flips_listing_inactive(monkeypatch):
     )
     _portal().mark_gone(object(), "a")
     assert captured == {"source": "idnes", "nid": "a"}
+
+
+# --- the empty slice ---------------------------------------------------------
+#
+# A slice with nothing in it publishes no count, so `total` is None — which is
+# byte-for-byte what a degraded or throttled page returns. Conflating the two is
+# how a broken fetch gets read as "this region is empty" and drives a delisting
+# sweep. idnes states emptiness out loud, so a confirmed zero is a REAL
+# measurement and an empty slice IS complete; an unconfirmed one is not.
+
+
+def _one_page(*, total, items, empty_confirmed=False):
+    return SimpleNamespace(total=total, next_offset=None, items=items,
+                           empty_confirmed=empty_confirmed)
+
+
+def _walk_with(monkeypatch, page_for, national_total=0):
+    """The FIRST parse is the national cross-check, not a slice: it supplies the
+    denominator the slice union has to satisfy. Give it a real total, or the
+    category fails closed for want of a denominator no matter how the slices
+    went — which is correct behaviour, and would mask what these tests assert."""
+    calls = {"n": 0}
+
+    def _parse(_h):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _one_page(total=national_total, items=[])
+        return page_for()
+
+    monkeypatch.setattr(idnes_main, "parse_index", _parse)
+    monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
+    monkeypatch.setattr(idnes_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(idnes_main.db, "enqueue_detail", lambda *a, **k: 0)
+    outcomes: dict[str, str] = {}
+    monkeypatch.setattr(idnes_main.db, "record_index_slice",
+                        lambda *a, **k: outcomes.__setitem__(k["slice_key"], k["outcome"]))
+    result = _portal().walk_category(
+        {"sale_type": "prodej", "category": "byty"}, _Conn(), False, _Limiter(), None)
+    return outcomes, result
+
+
+def test_a_confirmed_empty_slice_counts_as_finished(monkeypatch):
+    """Verified live: idnes garages-for-rent has zero abroad listings, and the
+    page says so. Without this the category could never read complete, because
+    one legitimately empty slice would hold it open forever."""
+    outcomes, (_seen, _c, national, _p, complete) = _walk_with(
+        monkeypatch, lambda: _one_page(total=None, items=[], empty_confirmed=True))
+    assert set(outcomes.values()) == {"exhausted"}
+    assert complete is True
+    assert national == 0
+
+
+def test_an_UNconfirmed_empty_page_is_missing_evidence(monkeypatch):
+    """The same shape without the site's own confirmation is a degraded page —
+    a throttle, a WAF interstitial, a parser drift — and it must never read as
+    'this region has nothing in it'."""
+    outcomes, (_seen, _c, _n, _p, complete) = _walk_with(
+        monkeypatch, lambda: _one_page(total=None, items=[], empty_confirmed=False))
+    assert set(outcomes.values()) == {"degraded"}
+    assert complete is False
+
+
+def test_the_empty_marker_cannot_override_a_page_that_has_results(monkeypatch):
+    """Belt and braces: a confirmed-empty flag on a page that actually carries a
+    count must not short-circuit the walk at page one."""
+    nid = "6a18deadbeefdeadbeef0001"
+    item = SimpleNamespace(
+        source_id_native=nid,
+        detail_path=f"https://reality.idnes.cz/detail/prodej/byt/x/{nid}/",
+        price_text="5 000 000 Kč")
+    outcomes, (seen, _c, _n, _p, complete) = _walk_with(
+        monkeypatch, lambda: _one_page(total=1, items=[item], empty_confirmed=True),
+        national_total=1)
+    assert seen == {nid}
+    assert set(outcomes.values()) == {"exhausted"}

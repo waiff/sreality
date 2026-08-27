@@ -2405,6 +2405,87 @@ def scrape_run_finalize(
         )
 
 
+# --- the index-slice ledger (migration 454) ----------------------------------
+#
+# An index walk starts at the first category's first page every time. When the
+# budget runs out the next run starts from the same place, so a catalogue bigger
+# than one budget does not get walked slowly -- the same HEAD gets walked over
+# and over while the tail is never reached. These two functions are the memory
+# that turns that into monotonic progress: record what each slice reached, then
+# order the next run by what is stalest.
+
+SLICE_OUTCOME_POSITIVE = "exhausted"
+
+
+def record_index_slice(
+    conn: psycopg.Connection,
+    *,
+    source: str,
+    category_main: str,
+    category_type: str,
+    slice_key: str,
+    outcome: str,
+    declared_total: int | None,
+    collected: int,
+    pages: int,
+) -> None:
+    """Latest-wins upsert of one slice's outcome. Best-effort: bookkeeping must
+    never break a walk, and a walk that fails to record simply looks stale next
+    run -- which errs toward walking it again, the safe direction."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO portal_index_slices
+                    (source, category_main, category_type, slice_key, walked_at,
+                     outcome, declared_total, collected, pages)
+                VALUES (%s, %s, %s, %s, now(), %s, %s, %s, %s)
+                ON CONFLICT (source, category_main, category_type, slice_key)
+                DO UPDATE SET walked_at = now(),
+                              outcome = EXCLUDED.outcome,
+                              declared_total = EXCLUDED.declared_total,
+                              collected = EXCLUDED.collected,
+                              pages = EXCLUDED.pages
+                """,
+                (source, category_main, category_type, slice_key, outcome,
+                 declared_total, collected, pages),
+            )
+    except Exception as exc:  # noqa: BLE001 - never let the ledger break the walk
+        LOG.warning("slice ledger: could not record %s/%s/%s/%s: %s",
+                    source, category_main, category_type, slice_key, exc)
+
+
+def slice_staleness(
+    conn: psycopg.Connection, source: str,
+) -> dict[tuple[str, str, str], float]:
+    """Hours since each slice of this source was last walked.
+
+    A slice with no row is ABSENT from the result, and callers must read that as
+    "never walked, walk it first" -- not as "fresh". Returning 0.0 for an unknown
+    slice would sort the never-walked ones LAST, which is precisely the starvation
+    this ledger exists to end.
+    """
+    out: dict[tuple[str, str, str], float] = {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT category_main, category_type, slice_key,
+                       extract(epoch FROM (now() - walked_at)) / 3600.0
+                  FROM portal_index_slices
+                 WHERE source = %s
+                """,
+                (source,),
+            )
+            for cm, ct, key, hours in cur.fetchall():
+                out[(cm, ct, key)] = float(hours)
+    except Exception as exc:  # noqa: BLE001 - an unreadable ledger means "walk everything"
+        LOG.warning("slice ledger: unreadable for %s (%s); treating all slices "
+                    "as never walked", source, exc)
+        return {}
+    return out
+
+
 def bump_index_pages(conn: psycopg.Connection, run_id: int, n: int) -> None:
     """Add n to a scrape_runs row's index_pages immediately, best-effort.
 

@@ -491,3 +491,43 @@ def test_uzitna_beats_podlahova_and_says_so():
         html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
     )
     assert (listing.area_m2, listing.area_basis) == (69.0, "usable")
+
+
+# --- the confirmed-empty signal ----------------------------------------------
+#
+# A slice with nothing in it publishes no count phrase, so `total` is None —
+# which is byte-for-byte what a throttled or malformed page returns. Conflating
+# the two is how a broken fetch gets read as "this region is empty" and drives a
+# delisting sweep over listings that are still on the market. idnes states the
+# zero out loud, so a confirmed one is a real measurement; an unconfirmed one is
+# missing evidence. (ceskereality has no such string and has to confirm a zero by
+# reading the page twice.)
+
+
+def test_empty_confirmed_only_when_the_page_says_so() -> None:
+    said = ("<html><body><strong>Momentálně tu není žádný inzerát, "
+            "který odpovídá vašemu hledání.</strong></body></html>")
+    silent = "<html><body><div class='shell'></div></body></html>"
+    assert parse_index(said).empty_confirmed is True
+    assert parse_index(silent).empty_confirmed is False
+
+
+def test_a_page_with_results_is_never_confirmed_empty() -> None:
+    """Belt and braces: boilerplate must not be able to short-circuit a walk on
+    a page that actually carries listings."""
+    html = ("<html><body><span>3 nemovitosti</span>"
+            "<strong>Momentálně tu není žádný inzerát</strong>"
+            '<div class="c-products__item">'
+            '<a class="c-products__link" href="/detail/prodej/byt/x/'
+            'aaaaaaaaaaaaaaaaaaaaaa01/">x</a></div></body></html>')
+    page = parse_index(html)
+    assert page.items
+    assert page.empty_confirmed is False
+
+
+def test_the_marker_survives_diacritics_and_whitespace() -> None:
+    """The live markup wraps the sentence across newlines and tabs, so the match
+    runs on a diacritics-stripped, whitespace-collapsed string."""
+    html = ("<html><body><strong>Momentalne   tu\n\tneni\n zadny "
+            "inzerat, ktery odpovida vasemu hledani.</strong></body></html>")
+    assert parse_index(html).empty_confirmed is True

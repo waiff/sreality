@@ -184,6 +184,29 @@ class IndexPage:
     total: int | None
     items: list[IndexItem] = field(default_factory=list)
     next_offset: int | None = None
+    # True when the page POSITIVELY states it has no results. Distinct from
+    # `total is None and not items`, which is also what a degraded or throttled
+    # page looks like — see `_EMPTY_MARKERS`.
+    empty_confirmed: bool = False
+
+
+# idnes states emptiness OUT LOUD, and that is worth a lot. A slice with no
+# results renders no count phrase at all, so `total` comes back None — which is
+# byte-for-byte what a degraded page returns, and treating the two alike is how
+# a broken fetch gets read as "this region has nothing in it" and authorises a
+# delisting sweep. ceskereality has no such string and has to confirm a zero by
+# READING THE PAGE TWICE (a throttle is transient, an empty slice is stable).
+# Here the site tells us directly, so one read is enough.
+_EMPTY_MARKERS: tuple[str, ...] = (
+    "momentalne tu neni zadny inzerat",      # the live string, diacritics stripped
+    "neodpovida zadny inzerat",
+    "nenasli jsme zadny inzerat",
+)
+
+
+def _is_empty_result(text: str) -> bool:
+    flat = " ".join(_strip_diacritics(text).lower().split())
+    return any(m in flat for m in _EMPTY_MARKERS)
 
 
 def _strip_diacritics(text: str) -> str:
@@ -455,7 +478,15 @@ def parse_index(html: str) -> IndexPage:
             )
         )
 
-    return IndexPage(total=total, items=items, next_offset=_next_page(tree))
+    # Only meaningful when there is genuinely nothing: a page that HAS results
+    # or a count is never "confirmed empty", whatever boilerplate it carries.
+    empty = (
+        not items and total is None and _is_empty_result(_page_text(tree))
+    )
+    return IndexPage(
+        total=total, items=items, next_offset=_next_page(tree),
+        empty_confirmed=empty,
+    )
 
 
 def _next_page(tree: HTMLParser) -> int | None:

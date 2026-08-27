@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 
+from scraper.portal import CZ_KRAJ_SLUGS
 from scraper.portal_base import BasePortalClient, ListingGoneError
 
 LOG = logging.getLogger(__name__)
@@ -44,13 +45,11 @@ BASE_URL = "https://www.ceskereality.cz"
 #       and 7 macro-region SUBDOMAINS. Mixing vocabularies double-counts.
 # TRAP: /zahranicni/ is a separate tree outside the national CZ totals
 #       (12,942 flats vs 8,855 national). Never walk it from here.
-KRAJ_SLUGS: tuple[str, ...] = (
-    "praha", "stredocesky-kraj", "jihocesky-kraj", "plzensky-kraj",
-    "karlovarsky-kraj", "ustecky-kraj", "liberecky-kraj",
-    "kralovehradecky-kraj", "pardubicky-kraj", "kraj-vysocina",
-    "jihomoravsky-kraj", "olomoucky-kraj", "moravskoslezsky-kraj",
-    "zlinsky-kraj",
-)
+# The tuple itself is shared (scraper.portal.CZ_KRAJ_SLUGS): idnes publishes the
+# same 14 slugs, character for character, so a second copy would only be a second
+# place to get `kraj-vysocina` wrong. The TRAPs above stay here because they are
+# about THIS site's URL space, not about the vocabulary.
+KRAJ_SLUGS: tuple[str, ...] = CZ_KRAJ_SLUGS
 
 # The second axis, used ONLY when a kraj slice would exceed the 99-page cap.
 # Declared per category, never scraped: a kraj page's facet block OMITS

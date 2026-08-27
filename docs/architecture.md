@@ -146,7 +146,28 @@ in ~2.3s each for exactly 20 requests, then one stalls for ~390 SECONDS and retu
 of one 160-minute run. A residential IP shows no stall over 26 consecutive requests (0.62
 pages/s vs 0.047), so idnes now sets `USE_PROXY` like the two Cloudflare portals — but with
 `PROXY_REQUIRED = False`, because idnes only *degrades* without the proxy where they hard-403,
-and skipping a slow portal trades degraded data for none. The detail URL carries the category
+and skipping a slow portal trades degraded data for none.
+**The walk is SLICED, and the slices are REMEMBERED.** Each category is walked as the 14
+`CZ_KRAJ_SLUGS` plus the abroad bucket (`?s-l=STAT-XX` — a query parameter, not a path segment;
+every `/zahranici/` spelling 404s). That last slice is not a nicety: the kraj slices sum to
+15,319 of the 27,372 flats for sale, so a slice set built from the region nav alone would report
+56% of the portal as 100% of it. Proven a true row-level partition by ID enumeration (755 rows,
+14 slices, zero overlap and zero gap), and `kraj_sum + abroad` equals the national declared total
+on all 10 categories. Slicing here is **not** a workaround for a pagination cap — idnes has none
+— it is what makes coverage *provable* (15 declared totals to check instead of one) and
+*resumable*: every slice's outcome lands in `portal_index_slices` (migration 454), and both the
+category order and the slice order are **least-recently-walked first**, with a never-walked slice
+sorting ahead of everything. That is the fix for the real defect, which was amnesia rather than
+speed — a walk that runs out of budget used to restart at the first category's first page, so the
+same head was re-walked while 8 of 10 categories were never touched at all. A category reads
+complete only when **every** slice was walked *and* returned `exhausted` *and* the union satisfies
+the national declared total; one `deadline`, `error`, `degraded` or `ceiling` holds the whole
+category open. An empty slice publishes no count, so `total` is `None` — identical to a degraded
+page — and is only accepted when idnes *says* it is empty ("momentálně tu není žádný inzerát",
+`IndexPage.empty_confirmed`); ceskereality, which publishes no such string, has to confirm a zero
+by reading the page twice instead. The page-capped realtime probe keeps the flat national walk,
+since slicing would scatter the newest-first head it exists to read.
+The detail URL carries the category
 (`/detail/{sale}/{cat}/…`), so the drain derives each listing's category from its own URL —
 one config (the `portals` row, migrations 110/111) walks many categories (byty + domy ×
 prodej + pronájem today). Image-URL rows are recorded by the drain; the shared `images.yml`

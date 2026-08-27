@@ -33,21 +33,42 @@ _GONE_MARKERS: tuple[str, ...] = (
 )
 
 
+# idnes exposes "abroad" as a QUERY PARAMETER, not a path segment: there is no
+# /s/prodej/byty/zahranici/ (every spelling 404s), only ?s-l=STAT-XX. It matters
+# far more than a URL quirk: the 14 kraj slices sum to 15,319 of the 27,372 flats
+# for sale, and the missing 12,053 (44%) are all here. A slice set built from the
+# region nav alone would report 56% of the portal as 100% of it.
+ABROAD_QUERY = "s-l=STAT-XX"
+
+
 def index_url(
     sale_type: str,
     category: str,
     page: int | None = None,
     *,
     locality: str | None = None,
+    abroad: bool = False,
 ) -> str:
     """Build a search URL. idnes paging is offset-style: the bare URL is page 1,
     and `?page=N` is the (N+1)-th page (the pager's "next" link carries the literal
-    N to use). `page=None` -> the bare first page; otherwise `?page={page}`."""
+    N to use). `page=None` -> the bare first page; otherwise `?page={page}`.
+
+    `locality` is a kraj slug (a path segment); `abroad` selects the foreign
+    bucket instead (a query parameter). They are mutually exclusive — together
+    they would ask for a region and its complement at once.
+    """
+    if abroad and locality:
+        raise ValueError("index_url: locality and abroad are mutually exclusive")
     url = f"{BASE_URL}/s/{sale_type}/{category}/"
     if locality:
         url += f"{urllib.parse.quote(locality.strip('/'))}/"
+    params = []
+    if abroad:
+        params.append(ABROAD_QUERY)
     if page is not None and page >= 1:
-        url += f"?page={page}"
+        params.append(f"page={page}")
+    if params:
+        url += "?" + "&".join(params)
     return url
 
 
@@ -90,8 +111,11 @@ class IdnesClient(BasePortalClient):
         page: int | None = None,
         *,
         locality: str | None = None,
+        abroad: bool = False,
     ) -> tuple[str, int]:
-        response = self._request(index_url(sale_type, category, page, locality=locality))
+        response = self._request(
+            index_url(sale_type, category, page, locality=locality, abroad=abroad)
+        )
         return response.text, response.status_code
 
     def fetch_detail(self, path_or_url: str) -> tuple[str, int]:
