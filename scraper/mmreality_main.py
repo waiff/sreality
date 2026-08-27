@@ -35,6 +35,7 @@ from scraper.mmreality_parser import index_price, parse_detail, parse_index
 from scraper.portal import (
     PortalConfig,
     default_config,
+    deadline_reached,
     load_portal_config,
     classify_index_sighting,
 )
@@ -86,6 +87,7 @@ class MmRealityPortal:
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
+        deadline: float | None = None,
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         client = MmRealityClient(limiter=limiter)
 
@@ -96,6 +98,13 @@ class MmRealityPortal:
         page: int | None = None  # None = the bare first page
 
         while True:
+            if deadline_reached(deadline):
+                LOG.info(
+                    "INDEX time budget reached index=%s before page=%s "
+                    "(pages=%d walked); stopping early, walk incomplete",
+                    category.get("index", "nemovitosti"), page or 1, pages,
+                )
+                break
             html, status = client.fetch_index(page)
             parsed = parse_index(html)
             pages += 1
@@ -153,7 +162,9 @@ class MmRealityPortal:
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
         # supports_complete_walk is false, so the runner never marks inactive;
-        # `complete` is reported false to make that explicit.
+        # `complete` is the literal False below to make that explicit — which
+        # also covers the deadline stop above (a truncated walk must never
+        # authorise delisting, rule #3). Never make this a computed boolean.
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, None, pages, False
 
     def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
@@ -316,7 +327,10 @@ def main(argv: list[str] | None = None) -> int:
     # split flags exist so a large backfill can be cadence-split like sreality.
     rc = 0
     if not args.drain_only:
-        rc = _run_phase(portal, "index", portal_runner.run_index_walk, args.dry_run)
+        rc = _run_phase(
+            portal, "index", portal_runner.run_index_walk, args.dry_run,
+            max_seconds=args.max_seconds,
+        )
     if rc == 0 and not args.index_only:
         rc = _run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,

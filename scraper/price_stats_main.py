@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from scraper import price_stats_db as db
+from scraper.portal import deadline_reached
 from scraper.price_stats_client import AuthExpiredError, PriceStatsClient
 from scraper.rate_limit import RateLimiter
 from scraper.sreality_auth import get_session_cookies
@@ -162,7 +163,7 @@ def run_dataset(
     budget_hit = False
     try:
         for i, loc in enumerate(localities, start=1):
-            if deadline is not None and time.monotonic() > deadline:
+            if deadline_reached(deadline):
                 LOG.warning(
                     "BUDGET reached dataset=%s stopped at city %d/%d",
                     dataset["id"], i - 1, len(localities),

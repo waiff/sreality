@@ -37,6 +37,7 @@ from scraper.location import CoordResolver
 from scraper.portal import (
     PortalConfig,
     default_config,
+    deadline_reached,
     load_portal_config,
     classify_index_sighting,
 )
@@ -130,6 +131,7 @@ class RealitymixPortal:
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
+        deadline: float | None = None,
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         sale_type, cat = category["sale_type"], category["category"]
         client = RealitymixClient(limiter=limiter)
@@ -141,7 +143,18 @@ class RealitymixPortal:
         pages = 0
         page = 1
         barren_retried = False
+        stopped_early = False
         while True:
+            if deadline_reached(deadline):
+                # Rule #3: a budget-truncated walk must never authorise delisting,
+                # so poison `complete` below rather than just leaving the loop.
+                stopped_early = True
+                LOG.info(
+                    "INDEX deadline reached sale_type=%s category=%s page=%d "
+                    "collected=%d total=%s -> stopping early (walk incomplete)",
+                    sale_type, cat, page, len(native_ids), total,
+                )
+                break
             try:
                 html, _ = client.fetch_index(sale_type, cat, page)
             except ListingGoneError:
@@ -216,7 +229,11 @@ class RealitymixPortal:
             "ENQUEUE source=realitymix new=%d changed=%d unchanged=%d enqueued=%d",
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        complete = (not self._max_pages) and _walk_complete(len(seen), total)
+        complete = (
+            (not stopped_early)
+            and (not self._max_pages)
+            and _walk_complete(len(seen), total)
+        )
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
 
     def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:

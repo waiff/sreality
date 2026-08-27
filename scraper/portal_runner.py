@@ -29,6 +29,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from scraper import db
+from scraper.portal import deadline_reached
 from scraper.rate_ledger import build_rate_limiter
 from scraper.rate_limit import RateLimiter
 
@@ -95,7 +96,13 @@ class Portal(Protocol):
     def connect_index(self) -> Any: ...
     def walk_category(
         self, category: Any, conn: Any, dry_run: bool, limiter: RateLimiter,
+        deadline: float | None = None,
     ) -> tuple[set[Any], dict[str, int], int | None, int, bool]: ...
+    #   `deadline` is a time.monotonic() instant. A walk that reaches it MUST
+    #   stop and return complete=False. Checking it only between categories is
+    #   not enough and was the idnes failure: one idnes category is ~1,050 pages,
+    #   so the runner's between-category check never got a turn and GitHub
+    #   SIGKILLed the job at page 599 of 1,050, 9 runs out of 12.
     def mark_inactive(self, conn: Any, category: Any, seen: set[Any]) -> int: ...
     def active_count(self, conn: Any, category: Any) -> int | None: ...
 
@@ -133,10 +140,13 @@ def run_index_walk(
     When run_id is supplied, index_pages is committed per category (bump) so
     Health liveness survives a SIGKILL before finalize. When max_seconds is
     supplied, the walk stops starting new categories past that wall-clock budget
-    and finalizes cleanly — so a slow or grown walk is never SIGKILLed by the
-    job timeout (no more 'stuck' runs). Already-walked categories are complete,
-    so mark_inactive stays safe (rule #3); the un-walked ones just aren't
-    refreshed this run and the next walk picks them up."""
+    AND passes the deadline into walk_category so a single huge category stops
+    mid-flight too. The between-category check alone was not enough: one idnes
+    category is ~1,050 pages, so the loop never came back round and the job was
+    SIGKILLed at the 180-minute ceiling in 9 of 12 runs, recording zero
+    categories each time. A category cut short returns complete=False, so
+    mark_inactive stays safe (rule #3) — the un-walked remainder just isn't
+    refreshed this run and the next walk picks it up."""
     deadline = (time.monotonic() + max_seconds) if max_seconds else None
     total_pages = 0
     total_index = 0
@@ -149,7 +159,7 @@ def run_index_walk(
 
     try:
         for category in portal.categories():
-            if deadline is not None and time.monotonic() >= deadline:
+            if deadline_reached(deadline):
                 LOG.info(
                     "INDEX time budget %.0fs reached; stopping cleanly before the "
                     "next category (%d walked so far)",
@@ -160,7 +170,7 @@ def run_index_walk(
             LOG.info("CATEGORY start cm=%s ct=%s", cm_text, ct_text)
             try:
                 seen_ids, cat_counts, cat_result_size, cat_pages, complete = (
-                    portal.walk_category(category, conn, dry_run, limiter)
+                    portal.walk_category(category, conn, dry_run, limiter, deadline)
                 )
             except Exception as exc:
                 LOG.exception(
@@ -554,7 +564,7 @@ def run_detail_drain(
             portal.source, max_claims, detail_workers, DETAIL_BATCH_SIZE, max_seconds,
         )
         while max_claims is None or total_claimed < max_claims:
-            if deadline is not None and time.monotonic() >= deadline:
+            if deadline_reached(deadline):
                 LOG.info(
                     "DRAIN time budget %ss reached at claimed=%d; finalizing cleanly",
                     max_seconds, total_claimed,

@@ -87,8 +87,9 @@ class _FakePortal:
             return c
         return self.conn
 
-    def walk_category(self, c, conn, dry_run, limiter):
+    def walk_category(self, c, conn, dry_run, limiter, deadline=None):
         self.calls["walk"].append(c)
+        self.calls.setdefault("deadline", []).append(deadline)
         if c in self._walk_fails:
             raise RuntimeError(f"blocked {c}")
         return ({1, 2}, {"found_new": 2, "enqueued": 2}, 2, 1, self._complete)

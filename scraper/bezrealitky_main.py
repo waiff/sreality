@@ -37,6 +37,7 @@ from scraper.bezrealitky_parser import (
 from scraper.portal import (
     PortalConfig,
     default_config,
+    deadline_reached,
     load_portal_config,
     classify_index_sighting,
 )
@@ -119,6 +120,7 @@ class BezrealitkyPortal:
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
+        deadline: float | None = None,
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         offer = category["offer_type"]
         estate = category["estate_type"]
@@ -135,6 +137,7 @@ class BezrealitkyPortal:
         offset = 0
         total = 0
         pages = 0
+        truncated = False
         while True:
             adverts, total = client.search(
                 offer, estate, limit=INDEX_PAGE_SIZE, offset=offset,
@@ -150,6 +153,14 @@ class BezrealitkyPortal:
                 # see a value the write boundary would have nulled.
                 price_map[nid] = db.sane_price_czk(adv.get("price"))
             offset += len(adverts)
+            if deadline_reached(deadline):
+                truncated = True
+                LOG.info(
+                    "INDEX deadline reached offer=%s estate=%s page=%d offset=%d "
+                    "collected=%d total=%d: stopping walk (incomplete)",
+                    offer, estate, pages, offset, len(price_map), total,
+                )
+                break
             if self._max_pages and pages >= self._max_pages:
                 break
             if not adverts or offset >= total:
@@ -189,7 +200,13 @@ class BezrealitkyPortal:
             "ENQUEUE source=bezrealitky new=%d changed=%d unchanged=%d enqueued=%d",
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        complete = (not self._max_pages) and _walk_complete(len(seen), total)
+        # A deadline-stopped walk is never complete, whatever the counts say:
+        # _walk_complete short-circuits to True when the API reports total=0, so
+        # completeness cannot be left to the collected/total ratio alone (rule #3).
+        complete = (
+            (not truncated) and (not self._max_pages)
+            and _walk_complete(len(seen), total)
+        )
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
 
     def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
@@ -384,7 +401,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Index-walk (enqueue) then detail-drain (fetch + ingest), through the one
     # shared runner. Two scrape_runs rows ('index' + 'detail'), like sreality.
-    rc = _run_phase(portal, "index", portal_runner.run_index_walk, args.dry_run)
+    rc = _run_phase(
+        portal, "index", portal_runner.run_index_walk, args.dry_run,
+        max_seconds=args.max_seconds,
+    )
     if rc == 0:
         rc = _run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,
@@ -424,6 +444,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--probe-pages", type=int, default=1,
         help="index pages per category for --probe (default 1; a page is "
              f"{INDEX_PAGE_SIZE} adverts)",
+    )
+    p.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Wall-clock budget for the run. The index walk stops cleanly on "
+            "expiry and reports the category INCOMPLETE, so mark_inactive is "
+            "suppressed (rule #3) rather than the job being killed by the CI "
+            "timeout with nothing recorded; the drain uses it the same way."
+        ),
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")

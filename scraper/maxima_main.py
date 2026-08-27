@@ -42,6 +42,7 @@ from scraper.maxima_parser import category_of, index_price, parse_detail, parse_
 from scraper.portal import (
     PortalConfig,
     default_config,
+    deadline_reached,
     load_portal_config,
     classify_index_sighting,
 )
@@ -131,11 +132,15 @@ class MaximaPortal:
         return conn
 
     def _walk_agenda(
-        self, af: int, conn: Any, limiter: RateLimiter,
+        self, af: int, conn: Any, limiter: RateLimiter, deadline: float | None = None,
     ) -> tuple[_AgendaWalk, int]:
         """Walk one agenda's full mixed index once; cache it for the agenda's
         other category descriptors. Returns (walk, pages_fetched_this_call) so the
-        runner counts each agenda's pages exactly once (0 on a cache hit)."""
+        runner counts each agenda's pages exactly once (0 on a cache hit).
+
+        A walk stopped by `deadline` is cached with complete=False, so every one of
+        that agenda's category descriptors inherits the incomplete verdict and
+        mark_inactive stays off (rule #3)."""
         cached = self._agenda_cache.get(af)
         if cached is not None:
             return cached, 0
@@ -148,6 +153,7 @@ class MaximaPortal:
         total: int | None = None
         pages = 0
         page = 1
+        stopped_early = False
         while True:
             html, status = client.fetch_index(page, af=af)
             parsed = parse_index(html)
@@ -173,13 +179,25 @@ class MaximaPortal:
             # Stop on an empty page (catalogue exhausted) or one adding nothing new.
             if not parsed.items or new_on_page == 0:
                 break
+            # Checked after the natural stops so a walk that finished on this very
+            # page isn't falsely called incomplete; before fetching the next one so
+            # the budget is still honoured.
+            if deadline_reached(deadline):
+                stopped_early = True
+                LOG.info(
+                    "INDEX time budget reached af=%d page=%d collected=%d total=%s; "
+                    "stopping this agenda walk (incomplete -> no delisting)",
+                    af, page, len(native_ids), total,
+                )
+                break
             page += 1
 
-        # Complete only if we walked the whole agenda (not page-capped) AND reached
-        # the portal-reported total — the gate for agenda-grain delisting.
+        # Complete only if we walked the whole agenda (not page-capped, not cut
+        # short by the wall-clock budget) AND reached the portal-reported total —
+        # the gate for agenda-grain delisting.
         capped = bool(self._max_pages and pages >= self._max_pages)
         complete = (
-            not capped and total is not None and total > 0
+            not capped and not stopped_early and total is not None and total > 0
             and len(native_ids) >= total * INDEX_MIN_COMPLETENESS
         )
         walk = _AgendaWalk(native_ids, ref_map, price_map, cat_map, total, pages, complete)
@@ -197,10 +215,11 @@ class MaximaPortal:
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
+        deadline: float | None = None,
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         cm = category.get("category_main")
         af = int(category.get("af") or 1)
-        walk, pages = self._walk_agenda(af, conn, limiter)
+        walk, pages = self._walk_agenda(af, conn, limiter, deadline)
 
         native_ids = [n for n in walk.native_ids if self._belongs(walk.cat_map.get(n), cm)]
         seen = set(native_ids)
@@ -429,7 +448,10 @@ def main(argv: list[str] | None = None) -> int:
     # escape hatch as the other portals; omitting both runs both phases.
     rc = 0
     if not args.drain_only:
-        rc = _run_phase(portal, "index", portal_runner.run_index_walk, args.dry_run)
+        rc = _run_phase(
+            portal, "index", portal_runner.run_index_walk, args.dry_run,
+            max_seconds=args.max_seconds,
+        )
     if rc == 0 and not args.index_only:
         rc = _run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,

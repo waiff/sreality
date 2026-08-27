@@ -46,6 +46,7 @@ from scraper.portal import (
     default_config,
     load_portal_config,
     classify_index_sighting,
+    deadline_reached,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -146,6 +147,7 @@ class IdnesPortal:
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
+        deadline: float | None = None,
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         sale_type, cat = category["sale_type"], category["category"]
         client = IdnesClient(limiter=limiter)
@@ -155,8 +157,20 @@ class IdnesPortal:
         ref_map: dict[str, str] = {}
         total: int | None = None
         pages = 0
+        # A deadline-stopped walk saw only part of the category, so it must never
+        # read as complete however close len(seen) got to `total` — mark_inactive
+        # would delist the pages we never fetched (rule #3).
+        truncated = False
         page: int | None = None       # None = the bare first page (idnes offset paging)
         while True:
+            if deadline_reached(deadline):
+                truncated = True
+                LOG.info(
+                    "INDEX deadline reached sale_type=%s cat=%s next_page=%s "
+                    "pages=%d collected=%d total=%s; stopping walk incomplete",
+                    sale_type, cat, page, pages, len(native_ids), total,
+                )
+                break
             html, status = client.fetch_index(sale_type, cat, page, locality=None)
             parsed = parse_index(html)
             pages += 1
@@ -215,7 +229,10 @@ class IdnesPortal:
             "ENQUEUE source=idnes new=%d changed=%d unchanged=%d enqueued=%d",
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        complete = (not self._max_pages) and _walk_complete(len(seen), total)
+        complete = (
+            (not self._max_pages) and (not truncated)
+            and _walk_complete(len(seen), total)
+        )
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
 
     def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:

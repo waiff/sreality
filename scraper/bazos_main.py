@@ -49,6 +49,7 @@ from scraper.location import build_geocoder
 from scraper.portal import (
     PortalConfig,
     classify_index_sighting,
+    deadline_reached,
     default_config,
     load_portal_config,
 )
@@ -135,6 +136,7 @@ class BazosPortal:
 
     def walk_category(
         self, category: dict[str, str], conn: Any, dry_run: bool, limiter: RateLimiter,
+        deadline: float | None = None,
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         sale_type, cat = category["sale_type"], category["category"]
         _, canon_type = self.category_labels(category)
@@ -144,7 +146,19 @@ class BazosPortal:
         total: int | None = None
         pages = 0
         offset = 0
+        # A walk cut short by the wall-clock budget is NOT a complete walk: this
+        # flag poisons the completeness verdict below so mark_inactive can never
+        # delist from pages we never reached (rule #3).
+        stopped_early = False
         while True:
+            if deadline_reached(deadline):
+                stopped_early = True
+                LOG.info(
+                    "INDEX deadline reached sale_type=%s category=%s "
+                    "pages=%d offset=%d seen=%d; stopping walk (incomplete)",
+                    sale_type, cat, pages, offset, len(seen),
+                )
+                break
             try:
                 html, status = client.fetch_index(
                     sale_type, cat, offset,
@@ -215,11 +229,12 @@ class BazosPortal:
             enqueued = db.enqueue_detail(conn, SOURCE, entries)
 
         # Complete only when the walk collected ~all of the portal-reported total
-        # (and wasn't page-capped). A failed total parse (None) reads as
-        # incomplete — for an HTML crawl we never infer delistings without that
-        # positive signal.
+        # (and wasn't page-capped or deadline-stopped). A failed total parse
+        # (None) reads as incomplete — for an HTML crawl we never infer
+        # delistings without that positive signal.
         complete = (
-            not self._max_pages
+            not stopped_early
+            and not self._max_pages
             and total is not None
             and total > 0
             and len(seen) >= total * INDEX_MIN_COMPLETENESS
@@ -448,7 +463,10 @@ def main(argv: list[str] | None = None) -> int:
     # dispatch-only combined fallback). Two scrape_runs rows ('index' + 'detail').
     rc = 0
     if not args.drain_only:
-        rc = _run_phase(portal, "index", portal_runner.run_index_walk, args.dry_run)
+        rc = _run_phase(
+            portal, "index", portal_runner.run_index_walk, args.dry_run,
+            max_seconds=args.max_seconds,
+        )
     if rc == 0 and not args.index_only:
         rc = _run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,

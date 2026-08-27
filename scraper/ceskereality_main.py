@@ -47,6 +47,7 @@ from scraper.ceskereality_parser import (
 from scraper.portal import (
     PortalConfig,
     default_config,
+    deadline_reached,
     load_portal_config,
     classify_index_sighting,
 )
@@ -149,15 +150,27 @@ class CeskerealityPortal:
         self, client: CeskerealityClient, host: str, sale_type: str, cat: str,
         sub_slug: str | None, conn: Any = None,
         archive_week: str | None = None, fresh_keys: set[str] | None = None,
+        deadline: float | None = None,
     ) -> tuple[list[tuple[str, str, int | None]], int, int | None, bool]:
         """Walk one region×facet slice, ≤12 pages — NEVER requesting page 13 (it
         404s). Returns (rows, pages_fetched, slice_total, complete); complete=False
-        if the slice still exceeds the cap (we could only take its top ~240)."""
+        if the slice still exceeds the cap (we could only take its top ~240) OR the
+        wall-clock deadline stopped it mid-slice (rule #3: an unfinished walk must
+        never authorise mark_inactive)."""
         rows: list[tuple[str, str, int | None]] = []
         total: int | None = None
         page = 1
         page_cap = min(_CAP_PAGES, self._max_pages or _CAP_PAGES)
         while page <= page_cap:
+            # Budget spent: stop BEFORE issuing another request and report the
+            # slice incomplete — the rows already collected still count.
+            if deadline_reached(deadline):
+                LOG.info(
+                    "DEADLINE index walk stopped cm=%s ct=%s host=%s slug=%s "
+                    "after page=%d collected=%d",
+                    cat, sale_type, host, sub_slug or "all", page - 1, len(rows),
+                )
+                return rows, max(page - 1, 0), total, False
             url = search_url(
                 sale_type, cat, host=host, sub_slug=sub_slug,
                 page=page if page > 1 else None,
@@ -252,6 +265,7 @@ class CeskerealityPortal:
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
+        deadline: float | None = None,
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         sale_type, cat = category["sale_type"], category["category"]
         client = CeskerealityClient(limiter=limiter)
@@ -274,7 +288,15 @@ class CeskerealityPortal:
         pages = 0
         incomplete_slices = 0
         slices = 0
+        # A deadline stop poisons the WHOLE category verdict, not just its slice:
+        # the region-wide (slug=None) slice's own incompleteness is expected and
+        # ignored below, and the un-walked hosts/facets never report at all — so
+        # incomplete_slices alone would let a truncated walk claim complete=True.
+        deadline_hit = False
         for host in hosts:
+            if deadline_reached(deadline):
+                deadline_hit = True
+                break
             facets = self._region_facets(client, host, sale_type, cat)
             # None = the region-wide page (a backstop for its top ~240); then every
             # discovered facet slice (each ~<=240 -> fully walked).
@@ -282,7 +304,7 @@ class CeskerealityPortal:
                 slices += 1
                 rows, slice_pages, _slice_total, slice_complete = self._walk_slice(
                     client, host, sale_type, cat, slug, conn,
-                    archive_week, fresh_keys)
+                    archive_week, fresh_keys, deadline)
                 pages += slice_pages
                 # The region-wide backstop (slug=None) is EXPECTED to cap for a big
                 # region — only a capped FACET slice (a dense district still > 240)
@@ -295,6 +317,11 @@ class CeskerealityPortal:
                         native_ids.append(nid)
                     ref_map[nid] = ref
                     price_map[nid] = price
+                if deadline_reached(deadline):
+                    deadline_hit = True
+                    break
+            if deadline_hit:
+                break
 
         total = self._nationwide_total(client, sale_type, cat)
         LOG.info(
@@ -341,9 +368,11 @@ class CeskerealityPortal:
         # mark_inactive is safe only on a FULL, uncapped walk: every region walked
         # (not --region scoped), no slice hit the 12-page cap, and we collected ~all
         # of the nationwide total. Any capped slice (a dense disposition still > 240)
-        # leaves the walk incomplete, so we suppress the sweep (rule #3).
+        # -- or a deadline that cut the walk short -- leaves the walk incomplete, so
+        # we suppress the sweep (rule #3).
         complete = (
-            not self._max_pages and not self._regions and incomplete_slices == 0
+            not deadline_hit
+            and not self._max_pages and not self._regions and incomplete_slices == 0
             and _walk_complete(len(seen), total)
         )
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
@@ -605,7 +634,10 @@ def main(argv: list[str] | None = None) -> int:
     # one job. The split flags exist for parity / tuning if it ever outgrows that.
     rc = 0
     if not args.drain_only:
-        rc = _run_phase(portal, "index", portal_runner.run_index_walk, args.dry_run)
+        rc = _run_phase(
+            portal, "index", portal_runner.run_index_walk, args.dry_run,
+            max_seconds=args.max_seconds,
+        )
     if rc == 0 and not args.index_only:
         rc = _run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,
