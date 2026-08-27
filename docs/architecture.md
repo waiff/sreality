@@ -886,8 +886,17 @@ renumber.** Navigate by area:
     batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`
     (`scraper.main --index-only`, `run_type='index'`) walks the full index, `touch_listings` +
     `mark_inactive` (under the completeness guard, rule #3), and **enqueues** new/price-changed
-    ids with a priority. `detail_drain.yml` (`--drain-only`, `run_type='detail'`) claims a
-    bounded slice (`FOR UPDATE SKIP LOCKED`), fetches, and writes **batched** via
+    ids into one of two service classes — ACQUISITION (`QUEUE_PRIORITY_NEW`, never fetched) or
+    REFRESH (everything else, ranked failure-retry > price-changed > refetch-cohort).
+    `detail_drain.yml` (`--drain-only`, `run_type='detail'`) claims a bounded slice
+    (`FOR UPDATE SKIP LOCKED`) **composed from both classes**: `claim_detail_batch` reserves
+    `QUEUE_ACQUISITION_RESERVE` (half) of each batch for acquisition and gives refresh the rest,
+    with unused reserve backfilling to refresh inside the SQL. This is load-bearing, not a tuning
+    knob: refresh inflow is unbounded (a walk re-enqueues on every pass) while acquisition is
+    bounded by the market, so **any strict ordering that puts refresh first eventually stops
+    ingesting new listings altogether** — it did, on 2026-08-17, for nine days and 15,064
+    listings, with no alarm. `tests/test_detail_queue_fairness_live.py` holds the invariant.
+    It fetches, and writes **batched** via
     `db.write_detail_batch` (set-based `jsonb_to_recordset`; one transaction per ~100 listings;
     snapshot-on-change preserved via an `IS DISTINCT FROM` anti-join). The index-walk uses the
     transaction pooler; the drain uses the session pooler (`connect_session()`) for prepared
