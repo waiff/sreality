@@ -53,7 +53,10 @@ const settingsItems: ReadonlyArray<MenuItem> = [
 const newDedupItems: ReadonlyArray<MenuItem> = [
   { to: '/new-dedup', label: 'Dashboard', end: true },
   { to: '/new-dedup/settings', label: 'Settings' },
-  { to: '/new-dedup/labeling', label: 'Labeling' },
+  // `end` so /new-dedup/labeling/taxonomy lights only Taxonomy — NavMenu passes
+  // this straight to NavLink, whose default prefix match would light both.
+  { to: '/new-dedup/labeling', label: 'Labeling', end: true },
+  { to: '/new-dedup/labeling/taxonomy', label: 'Taxonomy' },
 ];
 
 function isPathActive(pathname: string, to: string): boolean {

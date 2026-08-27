@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from api import dependencies as deps
 from toolkit import dedup_sim_labeling as dsl
 from toolkit import tag_annotations
+from toolkit import tag_definitions as td
 
 router = APIRouter(
     prefix="/new-dedup/labeling", tags=["new-dedup-labeling"],
@@ -79,6 +80,29 @@ class ImageIdsIn(BaseModel):
 class BulkSetImageTagsIn(BaseModel):
     tag_ids: list[int]
     state: str
+
+
+class DoesNotCountIn(BaseModel):
+    case: str
+    goes_to_tag_id: int | None = None
+
+
+class ConfusableWithIn(BaseModel):
+    tag_id: int
+    tell: str
+
+
+class SaveDefinitionIn(BaseModel):
+    means: str
+    counts: list[str] = []
+    does_not_count: list[DoesNotCountIn] = []
+    confusable_with: list[ConfusableWithIn] = []
+    leave_out_when: str | None = None
+    example_image_ids: list[int] = []
+    # The version the editor loaded, null for "this tag had no definition". An
+    # assertion, not a hint: a save written against a version that is no longer
+    # active is refused (422) instead of reverting the newer one.
+    base_version: int | None = None
 
 
 def _check_state(state: str) -> None:
@@ -331,3 +355,91 @@ def delete_annotation(
 ) -> dict[str, Any]:
     """Revert one cell to untouched."""
     return {"data": tag_annotations.clear_state(conn, image_id=image_id, tag_id=tag_id)}
+
+
+# --- tag definitions (migration 445) ----------------------------------------
+
+
+@router.get("/definitions")
+def get_definition_status(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
+    """One row per tag that HAS an active definition — the tag list's status
+    column. A tag absent from this list has no definition yet."""
+    return {"data": td.list_definition_status(conn)}
+
+
+@router.get("/tags/{tag_id}/definition")
+def get_tag_definition(tag_id: int, conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
+    """This tag's current definition, or a null body when it has none yet — an
+    unknown TAG is a 404, a known tag with no definition is a 200."""
+    try:
+        return {"data": td.get_active_definition(conn, tag_id=tag_id)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
+
+
+@router.put("/tags/{tag_id}/definition")
+def put_tag_definition(
+    tag_id: int, body: SaveDefinitionIn, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Save a new version. There are no drafts: this supersedes the version the
+    editor was written against and inserts the next one, in one transaction. A
+    stale base_version is a 422, not a silent overwrite."""
+    try:
+        return {
+            "data": td.save_definition(
+                conn, tag_id=tag_id, means=body.means, counts=body.counts,
+                does_not_count=[i.model_dump() for i in body.does_not_count],
+                confusable_with=[i.model_dump() for i in body.confusable_with],
+                leave_out_when=body.leave_out_when,
+                example_image_ids=body.example_image_ids,
+                base_version=body.base_version,
+            )
+        }
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/tags/{tag_id}/definition/versions")
+def get_tag_definition_versions(
+    tag_id: int, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Newest-first version metadata — the history dropdown."""
+    try:
+        return {"data": td.list_definition_versions(conn, tag_id=tag_id)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
+
+
+@router.get("/tags/{tag_id}/definition/versions/{version}")
+def get_tag_definition_version(
+    tag_id: int, version: int, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """One historical version, read-only."""
+    try:
+        return {"data": td.get_definition_version(conn, tag_id=tag_id, version=version)}
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail=f"definition v{version} for tag {tag_id} not found",
+        ) from exc
+
+
+@router.get("/tags/{tag_id}/positive-images")
+def get_positive_images(
+    tag_id: int, limit: int = 200, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """What this tag ACTUALLY contains — every image currently positive on it,
+    read straight from image_tag_labels (not the dedup_sim-scoped sample browse
+    at /tags/{tag_id}/images)."""
+    return {"data": td.list_positive_images(conn, tag_id=tag_id, limit=limit)}
+
+
+@router.get("/tags/{tag_id}/neighbours")
+def get_tag_neighbours(
+    tag_id: int, limit: int = 8, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """The tags whose positives sit closest to this tag's in CLIP embedding
+    space. Empty (never an error) when the tag has too few embedded positives to
+    have a centroid."""
+    return {"data": td.nearest_tags(conn, tag_id=tag_id, limit=limit)}
