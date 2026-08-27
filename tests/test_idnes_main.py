@@ -824,3 +824,38 @@ def test_the_ladder_covers_the_open_ends() -> None:
     assert ladder[-1][1] is None         # nothing above the top band
     edges = [hi for _lo, hi in ladder[:-1]]
     assert edges == [lo for lo, _hi in ladder[1:]], "the ladder must not have gaps"
+
+
+def test_a_slice_too_big_to_page_descends_rather_than_giving_up(monkeypatch):
+    """The abroad bucket is 12,054 rows over 482 pages. When the loop guard fired
+    it returned `ceiling`, and `ceiling` did not descend — so the slice ended at
+    10,400 with no attempt to split it. A ceiling is the same coverage shortfall
+    as `incomplete`, just stated more emphatically: there is a declared total to
+    measure a union against, and a narrower question fixes it."""
+    descended: list[str] = []
+
+    def _sub(_html, _s, _c, exclude=()):
+        descended.append("yes")
+        return ([], [])
+
+    monkeypatch.setattr(idnes_main, "sub_places", _sub)
+    monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
+    nid = iter(range(10**6))
+    monkeypatch.setattr(idnes_main, "parse_index", lambda _h: SimpleNamespace(
+        total=99_999, next_offset=1, empty_confirmed=False,
+        items=[SimpleNamespace(
+            source_id_native=f"6a18deadbeefdeadbeef{next(nid):04d}",
+            detail_path="https://reality.idnes.cz/detail/prodej/byt/x/y/",
+            price_text="5 000 000 Kč")]))
+    portal = _portal()
+    _rows, _d, _p, outcome = portal._walk_tree(
+        _IdxClient(), "prodej", "byty", locality=None, sl="STAT-XX",
+        label="abroad", deadline=None, depth=1, visited=set())
+    assert descended, "a ceiling must try to split the place, not give up on it"
+    assert outcome != "exhausted"      # …and still fail closed when it cannot
+
+
+def test_the_loop_guard_clears_the_largest_real_place() -> None:
+    """482 pages is a real place (the abroad bucket), not a runaway pager. The
+    guard has to sit above it or it fires on legitimate work."""
+    assert idnes_main._MAX_SLICE_PAGES > 482
