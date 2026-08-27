@@ -985,13 +985,34 @@ renumber.** Navigate by area:
     ceskereality's rebuilt walk moved byt/prodej from 85.7% to 99.8% in one deploy and made
     ~29,400 rows eligible; idnes has identical exposure the first time its walk ever completes.
     All three sweeps (`mark_inactive`, `_native`, `_agenda`) now count their scope BEFORE
-    flipping and refuse anything above `app_settings.delist_flip_cap` (2%, floor 500 active rows
-    so the cap polices catastrophes rather than small categories; a broken setting falls back to
-    the baked default and can never disarm it). A refusal is RECORDED in `delist_flip_refusals`
-    and alarmed by `verify_pipeline`'s `delist_flip_refused` — an Actions log expires, and a
-    signal nothing can query is a signal nobody receives. Refusing is safe in the direction that
-    matters: an unswept stale row is visible and self-heals on next sighting, a wrongly-delisted
-    live listing is not.
+    flipping and refuse anything above `app_settings.delist_flip_cap`. A refusal is RECORDED in
+    `delist_flip_refusals` and alarmed by `verify_pipeline`'s `delist_flip_refused` — an Actions
+    log expires, and a signal nothing can query is a signal nobody receives. Refusing is safe in
+    the direction that matters: an unswept stale row is visible and self-heals on next sighting,
+    a wrongly-delisted live listing is not.
+    **The threshold is 10% with a 2,000-row category floor, and it is MEASURED (migration 452).**
+    Across 60 days and 11,763 flipping sweeps the per-sweep share of a category is p95 = 1.8%,
+    p99 = 3.4%, and then the tail jumps straight to 86% — routine churn and genuine incidents are
+    two populations with a wide empty gap, and the ceiling belongs in the gap. The first cut (2%,
+    floor 500) sat *inside* the churn population: it would have tripped 446 times in 60 days on
+    ordinary sreality and idnes rental churn, and because the cap latches, it would have stalled
+    delisting on our two largest sources permanently. At 10% it trips on exactly four real events
+    (realitymix `dum/prodej` 86.3%, ceskereality `komercni/prodej` 30.1% and 13.7%, sreality
+    `pozemek/podil` 18.7%). The floor is on category SIZE, not on the ceiling, because the small
+    categories are the churny ones — sreality `pozemek/drazba` legitimately turns over 6–39% of
+    its ~600 rows per sweep, since auctions end on a date. **Calibrate a breaker against the
+    measured distribution or it becomes the outage it was meant to prevent.**
+    **The cap LATCHES on purpose, so it needs a reset.** A refusal does not clear itself: the
+    unswept rows keep aging, the next sweep proposes more, and it is refused again. That is
+    correct breaker behaviour — an auto-reclosing breaker defeats the purpose — but the only
+    reset migration 451 offered was raising the global ceiling, which disarms the guard for every
+    portal at once. `delist_flip_cap.overrides` is the per-scope release valve: each entry is
+    SCOPED (names its `source`; `category_main` / `category_type` / `subtype` omitted or null
+    mean "any"), BOUNDED (`max_rows` is a hard row count, so even a wildcard entry cannot
+    authorise an unbounded flip), and EXPIRING (`until` is required and must still be in the
+    future). Anything missing, unparseable or already expired is ignored — the valve fails shut,
+    exactly like the cap it releases, and one malformed entry never blocks a later valid one.
+    It lives in the SAME setting as the cap so there is one knob to read and one to audit.
 20. **Property maintenance is dirty-set incremental (Phase 3), not a full-table recompute.**
     The writers that change a property's children — `write_detail_batch` (a content change →
     new snapshot), `mark_inactive` / `mark_listing_inactive` (delisting), `touch_listings`
