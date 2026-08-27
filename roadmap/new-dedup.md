@@ -109,6 +109,33 @@ W1 (shared prerequisites + labeling program):
       machine rows can bury it, and NULL (never 0) when nothing is decided.
       Above `AMBIGUITY_RATE_THRESHOLD` (0.15, with a 20-decision floor) the tag's DEFINITION is the
       problem, not the labeling.
+- [x] Candidate retrieval + the per-tag review queue (migration 449, `tag_candidates`) —
+      the review universe stops being `dedup_sim.labeling_sample` (1,200 untargeted images,
+      one pool shared by all 51 tags, 943 of them never labeled) and becomes a PER-TAG queue
+      filled by CLIP centroid retrieval: rare tags are a fraction of a percent of the corpus,
+      so their candidates have to be FOUND, not stumbled on. `toolkit/tag_candidates.py`
+      ranks a bounded, category-stratified, per-listing-capped pool against a centroid built
+      **only** from that tag's human-verified positives (migration 442's 72,000 manufactured
+      negatives and unreviewed `machine` rows excluded by predicate, never by deletion — this
+      creates no dependency on the gated deletion PR). Three named mixes, not magic numbers:
+      rank bands 50/30/20 (a pure top-N produces prototypical heads that fail on odd cases;
+      the mid band is where the measured confusion clusters live; the random band is the
+      honesty rail — sustained positives there mean the centroid is missing a mode) and a
+      category mix that caps `byt` BELOW its corpus share, so every sitting dilutes the
+      83.8%-byt labeled-set skew instead of inheriting it. Exact-hash collapse in SQL plus a
+      Hamming-6 near-dup drop and a 2-per-property cap, so a head cannot look like it has 200
+      examples when it has 40. **Queue membership carries no training semantics** — no state
+      column, no reviewed flag, nothing to misread: absence is not a negative, which
+      overturns migration 442's ledger decision (449 restates it as a fresh table comment).
+      A tag under 15 human-verified positives is told so (`status='insufficient_positives'`,
+      zero rows) rather than handed a garbage pool. Every band and category bucket also
+      reports its YIELD (`positive` / `negative`), so the honesty rail is something the
+      operator can read rather than something the design asserts. Two admin routes + `python -m
+      scripts.draw_tag_candidates` (no workflow: no GPU, no torch, no R2). `sample_size` is
+      REMOVED from the overview payload, not repurposed — per-tag `candidate_count` /
+      `candidate_open_count` replace it. Does NOT unblock dropping `dedup_sim`: the
+      secondary-CLIP proposal lane still writes `labeling_sample` and reads
+      `label_proposals`.
 - [x] RunPod client (`scripts/runpod_client.py`, #972/#975/#977) — launch/poll/terminate an
       on-demand pod, live cheapest-GPU catalog lookup, capacity fallback. Guaranteed teardown
       verified across 4 real live dispatches (3 zero-cost, 1 real ~1.7¢ pod rental).

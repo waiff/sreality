@@ -15,6 +15,7 @@ from api import dependencies as deps
 from api import main as api_main
 from toolkit import dedup_sim_labeling as dsl
 from toolkit import tag_annotations as ta
+from toolkit import tag_candidates as tc
 from toolkit import tag_definitions as td
 
 
@@ -41,10 +42,16 @@ def client(fake_conn: _FakeConn):
 
 _RESPONSES: dict[str, Any] = {
     "tag_overview": {
-        "sample_size": 3, "ambiguity_threshold": 0.15, "ambiguity_min_decisions": 20,
+        # `sample_size` is gone with migration 449 — one pool shared by every tag
+        # no longer exists. `candidate_image_count` is distinct images queued for
+        # at least one tag, a different quantity with a different denominator.
+        "candidate_image_count": 3, "ambiguity_threshold": 0.15,
+        "ambiguity_min_decisions": 20,
         "tags": [{"id": 1, "label": "a", "human_count": 2, "machine_count": 0,
                   "backfill_count": 41, "ambiguous_count": 1, "pruned_count": 0,
-                  "decided_count": 3, "ambiguity_rate": 0.3333, "ambiguity_alert": True}],
+                  "decided_count": 3, "ambiguity_rate": 0.3333, "ambiguity_alert": True,
+                  "candidate_count": 240, "candidate_open_count": 118,
+                  "last_drawn_at": "2026-08-27T12:00:00Z"}],
     },
     "add_tag": {"id": 1, "label": "a", "family": None, "active": True, "created_at": "t"},
     "rename_tag": {"id": 1, "label": "b", "family": None, "active": True, "created_at": "t"},
@@ -54,8 +61,27 @@ _RESPONSES: dict[str, Any] = {
     "list_images_for_tag": [
         {"image_id": 1, "storage_path": "img/1.jpg", "state": "untouched",
          "updated_at": None, "created_by": None, "source": None,
-         "excluded_reason": None},
+         "excluded_reason": None, "draw": "centroid_head", "category_main": "byt",
+         "pool_rank": 4},
     ],
+    "candidate_summary": {
+        "tag_id": 2, "total": 240, "open": 118, "reviewed": 122,
+        "last_drawn_at": "2026-08-27T12:00:00Z", "verified_positive_count": 31,
+        "min_verified_positives": 15, "can_draw": True, "model": "openai/clip",
+        "by_draw": [{"key": "centroid_head", "total": 120, "open": 40}],
+        "by_category": [{"key": "byt", "total": 96, "open": 44}],
+    },
+    "draw_candidates": {
+        "tag_id": 2, "status": "drawn", "requested": 120, "inserted": 83,
+        "verified_positive_count": 31, "min_verified_positives": 15,
+        "model": "openai/clip",
+        "by_draw": {"centroid_head": 44, "centroid_mid": 23, "random": 16},
+        "by_category": {"byt": 27}, "dropped_near_dup": 21,
+        "dropped_property_cap": 16,
+        "categories": [{"category_main": "byt", "status": "drawn", "requested": 36,
+                        "pool_size": 5820, "inserted": 27, "dropped_near_dup": 6,
+                        "dropped_property_cap": 5, "elapsed_ms": 4180}],
+    },
     "list_tags_for_image": [
         {"id": 1, "label": "a", "family": None, "state": "positive", "updated_at": "t",
          "source": "human", "excluded_reason": None},
@@ -135,6 +161,7 @@ _PATCHED = {
     td: ["list_definition_status", "get_active_definition", "save_definition",
          "list_definition_versions", "get_definition_version", "list_positive_images",
          "nearest_tags"],
+    tc: ["candidate_summary", "draw_candidates"],
 }
 
 
@@ -174,8 +201,10 @@ def test_get_overview(client, calls):
     res = client.get("/new-dedup/labeling/overview")
     assert res.status_code == 200
     body = res.json()["data"]
-    assert body["sample_size"] == 3
+    assert body["candidate_image_count"] == 3
+    assert "sample_size" not in body
     assert body["tags"][0]["label"] == "a"
+    assert body["tags"][0]["candidate_open_count"] == 118
 
 
 # --- taxonomy ---------------------------------------------------------------
@@ -842,6 +871,90 @@ def test_delete_annotation_takes_no_provenance_arguments(client, calls):
     assert calls["clear_state"] == {"image_id": 1, "tag_id": 2}
 
 
+# --- candidate retrieval (migration 449) ------------------------------------
+
+
+def test_get_tag_candidates(client, calls):
+    res = client.get("/new-dedup/labeling/tags/2/candidates")
+    assert res.status_code == 200
+    body = res.json()["data"]
+    assert (body["total"], body["open"]) == (240, 118)
+    assert body["can_draw"] is True
+    assert calls["candidate_summary"] == {"tag_id": 2}
+
+
+def test_get_tag_candidates_unknown_tag_404s(client, monkeypatch):
+    monkeypatch.setattr(tc, "candidate_summary", _raises(KeyError(9)))
+    assert client.get("/new-dedup/labeling/tags/9/candidates").status_code == 404
+
+
+def test_post_tag_candidates_draws_with_the_full_category_mix_by_default(client, calls):
+    res = client.post("/new-dedup/labeling/tags/2/candidates", json={"count": 120})
+    assert res.status_code == 200
+    assert res.json()["data"]["inserted"] == 83
+    # category_main None = the skew-correcting default, not "no category".
+    assert calls["draw_candidates"] == {"tag_id": 2, "count": 120, "category_main": None}
+
+
+def test_post_tag_candidates_defaults_the_count(client, calls):
+    assert client.post("/new-dedup/labeling/tags/2/candidates", json={}).status_code == 200
+    assert calls["draw_candidates"]["count"] == tc.DEFAULT_DRAW_COUNT
+
+
+def test_post_tag_candidates_scopes_to_one_category(client, calls):
+    client.post(
+        "/new-dedup/labeling/tags/2/candidates",
+        json={"count": 40, "category_main": "pozemek"},
+    )
+    assert calls["draw_candidates"]["category_main"] == "pozemek"
+
+
+def test_post_tag_candidates_does_not_let_the_client_name_its_own_provenance(
+    client, calls,
+):
+    # Same rule as `source` on every write route (migration 446): a browser that
+    # can name its own provenance can corrupt the record it exists to protect.
+    res = client.post(
+        "/new-dedup/labeling/tags/2/candidates",
+        json={"count": 10, "drawn_by": "definitely-a-human"},
+    )
+    assert res.status_code == 200
+    assert "drawn_by" not in calls["draw_candidates"]
+
+
+def test_post_tag_candidates_unknown_tag_404s(client, monkeypatch):
+    monkeypatch.setattr(tc, "draw_candidates", _raises(KeyError(9)))
+    res = client.post("/new-dedup/labeling/tags/9/candidates", json={"count": 10})
+    assert res.status_code == 404
+
+
+def test_post_tag_candidates_bad_count_422s(client, monkeypatch):
+    monkeypatch.setattr(
+        tc, "draw_candidates", _raises(ValueError("count must be between 1 and 400")),
+    )
+    res = client.post("/new-dedup/labeling/tags/2/candidates", json={"count": 9999})
+    assert res.status_code == 422
+    assert "between 1 and 400" in res.json()["detail"]
+
+
+def test_post_tag_candidates_reports_an_undrawable_tag_as_a_200(client, monkeypatch):
+    """A tag under the floor is not an error — it is an answer, with the two
+    numbers that explain it. A 4xx would read as "the button is broken"."""
+    monkeypatch.setattr(
+        tc, "draw_candidates",
+        lambda conn, **kw: {
+            "tag_id": 2, "status": "insufficient_positives", "requested": 120,
+            "inserted": 0, "verified_positive_count": 4, "min_verified_positives": 15,
+            "model": "openai/clip", "by_draw": {b: 0 for b in tc.DRAWS},
+            "by_category": {}, "dropped_near_dup": 0, "dropped_property_cap": 0,
+            "categories": [],
+        },
+    )
+    res = client.post("/new-dedup/labeling/tags/2/candidates", json={"count": 120})
+    assert res.status_code == 200
+    assert res.json()["data"]["status"] == "insufficient_positives"
+
+
 # --- the gate ---------------------------------------------------------------
 
 
@@ -858,6 +971,7 @@ def test_new_dedup_labeling_requires_admin(client):
         "/new-dedup/labeling/tags/1/definition/versions",
         "/new-dedup/labeling/tags/1/positive-images",
         "/new-dedup/labeling/tags/1/neighbours",
+        "/new-dedup/labeling/tags/1/candidates",
     ],
 )
 def test_definition_routes_are_admin_gated(client, path):

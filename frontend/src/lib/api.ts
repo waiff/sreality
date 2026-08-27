@@ -775,6 +775,13 @@ export interface NewDedupTag {
   excluded_count: number;
   pending_count: number;
   dismissed_count: number;
+  /* This tag's own review queue (migration 449) — images CLIP retrieval drew
+   * for somebody to LOOK at, and how many of them are still undecided. Never a
+   * label: being a candidate says nothing about whether the tag applies, and an
+   * image nobody has reviewed is never trained as a negative. */
+  candidate_count: number;
+  candidate_open_count: number;
+  last_drawn_at: string | null;
   /* Provenance inventory. These sum to the tag's full row count and are the
    * honest breakdown of the positive/negative/excluded counts above, which
    * deliberately still include backfill rows. */
@@ -802,7 +809,12 @@ export interface NewDedupTag {
   ambiguity_alert: boolean;
 }
 export interface NewDedupLabelingOverview {
-  sample_size: number;
+  /* Distinct images queued as a candidate for at least ONE tag. It REPLACES
+   * sample_size rather than renaming it: sample_size counted the single pool
+   * every tag shared, and nothing in the candidate world means that — queues
+   * are per tag, so this is a different quantity over a different denominator.
+   * Keeping the old name with a new meaning is how a number drifts. */
+  candidate_image_count: number;
   /* 0.15 today. Echoed so the SPA renders "above 15 percent" without a second
    * hardcoded copy of the number. */
   ambiguity_threshold: number;
@@ -1018,6 +1030,90 @@ export const listNewDedupPositiveTagsForImages = (
     jwt: true,
   });
 
+/* Which band of a tag's ranked pool drew a candidate (migration 449).
+ * centroid_head = the nearest neighbours to the tag's centroid; centroid_mid =
+ * a random sample from just below the head, where the confusion clusters live;
+ * random = an unranked sample of the whole pool. A pure top-N would produce a
+ * prototypical training set that fails on odd cases, so the bands are mixed on
+ * purpose — and sustained positives out of the random band mean the centroid is
+ * missing a mode. */
+export type TagCandidateDraw = 'centroid_head' | 'centroid_mid' | 'random';
+
+/* One bucket of a tag's queue — `key` is a TagCandidateDraw in by_draw and a
+ * listings.category_main value in by_category. Empty buckets are omitted.
+ *
+ * `positive` / `negative` are the bucket's YIELD, derived by joining the label
+ * store; they are what makes the random band's honesty rail readable — an
+ * unranked sample of the pool that keeps coming back positive means the centroid
+ * is missing a mode. total - open - positive - negative is the excluded remainder. */
+export interface NewDedupCandidateBucket {
+  key: string;
+  total: number;
+  open: number;
+  positive: number;
+  negative: number;
+}
+
+export interface NewDedupCandidateSummary {
+  tag_id: number;
+  total: number;
+  /* Candidates with no decision yet for this tag — the work left. */
+  open: number;
+  reviewed: number;
+  last_drawn_at: string | null;
+  /* Human-verified positives that carry a CLIP vector — the centroid's
+   * population. Not the overview's positive_count, which includes backfill. */
+  verified_positive_count: number;
+  min_verified_positives: number;
+  can_draw: boolean;
+  model: string;
+  by_draw: NewDedupCandidateBucket[];
+  by_category: NewDedupCandidateBucket[];
+}
+
+export interface NewDedupCandidateDrawResult {
+  tag_id: number;
+  status: 'drawn' | 'insufficient_positives';
+  requested: number;
+  inserted: number;
+  verified_positive_count: number;
+  min_verified_positives: number;
+  model: string;
+  by_draw: Record<TagCandidateDraw, number>;
+  by_category: Record<string, number>;
+  dropped_near_dup: number;
+  dropped_property_cap: number;
+  categories: Array<{
+    category_main: string;
+    status: 'drawn' | 'timeout' | 'empty_pool' | 'skipped_budget';
+    requested: number;
+    pool_size: number;
+    inserted: number;
+    dropped_near_dup: number;
+    dropped_property_cap: number;
+    elapsed_ms: number;
+  }>;
+}
+
+export const getNewDedupTagCandidates = (
+  tagId: number,
+): Promise<{ data: NewDedupCandidateSummary }> =>
+  request<{ data: NewDedupCandidateSummary }>(
+    `/new-dedup/labeling/tags/${tagId}/candidates`, { jwt: true },
+  );
+
+/* `categoryMain` null = the full category mix (the skew-correcting default);
+ * a value scopes the whole draw to that one property type. */
+export const drawNewDedupTagCandidates = (
+  tagId: number,
+  count: number,
+  categoryMain?: string | null,
+): Promise<{ data: NewDedupCandidateDrawResult }> =>
+  request<{ data: NewDedupCandidateDrawResult }>(
+    `/new-dedup/labeling/tags/${tagId}/candidates`,
+    { method: 'POST', json: { count, category_main: categoryMain ?? null }, jwt: true },
+  );
+
 export interface NewDedupTagImage {
   image_id: number;
   storage_path: string | null;
@@ -1026,11 +1122,20 @@ export interface NewDedupTagImage {
   created_by: string | null;
   source: TagSource | null;
   excluded_reason: TagExcludedReason | null;
+  /* WHY this image is in front of you: which rank band drew it, which category
+   * quota it was drawn under, and where it sat in that ranked pool. All three
+   * are null for an image decided for this tag but never drawn as a candidate
+   * — the legacy positives, which the browse still lists so their labels don't
+   * read as vanished. */
+  draw: TagCandidateDraw | null;
+  category_main: string | null;
+  pool_rank: number | null;
 }
-/* Tag-centric browse: every image in the labeling sample with its state for
- * ONE tag — reaches images the model never proposed this tag for, and backs
- * "kitchen = excluded" filtering (state='untouched' shows the defaulted
- * remainder). */
+/* Tag-centric browse: this tag's candidate queue (migration 449) plus every
+ * image already decided for the tag, each with its state — reaches images the
+ * model never proposed this tag for, and backs "kitchen = excluded" filtering.
+ * state='untouched' is the undecided part of the queue, which is the work
+ * left; it is NOT a set of negatives. */
 export const listNewDedupTagImages = (
   tagId: number,
   params: { state?: TagState | 'untouched'; limit?: number } = {},
@@ -1236,8 +1341,8 @@ export const getTagDefinitionVersion = (
   );
 
 /* What the tag ACTUALLY contains — every image currently positive on it. Not
- * listNewDedupTagImages: that one is scoped to dedup_sim.labeling_sample
- * membership and to a schema planned for removal. */
+ * listNewDedupTagImages: that one lists the tag's REVIEW QUEUE (whatever its
+ * state), which is a question about work left, not about what the tag holds. */
 export const listTagPositiveImages = (
   tagId: number,
   limit = 200,

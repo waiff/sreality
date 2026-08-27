@@ -42,7 +42,7 @@ batch review, not a flat image×tag grid) and are reflected below.
 
 | Topic | Decision |
 |---|---|
-| Negative semantics | Global default-negative, literally as specified. Scoped to `labeling_sample` membership (the curated pool) — an image never added to the pool is outside every head's dataset; once in the pool, every active tag without an explicit row is an implicit negative, for both display and training. |
+| Negative semantics | **OVERTURNED 2026-08-27 — absence is not a negative.** No row means UNTOUCHED, and untouched never trains as negative. An image never reviewed for a tag must stay distinguishable, forever, from one reviewed and judged not-that-tag; membership of a review queue confers no label of any kind (see "Candidate retrieval" below — `tag_candidates` has no state column for exactly this reason). ~~The 2026-08-26 decision was: global default-negative scoped to `labeling_sample` membership — once in the pool, every active tag without an explicit row is an implicit negative for both display and training.~~ That is what produced migration 442's 72,000 manufactured negatives, and it is why the deletion PR keyed on `source = 'backfill_442'` exists. |
 | ClipAudit | Retire entirely — frontend page, `TrainControl`, and every backend route/table column exclusive to it. |
 | Border cases | Keep `image_border_cases` separate from the new per-tag `excluded` state — different grain (whole-image quarantine vs. one ambiguous tag on an otherwise fine image). |
 | UI shape | Tag-centric batch review is the default workflow; an image-centric detail view (all active tags on one image) is secondary, reached from a tile. |
@@ -109,9 +109,11 @@ create index on image_tag_labels (tag_id, state);
 alter table image_tag_labels enable row level security;
 ```
 
-One row per explicit decision. No row = untouched = displays and trains as negative
-once the image is in `labeling_sample`. `excluded` rows are dropped at training time
-by definition, not by a separate flag. Backend-only, admin-gated, same as `tag_taxonomy`.
+One row per explicit decision. No row = UNTOUCHED, and untouched never trains as
+negative (operator ruling 2026-08-27, superseding the ledger row above; migration 449
+restates it as a fresh `comment on table`, since migrations cannot be edited).
+`excluded` rows are dropped at training time by definition, not by a separate flag.
+Backend-only, admin-gated, same as `tag_taxonomy`.
 
 ### Migration/backfill (Wave A, additive)
 
@@ -275,9 +277,10 @@ counts positives that actually carry an embedding, so it can be lower than the o
 **The workbench does not depend on `dedup_sim`.** The gallery ("what this tag ACTUALLY
 contains") reads `image_tag_labels JOIN images` directly through
 `tag_definitions.list_positive_images`, not `tag_annotations.list_images_for_tag` — that one
-reads `dedup_sim.labeling_sample`, which is a membership filter rather than "every positive",
-and lives in a schema `docs/design/new-dedup/PROGRAM.md` plans to drop wholesale at Wave 8.
-This page is permanent; wiring it to a doomed schema would be a defect on delivery day.
+is driven by the tag's REVIEW QUEUE (`tag_candidates` since migration 449; before that,
+`dedup_sim.labeling_sample`), which is a work list rather than "every positive", and whose
+rows carry no label semantics at all. This page is permanent, and it is about what a tag
+contains, not about what is queued for review.
 
 Surface: `toolkit/tag_definitions.py`, seven routes appended to
 `api/new_dedup_labeling.py` (same `/new-dedup/labeling` prefix, same router-level
@@ -394,6 +397,180 @@ instead of a near-miss of it.
 `positive_count` / `gate_count` / `negative_count` / `excluded_count` are deliberately
 **unchanged** and still include the backfill rows; `backfill_count` is what makes that inventory
 legible. Narrowing them is the deletion PR's decision, not this one's.
+
+## Candidate retrieval (migration 449)
+
+**The problem.** `dedup_sim.labeling_sample` was 1,200 images picked as "the 2,000 newest
+with a storage_path" — untargeted, ONE pool shared by all 51 tags, and 943 of them never
+labeled at all. Rare tags are a fraction of a percent of the corpus, so a random pool
+cannot build their training sets: candidates have to be FOUND, not stumbled on. From here
+they are, per tag, by ranking a bounded pool against a centroid of that tag's positives.
+`public.tag_candidates` is that store; `toolkit/tag_candidates.py` is the retriever;
+`list_images_for_tag` and `tag_overview` are repointed onto it. Nothing in `dedup_sim` is
+dropped or even touched — the secondary-CLIP proposal lane still writes `labeling_sample`
+and reads `label_proposals`, so the candidate reader is off that schema but the schema is
+not yet droppable.
+
+**Membership carries no training semantics.** This is the load-bearing property and the
+reason the table has NO state column, NO reviewed flag and NO status. A candidate is an
+image somebody should LOOK at for this tag — not a positive, not a negative, not a
+default. Whether one has been DECIDED is derived by joining `image_tag_labels`, the only
+place a decision has ever lived. There is deliberately nothing there for a future reader
+to mistake for a label; `tests/test_migration_449_tag_candidates.py` asserts the absence
+of those column names, because the shape is the guarantee.
+
+**Every row records why it was drawn** — `draw` (which rank band), `category_main` (which
+quota), `pool_rank` / `pool_size` / `distance` (where it sat in the ranked pool, and rank
+means nothing without the size it is a rank OF), `centroid_positive_count` (how much
+evidence the centroid carried), `definition_id` (which written definition was active,
+resolved inside the INSERT from the row's own tag_id — migration 446's rule). Sampling
+provenance is auditable rather than asserted.
+
+**The centroid is human-verified positives only** (`state = 'positive' AND source IN
+('human','human_confirmed')`). Migration 442's 72,000 manufactured negatives and every
+unreviewed `machine` row are excluded BY PREDICATE, never by deletion — so this work
+creates no dependency on the gated deletion PR. The floor is `MIN_VERIFIED_POSITIVES = 15`,
+the smallest population retrieval was ever measured at (median AUC 0.942 across 28 tags,
+min 0.859). Below it the tag is told so — `status='insufficient_positives'`, zero rows
+written — instead of being handed a pool built from one operator's idiosyncrasies.
+`_COUNT_VERIFIED_POSITIVES_SQL`'s predicate is byte-identical to the centroid CTE's: if
+the gate and the centroid disagreed about the population, the gate would be a lie.
+
+**Three deliberate mixes, all named constants in one module.**
+- *Rank bands* — `BAND_MIX` head 0.50 / mid 0.30 / random 0.20. A pure top-N produces
+  prototypical training sets that fail on odd cases. The head is the only band that can
+  build a rare tag's positive set (measured precision@100 of 72-100%, 8-33x base rate);
+  the mid band is where the three measured confusion clusters live (bathrooms, circulation,
+  living spaces) and is where hard negatives come from; the random band is the honesty
+  rail — the only source of a truthful base rate and the only band that can surface a
+  positive the centroid is blind to. Sustained positives out of `random` mean the centroid
+  is missing a mode, and `candidate_summary` reports each bucket's yield so that check can
+  actually be READ instead of hand-counted off a grid. There is no redistribution between
+  bands: a shortfall is reported as requested vs inserted, never quietly back-filled.
+
+  **A band is only its band if its ORDER is.** Three things make that true, and each was a
+  live defect in the first cut. (a) `random` samples the WHOLE pool, head included — a
+  sample that skipped the head would be a sample of the pool minus its highest-yield
+  region, which is not a base rate; the overlap is resolved in `select_candidates`, which
+  walks the head first and skips a repeat `image_id`. (b) The union is ordered by a
+  per-band ordinal (`band_ord`: rank inside the head, a shuffle inside the two sampled
+  bands), never by `pool_rank` across all three — `select_candidates` consumes the order
+  greedily and stops each band at its quota, so a similarity sort would hand `mid` and
+  `random` the nearest THIRD of their 3x overfetch and nothing else, making the tail
+  structurally unreachable and biasing the base rate high. (c) The mid band's upper bound is
+  `greatest(5% of the pool, head_fetch + mid_fetch)`: the lower bound is the head's
+  OVERFETCHED window while the upper bound is a percentile, so on a thin pool the predicate
+  could become `rank > H and rank <= M` with `H > M` — a band empty by arithmetic, taking
+  every hard negative near the confusion clusters with it.
+- *Categories* — `CATEGORY_MIX` byt 0.30 / dum 0.25 / pozemek 0.20 / komercni 0.15 /
+  ostatni 0.10. The labeled set is 83.8% byt against a 43.9% corpus, with `pozemek`
+  under-represented 5.7x. Capping byt BELOW its corpus share means every sitting dilutes
+  the skew instead of merely not adding to it, and the thin categories get a floor. A side
+  effect worth naming: inside an off-type category, the head band surfaces that category's
+  hard negatives, which a byt-only pool never produces.
+- *Pool* — `POOL_IMAGES_TARGET = 20,000` images per draw — the WHOLE budget when the draw is
+  pinned to one category, that category's share of the mix otherwise. A pinned draw
+  allocates the whole count to one category, so scaling its pool by the mix share would
+  shrink the pool while the quota (and with it the head's fetch window) grew: at the UI's
+  prefilled count of 120 pinned to `komercni` the old sizing gave a 3,000-image ceiling
+  whose 5% mark sat at 150, under a head window of 180. Drawn as a listing lottery then
+  an image lottery (`POOL_IMAGES_PER_LISTING = 4`), never by consecutive `image_id`:
+  30,000 consecutive ids came from 2,106 listings, so an id-range "random" sample is a
+  listing sample wearing a disguise. The inner sort is `random()`, never `sequence` — a
+  listing's first photos are the exterior/living-room hero shots and floor plans sit at the
+  end, so ordering by sequence would make `pudorys` structurally unreachable. TABLESAMPLE
+  SYSTEM was rejected: it samples pages, and pages are insert-time clusters.
+
+**Rank and percentile, never an absolute cosine.** Measured inter-tag centroid cosines span
+0.58-0.99 (median 0.81), so a cosine that means "very close" for one tag means "unrelated"
+for another. Bands are defined by rank and percentile within one tag's own pool; `distance`
+is stored for auditing a single pool and is documented on the column as non-transferable.
+No global threshold exists and none may be added. For the same reason **whole-pool holdout
+rank is never computed**: held-out kitchens ranked ~2,000th of 31k because ~2,000 genuine
+unlabeled kitchens outranked them, while that same ranking was 100% precise@100. Treating
+unlabeled-outranking-holdout as an error would be measuring the retriever's success as a
+failure.
+
+**What the near-duplicate collapse does and does not catch.** Exact-hash collapse happens in
+SQL (`PARTITION BY phash`, with `phash IS NULL` rows explicitly kept — a naive
+`DISTINCT ON (phash)` would fold every un-hashed image into one row). Then a greedy Python
+pass drops anything within `NEAR_DUP_MIN_HAMMING = 6` of an already-accepted or
+already-stored hash, and caps `PER_PROPERTY_CAP = 2` rows per (tag, property).
+
+*What "already-stored" means:* the tag's queue AND everything already DECIDED for the tag.
+The second arm is not optional — the 1,440 human positives predate `tag_candidates`
+entirely, so a queue-only history is blind to the whole of today's ground truth, and the
+byte-identical twin of a stored positive would be queued, labeled again, and inflate the
+head by exactly the amount the rail exists to prevent. It mirrors the pool query's own
+`NOT EXISTS ... image_tag_labels` exclusion, which keys on `image_id` and so cannot see a
+twin under a different id. Both arms are bounded at `PHASH_HISTORY_MAX`; the label arm
+orders human decisions first, so the bound sheds migration 442's manufactured rows before
+it sheds a real one. *Catches:*
+the same photo reused across agencies, and re-encodes/rescales. *Does not catch:* the same
+room from a different angle (that is the per-property cap's job, not the hash's), the same
+real property listed on two portals and photographed separately, and crops. *Over-catches:*
+dHash collapses distinct floor plans — mostly-white documents hash alike — which is why 6
+and not the dedup engine's `l2_phash_hamming_threshold = 11`: a false collapse hides a
+distinct image from review permanently, a false keep costs one click. `dropped_near_dup` is
+reported per draw so an over-collapsing tag is visible rather than inferred.
+
+**Bounded and degrading honestly.** A wall-clock budget (45s, API-safe) bounds the call, and
+each category's `SET LOCAL statement_timeout` is DERIVED from what is left of it, capped at
+`DRAW_STATEMENT_TIMEOUT_MS = 60,000` and floored at `DRAW_MIN_CATEGORY_MS = 5,000` (below
+that the category is skipped whole). A fixed 60s ceiling would not have been a bound at all:
+a category starting at 44.9s of a 45s budget could still run a further 60s, so one
+synchronous admin request would reach ~105s and die at the proxy on top of already-committed
+categories. `scripts/draw_tag_candidates.py` passes `max_seconds=0` — the 45s default is
+request-shaped, and a runner inheriting it would drop a category on every tag of an
+`--all-ready` sweep.
+
+**Degradation order is a policy, not an accident.** Categories run SMALLEST QUOTA FIRST, so
+whatever the budget cuts is cut from the largest. Running in `CATEGORY_MIX` order would
+always sacrifice `komercni` and `ostatni` — the two thinnest, the two the mix gives a floor
+to — while guaranteeing `byt`, the category capped below its corpus share precisely to
+dilute the skew. Since `category_main` is stored per row, that drift would be durable in the
+table rather than merely momentary.
+
+A cancelled category reports `status='timeout'` and the others still land; an exhausted
+budget reports `skipped_budget`. Each category is three steps — score, select, insert — with
+the SQL steps in their own transactions and the near-duplicate pass BETWEEN them: that pass
+is pure CPython (a comparison is ~150ns, so a full `PHASH_HISTORY_MAX` compare list costs
+~15ms per candidate row) and holding a transaction open across it buys nothing. Past
+`PHASH_HISTORY_MAX = 50,000` rows per arm, a near-duplicate of one of the OLDEST candidates
+can slip through, which costs one click where an unbounded scan would cost a request.
+Concurrency is not defended against: two simultaneous draws can select the same image, the
+PK plus `ON CONFLICT DO NOTHING` makes that a no-op, and the per-property cap can be
+exceeded by at most one row. Single-operator platform; accepted, not fixed.
+
+**What the repoint changes for the operator.** `sample_size` is REMOVED from the overview
+payload, not repurposed: it meant "images in the one pool every tag shared", and nothing in
+the new world means that. `candidate_image_count` (distinct images queued for at least one
+tag) is a different quantity with a different denominator, and the per-tag
+`candidate_count` / `candidate_open_count` are what the operator actually works against. A
+tag with no candidates now shows an empty browse where it used to show all 1,200 sample
+images — that is the correction landing, not a regression. `list_images_for_tag` UNIONs the
+tag's queue with everything already decided for that tag, so the 1,440 legacy positives —
+decided long before retrieval existed — stay visible instead of reading as deleted labels.
+Ordering is `(drawn_at DESC, pool_rank ASC, image_id DESC)`, a total order, so the grid does
+not reshuffle between refetches.
+
+Every band and category bucket also carries its YIELD (`positive` / `negative`, derived by
+the same join that derives `open`). Without it the panel could say how much work was left
+but never whether the retrieval was working, and the tripwire this design names in five
+places — sustained positives out of an unranked sample mean the centroid is missing a mode —
+would have had no surface to fire on. The panel puts each bucket's yield in its chip title
+and states the random band's outright once anything in it has been decided.
+
+**Running it.** `POST /new-dedup/labeling/tags/{id}/candidates` (admin-gated; `drawn_by` is
+never a request field, same rule as `source`) and `python -m scripts.draw_tag_candidates`
+(`--all-ready --target 200`, resumable with no ledger of its own — the stored rows are the
+marker). No GitHub Actions workflow: the job needs no GPU, torch, R2 or model download, so
+a runner offers it nothing a terminal does not, and a scheduled top-up has no meaning until
+the operator's labeling cadence is known.
+
+**Deliberately deferred:** no `tag_candidate_runs` table (per-run yield and loss are
+reported live in the draw response; only the CURRENT pool composition is persisted), no
+probe-score retrieval, no hard-negative mining, no autonomy dials, no deletion.
 
 ## Explicitly deferred, not silently dropped
 

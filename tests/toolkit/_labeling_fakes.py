@@ -3,9 +3,11 @@ verified separately, live).
 
 Models the four tables `toolkit/tag_annotations.py` and
 `toolkit/dedup_sim_labeling.py` write (`tag_taxonomy`, `image_tag_labels`,
-`dedup_sim.labeling_sample`, `dedup_sim.label_proposals`) plus the two they only
-read (`images`, `image_border_cases`), dispatching on the exact SQL those modules
-issue.
+`dedup_sim.labeling_sample`, `dedup_sim.label_proposals`) plus the three they only
+read (`images`, `image_border_cases`, and — since migration 449 — `tag_candidates`,
+the per-tag review queue the tag browse and the overview now read), dispatching on
+the exact SQL those modules issue. `dedup_sim.labeling_sample` stays modelled:
+`grow_sample` still writes it for the secondary-CLIP proposal lane.
 
 Shared by both test modules on purpose: `set_proposal_state` resolves a tag and
 writes a tri-state cell by calling into `tag_annotations` with the SAME
@@ -176,14 +178,28 @@ class _Cur:
             image_id, tag_id = params
             self.rowcount = 1 if c.image_tag_labels.pop((image_id, tag_id), None) else 0
 
-        elif s.startswith("SELECT s.image_id, i.storage_path, itl.state"):
+        elif s.startswith("SELECT q.image_id, i.storage_path, itl.state"):
+            # The migration-449 browse: arm one is this tag's candidate queue, arm
+            # two every image already DECIDED for the tag but never drawn as a
+            # candidate (without it the legacy positives would look deleted).
             kw = params
+            tag_id = kw["tag_id"]
+            queue: list[tuple[int, Any, Any, Any, Any]] = [
+                (cand["image_id"], cand["drawn_at"], cand["pool_rank"],
+                 cand["draw"], cand["category_main"])
+                for (tid, image_id), cand in c.tag_candidates.items() if tid == tag_id
+            ]
+            drawn_ids = {q[0] for q in queue}
+            queue += [
+                (image_id, None, None, None, None)
+                for (image_id, tid) in c.image_tag_labels
+                if tid == tag_id and image_id not in drawn_ids
+            ]
             rows = []
-            for sample in c.sample.values():
-                image_id = sample["image_id"]
+            for image_id, drawn_at, pool_rank, draw, category_main in queue:
                 if image_id not in c.images:  # JOIN images
                     continue
-                cell = c.image_tag_labels.get((image_id, kw["tag_id"]))
+                cell = c.image_tag_labels.get((image_id, tag_id))
                 state = cell["state"] if cell else None
                 want = kw["state"]
                 if want is not None and not (
@@ -196,10 +212,21 @@ class _Cur:
                     cell["created_by"] if cell else None,
                     cell["source"] if cell else None,
                     cell["excluded_reason"] if cell else None,
-                    sample["added_at"],
+                    draw, category_main, pool_rank, drawn_at,
                 ))
-            rows.sort(key=lambda r: (r[7], r[0]), reverse=True)
-            self._rows = [r[:7] for r in rows[: kw["limit"]]]
+            # ORDER BY drawn_at DESC NULLS LAST, pool_rank ASC NULLS LAST,
+            # image_id DESC — stable passes, least significant key first, because
+            # the directions differ per key (Python's sort keeps the order of
+            # equal elements, reverse=True included).
+            rows.sort(key=lambda r: r[0], reverse=True)
+            rows.sort(key=lambda r: (r[9] is None, r[9] if r[9] is not None else 0))
+            rows = sorted(
+                (r for r in rows if r[10] is not None), key=lambda r: r[10], reverse=True,
+            ) + [r for r in rows if r[10] is None]
+            self._rows = [r[:10] for r in rows[: kw["limit"]]]
+
+        elif s.startswith("SELECT count(DISTINCT image_id)::int FROM tag_candidates"):
+            self._rows = [(len({image_id for _tid, image_id in c.tag_candidates}),)]
 
         elif s.startswith("SELECT t.id, t.label, t.family, itl.state, itl.updated_at"):
             image_id = params["image_id"]
@@ -279,6 +306,10 @@ class _Cur:
                     ),
                     c.count_proposals(t["label"], "pending"),
                     c.count_proposals(t["label"], "dismissed"),
+                    # The migration-449 aggregate: how big this tag's review queue
+                    # is and how much of it nobody has decided yet. `open` is a
+                    # JOIN onto image_tag_labels — the queue stores no state.
+                    *c.candidate_counts(t["id"]),
                 ))
             self._rows = rows
 
@@ -385,6 +416,9 @@ class _FakeConn:
         self.active_definitions: dict[int, int] = {}
         self.proposals: dict[tuple[int, str], dict[str, Any]] = {}
         self.sample: dict[int, dict[str, Any]] = {}
+        # tag_candidates (migration 449), keyed (tag_id, image_id) like the PK. A
+        # review queue: no state column here either, on purpose.
+        self.tag_candidates: dict[tuple[int, int], dict[str, Any]] = {}
         # images: id -> storage_path. grow_sample's real SQL requires
         # storage_path IS NOT NULL, so every fixture image gets one.
         self.images: dict[int, str] = {}
@@ -456,6 +490,32 @@ class _FakeConn:
         self.sample[image_id] = {
             "image_id": image_id, "added_by": added_by, "added_at": added_at or self.tick(),
         }
+
+    def add_candidate(
+        self, tag_id: int, image_id: int, *, draw: str = "centroid_head",
+        category_main: str = "byt", pool_rank: int = 1,
+        drawn_at: str | None = None,
+    ) -> None:
+        """Queue one image for review on one tag — the fixture form of a drawn
+        candidate. Says nothing about the image's state for that tag; a label, if
+        any, lives in image_tag_labels."""
+        self.images.setdefault(image_id, f"img/{image_id}.jpg")
+        self.tag_candidates[(tag_id, image_id)] = {
+            "tag_id": tag_id, "image_id": image_id, "draw": draw,
+            "category_main": category_main, "pool_rank": pool_rank,
+            "drawn_at": drawn_at or self.tick(),
+        }
+
+    def candidate_counts(self, tag_id: int) -> tuple[int, int, str | None]:
+        """(candidate_count, candidate_open_count, last_drawn_at) for one tag —
+        `open` = queued with no image_tag_labels row for that same tag."""
+        rows = [v for (tid, _img), v in self.tag_candidates.items() if tid == tag_id]
+        open_count = sum(
+            1 for v in rows
+            if (v["image_id"], tag_id) not in self.image_tag_labels
+        )
+        last = max((v["drawn_at"] for v in rows), default=None)
+        return len(rows), open_count, last
 
     def add_proposal(
         self, image_id: int, model: str, label: str, *, status: str = "pending",

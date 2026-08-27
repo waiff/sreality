@@ -359,12 +359,15 @@ def test_clear_state_reverts_a_cell_to_untouched(conn: _FakeConn) -> None:
 # --- list_images_for_tag ----------------------------------------------------
 
 
-def test_list_images_for_tag_lists_the_whole_sample(conn: _FakeConn) -> None:
-    """Driven FROM labeling_sample, not from the annotations — an image the
-    secondary CLIP never proposed this tag for is still reachable."""
+def test_list_images_for_tag_lists_this_tags_candidate_queue(conn: _FakeConn) -> None:
+    """Driven FROM tag_candidates (migration 449), not from the annotations — an
+    image the secondary CLIP never proposed this tag for is still reachable, and
+    the draw provenance rides along."""
     tag = ta.add_tag(conn, label="a")
-    conn.add_to_sample(1, added_at="t1")
-    conn.add_to_sample(2, added_at="t2")
+    conn.add_candidate(tag["id"], 1, draw="centroid_head", category_main="byt",
+                       pool_rank=1, drawn_at="t1")
+    conn.add_candidate(tag["id"], 2, draw="random", category_main="pozemek",
+                       pool_rank=812, drawn_at="t2")
     ta.set_state(conn, image_id=1, tag_id=tag["id"], state="excluded")
 
     rows = {r["image_id"]: r for r in ta.list_images_for_tag(conn, tag_id=tag["id"])}
@@ -372,25 +375,47 @@ def test_list_images_for_tag_lists_the_whole_sample(conn: _FakeConn) -> None:
     assert rows[1]["state"] == "excluded"
     assert rows[1]["storage_path"] == "img/1.jpg"
     assert rows[1]["created_by"] == "operator"
-    # No row means untouched — surfaced as a state, not as a null the caller
-    # has to interpret.
+    assert (rows[1]["draw"], rows[1]["category_main"], rows[1]["pool_rank"]) == (
+        "centroid_head", "byt", 1,
+    )
+    assert rows[2]["draw"] == "random"
+    # Queue membership is not a label: a candidate nobody has decided reads
+    # untouched, never negative.
     assert rows[2]["state"] == "untouched"
     assert rows[2]["updated_at"] is None
 
 
-def test_list_images_for_tag_ignores_images_outside_the_sample(conn: _FakeConn) -> None:
+def test_list_images_for_tag_is_scoped_to_this_tags_own_queue(conn: _FakeConn) -> None:
+    # The pool is per tag now — another tag's candidate is not in this browse.
+    a = ta.add_tag(conn, label="a")
+    b = ta.add_tag(conn, label="b")
+    conn.add_candidate(a["id"], 1)
+    conn.add_candidate(b["id"], 2)
+    assert [r["image_id"] for r in ta.list_images_for_tag(conn, tag_id=a["id"])] == [1]
+
+
+def test_list_images_for_tag_keeps_a_decided_image_that_was_never_drawn(
+    conn: _FakeConn,
+) -> None:
+    """The UNION's second arm. Without it the 1,440 legacy positives — decided
+    long before candidate retrieval existed — would vanish from the browse and
+    read as deleted labels."""
     tag = ta.add_tag(conn, label="a")
-    conn.add_to_sample(1)
-    conn.add_images(2)
-    ta.set_state(conn, image_id=2, tag_id=tag["id"], state="positive")
-    assert [r["image_id"] for r in ta.list_images_for_tag(conn, tag_id=tag["id"])] == [1]
+    conn.add_images(7)
+    ta.set_state(conn, image_id=7, tag_id=tag["id"], state="positive")
+    rows = ta.list_images_for_tag(conn, tag_id=tag["id"], state="positive")
+    assert [r["image_id"] for r in rows] == [7]
+    # Never drawn, so it carries no draw provenance — not a fabricated one.
+    assert (rows[0]["draw"], rows[0]["category_main"], rows[0]["pool_rank"]) == (
+        None, None, None,
+    )
 
 
 def test_list_images_for_tag_filters_by_state(conn: _FakeConn) -> None:
     # The "kitchen = excluded" filter the tag-centric grid is built around.
     tag = ta.add_tag(conn, label="kuchyne")
     for image_id in (1, 2, 3, 4):
-        conn.add_to_sample(image_id, added_at=f"t{image_id}")
+        conn.add_candidate(tag["id"], image_id, pool_rank=image_id, drawn_at="t1")
     ta.set_state(conn, image_id=1, tag_id=tag["id"], state="positive")
     ta.set_state(conn, image_id=2, tag_id=tag["id"], state="excluded")
     ta.set_state(conn, image_id=3, tag_id=tag["id"], state="negative")
@@ -401,6 +426,7 @@ def test_list_images_for_tag_filters_by_state(conn: _FakeConn) -> None:
     assert ids("positive") == {1}
     assert ids("excluded") == {2}
     assert ids("negative") == {3}
+    # 'untouched' is now the tag's OPEN queue: candidates nobody has decided.
     assert ids("untouched") == {4}
     assert ids(None) == {1, 2, 3, 4}
 
@@ -408,7 +434,7 @@ def test_list_images_for_tag_filters_by_state(conn: _FakeConn) -> None:
 def test_list_images_for_tag_scopes_state_to_the_requested_tag(conn: _FakeConn) -> None:
     a = ta.add_tag(conn, label="a")
     b = ta.add_tag(conn, label="b")
-    conn.add_to_sample(1)
+    conn.add_candidate(a["id"], 1)
     ta.set_state(conn, image_id=1, tag_id=b["id"], state="positive")
     rows = ta.list_images_for_tag(conn, tag_id=a["id"])
     assert [r["state"] for r in rows] == ["untouched"]
@@ -422,7 +448,7 @@ def test_list_images_for_tag_rejects_an_unknown_state(conn: _FakeConn) -> None:
 def test_list_images_for_tag_clamps_the_limit(conn: _FakeConn) -> None:
     tag = ta.add_tag(conn, label="a")
     for image_id in range(1, 6):
-        conn.add_to_sample(image_id, added_at=f"t{image_id}")
+        conn.add_candidate(tag["id"], image_id, pool_rank=image_id, drawn_at="t1")
     assert len(ta.list_images_for_tag(conn, tag_id=tag["id"], limit=2)) == 2
     # 0/negative floors to 1 rather than returning an empty grid...
     assert len(ta.list_images_for_tag(conn, tag_id=tag["id"], limit=0)) == 1
@@ -431,18 +457,24 @@ def test_list_images_for_tag_clamps_the_limit(conn: _FakeConn) -> None:
     assert conn.executed[-1][1]["limit"] == ta.IMAGE_LIST_MAX
 
 
-def test_list_images_for_tag_orders_newest_first_with_a_stable_tiebreaker(
+def test_list_images_for_tag_orders_newest_draw_first_with_a_total_order(
     conn: _FakeConn,
 ) -> None:
-    # A whole grow lands in one transaction sharing one added_at; without
-    # image_id in the sort the grid reshuffles under the operator between
-    # refetches (the ORDER BY timestamp-ties lesson).
+    # A whole draw lands in one transaction sharing one drawn_at, so drawn_at
+    # alone is not an order: pool_rank breaks the tie inside a draw and image_id
+    # breaks THAT tie, or the grid reshuffles under the operator between refetches
+    # (the ORDER BY timestamp-ties lesson).
     tag = ta.add_tag(conn, label="a")
-    for image_id in (1, 2, 3):
-        conn.add_to_sample(image_id, added_at="t1")
-    conn.add_to_sample(4, added_at="t2")
+    conn.add_candidate(tag["id"], 1, pool_rank=2, drawn_at="t1")
+    conn.add_candidate(tag["id"], 2, pool_rank=1, drawn_at="t1")
+    conn.add_candidate(tag["id"], 3, pool_rank=1, drawn_at="t1")
+    conn.add_candidate(tag["id"], 4, pool_rank=9, drawn_at="t2")
+    # Decided but never drawn: no drawn_at, so it sorts last (NULLS LAST).
+    conn.add_images(5)
+    ta.set_state(conn, image_id=5, tag_id=tag["id"], state="positive")
+
     rows = ta.list_images_for_tag(conn, tag_id=tag["id"])
-    assert [r["image_id"] for r in rows] == [4, 3, 2, 1]
+    assert [r["image_id"] for r in rows] == [4, 3, 2, 1, 5]
 
 
 # --- list_tags_for_image -----------------------------------------------------
@@ -557,11 +589,15 @@ def test_tag_overview_shape(conn: _FakeConn) -> None:
     ta.set_state(conn, image_id=3, tag_id=a["id"], state="excluded")
     conn.add_proposal(4, "m1", "a", status="pending")
     conn.add_proposal(5, "m1", "a", status="dismissed")
-    conn.add_to_sample(1)
-    conn.add_to_sample(2)
+    conn.add_candidate(a["id"], 1, drawn_at="t1")
+    conn.add_candidate(a["id"], 2, drawn_at="t2")
 
     overview = ta.tag_overview(conn)
-    assert overview["sample_size"] == 2
+    # Distinct images queued for at least ONE tag — a different quantity from the
+    # retired `sample_size` (one pool shared by every tag), which is why the name
+    # changed rather than the meaning.
+    assert overview["candidate_image_count"] == 2
+    assert "sample_size" not in overview
     row_a = next(r for r in overview["tags"] if r["label"] == "a")
     assert row_a["id"] == a["id"]
     assert row_a["family"] == "interier"
@@ -578,6 +614,39 @@ def test_tag_overview_shape(conn: _FakeConn) -> None:
     row_b = next(r for r in overview["tags"] if r["label"] == "b")
     assert row_b["positive_count"] == 0
     assert row_b["pending_count"] == 0
+    assert (row_b["candidate_count"], row_b["candidate_open_count"]) == (0, 0)
+    assert row_b["last_drawn_at"] is None
+
+
+def test_tag_overview_reports_the_open_half_of_each_tags_queue(conn: _FakeConn) -> None:
+    """`candidate_open_count` is the work LEFT — a candidate with any decision on
+    this tag (positive, negative or excluded) is done. It is derived by joining
+    image_tag_labels; the queue itself stores no state."""
+    tag = ta.add_tag(conn, label="a")
+    for image_id in (1, 2, 3):
+        conn.add_candidate(tag["id"], image_id, drawn_at=f"t{image_id}")
+    ta.set_state(conn, image_id=1, tag_id=tag["id"], state="positive")
+    ta.set_state(conn, image_id=2, tag_id=tag["id"], state="negative")
+
+    row = next(r for r in ta.tag_overview(conn)["tags"] if r["label"] == "a")
+    assert row["candidate_count"] == 3
+    assert row["candidate_open_count"] == 1
+    assert row["last_drawn_at"] == "t3"
+
+
+def test_tag_overview_candidate_counts_are_per_tag(conn: _FakeConn) -> None:
+    # One image can legitimately be queued for several tags; each tag counts its
+    # own queue, and the header count is DISTINCT images across all of them.
+    a = ta.add_tag(conn, label="a")
+    b = ta.add_tag(conn, label="b")
+    conn.add_candidate(a["id"], 1)
+    conn.add_candidate(b["id"], 1)
+    conn.add_candidate(b["id"], 2)
+
+    overview = ta.tag_overview(conn)
+    counts = {r["label"]: r["candidate_count"] for r in overview["tags"]}
+    assert counts == {"a": 1, "b": 2}
+    assert overview["candidate_image_count"] == 2
 
 
 def test_tag_overview_keeps_border_cases_out_of_the_gate_count(conn: _FakeConn) -> None:
@@ -900,8 +969,8 @@ def test_bulk_paths_report_cells_submitted_not_cells_changed(conn: _FakeConn) ->
 
 def test_list_images_for_tag_carries_provenance(conn: _FakeConn) -> None:
     tag = ta.add_tag(conn, label="a")
-    conn.add_to_sample(1)
-    conn.add_to_sample(2)
+    conn.add_candidate(tag["id"], 1)
+    conn.add_candidate(tag["id"], 2)
     ta.set_state(
         conn, image_id=1, tag_id=tag["id"], state="excluded",
         excluded_reason=ta.EXCLUDED_PRUNED,

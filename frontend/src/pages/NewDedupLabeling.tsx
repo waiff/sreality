@@ -19,13 +19,19 @@ import {
   bulkSetNewDedupImageTags,
   listNewDedupPositiveTagsForImages,
   listNewDedupSettings,
+  getNewDedupTagCandidates,
+  drawNewDedupTagCandidates,
   TAG_STATES,
   type TagState,
   type TagExcludedReason,
   type TagSource,
+  type TagCandidateDraw,
   type NewDedupTag,
   type NewDedupLabelProposal,
   type NewDedupTagImage,
+  type NewDedupCandidateBucket,
+  type NewDedupCandidateSummary,
+  type NewDedupCandidateDrawResult,
 } from '@/lib/api';
 import { fetchImagesByImageIds } from '@/lib/queries';
 import { imageSrc } from '@/lib/imageUrl';
@@ -40,6 +46,7 @@ import TaxonomyManageModal from '@/components/TaxonomyManageModal';
 import LabelCombobox, { type LabelOption } from '@/components/LabelCombobox';
 import { Chevron, useCollapsed } from '@/components/settings/SectionChrome';
 import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
+import { fmtRelative } from '@/lib/format';
 import { usePersistedFlag } from '@/lib/persistedFlag';
 import { useBorderCases, type BorderCaseStore } from '@/lib/useBorderCases';
 import type { ImagePublic } from '@/lib/types';
@@ -47,6 +54,10 @@ import type { ImagePublic } from '@/lib/types';
 const OVERVIEW_KEY = ['new-dedup', 'labeling', 'overview'];
 const PROPOSALS_KEY = ['new-dedup', 'labeling', 'proposals'];
 const TAG_IMAGES_KEY = ['new-dedup', 'labeling', 'tag-images'];
+/* Prefix; the live key appends the tag id, because a candidate queue only ever
+ * exists FOR one tag. Invalidating the prefix (the all-tags detail panel) tops
+ * up whichever tag's readout happens to be mounted. */
+const CANDIDATES_KEY = ['new-dedup', 'labeling', 'candidates'];
 const SETTINGS_KEY = ['new-dedup', 'settings'];
 
 /* 'all' is the union of the other three — the tab to work in when you want the
@@ -62,19 +73,64 @@ const STATUS_TABS: ReadonlyArray<{ key: TabKey; label: string }> = [
 
 /* The two review workflows this page supports (decided 2026-08-26): tag-centric
  * batch review of the secondary-CLIP's SUGGESTIONS (the default — fast, because
- * each screen only asks about one tag), and a Sample browse that reaches every
- * image in the labeling pool for one tag, including ones the model never
- * proposed it for — the only way to answer "show me every image where kitchen =
- * excluded" for images outside the suggestion queue. */
-type Mode = 'proposals' | 'sample';
-type SampleStateFilter = TagState | 'untouched' | 'all';
-const SAMPLE_STATE_OPTIONS: ReadonlyArray<{ key: SampleStateFilter; label: string }> = [
+ * each screen only asks about one tag), and a Candidates browse over ONE tag's
+ * own review queue (migration 449) plus everything already decided for it —
+ * including images the model never proposed the tag for, which is the only way
+ * to answer "show me every image where kitchen = excluded".
+ *
+ * The queue used to be `dedup_sim.labeling_sample`: 1,200 untargeted images
+ * every tag shared. Rare tags are a fraction of a percent of the corpus, so a
+ * random pool can never build their sets — candidates are FOUND now, by ranking
+ * a bounded pool against the tag's own centroid. */
+type Mode = 'proposals' | 'candidates';
+type CandidateStateFilter = TagState | 'untouched' | 'all';
+const CANDIDATE_STATE_OPTIONS: ReadonlyArray<{ key: CandidateStateFilter; label: string }> = [
   { key: 'all', label: 'All' },
   { key: 'untouched', label: 'Untouched' },
   { key: 'positive', label: 'Positive' },
   { key: 'negative', label: 'Negative' },
   { key: 'excluded', label: 'Excluded' },
 ];
+
+/* The rank bands a candidate can come from. The short label is what fits on a
+ * tile; the title is the WHY, because a band is only meaningful as a deliberate
+ * mix — a pure top-N produces a prototypical training set that fails on the odd
+ * cases, which is the failure the whole mix exists to avoid. */
+const DRAW_META: Record<TagCandidateDraw, { label: string; title: string }> = {
+  centroid_head: {
+    label: 'head',
+    title:
+      "Nearest the tag's centroid — the highest-yield band, and the only one that can build a rare tag's positive set at all. On its own it would produce a prototypical set that fails on odd cases.",
+  },
+  centroid_mid: {
+    label: 'mid',
+    title:
+      'Just below the head, where the confusion clusters live (bathrooms, circulation, living spaces) — the hard cases the head cannot surface.',
+  },
+  random: {
+    label: 'random',
+    title:
+      "An unranked sample of the pool: the only honest base rate for this tag, and the only band that can surface a positive the centroid is blind to. Sustained positives here mean the centroid is missing a mode.",
+  },
+};
+/* Falls back to the raw key — the band vocabulary lives in the database's CHECK
+ * constraint, and a band added there must not render as blank here. */
+const drawLabel = (draw: string): string => DRAW_META[draw as TagCandidateDraw]?.label ?? draw;
+const drawTitle = (draw: string): string => DRAW_META[draw as TagCandidateDraw]?.title ?? '';
+
+/* A bucket's YIELD, appended to its tooltip. Silent until something has been
+ * decided: "0 positive" on an untouched bucket would read as a verdict on the
+ * band rather than as the absence of one. */
+const yieldPhrase = (b: NewDedupCandidateBucket): string =>
+  b.positive + b.negative === 0
+    ? ''
+    : `, ${b.positive} positive of ${b.positive + b.negative} decided`;
+
+/* Mirrors toolkit/tag_candidates.DEFAULT_DRAW_COUNT. Only the INITIAL value of
+ * an input the operator overtypes — the count that actually binds is the
+ * server's, and the 1..DRAW_COUNT_MAX range is enforced there (a 422 carries
+ * its own message) rather than copied into a second validator here. */
+const DEFAULT_DRAW_COUNT = '120';
 
 type ProposalsPage = { data: NewDedupLabelProposal[] };
 
@@ -354,7 +410,7 @@ export default function NewDedupLabeling() {
   const [maxTrained, setMaxTrained] = useState('');
   const [manageOpen, setManageOpen] = useState(false);
   const [tab, setTab] = useState<TabKey>('pending');
-  const [sampleState, setSampleState] = useState<SampleStateFilter>('untouched');
+  const [candidateState, setCandidateState] = useState<CandidateStateFilter>('untouched');
   const [showOriginal, setShowOriginal] = useState(false);
   // The "Original tag" view filters by the production CLIP tagger's own
   // fine_tag — a different, fixed vocabulary from Taxonomy v1 (`labelFilter`
@@ -405,19 +461,30 @@ export default function NewDedupLabeling() {
   const proposals = useMemo(() => proposalsQ.data?.data ?? [], [proposalsQ.data]);
 
   const tagImagesKey = useMemo(
-    () => [...TAG_IMAGES_KEY, activeTagId, sampleState],
-    [activeTagId, sampleState],
+    () => [...TAG_IMAGES_KEY, activeTagId, candidateState],
+    [activeTagId, candidateState],
   );
   const tagImagesQ = useQuery({
     queryKey: tagImagesKey,
     queryFn: () =>
       listNewDedupTagImages(activeTagId as number, {
-        state: sampleState === 'all' ? undefined : sampleState,
+        state: candidateState === 'all' ? undefined : candidateState,
         limit: 200,
       }),
-    enabled: mode === 'sample' && activeTagId != null,
+    enabled: mode === 'candidates' && activeTagId != null,
   });
   const tagImages = useMemo(() => tagImagesQ.data?.data ?? [], [tagImagesQ.data]);
+
+  /* The queue READOUT, independent of the grid: it answers "is there work on
+   * this tag, how was it drawn, and can I get more" and must stay right whether
+   * or not the Candidates grid is the one on screen. */
+  const candidatesKey = useMemo(() => [...CANDIDATES_KEY, activeTagId], [activeTagId]);
+  const candidatesQ = useQuery({
+    queryKey: candidatesKey,
+    queryFn: () => getNewDedupTagCandidates(activeTagId as number),
+    enabled: activeTagId != null,
+  });
+  const candidates: NewDedupCandidateSummary | undefined = candidatesQ.data?.data;
 
   const imageIds = useMemo(
     () => (mode === 'proposals' ? proposals.map((p) => p.image_id) : tagImages.map((r) => r.image_id)),
@@ -534,7 +601,7 @@ export default function NewDedupLabeling() {
     setSelected(new Set());
     setDrafts(new Map());
     setLightboxAt(null);
-  }, [tab, labelFilter, originalTagFilter, mode, sampleState]);
+  }, [tab, labelFilter, originalTagFilter, mode, candidateState]);
   useEffect(() => {
     const ids = new Set(imageIds);
     setSelected((prev) => {
@@ -561,6 +628,7 @@ export default function NewDedupLabeling() {
   const invalidateOverview = () => qc.invalidateQueries({ queryKey: OVERVIEW_KEY });
   const invalidateProposals = () => qc.invalidateQueries({ queryKey: PROPOSALS_KEY });
   const invalidateTagImages = () => qc.invalidateQueries({ queryKey: TAG_IMAGES_KEY });
+  const invalidateCandidates = () => qc.invalidateQueries({ queryKey: candidatesKey });
   // Only the tabs the operator ISN'T looking at. Invalidating the visible one
   // would refetch it and re-render every tile — the churn this page is built
   // to avoid (see patchRows / patchTagImages). None of the others is
@@ -620,7 +688,7 @@ export default function NewDedupLabeling() {
         ? {
             ...old,
             data:
-              sampleState === 'all' || sampleState === state
+              candidateState === 'all' || candidateState === state
                 ? old.data.map((r) => (set.has(r.image_id) ? patch(r) : r))
                 : old.data.filter((r) => !set.has(r.image_id)),
           }
@@ -712,7 +780,45 @@ export default function NewDedupLabeling() {
     onError: (err: Error) => pushToast('err', err.message),
   });
 
-  // --- sample -------------------------------------------------------------
+  // --- candidate retrieval --------------------------------------------------
+
+  const [drawCount, setDrawCount] = useState(DEFAULT_DRAW_COUNT);
+  const [drawCategory, setDrawCategory] = useState('');
+  const drawCountValid = Number.isInteger(Number(drawCount)) && Number(drawCount) > 0;
+  /* The last draw's own report, kept on screen rather than only in a toast: the
+   * loss counters and any per-category timeout are the ONLY quality signal this
+   * mechanism ships, and a shortfall that scrolls away in six seconds reads as
+   * "it just gave me fewer". */
+  const [lastDraw, setLastDraw] = useState<NewDedupCandidateDrawResult | null>(null);
+  const drawMut = useMutation({
+    mutationFn: () =>
+      drawNewDedupTagCandidates(activeTagId as number, Number(drawCount), drawCategory || null),
+    onMutate: () => setLastDraw(null),
+    onSuccess: (res) => {
+      const d = res.data;
+      setLastDraw(d);
+      if (d.status === 'insufficient_positives') {
+        pushToast(
+          'info',
+          `No draw — this tag has ${d.verified_positive_count} verified positive images, and a centroid needs ${d.min_verified_positives}.`,
+        );
+      } else {
+        pushToast(
+          'ok',
+          `Drew ${d.inserted} candidates (${d.dropped_near_dup} near-duplicates, ${d.dropped_property_cap} over the per-property cap).`,
+        );
+      }
+      invalidateOverview();
+      invalidateCandidates();
+      invalidateTagImages();
+    },
+    onError: (err: Error) => pushToast('err', err.message),
+  });
+  // A new tag is a different queue: the previous tag's draw report would read
+  // as this one's.
+  useEffect(() => setLastDraw(null), [activeTagId]);
+
+  // --- proposal pool --------------------------------------------------------
 
   const [growCount, setGrowCount] = useState('200');
   const [growCategory, setGrowCategory] = useState('');
@@ -824,6 +930,9 @@ export default function NewDedupLabeling() {
       patchTagImages([vars.imageId], res.data.state, res.data.excluded_reason);
       if (labelFilter) patchPositiveTags(vars.imageId, labelFilter, res.data.state);
       invalidateOverview();
+      // The readout's open count just moved by one — the grid itself is still
+      // patched in place, never invalidated.
+      invalidateCandidates();
     },
     onError: (err: Error) => pushToast('err', err.message),
     onSettled: (_d, _e, vars) => endAction(vars.imageId, 'sample'),
@@ -844,6 +953,7 @@ export default function NewDedupLabeling() {
         for (const imageId of res.data.image_ids) patchPositiveTags(imageId, labelFilter, res.data.state);
       }
       invalidateOverview();
+      invalidateCandidates();
     },
     onError: (err: Error) => pushToast('err', err.message),
   });
@@ -907,13 +1017,13 @@ export default function NewDedupLabeling() {
       excludedReason,
     });
   });
-  const sampleKeyboard = useGridKeyboardReview(tagImages.length, (i, state, excludedReason) => {
+  const candidateKeyboard = useGridKeyboardReview(tagImages.length, (i, state, excludedReason) => {
     const r = tagImages[i];
     if (!r || activeTagId == null) return;
     beginAction(r.image_id, 'sample');
     setTagAnnotationMut.mutate({ imageId: r.image_id, state, excludedReason });
   });
-  const keyboard = mode === 'proposals' ? proposalKeyboard : sampleKeyboard;
+  const keyboard = mode === 'proposals' ? proposalKeyboard : candidateKeyboard;
 
   return (
     <div className="px-6 py-12 max-w-5xl mx-auto">
@@ -926,7 +1036,9 @@ export default function NewDedupLabeling() {
       <p className="mt-3 text-sm text-[var(--color-ink-2)] leading-relaxed max-w-2xl">
         Build the tag annotation matrix every per-tag classifier head trains from: each image ×
         tag cell is positive, negative, or excluded (dropped from that head's training set
-        entirely). An untouched cell defaults to negative. "Border case" is a separate,
+        entirely). An untouched cell is untouched — nobody reviewed it, and it is never
+        trained as a negative; being queued as a candidate is not a label either. "Border
+        case" is a separate,
         whole-image flag — a photo unclear even to a human — independent of any tag's
         state. Gate 1 needs {gate1Target} positive images per active tag, counting only the ones
         that are NOT parked as a border case. Excluding an image asks why: ambiguous (nobody
@@ -940,7 +1052,7 @@ export default function NewDedupLabeling() {
       <TaxonomyBarChart
         tags={visibleTags}
         totalTags={allTags.length}
-        sampleSize={overviewQ.data?.data.sample_size}
+        candidateImageCount={overviewQ.data?.data.candidate_image_count}
         loading={!overviewQ.data && !overviewQ.error}
         gate1Target={gate1Target}
         proposalTarget={proposalTarget}
@@ -970,61 +1082,20 @@ export default function NewDedupLabeling() {
         />
       )}
 
-      <section className="mt-8 border border-[var(--color-rule)] rounded-[var(--radius-sm)] p-4">
-        <span className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] mb-3">
-          Sample
-        </span>
-        <div className="flex items-center gap-3 flex-wrap text-sm">
-          <span className="text-[var(--color-ink-2)]">
-            {overviewQ.data ? overviewQ.data.data.sample_size : '—'} images in sample
-          </span>
-          <span className="h-4 w-px bg-[var(--color-rule)]" aria-hidden />
-          <input
-            type="number"
-            min={1}
-            step={1}
-            value={growCount}
-            onChange={(e) => setGrowCount(e.target.value)}
-            disabled={growMut.isPending}
-            className="w-20 px-2 py-1 font-mono text-sm text-right rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)] disabled:opacity-50"
-          />
-          <select
-            value={growCategory}
-            onChange={(e) => setGrowCategory(e.target.value)}
-            disabled={growMut.isPending}
-            className="px-2 py-1 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)] disabled:opacity-50"
-          >
-            {CATEGORY_MAIN_TABS.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.label}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={() => growMut.mutate()}
-            disabled={growMut.isPending || !growCountValid}
-            className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-[var(--radius-xs)] bg-[var(--color-copper)] text-[var(--color-paper)] disabled:opacity-50"
-          >
-            {growMut.isPending && <Spinner size={10} />}
-            {growMut.isPending ? 'Growing…' : 'Grow sample'}
-          </button>
-        </div>
-
-        {lastGrow && (
-          <p className="mt-2.5 text-xs text-[var(--color-sage)]">
-            {lastGrow.added > 0
-              ? `Added ${lastGrow.added} image${lastGrow.added === 1 ? '' : 's'} — dispatch the relabel workflow below to generate proposals for them.`
-              : `No new images matched (requested ${lastGrow.requested}) — everything eligible is already in the sample.`}
-          </p>
-        )}
-
-        <p className="mt-2 text-xs text-[var(--color-ink-4)] leading-relaxed">
-          Adds newest not-yet-sampled images to the pool. Scoring runs separately via the "NEW
-          DEDUP — Labeling secondary-CLIP proposals" GitHub Actions workflow (model:{' '}
-          {secondaryModel ?? '…'}).
-        </p>
-      </section>
+      <CandidateQueuePanel
+        tagSelected={activeTagId != null}
+        summary={activeTagId == null ? undefined : candidates}
+        loading={activeTagId != null && candidatesQ.isLoading}
+        error={activeTagId == null ? null : (candidatesQ.error as Error | null)}
+        count={drawCount}
+        onCountChange={setDrawCount}
+        countValid={drawCountValid}
+        category={drawCategory}
+        onCategoryChange={setDrawCategory}
+        onDraw={() => drawMut.mutate()}
+        drawing={drawMut.isPending}
+        lastDraw={lastDraw}
+      />
 
       <section className="mt-8">
         <div className="flex items-center justify-between flex-wrap gap-3">
@@ -1032,8 +1103,8 @@ export default function NewDedupLabeling() {
             <ToggleButton active={mode === 'proposals'} onClick={() => setMode('proposals')}>
               Proposals
             </ToggleButton>
-            <ToggleButton active={mode === 'sample'} onClick={() => setMode('sample')}>
-              Sample
+            <ToggleButton active={mode === 'candidates'} onClick={() => setMode('candidates')}>
+              Candidates
             </ToggleButton>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
@@ -1085,7 +1156,7 @@ export default function NewDedupLabeling() {
               onChange={(e) => setLabelFilter(e.target.value || null)}
               className="px-2 py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)] max-w-[18rem]"
             >
-              <option value="">{mode === 'sample' ? 'Choose a tag…' : 'All tags'}</option>
+              <option value="">{mode === 'candidates' ? 'Choose a tag…' : 'All tags'}</option>
               {labelFilter && !filterOptions.some((t) => t.label === labelFilter) && (
                 <option value={labelFilter}>{labelFilter}</option>
               )}
@@ -1120,19 +1191,19 @@ export default function NewDedupLabeling() {
               {filterOptions.length} of {allTags.length} tags (≤ {maxTrainedNum} training images)
             </span>
           )}
-          {mode === 'sample' && (
+          {mode === 'candidates' && (
             <>
               <span className="h-4 w-px bg-[var(--color-rule)]" aria-hidden />
-              <label htmlFor="labeling-sample-state" className="text-[var(--color-ink-3)]">
+              <label htmlFor="labeling-candidate-state" className="text-[var(--color-ink-3)]">
                 State
               </label>
               <select
-                id="labeling-sample-state"
-                value={sampleState}
-                onChange={(e) => setSampleState(e.target.value as SampleStateFilter)}
+                id="labeling-candidate-state"
+                value={candidateState}
+                onChange={(e) => setCandidateState(e.target.value as CandidateStateFilter)}
                 className="px-2 py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)]"
               >
-                {SAMPLE_STATE_OPTIONS.map((o) => (
+                {CANDIDATE_STATE_OPTIONS.map((o) => (
                   <option key={o.key} value={o.key}>
                     {o.label}
                   </option>
@@ -1202,6 +1273,63 @@ export default function NewDedupLabeling() {
 
         {mode === 'proposals' ? (
           <>
+            {/* The pool the secondary-CLIP scores to make the suggestions below
+              * — a different pool from the per-tag candidate queues above, and
+              * it lives here because this is the only mode it feeds. */}
+            <section className="mt-4 border border-[var(--color-rule)] rounded-[var(--radius-sm)] p-4">
+              <span className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] mb-3">
+                Proposal pool
+              </span>
+              <div className="flex items-center gap-3 flex-wrap text-sm">
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={growCount}
+                  onChange={(e) => setGrowCount(e.target.value)}
+                  disabled={growMut.isPending}
+                  aria-label="Images to add to the proposal pool"
+                  className="w-20 px-2 py-1 font-mono text-sm text-right rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)] disabled:opacity-50"
+                />
+                <select
+                  value={growCategory}
+                  onChange={(e) => setGrowCategory(e.target.value)}
+                  disabled={growMut.isPending}
+                  aria-label="Property type for the proposal pool"
+                  className="px-2 py-1 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)] disabled:opacity-50"
+                >
+                  {CATEGORY_MAIN_TABS.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => growMut.mutate()}
+                  disabled={growMut.isPending || !growCountValid}
+                  className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-[var(--radius-xs)] bg-[var(--color-copper)] text-[var(--color-paper)] disabled:opacity-50"
+                >
+                  {growMut.isPending && <Spinner size={10} />}
+                  {growMut.isPending ? 'Growing…' : 'Grow sample'}
+                </button>
+              </div>
+
+              {lastGrow && (
+                <p className="mt-2.5 text-xs text-[var(--color-sage)]">
+                  {lastGrow.added > 0
+                    ? `Added ${lastGrow.added} image${lastGrow.added === 1 ? '' : 's'} — dispatch the relabel workflow below to generate proposals for them.`
+                    : `No new images matched (requested ${lastGrow.requested}) — everything eligible is already in the sample.`}
+                </p>
+              )}
+
+              <p className="mt-2 text-xs text-[var(--color-ink-4)] leading-relaxed">
+                Adds newest not-yet-sampled images to the pool. Scoring runs separately via the
+                "NEW DEDUP — Labeling secondary-CLIP proposals" GitHub Actions workflow (model:{' '}
+                {secondaryModel ?? '…'}).
+              </p>
+            </section>
+
             {proposalsQ.error && <ErrorBanner message={(proposalsQ.error as Error).message} />}
             {!proposalsQ.data && !proposalsQ.error && (
               <p className="mt-6 text-sm text-[var(--color-ink-3)]">Loading proposals…</p>
@@ -1260,17 +1388,24 @@ export default function NewDedupLabeling() {
           <>
             {activeTagId == null && (
               <p className="mt-6 text-sm text-[var(--color-ink-3)]">
-                Choose a tag above to browse its sample.
+                Choose a tag above to browse its candidates.
               </p>
             )}
             {activeTagId != null && tagImagesQ.error && (
               <ErrorBanner message={(tagImagesQ.error as Error).message} />
             )}
             {activeTagId != null && !tagImagesQ.data && !tagImagesQ.error && (
-              <p className="mt-6 text-sm text-[var(--color-ink-3)]">Loading sample…</p>
+              <p className="mt-6 text-sm text-[var(--color-ink-3)]">Loading candidates…</p>
             )}
             {activeTagId != null && tagImagesQ.data && tagImages.length === 0 && (
-              <p className="mt-6 text-sm text-[var(--color-ink-3)]">No images match.</p>
+              <p className="mt-6 text-sm text-[var(--color-ink-3)]">
+                {/* "No candidates yet" is only true when nothing is being
+                  * filtered OUT — under a positive/negative/excluded filter the
+                  * queue can be full and still show nothing here. */}
+                {candidateState === 'all' || candidateState === 'untouched'
+                  ? 'No candidates yet — draw some above.'
+                  : 'No candidates in that state.'}
+              </p>
             )}
             {activeTagId != null && (
               <div
@@ -1317,7 +1452,7 @@ export default function NewDedupLabeling() {
           startIndex={lightboxAt}
           onClose={() => setLightboxAt(null)}
           tagAt={
-            showOriginal || mode === 'sample'
+            showOriginal || mode === 'candidates'
               ? undefined
               : (i) => ({ tag: gallery[i]?.tag ?? null, confidence: gallery[i]?.confidence ?? null })
           }
@@ -1358,6 +1493,224 @@ function ToggleButton({
     >
       {children}
     </button>
+  );
+}
+
+/* A run of quiet metadata chips, `a 12 · b 7 · c 3`, each carrying its own
+ * explanation. The same `·`-separated idiom the taxonomy strip already uses for
+ * a tag's counts, so the composition readout needs no new vocabulary. */
+function ChipRun({
+  items,
+  label,
+}: {
+  items: ReadonlyArray<{ key: string; text: string; title: string }>;
+  label: string;
+}) {
+  return (
+    <span role="list" aria-label={label} className="flex items-baseline gap-1.5 flex-wrap">
+      {items.map((it, i) => (
+        <span key={it.key} role="listitem" title={it.title} className="whitespace-nowrap">
+          {i > 0 ? '· ' : ''}
+          {it.text}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/* ONE tag's review queue: how much work is on it, how it was drawn, and the way
+ * to get more. A work-queue readout, not a retrieval console — nothing here
+ * tunes the retrieval, and nothing here is a judgement about an image.
+ *
+ * The load-bearing constraint is what this panel must NOT imply. A candidate is
+ * an image somebody should LOOK at for this tag: not a positive, not a
+ * negative, not a default. So every number is a count of WORK (open / drawn),
+ * never of evidence; the band and category chips describe the DRAW, never the
+ * images; and the helper line says so outright, because this is the screen
+ * where the opposite belief would be born.
+ *
+ * The composition chips are also the only place the corpus skew is visible: the
+ * labeled set is 83.8% byt against a 43.9% corpus, and the draw is stratified
+ * to dilute that. Printing the buckets is what makes the correction auditable
+ * instead of a claim. */
+function CandidateQueuePanel({
+  tagSelected,
+  summary,
+  loading,
+  error,
+  count,
+  onCountChange,
+  countValid,
+  category,
+  onCategoryChange,
+  onDraw,
+  drawing,
+  lastDraw,
+}: {
+  tagSelected: boolean;
+  summary: NewDedupCandidateSummary | undefined;
+  loading: boolean;
+  error: Error | null;
+  count: string;
+  onCountChange: (next: string) => void;
+  countValid: boolean;
+  category: string;
+  onCategoryChange: (next: string) => void;
+  onDraw: () => void;
+  drawing: boolean;
+  lastDraw: NewDedupCandidateDrawResult | null;
+}) {
+  /* A tag with too few human-verified positives has no meaningful centroid, and
+   * the floor is the SERVER's — rendered, never recomputed here, the same rule
+   * the ambiguity threshold follows. */
+  const canDraw = summary?.can_draw ?? false;
+  const shortfall = lastDraw != null && lastDraw.status === 'drawn' && lastDraw.inserted < lastDraw.requested;
+  const degraded = lastDraw?.categories.filter((c) => c.status !== 'drawn') ?? [];
+  const randomBand = summary?.by_draw.find((b) => b.key === 'random');
+
+  return (
+    <section className="mt-8 border border-[var(--color-rule)] rounded-[var(--radius-sm)] p-4">
+      <span className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] mb-3">
+        Candidates
+      </span>
+
+      {!tagSelected && (
+        <p className="text-sm text-[var(--color-ink-3)]">
+          Choose a tag to see its candidate queue.
+        </p>
+      )}
+
+      {tagSelected && error && <ErrorBanner message={error.message} />}
+      {tagSelected && !error && loading && (
+        <p className="text-sm text-[var(--color-ink-3)]">Loading…</p>
+      )}
+
+      {tagSelected && summary && (
+        <>
+          {/* One text node on purpose: the hierarchy here is line-to-line (this
+            * line against the 0.68rem chips below), not word-to-word, and a
+            * status line broken into styled fragments is a status line nothing
+            * can read as a whole. */}
+          <p className="text-sm text-[var(--color-ink)]">
+            {`${summary.open} open · ${summary.total} drawn · ${
+              summary.last_drawn_at ? `last drawn ${fmtRelative(summary.last_drawn_at)}` : 'never drawn'
+            }`}
+          </p>
+
+          {(summary.by_draw.length > 0 || summary.by_category.length > 0) && (
+            <div className="mt-2 flex items-center gap-2 flex-wrap text-[0.68rem] text-[var(--color-ink-4)]">
+              <ChipRun
+                label="Candidates by rank band"
+                items={summary.by_draw.map((b) => ({
+                  key: b.key,
+                  text: `${drawLabel(b.key)} ${b.total}`,
+                  title: `${drawTitle(b.key)} ${b.open} of ${b.total} still undecided${yieldPhrase(b)}.`,
+                }))}
+              />
+              {summary.by_draw.length > 0 && summary.by_category.length > 0 && (
+                <span className="h-3 w-px bg-[var(--color-rule)]" aria-hidden />
+              )}
+              <ChipRun
+                label="Candidates by property type"
+                items={summary.by_category.map((b) => ({
+                  key: b.key,
+                  text: `${b.key} ${b.total}`,
+                  title: `${b.total} candidates drawn under the ${b.key} quota, ${b.open} still undecided${yieldPhrase(b)}. Draws are stratified by property type so the labeled set's byt skew is diluted rather than inherited.`,
+                }))}
+              />
+            </div>
+          )}
+
+          {randomBand != null && randomBand.positive > 0 && (
+            // The one self-check the retrieval has, and the only place it can be
+            // read. Neutral, not alarm: a centroid missing a mode is information
+            // the random band exists to produce, not a fault to flag.
+            <p className="mt-2 text-xs text-[var(--color-ink-3)]">
+              {`Random band: ${randomBand.positive} positive of ${randomBand.positive + randomBand.negative} decided. Sustained positives from an unranked sample mean the centroid is missing a mode of this tag.`}
+            </p>
+          )}
+
+          <div className="mt-3 flex items-center gap-3 flex-wrap text-sm">
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={count}
+              onChange={(e) => onCountChange(e.target.value)}
+              disabled={drawing}
+              aria-label="Candidates to draw"
+              className="w-20 px-2 py-1 font-mono text-sm text-right rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)] disabled:opacity-50"
+            />
+            <select
+              value={category}
+              onChange={(e) => onCategoryChange(e.target.value)}
+              disabled={drawing}
+              aria-label="Property type for this draw"
+              className="px-2 py-1 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)] disabled:opacity-50"
+            >
+              {CATEGORY_MAIN_TABS.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={onDraw}
+              disabled={drawing || !countValid || !canDraw}
+              className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-[var(--radius-xs)] bg-[var(--color-copper)] text-[var(--color-paper)] disabled:opacity-50"
+            >
+              {drawing && <Spinner size={10} />}
+              {drawing ? 'Drawing…' : 'Draw candidates'}
+            </button>
+          </div>
+
+          {!canDraw && (
+            // Brick, the page's alarm hue: this is a blocked state with a named
+            // way out, not a failure. A centroid over fewer positives than were
+            // ever measured is one operator's idiosyncrasies, and a garbage
+            // pool costs a whole review sitting.
+            <p className="mt-2.5 text-xs text-[var(--color-brick)]">
+              Needs {summary.min_verified_positives} verified positive images to build a centroid
+              — this tag has {summary.verified_positive_count}. Label more positives first.
+            </p>
+          )}
+
+          {lastDraw && lastDraw.status === 'drawn' && (
+            <p className="mt-2.5 text-xs text-[var(--color-sage)]">
+              {`Drew ${lastDraw.inserted} candidate${lastDraw.inserted === 1 ? '' : 's'} — ${lastDraw.dropped_near_dup} near-duplicate${lastDraw.dropped_near_dup === 1 ? '' : 's'} and ${lastDraw.dropped_property_cap} over the per-property cap dropped.`}
+              {shortfall && (
+                // Neutral, not alarm: a short draw is the honest outcome of a
+                // thin pool, and the numbers say which loss caused it.
+                <span className="text-[var(--color-ink-3)]">
+                  {` Asked for ${lastDraw.requested}, short by ${lastDraw.requested - lastDraw.inserted} — bands are never back-filled from each other, so a thin band shows up here instead of being quietly topped up.`}
+                </span>
+              )}
+              {degraded.length > 0 && (
+                // This one IS alarm: a timed-out or skipped category means a
+                // quota nobody filled, which a smaller total would otherwise
+                // hide.
+                <span className="text-[var(--color-brick)]">
+                  {` Did not complete: ${degraded.map((c) => `${c.category_main} (${c.status})`).join(', ')}.`}
+                </span>
+              )}
+            </p>
+          )}
+
+          {lastDraw && lastDraw.status === 'insufficient_positives' && (
+            <p className="mt-2.5 text-xs text-[var(--color-brick)]">
+              Nothing drawn — no pool is built at all below the floor, rather than a garbage one.
+            </p>
+          )}
+        </>
+      )}
+
+      <p className="mt-2 text-xs text-[var(--color-ink-4)] leading-relaxed">
+        Candidates are images to LOOK at for this tag, found by ranking a bounded,
+        category-stratified pool against a centroid of this tag's human-verified positives.
+        Membership is not a label — an image nobody has reviewed is never trained as a negative.
+      </p>
+    </section>
   );
 }
 
@@ -1461,7 +1814,7 @@ function AmbiguityChip({
 function TaxonomyBarChart({
   tags,
   totalTags,
-  sampleSize,
+  candidateImageCount,
   loading,
   gate1Target,
   proposalTarget,
@@ -1475,7 +1828,10 @@ function TaxonomyBarChart({
 }: {
   tags: NewDedupTag[];
   totalTags: number;
-  sampleSize: number | undefined;
+  /* Distinct images queued for at least ONE tag. A different quantity from the
+   * old shared-pool size, over a different denominator — the header says
+   * "queued", never "sampled". */
+  candidateImageCount: number | undefined;
   loading: boolean;
   gate1Target: number;
   proposalTarget: number;
@@ -1507,7 +1863,7 @@ function TaxonomyBarChart({
           <Chevron open={open} />
           <span className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] group-hover:text-[var(--color-ink-2)] transition-colors">
             Taxonomy v1 ({filtered ? `${tags.length} of ${totalTags}` : totalTags} tags
-            {sampleSize != null ? `, ${sampleSize} sampled` : ''})
+            {candidateImageCount != null ? `, ${candidateImageCount} images queued` : ''})
           </span>
         </button>
         <div className="flex shrink-0 items-center gap-2">
@@ -1788,9 +2144,9 @@ function ProposalTile({
   );
 }
 
-/* Sample-mode tile: no proposal, no label picker (the tag is already fixed by
- * the page's tag filter) — just the photo, the tri-state control for THAT
- * tag, and border case. */
+/* Candidates-mode tile: no proposal, no label picker (the tag is already fixed
+ * by the page's tag filter) — just the photo, the tri-state control for THAT
+ * tag, border case, and the band that put it in front of you. */
 function TagImageTile({
   row,
   image,
@@ -1871,6 +2227,20 @@ function TagImageTile({
       </div>
       <div className="px-2 pb-2 flex items-center justify-between gap-1.5">
         <BorderCaseButton imageId={row.image_id} store={borderCases} />
+        {/* WHY this tile is in front of you. Deliberately colourless and quiet:
+          * the band is a fact about the retrieval, never a hint about the
+          * answer — an operator who starts reading "head" as "probably yes"
+          * is exactly the bias the mixed bands exist to prevent. Absent
+          * entirely on an image decided before candidates existed. */}
+        {row.draw != null && (
+          <span
+            className="shrink-0 font-mono text-[0.62rem] text-[var(--color-ink-4)]"
+            title={`${drawTitle(row.draw)}${row.category_main ? ` Drawn under the ${row.category_main} quota.` : ''} This says why the image was queued, not what it is.`}
+          >
+            {drawLabel(row.draw)}
+            {row.pool_rank != null ? ` #${row.pool_rank}` : ''}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -1957,6 +2327,9 @@ function ImageTagDetailPanel({
       });
       qc.invalidateQueries({ queryKey: OVERVIEW_KEY });
       qc.invalidateQueries({ queryKey: TAG_IMAGES_KEY });
+      // Prefix: this panel decides tags OTHER than the one whose queue is on
+      // screen, and each of those readouts has an open count that just moved.
+      qc.invalidateQueries({ queryKey: CANDIDATES_KEY });
     },
     onError: (err: Error) => pushToast('err', err.message),
   });
@@ -1990,6 +2363,9 @@ function ImageTagDetailPanel({
       pushToast('ok', `Set ${res.data.updated} to ${res.data.state}.`);
       qc.invalidateQueries({ queryKey: OVERVIEW_KEY });
       qc.invalidateQueries({ queryKey: TAG_IMAGES_KEY });
+      // Prefix: this panel decides tags OTHER than the one whose queue is on
+      // screen, and each of those readouts has an open count that just moved.
+      qc.invalidateQueries({ queryKey: CANDIDATES_KEY });
     },
     onError: (err: Error) => pushToast('err', err.message),
   });
