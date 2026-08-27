@@ -165,7 +165,22 @@ the national declared total; one `deadline`, `error`, `degraded` or `ceiling` ho
 category open. An empty slice publishes no count, so `total` is `None` — identical to a degraded
 page — and is only accepted when idnes *says* it is empty ("momentálně tu není žádný inzerát",
 `IndexPage.empty_confirmed`); ceskereality, which publishes no such string, has to confirm a zero
-by reading the page twice instead. The page-capped realtime probe keeps the flat national walk,
+by reading the page twice instead.
+**A slice that paging cannot finish DESCENDS, and the parent walk is kept.** idnes's result
+ordering is not stable between requests, so pages of one query overlap and the loss compounds with
+page count: `stredocesky-kraj` (67 pages) returned its declared 1,675 exactly, `praha` (154 pages)
+returned 2,948 of 3,839 — 27% of slots were repeats. Two axes, tried in order: **place** (the
+site's own hierarchy — a kraj links its okresy, Prague its ten obvody, abroad one `s-l` per
+country, and those 38 countries sum *exactly* to the abroad total), then **price bands** for a
+place with no sub-places at all (Spain: 8,613 flats, 345 pages, no regions advertised). Neither
+axis is a partition — 60 Prague listings are too vaguely addressed for any obvod, and 6 Spanish
+ones have no price — which is precisely why the parent's own rows are merged with its children's
+rather than replaced: the unfiltered walk is what holds each axis's remainder. Measured:
+parent alone 76.8%, children alone 98.4%, **union 99.74%**; verified through the real code path at
+99.61%. The child list is scraped rather than declared, which is safe only because the arithmetic
+checks it — a missing child leaves the union short, and a spurious one can only add rows of the
+same category. Descent runs only on `incomplete` (paged to the end and came up short), never on an
+`error` or a `degraded` page, which would relabel a fetch problem as a coverage one. The page-capped realtime probe keeps the flat national walk,
 since slicing would scatter the newest-first head it exists to read.
 **Un-parking is a scheduled decision, not a human one** (`coverage_gate.yml` → `scripts/
 coverage_gate.py`, cron `15 3,9,15,21`, three hours after each walk cycle). Both parked portals

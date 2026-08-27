@@ -71,6 +71,77 @@ abroad bucket.
   `IndexPage.empty_confirmed`), so a confirmed zero is a real measurement.
   ceskereality has no such string and must read the page twice instead.
 
+## Descending when paging cannot reach the tail
+
+**idnes's result ordering is not stable between requests**, so successive pages
+of one query overlap, and the loss compounds with page count:
+
+| slice | pages | collected / declared | |
+| --- | --- | --- | --- |
+| `stredocesky-kraj` | 67 | 1,675 / 1,675 | exact |
+| `jihomoravsky-kraj` | 71 | 1,693 / 1,698 | 99.7% |
+| `praha` | 154 | 2,948 / 3,839 | **76.8%** — 27% of page slots were repeats |
+
+Paging harder does not help; the pager genuinely ends there. Two things follow.
+
+**The `new_on_page == 0` stop was actively harmful.** It existed to defend
+against idnes clamping an out-of-range `?page` to the last page — but with
+unstable ordering a legitimately mid-walk page can be entirely rows we already
+hold, and it ended Prague at 594 of 3,839 on the first production run.
+`next_offset is None` is the reliable terminator (the clamped page reports it);
+`_MAX_SLICE_PAGES` is the loop backstop.
+
+**A short slice descends, and the parent walk is KEPT.** This is the measurement
+that decided the design, and neither half of it is optional:
+
+| | collected / 3,840 | |
+| --- | --- | --- |
+| parent `praha` alone | 2,948 | 76.8% ✗ |
+| its ten obvody alone | 3,777 | 98.4% ✗ |
+| **the union of both** | **3,830** | **99.74% ✓** |
+
+Verified end-to-end through the real code path: `praha` → 3,825 / 3,840 =
+**99.61%, `exhausted`**, 308 pages, 289s.
+
+### Two axes, tried in order
+
+**Place** first — the site's own hierarchy, and on the Czech side very nearly a
+partition. A kraj links its okresy, Prague its ten obvody, the abroad bucket one
+`s-l` value per country; those 38 countries sum **exactly** to the abroad total
+(12,054 = 12,054). `stredocesky-kraj`'s 12 children likewise sum exactly to
+1,675.
+
+**Price** second, for a place with no sub-places at all: **Spain is 8,613 flats
+over 345 pages and advertises no regions**. Without a second axis that slice
+could never finish, and one unfinished slice holds its whole category open
+forever. The ladder opens at both ends and a band that is still too big splits
+geometrically (prices are log-distributed; an arithmetic midpoint would leave
+nearly everything on one side).
+
+### Why the parent walk is what makes either axis safe
+
+**Neither axis is a partition**, and both leak in the same direction:
+
+- 60 of Prague's 3,840 listings are too vaguely addressed to file under any obvod
+- 110 of Prague's 3,840 and 6 of Spain's 8,613 have no price at all, so they fall
+  outside every band
+
+The unfiltered walk of the same place is what holds those remainders. That is why
+the parent's rows are merged with its children's rather than replaced by them.
+
+The child list is **scraped, not declared** — which on ceskereality would be a
+mistake, since its facet block is a top-10-by-popularity list rather than a
+partition. It is safe here only because **the arithmetic checks it**: a missing
+child leaves the union short and the slice stays `incomplete`, while a spurious
+child can only add rows of the same category, which cannot push the union past
+the declared total. The link list never has to be trusted.
+
+Descent runs **only on `incomplete`** — we paged to the pager's own end and came
+up short, which is the shortfall a finer query can fix. An `error` is a transport
+failure and a `degraded` page carries no total to measure a union against;
+descending on either would just multiply failed requests and relabel a fetch
+problem as a coverage one.
+
 ## The ledger (`portal_index_slices`, migration 454)
 
 One latest-wins row per `(source, category_main, category_type, slice_key)`:

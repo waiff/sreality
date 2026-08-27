@@ -51,7 +51,8 @@ class _FakeClient:
         self._html = html
 
     def fetch_index(self, sale_type: str, cat: str, page: Any = None, *,
-                    locality: Any = None, abroad: bool = False):
+                    locality: Any = None, sl: Any = None,
+                    price_min: Any = None, price_max: Any = None):
         # Every slice serves the same page; the walk dedupes by native id, so the
         # price-classification contract under test is unaffected by slicing.
         return self._html, 200
