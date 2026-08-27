@@ -42,7 +42,7 @@ from scraper.portal import (
     PortalConfig,
     default_config,
     load_portal_config,
-    price_changed,
+    classify_index_sighting,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -269,9 +269,9 @@ class RemaxPortal:
             # listings on a permanent CHANGED-priority refetch treadmill every
             # walk, eating the whole drain budget ahead of the NEW rows (rent
             # listings never got claimed). Touch it and move on.
-            if idx_price is None or not price_changed(
-                prev["price_czk"], idx_price, self._price_change_min_pct,
-            ):
+            if classify_index_sighting(
+                prev, idx_price, self._price_change_min_pct,
+            ) == "unchanged":
                 unchanged_pks.append(prev["id"])
             else:
                 changed.append(nid)

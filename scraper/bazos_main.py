@@ -46,7 +46,12 @@ from scraper.bazos_parser import (
     parse_index,
 )
 from scraper.location import build_geocoder
-from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper.portal import (
+    PortalConfig,
+    classify_index_sighting,
+    default_config,
+    load_portal_config,
+)
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
@@ -194,9 +199,10 @@ class BazosPortal:
         unchanged = 0
         for native, path, idx_price in items:
             prev = existing.get(native)
-            if prev is None:
+            verdict = classify_index_sighting(prev, idx_price)
+            if verdict == "new":
                 new_entries.append((native, path, idx_price, db.QUEUE_PRIORITY_NEW))
-            elif idx_price is not None and prev["price_czk"] != idx_price:
+            elif verdict == "changed":
                 changed_entries.append(
                     (native, path, idx_price, db.QUEUE_PRIORITY_CHANGED)
                 )

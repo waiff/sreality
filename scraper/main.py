@@ -43,7 +43,12 @@ from urllib.parse import urlsplit
 import requests
 
 from scraper import db, hashing, image_storage, media, parser, portal_runner
-from scraper.portal import PortalLimits, default_config, load_portal_config
+from scraper.portal import (
+    PortalLimits,
+    classify_index_sighting,
+    default_config,
+    load_portal_config,
+)
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
 from scraper.sreality_client import (
@@ -957,8 +962,8 @@ class SrealityPortal:
             new_ids = [s for s in page_ids if s not in existing]
             changed = [
                 s for s in page_ids
-                if s in existing and price_map.get(s) is not None
-                and existing[s]["price_czk"] != price_map[s]
+                if classify_index_sighting(existing.get(s), price_map.get(s))
+                == "changed"
             ]
             unchanged_ids = [
                 s for s in page_ids if s in existing and s not in changed
@@ -1421,12 +1426,7 @@ def _walk_category(
     to_refetch: list[int] = []
     unchanged = 0
     for sid, idx_price in index_entries:
-        prev = existing.get(sid)
-        if (
-            prev is not None
-            and idx_price is not None
-            and prev["price_czk"] == idx_price
-        ):
+        if classify_index_sighting(existing.get(sid), idx_price) == "unchanged":
             unchanged += 1
         else:
             to_refetch.append(sid)
