@@ -25,6 +25,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Protocol
 
 from scraper import db
@@ -62,6 +63,10 @@ class DrainItem:
     # Threaded into each portal's write_details so listings.discovery_seq can be
     # stamped independent of fetch/claim/write order.
     discovery_seq: int | None = None
+    # The same claimed row's enqueued_at (migration 444) — when the walk first SAW
+    # this id, as distinct from when this fetch is written. Carried for the same
+    # reason and by the same route as discovery_seq.
+    discovered_at: datetime | None = None
     # W2a-0 churn instrument (migration 402): the identity of this FETCH, minted
     # once when the item is created and carried through every replay of the
     # flush. _flush_drain_batch retries the whole write op on a transient pooler
@@ -570,15 +575,17 @@ def run_detail_drain(
             # completes rather than threaded through fetch_detail, which is a
             # portal-specific network+parse seam that shouldn't need to know about
             # the queue's internals.
-            dseq_by_nid = {nid: dseq for nid, _ref, _price, dseq in claimed}
+            dseq_by_nid = {nid: dseq for nid, _ref, _price, dseq, _enq in claimed}
+            enq_by_nid = {nid: enq for nid, _ref, _price, _dseq, enq in claimed}
             with ThreadPoolExecutor(max_workers=max(1, detail_workers)) as pool:
                 futures = {
                     pool.submit(portal.fetch_detail, client, nid, ref): nid
-                    for nid, ref, _price, _dseq in claimed
+                    for nid, ref, _price, _dseq, _enq in claimed
                 }
                 for future in as_completed(futures):
                     item = future.result()  # never raises
                     item.discovery_seq = dseq_by_nid.get(item.native_id)
+                    item.discovered_at = enq_by_nid.get(item.native_id)
                     if item.kind == "ok":
                         buffer.append(item)
                         if len(buffer) >= DETAIL_BATCH_SIZE:

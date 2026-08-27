@@ -560,7 +560,8 @@ def upsert_listing(
         INSERT INTO listings (
             sreality_id, last_seen_at, is_active,
             {column_list},
-            street_source, source, source_id_native, geom, raw_json, discovery_seq
+            street_source, source, source_id_native, geom, raw_json, discovery_seq,
+            discovered_at
         )
         VALUES (
             %(sreality_id)s, now(), true,
@@ -592,7 +593,8 @@ def upsert_listing(
               ELSE NULL
             END,
             %(raw_json)s,
-            %(discovery_seq)s
+            %(discovery_seq)s,
+            %(discovered_at)s
         )
         -- Arbiter is the natural key, not sreality_id (R2 Phase D). Safe because
         -- (a) listings_source_native_uidx is a full (non-partial) unique index, so
@@ -622,7 +624,11 @@ def upsert_listing(
           -- as source_id_native above, just favoring the STORED value over the
           -- incoming one (a refetch's discovery_seq is a fresh, unrelated queue draw,
           -- not a correction).
-          discovery_seq = COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq)
+          discovery_seq = COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq),
+          -- Set-once for the same reason (migration 444): discovered_at is when the
+          -- WALK first saw this listing. A refetch carries a fresh queue draw, which is
+          -- a later re-sighting, never a correction to the first one.
+          discovered_at = COALESCE(listings.discovered_at, EXCLUDED.discovered_at)
         RETURNING xmax = 0 AS inserted, id
     """
 
@@ -641,6 +647,9 @@ def upsert_listing(
         # the queue-driven drain (e.g. a manual --detail-only fetch) — NULL is correct
         # there, it just means "no discovery-order signal for this row".
         "discovery_seq": row.get("discovery_seq"),
+        # When the index walk first SAW it (migration 444), carried from the claimed
+        # queue row. NULL outside the queue-driven drain, same as discovery_seq.
+        "discovered_at": row.get("discovered_at"),
     }
     for col in LISTING_COLUMNS:
         params[col] = row.get(col)
@@ -794,6 +803,7 @@ def _gate2_null_sreality_id_enabled(conn: psycopg.Connection) -> bool:
 def ingest_scraped_listing(
     conn: psycopg.Connection, listing: ScrapedListing,
     discovery_seq: int | None = None,
+    discovered_at: datetime | None = None,
 ) -> tuple[int, UpsertResult]:
     """Write a non-sreality ScrapedListing through the same matcher path.
 
@@ -866,6 +876,7 @@ def ingest_scraped_listing(
     row["source"] = listing.source
     row["source_id_native"] = listing.source_id_native
     row["discovery_seq"] = discovery_seq
+    row["discovered_at"] = discovered_at
     with conn.transaction():
         result = upsert_listing(conn, row, listing.raw or {}, listing.content_hash())
         if listing_id is None:
@@ -2271,6 +2282,9 @@ class DetailResult(Protocol):
     # by write_detail_batch. Not set by fetch_detail itself — it has nothing to
     # do with fetch/parse, only with when the id was originally discovered.
     discovery_seq: int | None
+    # Companion to discovery_seq (migration 444): the same claimed row's
+    # enqueued_at, i.e. when the walk first SAW this id.
+    discovered_at: datetime | None
 
 
 # jsonb_to_recordset keeps the SQL text fixed-shape (the column-type spec is a
@@ -2289,7 +2303,8 @@ _BATCH_UPSERT_SQL = f"""
     INSERT INTO listings (
         sreality_id, last_seen_at, is_active,
         {", ".join(LISTING_COLUMNS)},
-        street_source, source_id_native, geom, raw_json, discovery_seq
+        street_source, source_id_native, geom, raw_json, discovery_seq,
+        discovered_at
     )
     SELECT
         j.sreality_id, now(), true,
@@ -2306,11 +2321,12 @@ _BATCH_UPSERT_SQL = f"""
           ELSE NULL
         END,
         j.raw_json,
-        j.discovery_seq
+        j.discovery_seq,
+        j.discovered_at
     FROM jsonb_to_recordset(%s::jsonb) AS j(
         sreality_id bigint, {_BATCH_RECORD_SPEC},
         lon double precision, lat double precision, raw_json jsonb,
-        discovery_seq bigint
+        discovery_seq bigint, discovered_at timestamptz
     )
     -- Arbiter is the natural key, not sreality_id (R2 Phase D) — see upsert_listing's
     -- identical retarget for the full safety argument. `source` isn't in this
@@ -2326,8 +2342,9 @@ _BATCH_UPSERT_SQL = f"""
       source_id_native = COALESCE(listings.source_id_native, EXCLUDED.source_id_native),
       geom = COALESCE(EXCLUDED.geom, listings.geom),
       raw_json = EXCLUDED.raw_json,
-      -- Set-once (migration 368) — same shape as upsert_listing's identical clause.
-      discovery_seq = COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq)
+      -- Set-once (migrations 368 + 444) — same shape as upsert_listing's identical clause.
+      discovery_seq = COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq),
+      discovered_at = COALESCE(listings.discovered_at, EXCLUDED.discovered_at)
     RETURNING (xmax = 0) AS inserted
 """
 
@@ -2446,6 +2463,7 @@ def write_detail_batch(
         obj["lat"] = row.get("lat")
         obj["raw_json"] = r.raw or {}
         obj["discovery_seq"] = r.discovery_seq
+        obj["discovered_at"] = r.discovered_at
         listing_objs.append(obj)
         snapshot_objs.append({
             "sreality_id": sid,
@@ -2570,12 +2588,13 @@ def claim_detail_batch(
     source: str,
     limit: int,
     acquisition_reserve: float | None = None,
-) -> list[tuple[str, str | None, int | None, int]]:
+) -> list[tuple[str, str | None, int | None, int, datetime | None]]:
     """Atomically claim up to `limit` available rows for `source`. Returns
-    (native_id, detail_ref, index_price_czk, discovery_seq) — discovery_seq is
-    the row's enqueue-time sequence value (see migration 368), carried through so
-    the drain can stamp it onto listings.discovery_seq at write time,
-    independent of claim/fetch/write order.
+    (native_id, detail_ref, index_price_czk, discovery_seq, enqueued_at) —
+    discovery_seq is the row's enqueue-time sequence value (see migration 368) and
+    enqueued_at is when the walk first saw the id (migration 444); both are carried
+    through so the drain can stamp listings.discovery_seq / listings.discovered_at
+    at write time, independent of claim/fetch/write order.
 
     The batch is composed from two classes rather than taken off one ranking:
     up to ceil(limit * QUEUE_ACQUISITION_RESERVE) never-fetched rows
@@ -2624,7 +2643,8 @@ def claim_detail_batch(
             )
             UPDATE listing_detail_queue q SET claimed_at = now()
             FROM c WHERE q.source = c.source AND q.native_id = c.native_id
-            RETURNING q.native_id, q.detail_ref, q.index_price_czk, q.discovery_seq
+            RETURNING q.native_id, q.detail_ref, q.index_price_czk, q.discovery_seq,
+                      q.enqueued_at
             """,
             {
                 "source": source,
@@ -2633,7 +2653,10 @@ def claim_detail_batch(
                 "limit": limit,
             },
         )
-        return [(nid, ref, price, dseq) for nid, ref, price, dseq in cur.fetchall()]
+        return [
+            (nid, ref, price, dseq, enq)
+            for nid, ref, price, dseq, enq in cur.fetchall()
+        ]
 
 
 def complete_detail(

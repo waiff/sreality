@@ -9,9 +9,10 @@ ISO timestamp; the timestamptz column stores a bare date as midnight UTC.
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from unicodedata import combining, normalize
+from zoneinfo import ZoneInfo
 
 # bazos renders the posting date as "[D.M. YYYY]", optionally preceded by a
 # promotion marker ("- TOP - [9.6. 2026]").
@@ -35,6 +36,25 @@ _CZECH_MONTHS: dict[str, int] = {
     "listopadu": 11, "listopad": 11,
     "prosince": 12, "prosinec": 12,
 }
+
+# Czech portals render a fresh listing's date RELATIVELY and only fall back to a
+# long-form date once it ages out. ceskereality's "Datum vložení" reads "včera"
+# for a listing posted yesterday — so the absolute-date regex above missed
+# exactly the rows where the publish date matters most (a brand-new listing),
+# leaving published_at NULL on every freshly-inserted one.
+#
+# Resolved against Europe/Prague, not UTC: the portals are Czech and render
+# "dnes" in local time, so a walk running at 23:30 UTC (01:30 CEST) would
+# otherwise resolve "dnes" to the previous day.
+_PRAGUE = ZoneInfo("Europe/Prague")
+_RELATIVE_DAYS: dict[str, int] = {
+    "dnes": 0,
+    "vcera": 1,
+    "predevcirem": 2,
+}
+# "před 3 dny" / "před 1 dnem" / "před týdnem".
+_PRED_N_DNY_RE = re.compile(r"\bpred\s+(\d{1,3})\s+dn", re.UNICODE)
+_PRED_TYDNEM_RE = re.compile(r"\bpred\s+tydnem\b", re.UNICODE)
 
 
 def _fold(text: str) -> str:
@@ -61,10 +81,26 @@ def bazos_posted_date(text: str | None) -> date | None:
     return _date_or_none(year, month, day)
 
 
-def czech_date(text: str | None) -> date | None:
-    """A Czech long-form date ("10. února 2026") to a date, else None."""
+def czech_date(text: str | None, today: date | None = None) -> date | None:
+    """A Czech date to a date, else None.
+
+    Handles the long form ("10. února 2026") and the RELATIVE forms portals use
+    for recent listings ("dnes", "včera", "předevčírem", "před 3 dny", "před
+    týdnem"). `today` is injectable so the relative arms are testable without
+    freezing the clock; it defaults to today in Europe/Prague.
+    """
     if not text:
         return None
+    folded = _fold(text)
+    anchor = today or datetime.now(_PRAGUE).date()
+    for word, delta in _RELATIVE_DAYS.items():
+        if word in folded:
+            return anchor - timedelta(days=delta)
+    m_rel = _PRED_N_DNY_RE.search(folded)
+    if m_rel:
+        return anchor - timedelta(days=int(m_rel.group(1)))
+    if _PRED_TYDNEM_RE.search(folded):
+        return anchor - timedelta(days=7)
     m = _CZECH_DATE_RE.search(text)
     if not m:
         return None

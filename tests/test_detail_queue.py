@@ -72,11 +72,13 @@ def _find(executed, needle: str) -> tuple[str, Any] | None:
     return next((e for e in executed if needle in e[0]), None)
 
 
-def _result(sid: int, *, price: int, content_hash: str, images=None, discovery_seq=None):
+def _result(sid: int, *, price: int, content_hash: str, images=None, discovery_seq=None,
+            discovered_at=None):
     row = {"sreality_id": sid, "price_czk": price}
     return SimpleNamespace(
         row=row, raw={"id": sid}, content_hash=content_hash, images=images or [],
         discovery_seq=discovery_seq,
+        discovered_at=discovered_at,
     )
 
 
@@ -289,6 +291,7 @@ def test_write_detail_batch_nulls_overflow_locality_id():
     }
     res = SimpleNamespace(
         row=row, raw={"id": 1}, content_hash="h1", images=[], discovery_seq=None,
+        discovered_at=None,
     )
     db.write_detail_batch(conn, [res])
     obj = _find(conn.executed, "INSERT INTO listings (")[1][0].obj[0]
@@ -385,10 +388,11 @@ def test_enqueue_detail_nulls_overflow_index_price():
 
 def test_claim_detail_batch_skip_locked_priority_order():
     conn = _FakeConn([
-        (lambda s: "FOR UPDATE SKIP LOCKED" in s, [("5", None, 100, 42), ("6", "/p", None, 43)]),
+        (lambda s: "FOR UPDATE SKIP LOCKED" in s,
+         [("5", None, 100, 42, None), ("6", "/p", None, 43, None)]),
     ])
     claimed = db.claim_detail_batch(conn, "sreality", 50)
-    assert claimed == [("5", None, 100, 42), ("6", "/p", None, 43)]
+    assert claimed == [("5", None, 100, 42, None), ("6", "/p", None, 43, None)]
     sql, params = conn.executed[0]
     # Acquisition is claimed by age alone; the old ranking survives only INSIDE refresh.
     assert "AND priority = %(new_priority)s ORDER BY enqueued_at" in sql
@@ -396,6 +400,8 @@ def test_claim_detail_batch_skip_locked_priority_order():
     assert "claimed_at IS NULL AND given_up = false" in sql
     assert "SET claimed_at = now()" in sql
     assert "RETURNING q.native_id, q.detail_ref, q.index_price_czk, q.discovery_seq" in sql
+    # migration 444: the claim also carries when the walk first SAW the id.
+    assert "q.enqueued_at" in sql
     assert params["source"] == "sreality"
     assert params["limit"] == 50
     assert params["new_priority"] == db.QUEUE_PRIORITY_NEW
@@ -669,6 +675,7 @@ def test_write_detail_batch_carries_area_basis_into_listings_and_not_the_snapsho
         row={"sreality_id": 7, "price_czk": 3_190_000, "area_m2": 70.0,
              "area_basis": "usable"},
         raw={"id": 7}, content_hash="h7", images=[], discovery_seq=None,
+        discovered_at=None,
     )
     db.write_detail_batch(conn, [result])
 

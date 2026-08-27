@@ -372,7 +372,8 @@ class RemaxPortal:
                 churn_observation=it.observation_id,
             )
             pk, result = db.ingest_scraped_listing(
-                conn, p["listing"], discovery_seq=it.discovery_seq)
+                conn, p["listing"], discovery_seq=it.discovery_seq,
+                discovered_at=it.discovered_at)
             image_urls = p["listing"].raw.get("image_urls") or []
             inserted = db.record_media(conn, pk, image_urls)
             db.mark_portal_page_parsed(conn, page_id)

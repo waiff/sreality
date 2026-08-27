@@ -401,7 +401,7 @@ def test_write_details_ingests_and_counts(monkeypatch):
     monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 9)
     monkeypatch.setattr(
         bazos_main.db, "ingest_scraped_listing",
-        lambda _c, _l, discovery_seq=None: (8105, "new"))
+        lambda _c, _l, discovery_seq=None, discovered_at=None: (8105, "new"))
     monkeypatch.setattr(bazos_main.db, "record_images", lambda _c, _sid, imgs, **k: len(imgs))
     monkeypatch.setattr(bazos_main.db, "mark_portal_page_parsed", lambda *a, **k: None)
     counts = _portal().write_details(object(), items)
