@@ -184,15 +184,24 @@ both index walk + detail drain in one job via `bezrealitky_main`). The maxima sc
 `scrape_maxima.yml` ("Scraping: Maxima Reality scraper (pilot)", every 6h + dispatch; the
 ~220-listing catalogue fits both phases in one job via `maxima_main`). The mmreality scrape is
 `scrape_mmreality.yml` ("Scraping: M&M Reality scraper (pilot)", cron `50 */6` + dispatch —
-every request via the residential `SCRAPER_PROXY_URL` (Cloudflare 403-blocks datacenter IPs);
+every request via the residential `SCRAPER_PROXY_URL` (Cloudflare 403-blocks datacenter IPs — a
+`USE_PROXY` client with `PROXY_REQUIRED=True`, so the realtime worker skips it when the env is
+unset; idnes also rides the proxy but sets `PROXY_REQUIRED=False`, since it is soft-throttled
+rather than blocked and must keep running slowly rather than not at all);
 runs both phases in one job via `mmreality_main`, bounded by `--max-pages`/`--max-detail`). The remax
 scrape is `scrape_remax.yml` ("Scraping: RE/MAX scraper (pilot)", every 6h + dispatch; runs both
 phases in one job via `remax_main`, bounded by `--max-detail` + a `--max-seconds` budget so the
 ~7,900-listing backlog drains over several ticks). The idnes scrape is
-**cadence-split** like sreality (iDNES is large — ~2400 index pages, ~60k listings — so a
+**cadence-split** like sreality (iDNES is large — 4,235 index pages, ~110k listings — so a
 combined run's full index starves the drain): `idnes_index_walk.yml` ("Scraping: iDNES Reality
-index walk", `idnes_main --index-only`, cron `15 */6`, full complete-walk + mark_inactive +
-enqueue) feeds `idnes_detail_drain.yml` ("Scraping: iDNES Reality detail drain", `--drain-only`,
+index walk", `idnes_main --index-only`, cron `15 */6`, full walk + enqueue; **`mark_inactive` is
+parked since migration 453** — the flag claimed complete walks the runs never achieved. The walk
+is sliced into the 14 kraje + the abroad bucket and each slice's outcome is recorded in
+`portal_index_slices` (migration 454), so a budget-limited run resumes where it left off instead
+of restarting at page 1; inspect coverage with
+`select category_main, category_type, slice_key, outcome, walked_at from portal_index_slices
+where source='idnes' order by walked_at` — a category is fully covered only when all 15 of its
+slices read `exhausted` inside one window) feeds `idnes_detail_drain.yml` ("Scraping: iDNES Reality detail drain", `--drain-only`,
 hourly cron `30 * * * *`, bounded by a `--max-seconds` wall-clock budget; with
 `SCRAPE_CHAIN_TOKEN` it re-dispatches itself while the queue has work, for near-continuous
 backlog drains). There is no combined bazos/idnes fallback workflow anymore — sreality's
