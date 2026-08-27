@@ -71,20 +71,30 @@
 -- 7.8% of active broker-attributed byt/prodej listings and 19.8% of byt/pronajem carry
 -- no price, so the include/exclude choice is a real, non-cosmetic decision.
 --
--- CREATE OR REPLACE, not DROP + CREATE: the signature is unchanged from what is live in
--- production (this exact 10-parameter signature was created, tested and left live
--- during development of this migration — see below), only the body/language changes,
--- which CREATE OR REPLACE handles safely and preserves the ACL for. Widening the
--- parameter COUNT (8 -> 10, done once already earlier in this same development pass)
--- is the case that genuinely requires DROP + CREATE, because Postgres treats
--- (name, argument types) as the function's identity — confirmed live: a first attempt
--- at CREATE OR REPLACE with 2 new trailing parameters silently created a SECOND,
--- overloaded function instead of replacing the old 8-arg one, making every short
--- positional call (including api/outreach.py's bare 7-arg one) ambiguous
--- ("is not unique") until the old overload was dropped by hand. That signature change
--- already happened during this development session (this file's CREATE OR REPLACE
--- targets the resulting 10-arg signature); the language/body rewrite below is a pure
--- follow-up needing no further DROP.
+-- DROP THE OLD 8-ARG SIGNATURE, THEN CREATE OR REPLACE THE NEW 10-ARG ONE — both are
+-- needed HERE, in the file, regardless of what already happened on production during
+-- development. Postgres treats (name, argument types) as a function's identity, so
+-- widening the parameter COUNT (8 -> 10) is a genuinely different object: a first
+-- live attempt at CREATE OR REPLACE with 2 new trailing parameters, with nothing to
+-- replace yet, silently created a SECOND, overloaded function instead — confirmed by
+-- every short positional/named call (including api/outreach.py's bare 7-arg one, and
+-- tests/test_broker_leaderboard_live.py's named-arg calls) becoming ambiguous ("is not
+-- unique") until the old overload was dropped by hand.
+--
+-- REAL MISTAKE MADE AND CAUGHT HERE, kept in the history rather than quietly fixed:
+-- an earlier version of this file OMITTED the DROP, reasoning that "the signature
+-- widening already happened during development, live on production" — true of prod's
+-- CURRENT state, and irrelevant to what THIS FILE must do. CI's schema-replay lane
+-- (`.github/workflows/migrations.yml`) applies every migration in order against an
+-- EMPTY database, where migration 435 still leaves the OLD 8-arg function — so a
+-- from-scratch replay hit the exact overload bug above, caught by
+-- tests/test_broker_leaderboard_live.py's named-arg calls going "AmbiguousFunction".
+-- Ad hoc production state is not a substitute for what the migration file itself
+-- does when replayed from nothing — that is the entire point of the replay lane.
+-- CREATE OR REPLACE alone is still correct for the BODY/LANGUAGE change (this file
+-- also rewrote plpgsql back to plain SQL — see below — with the signature held
+-- constant across that rewrite), preserving the ACL exactly as migration 435
+-- documents; only the parameter-count widening needs the DROP.
 --
 -- Also re-learned live: a freshly CREATEd function grants EXECUTE to PUBLIC by default
 -- (this project's standing default-ACL gotcha — see the database skill). The new
@@ -113,6 +123,9 @@
 -- on it being duplicated — sharing one instance (defined before either branch, computed
 -- once, joined into both `fast_agg` and `live_agg`) dropped the unfiltered call's total
 -- cost to 7,010 with no change to the pruning behaviour, reverified live the same way.
+
+drop function if exists public.broker_leaderboard(
+  bigint[], bigint[], bigint[], text, text, text, integer, bigint[]);
 
 create or replace function public.broker_leaderboard(
   p_region_ids bigint[] default null::bigint[],
