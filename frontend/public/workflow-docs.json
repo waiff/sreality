@@ -1728,6 +1728,49 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/condition_scores.yml"
     },
     {
+      "filename": "coverage_gate.yml",
+      "name": "Ops: index coverage gate",
+      "description": "Decides, from evidence, whether a portal whose delisting is PARKED (supports_complete_walk = false) has earned it back.",
+      "portal": null,
+      "manual": true,
+      "schedules": [
+        {
+          "cron": "15 3,9,15,21 * * *",
+          "human": "15 3,9,15,21 * * *"
+        }
+      ],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "source",
+          "description": "evaluate one portal only (blank = every parked portal)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "dry_run",
+          "description": "evaluate and report, but write nothing and un-park nothing",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "coverage-gate",
+      "cancelInProgress": false,
+      "timeoutMinutes": 10,
+      "permissions": null,
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/coverage_gate.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/coverage_gate.yml"
+    },
+    {
       "filename": "detail_drain.yml",
       "name": "Scraping: Sreality detail drain (Phase 2)",
       "description": "The slow half of the Phase-2 cadence split, now on the shared portal framework: `scraper.sreality_main --drain-only` drives SrealityPortal through the one generic portal_runner. Claims a bounded slice of listing_detail_queue (source='sreality', enqueued by index_walk.yml), fetches each listing's detail on a rate-limited worker pool (429/403 auto-penalize), and writes them in batches via the set-based write_detail_batch (one transaction per ~100 listings) on the Session-mode pooler — the Phase-1 prepared-statement win. New listings land with property_id NULL; the Tier-1 matcher is deferred to the recompute_property_stats straggler-attach phase.",
