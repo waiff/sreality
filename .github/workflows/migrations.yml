@@ -343,6 +343,17 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_payload_dual_write_live.py -q
 
+      # The detail queue serves two service classes from one table. The hermetic
+      # suite proves the SQL SHAPE; only executing it proves the property that
+      # actually failed in production on 2026-08-17 — that a refresh backlog
+      # larger than the batch no longer stops new listings being claimed. That
+      # is a property of how Postgres composes two FOR UPDATE SKIP LOCKED CTEs
+      # under a shared limit, which no fake connection can answer.
+      - name: New listings cannot be starved by refresh work (executed)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_detail_queue_fairness_live.py -q
+
       # W2a-5's pruner sweeps the same store on a cadence, and every property that
       # matters about it is a property of real constraints: that the cap re-asserts
       # over a group no append is coming to fix, that the edge pins and the claim FK
