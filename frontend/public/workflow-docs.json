@@ -1310,8 +1310,8 @@
           "options": null
         },
         {
-          "name": "region",
-          "description": "limit the walk to ONE region subdomain (e.g. stredo.ceskereality.cz) for a proxy test. Blank = all 7.",
+          "name": "kraj",
+          "description": "limit the walk to ONE kraj (e.g. stredocesky-kraj) for an ad-hoc partial run; suppresses mark_inactive. Blank = all 14.",
           "required": false,
           "type": "string",
           "default": "",

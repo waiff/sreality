@@ -504,9 +504,11 @@ def test_ceskereality_index_walk_records_the_fetch_its_freshness_skip_hides(
         source="ceskereality", supports_complete_walk=True,
         categories=[], split_threshold=None,
     ))
-    key = "prodej/byty/praha/all/1/2026w33"
+    # v2/ prefix: the key space is per WALK SHAPE — the dead v1 subdomain/facet
+    # keys and these kraj keys share one UNIQUE(source, source_id_native, page_kind).
+    key = "v2/prodej/byty/praha/all/1/2026w33"
     portal._walk_slice(
-        _Client(), "praha", "prodej", "byty", None,
+        _Client(), "prodej", "byty", "praha",
         conn=conn, archive_week="2026w33", fresh_keys={key},
     )
 

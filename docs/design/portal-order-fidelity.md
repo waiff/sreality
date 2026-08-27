@@ -29,7 +29,7 @@ Everyone else is worse than "unordered":
 |---|---|---|---|
 | bezrealitky | **Requested newest-first** (`TIMEORDER_DESC`) | `timeActivated` | Wired, but anon API returns NULL today (`scraper/bezrealitky_parser.py:212-215`) |
 | sreality | **API ignores every sort param** (live-HAR-confirmed, `docs/design/realtime-scrapers.md:37-41`); page 1 is promotion-polluted | `edited` (day-granular, ~40% populated, last-*edit* not first-publish) | Yes → `published_at` |
-| ceskereality | Default index order is **explicitly NOT newest-first** (`scraper/ceskereality_main.py:83-87`); a `/nejnovejsi/` sort-slug exists but is only used by the probe, never the main ingestion walk | "Datum vložení" (real publish date) | Yes → `published_at` |
+| ceskereality | Default index order is **explicitly NOT newest-first** (`scraper/ceskereality_main.py`, `_PROBE_SUB_SLUG`); a `/nejnovejsi/` sort-slug exists but is only used by the probe, never the main ingestion walk | "Datum vložení" (real publish date) | Yes → `published_at` |
 | bazos | *Assumed* newest-first, never enforced by a sort param | last-*bump*/TOP-renewal date, not first-publish | Yes → `published_at` |
 | idnes, realitymix, remax | *Assumed* newest-first, never enforced by a sort param | **None exists** — live-fetched and grepped for meta/JSON-LD/date keywords, genuinely absent at the source | No (nothing to capture) |
 | maxima | No claim made (catalogue small enough it doesn't matter) | **None exists** | No |
@@ -348,7 +348,7 @@ full walk that also does completeness — which is exactly what scrambles order 
 **The other 8 portals already prove the fix pattern.** 7 of them use a generic page-capped probe
 (`scraper/portal_runner.py:240-364`, `run_index_probe`) that's cheap and separate from their full
 walk. ceskereality — the other portal with no reliable default sort — has a *bespoke* probe
-(`scraper/ceskereality_main.py:301-371`, `probe_category`) that checks the DB **after every page**
+(`scraper/ceskereality_main.py`, `probe_category`) that checks the DB **after every page**
 (`:340-343`, via the existing `db.index_summary_native` helper) and stops on the first page that
 comes back **entirely already-known** (`:369`, comment at `:310`: *"early stop on the first
 all-known page"*). This is precisely the "known prefix" stop condition this doc's discovery/
@@ -376,7 +376,7 @@ function (rule #21-compliant: this is the *second* sanctioned per-portal hook, i
 as ceskereality's, not a departure from the pattern).
 
 **Verified not needed elsewhere:** no portal besides sreality splits geographically for pagination-
-cap reasons. ceskereality's region×facet split (`scraper/ceskereality_main.py:97-190`) is a
+cap reasons. ceskereality's 14-kraj partition (`scraper/ceskereality_main.py:_walk_slice`) is a
 *different* mechanism for a *different* trigger (a hard ~240-result anon page-count wall, not a
 deep-offset 422) — and it's irrelevant to ordering anyway, because ceskereality's probe already
 requests a genuine newest-first sort from the portal (`/nejnovejsi/`) and doesn't go through the

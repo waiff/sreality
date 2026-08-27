@@ -202,7 +202,14 @@ independent of the `portals` row's `kind`.
 `ceskereality_parser.py`, `ceskereality_main.py`) tagged `source='ceskereality'`. It is large
 (~49k listings), so — like sreality/idnes — it is **cadence-split**: `ceskereality_index_walk.yml`
 (every 6h, full complete-walk + mark_inactive + enqueue) feeds the hourly bounded
-`ceskereality_detail_drain.yml` (`--max-seconds` budget). ceskereality is a STRUCTURED HTML portal
+`ceskereality_detail_drain.yml` (`--max-seconds` budget). The index walk partitions each
+category on the **14 declared kraj slugs** (`KRAJ_SLUGS`, a proven row-level partition —
+never the rendered facet block, which is a top-10-by-popularity list), pages each slice to
+its own declared tail (a *filtered* search URL caps at 99 pages / 1,980 rows; the famous
+12-page cap belongs only to UNFILTERED category URLs), and descends onto a declared subtype
+axis for the one kraj slice that exceeds that ceiling. A 200 carrying zero cards is the
+portal's real degraded response and is only ever read as a finished slice when the page's
+H1 proves it is the empty slice we asked for. ceskereality is a STRUCTURED HTML portal
 like idnes: each detail page carries a `schema.org` `individualProduct` JSON-LD block (clean price +
 broker), an `i-info` spec list, **precise per-listing coordinates** in `data-coord-lat/lng` (and a
 Google-Maps `?q=` link) so there is **no geocoding step**, and an `img.ceskereality.cz/foto/` gallery.

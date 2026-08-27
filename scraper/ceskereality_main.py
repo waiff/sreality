@@ -10,9 +10,10 @@ then a detail-drain that fetches each listing page, parses it to a
 (CeskerealityClient) + parser (ceskereality_parser) + config differ from
 sreality/idnes (the modularity rule in CLAUDE.md).
 
-Like idnes, ceskereality's search pages carry a result total (the meta "Máme tady
-N…") and have no deep-pagination cap (deep pages return real listings; the tail
-is genuinely empty), so a per-category walk is provable-complete:
+ceskereality's search pages carry a result total (the meta "Máme tady N…"), and a
+FILTERED search URL pages deep and row-faithfully (verified: /prodej/byty/praha/
+?strana=93 returns exactly 3 items = the declared 1843, and ?strana=94 404s), so a
+walk partitioned on the 14 declared kraje is provable-complete:
 `supports_complete_walk` (config-driven) lets the runner mark delisted listings
 inactive under the completeness guard (architectural rule #3), source-scoped so it
 only ever touches ceskereality rows (rule #15). The detail URL carries the
@@ -25,12 +26,14 @@ from __future__ import annotations
 
 import argparse
 import logging
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, Literal
 
 from scraper import db, portal_runner
 from scraper.location import CoordResolver
 from scraper.ceskereality_client import (
-    REGION_HOSTS,
+    KRAJ_SLUGS,
+    SUBTYPE_SLUGS,
     CeskerealityClient,
     detail_url,
     search_url,
@@ -40,6 +43,7 @@ from scraper.ceskereality_parser import (
     SALE_TYPE,
     category_from_url,
     extract_facet_slugs,
+    heading_names_kraj,
     index_price,
     parse_detail,
     parse_index,
@@ -73,11 +77,16 @@ SOURCE = "ceskereality"
 # Tightened 24->12h for the real-time delisting SLO.
 INACTIVE_MIN_UNSEEN_HOURS = 12
 
-# Anonymous search hard-caps at 12 pages (~240 results); ?strana=13 returns 404.
-# So the walk NEVER requests page 13 — it slices each category by REGION SUBDOMAIN
-# × disposition/type facet (ceskereality_client) to keep every query under the cap,
-# and marks a slice that still exceeds it as incomplete (suppressing mark_inactive).
-_CAP_PAGES = 12
+# The 12-page cap is NOT a site-wide law — it belongs to UNFILTERED category URLs
+# (/prodej/byty/?strana=13 = 404) and to nothing else. A FILTERED URL caps at 99
+# pages / 1,980 rows (measured 2026-08-27 on /prodej/rodinne-domy/stredocesky-kraj/:
+# ?strana=99 serves 20 cards, ?strana=100 is a 404; the national pagination widget
+# maxes at 99 too). So 99 is the site's ceiling on a kraj slice, and a slice whose
+# declared total needs more than that descends onto the subtype axis rather than
+# quietly losing its tail. _PROBE_MAX_PAGES is the OTHER cap: --probe reads the
+# unfiltered /nejnovejsi/ URL, which is exactly the shape that really does 404 at 13.
+_MAX_SLICE_PAGES = 99
+_PROBE_MAX_PAGES = 12
 _PER_PAGE = 20
 
 # ceskereality's default index order is NOT newest-first, but every category page
@@ -86,6 +95,27 @@ _PER_PAGE = 20
 # paging) — it fits search_url's sub_slug slot, so the delta probe reads it on the
 # nationwide www host instead of enumerating the region×facet slices.
 _PROBE_SUB_SLUG = "nejnovejsi"
+
+
+SliceOutcome = Literal["exhausted", "deadline", "ceiling", "error", "degraded"]
+
+
+@dataclass(frozen=True)
+class SliceResult:
+    """One (kraj[, subtype]) slice's outcome. `exhausted` — walked to the slice's
+    own declared tail — is the ONLY positive one; every other outcome is missing
+    evidence and forces the category incomplete (rule #3)."""
+
+    kraj: str
+    subtype: str | None
+    rows: list[tuple[str, str, int | None]]
+    declared_total: int | None
+    pages: int
+    outcome: SliceOutcome
+
+    @property
+    def positive(self) -> bool:
+        return self.outcome == "exhausted"
 
 
 class CeskerealityPortal:
@@ -101,14 +131,14 @@ class CeskerealityPortal:
         config: PortalConfig,
         *,
         max_pages: int | None = None,
-        regions: tuple[str, ...] | None = None,
+        kraje: tuple[str, ...] | None = None,
     ) -> None:
         self.supports_complete_walk = config.supports_complete_walk
         self._categories = config.categories
         self._max_pages = max_pages
-        # A region subset to walk (for an ad-hoc one-region test); None = all 7.
+        # A kraj subset to walk (for an ad-hoc one-kraj test); None = all 14.
         # When set, the walk is partial so mark_inactive is suppressed.
-        self._regions = regions
+        self._kraje = kraje
         self.index_rate = config.limits.index_rate
         self.shared_rate_limiter = config.limits.shared_rate_limiter
         self._price_change_min_pct = config.limits.price_change_min_pct
@@ -139,122 +169,245 @@ class CeskerealityPortal:
         self._coords.preload(conn)
         return conn
 
+    def _archive_index_page(
+        self, conn: Any, key: str, url: str, html: str, status: int,
+        fresh_keys: set[str] | None,
+    ) -> None:
+        """W0 item 0n: search pages carry index-only signals (map markers)."""
+        db.record_payload_churn_if_enabled(
+            conn,
+            source=SOURCE,
+            source_id_native=key,
+            page_kind="index",
+            body=lambda: html.encode("utf-8"),
+            content_type="text/html",
+        )
+        # KNOWN GAP (W2a-2): this skip guards upsert_portal_raw_page, so it
+        # also suppresses the payload dual-write for an index page that
+        # changed inside the freshness window. Deliberately unchanged here —
+        # W2a-6's index-coverage audit measures the gap before P2 reworks it.
+        if fresh_keys is None or key not in fresh_keys:
+            try:
+                db.upsert_portal_raw_page(
+                    conn,
+                    source=SOURCE,
+                    source_id_native=key,
+                    source_url=url,
+                    page_kind="index",
+                    html=html,
+                    http_status=status,
+                    refresh_after_hours=db.INDEX_ARCHIVE_REFRESH_HOURS,
+                    record_churn=False,
+                )
+                if fresh_keys is not None:
+                    fresh_keys.add(key)
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("INDEX archive failed url=%s: %s", url, exc)
+
+    def _confirm_slice_is_empty(
+        self, client: CeskerealityClient, url: str, kraj: str,
+    ) -> bool:
+        """Re-read the SAME url that looked empty; True only if it is empty again.
+
+        Takes the url rather than rebuilding it, so the confirmation cannot drift
+        onto a different page than the one it is confirming. Any failure to
+        re-read returns False (degraded), never True — a confirmation that cannot
+        be obtained is not a confirmation.
+        """
+        try:
+            html, _status = client.fetch_search(url)
+        except Exception as exc:  # noqa: BLE001 - an unreadable re-read proves nothing
+            LOG.warning("SLICE empty re-read failed kraj=%s: %s", kraj, exc)
+            return False
+        reread = parse_index(html)
+        return not reread.items and reread.total in (None, 0)
+
     def _walk_slice(
-        self, client: CeskerealityClient, host: str, sale_type: str, cat: str,
-        sub_slug: str | None, conn: Any = None,
+        self, client: CeskerealityClient, sale_type: str, cat: str, kraj: str, *,
+        subtype: str | None = None, conn: Any = None,
         archive_week: str | None = None, fresh_keys: set[str] | None = None,
         deadline: float | None = None,
-    ) -> tuple[list[tuple[str, str, int | None]], int, int | None, bool]:
-        """Walk one region×facet slice, ≤12 pages — NEVER requesting page 13 (it
-        404s). Returns (rows, pages_fetched, slice_total, complete); complete=False
-        if the slice still exceeds the cap (we could only take its top ~240) OR the
-        wall-clock deadline stopped it mid-slice (rule #3: an unfinished walk must
-        never authorise mark_inactive)."""
+    ) -> SliceResult:
+        """Walk ONE (kraj[, subtype]) slice to its declared tail.
+
+        `exhausted` is the only positive outcome — everything else forces the
+        category incomplete (rule #3). The load-bearing case is a 200 carrying
+        ZERO cards: that is the site's real degraded response (the 404 is not —
+        `Retry-After: 3` accompanies every 404 here, nonexistent paths included),
+        so it is only ever read as a finished slice when the page also proves it
+        is the empty slice we asked for (`heading_names_kraj`).
+        """
         rows: list[tuple[str, str, int | None]] = []
-        total: int | None = None
+        declared_total: int | None = None
+        last_page: int | None = None
+        live_last: int | None = None
         page = 1
-        page_cap = min(_CAP_PAGES, self._max_pages or _CAP_PAGES)
-        while page <= page_cap:
+        page_cap = self._max_pages or _MAX_SLICE_PAGES
+
+        def out(outcome: SliceOutcome, pages: int) -> SliceResult:
+            return SliceResult(kraj, subtype, rows, declared_total, max(pages, 0), outcome)
+
+        while True:
+            if page > page_cap:
+                return out("ceiling", page - 1)
             # Budget spent: stop BEFORE issuing another request and report the
-            # slice incomplete — the rows already collected still count.
+            # slice as a deadline stop — the rows already collected still count.
             if deadline_reached(deadline):
                 LOG.info(
-                    "DEADLINE index walk stopped cm=%s ct=%s host=%s slug=%s "
+                    "DEADLINE index walk stopped cm=%s ct=%s kraj=%s subtype=%s "
                     "after page=%d collected=%d",
-                    cat, sale_type, host, sub_slug or "all", page - 1, len(rows),
+                    cat, sale_type, kraj, subtype or "all", page - 1, len(rows),
                 )
-                return rows, max(page - 1, 0), total, False
+                return out("deadline", page - 1)
             url = search_url(
-                sale_type, cat, host=host, sub_slug=sub_slug,
+                sale_type, cat, kraj=kraj, subtype=subtype,
                 page=page if page > 1 else None,
             )
             try:
                 html, status = client.fetch_search(url)
-            except ListingGoneError:
-                break                       # past the cap / empty slice -> end
-            except Exception as exc:        # noqa: BLE001 - one slice must not kill the walk
-                LOG.warning("SLICE error host=%s slug=%s page=%d: %s",
-                            host, sub_slug, page, exc)
-                break
-            # Location-data W0 item 0n: search pages carry index-only signals
-            # (map markers). Week-stamped keys accumulate (never roll over);
-            # the caller-preloaded fresh set skips re-uploading bodies the
-            # server-side guard would discard; a failure never kills the walk.
+            except Exception as exc:  # noqa: BLE001 - one slice must not kill the walk
+                # NOT a clean finish: a fetch that failed is missing evidence, and
+                # ListingGoneError here is a 404 we did not expect to exist.
+                LOG.warning("SLICE error kraj=%s subtype=%s page=%d: %s",
+                            kraj, subtype or "all", page, exc)
+                return out("error", page - 1)
             if conn is not None and archive_week is not None:
-                key = f"{sale_type}/{cat}/{host}/{sub_slug or 'all'}/{page}/{archive_week}"
+                # v2/ prefix: portal_raw_pages is UNIQUE(source, source_id_native,
+                # page_kind), and without it the dead v1 subdomain/facet keys and
+                # these kraj keys would interleave in one table indistinguishably.
+                key = f"v2/{sale_type}/{cat}/{kraj}/{subtype or 'all'}/{page}/{archive_week}"
                 # W2a-0: the instrument's denominator is FETCHES, never archive
                 # writes — recorded ahead of the client-side freshness skip, the
                 # same shape as sreality's and remax's archivers.
-                db.record_payload_churn_if_enabled(
-                    conn,
-                    source=SOURCE,
-                    source_id_native=key,
-                    page_kind="index",
-                    body=lambda: html.encode("utf-8"),
-                    content_type="text/html",
-                )
-                # KNOWN GAP (W2a-2): this skip guards upsert_portal_raw_page, so it
-                # also suppresses the payload dual-write for an index page that
-                # changed inside the freshness window. Deliberately unchanged here —
-                # W2a-6's index-coverage audit measures the gap before P2 reworks it.
-                if fresh_keys is None or key not in fresh_keys:
-                    try:
-                        db.upsert_portal_raw_page(
-                            conn,
-                            source=SOURCE,
-                            source_id_native=key,
-                            source_url=url,
-                            page_kind="index",
-                            html=html,
-                            http_status=status,
-                            refresh_after_hours=db.INDEX_ARCHIVE_REFRESH_HOURS,
-                            record_churn=False,
-                        )
-                        if fresh_keys is not None:
-                            fresh_keys.add(key)
-                    except Exception as exc:  # noqa: BLE001
-                        LOG.warning("INDEX archive failed url=%s: %s", url, exc)
+                self._archive_index_page(conn, key, url, html, status, fresh_keys)
             parsed = parse_index(html)
+            if page == 1:
+                declared_total = parsed.total
+                if declared_total is None:
+                    # No "Máme tady N" at all. A genuinely empty slice looks EXACTLY
+                    # like this and there is no count to fail closed on, so the H1
+                    # has to carry the proof; anything else is degraded.
+                    if not parsed.items and heading_names_kraj(html, kraj):
+                        # CONFIRM THE ZERO BY READING IT TWICE.
+                        #
+                        # The site publishes no "no results" string — an empty
+                        # slice renders the shell with an empty results block and
+                        # no count phrase. That is byte-for-byte the shape of a
+                        # THROTTLED page, because the count comes from the same
+                        # query as the cards and vanishes with them. An
+                        # adversarial review reproduced complete=True with a
+                        # whole kraj missing on exactly this path, so the H1
+                        # alone cannot carry the proof.
+                        #
+                        # A throttle is transient; a genuinely empty kraj is
+                        # stable. Reading it twice separates them, and costs one
+                        # extra request only for slices that are already one page
+                        # long. It is not the only rail — the category's national
+                        # cross-check now fails closed too — but it is the one
+                        # that stops a bad zero entering the arithmetic at all.
+                        if not self._confirm_slice_is_empty(client, url, kraj):
+                            LOG.warning(
+                                "SLICE cm=%s ct=%s kraj=%s subtype=%s looked empty "
+                                "but did not confirm on re-read; treating as degraded",
+                                cat, sale_type, kraj, subtype or "all",
+                            )
+                            return out("degraded", 1)
+                        declared_total = 0
+                        LOG.info(
+                            "SLICE cm=%s ct=%s kraj=%s subtype=%s declared=0 "
+                            "collected=0 pages=1 outcome=exhausted (empty-confirmed x2)",
+                            cat, sale_type, kraj, subtype or "all",
+                        )
+                        return out("exhausted", 1)
+                    return out("degraded", 1)
+                last_page = max(1, -(-declared_total // _PER_PAGE))
+                if last_page > _MAX_SLICE_PAGES:
+                    # Past the site's own 99-page ceiling on a filtered URL: the
+                    # tail is unreachable on this axis, so descend instead.
+                    return out("ceiling", 1)
             if parsed.total is not None:
-                total = parsed.total
+                live_last = max(1, -(-parsed.total // _PER_PAGE))
             if not parsed.items:
-                break
+                if page == 1 and declared_total == 0:
+                    return out("exhausted", 1)
+                return out("degraded", page)
             for item in parsed.items:
                 rows.append((
                     item.source_id_native,
                     detail_url(item.detail_path),
                     index_price(item.price_text),
                 ))
-            last_page = (total + _PER_PAGE - 1) // _PER_PAGE if total else None
+            # The tail can move under a live walk (~7-11 rows/10 min), so believe
+            # whichever declared count says we are done first.
+            stop_at = min(x for x in (last_page, live_last) if x is not None)
+            if page >= stop_at:
+                break
             if parsed.next_offset is None:
-                break
-            if last_page is not None and page >= last_page:
-                break
+                # The pager ended before the declared tail: a truncated page.
+                return out("degraded", page)
             page += 1
-        capped = bool(total and total > _CAP_PAGES * _PER_PAGE and page >= _CAP_PAGES)
-        return rows, page, total, (not capped and not self._max_pages)
+
+        # Arithmetic gate: the shared two-sided verdict, on DISTINCT ids (pages
+        # shift under a live walk, so len(rows) double-counts).
+        if not walk_is_complete(len({r[0] for r in rows}), declared_total):
+            return out("degraded", page)
+        return out("exhausted", page)
 
     def _nationwide_total(self, client: CeskerealityClient, sale_type: str, cat: str) -> int | None:
         """The www result total — the portal-reported count for the RECONCILE +
-        completeness gate (the per-region slices only report their own subset)."""
+        the category verdict's cross-check (the kraj slices report their own
+        subsets, which is the primary denominator)."""
         try:
             html, _ = client.fetch_index(sale_type, cat, None)
             return parse_index(html).total
         except Exception:                   # noqa: BLE001
             return None
 
-    def _region_facets(
-        self, client: CeskerealityClient, host: str, sale_type: str, cat: str,
-    ) -> list[str]:
-        """The narrowing-facet slugs (districts + dispositions + types) a region's
-        category page links — discovered live so a new district/type is never
-        missed. District is a complete partition, so walking the union covers
-        ~all of a region's inventory under the 12-page cap."""
-        try:
-            html, _ = client.fetch_search(search_url(sale_type, cat, host=host))
-            return extract_facet_slugs(html, sale_type, cat)
-        except Exception:                   # noqa: BLE001
-            return []
+    def _descend_slice(
+        self, client: CeskerealityClient, sale_type: str, cat: str,
+        parent: SliceResult, *, conn: Any = None, archive_week: str | None = None,
+        fresh_keys: set[str] | None = None, deadline: float | None = None,
+    ) -> list[SliceResult]:
+        """The second axis, depth EXACTLY one: a kraj past the 99-page ceiling is
+        re-walked per subtype. Declared slugs where we measured them (subtype is a
+        true partition within a kraj: the 10 rodinne-domy slugs summed to 2,312 in
+        stredocesky — the kraj total exactly); the rendered facets otherwise, and
+        either way this SELF-VERIFIES the children's declared sum against the
+        parent's, so a missing subtype reads incomplete instead of silently
+        dropping the residue."""
+        kraj = parent.kraj
+        subtypes: tuple[str, ...] = SUBTYPE_SLUGS.get(cat, ())
+        if not subtypes:
+            try:
+                html, _ = client.fetch_search(search_url(sale_type, cat, kraj=kraj))
+                subtypes = tuple(
+                    s for s in extract_facet_slugs(html, sale_type, cat)
+                    if s.startswith(f"{cat}-")
+                )
+            except Exception as exc:        # noqa: BLE001
+                LOG.warning("DESCENT facet probe failed kraj=%s: %s", kraj, exc)
+                subtypes = ()
+        if not subtypes:
+            LOG.warning("DESCENT no subtype axis cm=%s ct=%s kraj=%s declared=%s",
+                        cat, sale_type, kraj, parent.declared_total)
+            return [parent]                 # still 'ceiling' -> category incomplete
+        children: list[SliceResult] = []
+        for slug in subtypes:
+            if deadline_reached(deadline):
+                children.append(replace(parent, outcome="deadline"))
+                return children
+            children.append(self._walk_slice(
+                client, sale_type, cat, kraj, subtype=slug, conn=conn,
+                archive_week=archive_week, fresh_keys=fresh_keys, deadline=deadline,
+            ))
+        child_declared = sum(c.declared_total or 0 for c in children)
+        if not walk_is_complete(child_declared, parent.declared_total):
+            LOG.warning(
+                "DESCENT residue cm=%s ct=%s kraj=%s children_declared=%d parent=%s",
+                cat, sale_type, kraj, child_declared, parent.declared_total,
+            )
+            children.append(replace(parent, rows=[], pages=0, outcome="ceiling"))
+        return children
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
@@ -262,7 +415,7 @@ class CeskerealityPortal:
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         sale_type, cat = category["sale_type"], category["category"]
         client = CeskerealityClient(limiter=limiter)
-        hosts = self._regions or REGION_HOSTS
+        kraje = self._kraje or KRAJ_SLUGS
 
         archive_week = db.index_archive_week() if conn is not None else None
         fresh_keys: set[str] = set()
@@ -278,51 +431,52 @@ class CeskerealityPortal:
         price_map: dict[str, int | None] = {}
         ref_map: dict[str, str] = {}
         seen_ids: set[str] = set()
-        pages = 0
-        incomplete_slices = 0
-        slices = 0
         # A deadline stop poisons the WHOLE category verdict, not just its slice:
-        # the region-wide (slug=None) slice's own incompleteness is expected and
-        # ignored below, and the un-walked hosts/facets never report at all — so
-        # incomplete_slices alone would let a truncated walk claim complete=True.
-        # Passed to walk_is_complete as stopped_early=, so one function owns it.
+        # the un-walked kraje never report at all, so per-slice outcomes alone
+        # would let a truncated walk claim complete=True. Passed to
+        # walk_is_complete as stopped_early=, so one function owns it.
         deadline_hit = False
-        for host in hosts:
+        results: list[SliceResult] = []
+        for kraj in kraje:
             if deadline_reached(deadline):
                 deadline_hit = True
                 break
-            facets = self._region_facets(client, host, sale_type, cat)
-            # None = the region-wide page (a backstop for its top ~240); then every
-            # discovered facet slice (each ~<=240 -> fully walked).
-            for slug in (None, *facets):
-                slices += 1
-                rows, slice_pages, _slice_total, slice_complete = self._walk_slice(
-                    client, host, sale_type, cat, slug, conn,
-                    archive_week, fresh_keys, deadline)
-                pages += slice_pages
-                # The region-wide backstop (slug=None) is EXPECTED to cap for a big
-                # region — only a capped FACET slice (a dense district still > 240)
-                # is genuine incompleteness that suppresses mark_inactive.
-                if slug is not None and not slice_complete:
-                    incomplete_slices += 1
-                for nid, ref, price in rows:
-                    if nid not in seen_ids:
-                        seen_ids.add(nid)
-                        native_ids.append(nid)
-                    ref_map[nid] = ref
-                    price_map[nid] = price
-                if deadline_reached(deadline):
-                    deadline_hit = True
-                    break
-            if deadline_hit:
-                break
+            r = self._walk_slice(
+                client, sale_type, cat, kraj, conn=conn, archive_week=archive_week,
+                fresh_keys=fresh_keys, deadline=deadline,
+            )
+            if r.outcome == "ceiling" and not self._max_pages:
+                results.extend(self._descend_slice(
+                    client, sale_type, cat, r, conn=conn, archive_week=archive_week,
+                    fresh_keys=fresh_keys, deadline=deadline,
+                ))
+            else:
+                results.append(r)
 
-        total = self._nationwide_total(client, sale_type, cat)
+        for r in results:
+            LOG.info(
+                "SLICE cm=%s ct=%s kraj=%s subtype=%s declared=%s collected=%d "
+                "pages=%d outcome=%s",
+                cat, sale_type, r.kraj, r.subtype or "all", r.declared_total,
+                len({x[0] for x in r.rows}), r.pages, r.outcome,
+            )
+            for nid, ref, price in r.rows:
+                if nid not in seen_ids:
+                    seen_ids.add(nid)
+                    native_ids.append(nid)
+                ref_map[nid] = ref
+                price_map[nid] = price
+
+        pages = sum(r.pages for r in results)
+        declared_sum = sum(r.declared_total or 0 for r in results if r.positive)
+        national = self._nationwide_total(client, sale_type, cat)
+        kraje_seen = {r.kraj for r in results}
         LOG.info(
-            "SPLIT cm=%s ct=%s regions=%d slices=%d collected=%d total=%s "
-            "incomplete_slices=%d pages=%d",
-            cat, sale_type, len(hosts), slices, len(seen_ids), total,
-            incomplete_slices, pages,
+            "PARTITION cm=%s ct=%s kraje=%d slices=%d positive=%d collected=%d "
+            "declared_sum=%d national=%s pages=%d",
+            cat, sale_type, len(kraje_seen), len(results),
+            sum(1 for r in results if r.positive), len(seen_ids), declared_sum,
+            national, pages,
         )
 
         seen = set(native_ids)
@@ -359,18 +513,35 @@ class CeskerealityPortal:
             "ENQUEUE source=ceskereality new=%d changed=%d unchanged=%d enqueued=%d",
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        # mark_inactive is safe only on a FULL, uncapped walk: every region walked
-        # (not --region scoped), no slice hit the 12-page cap, and we collected ~all
-        # of the nationwide total. Any capped slice (a dense disposition still > 240)
-        # -- or a deadline that cut the walk short -- leaves the walk incomplete, so
-        # we suppress the sweep (rule #3). _nationwide_total swallows its own
-        # exception and returns None; that now reads 'unknown' (not complete), so a
-        # failed total probe suppresses the sweep instead of authorising it.
+        # mark_inactive is safe only on a walk that PROVED it saw the whole
+        # category (rule #3): every one of the 14 kraje represented, every slice
+        # exhausted to its declared tail, and the union reconciling against BOTH
+        # the summed per-kraj declared counts and — when it is measurable — the
+        # nationwide total. declared_sum is the primary denominator because
+        # _nationwide_total swallows its own exception: a failed probe must never
+        # be the thing that suppresses every sweep forever, and equally must never
+        # authorise one on its own (it is skipped only after 14 positive slices
+        # already proved coverage).
         complete = (
-            not self._max_pages and not self._regions and incomplete_slices == 0
-            and walk_is_complete(len(seen), total, stopped_early=deadline_hit)
+            not self._max_pages
+            and not self._kraje
+            and not deadline_hit
+            and kraje_seen == set(KRAJ_SLUGS)
+            and all(r.positive for r in results)
+            and walk_is_complete(len(seen), declared_sum, stopped_early=deadline_hit)
+            # FAIL CLOSED. This was written `national is None or ...`, which
+            # made an unmeasurable national probe *prove* completeness — and
+            # _nationwide_total swallows its own exception, so the rail was
+            # weakest exactly when it mattered. Throttling is correlated: if the
+            # kraj pages are degraded, the national probe is degraded too. An
+            # adversarial review reproduced complete=True with 5,200 of 5,600
+            # rows collected and a whole kraj missing. Rule #3: an unproven walk
+            # never authorises a sweep.
+            and national is not None
+            and walk_is_complete(len(seen), national)
         )
-        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
+        result_size = national if national is not None else declared_sum
+        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, result_size, pages, complete
 
     def probe_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool,
@@ -390,9 +561,9 @@ class CeskerealityPortal:
         pages = 0
         found_new = 0
         enqueued = 0
-        for page in range(1, min(max(1, probe_pages), _CAP_PAGES) + 1):
+        for page in range(1, min(max(1, probe_pages), _PROBE_MAX_PAGES) + 1):
             url = search_url(
-                sale_type, cat, sub_slug=_PROBE_SUB_SLUG,
+                sale_type, cat, subtype=_PROBE_SUB_SLUG,
                 page=page if page > 1 else None,
             )
             try:
@@ -606,8 +777,8 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging(args.verbose)
 
     config = _load_config(args.dry_run)
-    regions = tuple(args.region) if args.region else None
-    portal = CeskerealityPortal(config, max_pages=args.max_pages, regions=regions)
+    kraje = tuple(args.kraj) if args.kraj else None
+    portal = CeskerealityPortal(config, max_pages=args.max_pages, kraje=kraje)
 
     # Resolve operational limits: CLI override > per-portal DB config > default.
     workers = args.workers if args.workers is not None else config.limits.detail_workers
@@ -675,10 +846,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="drain the detail queue only (no index walk)",
     )
     p.add_argument(
-        "--region", action="append", default=None,
-        help="limit the index walk to this region subdomain (repeatable; e.g. "
-             "stredo.ceskereality.cz) for a one-region proxy test. Suppresses "
-             "mark_inactive. Omit = all 7 regions.",
+        "--kraj", action="append", default=None, choices=list(KRAJ_SLUGS),
+        metavar="SLUG",
+        help="limit the index walk to this kraj (repeatable; e.g. "
+             "stredocesky-kraj) for an ad-hoc partial run. Suppresses "
+             "mark_inactive. Omit = all 14 kraje. An unknown slug is an "
+             "argparse error, never a silently-404ing walk.",
     )
     p.add_argument(
         "--probe", action="store_true",
