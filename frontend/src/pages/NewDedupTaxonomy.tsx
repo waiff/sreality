@@ -9,23 +9,41 @@ import {
   listTagDefinitionVersions,
   listTagNeighbours,
   listTagPositiveImages,
+  renameNewDedupTag,
   saveTagDefinition,
+  setNewDedupTagAnnotation,
+  type NewDedupImageTag,
+  type NewDedupLabelingOverview,
   type NewDedupTag,
   type SaveTagDefinitionIn,
   type TagDefinition,
   type TagDefinitionStatus,
+  type TagPositiveImage,
 } from '@/lib/api';
 import { fetchImagesByImageIds } from '@/lib/queries';
 import { pushToast } from '@/lib/toast';
 import Spinner from '@/components/Spinner';
+import ErrorBanner from '@/components/ErrorBanner';
 import DefinitionEditor, {
   EMPTY_DRAFT,
   type Draft,
 } from '@/components/tag-definitions/DefinitionEditor';
 import DefinitionReadOnly from '@/components/tag-definitions/DefinitionReadOnly';
 import OverlapEvidence from '@/components/tag-definitions/OverlapEvidence';
-import TagContentsGallery from '@/components/tag-definitions/TagContentsGallery';
+import TagContentsGallery, {
+  type MovedOutImage,
+} from '@/components/tag-definitions/TagContentsGallery';
 import TagDefinitionList from '@/components/tag-definitions/TagDefinitionList';
+import ImageTagDetailPanel, {
+  type ImageTagChange,
+} from '@/components/tag-annotations/ImageTagDetailPanel';
+import {
+  NEW_DEDUP_OVERVIEW_KEY,
+  NEW_DEDUP_PROPOSALS_KEY,
+  NEW_DEDUP_TAG_IMAGES_KEY,
+  newDedupImageTagsKey,
+  newDedupPositiveImagesKey,
+} from '@/lib/newDedupKeys';
 import type { ImagePublic } from '@/lib/types';
 
 /* NEW DEDUP · Taxonomy — the Phase-0 workbench where the ~51 tags stop being
@@ -39,11 +57,16 @@ import type { ImagePublic } from '@/lib/types';
  * does-not-count line separating two tags, they are one tag, and you only see
  * that with both in view.
  *
- * There are no drafts server-side: one Save = one version. So every edit —
- * text, picker, gallery click, "add to confusable" — stages into local state
- * and the page makes exactly ONE network write. */
+ * There are no drafts server-side: one Save = one version. So every edit to the
+ * DEFINITION — text, picker, gallery click, "add to confusable" — stages into
+ * local state and the page makes exactly ONE network write.
+ *
+ * Two edits deliberately sit outside that rule, because neither is part of the
+ * document: retagging an image from the gallery's "all tags" pill, and renaming
+ * a tag from the list. A tri-state cell and a tag's name are ground truth with
+ * no draft to batch into, so both write immediately — the gallery says so in as
+ * many words, and neither touches the definition draft. */
 
-const OVERVIEW_KEY = ['new-dedup', 'labeling', 'overview'];
 const DEFINITIONS_KEY = ['new-dedup', 'labeling', 'definitions'];
 const definitionKey = (tagId: number) => ['new-dedup', 'labeling', 'definition', tagId];
 const versionsKey = (tagId: number) => ['new-dedup', 'labeling', 'definition-versions', tagId];
@@ -54,7 +77,6 @@ const versionKey = (tagId: number, v: number) => [
   tagId,
   v,
 ];
-const positiveImagesKey = (tagId: number) => ['new-dedup', 'labeling', 'positive-images', tagId];
 const neighboursKey = (tagId: number) => ['new-dedup', 'labeling', 'neighbours', tagId];
 const photosKey = (ids: string) => ['new-dedup', 'taxonomy', 'photos', ids];
 
@@ -108,7 +130,7 @@ export default function NewDedupTaxonomy() {
   const [params, setParams] = useSearchParams();
   const selectedTagId = Number(params.get('tag')) || null;
 
-  const overviewQ = useQuery({ queryKey: OVERVIEW_KEY, queryFn: getNewDedupLabelingOverview });
+  const overviewQ = useQuery({ queryKey: NEW_DEDUP_OVERVIEW_KEY, queryFn: getNewDedupLabelingOverview });
   const statusQ = useQuery({ queryKey: DEFINITIONS_KEY, queryFn: listTagDefinitionStatus });
 
   const tags = useMemo<NewDedupTag[]>(() => overviewQ.data?.data.tags ?? [], [overviewQ.data]);
@@ -130,7 +152,7 @@ export default function NewDedupTaxonomy() {
     enabled: selectedTagId != null,
   });
   const positiveImagesQ = useQuery({
-    queryKey: positiveImagesKey(selectedTagId ?? 0),
+    queryKey: newDedupPositiveImagesKey(selectedTagId ?? 0),
     queryFn: () => listTagPositiveImages(selectedTagId as number, POSITIVE_IMAGE_LIMIT),
     enabled: selectedTagId != null,
   });
@@ -269,6 +291,189 @@ export default function NewDedupTaxonomy() {
     setParams({ tag: String(id) }, { replace: true });
   };
 
+  // --- retagging from the gallery ------------------------------------------
+
+  /* The one image whose all-tags panel is open. Distinct from the tile click,
+   * which still means "stage as a canonical example". */
+  const [detailImageId, setDetailImageId] = useState<number | null>(null);
+
+  /* Images taken OUT of this tag during this sitting — a receipt that persists
+   * and is actionable, which is why there is no toast on a single subject write.
+   * Session-local, cleared on a tag switch. */
+  const [movedOut, setMovedOut] = useState<ReadonlyArray<MovedOutImage>>([]);
+  const movedOutRef = useRef<ReadonlyArray<MovedOutImage>>([]);
+  movedOutRef.current = movedOut;
+  useEffect(() => {
+    setMovedOut([]);
+    setDetailImageId(null);
+  }, [selectedTagId]);
+
+  /* Put the row back where it was, not at the top. The server orders by
+   * `updated_at DESC` and a put-back genuinely moves the row, so it WILL float
+   * to the front on the next natural refetch — converging then is honest;
+   * reshuffling the grid under the operator's cursor mid-sitting is the churn
+   * both pages are built to avoid. */
+  /* Returns whether the patch was possible at all: the receipt strip is
+   * session-local and a tag switch empties it, so a put-back that resolves
+   * after one has no row to splice back and the caller has to repair the cache
+   * some other way. */
+  const restorePositiveRow = useCallback(
+    (tagId: number, imageId: number): boolean => {
+      const held = movedOutRef.current.find((m) => m.row.image_id === imageId);
+      setMovedOut((prev) => prev.filter((m) => m.row.image_id !== imageId));
+      if (!held) return false;
+      qc.setQueryData<{ data: TagPositiveImage[] }>(
+        newDedupPositiveImagesKey(tagId),
+        (old) => {
+          if (!old || old.data.some((r) => r.image_id === imageId)) return old;
+          const next = [...old.data];
+          next.splice(Math.min(held.index, next.length), 0, held.row);
+          return { ...old, data: next };
+        },
+      );
+      return true;
+    },
+    [qc],
+  );
+
+  /* Patched, never invalidated: an invalidate refetches up to 300 rows,
+   * re-renders every tile, AND reorders by updated_at. The patch is not a guess
+   * — the server already agrees the row is no longer positive, so a background
+   * focus-refetch converges on the same answer. */
+  const onImageTagChange = useCallback(
+    (c: ImageTagChange) => {
+      /* A write to a tag OTHER than the one being read — the whole point of the
+       * panel's second half. That tag's gallery is not mounted, so there is
+       * nothing to blink and nothing to patch in place; but it IS cached, and
+       * the overview refetch has already moved its count in the list on the
+       * left. Mark it stale, or selecting it inside main.tsx's 60s staleTime
+       * serves a gallery this very write contradicted. Inactive queries only
+       * take the flag — the refetch happens when the operator gets there. */
+      if (selectedTagId == null || c.tagId !== selectedTagId) {
+        qc.invalidateQueries({ queryKey: newDedupPositiveImagesKey(c.tagId) });
+        return;
+      }
+      if (c.state === 'positive') {
+        // A `false` here is a re-affirmed positive on a tile that never left,
+        // not a hole in the cache — invalidating would blink the visible grid.
+        restorePositiveRow(selectedTagId, c.imageId);
+        return;
+      }
+      const key = newDedupPositiveImagesKey(selectedTagId);
+      const cached = qc.getQueryData<{ data: TagPositiveImage[] }>(key);
+      const index = cached?.data.findIndex((r) => r.image_id === c.imageId) ?? -1;
+      const row = index >= 0 ? cached?.data[index] : undefined;
+      if (row) {
+        qc.setQueryData<{ data: TagPositiveImage[] }>(key, (old) =>
+          old ? { ...old, data: old.data.filter((r) => r.image_id !== c.imageId) } : old,
+        );
+      }
+      setMovedOut((prev) => {
+        const existing = prev.find((m) => m.row.image_id === c.imageId);
+        // A second outcome on the same image only restates WHY it left.
+        if (existing)
+          return prev.map((m) =>
+            m.row.image_id === c.imageId
+              ? { ...m, state: c.state, excludedReason: c.excludedReason }
+              : m,
+          );
+        if (!row) return prev;
+        return [...prev, { row, index, state: c.state, excludedReason: c.excludedReason }];
+      });
+    },
+    [qc, restorePositiveRow, selectedTagId],
+  );
+
+  const putBackMut = useMutation({
+    mutationFn: (vars: { tagId: number; imageId: number }) =>
+      setNewDedupTagAnnotation(vars.tagId, vars.imageId, 'positive', null),
+    onSuccess: (res, vars) => {
+      /* Normally a patch. But a tag switch empties the receipt strip, so a
+       * put-back that resolves after one leaves the server holding a positive
+       * the cached grid does not list — and nothing on screen to explain it.
+       * The refetch is the fallback for exactly that path, never the norm, so
+       * no visible list blinks on the ordinary one. */
+      if (!restorePositiveRow(vars.tagId, vars.imageId))
+        qc.invalidateQueries({ queryKey: newDedupPositiveImagesKey(vars.tagId) });
+      /* Patched, not invalidated, for the same reason the panel patches its own
+       * list: an open panel must not blink through a refetch. */
+      qc.setQueryData<{ data: NewDedupImageTag[] }>(
+        newDedupImageTagsKey(vars.imageId),
+        (old) =>
+          old
+            ? {
+                ...old,
+                data: old.data.map((r) =>
+                  r.id === vars.tagId
+                    ? {
+                        ...r,
+                        state: res.data.state,
+                        source: res.data.source,
+                        excluded_reason: res.data.excluded_reason,
+                      }
+                    : r,
+                ),
+              }
+            : old,
+      );
+      // Nine interdependent derived numbers moved, and ambiguity_rate has
+      // exactly ONE definition — server-side. Never re-derived here.
+      qc.invalidateQueries({ queryKey: NEW_DEDUP_OVERVIEW_KEY });
+    },
+    onError: (err: Error) => pushToast('err', err.message),
+  });
+  const putBackPending = useMemo(
+    () =>
+      new Set<number>(
+        putBackMut.isPending && putBackMut.variables ? [putBackMut.variables.imageId] : [],
+      ),
+    [putBackMut.isPending, putBackMut.variables],
+  );
+
+  // --- renaming a tag in place ---------------------------------------------
+
+  const [renameError, setRenameError] = useState<string | null>(null);
+  /* Stable by contract: the list clears the pending rename whenever selection
+   * moves, and an inline arrow here would make that effect fire every render. */
+  const clearRenameError = useCallback(() => setRenameError(null), []);
+  const renameMut = useMutation({
+    mutationFn: (vars: { tagId: number; label: string }) =>
+      renameNewDedupTag(vars.tagId, vars.label),
+    onSuccess: (res, vars) => {
+      setRenameError(null);
+      /* Patch, don't invalidate: the tag list is a 51-row VISIBLE list. And
+       * merge only label+family — the rename route echoes tag_annotations'
+       * _tag_dict (identity and flags only), so spreading the response would
+       * wipe every count to undefined and render NaN. */
+      qc.setQueryData<{ data: NewDedupLabelingOverview }>(NEW_DEDUP_OVERVIEW_KEY, (old) =>
+        old
+          ? {
+              ...old,
+              data: {
+                ...old.data,
+                tags: old.data.tags.map((t) =>
+                  t.id === vars.tagId
+                    ? { ...t, label: res.data.label, family: res.data.family }
+                    : t,
+                ),
+              },
+            }
+          : old,
+      );
+      /* Label-carrying reads that are NOT mounted here. Marked stale so a later
+       * panel open, or the Labeling page, is correct — no refetch happens now. */
+      qc.invalidateQueries({ queryKey: ['new-dedup', 'labeling', 'image-tags'] });
+      qc.invalidateQueries({ queryKey: NEW_DEDUP_PROPOSALS_KEY });
+      qc.invalidateQueries({ queryKey: NEW_DEDUP_TAG_IMAGES_KEY });
+      pushToast('ok', 'Renamed.');
+    },
+    /* Own onError, which suppresses main.tsx's global toast on purpose: the
+     * error is field-scoped and the field is on screen and focused. A toast six
+     * seconds away from the input is worse feedback, and a toast PLUS an inline
+     * message is one message said twice. */
+    onError: (err: Error) => setRenameError(err.message),
+  });
+
   const addConfusable = (tagId: number) => {
     if (draft.confusable_with.some((r) => r.tag_id === tagId)) return;
     const index = draft.confusable_with.length;
@@ -332,6 +537,15 @@ export default function NewDedupTaxonomy() {
           selectedId={selectedTagId}
           onSelect={selectTag}
           loading={overviewQ.isLoading}
+          onRename={(tagId, label) =>
+            renameMut.mutateAsync({ tagId, label }).then(
+              () => true,
+              () => false,
+            )
+          }
+          renamePending={renameMut.isPending}
+          renameError={renameError}
+          onRenameErrorClear={clearRenameError}
         />
 
         <div>
@@ -503,6 +717,12 @@ export default function NewDedupTaxonomy() {
                     loading={positiveImagesQ.isLoading}
                     limit={POSITIVE_IMAGE_LIMIT}
                     exampleLimit={EXAMPLE_IMAGES_MAX}
+                    onOpenTags={setDetailImageId}
+                    movedOut={movedOut}
+                    onPutBack={(imageId) =>
+                      putBackMut.mutate({ tagId: selectedTagId, imageId })
+                    }
+                    putBackPending={putBackPending}
                   />
                   <OverlapEvidence
                     neighbours={neighboursQ.data?.data ?? []}
@@ -518,14 +738,15 @@ export default function NewDedupTaxonomy() {
           )}
         </div>
       </div>
-    </div>
-  );
-}
 
-function ErrorBanner({ message }: { message: string }) {
-  return (
-    <div className="mt-6 p-3 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)] text-sm text-[var(--color-brick)]">
-      <strong className="font-medium">Failed:</strong> {message}
+      {detailImageId != null && (
+        <ImageTagDetailPanel
+          imageId={detailImageId}
+          onClose={() => setDetailImageId(null)}
+          onTagStateChange={onImageTagChange}
+          subjectTagId={selectedTagId}
+        />
+      )}
     </div>
   );
 }

@@ -2237,6 +2237,27 @@ describe('<NewDedupLabeling>', () => {
     );
   });
 
+  it('pins no subject tag in the all-tags panel on this page', async () => {
+    // The panel is SHARED with the definitions workbench, which opens it with a
+    // subject tag pulled out of its family group and given four word-labeled
+    // outcomes. Nothing here passes one, so that branch must stay off: every
+    // tag stays inside its family, with the three-glyph control.
+    vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
+      data: [
+        imageTag({ id: 1, label: 'interier - kuchyne', family: 'interier', state: 'positive', updated_at: 't' }),
+        imageTag({ id: 2, label: 'interier - obyvak', family: 'interier', state: 'untouched', updated_at: null }),
+        imageTag({ id: 3, label: 'exterier - fasada', family: 'exterier', state: 'negative', updated_at: 't' }),
+      ],
+    });
+    renderPage();
+    fireEvent.click(await screen.findByText('all tags'));
+    const panel = await screen.findByRole('dialog', { name: 'All tags on this image' });
+    await within(panel).findAllByRole('group', { name: 'Tag state' });
+
+    expect(within(panel).queryByRole('group', { name: "This tag's state" })).toBeNull();
+    expect(within(panel).getAllByRole('group', { name: 'Tag state' })).toHaveLength(3);
+  });
+
   // --- tabs + tag filter ---------------------------------------------------
 
   it('switching status tabs re-queries proposals with the new status', async () => {
