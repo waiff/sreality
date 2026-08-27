@@ -50,6 +50,7 @@ from scraper.portal import (
     deadline_reached,
     load_portal_config,
     classify_index_sighting,
+    walk_is_complete,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -58,12 +59,10 @@ from scraper.rate_limit import RateLimiter
 LOG = logging.getLogger(__name__)
 SOURCE = "ceskereality"
 
-# An index walk that collected at least this fraction of the page-reported total
-# is treated as complete enough to drive mark_inactive; below it the walk likely
-# truncated and flipping unseen listings inactive would falsely delist live ones.
-# The framework standard (rule #3, matches idnes); the INACTIVE_MIN_UNSEEN_HOURS
-# staleness rail below is the second, stronger guard.
-INDEX_MIN_COMPLETENESS = 0.995
+# The completeness verdict — min ratio, over-collection ceiling, early-stop — is
+# scraper.portal.walk_is_complete, one definition for all nine portals (rule #3).
+# It replaced a local copy that returned True when the total was unmeasurable;
+# the INACTIVE_MIN_UNSEEN_HOURS staleness rail below is the second, stronger guard.
 
 # Only flip rows unseen for 12h+ — ~2 full walk cadences at the 6h schedule.
 # last_seen_at is bumped for unchanged rows each walk (touch_listings) and for
@@ -87,12 +86,6 @@ _PER_PAGE = 20
 # paging) — it fits search_url's sub_slug slot, so the delta probe reads it on the
 # nationwide www host instead of enumerating the region×facet slices.
 _PROBE_SUB_SLUG = "nejnovejsi"
-
-
-def _walk_complete(collected: int, total: int | None) -> bool:
-    if not total or total <= 0:
-        return True
-    return collected >= total * INDEX_MIN_COMPLETENESS
 
 
 class CeskerealityPortal:
@@ -292,6 +285,7 @@ class CeskerealityPortal:
         # the region-wide (slug=None) slice's own incompleteness is expected and
         # ignored below, and the un-walked hosts/facets never report at all — so
         # incomplete_slices alone would let a truncated walk claim complete=True.
+        # Passed to walk_is_complete as stopped_early=, so one function owns it.
         deadline_hit = False
         for host in hosts:
             if deadline_reached(deadline):
@@ -369,11 +363,12 @@ class CeskerealityPortal:
         # (not --region scoped), no slice hit the 12-page cap, and we collected ~all
         # of the nationwide total. Any capped slice (a dense disposition still > 240)
         # -- or a deadline that cut the walk short -- leaves the walk incomplete, so
-        # we suppress the sweep (rule #3).
+        # we suppress the sweep (rule #3). _nationwide_total swallows its own
+        # exception and returns None; that now reads 'unknown' (not complete), so a
+        # failed total probe suppresses the sweep instead of authorising it.
         complete = (
-            not deadline_hit
-            and not self._max_pages and not self._regions and incomplete_slices == 0
-            and _walk_complete(len(seen), total)
+            not self._max_pages and not self._regions and incomplete_slices == 0
+            and walk_is_complete(len(seen), total, stopped_early=deadline_hit)
         )
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
 

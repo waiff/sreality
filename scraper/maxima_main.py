@@ -45,6 +45,7 @@ from scraper.portal import (
     deadline_reached,
     load_portal_config,
     classify_index_sighting,
+    walk_is_complete,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -52,7 +53,6 @@ from scraper.rate_limit import RateLimiter
 
 LOG = logging.getLogger(__name__)
 SOURCE = "maxima"
-INDEX_MIN_COMPLETENESS = 0.995  # agenda walk must reach ≥99.5% of the reported total to delist
 
 
 class _AgendaWalk:
@@ -192,13 +192,12 @@ class MaximaPortal:
                 break
             page += 1
 
-        # Complete only if we walked the whole agenda (not page-capped, not cut
-        # short by the wall-clock budget) AND reached the portal-reported total —
-        # the gate for agenda-grain delisting.
+        # Complete only if we walked the whole agenda (not page-capped) AND the
+        # shared verdict says so — one definition of coverage for all portals,
+        # and an agenda whose total never parsed is "unknown", not complete.
         capped = bool(self._max_pages and pages >= self._max_pages)
-        complete = (
-            not capped and not stopped_early and total is not None and total > 0
-            and len(native_ids) >= total * INDEX_MIN_COMPLETENESS
+        complete = not capped and walk_is_complete(
+            len(native_ids), total, stopped_early=stopped_early
         )
         walk = _AgendaWalk(native_ids, ref_map, price_map, cat_map, total, pages, complete)
         self._agenda_cache[af] = walk

@@ -274,7 +274,8 @@ def _walk_with(monkeypatch, n_items: int, total: int | None):
 def test_walk_category_below_tolerance_is_incomplete(monkeypatch):
     # A full (un-capped) walk well short of the reported total must read
     # incomplete: the sweep runs only after a ~complete walk (architectural
-    # rule #3), hardcoded (INDEX_MIN_COMPLETENESS=0.995), not tunable.
+    # rule #3). The 0.995 bar is scraper.portal.INDEX_MIN_COMPLETENESS — one
+    # shared constant for all nine portals now, not a per-portal copy.
     _seen, _counts, result_size, _pages, complete = _walk_with(monkeypatch, 19, 20)
     assert result_size == 20 and complete is False   # 19/20 = 95% < 99.5% → suppress sweep
 
@@ -289,10 +290,22 @@ def test_walk_category_completeness_boundary(monkeypatch):
 
 
 def test_walk_category_unknown_total_is_incomplete(monkeypatch):
-    # bazos-specific conservatism (unchanged by the tolerance): an HTML crawl
-    # whose total failed to parse never infers delistings.
+    # An unmeasurable walk is "unknown", never complete: a total that failed to
+    # parse is not proof of coverage, and rule #3 delists only on proof. bazos
+    # already got this right; the shared walk_coverage now makes it the contract
+    # for every portal (several of which used to fail OPEN here).
     _seen, _counts, result_size, _pages, complete = _walk_with(monkeypatch, 20, None)
     assert result_size is None and complete is False
+
+
+def test_walk_category_overcollection_is_incomplete(monkeypatch):
+    # Collecting materially MORE than the portal declared means the slices
+    # overlap or foreign stock leaked in, so `total` is not the denominator we
+    # think it is. Contamination must not read as completeness.
+    _seen, _counts, _result_size, _pages, complete = _walk_with(monkeypatch, 25, 20)
+    assert complete is False                         # 25/20 = 125% > 102% → suppress sweep
+    *_rest, complete = _walk_with(monkeypatch, 1010, 1000)
+    assert complete is True                          # 101% is within churn tolerance
 
 
 class _SeqIdxClient:

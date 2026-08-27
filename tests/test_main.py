@@ -16,6 +16,7 @@ import pytest
 import requests
 
 from scraper import main as scraper_main
+from scraper.portal import walk_is_complete
 from scraper.sreality_client import ListingGoneError
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -47,7 +48,13 @@ class _FakeClient:
     that mark_inactive is scoped correctly."""
 
     pages_fetched = 1
-    result_size = None  # unfiltered total reported by probe_result_size
+    # Unfiltered total reported by probe_result_size. Matches total_entries (5)
+    # so the default fake walk is MEASURABLY complete, like the real API which
+    # always reports result_size. It used to be None, back when an unmeasurable
+    # walk was trusted as complete; scraper.portal.walk_is_complete now calls
+    # that "unknown" and suppresses the sweep, so a None here would mean "no
+    # delisting" rather than "full walk".
+    result_size = 5
     # Region-split simulation (opt-in): when result_size > SPLIT_THRESHOLD a
     # region client is built per kraj; these map region_id -> reported total
     # and (optionally) -> collected count (defaults to the reported total).
@@ -239,10 +246,13 @@ def test_sreality_mark_inactive_carries_unseen_rail(monkeypatch):
 def test_walk_complete_tolerates_half_percent_short_walk():
     """0.995 gate (relaxed from 1.0): a 99.6% walk is complete (mid-walk jitter
     tolerated — the flip would have been suppressed at the old 1.0 gate); 99.4% is
-    not. result_size unknown -> trust the walk (unchanged fallback)."""
-    assert scraper_main._walk_complete(996, 1000) is True
-    assert scraper_main._walk_complete(994, 1000) is False
-    assert scraper_main._walk_complete(10, None) is True
+    not. Sreality now shares scraper.portal.walk_is_complete with every portal."""
+    assert walk_is_complete(996, 1000) is True
+    assert walk_is_complete(994, 1000) is False
+    # An unreported total used to return True here ("trust the walk"). That
+    # fail-open was the DEFECT, not the spec: rule #3 delists only from a proven
+    # walk, and a failed probe proves nothing.
+    assert walk_is_complete(10, None) is False
 
 
 def test_dry_run_never_calls_mark_inactive(patched_db, monkeypatch):
@@ -292,17 +302,31 @@ def test_run_full_isolates_one_crashing_category_marks_the_rest(
 
 
 def test_walk_complete_thresholds():
-    # No reported total → trust the walk (don't silently disable delisting).
-    assert scraper_main._walk_complete(0, None) is True
-    assert scraper_main._walk_complete(0, 0) is True
-    # Collected the FULL reported total (100%) → complete. Over-collecting
-    # (concurrent additions mid-walk) still counts as complete.
-    assert scraper_main._walk_complete(100, 100) is True
-    assert scraper_main._walk_complete(101, 100) is True
-    # Anything short of 100% → incomplete, suppress the flip.
-    assert scraper_main._walk_complete(99, 100) is False
-    assert scraper_main._walk_complete(90, 100) is False
-    assert scraper_main._walk_complete(10, 100) is False
+    # No reported total → "unknown", NOT complete. These two asserted True
+    # before, on the reasoning that an unmeasurable walk should be trusted so
+    # delisting isn't silently disabled. That was the bug: "complete" is what
+    # authorises mark_inactive to delist everything the walk did not reach, and
+    # a probe that failed cannot authorise anything. Suppressing the sweep is
+    # the safe direction — less delisting, never more.
+    assert walk_is_complete(0, None) is False
+    # A DECLARED zero is different: it is a measurement, not a failure to
+    # measure. An empty district IS genuinely complete, and sreality's split
+    # relies on that — 77 districts, most of them empty for a small category.
+    # Conflating the two is exactly how a failed probe came to look like an
+    # empty category.
+    assert walk_is_complete(0, 0) is True
+    assert walk_is_complete(5, 0) is False   # rows against a declared zero
+    # Collected the FULL reported total (100%) → complete. Mild over-collection
+    # (concurrent additions mid-walk) is still complete, up to 1.02x.
+    assert walk_is_complete(100, 100) is True
+    assert walk_is_complete(101, 100) is True
+    # Beyond 1.02x the denominator itself is wrong (overlapping slices or
+    # foreign stock), so contamination must not read as completeness.
+    assert walk_is_complete(120, 100) is False
+    # Anything short of 99.5% → incomplete, suppress the flip.
+    assert walk_is_complete(99, 100) is False
+    assert walk_is_complete(90, 100) is False
+    assert walk_is_complete(10, 100) is False
 
 
 def test_run_full_skips_mark_inactive_when_walk_incomplete(patched_db, monkeypatch):
@@ -609,7 +633,13 @@ def test_walk_category_split_reports_probe_not_summed_districts(
         1, 2, **_split_args()
     )
     assert rs == 12000             # probe total, not summed_drs (16000)
-    assert complete is True
+    # ...and the walk is NOT complete: the union (16000 distinct ids) overshoots
+    # the national probe by 1.33x, past INDEX_MAX_OVERCOLLECTION. This asserted
+    # True before the shared verdict landed. Over-collection means the
+    # denominator can't be trusted — either the slices overlap or foreign stock
+    # leaked in — so it must not authorise a sweep. The denominator this test
+    # exists to pin (rs) is unaffected.
+    assert complete is False
 
 
 def test_walk_category_split_truncated_district_suppresses_inactivation(

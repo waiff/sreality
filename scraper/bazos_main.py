@@ -52,6 +52,7 @@ from scraper.portal import (
     deadline_reached,
     default_config,
     load_portal_config,
+    walk_is_complete,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -59,16 +60,6 @@ from scraper.rate_limit import RateLimiter
 
 LOG = logging.getLogger(__name__)
 SOURCE = "bazos"
-
-# A walk must collect ~the FULL portal-reported total before its index-absence
-# sweep is trusted to mark_inactive (architectural rule #3). 100% is
-# statistically unreachable on large categories: ads churn mid-walk (a byt/prodej
-# section walk takes ~12 min) with observed real-walk deficits up to 0.24%, so a
-# 1.0 bar suppressed every healthy sweep. 99.5% passes every healthy walk with
-# 2x margin while a genuinely truncated walk (e.g. rate-limited 1,029/7,000)
-# still reads incomplete; the INACTIVE_MIN_UNSEEN_HOURS staleness rail below is
-# the second, stronger guard. Not operator-tunable.
-INDEX_MIN_COMPLETENESS = 0.995
 
 # Only flip rows unseen for 12h+ — ~2x the 6-7h walk cadence. Combined with
 # touch_listings bumping last_seen_at for every index-seen row BEFORE the sweep,
@@ -228,16 +219,13 @@ class BazosPortal:
         if conn is not None and entries:
             enqueued = db.enqueue_detail(conn, SOURCE, entries)
 
-        # Complete only when the walk collected ~all of the portal-reported total
-        # (and wasn't page-capped or deadline-stopped). A failed total parse
-        # (None) reads as incomplete — for an HTML crawl we never infer
-        # delistings without that positive signal.
-        complete = (
-            not stopped_early
-            and not self._max_pages
-            and total is not None
-            and total > 0
-            and len(seen) >= total * INDEX_MIN_COMPLETENESS
+        # `walk_is_complete` owns the whole coverage verdict (shared across all
+        # nine portals): the deadline stop, an unmeasurable total, and
+        # over-collection past the declared total all read as "not complete".
+        # The page cap stays a separate conjunct — it is a config choice, not a
+        # coverage measurement.
+        complete = not self._max_pages and walk_is_complete(
+            len(seen), total, stopped_early=stopped_early
         )
         LOG.info(
             "ENQUEUE source=bazos enqueued=%d new=%d changed=%d unchanged=%d "

@@ -49,6 +49,7 @@ from scraper.portal import (
     deadline_reached,
     default_config,
     load_portal_config,
+    walk_is_complete,
 )
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
@@ -67,17 +68,16 @@ DEFAULT_IMAGE_WORKERS = 32
 DEFAULT_DETAIL_WORKERS = 4
 DEFAULT_DETAIL_RATE = 2.0  # requests/sec, global across all workers
 
-# A walk must collect ~the FULL API-reported total (result_size) before its
-# absence sweep is trusted to mark listings inactive. Set to 0.995 (not 1.0):
+# The completeness gate (INDEX_MIN_COMPLETENESS = 0.995) and the verdict that
+# reads it (walk_is_complete) now live in scraper.portal — ONE definition for all
+# nine portals (rule #21), imported above. 0.995 rather than 1.0 because
 # sreality's result_size jitters mid-walk, so a strict 100% gate suppressed the
-# sweep on nearly every walk and delistings accumulated until a perfect one — the
-# same statistical trap that pushed the framework portals to 0.995 (rule #3). The
-# second rail (INACTIVE_MIN_UNSEEN_HOURS) is what makes relaxing this safe: even
+# sweep on nearly every walk and delistings accumulated until a perfect one. The
+# second rail (INACTIVE_MIN_UNSEEN_HOURS) is what makes relaxing it safe: even
 # under a 0.5%-short walk, a listing only flips if it has ALSO been unseen across
 # several consecutive walks, so a single walk-miss can never false-delist a live
-# listing. When result_size is unavailable we fall back to trusting the walk
-# (see _walk_complete) rather than silently disabling delisting detection.
-INDEX_MIN_COMPLETENESS = 0.995
+# listing. An UNMEASURABLE walk (no result_size) is "unknown", not "complete" —
+# the shared verdict never fails open, so a failed probe suppresses the sweep.
 
 # Staleness rail on the index-absence sweep (rule #3, the second rail): a listing
 # is flipped inactive only if it was ALSO unseen for at least this many hours, so
@@ -1079,21 +1079,6 @@ def _run_detail_drain(
     )
 
 
-def _walk_complete(collected: int, result_size: int | None) -> bool:
-    """Whether an index walk covered ~the FULL API-reported total, so it can
-    safely drive mark_inactive (a >=99.5% walk — see INDEX_MIN_COMPLETENESS; the
-    INACTIVE_MIN_UNSEEN_HOURS rail is the second guard on the relaxed gate).
-
-    Only a *positive* signal of incompleteness suppresses the flip: if the
-    API didn't report result_size (or reported <= 0) we fall back to
-    trusting the walk, matching the pre-existing nightly behaviour, rather
-    than silently disabling delisting detection.
-    """
-    if result_size is None or result_size <= 0:
-        return True
-    return collected >= result_size * INDEX_MIN_COMPLETENESS
-
-
 _REFETCH_OUTCOMES = ("new", "updated", "unchanged", "gone", "errors")
 # The subset that actually consumed a detail FETCH (and the global
 # refetch_budget). Excludes "unchanged" — those are bulk-touched, not fetched —
@@ -1151,7 +1136,7 @@ def _walk_category_split(
             cat_refetch_cap, detail_workers, enqueue_only=enqueue_only,
         )
         rs = client.result_size if client.result_size is not None else result_size
-        complete = cat_limit is None and _walk_complete(len(seen), rs)
+        complete = cat_limit is None and walk_is_complete(len(seen), rs)
         return seen, counts, rs, client.pages_fetched, complete
 
     LOG.info(
@@ -1209,9 +1194,12 @@ def _walk_category_split(
         # That silently starved the detail backlog of the big split categories
         # (komercni/pronajem, dum/prodej) so it never drained.
         cat_refetched += sum(dcounts.get(o, 0) for o in _DETAIL_FETCH_OUTCOMES)
-        # Empty district (drs 0) is trivially complete; a populated district
-        # whose own walk fell short is a truncation.
-        if drs is None or len(dseen) < drs * INDEX_MIN_COMPLETENESS:
+        # One definition for every completeness judgement in the tree, so a
+        # district inherits the same fail-closed and over-collection rules as
+        # the category verdict: an unmeasured district (drs None) is `unknown`,
+        # never trivially complete, and a district that somehow out-collects its
+        # own probe is a contaminated slice, not a thorough one.
+        if not walk_is_complete(len(dseen), drs):
             all_districts_complete = False
             LOG.warning(
                 "SPLIT district incomplete cm=%s ct=%s district=%d collected=%d result_size=%s",
@@ -1223,7 +1211,7 @@ def _walk_category_split(
     # remainder. The deep-pagination cap truncates it, but the union only grows
     # — it can never cause a false delisting, and the completeness guard still
     # compares the final union against the national probe below.
-    if not _walk_complete(len(union), result_size) and not deadline_reached(deadline):
+    if not walk_is_complete(len(union), result_size) and not deadline_reached(deadline):
         LOG.info(
             "SPLIT national-fallback cm=%s ct=%s union=%d result_size=%d",
             cm_text, ct_text, len(union), result_size,
@@ -1253,8 +1241,12 @@ def _walk_category_split(
 
     # Complete only if every district fully walked AND the union covers the
     # national total — the latter catches a district missing from DISTRICT_IDS
-    # (both union and summed sizes would otherwise drop together).
-    complete = all_districts_complete and _walk_complete(len(union), result_size)
+    # (both union and summed sizes would otherwise drop together). Any negative
+    # district exit (deadline, crash, short walk) goes in as stopped_early so the
+    # ONE shared verdict owns the whole answer instead of being ANDed after it.
+    complete = walk_is_complete(
+        len(union), result_size, stopped_early=not all_districts_complete,
+    )
     LOG.info(
         "SPLIT summary cm=%s ct=%s districts=%d union=%d national_probe=%s "
         "summed_districts=%d complete=%s",

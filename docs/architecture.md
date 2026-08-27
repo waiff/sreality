@@ -505,7 +505,22 @@ renumber.** Navigate by area:
    sacred. The `is_active=false` inference is only valid after a **~complete index walk** —
    a partial walk (`--limit N`, `--detail-only`, `--max-pages`) cannot determine which
    listings are gone. The scraper enforces this: `mark_inactive` is skipped when `--limit`
-   is set, and `--detail-only` never reaches the index phase. "Complete" is ≥99.5%
+   is set, and `--detail-only` never reaches the index phase. **The verdict is
+   `scraper.portal.walk_coverage`, the ONE definition for all nine portals, and it has three
+   outcomes, not two: `complete` / `incomplete` / `unknown`. Only `complete` authorises a
+   sweep.** It replaced eight byte-identical private copies that FAILED OPEN — `if not total:
+   return True`, i.e. "I could not measure, so assume complete". ceskereality's nationwide
+   probe swallows its own exception and returns None, so a walk that reached a fraction of a
+   category reported itself complete and became eligible to delist everything it never saw.
+   An unmeasurable walk is now `unknown`; "I don't know" is not a proof. Note the care around
+   zero: `None` means *could not measure* and fails closed, while a declared `0` is a real
+   measurement, so an empty district IS complete (sreality's 77-district split depends on it)
+   — conflating them via `if not total` is precisely how a failed probe came to look like an
+   empty category. The gate is also TWO-SIDED: collecting more than `INDEX_MAX_OVERCOLLECTION`
+   (1.02x) of the declared total means the slices overlap or foreign stock leaked in, so the
+   denominator is wrong — contamination must not read as completeness. Measured 2026-08-27
+   across 7 days and all nine portals, the worst real ratio is 1.0029, so the ceiling
+   suppresses nothing that works today. "Complete" is ≥99.5%
    (`INDEX_MIN_COMPLETENESS = 0.995`) for the framework portals, NOT 100% — portal counts
    jitter mid-walk, and a strict 1.0 gate proved statistically unreachable for large bazos
    categories (delistings then accumulated for 11 days). The second rail: framework sweeps

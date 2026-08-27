@@ -153,6 +153,74 @@ def price_changed(
     return abs(new - prev) / prev >= min_change_pct
 
 
+# A walk may drive mark_inactive only when it covered ~all of what the portal
+# said it had. 0.995 tolerates live churn during a multi-minute walk; the upper
+# bound catches the opposite failure, a walk that collected MORE than the portal
+# declared, which means the slices overlap or foreign stock leaked in and the
+# "total" is not the denominator we think it is. Contamination must not read as
+# completeness.
+INDEX_MIN_COMPLETENESS = 0.995
+INDEX_MAX_OVERCOLLECTION = 1.02
+
+WalkVerdict = Literal["complete", "incomplete", "unknown"]
+
+
+def walk_coverage(
+    collected: int,
+    declared_total: int | None,
+    *,
+    stopped_early: bool = False,
+) -> WalkVerdict:
+    """How much of a portal category this walk actually covered.
+
+    ONE definition for all nine portals. It replaced eight byte-identical copies
+    of a `_walk_complete` that FAILED OPEN:
+
+        if not total or total <= 0:
+            return True        # <- "I could not measure, so assume complete"
+
+    That is backwards, and it is the hole the 2026-08-27 audit came through.
+    ceskereality's nationwide-total probe swallows its own exception and returns
+    None, so a walk that collected a fraction of the category reported itself
+    complete and became eligible to delist everything it had not reached. An
+    unmeasurable walk is `unknown`, never `complete`: rule #3 permits delisting
+    only on a proven-complete walk, and "I don't know" is not a proof.
+
+    `stopped_early` is any negative exit the caller detected (budget expiry, a
+    page cap, an aborted slice). It short-circuits the arithmetic, because the
+    count alone cannot see it: a portal that under-reports its total can clear
+    99.5% while having walked a third of the pages.
+    """
+    if stopped_early:
+        return "incomplete"
+    if declared_total is None or declared_total < 0:
+        return "unknown"
+    if declared_total == 0:
+        # A measured zero is a fact, not a gap. An empty district, or a category
+        # the portal genuinely has nothing in, IS complete — sreality's district
+        # split depends on it (77 districts, most empty for a small category).
+        # Collecting rows against a declared zero is the opposite: the
+        # denominator is wrong, so the slice is contaminated, not thorough.
+        # The old `if not total` conflated the two, which is how a FAILED probe
+        # came to look exactly like an empty category.
+        return "complete" if collected == 0 else "incomplete"
+    ratio = collected / declared_total
+    if ratio > INDEX_MAX_OVERCOLLECTION:
+        return "incomplete"
+    return "complete" if ratio >= INDEX_MIN_COMPLETENESS else "incomplete"
+
+
+def walk_is_complete(
+    collected: int,
+    declared_total: int | None,
+    *,
+    stopped_early: bool = False,
+) -> bool:
+    """`walk_coverage` as the boolean the runner gates mark_inactive on. Only a
+    positive `complete` verdict is True — `unknown` is not."""
+    return walk_coverage(collected, declared_total, stopped_early=stopped_early) == "complete"
+
+
 def deadline_reached(deadline: float | None) -> bool:
     """Has this walk spent its wall-clock budget?
 

@@ -44,6 +44,7 @@ from scraper.portal import (
     load_portal_config,
     classify_index_sighting,
     deadline_reached,
+    walk_is_complete,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -54,7 +55,6 @@ from scraper.remax_parser import category_of, index_price, parse_detail, parse_i
 LOG = logging.getLogger(__name__)
 SOURCE = "remax"
 _PAGE_SIZE = 21  # remax serves 21 cards per search page
-INDEX_MIN_COMPLETENESS = 0.995  # agenda walk must reach ≥99.5% of the reported total to delist
 
 
 class _AgendaWalk:
@@ -233,16 +233,18 @@ class RemaxPortal:
                 break
             page += 1
 
-        # Complete only if we walked the whole agenda (not page-capped, not cut
-        # short by the wall-clock deadline) AND reached the portal-reported total
-        # — the gate for agenda-grain delisting. A deadline stop can leave the
-        # collected count above INDEX_MIN_COMPLETENESS, so it must force the flag
-        # False explicitly; the walk is cached, so the whole agenda (every one of
-        # its category descriptors) inherits the incomplete verdict.
+        # Complete only if we walked the whole agenda (not page-capped) AND the
+        # shared verdict says so — the gate for agenda-grain delisting.
+        # `walk_is_complete` owns the whole coverage judgement: a deadline stop
+        # (which can still leave the collected count above the threshold) is
+        # passed as `stopped_early`, an unreported total is `unknown` — never
+        # complete — and over-collection past the declared total means the
+        # denominator is wrong, so it cannot read as coverage either. The walk is
+        # cached, so the whole agenda (every one of its category descriptors)
+        # inherits the incomplete verdict.
         capped = bool(self._max_pages and pages >= self._max_pages)
-        complete = (
-            not stopped_early and not capped and total is not None and total > 0
-            and len(native_ids) >= total * INDEX_MIN_COMPLETENESS
+        complete = not capped and walk_is_complete(
+            len(native_ids), total, stopped_early=stopped_early,
         )
         walk = _AgendaWalk(native_ids, ref_map, price_map, cat_map, total, pages, complete)
         self._agenda_cache[sale] = walk

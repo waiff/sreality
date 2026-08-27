@@ -6,20 +6,48 @@ from __future__ import annotations
 import pytest
 
 from scraper import bezrealitky_main
-from scraper.portal import PortalConfig
+from scraper.portal import PortalConfig, walk_coverage, walk_is_complete
 
 
 def test_walk_complete_requires_near_full_walk():
     # Architectural rule #3: only infer delisting after a ~complete index walk.
     # The bar is hardcoded (INDEX_MIN_COMPLETENESS=0.995, tolerating mid-walk
     # churn), not operator-tunable — a genuinely truncated walk still reads
-    # incomplete and skips the inactive sweep.
-    assert bezrealitky_main._walk_complete(100, 100) is True
-    assert bezrealitky_main._walk_complete(996, 1000) is True   # 0.4% deficit = churn
-    assert bezrealitky_main._walk_complete(994, 1000) is False  # 0.6% deficit = truncated
-    assert bezrealitky_main._walk_complete(99, 100) is False
-    assert bezrealitky_main._walk_complete(90, 100) is False
-    assert bezrealitky_main._walk_complete(0, None) is True   # unknown total → trust the walk
+    # incomplete and skips the inactive sweep. bezrealitky no longer owns a
+    # private copy of this rule; scraper.portal.walk_is_complete is the one
+    # definition for all nine portals.
+    assert walk_is_complete(100, 100) is True
+    assert walk_is_complete(996, 1000) is True   # 0.4% deficit = churn
+    assert walk_is_complete(994, 1000) is False  # 0.6% deficit = truncated
+    assert walk_is_complete(99, 100) is False
+    assert walk_is_complete(90, 100) is False
+
+
+def test_unmeasurable_walk_is_unknown_not_complete():
+    # This case used to assert `_walk_complete(0, None) is True` ("unknown total
+    # → trust the walk"). That expectation was the DEFECT, not the spec: an
+    # unmeasured walk was authorising mark_inactive to delist everything it had
+    # not reached. "I could not measure it" is `unknown`, and only `complete`
+    # opens the delisting gate.
+    assert walk_coverage(0, None) == "unknown"
+    assert walk_is_complete(0, None) is False
+    assert walk_is_complete(500, 0) is False    # totalCount=0 alongside real rows
+
+
+def test_overcollection_is_not_completeness():
+    # Collecting materially MORE than bezrealitky declared means the slices
+    # overlapped or foreign stock leaked in, so the denominator is wrong;
+    # contamination must not read as a proven-complete walk.
+    assert walk_is_complete(1020, 1000) is True    # within the 1.02x tolerance
+    assert walk_is_complete(1500, 1000) is False
+
+
+def test_stopped_early_short_circuits_the_ratio():
+    # The deadline/page-cap exit the walk detects outranks the arithmetic: a
+    # portal that under-reports totalCount can clear 99.5% having walked a
+    # fraction of the pages.
+    assert walk_is_complete(1000, 1000, stopped_early=True) is False
+    assert walk_coverage(1000, 1000, stopped_early=True) == "incomplete"
 
 
 def _portal() -> bezrealitky_main.BezrealitkyPortal:
