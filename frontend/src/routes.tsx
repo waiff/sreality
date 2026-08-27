@@ -36,6 +36,7 @@ const LocationQuality = lazyChunk(() => import('./pages/LocationQuality'));
 const NewDedupDashboard = lazyChunk(() => import('./pages/NewDedupDashboard'));
 const NewDedupSettings = lazyChunk(() => import('./pages/NewDedupSettings'));
 const NewDedupLabeling = lazyChunk(() => import('./pages/NewDedupLabeling'));
+const NewDedupTaxonomy = lazyChunk(() => import('./pages/NewDedupTaxonomy'));
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
 const DevConfidencePreview = lazyChunk(() => import('./pages/DevConfidencePreview'));
@@ -109,6 +110,7 @@ export const routes: RouteObject[] = [
       { path: 'new-dedup', element: <AdminPage><NewDedupDashboard /></AdminPage>, handle: { title: 'NEW DEDUP' } },
       { path: 'new-dedup/settings', element: <AdminPage><NewDedupSettings /></AdminPage>, handle: { title: 'NEW DEDUP · Settings' } },
       { path: 'new-dedup/labeling', element: <AdminPage><NewDedupLabeling /></AdminPage>, handle: { title: 'NEW DEDUP · Labeling' } },
+      { path: 'new-dedup/labeling/taxonomy', element: <AdminPage><NewDedupTaxonomy /></AdminPage>, handle: { title: 'NEW DEDUP · Taxonomy' } },
       { path: 'scrapers', element: <AdminPage><Scrapers /></AdminPage>, handle: { title: 'Scrapers' } },
       { path: 'dev/confidence-indicator', element: <AdminPage><DevConfidencePreview /></AdminPage>, handle: { title: 'Confidence indicator (dev)' } },
       { path: '*', element: <NotFound />, handle: { title: 'Not found' } },

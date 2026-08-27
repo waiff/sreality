@@ -15,6 +15,7 @@ from api import dependencies as deps
 from api import main as api_main
 from toolkit import dedup_sim_labeling as dsl
 from toolkit import tag_annotations as ta
+from toolkit import tag_definitions as td
 
 
 class _FakeConn:
@@ -68,6 +69,45 @@ _RESPONSES: dict[str, Any] = {
                            "status": "confirmed", "proposed_label": "a", "corrected": False},
     "bulk_set_proposal_state": {"updated": 2, "model": "m", "state": "negative",
                                 "image_ids": [1, 2]},
+    "list_definition_status": [
+        {"tag_id": 1, "definition_id": 9, "version": 2, "means": "A kitchen.",
+         "created_at": "t"},
+    ],
+    "get_active_definition": {
+        "id": 9, "tag_id": 1, "version": 2, "means": "A kitchen.",
+        "counts": ["a galley kitchen"],
+        "does_not_count": [{"case": "a kitchenette", "goes_to_tag_id": 3}],
+        "confusable_with": [{"tag_id": 2, "tell": "no worktop"}],
+        "leave_out_when": None, "example_image_ids": [11],
+        "status": "active", "created_at": "t", "created_by": "operator",
+        "referenced_tags": [{"tag_id": 2, "label": "b"}],
+    },
+    "save_definition": {
+        "id": 10, "tag_id": 1, "version": 3, "means": "A kitchen.",
+        "counts": [], "does_not_count": [], "confusable_with": [],
+        "leave_out_when": None, "example_image_ids": [],
+        "status": "active", "created_at": "t", "created_by": "operator",
+        "referenced_tags": [],
+    },
+    "list_definition_versions": [
+        {"id": 9, "version": 2, "status": "active", "means": "A kitchen.",
+         "created_at": "t", "created_by": "operator"},
+    ],
+    "get_definition_version": {
+        "id": 8, "tag_id": 1, "version": 1, "means": "First take.",
+        "counts": [], "does_not_count": [], "confusable_with": [],
+        "leave_out_when": None, "example_image_ids": [],
+        "status": "superseded", "created_at": "t", "created_by": "operator",
+        "referenced_tags": [],
+    },
+    "list_positive_images": [
+        {"image_id": 11, "storage_path": "img/11.jpg",
+         "sreality_url": "https://cdn/11.jpg", "updated_at": "t"},
+    ],
+    "nearest_tags": [
+        {"tag_id": 2, "label": "b", "family": None,
+         "embedded_positive_count": 31, "cosine_distance": 0.0412},
+    ],
 }
 
 _PATCHED = {
@@ -76,6 +116,11 @@ _PATCHED = {
          "list_tags_for_image",
          "list_positive_tags_for_images"],
     dsl: ["grow_sample", "list_proposals", "set_proposal_state", "bulk_set_proposal_state"],
+    # list_definition_status takes the connection only; _record handles that fine
+    # (it records {}), so it needs no special case.
+    td: ["list_definition_status", "get_active_definition", "save_definition",
+         "list_definition_versions", "get_definition_version", "list_positive_images",
+         "nearest_tags"],
 }
 
 
@@ -504,9 +549,198 @@ def test_post_positive_tags_for_images_over_max_422s(client, monkeypatch):
     assert res.status_code == 422
 
 
+# --- tag definitions (migration 445) ----------------------------------------
+
+
+_SAVE_BODY = {
+    "means": "A kitchen inside a flat.",
+    "counts": ["a galley kitchen"],
+    "does_not_count": [{"case": "a kitchenette", "goes_to_tag_id": 3}],
+    "confusable_with": [{"tag_id": 2, "tell": "no worktop = living room"}],
+    "leave_out_when": None,
+    "example_image_ids": [11],
+    "base_version": 2,
+}
+
+
+def test_get_definition_status(client, calls):
+    res = client.get("/new-dedup/labeling/definitions")
+    assert res.status_code == 200
+    assert res.json()["data"][0]["version"] == 2
+    # Connection-only call — nothing to plumb, but it must have been reached.
+    assert calls["list_definition_status"] == {}
+
+
+def test_get_tag_definition(client, calls):
+    res = client.get("/new-dedup/labeling/tags/1/definition")
+    assert res.status_code == 200
+    assert res.json()["data"]["means"] == "A kitchen."
+    assert calls["get_active_definition"] == {"tag_id": 1}
+
+
+def test_get_tag_definition_is_a_200_with_a_null_body_when_undefined(client, monkeypatch):
+    # A known tag with no definition yet is NOT a 404 — the editor opens empty.
+    monkeypatch.setattr(td, "get_active_definition", lambda conn, **kw: None)
+    res = client.get("/new-dedup/labeling/tags/1/definition")
+    assert res.status_code == 200
+    assert res.json()["data"] is None
+
+
+def test_get_tag_definition_unknown_tag_404s(client, monkeypatch):
+    monkeypatch.setattr(td, "get_active_definition", _raises(KeyError(999)))
+    assert client.get("/new-dedup/labeling/tags/999/definition").status_code == 404
+
+
+def test_put_tag_definition(client, calls):
+    res = client.put("/new-dedup/labeling/tags/1/definition", json=_SAVE_BODY)
+    assert res.status_code == 200  # a new version is a 200, never a 201
+    assert res.json()["data"]["version"] == 3
+    assert calls["save_definition"]["tag_id"] == 1
+    assert calls["save_definition"]["means"] == "A kitchen inside a flat."
+    assert calls["save_definition"]["example_image_ids"] == [11]
+    # The version the editor was written against — the lost-update guard.
+    assert calls["save_definition"]["base_version"] == 2
+
+
+def test_put_tag_definition_plumbs_nested_models_through_as_plain_dicts(client, calls):
+    # The toolkit validates dicts (unknown-key rejection, id coercion); handing it
+    # pydantic objects would make `isinstance(item, dict)` false and every entry a
+    # 422. model_dump() is load-bearing, not cosmetic.
+    client.put("/new-dedup/labeling/tags/1/definition", json=_SAVE_BODY)
+    saved = calls["save_definition"]
+    assert saved["does_not_count"] == [{"case": "a kitchenette", "goes_to_tag_id": 3}]
+    assert saved["confusable_with"] == [{"tag_id": 2, "tell": "no worktop = living room"}]
+    assert all(type(i) is dict for i in saved["does_not_count"] + saved["confusable_with"])
+
+
+def test_put_tag_definition_defaults_every_optional_field(client, calls):
+    res = client.put("/new-dedup/labeling/tags/1/definition", json={"means": "A kitchen."})
+    assert res.status_code == 200
+    saved = calls["save_definition"]
+    assert saved["counts"] == []
+    assert saved["does_not_count"] == []
+    assert saved["confusable_with"] == []
+    assert saved["example_image_ids"] == []
+    assert saved["leave_out_when"] is None
+    # No base_version means "I loaded a tag with no definition" — an assertion
+    # the toolkit checks, never "don't check".
+    assert saved["base_version"] is None
+
+
+def test_put_tag_definition_unknown_tag_404s(client, monkeypatch):
+    monkeypatch.setattr(td, "save_definition", _raises(KeyError(999)))
+    res = client.put("/new-dedup/labeling/tags/999/definition", json={"means": "x"})
+    assert res.status_code == 404
+
+
+def test_put_tag_definition_rejected_input_422s(client, monkeypatch):
+    monkeypatch.setattr(
+        td, "save_definition", _raises(ValueError("a tag cannot be confusable with itself")),
+    )
+    res = client.put("/new-dedup/labeling/tags/1/definition", json={"means": "x"})
+    assert res.status_code == 422
+
+
+def test_put_tag_definition_concurrent_save_422s(client, monkeypatch):
+    # A stale base_version (or the unique index losing a race) is an input problem
+    # for the operator ("reload and save again"), not a 409 — this file's
+    # vocabulary is 404/422.
+    monkeypatch.setattr(
+        td, "save_definition",
+        _raises(ValueError("this tag's definition changed in another tab")),
+    )
+    res = client.put("/new-dedup/labeling/tags/1/definition", json={"means": "x"})
+    assert res.status_code == 422
+    assert "another tab" in res.json()["detail"]
+
+
+def test_put_tag_definition_requires_a_means(client, calls):
+    res = client.put("/new-dedup/labeling/tags/1/definition", json={"counts": []})
+    assert res.status_code == 422  # pydantic's own validation
+    assert "save_definition" not in calls
+
+
+def test_get_tag_definition_versions(client, calls):
+    res = client.get("/new-dedup/labeling/tags/1/definition/versions")
+    assert res.status_code == 200
+    assert res.json()["data"][0]["status"] == "active"
+    assert calls["list_definition_versions"] == {"tag_id": 1}
+
+
+def test_get_tag_definition_versions_unknown_tag_404s(client, monkeypatch):
+    monkeypatch.setattr(td, "list_definition_versions", _raises(KeyError(999)))
+    assert client.get(
+        "/new-dedup/labeling/tags/999/definition/versions",
+    ).status_code == 404
+
+
+def test_get_tag_definition_version(client, calls):
+    res = client.get("/new-dedup/labeling/tags/1/definition/versions/1")
+    assert res.status_code == 200
+    assert res.json()["data"]["status"] == "superseded"
+    assert calls["get_definition_version"] == {"tag_id": 1, "version": 1}
+
+
+def test_get_tag_definition_version_missing_404s(client, monkeypatch):
+    monkeypatch.setattr(td, "get_definition_version", _raises(KeyError((1, 7))))
+    res = client.get("/new-dedup/labeling/tags/1/definition/versions/7")
+    assert res.status_code == 404
+    assert "v7" in res.json()["detail"]
+
+
+def test_definition_version_route_does_not_shadow_the_definition_route(client, calls):
+    # /tags/{id}/definition and /tags/{id}/definition/versions/{v} are distinct
+    # paths; a regression that collapsed them would silently serve the wrong doc.
+    client.get("/new-dedup/labeling/tags/1/definition")
+    client.get("/new-dedup/labeling/tags/1/definition/versions/1")
+    assert "get_active_definition" in calls and "get_definition_version" in calls
+
+
+def test_get_positive_images(client, calls):
+    res = client.get("/new-dedup/labeling/tags/1/positive-images?limit=50")
+    assert res.status_code == 200
+    assert res.json()["data"][0]["image_id"] == 11
+    assert calls["list_positive_images"] == {"tag_id": 1, "limit": 50}
+
+
+def test_get_positive_images_defaults_its_limit(client, calls):
+    assert client.get("/new-dedup/labeling/tags/1/positive-images").status_code == 200
+    assert calls["list_positive_images"] == {"tag_id": 1, "limit": 200}
+
+
+def test_get_tag_neighbours(client, calls):
+    res = client.get("/new-dedup/labeling/tags/1/neighbours?limit=3")
+    assert res.status_code == 200
+    assert res.json()["data"][0]["cosine_distance"] == 0.0412
+    assert calls["nearest_tags"] == {"tag_id": 1, "limit": 3}
+
+
+def test_get_tag_neighbours_empty_is_a_200_not_an_error(client, monkeypatch):
+    # Too few embedded positives to have a centroid degrades to [], never a 4xx.
+    monkeypatch.setattr(td, "nearest_tags", lambda conn, **kw: [])
+    res = client.get("/new-dedup/labeling/tags/1/neighbours")
+    assert res.status_code == 200
+    assert res.json()["data"] == []
+
+
 # --- the gate ---------------------------------------------------------------
 
 
 def test_new_dedup_labeling_requires_admin(client):
     api_main.app.dependency_overrides.pop(deps.require_admin, None)
     assert client.get("/new-dedup/labeling/overview").status_code == 401
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/new-dedup/labeling/definitions",
+        "/new-dedup/labeling/tags/1/definition",
+        "/new-dedup/labeling/tags/1/definition/versions",
+        "/new-dedup/labeling/tags/1/positive-images",
+        "/new-dedup/labeling/tags/1/neighbours",
+    ],
+)
+def test_definition_routes_are_admin_gated(client, path):
+    api_main.app.dependency_overrides.pop(deps.require_admin, None)
+    assert client.get(path).status_code == 401

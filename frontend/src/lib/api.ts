@@ -988,6 +988,169 @@ export const clearNewDedupTagAnnotation = (
     { method: 'DELETE', jwt: true },
   );
 
+/* Tag definitions (migration 445) — the versioned written meaning of a
+ * tag_taxonomy row. Supersede, never overwrite: every save creates a new
+ * version and retires the previous one, so `version` only ever goes up and old
+ * versions are readable forever.
+ *
+ * Named without the NewDedup prefix on purpose: the taxonomy these define is
+ * permanent and not dedup-scoped. The ROUTES still live under
+ * /new-dedup/labeling — renaming that prefix is separately flagged debt. */
+export interface TagDefinitionDoesNotCount {
+  case: string;
+  /* The tag this case belongs to instead, when there is one. Always an id —
+   * never label text, so a rename can't rot a definition. */
+  goes_to_tag_id: number | null;
+}
+
+export interface TagDefinitionConfusable {
+  tag_id: number;
+  /* The visual tell that separates the two ("mailboxes/intercom = shared"). */
+  tell: string;
+}
+
+/* Every other tag this definition points at, resolved to a label server-side.
+ * Ids that no longer exist are simply absent — the definition document is a
+ * denormalized snapshot and is resolved leniently on read. */
+export interface TagDefinitionReferencedTag {
+  tag_id: number;
+  label: string;
+}
+
+export interface TagDefinition {
+  id: number;
+  tag_id: number;
+  version: number;
+  means: string;
+  counts: string[];
+  does_not_count: TagDefinitionDoesNotCount[];
+  confusable_with: TagDefinitionConfusable[];
+  leave_out_when: string | null;
+  example_image_ids: number[];
+  status: 'active' | 'superseded';
+  created_at: string;
+  created_by: string;
+  referenced_tags: TagDefinitionReferencedTag[];
+}
+
+/* Version metadata only — no document body. */
+export interface TagDefinitionVersion {
+  id: number;
+  version: number;
+  status: 'active' | 'superseded';
+  means: string;
+  created_at: string;
+  created_by: string;
+}
+
+/* One row per tag that HAS an active definition; a tag absent from the list has
+ * none yet (the future "no definition = cannot enter the pipeline" gate). */
+export interface TagDefinitionStatus {
+  tag_id: number;
+  definition_id: number;
+  version: number;
+  means: string;
+  created_at: string;
+}
+
+export interface TagPositiveImage {
+  image_id: number;
+  storage_path: string | null;
+  sreality_url: string;
+  updated_at: string;
+}
+
+/* `cosine_distance` is a DISTANCE (0 = identical), not a similarity — pgvector's
+ * `<=>`. Lower is closer; the list arrives sorted ascending.
+ * `embedded_positive_count` counts positives that actually have a CLIP
+ * embedding, so it can be lower than the overview's positive_count. */
+export interface TagNeighbour {
+  tag_id: number;
+  label: string;
+  family: string | null;
+  embedded_positive_count: number;
+  cosine_distance: number;
+}
+
+export interface SaveTagDefinitionIn {
+  means: string;
+  counts: string[];
+  does_not_count: TagDefinitionDoesNotCount[];
+  confusable_with: TagDefinitionConfusable[];
+  leave_out_when: string | null;
+  example_image_ids: number[];
+  /* The version this edit was written against — null when the editor opened a
+   * tag with no definition. The server refuses (422) a save whose base_version
+   * is no longer the active one, so a stale second tab cannot revert the
+   * definition; send what the form was loaded from, never the newest known. */
+  base_version: number | null;
+}
+
+export const listTagDefinitionStatus = (): Promise<{ data: TagDefinitionStatus[] }> =>
+  request<{ data: TagDefinitionStatus[] }>('/new-dedup/labeling/definitions', { jwt: true });
+
+/* Null body when the tag exists but has no definition yet; a 404 (ApiError) when
+ * the tag itself is unknown. */
+export const getTagDefinition = (
+  tagId: number,
+): Promise<{ data: TagDefinition | null }> =>
+  request<{ data: TagDefinition | null }>(
+    `/new-dedup/labeling/tags/${tagId}/definition`,
+    { jwt: true },
+  );
+
+/* Writes a NEW version and retires the previous one. There is no draft state
+ * server-side — batch every edit into one call. */
+export const saveTagDefinition = (
+  tagId: number,
+  body: SaveTagDefinitionIn,
+): Promise<{ data: TagDefinition }> =>
+  request<{ data: TagDefinition }>(`/new-dedup/labeling/tags/${tagId}/definition`, {
+    method: 'PUT',
+    json: body,
+    jwt: true,
+  });
+
+export const listTagDefinitionVersions = (
+  tagId: number,
+): Promise<{ data: TagDefinitionVersion[] }> =>
+  request<{ data: TagDefinitionVersion[] }>(
+    `/new-dedup/labeling/tags/${tagId}/definition/versions`,
+    { jwt: true },
+  );
+
+export const getTagDefinitionVersion = (
+  tagId: number,
+  version: number,
+): Promise<{ data: TagDefinition }> =>
+  request<{ data: TagDefinition }>(
+    `/new-dedup/labeling/tags/${tagId}/definition/versions/${version}`,
+    { jwt: true },
+  );
+
+/* What the tag ACTUALLY contains — every image currently positive on it. Not
+ * listNewDedupTagImages: that one is scoped to dedup_sim.labeling_sample
+ * membership and to a schema planned for removal. */
+export const listTagPositiveImages = (
+  tagId: number,
+  limit = 200,
+): Promise<{ data: TagPositiveImage[] }> =>
+  request<{ data: TagPositiveImage[] }>(
+    `/new-dedup/labeling/tags/${tagId}/positive-images`,
+    { query: { limit }, jwt: true },
+  );
+
+/* Empty — never an error — when the tag has fewer than 5 positives carrying a
+ * CLIP embedding, i.e. too few to have a meaningful centroid. */
+export const listTagNeighbours = (
+  tagId: number,
+  limit = 8,
+): Promise<{ data: TagNeighbour[] }> =>
+  request<{ data: TagNeighbour[] }>(`/new-dedup/labeling/tags/${tagId}/neighbours`, {
+    query: { limit },
+    jwt: true,
+  });
+
 // "Border case" flag (migration 310): even a human isn't confident about this
 // image's classification. Independent of image_training_examples — no label
 // required, may coexist with one (a best-guess flagged as uncertain).

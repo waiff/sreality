@@ -205,6 +205,100 @@ Two operator-requested additions, same data model, no new tables beyond one migr
   picked in that view. The toggle itself still never refetches the grid on its own —
   only actually dropping a set filter does.
 
+## Tag definitions (migration 445)
+
+The 51 tags are bare Czech strings. Two people looking at the same photo apply them
+differently, and neither is wrong, because nothing anywhere says what "interier - chodba"
+means. Independent per-tag heads trained on that inconsistency learn the inconsistency.
+So the definitions come **before** any further labeling: each tag gets a written meaning,
+a list of what counts, a list of what does NOT count (and which tag each of those cases
+belongs to instead), the tags it is confusable with plus the visual tell that separates
+them, and an optional "leave the image out of this head entirely rather than decide" rule.
+
+Writing them is also the diagnostic that settles the taxonomy. If you cannot write a
+`does_not_count` line that separates tag A from tag B, they are one tag — the document is
+where that becomes undeniable instead of an argument. That is why this ships before any
+merge/split tooling: the tool would be guessing, the definitions produce the answer.
+
+**Supersede, never overwrite.** `tag_definitions` (migration 445) is the same latest-wins +
+append-only-history idiom `listings`/`listing_snapshots` already use. There are **no
+drafts**: every save inserts a row at `version = max(version) + 1` with `status = 'active'`
+and flips the previously-active row to `'superseded'`, in ONE transaction. Because there is
+no draft state server-side, the workbench batches every edit — text, example-image toggles,
+"add this neighbour to confusable_with" — into local state and writes exactly once, when the
+operator presses Save. Otherwise one sitting would produce thirty versions of one definition.
+
+**Every save states what it was written against**, and there are two rails under that, for
+two different races. `save_definition` takes a `base_version` — the version the editor
+loaded, `null` for "this tag had no definition" — and it is an assertion, not a hint: the
+supersede names that version (`... AND status = 'active' AND version = %(base_version)s`)
+and a save that retires nothing is refused. That is the rail for the race that actually
+happens: two browser tabs minutes apart, which are not overlapping transactions and which
+no index can see. Without it, a save written against v2 while v3 was already active would
+supersede v3 and land its own stale text as v4 — no error, the active definition silently
+reverted to older wording. The partial unique index `tag_definitions_one_active_idx` is the
+second rail, for genuinely overlapping transactions: the loser's read predates the winner's
+insert, so its own insert trips the index. Both surface as the same `ValueError` ("this
+tag's definition changed in another tab — reload and save again") and the same 422, and the
+editor sends the version the FORM holds — never the newest one a background refetch has
+since learned about, which would defeat the check precisely when it matters.
+
+**Old versions are immutable, and that is the point.** A future PR stamps each annotation
+with the `definition_id` it was decided under. A definition change then requeues exactly the
+annotations made under the old version instead of invalidating a whole tag's set — which
+only works if the old document still exists, verbatim, forever. Design for it; it is not
+built here.
+
+**Other tags are referenced by id, never by label text.** `does_not_count[*].goes_to_tag_id`
+and `confusable_with[*].tag_id` are `tag_taxonomy.id`s, so renaming a tag cannot rot a
+definition that points at it. They live denormalized inside the versioned JSONB document
+deliberately — a version is an atomic snapshot of what the operator wrote — and are resolved
+to labels at render/prompt time via `referenced_tags`, **skipping ids that no longer exist**.
+`example_image_ids` makes the same trade for the opposite reason: no foreign key is possible
+on a `bigint[]`, so a deleted image is skipped when the gallery renders. The write path is
+strict where the read path is lenient: `save_definition` rejects a reference to a tag that
+does not exist right now (the picker only ever offers real tags, so an unknown id at save
+time is a bug), while a *later* deletion is normal and is absorbed on read.
+
+**Overlap evidence.** `nearest_tags` builds one centroid per tag by averaging the CLIP
+embeddings (`image_clip_embeddings`, the checkpoint named in `data/clip_taxonomy.json` — read
+from there, never a second hardcoded copy) of that tag's positives, and returns the closest
+other tags by pgvector `<=>`. That operator is a cosine **distance** — 0 is identical — so the
+field is named `cosine_distance` and rendered as one, never silently converted to a
+similarity. `MIN_POSITIVES_FOR_CENTROID = 5` floors both the subject and every candidate: a
+centroid over fewer positives is one image's idiosyncrasies, not a tag's visual identity. A
+tag under the floor gets `[]` rather than an error — the `CROSS JOIN` over an empty `subject`
+CTE simply yields no rows, so there is no special case in Python. `embedded_positive_count`
+counts positives that actually carry an embedding, so it can be lower than the overview's
+`positive_count`; it is named differently for exactly that reason.
+
+**The workbench does not depend on `dedup_sim`.** The gallery ("what this tag ACTUALLY
+contains") reads `image_tag_labels JOIN images` directly through
+`tag_definitions.list_positive_images`, not `tag_annotations.list_images_for_tag` — that one
+reads `dedup_sim.labeling_sample`, which is a membership filter rather than "every positive",
+and lives in a schema `docs/design/new-dedup/PROGRAM.md` plans to drop wholesale at Wave 8.
+This page is permanent; wiring it to a doomed schema would be a defect on delivery day.
+
+Surface: `toolkit/tag_definitions.py`, seven routes appended to
+`api/new_dedup_labeling.py` (same `/new-dedup/labeling` prefix, same router-level
+`require_admin`), and the `NEW DEDUP · Taxonomy` page at `/new-dedup/labeling/taxonomy` —
+tag list on the left with a `v{n}` / `—` status chip, the definition editor on the right, the
+positives gallery, and the overlap-evidence list. One sitting is one write, so every cap the
+toolkit enforces is mirrored in the editor (`means` 500 chars, every other line 300, 24
+example images) — a cap discovered only as a 422 would cost the whole sitting. For the same
+reason a half-written row blocks Save instead of being dropped on the way to the server, and
+a staged example that has stopped being positive on the tag (or fell past the 300 the grid
+shows) is listed separately above the grid, because it still saves into the next version and
+would otherwise be uncountable and unremovable. `tag_taxonomy.family` is NULL on all 51
+live rows, so the page derives the family from the `" - "` prefix in the label; **no backfill
+of `family` happens here** — that is a data change nobody asked for, and it would collide with
+the very taxonomy work this page exists to inform.
+
+Deliberate non-additions: no definition lifecycle state machine (`active`/`superseded` is the
+whole vocabulary), no merge/split execution, no bulk edit tools. The taxonomy is not settled
+yet; building tools to reshape it before the definitions exist would be building on the
+guesses this page is meant to replace.
+
 ## Explicitly deferred, not silently dropped
 
 - The per-tag trainer. `clip-linear-probe.md` still specifies v1 as one multinomial

@@ -75,6 +75,22 @@ W1 (shared prerequisites + labeling program):
       Follow-up same day: every tile shows its image's already-assigned tags in one batched call
       (`list_positive_tags_for_images`), and "Modify labels" gained two operator flags — `priority`
       (pins + reddens a tag needing attention) and `ready_for_training` (migration 443).
+- [x] Tag definitions store + operator workbench (migration 445, `tag_definitions`) — each tag now
+      gets a WRITTEN definition (means / counts / does_not_count / confusable_with + the visual
+      tell / leave_out_when / example images), versioned supersede-never-overwrite with no drafts:
+      one Save = one new active version, the previous one flipped to `superseded` in the same
+      transaction, exactly one active per tag enforced by a partial unique index. Every save states
+      the version it was written against (`base_version`) and is refused when that is no longer the
+      active one, so a stale second tab cannot silently revert a definition. Other tags are
+      referenced BY ID inside the versioned JSONB document (a rename can't rot a definition) and
+      resolved to labels leniently on read. `toolkit/tag_definitions.py` + seven routes on
+      `/new-dedup/labeling/*` + the `NEW DEDUP · Taxonomy` page (`/new-dedup/labeling/taxonomy`):
+      tag list with a `v{n}` status chip, the editor, a gallery of what the tag ACTUALLY contains
+      (read straight from `image_tag_labels`, no `dedup_sim` dependency), and CLIP-centroid overlap
+      evidence (`nearest_tags`, cosine DISTANCE, min 5 embedded positives). **Writing the ~51
+      definitions is now the operator-side blocker**: labeling at scale and per-tag heads both wait
+      on them, and the definitions are also the diagnostic that settles the taxonomy — two tags
+      whose does_not_count lines can't be written apart are one tag.
 - [x] RunPod client (`scripts/runpod_client.py`, #972/#975/#977) — launch/poll/terminate an
       on-demand pod, live cheapest-GPU catalog lookup, capacity fallback. Guaranteed teardown
       verified across 4 real live dispatches (3 zero-cost, 1 real ~1.7¢ pod rental).
