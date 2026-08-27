@@ -10,9 +10,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from pathlib import Path
+
+from scripts.migration_objects import load_migrations
 from scripts.verify_pipeline import (
     DEFAULT_THRESHOLDS,
+    _SAFE_IDENT,
     check_acquisition_lag,
+    check_migration_drift,
     check_walk_coverage,
     _status_for_cron,
     _status_for_burn,
@@ -24,6 +29,7 @@ from scripts.verify_pipeline import (
 )
 
 T = DEFAULT_THRESHOLDS
+_MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 
 
 # --- llm_errors ------------------------------------------------------------
@@ -1412,3 +1418,77 @@ def test_walk_coverage_never_certifies_a_self_reported_total() -> None:
     for source in ("remax", "maxima", "mmreality"):
         assert out["details"]["per_source"][source]["verifiable"] is False
         assert out["details"]["per_source"][source]["gap_pct"] is None
+
+
+# --- migration_drift: merged is not applied --------------------------------
+
+
+class _DriftConn:
+    """Returns a canned presence verdict per (kind, ident) probe."""
+
+    def __init__(self, present: dict[tuple[str, str], bool], default: bool = True) -> None:
+        self._present = present
+        self._default = default
+        self.probed: list[tuple[str, str]] = []
+
+    def cursor(self) -> "_DriftConn":
+        return self
+
+    def __enter__(self) -> "_DriftConn":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.probed = list(zip(params["kinds"], params["idents"]))
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return [(k, i, self._present.get((k, i), self._default)) for k, i in self.probed]
+
+
+def test_migration_drift_ok_when_everything_is_present() -> None:
+    out = check_migration_drift(_DriftConn({}, default=True), T)
+    assert out["status"] == "ok"
+    assert out["value"] == 0
+    assert out["details"]["objects_probed"] > 0
+
+
+def test_migration_drift_fails_when_a_migration_is_wholly_absent() -> None:
+    """The 2026-08-25 signature: merged, never applied, so NONE of its objects
+    exist. Nothing else in the platform noticed for 29 hours."""
+    conn = _DriftConn({("column", "listings.discovered_at"): False}, default=True)
+    out = check_migration_drift(conn, T)
+    assert out["status"] == "fail"
+    assert out["value"] == 1
+    assert any("444" in m for m in out["details"]["missing_entirely"])
+
+
+def test_migration_drift_only_warns_when_a_migration_is_half_present() -> None:
+    """Half-applied is ambiguous — a partial apply, or the parser mis-read the
+    file. Ambiguity warns; it must not page anyone at 3am."""
+    migs = load_migrations(_MIGRATIONS_DIR, newest=T["migration_drift_window"])
+    multi = next(m for m in migs if len(m.objects) >= 2)
+    conn = _DriftConn({(multi.objects[0].kind, multi.objects[0].ident): False}, default=True)
+    out = check_migration_drift(conn, T)
+    assert out["status"] == "warn"
+    assert any(multi.filename in p for p in out["details"]["partially_missing"])
+    assert out["details"]["missing_entirely"] == []
+
+
+def test_migration_drift_reports_its_own_blind_spot() -> None:
+    """Migrations that only drop, grant, or update data declare nothing to
+    probe. They must be COUNTED and named, not silently treated as passing —
+    the failure mode this sprint already hit with a test that never ran."""
+    out = check_migration_drift(_DriftConn({}, default=True), T)
+    assert isinstance(out["details"]["unverifiable"], list)
+    assert all(f.endswith(".sql") for f in out["details"]["unverifiable"])
+
+
+def test_migration_drift_probes_only_safe_identifiers() -> None:
+    """to_regclass raises on a malformed identifier instead of returning NULL,
+    which would turn one odd migration into a crashed check."""
+    conn = _DriftConn({}, default=True)
+    check_migration_drift(conn, T)
+    for _kind, ident in conn.probed:
+        assert _SAFE_IDENT.match(ident), ident

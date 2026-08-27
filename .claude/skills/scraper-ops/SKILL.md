@@ -430,7 +430,7 @@ comparison against EXTERNAL truth: collected vs the portal's advertised total fr
 COMPLETED index run's `by_category`, plus a truncation arm (categories walked vs that portal's own
 7-day best) because a budget-stopped walk leaves no entry for the categories it never reached and
 so makes the gap look BETTER. remax and maxima derive their total as `len(seen)` and mmreality
-reports none — all three are reported `verifiable: false` rather than 100%. Thresholds live in
+reports none — all three are reported `verifiable: false` rather than 100%. **`migration_drift`** closes a different silent gap: it probes the live catalog for the objects the newest 25 migrations declare, so a migration merged but never applied is caught in one tick instead of the 29 h it took on 2026-08-25 (see the `database` skill). Thresholds live in
 `app_settings.pipeline_check_thresholds` over code defaults in `DEFAULT_THRESHOLDS`.
 **Per-check rationale, incident history and threshold sizing:
 `.claude/skills/scraper-ops/references/pipeline-verification.md`.**
