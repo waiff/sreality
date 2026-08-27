@@ -153,6 +153,41 @@ def price_changed(
     return abs(new - prev) / prev >= min_change_pct
 
 
+# --- the Czech region vocabulary, shared -------------------------------------
+#
+# The 14 kraje are how the Czech Republic is administratively divided, and both
+# ceskereality and idnes publish EXACTLY these slugs (verified 2026-08-27 by
+# reading each site's own region nav). They live here rather than in either
+# portal module because a second copy is a second thing to get wrong, and the
+# irregular member is easy to get wrong: `kraj-vysocina` is the only one that
+# does not follow `<name>-kraj`, and both `vysocina-kraj` and `vysocina` 404.
+#
+# Slicing a category by kraj is not a workaround for a pagination limit -- on
+# idnes there is no limit -- it is what makes coverage PROVABLE: each slice
+# declares its own total, so "did we reach the end" is answerable per slice
+# instead of once for a 27,000-row category. Proven a true row-level partition
+# on both portals by ID enumeration, never by matching counts (an overlap and a
+# gap of equal size produce matching counts, which is how the first such proof
+# on ceskereality was correctly refuted).
+CZ_KRAJ_SLUGS: tuple[str, ...] = (
+    "praha", "stredocesky-kraj", "jihocesky-kraj", "plzensky-kraj",
+    "karlovarsky-kraj", "ustecky-kraj", "liberecky-kraj",
+    "kralovehradecky-kraj", "pardubicky-kraj", "kraj-vysocina",
+    "jihomoravsky-kraj", "olomoucky-kraj", "moravskoslezsky-kraj",
+    "zlinsky-kraj",
+)
+
+# Foreign stock is a SIBLING of the 14, not a member, and it is not optional to
+# think about: on idnes the kraj slices sum to 15,319 of 27,372 flats for sale,
+# and the missing 12,053 (44%) are abroad. A portal's slice set is complete only
+# when it accounts for this bucket too -- either by walking it (idnes: we already
+# hold ~24,000 such rows, and a row we never revisit can never be delisted) or by
+# deliberately excluding it from a CZ-only denominator (ceskereality, whose
+# /zahranicni/ tree sits outside the national totals entirely). Never leave it
+# implicit: a slice set that silently omits it reports 56% coverage as 100%.
+ABROAD_SLICE = "__abroad__"
+
+
 # A walk may drive mark_inactive only when it covered ~all of what the portal
 # said it had. 0.995 tolerates live churn during a multi-minute walk; the upper
 # bound catches the opposite failure, a walk that collected MORE than the portal

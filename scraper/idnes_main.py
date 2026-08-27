@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from scraper import db, portal_runner
@@ -42,11 +43,14 @@ from scraper.idnes_parser import (
     parse_index,
 )
 from scraper.portal import (
+    ABROAD_SLICE,
+    CZ_KRAJ_SLUGS,
     PortalConfig,
     default_config,
     load_portal_config,
     classify_index_sighting,
     deadline_reached,
+    walk_coverage,
     walk_is_complete,
 )
 from scraper.portal_base import ListingGoneError
@@ -64,6 +68,26 @@ SOURCE = "idnes"
 # flip self-heals on the next index sighting (touch_listings reactivates).
 # Tightened 24->12h for the real-time delisting SLO.
 INACTIVE_MIN_UNSEEN_HOURS = 12
+
+# No slice of any category is anywhere near this: the largest measured is
+# stredocesky-kraj's 171 pages of land for sale. It is a loop guard, not a
+# budget — idnes clamps an out-of-range ?page to the last page and serves it
+# again, so a pager bug could otherwise page forever against a live URL.
+_MAX_SLICE_PAGES = 400
+
+
+@dataclass(frozen=True)
+class SliceWalk:
+    """One slice's outcome. Only `exhausted` — walked to the slice's OWN declared
+    tail — is positive; `deadline`, `error`, `degraded`, `ceiling` and
+    `incomplete` all mean missing evidence, and any of them forces the whole
+    category incomplete (rule #3)."""
+
+    slice_key: str
+    rows: list[tuple[str, str, int | None]]   # (native_id, detail_ref, index_price)
+    declared_total: int | None
+    pages: int
+    outcome: str
 
 
 class IdnesPortal:
@@ -101,6 +125,10 @@ class IdnesPortal:
         # page > carry-forward > geocode; preloaded once in connect_drain (the
         # 2026-06 Mapy-credit incident guard — see scraper.location).
         self._coords = CoordResolver(SOURCE)
+        # Read once in connect_index, before the runner asks for categories.
+        # Empty = every slice sorts as never-walked, which is the safe default:
+        # it walks everything rather than skipping on stale bookkeeping.
+        self._staleness: dict[tuple[str, str, str], float] = {}
 
     # --- index-walk seams ---
     def set_index_page_cap(self, pages: int | None) -> None:
@@ -109,7 +137,31 @@ class IdnesPortal:
         self._max_pages = pages
 
     def categories(self) -> list[dict[str, Any]]:
-        return list(self._categories)
+        """Stalest category first.
+
+        Slice ordering alone is not enough. The runner walks categories in
+        order, so if the first one exhausts the budget every run, the later ones
+        starve no matter how their own slices are sorted — which is exactly what
+        happened: 8 of 10 idnes categories were never walked at all. Ranking a
+        category by its STALEST slice means the one that just consumed the
+        budget goes last next time, and the rotation covers the portal.
+        """
+        cats = list(self._categories)
+        if not self._staleness:
+            return cats
+
+        def worst(category: dict[str, Any]) -> float:
+            cm, ct = self.category_labels(category)
+            if cm is None or ct is None:
+                return float("inf")
+            # A slice with no row is "never walked" = infinitely stale, so a
+            # category holding one always outranks a fully-walked category.
+            return max(
+                self._staleness.get((cm, ct, key), float("inf"))
+                for key in self.SLICES
+            )
+
+        return sorted(cats, key=worst, reverse=True)
 
     def category_labels(self, category: dict[str, Any]) -> tuple[str | None, str | None]:
         return (
@@ -118,7 +170,11 @@ class IdnesPortal:
         )
 
     def connect_index(self) -> Any:
-        return db.connect()
+        conn = db.connect()
+        # The runner calls this BEFORE categories(), which is what lets both the
+        # category order and the slice order come from one ledger read.
+        self._staleness = db.slice_staleness(conn, SOURCE)
+        return conn
 
     def connect_drain(self) -> Any:
         # Single-row ingest (ingest_scraped_listing), not batched prepared writes,
@@ -130,60 +186,193 @@ class IdnesPortal:
         self._coords.preload(conn)
         return conn
 
+    # --- the sliced walk ---
+    #
+    # Why this is not a single loop over ?page=N any more: idnes has no
+    # pagination cap (page 1,052 of prodej/byty serves the declared tail and
+    # 1,060 404s), so the catalogue is fully REACHABLE. It was not being reached
+    # because a walk that runs out of budget restarts at the first category's
+    # first page next time, so the same head got re-walked while 8 of 10
+    # categories were never touched at all. Cutting each category into the 14
+    # kraje plus the abroad bucket gives units that (a) finish inside any
+    # plausible budget, (b) each declare their own total, so "did we reach the
+    # end" is answerable 15 times instead of once, and (c) can be REMEMBERED
+    # between runs (portal_index_slices, migration 454) so coverage accumulates.
+    SLICES: tuple[str, ...] = CZ_KRAJ_SLUGS + (ABROAD_SLICE,)
+
+    def _walk_slice(
+        self, client: IdnesClient, sale_type: str, cat: str, slice_key: str,
+        *, deadline: float | None,
+    ) -> "SliceWalk":
+        """Walk ONE slice to its own declared tail.
+
+        `exhausted` is the only positive outcome; everything else is missing
+        evidence and forces the whole category incomplete (rule #3).
+        """
+        abroad = slice_key == ABROAD_SLICE
+        locality = None if abroad else slice_key
+        rows: list[tuple[str, str, int | None]] = []
+        ref: set[str] = set()
+        declared: int | None = None
+        pages = 0
+        page: int | None = None
+        while True:
+            if deadline_reached(deadline):
+                LOG.info(
+                    "SLICE deadline cm=%s ct=%s slice=%s pages=%d collected=%d "
+                    "declared=%s; stopping incomplete",
+                    cat, sale_type, slice_key, pages, len(rows), declared,
+                )
+                return SliceWalk(slice_key, rows, declared, pages, "deadline")
+            try:
+                html, _ = client.fetch_index(
+                    sale_type, cat, page, locality=locality, abroad=abroad,
+                )
+            except Exception as exc:  # noqa: BLE001 - one slice must not kill the walk
+                # NOT a clean finish: a fetch that failed is missing evidence.
+                LOG.warning("SLICE error cm=%s ct=%s slice=%s page=%s: %s",
+                            cat, sale_type, slice_key, page, exc)
+                return SliceWalk(slice_key, rows, declared, pages, "error")
+            parsed = parse_index(html)
+            pages += 1
+            if declared is None:
+                declared = parsed.total
+                # A slice with nothing in it publishes no count, so `total` is
+                # None — exactly what a degraded page returns. The difference is
+                # that idnes SAYS SO ("momentálně tu není žádný inzerát"), and a
+                # confirmed zero is a real measurement: an empty slice IS
+                # complete. Without this, every legitimately empty slice would
+                # read as missing evidence and hold its whole category
+                # incomplete forever.
+                if declared is None and parsed.empty_confirmed:
+                    declared = 0
+                    LOG.info(
+                        "SLICE cm=%s ct=%s slice=%s declared=0 collected=0 pages=1 "
+                        "outcome=exhausted (empty, confirmed by the page itself)",
+                        cat, sale_type, slice_key,
+                    )
+                    return SliceWalk(slice_key, rows, 0, pages, "exhausted")
+            new_on_page = 0
+            for item in parsed.items:
+                nid = item.source_id_native
+                if nid not in ref:
+                    ref.add(nid)
+                    rows.append((nid, detail_url(item.detail_path),
+                                 db.sane_price_czk(index_price(item.price_text))))
+                    new_on_page += 1
+            if pages >= _MAX_SLICE_PAGES:
+                LOG.warning("SLICE ceiling cm=%s ct=%s slice=%s at %d pages "
+                            "(declared=%s) — refusing to loop",
+                            cat, sale_type, slice_key, pages, declared)
+                return SliceWalk(slice_key, rows, declared, pages, "ceiling")
+            # An empty page, no "next" link, or a page that added nothing new.
+            # The last matters: idnes CLAMPS an out-of-range ?page to the final
+            # page and serves it again with next=None, so a walk that trusted
+            # only the pager could re-read the tail forever.
+            if not parsed.items or parsed.next_offset is None or new_on_page == 0:
+                break
+            page = parsed.next_offset
+        verdict = walk_coverage(len(rows), declared, stopped_early=False)
+        # `unknown` (no declared total) is missing evidence, not success: a
+        # throttled or malformed page renders a shell with no count and no cards,
+        # which is byte-for-byte an empty slice. It must never read as finished.
+        outcome = "exhausted" if verdict == "complete" else (
+            "degraded" if verdict == "unknown" else "incomplete")
+        LOG.info("SLICE cm=%s ct=%s slice=%s declared=%s collected=%d pages=%d outcome=%s",
+                 cat, sale_type, slice_key, declared, len(rows), pages, outcome)
+        return SliceWalk(slice_key, rows, declared, pages, outcome)
+
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
         deadline: float | None = None,
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         sale_type, cat = category["sale_type"], category["category"]
+        cm, ct = self.category_labels(category)
         client = IdnesClient(limiter=limiter)
 
-        native_ids: list[str] = []
-        price_map: dict[str, int | None] = {}
-        ref_map: dict[str, str] = {}
-        total: int | None = None
-        pages = 0
-        # A deadline-stopped walk saw only part of the category, so it must never
-        # read as complete however close len(seen) got to `total` — mark_inactive
-        # would delist the pages we never fetched (rule #3).
-        truncated = False
-        page: int | None = None       # None = the bare first page (idnes offset paging)
-        while True:
-            if deadline_reached(deadline):
-                truncated = True
-                LOG.info(
-                    "INDEX deadline reached sale_type=%s cat=%s next_page=%s "
-                    "pages=%d collected=%d total=%s; stopping walk incomplete",
-                    sale_type, cat, page, pages, len(native_ids), total,
-                )
-                break
-            html, status = client.fetch_index(sale_type, cat, page, locality=None)
-            parsed = parse_index(html)
-            pages += 1
-            total = parsed.total if parsed.total is not None else total
-            LOG.info("INDEX page=%s items=%d total=%s", page, len(parsed.items), total)
-            new_on_page = 0
-            for item in parsed.items:
-                nid = item.source_id_native
-                if nid not in ref_map:
-                    native_ids.append(nid)
-                    new_on_page += 1
-                ref_map[nid] = detail_url(item.detail_path)
-                # Same clamps as the stored price so the unchanged-compare can't
-                # see a value the write boundary would have nulled.
-                price_map[nid] = db.sane_price_czk(index_price(item.price_text))
-            if self._max_pages and pages >= self._max_pages:
-                break
-            # Stop on an empty page, no "next" link, or a page that added nothing
-            # new (idnes clamps an out-of-range ?page to the last page, which
-            # would otherwise loop forever).
-            if not parsed.items or parsed.next_offset is None or new_on_page == 0:
-                break
-            page = parsed.next_offset
+        # The realtime probe caps pages to read the newest-first head of the
+        # NATIONAL list; slicing would scatter that head across 15 requests and
+        # defeat the probe's whole purpose. Page-capped runs keep the flat walk
+        # (and, being partial, never drive mark_inactive — rule #3).
+        if self._max_pages:
+            return self._walk_flat(client, sale_type, cat, conn, deadline)
 
-        seen = set(native_ids)
+        # The portal's own claim about the whole category, fetched once. It is
+        # the denominator the slice union has to satisfy, and it is what catches
+        # a slice vocabulary that has silently stopped covering the category.
+        national: int | None = None
+        try:
+            html, _ = client.fetch_index(sale_type, cat, None)
+            national = parse_index(html).total
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("NATIONAL probe failed cm=%s ct=%s: %s", cat, sale_type, exc)
+        pages = 1 if national is not None else 0
+
+        order = self._slice_order(cm, ct)
+        collected: dict[str, tuple[str, int | None]] = {}
+        results: list[SliceWalk] = []
+        for slice_key in order:
+            if deadline_reached(deadline):
+                LOG.info("CATEGORY cm=%s ct=%s stopped at the budget with %d/%d "
+                         "slices walked; the rest keep their staleness and go "
+                         "first next run", cat, sale_type, len(results), len(order))
+                break
+            result = self._walk_slice(
+                client, sale_type, cat, slice_key, deadline=deadline)
+            results.append(result)
+            pages += result.pages
+            for nid, ref, price in result.rows:
+                collected[nid] = (ref, price)
+            if conn is not None and cm and ct:
+                db.record_index_slice(
+                    conn, source=SOURCE, category_main=cm, category_type=ct,
+                    slice_key=slice_key, outcome=result.outcome,
+                    declared_total=result.declared_total,
+                    collected=len(result.rows), pages=result.pages,
+                )
+
+        seen = set(collected)
+        # EVERY slice must have been walked AND finished. Anything less is a
+        # walk with a hole in it, and a hole is exactly what mark_inactive would
+        # read as "these listings are gone".
+        all_walked = len(results) == len(order)
+        all_positive = all(r.outcome == db.SLICE_OUTCOME_POSITIVE for r in results)
+        complete = bool(
+            all_walked and all_positive
+            and walk_is_complete(len(seen), national, stopped_early=False)
+        )
+        LOG.info(
+            "CATEGORY cm=%s ct=%s slices=%d/%d positive=%s national=%s collected=%d "
+            "pages=%d complete=%s",
+            cat, sale_type, len(results), len(order), all_positive, national,
+            len(seen), pages, complete,
+        )
+        counts = self._reconcile(conn, collected)
+        return seen, counts, national, pages, complete
+
+    def _slice_order(self, cm: str | None, ct: str | None) -> list[str]:
+        """Least-recently-walked first, never-walked before everything.
+
+        A slice with no ledger row sorts to infinity, not to zero: treating an
+        unknown slice as fresh would sort exactly the never-walked ones LAST,
+        which is the starvation the ledger exists to end.
+        """
+        stale = self._staleness
+        if not stale or cm is None or ct is None:
+            return list(self.SLICES)
+        return sorted(
+            self.SLICES,
+            key=lambda k: -stale.get((cm, ct, k), float("inf")),
+        )
+
+    def _reconcile(
+        self, conn: Any, collected: dict[str, tuple[str, int | None]],
+    ) -> dict[str, int]:
+        """Touch what is unchanged, enqueue what is new or repriced."""
+        native_ids = list(collected)
         existing = (
             db.index_summary_native(conn, SOURCE, native_ids)
-            if conn is not None else {}
+            if conn is not None and native_ids else {}
         )
         new_ids = [n for n in native_ids if n not in existing]
         changed: list[str] = []
@@ -193,18 +382,18 @@ class IdnesPortal:
             if prev is None:
                 continue
             if classify_index_sighting(
-                prev, price_map.get(nid), self._price_change_min_pct,
+                prev, collected[nid][1], self._price_change_min_pct,
             ) == "unchanged":
                 unchanged_pks.append(prev["id"])
             else:
                 changed.append(nid)
-
         if conn is not None and unchanged_pks:
             db.touch_listings_by_id(conn, unchanged_pks)
-
         entries = (
-            [(n, ref_map[n], price_map.get(n), db.QUEUE_PRIORITY_CHANGED) for n in changed]
-            + [(n, ref_map[n], price_map.get(n), db.QUEUE_PRIORITY_NEW) for n in new_ids]
+            [(n, collected[n][0], collected[n][1], db.QUEUE_PRIORITY_CHANGED)
+             for n in changed]
+            + [(n, collected[n][0], collected[n][1], db.QUEUE_PRIORITY_NEW)
+               for n in new_ids]
         )
         enqueued = (
             db.enqueue_detail(conn, SOURCE, entries)
@@ -214,10 +403,41 @@ class IdnesPortal:
             "ENQUEUE source=idnes new=%d changed=%d unchanged=%d enqueued=%d",
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        complete = (not self._max_pages) and walk_is_complete(
-            len(seen), total, stopped_early=truncated,
-        )
-        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
+        return {"found_new": len(new_ids), "enqueued": enqueued}
+
+    def _walk_flat(
+        self, client: IdnesClient, sale_type: str, cat: str, conn: Any,
+        deadline: float | None,
+    ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
+        """The page-capped probe path: the newest-first head of the national
+        list. Always incomplete by construction — it is a delta probe, not a
+        walk — so it can never drive mark_inactive."""
+        collected: dict[str, tuple[str, int | None]] = {}
+        total: int | None = None
+        pages = 0
+        page: int | None = None
+        while True:
+            if deadline_reached(deadline):
+                break
+            html, _ = client.fetch_index(sale_type, cat, page)
+            parsed = parse_index(html)
+            pages += 1
+            total = parsed.total if parsed.total is not None else total
+            new_on_page = 0
+            for item in parsed.items:
+                nid = item.source_id_native
+                if nid not in collected:
+                    new_on_page += 1
+                collected[nid] = (detail_url(item.detail_path),
+                                  db.sane_price_czk(index_price(item.price_text)))
+            LOG.info("INDEX page=%s items=%d total=%s", page, len(parsed.items), total)
+            if pages >= self._max_pages:
+                break
+            if not parsed.items or parsed.next_offset is None or new_on_page == 0:
+                break
+            page = parsed.next_offset
+        counts = self._reconcile(conn, collected)
+        return set(collected), counts, total, pages, False
 
     def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
         cm, ct = self.category_labels(category)
