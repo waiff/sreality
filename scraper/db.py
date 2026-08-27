@@ -1407,6 +1407,86 @@ def _seen_without_nulls(seen: Collection[Any], label: str) -> list[Any] | None:
     return kept
 
 
+# --- the delisting flip cap (migration 451) ---------------------------------
+#
+# mark_inactive never had a ceiling: it flips every unseen active row of a
+# category in one statement, however many that is. That was survivable only
+# because the completeness gate kept the dangerous cases from running -- a
+# coincidence, not a safety property, and the coincidence ends every time we
+# repair a portal's walk. Fixing coverage is the SAME EVENT as authorising the
+# mass flip it unblocks.
+_DELIST_CAP_DEFAULTS = {"fraction": 0.02, "min_rows": 500}
+
+
+def _delist_cap(conn: psycopg.Connection) -> tuple[float, int]:
+    """Operator-tunable ceiling from app_settings, falling back to the baked
+    defaults so a settings hiccup can never REMOVE the guard."""
+    fraction = float(_DELIST_CAP_DEFAULTS["fraction"])
+    min_rows = int(_DELIST_CAP_DEFAULTS["min_rows"])
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM app_settings WHERE key = 'delist_flip_cap'")
+            row = cur.fetchone()
+        if row and isinstance(row[0], dict):
+            fraction = float(row[0].get("fraction", fraction))
+            min_rows = int(row[0].get("min_rows", min_rows))
+    except Exception as exc:  # noqa: BLE001 - a broken knob must not disarm the cap
+        LOG.warning("delist cap: falling back to defaults (%s)", exc)
+    return fraction, min_rows
+
+
+def _delist_flip_allowed(
+    conn: psycopg.Connection,
+    *,
+    source: str,
+    category_main: str | None,
+    category_type: str | None,
+    subtype: str | None,
+    candidates: int,
+    active_rows: int,
+) -> bool:
+    """May a sweep of this size proceed?
+
+    Refusing is safe in the direction that matters: an unswept stale row is
+    visible, queryable and self-heals the moment the listing is seen again
+    (touch_listings), while a wrongly-delisted live listing is invisible to
+    Browse, the watchdog and every estimate, and nothing re-surfaces it.
+
+    The refusal is RECORDED, not just logged: an Actions log expires, and the
+    lesson of this sprint is that a signal nothing can query is a signal nobody
+    receives.
+    """
+    fraction, min_rows = _delist_cap(conn)
+    if active_rows < min_rows:
+        # The cap polices catastrophes, not small categories: 2% of 200 rows is
+        # 4, which ordinary churn would trip weekly.
+        return True
+    cap = max(1, int(active_rows * fraction))
+    if candidates <= cap:
+        return True
+    LOG.error(
+        "DELIST REFUSED source=%s cm=%s ct=%s subtype=%s candidates=%d active=%d cap=%d "
+        "-- a sweep this large is a claim the market moved overnight; verify per listing "
+        "before raising the cap",
+        source, category_main, category_type, subtype, candidates, active_rows, cap,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO delist_flip_refusals
+                    (source, category_main, category_type, subtype,
+                     candidates, active_rows, cap)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (source, category_main, category_type, subtype,
+                 candidates, active_rows, cap),
+            )
+    except Exception as exc:  # noqa: BLE001 - never let bookkeeping undo the refusal
+        LOG.warning("delist cap: could not record the refusal: %s", exc)
+    return False
+
+
 def mark_inactive(
     conn: psycopg.Connection,
     category_main: str,
@@ -1441,7 +1521,36 @@ def mark_inactive(
     if min_unseen_hours is not None:
         params.append(min_unseen_hours)
     params.append(ids)
+    stale_filter = (
+        "\n                  AND last_seen_at < now() - make_interval(hours => %s)"
+        if min_unseen_hours is not None else ""
+    )
+    count_params: list[Any] = [ids]
+    if min_unseen_hours is not None:
+        count_params.append(min_unseen_hours)
+    count_params += [source, category_main, category_type]
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT
+              count(*) FILTER (
+                WHERE sreality_id <> ALL(%s){stale_filter}) AS candidates,
+              count(*) AS active_rows
+            FROM listings
+            WHERE is_active = true
+              AND source = %s
+              AND category_main = %s
+              AND category_type = %s
+            """,
+            tuple(count_params),
+        )
+        candidates, active_rows = cur.fetchone()
+        if not _delist_flip_allowed(
+            conn, source=source, category_main=category_main,
+            category_type=category_type, subtype=None,
+            candidates=int(candidates), active_rows=int(active_rows),
+        ):
+            return 0
         cur.execute(
             f"""
             UPDATE listings
@@ -1539,7 +1648,40 @@ def mark_inactive_native(
     if min_unseen_hours is not None:
         params.append(min_unseen_hours)
     params.append(natives)
+    # The cap's count runs the SAME predicate, but with the natives array inside
+    # a FILTER, so its parameters bind in a different order.
+    stale_filter = (
+        "\n                  AND last_seen_at < now() - make_interval(hours => %s)"
+        if min_unseen_hours is not None else ""
+    )
+    count_params: list[Any] = [natives]
+    if min_unseen_hours is not None:
+        count_params.append(min_unseen_hours)
+    count_params += [source, category_main, category_type]
+    if scope_subtype:
+        count_params.append(subtype)
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT
+              count(*) FILTER (
+                WHERE source_id_native <> ALL(%s){stale_filter}) AS candidates,
+              count(*) AS active_rows
+            FROM listings
+            WHERE is_active = true
+              AND source = %s
+              AND category_main = %s
+              AND category_type = %s{sub_clause}
+            """,
+            tuple(count_params),
+        )
+        candidates, active_rows = cur.fetchone()
+        if not _delist_flip_allowed(
+            conn, source=source, category_main=category_main,
+            category_type=category_type, subtype=subtype if scope_subtype else None,
+            candidates=int(candidates), active_rows=int(active_rows),
+        ):
+            return 0
         cur.execute(
             f"""
             UPDATE listings
@@ -1604,7 +1746,35 @@ def mark_inactive_agenda(
     if min_unseen_hours is not None:
         params.append(min_unseen_hours)
     params.append(natives)
+    stale_filter = (
+        "\n                  AND last_seen_at < now() - make_interval(hours => %s)"
+        if min_unseen_hours is not None else ""
+    )
+    count_params: list[Any] = [natives]
+    if min_unseen_hours is not None:
+        count_params.append(min_unseen_hours)
+    count_params += [source, category_type]
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT
+              count(*) FILTER (
+                WHERE source_id_native <> ALL(%s){stale_filter}) AS candidates,
+              count(*) AS active_rows
+            FROM listings
+            WHERE is_active = true
+              AND source = %s
+              AND category_type = %s
+            """,
+            tuple(count_params),
+        )
+        candidates, active_rows = cur.fetchone()
+        if not _delist_flip_allowed(
+            conn, source=source, category_main=None,
+            category_type=category_type, subtype=None,
+            candidates=int(candidates), active_rows=int(active_rows),
+        ):
+            return 0
         cur.execute(
             f"""
             UPDATE listings

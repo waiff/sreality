@@ -153,6 +153,8 @@ incident history: `docs/architecture.md` § Architectural rules.
    partial walks (`--limit` / `--detail-only` / `--max-pages`) must never flip rows; a false flip
    self-heals on next sighting (`touch_listings`); a gone detail fetch (404/410 → `ListingGoneError`)
    flips that one listing immediately (never slowed by the rail). Every flip stamps `inactive_at`.
+   **THIRD rail (mig 451): no sweep flips >`app_settings.delist_flip_cap` (2%, floor 500) of a
+   category at once** — repairing a walk IS authorising the flip it unblocks; refusals alarm.
 4. **`last_seen_at` is driven by index sightings + successful detail fetches only; failed fetches never
    touch it** (else repeated failures would falsely delist a live listing). The `unchanged` freshness
    path also doesn't bump it — its signal is `listing_freshness_checks.checked_at`.

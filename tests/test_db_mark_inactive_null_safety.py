@@ -48,7 +48,15 @@ class _Cur:
         return None
 
     def execute(self, sql: str, params: Any = None) -> None:
-        self._conn.executed.append((" ".join(sql.split()), params))
+        s = " ".join(sql.split())
+        self._conn.executed.append((s, params))
+        # migration 450 flip cap: the sweep counts its scope before flipping.
+        # (0, 0) is below min_rows, so the cap allows it and these tests stay
+        # about the null-filtering they were written to assert.
+        self._rows = [(0, 0)] if "AS candidates" in s else []
+
+    def fetchone(self) -> Any:
+        return self._rows[0] if getattr(self, "_rows", None) else None
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         return []

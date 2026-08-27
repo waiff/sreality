@@ -977,6 +977,21 @@ renumber.** Navigate by area:
     restate the queue delay as a market fact, which is precisely the false statement that hid the
     outage. NULL is the truthful value for a row whose discovery time was not retained; only the
     tail seeded from `detail_queue_completions` is populated for history.
+    **THIRD DELISTING RAIL — the flip cap (migration 451).** `mark_inactive` had no ceiling: it
+    flipped every unseen active row of a category in one statement, however many that was. That
+    was survivable only because the completeness gate kept the dangerous cases from running — a
+    coincidence, not a safety property, and it ends every time a portal's walk is repaired,
+    because **fixing coverage is the same event as authorising the mass flip it unblocks**.
+    ceskereality's rebuilt walk moved byt/prodej from 85.7% to 99.8% in one deploy and made
+    ~29,400 rows eligible; idnes has identical exposure the first time its walk ever completes.
+    All three sweeps (`mark_inactive`, `_native`, `_agenda`) now count their scope BEFORE
+    flipping and refuse anything above `app_settings.delist_flip_cap` (2%, floor 500 active rows
+    so the cap polices catastrophes rather than small categories; a broken setting falls back to
+    the baked default and can never disarm it). A refusal is RECORDED in `delist_flip_refusals`
+    and alarmed by `verify_pipeline`'s `delist_flip_refused` — an Actions log expires, and a
+    signal nothing can query is a signal nobody receives. Refusing is safe in the direction that
+    matters: an unswept stale row is visible and self-heals on next sighting, a wrongly-delisted
+    live listing is not.
 20. **Property maintenance is dirty-set incremental (Phase 3), not a full-table recompute.**
     The writers that change a property's children — `write_detail_batch` (a content change →
     new snapshot), `mark_inactive` / `mark_listing_inactive` (delisting), `touch_listings`
