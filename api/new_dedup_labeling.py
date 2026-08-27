@@ -520,12 +520,35 @@ def get_tag_definition_version(
 
 @router.get("/tags/{tag_id}/positive-images")
 def get_positive_images(
-    tag_id: int, limit: int = 200, conn: Any = Depends(deps.get_db_conn),
+    tag_id: int, limit: int = 200, order: str = "recent",
+    conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
     """What this tag ACTUALLY contains — every image currently positive on it,
     read straight from image_tag_labels (not the dedup_sim-scoped sample browse
-    at /tags/{tag_id}/images)."""
-    return {"data": td.list_positive_images(conn, tag_id=tag_id, limit=limit)}
+    at /tags/{tag_id}/images).
+
+    `order='outlier_first'` sorts by cosine distance from this tag's own
+    centroid, farthest first, so the mis-filed images come back first. A tag with
+    too few embedded human-verified positives to have a centroid is NOT an error:
+    it gets a 200 carrying the rows in the default order and `order='recent'`,
+    which is the server's own verdict — the UI never re-derives it."""
+    if order not in td.POSITIVE_IMAGE_ORDERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"order must be one of {', '.join(td.POSITIVE_IMAGE_ORDERS)}",
+        )
+    if order == "outlier_first":
+        out = td.list_positive_images_outlier_first(conn, tag_id=tag_id, limit=limit)
+        return {
+            "data": out["images"], "order": out["order"],
+            "centroid_positives": out["centroid_positives"],
+            "min_positives": out["min_positives"],
+        }
+    return {
+        "data": td.list_positive_images(conn, tag_id=tag_id, limit=limit),
+        "order": "recent", "centroid_positives": None,
+        "min_positives": td.MIN_POSITIVES_FOR_CENTROID,
+    }
 
 
 @router.get("/tags/{tag_id}/neighbours")

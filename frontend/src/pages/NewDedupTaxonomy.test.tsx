@@ -177,7 +177,27 @@ const FASADA_POSITIVES: TagPositiveImage[] = [101, 209, 314].map((image_id, i) =
   storage_path: `img/555/${i}.jpg`,
   sreality_url: `https://sdn.cz/${image_id}.jpg`,
   updated_at: '2026-08-21T00:00:00Z',
+  /* Farthest-first, which is the order the server returns them in — image 101,
+   * the one every retag test moves out, is the least like the rest. All three
+   * share an updated_at, so the newest-first VIEW is decided purely by the
+   * image_id tiebreaker: exactly the reshuffle a bare timestamp sort causes. */
+  centroid_distance: [0.266, 0.181, 0.104][i],
+  distance_rank: i + 1,
 }));
+
+/* The /positive-images envelope. The SERVER ranks — the page only picks which
+ * end to read from — so the default fixture is a tag that HAS a centroid, and a
+ * test says "under the floor" by overriding `order`. */
+const positivesRes = (
+  rows: TagPositiveImage[],
+  over: Partial<Omit<api.TagPositiveImagesResponse, 'data'>> = {},
+): api.TagPositiveImagesResponse => ({
+  data: rows,
+  order: 'outlier_first',
+  centroid_positives: 71,
+  min_positives: 5,
+  ...over,
+});
 
 function imageTag(over: Partial<NewDedupImageTag> = {}): NewDedupImageTag {
   return {
@@ -262,9 +282,9 @@ function renderPageWithProductionCache() {
 
 /* Per-tag positives, so a test can watch what a SECOND tag's gallery holds. */
 const positivesByTag = (map: Record<number, TagPositiveImage[]>) =>
-  vi.mocked(api.listTagPositiveImages).mockImplementation(async (tagId: number) => ({
-    data: map[tagId] ?? [],
-  }));
+  vi.mocked(api.listTagPositiveImages).mockImplementation(async (tagId: number) =>
+    positivesRes(map[tagId] ?? []),
+  );
 const positiveCallsFor = (tagId: number) =>
   vi.mocked(api.listTagPositiveImages).mock.calls.filter((c) => c[0] === tagId).length;
 const neighbourCallsFor = (tagId: number) =>
@@ -332,7 +352,7 @@ async function selectKuchyne() {
 /* The tag the operator is looking at in the live case this work came from:
  * "exterier - fasáda", whose gallery is the wall of photos being read. */
 async function selectFasada() {
-  vi.mocked(api.listTagPositiveImages).mockResolvedValue({ data: FASADA_POSITIVES });
+  vi.mocked(api.listTagPositiveImages).mockResolvedValue(positivesRes(FASADA_POSITIVES));
   const row = await screen.findByRole('button', { name: /fasada/ });
   fireEvent.click(row);
   await screen.findByLabelText('means');
@@ -368,7 +388,7 @@ describe('<NewDedupTaxonomy>', () => {
     vi.mocked(api.getTagDefinitionVersion).mockResolvedValue({
       data: { ...DEFINITION, id: 70, version: 1, means: 'Kitchen.', status: 'superseded' },
     });
-    vi.mocked(api.listTagPositiveImages).mockResolvedValue({ data: POSITIVES });
+    vi.mocked(api.listTagPositiveImages).mockResolvedValue(positivesRes(POSITIVES));
     vi.mocked(api.listTagNeighbours).mockResolvedValue({ data: NEIGHBOURS });
     vi.mocked(api.saveTagDefinition).mockResolvedValue({
       data: { ...DEFINITION, version: 3 },
@@ -611,7 +631,7 @@ describe('<NewDedupTaxonomy>', () => {
       image_id: 200 + i, storage_path: `img/555/${i}.jpg`,
       sreality_url: 'https://sdn.cz/x.jpg', updated_at: '2026-08-21T00:00:00Z',
     }));
-    vi.mocked(api.listTagPositiveImages).mockResolvedValue({ data: many });
+    vi.mocked(api.listTagPositiveImages).mockResolvedValue(positivesRes(many));
     renderPage();
     await selectKuchyne();
     await screen.findByRole('button', { name: 'Toggle image 200 as a canonical example' });
@@ -643,11 +663,13 @@ describe('<NewDedupTaxonomy>', () => {
       sreality_url: 'https://sdn.cz/x.jpg',
       updated_at: '2026-08-21T00:00:00Z',
     }));
-    vi.mocked(api.listTagPositiveImages).mockResolvedValue({ data: capped });
+    vi.mocked(api.listTagPositiveImages).mockResolvedValue(positivesRes(capped));
     renderPage();
     await selectRow(/fasada/, 'exterier - fasada');
     await screen.findByRole('button', { name: 'All tags on image 101' });
-    expect(screen.getByText('showing the 300 most recent')).toBeInTheDocument();
+    expect(
+      screen.getByText('showing the 300 farthest from this tag\u2019s centre'),
+    ).toBeInTheDocument();
 
     const panel = await openAllTags();
     fireEvent.click(outcome(panel, 'belongs elsewhere'));
@@ -658,7 +680,9 @@ describe('<NewDedupTaxonomy>', () => {
       ).toBeNull(),
     );
     expect(screen.getByText(/299 positive images/)).toBeInTheDocument();
-    expect(screen.getByText('showing the 300 most recent')).toBeInTheDocument();
+    expect(
+      screen.getByText('showing the 300 farthest from this tag\u2019s centre'),
+    ).toBeInTheDocument();
     // Hitting the cap is the point, so this renders 300 tiles plus the 51-row
     // panel and re-renders them all on the move-out. That is ~5s in jsdom —
     // genuinely heavy work, not a slow assertion — and it straddled the 5s
@@ -666,12 +690,316 @@ describe('<NewDedupTaxonomy>', () => {
   }, 20_000);
 
   it('shows the empty state when a tag has no positive images', async () => {
-    vi.mocked(api.listTagPositiveImages).mockResolvedValue({ data: [] });
+    vi.mocked(api.listTagPositiveImages).mockResolvedValue(positivesRes([]));
     renderPage();
     await selectKuchyne();
     expect(
       await screen.findByText('No positive images yet for this tag.'),
     ).toBeInTheDocument();
+  });
+
+  // --- outlier-first contents ----------------------------------------------
+  //
+  // The operator settles a 51-tag taxonomy by reading what each tag ACTUALLY
+  // holds. Finding the wrong images by eye through a wall of 300 photos is the
+  // cost this ordering removes: farthest from the tag's own centroid first.
+
+  it('asks the server for the outlier order and shows the farthest first', async () => {
+    renderPage();
+    await selectFasada();
+
+    expect(api.listTagPositiveImages).toHaveBeenCalledWith(3, 300, 'outlier_first');
+    // The server ranked; the page renders that order untouched.
+    expect(
+      screen.getAllByRole('button', { name: /^All tags on image \d+$/ }).map((b) =>
+        b.getAttribute('aria-label'),
+      ),
+    ).toEqual([
+      'All tags on image 101',
+      'All tags on image 209',
+      'All tags on image 314',
+    ]);
+    expect(screen.getByRole('button', { name: 'Least like the rest' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('says why an image sits where it does — a distance and a rank, never a score', async () => {
+    renderPage();
+    await selectFasada();
+
+    const badge = await screen.findByText('d 0.27');
+    expect(badge.getAttribute('title')).toMatch(/#1 farthest here/);
+    expect(badge.getAttribute('title')).toMatch(/never compares across tags/);
+    // A distance, named as one. Nothing on this page may read as a similarity
+    // or a confidence: inter-tag centroid distances span ~0.01 to ~0.42, so
+    // only the rank inside ONE tag transfers.
+    expect(badge.getAttribute('title')).toMatch(/^Cosine distance 0\.266/);
+  });
+
+  it('flips to newest first without refetching the grid', async () => {
+    renderPage();
+    await selectFasada();
+    expect(vi.mocked(api.listTagPositiveImages).mock.calls).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Newest first' }));
+
+    // All three share an updated_at, so this is the image_id tiebreaker alone.
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole('button', { name: /^All tags on image \d+$/ })[0],
+      ).toHaveAccessibleName('All tags on image 314'),
+    );
+    // One fetch, one cache entry: the order is a VIEW over rows already held.
+    expect(vi.mocked(api.listTagPositiveImages).mock.calls).toHaveLength(1);
+  });
+
+  it('keeps the distance badges in the newest-first view', async () => {
+    // The tile's oddness is a fact about the IMAGE, not about the sort.
+    renderPage();
+    await selectFasada();
+    fireEvent.click(screen.getByRole('button', { name: 'Newest first' }));
+    expect(await screen.findByText('d 0.27')).toBeInTheDocument();
+  });
+
+  it('orders the newest-first view on a total order', async () => {
+    // A bare timestamp sort reshuffles ties under the operator between
+    // renders. FASADA_POSITIVES share one updated_at on purpose.
+    renderPage();
+    await selectFasada();
+    fireEvent.click(screen.getByRole('button', { name: 'Newest first' }));
+
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole('button', { name: /^All tags on image \d+$/ }).map((b) =>
+          b.getAttribute('aria-label'),
+        ),
+      ).toEqual([
+        'All tags on image 314',
+        'All tags on image 209',
+        'All tags on image 101',
+      ]),
+    );
+  });
+
+  it('falls back to the existing order and says why when the tag is under the floor', async () => {
+    // A centroid over 3 images is one image's idiosyncrasies. The server says
+    // so in its own `order`, and the page never re-derives that verdict.
+    vi.mocked(api.listTagPositiveImages).mockResolvedValue(
+      positivesRes(
+        FASADA_POSITIVES.map((r) => ({ ...r, centroid_distance: null, distance_rank: null })),
+        { order: 'recent', centroid_positives: 3, min_positives: 5 },
+      ),
+    );
+    renderPage();
+    await selectRow(/fasada/, 'exterier - fasada');
+    await screen.findByRole('button', { name: 'All tags on image 101' });
+
+    expect(
+      screen.getByText(
+        /Needs at least 5 human-verified positives with a CLIP embedding to sort by distance — this tag has 3\./,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Least like the rest' })).toBeDisabled();
+    expect(screen.queryByText(/^d /)).toBeNull();
+  });
+
+  it('says what the centroid rests on, not just that it exists', async () => {
+    // Above the floor a centroid over 5 images and one over 200 otherwise
+    // present identically — same active button, same badges, same ranks. The
+    // basis is the difference between a ranking worth re-filing on and noise.
+    renderPage();
+    await selectFasada();
+
+    expect(
+      await screen.findByText(
+        /Distance measured against this tag's 71 human-verified positives — a rank inside this tag only\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('never renders an uncomputed centroid count as a count of zero', async () => {
+    // A failed read took no measurement. "This tag has 0" would be a specific,
+    // false, DATA-shaped diagnosis of a transport failure — the one thing this
+    // page must never say, because showing a tag's real contents is its claim.
+    vi.mocked(api.listTagPositiveImages).mockRejectedValue(new Error('401 Unauthorized'));
+    renderPage();
+    await selectRow(/fasada/, 'exterier - fasada');
+
+    expect(await screen.findByText(/401 Unauthorized/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /^Needs at least 5 human-verified positives with a CLIP embedding to sort by distance\. Showing newest first\.$/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/this tag has 0/)).toBeNull();
+  });
+
+  it('marks an image with no CLIP embedding as unplaceable, not as the least like the rest', async () => {
+    vi.mocked(api.listTagPositiveImages).mockResolvedValue(
+      positivesRes([
+        FASADA_POSITIVES[0],
+        { ...FASADA_POSITIVES[1], centroid_distance: null, distance_rank: null },
+      ]),
+    );
+    renderPage();
+    await selectRow(/fasada/, 'exterier - fasada');
+    await screen.findByRole('button', { name: 'All tags on image 101' });
+
+    const badge = screen.getByText('no embedding');
+    expect(badge.getAttribute('title')).toMatch(/Not an outlier, just unplaceable/);
+    // It sorts last — NULLS LAST server-side — so it is not read as the worst
+    // offender just because it cannot be placed.
+    expect(
+      screen.getAllByRole('button', { name: /^All tags on image \d+$/ }).map((b) =>
+        b.getAttribute('aria-label'),
+      ),
+    ).toEqual(['All tags on image 101', 'All tags on image 209']);
+  });
+
+  it('describes the truncation by what the server selected, not by the current view', async () => {
+    // The 300 are the 300 FARTHEST. Flipping to newest-first re-sorts those
+    // 300; it does not re-select them, so the note must not start claiming the
+    // operator is looking at the 300 most recent of the tag.
+    const capped: TagPositiveImage[] = Array.from({ length: 300 }, (_, i) => ({
+      image_id: 1000 + i,
+      storage_path: `img/9/${i}.jpg`,
+      sreality_url: 'https://sdn.cz/x.jpg',
+      updated_at: `2026-08-21T00:00:${String(i % 60).padStart(2, '0')}Z`,
+      centroid_distance: 0.4 - i * 0.001,
+      distance_rank: i + 1,
+    }));
+    vi.mocked(api.listTagPositiveImages).mockResolvedValue(positivesRes(capped));
+    renderPage();
+    await selectRow(/fasada/, 'exterier - fasada');
+    await screen.findByRole('button', { name: 'All tags on image 1000' });
+
+    const note = 'showing the 300 farthest from this tag’s centre';
+    expect(screen.getByText(note)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Newest of these 300' }));
+    expect(await screen.findByText(note)).toBeInTheDocument();
+  }, 20_000);
+
+  it('stops the recent view claiming recency it cannot deliver over a full page', async () => {
+    // The server LIMITs *after* the distance sort, so a tag holding more than
+    // the cap comes back as the 300 FARTHEST. Re-sorting those by time is the
+    // newest OF THOSE — and an image labeled this morning, being typical for
+    // the tag, sits near the centre and is not in the window at all. A button
+    // promising "what moved since the last sitting" would be lying.
+    const capped: TagPositiveImage[] = Array.from({ length: 300 }, (_, i) => ({
+      image_id: 1000 + i,
+      storage_path: `img/9/${i}.jpg`,
+      sreality_url: 'https://sdn.cz/x.jpg',
+      updated_at: `2026-08-21T00:00:${String(i % 60).padStart(2, '0')}Z`,
+      centroid_distance: 0.4 - i * 0.001,
+      distance_rank: i + 1,
+    }));
+    vi.mocked(api.listTagPositiveImages).mockResolvedValue(positivesRes(capped));
+    renderPage();
+    await selectRow(/fasada/, 'exterier - fasada');
+    await screen.findByRole('button', { name: 'All tags on image 1000' });
+
+    expect(screen.queryByRole('button', { name: 'Newest first' })).toBeNull();
+    const btn = screen.getByRole('button', { name: 'Newest of these 300' });
+    expect(btn.getAttribute('title')).toMatch(/selected by DISTANCE/);
+    expect(btn.getAttribute('title')).toMatch(/not the tag's 300 newest/);
+  }, 20_000);
+
+  it('leaves the recent view its full promise when the whole tag fits', async () => {
+    // Under the cap the fetched rows ARE every positive the tag has, so a time
+    // re-sort of them is the tag's newest and the button may say so.
+    renderPage();
+    await selectFasada();
+
+    const btn = screen.getByRole('button', { name: 'Newest first' });
+    expect(btn.getAttribute('title')).toMatch(/what moved since the last sitting/);
+  });
+
+  it('keeps a moved-out image out of both views', async () => {
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+    fireEvent.click(outcome(panel, 'belongs elsewhere'));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'Toggle image 101 as a canonical example' }),
+      ).toBeNull(),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Newest first' }));
+    expect(
+      screen.queryByRole('button', { name: 'Toggle image 101 as a canonical example' }),
+    ).toBeNull();
+    // The patch is on the ONE cache entry both views read, so the order flip
+    // cannot resurrect a tile the server already agrees has left.
+    expect(vi.mocked(api.listTagPositiveImages).mock.calls).toHaveLength(1);
+  });
+
+  // --- the subject row states the state it is in ---------------------------
+
+  it('shows at a glance that the image is positive on the tag being read', async () => {
+    // The subject is LIFTED OUT of the list below, so the ✓ the operator scans
+    // 51 rows for is not there to be found — and four word buttons with a
+    // coloured fill do not read as "checked".
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+
+    expect(within(panel).getByText('✓ currently in this tag')).toBeInTheDocument();
+    // Still exactly the four outcomes: the chip states, it never sets.
+    expect(
+      within(within(panel).getByRole('group', { name: "This tag's state" })).getAllByRole(
+        'button',
+      ),
+    ).toHaveLength(4);
+  });
+
+  it("names the subject's state in the same words its outcomes use", async () => {
+    vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
+      data: IMAGE_TAGS.map((t) =>
+        t.id === 3
+          ? { ...t, state: 'excluded' as api.TagState, excluded_reason: 'pruned' as const }
+          : t,
+      ),
+    });
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+
+    expect(within(panel).getByText('⊘ currently belongs elsewhere')).toBeInTheDocument();
+  });
+
+  it('draws a manufactured subject state as the fiction it is', async () => {
+    vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
+      data: IMAGE_TAGS.map((t) => (t.id === 3 ? { ...t, source: 'backfill_442' as const } : t)),
+    });
+    renderPage();
+    await selectFasada();
+    const panel = await openAllTags();
+
+    const chip = within(panel).getByText('✓ currently in this tag');
+    expect(chip.className).toMatch(/border-dashed/);
+    expect(chip.getAttribute('title')).toMatch(/migration 442/);
+  });
+
+  it('says nothing about a state when the subject tag is inactive', async () => {
+    // The tag is not in the image's active-tag list, so there IS no cell — the
+    // block already says so, and a chip would be a claim about nothing.
+    vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
+      data: IMAGE_TAGS.filter((t) => t.id !== 3),
+    });
+    renderPage();
+    await selectFasada();
+    fireEvent.click(screen.getByRole('button', { name: 'All tags on image 101' }));
+    const panel = await screen.findByRole('dialog', { name: 'All tags on this image' });
+
+    expect(
+      await within(panel).findByText(
+        'This tag is not in the active list, so its state cannot be set here.',
+      ),
+    ).toBeInTheDocument();
+    expect(within(panel).queryByText(/currently /i)).toBeNull();
   });
 
   // --- overlap evidence ----------------------------------------------------
@@ -1499,7 +1827,7 @@ describe('<NewDedupTaxonomy>', () => {
 
   it('admits the grid is truncated rather than claiming select-all took the tag', async () => {
     const capped = manyPositives(300, 5000);
-    vi.mocked(api.listTagPositiveImages).mockResolvedValue({ data: capped });
+    vi.mocked(api.listTagPositiveImages).mockResolvedValue(positivesRes(capped));
     renderPage();
     await selectRow(/fasada/, 'exterier - fasada');
     await screen.findByRole('button', { name: 'All tags on image 5000' });
@@ -1555,7 +1883,7 @@ describe('<NewDedupTaxonomy>', () => {
     // genuinely ARE bathrooms-with-bathtubs as well as bathrooms; marking the
     // child negative would be a lie and would poison its head.
     const many = manyPositives(145, 2000);
-    vi.mocked(api.listTagPositiveImages).mockResolvedValue({ data: many });
+    vi.mocked(api.listTagPositiveImages).mockResolvedValue(positivesRes(many));
     renderPage();
     await selectRow(/fasada/, 'exterier - fasada');
     await screen.findByRole('button', { name: 'All tags on image 2000' });
@@ -1624,7 +1952,7 @@ describe('<NewDedupTaxonomy>', () => {
 
   it('chunks a selection past the server cap without repeating or losing an id', async () => {
     const many = manyPositives(250, 3000);
-    vi.mocked(api.listTagPositiveImages).mockResolvedValue({ data: many });
+    vi.mocked(api.listTagPositiveImages).mockResolvedValue(positivesRes(many));
     renderPage();
     await selectRow(/fasada/, 'exterier - fasada');
     await screen.findByRole('button', { name: 'All tags on image 3000' });
@@ -1644,7 +1972,7 @@ describe('<NewDedupTaxonomy>', () => {
 
   it('stops before touching the source when a destination chunk fails', async () => {
     const many = manyPositives(250, 3000);
-    vi.mocked(api.listTagPositiveImages).mockResolvedValue({ data: many });
+    vi.mocked(api.listTagPositiveImages).mockResolvedValue(positivesRes(many));
     let n = 0;
     vi.mocked(api.bulkSetNewDedupTagAnnotation).mockImplementation(async (tagId, ids, state) => {
       n += 1;

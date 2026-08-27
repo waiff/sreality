@@ -23,6 +23,7 @@ import {
   type TagExcludedReason,
   type TagPositiveImage,
   type TagState,
+  type TagPositiveImagesResponse,
 } from '@/lib/api';
 import { fetchImagesByImageIds } from '@/lib/queries';
 import { pushToast } from '@/lib/toast';
@@ -39,6 +40,10 @@ import TagContentsGallery, {
   type BatchFileResult,
   type MovedOutImage,
 } from '@/components/tag-definitions/TagContentsGallery';
+import {
+  orderPositives,
+  type ContentsOrder,
+} from '@/components/tag-definitions/ContentsOrder';
 import TagDefinitionList from '@/components/tag-definitions/TagDefinitionList';
 import TagDeleteConfirm from '@/components/tag-definitions/TagDeleteConfirm';
 import ImageTagDetailPanel, {
@@ -176,7 +181,8 @@ export default function NewDedupTaxonomy() {
   });
   const positiveImagesQ = useQuery({
     queryKey: newDedupPositiveImagesKey(selectedTagId ?? 0),
-    queryFn: () => listTagPositiveImages(selectedTagId as number, POSITIVE_IMAGE_LIMIT),
+    queryFn: () =>
+      listTagPositiveImages(selectedTagId as number, POSITIVE_IMAGE_LIMIT, 'outlier_first'),
     enabled: selectedTagId != null,
   });
   const neighboursQ = useQuery({
@@ -185,7 +191,18 @@ export default function NewDedupTaxonomy() {
     enabled: selectedTagId != null,
   });
 
-  const positiveRows = useMemo(() => positiveImagesQ.data?.data ?? [], [positiveImagesQ.data]);
+  /* ONE fetch per tag, always the distance order — "Newest first" is a
+   * client-side re-sort of the same rows, so flipping the order never refetches
+   * a visible grid and every cache patch below stays keyed on one entry. */
+  const [contentsOrder, setContentsOrder] = useState<ContentsOrder>('outlier_first');
+  const positivesRes = positiveImagesQ.data;
+  /* The server's own verdict, not a re-derivation from the counts. */
+  const outlierApplied = positivesRes?.order === 'outlier_first';
+  const effectiveOrder: ContentsOrder = outlierApplied ? contentsOrder : 'recent';
+  const positiveRows = useMemo(
+    () => orderPositives(positivesRes?.data ?? [], effectiveOrder),
+    [positivesRes, effectiveOrder],
+  );
 
   // --- draft state ---------------------------------------------------------
 
@@ -374,7 +391,9 @@ export default function NewDedupTaxonomy() {
    * `updated_at DESC` and a put-back genuinely moves the row, so it WILL float
    * to the front on the next natural refetch — converging then is honest;
    * reshuffling the grid under the operator's cursor mid-sitting is the churn
-   * both pages are built to avoid. */
+   * both pages are built to avoid. Under the DISTANCE order the same argument
+   * holds even more quietly: a put-back moves the row only as far as the
+   * centroid it re-joins shifts, which is a fraction of one image in N. */
   /* Returns whether the patch was possible at all: the receipt strip is
    * session-local and a tag switch empties it, so a put-back that resolves
    * after one has no row to splice back and the caller has to repair the cache
@@ -384,7 +403,7 @@ export default function NewDedupTaxonomy() {
       const held = movedOutRef.current.find((m) => m.row.image_id === imageId);
       setMovedOut((prev) => prev.filter((m) => m.row.image_id !== imageId));
       if (!held) return false;
-      qc.setQueryData<{ data: TagPositiveImage[] }>(
+      qc.setQueryData<TagPositiveImagesResponse>(
         newDedupPositiveImagesKey(tagId),
         (old) => {
           if (!old || old.data.some((r) => r.image_id === imageId)) return old;
@@ -452,11 +471,11 @@ export default function NewDedupTaxonomy() {
         return;
       }
       const key = newDedupPositiveImagesKey(selectedTagId);
-      const cached = qc.getQueryData<{ data: TagPositiveImage[] }>(key);
+      const cached = qc.getQueryData<TagPositiveImagesResponse>(key);
       const index = cached?.data.findIndex((r) => r.image_id === c.imageId) ?? -1;
       const row = index >= 0 ? cached?.data[index] : undefined;
       if (row) {
-        qc.setQueryData<{ data: TagPositiveImage[] }>(key, (old) =>
+        qc.setQueryData<TagPositiveImagesResponse>(key, (old) =>
           old ? { ...old, data: old.data.filter((r) => r.image_id !== c.imageId) } : old,
         );
       }
@@ -827,7 +846,14 @@ export default function NewDedupTaxonomy() {
     !confusableIncomplete &&
     !doesNotCountIncomplete;
 
-  const loadError = overviewQ.error ?? statusQ.error ?? definitionQ.error;
+  /* The gallery renders unconditionally and `isLoading` is false once a query
+   * has ERRORED, so without this a failed /positive-images read left the page
+   * saying the tag has no centroid — a data-shaped diagnosis of a transport
+   * failure, on the one surface whose whole claim is showing a tag's real
+   * contents. Last in the chain: an overview or definition failure is the more
+   * fundamental one and still wins the banner. */
+  const loadError =
+    overviewQ.error ?? statusQ.error ?? definitionQ.error ?? positiveImagesQ.error;
 
   /* Filing images onto a retired tag would put them where list_tags_for_image
    * can no longer show them. */
@@ -1087,6 +1113,11 @@ export default function NewDedupTaxonomy() {
                       })
                     }
                     putBackAllPending={putBackAllMut.isPending}
+                    order={effectiveOrder}
+                    onOrderChange={setContentsOrder}
+                    outlierApplied={outlierApplied}
+                    centroidPositives={positivesRes?.centroid_positives ?? null}
+                    minPositives={positivesRes?.min_positives ?? MIN_POSITIVES_FOR_CENTROID}
                   />
                   <OverlapEvidence
                     neighbours={neighboursQ.data?.data ?? []}

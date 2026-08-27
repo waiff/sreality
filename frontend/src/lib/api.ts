@@ -1275,11 +1275,34 @@ export interface TagDefinitionStatus {
   created_at: string;
 }
 
+export type TagContentsOrder = 'recent' | 'outlier_first';
+
 export interface TagPositiveImage {
   image_id: number;
   storage_path: string | null;
   sreality_url: string;
   updated_at: string;
+  /* Cosine DISTANCE from this tag's own centroid — 0 = identical, and only ever
+   * meaningful as a rank INSIDE this one tag (measured inter-tag centroid
+   * distances span ~0.01 to ~0.42, so an absolute value transfers nowhere).
+   * Present only on an order='outlier_first' read; null when the image carries
+   * no CLIP embedding, which makes it unplaceable, not an outlier. */
+  centroid_distance?: number | null;
+  /* 1 = farthest from the centroid. Server-assigned, so patching a row out of
+   * the cached list cannot renumber the ones that stay. */
+  distance_rank?: number | null;
+}
+
+export interface TagPositiveImagesResponse {
+  data: TagPositiveImage[];
+  /* The order the server ACTUALLY applied — a tag under the centroid floor
+   * comes back 'recent' however it was asked. The UI reads this and never
+   * re-derives the verdict from the counts. */
+  order: TagContentsOrder;
+  /* Embedded human-verified positives behind the centroid: null = not computed
+   * (recent read), 0 = computed and there are none. */
+  centroid_positives: number | null;
+  min_positives: number;
 }
 
 /* `cosine_distance` is a DISTANCE (0 = identical), not a similarity — pgvector's
@@ -1356,10 +1379,11 @@ export const getTagDefinitionVersion = (
 export const listTagPositiveImages = (
   tagId: number,
   limit = 200,
-): Promise<{ data: TagPositiveImage[] }> =>
-  request<{ data: TagPositiveImage[] }>(
+  order: TagContentsOrder = 'recent',
+): Promise<TagPositiveImagesResponse> =>
+  request<TagPositiveImagesResponse>(
     `/new-dedup/labeling/tags/${tagId}/positive-images`,
-    { query: { limit }, jwt: true },
+    { query: { limit, order }, jwt: true },
   );
 
 /* Empty — never an error — when the tag has fewer than 5 positives carrying a

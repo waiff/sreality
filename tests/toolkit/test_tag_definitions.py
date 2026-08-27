@@ -163,6 +163,12 @@ class _Cur:
             rows.sort(key=lambda r: (r[3], r[0]), reverse=True)
             self._rows = rows[: params["limit"]]
 
+        # "WITH centroid AS" (this tag's own centroid) and "WITH centroids AS"
+        # (every tag's, for the neighbour list) diverge at character 16 — no
+        # prefix collision, but they must stay adjacent so that stays visible.
+        elif s.startswith("WITH centroid AS"):
+            self._rows = list(c.outlier_rows)
+
         elif s.startswith("WITH centroids AS"):
             self._rows = list(c.neighbour_rows)
 
@@ -201,6 +207,13 @@ class _FakeConn:
         # rows whose state is 'positive', already JOINed to images.
         self.positives: list[tuple[int, int, str]] = []
         self.neighbour_rows: list[tuple[Any, ...]] = []
+        # Rows as the DISTANCE-ordered read returns them:
+        # (image_id, storage_path, sreality_url, updated_at, centroid_distance,
+        #  distance_rank, positives). The fake cannot do vector math — Postgres
+        # + pgvector own the ordering, and tests/test_sql_schema_prepare.py owns
+        # whether the SQL compiles. What is asserted here is the SQL the module
+        # emits, the params it binds, and the shape it maps back.
+        self.outlier_rows: list[tuple[Any, ...]] = []
         self.fail_next_insert_with_unique_violation = False
         self.executed: list[tuple[str, Any]] = []
         self._clock = 0
@@ -668,6 +681,175 @@ def test_list_positive_images_clamps_its_limit(conn, asked, bound):
     td.list_positive_images(conn, tag_id=1, limit=asked)
     params = next(p for s, p in conn.executed if s.startswith("SELECT itl.image_id"))
     assert params["limit"] == bound
+
+
+# --- outlier-first contents -------------------------------------------------
+#
+# The fake conn hands back canned rows: it cannot average a vector or apply
+# `<=>`, so nothing below "passes" because the fake ordered anything. Postgres
+# does the ordering, tests/test_sql_schema_prepare.py proves the statement
+# compiles against the real schema, and these assert the three things Python
+# actually owns — the SQL emitted, the params bound, and the shape returned.
+
+def _outlier_row(
+    image_id: int, distance: float | None, rank: int | None, positives: int,
+    updated_at: str = "2026-08-27T00:00:00Z",
+) -> tuple[Any, ...]:
+    return (
+        image_id, f"img/{image_id}.jpg", f"https://cdn/{image_id}.jpg",
+        updated_at, distance, rank, positives,
+    )
+
+
+def test_outlier_order_returns_the_rows_in_the_order_the_database_gave_them(conn):
+    conn.outlier_rows = [
+        _outlier_row(31, 0.266, 1, 71),
+        _outlier_row(12, 0.181, 2, 71),
+        _outlier_row(99, 0.104, 3, 71),
+    ]
+    out = td.list_positive_images_outlier_first(conn, tag_id=3)
+    assert [r["image_id"] for r in out["images"]] == [31, 12, 99]
+
+
+def test_outlier_order_maps_the_distance_and_the_rank_onto_each_row(conn):
+    conn.outlier_rows = [_outlier_row(31, 0.266, 1, 71)]
+    assert td.list_positive_images_outlier_first(conn, tag_id=3)["images"] == [
+        {
+            "image_id": 31, "storage_path": "img/31.jpg",
+            "sreality_url": "https://cdn/31.jpg",
+            "updated_at": "2026-08-27T00:00:00Z",
+            "centroid_distance": 0.266, "distance_rank": 1,
+        },
+    ]
+
+
+def test_outlier_order_reports_the_order_it_actually_applied(conn):
+    conn.outlier_rows = [_outlier_row(31, 0.266, 1, 71)]
+    out = td.list_positive_images_outlier_first(conn, tag_id=3)
+    assert out["order"] == "outlier_first"
+    assert out["centroid_positives"] == 71
+    assert out["min_positives"] == td.MIN_POSITIVES_FOR_CENTROID
+
+
+def test_a_tag_under_the_positives_floor_falls_back_to_the_existing_order(conn):
+    # The CASE leaves every distance NULL, so the SQL's ORDER BY has already
+    # degraded to (updated_at DESC, image_id DESC). The point of the count
+    # riding on the rows is that the caller can SAY so instead of sorting on
+    # nothing.
+    conn.outlier_rows = [_outlier_row(31, None, None, 3), _outlier_row(12, None, None, 3)]
+    out = td.list_positive_images_outlier_first(conn, tag_id=3)
+    assert out["order"] == "recent"
+    assert out["centroid_positives"] == 3
+    assert [r["image_id"] for r in out["images"]] == [31, 12]
+
+
+def test_a_tag_with_no_positives_at_all_reports_zero_and_the_recent_order(conn):
+    conn.outlier_rows = []
+    out = td.list_positive_images_outlier_first(conn, tag_id=3)
+    assert out == {
+        "order": "recent", "centroid_positives": 0,
+        "min_positives": td.MIN_POSITIVES_FOR_CENTROID, "images": [],
+    }
+
+
+def test_a_row_with_no_embedding_carries_a_null_distance_and_no_rank(conn):
+    # Unplaceable, not an outlier — the LEFT JOIN leaves it NULL and NULLS LAST
+    # puts it at the end.
+    conn.outlier_rows = [_outlier_row(31, 0.266, 1, 71), _outlier_row(12, None, None, 71)]
+    rows = td.list_positive_images_outlier_first(conn, tag_id=3)["images"]
+    assert rows[1]["centroid_distance"] is None
+    assert rows[1]["distance_rank"] is None
+
+
+def test_the_outlier_sql_orders_by_distance_desc_with_a_unique_tiebreaker(conn):
+    # image_id is the unique terminal key, in BOTH the window that assigns the
+    # rank and the outer sort that renders the grid — otherwise ties reshuffle
+    # under the operator between refetches.
+    sql = " ".join(td._POSITIVE_IMAGES_OUTLIER_SQL.split())
+    order_by = "ORDER BY centroid_distance DESC NULLS LAST, updated_at DESC, image_id DESC"
+    assert sql.count(order_by) == 2
+
+
+def test_the_outlier_order_degrades_to_the_existing_order_by_construction(conn):
+    # The fallback's whole proof: with every distance NULL the outer ORDER BY's
+    # tail IS _POSITIVE_IMAGES_SQL's order, so "falls back" is structural rather
+    # than a second code path that could drift.
+    outlier = " ".join(td._POSITIVE_IMAGES_OUTLIER_SQL.split())
+    assert outlier.endswith(
+        "ORDER BY centroid_distance DESC NULLS LAST, updated_at DESC, image_id DESC "
+        "LIMIT %(limit)s::int"
+    )
+    recent = " ".join(td._POSITIVE_IMAGES_SQL.split())
+    assert "ORDER BY itl.updated_at DESC, itl.image_id DESC" in recent
+
+
+def test_the_outlier_sql_builds_its_centroid_from_human_verified_positives_only(conn):
+    # Migration 446 (:84) stamped backfill_442 on NEGATIVES only, so
+    # state='positive' already sheds all 72,000 manufactured rows; the source
+    # clause is the rail against an unreviewed MACHINE positive defining the
+    # centre it would then be measured against. Same predicate
+    # tag_candidates._DRAW_POOL_SQL draws on.
+    sql = " ".join(td._POSITIVE_IMAGES_OUTLIER_SQL.split())
+    centroid = sql[sql.index("WITH centroid AS") : sql.index("scored AS")]
+    assert "itl.state = 'positive'" in centroid
+    assert "itl.source IN ('human', 'human_confirmed')" in centroid
+
+
+def test_the_outlier_sql_never_thresholds_on_an_absolute_distance(conn):
+    # Measured inter-tag centroid distances span ~0.01 to ~0.42, so an absolute
+    # cutoff transfers nowhere — only RANK inside one tag is meaningful. The one
+    # numeric gate is the positives floor, which counts rows, not distance.
+    import re
+
+    sql = " ".join(td._POSITIVE_IMAGES_OUTLIER_SQL.split())
+    # `<=>` is the distance OPERATOR, not a comparison — mask it before looking
+    # for comparisons at all, or it matches every one of these patterns.
+    masked = sql.replace("<=>", " DIST ")
+    comparisons = re.findall(r"[^<>]{0,40}(?:>=|<=|<|>)[^<>]{0,40}", masked)
+    assert len(comparisons) == 1
+    assert "c.positives >= %(min_positives)s::int" in comparisons[0]
+    # Nothing is ever compared to a bare number: the floor counts ROWS, and the
+    # distance is only ever sorted on.
+    assert not re.search(r"(?:>=|<=|<|>)\s*[\d.]", masked)
+
+
+@pytest.mark.parametrize(
+    ("asked", "bound"), [(10_000, td.POSITIVE_IMAGE_LIST_MAX), (0, 1), (25, 25)],
+)
+def test_outlier_order_clamps_its_limit(conn, asked, bound):
+    td.list_positive_images_outlier_first(conn, tag_id=3, limit=asked)
+    params = next(p for s, p in conn.executed if s.startswith("WITH centroid AS"))
+    assert params["limit"] == bound
+
+
+def test_outlier_order_binds_the_same_floor_the_overlap_evidence_uses(conn):
+    # One floor, one explanation on the page — a second number would need a
+    # second sentence.
+    td.list_positive_images_outlier_first(conn, tag_id=3)
+    params = next(p for s, p in conn.executed if s.startswith("WITH centroid AS"))
+    assert params["min_positives"] == td.MIN_POSITIVES_FOR_CENTROID == 5
+
+
+def test_outlier_order_defaults_the_model_to_the_checkpoint_in_the_taxonomy_file(conn):
+    from scraper.clip_tagger import load_taxonomy
+
+    td.list_positive_images_outlier_first(conn, tag_id=3)
+    params = next(p for s, p in conn.executed if s.startswith("WITH centroid AS"))
+    assert params["model"] == load_taxonomy()["model"]
+
+
+def test_outlier_order_lets_an_explicit_model_override_the_default(conn):
+    td.list_positive_images_outlier_first(conn, tag_id=3, model="some/other-checkpoint")
+    params = next(p for s, p in conn.executed if s.startswith("WITH centroid AS"))
+    assert params["model"] == "some/other-checkpoint"
+
+
+def test_the_recent_read_never_computes_a_centroid(conn):
+    # A caller that does not ask for the new order pays for none of it, and the
+    # old function is untouched.
+    conn.add_positive(11, 1)
+    td.list_positive_images(conn, tag_id=1)
+    assert not any(s.startswith("WITH centroid") for s in conn.sql_log())
 
 
 # --- overlap evidence -------------------------------------------------------

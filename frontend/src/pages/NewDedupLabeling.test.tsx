@@ -2258,6 +2258,23 @@ describe('<NewDedupLabeling>', () => {
     expect(within(panel).getAllByRole('group', { name: 'Tag state' })).toHaveLength(3);
   });
 
+  it('shows no subject state chip on this page', async () => {
+    // The chip that says "✓ currently in this tag" belongs to the subject block
+    // the definitions workbench pins. With no subject there is no tag being
+    // read, so there is nothing for it to be about.
+    vi.mocked(api.listNewDedupImageTags).mockResolvedValue({
+      data: [
+        imageTag({ id: 1, label: 'interier - kuchyne', family: 'interier', state: 'positive', updated_at: 't' }),
+      ],
+    });
+    renderPage();
+    fireEvent.click(await screen.findByText('all tags'));
+    const panel = await screen.findByRole('dialog', { name: 'All tags on this image' });
+    await within(panel).findAllByRole('group', { name: 'Tag state' });
+
+    expect(within(panel).queryByText(/currently /i)).toBeNull();
+  });
+
   // --- tabs + tag filter ---------------------------------------------------
 
   it('switching status tabs re-queries proposals with the new status', async () => {

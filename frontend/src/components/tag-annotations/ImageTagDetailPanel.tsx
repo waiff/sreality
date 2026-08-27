@@ -85,6 +85,18 @@ const SUBJECT_ACTIONS: ReadonlyArray<{
   },
 ];
 
+/* What the cell IS, in the words the four outcomes already use — three of the
+ * five are literally the same string, because the operator should not have to
+ * learn a second vocabulary to read the state they can already set. Only
+ * 'positive' needs its own word: "keeps it" is what the BUTTON does, not where
+ * the image is. */
+const SUBJECT_STATE_WORD: Record<string, string> = {
+  keeps: 'in this tag',
+  'not-this': 'not this tag',
+  elsewhere: 'belongs elsewhere',
+  'cant-tell': "can't tell",
+};
+
 /* Which of the four the cell is in now. An excluded cell with no reason reads
  * as ambiguous — the same fallback TriStateControl and the ambiguity rate both
  * use, because the three must not disagree about one cell. */
@@ -423,6 +435,29 @@ function SubjectTagBlock({
           <p className="mt-0.5 truncate font-mono text-sm text-[var(--color-ink)]" title={row.label}>
             {row.label}
           </p>
+          {/* The subject is lifted out of the list below, so the ✓ the operator
+            * scans for is not there to be found — and four word buttons with a
+            * coloured fill do not read as "checked". This says the state
+            * outright, in the list's own glyph + the outcomes' own word. Never a
+            * button: the four below already own the setting, and a second
+            * control over one cell is the bug this block was created to avoid. */}
+          <span
+            title={
+              manufactured
+                ? "Manufactured by migration 442's backfill — not a decision anybody made."
+                : 'The state this image is in on the tag you are reading.'
+            }
+            className={[
+              'mt-1 inline-flex items-center gap-1 rounded-[var(--radius-xs)] border px-1.5 py-0.5 text-[0.65rem] leading-none',
+              pressed == null || manufactured
+                ? 'border-dashed border-[var(--color-ink-3)] text-[var(--color-ink-3)]'
+                : STATE_META[row.state as TagState].activeClass,
+            ].join(' ')}
+          >
+            {pressed == null
+              ? 'not decided yet'
+              : `${STATE_META[row.state as TagState].icon} currently ${SUBJECT_STATE_WORD[pressed]}`}
+          </span>
           <div
             role="group"
             /* Deliberately NOT "Tag state": that name belongs to the three-glyph

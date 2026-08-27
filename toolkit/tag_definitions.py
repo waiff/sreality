@@ -453,6 +453,103 @@ def list_positive_images(
     ]
 
 
+POSITIVE_IMAGE_ORDERS = ("recent", "outlier_first")
+
+# Outlier-first: this tag's own positives ordered by cosine distance from this
+# tag's own centroid, farthest first, so a mis-filed image is on screen instead
+# of somewhere in a wall of 300 photos.
+#
+# The centroid is built from HUMAN-VERIFIED positives only — the same predicate
+# tag_candidates._DRAW_POOL_SQL uses. Migration 446 (:84) stamped backfill_442
+# on NEGATIVES only, so `state = 'positive'` already excludes every manufactured
+# row; the source clause is the rail that keeps an unreviewed MACHINE positive
+# from defining the centre it would then be measured against.
+#
+# The floor is applied in the CASE, not in a HAVING, so `positives` is readable
+# even when the tag is UNDER it — a page that has to say "3 of the 5 needed"
+# cannot get that from an empty CTE. An aggregate with no GROUP BY always
+# returns exactly one row, so the CROSS JOIN is safe and total.
+#
+# Below the floor every distance is NULL and the ORDER BY degrades to
+# `updated_at DESC, image_id DESC` — byte-identical to _POSITIVE_IMAGES_SQL's
+# order. Same degrade-by-construction trick as nearest_tags' empty `subject`.
+#
+# `<=>` is cosine DISTANCE (0 = identical), never similarity, and there is NO
+# threshold on it anywhere: measured inter-tag centroid distances span ~0.01 to
+# ~0.42, so only RANK within one tag transfers. The LEFT JOIN cannot fan out —
+# (image_id, model) is image_clip_embeddings' primary key (migration 226).
+# Every placeholder carries an explicit cast so tests/test_sql_schema_prepare.py
+# can PREPARE it without binding values.
+_POSITIVE_IMAGES_OUTLIER_SQL = """
+    WITH centroid AS (
+      SELECT avg(e.embedding) AS vec, count(*)::int AS positives
+      FROM image_tag_labels itl
+      JOIN image_clip_embeddings e
+        ON e.image_id = itl.image_id AND e.model = %(model)s::text
+      WHERE itl.tag_id = %(tag_id)s::bigint
+        AND itl.state = 'positive'
+        AND itl.source IN ('human', 'human_confirmed')
+    ),
+    scored AS (
+      SELECT itl.image_id, i.storage_path, i.sreality_url, itl.updated_at,
+             c.positives,
+             CASE WHEN c.positives >= %(min_positives)s::int
+                  THEN (e.embedding <=> c.vec) END AS centroid_distance
+      FROM image_tag_labels itl
+      JOIN images i ON i.id = itl.image_id
+      CROSS JOIN centroid c
+      LEFT JOIN image_clip_embeddings e
+        ON e.image_id = itl.image_id AND e.model = %(model)s::text
+      WHERE itl.tag_id = %(tag_id)s::bigint AND itl.state = 'positive'
+    )
+    SELECT image_id, storage_path, sreality_url, updated_at, centroid_distance,
+           CASE WHEN centroid_distance IS NULL THEN NULL ELSE
+             row_number() OVER (
+               ORDER BY centroid_distance DESC NULLS LAST,
+                        updated_at DESC, image_id DESC
+             )::int END AS distance_rank,
+           positives
+    FROM scored
+    ORDER BY centroid_distance DESC NULLS LAST, updated_at DESC, image_id DESC
+    LIMIT %(limit)s::int
+"""
+
+
+def list_positive_images_outlier_first(
+    conn: psycopg.Connection, *, tag_id: int, limit: int = 200,
+    min_positives: int = MIN_POSITIVES_FOR_CENTROID, model: str | None = None,
+) -> dict[str, Any]:
+    """This tag's positives ordered farthest-first from its own centroid — the
+    mis-filed images, on screen instead of somewhere in a wall of 300 photos.
+
+    Reports the order it ACTUALLY applied: a tag under the positives floor has
+    no meaningful centroid, so it falls back to list_positive_images' order and
+    says so, rather than sorting on nothing."""
+    limit = min(max(1, limit), POSITIVE_IMAGE_LIST_MAX)
+    min_positives = max(1, int(min_positives))
+    with conn.cursor() as cur:
+        cur.execute(_POSITIVE_IMAGES_OUTLIER_SQL, {
+            "tag_id": tag_id, "limit": limit, "min_positives": min_positives,
+            "model": model or embedding_model(),
+        })
+        rows = cur.fetchall()
+    positives = int(rows[0][6]) if rows else 0
+    return {
+        "order": "outlier_first" if positives >= min_positives else "recent",
+        "centroid_positives": positives,
+        "min_positives": min_positives,
+        "images": [
+            {
+                "image_id": r[0], "storage_path": r[1], "sreality_url": r[2],
+                "updated_at": r[3],
+                "centroid_distance": None if r[4] is None else float(r[4]),
+                "distance_rank": r[5],
+            }
+            for r in rows
+        ],
+    }
+
+
 # --- overlap evidence -------------------------------------------------------
 
 # `<=>` is cosine DISTANCE (0 = identical), never similarity. The c.tag_id
