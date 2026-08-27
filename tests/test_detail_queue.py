@@ -390,11 +390,50 @@ def test_claim_detail_batch_skip_locked_priority_order():
     claimed = db.claim_detail_batch(conn, "sreality", 50)
     assert claimed == [("5", None, 100, 42), ("6", "/p", None, 43)]
     sql, params = conn.executed[0]
-    assert "ORDER BY priority DESC, enqueued_at" in sql
-    assert "source = %s AND claimed_at IS NULL AND given_up = false" in sql
+    # Acquisition is claimed by age alone; the old ranking survives only INSIDE refresh.
+    assert "AND priority = %(new_priority)s ORDER BY enqueued_at" in sql
+    assert "AND priority <> %(new_priority)s ORDER BY priority DESC, enqueued_at" in sql
+    assert "claimed_at IS NULL AND given_up = false" in sql
     assert "SET claimed_at = now()" in sql
     assert "RETURNING q.native_id, q.detail_ref, q.index_price_czk, q.discovery_seq" in sql
-    assert params == ("sreality", 50)
+    assert params["source"] == "sreality"
+    assert params["limit"] == 50
+    assert params["new_priority"] == db.QUEUE_PRIORITY_NEW
+
+
+def test_claim_detail_batch_reserves_half_the_batch_for_new_listings():
+    conn = _FakeConn([(lambda s: "FOR UPDATE SKIP LOCKED" in s, [])])
+    db.claim_detail_batch(conn, "sreality", 200)
+    _, params = conn.executed[0]
+    assert params["acq_limit"] == 100
+    # Refresh takes the rest, and only the rest — unused reserve backfills to it
+    # inside SQL (GREATEST(limit - count(acq), 0)), never in Python.
+    sql, _ = conn.executed[0]
+    assert "LIMIT GREATEST(%(limit)s - (SELECT count(*) FROM acq), 0)" in sql
+
+
+def test_claim_detail_batch_reserve_rounds_up_so_tiny_batches_still_acquire():
+    # Rounding down would give a 1-row batch zero acquisition slots forever —
+    # the same starvation in miniature.
+    for limit, expected in ((1, 1), (2, 1), (3, 2), (7, 4)):
+        conn = _FakeConn([(lambda s: "FOR UPDATE SKIP LOCKED" in s, [])])
+        db.claim_detail_batch(conn, "bazos", limit)
+        _, params = conn.executed[0]
+        assert params["acq_limit"] == expected, limit
+
+
+def test_claim_detail_batch_reserve_never_exceeds_the_batch():
+    conn = _FakeConn([(lambda s: "FOR UPDATE SKIP LOCKED" in s, [])])
+    db.claim_detail_batch(conn, "bazos", 10, acquisition_reserve=1.5)
+    _, params = conn.executed[0]
+    assert params["acq_limit"] == 10
+
+
+def test_claim_detail_batch_reserve_can_be_disabled():
+    conn = _FakeConn([(lambda s: "FOR UPDATE SKIP LOCKED" in s, [])])
+    db.claim_detail_batch(conn, "bazos", 10, acquisition_reserve=0)
+    _, params = conn.executed[0]
+    assert params["acq_limit"] == 0
 
 
 def test_claim_detail_batch_zero_limit_noop():

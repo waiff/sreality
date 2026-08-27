@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -2234,10 +2235,22 @@ def active_failure_ids(
 # via write_detail_batch. The queue is the "what to fetch" signal;
 # listing_fetch_failures stays the Health-visible give-up ledger.
 
-# Priorities (higher drains first): failure-retry > price-changed > new.
+# Two service classes, not one ranking. ACQUISITION (QUEUE_PRIORITY_NEW) is a
+# listing we have never fetched: latency-critical, and bounded by how fast the
+# market posts adverts. REFRESH (everything else) is a listing we already hold:
+# throughput work, and effectively unbounded because a walk re-enqueues on every
+# pass. Ranking them on one axis and always serving the top made refresh starve
+# acquisition outright — 15,064 listings discovered and never fetched, sreality
+# nine days at zero (2026-08-17). claim_detail_batch now reserves a share of
+# every batch for acquisition instead; within refresh the old order still holds.
 QUEUE_PRIORITY_NEW = 0
 QUEUE_PRIORITY_CHANGED = 1
 QUEUE_PRIORITY_FAILURE = 2
+
+# Fraction of each claim reserved for acquisition. Unused reserve backfills to
+# refresh (the refresh limit is computed from the rows acquisition actually
+# took), so a quiet market costs no refresh throughput.
+QUEUE_ACQUISITION_RESERVE = 0.5
 
 _QUEUE_ENQUEUE_CHUNK = 1000
 
@@ -2556,34 +2569,69 @@ def claim_detail_batch(
     conn: psycopg.Connection,
     source: str,
     limit: int,
+    acquisition_reserve: float | None = None,
 ) -> list[tuple[str, str | None, int | None, int]]:
-    """Atomically claim up to `limit` available rows for `source`, highest
-    priority + oldest first. Returns (native_id, detail_ref, index_price_czk,
-    discovery_seq) — discovery_seq is the row's enqueue-time sequence value
-    (see migration 368), carried through so the drain can stamp it onto
-    listings.discovery_seq at write time, independent of claim/fetch/write order.
+    """Atomically claim up to `limit` available rows for `source`. Returns
+    (native_id, detail_ref, index_price_czk, discovery_seq) — discovery_seq is
+    the row's enqueue-time sequence value (see migration 368), carried through so
+    the drain can stamp it onto listings.discovery_seq at write time,
+    independent of claim/fetch/write order.
 
-    FOR UPDATE SKIP LOCKED makes concurrent drains safe. The claim is committed
-    immediately (claimed_at set) so a crashed drain's rows are recovered by
-    reclaim_stale_claims rather than lost.
+    The batch is composed from two classes rather than taken off one ranking:
+    up to ceil(limit * QUEUE_ACQUISITION_RESERVE) never-fetched rows
+    (QUEUE_PRIORITY_NEW, oldest first), then refresh rows (priority DESC,
+    enqueued_at) for whatever the reserve did not use. This is what makes
+    starvation structurally impossible: refresh inflow is unbounded and can
+    exceed drain throughput indefinitely, so any strict ordering that puts it
+    ahead of acquisition eventually stops ingesting new listings entirely.
+    Backfill is one-directional by design — acquisition cannot take refresh's
+    share, because the market bounds it anyway.
+
+    FOR UPDATE SKIP LOCKED makes concurrent drains safe; both classes are locked
+    in the same order by every caller, so concurrent drains cannot deadlock. The
+    claim is committed immediately (claimed_at set) so a crashed drain's rows are
+    recovered by reclaim_stale_claims rather than lost.
     """
     if limit <= 0:
         return []
+    reserve = (
+        QUEUE_ACQUISITION_RESERVE if acquisition_reserve is None else acquisition_reserve
+    )
+    acq_limit = 0 if reserve <= 0 else min(limit, max(1, math.ceil(limit * reserve)))
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
-            WITH c AS (
+            WITH acq AS (
                 SELECT source, native_id FROM listing_detail_queue
-                WHERE source = %s AND claimed_at IS NULL AND given_up = false
-                ORDER BY priority DESC, enqueued_at
-                LIMIT %s
+                WHERE source = %(source)s AND claimed_at IS NULL AND given_up = false
+                  AND priority = %(new_priority)s
+                ORDER BY enqueued_at
+                LIMIT %(acq_limit)s
                 FOR UPDATE SKIP LOCKED
+            ),
+            rest AS (
+                SELECT source, native_id FROM listing_detail_queue
+                WHERE source = %(source)s AND claimed_at IS NULL AND given_up = false
+                  AND priority <> %(new_priority)s
+                ORDER BY priority DESC, enqueued_at
+                LIMIT GREATEST(%(limit)s - (SELECT count(*) FROM acq), 0)
+                FOR UPDATE SKIP LOCKED
+            ),
+            c AS (
+                SELECT source, native_id FROM acq
+                UNION ALL
+                SELECT source, native_id FROM rest
             )
             UPDATE listing_detail_queue q SET claimed_at = now()
             FROM c WHERE q.source = c.source AND q.native_id = c.native_id
             RETURNING q.native_id, q.detail_ref, q.index_price_czk, q.discovery_seq
             """,
-            (source, limit),
+            {
+                "source": source,
+                "new_priority": QUEUE_PRIORITY_NEW,
+                "acq_limit": acq_limit,
+                "limit": limit,
+            },
         )
         return [(nid, ref, price, dseq) for nid, ref, price, dseq in cur.fetchall()]
 

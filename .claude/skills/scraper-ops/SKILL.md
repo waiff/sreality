@@ -273,7 +273,10 @@ from the slow "download each ad" write:
 - **`index_walk.yml` (fast, frequent).** Walks the **entire** index of every category pair (no
   `--limit`), `touch_listings` bumps `last_seen_at` on still-listed ids, `mark_inactive` flips
   delisted ones (under the completeness guard), and new + price-changed ids are **enqueued** into
-  `listing_detail_queue` with a priority (failure-retry > price-changed > new). No detail fetch,
+  `listing_detail_queue` in one of two service classes — ACQUISITION (never fetched) or REFRESH
+  (failure-retry > price-changed > the location refetch lane). The drain reserves half of every
+  claim for acquisition, so an unbounded refresh backlog can no longer starve new listings; unused
+  reserve backfills to refresh. Do NOT reintroduce a single ordering across both. No detail fetch,
   so delistings surface within minutes. Records `run_type='index'`, `index_pages>0` (what Health
   liveness keys off). Uses the **transaction pooler** (`connect()`) — bulk set-based statements,
   no per-listing loop.
