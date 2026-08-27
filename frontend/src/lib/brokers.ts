@@ -168,6 +168,12 @@ export interface LeaderboardParams {
   metric: LeaderMetric;
   limit?: number;
   firmIds?: number[];
+  // Same column, same >= semantics as Browse's own min_price_czk (migration 448) —
+  // total asking price for a sale, monthly rent for a rental. null/undefined = no
+  // value filter. includeUnpriced only matters once minPriceCzk is set: whether a
+  // listing with no price ("cena na vyžádání") counts as meeting it.
+  minPriceCzk?: number | null;
+  includeUnpriced?: boolean;
 }
 
 /* The attributed broker for one listing, contact included (migration 419).
@@ -279,6 +285,8 @@ export async function fetchBrokerLeaderboard(
       metric: p.metric,
       limit: p.limit ?? 100,
       firm_ids: p.firmIds ?? [],
+      min_price_czk: p.minPriceCzk ?? null,
+      include_unpriced: p.includeUnpriced ?? false,
     },
     undefined,
     JWT,

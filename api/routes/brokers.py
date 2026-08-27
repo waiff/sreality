@@ -57,13 +57,16 @@ def get_leaderboard(
     metric: str = "active_property_count",
     limit: int = Query(default=100, ge=1, le=2000),
     firm_ids: list[int] = Query(default=[]),
+    min_price_czk: int | None = Query(default=None, ge=0),
+    include_unpriced: bool = Query(default=False),
     conn: Any = Depends(deps.get_db_conn),
     claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return _policy(brokers.leaderboard(
         conn, region_ids=region_ids, okres_ids=okres_ids, obec_ids=obec_ids,
         category_main=category_main, category_type=category_type,
-        metric=metric, limit=limit, firm_ids=firm_ids), claims)
+        metric=metric, limit=limit, firm_ids=firm_ids,
+        min_price_czk=min_price_czk, include_unpriced=include_unpriced), claims)
 
 
 @router.get("/firm-options")

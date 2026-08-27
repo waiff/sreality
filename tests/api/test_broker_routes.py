@@ -52,12 +52,15 @@ def test_leaderboard_passes_params(client, monkeypatch):
 
     res = client.get("/brokers/leaderboard",
                      params={"region_ids": [27, 116], "metric": "listing_count", "limit": 5,
-                             "firm_ids": [8]})
+                             "firm_ids": [8], "min_price_czk": 5_000_000,
+                             "include_unpriced": True})
     assert res.status_code == 200
     assert captured["region_ids"] == [27, 116]
     assert captured["metric"] == "listing_count"
     assert captured["limit"] == 5
     assert captured["firm_ids"] == [8]
+    assert captured["min_price_czk"] == 5_000_000
+    assert captured["include_unpriced"] is True
     assert res.json()["data"] == [{"broker_id": 1}]  # no contact column, no flags
 
 
@@ -69,6 +72,24 @@ def test_leaderboard_defaults_firm_ids_to_empty(client, monkeypatch):
     monkeypatch.setattr(broker_routes.brokers, "leaderboard", fake)
     client.get("/brokers/leaderboard")
     assert captured["firm_ids"] == []
+
+
+def test_leaderboard_defaults_value_filter_to_unset(client, monkeypatch):
+    captured = {}
+    def fake(conn, **kw):
+        captured.update(kw)
+        return {"data": [], "metadata": {}}
+    monkeypatch.setattr(broker_routes.brokers, "leaderboard", fake)
+    client.get("/brokers/leaderboard")
+    assert captured["min_price_czk"] is None
+    assert captured["include_unpriced"] is False
+
+
+def test_leaderboard_rejects_a_negative_min_price(client, monkeypatch):
+    monkeypatch.setattr(broker_routes.brokers, "leaderboard",
+                        lambda conn, **kw: {"data": [], "metadata": {}})
+    res = client.get("/brokers/leaderboard", params={"min_price_czk": -1})
+    assert res.status_code == 422
 
 
 def test_leaderboard_masks_contacts_for_a_plain_user(client, monkeypatch):

@@ -144,6 +144,33 @@ describe('fetchBrokerLeaderboard', () => {
     expect(new URL(calls[0].url).searchParams.getAll('firm_ids')).toEqual([]);
   });
 
+  it('sends min_price_czk and include_unpriced when a value filter is set', async () => {
+    const calls = stubFetch(() => ({ body: { data: [] } }));
+    const { fetchBrokerLeaderboard } = await loadBrokers();
+    await fetchBrokerLeaderboard({
+      regionIds: [], okresIds: [], obecIds: [],
+      categoryMain: 'byt', categoryType: 'prodej', metric: 'active_property_count',
+      minPriceCzk: 5_000_000, includeUnpriced: true,
+    });
+    const url = new URL(calls[0].url);
+    expect(url.searchParams.get('min_price_czk')).toBe('5000000');
+    expect(url.searchParams.get('include_unpriced')).toBe('true');
+  });
+
+  // null/undefined must be OMITTED, not sent as the literal string "null" — the
+  // API route's `int | None` default only applies when the param is absent.
+  it('omits min_price_czk when unset and defaults include_unpriced to false', async () => {
+    const calls = stubFetch(() => ({ body: { data: [] } }));
+    const { fetchBrokerLeaderboard } = await loadBrokers();
+    await fetchBrokerLeaderboard({
+      regionIds: [], okresIds: [], obecIds: [],
+      categoryMain: null, categoryType: null, metric: 'listing_count',
+    });
+    const url = new URL(calls[0].url);
+    expect(url.searchParams.has('min_price_czk')).toBe(false);
+    expect(url.searchParams.get('include_unpriced')).toBe('false');
+  });
+
   it('keeps the masked flags on the returned rows', async () => {
     stubFetch(() => ({
       body: {

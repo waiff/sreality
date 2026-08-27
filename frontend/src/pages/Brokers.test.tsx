@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -176,5 +176,108 @@ describe('<Brokers> company filter', () => {
     // correctly skips.
     fireEvent.click(mmreality);
     expect(mmreality).toHaveAttribute('aria-pressed', 'false');
+  });
+});
+
+describe('<Brokers> value filter', () => {
+  it('filters by minimum price; the "bez ceny" toggle stays disabled until a value is set', async () => {
+    asUser(false);
+    renderPage();
+    await waitFor(() => expect(brokers.fetchBrokerLeaderboard).toHaveBeenCalled());
+
+    const toggle = screen.getByRole('button', { name: 'Počítat nabídky bez ceny' });
+    expect(toggle).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('Minimální cena'), {
+      target: { value: '5000000' },
+    });
+    await waitFor(() =>
+      expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
+        expect.objectContaining({ minPriceCzk: 5_000_000, includeUnpriced: false }),
+      ),
+    );
+    expect(toggle).not.toBeDisabled();
+
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
+        expect.objectContaining({ minPriceCzk: 5_000_000, includeUnpriced: true }),
+      ),
+    );
+  });
+
+  // price_czk is the total asking price for a sale but the MONTHLY rent for a
+  // rental (same column, same dual meaning as Browse's own price filter) — the
+  // placeholder is the only cue distinguishing them, so it has to track Nabídka.
+  it('labels the unit Kč for Prodej and Kč/měsíc for Pronájem', async () => {
+    asUser(false);
+    renderPage();
+    await waitFor(() => expect(brokers.fetchBrokerLeaderboard).toHaveBeenCalled());
+    expect(screen.getByLabelText('Minimální cena')).toHaveAttribute('placeholder', 'Kč');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Pronájem' }));
+    await waitFor(() =>
+      expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
+        expect.objectContaining({ categoryType: 'pronajem' }),
+      ),
+    );
+    expect(screen.getByLabelText('Minimální cena')).toHaveAttribute('placeholder', 'Kč/měsíc');
+  });
+
+  // Switching directly between Prodej and Pronájem must not silently carry a number
+  // typed for one scale into the other (5 000 000 Kč is a normal sale price and an
+  // impossible monthly rent) — clear rather than reinterpret.
+  it('clears the value filter when the offer type actually changes', async () => {
+    asUser(false);
+    renderPage();
+    await waitFor(() => expect(brokers.fetchBrokerLeaderboard).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByLabelText('Minimální cena'), {
+      target: { value: '5000000' },
+    });
+    await waitFor(() =>
+      expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
+        expect.objectContaining({ minPriceCzk: 5_000_000 }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Pronájem' }));
+    await waitFor(() =>
+      expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
+        expect.objectContaining({ categoryType: 'pronajem', minPriceCzk: null, includeUnpriced: false }),
+      ),
+    );
+    expect(screen.getByLabelText('Minimální cena')).toHaveValue('');
+  });
+
+  // "Vše" mixes prodej/pronájem/podíl/dražba under one price column, so a value
+  // filter has no single meaning there — the control disappears rather than
+  // silently keeping a stale, ambiguous filter applied underneath.
+  it('hides the value filter behind an explanatory hint when Nabídka is "Vše"', async () => {
+    asUser(false);
+    renderPage();
+    await waitFor(() => expect(brokers.fetchBrokerLeaderboard).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByLabelText('Minimální cena'), {
+      target: { value: '3000000' },
+    });
+    await waitFor(() =>
+      expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
+        expect.objectContaining({ minPriceCzk: 3_000_000 }),
+      ),
+    );
+
+    // Three "Vše" pills exist (Typ / Nabídka / Počet) — scope to Nabídka's field.
+    const nabidkaField = screen.getByText('Nabídka').closest('label');
+    if (!nabidkaField) throw new Error('Nabídka field not found');
+    fireEvent.click(within(nabidkaField).getByRole('button', { name: 'Vše' }));
+
+    expect(screen.queryByLabelText('Minimální cena')).not.toBeInTheDocument();
+    expect(screen.getByText('Zvolte Prodej nebo Pronájem')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
+        expect.objectContaining({ categoryType: null, minPriceCzk: null, includeUnpriced: false }),
+      ),
+    );
   });
 });
