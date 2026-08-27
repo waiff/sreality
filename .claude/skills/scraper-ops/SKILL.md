@@ -419,7 +419,18 @@ plausibility checks `ppm2_median_shift`, `ppm2_basis_floor_share`, `area_vs_usab
 `ppm2_measure_coverage` over `measure_plausibility_by_source` (migration 427), which watch what a
 value IS where `data_quality_by_source` only tests that it exists — the fourth watching whether
 there is anything to measure at all, since the other three are ratios that skip a cell with no
-inputs and would read clean on a corpus gone dark. Thresholds live in
+inputs and would read clean on a corpus gone dark. **`acquisition_lag` + `walk_coverage`
+(2026-08-27)** close the ingestion blind spot: until then every scraper health signal compared our
+data to our own data and rendered as a dot on a page, so sreality ingested ZERO new listings for
+nine days without anything leaving the database. `acquisition_lag` reads the oldest unclaimed
+never-fetched `listing_detail_queue` row per portal — deliberately the QUEUE and not
+`listings.first_seen_at`, because a "no new rows in N hours" check needs a baseline that the outage
+itself erodes (nine days of zeros makes zero the expected value). `walk_coverage` is the only
+comparison against EXTERNAL truth: collected vs the portal's advertised total from the latest
+COMPLETED index run's `by_category`, plus a truncation arm (categories walked vs that portal's own
+7-day best) because a budget-stopped walk leaves no entry for the categories it never reached and
+so makes the gap look BETTER. remax and maxima derive their total as `len(seen)` and mmreality
+reports none — all three are reported `verifiable: false` rather than 100%. Thresholds live in
 `app_settings.pipeline_check_thresholds` over code defaults in `DEFAULT_THRESHOLDS`.
 **Per-check rationale, incident history and threshold sizing:
 `.claude/skills/scraper-ops/references/pipeline-verification.md`.**

@@ -12,6 +12,8 @@ from typing import Any
 
 from scripts.verify_pipeline import (
     DEFAULT_THRESHOLDS,
+    check_acquisition_lag,
+    check_walk_coverage,
     _status_for_cron,
     _status_for_burn,
     _status_for_llm_errors,
@@ -1289,3 +1291,124 @@ def test_every_measure_threshold_has_a_code_default() -> None:
                 "area_divergence_min_rows", "ppm2_coverage_gap_warn",
                 "ppm2_coverage_gap_fail_7d", "ppm2_coverage_min_rows"):
         assert key in DEFAULT_THRESHOLDS
+
+
+# --- ingestion checks (2026-08-27) -----------------------------------------
+#
+# These two are the push half of the starvation incident: nothing in this harness
+# had ever looked at whether listings were actually being INGESTED, so a portal
+# could sit at zero for nine days without a signal leaving the database.
+
+
+class _RowsConn:
+    """Minimal conn whose cursor returns one canned result set."""
+
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self._rows = rows
+        self.executed: list[tuple[str, Any]] = []
+
+    def cursor(self) -> "_RowsConn":
+        return self
+
+    def __enter__(self) -> "_RowsConn":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.executed.append((sql, params))
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return list(self._rows)
+
+
+def test_acquisition_lag_ok_when_every_portal_is_current() -> None:
+    conn = _RowsConn([("bazos", 8, 1.6, 1.3), ("realitymix", 123, 0.8, 0.1)])
+    out = check_acquisition_lag(conn, T)
+    assert out["status"] == "ok"
+    assert out["value"] == 1.6
+    assert out["details"]["offenders"] == []
+
+
+def test_acquisition_lag_fails_on_the_starvation_signature() -> None:
+    """The live numbers on the morning of the fix: sreality 216h / 9,873 waiting."""
+    conn = _RowsConn([
+        ("sreality", 9873, 216.11, 86.29),
+        ("ceskereality", 2840, 89.31, 44.47),
+        ("bazos", 8, 1.6, 1.3),
+    ])
+    out = check_acquisition_lag(conn, T)
+    assert out["status"] == "fail"
+    assert out["value"] == 216.11
+    assert any("sreality" in o for o in out["details"]["offenders"])
+    assert not any("bazos" in o for o in out["details"]["offenders"])
+
+
+def test_acquisition_lag_warns_between_the_tiers() -> None:
+    conn = _RowsConn([("idnes", 1125, 12.0, 8.0)])
+    assert check_acquisition_lag(conn, T)["status"] == "warn"
+
+
+def test_acquisition_lag_queries_the_new_class_only() -> None:
+    """Keyed on the queue, not on listings.first_seen_at — a "no new rows in N
+    hours" check needs a baseline that the outage itself erodes."""
+    conn = _RowsConn([])
+    check_acquisition_lag(conn, T)
+    sql, params = conn.executed[0]
+    assert "listing_detail_queue" in sql
+    assert "claimed_at is null" in sql and "given_up = false" in sql
+    assert params == (0,)  # db.QUEUE_PRIORITY_NEW
+
+
+def _cov(source, walked, best, age, collected, total):
+    return (source, walked, best, age, collected, total)
+
+
+def test_walk_coverage_ok_at_the_observed_noise_floor() -> None:
+    conn = _RowsConn([
+        _cov("sreality", 20, 20, 2.5, 102487, 102488),
+        _cov("bazos", 14, 14, 1.8, 29731, 29778),  # 0.16%
+    ])
+    out = check_walk_coverage(conn, T)
+    assert out["status"] == "ok"
+
+
+def test_walk_coverage_warns_on_the_ceskereality_facet_gap() -> None:
+    """43,431 of 48,235 advertised — the top-10-popularity facet widget is not a
+    partition. Amber, not red: it is a known bounded problem with its own fix."""
+    conn = _RowsConn([_cov("ceskereality", 12, 12, 13.9, 43431, 48235)])
+    out = check_walk_coverage(conn, T)
+    assert out["status"] == "warn"
+    assert out["value"] == 9.96
+
+
+def test_walk_coverage_fails_on_a_deep_hole() -> None:
+    conn = _RowsConn([_cov("idnes", 10, 10, 3.0, 12036, 35769)])
+    assert check_walk_coverage(conn, T)["status"] == "fail"
+
+
+def test_walk_coverage_flags_a_truncated_walk_even_at_zero_gap() -> None:
+    """A run that reached fewer categories than the portal's own recent best is
+    truncated — and truncation makes the GAP look better, because the categories
+    it never reached contribute no shortfall. Caught on the category count."""
+    conn = _RowsConn([_cov("idnes", 0, 10, 14.2, None, None)])
+    out = check_walk_coverage(conn, T)
+    assert out["status"] == "warn"
+    assert out["details"]["per_source"]["idnes"]["truncated"] is True
+
+
+def test_walk_coverage_never_certifies_a_self_reported_total() -> None:
+    """remax and maxima derive their "advertised total" as len(seen), so their gap
+    is 0% by construction; mmreality reports no total at all. Reporting any of them
+    as 100% covered would be a number that cannot be wrong."""
+    conn = _RowsConn([
+        _cov("remax", 10, 10, 13.0, 8132, 8132),
+        _cov("maxima", 10, 10, 13.0, 272, 272),
+        _cov("mmreality", 1, 1, 12.1, None, None),
+    ])
+    out = check_walk_coverage(conn, T)
+    assert out["details"]["unverified"] == ["maxima", "mmreality", "remax"]
+    for source in ("remax", "maxima", "mmreality"):
+        assert out["details"]["per_source"][source]["verifiable"] is False
+        assert out["details"]["per_source"][source]["gap_pct"] is None
