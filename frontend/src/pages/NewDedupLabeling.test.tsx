@@ -10,9 +10,15 @@
  *   - Proposals — the secondary-CLIP suggestion queue. A tile's tri-state
  *     control writes through setNewDedupProposalState, which ALSO flips the
  *     proposal's bookkeeping status.
- *   - Sample — every image in the labeling pool for ONE tag, including ones no
- *     model ever proposed it for. Writes through setNewDedupTagAnnotation,
- *     which is a plain idempotent upsert on image_tag_labels.
+ *   - Candidates — ONE tag's review queue (migration 449) plus everything
+ *     already decided for that tag, including images no model ever proposed it
+ *     for. Writes through setNewDedupTagAnnotation, which is a plain idempotent
+ *     upsert on image_tag_labels.
+ *
+ * The load-bearing property, asserted here as copy and as wiring: candidate
+ * membership carries NO training semantics. A queued image is one somebody
+ * should LOOK at — never a positive, never a negative, never a default — and
+ * nothing on this page may derive a label from a row's existence.
  *
  * Re-deciding an already-decided proposal (clicking a different tri-state
  * button on a Confirmed/Dismissed tile) is allowed server-side —
@@ -29,6 +35,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import NewDedupLabeling from './NewDedupLabeling';
 import type {
+  NewDedupCandidateDrawResult,
+  NewDedupCandidateSummary,
   NewDedupImageTag,
   NewDedupLabelingOverview,
   NewDedupLabelProposal,
@@ -64,6 +72,8 @@ vi.mock('@/lib/api', async (importOriginal) => {
     bulkSetNewDedupImageTags: vi.fn(),
     listNewDedupPositiveTagsForImages: vi.fn(),
     listNewDedupSettings: vi.fn(),
+    getNewDedupTagCandidates: vi.fn(),
+    drawNewDedupTagCandidates: vi.fn(),
     setBorderCase: vi.fn(),
     deleteBorderCase: vi.fn(),
   };
@@ -110,6 +120,9 @@ function tag(over: Partial<NewDedupTag> = {}): NewDedupTag {
     positive_count: 12, gate_count: 12, border_case_count: 0,
     negative_count: 8, excluded_count: 5,
     pending_count: 3, dismissed_count: 1,
+    /* The tag's own review queue (migration 449). A count of WORK, never of
+     * evidence — no test may read these as labels. */
+    candidate_count: 0, candidate_open_count: 0, last_drawn_at: null,
     /* Provenance (migration 446). The default fixture is an all-human tag with
      * a healthy ambiguity rate — every test that cares about the signal states
      * its own numbers. */
@@ -123,7 +136,10 @@ function tag(over: Partial<NewDedupTag> = {}): NewDedupTag {
 function overview(over: Partial<NewDedupLabelingOverview> = {}): NewDedupLabelingOverview {
   // Threshold and floor come from the SERVER, never from a literal in the SPA —
   // so every fixture carries them and the page renders whatever it is told.
-  return { sample_size: 42, ambiguity_threshold: 0.15, ambiguity_min_decisions: 20, tags: [tag()], ...over };
+  return {
+    candidate_image_count: 42, ambiguity_threshold: 0.15, ambiguity_min_decisions: 20,
+    tags: [tag()], ...over,
+  };
 }
 
 const OVERVIEW: NewDedupLabelingOverview = overview();
@@ -176,10 +192,63 @@ const IMAGE: ImagePublic = {
   clip_confidence: 0.6, clip_render_score: 0.1, phash: 123,
 };
 
+/* Default fixture is a legacy row — decided for the tag but never drawn as a
+ * candidate, so all three provenance keys are null. Tests that care about the
+ * draw state their own. */
 function tagImage(over: Partial<NewDedupTagImage> = {}): NewDedupTagImage {
   return {
     image_id: 101, storage_path: 'img/555/1.jpg', state: 'untouched',
     updated_at: null, created_by: null, source: null, excluded_reason: null,
+    draw: null, category_main: null, pool_rank: null,
+    ...over,
+  };
+}
+
+/* A tag with a healthy queue and enough verified positives to draw again. Every
+ * count here is WORK (open / drawn), never evidence. */
+function candidateSummary(
+  over: Partial<NewDedupCandidateSummary> = {},
+): NewDedupCandidateSummary {
+  return {
+    tag_id: 1,
+    total: 240, open: 118, reviewed: 122,
+    last_drawn_at: '2026-08-26T09:00:00Z',
+    /* NOT the overview's positive_count — that one includes backfill rows, and
+     * a centroid built from those is a centroid of a fiction. */
+    verified_positive_count: 31,
+    min_verified_positives: 15,
+    can_draw: true,
+    model: 'openai/clip-vit-base-patch32',
+    /* positive/negative are the band's YIELD. The random band's is the one
+     * self-check the retrieval has — an unranked sample of the pool that keeps
+     * coming back positive means the centroid is missing a mode. */
+    by_draw: [
+      { key: 'centroid_head', total: 120, open: 40, positive: 61, negative: 19 },
+      { key: 'centroid_mid', total: 72, open: 48, positive: 6, negative: 18 },
+      { key: 'random', total: 48, open: 30, positive: 0, negative: 18 },
+    ],
+    by_category: [
+      { key: 'byt', total: 96, open: 44, positive: 40, negative: 12 },
+      { key: 'dum', total: 60, open: 30, positive: 21, negative: 9 },
+    ],
+    ...over,
+  };
+}
+
+function drawResult(over: Partial<NewDedupCandidateDrawResult> = {}): NewDedupCandidateDrawResult {
+  return {
+    tag_id: 1, status: 'drawn', requested: 120, inserted: 83,
+    verified_positive_count: 31, min_verified_positives: 15,
+    model: 'openai/clip-vit-base-patch32',
+    by_draw: { centroid_head: 44, centroid_mid: 23, random: 16 },
+    by_category: { byt: 27, dum: 21, pozemek: 16, komercni: 12, ostatni: 7 },
+    dropped_near_dup: 21, dropped_property_cap: 16,
+    categories: [
+      {
+        category_main: 'byt', status: 'drawn', requested: 36, pool_size: 5820,
+        inserted: 27, dropped_near_dup: 6, dropped_property_cap: 5, elapsed_ms: 4180,
+      },
+    ],
     ...over,
   };
 }
@@ -237,6 +306,8 @@ describe('<NewDedupLabeling>', () => {
     vi.mocked(api.listNewDedupTagImages).mockResolvedValue({ data: [] });
     vi.mocked(api.listNewDedupImageTags).mockResolvedValue({ data: [] });
     vi.mocked(api.listNewDedupPositiveTagsForImages).mockResolvedValue({ data: [] });
+    vi.mocked(api.getNewDedupTagCandidates).mockResolvedValue({ data: candidateSummary() });
+    vi.mocked(api.drawNewDedupTagCandidates).mockResolvedValue({ data: drawResult() });
     vi.mocked(queries.fetchImagesByImageIds).mockResolvedValue(new Map([[101, IMAGE]]));
     vi.mocked(queries.fetchBorderCasesByImageIds).mockResolvedValue(new Set());
     vi.mocked(api.setBorderCase).mockResolvedValue({
@@ -622,7 +693,264 @@ describe('<NewDedupLabeling>', () => {
     expect((screen.getByLabelText('Tag') as HTMLSelectElement).value).toBe('');
   });
 
-  // --- growing the sample --------------------------------------------------
+  // --- the candidate queue (migration 449) ---------------------------------
+
+  /* Selects the default tag so the queue readout has something to read. Stays
+   * in Proposals mode — the readout is about the QUEUE, not the grid, and has
+   * to be right whichever grid is on screen. */
+  async function selectTag() {
+    renderPage();
+    await screen.findByRole('button', { name: 'interier - kuchyne' });
+    fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'interier - kuchyne' } });
+    await waitFor(() => expect(api.getNewDedupTagCandidates).toHaveBeenCalledWith(1));
+    // The controls only exist once the summary lands — a disabled Draw button
+    // is still a rendered one, so this waits for data, not for permission.
+    await screen.findByRole('button', { name: 'Draw candidates' });
+  }
+
+  it('asks for a tag before reading a queue out, because a queue is always FOR one tag', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: 'interier - kuchyne' });
+    // The old shared pool was one number for all 51 tags. Nothing in the
+    // candidate world means that, so there is no unscoped number to show.
+    expect(await screen.findByText('Choose a tag to see its candidate queue.')).toBeInTheDocument();
+    expect(api.getNewDedupTagCandidates).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'Draw candidates' })).not.toBeInTheDocument();
+  });
+
+  it('reads out the work left, the work done, and when the queue was last topped up', async () => {
+    await selectTag();
+    // "open" is the number the operator actually works against; "drawn" is the
+    // whole queue including everything already decided.
+    const line = await screen.findByText(/118 open/);
+    expect(line).toHaveTextContent('118 open · 240 drawn');
+    expect(line).toHaveTextContent(/last drawn/);
+  });
+
+  it('says "never drawn" rather than printing a missing date', async () => {
+    vi.mocked(api.getNewDedupTagCandidates).mockResolvedValue({
+      data: candidateSummary({ total: 0, open: 0, reviewed: 0, last_drawn_at: null,
+        by_draw: [], by_category: [] }),
+    });
+    await selectTag();
+    expect(await screen.findByText(/never drawn/)).toHaveTextContent('0 open · 0 drawn · never drawn');
+  });
+
+  it('shows how the queue was drawn — the rank bands, and the property-type mix', async () => {
+    await selectTag();
+    const bands = await screen.findByRole('list', { name: 'Candidates by rank band' });
+    // Short band names, because the tile chip uses the same words. A pure
+    // top-N would produce a prototypical set, so the mix is deliberate and
+    // therefore worth printing.
+    expect(bands).toHaveTextContent('head 120');
+    expect(bands).toHaveTextContent('· mid 72');
+    expect(bands).toHaveTextContent('· random 48');
+
+    // THIS is the readout that makes the corpus skew visible instead of
+    // silently inherited: 83.8% byt in the labeled set against 43.9% of the
+    // corpus, diluted by drawing per category.
+    const types = screen.getByRole('list', { name: 'Candidates by property type' });
+    expect(types).toHaveTextContent('byt 96');
+    expect(types).toHaveTextContent('· dum 60');
+  });
+
+  it('reports each band\'s yield, and surfaces the random band\'s outright', async () => {
+    // The design names "sustained positives out of the random band mean the
+    // centroid is missing a mode" in five places; without a per-band yield the
+    // only way to check it is hand-counting badges across a 200-row grid.
+    vi.mocked(api.getNewDedupTagCandidates).mockResolvedValue({
+      data: candidateSummary({
+        by_draw: [
+          { key: 'centroid_head', total: 120, open: 40, positive: 61, negative: 19 },
+          { key: 'random', total: 48, open: 30, positive: 11, negative: 7 },
+        ],
+      }),
+    });
+    await selectTag();
+    const bands = await screen.findByRole('list', { name: 'Candidates by rank band' });
+    expect(within(bands).getByTitle(/Nearest the tag's centroid/).getAttribute('title'))
+      .toMatch(/61 positive of 80 decided/);
+    expect(await screen.findByText(/Random band: 11 positive of 18 decided/))
+      .toHaveTextContent(/missing a mode/);
+  });
+
+  it('stays silent about a yield nothing has been decided for', async () => {
+    // "0 positive" on an untouched band reads as a verdict on the band rather
+    // than as the absence of one.
+    vi.mocked(api.getNewDedupTagCandidates).mockResolvedValue({
+      data: candidateSummary({
+        by_draw: [{ key: 'random', total: 48, open: 48, positive: 0, negative: 0 }],
+      }),
+    });
+    await selectTag();
+    const bands = await screen.findByRole('list', { name: 'Candidates by rank band' });
+    expect(within(bands).getByTitle(/unranked sample/).getAttribute('title'))
+      .not.toMatch(/positive of/);
+    expect(screen.queryByText(/Random band:/)).not.toBeInTheDocument();
+  });
+
+  it('never lets a band read as a verdict about the images in it', async () => {
+    await selectTag();
+    const bands = await screen.findByRole('list', { name: 'Candidates by rank band' });
+    const head = within(bands).getByTitle(/Nearest the tag's centroid/);
+    // The head band is the highest-yield one, and an operator who starts
+    // reading "head" as "probably yes" is exactly the bias the mixed bands
+    // exist to prevent. The title describes the DRAW, and says what the band
+    // costs, not what the images are.
+    expect(head.getAttribute('title')).toMatch(/prototypical set that fails on odd cases/);
+    expect(within(bands).getByTitle(/only band that can surface a positive the centroid is blind to/))
+      .toBeInTheDocument();
+  });
+
+  it('says outright that being queued is not a label', async () => {
+    renderPage();
+    // The one sentence this whole panel exists to carry — and it is on screen
+    // with no tag selected, before any number is.
+    expect(
+      await screen.findByText(/Membership is not a label/),
+    ).toHaveTextContent(/an image nobody has reviewed is never trained as a negative/);
+  });
+
+  it('draws candidates for the selected tag, defaulting to the full category mix', async () => {
+    await selectTag();
+    fireEvent.click(screen.getByRole('button', { name: 'Draw candidates' }));
+    // null category = the skew-correcting default mix, not "no category".
+    await waitFor(() =>
+      expect(api.drawNewDedupTagCandidates).toHaveBeenCalledWith(1, 120, null),
+    );
+  });
+
+  it('scopes a draw to one property type, and honours an overtyped count', async () => {
+    await selectTag();
+    fireEvent.change(screen.getByLabelText('Candidates to draw'), { target: { value: '40' } });
+    fireEvent.change(screen.getByLabelText('Property type for this draw'), {
+      target: { value: 'pozemek' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Draw candidates' }));
+    await waitFor(() =>
+      expect(api.drawNewDedupTagCandidates).toHaveBeenCalledWith(1, 40, 'pozemek'),
+    );
+  });
+
+  it('keeps the draw report on screen — the loss counters are the only quality signal', async () => {
+    await selectTag();
+    fireEvent.click(screen.getByRole('button', { name: 'Draw candidates' }));
+    // Near-duplicate and per-property drops are how an over-collapsing tag
+    // becomes visible rather than inferred, so they outlive the toast.
+    const report = await screen.findByText(/Drew 83 candidates/);
+    expect(report).toHaveTextContent('21 near-duplicates and 16 over the per-property cap dropped');
+    // Bands are never back-filled from each other, so a shortfall is reported
+    // rather than quietly topped up from another band.
+    expect(report).toHaveTextContent('Asked for 120, short by 37');
+  });
+
+  it('names a category that did not complete instead of hiding it in a smaller number', async () => {
+    vi.mocked(api.drawNewDedupTagCandidates).mockResolvedValue({
+      data: drawResult({
+        categories: [
+          { category_main: 'byt', status: 'drawn', requested: 36, pool_size: 5820,
+            inserted: 27, dropped_near_dup: 6, dropped_property_cap: 5, elapsed_ms: 4180 },
+          { category_main: 'pozemek', status: 'timeout', requested: 24, pool_size: 0,
+            inserted: 0, dropped_near_dup: 0, dropped_property_cap: 0, elapsed_ms: 60000 },
+        ],
+      }),
+    });
+    await selectTag();
+    fireEvent.click(screen.getByRole('button', { name: 'Draw candidates' }));
+    // A slow category degrades to a timeout and the others still land — that
+    // is honest degradation, and it has to be legible as such.
+    expect(await screen.findByText(/Did not complete: pozemek \(timeout\)/)).toBeInTheDocument();
+  });
+
+  it('shows an inline pending state while drawing', async () => {
+    let resolveDraw: (v: { data: NewDedupCandidateDrawResult }) => void = () => {};
+    vi.mocked(api.drawNewDedupTagCandidates).mockImplementation(
+      () => new Promise((resolve) => { resolveDraw = resolve; }),
+    );
+    await selectTag();
+    fireEvent.click(screen.getByRole('button', { name: 'Draw candidates' }));
+
+    expect(await screen.findByText('Drawing…')).toBeInTheDocument();
+    expect(screen.getByLabelText('Candidates to draw')).toBeDisabled();
+
+    resolveDraw({ data: drawResult() });
+    await waitFor(() => expect(screen.queryByText('Drawing…')).not.toBeInTheDocument());
+  });
+
+  it('refuses to draw for a tag with too few verified positives, and says what is missing', async () => {
+    vi.mocked(api.getNewDedupTagCandidates).mockResolvedValue({
+      data: candidateSummary({ verified_positive_count: 6, can_draw: false }),
+    });
+    await selectTag();
+    // Honest degradation: a centroid over fewer positives than were ever
+    // measured is one operator's idiosyncrasies. The block names the floor,
+    // the tag's own number, and the way out.
+    const blocked = await screen.findByText(/Needs 15 verified positive images/);
+    expect(blocked).toHaveTextContent('this tag has 6');
+    expect(blocked).toHaveTextContent('Label more positives first');
+    expect(screen.getByRole('button', { name: 'Draw candidates' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Draw candidates' }));
+    expect(api.drawNewDedupTagCandidates).not.toHaveBeenCalled();
+  });
+
+  it('never recomputes the floor in the SPA — the server decides whether a tag can draw', async () => {
+    // Comfortably over the printed floor, but the server said no. One
+    // definition of "enough positives", the same rule the ambiguity threshold
+    // follows.
+    vi.mocked(api.getNewDedupTagCandidates).mockResolvedValue({
+      data: candidateSummary({ verified_positive_count: 99, can_draw: false }),
+    });
+    await selectTag();
+    await screen.findByText(/Needs 15 verified positive images/);
+    expect(screen.getByRole('button', { name: 'Draw candidates' })).toBeDisabled();
+  });
+
+  it('re-reads the queue after a decision, without refetching the grid', async () => {
+    vi.mocked(api.listNewDedupTagImages).mockResolvedValue({ data: [tagImage()] });
+    vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(annotationResult());
+    await openCandidates([tagImage()]);
+    const before = vi.mocked(api.getNewDedupTagCandidates).mock.calls.length;
+
+    setStateOn(0, 'positive');
+
+    // The open count just moved by one, so the readout is invalidated — but the
+    // visible grid is still patched in place, never invalidated, which is the
+    // churn this page is built to avoid.
+    await waitFor(() =>
+      expect(vi.mocked(api.getNewDedupTagCandidates).mock.calls.length).toBeGreaterThan(before),
+    );
+    expect(vi.mocked(api.listNewDedupTagImages).mock.calls).toHaveLength(1);
+  });
+
+  it('labels a tile with the band that queued it, and with nothing at all for a legacy row', async () => {
+    const { container } = await openCandidates([
+      tagImage({ image_id: 101, draw: 'centroid_mid', category_main: 'dum', pool_rank: 412 }),
+      tagImage({ image_id: 102 }),
+    ]);
+    const tiles = within(grid(container));
+    // WHY this image is in front of you, and where it sat in the ranked pool.
+    expect(tiles.getByText('mid #412')).toBeInTheDocument();
+    expect(tiles.getByTitle(/Drawn under the dum quota/)).toBeInTheDocument();
+    // The band describes the DRAW, never the answer — the title has to say so,
+    // or "head" starts reading as "probably yes".
+    expect(tiles.getByText('mid #412').getAttribute('title'))
+      .toMatch(/why the image was queued, not what it is/);
+    // The second row was decided before candidates existed and was never drawn.
+    // It carries no band at all; inventing one would be a claim nobody made.
+    expect(tiles.queryAllByText(/#\d+$/)).toHaveLength(1);
+  });
+
+  it('counts images QUEUED in the taxonomy header, not images in a shared pool', async () => {
+    renderPage();
+    // sample_size meant "images in the one pool every tag shared" and is gone,
+    // not repurposed: this is a different quantity over a different
+    // denominator, so it gets a different word.
+    expect(await screen.findByText(/42 images queued/)).toBeInTheDocument();
+    expect(screen.queryByText(/\d+ sampled/)).not.toBeInTheDocument();
+  });
+
+  // --- growing the proposal pool -------------------------------------------
 
   it('grows the sample with the entered count', async () => {
     vi.mocked(api.growNewDedupSample).mockResolvedValue({ data: { added: 50 } });
@@ -920,11 +1248,11 @@ describe('<NewDedupLabeling>', () => {
 
   /* Into Sample mode on the default tag, with a chosen state filter — the mode
    * where a cell's stored reason is visible without a proposal in the way. */
-  async function openSample(rows: NewDedupTagImage[], stateFilter?: string) {
+  async function openCandidates(rows: NewDedupTagImage[], stateFilter?: string) {
     vi.mocked(api.listNewDedupTagImages).mockResolvedValue({ data: rows });
     const rendered = renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
-    fireEvent.click(screen.getByRole('button', { name: 'Sample' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Candidates' }));
     fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'interier - kuchyne' } });
     if (stateFilter) {
       fireEvent.change(screen.getByLabelText('State'), { target: { value: stateFilter } });
@@ -937,7 +1265,7 @@ describe('<NewDedupLabeling>', () => {
     vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(
       annotationResult({ state: 'excluded', excluded_reason: 'ambiguous' }),
     );
-    await openSample([tagImage()]);
+    await openCandidates([tagImage()]);
 
     setStateOn(0, 'excluded');
 
@@ -951,7 +1279,7 @@ describe('<NewDedupLabeling>', () => {
   it('shows no reason chip until a cell is actually excluded', async () => {
     // Cold path: nothing new on screen, no layout shift, no extra affordance to
     // read past on a tile the operator is about to wave through.
-    await openSample([tagImage({ state: 'positive', source: 'human' })]);
+    await openCandidates([tagImage({ state: 'positive', source: 'human' })]);
     expect(reasonChip()).toBeNull();
   });
 
@@ -959,7 +1287,7 @@ describe('<NewDedupLabeling>', () => {
     vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(
       annotationResult({ state: 'excluded', excluded_reason: 'pruned' }),
     );
-    await openSample(
+    await openCandidates(
       [tagImage({ state: 'excluded', excluded_reason: 'ambiguous', source: 'human' })],
       'excluded',
     );
@@ -982,7 +1310,7 @@ describe('<NewDedupLabeling>', () => {
     // The one pre-445 excluded row's reason is genuinely unknown. Ambiguous is
     // what ⊘ means everywhere else on this page, so that is what it shows —
     // and the operator can correct it in one click like any other.
-    await openSample([tagImage({ state: 'excluded', excluded_reason: null })], 'excluded');
+    await openCandidates([tagImage({ state: 'excluded', excluded_reason: null })], 'excluded');
     expect(reasonChip()).toHaveTextContent('ambiguous');
   });
 
@@ -990,7 +1318,7 @@ describe('<NewDedupLabeling>', () => {
     vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(
       annotationResult({ state: 'positive', excluded_reason: null }),
     );
-    await openSample(
+    await openCandidates(
       [tagImage({ state: 'excluded', excluded_reason: 'pruned', source: 'human' })],
       'all',
     );
@@ -1011,7 +1339,7 @@ describe('<NewDedupLabeling>', () => {
       data: { updated: 2, tag_id: 1, state: 'excluded', excluded_reason: 'pruned',
         image_ids: [101, 102] },
     });
-    await openSample([tagImage(), tagImage({ image_id: 102 })]);
+    await openCandidates([tagImage(), tagImage({ image_id: 102 })]);
 
     fireEvent.click(screen.getByText('Select all'));
     fireEvent.click(screen.getByText('Set selected: excluded · pruned'));
@@ -1032,7 +1360,7 @@ describe('<NewDedupLabeling>', () => {
       data: { updated: 2, tag_id: 1, state: 'positive', excluded_reason: null,
         image_ids: [101, 102] },
     });
-    await openSample([tagImage(), tagImage({ image_id: 102 })]);
+    await openCandidates([tagImage(), tagImage({ image_id: 102 })]);
 
     fireEvent.click(screen.getByText('Select all'));
     fireEvent.click(screen.getByText('Set selected: positive'));
@@ -1082,7 +1410,7 @@ describe('<NewDedupLabeling>', () => {
   });
 
   it('draws a 442-manufactured cell as the default it is, not as a decision', async () => {
-    await openSample(
+    await openCandidates(
       [
         tagImage({ image_id: 101, state: 'negative', source: 'backfill_442' }),
         tagImage({ image_id: 102, state: 'negative', source: 'human' }),
@@ -1458,14 +1786,14 @@ describe('<NewDedupLabeling>', () => {
     );
   });
 
-  it('shows assigned tags in Sample mode tiles too', async () => {
+  it('shows assigned tags in Candidates mode tiles too', async () => {
     vi.mocked(api.listNewDedupTagImages).mockResolvedValue({ data: [tagImage()] });
     vi.mocked(api.listNewDedupPositiveTagsForImages).mockResolvedValue({
       data: [{ image_id: 101, tag_id: 1, label: 'interier - kuchyne' }],
     });
     renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
-    fireEvent.click(screen.getByRole('button', { name: 'Sample' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Candidates' }));
     fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'interier - kuchyne' } });
     const list = await screen.findByRole('list', { name: 'Assigned tags' });
     expect(within(list).getByText('interier - kuchyne')).toBeInTheDocument();
@@ -1623,15 +1951,15 @@ describe('<NewDedupLabeling>', () => {
     );
   });
 
-  // --- Sample mode ---------------------------------------------------------
+  // --- Candidates mode -----------------------------------------------------
 
   it('asks for a tag before browsing the sample', async () => {
     renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
-    fireEvent.click(screen.getByRole('button', { name: 'Sample' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Candidates' }));
     // The whole point of this mode is "every image in the pool for ONE tag" —
     // there is no meaningful unscoped listing, so it asks instead of guessing.
-    expect(await screen.findByText('Choose a tag above to browse its sample.')).toBeInTheDocument();
+    expect(await screen.findByText('Choose a tag above to browse its candidates.')).toBeInTheDocument();
     expect(api.listNewDedupTagImages).not.toHaveBeenCalled();
   });
 
@@ -1644,7 +1972,7 @@ describe('<NewDedupLabeling>', () => {
     );
     renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
-    fireEvent.click(screen.getByRole('button', { name: 'Sample' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Candidates' }));
     fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'interier - kuchyne' } });
 
     // Scoped by the tag's ID, not its label text — the reason tag_taxonomy got
@@ -1670,7 +1998,7 @@ describe('<NewDedupLabeling>', () => {
     vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue(annotationResult());
     renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
-    fireEvent.click(screen.getByRole('button', { name: 'Sample' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Candidates' }));
     fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'interier - kuchyne' } });
     await waitFor(() => expect(stateGroups()).toHaveLength(2));
 
@@ -1691,7 +2019,7 @@ describe('<NewDedupLabeling>', () => {
     });
     renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
-    fireEvent.click(screen.getByRole('button', { name: 'Sample' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Candidates' }));
     fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'interier - kuchyne' } });
     await waitFor(() => expect(api.listNewDedupTagImages).toHaveBeenCalled());
 
@@ -1711,7 +2039,7 @@ describe('<NewDedupLabeling>', () => {
     vi.mocked(api.listNewDedupTagImages).mockResolvedValue({ data: [tagImage()] });
     renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
-    fireEvent.click(screen.getByRole('button', { name: 'Sample' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Candidates' }));
     fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'interier - kuchyne' } });
     await waitFor(() => expect(api.listNewDedupTagImages).toHaveBeenCalled());
 
@@ -1730,7 +2058,7 @@ describe('<NewDedupLabeling>', () => {
     });
     renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
-    fireEvent.click(screen.getByRole('button', { name: 'Sample' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Candidates' }));
     fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'interier - kuchyne' } });
     await waitFor(() => expect(stateGroups()).toHaveLength(2));
 
@@ -1754,7 +2082,7 @@ describe('<NewDedupLabeling>', () => {
     );
     const { container } = renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
-    fireEvent.click(screen.getByRole('button', { name: 'Sample' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Candidates' }));
     fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'interier - kuchyne' } });
     await waitFor(() => expect(stateGroups()).toHaveLength(1));
 
@@ -1765,13 +2093,21 @@ describe('<NewDedupLabeling>', () => {
     );
   });
 
-  it('tells the operator when a tag has no images in the chosen state', async () => {
+  it('points an empty queue at the draw control, but only when nothing is filtered out', async () => {
     vi.mocked(api.listNewDedupTagImages).mockResolvedValue({ data: [] });
     renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
-    fireEvent.click(screen.getByRole('button', { name: 'Sample' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Candidates' }));
     fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'interier - kuchyne' } });
-    expect(await screen.findByText('No images match.')).toBeInTheDocument();
+    // Default filter is "untouched": nothing to review means the queue needs
+    // topping up, and the control that does it is named.
+    expect(await screen.findByText('No candidates yet — draw some above.')).toBeInTheDocument();
+
+    // Under a state filter the queue can be full and still show nothing, so the
+    // same copy would be a lie — "draw some" is not the fix for "no excluded
+    // ones".
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: 'excluded' } });
+    expect(await screen.findByText('No candidates in that state.')).toBeInTheDocument();
   });
 
   // --- the all-tags detail panel ------------------------------------------

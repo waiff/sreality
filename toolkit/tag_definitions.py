@@ -45,7 +45,7 @@ _DEFINITION_COLUMNS = (
 )
 
 
-def _embedding_model() -> str:
+def embedding_model() -> str:
     """The checkpoint image_clip_embeddings is written with — read from
     data/clip_taxonomy.json, never a second hardcoded copy of the name."""
     return load_taxonomy()["model"]
@@ -436,10 +436,10 @@ def list_positive_images(
     contains, which is how the operator sees the drift between a label's name
     and its contents while writing the definition.
 
-    Deliberately NOT tag_annotations.list_images_for_tag: that one reads
-    dedup_sim.labeling_sample, which is (a) a membership filter, not "every
-    positive", and (b) a schema PROGRAM.md plans to drop at Wave 8. This page is
-    permanent, so it reads image_tag_labels directly."""
+    Deliberately NOT tag_annotations.list_images_for_tag: that one is driven by
+    the tag's REVIEW QUEUE (tag_candidates, migration 449) — a work list, not
+    "every positive" — and its rows carry no label semantics at all. This page is
+    about what the tag contains, so it reads image_tag_labels directly."""
     limit = min(max(1, limit), POSITIVE_IMAGE_LIST_MAX)
     with conn.cursor() as cur:
         cur.execute(_POSITIVE_IMAGES_SQL, {"tag_id": tag_id, "limit": limit})
@@ -501,7 +501,7 @@ def nearest_tags(
     with conn.cursor() as cur:
         cur.execute(_NEAREST_TAGS_SQL, {
             "tag_id": tag_id, "limit": limit, "min_positives": min_positives,
-            "model": model or _embedding_model(),
+            "model": model or embedding_model(),
         })
         rows = cur.fetchall()
     return [

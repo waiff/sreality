@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from api import dependencies as deps
 from toolkit import dedup_sim_labeling as dsl
 from toolkit import tag_annotations
+from toolkit import tag_candidates
 from toolkit import tag_definitions as td
 
 router = APIRouter(
@@ -44,6 +45,14 @@ class TagFlagsIn(BaseModel):
 
 class GrowSampleIn(BaseModel):
     count: int
+    category_main: str | None = None
+
+
+# `drawn_by` is deliberately not a request field, for the same reason `source` is
+# not (migration 446): a browser that can name its own provenance can corrupt the
+# record the provenance exists to protect.
+class DrawCandidatesIn(BaseModel):
+    count: int = tag_candidates.DEFAULT_DRAW_COUNT
     category_main: str | None = None
 
 
@@ -149,8 +158,9 @@ def _check_excluded_reason(state: str, reason: str | None) -> None:
 
 @router.get("/overview")
 def get_overview(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
-    """Every tag with its tri-state counts, plus the current sample size —
-    the single call the page's coverage strip renders from."""
+    """Every tag with its tri-state counts, its candidate-queue size and how
+    much of it is still open — the single call the page's coverage strip
+    renders from."""
     return {"data": tag_annotations.tag_overview(conn)}
 
 
@@ -343,10 +353,10 @@ def get_images_for_tag(
     tag_id: int, state: str | None = None, limit: int = 100,
     conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
-    """Tag-centric browse: every image in the labeling sample with its
-    current state for this one tag. Backs "kitchen = excluded" filtering —
-    unlike /proposals, this reaches images the model never proposed this
-    tag for."""
+    """Tag-centric browse: this tag's candidate queue plus everything already
+    decided for it, each with its state for this one tag. Backs "kitchen =
+    excluded" filtering — unlike /proposals, this reaches images the model never
+    proposed this tag for. Queue membership is not a label."""
     try:
         return {
             "data": tag_annotations.list_images_for_tag(
@@ -402,6 +412,42 @@ def delete_annotation(
 ) -> dict[str, Any]:
     """Revert one cell to untouched."""
     return {"data": tag_annotations.clear_state(conn, image_id=image_id, tag_id=tag_id)}
+
+
+# --- candidate retrieval (migration 449) ------------------------------------
+
+
+@router.get("/tags/{tag_id}/candidates")
+def get_tag_candidates(
+    tag_id: int, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """This tag's review queue: how many candidates it holds, how many are still
+    undecided, how they were drawn (rank band and category), and whether the tag
+    has enough human-verified positives to draw more."""
+    try:
+        return {"data": tag_candidates.candidate_summary(conn, tag_id=tag_id)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
+
+
+@router.post("/tags/{tag_id}/candidates")
+def post_tag_candidates(
+    tag_id: int, body: DrawCandidatesIn, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Draw candidates for this tag by CLIP retrieval. A tag with too few
+    human-verified positives gets a 200 with status='insufficient_positives' and
+    no rows — never a silently empty pool."""
+    try:
+        return {
+            "data": tag_candidates.draw_candidates(
+                conn, tag_id=tag_id, count=body.count,
+                category_main=body.category_main,
+            )
+        }
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # --- tag definitions (migration 446) ----------------------------------------

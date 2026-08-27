@@ -7,9 +7,11 @@ Two concerns:
   (docs/design/new-dedup/PROGRAM.md). A real surrogate key replaces the old
   text-keyed join, so a rename is one UPDATE instead of a cascade rewrite.
 * Annotations (`image_tag_labels`) — one row per (image, tag) decision:
-  positive, negative, or excluded. No row means untouched — displays and
-  trains as negative once the image is in `dedup_sim.labeling_sample`
-  (docs/design/tag-annotation-matrix.md's decisions ledger).
+  positive, negative, or excluded. No row means UNTOUCHED, and untouched never
+  trains as negative (operator ruling 2026-08-27, superseding migration 442's
+  pool-scoped default-negative): an image never reviewed for a tag must stay
+  distinguishable from one reviewed and judged not-that-tag. Membership of the
+  `tag_candidates` review queue (migration 449) confers no label of any kind.
 * Provenance (migration 446) — every decision also records WHO decided it
   (`source`), under WHICH written definition (`definition_id`, migration 445),
   when a human last checked it (`verified_at`) and, on an excluded cell, WHY
@@ -402,21 +404,40 @@ def clear_state(conn: psycopg.Connection, *, image_id: int, tag_id: int) -> dict
     return {"image_id": image_id, "tag_id": tag_id, "deleted": deleted}
 
 
-# `s.added_at DESC, s.image_id DESC` is a total order for the same reason
-# dedup_sim_labeling's proposal list needs one: a stable tiebreaker so the
-# grid doesn't reshuffle under the operator between refetches.
+# The browse is TAG-SCOPED now: a tag's own candidate queue (migration 449),
+# not one global pool every tag shared. The second UNION arm is not optional —
+# without it, "show me every image where kitchen = positive" would return almost
+# nothing, because the 1,440 legacy positives were never drawn as candidates and
+# the operator would reasonably conclude their labels had vanished. Candidates
+# first (a draw always has a drawn_at), decided-but-never-drawn images after.
+# (drawn_at DESC, pool_rank ASC, image_id DESC) is a TOTAL order — image_id is
+# unique across the union because arm two excludes candidates — so the grid does
+# not reshuffle under the operator between refetches.
 _LIST_IMAGES_FOR_TAG_SQL = """
-    SELECT s.image_id, i.storage_path, itl.state, itl.updated_at, itl.created_by,
-           itl.source, itl.excluded_reason
-    FROM dedup_sim.labeling_sample s
-    JOIN images i ON i.id = s.image_id
-    LEFT JOIN image_tag_labels itl ON itl.image_id = s.image_id AND itl.tag_id = %(tag_id)s
+    SELECT q.image_id, i.storage_path, itl.state, itl.updated_at, itl.created_by,
+           itl.source, itl.excluded_reason, q.draw, q.category_main, q.pool_rank
+    FROM (
+      SELECT c.image_id, c.drawn_at, c.pool_rank, c.draw, c.category_main
+      FROM tag_candidates c
+      WHERE c.tag_id = %(tag_id)s
+      UNION ALL
+      SELECT d.image_id, NULL::timestamptz, NULL::int, NULL::text, NULL::text
+      FROM image_tag_labels d
+      WHERE d.tag_id = %(tag_id)s
+        AND NOT EXISTS (
+          SELECT 1 FROM tag_candidates c2
+          WHERE c2.tag_id = %(tag_id)s AND c2.image_id = d.image_id
+        )
+    ) q
+    JOIN images i ON i.id = q.image_id
+    LEFT JOIN image_tag_labels itl
+      ON itl.image_id = q.image_id AND itl.tag_id = %(tag_id)s
     WHERE (
       %(state)s::text IS NULL
       OR (%(state)s = 'untouched' AND itl.state IS NULL)
       OR itl.state = %(state)s
     )
-    ORDER BY s.added_at DESC, s.image_id DESC
+    ORDER BY q.drawn_at DESC NULLS LAST, q.pool_rank ASC NULLS LAST, q.image_id DESC
     LIMIT %(limit)s
 """
 
@@ -484,12 +505,15 @@ def list_positive_tags_for_images(
 def list_images_for_tag(
     conn: psycopg.Connection, *, tag_id: int, state: str | None = None, limit: int = 100,
 ) -> list[dict[str, Any]]:
-    """Tag-centric browse: every image in the labeling sample, with its
-    current state for this one tag (state=None in the response means
-    untouched/defaulted-negative). Backs the "kitchen = excluded" filter —
-    unlike dedup_sim_labeling.list_proposals (which lists machine
-    SUGGESTIONS), this lists the SAMPLE itself, so an image the secondary
-    CLIP never proposed this tag for is still reachable and reviewable."""
+    """Tag-centric browse: this tag's candidate queue (migration 449) plus
+    everything already decided for it, each row carrying its state for this one
+    tag (state=None in the response means untouched).
+
+    Candidate membership means "LOOK at this image for this tag" — it is not a
+    label, and an untouched candidate is not a negative. `draw` / `category_main`
+    / `pool_rank` say how a row was drawn, and are None for an image decided but
+    never drawn as a candidate. Unlike dedup_sim_labeling.list_proposals (machine
+    SUGGESTIONS), this reaches images no model ever proposed this tag for."""
     valid_states = (*STATES, "untouched")
     if state is not None and state not in valid_states:
         raise ValueError(f"state must be one of {valid_states}")
@@ -502,6 +526,7 @@ def list_images_for_tag(
             "image_id": r[0], "storage_path": r[1], "state": r[2] or "untouched",
             "updated_at": r[3], "created_by": r[4],
             "source": r[5], "excluded_reason": r[6],
+            "draw": r[7], "category_main": r[8], "pool_rank": r[9],
         }
         for r in rows
     ]
@@ -555,7 +580,10 @@ _OVERVIEW_SQL = """
         false
       ) AS ambiguity_alert,
       COALESCE(p.pending_count, 0) AS pending_count,
-      COALESCE(p.dismissed_count, 0) AS dismissed_count
+      COALESCE(p.dismissed_count, 0) AS dismissed_count,
+      COALESCE(cand.candidate_count, 0) AS candidate_count,
+      COALESCE(cand.candidate_open_count, 0) AS candidate_open_count,
+      cand.last_drawn_at
     FROM tag_taxonomy t
     LEFT JOIN (
       SELECT itl.tag_id,
@@ -600,8 +628,24 @@ _OVERVIEW_SQL = """
       FROM dedup_sim.label_proposals lp
       GROUP BY lp.label
     ) p ON p.label = t.label
+    LEFT JOIN (
+      SELECT tc.tag_id,
+        count(*) AS candidate_count,
+        count(*) FILTER (WHERE lab.image_id IS NULL) AS candidate_open_count,
+        max(tc.drawn_at) AS last_drawn_at
+      FROM tag_candidates tc
+      LEFT JOIN image_tag_labels lab
+        ON lab.image_id = tc.image_id AND lab.tag_id = tc.tag_id
+      GROUP BY tc.tag_id
+    ) cand ON cand.tag_id = t.id
     ORDER BY t.label
 """
+
+# Distinct IMAGES queued for at least one tag — deliberately NOT the old
+# `sample_size` under a new name. That number meant "images in the one pool every
+# tag shared"; candidates are per tag, so nothing in the new world means it, and a
+# reused name with a changed denominator is exactly the drift this codebase refuses.
+_CANDIDATE_IMAGE_COUNT_SQL = "SELECT count(DISTINCT image_id)::int FROM tag_candidates"
 
 
 def tag_overview(conn: psycopg.Connection) -> dict[str, Any]:
@@ -618,10 +662,17 @@ def tag_overview(conn: psycopg.Connection) -> dict[str, Any]:
 
     positive/negative/excluded_count still INCLUDE the migration-442 backfill
     rows; `backfill_count` is what makes that inventory legible. Narrowing them
-    belongs to the separate, gated deletion PR."""
+    belongs to the separate, gated deletion PR.
+
+    `sample_size` is GONE, not repurposed (migration 449): it meant "images in the
+    one pool every tag shared", and candidates are per tag. `candidate_image_count`
+    is distinct images queued for at least one tag — a different quantity with a
+    different denominator — and the per-tag `candidate_count` /
+    `candidate_open_count` are the numbers an operator actually works against.
+    Queue membership is not a label: an untouched candidate is untouched."""
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM dedup_sim.labeling_sample")
-        sample_size = cur.fetchone()[0]
+        cur.execute(_CANDIDATE_IMAGE_COUNT_SQL)
+        candidate_image_count = cur.fetchone()[0]
         cur.execute(_OVERVIEW_SQL, {
             "threshold": AMBIGUITY_RATE_THRESHOLD,
             "min_decisions": AMBIGUITY_MIN_DECISIONS,
@@ -641,11 +692,13 @@ def tag_overview(conn: psycopg.Connection) -> dict[str, Any]:
             "ambiguity_rate": None if r[19] is None else float(r[19]),
             "ambiguity_alert": bool(r[20]),
             "pending_count": r[21], "dismissed_count": r[22],
+            "candidate_count": r[23], "candidate_open_count": r[24],
+            "last_drawn_at": r[25],
         }
         for r in rows
     ]
     return {
-        "sample_size": sample_size,
+        "candidate_image_count": candidate_image_count,
         "ambiguity_threshold": AMBIGUITY_RATE_THRESHOLD,
         "ambiguity_min_decisions": AMBIGUITY_MIN_DECISIONS,
         "tags": tags,

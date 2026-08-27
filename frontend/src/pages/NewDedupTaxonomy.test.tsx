@@ -57,6 +57,7 @@ function tag(over: Partial<NewDedupTag> = {}): NewDedupTag {
     created_at: '2026-08-01T00:00:00Z',
     positive_count: 12, gate_count: 12, border_case_count: 0,
     negative_count: 0, excluded_count: 0, pending_count: 0, dismissed_count: 0,
+    candidate_count: 0, candidate_open_count: 0, last_drawn_at: null,
     human_count: 12, machine_count: 0, backfill_count: 0,
     ambiguous_count: 0, ambiguous_decided_count: 0, pruned_count: 0, decided_count: 12,
     ambiguity_rate: 0, ambiguity_alert: false,
@@ -69,7 +70,7 @@ const KOUPELNA = tag({ id: 2, label: 'interier - koupelna' });
 const FASADA = tag({ id: 3, label: 'exterier - fasada' });
 
 const OVERVIEW: NewDedupLabelingOverview = {
-  sample_size: 42,
+  candidate_image_count: 42,
   ambiguity_threshold: 0.15,
   ambiguity_min_decisions: 20,
   tags: [KUCHYNE, KOUPELNA, FASADA],
