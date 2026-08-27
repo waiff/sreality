@@ -1,12 +1,12 @@
 """The LIMIT must sit BELOW the hydration join (migration 435), in BOTH of migration
-445's branches — and each branch's inactive twin must be fully pruned from the plan.
+448's branches — and each branch's inactive twin must be fully pruned from the plan.
 
 W4's whole claim is that the leaderboard ranks on cheap columns alone, truncates, and only
 then joins `brokers` and `firms` to decorate at most `p_limit` rows. Measured before:
 between 87% and 99.2% of every joined-and-decorated row was discarded by the LIMIT — 2,067
 of the default shape's 3,140 blocks, and 20,355 of the region chip's 22,910.
 
-445 adds a second branch (reads `listings` directly when p_min_price_czk is set) beside the
+448 adds a second branch (reads `listings` directly when p_min_price_czk is set) beside the
 unfiltered one (reads broker_region_type_stats), UNIONed together in one `language sql`
 function so each stays plan-inlinable — see the migration's own header for why a `language
 plpgsql` if/else was tried and reverted (it made the whole function an opaque "Function
@@ -143,7 +143,7 @@ def test_firms_is_not_touched_below_the_limit_unfiltered(plan_unfiltered):
 
 
 def test_firms_is_not_touched_below_the_limit_priced(plan_priced):
-    """The same guarantee, for the new (445) live branch — nothing structural exempts
+    """The same guarantee, for the new (448) live branch — nothing structural exempts
     a price-filtered call from the ranking-then-hydrate rule."""
     limit = _find_limit(plan_priced)
     below = _relation_names(limit)
@@ -193,7 +193,7 @@ def test_the_active_set_resolves_once_below_the_limit_unfiltered(plan_unfiltered
     every active broker every 10 minutes), which is why the originally-designed partial
     index was measured and dropped.
 
-    RED by: deleting `as materialized` from the (shared, migration 445) `active_brokers`
+    RED by: deleting `as materialized` from the (shared, migration 448) `active_brokers`
     CTE.
     """
     limit = _find_limit(plan_unfiltered)
@@ -215,7 +215,7 @@ def test_the_active_set_resolves_once_below_the_limit_priced(plan_priced):
     )
 
 
-# --- migration 445's specific claim: the inactive branch costs nothing ------------
+# --- migration 448's specific claim: the inactive branch costs nothing ------------
 
 
 def test_unfiltered_call_never_touches_listings(plan_unfiltered):

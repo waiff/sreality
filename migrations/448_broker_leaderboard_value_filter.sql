@@ -1,4 +1,4 @@
--- 445_broker_leaderboard_value_filter.sql
+-- 448_broker_leaderboard_value_filter.sql
 -- Brokers UI (Makléři): filter the leaderboard by property value, so the ranking can
 -- answer "who has the most listings priced at least X" instead of only "who has the
 -- most listings" — plus an explicit toggle for whether a listing with no price counts.
@@ -225,7 +225,7 @@ as $function$
     limit greatest(1, least(p_limit, 2000))
   ),
 
-  -- LIVE BRANCH (445): only "runs" (survives planner pruning) when p_min_price_czk is
+  -- LIVE BRANCH (448): only "runs" (survives planner pruning) when p_min_price_czk is
   -- set. Reads `listings` directly, because price is the one dimension nothing here
   -- precomputes. Mirrors the matview's own base predicate (obec_id is not null =
   -- migration 396's domestic scope, is_active + 7-day window = "active"), adds the

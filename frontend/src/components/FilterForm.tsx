@@ -504,7 +504,7 @@ function FilterRow({
 /* -------------------------------------------------------------------------- */
 
 // Exported for reuse outside the generic filter-registry form — Brokers.tsx's value
-// filter (migration 445) wants the same safe-buffering numeric input, driven by its
+// filter (migration 448) wants the same safe-buffering numeric input, driven by its
 // own local state instead of a FilterDef, and duplicating this logic would risk the
 // exact bug this component's own header comment documents.
 export function BufferedNumberInput({

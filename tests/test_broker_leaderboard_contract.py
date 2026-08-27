@@ -1,11 +1,11 @@
-"""Offline contracts W4 must not break (migrations 435, 445).
+"""Offline contracts W4 must not break (migrations 435, 448).
 
 Load-bearing things about the broker leaderboard, invisible in the normal test suite, and
 each would fail only in production:
 
   * `api/outreach.py` calls the function with SEVEN positional arguments regardless of how
     many parameters it has grown to. That is legal only because every parameter added since
-    migration 410 (`p_firm_ids`, then 445's `p_min_price_czk`/`p_include_unpriced`) is
+    migration 410 (`p_firm_ids`, then 448's `p_min_price_czk`/`p_include_unpriced`) is
     TRAILING and carries a DEFAULT. Dropping a default, or inserting a new parameter
     anywhere but the end, breaks that call at runtime with CI green —
     `tests/api/test_outreach_routes.py` mentions neither `leaderboard` nor `select_targets`.
@@ -15,10 +15,10 @@ each would fail only in production:
     migration 299. The existing rule-4 gate in test_migration_rls_grants.py scans for
     literal `grant` statements and cannot see a default-ACL restoration.
     BUT a DROP is sometimes structurally unavoidable: Postgres cannot widen a function's
-    parameter COUNT via CREATE OR REPLACE (verified live while building migration 445 — it
+    parameter COUNT via CREATE OR REPLACE (verified live while building migration 448 — it
     silently created a second, overloaded function instead of replacing the first, which
     briefly left THAT overload at the anon/authenticated-executable default until caught and
-    revoked by hand). Migrations 410 and 445 both DROP the old signature and immediately
+    revoked by hand). Migrations 410 and 448 both DROP the old signature and immediately
     CREATE + fully REVOKE the new one in the SAME file — that pairing is exactly as safe as
     CREATE OR REPLACE, so the gate below checks for the pairing, not for the DROP's absence.
   * The active-broker set must be resolved ONCE, via `AS MATERIALIZED`. Written as an
@@ -44,7 +44,7 @@ from tests.test_migration_rls_grants import _statements, _strip_comments
 _ROOT = Path(__file__).resolve().parent.parent
 _MIGRATIONS = _ROOT / "migrations"
 
-_FN_MIGRATION = _MIGRATIONS / "445_broker_leaderboard_value_filter.sql"
+_FN_MIGRATION = _MIGRATIONS / "448_broker_leaderboard_value_filter.sql"
 _OUTREACH = _ROOT / "api" / "outreach.py"
 
 
@@ -89,7 +89,7 @@ def test_every_function_parameter_carries_a_default():
     signature it is retiring) — `body.index("broker_leaderboard(")` alone would find that
     DROP first and silently check the wrong parameter list.
 
-    RED by: un-defaulting any parameter in 445.
+    RED by: un-defaulting any parameter in 448.
     """
     body = _sql(_FN_MIGRATION)
     create_at = body.index("create or replace function public.broker_leaderboard(")
@@ -158,7 +158,7 @@ def test_every_leaderboard_drop_is_immediately_recreated_and_fully_revoked():
     since it never touches the ACL.
 
     RED by: a DROP with no matching same-file CREATE + full 3-role REVOKE (migrations 410
-    and 445 both must stay green here).
+    and 448 both must stay green here).
     """
     offenders: list[str] = []
     for path in sorted(_MIGRATIONS.glob("*.sql")):
@@ -188,24 +188,24 @@ def test_every_leaderboard_drop_is_immediately_recreated_and_fully_revoked():
 
 
 def test_the_function_migration_replaces_and_reasserts_the_revokes():
-    """RED by: dropping the three REVOKE statements from 445, or losing CREATE OR REPLACE
+    """RED by: dropping the three REVOKE statements from 448, or losing CREATE OR REPLACE
     for the new signature (a plain CREATE would also work for a from-empty CI replay, but
     would fail "already exists" replayed against a database where this exact signature was
     already created live — see the migration's own header)."""
     statements = [" ".join(s.split()).lower() for s in _statements(_FN_MIGRATION.read_text())]
     assert any(s.startswith("create or replace function") and "broker_leaderboard" in s
                for s in statements), (
-        "445 must use CREATE OR REPLACE FUNCTION for the new signature"
+        "448 must use CREATE OR REPLACE FUNCTION for the new signature"
     )
     revoked = _revoked_roles(statements)
     assert revoked == {"public", "anon", "authenticated"}, (
-        f"445 must re-assert EXECUTE revokes for all three roles, got {sorted(revoked)}"
+        f"448 must re-assert EXECUTE revokes for all three roles, got {sorted(revoked)}"
     )
 
 
 # --- the two branches -------------------------------------------------------
 #
-# 445 adds a live branch (reads `listings` directly when p_min_price_czk is set) beside
+# 448 adds a live branch (reads `listings` directly when p_min_price_czk is set) beside
 # the unfiltered fast path (unchanged from 435, reads broker_region_type_stats). Both are
 # ONE `language sql` function — a `language plpgsql` if/else was tried and reverted (see
 # the migration's own header): PL/pgSQL is never inlined, so it made the function an
@@ -333,7 +333,7 @@ def test_the_final_combined_order_by_carries_the_same_tiebreaker():
 
 
 def test_each_branch_ranking_cte_has_exactly_one_limit():
-    """The whole point of W4 (and why 445 preserves it in the new branch too): each
+    """The whole point of W4 (and why 448 preserves it in the new branch too): each
     branch truncates to p_limit rows BEFORE `combined` ever joins `brokers`/`firms` — a
     CTE can only be referenced after it is fully defined, so Postgres's own grammar
     already forces the ranking-then-hydrate ORDER here; this pins the ranking half of

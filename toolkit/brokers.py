@@ -158,7 +158,7 @@ def leaderboard(conn: Any, *, region_ids: list[int] | None = None,
                 include_unpriced: bool = False) -> dict[str, Any]:
     """Top brokers by a chosen metric, optionally scoped to admin regions +
     category + one or more companies (firm_ids, migration 410) + a minimum
-    property value (min_price_czk, migration 445).
+    property value (min_price_czk, migration 448).
 
     Thin wrapper over the broker_leaderboard RPC (the same one Browse calls), so the
     agent and Browse never disagree on the ranking. Empty id arrays = national /
@@ -166,7 +166,7 @@ def leaderboard(conn: Any, *, region_ids: list[int] | None = None,
 
     `min_price_czk` reads `listings.price_czk` directly — same column, same ">="
     semantics as Browse's own min_price_czk filter (toolkit.comparables), unit-for-unit
-    (total price for a sale, monthly rent for a rental; migration 445's header has the
+    (total price for a sale, monthly rent for a rental; migration 448's header has the
     full rationale for why this is a live query rather than a precomputed one).
     `include_unpriced` only has an effect once `min_price_czk` is set — it decides
     whether a listing with no price ("cena na vyžádání", i.e. price_czk IS NULL) counts

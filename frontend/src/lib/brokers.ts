@@ -168,7 +168,7 @@ export interface LeaderboardParams {
   metric: LeaderMetric;
   limit?: number;
   firmIds?: number[];
-  // Same column, same >= semantics as Browse's own min_price_czk (migration 445) —
+  // Same column, same >= semantics as Browse's own min_price_czk (migration 448) —
   // total asking price for a sale, monthly rent for a rental. null/undefined = no
   // value filter. includeUnpriced only matters once minPriceCzk is set: whether a
   // listing with no price ("cena na vyžádání") counts as meeting it.
