@@ -1,0 +1,90 @@
+name: "Labeling: draw tag candidates"
+
+# Tops up each tag's candidate review queue by CLIP centroid retrieval. Pure SQL
+# against the embedding store — no GPU, no torch, no R2, no LLM key, and it writes
+# only tag_candidates rows, which carry no training semantics (migration 450), so a
+# bad run is deleted rather than unwound. Source-agnostic maintenance job, so it
+# carries NO `# portal:` tag.
+#
+# Dispatch-only. The schedule stays commented out until the shape of a good draw is
+# settled: a scheduled top-up that quietly fills queues with the wrong property mix
+# is worse than no top-up, and that is exactly the failure this lane was built after
+# (migration 457).
+#
+# Required secret: SUPABASE_DB_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_id:
+        description: "One tag id. Leave blank to draw for every ready tag."
+        required: false
+        type: string
+      count:
+        description: "Candidates per tag (1-400)."
+        required: false
+        default: "120"
+        type: string
+      target:
+        description: "Skip a tag whose open queue already reaches this."
+        required: false
+        default: "200"
+        type: string
+      category:
+        description: "byt|dum|pozemek|komercni|ostatni. Blank honours the tag's own routing scope."
+        required: false
+        type: string
+      dry_run:
+        description: "Report what would be drawn; write nothing."
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+# Concurrent draws are idempotent, not corrupting — the insert is ON CONFLICT
+# (tag_id, image_id) DO NOTHING — so this group exists to stop two runs wasting the
+# same minutes on the same pool scans, not to protect the table. cancel-in-progress
+# false: a draw part-way through is committing useful rows category by category.
+concurrency:
+  group: draw-tag-candidates
+  cancel-in-progress: false
+
+jobs:
+  draw:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e ".[api]"
+      - name: Draw candidates
+        env:
+          TAG_ID: ${{ inputs.tag_id }}
+          COUNT: ${{ inputs.count }}
+          TARGET: ${{ inputs.target }}
+          CATEGORY: ${{ inputs.category }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        # --max-seconds 1500 (25min) sits under timeout-minutes so the run finalizes
+        # cleanly between tags and reports, instead of being killed mid-tag with no
+        # summary. Inputs are read from env, never interpolated into the command, so
+        # a value can never become shell.
+        run: |
+          set -euo pipefail
+          ARGS=""
+          if [ -n "${TAG_ID:-}" ]; then ARGS="--tag-id ${TAG_ID}"; else ARGS="--all-ready"; fi
+          if [ -n "${COUNT:-}" ]; then ARGS="${ARGS} --count ${COUNT}"; fi
+          if [ -n "${TARGET:-}" ]; then ARGS="${ARGS} --target ${TARGET}"; fi
+          if [ -n "${CATEGORY:-}" ]; then ARGS="${ARGS} --category ${CATEGORY}"; fi
+          if [ "${DRY_RUN:-false}" = "true" ]; then ARGS="${ARGS} --dry-run"; fi
+          ARGS="${ARGS} --max-seconds 1500"
+          echo "python -m scripts.draw_tag_candidates ${ARGS}"
+          python -m scripts.draw_tag_candidates ${ARGS}

@@ -188,6 +188,55 @@ W1 (shared prerequisites + labeling program):
       `candidate_open_count` replace it. Does NOT unblock dropping `dedup_sim`: the
       secondary-CLIP proposal lane still writes `labeling_sample` and reads
       `label_proposals`.
+- [x] **Routing north star ratified (2026-08-28)** — tags exist to ROUTE the expensive vision
+      dedup step: when two listings might be the same property, compare kitchen-to-kitchen and
+      floorplan-to-floorplan, and skip the rest. That re-ranks the whole programme. Eight
+      ROUTING tags carry it (koupelna, kuchyně, technické zařízení, půdorys for byt; + fasáda
+      and katastrální mapa for dům/komerční; letecký snímek s ohraničením for pozemek; garáž
+      for ostatní) — exactly the eight already flagged `priority`, all eight already defined.
+      Consequences: **no taxonomy restructure** (tags get TIERED — routing / border-guard /
+      parked — not rebuilt), and the `smíšený městský` / `mimoměstský` / `zahrada` work is
+      **cancelled**: those describe a photo's SETTING, and no dedup decision pairs two listings
+      on "both look urban". `fasáda ∪ vyznačení bytu na fasádě` and `katastrální ∪ letecký
+      s ohraničením` become router-config unions, never tag merges.
+- [x] The 67,654 surviving `backfill_442` manufactured negatives DELETED (operator-approved).
+      Every deletion is recorded in `image_tag_label_events`, so the record survives the rows.
+      The store is now 1,522 rows of pure human judgement (1,453 pos / 55 neg / 14 excluded)
+      and **absence means untouched, universally** — the premise every later wave assumes.
+- [x] CLIP encoder PINNED (#1221, migration 456) — `image_clip_embeddings` is keyed
+      `(image_id, model)` where `model` is a NAME, passed to `from_pretrained` with no
+      revision, so it resolved to whatever the hub head held at download time. An upstream
+      re-upload would have changed every vector written afterwards while the `model` column
+      stayed byte-identical: two incomparable populations inside 10.36M rows, invisible at
+      runtime, every centroid quietly wrong. Now pinned by sha, REQUIRED (a missing revision
+      raises), stamped per row, and guarded by an AST test over every `from_pretrained` call
+      site. Nothing trains until this holds.
+- [x] Candidate draws honour each tag's property types (#1222, migration 457) — **the first
+      live draw was the bug report**. `interier - koupelna`, count=120, returned 54 rows:
+      pozemek 24, komercni 18, ostatni 12, byt 0, dum 0. The three least relevant quotas
+      filled EXACTLY while the two that matter landed nothing, so 100% of that sample was
+      review time spent where bathrooms essentially do not occur. Two causes: a FIXED global
+      `CATEGORY_MIX` for every tag (right for a tag with no opinion about property type, wrong
+      for every tag that has one — `tag_taxonomy.routing_categories` now scopes and
+      renormalises it), and GREEDY budget ceilings (each category could claim the whole
+      remaining budget; since the loop runs smallest-quota-first the starved ones were always
+      byt and dum — now a fair share that still rolls unused time forward). Not a cause but
+      worth recording: retrieval never used the old zero-shot CLIP *tags*, only the raw
+      embeddings ranked against a centroid of the operator's own positives.
+- [x] Dispatchable draw lane (#1223) — the draw was reachable only from a synchronous admin
+      request whose whole-call budget is 45s, while the `byt` pool query alone measures ~14s
+      (bitmap heap scan of 320,909 listings sorted by `random()`). The lane removes the
+      ceiling and the need for an operator with a browser open. Also fixes an exit code that
+      returned 0 even when every tag raised — on a dispatched lane that is the only failure
+      signal there is. Cron deliberately commented out.
+- [ ] **NEXT — W1 remainder:** one definition renderer with two outputs (the machine prompt and
+      a plain-language handbook card, so the operator never meets `counts` / `does_not_count` /
+      `confusable_with` / `leave_out_when` while labeling); the machine-label store (a SEPARATE
+      table — `image_tag_labels`' human-wins upsert SUPPRESSES a machine write onto a human
+      cell, which is precisely the disagreement worth surfacing); the sealed 250-image exam
+      (100 pure-random + 150 LLM-stratified with recorded inclusion odds, so the four rare tags
+      are measurable at all); and a derived per-tag lifecycle so adding parkoviště/wc later is
+      a Tuesday. Sprint budget: **$50 hard ceiling**, gpt-5-mini.
 - [x] RunPod client (`scripts/runpod_client.py`, #972/#975/#977) — launch/poll/terminate an
       on-demand pod, live cheapest-GPU catalog lookup, capacity fallback. Guaranteed teardown
       verified across 4 real live dispatches (3 zero-cost, 1 real ~1.7¢ pod rental).

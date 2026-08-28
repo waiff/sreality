@@ -9,11 +9,11 @@ marker — and bounded by --count, --target and --max-seconds.
     python -m scripts.draw_tag_candidates --tag-id 12 --count 120
     python -m scripts.draw_tag_candidates --all-ready --target 200 --max-seconds 1800
 
-Dispatch-free on purpose: unlike clip_tag.yml this job needs no GPU, no torch, no
-R2 and no model download — it is pure SQL against the database, so a runner gives
-it nothing the operator's own terminal does not, and its natural trigger ("I am
-labeling this tag right now") is the sync API button. Ship a workflow when a
-scheduled top-up is actually wanted.
+Runs as .github/workflows/draw_tag_candidates.yml (dispatch-only). This job needs
+no GPU, no torch, no R2 and no model download — it is pure SQL against the
+database — but it does need the DB URL, which lives only in Actions secrets, and
+it needs more wall clock than a synchronous admin request can hold: the pool query
+for `byt` alone measures ~14s, against the API path's whole-call budget of 45s.
 """
 
 from __future__ import annotations
@@ -153,7 +153,12 @@ def main() -> int:
             )
     LOG.info("TAGCAND done tags=%d inserted=%d skipped=%d timeouts=%d errors=%d",
              tags_drawn, inserted, skipped, timeouts, errors)
-    return 0
+    # Errors are counted per tag so one bad tag cannot kill the run — but a run
+    # where EVERY tag raised must not exit green. On a dispatched lane the exit
+    # code is the only failure signal there is; a warning in the log is read by
+    # nobody. A timeout is NOT an error: a degraded category is the documented
+    # outcome of a thin pool and the report already says so.
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":
