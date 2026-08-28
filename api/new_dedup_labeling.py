@@ -497,6 +497,35 @@ def get_tag_definition_card(
     }}
 
 
+@router.post("/tags/{tag_id}/definition/card/preview")
+def preview_tag_definition_card(
+    tag_id: int, body: SaveDefinitionIn, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Render an UNSAVED draft as its handbook card. Writes nothing.
+
+    There are no server-side drafts — one Save is one version — so the editor
+    cannot preview what is being typed by re-reading the saved definition: it
+    would always show the PREVIOUS one. The obvious alternative, a TypeScript
+    copy of the renderer, would put two implementations of "what this tag means"
+    in the repo and let them drift, which is the exact failure this whole
+    two-renderings design exists to prevent. So the draft comes here instead and
+    the ONE renderer stays authoritative.
+
+    Referenced tag labels are resolved server-side from the draft's own ids, so
+    the browser never needs its own copy of that lookup either."""
+    doc = body.model_dump()
+    doc["referenced_tags"] = td.referenced_tags_for(
+        conn,
+        does_not_count=doc["does_not_count"],
+        confusable_with=doc["confusable_with"],
+    )
+    try:
+        label = td.tag_label(conn, tag_id=tag_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
+    return {"data": {"card": tdr.render_card(doc, tag_label=label)}}
+
+
 @router.put("/tags/{tag_id}/definition")
 def put_tag_definition(
     tag_id: int, body: SaveDefinitionIn, conn: Any = Depends(deps.get_db_conn),

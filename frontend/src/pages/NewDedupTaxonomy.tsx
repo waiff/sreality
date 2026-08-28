@@ -10,6 +10,7 @@ import {
   listTagDefinitionVersions,
   listTagNeighbours,
   listTagPositiveImages,
+  previewTagDefinitionCard,
   removeNewDedupTag,
   renameNewDedupTag,
   saveTagDefinition,
@@ -34,6 +35,7 @@ import DefinitionEditor, {
   type Draft,
 } from '@/components/tag-definitions/DefinitionEditor';
 import DefinitionReadOnly from '@/components/tag-definitions/DefinitionReadOnly';
+import DefinitionCard from '@/components/tag-definitions/DefinitionCard';
 import OverlapEvidence from '@/components/tag-definitions/OverlapEvidence';
 import TagContentsGallery, {
   type BatchFileRequest,
@@ -218,6 +220,30 @@ export default function NewDedupTaxonomy() {
   const definition = definitionQ.data?.data ?? null;
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline);
   const patch = useCallback((p: Partial<Draft>) => setDraft((d) => ({ ...d, ...p })), []);
+
+  /* The handbook card for whatever is currently in the form.
+   *
+   * Rendered SERVER-side, deliberately. A TypeScript copy of the renderer would
+   * be a second implementation of what a tag means, free to drift from the one
+   * the vision model is actually given — and that drift is the exact failure the
+   * two-renderings design exists to prevent. Debounced, because the cost of the
+   * round-trip is a keystroke's latency and the cost of drift is silent. */
+  const [debouncedDraft, setDebouncedDraft] = useState<Draft>(EMPTY_DRAFT);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedDraft(draft), 350);
+    return () => clearTimeout(t);
+  }, [draft]);
+
+  const previewQ = useQuery({
+    queryKey: [...definitionKey(selectedTagId ?? 0), 'card', debouncedDraft],
+    queryFn: () =>
+      previewTagDefinitionCard(selectedTagId as number, toPayload(debouncedDraft, loadedVersion)),
+    enabled: selectedTagId != null && debouncedDraft.means.trim() !== '',
+    /* A failed preview must never look like an empty definition, so the last
+     * good card stays on screen while a new one is in flight. */
+    placeholderData: (prev) => prev,
+  });
+  const previewCard = previewQ.data?.data.card ?? null;
 
   /* Load the form from a server document — the ONE place draft, baseline and
    * loadedVersion move together. A save reloads through it too, so the saved
@@ -1043,6 +1069,14 @@ export default function NewDedupTaxonomy() {
                           focusConfusableIndex={focusConfusableIndex}
                           onConfusableFocused={() => setFocusConfusableIndex(null)}
                         />
+                        {previewCard && (
+                          // The same fields, rendered the way the operator and the
+                          // vision model will actually read them. The four boxes
+                          // above are the storage shape; this is the meaning.
+                          <div className="mt-4">
+                            <DefinitionCard card={previewCard} draft={dirty} />
+                          </div>
+                        )}
                         {dirty && draft.means.trim() === '' && (
                           <p className="mt-2 text-[0.7rem] text-[var(--color-brick)]">
                             A definition needs its one-sentence <code>means</code> before it can

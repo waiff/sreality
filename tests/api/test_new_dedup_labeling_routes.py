@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import json
+
 import pytest
 
 fastapi = pytest.importorskip("fastapi")
@@ -122,6 +124,8 @@ _RESPONSES: dict[str, Any] = {
         "status": "active", "created_at": "t", "created_by": "operator",
         "referenced_tags": [{"tag_id": 2, "label": "b"}],
     },
+    "tag_label": "interier - kuchyne",
+    "referenced_tags_for": [{"tag_id": 3, "label": "interier - jidelna"}],
     "save_definition": {
         "id": 10, "tag_id": 1, "version": 3, "means": "A kitchen.",
         "counts": [], "does_not_count": [], "confusable_with": [],
@@ -168,7 +172,8 @@ _PATCHED = {
     # (it records {}), so it needs no special case.
     td: ["list_definition_status", "get_active_definition", "save_definition",
          "list_definition_versions", "get_definition_version", "list_positive_images",
-         "list_positive_images_outlier_first", "nearest_tags"],
+         "list_positive_images_outlier_first", "nearest_tags",
+         "tag_label", "referenced_tags_for"],
     tc: ["candidate_summary", "draw_candidates"],
 }
 
@@ -1031,3 +1036,68 @@ def test_new_dedup_labeling_requires_admin(client):
 def test_definition_routes_are_admin_gated(client, path):
     api_main.app.dependency_overrides.pop(deps.require_admin, None)
     assert client.get(path).status_code == 401
+
+
+# --- the handbook card ------------------------------------------------------
+
+
+def test_get_tag_definition_card_returns_both_renderings(client):
+    # One stored row, two audiences: the operator reads `card`, the vision model
+    # is given `prompt`. Serving them from one call is what keeps them the same
+    # definition rather than two descriptions of it.
+    res = client.get("/new-dedup/labeling/tags/1/definition/card")
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert set(data) == {"card", "prompt", "definition_id", "version"}
+    assert data["card"]["headline"].endswith("?")
+    assert "COUNTS AS THIS TAG:" in data["prompt"]
+
+
+def test_the_card_never_carries_a_storage_field_name(client):
+    body = client.get("/new-dedup/labeling/tags/1/definition/card").json()["data"]["card"]
+    blob = json.dumps(body, ensure_ascii=False)
+    for name in ("counts", "does_not_count", "confusable_with", "leave_out_when"):
+        assert name not in blob
+
+
+def test_the_card_is_null_when_the_tag_has_no_definition(client, monkeypatch):
+    # A card invented from nothing would be a labeling guide nobody wrote.
+    monkeypatch.setattr(td, "get_active_definition", lambda conn, **kw: None)
+    res = client.get("/new-dedup/labeling/tags/1/definition/card")
+    assert res.status_code == 200
+    assert res.json()["data"] is None
+
+
+def test_the_card_404s_on_an_unknown_tag(client, monkeypatch):
+    monkeypatch.setattr(td, "tag_label", _raises(KeyError(999)))
+    assert client.get("/new-dedup/labeling/tags/999/definition/card").status_code == 404
+
+
+def test_previewing_a_draft_renders_without_saving(client, calls):
+    # There are no server-side drafts, so the editor cannot preview by re-reading
+    # the saved definition — it would always show the PREVIOUS version.
+    res = client.post("/new-dedup/labeling/tags/1/definition/card/preview", json=_SAVE_BODY)
+    assert res.status_code == 200
+    assert "card" in res.json()["data"]
+    assert "save_definition" not in calls, "a preview must never write a version"
+
+
+def test_the_preview_resolves_referenced_labels_from_the_drafts_own_ids(client, calls):
+    # So the browser never needs its own copy of that lookup — which would be the
+    # first crack in "one renderer".
+    client.post("/new-dedup/labeling/tags/1/definition/card/preview", json=_SAVE_BODY)
+    passed = calls["referenced_tags_for"]
+    # Structural, not literal: the point is that the DRAFT's own ids are what get
+    # resolved, whatever text the fixture happens to carry.
+    assert [c["tag_id"] for c in passed["confusable_with"]] == [
+        c["tag_id"] for c in _SAVE_BODY["confusable_with"]
+    ]
+    assert [d["goes_to_tag_id"] for d in passed["does_not_count"]] == [
+        d["goes_to_tag_id"] for d in _SAVE_BODY["does_not_count"]
+    ]
+
+
+def test_the_preview_404s_on_an_unknown_tag(client, monkeypatch):
+    monkeypatch.setattr(td, "tag_label", _raises(KeyError(999)))
+    res = client.post("/new-dedup/labeling/tags/999/definition/card/preview", json=_SAVE_BODY)
+    assert res.status_code == 404
