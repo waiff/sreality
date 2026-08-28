@@ -190,6 +190,18 @@ def _referenced_tags(
     return [{"tag_id": r[0], "label": r[1]} for r in rows]
 
 
+def referenced_tags_for(
+    conn: psycopg.Connection, *, does_not_count: list[dict[str, Any]],
+    confusable_with: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Public face of `_referenced_tags`, for callers holding a definition that is
+    not (yet) a stored row — the editor's live draft. Same resolution, so a draft
+    preview and a saved card name their tags identically."""
+    return _referenced_tags(
+        conn, does_not_count=does_not_count, confusable_with=confusable_with,
+    )
+
+
 def _with_references(conn: psycopg.Connection, doc: dict[str, Any]) -> dict[str, Any]:
     return doc | {
         "referenced_tags": _referenced_tags(

@@ -1348,6 +1348,42 @@ export const getTagDefinition = (
     { jwt: true },
   );
 
+/* The definition as a PERSON reads it while labeling. Every string is rendered by
+ * toolkit/tag_definition_render.py — the browser lays it out and assembles nothing,
+ * so there is exactly one answer anywhere to "what does this tag mean". */
+export interface TagHandbookCard {
+  tag_label: string;
+  headline: string;
+  count_it: string[];
+  dont_count_it: string[];
+  cant_tell: string[];
+}
+
+/* Null body when the tag has no definition yet: a card invented from nothing
+ * would be a labeling guide nobody wrote. */
+export const getTagDefinitionCard = (
+  tagId: number,
+): Promise<{ data: { card: TagHandbookCard; prompt: string; definition_id: number; version: number } | null }> =>
+  request<{ data: { card: TagHandbookCard; prompt: string; definition_id: number; version: number } | null }>(
+    `/new-dedup/labeling/tags/${tagId}/definition/card`,
+    { jwt: true },
+  );
+
+/* Renders an UNSAVED draft. Writes nothing.
+ *
+ * The editor cannot preview by re-reading the saved definition — there are no
+ * server-side drafts, so it would always show the PREVIOUS version. The other way
+ * round would be a TypeScript copy of the renderer, i.e. two implementations of
+ * the same meaning, free to drift. A debounced round-trip is the cheaper price. */
+export const previewTagDefinitionCard = (
+  tagId: number,
+  body: SaveTagDefinitionIn,
+): Promise<{ data: { card: TagHandbookCard } }> =>
+  request<{ data: { card: TagHandbookCard } }>(
+    `/new-dedup/labeling/tags/${tagId}/definition/card/preview`,
+    { method: 'POST', json: body, jwt: true },
+  );
+
 /* Writes a NEW version and retires the previous one. There is no draft state
  * server-side — batch every edit into one call. */
 export const saveTagDefinition = (
