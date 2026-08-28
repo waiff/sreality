@@ -116,3 +116,35 @@ def test_the_check_restates_every_value_it_inherited() -> None:
         (ROOT / "migrations" / "459_exam_screening.sql").read_text())
     missing = inherited - restated
     assert not missing, f"459 drops inherited called_for values: {sorted(missing)}"
+
+
+# --- the truncation trap ----------------------------------------------------
+
+
+def test_the_token_budget_leaves_room_for_reasoning() -> None:
+    """gpt-5-mini spends output tokens on reasoning BEFORE writing anything, so a
+    budget sized for the answer is consumed by the thinking and the call returns an
+    EMPTY STRING — billed in full, with nothing to parse.
+
+    Measured twice in this repo: this lane's first calibration failed 5 of 10 at
+    300 tokens, and the enrichment lane hit the same wall at 512 in July. The reply
+    is ~30 tokens; the ceiling is headroom for reasoning, not for the answer."""
+    import scripts.screen_exam_cohort as mod
+    assert mod.MAX_TOKENS >= 4096
+
+
+def test_the_probe_factor_matches_the_measured_yield() -> None:
+    # ~1.7% of probed ids resolve to a usable image (6,000 probes -> 100 images),
+    # because images.id spans far more values than there are rows. A factor of 12
+    # offered 10 images when asked for 25.
+    import scripts.screen_exam_cohort as mod
+    assert mod.PROBE_FACTOR >= 60
+
+
+def test_a_failed_screen_is_offered_again() -> None:
+    # A failed screen is not a screen. Excluding errored images would strand them
+    # AND leave their rows dragging the error rate above the stratify gate with no
+    # way to clear it.
+    import scripts.screen_exam_cohort as mod
+    sql = " ".join(mod._UNSCREENED_PROBE_SQL.split())
+    assert "s.error IS NULL" in sql

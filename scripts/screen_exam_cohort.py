@@ -28,9 +28,22 @@ from typing import Any
 LOG = logging.getLogger("screen_exam_cohort")
 
 CALLED_FOR = "screen_exam_image"
-# The screener answers with a short JSON object. A generous ceiling still bounds a
-# runaway reasoning trace, which is the failure mode that actually costs money.
-MAX_TOKENS = 300
+
+# 4096, matching the value toolkit/bazos_enrichment.py settled on for the same
+# model, and NOT the ~300 a one-line JSON answer appears to need.
+#
+# MEASURED THE HARD WAY, twice. gpt-5-mini spends output tokens on reasoning BEFORE
+# it writes anything, so a budget sized for the answer is consumed entirely by the
+# thinking and the call returns an EMPTY STRING — billed in full, with nothing to
+# parse. This lane's first calibration run failed 5 of 10 that way; the enrichment
+# lane hit the identical wall at 512 in July. The reply is ~30 tokens; essentially
+# all of this ceiling is headroom for reasoning, and that is the point.
+MAX_TOKENS = 4096
+
+# Probes per image wanted. MEASURED: the live yield is ~1.7% (6,000 probes returned
+# 100 images), because images.id spans far more values than there are rows. The
+# first version used 12 and offered 10 images when asked for 25.
+PROBE_FACTOR = 60
 
 
 _MEASURED_COST_SQL = """
@@ -57,8 +70,12 @@ _UNSCREENED_PROBE_SQL = """
             SELECT 1 FROM tag_exam_members m WHERE m.image_id = i.id
           )
       AND NOT EXISTS (
+            -- error IS NULL: a FAILED screen is not a screen. Excluding errored
+            -- images would strand them forever and leave their rows dragging the
+            -- error rate above the stratify gate with no way to clear it.
             SELECT 1 FROM tag_exam_screens s
             WHERE s.cohort_id = %(cohort_id)s AND s.image_id = i.id
+              AND s.error IS NULL
           )
     LIMIT %(count)s
 """
@@ -86,7 +103,7 @@ def _routing_tags(conn: Any) -> list[dict[str, Any]]:
 def _draw_unscreened(conn: Any, *, cohort_id: int, model: str, count: int) -> list[tuple[int, str]]:
     with conn.cursor() as cur:
         cur.execute(_UNSCREENED_PROBE_SQL, {
-            "probes": min(60_000, count * 12), "count": count,
+            "probes": min(60_000, count * PROBE_FACTOR), "count": count,
             "model": model, "cohort_id": cohort_id,
         })
         return [(int(r[0]), r[1]) for r in cur.fetchall()]
