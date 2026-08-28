@@ -1942,6 +1942,67 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/docs-budget.yml"
     },
     {
+      "filename": "draw_exam_cohort.yml",
+      "name": "Labeling: draw exam cohort",
+      "description": "Draws and seals the sealed exam (migration 458) — the images the per-tag probes are GRADED on and must never be trained on. Pure SQL against the embedding store: no GPU, no torch, no R2, no LLM key. The stratified half of the exam is added by the screening lane, which is the one that spends money.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "cohort",
+          "description": "Cohort name, e.g. exam_v1.",
+          "required": true,
+          "type": "string",
+          "default": "exam_v1",
+          "options": null
+        },
+        {
+          "name": "pure_random",
+          "description": "Draw N images uniformly at random. 0 to skip.",
+          "required": false,
+          "type": "string",
+          "default": "0",
+          "options": null
+        },
+        {
+          "name": "action",
+          "description": "draw | status | seal. Sealing is IRREVERSIBLE.",
+          "required": false,
+          "type": "choice",
+          "default": "status",
+          "options": [
+            "status",
+            "draw",
+            "seal"
+          ]
+        },
+        {
+          "name": "dry_run",
+          "description": "Report what would happen; write nothing.",
+          "required": false,
+          "type": "choice",
+          "default": "false",
+          "options": [
+            "false",
+            "true"
+          ]
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "draw-exam-cohort",
+      "cancelInProgress": false,
+      "timeoutMinutes": 15,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/draw_exam_cohort.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/draw_exam_cohort.yml"
+    },
+    {
       "filename": "draw_tag_candidates.yml",
       "name": "Labeling: draw tag candidates",
       "description": "Tops up each tag's candidate review queue by CLIP centroid retrieval. Pure SQL against the embedding store — no GPU, no torch, no R2, no LLM key, and it writes only tag_candidates rows, which carry no training semantics (migration 450), so a bad run is deleted rather than unwound. Source-agnostic maintenance job, so it carries NO `# portal:` tag.",
