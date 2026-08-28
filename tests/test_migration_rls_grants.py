@@ -322,6 +322,11 @@ _ADMIN_ONLY_RELATIONS = frozenset({
     # image_tag_label_events (migration 446) is the append-only decision history
     # behind image_tag_labels — same backend-only posture, no `_public` view.
     "image_tag_label_events",
+    # tag_candidates (450) is the per-tag review queue; tag_exam_cohorts /
+    # tag_exam_members (458) are the sealed exam roster. All three are
+    # backend-only with NO `_public` view — and publishing the exam roster would
+    # hand anyone the answer key's index.
+    "tag_candidates", "tag_exam_cohorts", "tag_exam_members",
     "workflow_failures", "workflow_run_health",
     "scrape_runs", "worker_heartbeats",
     "health_summary_mv", "portal_health_mv", "scraper_health_checks_mv",

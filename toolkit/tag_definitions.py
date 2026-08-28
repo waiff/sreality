@@ -20,6 +20,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from scraper.clip_tagger import load_taxonomy
+from toolkit.tag_holdout import exclusion_for
 
 MEANS_MAX_CHARS = 500
 LINE_MAX_CHARS = 300
@@ -450,11 +451,12 @@ def save_definition(
 
 # (updated_at DESC, image_id DESC) is a total order — a bare timestamp sort
 # reshuffles under the operator between refetches.
-_POSITIVE_IMAGES_SQL = """
+_POSITIVE_IMAGES_SQL = f"""
     SELECT itl.image_id, i.storage_path, i.sreality_url, itl.updated_at
     FROM image_tag_labels itl
     JOIN images i ON i.id = itl.image_id
     WHERE itl.tag_id = %(tag_id)s AND itl.state = 'positive'
+      {exclusion_for("itl")}
     ORDER BY itl.updated_at DESC, itl.image_id DESC
     LIMIT %(limit)s
 """
@@ -511,7 +513,7 @@ POSITIVE_IMAGE_ORDERS = ("recent", "outlier_first")
 # (image_id, model) is image_clip_embeddings' primary key (migration 226).
 # Every placeholder carries an explicit cast so tests/test_sql_schema_prepare.py
 # can PREPARE it without binding values.
-_POSITIVE_IMAGES_OUTLIER_SQL = """
+_POSITIVE_IMAGES_OUTLIER_SQL = f"""
     WITH centroid AS (
       SELECT avg(e.embedding) AS vec, count(*)::int AS positives
       FROM image_tag_labels itl
@@ -520,6 +522,7 @@ _POSITIVE_IMAGES_OUTLIER_SQL = """
       WHERE itl.tag_id = %(tag_id)s::bigint
         AND itl.state = 'positive'
         AND itl.source IN ('human', 'human_confirmed')
+        {exclusion_for("itl")}
     ),
     scored AS (
       SELECT itl.image_id, i.storage_path, i.sreality_url, itl.updated_at,
@@ -532,6 +535,7 @@ _POSITIVE_IMAGES_OUTLIER_SQL = """
       LEFT JOIN image_clip_embeddings e
         ON e.image_id = itl.image_id AND e.model = %(model)s::text
       WHERE itl.tag_id = %(tag_id)s::bigint AND itl.state = 'positive'
+        {exclusion_for("itl")}
     )
     SELECT image_id, storage_path, sreality_url, updated_at, centroid_distance,
            CASE WHEN centroid_distance IS NULL THEN NULL ELSE
@@ -586,7 +590,7 @@ def list_positive_images_outlier_first(
 # `<=>` is cosine DISTANCE (0 = identical), never similarity. The c.tag_id
 # tiebreaker is mandatory, not decorative: equal distances would otherwise
 # reshuffle between refetches.
-_NEAREST_TAGS_SQL = """
+_NEAREST_TAGS_SQL = f"""
     WITH centroids AS (
       SELECT itl.tag_id,
              avg(e.embedding) AS centroid,
@@ -595,6 +599,7 @@ _NEAREST_TAGS_SQL = """
       JOIN image_clip_embeddings e
         ON e.image_id = itl.image_id AND e.model = %(model)s
       WHERE itl.state = 'positive'
+        {exclusion_for("itl")}
       GROUP BY itl.tag_id
       HAVING count(*) >= %(min_positives)s
     ),

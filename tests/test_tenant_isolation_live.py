@@ -105,6 +105,11 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
     # image_tag_label_events (migration 446): the append-only decision history
     # behind image_tag_labels, same backend-only posture, no `_public` view.
     "image_tag_label_events",
+    # tag_candidates (450) + the sealed exam roster (458) — backend-only, no
+    # `_public` view. See the note in test_migration_rls_grants.py.
+    "tag_candidates",
+    "tag_exam_cohorts",
+    "tag_exam_members",
     "workflow_failures", "workflow_run_health",
     # Added by migration 340: the audit found scrape_runs_public/recent_scrape_runs()
     # ungated and browser-readable because this list was seeded from migration 318's

@@ -25,6 +25,7 @@ from typing import Any, NamedTuple
 import psycopg
 
 from toolkit.tag_definitions import embedding_model
+from toolkit.tag_holdout import exclusion_for
 
 # The whole draw vocabulary; mirrored by migration 450's CHECK on tag_candidates.draw.
 DRAWS = ("centroid_head", "centroid_mid", "random")
@@ -190,7 +191,7 @@ def scoped_mix(scope: tuple[str, ...]) -> dict[str, float]:
 # The predicate is byte-identical to the centroid CTE's in _DRAW_POOL_SQL. If the
 # floor check and the centroid ever disagreed about the population, the floor would
 # be a lie — a tag could pass the gate and still produce an empty pool.
-_COUNT_VERIFIED_POSITIVES_SQL = """
+_COUNT_VERIFIED_POSITIVES_SQL = f"""
     SELECT count(*)::int
     FROM image_tag_labels itl
     JOIN image_clip_embeddings e
@@ -198,6 +199,7 @@ _COUNT_VERIFIED_POSITIVES_SQL = """
     WHERE itl.tag_id = %(tag_id)s
       AND itl.state = 'positive'
       AND itl.source IN ('human', 'human_confirmed')
+      {exclusion_for("itl")}
 """
 
 # TWO arms, because the near-duplicate rail is about the training set and the
@@ -305,7 +307,7 @@ def count_verified_positives(
 # `ranked` and `centroid` are each referenced more than once, so Postgres
 # materialises them: the pool is scored exactly once. Every bound parameter carries
 # an explicit cast so tests/test_sql_schema_prepare.py can type it without values.
-_DRAW_POOL_SQL = """
+_DRAW_POOL_SQL = f"""
     WITH centroid AS (
       SELECT avg(e.embedding) AS vec, count(*)::int AS positives
       FROM image_tag_labels itl
@@ -314,6 +316,7 @@ _DRAW_POOL_SQL = """
       WHERE itl.tag_id = %(tag_id)s
         AND itl.state = 'positive'
         AND itl.source IN ('human', 'human_confirmed')
+        {exclusion_for("itl")}
       HAVING count(*) >= %(min_positives)s::bigint
     ),
     pool_listings AS (
@@ -349,6 +352,7 @@ _DRAW_POOL_SQL = """
               SELECT 1 FROM tag_candidates tc
               WHERE tc.tag_id = %(tag_id)s AND tc.image_id = p.image_id
             )
+        {exclusion_for("p")}
     ),
     collapsed AS (
       SELECT x.image_id, x.phash, x.listing_id, x.property_id, x.distance
