@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_id:
-        description: "One tag id. Leave blank to draw for every ready tag."
+        description: "Tag ids, comma or space separated (e.g. 22,25,46). Blank = every ready tag."
         required: false
         type: string
       count:
@@ -77,10 +77,27 @@ jobs:
         # cleanly between tags and reports, instead of being killed mid-tag with no
         # summary. Inputs are read from env, never interpolated into the command, so
         # a value can never become shell.
+        #
+        # tag_id takes a LIST because the concurrency group keeps only ONE queued run:
+        # dispatching a tag per run silently cancels all but the last (measured — five
+        # of seven fan-out runs died at ~7s, reported 'cancelled', not 'failed'). One
+        # run over many tags is the shape this lane has to support.
+        #
+        # Each id is validated as an integer before it reaches the command line. The
+        # values arrive via env, so this is belt-and-braces rather than the only rail.
         run: |
           set -euo pipefail
           ARGS=""
-          if [ -n "${TAG_ID:-}" ]; then ARGS="--tag-id ${TAG_ID}"; else ARGS="--all-ready"; fi
+          if [ -n "${TAG_ID:-}" ]; then
+            for raw in $(printf '%s' "${TAG_ID}" | tr ',' ' '); do
+              case "$raw" in
+                ''|*[!0-9]*) echo "::error::tag_id '${raw}' is not a number"; exit 1 ;;
+                *) ARGS="${ARGS} --tag-id ${raw}" ;;
+              esac
+            done
+          else
+            ARGS="--all-ready"
+          fi
           if [ -n "${COUNT:-}" ]; then ARGS="${ARGS} --count ${COUNT}"; fi
           if [ -n "${TARGET:-}" ]; then ARGS="${ARGS} --target ${TARGET}"; fi
           if [ -n "${CATEGORY:-}" ]; then ARGS="${ARGS} --category ${CATEGORY}"; fi

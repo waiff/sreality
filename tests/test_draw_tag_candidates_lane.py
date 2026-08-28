@@ -140,3 +140,37 @@ def test_a_run_whose_every_draw_raised_exits_nonzero(
 
 def test_a_clean_run_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _run_main(monkeypatch, raises=False) == 0
+
+
+# --- the fan-out trap -------------------------------------------------------
+
+
+def test_the_lane_accepts_a_LIST_of_tag_ids(lane: dict[str, Any]) -> None:
+    """GitHub keeps only ONE queued run per concurrency group, so dispatching a run
+    per tag silently supersedes its own work: five of seven fan-out runs died at
+    ~7s on 2026-08-28, reported `cancelled` rather than `failed`, and left five
+    tags with no candidates and nothing in the UI to say so. `cancel-in-progress:
+    false` does not help — it protects the RUNNING job, not the queue.
+
+    So one run has to be able to cover many tags. `scripts.draw_tag_candidates`
+    already supports it (`--tag-id` is argparse `action="append"`); only the lane
+    had narrowed it to one."""
+    triggers = lane.get(True) or lane.get("on")
+    described = triggers["workflow_dispatch"]["inputs"]["tag_id"]["description"]
+    assert "separated" in described.lower()
+
+    step = next(s for s in lane["jobs"]["draw"]["steps"]
+                if s.get("name") == "Draw candidates")
+    # Repeated flags, not one flag with several values: argparse `append` takes a
+    # single value per occurrence, so `--tag-id 3 17` would be a parse error.
+    assert "--tag-id ${raw}" in step["run"]
+    assert "tr ',' ' '" in step["run"]
+
+
+def test_a_non_numeric_tag_id_is_rejected_before_it_reaches_the_command(
+    lane: dict[str, Any],
+) -> None:
+    step = next(s for s in lane["jobs"]["draw"]["steps"]
+                if s.get("name") == "Draw candidates")
+    assert "*[!0-9]*" in step["run"]
+    assert "::error::" in step["run"]
