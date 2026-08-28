@@ -148,3 +148,40 @@ def test_a_failed_screen_is_offered_again() -> None:
     import scripts.screen_exam_cohort as mod
     sql = " ".join(mod._UNSCREENED_PROBE_SQL.split())
     assert "s.error IS NULL" in sql
+
+
+# --- parallelism ------------------------------------------------------------
+
+
+def test_the_screener_runs_in_parallel_by_default() -> None:
+    # MEASURED: 148s for 25 images = 5.9s each, nearly all of it waiting on R2 and
+    # the model. Sequentially 1,500 images is 2.5 hours against a 25-minute lane.
+    import scripts.screen_exam_cohort as mod
+    assert mod.DEFAULT_WORKERS >= 4
+    assert mod.WORKERS_MAX >= mod.DEFAULT_WORKERS
+
+
+def test_each_worker_opens_its_own_connection() -> None:
+    """psycopg connections are not thread-safe, and LLMClient writes an llm_calls
+    row per call — sharing one connection across workers would interleave writes on
+    it, which is the classic way a parallel lane corrupts its own cost ledger."""
+    import inspect
+    import scripts.screen_exam_cohort as mod
+    src = inspect.getsource(mod._screen_batch)
+    assert "wconn = db.connect()" in src
+    assert "wconn.close()" in src
+
+
+def test_the_budget_is_checked_by_the_worker_under_a_lock() -> None:
+    # Checking after the fact on a parallel lane means discovering the overspend
+    # once every in-flight call has already been billed.
+    import inspect
+    import scripts.screen_exam_cohort as mod
+    src = inspect.getsource(mod._screen_batch)
+    assert "with lock:" in src and "_stop()" in src
+
+
+def test_the_lane_passes_a_worker_count(lane: dict[str, Any]) -> None:
+    step = _step(lane)
+    assert "--workers" in step["run"]
+    assert "WORKERS" in step["env"]

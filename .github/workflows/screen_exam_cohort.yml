@@ -42,6 +42,11 @@ on:
         required: false
         default: "8"
         type: string
+      workers:
+        description: "Parallel screeners (1-16). The work is I/O-bound on R2 and the model."
+        required: false
+        default: "8"
+        type: string
       dry_run:
         description: "Report what would happen; spend nothing, write nothing."
         required: false
@@ -81,6 +86,7 @@ jobs:
           ACTION: ${{ inputs.action }}
           COUNT: ${{ inputs.count }}
           MAX_USD: ${{ inputs.max_usd }}
+          WORKERS: ${{ inputs.workers }}
           DRY_RUN: ${{ inputs.dry_run }}
         # --max-seconds 1500 under a 30min runner timeout, so the pass stops between
         # images and reports what it spent rather than being killed mid-flight with
@@ -96,13 +102,16 @@ jobs:
           case "${MAX_USD}" in
             ''|*[!0-9.]*) echo "::error::max_usd must be a number"; exit 1 ;;
           esac
+          case "${WORKERS:-8}" in
+            ''|*[!0-9]*) echo "::error::workers must be a number"; exit 1 ;;
+          esac
           case "${ACTION}" in
             calibrate) FLAG="--calibrate ${COUNT}" ;;
             screen)    FLAG="--screen ${COUNT}" ;;
             stratify)  FLAG="--stratify ${COUNT}" ;;
             *) echo "::error::unknown action ${ACTION}"; exit 1 ;;
           esac
-          ARGS="--cohort ${COHORT} ${FLAG} --max-usd ${MAX_USD} --max-seconds 1500"
+          ARGS="--cohort ${COHORT} ${FLAG} --max-usd ${MAX_USD} --max-seconds 1500 --workers ${WORKERS:-8}"
           if [ "${DRY_RUN:-false}" = "true" ]; then ARGS="${ARGS} --dry-run"; fi
           echo "python -m scripts.screen_exam_cohort ${ARGS}"
           python -m scripts.screen_exam_cohort ${ARGS}
