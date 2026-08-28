@@ -68,6 +68,13 @@ _EXEMPT: dict[str, str] = {
         "Counts a tag's OPEN candidates to decide whether to draw more. Reads "
         "tag_candidates, which cannot contain a holdout image.",
 
+    # --- drawing the exam itself ----------------------------------------------
+    "_PREEXISTING_LABELS_SQL":
+        "Freezes an image's PRIOR label state at the moment it is drawn INTO the "
+        "exam. Excluding exam members here would defeat the point — these images "
+        "are about to become members — and it selects no training population, only "
+        "the state of ids the caller already holds.",
+
     # --- legacy ---------------------------------------------------------------
     "_LIST_PROPOSALS_SQL":
         "The retiring dedup_sim proposal lane. It feeds no probe and goes with the "
