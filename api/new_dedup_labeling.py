@@ -21,6 +21,7 @@ from api import dependencies as deps
 from toolkit import dedup_sim_labeling as dsl
 from toolkit import tag_annotations
 from toolkit import tag_candidates
+from toolkit import tag_definition_render as tdr
 from toolkit import tag_definitions as td
 
 router = APIRouter(
@@ -468,6 +469,32 @@ def get_tag_definition(tag_id: int, conn: Any = Depends(deps.get_db_conn)) -> di
         return {"data": td.get_active_definition(conn, tag_id=tag_id)}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
+
+
+@router.get("/tags/{tag_id}/definition/card")
+def get_tag_definition_card(
+    tag_id: int, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """The same definition rendered two ways: `card` is the plain-language version
+    a person reads while labeling, `prompt` is the instruction sheet the vision
+    model reads. Both come from one stored row, so the rule the operator follows
+    and the rule the machine is given cannot drift apart.
+
+    Null body for a tag with no definition — a card invented from nothing would be
+    a labeling guide nobody wrote."""
+    try:
+        label = td.tag_label(conn, tag_id=tag_id)
+        definition = td.get_active_definition(conn, tag_id=tag_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
+    if definition is None:
+        return {"data": None}
+    return {"data": {
+        "card": tdr.render_card(definition, tag_label=label),
+        "prompt": tdr.render_prompt(definition, tag_label=label),
+        "definition_id": definition["id"],
+        "version": definition["version"],
+    }}
 
 
 @router.put("/tags/{tag_id}/definition")
