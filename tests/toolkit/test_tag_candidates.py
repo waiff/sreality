@@ -63,6 +63,9 @@ class _Cur:
         elif s.startswith("SELECT 1 FROM tag_taxonomy WHERE id"):
             self._rows = [(1,)] if params["tag_id"] in c.tags else []
 
+        elif s.startswith("SELECT routing_categories FROM tag_taxonomy"):
+            self._rows = [(c.routing_categories,)]
+
         elif s.startswith("SELECT count(*)::int FROM image_tag_labels itl"):
             self._rows = [(c.verified_positives,)]
 
@@ -113,6 +116,7 @@ class _FakeConn:
     def __init__(self) -> None:
         self.tags: set[int] = {1, 2}
         self.verified_positives = 40
+        self.routing_categories: list[str] | None = None
         self.existing: list[tuple[Any, ...]] = []
         self.pool_by_category: dict[str, list[tuple[Any, ...]]] = {}
         self.cancel_categories: set[str] = set()
@@ -830,3 +834,127 @@ def test_candidate_summary_derives_open_by_joining_the_labels(conn: _FakeConn) -
     sql = next(s for s, _ in conn.executed if s.startswith("SELECT c.draw,"))
     assert "LEFT JOIN image_tag_labels lab" in sql
     assert "count(*) FILTER (WHERE lab.image_id IS NULL)::int AS open" in sql
+
+
+# --- routing scope (migration 457) ------------------------------------------
+
+
+def test_scoped_mix_renormalises_so_a_narrowed_draw_is_not_a_short_draw() -> None:
+    # Filtering CATEGORY_MIX without renormalising leaves the weights summing to
+    # 0.70 for a byt/dum/komercni tag, and allocate_counts would hand back ~84 of a
+    # requested 120 — a narrowed scope that reads as a thin corpus.
+    mix = tc.scoped_mix(("byt", "dum", "komercni"))
+    assert set(mix) == {"byt", "dum", "komercni"}
+    assert abs(sum(mix.values()) - 1.0) < 1e-9
+    assert sum(tc.allocate_counts(120, mix).values()) == 120
+
+
+def test_scoped_mix_of_no_scope_is_the_global_mix() -> None:
+    assert tc.scoped_mix(()) == tc.CATEGORY_MIX
+
+
+def test_scoped_mix_keeps_the_relative_weights_of_the_categories_it_keeps() -> None:
+    mix = tc.scoped_mix(("byt", "dum"))
+    assert mix["byt"] / mix["dum"] == pytest.approx(
+        tc.CATEGORY_MIX["byt"] / tc.CATEGORY_MIX["dum"]
+    )
+
+
+def test_routing_categories_drops_values_outside_the_known_vocabulary(
+    conn: _FakeConn,
+) -> None:
+    # Operator-owned free text: a typo should narrow a draw, never break one.
+    conn.routing_categories = ["byt", "hausboat", "dum"]
+    assert tc.routing_categories(conn, tag_id=1) == ("byt", "dum")
+
+
+def test_a_scope_that_filters_to_nothing_falls_back_to_the_whole_mix(
+    conn: _FakeConn,
+) -> None:
+    # Otherwise one bad edit leaves a tag permanently undrawable.
+    conn.routing_categories = ["nonsense"]
+    assert tc.routing_categories(conn, tag_id=1) == ()
+    assert tc.scoped_mix(tc.routing_categories(conn, tag_id=1)) == tc.CATEGORY_MIX
+
+
+def test_a_scoped_tag_never_draws_from_a_category_it_does_not_serve(
+    conn: _FakeConn,
+) -> None:
+    # The bug this fixes, measured live 2026-08-28: koupelna's first draw returned
+    # 54 rows — pozemek 24, komercni 18, ostatni 12, byt 0, dum 0. Every row came
+    # from a property type where bathrooms essentially do not occur.
+    conn.routing_categories = ["byt", "dum", "komercni"]
+    conn.pool_by_category = {c: [] for c in ("byt", "dum", "komercni")}
+    tc.draw_candidates(conn, tag_id=1, count=120)
+    asked = {p["category_main"] for s, p in conn.executed
+             if s.startswith("WITH centroid AS")}
+    assert asked == {"byt", "dum", "komercni"}
+    assert "pozemek" not in asked and "ostatni" not in asked
+
+
+def test_an_explicit_category_still_overrides_the_tags_scope(conn: _FakeConn) -> None:
+    # The caller naming one category is a deliberate request, not a mistake.
+    conn.routing_categories = ["byt", "dum"]
+    conn.pool_by_category = {"pozemek": []}
+    tc.draw_candidates(conn, tag_id=1, count=20, category_main="pozemek")
+    asked = {p["category_main"] for s, p in conn.executed
+             if s.startswith("WITH centroid AS")}
+    assert asked == {"pozemek"}
+
+
+def test_an_unscoped_tag_still_draws_the_full_mix(conn: _FakeConn) -> None:
+    conn.routing_categories = None
+    conn.pool_by_category = {c: [] for c in tc.CATEGORY_MIX}
+    tc.draw_candidates(conn, tag_id=1, count=120)
+    asked = {p["category_main"] for s, p in conn.executed
+             if s.startswith("WITH centroid AS")}
+    assert asked == set(tc.CATEGORY_MIX)
+
+
+def test_the_summary_reports_the_scope_so_a_narrow_draw_explains_itself(
+    conn: _FakeConn,
+) -> None:
+    conn.routing_categories = ["byt", "dum", "komercni"]
+    out = tc.candidate_summary(conn, tag_id=1)
+    assert out["routing_categories"] == ["byt", "dum", "komercni"]
+
+
+# --- budget fairness --------------------------------------------------------
+
+
+def test_no_category_may_claim_the_whole_remaining_budget(conn: _FakeConn) -> None:
+    # Greedy ceilings let the first category eat the budget and leave the rest
+    # 'skipped_budget'. Because the loop runs smallest-quota-first, the starved ones
+    # were always byt and dum — the two most tags care about most.
+    conn.pool_by_category = {c: [] for c in tc.CATEGORY_MIX}
+    tc.draw_candidates(conn, tag_id=1, count=120, max_seconds=50)
+    timeouts = [int(s.split("=")[1].strip())
+                for s, _ in conn.executed
+                if s.startswith("SET LOCAL statement_timeout")]
+    assert timeouts, "expected a per-category statement timeout to be set"
+    # Five categories, ~50s: the first must not be handed anything like all of it.
+    assert timeouts[0] <= 50_000 // 5 + 1_000
+
+
+def test_unspent_budget_rolls_forward_to_the_later_categories(
+    conn: _FakeConn,
+) -> None:
+    # Fair share must not become a straitjacket: the loop runs smallest-first, so
+    # the LAST category is the largest and should inherit what the small ones left.
+    conn.pool_by_category = {c: [] for c in tc.CATEGORY_MIX}
+    tc.draw_candidates(conn, tag_id=1, count=120, max_seconds=50)
+    timeouts = [int(s.split("=")[1].strip())
+                for s, _ in conn.executed
+                if s.startswith("SET LOCAL statement_timeout")]
+    assert timeouts[-1] > timeouts[0]
+
+
+def test_a_zero_budget_still_means_no_wall_clock_limit(conn: _FakeConn) -> None:
+    # The runner passes max_seconds=0 deliberately: the 45s default is shaped for a
+    # synchronous admin request, not a background job.
+    conn.pool_by_category = {c: [] for c in tc.CATEGORY_MIX}
+    tc.draw_candidates(conn, tag_id=1, count=120, max_seconds=0)
+    timeouts = [int(s.split("=")[1].strip())
+                for s, _ in conn.executed
+                if s.startswith("SET LOCAL statement_timeout")]
+    assert timeouts and all(t == tc.DRAW_STATEMENT_TIMEOUT_MS for t in timeouts)

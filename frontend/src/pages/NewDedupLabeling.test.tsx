@@ -219,6 +219,7 @@ function candidateSummary(
     min_verified_positives: 15,
     can_draw: true,
     model: 'openai/clip-vit-base-patch32',
+    routing_categories: [],
     /* positive/negative are the band's YIELD. The random band's is the one
      * self-check the retrieval has — an unranked sample of the pool that keeps
      * coming back positive means the centroid is missing a mode. */
@@ -734,6 +735,26 @@ describe('<NewDedupLabeling>', () => {
     });
     await selectTag();
     expect(await screen.findByText(/never drawn/)).toHaveTextContent('0 open · 0 drawn · never drawn');
+  });
+
+  it('says which property types a scoped tag draws from', async () => {
+    // A scoped draw returns FEWER rows on purpose. Unexplained, that reads as a
+    // broken retrieval — which is exactly how the first live koupelna draw read.
+    vi.mocked(api.getNewDedupTagCandidates).mockResolvedValue({
+      data: candidateSummary({ routing_categories: ['byt', 'dum', 'komercni'] }),
+    });
+    await selectTag();
+    expect(await screen.findByText(/Draws only from/)).toHaveTextContent(
+      'Draws only from byt, dum, komercni — the property types this tag serves.',
+    );
+  });
+
+  it('says nothing about scope for a tag that draws the whole mix', async () => {
+    // Absence of a scope is not a fact worth a line; every unscoped tag would
+    // carry noise saying it is normal.
+    await selectTag();
+    await screen.findByText(/118 open/);
+    expect(screen.queryByText(/Draws only from/)).toBeNull();
   });
 
   it('shows how the queue was drawn — the rank bands, and the property-type mix', async () => {
