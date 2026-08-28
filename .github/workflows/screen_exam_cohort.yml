@@ -1,0 +1,108 @@
+name: "Labeling: screen exam cohort"
+
+# The vision screening pass behind the exam's stratified frame (migrations 458+459).
+# gpt-5-mini looks at each image and guesses which routing tags MIGHT apply; those
+# guesses never become training data and the operator never sees them. They exist so
+# the exam can be enriched: a random 250 images holds three or four garages, which
+# cannot grade anything, while a stratified 250 holds around sixteen.
+#
+# THIS IS THE ONLY LANE IN THE PROGRAMME THAT SPENDS MONEY. Three separate acts, and
+# `calibrate` must come first: the repo has no measured per-image vision cost and
+# gpt-5-mini bills reasoning tokens as OUTPUT at $2.00/M, so an estimate from input
+# tokens alone would wave through a run that overspends severalfold. `screen` refuses
+# to start when the measured cost times the image count exceeds max_usd.
+#
+# First lane to need OPENAI_API_KEY and the four R2_* secrets together — the LLM
+# lanes have never needed image bytes, and the R2 lanes have never called a model.
+# Dispatch it with dry_run first if that combination has not been proven.
+#
+# Required secrets: SUPABASE_DB_URL, OPENAI_API_KEY, R2_*.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cohort:
+        description: "Cohort name, e.g. exam_v1."
+        required: true
+        default: "exam_v1"
+        type: string
+      action:
+        description: "calibrate (measure cost) | screen | stratify"
+        required: false
+        default: "calibrate"
+        type: choice
+        options: ["calibrate", "screen", "stratify"]
+      count:
+        description: "Images to screen, or members to draw when stratifying."
+        required: false
+        default: "25"
+        type: string
+      max_usd:
+        description: "Hard pre-flight ceiling for this run, in USD."
+        required: false
+        default: "8"
+        type: string
+      dry_run:
+        description: "Report what would happen; spend nothing, write nothing."
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+concurrency:
+  group: screen-exam-cohort
+  cancel-in-progress: false
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e ".[api]"
+      - name: Screen
+        env:
+          COHORT: ${{ inputs.cohort }}
+          ACTION: ${{ inputs.action }}
+          COUNT: ${{ inputs.count }}
+          MAX_USD: ${{ inputs.max_usd }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        # --max-seconds 1500 under a 30min runner timeout, so the pass stops between
+        # images and reports what it spent rather than being killed mid-flight with
+        # the bill known only to OpenAI. Inputs travel via env, never interpolation.
+        run: |
+          set -euo pipefail
+          case "${COHORT}" in
+            ''|*[!a-zA-Z0-9_-]*) echo "::error::cohort must be [A-Za-z0-9_-]+"; exit 1 ;;
+          esac
+          case "${COUNT}" in
+            ''|*[!0-9]*) echo "::error::count must be a number"; exit 1 ;;
+          esac
+          case "${MAX_USD}" in
+            ''|*[!0-9.]*) echo "::error::max_usd must be a number"; exit 1 ;;
+          esac
+          case "${ACTION}" in
+            calibrate) FLAG="--calibrate ${COUNT}" ;;
+            screen)    FLAG="--screen ${COUNT}" ;;
+            stratify)  FLAG="--stratify ${COUNT}" ;;
+            *) echo "::error::unknown action ${ACTION}"; exit 1 ;;
+          esac
+          ARGS="--cohort ${COHORT} ${FLAG} --max-usd ${MAX_USD} --max-seconds 1500"
+          if [ "${DRY_RUN:-false}" = "true" ]; then ARGS="${ARGS} --dry-run"; fi
+          echo "python -m scripts.screen_exam_cohort ${ARGS}"
+          python -m scripts.screen_exam_cohort ${ARGS}

@@ -5102,6 +5102,80 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_remax.yml"
     },
     {
+      "filename": "screen_exam_cohort.yml",
+      "name": "Labeling: screen exam cohort",
+      "description": "The vision screening pass behind the exam's stratified frame (migrations 458+459). gpt-5-mini looks at each image and guesses which routing tags MIGHT apply; those guesses never become training data and the operator never sees them. They exist so the exam can be enriched: a random 250 images holds three or four garages, which cannot grade anything, while a stratified 250 holds around sixteen.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "cohort",
+          "description": "Cohort name, e.g. exam_v1.",
+          "required": true,
+          "type": "string",
+          "default": "exam_v1",
+          "options": null
+        },
+        {
+          "name": "action",
+          "description": "calibrate (measure cost) | screen | stratify",
+          "required": false,
+          "type": "choice",
+          "default": "calibrate",
+          "options": [
+            "calibrate",
+            "screen",
+            "stratify"
+          ]
+        },
+        {
+          "name": "count",
+          "description": "Images to screen, or members to draw when stratifying.",
+          "required": false,
+          "type": "string",
+          "default": "25",
+          "options": null
+        },
+        {
+          "name": "max_usd",
+          "description": "Hard pre-flight ceiling for this run, in USD.",
+          "required": false,
+          "type": "string",
+          "default": "8",
+          "options": null
+        },
+        {
+          "name": "dry_run",
+          "description": "Report what would happen; spend nothing, write nothing.",
+          "required": false,
+          "type": "choice",
+          "default": "false",
+          "options": [
+            "false",
+            "true"
+          ]
+        }
+      ],
+      "secrets": [
+        "OPENAI_API_KEY",
+        "R2_ACCESS_KEY_ID",
+        "R2_ACCOUNT_ID",
+        "R2_BUCKET_NAME",
+        "R2_SECRET_ACCESS_KEY",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "screen-exam-cohort",
+      "cancelInProgress": false,
+      "timeoutMinutes": 30,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/screen_exam_cohort.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/screen_exam_cohort.yml"
+    },
+    {
       "filename": "seed_broker_settings.yml",
       "name": "Data: seed broker settings (free-email + franchise domains)",
       "description": "One-shot workflow that populates the two app_settings rows created as `[]` placeholders by migration 186 — `broker_free_email_domains` and `broker_franchise_domains` — from the committed JSON files (data/broker_free_email_domains.json + data/broker_franchise_domains.json).",
