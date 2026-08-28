@@ -1954,7 +1954,7 @@
       "inputs": [
         {
           "name": "tag_id",
-          "description": "One tag id. Leave blank to draw for every ready tag.",
+          "description": "Tag ids, comma or space separated (e.g. 22,25,46). Blank = every ready tag.",
           "required": false,
           "type": "string",
           "default": null,
