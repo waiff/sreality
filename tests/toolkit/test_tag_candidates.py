@@ -69,6 +69,9 @@ class _Cur:
         elif s.startswith("SELECT count(*)::int FROM image_tag_labels itl"):
             self._rows = [(c.verified_positives,)]
 
+        elif s.startswith("SELECT count(*)::bigint FROM listings WHERE category_main"):
+            self._rows = [(c.category_counts.get(params["category_main"], 0),)]
+
         elif s.startswith("SELECT q.image_id, q.phash, q.listing_id, q.property_id"):
             self._rows = c.existing[: params["limit"]]
 
@@ -117,6 +120,12 @@ class _FakeConn:
         self.tags: set[int] = {1, 2}
         self.verified_positives = 40
         self.routing_categories: list[str] | None = None
+        # Real 2026-08-28 shares, so the sample percentages the tests see are the
+        # ones production computes.
+        self.category_counts: dict[str, int] = {
+            "byt": 320_909, "dum": 172_310, "pozemek": 124_048,
+            "komercni": 96_903, "ostatni": 14_171,
+        }
         self.existing: list[tuple[Any, ...]] = []
         self.pool_by_category: dict[str, list[tuple[Any, ...]]] = {}
         self.cancel_categories: set[str] = set()
@@ -393,6 +402,7 @@ def test_the_mid_bands_window_never_closes_below_its_own_fetch() -> None:
     params = tc._draw_pool_params(
         tag_id=1, model="m", category_main="byt",
         band_quotas=tc.allocate_counts(120, tc.BAND_MIX), scoped=True,
+        category_count=320_909,
     )
     assert params["mid_floor"] == params["head_fetch"] + params["mid_fetch"]
 
@@ -423,10 +433,60 @@ def test_the_pool_is_sampled_by_listing_lottery_not_by_id_range() -> None:
     # Consecutive image_id samples LISTINGS, not images (30,000 ids came from
     # 2,106 listings), and ordering a listing's images by `sequence` would put the
     # hero shots first and make `pudorys` structurally unreachable.
+    #
+    # The listing lottery is now TABLESAMPLE rather than ORDER BY random() — the
+    # sort cost 35s on byt and timed out 2 of 3 categories in the first live
+    # background draw. What must NOT come back is id-range sampling; the guarantee
+    # this test defends is that neither stage walks ids in order.
     sql = " ".join(tc._DRAW_POOL_SQL.split())
-    assert "FROM listings l WHERE l.category_main = %(category_main)s::text ORDER BY random()" in sql
+    assert "FROM listings l TABLESAMPLE SYSTEM (%(sample_pct)s)" in sql
     assert "ORDER BY random() LIMIT %(images_per_listing)s" in sql
     assert "sequence" not in sql
+    assert "l.id >" not in sql and "l.id BETWEEN" not in sql
+
+
+def test_the_sample_percentage_scales_inversely_with_the_categorys_size() -> None:
+    # TABLESAMPLE reads a fraction of the TABLE and the category filter runs after,
+    # so a fixed percentage starves the small categories. Measured at 3%: byt and
+    # dum filled 5,000, but ostatni returned 401.
+    big = tc.sample_pct(pool_listings=5000, category_count=320_909)
+    small = tc.sample_pct(pool_listings=5000, category_count=14_171)
+    assert big < small
+    assert big < 5.0    # byt: a few percent of the table is plenty
+    assert small > 50.0  # ostatni: most of the table, because 1.9% of it is ostatni
+
+
+def test_the_sample_percentage_is_bounded_at_both_ends() -> None:
+    assert tc.sample_pct(pool_listings=1, category_count=10**9) == tc.SAMPLE_PCT_MIN
+    assert tc.sample_pct(pool_listings=10**6, category_count=10) == tc.SAMPLE_PCT_MAX
+
+
+def test_an_uncountable_category_falls_back_to_a_full_scan() -> None:
+    # A draw returning zero because of an arithmetic edge would look exactly like
+    # a thin corpus, which is the one thing the report must never lie about.
+    assert tc.sample_pct(pool_listings=5000, category_count=0) == tc.SAMPLE_PCT_MAX
+
+
+def test_the_category_count_is_read_outside_the_timed_transaction(
+    conn: _FakeConn,
+) -> None:
+    # It SIZES the sample, so charging it to the pool query's own ceiling would let
+    # a slow count eat the budget it exists to protect.
+    conn.pool_by_category = {"byt": []}
+    tc.draw_candidates(conn, tag_id=1, count=20, category_main="byt")
+    kinds = [s for s, _ in conn.executed
+             if s.startswith("SELECT count(*)::bigint FROM listings")
+             or s.startswith("SET LOCAL statement_timeout")]
+    assert kinds[0].startswith("SELECT count(*)::bigint FROM listings")
+
+
+def test_the_sample_percentage_reaches_the_pool_query(conn: _FakeConn) -> None:
+    conn.pool_by_category = {"byt": []}
+    tc.draw_candidates(conn, tag_id=1, count=20, category_main="byt")
+    params = conn.pool_params("byt")
+    assert params["sample_pct"] == tc.sample_pct(
+        pool_listings=params["pool_listings"], category_count=320_909,
+    )
 
 
 def test_the_insert_resolves_the_definition_from_the_rows_own_tag() -> None:

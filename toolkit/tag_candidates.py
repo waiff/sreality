@@ -84,6 +84,18 @@ NEAR_DUP_MIN_HAMMING = 6
 # is why that pass runs outside the transaction, and the number to retune if a
 # tag's queue ever approaches the bound.
 PHASH_HISTORY_MAX = 50_000
+# TABLESAMPLE reads a fraction of the TABLE, so the fraction needed to fill a pool
+# scales inversely with how much of the table the category occupies. Measured
+# 2026-08-28 at 3%: byt and dum fill 5,000 listings, pozemek 3,840, komercni 2,930,
+# ostatni 401. So the percentage is computed per category from its own row count
+# (an index-only scan, ~0.9s) rather than fixed.
+#
+# The multiple exists because SYSTEM sampling is block-granular and therefore
+# lumpy: asking for exactly enough blocks lands short about half the time.
+SAMPLE_OVERSAMPLE = 2.5
+SAMPLE_PCT_MIN = 1.0     # below this the lumpiness dominates and a draw goes hungry
+SAMPLE_PCT_MAX = 100.0   # 100 is a plain seq scan, which is correct for a tiny category
+
 DRAW_STATEMENT_TIMEOUT_MS = 60_000  # ceiling on ONE category's pool query
 DRAW_BUDGET_SECONDS = 45     # wall-clock budget for one draw_candidates call (API-safe)
 # Below this much budget left, a category is skipped rather than started: the
@@ -306,9 +318,8 @@ _DRAW_POOL_SQL = """
     ),
     pool_listings AS (
       SELECT l.id, l.property_id
-      FROM listings l
+      FROM listings l TABLESAMPLE SYSTEM (%(sample_pct)s)
       WHERE l.category_main = %(category_main)s::text
-      ORDER BY random()
       LIMIT %(pool_listings)s
     ),
     pool AS (
@@ -515,9 +526,39 @@ def _existing_pool(
     return phashes, counts
 
 
+_CATEGORY_COUNT_SQL = """
+    SELECT count(*)::bigint FROM listings WHERE category_main = %(category_main)s::text
+"""
+
+
+def category_listing_count(conn: psycopg.Connection, *, category_main: str) -> int:
+    """How many listings this category holds. An index-only scan on
+    listings_category_main_category_type_idx — ~0.9s for byt, against the ~35s the
+    ORDER BY random() pool build used to cost, so paying it to size the sample is
+    a bargain rather than an extra."""
+    with conn.cursor() as cur:
+        cur.execute(_CATEGORY_COUNT_SQL, {"category_main": category_main})
+        row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+def sample_pct(*, pool_listings: int, category_count: int) -> float:
+    """The TABLESAMPLE percentage that should yield `pool_listings` rows.
+
+    TABLESAMPLE reads a fraction of the whole TABLE, and the filter runs after, so
+    the fraction has to be scaled by how much of the table this category occupies.
+    An unknown or empty category falls back to a full scan rather than sampling
+    nothing — a draw that returns zero because of an arithmetic edge would look
+    exactly like a thin corpus."""
+    if category_count <= 0:
+        return SAMPLE_PCT_MAX
+    wanted = 100.0 * pool_listings * SAMPLE_OVERSAMPLE / category_count
+    return min(SAMPLE_PCT_MAX, max(SAMPLE_PCT_MIN, wanted))
+
+
 def _draw_pool_params(
     *, tag_id: int, model: str, category_main: str, band_quotas: dict[str, int],
-    scoped: bool,
+    scoped: bool, category_count: int,
 ) -> dict[str, Any]:
     # A draw PINNED to one category gets the whole pool budget, because the whole
     # count was allocated to it. Sizing the pool by that category's share of the
@@ -527,12 +568,16 @@ def _draw_pool_params(
     pool_images = round(POOL_IMAGES_TARGET * share)
     head_fetch = band_quotas["centroid_head"] * OVERFETCH
     mid_fetch = band_quotas["centroid_mid"] * OVERFETCH
+    pool_listings = math.ceil(pool_images / POOL_IMAGES_PER_LISTING)
     return {
         "tag_id": tag_id,
         "model": model,
         "min_positives": MIN_VERIFIED_POSITIVES,
         "category_main": category_main,
-        "pool_listings": math.ceil(pool_images / POOL_IMAGES_PER_LISTING),
+        "sample_pct": sample_pct(
+            pool_listings=pool_listings, category_count=category_count,
+        ),
+        "pool_listings": pool_listings,
         "images_per_listing": POOL_IMAGES_PER_LISTING,
         "head_fetch": head_fetch,
         "mid_percentile": MID_BAND_PERCENTILE,
@@ -571,6 +616,10 @@ def _draw_one_category(
     and holding a transaction open across it buys nothing."""
     band_quotas = allocate_counts(quota, BAND_MIX)
     started = time.monotonic()
+    # Read OUTSIDE the timed transaction: it sizes the sample, so charging it to
+    # the pool query's own ceiling would make a slow count eat the budget it exists
+    # to protect.
+    category_count = category_listing_count(conn, category_main=category_main)
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
         cur.execute(
@@ -578,6 +627,7 @@ def _draw_one_category(
             _draw_pool_params(
                 tag_id=tag_id, model=model, category_main=category_main,
                 band_quotas=band_quotas, scoped=scoped,
+                category_count=category_count,
             ),
         )
         raw = cur.fetchall()
