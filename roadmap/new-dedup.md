@@ -229,6 +229,29 @@ W1 (shared prerequisites + labeling program):
       ceiling and the need for an operator with a browser open. Also fixes an exit code that
       returned 0 even when every tag raised — on a dispatched lane that is the only failure
       signal there is. Cron deliberately commented out.
+- [x] **W2 SHIPPED (#1228-#1231, migrations 458+459)** — the sealed exam exists end to end.
+      458 stores MEMBERSHIP, not answers: an operator's verdict IS a human judgement
+      about an (image, tag) pair, so it goes in `image_tag_labels` through the existing
+      upsert and this table records only which images are protected. The cost of that
+      single-write-path choice is that every training read owes an exclusion it cannot
+      discover from the schema — discharged by ONE constant and policed by
+      `tests/test_holdout_exclusion_census.py`, which fails on any statement reading
+      `image_tag_labels` that neither excludes nor is censused with a reason. The
+      obvious narrower guard ("joins labels to embeddings") would have covered 4 of 19
+      statements and, worse, would have missed the trainer it exists for: a trainer
+      naturally SELECTs labels and embeddings separately and joins them in numpy.
+      MEMBERSHIP ALONE PROTECTS — `sealed_at` means "finished", never "protected", or
+      the whole drawing window is open. The draw is two frames: 100 pure-random (probe
+      by random id, NOT TABLESAMPLE — a page of `images` is one listing's photos, so a
+      block sample would be ~25 listings seen four times) and 150 stratified on
+      gpt-5-mini's guesses, each row carrying the odds it was drawn under so statistics
+      are inverse-probability weighted. STRATIFY NEVER FILTER: `screen_none` keeps a
+      non-zero share, and a screener ERROR is never binned as "saw nothing". The
+      screening lane CALIBRATES before it spends — gpt-5-mini bills reasoning as output
+      at $2.00/M and the repo had no measured per-image cost, so the pre-flight cap
+      refuses to start on an unmeasured rate. The exam screen is deliberately unlike
+      the labeling grid (one large image, permanent key legend): that grid binds 1-4 to
+      STATES while the exam binds 1-8 to TAGS, same operator, adjacent pages.
 - [ ] **NEXT — W1 remainder:** one definition renderer with two outputs (the machine prompt and
       a plain-language handbook card, so the operator never meets `counts` / `does_not_count` /
       `confusable_with` / `leave_out_when` while labeling); the machine-label store (a SEPARATE

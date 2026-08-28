@@ -23,6 +23,7 @@ from toolkit import tag_annotations
 from toolkit import tag_candidates
 from toolkit import tag_definition_render as tdr
 from toolkit import tag_definitions as td
+from toolkit import tag_exam, tag_holdout
 
 router = APIRouter(
     prefix="/new-dedup/labeling", tags=["new-dedup-labeling"],
@@ -615,3 +616,89 @@ def get_tag_neighbours(
     space. Empty (never an error) when the tag has too few embedded positives to
     have a centroid."""
     return {"data": td.nearest_tags(conn, tag_id=tag_id, limit=limit)}
+
+
+# --- the sealed exam (migrations 458 + 459) ---------------------------------
+#
+# The exam GRADES the probes, so this is the one surface that shows an operator a
+# holdout image on purpose. Two rules make it a measurement rather than a labelling
+# session, and both live here rather than in the client:
+#   * no machine suggestion is ever returned with a question — a pre-ticked answer
+#     would anchor the operator, and an exam the machine helped answer cannot grade
+#     the machine;
+#   * an answer is refused for any image outside the cohort, which is what stops a
+#     mis-wired client writing warm-up practice into the measurement.
+
+
+class ExamAnswerIn(BaseModel):
+    image_id: int
+    # Which of the routing tags apply. Every routing tag NOT listed becomes a
+    # negative — that is what lets one answer measure precision AND recall.
+    picked_tag_ids: list[int] = []
+    cant_tell: bool = False
+
+
+def _routing_tags(conn: Any) -> list[dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, label FROM tag_taxonomy "
+            "WHERE routing_categories IS NOT NULL AND active ORDER BY id"
+        )
+        return [{"id": int(r[0]), "label": r[1]} for r in cur.fetchall()]
+
+
+def _cohort_or_404(conn: Any, name: str) -> dict[str, Any]:
+    cohort = tag_holdout.get_cohort(conn, name=name)
+    if cohort is None:
+        raise HTTPException(status_code=404, detail=f"cohort {name!r} not found")
+    return cohort
+
+
+@router.get("/exam/{cohort_name}")
+def get_exam_state(
+    cohort_name: str, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """The exam's tags, progress, and the next unanswered question.
+
+    `question` is null when the exam is finished. The tag list is served with the
+    question so the eight buttons are the server's list, never a copy that could
+    drift from the routing set."""
+    cohort = _cohort_or_404(conn, cohort_name)
+    tags = _routing_tags(conn)
+    tag_ids = [t["id"] for t in tags]
+    return {"data": {
+        "cohort": {"name": cohort["name"], "sealed": cohort["sealed_at"] is not None},
+        "tags": tags,
+        "progress": tag_exam.progress(conn, cohort_id=cohort["id"], tag_ids=tag_ids),
+        "question": tag_exam.next_question(conn, cohort_id=cohort["id"], tag_ids=tag_ids),
+    }}
+
+
+@router.get("/exam/{cohort_name}/warmup")
+def get_exam_warmup(
+    cohort_name: str, limit: int = 10, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Practice images from OUTSIDE the exam. They settle the operator's hand;
+    spending real exam images on that would shrink the sample that has to grade
+    everything, and answers posted for them are refused by design."""
+    _cohort_or_404(conn, cohort_name)
+    return {"data": tag_exam.warmup_images(conn, limit=max(0, min(limit, 25)))}
+
+
+@router.post("/exam/{cohort_name}/answer")
+def post_exam_answer(
+    cohort_name: str, body: ExamAnswerIn, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    cohort = _cohort_or_404(conn, cohort_name)
+    tag_ids = [t["id"] for t in _routing_tags(conn)]
+    try:
+        return {"data": tag_exam.record_answer(
+            conn, cohort_id=cohort["id"], image_id=body.image_id,
+            tag_ids=tag_ids, picked=body.picked_tag_ids, cant_tell=body.cant_tell,
+        )}
+    except KeyError as exc:
+        # Not in the cohort — a warm-up image, or a stale client. Refusing is the
+        # rail that keeps practice out of the measurement.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

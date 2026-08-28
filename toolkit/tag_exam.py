@@ -34,6 +34,8 @@ from typing import Any
 
 import psycopg
 
+from toolkit.tag_holdout import exclusion_for
+
 FRAMES = ("pure_random", "stratified")
 
 # Probes per wanted image. Every probe is a PK lookup, so overshooting is cheap;
@@ -289,3 +291,136 @@ def composition(conn: psycopg.Connection, *, cohort_id: int) -> list[dict[str, A
              "p_min": float(r[3]), "p_max": float(r[4])}
             for r in cur.fetchall()
         ]
+
+
+# --- sitting the exam -------------------------------------------------------
+
+_NEXT_MEMBER_SQL = """
+    SELECT m.image_id, m.position, i.storage_path
+    FROM tag_exam_members m
+    JOIN images i ON i.id = m.image_id
+    WHERE m.cohort_id = %(cohort_id)s
+      AND NOT EXISTS (
+            SELECT 1 FROM image_tag_labels l
+            WHERE l.image_id = m.image_id
+              AND l.tag_id = ANY(%(tag_ids)s::bigint[])
+              AND l.source IN ('human', 'human_confirmed')
+          )
+    ORDER BY m.position
+    LIMIT 1
+"""
+
+# Progress is "images with a verdict on EVERY routing tag", not "images with any
+# label". A half-answered image is not answered: the exam grades all eight heads,
+# so a partial row would silently shrink one tag's test set.
+_PROGRESS_SQL = """
+    SELECT count(*)::int AS total,
+           count(*) FILTER (WHERE d.decided = %(tag_count)s)::int AS answered
+    FROM tag_exam_members m
+    CROSS JOIN LATERAL (
+      SELECT count(*)::int AS decided
+      FROM image_tag_labels l
+      WHERE l.image_id = m.image_id
+        AND l.tag_id = ANY(%(tag_ids)s::bigint[])
+        AND l.source IN ('human', 'human_confirmed')
+    ) d
+    WHERE m.cohort_id = %(cohort_id)s
+"""
+
+_IS_MEMBER_SQL = """
+    SELECT 1 FROM tag_exam_members
+    WHERE cohort_id = %(cohort_id)s AND image_id = %(image_id)s
+"""
+
+# Warm-up images come from OUTSIDE the exam on purpose: they exist to settle the
+# operator's hand, and spending real exam images on that would shrink the sample
+# that has to grade everything.
+_WARMUP_SQL = f"""
+    SELECT DISTINCT l.image_id, i.storage_path
+    FROM image_tag_labels l
+    JOIN images i ON i.id = l.image_id AND i.storage_path IS NOT NULL
+    WHERE l.source IN ('human', 'human_confirmed')
+      AND l.state = 'positive'
+      {exclusion_for("l")}
+    ORDER BY l.image_id
+    LIMIT %(limit)s
+"""
+
+
+def next_question(
+    conn: psycopg.Connection, *, cohort_id: int, tag_ids: list[int],
+) -> dict[str, Any] | None:
+    """The next exam image with no human verdict yet, in draw order."""
+    with conn.cursor() as cur:
+        cur.execute(_NEXT_MEMBER_SQL, {"cohort_id": cohort_id, "tag_ids": tag_ids})
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {"image_id": int(row[0]), "position": int(row[1]), "storage_path": row[2]}
+
+
+def progress(
+    conn: psycopg.Connection, *, cohort_id: int, tag_ids: list[int],
+) -> dict[str, int]:
+    with conn.cursor() as cur:
+        cur.execute(_PROGRESS_SQL, {
+            "cohort_id": cohort_id, "tag_ids": tag_ids, "tag_count": len(tag_ids),
+        })
+        row = cur.fetchone()
+    total, answered = (int(row[0]), int(row[1])) if row else (0, 0)
+    return {"total": total, "answered": answered, "remaining": total - answered}
+
+
+def warmup_images(
+    conn: psycopg.Connection, *, limit: int = 10,
+) -> list[dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(_WARMUP_SQL, {"limit": limit})
+        return [{"image_id": int(r[0]), "storage_path": r[1]} for r in cur.fetchall()]
+
+
+def is_member(conn: psycopg.Connection, *, cohort_id: int, image_id: int) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(_IS_MEMBER_SQL, {"cohort_id": cohort_id, "image_id": image_id})
+        return cur.fetchone() is not None
+
+
+def record_answer(
+    conn: psycopg.Connection, *, cohort_id: int, image_id: int,
+    tag_ids: list[int], picked: list[int], cant_tell: bool = False,
+    answered_by: str = "operator",
+) -> dict[str, Any]:
+    """Write one exam answer across ALL routing tags.
+
+    The exam asks "which of these, if any?", so a pick is a positive and every tag
+    NOT picked is a negative — that is what lets one answer measure both precision
+    and recall. Answering only the positives would leave seven cells undecided per
+    image and grade nothing.
+
+    Refuses an image outside the cohort. That refusal is the warm-up's safety rail:
+    warm-up images come from outside the exam, so a mis-wired client cannot write
+    practice answers into the measurement.
+    """
+    from toolkit import tag_annotations as ta
+
+    if not is_member(conn, cohort_id=cohort_id, image_id=image_id):
+        raise KeyError(f"image {image_id} is not in cohort {cohort_id}")
+    unknown = sorted(set(picked) - set(tag_ids))
+    if unknown:
+        raise ValueError(f"not routing tags: {unknown}")
+
+    written = 0
+    for tag_id in tag_ids:
+        if cant_tell:
+            # `excluded`, never `negative`: an image nobody could decide is not a
+            # counter-example, and training on it teaches the operator's confusion.
+            state, reason = "excluded", "ambiguous"
+        else:
+            state, reason = ("positive" if tag_id in picked else "negative"), None
+        ta.set_state(
+            conn, image_id=image_id, tag_id=tag_id, state=state,
+            created_by=answered_by, source=ta.SOURCE_HUMAN, excluded_reason=reason,
+        )
+        written += 1
+    return {"image_id": image_id, "cells_written": written,
+            "picked": sorted(picked), "cant_tell": cant_tell}

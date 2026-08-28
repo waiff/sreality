@@ -30,7 +30,17 @@ import pytest
 from tests.sql_corpus import discover, first_keyword
 from toolkit import tag_holdout
 
-_MARKER = "tag_exam_members"
+# The real anti-join, not merely a mention of the table. `hx` is the alias the
+# shared constant uses, so matching it proves toolkit.tag_holdout.exclusion_for was
+# formatted in rather than a hand-rolled copy that can drift from it. A statement
+# that JOINS the exam deliberately (the exam-sitting reads) mentions the table but
+# does not carry this, and must therefore be censused by name — which is the honest
+# outcome: "excludes the exam" and "reads the exam on purpose" are different facts.
+_MARKER = "NOT EXISTS ( SELECT 1 FROM tag_exam_members hx"
+
+
+def _norm(sql: str) -> str:
+    return " ".join(sql.split())
 
 # Statements that read image_tag_labels and legitimately do NOT exclude the exam.
 # Keyed by "<file>::<constant>" or "<file>:<line>" as sql_corpus reports it; the
@@ -67,6 +77,14 @@ _EXEMPT: dict[str, str] = {
     "_TAG_QUEUE_SQL":
         "Counts a tag's OPEN candidates to decide whether to draw more. Reads "
         "tag_candidates, which cannot contain a holdout image.",
+
+    # --- reads that are ABOUT the exam ----------------------------------------
+    "_NEXT_MEMBER_SQL":
+        "Serves the next unanswered exam image. It reads the exam deliberately — "
+        "excluding it would leave nothing to answer.",
+    "_PROGRESS_SQL":
+        "Counts how much of the exam has a verdict on every routing tag. Scoped to "
+        "one cohort; it selects no training population.",
 
     # --- drawing the exam itself ----------------------------------------------
     "_PREEXISTING_LABELS_SQL":
@@ -107,7 +125,7 @@ def _key(item) -> str:
 def test_every_label_read_excludes_the_exam_or_is_censused() -> None:
     offenders = []
     for item in _reading_labels():
-        if _MARKER in item.sql or _key(item) in _EXEMPT:
+        if _MARKER in _norm(item.sql) or _key(item) in _EXEMPT:
             continue
         offenders.append(f"{_key(item)}  ({item.origin})")
     assert not offenders, (
@@ -153,7 +171,7 @@ def test_every_censused_entry_still_exists() -> None:
 
 
 def test_the_exclusion_names_the_membership_table() -> None:
-    assert _MARKER in tag_holdout.HOLDOUT_EXCLUSION
+    assert _MARKER in _norm(tag_holdout.HOLDOUT_EXCLUSION)
     # Membership alone must exclude. A `sealed_at IS NOT NULL` qualifier here would
     # leave the entire drawing window unprotected — precisely when the images are
     # chosen but not yet answered.
@@ -162,7 +180,17 @@ def test_the_exclusion_names_the_membership_table() -> None:
 
 def test_the_sanctioned_training_door_excludes_the_exam() -> None:
     from toolkit.tag_holdout import _TRAINING_LABEL_ROWS_SQL
-    assert _MARKER in _TRAINING_LABEL_ROWS_SQL
+    assert _MARKER in _norm(_TRAINING_LABEL_ROWS_SQL)
+
+
+def test_merely_naming_the_exam_table_does_not_satisfy_the_guard() -> None:
+    # The weaker "mentions tag_exam_members" check passed a statement that JOINS
+    # the exam as readily as one that excludes it, which is not what the docstring
+    # promises. This pins the stronger reading.
+    mentions_only = ("SELECT l.image_id FROM image_tag_labels l "
+                     "JOIN tag_exam_members m ON m.image_id = l.image_id")
+    assert "tag_exam_members" in mentions_only
+    assert _MARKER not in _norm(mentions_only)
 
 
 def test_the_exclusion_constant_is_not_named_like_a_statement() -> None:
