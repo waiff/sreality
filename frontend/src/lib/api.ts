@@ -1384,6 +1384,51 @@ export const previewTagDefinitionCard = (
     { method: 'POST', json: body, jwt: true },
   );
 
+/* --- the sealed exam (migrations 458 + 459) ------------------------------- */
+
+export interface ExamTag { id: number; label: string }
+
+export interface ExamQuestion {
+  image_id: number;
+  position: number;
+  storage_path: string | null;
+}
+
+export interface ExamState {
+  cohort: { name: string; sealed: boolean };
+  /* The eight routing tags, server-resolved. Never a copy in the client: the
+   * buttons must be the same set the answers are written against. */
+  tags: ExamTag[];
+  progress: { total: number; answered: number; remaining: number };
+  /* Null when every image has a verdict on every tag. Deliberately carries NO
+   * machine suggestion — a pre-ticked answer would anchor the operator, and an
+   * exam the machine helped answer cannot grade the machine. */
+  question: ExamQuestion | null;
+}
+
+export const getExamState = (cohort: string): Promise<{ data: ExamState }> =>
+  request<{ data: ExamState }>(`/new-dedup/labeling/exam/${cohort}`, { jwt: true });
+
+/* Practice images from OUTSIDE the exam — they settle the hand without spending
+ * real exam images, and answers for them are refused server-side. */
+export const getExamWarmup = (
+  cohort: string, limit = 10,
+): Promise<{ data: Array<{ image_id: number; storage_path: string | null }> }> =>
+  request<{ data: Array<{ image_id: number; storage_path: string | null }> }>(
+    `/new-dedup/labeling/exam/${cohort}/warmup?limit=${limit}`, { jwt: true },
+  );
+
+/* Every routing tag NOT in picked_tag_ids becomes a NEGATIVE — that is what lets
+ * one answer measure precision and recall at once. */
+export const answerExamQuestion = (
+  cohort: string,
+  body: { image_id: number; picked_tag_ids: number[]; cant_tell: boolean },
+): Promise<{ data: { image_id: number; cells_written: number } }> =>
+  request<{ data: { image_id: number; cells_written: number } }>(
+    `/new-dedup/labeling/exam/${cohort}/answer`,
+    { method: 'POST', json: body, jwt: true },
+  );
+
 /* Writes a NEW version and retires the previous one. There is no draft state
  * server-side — batch every edit into one call. */
 export const saveTagDefinition = (
