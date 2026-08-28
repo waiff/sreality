@@ -45,6 +45,18 @@ MAX_TOKENS = 4096
 # first version used 12 and offered 10 images when asked for 25.
 PROBE_FACTOR = 60
 
+# MEASURED: 148s for 25 images = 5.9s each, nearly all of it waiting on R2 and the
+# model. Sequentially, 1,500 images is 2.5 hours against a 25-minute lane budget.
+# The work is I/O-bound, so workers buy the whole difference: 8 of them bring the
+# same 1,500 under 20 minutes.
+#
+# Each worker owns its OWN connection and LLMClient. psycopg connections are not
+# thread-safe and LLMClient writes an llm_calls row per call, so sharing one would
+# interleave writes on a single connection — the classic way a parallel lane
+# corrupts its own cost ledger.
+DEFAULT_WORKERS = 8
+WORKERS_MAX = 16
+
 
 _MEASURED_COST_SQL = """
     SELECT count(*)::int, COALESCE(avg(cost_usd), 0)::double precision
@@ -110,47 +122,87 @@ def _draw_unscreened(conn: Any, *, cohort_id: int, model: str, count: int) -> li
 
 
 def _screen_batch(
-    conn: Any, llm, r2, *, cohort_id: int, rows: list[tuple[int, str]],
+    conn: Any, r2, *, cohort_id: int, rows: list[tuple[int, str]],
     tags: list[dict[str, Any]], model: str, max_usd: float, max_seconds: int,
+    workers: int,
 ) -> dict[str, Any]:
+    """Screen `rows` across `workers` threads, writing results as they land.
+
+    The budget is enforced by the WORKERS, before each call, under a lock — not by
+    the main thread afterwards. Checking after the fact on a parallel lane means
+    discovering the overspend once every in-flight call has already been billed.
+    """
+    from api.llm_client import LLMClient
+    from api.providers.openai import OpenAIProvider
+    from scraper import db
     from toolkit import exam_screening as es
     from toolkit.vision_images import COMPARISON_MAX_EDGE, image_block
 
     prompt = es.build_prompt(tags)
     valid = {t["id"] for t in tags}
     stats = {"ok": 0, "errors": 0, "hits": 0, "spent": 0.0, "aborted": False}
+    lock = threading.Lock()
     started = time.monotonic()
+    work: queue.Queue = queue.Queue()
+    for row in rows:
+        work.put(row)
 
-    for image_id, storage_path in rows:
+    def _stop() -> bool:
         if max_usd > 0 and stats["spent"] >= max_usd:
-            LOG.warning("SCREEN cost ceiling $%.2f reached; stopping cleanly", max_usd)
-            stats["aborted"] = True
-            break
-        if max_seconds > 0 and time.monotonic() - started >= max_seconds:
-            LOG.info("SCREEN time budget %ds reached; stopping cleanly", max_seconds)
-            stats["aborted"] = True
-            break
+            return True
+        return max_seconds > 0 and time.monotonic() - started >= max_seconds
+
+    def _worker() -> None:
+        # One connection and one client per worker, opened here so the thread that
+        # uses them is the thread that owns them.
+        wconn = db.connect()
         try:
-            block = image_block(r2, storage_path, COMPARISON_MAX_EDGE)
-            res = llm.call(
-                called_for=CALLED_FOR, model=model, max_tokens=MAX_TOKENS,
-                messages=[{"role": "user", "content": [block, {"type": "text", "text": prompt}]}],
-            )
-            stats["spent"] += float(getattr(res, "cost_usd", 0.0) or 0.0)
-            ids = es.parse_guess(getattr(res, "text", "") or "", valid_ids=valid)
-        except Exception as exc:  # noqa: BLE001 - one image must not kill the pass
-            # Recorded as an ERROR, never as an empty guess. The two look identical
-            # downstream and mean opposite things: "saw nothing" is evidence,
-            # "failed" is the absence of it, and binning failures into screen_none
-            # would fill that stratum with model errors.
-            stats["errors"] += 1
-            es.record_screen(conn, cohort_id=cohort_id, image_id=image_id,
-                             guess_tag_ids=None, model=model, error=str(exc)[:500])
-            continue
-        stats["ok"] += 1
-        stats["hits"] += 1 if ids else 0
-        es.record_screen(conn, cohort_id=cohort_id, image_id=image_id,
-                         guess_tag_ids=ids, model=model, error=None)
+            llm = LLMClient(wconn, providers={"openai": OpenAIProvider()})
+            while True:
+                try:
+                    image_id, storage_path = work.get_nowait()
+                except queue.Empty:
+                    return
+                with lock:
+                    if _stop():
+                        stats["aborted"] = True
+                        return
+                try:
+                    block = image_block(r2, storage_path, COMPARISON_MAX_EDGE)
+                    res = llm.call(
+                        called_for=CALLED_FOR, model=model, max_tokens=MAX_TOKENS,
+                        messages=[{"role": "user", "content": [
+                            block, {"type": "text", "text": prompt}]}],
+                    )
+                    cost = float(getattr(res, "cost_usd", 0.0) or 0.0)
+                    ids = es.parse_guess(getattr(res, "text", "") or "", valid_ids=valid)
+                except Exception as exc:  # noqa: BLE001 - one image must not kill the pass
+                    # Recorded as an ERROR, never as an empty guess: the two look
+                    # identical downstream and mean opposite things.
+                    with lock:
+                        stats["errors"] += 1
+                    es.record_screen(wconn, cohort_id=cohort_id, image_id=image_id,
+                                     guess_tag_ids=None, model=model, error=str(exc)[:500])
+                    continue
+                with lock:
+                    stats["ok"] += 1
+                    stats["spent"] += cost
+                    if ids:
+                        stats["hits"] += 1
+                es.record_screen(wconn, cohort_id=cohort_id, image_id=image_id,
+                                 guess_tag_ids=ids, model=model, error=None)
+        finally:
+            wconn.close()
+
+    threads = [threading.Thread(target=_worker, daemon=True)
+               for _ in range(max(1, min(workers, WORKERS_MAX)))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if stats["aborted"]:
+        LOG.warning("SCREEN stopped early: ceiling $%.2f or %ds reached",
+                    max_usd, max_seconds)
     return stats
 
 
@@ -166,6 +218,8 @@ def main() -> int:
     ap.add_argument("--max-usd", type=float, default=8.0,
                     help="Hard pre-flight ceiling for this run.")
     ap.add_argument("--max-seconds", type=int, default=1500)
+    ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                    help=f"Parallel screeners (1-{WORKERS_MAX}). The work is I/O-bound.")
     ap.add_argument("--model", default="gpt-5-mini")
     ap.add_argument("--max-error-rate", type=float, default=0.05,
                     help="Refuse to stratify above this screen error rate.")
@@ -258,15 +312,13 @@ def main() -> int:
             LOG.info("SCREEN dry-run: would screen %d images", len(rows))
             return 0
 
-        from api.llm_client import LLMClient
-        from api.providers.openai import OpenAIProvider
         from scraper.image_storage import R2Client
 
-        llm = LLMClient(conn, providers={"openai": OpenAIProvider()})
         r2 = R2Client.from_env()
         stats = _screen_batch(
-            conn, llm, r2, cohort_id=cohort_id, rows=rows, tags=tags,
+            conn, r2, cohort_id=cohort_id, rows=rows, tags=tags,
             model=args.model, max_usd=args.max_usd, max_seconds=args.max_seconds,
+            workers=args.workers,
         )
         per_image = stats["spent"] / stats["ok"] if stats["ok"] else 0.0
         LOG.info("SCREEN done ok=%d errors=%d with_hits=%d spent=$%.4f "

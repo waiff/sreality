@@ -5149,6 +5149,14 @@
           "options": null
         },
         {
+          "name": "workers",
+          "description": "Parallel screeners (1-16). The work is I/O-bound on R2 and the model.",
+          "required": false,
+          "type": "string",
+          "default": "8",
+          "options": null
+        },
+        {
           "name": "dry_run",
           "description": "Report what would happen; spend nothing, write nothing.",
           "required": false,
