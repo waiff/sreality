@@ -342,6 +342,19 @@ _INSERT_DEFINITION_SQL = f"""
 """
 
 _TAG_EXISTS_SQL = "SELECT 1 FROM tag_taxonomy WHERE id = %(tag_id)s"
+
+_TAG_LABEL_SQL = "SELECT label FROM tag_taxonomy WHERE id = %(tag_id)s"
+
+
+def tag_label(conn: psycopg.Connection, *, tag_id: int) -> str:
+    """This tag's label. KeyError for an unknown tag, so callers 404 rather than
+    render a card headed by a blank."""
+    with conn.cursor() as cur:
+        cur.execute(_TAG_LABEL_SQL, {"tag_id": tag_id})
+        row = cur.fetchone()
+    if row is None:
+        raise KeyError(tag_id)
+    return str(row[0])
 _TAGS_EXIST_SQL = "SELECT id FROM tag_taxonomy WHERE id = ANY(%(ids)s)"
 
 
