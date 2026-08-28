@@ -1,5 +1,7 @@
 {
   "model": "openai/clip-vit-base-patch32",
+  "revision": "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268",
+  "revision_note": "HF commit of the checkpoint. The model NAME is a moving pointer: `openai/clip-vit-base-patch32` resolves to whatever `main` holds the day it downloads, and a silent re-upload would change every vector we write from then on while leaving `image_clip_embeddings.model` identical. 10.36M stored vectors are only comparable to new ones because this sha is passed to from_pretrained. Never change it without a planned re-embed of the whole corpus.",
   "note": "CLIP zero-shot anchors. The trial's site_plan miss (37%) was one overloaded prompt: 'site_plan' bundled situation drawings + cadastral maps + aerial plot photos into one anchor that biased to line-art, so photo/aerial site plans leaked to garden/exterior. Fix: give each visual sub-style its OWN coherent anchor, then COLLAPSE back to the engine's logical labels (toolkit.image_classification.ROOM_TYPES) via `collapse`. CLIP picks argmax over `prompts`; metrics + the engine use the collapsed logical tag. This also unlocks the untagged non-apartment categories (dum/pozemek/komercni, ~166k listings, zero classified today) where plot/cadastral drawings are the property identity.",
   "prompts": {
     "kitchen": "a photo of a kitchen with cabinets and a countertop",

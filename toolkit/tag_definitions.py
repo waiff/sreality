@@ -51,6 +51,12 @@ def embedding_model() -> str:
     return load_taxonomy()["model"]
 
 
+def embedding_revision() -> str | None:
+    """The pinned HF commit behind embedding_model(); None only for a taxonomy
+    file predating the pin. Same single-source rule as the name above."""
+    return load_taxonomy().get("revision")
+
+
 # --- row mappers ------------------------------------------------------------
 
 def _definition_dict(r: tuple[Any, ...]) -> dict[str, Any]:
