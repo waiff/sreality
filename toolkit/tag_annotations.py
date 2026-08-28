@@ -26,6 +26,8 @@ from typing import Any
 
 import psycopg
 
+from toolkit.tag_holdout import exclusion_for
+
 LABEL_MAX_CHARS = 100  # mirrors tag_taxonomy's CHECK (migration 442)
 STATES = ("positive", "negative", "excluded")
 BULK_STATE_MAX = 200
@@ -413,7 +415,7 @@ def clear_state(conn: psycopg.Connection, *, image_id: int, tag_id: int) -> dict
 # (drawn_at DESC, pool_rank ASC, image_id DESC) is a TOTAL order — image_id is
 # unique across the union because arm two excludes candidates — so the grid does
 # not reshuffle under the operator between refetches.
-_LIST_IMAGES_FOR_TAG_SQL = """
+_LIST_IMAGES_FOR_TAG_SQL = f"""
     SELECT q.image_id, i.storage_path, itl.state, itl.updated_at, itl.created_by,
            itl.source, itl.excluded_reason, q.draw, q.category_main, q.pool_rank
     FROM (
@@ -428,6 +430,7 @@ _LIST_IMAGES_FOR_TAG_SQL = """
           SELECT 1 FROM tag_candidates c2
           WHERE c2.tag_id = %(tag_id)s AND c2.image_id = d.image_id
         )
+        {exclusion_for("d")}
     ) q
     JOIN images i ON i.id = q.image_id
     LEFT JOIN image_tag_labels itl
@@ -555,7 +558,7 @@ def list_images_for_tag(
 #
 # Threshold and floor are bound parameters so AMBIGUITY_RATE_THRESHOLD /
 # AMBIGUITY_MIN_DECISIONS have exactly one definition, like gate_count above.
-_OVERVIEW_SQL = """
+_OVERVIEW_SQL = f"""
     SELECT
       t.id, t.label, t.family, t.active, t.priority, t.ready_for_training, t.created_at,
       COALESCE(c.positive_count, 0) AS positive_count,
@@ -619,6 +622,8 @@ _OVERVIEW_SQL = """
         ) AS decided_count
       FROM image_tag_labels itl
       LEFT JOIN image_border_cases bc ON bc.image_id = itl.image_id
+      WHERE true
+        {exclusion_for("itl")}
       GROUP BY itl.tag_id
     ) c ON c.tag_id = t.id
     LEFT JOIN (
