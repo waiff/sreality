@@ -51,13 +51,14 @@ class Tagger:
     """Loaded CLIP model + precomputed taxonomy text embeddings."""
 
     def __init__(self, model, processor, labels, text_emb, collapse, model_id,
-                 render_emb=None, n_render=0):
+                 render_emb=None, n_render=0, revision=None):
         self._model = model
         self._processor = processor
         self._labels = labels
         self._text_emb = text_emb
         self._collapse = collapse
         self.model_id = model_id
+        self.revision = revision
         # Orthogonal render-vs-photo axis: render_emb stacks render_anchors then
         # photo_anchors; the first n_render rows are the render side.
         self._render_emb = render_emb
@@ -74,6 +75,18 @@ class Tagger:
         torch.set_num_threads(threads or (os.cpu_count() or 4))
         tax = load_taxonomy()
         model_id = tax["model"]
+        # A bare model name resolves to whatever the hub's `main` holds at download
+        # time, so an upstream re-upload would silently change every vector written
+        # from then on while image_clip_embeddings.model stayed identical — the old
+        # and new vectors would be incomparable with nothing to detect it. Required,
+        # not optional: a missing revision is a corpus-wide integrity risk, so fail
+        # loudly here rather than quietly embed against unknown weights.
+        revision = tax.get("revision")
+        if not revision:
+            raise RuntimeError(
+                "data/clip_taxonomy.json has no 'revision' — refusing to embed "
+                "against an unpinned checkpoint"
+            )
         # The sharded backfill runs 4 jobs in parallel; concurrent HF downloads of
         # the ~600 MB weights occasionally 503 / time out (the single-job trial
         # never did). Retry with backoff; the workflow also caches
@@ -82,8 +95,8 @@ class Tagger:
         last_exc: Exception | None = None
         for attempt in range(4):
             try:
-                model = CLIPModel.from_pretrained(model_id)
-                processor = CLIPProcessor.from_pretrained(model_id)
+                model = CLIPModel.from_pretrained(model_id, revision=revision)
+                processor = CLIPProcessor.from_pretrained(model_id, revision=revision)
                 break
             except Exception as exc:  # noqa: BLE001 - transient HF hub error -> retry
                 last_exc = exc
@@ -116,7 +129,8 @@ class Tagger:
                 render_emb = model.text_projection(_project(rout))
             render_emb = render_emb / render_emb.norm(dim=-1, keepdim=True)
         return cls(model, processor, labels, text_emb, tax.get("collapse", {}),
-                   model_id, render_emb=render_emb, n_render=n_render)
+                   model_id, render_emb=render_emb, n_render=n_render,
+                   revision=revision)
 
     def embed(self, images: list, batch_size: int = 32):
         """L2-normalized image embeddings (for tagging AND the cosine tier)."""

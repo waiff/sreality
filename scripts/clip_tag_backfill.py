@@ -93,9 +93,11 @@ _UPSERT_SQL = """
 # ~2KB/row (~+4GB total) and closes the hole for good; nothing deletes vectors, so a
 # vector outlives delist/reactivate cycles. pgvector parses the text '[f,f,...]' form.
 _UPSERT_EMB_SQL = """
-    INSERT INTO image_clip_embeddings (image_id, model, embedding)
-    VALUES (%s, %s, %s::vector)
-    ON CONFLICT (image_id, model) DO UPDATE SET embedding = EXCLUDED.embedding
+    INSERT INTO image_clip_embeddings (image_id, model, revision, embedding)
+    VALUES (%s, %s, %s, %s::vector)
+    ON CONFLICT (image_id, model) DO UPDATE
+      SET embedding = EXCLUDED.embedding,
+          revision  = EXCLUDED.revision
 """
 
 
@@ -233,15 +235,18 @@ def main() -> int:
 
     from scraper.clip_tagger import Tagger, load_taxonomy
 
-    model = load_taxonomy()["model"]  # for the tag/embedding upsert + the log; no torch load
+    _tax = load_taxonomy()  # for the tag/embedding upsert + the log; no torch load
+    model = _tax["model"]
+    revision = _tax["revision"]  # KeyError here beats embedding against unknown weights
 
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
         priority = _priority_region_ids(conn, args.region_id)
         rows, phase = _select_pending(
             conn, limit=args.limit, shards=args.shards, shard=args.shard,
             priority_regions=priority)
-        LOG.info("CLIP_TAG pending=%d phase=%s shard=%d/%d model=%s dry_run=%s",
-                 len(rows), phase, args.shard, args.shards, model, args.dry_run)
+        LOG.info("CLIP_TAG pending=%d phase=%s shard=%d/%d model=%s rev=%s dry_run=%s",
+                 len(rows), phase, args.shard, args.shards, model, revision[:8],
+                 args.dry_run)
         if args.dry_run or not rows:
             return 0
 
@@ -268,8 +273,11 @@ def main() -> int:
                     (image_id, model, r.fine_tag, r.logical_tag, r.confidence, r.render_score)
                     for image_id, r in zip(ids, results)
                 ]
+                # tagger.revision, not the file read above: stamp what the loaded
+                # weights actually were, so a tagger loaded some other way can
+                # never write a row claiming a revision it did not use.
                 emb_params = [
-                    (image_id, model, _vec_str(emb[i]))
+                    (image_id, model, tagger.revision, _vec_str(emb[i]))
                     for i, image_id in enumerate(ids)
                 ]
             with conn.cursor() as cur:

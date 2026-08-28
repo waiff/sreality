@@ -68,7 +68,12 @@ pricestats = [
 # install; ONLY the tagging workflows install it, and they install the CPU-only torch
 # wheel first, so this extra is NOT a runtime dep of the scraper/API images.
 clip = [
-  "transformers>=4.40",
+  # Upper bound, not an exact pin: what determines a vector's VALUE is the
+  # checkpoint (pinned by sha in data/clip_taxonomy.json), not the library
+  # version — the same weights give the same numbers across 4.x. The <5 guard is
+  # against a major release changing the from_pretrained/CLIPModel API under the
+  # four tagging workflows, which is a breakage risk, not a drift risk.
+  "transformers>=4.40,<5",
 ]
 
 [build-system]
