@@ -1077,6 +1077,10 @@ export interface NewDedupCandidateSummary {
   min_verified_positives: number;
   can_draw: boolean;
   model: string;
+  /* Property types this tag serves (migration 457); [] = no scope, draw the full
+   * mix. Server-resolved — a draw that covers three of five categories has to SAY
+   * so, or a deliberately narrow draw reads as a thin corpus. */
+  routing_categories: string[];
   by_draw: NewDedupCandidateBucket[];
   by_category: NewDedupCandidateBucket[];
 }

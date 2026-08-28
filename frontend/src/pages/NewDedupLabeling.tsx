@@ -1411,6 +1411,15 @@ function CandidateQueuePanel({
             }`}
           </p>
 
+          {summary.routing_categories.length > 0 && (
+            // A scoped draw is NARROWER on purpose, and silence here is what made
+            // the first live koupelna draw read as a broken retrieval rather than a
+            // deliberate one. Neutral, not alarm: this is the tag working correctly.
+            <p className="mt-1 text-xs text-[var(--color-ink-3)]">
+              {`Draws only from ${summary.routing_categories.join(', ')} — the property types this tag serves.`}
+            </p>
+          )}
+
           {(summary.by_draw.length > 0 || summary.by_category.length > 0) && (
             <div className="mt-2 flex items-center gap-2 flex-wrap text-[0.68rem] text-[var(--color-ink-4)]">
               <ChipRun

@@ -143,6 +143,38 @@ def allocate_counts(total: int, weights: dict[str, float]) -> dict[str, int]:
 
 _TAG_EXISTS_SQL = "SELECT 1 FROM tag_taxonomy WHERE id = %(tag_id)s"
 
+_TAG_ROUTING_SQL = """
+    SELECT routing_categories FROM tag_taxonomy WHERE id = %(tag_id)s
+"""
+
+
+def routing_categories(
+    conn: psycopg.Connection, *, tag_id: int,
+) -> tuple[str, ...]:
+    """The property types this tag serves (migration 457), or () for no scope.
+
+    Unknown values are dropped rather than raised on: the column is operator-owned
+    and a typo there should narrow a draw, never break one. An array that survives
+    filtering to nothing is treated as no scope, so a tag can't be left undrawable
+    by a bad edit."""
+    with conn.cursor() as cur:
+        cur.execute(_TAG_ROUTING_SQL, {"tag_id": tag_id})
+        row = cur.fetchone()
+    stored = (row[0] if row else None) or []
+    return tuple(c for c in stored if c in CATEGORY_MIX)
+
+
+def scoped_mix(scope: tuple[str, ...]) -> dict[str, float]:
+    """CATEGORY_MIX restricted to `scope` and renormalised to sum to 1.
+
+    Renormalised, not merely filtered: filtering alone would leave the weights
+    summing to <1 and allocate_counts would hand back fewer rows than asked for —
+    the short draw would look like a thin pool instead of a narrowed scope."""
+    if not scope:
+        return dict(CATEGORY_MIX)
+    total = sum(CATEGORY_MIX[c] for c in scope)
+    return {c: CATEGORY_MIX[c] / total for c in scope}
+
 # The predicate is byte-identical to the centroid CTE's in _DRAW_POOL_SQL. If the
 # floor check and the centroid ever disagreed about the population, the floor would
 # be a lie — a tag could pass the gate and still produce an empty pool.
@@ -627,8 +659,14 @@ def draw_candidates(
             tag_id=tag_id, count=count, verified=verified, model=model,
         )
 
+    # A tag's routing scope (migration 457) narrows the mix to the property types it
+    # actually serves. Without it the fixed mix sent 44% of a bathroom draw at pozemek
+    # and ostatni, where bathrooms essentially do not occur — measured on the first
+    # live koupelna draw: 54 rows, pozemek 24 / komercni 18 / ostatni 12, byt 0, dum 0.
+    # An explicit category_main still wins: it is the caller asking for one category.
+    scope = () if category_main is not None else routing_categories(conn, tag_id=tag_id)
     allocation = (
-        allocate_counts(count, CATEGORY_MIX) if category_main is None
+        allocate_counts(count, scoped_mix(scope)) if category_main is None
         else {category_main: count}
     )
     existing_phashes, existing_property_counts = _existing_pool(conn, tag_id=tag_id)
@@ -644,17 +682,31 @@ def draw_candidates(
     # floor to — while guaranteeing byt, the category capped BELOW its corpus share
     # precisely to dilute the labeled set's 83.8% byt skew. category_main is stored
     # per row, so that drift would be durable in the table, not merely momentary.
-    for category, quota in sorted(allocation.items(), key=lambda kv: (kv[1], kv[0])):
-        if quota <= 0:
-            continue  # allocated nothing; nothing was drawn, so nothing to report
+    ordered = [kv for kv in sorted(allocation.items(), key=lambda kv: (kv[1], kv[0]))
+               if kv[1] > 0]
+    for position, (category, quota) in enumerate(ordered):
         # The per-statement ceiling is derived from what is LEFT of the budget,
         # never a constant: a fixed 60s timeout on a category that starts at 44.9s
         # of a 45s budget lets one synchronous admin request run ~105s and die at
         # the proxy on top of committed work.
+        #
+        # FAIR SHARE, not greedy. Handing each category the whole remaining budget
+        # as its ceiling lets an early one eat it and leave the rest 'skipped_budget'
+        # — and since the loop runs smallest-quota-first, the starved ones are always
+        # byt and dum, the two categories most tags care about most. Dividing by the
+        # categories still to come bounds that, while recomputing it each iteration
+        # rolls unused time forward, so the last category (the largest, deliberately)
+        # still inherits whatever the small ones did not spend.
         timeout_ms = DRAW_STATEMENT_TIMEOUT_MS
         if max_seconds > 0:
-            remaining = max_seconds - (time.monotonic() - started)
-            timeout_ms = min(DRAW_STATEMENT_TIMEOUT_MS, int(remaining * 1000))
+            remaining_ms = int((max_seconds - (time.monotonic() - started)) * 1000)
+            share_ms = remaining_ms // max(1, len(ordered) - position)
+            # Fair share only while a fair share is workable. Once it would fall
+            # below the per-category floor, sharing it out would put EVERY category
+            # under the floor and skip all of them — so at that point spend what is
+            # left on this one category instead of wasting the remainder entirely.
+            budget_ms = share_ms if share_ms >= DRAW_MIN_CATEGORY_MS else remaining_ms
+            timeout_ms = min(DRAW_STATEMENT_TIMEOUT_MS, budget_ms)
         if exhausted or timeout_ms < DRAW_MIN_CATEGORY_MS:
             exhausted = True
             reports.append({
@@ -751,6 +803,9 @@ def candidate_summary(
         "min_verified_positives": MIN_VERIFIED_POSITIVES,
         "can_draw": verified >= MIN_VERIFIED_POSITIVES,
         "model": model,
+        # Rendered, never recomputed in the SPA: a draw that quietly covers three of
+        # five property types must SAY so, or a short draw reads as a thin corpus.
+        "routing_categories": list(routing_categories(conn, tag_id=tag_id)),
         # Empty buckets are omitted, never zero-filled: a band that never produced a
         # row and a band that produced only decided rows are different facts.
         "by_draw": [
