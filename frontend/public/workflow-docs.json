@@ -1942,6 +1942,71 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/docs-budget.yml"
     },
     {
+      "filename": "draw_tag_candidates.yml",
+      "name": "Labeling: draw tag candidates",
+      "description": "Tops up each tag's candidate review queue by CLIP centroid retrieval. Pure SQL against the embedding store — no GPU, no torch, no R2, no LLM key, and it writes only tag_candidates rows, which carry no training semantics (migration 450), so a bad run is deleted rather than unwound. Source-agnostic maintenance job, so it carries NO `# portal:` tag.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "tag_id",
+          "description": "One tag id. Leave blank to draw for every ready tag.",
+          "required": false,
+          "type": "string",
+          "default": null,
+          "options": null
+        },
+        {
+          "name": "count",
+          "description": "Candidates per tag (1-400).",
+          "required": false,
+          "type": "string",
+          "default": "120",
+          "options": null
+        },
+        {
+          "name": "target",
+          "description": "Skip a tag whose open queue already reaches this.",
+          "required": false,
+          "type": "string",
+          "default": "200",
+          "options": null
+        },
+        {
+          "name": "category",
+          "description": "byt|dum|pozemek|komercni|ostatni. Blank honours the tag's own routing scope.",
+          "required": false,
+          "type": "string",
+          "default": null,
+          "options": null
+        },
+        {
+          "name": "dry_run",
+          "description": "Report what would be drawn; write nothing.",
+          "required": false,
+          "type": "choice",
+          "default": "false",
+          "options": [
+            "false",
+            "true"
+          ]
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "draw-tag-candidates",
+      "cancelInProgress": false,
+      "timeoutMinutes": 30,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/draw_tag_candidates.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/draw_tag_candidates.yml"
+    },
+    {
       "filename": "drop_r2_legacy_fks.yml",
       "name": "Drop R2 legacy child FKs",
       "description": "Phase D step 6 of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 5, item 6). Drops the legacy child FKs onto listings(sreality_id) — integrity is already held by the parallel listing_id -> listings(id) FKs Phase B validated. Not gate-destructive: re-addable any time (NOT VALID -> VALIDATE).",
