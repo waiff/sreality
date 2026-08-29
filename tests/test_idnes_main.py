@@ -746,84 +746,93 @@ def test_an_all_duplicates_page_no_longer_ends_the_walk(monkeypatch):
     assert outcome == "exhausted"
 
 
-def test_price_bands_are_the_fallback_when_a_place_has_no_sub_places(monkeypatch):
-    """Spain: 8,613 flats for sale over 345 pages, and it advertises no regions
-    at all. Without a second axis that slice could never finish, and one
-    unfinished slice holds its whole category open forever."""
-    asked: list[tuple[Any, Any, Any]] = []
+def test_a_url_that_does_not_paginate_stops_instead_of_looping(monkeypatch):
+    """The bug that cost 1,492 pages on ONE slice in production.
 
-    class _Spy(_IdxClient):
-        def fetch_index(self, sale_type, category, page=None, *, locality=None,
-                        sl=None, price_min=None, price_max=None):
-            asked.append((sl, price_min, price_max))
-            return ("<html>", 200)
+    A price-filtered idnes search ignores ?page= entirely: it serves page one
+    forever and reports next=1 every time. Nothing stopped that, because the
+    "no new rows" guard had been removed (correctly — unstable ordering makes a
+    legitimate mid-walk page all repeats). The right invariant is progress in the
+    CURSOR, not novelty in the CONTENT: repeats are fine, standing still is not.
+    """
+    nid = iter(range(10**6))
 
-    nid = "6a18deadbeefdeadbeef0001"
-    monkeypatch.setattr(idnes_main, "parse_index", lambda _h: SimpleNamespace(
-        total=100, next_offset=None, empty_confirmed=False,
-        items=[SimpleNamespace(
-            source_id_native=nid,
-            detail_path=f"https://reality.idnes.cz/detail/prodej/byt/x/{nid}/",
-            price_text="5 000 000 Kč")]))
-    monkeypatch.setattr(idnes_main, "IdnesClient", _Spy)
-    monkeypatch.setattr(idnes_main, "sub_places", lambda *a, **k: ([], []))
+    def _stuck(_h):
+        return SimpleNamespace(
+            total=999, next_offset=1, empty_confirmed=False,     # never advances
+            items=[SimpleNamespace(
+                source_id_native=f"6a18deadbeefdeadbeef{next(nid):04d}",
+                detail_path="https://reality.idnes.cz/detail/prodej/byt/x/y/",
+                price_text="5 000 000 Kč")])
 
+    monkeypatch.setattr(idnes_main, "parse_index", _stuck)
     portal = _portal()
-    rows, declared, pages, outcome = portal._walk_tree(
-        _Spy(), "prodej", "byty", locality=None, sl="STAT-ES", label="STAT-ES",
-        deadline=None, depth=1, visited=set())
-    banded = [(lo, hi) for _sl, lo, hi in asked if lo is not None or hi is not None]
-    assert banded, "a place with no sub-places must fall back to price bands"
-    assert (None, 1_000_000) in banded          # the ladder's open bottom
-    assert (50_000_000, None) in banded         # …and its open top
-    assert all(sl == "STAT-ES" for sl, _lo, _hi in asked)   # same place, narrowed
+    _rows, _d, pages, outcome, _html = portal._walk_place(
+        _IdxClient(), "prodej", "byty", locality="praha-4", sl=None,
+        deadline=None, label="praha-4")
+    # page=None -> next=1 (advances), page=1 -> next=1 (does not). Two fetches,
+    # not six hundred.
+    assert pages == 2
+    assert outcome != "exhausted"
 
 
-def test_the_unfiltered_walk_is_kept_alongside_the_bands(monkeypatch):
-    """Price bands are NOT a partition: a listing with no price falls outside
-    every one of them (6 of Spain's 8,613, 110 of Prague's 3,840). The parent's
-    own unfiltered walk is what holds that remainder, so it must always run."""
-    asked: list[tuple[Any, Any]] = []
-
-    class _Spy(_IdxClient):
-        def fetch_index(self, sale_type, category, page=None, *, locality=None,
-                        sl=None, price_min=None, price_max=None):
-            asked.append((price_min, price_max))
-            return ("<html>", 200)
-
-    nid = "6a18deadbeefdeadbeef0001"
+def test_fresh_rows_do_not_excuse_a_stalled_pager(monkeypatch):
+    """Deliberately adversarial: the stuck page above serves DIFFERENT ids every
+    time, so a novelty-based guard would happily loop forever. Only the cursor
+    check stops it."""
+    nid = iter(range(10**6))
     monkeypatch.setattr(idnes_main, "parse_index", lambda _h: SimpleNamespace(
-        total=100, next_offset=None, empty_confirmed=False,
+        total=999, next_offset=3, empty_confirmed=False,
         items=[SimpleNamespace(
-            source_id_native=nid,
-            detail_path=f"https://reality.idnes.cz/detail/prodej/byt/x/{nid}/",
+            source_id_native=f"6a18deadbeefdeadbeef{next(nid):04d}",
+            detail_path="https://reality.idnes.cz/detail/prodej/byt/x/y/",
             price_text="5 000 000 Kč")]))
-    monkeypatch.setattr(idnes_main, "IdnesClient", _Spy)
-    monkeypatch.setattr(idnes_main, "sub_places", lambda *a, **k: ([], []))
     portal = _portal()
-    portal._walk_tree(_Spy(), "prodej", "byty", locality=None, sl="STAT-ES",
-                      label="STAT-ES", deadline=None, depth=1, visited=set())
-    assert asked[0] == (None, None), "the unfiltered walk must come first"
+    _rows, _d, pages, _o, _html = portal._walk_place(
+        _IdxClient(), "prodej", "byty", locality="praha-4", sl=None,
+        deadline=None, label="praha-4")
+    # None -> 3 advances; 3 -> 3 does not.
+    assert pages == 2
 
 
-def test_a_band_that_is_still_too_big_splits_again() -> None:
-    """Geometric, not arithmetic: prices are log-distributed, so an arithmetic
-    midpoint would leave nearly everything on one side."""
-    lo, hi = 7_000_000, 10_000_000
-    kids = idnes_main._price_children(lo, hi)
-    assert len(kids) == 2 and kids[0][0] == lo and kids[1][1] == hi
-    mid = kids[0][1]
-    assert lo < mid < hi
-    assert mid < (lo + hi) // 2          # geometric sits below the arithmetic mean
+def test_overlapping_pages_still_walk_on(monkeypatch):
+    """The other half of the contract, and the reason the old guard had to go:
+    idnes's ordering is unstable, so a legitimate mid-walk page can be entirely
+    rows we already hold. That must NOT stop the walk."""
+    pages_seq = iter([
+        (["a"], 1),
+        (["a"], 2),      # pure repeat, but the cursor advanced
+        (["b"], None),
+    ])
+
+    def _parse(_h):
+        ids, nxt = next(pages_seq)
+        return SimpleNamespace(
+            total=2, next_offset=nxt, empty_confirmed=False,
+            items=[SimpleNamespace(
+                source_id_native=f"6a18deadbeefdeadbeef000{i}",
+                detail_path="https://reality.idnes.cz/detail/prodej/byt/x/y/",
+                price_text="5 000 000 Kč") for i in ids])
+
+    monkeypatch.setattr(idnes_main, "parse_index", _parse)
+    portal = _portal()
+    rows, _d, pages, outcome, _html = portal._walk_place(
+        _IdxClient(), "prodej", "byty", locality="praha", sl=None,
+        deadline=None, label="praha")
+    assert pages == 3
+    assert len(rows) == 2
+    assert outcome == "exhausted"
 
 
-def test_the_ladder_covers_the_open_ends() -> None:
-    """A closed ladder would silently drop the cheapest and the priciest rows."""
-    ladder = idnes_main._price_children(None, None)
-    assert ladder[0][0] is None          # nothing below the bottom band
-    assert ladder[-1][1] is None         # nothing above the top band
-    edges = [hi for _lo, hi in ladder[:-1]]
-    assert edges == [lo for lo, _hi in ladder[1:]], "the ladder must not have gaps"
+def test_place_is_the_only_descent_axis(monkeypatch):
+    """The price ladder is gone. A place with no sub-places stays honestly
+    incomplete rather than burning hundreds of requests on a filter that cannot
+    paginate."""
+    src = (idnes_main.__file__)
+    with open(src, encoding="utf-8") as fh:
+        body = fh.read()
+    assert "_PRICE_LADDER" not in body
+    assert "price_min" not in body
 
 
 def test_a_slice_too_big_to_page_descends_rather_than_giving_up(monkeypatch):
