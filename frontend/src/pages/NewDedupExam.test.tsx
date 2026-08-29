@@ -87,16 +87,64 @@ describe('<NewDedupExam>', () => {
     expect(await screen.findByText(/space = none of these/)).toBeInTheDocument();
   });
 
-  it('sends every unpicked tag as a negative, not just the picks', async () => {
+  it('sends every untouched tag as a negative, not just the picks', async () => {
     // One answer has to measure precision AND recall, which it can only do if
-    // the seven tags you did not pick are recorded as negatives.
+    // the tags you did not touch are recorded as negatives.
     const user = userEvent.setup();
     renderPage();
     await screen.findByText(/Which of these/);
     await user.click(screen.getByRole('button', { name: /interier - koupelna/ }));
     await user.click(screen.getByRole('button', { name: /^Confirm/ }));
     await waitFor(() => expect(api.answerExamQuestion).toHaveBeenCalledWith(
-      'exam_v1', { image_id: 555, picked_tag_ids: [22], cant_tell: false },
+      'exam_v1',
+      { image_id: 555, picked_tag_ids: [22], skipped_tag_ids: [], cant_tell: false },
+    ));
+  });
+
+  it('a second press turns a pick into a per-tag leave-out', async () => {
+    // The brief's rule, on screen: subject clearly present but the photo is of
+    // something else -> leave it out of THAT head, everything else still answers.
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/Which of these/);
+    const btn = screen.getByRole('button', { name: /interier - kuchyně/ });
+    await user.click(btn);
+    await user.click(btn);
+    expect(screen.getByText('left out')).toBeInTheDocument();
+    expect(btn).toHaveAttribute('aria-pressed', 'false');
+    await user.click(screen.getByRole('button', { name: /^Confirm/ }));
+    await waitFor(() => expect(api.answerExamQuestion).toHaveBeenCalledWith(
+      'exam_v1',
+      { image_id: 555, picked_tag_ids: [], skipped_tag_ids: [25], cant_tell: false },
+    ));
+  });
+
+  it('a third press clears the tag back to untouched', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/Which of these/);
+    const btn = screen.getByRole('button', { name: /interier - kuchyně/ });
+    await user.click(btn);
+    await user.click(btn);
+    await user.click(btn);
+    expect(screen.queryByText('left out')).toBeNull();
+    expect(screen.getByRole('button', { name: /^Confirm/ })).toBeDisabled();
+  });
+
+  it('composes a pick and a leave-out in one answer', async () => {
+    // The motivating warm-up image exactly: koupelna picked, kuchyně left out,
+    // six untouched tags become negatives server-side.
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/Which of these/);
+    await user.click(screen.getByRole('button', { name: /interier - koupelna/ }));
+    const kitchen = screen.getByRole('button', { name: /interier - kuchyně/ });
+    await user.click(kitchen);
+    await user.click(kitchen);
+    await user.click(screen.getByRole('button', { name: /^Confirm/ }));
+    await waitFor(() => expect(api.answerExamQuestion).toHaveBeenCalledWith(
+      'exam_v1',
+      { image_id: 555, picked_tag_ids: [22], skipped_tag_ids: [25], cant_tell: false },
     ));
   });
 
@@ -106,7 +154,8 @@ describe('<NewDedupExam>', () => {
     await screen.findByText(/Which of these/);
     await user.click(screen.getByRole('button', { name: /None of these/ }));
     await waitFor(() => expect(api.answerExamQuestion).toHaveBeenCalledWith(
-      'exam_v1', { image_id: 555, picked_tag_ids: [], cant_tell: false },
+      'exam_v1',
+      { image_id: 555, picked_tag_ids: [], skipped_tag_ids: [], cant_tell: false },
     ));
   });
 
@@ -116,7 +165,8 @@ describe('<NewDedupExam>', () => {
     await screen.findByText(/Which of these/);
     await user.click(screen.getByRole('button', { name: /Can’t tell/ }));
     await waitFor(() => expect(api.answerExamQuestion).toHaveBeenCalledWith(
-      'exam_v1', { image_id: 555, picked_tag_ids: [], cant_tell: true },
+      'exam_v1',
+      { image_id: 555, picked_tag_ids: [], skipped_tag_ids: [], cant_tell: true },
     ));
   });
 
@@ -137,8 +187,25 @@ describe('<NewDedupExam>', () => {
     await screen.findByText(/Which of these/);
     await user.keyboard(' ');
     await waitFor(() => expect(api.answerExamQuestion).toHaveBeenCalledWith(
-      'exam_v1', { image_id: 555, picked_tag_ids: [], cant_tell: false },
+      'exam_v1',
+      { image_id: 555, picked_tag_ids: [], skipped_tag_ids: [], cant_tell: false },
     ));
+  });
+
+  it('cycles pick -> leave-out with the same number key', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/Which of these/);
+    await user.keyboard('2');
+    expect(screen.getByRole('button', { name: /interier - kuchyně/ }))
+      .toHaveAttribute('aria-pressed', 'true');
+    await user.keyboard('2');
+    expect(screen.getByText('left out')).toBeInTheDocument();
+  });
+
+  it('keeps the leave-out key in the permanent legend', async () => {
+    renderPage();
+    expect(await screen.findByText(/again = leave it out of that tag/)).toBeInTheDocument();
   });
 
   it('ignores a digit typed into a text field', async () => {

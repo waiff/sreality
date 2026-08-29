@@ -42,7 +42,11 @@ export default function NewDedupExam() {
   const [params] = useSearchParams();
   const cohort = params.get('cohort') || 'exam_v1';
 
-  const [picked, setPicked] = useState<Set<number>>(new Set());
+  /* Per-tag verdict while composing one answer. Absent = negative on confirm.
+   * 'picked' = positive; 'skipped' = the brief's leave-out — subject clearly
+   * present, photo of something else — stored as excluded/'pruned' and neither
+   * trained nor graded. A digit cycles off -> picked -> skipped -> off. */
+  const [verdicts, setVerdicts] = useState<Map<number, 'picked' | 'skipped'>>(new Map());
   const [warmupIndex, setWarmupIndex] = useState(0);
   const [warmupDone, setWarmupDone] = useState(false);
   const [hoveredTag, setHoveredTag] = useState<number | null>(null);
@@ -84,10 +88,11 @@ export default function NewDedupExam() {
   const card: TagHandbookCard | null = cardQ.data?.data?.card ?? null;
 
   const answerMut = useMutation({
-    mutationFn: (body: { image_id: number; picked_tag_ids: number[]; cant_tell: boolean }) =>
-      answerExamQuestion(cohort, body),
+    mutationFn: (body: {
+      image_id: number; picked_tag_ids: number[]; skipped_tag_ids: number[]; cant_tell: boolean;
+    }) => answerExamQuestion(cohort, body),
     onSuccess: () => {
-      setPicked(new Set());
+      setVerdicts(new Map());
       qc.invalidateQueries({ queryKey: EXAM_KEY(cohort) });
     },
     onError: (e: Error) => pushToast('err', e.message),
@@ -100,25 +105,31 @@ export default function NewDedupExam() {
         /* Practice is never written. The server would refuse it anyway — a
          * warm-up image is not a cohort member — but not sending it keeps the
          * refusal a rail rather than a routine 422. */
-        setPicked(new Set());
+        setVerdicts(new Map());
         setWarmupIndex((i) => i + 1);
         return;
       }
       if (answerMut.isPending) return;
+      const picked_tag_ids: number[] = [];
+      const skipped_tag_ids: number[] = [];
+      for (const [id, v] of verdicts) (v === 'picked' ? picked_tag_ids : skipped_tag_ids).push(id);
       answerMut.mutate({
         image_id: currentImageId,
-        picked_tag_ids: [...picked],
+        picked_tag_ids,
+        skipped_tag_ids,
         cant_tell: cantTell,
       });
     },
-    [currentImageId, inWarmup, picked, answerMut],
+    [currentImageId, inWarmup, verdicts, answerMut],
   );
 
-  const toggle = useCallback((tagId: number) => {
-    setPicked((prev) => {
-      const next = new Set(prev);
-      if (next.has(tagId)) next.delete(tagId);
-      else next.add(tagId);
+  const cycle = useCallback((tagId: number) => {
+    setVerdicts((prev) => {
+      const next = new Map(prev);
+      const cur = next.get(tagId);
+      if (cur == null) next.set(tagId, 'picked');
+      else if (cur === 'picked') next.set(tagId, 'skipped');
+      else next.delete(tagId);
       return next;
     });
   }, []);
@@ -138,7 +149,7 @@ export default function NewDedupExam() {
         const idx = Number(e.key) - 1;
         if (idx < tags.length) {
           e.preventDefault();
-          toggle(tags[idx].id);
+          cycle(tags[idx].id);
         }
         return;
       }
@@ -146,7 +157,7 @@ export default function NewDedupExam() {
         // Space = "none of these", the commonest answer by far: most random
         // photos are none of the eight, and it has to cost one keystroke.
         e.preventDefault();
-        setPicked(new Set());
+        setVerdicts(new Map());
         advance(false);
         return;
       }
@@ -162,7 +173,7 @@ export default function NewDedupExam() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [tags, toggle, advance]);
+  }, [tags, cycle, advance]);
 
   if (stateQ.isLoading) return <div className="p-6"><Spinner /></div>;
   if (stateQ.error) return <div className="p-6"><ErrorBanner message={(stateQ.error as Error).message} /></div>;
@@ -218,25 +229,32 @@ export default function NewDedupExam() {
 
               <div className="mt-3 grid gap-2 sm:grid-cols-2">
                 {tags.map((t, i) => {
-                  const on = picked.has(t.id);
+                  const v = verdicts.get(t.id);
                   return (
                     <button
                       key={t.id}
                       type="button"
-                      onClick={() => toggle(t.id)}
+                      onClick={() => cycle(t.id)}
                       onMouseEnter={() => setHoveredTag(t.id)}
                       onFocus={() => setHoveredTag(t.id)}
-                      aria-pressed={on}
+                      aria-pressed={v === 'picked'}
                       className={`flex items-center gap-2 px-3 py-2 text-sm text-left rounded-[var(--radius-sm)] border transition-colors ${
-                        on
+                        v === 'picked'
                           ? 'border-[var(--color-sage)] bg-[var(--color-sage)]/10 text-[var(--color-ink)]'
-                          : 'border-[var(--color-rule)] text-[var(--color-ink-2)]'
+                          : v === 'skipped'
+                            ? 'border-dashed border-[var(--color-copper)] text-[var(--color-ink-2)]'
+                            : 'border-[var(--color-rule)] text-[var(--color-ink-2)]'
                       }`}
                     >
                       <kbd className="font-mono text-[0.7rem] px-1.5 py-0.5 rounded border border-[var(--color-rule)] text-[var(--color-ink-3)]">
                         {i + 1}
                       </kbd>
                       <span className="truncate">{t.label}</span>
+                      {v === 'skipped' && (
+                        <span className="ml-auto shrink-0 text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-copper)]">
+                          left out
+                        </span>
+                      )}
                     </button>
                   );
                 })}
@@ -245,7 +263,7 @@ export default function NewDedupExam() {
               <div className="mt-4 flex items-center gap-2 flex-wrap">
                 <button
                   type="button"
-                  onClick={() => { setPicked(new Set()); advance(false); }}
+                  onClick={() => { setVerdicts(new Map()); advance(false); }}
                   disabled={answerMut.isPending}
                   className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-[var(--color-paper)] disabled:opacity-50"
                 >
@@ -254,10 +272,10 @@ export default function NewDedupExam() {
                 <button
                   type="button"
                   onClick={() => advance(false)}
-                  disabled={answerMut.isPending || picked.size === 0}
+                  disabled={answerMut.isPending || verdicts.size === 0}
                   className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink)] disabled:opacity-40"
                 >
-                  Confirm {picked.size > 0 ? `(${picked.size})` : ''}{' '}
+                  Confirm {verdicts.size > 0 ? `(${verdicts.size})` : ''}{' '}
                   <kbd className="ml-1 font-mono text-[0.7rem]">enter</kbd>
                 </button>
                 <button
@@ -275,7 +293,7 @@ export default function NewDedupExam() {
                 * digits to states, and the legend is the only thing standing
                 * between that habit and a mis-keyed exam row. */}
               <p className="mt-3 text-[0.7rem] text-[var(--color-ink-4)]">
-                1–{tags.length} pick a category · space = none of these · enter = confirm · u = can&rsquo;t tell
+                1–{tags.length} once = it applies · again = leave it out of that tag · space = none of these · enter = confirm · u = can&rsquo;t tell at all
               </p>
             </div>
 

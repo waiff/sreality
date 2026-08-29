@@ -1418,11 +1418,13 @@ export const getExamWarmup = (
     `/new-dedup/labeling/exam/${cohort}/warmup?limit=${limit}`, { jwt: true },
   );
 
-/* Every routing tag NOT in picked_tag_ids becomes a NEGATIVE — that is what lets
- * one answer measure precision and recall at once. */
+/* Every routing tag in NEITHER list becomes a NEGATIVE — that is what lets one
+ * answer measure precision and recall at once. skipped_tag_ids is the brief's
+ * per-tag leave-out (excluded/'pruned'): subject clearly present, photo of
+ * something else; the cell trains nothing and grades nothing. */
 export const answerExamQuestion = (
   cohort: string,
-  body: { image_id: number; picked_tag_ids: number[]; cant_tell: boolean },
+  body: { image_id: number; picked_tag_ids: number[]; skipped_tag_ids: number[]; cant_tell: boolean },
 ): Promise<{ data: { image_id: number; cells_written: number } }> =>
   request<{ data: { image_id: number; cells_written: number } }>(
     `/new-dedup/labeling/exam/${cohort}/answer`,

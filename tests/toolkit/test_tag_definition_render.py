@@ -124,15 +124,26 @@ def test_the_prompt_keeps_the_distinction_the_card_collapses() -> None:
 
 
 def test_the_prompt_forbids_a_no_that_is_really_a_preference() -> None:
-    # The operator's own rule from the brief: a tag whose subject is clearly present
-    # must never be marked negative merely because another tag fits better.
+    # The brief's rule, restored VERBATIM in effect after the first version of the
+    # closing paragraph quietly sharpened present-but-not-the-subject into a yes:
+    # that case is a leave-out ("skip"), never a no — and never a yes either.
     prompt = r.render_prompt(FULL, tag_label="x")
-    assert "Never answer no because a different tag fits better" in prompt
+    assert "clearly and substantially present" in prompt
+    assert "leave it out instead" in prompt
+    assert "Never answer no in that second case" in prompt
 
 
 def test_the_prompt_asks_for_the_three_states_the_store_holds() -> None:
     prompt = r.render_prompt(FULL, tag_label="x")
-    assert "yes / no / unsure" in prompt
+    assert "yes / no / skip" in prompt
+
+
+def test_the_prompt_never_promotes_a_present_subject_to_a_forced_yes() -> None:
+    # The exact regression this file failed to catch the first time: the machine
+    # instruction told the model "if clearly present, answer yes", which
+    # contradicted the brief the human labels under. One rule, both audiences.
+    prompt = r.render_prompt(FULL, tag_label="x")
+    assert "present, answer yes" not in prompt
 
 
 def test_the_prompt_names_the_rival_tag_by_label() -> None:

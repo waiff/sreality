@@ -1101,3 +1101,45 @@ def test_the_preview_404s_on_an_unknown_tag(client, monkeypatch):
     monkeypatch.setattr(td, "tag_label", _raises(KeyError(999)))
     res = client.post("/new-dedup/labeling/tags/999/definition/card/preview", json=_SAVE_BODY)
     assert res.status_code == 404
+
+
+def test_exam_answer_plumbs_the_per_tag_leave_out(client, monkeypatch):
+    # The route is a thin pass-through, which is exactly how a renamed kwarg slips
+    # out of type-checking: record_answer is patched here, so only THIS asserts the
+    # skipped list survives the trip.
+    from toolkit import tag_exam, tag_holdout
+    import api.new_dedup_labeling as mod
+
+    got: dict = {}
+    monkeypatch.setattr(tag_holdout, "get_cohort",
+                        lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
+    monkeypatch.setattr(mod, "_routing_tags",
+                        lambda conn: [{"id": 22, "label": "k"}, {"id": 25, "label": "u"}])
+    monkeypatch.setattr(tag_exam, "record_answer",
+                        lambda conn, **kw: got.update(kw) or
+                        {"image_id": kw["image_id"], "cells_written": 2,
+                         "picked": kw["picked"], "skipped": kw["skipped"],
+                         "cant_tell": kw["cant_tell"]})
+    res = client.post("/new-dedup/labeling/exam/exam_v1/answer", json={
+        "image_id": 5, "picked_tag_ids": [22], "skipped_tag_ids": [25],
+        "cant_tell": False,
+    })
+    assert res.status_code == 200
+    assert got["picked"] == [22] and got["skipped"] == [25]
+
+
+def test_exam_answer_422s_on_an_overlapping_pick_and_skip(client, monkeypatch):
+    from toolkit import tag_exam, tag_holdout
+    import api.new_dedup_labeling as mod
+
+    monkeypatch.setattr(tag_holdout, "get_cohort",
+                        lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
+    monkeypatch.setattr(mod, "_routing_tags", lambda conn: [{"id": 22, "label": "k"}])
+    def _raise(conn, **kw):
+        raise ValueError("picked and skipped overlap: [22]")
+    monkeypatch.setattr(tag_exam, "record_answer", _raise)
+    res = client.post("/new-dedup/labeling/exam/exam_v1/answer", json={
+        "image_id": 5, "picked_tag_ids": [22], "skipped_tag_ids": [22],
+        "cant_tell": False,
+    })
+    assert res.status_code == 422
