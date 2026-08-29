@@ -79,49 +79,10 @@ INACTIVE_MIN_UNSEEN_HOURS = 12
 _MAX_SLICE_PAGES = 600
 
 # How many levels a slice may descend when paging cannot reach its own tail.
-# Two, because one is not always enough: kraj -> okres suffices for the Czech
-# side, but the abroad bucket is three times Prague's size, so it splits by
-# country and a large country may need splitting again. Deeper than that and the
-# request cost stops being worth the rows.
-_DESCENT_DEPTH = 3
-
-# The fallback axis, for a place too big to page through that advertises no
-# sub-places at all. Spain holds 8,613 flats for sale over 345 pages and links no
-# regions; without this its slice could never be enumerated, and one unfinished
-# slice holds its whole category open forever.
-#
-# These are NOT a partition and must never be treated as one: a listing with no
-# price falls outside every band. Measured on Spain, 6 of 8,613 (and 110 of
-# 3,840 in Prague). That is exactly why the unfiltered walk of the same place is
-# always kept alongside its children — it is what holds the price-less remainder,
-# the same property that made the place descent work.
-_PRICE_LADDER: tuple[tuple[int | None, int | None], ...] = (
-    (None, 1_000_000), (1_000_000, 2_000_000), (2_000_000, 3_000_000),
-    (3_000_000, 5_000_000), (5_000_000, 7_000_000), (7_000_000, 10_000_000),
-    (10_000_000, 15_000_000), (15_000_000, 25_000_000),
-    (25_000_000, 50_000_000), (50_000_000, None),
-)
-
-
-def _price_children(
-    lo: int | None, hi: int | None,
-) -> list[tuple[int | None, int | None]]:
-    """Sub-bands of a price range. The whole range opens into the ladder; a band
-    that is itself too big splits in half — geometrically, because prices are
-    log-distributed and an arithmetic midpoint would leave everything on one
-    side."""
-    if lo is None and hi is None:
-        return list(_PRICE_LADDER)
-    if lo is None:
-        return [(None, hi // 2), (hi // 2, hi)] if hi and hi > 1 else []
-    if hi is None:
-        return [(lo, lo * 4), (lo * 4, None)]
-    if hi - lo < 2:
-        return []
-    mid = int((lo * hi) ** 0.5) or (lo + hi) // 2
-    if mid <= lo or mid >= hi:
-        mid = (lo + hi) // 2
-    return [(lo, mid), (mid, hi)]
+# Two is enough for every place the site actually publishes: kraj -> okres on the
+# Czech side, abroad -> country on the other. Deeper only mattered for the price
+# ladder, which is gone.
+_DESCENT_DEPTH = 2
 
 
 @dataclass(frozen=True)
@@ -255,7 +216,7 @@ class IdnesPortal:
     def _walk_place(
         self, client: IdnesClient, sale_type: str, cat: str, *,
         locality: str | None, sl: str | None, deadline: float | None,
-        label: str, price_min: int | None = None, price_max: int | None = None,
+        label: str,
     ) -> tuple[list[tuple[str, str, int | None]], int | None, int, str, str | None]:
         """Page one place to its own tail.
 
@@ -276,8 +237,7 @@ class IdnesPortal:
                 return rows, declared, pages, "deadline", first_html
             try:
                 html, _ = client.fetch_index(
-                    sale_type, cat, page, locality=locality, sl=sl,
-                    price_min=price_min, price_max=price_max)
+                    sale_type, cat, page, locality=locality, sl=sl)
             except Exception as exc:  # noqa: BLE001 - one place must not kill the walk
                 LOG.warning("SLICE error cm=%s ct=%s place=%s page=%s: %s",
                             cat, sale_type, label, page, exc)
@@ -302,15 +262,30 @@ class IdnesPortal:
                 LOG.warning("SLICE ceiling cm=%s ct=%s place=%s at %d pages",
                             cat, sale_type, label, pages)
                 return rows, declared, pages, "ceiling", first_html
-            # STOP ONLY WHEN THE PAGER SAYS SO. An earlier version also stopped on
-            # a page that added nothing new, to defend against idnes clamping an
-            # out-of-range ?page to the last page. That guard is wrong here:
-            # idnes's result ordering is UNSTABLE between requests, so pages
-            # overlap, and a legitimately mid-walk page can be entirely rows we
-            # already hold. It fired on page 26 of Prague and ended the slice at
-            # 594 of 3,839. `next_offset is None` is the reliable terminator (the
-            # clamped page reports it), and _MAX_SLICE_PAGES is the loop backstop.
+            # STOP WHEN THE PAGER STOPS ADVANCING — progress in the CURSOR, not
+            # novelty in the CONTENT.
+            #
+            # An early version stopped on a page that added no new rows, to guard
+            # against idnes clamping an out-of-range ?page to the last page. That
+            # is wrong: idnes's ordering is unstable between requests, so pages
+            # overlap and a legitimately mid-walk page can be entirely rows we
+            # already hold — it ended Prague at 594 of 3,839.
+            #
+            # But dropping it left nothing to catch a URL that does not paginate
+            # AT ALL, and one exists: a price-filtered search ignores ?page= and
+            # reports next=1 forever. The walk then re-fetched the same 26 rows
+            # until the page cap — 1,492 pages on one slice. Requiring the pager
+            # to move FORWARD separates the two cleanly: repeats are fine,
+            # standing still is not.
+            current = page or 0
             if not parsed.items or parsed.next_offset is None:
+                break
+            if parsed.next_offset <= current:
+                LOG.warning(
+                    "SLICE cm=%s ct=%s place=%s pager did not advance at page=%s "
+                    "(next=%s) — this URL does not paginate; stopping",
+                    cat, sale_type, label, page, parsed.next_offset,
+                )
                 break
             page = parsed.next_offset
         verdict = walk_coverage(len(rows), declared, stopped_early=False)
@@ -323,7 +298,6 @@ class IdnesPortal:
         locality: str | None, sl: str | None, label: str,
         deadline: float | None, depth: int,
         visited: set[tuple[str | None, str | None]],
-        price_min: int | None = None, price_max: int | None = None,
     ) -> tuple[list[tuple[str, str, int | None]], int | None, int, str]:
         """Walk a place, descending if paging alone cannot reach its tail.
 
@@ -347,8 +321,7 @@ class IdnesPortal:
         visited.add((locality, sl))
         rows, declared, pages, outcome, html = self._walk_place(
             client, sale_type, cat, locality=locality, sl=sl,
-            deadline=deadline, label=label,
-            price_min=price_min, price_max=price_max)
+            deadline=deadline, label=label)
         # Descend on a COVERAGE shortfall, not on a fetch problem.
         #   incomplete — paged to the pager's own end and came up short
         #   ceiling    — too big to page through at all, which is the same
@@ -361,18 +334,20 @@ class IdnesPortal:
         if outcome not in ("incomplete", "ceiling") or depth <= 0:
             return rows, declared, pages, outcome
 
-        children: list[tuple[str | None, str | None, int | None, int | None, str]] = []
-        if html is not None and price_min is None and price_max is None:
+        # PLACE is the only descent axis. A price-band axis was tried and removed:
+        # a price-filtered idnes search IGNORES ?page= — it serves page one
+        # forever and reports next=1 — so a band could never yield more than 26
+        # rows however long the walk ran. Its motivating case never materialised
+        # either: Spain is the one place with no sub-places, and the abroad slice
+        # that contains it completes at the parent level (12,054 of 12,054). A
+        # place with no children now stays honestly incomplete instead.
+        children: list[tuple[str | None, str | None, str]] = []
+        if html is not None:
             paths, sls = sub_places(html, sale_type, cat, exclude=set(self.SLICES))
             children = (
-                [(c, None, None, None, c) for c in paths if (c, None) not in visited]
-                + [(None, c, None, None, c) for c in sls if (None, c) not in visited]
+                [(c, None, c) for c in paths if (c, None) not in visited]
+                + [(None, c, c) for c in sls if (None, c) not in visited]
             )
-        if not children:
-            children = [
-                (locality, sl, lo, hi, f"{lo or 0}-{hi or 'max'}")
-                for lo, hi in _price_children(price_min, price_max)
-            ]
         if not children:
             return rows, declared, pages, outcome
 
@@ -380,14 +355,13 @@ class IdnesPortal:
                  "-> %d children (depth %d)",
                  cat, sale_type, label, len(rows), declared, len(children), depth)
         merged = {r[0]: r for r in rows}
-        for c_loc, c_sl, c_lo, c_hi, c_label in children:
+        for c_loc, c_sl, c_label in children:
             if deadline_reached(deadline):
                 return list(merged.values()), declared, pages, "deadline"
             c_rows, _cd, c_pages, _co = self._walk_tree(
                 client, sale_type, cat, locality=c_loc, sl=c_sl,
                 label=f"{label}/{c_label}", deadline=deadline,
-                depth=depth - 1, visited=visited,
-                price_min=c_lo, price_max=c_hi)
+                depth=depth - 1, visited=visited)
             pages += c_pages
             for r in c_rows:
                 merged.setdefault(r[0], r)
