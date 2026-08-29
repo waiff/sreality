@@ -185,3 +185,133 @@ def test_the_lane_passes_a_worker_count(lane: dict[str, Any]) -> None:
     step = _step(lane)
     assert "--workers" in step["run"]
     assert "WORKERS" in step["env"]
+
+
+# --- the function actually RUNS ---------------------------------------------
+
+
+def test_screen_batch_really_executes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drive _screen_batch end to end against fakes.
+
+    WHY THIS EXISTS. Every other test in this file reads the function's SOURCE —
+    `inspect.getsource`, YAML, constants. All of them passed while the shipped code
+    raised `NameError: name 'threading' is not defined` on its first live run: a
+    string-replace edit that added the import silently failed to match, `ast.parse`
+    still succeeded because a missing name is a RUNTIME error, and no test ever
+    called the function.
+
+    A guard that reads code instead of running it proves the code was WRITTEN, not
+    that it WORKS.
+    """
+    import scripts.screen_exam_cohort as mod
+
+    written: list[tuple[int, list[int] | None, str | None]] = []
+
+    class _FakeLLM:
+        def __init__(self, *a: Any, **k: Any) -> None: ...
+
+        def call(self, **kw: Any) -> Any:
+            class _R:
+                cost_usd = 0.001
+                text = '{"ids": [22]}'
+            return _R()
+
+    class _FakeConn:
+        def close(self) -> None: ...
+
+    monkeypatch.setattr("api.llm_client.LLMClient", _FakeLLM)
+    monkeypatch.setattr("api.providers.openai.OpenAIProvider", lambda *a, **k: object())
+    monkeypatch.setattr("scraper.db.connect", lambda *a, **k: _FakeConn())
+    monkeypatch.setattr("toolkit.vision_images.image_block",
+                        lambda *a, **k: {"type": "image"})
+    monkeypatch.setattr(
+        "toolkit.exam_screening.record_screen",
+        lambda conn, **kw: written.append(
+            (kw["image_id"], kw["guess_tag_ids"], kw["error"])),
+    )
+
+    rows = [(i, f"img/{i}.jpg") for i in range(1, 13)]
+    stats = mod._screen_batch(
+        None, object(), cohort_id=1, rows=rows,
+        tags=[{"id": 22, "label": "koupelna"}], model="gpt-5-mini",
+        max_usd=0, max_seconds=0, workers=4,
+    )
+    assert stats["ok"] == 12 and stats["errors"] == 0
+    assert stats["hits"] == 12
+    assert len(written) == 12
+    assert all(g == [22] and e is None for _i, g, e in written)
+
+
+def test_screen_batch_stops_at_the_cost_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The ceiling has to bind in the WORKER, before the call. A parallel lane that
+    # checks afterwards discovers the overspend once every in-flight call is billed.
+    import scripts.screen_exam_cohort as mod
+
+    class _FakeLLM:
+        def __init__(self, *a: Any, **k: Any) -> None: ...
+
+        def call(self, **kw: Any) -> Any:
+            class _R:
+                cost_usd = 1.0
+                text = '{"ids": []}'
+            return _R()
+
+    class _FakeConn:
+        def close(self) -> None: ...
+
+    monkeypatch.setattr("api.llm_client.LLMClient", _FakeLLM)
+    monkeypatch.setattr("api.providers.openai.OpenAIProvider", lambda *a, **k: object())
+    monkeypatch.setattr("scraper.db.connect", lambda *a, **k: _FakeConn())
+    monkeypatch.setattr("toolkit.vision_images.image_block", lambda *a, **k: {})
+    monkeypatch.setattr("toolkit.exam_screening.record_screen", lambda conn, **kw: None)
+
+    stats = mod._screen_batch(
+        None, object(), cohort_id=1, rows=[(i, "p") for i in range(1, 40)],
+        tags=[{"id": 22, "label": "k"}], model="m",
+        max_usd=3.0, max_seconds=0, workers=2,
+    )
+    assert stats["aborted"] is True
+    # Two workers can each be mid-call when the ceiling trips, so the bound is the
+    # ceiling plus at most one in-flight call per worker — never the whole queue.
+    assert stats["ok"] <= 3 + 2
+
+
+def test_a_screener_failure_is_recorded_as_an_error_not_an_empty_guess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.screen_exam_cohort as mod
+
+    written: list[tuple[int, list[int] | None, str | None]] = []
+
+    class _FakeLLM:
+        def __init__(self, *a: Any, **k: Any) -> None: ...
+
+        def call(self, **kw: Any) -> Any:
+            class _R:
+                cost_usd = 0.001
+                text = ""          # the live truncation failure, exactly
+            return _R()
+
+    class _FakeConn:
+        def close(self) -> None: ...
+
+    monkeypatch.setattr("api.llm_client.LLMClient", _FakeLLM)
+    monkeypatch.setattr("api.providers.openai.OpenAIProvider", lambda *a, **k: object())
+    monkeypatch.setattr("scraper.db.connect", lambda *a, **k: _FakeConn())
+    monkeypatch.setattr("toolkit.vision_images.image_block", lambda *a, **k: {})
+    monkeypatch.setattr(
+        "toolkit.exam_screening.record_screen",
+        lambda conn, **kw: written.append(
+            (kw["image_id"], kw["guess_tag_ids"], kw["error"])),
+    )
+
+    stats = mod._screen_batch(
+        None, object(), cohort_id=1, rows=[(1, "p"), (2, "p")],
+        tags=[{"id": 22, "label": "k"}], model="m",
+        max_usd=0, max_seconds=0, workers=2,
+    )
+    assert stats["errors"] == 2 and stats["ok"] == 0
+    # An empty guess and a failure mean opposite things downstream.
+    assert all(g is None and e for _i, g, e in written)
