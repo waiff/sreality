@@ -663,11 +663,24 @@ def _exam_tag_set(conn: Any, set_name: str | None) -> tuple[str, list[dict[str, 
     since the set was written is dropped silently rather than crashing the
     sitting: its column simply is not asked.
 
-    No name falls back to the routing derivation, which set_1 was seeded to match
-    exactly — so the sitting already in progress noticed nothing when sets landed.
+    No name means THE FIRST SET (lowest id, i.e. the sitting that has been running
+    since before sets existed), and only a database with no sets at all falls back
+    to the routing derivation.
+
+    Measured reason, not a preference: the first version defaulted to the routing
+    derivation, and applying migration 460 — which flags three TRAINING tags for
+    draw scoping — instantly grew the live bare-URL sitting from 8 buttons to 11,
+    shifting every key under the operator's fingers mid-exam. Reverted within ~90s,
+    zero stray cells written, but the lesson stands: a sitting's question list must
+    never be derivable from a flag that other machinery flips for its own reasons.
     """
     if set_name is None:
-        return "routing", _routing_tags(conn)
+        with conn.cursor() as cur:
+            cur.execute("SELECT name FROM tag_exam_sets ORDER BY id LIMIT 1")
+            row = cur.fetchone()
+        if row is None:
+            return "routing", _routing_tags(conn)
+        set_name = str(row[0])
     with conn.cursor() as cur:
         cur.execute("SELECT tag_ids FROM tag_exam_sets WHERE name = %s", (set_name,))
         row = cur.fetchone()
