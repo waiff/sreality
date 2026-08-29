@@ -1113,8 +1113,9 @@ def test_exam_answer_plumbs_the_per_tag_leave_out(client, monkeypatch):
     got: dict = {}
     monkeypatch.setattr(tag_holdout, "get_cohort",
                         lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
-    monkeypatch.setattr(mod, "_routing_tags",
-                        lambda conn: [{"id": 22, "label": "k"}, {"id": 25, "label": "u"}])
+    monkeypatch.setattr(mod, "_exam_tag_set",
+                        lambda conn, name: ("set_1",
+                                            [{"id": 22, "label": "k"}, {"id": 25, "label": "u"}]))
     monkeypatch.setattr(tag_exam, "record_answer",
                         lambda conn, **kw: got.update(kw) or
                         {"image_id": kw["image_id"], "cells_written": 2,
@@ -1134,7 +1135,8 @@ def test_exam_answer_422s_on_an_overlapping_pick_and_skip(client, monkeypatch):
 
     monkeypatch.setattr(tag_holdout, "get_cohort",
                         lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
-    monkeypatch.setattr(mod, "_routing_tags", lambda conn: [{"id": 22, "label": "k"}])
+    monkeypatch.setattr(mod, "_exam_tag_set",
+                        lambda conn, name: ("set_1", [{"id": 22, "label": "k"}]))
     def _raise(conn, **kw):
         raise ValueError("picked and skipped overlap: [22]")
     monkeypatch.setattr(tag_exam, "record_answer", _raise)
@@ -1178,6 +1180,49 @@ def test_exam_set_resolution_preserves_the_arrays_order(client, monkeypatch):
         data = res.json()["data"]
         assert data["set"] == "set_2"
         assert [t["id"] for t in data["tags"]] == [28, 20, 27]
+    finally:
+        api_main.app.dependency_overrides.pop(deps.get_db_conn, None)
+    _ = mod
+
+
+def test_a_bare_url_sits_the_first_set_not_the_routing_flags(client, monkeypatch):
+    """The incident this pins: migration 460 flagged three TRAINING tags for draw
+    scoping, and because the bare URL derived its question list from those same
+    flags, the live sitting grew from 8 buttons to 11 mid-exam — keys shifted
+    under the operator's fingers. A sitting's question list must never be
+    derivable from a flag other machinery flips for its own reasons."""
+    from toolkit import tag_exam, tag_holdout
+    import api.new_dedup_labeling as mod
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            if "ORDER BY id LIMIT 1" in sql:
+                self._rows = [("set_1",)]
+            elif "tag_exam_sets" in sql:
+                self._rows = [([3, 17],)]
+            elif "routing_categories" in sql:
+                raise AssertionError(
+                    "bare URL reached the routing derivation while a set exists")
+            else:
+                self._rows = [(3, "fasada"), (17, "garaz")]
+        def fetchone(self): return self._rows[0] if self._rows else None
+        def fetchall(self): return self._rows
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    monkeypatch.setattr(tag_holdout, "get_cohort",
+                        lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
+    monkeypatch.setattr(tag_exam, "progress",
+                        lambda conn, **kw: {"total": 250, "answered": 0, "remaining": 250})
+    monkeypatch.setattr(tag_exam, "next_question", lambda conn, **kw: None)
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: _Conn()
+    try:
+        res = client.get("/new-dedup/labeling/exam/exam_v1")
+        assert res.status_code == 200
+        assert res.json()["data"]["set"] == "set_1"
     finally:
         api_main.app.dependency_overrides.pop(deps.get_db_conn, None)
     _ = mod
