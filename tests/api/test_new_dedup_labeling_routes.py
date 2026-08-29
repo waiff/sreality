@@ -1143,3 +1143,90 @@ def test_exam_answer_422s_on_an_overlapping_pick_and_skip(client, monkeypatch):
         "cant_tell": False,
     })
     assert res.status_code == 422
+
+
+def test_exam_set_resolution_preserves_the_arrays_order(client, monkeypatch):
+    # The array order IS the key order on screen (1..n). Re-sorting here would
+    # move buttons under the operator's fingers between sittings.
+    from toolkit import tag_exam, tag_holdout
+    import api.new_dedup_labeling as mod
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            self._rows = ([([28, 20, 27],)] if "tag_exam_sets" in sql
+                          else [(20, "jídelna"), (27, "nezařízená"), (28, "obývací")])
+        def fetchone(self): return self._rows[0]
+        def fetchall(self): return self._rows
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    monkeypatch.setattr(tag_holdout, "get_cohort",
+                        lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
+    monkeypatch.setattr(tag_exam, "progress",
+                        lambda conn, **kw: {"total": 250, "answered": 0, "remaining": 250})
+    monkeypatch.setattr(tag_exam, "next_question", lambda conn, **kw: None)
+    # Override on the ORIGINAL dependency object (the fixture's key) — replacing
+    # the module attribute and keying on the replacement leaves the route reading
+    # the fixture's conn, since Depends() captured the original at import.
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: _Conn()
+    try:
+        res = client.get("/new-dedup/labeling/exam/exam_v1?set=set_2")
+        assert res.status_code == 200
+        data = res.json()["data"]
+        assert data["set"] == "set_2"
+        assert [t["id"] for t in data["tags"]] == [28, 20, 27]
+    finally:
+        api_main.app.dependency_overrides.pop(deps.get_db_conn, None)
+    _ = mod
+
+
+def test_an_unknown_exam_set_is_a_404(client, monkeypatch):
+    from toolkit import tag_holdout
+    import api.new_dedup_labeling as mod
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): return None
+        def fetchone(self): return None
+        def fetchall(self): return []
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    monkeypatch.setattr(tag_holdout, "get_cohort",
+                        lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: _Conn()
+    try:
+        assert client.get("/new-dedup/labeling/exam/exam_v1?set=nope").status_code == 404
+    finally:
+        api_main.app.dependency_overrides.pop(deps.get_db_conn, None)
+    _ = mod
+
+
+def test_the_answer_resolves_the_same_set_as_the_question(client, monkeypatch):
+    # One resolver for both directions: a sitting can never compose against one
+    # list and write against another.
+    from toolkit import tag_exam, tag_holdout
+    import api.new_dedup_labeling as mod
+
+    got = {}
+    monkeypatch.setattr(tag_holdout, "get_cohort",
+                        lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
+    monkeypatch.setattr(mod, "_exam_tag_set",
+                        lambda conn, name: (name or "routing",
+                                            [{"id": 28, "label": "o"}, {"id": 20, "label": "j"}]))
+    monkeypatch.setattr(tag_exam, "record_answer",
+                        lambda conn, **kw: got.update(kw) or
+                        {"image_id": kw["image_id"], "cells_written": 2,
+                         "picked": kw["picked"], "skipped": kw["skipped"],
+                         "cant_tell": kw["cant_tell"]})
+    res = client.post("/new-dedup/labeling/exam/exam_v1/answer", json={
+        "image_id": 5, "set": "set_2", "picked_tag_ids": [28],
+        "skipped_tag_ids": [], "cant_tell": False,
+    })
+    assert res.status_code == 200
+    assert got["tag_ids"] == [28, 20]

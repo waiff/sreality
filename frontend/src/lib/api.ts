@@ -1396,6 +1396,9 @@ export interface ExamQuestion {
 
 export interface ExamState {
   cohort: { name: string; sealed: boolean };
+  /* Which iteration's question list this sitting asks — a named tag_exam_sets row,
+   * or 'routing' for the flag-derived fallback set_1 was seeded to match. */
+  set: string;
   /* The eight routing tags, server-resolved. Never a copy in the client: the
    * buttons must be the same set the answers are written against. */
   tags: ExamTag[];
@@ -1406,8 +1409,11 @@ export interface ExamState {
   question: ExamQuestion | null;
 }
 
-export const getExamState = (cohort: string): Promise<{ data: ExamState }> =>
-  request<{ data: ExamState }>(`/new-dedup/labeling/exam/${cohort}`, { jwt: true });
+export const getExamState = (cohort: string, set?: string): Promise<{ data: ExamState }> =>
+  request<{ data: ExamState }>(
+    `/new-dedup/labeling/exam/${cohort}${set ? `?set=${encodeURIComponent(set)}` : ''}`,
+    { jwt: true },
+  );
 
 /* Practice images from OUTSIDE the exam — they settle the hand without spending
  * real exam images, and answers for them are refused server-side. */
@@ -1424,7 +1430,10 @@ export const getExamWarmup = (
  * something else; the cell trains nothing and grades nothing. */
 export const answerExamQuestion = (
   cohort: string,
-  body: { image_id: number; picked_tag_ids: number[]; skipped_tag_ids: number[]; cant_tell: boolean },
+  body: {
+    image_id: number; picked_tag_ids: number[]; skipped_tag_ids: number[];
+    cant_tell: boolean; set?: string;
+  },
 ): Promise<{ data: { image_id: number; cells_written: number } }> =>
   request<{ data: { image_id: number; cells_written: number } }>(
     `/new-dedup/labeling/exam/${cohort}/answer`,

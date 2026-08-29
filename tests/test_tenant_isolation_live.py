@@ -110,6 +110,7 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
     "tag_candidates",
     "tag_exam_cohorts",
     "tag_exam_members",
+    "tag_exam_sets",
     "workflow_failures", "workflow_run_health",
     # Added by migration 340: the audit found scrape_runs_public/recent_scrape_runs()
     # ungated and browser-readable because this list was seeded from migration 318's

@@ -632,6 +632,9 @@ def get_tag_neighbours(
 
 class ExamAnswerIn(BaseModel):
     image_id: int
+    # Which iteration's question list this answer was composed against. The server
+    # re-resolves it, so question and answer can never use different lists.
+    set: str | None = None
     # Which of the routing tags apply. Every routing tag in NEITHER list becomes a
     # negative — that is what lets one answer measure precision AND recall.
     picked_tag_ids: list[int] = []
@@ -651,6 +654,36 @@ def _routing_tags(conn: Any) -> list[dict[str, Any]]:
         return [{"id": int(r[0]), "label": r[1]} for r in cur.fetchall()]
 
 
+def _exam_tag_set(conn: Any, set_name: str | None) -> tuple[str, list[dict[str, Any]]]:
+    """Resolve one sitting's question list.
+
+    A named set (migration 460) is the normal path: iterations of the exam are
+    named, ORDERED tag lists over the same 250 images — the array order is the
+    on-screen key order, so it is preserved here, never re-sorted. A tag deleted
+    since the set was written is dropped silently rather than crashing the
+    sitting: its column simply is not asked.
+
+    No name falls back to the routing derivation, which set_1 was seeded to match
+    exactly — so the sitting already in progress noticed nothing when sets landed.
+    """
+    if set_name is None:
+        return "routing", _routing_tags(conn)
+    with conn.cursor() as cur:
+        cur.execute("SELECT tag_ids FROM tag_exam_sets WHERE name = %s", (set_name,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"exam set {set_name!r} not found")
+        ordered = [int(x) for x in row[0]]
+        cur.execute(
+            "SELECT id, label FROM tag_taxonomy WHERE id = ANY(%s) AND active",
+            (ordered,),
+        )
+        labels = {int(r[0]): r[1] for r in cur.fetchall()}
+    return set_name, [
+        {"id": i, "label": labels[i]} for i in ordered if i in labels
+    ]
+
+
 def _cohort_or_404(conn: Any, name: str) -> dict[str, Any]:
     cohort = tag_holdout.get_cohort(conn, name=name)
     if cohort is None:
@@ -660,18 +693,19 @@ def _cohort_or_404(conn: Any, name: str) -> dict[str, Any]:
 
 @router.get("/exam/{cohort_name}")
 def get_exam_state(
-    cohort_name: str, conn: Any = Depends(deps.get_db_conn),
+    cohort_name: str, set: str | None = None, conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
     """The exam's tags, progress, and the next unanswered question.
 
-    `question` is null when the exam is finished. The tag list is served with the
-    question so the eight buttons are the server's list, never a copy that could
-    drift from the routing set."""
+    `question` is null when the sitting is finished. The tag list is served with
+    the question so the buttons are the server's list, never a client copy; `set`
+    names which iteration's question list to sit (migration 460)."""
     cohort = _cohort_or_404(conn, cohort_name)
-    tags = _routing_tags(conn)
+    set_name, tags = _exam_tag_set(conn, set)
     tag_ids = [t["id"] for t in tags]
     return {"data": {
         "cohort": {"name": cohort["name"], "sealed": cohort["sealed_at"] is not None},
+        "set": set_name,
         "tags": tags,
         "progress": tag_exam.progress(conn, cohort_id=cohort["id"], tag_ids=tag_ids),
         "question": tag_exam.next_question(conn, cohort_id=cohort["id"], tag_ids=tag_ids),
@@ -694,7 +728,8 @@ def post_exam_answer(
     cohort_name: str, body: ExamAnswerIn, conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
     cohort = _cohort_or_404(conn, cohort_name)
-    tag_ids = [t["id"] for t in _routing_tags(conn)]
+    _, tags = _exam_tag_set(conn, body.set)
+    tag_ids = [t["id"] for t in tags]
     try:
         return {"data": tag_exam.record_answer(
             conn, cohort_id=cohort["id"], image_id=body.image_id,

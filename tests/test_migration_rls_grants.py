@@ -326,7 +326,7 @@ _ADMIN_ONLY_RELATIONS = frozenset({
     # tag_exam_members (458) are the sealed exam roster. All three are
     # backend-only with NO `_public` view — and publishing the exam roster would
     # hand anyone the answer key's index.
-    "tag_candidates", "tag_exam_cohorts", "tag_exam_members",
+    "tag_candidates", "tag_exam_cohorts", "tag_exam_members", "tag_exam_sets",
     "workflow_failures", "workflow_run_health",
     "scrape_runs", "worker_heartbeats",
     "health_summary_mv", "portal_health_mv", "scraper_health_checks_mv",
