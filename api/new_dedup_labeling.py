@@ -632,9 +632,13 @@ def get_tag_neighbours(
 
 class ExamAnswerIn(BaseModel):
     image_id: int
-    # Which of the routing tags apply. Every routing tag NOT listed becomes a
+    # Which of the routing tags apply. Every routing tag in NEITHER list becomes a
     # negative — that is what lets one answer measure precision AND recall.
     picked_tag_ids: list[int] = []
+    # Left out of that head (excluded/'pruned'): the brief's rule for a subject
+    # clearly present in a photo that is OF something else. Trains and grades
+    # nothing on that cell.
+    skipped_tag_ids: list[int] = []
     cant_tell: bool = False
 
 
@@ -694,7 +698,8 @@ def post_exam_answer(
     try:
         return {"data": tag_exam.record_answer(
             conn, cohort_id=cohort["id"], image_id=body.image_id,
-            tag_ids=tag_ids, picked=body.picked_tag_ids, cant_tell=body.cant_tell,
+            tag_ids=tag_ids, picked=body.picked_tag_ids,
+            skipped=body.skipped_tag_ids, cant_tell=body.cant_tell,
         )}
     except KeyError as exc:
         # Not in the cohort — a warm-up image, or a stale client. Refusing is the

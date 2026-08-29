@@ -387,15 +387,30 @@ def is_member(conn: psycopg.Connection, *, cohort_id: int, image_id: int) -> boo
 
 def record_answer(
     conn: psycopg.Connection, *, cohort_id: int, image_id: int,
-    tag_ids: list[int], picked: list[int], cant_tell: bool = False,
-    answered_by: str = "operator",
+    tag_ids: list[int], picked: list[int], skipped: list[int] | None = None,
+    cant_tell: bool = False, answered_by: str = "operator",
 ) -> dict[str, Any]:
     """Write one exam answer across ALL routing tags.
 
-    The exam asks "which of these, if any?", so a pick is a positive and every tag
-    NOT picked is a negative — that is what lets one answer measure both precision
-    and recall. Answering only the positives would leave seven cells undecided per
-    image and grade nothing.
+    Four verdicts, restating the BRIEF's three-state rule rather than inventing a
+    new one — the first exam UI collapsed it for speed, which turned out to bend
+    the labeling calculus to fit a screen:
+
+      * picked    -> positive: the photo is OF this thing (a co-subject counts).
+      * skipped   -> excluded/'pruned': the subject is clearly and substantially
+                     present but the photo is of something else. The brief: "never
+                     mark a tag negative ... leave it out of that head instead."
+                     An excluded cell trains nothing and grades nothing — the
+                     standard treatment of contested ground truth (VOC's
+                     'difficult' flag is the same idea).
+      * unpicked  -> negative: does not apply. An incidental hint in the
+                     background is a valuable negative.
+      * cant_tell -> excluded/'ambiguous' on EVERY tag: the whole image is
+                     genuinely undecidable.
+
+    The store's two leave-out reasons map exactly onto the brief's two kinds:
+    'ambiguous' = undecidable, 'pruned' = deliberately left out of this head. No
+    new vocabulary.
 
     Refuses an image outside the cohort. That refusal is the warm-up's safety rail:
     warm-up images come from outside the exam, so a mis-wired client cannot write
@@ -405,16 +420,22 @@ def record_answer(
 
     if not is_member(conn, cohort_id=cohort_id, image_id=image_id):
         raise KeyError(f"image {image_id} is not in cohort {cohort_id}")
-    unknown = sorted(set(picked) - set(tag_ids))
+    skipped = skipped or []
+    unknown = sorted((set(picked) | set(skipped)) - set(tag_ids))
     if unknown:
         raise ValueError(f"not routing tags: {unknown}")
+    both = sorted(set(picked) & set(skipped))
+    if both:
+        # One cell cannot be a positive and a leave-out at once; refusing beats
+        # letting write order decide.
+        raise ValueError(f"picked and skipped overlap: {both}")
 
     written = 0
     for tag_id in tag_ids:
         if cant_tell:
-            # `excluded`, never `negative`: an image nobody could decide is not a
-            # counter-example, and training on it teaches the operator's confusion.
-            state, reason = "excluded", "ambiguous"
+            state, reason = "excluded", ta.EXCLUDED_AMBIGUOUS
+        elif tag_id in skipped:
+            state, reason = "excluded", ta.EXCLUDED_PRUNED
         else:
             state, reason = ("positive" if tag_id in picked else "negative"), None
         ta.set_state(
@@ -423,4 +444,5 @@ def record_answer(
         )
         written += 1
     return {"image_id": image_id, "cells_written": written,
-            "picked": sorted(picked), "cant_tell": cant_tell}
+            "picked": sorted(picked), "skipped": sorted(skipped),
+            "cant_tell": cant_tell}

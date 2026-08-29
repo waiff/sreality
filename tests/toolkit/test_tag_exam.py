@@ -306,3 +306,109 @@ def test_an_unlabelled_member_carries_no_frozen_state(conn: _FakeConn) -> None:
     cohort = _open(conn)
     te.draw_pure_random(conn, cohort_id=cohort["id"], count=2)
     assert all(m["preexisting_labels"] is None for m in conn.members)
+
+
+# --- the brief's per-tag leave-out ------------------------------------------
+
+
+class _AnswerConn:
+    """Records set_state calls; membership check answers true."""
+
+    def __init__(self) -> None:
+        self.cells: list[tuple[int, int, str, str | None]] = []
+
+    def cursor(self) -> Any:
+        conn = self
+
+        class _C:
+            def __enter__(self) -> "_C":
+                return self
+
+            def __exit__(self, *exc: Any) -> None:
+                return None
+
+            def execute(self, sql: str, params: Any = None) -> None:
+                self._hit = sql.strip().startswith("SELECT 1 FROM tag_exam_members")
+
+            def fetchone(self) -> tuple[int, ...] | None:
+                return (1,) if self._hit else None
+
+        _ = conn
+        return _C()
+
+
+def _answers(monkeypatch: pytest.MonkeyPatch, conn: _AnswerConn) -> None:
+    from toolkit import tag_annotations as ta
+
+    def _fake_set_state(c: Any, *, image_id: int, tag_id: int, state: str,
+                        created_by: str, source: str,
+                        excluded_reason: str | None = None,
+                        model: str | None = None) -> dict[str, Any]:
+        conn.cells.append((image_id, tag_id, state, excluded_reason))
+        return {"applied": True}
+
+    monkeypatch.setattr(ta, "set_state", _fake_set_state)
+
+
+def test_a_skipped_tag_is_left_out_not_negatived(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The brief, verbatim in effect: "never mark a tag negative when its subject is
+    # clearly and substantially present ... leave it out of that head instead."
+    conn = _AnswerConn()
+    _answers(monkeypatch, conn)
+    out = te.record_answer(conn, cohort_id=1, image_id=5,
+                           tag_ids=[3, 17, 25], picked=[], skipped=[25])
+    states = {t: (s, r) for _i, t, s, r in conn.cells}
+    assert states[25] == ("excluded", "pruned")
+    assert states[3] == ("negative", None) and states[17] == ("negative", None)
+    assert out["skipped"] == [25]
+
+
+def test_picks_and_skips_compose_in_one_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The motivating image exactly: a living-room photo (obývací is not on the
+    # sheet), kitchen corner clearly present -> kuchyně left out, all else negative.
+    conn = _AnswerConn()
+    _answers(monkeypatch, conn)
+    te.record_answer(conn, cohort_id=1, image_id=5,
+                     tag_ids=[3, 22, 25], picked=[22], skipped=[25])
+    states = {t: (s, r) for _i, t, s, r in conn.cells}
+    assert states[22] == ("positive", None)
+    assert states[25] == ("excluded", "pruned")
+    assert states[3] == ("negative", None)
+
+
+def test_a_tag_cannot_be_picked_and_skipped_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _AnswerConn()
+    _answers(monkeypatch, conn)
+    with pytest.raises(ValueError, match="overlap"):
+        te.record_answer(conn, cohort_id=1, image_id=5,
+                         tag_ids=[22, 25], picked=[25], skipped=[25])
+    assert conn.cells == []
+
+
+def test_whole_image_cant_tell_stays_ambiguous_not_pruned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The store's two leave-out reasons carry the brief's two MEANINGS: 'ambiguous'
+    # = undecidable image, 'pruned' = deliberately left out of one head. Collapsing
+    # them would gut the >15%-ambiguity definition alarm.
+    conn = _AnswerConn()
+    _answers(monkeypatch, conn)
+    te.record_answer(conn, cohort_id=1, image_id=5,
+                     tag_ids=[22, 25], picked=[], skipped=[], cant_tell=True)
+    assert {(s, r) for _i, _t, s, r in conn.cells} == {("excluded", "ambiguous")}
+
+
+def test_a_skip_outside_the_routing_set_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _AnswerConn()
+    _answers(monkeypatch, conn)
+    with pytest.raises(ValueError, match="not routing tags"):
+        te.record_answer(conn, cohort_id=1, image_id=5,
+                         tag_ids=[22], picked=[], skipped=[999])

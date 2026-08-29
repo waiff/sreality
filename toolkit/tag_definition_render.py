@@ -161,14 +161,19 @@ def render_prompt(definition: dict[str, Any], *, tag_label: str) -> str:
     if leave_out:
         lines.append(f"GENUINELY UNDECIDABLE WHEN: {leave_out}")
 
-    # Stated last so it is the final instruction the model reads, and stated in the
-    # operator's own words from the brief: a tag whose subject is clearly present
-    # must never be marked negative merely because another tag fits better.
+    # Stated last so it is the final instruction the model reads, and it is the
+    # BRIEF's three-state rule verbatim in spirit — the first version of this
+    # paragraph "sharpened" the present-but-not-the-subject case into a yes, which
+    # was a quiet guideline change hiding in a renderer. Restored: that case is a
+    # leave-out, exactly as the operator labels it on the exam screen, so the
+    # machine and the human answer the same question the same way.
     lines.append(
-        "ANSWER yes / no / unsure. Answer yes when the photo is OF this thing. "
-        "Answer no when it does not apply — an incidental appearance in the "
-        "background is a valuable no. Answer unsure ONLY when it is genuinely "
-        "undecidable. Never answer no because a different tag fits better: if this "
-        "tag's subject is clearly and substantially present, answer yes."
+        "ANSWER yes / no / skip. Answer yes when the photo is OF this thing — a "
+        "co-subject counts, a photo framed on something else does not. Answer no "
+        "when it does not apply — an incidental hint in the background is a "
+        "valuable no. Answer skip in two cases ONLY: the image is genuinely "
+        "undecidable, or this tag's subject is clearly and substantially present "
+        "but the photo is of something else. Never answer no in that second case: "
+        "leave it out instead."
     )
     return "\n".join(lines)
