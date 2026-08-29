@@ -24,6 +24,7 @@ const TAGS = [
 
 const examState = (over: Partial<api.ExamState> = {}): api.ExamState => ({
   cohort: { name: 'exam_v1', sealed: true },
+  set: 'routing',
   tags: TAGS,
   progress: { total: 250, answered: 12, remaining: 238 },
   question: { image_id: 555, position: 13, storage_path: 'img/1/555.jpg' },
@@ -265,5 +266,85 @@ describe('<NewDedupExam>', () => {
     });
     renderPage();
     expect(await screen.findByText(/do not count/)).toBeInTheDocument();
+  });
+});
+
+describe('<NewDedupExam> iterations (sets)', () => {
+  it('sits the set named in the URL and stamps answers with it', async () => {
+    // Iteration 2 runs on a NEW question list over the SAME 250 images — the
+    // server resolves ?set= for both question and answer, so the two can never
+    // disagree about which columns a sitting is writing.
+    vi.mocked(api.getExamState).mockResolvedValue({
+      data: examState({
+        set: 'set_2',
+        tags: [
+          { id: 28, label: 'interier - obývací pokoj' },
+          { id: 20, label: 'interier - jídelna' },
+          { id: 27, label: 'interier - nezařízená místnost' },
+        ],
+      }),
+    });
+    const user = userEvent.setup();
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={['/new-dedup/exam?cohort=exam_v1&set=set_2']}>
+          <NewDedupExam />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await screen.findByText(/Which of these/);
+    expect(api.getExamState).toHaveBeenCalledWith('exam_v1', 'set_2');
+    expect(screen.getByText('set_2')).toBeInTheDocument();
+    // Three buttons, the set's own order — not tag-id order.
+    const kbds = screen.getAllByRole('button').filter((b) => /interier/.test(b.textContent ?? ''));
+    expect(kbds.map((b) => b.textContent)).toEqual([
+      expect.stringContaining('obývací'),
+      expect.stringContaining('jídelna'),
+      expect.stringContaining('nezařízená'),
+    ]);
+    await user.keyboard('2');
+    await user.keyboard(' ');
+    await waitFor(() => expect(api.answerExamQuestion).toHaveBeenCalledWith(
+      'exam_v1',
+      { image_id: 555, picked_tag_ids: [], skipped_tag_ids: [], cant_tell: false, set: 'set_2' },
+    ));
+  });
+
+  it('a bare URL still sits the routing set, so the current sitting never moved', async () => {
+    renderPage();
+    await screen.findByText(/Which of these/);
+    expect(api.getExamState).toHaveBeenCalledWith('exam_v1', undefined);
+    expect(screen.queryByText('routing')).toBeNull();
+  });
+
+  it('key 0 reaches the tenth button of a full set', async () => {
+    vi.mocked(api.getExamState).mockResolvedValue({
+      data: examState({
+        tags: Array.from({ length: 10 }, (_, i) => ({ id: 100 + i, label: `tag ${i + 1}` })),
+      }),
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/Which of these/);
+    await user.keyboard('0');
+    expect(screen.getByRole('button', { name: /tag 10/ }))
+      .toHaveAttribute('aria-pressed', 'true');
+  });
+});
+
+describe('<NewDedupExam> abandoned picks', () => {
+  it('"none of these" after picking sends none, not the abandoned picks', async () => {
+    // The regression the set_2 test exposed: advance() read verdicts from a stale
+    // closure, so pick -> change mind -> space submitted the picks anyway.
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/Which of these/);
+    await user.click(screen.getByRole('button', { name: /interier - koupelna/ }));
+    await user.click(screen.getByRole('button', { name: /None of these/ }));
+    await waitFor(() => expect(api.answerExamQuestion).toHaveBeenCalledWith(
+      'exam_v1',
+      { image_id: 555, picked_tag_ids: [], skipped_tag_ids: [], cant_tell: false },
+    ));
   });
 });

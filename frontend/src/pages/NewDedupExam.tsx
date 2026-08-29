@@ -41,6 +41,9 @@ export default function NewDedupExam() {
   const qc = useQueryClient();
   const [params] = useSearchParams();
   const cohort = params.get('cohort') || 'exam_v1';
+  /* Which iteration to sit: /new-dedup/exam?cohort=exam_v1&set=set_2. Absent =
+   * the routing-derived list, which set_1 matches exactly. */
+  const setName = params.get('set') ?? undefined;
 
   /* Per-tag verdict while composing one answer. Absent = negative on confirm.
    * 'picked' = positive; 'skipped' = the brief's leave-out — subject clearly
@@ -52,8 +55,8 @@ export default function NewDedupExam() {
   const [hoveredTag, setHoveredTag] = useState<number | null>(null);
 
   const stateQ = useQuery({
-    queryKey: EXAM_KEY(cohort),
-    queryFn: () => getExamState(cohort),
+    queryKey: [...EXAM_KEY(cohort), setName ?? 'routing'],
+    queryFn: () => getExamState(cohort, setName),
   });
   const warmupQ = useQuery({
     queryKey: WARMUP_KEY(cohort),
@@ -98,8 +101,11 @@ export default function NewDedupExam() {
     onError: (e: Error) => pushToast('err', e.message),
   });
 
+  /* `toSend` is EXPLICIT, never read from state: "None of these" means none even
+   * when picks are on screen, and setVerdicts(new Map()) settles after this
+   * closure runs — the first version submitted the abandoned picks. */
   const advance = useCallback(
-    (cantTell: boolean) => {
+    (cantTell: boolean, toSend: Map<number, 'picked' | 'skipped'>) => {
       if (currentImageId == null) return;
       if (inWarmup) {
         /* Practice is never written. The server would refuse it anyway — a
@@ -112,15 +118,16 @@ export default function NewDedupExam() {
       if (answerMut.isPending) return;
       const picked_tag_ids: number[] = [];
       const skipped_tag_ids: number[] = [];
-      for (const [id, v] of verdicts) (v === 'picked' ? picked_tag_ids : skipped_tag_ids).push(id);
+      for (const [id, v] of toSend) (v === 'picked' ? picked_tag_ids : skipped_tag_ids).push(id);
       answerMut.mutate({
         image_id: currentImageId,
         picked_tag_ids,
         skipped_tag_ids,
         cant_tell: cantTell,
+        ...(setName ? { set: setName } : {}),
       });
     },
-    [currentImageId, inWarmup, verdicts, answerMut],
+    [currentImageId, inWarmup, answerMut, setName],
   );
 
   const cycle = useCallback((tagId: number) => {
@@ -145,8 +152,10 @@ export default function NewDedupExam() {
       const el = e.target as HTMLElement | null;
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.key >= '1' && e.key <= '9') {
-        const idx = Number(e.key) - 1;
+      if (e.key >= '0' && e.key <= '9') {
+        // 0 is the TENTH button: sets are capped at ten tags, and the digit row
+        // ends at 0, so the mapping is the keyboard's own.
+        const idx = e.key === '0' ? 9 : Number(e.key) - 1;
         if (idx < tags.length) {
           e.preventDefault();
           cycle(tags[idx].id);
@@ -158,22 +167,22 @@ export default function NewDedupExam() {
         // photos are none of the eight, and it has to cost one keystroke.
         e.preventDefault();
         setVerdicts(new Map());
-        advance(false);
+        advance(false, new Map());
         return;
       }
       if (e.key === 'Enter') {
         e.preventDefault();
-        advance(false);
+        advance(false, verdicts);
         return;
       }
       if (e.key.toLowerCase() === 'u') {
         e.preventDefault();
-        advance(true);
+        advance(true, new Map());
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [tags, cycle, advance]);
+  }, [tags, cycle, advance, verdicts]);
 
   if (stateQ.isLoading) return <div className="p-6"><Spinner /></div>;
   if (stateQ.error) return <div className="p-6"><ErrorBanner message={(stateQ.error as Error).message} /></div>;
@@ -188,6 +197,11 @@ export default function NewDedupExam() {
         <div>
           <h1 className="text-lg font-medium text-[var(--color-ink)]">
             Exam · {exam.cohort.name}
+            {exam.set !== 'routing' && (
+              <span className="ml-2 text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)] align-middle">
+                {exam.set}
+              </span>
+            )}
           </h1>
           <p className="text-xs text-[var(--color-ink-3)] mt-0.5">
             {inWarmup
@@ -247,7 +261,7 @@ export default function NewDedupExam() {
                       }`}
                     >
                       <kbd className="font-mono text-[0.7rem] px-1.5 py-0.5 rounded border border-[var(--color-rule)] text-[var(--color-ink-3)]">
-                        {i + 1}
+                        {i === 9 ? 0 : i + 1}
                       </kbd>
                       <span className="truncate">{t.label}</span>
                       {v === 'skipped' && (
@@ -263,7 +277,7 @@ export default function NewDedupExam() {
               <div className="mt-4 flex items-center gap-2 flex-wrap">
                 <button
                   type="button"
-                  onClick={() => { setVerdicts(new Map()); advance(false); }}
+                  onClick={() => { setVerdicts(new Map()); advance(false, new Map()); }}
                   disabled={answerMut.isPending}
                   className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-[var(--color-paper)] disabled:opacity-50"
                 >
@@ -271,7 +285,7 @@ export default function NewDedupExam() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => advance(false)}
+                  onClick={() => advance(false, verdicts)}
                   disabled={answerMut.isPending || verdicts.size === 0}
                   className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink)] disabled:opacity-40"
                 >
@@ -280,7 +294,7 @@ export default function NewDedupExam() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => advance(true)}
+                  onClick={() => advance(true, new Map())}
                   disabled={answerMut.isPending}
                   className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink-3)] disabled:opacity-40"
                 >
