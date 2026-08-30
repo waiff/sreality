@@ -284,6 +284,9 @@ describe('<NewDedupExam>', () => {
   it('never posts an answer during the warm-up', async () => {
     // Practice must not reach the measurement. The server would refuse it, but
     // not sending it keeps that refusal a rail rather than routine traffic.
+    vi.mocked(api.getExamState).mockResolvedValue({
+      data: examState({ progress: { total: 250, answered: 0, remaining: 250 } }),
+    });
     vi.mocked(api.getExamWarmup).mockResolvedValue({
       data: [{ image_id: 900, storage_path: 'img/9/900.jpg' }],
     });
@@ -298,11 +301,28 @@ describe('<NewDedupExam>', () => {
   });
 
   it('says the warm-up does not count', async () => {
+    vi.mocked(api.getExamState).mockResolvedValue({
+      data: examState({ progress: { total: 250, answered: 0, remaining: 250 } }),
+    });
     vi.mocked(api.getExamWarmup).mockResolvedValue({
       data: [{ image_id: 900, storage_path: 'img/9/900.jpg' }],
     });
     renderPage();
     expect(await screen.findByText(/do not count/)).toBeInTheDocument();
+  });
+
+  it('skips the warm-up entirely once the sitting has answers', async () => {
+    // The warm-up settles a COLD hand. Replaying ten practice images on every
+    // reload of a sitting 44 answers deep read as "my progress is gone" — the
+    // real, resumed question was waiting right behind it.
+    vi.mocked(api.getExamWarmup).mockResolvedValue({
+      data: [{ image_id: 900, storage_path: 'img/9/900.jpg' }],
+    });
+    renderPage(); // default examState: 12 of 250 answered
+    expect(await screen.findByText(/Which of these/)).toBeInTheDocument();
+    expect(screen.queryByText(/Warm-up/)).toBeNull();
+    expect(screen.getByText(/12 of 250 answered/)).toBeInTheDocument();
+    expect(api.getExamWarmup).not.toHaveBeenCalled();
   });
 });
 
@@ -397,6 +417,7 @@ describe('<NewDedupExam> suggestions and the warm-up', () => {
     // image on screen — marking it there would be an answer to the wrong photo.
     vi.mocked(api.getExamState).mockResolvedValue({
       data: examState({
+        progress: { total: 250, answered: 0, remaining: 250 },
         question: {
           image_id: 555, position: 13, storage_path: 'img/1/555.jpg',
           suggested_tag_ids: [22],

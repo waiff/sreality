@@ -71,13 +71,19 @@ export default function NewDedupExam() {
     queryKey: [...EXAM_KEY(cohort), setName ?? 'routing'],
     queryFn: () => getExamState(cohort, setName),
   });
+  const exam: ExamState | undefined = stateQ.data?.data;
+
+  /* The warm-up exists to settle a COLD hand, so it runs only while the sitting
+   * has zero answers. It used to replay all ten practice images on every page
+   * load — mid-sitting, that read as "my progress is gone" when the real
+   * question was waiting right behind it. Server-derived (progress.answered),
+   * so it holds across reloads and devices without any local storage. */
+  const handIsCold = (exam?.progress.answered ?? 0) === 0;
   const warmupQ = useQuery({
     queryKey: WARMUP_KEY(cohort),
     queryFn: () => getExamWarmup(cohort, WARMUP_COUNT),
-    enabled: !warmupDone,
+    enabled: !warmupDone && exam != null && handIsCold,
   });
-
-  const exam: ExamState | undefined = stateQ.data?.data;
   const tags = useMemo(() => exam?.tags ?? [], [exam]);
   const warmupRows = warmupQ.data?.data ?? [];
   const inWarmup = !warmupDone && warmupRows.length > 0 && warmupIndex < warmupRows.length;
