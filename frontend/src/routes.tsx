@@ -37,6 +37,7 @@ const NewDedupDashboard = lazyChunk(() => import('./pages/NewDedupDashboard'));
 const NewDedupSettings = lazyChunk(() => import('./pages/NewDedupSettings'));
 const NewDedupLabeling = lazyChunk(() => import('./pages/NewDedupLabeling'));
 const NewDedupExam = lazyChunk(() => import('./pages/NewDedupExam'));
+const NewDedupExamReview = lazyChunk(() => import('./pages/NewDedupExamReview'));
 const NewDedupTaxonomy = lazyChunk(() => import('./pages/NewDedupTaxonomy'));
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
@@ -113,6 +114,7 @@ export const routes: RouteObject[] = [
       { path: 'new-dedup/labeling', element: <AdminPage><NewDedupLabeling /></AdminPage>, handle: { title: 'NEW DEDUP · Labeling' } },
       { path: 'new-dedup/labeling/taxonomy', element: <AdminPage><NewDedupTaxonomy /></AdminPage>, handle: { title: 'NEW DEDUP · Taxonomy' } },
       { path: 'new-dedup/exam', element: <AdminPage><NewDedupExam /></AdminPage>, handle: { title: 'NEW DEDUP · Exam' } },
+      { path: 'new-dedup/exam/review', element: <AdminPage><NewDedupExamReview /></AdminPage>, handle: { title: 'NEW DEDUP · Exam review' } },
       { path: 'scrapers', element: <AdminPage><Scrapers /></AdminPage>, handle: { title: 'Scrapers' } },
       { path: 'dev/confidence-indicator', element: <AdminPage><DevConfidencePreview /></AdminPage>, handle: { title: 'Confidence indicator (dev)' } },
       { path: '*', element: <NotFound />, handle: { title: 'Not found' } },

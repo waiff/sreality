@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   answerExamQuestion,
   getExamState,
@@ -236,11 +236,19 @@ export default function NewDedupExam() {
               : `${progress.answered} of ${progress.total} answered · ${progress.remaining} left`}
           </p>
         </div>
-        {!exam.cohort.sealed && (
-          <span className="text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-brick)]">
-            cohort not sealed
-          </span>
-        )}
+        <div className="flex items-baseline gap-3">
+          <Link
+            to={`/new-dedup/exam/review?cohort=${encodeURIComponent(cohort)}${setName ? `&set=${encodeURIComponent(setName)}` : ''}`}
+            className="text-xs text-[var(--color-copper)] hover:underline"
+          >
+            review answers →
+          </Link>
+          {!exam.cohort.sealed && (
+            <span className="text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-brick)]">
+              cohort not sealed
+            </span>
+          )}
+        </div>
       </header>
 
       {finished ? (

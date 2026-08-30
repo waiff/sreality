@@ -1281,6 +1281,31 @@ def test_the_routing_fallback_never_asks_for_suggestions(client, monkeypatch):
     assert res.json()["data"]["question"]["suggested_tag_ids"] is None
 
 
+def test_the_review_read_serves_the_sittings_own_answers(client, monkeypatch):
+    # The review subpage: answers come back in record_answer's vocabulary, for
+    # the SAME resolved set the corrections will be posted against.
+    from toolkit import tag_exam, tag_holdout
+    import api.new_dedup_labeling as mod
+
+    got: dict = {}
+    monkeypatch.setattr(tag_holdout, "get_cohort",
+                        lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
+    monkeypatch.setattr(mod, "_exam_tag_set",
+                        lambda conn, name: ("set_1", 1,
+                                            [{"id": 22, "label": "k"}, {"id": 25, "label": "u"}]))
+    monkeypatch.setattr(tag_exam, "answers",
+                        lambda conn, **kw: got.update(kw) or [
+                            {"image_id": 5, "position": 1, "picked_tag_ids": [22],
+                             "skipped_tag_ids": [], "cant_tell": False}])
+    res = client.get("/new-dedup/labeling/exam/exam_v1/answers")
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert data["set"] == "set_1"
+    assert [t["id"] for t in data["tags"]] == [22, 25]
+    assert data["rows"][0]["picked_tag_ids"] == [22]
+    assert got["tag_ids"] == [22, 25]
+
+
 def test_an_unknown_exam_set_is_a_404(client, monkeypatch):
     from toolkit import tag_holdout
     import api.new_dedup_labeling as mod

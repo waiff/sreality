@@ -262,6 +262,10 @@ W1 (shared prerequisites + labeling program):
       never a pre-filled verdict, served only when the stored answer matches the sitting's
       exact question list. Anchoring cost recorded in PROGRAM.md's ledger; suggested-vs-final
       stays auditable per cell. Shared worker engine extracted to `toolkit/vision_batch.py`.
+      Follow-ups same day: Exam in the new-dedup nav (#1241) and an **exam review subpage**
+      (`/new-dedup/exam/review`) — every answered image in a list, same click semantics,
+      every correction re-answering the whole image through the exam's own /answer route
+      (one write path; review can never produce a row shape the exam could not).
 - [ ] **NEXT — W1 remainder:** one definition renderer with two outputs (the machine prompt and
       a plain-language handbook card, so the operator never meets `counts` / `does_not_count` /
       `confusable_with` / `leave_out_when` while labeling); the machine-label store (a SEPARATE

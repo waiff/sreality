@@ -85,6 +85,11 @@ _EXEMPT: dict[str, str] = {
     "_PROGRESS_SQL":
         "Counts how much of the exam has a verdict on every routing tag. Scoped to "
         "one cohort; it selects no training population.",
+    "_ANSWERS_SQL":
+        "The review subpage's read: a sitting's own answers, served back for "
+        "correction. Scoped to one cohort's members; edits go back through "
+        "record_answer, so it selects no training population and opens no second "
+        "write path.",
 
     # --- drawing the exam itself ----------------------------------------------
     "_PREEXISTING_LABELS_SQL":
