@@ -27,13 +27,18 @@ on:
         default: "exam_v1"
         type: string
       action:
-        description: "calibrate (measure cost) | screen | stratify"
+        description: "calibrate (measure cost) | screen | stratify | suggest (pre-answer a sitting)"
         required: false
         default: "calibrate"
         type: choice
-        options: ["calibrate", "screen", "stratify"]
+        options: ["calibrate", "screen", "stratify", "suggest"]
+      set:
+        description: "For suggest: the exam set (tag_exam_sets.name) whose question list to pre-answer."
+        required: false
+        default: ""
+        type: string
       count:
-        description: "Images to screen, or members to draw when stratifying."
+        description: "Images to screen, members to draw when stratifying, or max members to suggest."
         required: false
         default: "25"
         type: string
@@ -84,6 +89,7 @@ jobs:
         env:
           COHORT: ${{ inputs.cohort }}
           ACTION: ${{ inputs.action }}
+          EXAM_SET: ${{ inputs.set }}
           COUNT: ${{ inputs.count }}
           MAX_USD: ${{ inputs.max_usd }}
           WORKERS: ${{ inputs.workers }}
@@ -105,13 +111,23 @@ jobs:
           case "${WORKERS:-8}" in
             ''|*[!0-9]*) echo "::error::workers must be a number"; exit 1 ;;
           esac
+          MODULE="scripts.screen_exam_cohort"
           case "${ACTION}" in
             calibrate) FLAG="--calibrate ${COUNT}" ;;
             screen)    FLAG="--screen ${COUNT}" ;;
             stratify)  FLAG="--stratify ${COUNT}" ;;
+            suggest)
+              # The suggest lane pre-answers one SITTING: same engine, same
+              # spending rails, different script (it must accept a sealed
+              # cohort — sittings happen after sealing).
+              case "${EXAM_SET}" in
+                ''|*[!a-zA-Z0-9_-]*) echo "::error::suggest needs set=[A-Za-z0-9_-]+"; exit 1 ;;
+              esac
+              MODULE="scripts.suggest_exam_answers"
+              FLAG="--set ${EXAM_SET} --count ${COUNT}" ;;
             *) echo "::error::unknown action ${ACTION}"; exit 1 ;;
           esac
           ARGS="--cohort ${COHORT} ${FLAG} --max-usd ${MAX_USD} --max-seconds 1500 --workers ${WORKERS:-8}"
           if [ "${DRY_RUN:-false}" = "true" ]; then ARGS="${ARGS} --dry-run"; fi
-          echo "python -m scripts.screen_exam_cohort ${ARGS}"
-          python -m scripts.screen_exam_cohort ${ARGS}
+          echo "python -m ${MODULE} ${ARGS}"
+          python -m ${MODULE} ${ARGS}

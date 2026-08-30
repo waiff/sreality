@@ -69,15 +69,50 @@ describe('<NewDedupExam>', () => {
     }
   });
 
-  it('never shows a machine suggestion', async () => {
-    // An exam the machine helped answer cannot grade the machine, so the
-    // screener's guesses are not even requested.
+  it('a suggestion is a mark, never a pre-filled verdict', async () => {
+    // The operator's 2026-08-30 ruling reversed the no-suggestion posture, but
+    // the line that keeps the exam auditable holds: the machine marks a button,
+    // it never presses one. The verdict state — and therefore what gets
+    // written — starts untouched regardless of what the machine thinks.
+    vi.mocked(api.getExamState).mockResolvedValue({
+      data: examState({
+        question: {
+          image_id: 555, position: 13, storage_path: 'img/1/555.jpg',
+          suggested_tag_ids: [22],
+        },
+      }),
+    });
     renderPage();
     await screen.findByText(/Which of these/);
+    expect(screen.getByTestId('suggested-22')).toBeInTheDocument();
     for (const t of TAGS) {
       expect(screen.getByRole('button', { name: new RegExp(t.label) }))
         .toHaveAttribute('aria-pressed', 'false');
     }
+    expect(screen.getByRole('button', { name: /^Confirm/ })).toBeDisabled();
+  });
+
+  it('an empty suggestion marks "none of these" — silence would be ambiguous', async () => {
+    // [] = the machine genuinely says none; null = nothing worth showing. The
+    // two must render differently or "no dot" could mean either.
+    vi.mocked(api.getExamState).mockResolvedValue({
+      data: examState({
+        question: {
+          image_id: 555, position: 13, storage_path: 'img/1/555.jpg',
+          suggested_tag_ids: [],
+        },
+      }),
+    });
+    renderPage();
+    await screen.findByText(/Which of these/);
+    expect(screen.getByTestId('suggested-none')).toBeInTheDocument();
+  });
+
+  it('shows no mark at all when no suggestion was computed', async () => {
+    renderPage();
+    await screen.findByText(/Which of these/);
+    expect(screen.queryByTestId('suggested-22')).toBeNull();
+    expect(screen.queryByTestId('suggested-none')).toBeNull();
   });
 
   it('keeps the key legend permanently on screen', async () => {
@@ -171,11 +206,13 @@ describe('<NewDedupExam>', () => {
     ));
   });
 
-  it('picks a tag with its number key', async () => {
+  it('picks a tag with its letter key', async () => {
+    // Letters, not digits (operator's ruling): on Czech QWERTZ the digit row is
+    // shifted, and letters cannot collide with the labeling grid's digit habit.
     const user = userEvent.setup();
     renderPage();
     await screen.findByText(/Which of these/);
-    await user.keyboard('2');
+    await user.keyboard('e');
     expect(screen.getByRole('button', { name: /interier - kuchyně/ }))
       .toHaveAttribute('aria-pressed', 'true');
   });
@@ -193,14 +230,14 @@ describe('<NewDedupExam>', () => {
     ));
   });
 
-  it('cycles pick -> leave-out with the same number key', async () => {
+  it('cycles pick -> leave-out with the same letter key', async () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByText(/Which of these/);
-    await user.keyboard('2');
+    await user.keyboard('e');
     expect(screen.getByRole('button', { name: /interier - kuchyně/ }))
       .toHaveAttribute('aria-pressed', 'true');
-    await user.keyboard('2');
+    await user.keyboard('e');
     expect(screen.getByText('left out')).toBeInTheDocument();
   });
 
@@ -209,14 +246,14 @@ describe('<NewDedupExam>', () => {
     expect(await screen.findByText(/again = leave it out of that tag/)).toBeInTheDocument();
   });
 
-  it('ignores a digit typed into a text field', async () => {
+  it('ignores a key typed into a text field', async () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByText(/Which of these/);
     const input = document.createElement('input');
     document.body.appendChild(input);
     input.focus();
-    await user.keyboard('3');
+    await user.keyboard('i');
     expect(screen.getByRole('button', { name: /podklad - půdorys/ }))
       .toHaveAttribute('aria-pressed', 'false');
     input.remove();
@@ -303,7 +340,7 @@ describe('<NewDedupExam> iterations (sets)', () => {
       expect.stringContaining('jídelna'),
       expect.stringContaining('nezařízená'),
     ]);
-    await user.keyboard('2');
+    await user.keyboard('e');
     await user.keyboard(' ');
     await waitFor(() => expect(api.answerExamQuestion).toHaveBeenCalledWith(
       'exam_v1',
@@ -318,17 +355,22 @@ describe('<NewDedupExam> iterations (sets)', () => {
     expect(screen.queryByText('routing')).toBeNull();
   });
 
-  it('key 0 reaches the tenth button of a full set', async () => {
+  it('the letter grid reaches all twelve buttons of a full set', async () => {
+    // Twelve positions, keyboard-shaped: w e i o / s d k l / y x n m. Sets are
+    // capped at 12 (migration 461) because this is where the keys run out.
     vi.mocked(api.getExamState).mockResolvedValue({
       data: examState({
-        tags: Array.from({ length: 10 }, (_, i) => ({ id: 100 + i, label: `tag ${i + 1}` })),
+        tags: Array.from({ length: 12 }, (_, i) => ({ id: 100 + i, label: `tag ${i + 1}` })),
       }),
     });
     const user = userEvent.setup();
     renderPage();
     await screen.findByText(/Which of these/);
-    await user.keyboard('0');
+    await user.keyboard('x');
     expect(screen.getByRole('button', { name: /tag 10/ }))
+      .toHaveAttribute('aria-pressed', 'true');
+    await user.keyboard('m');
+    expect(screen.getByRole('button', { name: /tag 12/ }))
       .toHaveAttribute('aria-pressed', 'true');
   });
 });
@@ -346,5 +388,30 @@ describe('<NewDedupExam> abandoned picks', () => {
       'exam_v1',
       { image_id: 555, picked_tag_ids: [], skipped_tag_ids: [], cant_tell: false },
     ));
+  });
+});
+
+describe('<NewDedupExam> suggestions and the warm-up', () => {
+  it('never marks a suggestion on a warm-up image', async () => {
+    // The served suggestion belongs to the NEXT REAL question, not the practice
+    // image on screen — marking it there would be an answer to the wrong photo.
+    vi.mocked(api.getExamState).mockResolvedValue({
+      data: examState({
+        question: {
+          image_id: 555, position: 13, storage_path: 'img/1/555.jpg',
+          suggested_tag_ids: [22],
+        },
+      }),
+    });
+    vi.mocked(api.getExamWarmup).mockResolvedValue({
+      data: [{ image_id: 900, storage_path: 'img/9/900.jpg' }],
+    });
+    vi.mocked(queries.fetchImagesByImageIds).mockResolvedValue(
+      new Map([[900, { id: 900, storage_path: 'img/9/900.jpg' } as never]]),
+    );
+    renderPage();
+    expect(await screen.findByText(/Warm-up 1 of 1/)).toBeInTheDocument();
+    expect(screen.queryByTestId('suggested-22')).toBeNull();
+    expect(screen.queryByTestId('suggested-none')).toBeNull();
   });
 });

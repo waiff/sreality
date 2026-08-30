@@ -140,6 +140,28 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-08-30 — **Exam keys become letters, sets cap 12, machine suggestions ON (operator
+  ruling; PR: exam letters + suggestions, migration 461).** Three operator instructions in one
+  turn: (1) set_2 extended by "chodba / předsíň, ložnice, chodba / schodiště, vstupní dveře" —
+  mapped to tags 30/26/18 one-to-one; "vstupní dveře" has no single tag, so BOTH entrance tags
+  (2 exterier, 19 interier) were seated, trimming either is one array edit. (2) The exam keys
+  are the letter grid w e i o / s d k l / y x n m — twelve positions laid out like the keyboard
+  (Czech QWERTZ's digit row is shifted), sets capped at 12 where the keys run out. (3) Each
+  exam image is pre-run through gpt-5-mini and the suggested buttons get a subtle dot
+  (`tag_exam_suggestions`, `scripts/suggest_exam_answers.py`, suggest action on the screen
+  lane). This REVERSES the exam's founding no-suggestion posture ("an exam the machine helped
+  answer cannot grade the machine") — the operator ordered it knowing that context. Recorded
+  consequence: sittings now measure agreement with a machine-ANCHORED human, not blind
+  agreement. Mitigations built in: every suggestion is stored beside the final answer with the
+  exact question list it answered (suggested-vs-final anchoring stays computable per image and
+  per tag, forever); a suggestion is a mark, never a pre-filled verdict; a stored suggestion is
+  served ONLY when its asked list equals the sitting's current list (sets grow by columns — a
+  3-tag answer must not mark a subset of 8 buttons while looking complete); the suggester's
+  prompt is precision-tuned, the exact opposite of the screener (a wrong mark anchors, an
+  omission merely leaves a button unmarked). The worker engine was extracted to
+  `toolkit/vision_batch.py` — screen and suggest share one loop (budget checked pre-call in the
+  worker, per-worker connections), third consumer (W3 machine relabel) already on the roadmap.
+
 - 2026-08-27 (part 2) — **Course correction (operator instruction): no invented rules.** The
   operator's standing principle, now in the non-negotiables: the pipeline must stay simple
   enough to hold in one head; NO new rules, safeguards, or mechanisms enter the plan until the

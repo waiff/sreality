@@ -23,7 +23,7 @@ from toolkit import tag_annotations
 from toolkit import tag_candidates
 from toolkit import tag_definition_render as tdr
 from toolkit import tag_definitions as td
-from toolkit import tag_exam, tag_holdout
+from toolkit import exam_suggestions, tag_exam, tag_holdout
 
 router = APIRouter(
     prefix="/new-dedup/labeling", tags=["new-dedup-labeling"],
@@ -621,13 +621,18 @@ def get_tag_neighbours(
 # --- the sealed exam (migrations 458 + 459) ---------------------------------
 #
 # The exam GRADES the probes, so this is the one surface that shows an operator a
-# holdout image on purpose. Two rules make it a measurement rather than a labelling
-# session, and both live here rather than in the client:
-#   * no machine suggestion is ever returned with a question — a pre-ticked answer
-#     would anchor the operator, and an exam the machine helped answer cannot grade
-#     the machine;
+# holdout image on purpose. The rules that make it a measurement live here rather
+# than in the client:
 #   * an answer is refused for any image outside the cohort, which is what stops a
-#     mis-wired client writing warm-up practice into the measurement.
+#     mis-wired client writing warm-up practice into the measurement;
+#   * a machine suggestion travels WITH the question since 2026-08-30 — the
+#     operator's own ruling, reversing the original no-suggestion posture. The
+#     honest cost: a machine-assisted sitting measures agreement with a
+#     machine-ANCHORED human, not blind agreement. The mitigation is provenance
+#     (tag_exam_suggestions keeps every suggestion beside the final answer, so
+#     anchoring stays computable per image and per tag) plus discipline in the
+#     client: a suggestion is a subtle mark, never a pre-filled verdict, and it is
+#     served only when it was computed against the sitting's exact question list.
 
 
 class ExamAnswerIn(BaseModel):
@@ -654,7 +659,9 @@ def _routing_tags(conn: Any) -> list[dict[str, Any]]:
         return [{"id": int(r[0]), "label": r[1]} for r in cur.fetchall()]
 
 
-def _exam_tag_set(conn: Any, set_name: str | None) -> tuple[str, list[dict[str, Any]]]:
+def _exam_tag_set(
+    conn: Any, set_name: str | None,
+) -> tuple[str, int | None, list[dict[str, Any]]]:
     """Resolve one sitting's question list.
 
     A named set (migration 460) is the normal path: iterations of the exam are
@@ -679,20 +686,21 @@ def _exam_tag_set(conn: Any, set_name: str | None) -> tuple[str, list[dict[str, 
             cur.execute("SELECT name FROM tag_exam_sets ORDER BY id LIMIT 1")
             row = cur.fetchone()
         if row is None:
-            return "routing", _routing_tags(conn)
+            return "routing", None, _routing_tags(conn)
         set_name = str(row[0])
     with conn.cursor() as cur:
-        cur.execute("SELECT tag_ids FROM tag_exam_sets WHERE name = %s", (set_name,))
+        cur.execute("SELECT id, tag_ids FROM tag_exam_sets WHERE name = %s", (set_name,))
         row = cur.fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail=f"exam set {set_name!r} not found")
-        ordered = [int(x) for x in row[0]]
+        set_id = int(row[0])
+        ordered = [int(x) for x in row[1]]
         cur.execute(
             "SELECT id, label FROM tag_taxonomy WHERE id = ANY(%s) AND active",
             (ordered,),
         )
         labels = {int(r[0]): r[1] for r in cur.fetchall()}
-    return set_name, [
+    return set_name, set_id, [
         {"id": i, "label": labels[i]} for i in ordered if i in labels
     ]
 
@@ -714,14 +722,26 @@ def get_exam_state(
     the question so the buttons are the server's list, never a client copy; `set`
     names which iteration's question list to sit (migration 460)."""
     cohort = _cohort_or_404(conn, cohort_name)
-    set_name, tags = _exam_tag_set(conn, set)
+    set_name, set_id, tags = _exam_tag_set(conn, set)
     tag_ids = [t["id"] for t in tags]
+    question = tag_exam.next_question(conn, cohort_id=cohort["id"], tag_ids=tag_ids)
+    if question is not None:
+        # None = nothing worth showing (not computed, errored, or computed against
+        # a different question list); [] = the machine genuinely suggests none,
+        # which the client shows too. The lane that fills the store is
+        # scripts/suggest_exam_answers.py.
+        question["suggested_tag_ids"] = (
+            exam_suggestions.suggestion_for(
+                conn, cohort_id=cohort["id"], image_id=question["image_id"],
+                set_id=set_id, current_tag_ids=tag_ids)
+            if set_id is not None else None
+        )
     return {"data": {
         "cohort": {"name": cohort["name"], "sealed": cohort["sealed_at"] is not None},
         "set": set_name,
         "tags": tags,
         "progress": tag_exam.progress(conn, cohort_id=cohort["id"], tag_ids=tag_ids),
-        "question": tag_exam.next_question(conn, cohort_id=cohort["id"], tag_ids=tag_ids),
+        "question": question,
     }}
 
 
@@ -741,7 +761,7 @@ def post_exam_answer(
     cohort_name: str, body: ExamAnswerIn, conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
     cohort = _cohort_or_404(conn, cohort_name)
-    _, tags = _exam_tag_set(conn, body.set)
+    _, _, tags = _exam_tag_set(conn, body.set)
     tag_ids = [t["id"] for t in tags]
     try:
         return {"data": tag_exam.record_answer(

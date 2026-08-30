@@ -252,6 +252,16 @@ W1 (shared prerequisites + labeling program):
       refuses to start on an unmeasured rate. The exam screen is deliberately unlike
       the labeling grid (one large image, permanent key legend): that grid binds 1-4 to
       STATES while the exam binds 1-8 to TAGS, same operator, adjacent pages.
+- [x] **Exam iteration-2 upgrades (2026-08-30, migration 461)** — set_2 extended to 8 tags
+      (operator's four names; "vstupní dveře" seated as BOTH entrance tags, 2+19, since the
+      taxonomy splits the door by side); exam keys became the letter grid w e i o / s d k l /
+      y x n m (Czech QWERTZ digits are shifted; letters also can't collide with the labeling
+      grid's digit-to-state habit), set cap 10→12 where the keys run out; and machine
+      suggestions ON per operator ruling — each exam image pre-run through gpt-5-mini
+      (`tag_exam_suggestions` + suggest action on the screen lane), rendered as a subtle dot,
+      never a pre-filled verdict, served only when the stored answer matches the sitting's
+      exact question list. Anchoring cost recorded in PROGRAM.md's ledger; suggested-vs-final
+      stays auditable per cell. Shared worker engine extracted to `toolkit/vision_batch.py`.
 - [ ] **NEXT — W1 remainder:** one definition renderer with two outputs (the machine prompt and
       a plain-language handbook card, so the operator never meets `counts` / `does_not_count` /
       `confusable_with` / `leave_out_when` while labeling); the machine-label store (a SEPARATE

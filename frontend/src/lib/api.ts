@@ -1392,6 +1392,13 @@ export interface ExamQuestion {
   image_id: number;
   position: number;
   storage_path: string | null;
+  /* The machine's pre-answer for THIS image against THIS sitting's question
+   * list (scripts/suggest_exam_answers.py). null = nothing worth showing (not
+   * computed, errored, or computed against a different question list); [] =
+   * the machine genuinely suggests none. Rendered as a subtle mark, never a
+   * pre-filled verdict — the stored suggestion vs the final answer is the
+   * standing anchoring audit. */
+  suggested_tag_ids?: number[] | null;
 }
 
 export interface ExamState {
@@ -1403,9 +1410,9 @@ export interface ExamState {
    * buttons must be the same set the answers are written against. */
   tags: ExamTag[];
   progress: { total: number; answered: number; remaining: number };
-  /* Null when every image has a verdict on every tag. Deliberately carries NO
-   * machine suggestion — a pre-ticked answer would anchor the operator, and an
-   * exam the machine helped answer cannot grade the machine. */
+  /* Null when every image has a verdict on every tag. Carries the machine's
+   * suggestion since 2026-08-30 (the operator's ruling, reversing the original
+   * no-suggestion posture) — see ExamQuestion.suggested_tag_ids. */
   question: ExamQuestion | null;
 }
 

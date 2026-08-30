@@ -66,6 +66,7 @@ CalledFor = Literal[
     "summarize_region_dispositions",
     "enrich_listing_description",
     "screen_exam_image",
+    "suggest_exam_answer",
 ]
 
 
