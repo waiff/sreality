@@ -745,6 +745,24 @@ def get_exam_state(
     }}
 
 
+@router.get("/exam/{cohort_name}/answers")
+def get_exam_answers(
+    cohort_name: str, set: str | None = None, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Every fully-answered image of one sitting with its current verdicts, in
+    draw order — the review subpage. Corrections are POSTed back to the same
+    /answer route the exam uses: one write path, re-answering the whole image,
+    so review can never produce a row shape the exam could not."""
+    cohort = _cohort_or_404(conn, cohort_name)
+    set_name, _set_id, tags = _exam_tag_set(conn, set)
+    tag_ids = [t["id"] for t in tags]
+    return {"data": {
+        "set": set_name,
+        "tags": tags,
+        "rows": tag_exam.answers(conn, cohort_id=cohort["id"], tag_ids=tag_ids),
+    }}
+
+
 @router.get("/exam/{cohort_name}/warmup")
 def get_exam_warmup(
     cohort_name: str, limit: int = 10, conn: Any = Depends(deps.get_db_conn),

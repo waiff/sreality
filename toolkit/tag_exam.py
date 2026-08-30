@@ -327,6 +327,24 @@ _PROGRESS_SQL = """
     WHERE m.cohort_id = %(cohort_id)s
 """
 
+# Fully-answered members with their current per-tag verdicts, for the review
+# subpage. "Fully answered" mirrors _PROGRESS_SQL: a verdict on EVERY tag of the
+# sitting — a half-answered image still belongs to the exam screen, not review.
+_ANSWERS_SQL = """
+    SELECT m.image_id, m.position,
+           jsonb_object_agg(l.tag_id::text, jsonb_build_object(
+             'state', l.state, 'reason', l.excluded_reason)) AS cells
+    FROM tag_exam_members m
+    JOIN image_tag_labels l
+      ON l.image_id = m.image_id
+     AND l.tag_id = ANY(%(tag_ids)s::bigint[])
+     AND l.source IN ('human', 'human_confirmed')
+    WHERE m.cohort_id = %(cohort_id)s
+    GROUP BY m.image_id, m.position
+    HAVING count(*) = %(tag_count)s
+    ORDER BY m.position
+"""
+
 _IS_MEMBER_SQL = """
     SELECT 1 FROM tag_exam_members
     WHERE cohort_id = %(cohort_id)s AND image_id = %(image_id)s
@@ -369,6 +387,46 @@ def progress(
         row = cur.fetchone()
     total, answered = (int(row[0]), int(row[1])) if row else (0, 0)
     return {"total": total, "answered": answered, "remaining": total - answered}
+
+
+def answers(
+    conn: psycopg.Connection, *, cohort_id: int, tag_ids: list[int],
+) -> list[dict[str, Any]]:
+    """Every fully-answered exam image with its verdicts, in draw order — the
+    read behind the review subpage. The verdict vocabulary is record_answer's
+    own, inverted: positive -> picked, excluded/'pruned' -> skipped,
+    excluded/'ambiguous' on every tag -> cant_tell, negative -> untouched.
+    Editing goes back through record_answer, never through a second write path."""
+    from toolkit import tag_annotations as ta
+
+    with conn.cursor() as cur:
+        cur.execute(_ANSWERS_SQL, {
+            "cohort_id": cohort_id, "tag_ids": tag_ids, "tag_count": len(tag_ids),
+        })
+        rows = cur.fetchall()
+    out: list[dict[str, Any]] = []
+    for image_id, position, cells in rows:
+        picked, skipped = [], []
+        ambiguous = 0
+        for tag_id in tag_ids:
+            cell = (cells or {}).get(str(tag_id))
+            if cell is None:
+                continue
+            if cell["state"] == "positive":
+                picked.append(tag_id)
+            elif cell["state"] == "excluded" and cell["reason"] == ta.EXCLUDED_PRUNED:
+                skipped.append(tag_id)
+            elif cell["state"] == "excluded" and cell["reason"] == ta.EXCLUDED_AMBIGUOUS:
+                ambiguous += 1
+        out.append({
+            "image_id": int(image_id), "position": int(position),
+            "picked_tag_ids": picked, "skipped_tag_ids": skipped,
+            # record_answer writes 'ambiguous' on EVERY tag or none, so a full
+            # sweep is the only honest cant_tell; anything partial renders as
+            # its per-tag states.
+            "cant_tell": ambiguous == len(tag_ids) and len(tag_ids) > 0,
+        })
+    return out
 
 
 def warmup_images(

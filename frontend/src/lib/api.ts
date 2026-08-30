@@ -1424,6 +1424,25 @@ export const getExamState = (cohort: string, set?: string): Promise<{ data: Exam
 
 /* Practice images from OUTSIDE the exam — they settle the hand without spending
  * real exam images, and answers for them are refused server-side. */
+export interface ExamAnswerRow {
+  image_id: number;
+  position: number;
+  picked_tag_ids: number[];
+  skipped_tag_ids: number[];
+  cant_tell: boolean;
+}
+
+/* Every fully-answered image of one sitting with its current verdicts, draw
+ * order. Corrections go back through answerExamQuestion — the same single write
+ * path the exam uses. */
+export const getExamAnswers = (
+  cohort: string, set?: string,
+): Promise<{ data: { set: string; tags: ExamTag[]; rows: ExamAnswerRow[] } }> =>
+  request<{ data: { set: string; tags: ExamTag[]; rows: ExamAnswerRow[] } }>(
+    `/new-dedup/labeling/exam/${cohort}/answers${set ? `?set=${encodeURIComponent(set)}` : ''}`,
+    { jwt: true },
+  );
+
 export const getExamWarmup = (
   cohort: string, limit = 10,
 ): Promise<{ data: Array<{ image_id: number; storage_path: string | null }> }> =>
