@@ -1114,7 +1114,7 @@ def test_exam_answer_plumbs_the_per_tag_leave_out(client, monkeypatch):
     monkeypatch.setattr(tag_holdout, "get_cohort",
                         lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
     monkeypatch.setattr(mod, "_exam_tag_set",
-                        lambda conn, name: ("set_1",
+                        lambda conn, name: ("set_1", 1,
                                             [{"id": 22, "label": "k"}, {"id": 25, "label": "u"}]))
     monkeypatch.setattr(tag_exam, "record_answer",
                         lambda conn, **kw: got.update(kw) or
@@ -1136,7 +1136,7 @@ def test_exam_answer_422s_on_an_overlapping_pick_and_skip(client, monkeypatch):
     monkeypatch.setattr(tag_holdout, "get_cohort",
                         lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
     monkeypatch.setattr(mod, "_exam_tag_set",
-                        lambda conn, name: ("set_1", [{"id": 22, "label": "k"}]))
+                        lambda conn, name: ("set_1", 1, [{"id": 22, "label": "k"}]))
     def _raise(conn, **kw):
         raise ValueError("picked and skipped overlap: [22]")
     monkeypatch.setattr(tag_exam, "record_answer", _raise)
@@ -1157,7 +1157,7 @@ def test_exam_set_resolution_preserves_the_arrays_order(client, monkeypatch):
         def __enter__(self): return self
         def __exit__(self, *a): return None
         def execute(self, sql, params=None):
-            self._rows = ([([28, 20, 27],)] if "tag_exam_sets" in sql
+            self._rows = ([(2, [28, 20, 27])] if "tag_exam_sets" in sql
                           else [(20, "jídelna"), (27, "nezařízená"), (28, "obývací")])
         def fetchone(self): return self._rows[0]
         def fetchall(self): return self._rows
@@ -1201,7 +1201,7 @@ def test_a_bare_url_sits_the_first_set_not_the_routing_flags(client, monkeypatch
             if "ORDER BY id LIMIT 1" in sql:
                 self._rows = [("set_1",)]
             elif "tag_exam_sets" in sql:
-                self._rows = [([3, 17],)]
+                self._rows = [(1, [3, 17])]
             elif "routing_categories" in sql:
                 raise AssertionError(
                     "bare URL reached the routing derivation while a set exists")
@@ -1226,6 +1226,59 @@ def test_a_bare_url_sits_the_first_set_not_the_routing_flags(client, monkeypatch
     finally:
         api_main.app.dependency_overrides.pop(deps.get_db_conn, None)
     _ = mod
+
+
+def test_the_question_carries_the_machine_suggestion(client, monkeypatch):
+    """The operator's 2026-08-30 ruling, reversing the no-suggestion posture:
+    the machine's pre-answer travels WITH the question — resolved server-side
+    against the sitting's set, so the client can only mark what was actually
+    asked."""
+    from toolkit import exam_suggestions, tag_exam, tag_holdout
+    import api.new_dedup_labeling as mod
+
+    got: dict = {}
+    monkeypatch.setattr(tag_holdout, "get_cohort",
+                        lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
+    monkeypatch.setattr(mod, "_exam_tag_set",
+                        lambda conn, name: ("set_2", 2,
+                                            [{"id": 28, "label": "o"}, {"id": 20, "label": "j"}]))
+    monkeypatch.setattr(tag_exam, "progress",
+                        lambda conn, **kw: {"total": 250, "answered": 0, "remaining": 250})
+    monkeypatch.setattr(tag_exam, "next_question",
+                        lambda conn, **kw: {"image_id": 555, "position": 1,
+                                            "storage_path": "img/1/555.jpg"})
+    monkeypatch.setattr(exam_suggestions, "suggestion_for",
+                        lambda conn, **kw: got.update(kw) or [28])
+    res = client.get("/new-dedup/labeling/exam/exam_v1?set=set_2")
+    assert res.status_code == 200
+    q = res.json()["data"]["question"]
+    assert q["suggested_tag_ids"] == [28]
+    # Resolved against the sitting's OWN set and question list, never a default.
+    assert got["set_id"] == 2 and got["image_id"] == 555
+    assert got["current_tag_ids"] == [28, 20]
+
+
+def test_the_routing_fallback_never_asks_for_suggestions(client, monkeypatch):
+    # No set row means no set_id to key the store on; the fallback serves null
+    # rather than guessing which stored question list might apply.
+    from toolkit import exam_suggestions, tag_exam, tag_holdout
+    import api.new_dedup_labeling as mod
+
+    monkeypatch.setattr(tag_holdout, "get_cohort",
+                        lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
+    monkeypatch.setattr(mod, "_exam_tag_set",
+                        lambda conn, name: ("routing", None, [{"id": 22, "label": "k"}]))
+    monkeypatch.setattr(tag_exam, "progress",
+                        lambda conn, **kw: {"total": 250, "answered": 0, "remaining": 250})
+    monkeypatch.setattr(tag_exam, "next_question",
+                        lambda conn, **kw: {"image_id": 5, "position": 1,
+                                            "storage_path": None})
+    def _boom(conn, **kw):
+        raise AssertionError("suggestion_for called with no set to key on")
+    monkeypatch.setattr(exam_suggestions, "suggestion_for", _boom)
+    res = client.get("/new-dedup/labeling/exam/exam_v1")
+    assert res.status_code == 200
+    assert res.json()["data"]["question"]["suggested_tag_ids"] is None
 
 
 def test_an_unknown_exam_set_is_a_404(client, monkeypatch):
@@ -1262,7 +1315,7 @@ def test_the_answer_resolves_the_same_set_as_the_question(client, monkeypatch):
     monkeypatch.setattr(tag_holdout, "get_cohort",
                         lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
     monkeypatch.setattr(mod, "_exam_tag_set",
-                        lambda conn, name: (name or "routing",
+                        lambda conn, name: (name or "routing", 1,
                                             [{"id": 28, "label": "o"}, {"id": 20, "label": "j"}]))
     monkeypatch.setattr(tag_exam, "record_answer",
                         lambda conn, **kw: got.update(kw) or

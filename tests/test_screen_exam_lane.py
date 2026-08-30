@@ -116,6 +116,12 @@ def test_the_check_restates_every_value_it_inherited() -> None:
         (ROOT / "migrations" / "459_exam_screening.sql").read_text())
     missing = inherited - restated
     assert not missing, f"459 drops inherited called_for values: {sorted(missing)}"
+    # 461 restates the CHECK again (adding suggest_exam_answer); the same rule
+    # applies down the chain — anything 459 carried must survive.
+    restated_461 = _check_values(
+        (ROOT / "migrations" / "461_exam_letters_sets12_and_suggestions.sql").read_text())
+    missing_461 = restated - restated_461
+    assert not missing_461, f"461 drops inherited called_for values: {sorted(missing_461)}"
 
 
 # --- the truncation trap ----------------------------------------------------
@@ -166,8 +172,8 @@ def test_each_worker_opens_its_own_connection() -> None:
     row per call — sharing one connection across workers would interleave writes on
     it, which is the classic way a parallel lane corrupts its own cost ledger."""
     import inspect
-    import scripts.screen_exam_cohort as mod
-    src = inspect.getsource(mod._screen_batch)
+    from toolkit import vision_batch
+    src = inspect.getsource(vision_batch.run_vision_batch)
     assert "wconn = db.connect()" in src
     assert "wconn.close()" in src
 
@@ -176,8 +182,8 @@ def test_the_budget_is_checked_by_the_worker_under_a_lock() -> None:
     # Checking after the fact on a parallel lane means discovering the overspend
     # once every in-flight call has already been billed.
     import inspect
-    import scripts.screen_exam_cohort as mod
-    src = inspect.getsource(mod._screen_batch)
+    from toolkit import vision_batch
+    src = inspect.getsource(vision_batch.run_vision_batch)
     assert "with lock:" in src and "_stop()" in src
 
 

@@ -21,10 +21,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-import queue
 import sys
-import threading
-import time
 from typing import Any
 
 LOG = logging.getLogger("screen_exam_cohort")
@@ -128,85 +125,34 @@ def _screen_batch(
     tags: list[dict[str, Any]], model: str, max_usd: float, max_seconds: int,
     workers: int,
 ) -> dict[str, Any]:
-    """Screen `rows` across `workers` threads, writing results as they land.
+    """Screen `rows` through the shared vision-batch engine, sinking into
+    tag_exam_screens.
 
-    The budget is enforced by the WORKERS, before each call, under a lock — not by
-    the main thread afterwards. Checking after the fact on a parallel lane means
-    discovering the overspend once every in-flight call has already been billed.
+    The worker pool, per-worker connections, and the pre-call budget lock all
+    live in toolkit.vision_batch now — the suggest lane runs the identical loop
+    with a different sink, and a copied loop is the kind of drift where one copy
+    learns a lesson and the other repeats it.
     """
-    from api.llm_client import LLMClient
-    from api.providers.openai import OpenAIProvider
-    from scraper import db
     from toolkit import exam_screening as es
-    from toolkit.vision_images import COMPARISON_MAX_EDGE, image_block
+    from toolkit import vision_batch
 
     prompt = es.build_prompt(tags)
     valid = {t["id"] for t in tags}
-    stats = {"ok": 0, "errors": 0, "hits": 0, "spent": 0.0, "aborted": False}
-    lock = threading.Lock()
-    started = time.monotonic()
-    work: queue.Queue = queue.Queue()
-    for row in rows:
-        work.put(row)
 
-    def _stop() -> bool:
-        if max_usd > 0 and stats["spent"] >= max_usd:
-            return True
-        return max_seconds > 0 and time.monotonic() - started >= max_seconds
+    def _record(wconn: Any, image_id: int, ids: list[int] | None,
+                error: str | None) -> None:
+        # Recorded as an ERROR when ids is None, never as an empty guess: the two
+        # look identical downstream and mean opposite things.
+        es.record_screen(wconn, cohort_id=cohort_id, image_id=image_id,
+                         guess_tag_ids=ids, model=model, error=error)
 
-    def _worker() -> None:
-        # One connection and one client per worker, opened here so the thread that
-        # uses them is the thread that owns them.
-        wconn = db.connect()
-        try:
-            llm = LLMClient(wconn, providers={"openai": OpenAIProvider()})
-            while True:
-                try:
-                    image_id, storage_path = work.get_nowait()
-                except queue.Empty:
-                    return
-                with lock:
-                    if _stop():
-                        stats["aborted"] = True
-                        return
-                try:
-                    block = image_block(r2, storage_path, COMPARISON_MAX_EDGE)
-                    res = llm.call(
-                        called_for=CALLED_FOR, model=model, max_tokens=MAX_TOKENS,
-                        messages=[{"role": "user", "content": [
-                            block, {"type": "text", "text": prompt}]}],
-                    )
-                    cost = float(getattr(res, "cost_usd", 0.0) or 0.0)
-                    ids = es.parse_guess(getattr(res, "text", "") or "", valid_ids=valid)
-                except Exception as exc:  # noqa: BLE001 - one image must not kill the pass
-                    # Recorded as an ERROR, never as an empty guess: the two look
-                    # identical downstream and mean opposite things.
-                    with lock:
-                        stats["errors"] += 1
-                    es.record_screen(wconn, cohort_id=cohort_id, image_id=image_id,
-                                     guess_tag_ids=None, model=model, error=str(exc)[:500])
-                    continue
-                with lock:
-                    stats["ok"] += 1
-                    stats["spent"] += cost
-                    if ids:
-                        stats["hits"] += 1
-                es.record_screen(wconn, cohort_id=cohort_id, image_id=image_id,
-                                 guess_tag_ids=ids, model=model, error=None)
-        finally:
-            wconn.close()
-
-    threads = [threading.Thread(target=_worker, daemon=True)
-               for _ in range(max(1, min(workers, WORKERS_MAX)))]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    if stats["aborted"]:
-        LOG.warning("SCREEN stopped early: ceiling $%.2f or %ds reached",
-                    max_usd, max_seconds)
-    return stats
-
+    return vision_batch.run_vision_batch(
+        r2, rows=rows, prompt=prompt,
+        parse=lambda text: es.parse_guess(text, valid_ids=valid),
+        record=_record, model=model, called_for=CALLED_FOR,
+        max_tokens=MAX_TOKENS, max_usd=max_usd, max_seconds=max_seconds,
+        workers=max(1, min(workers, WORKERS_MAX)),
+    )
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)

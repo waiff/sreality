@@ -109,6 +109,11 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
     # `_public` view. See the note in test_migration_rls_grants.py.
     "tag_candidates",
     "tag_exam_cohorts",
+    # tag_exam_screens (459) + tag_exam_suggestions (461): the screener's guesses
+    # and the sitting pre-answers — machine output about the answer key, backend-
+    # only, no `_public` view.
+    "tag_exam_screens",
+    "tag_exam_suggestions",
     "tag_exam_members",
     "tag_exam_sets",
     "workflow_failures", "workflow_run_health",

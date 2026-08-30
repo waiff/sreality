@@ -20,35 +20,48 @@ import { pushToast } from '@/lib/toast';
  *
  * This screen must NOT look like the labeling grid, and the reason is concrete
  * rather than aesthetic. That grid binds 1-4 to STATES (yes / no / excluded);
- * this one binds 1-8 to TAG IDENTITIES. Same operator, same session, adjacent
+ * this one binds keys to TAG IDENTITIES. Same operator, same session, adjacent
  * pages, contradictory muscle memory — and a mis-keyed exam answer is the one
  * error that poisons every downstream number silently, because a wrong holdout
  * label looks exactly like a model being wrong.
  *
- * So: one large image instead of a grid, a permanent key legend rather than a
- * tooltip, and a warm-up on throwaway images before the first real question.
+ * THE KEYS ARE LETTERS, NOT DIGITS (operator's ruling, 2026-08-30): twelve
+ * positions laid out like the keyboard itself — w e · i o / s d · k l /
+ * y x · n m — because on the Czech QWERTZ layout the digit row is shifted
+ * (unshifted it types diacritics), and because letters cannot collide with the
+ * labeling grid's digit-to-state habit at all. Array order = key order; the
+ * buttons are drawn in the same three staggered rows the fingers find them in.
  *
- * NO MACHINE SUGGESTION APPEARS HERE. The screener's guesses exist in the
- * database and are deliberately not requested: a pre-ticked answer would anchor
- * the operator, and an exam the machine helped answer cannot grade the machine.
+ * A MACHINE SUGGESTION APPEARS HERE — a subtle dot, never a pre-filled verdict
+ * (the operator's ruling, reversing the original no-suggestion posture). The
+ * honest cost is anchoring; the mitigation is provenance (every suggestion is
+ * stored beside the final answer, so suggested-vs-final stays computable) and
+ * restraint here: a dot marks what the machine would press, the verdict state
+ * stays untouched, and nothing is shown during the warm-up or when the stored
+ * suggestion answered a different question list than this sitting asks.
  */
 
 const EXAM_KEY = (cohort: string) => ['new-dedup', 'exam', cohort];
 const WARMUP_KEY = (cohort: string) => ['new-dedup', 'exam', cohort, 'warmup'];
 const WARMUP_COUNT = 10;
 
+/* Position -> key, reading the keyboard like the buttons: two columns per hand,
+ * three rows. Sets are capped at 12 tags (migration 461) because this is where
+ * the keys run out. */
+const EXAM_KEYS = ['w', 'e', 'i', 'o', 's', 'd', 'k', 'l', 'y', 'x', 'n', 'm'];
+
 export default function NewDedupExam() {
   const qc = useQueryClient();
   const [params] = useSearchParams();
   const cohort = params.get('cohort') || 'exam_v1';
   /* Which iteration to sit: /new-dedup/exam?cohort=exam_v1&set=set_2. Absent =
-   * the routing-derived list, which set_1 matches exactly. */
+   * the first set (the sitting that predates sets). */
   const setName = params.get('set') ?? undefined;
 
   /* Per-tag verdict while composing one answer. Absent = negative on confirm.
    * 'picked' = positive; 'skipped' = the brief's leave-out — subject clearly
    * present, photo of something else — stored as excluded/'pruned' and neither
-   * trained nor graded. A digit cycles off -> picked -> skipped -> off. */
+   * trained nor graded. A key cycles off -> picked -> skipped -> off. */
   const [verdicts, setVerdicts] = useState<Map<number, 'picked' | 'skipped'>>(new Map());
   const [warmupIndex, setWarmupIndex] = useState(0);
   const [warmupDone, setWarmupDone] = useState(false);
@@ -73,6 +86,15 @@ export default function NewDedupExam() {
     ? warmupRows[warmupIndex]?.image_id
     : exam?.question?.image_id;
 
+  /* The machine's pre-answer for the CURRENT REAL question. Warm-up images are
+   * not the question, so nothing is marked there. */
+  const suggestedIds = exam?.question?.suggested_tag_ids;
+  const suggestionsKnown = !inWarmup && suggestedIds != null;
+  const suggested = useMemo(
+    () => new Set(suggestionsKnown ? suggestedIds : []),
+    [suggestionsKnown, suggestedIds],
+  );
+
   const photoQ = useQuery({
     queryKey: ['new-dedup', 'exam', 'photo', currentImageId],
     queryFn: () => fetchImagesByImageIds([currentImageId as number]),
@@ -81,7 +103,7 @@ export default function NewDedupExam() {
   const photo = currentImageId != null ? photoQ.data?.get(currentImageId) : undefined;
 
   /* The card for the tag under the cursor. Fetched only on hover so the screen
-   * does not pull eight documents it may never show. */
+   * does not pull twelve documents it may never show. */
   const cardQ = useQuery({
     queryKey: ['new-dedup', 'labeling', 'definition', hoveredTag, 'card'],
     queryFn: () => getTagDefinitionCard(hoveredTag as number),
@@ -152,19 +174,9 @@ export default function NewDedupExam() {
       const el = e.target as HTMLElement | null;
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.key >= '0' && e.key <= '9') {
-        // 0 is the TENTH button: sets are capped at ten tags, and the digit row
-        // ends at 0, so the mapping is the keyboard's own.
-        const idx = e.key === '0' ? 9 : Number(e.key) - 1;
-        if (idx < tags.length) {
-          e.preventDefault();
-          cycle(tags[idx].id);
-        }
-        return;
-      }
       if (e.key === ' ') {
         // Space = "none of these", the commonest answer by far: most random
-        // photos are none of the eight, and it has to cost one keystroke.
+        // photos are none of the set, and it has to cost one keystroke.
         e.preventDefault();
         setVerdicts(new Map());
         advance(false, new Map());
@@ -175,9 +187,18 @@ export default function NewDedupExam() {
         advance(false, verdicts);
         return;
       }
-      if (e.key.toLowerCase() === 'u') {
+      const key = e.key.length === 1 ? e.key.toLowerCase() : '';
+      if (key === 'u') {
         e.preventDefault();
         advance(true, new Map());
+        return;
+      }
+      /* Matched on the CHARACTER, not the physical key: the operator's layout
+       * is Czech QWERTZ, and the letter they named is the letter they press. */
+      const idx = EXAM_KEYS.indexOf(key);
+      if (idx >= 0 && idx < tags.length) {
+        e.preventDefault();
+        cycle(tags[idx].id);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -190,6 +211,12 @@ export default function NewDedupExam() {
 
   const { progress } = exam;
   const finished = !inWarmup && exam.question == null;
+
+  /* The buttons sit where the keys sit: rows of four (two per hand, a gutter
+   * between hands), staggered like the keyboard, short rows padded so every
+   * button keeps the same width. */
+  const keyRows = [tags.slice(0, 4), tags.slice(4, 8), tags.slice(8, 12)]
+    .filter((row) => row.length > 0);
 
   return (
     <div className="max-w-[68rem] mx-auto px-4 py-6">
@@ -241,37 +268,63 @@ export default function NewDedupExam() {
                 Which of these, if any, is this photo a usable example of?
               </h2>
 
-              <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                {tags.map((t, i) => {
-                  const v = verdicts.get(t.id);
-                  return (
-                    <button
-                      key={t.id}
-                      type="button"
-                      onClick={() => cycle(t.id)}
-                      onMouseEnter={() => setHoveredTag(t.id)}
-                      onFocus={() => setHoveredTag(t.id)}
-                      aria-pressed={v === 'picked'}
-                      className={`flex items-center gap-2 px-3 py-2 text-sm text-left rounded-[var(--radius-sm)] border transition-colors ${
-                        v === 'picked'
-                          ? 'border-[var(--color-sage)] bg-[var(--color-sage)]/10 text-[var(--color-ink)]'
-                          : v === 'skipped'
-                            ? 'border-dashed border-[var(--color-copper)] text-[var(--color-ink-2)]'
-                            : 'border-[var(--color-rule)] text-[var(--color-ink-2)]'
-                      }`}
-                    >
-                      <kbd className="font-mono text-[0.7rem] px-1.5 py-0.5 rounded border border-[var(--color-rule)] text-[var(--color-ink-3)]">
-                        {i === 9 ? 0 : i + 1}
-                      </kbd>
-                      <span className="truncate">{t.label}</span>
-                      {v === 'skipped' && (
-                        <span className="ml-auto shrink-0 text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-copper)]">
-                          left out
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
+              <div className="mt-3 flex flex-col gap-2">
+                {keyRows.map((row, r) => (
+                  <div
+                    key={r}
+                    className="flex gap-2"
+                    style={{ paddingLeft: `${r * 1.25}rem` }}
+                  >
+                    {Array.from({ length: 4 }, (_, c) => {
+                      const t = row[c];
+                      const gutter = c === 2 ? 'ml-5' : '';
+                      if (!t) {
+                        return <div key={`pad-${c}`} className={`flex-1 basis-0 ${gutter}`} />;
+                      }
+                      const i = r * 4 + c;
+                      const v = verdicts.get(t.id);
+                      const isSuggested = suggested.has(t.id);
+                      return (
+                        <button
+                          key={t.id}
+                          type="button"
+                          onClick={() => cycle(t.id)}
+                          onMouseEnter={() => setHoveredTag(t.id)}
+                          onFocus={() => setHoveredTag(t.id)}
+                          aria-pressed={v === 'picked'}
+                          className={`flex-1 basis-0 min-w-0 flex items-center gap-2 px-3 py-2 text-sm text-left rounded-[var(--radius-sm)] border transition-colors ${gutter} ${
+                            v === 'picked'
+                              ? 'border-[var(--color-sage)] bg-[var(--color-sage)]/10 text-[var(--color-ink)]'
+                              : v === 'skipped'
+                                ? 'border-dashed border-[var(--color-copper)] text-[var(--color-ink-2)]'
+                                : isSuggested
+                                  ? 'border-[var(--color-sage)]/50 text-[var(--color-ink-2)]'
+                                  : 'border-[var(--color-rule)] text-[var(--color-ink-2)]'
+                          }`}
+                        >
+                          <kbd className="font-mono text-[0.7rem] px-1.5 py-0.5 rounded border border-[var(--color-rule)] text-[var(--color-ink-3)]">
+                            {EXAM_KEYS[i]}
+                          </kbd>
+                          {/* The machine's mark: visible, subtle, and NEVER a
+                            * pre-filled verdict — aria-pressed stays false until
+                            * the operator acts. */}
+                          {isSuggested && (
+                            <span
+                              data-testid={`suggested-${t.id}`}
+                              className="w-1.5 h-1.5 rounded-full bg-[var(--color-sage)]/80 shrink-0"
+                            />
+                          )}
+                          <span className="truncate">{t.label}</span>
+                          {v === 'skipped' && (
+                            <span className="ml-auto shrink-0 text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-copper)]">
+                              left out
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ))}
               </div>
 
               <div className="mt-4 flex items-center gap-2 flex-wrap">
@@ -281,6 +334,12 @@ export default function NewDedupExam() {
                   disabled={answerMut.isPending}
                   className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-[var(--color-paper)] disabled:opacity-50"
                 >
+                  {suggestionsKnown && suggested.size === 0 && (
+                    <span
+                      data-testid="suggested-none"
+                      className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--color-paper)]/80 mr-1.5 align-middle"
+                    />
+                  )}
                   None of these <kbd className="ml-1 font-mono text-[0.7rem]">space</kbd>
                 </button>
                 <button
@@ -303,11 +362,11 @@ export default function NewDedupExam() {
                 {answerMut.isPending && <Spinner size={12} />}
               </div>
 
-              {/* Permanent, not a tooltip: the grid next door binds these same
-                * digits to states, and the legend is the only thing standing
-                * between that habit and a mis-keyed exam row. */}
+              {/* Permanent, not a tooltip: the grid next door binds digits to
+                * states, and the legend is what stands between habit and a
+                * mis-keyed exam row. */}
               <p className="mt-3 text-[0.7rem] text-[var(--color-ink-4)]">
-                1–{tags.length} once = it applies · again = leave it out of that tag · space = none of these · enter = confirm · u = can&rsquo;t tell at all
+                a letter once = it applies · again = leave it out of that tag · space = none of these · enter = confirm · u = can&rsquo;t tell at all · dot = the machine&rsquo;s suggestion
               </p>
             </div>
 
