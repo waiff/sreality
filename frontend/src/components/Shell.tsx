@@ -57,6 +57,7 @@ const newDedupItems: ReadonlyArray<MenuItem> = [
   // this straight to NavLink, whose default prefix match would light both.
   { to: '/new-dedup/labeling', label: 'Labeling', end: true },
   { to: '/new-dedup/labeling/taxonomy', label: 'Taxonomy' },
+  { to: '/new-dedup/exam', label: 'Exam' },
 ];
 
 function isPathActive(pathname: string, to: string): boolean {
