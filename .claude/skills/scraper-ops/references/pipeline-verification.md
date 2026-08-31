@@ -248,3 +248,97 @@ exactly this reason. `llm_silence_fail_hours` is **not** in the migration-274 se
 later migration adds it, so it resolves from the code default; if an operator ever adds it to
 `app_settings.pipeline_check_thresholds`, that row wins over the code (`load_thresholds`
 merges the DB over the defaults) and the deploy alone will not move it.
+
+---
+
+## `ops_incidents` — the failure-signature producer (W3, migration 462)
+
+The verification harness rings the bell for the 19 checks it runs. It says nothing about the
+~40 workflow failures/day that never touch a check: portal crashes, CI, backfills, LLM lanes.
+That is the seam the 2026-08-26 outage fell into — the surface that could alert had nothing to
+say about ingest, and `workflow_failures` (the surface that knew ingest was red) stores no
+failure reason of any kind. W3 closes it WITHOUT a second bell: `ops_incidents` emits an
+ordinary `system_health` `notification_dispatches` row and the shipped outbox delivers it.
+
+**The key.** `scripts/failure_signature.py` (pure stdlib, no DB) normalizes an error into a
+signature derived from the **error text only, never from `workflow_path`** — that asymmetry is
+the whole mechanism, and it is why six portals failing on one `CheckViolation` are one row:
+
+```
+checkviolation|new row for relation listings violates check constraint listings_area_basis_check
+check:property_maintenance|fail          # verify_pipeline's own CHECK line, one key per check
+aborting|consecutive errors provider outage   # scripts that catch their own error and exit 1
+step:run tests|exit:timed_out@.github/workflows/test.yml   # unreadable red — the ONE scoped key
+```
+
+Normalizer rails, each of which was a bug on the first pass: quoted identifiers survive the
+digit-strip (the constraint name IS the key — a placeholder containing digits destroys it);
+3-digit HTTP codes survive it too (else a 403 and a 500 collapse into `httperror|from`); only
+line 1 of a psycopg message is read (line 2 is `DETAIL: Failing row contains (…)` — a whole
+listing row); the exception class is matched by the dotted-module + CapWord grammar, never by
+an `*Error` suffix allowlist (`CheckViolation`, `QueryCanceled`, `AdminShutdown`,
+`AmbiguousFunction` and `InsufficientPrivilege` all fail that test).
+
+**Two producers, one function.** `portal_runner.record_failure_signature(conn, exc, source=,
+lane=)` is the single seam (rule 21):
+- `portal_runner._record_run_crash` — the in-process chokepoint. The exception is in hand, so
+  the signature is correct at t+0 with zero Actions-API cost. Writes on the SAME connection as
+  the `scrape_runs.errors` bump, inside the existing best-effort try/except: a bookkeeping
+  write must never mask the exception that got us here.
+- `realtime_worker._record_lane_failure` — the probe and drain lanes call `portal_runner`
+  directly (`run_id=None`, deliberately) and so bypass `run_phase` entirely. Before W3 a
+  `CheckViolation` on the latency-critical drain produced a log line and nothing else, forever.
+  **Always `await asyncio.to_thread(...)` it**, like every other DB touch in that file:
+  `db.connect()` sleeps up to ~20s per source on a transient failure, and a bare call would
+  stall the heartbeat lane during exactly the DB incident it exists to record.
+- `record_workflow_failures.record_incidents` — the backstop, and the MAJORITY path (portal
+  workflows are only ~22% of the failure corpus). For each NEWLY inserted failed run it reads
+  the failed job's log and extracts the terminal error. Two budgets, both real:
+  `MAX_LOG_FETCHES` per poll, and `INCIDENT_PASS_BUDGET_S` of wall clock — a fetch is up to 4
+  round trips at `API_TIMEOUT_S`, so the fetch cap alone is a ~50-minute worst case inside a
+  job with `timeout-minutes: 5`. The pass runs **after** `_write_cursor`, because a job kill is
+  not an exception and the cursor advance is the input-coverage guarantee W3 rests on.
+
+**One run is one failure (`ops_incident_runs`, migration 463).** Both producers see the same
+Actions run — the chokepoint at t+0, the poller 80–256 minutes later — and the upsert bumps
+`failure_count` unconditionally, so before 463 every portal crash counted **twice** and a LONE
+crash crossed the measured onset threshold on its own. `claim_run(conn, run_id)` inserts the
+run id and returns whether this caller won it; the poller claims **before** downloading, so a
+run the chokepoint already recorded costs zero fetches too. That claim replaced an earlier
+workflow-keyed signature-reuse map, which had no run correlation and folded an unrelated new
+red (a timeout, say) into whatever incident last touched that workflow within the hour — the
+real reason was then never derived and could never alert. `run_id=None` (the Railway worker)
+always claims: it has no second observer. The ledger self-prunes at 30 days inside
+`auto_resolve`.
+
+**The log fetch has three hazards, all live-verified — do not simplify it.**
+`/actions/jobs/{id}/logs` answers **302** to a SAS-signed Azure blob URL, and CPython's
+`HTTPRedirectHandler` copies every header (`Authorization: Bearer` included) onto the redirect:
+that leaks `GITHUB_TOKEN` to a third-party host *and* returns 401. So redirects are disabled and
+the `Location` is re-requested **bare**. Azure **ignores suffix ranges** (`Range: bytes=-500`
+came back 200 with the whole 27 KB body), so the tail is two requests: `bytes=0-0` to read the
+length off `Content-Range`, then a real closed range. And the signed URL can 404 `BlobNotFound`
+(retention, or logs not yet flushed) — that is a degraded incident, never a poller failure.
+Never `tail` a log either: the last ~25 lines are always runner cleanup, so the extractor
+anchors on the error and walks backwards.
+
+**Alerting and closing.** Onset fires on `failure_count >= ops_incident_min_failures` (2) **or**
+the signature spanning 2 distinct workflows, whichever first — the breadth arm matters because
+the 2026-08-26 signature reached its 2nd workflow 8 minutes after onset while a same-workflow
+2nd failure can be 164 minutes away under the Actions throttle. Exactly one dispatch per
+incident (`sys:ops_incident:{id}:onset`), claimed with a conditional UPDATE before emitting so
+two producers racing cannot both alert — **claim and emit share one explicit
+`conn.transaction()`**, because every caller here is autocommit and a claim that committed
+alone before a failed emit would set `alerted_at` with no dispatch, permanently silencing that
+incident's only onset. Closing: every member workflow posting a newer
+`workflow_run_health.last_success_at` (primary), `ops_incident_max_age_hours` (168 — the
+backstop for retired/disabled/renamed workflows and for worker-origin incidents that have no
+member workflow at all), or `toolkit.ops_incidents.resolve_incident` (manual; there is no admin
+route yet). All three thresholds are scalars in `app_settings.pipeline_check_thresholds` —
+`load_thresholds` merges only int/float out of that blob, so an array key would be silently
+dropped and the code default would win forever.
+
+**External delivery is still off.** `system_health_channels` is `[]`, so incidents ring the
+in-app bell only. The flip is two `app_settings` rows plus a transport secret on the API
+service — see the `toolkit-api` skill for `RESEND_API_KEY` / `TELEGRAM_BOT_TOKEN`;
+`api/main.py` starts `outbox_loop` only when a transport `is_configured()`.

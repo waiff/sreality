@@ -237,3 +237,275 @@ def test_page_budget_covers_the_worst_observed_inter_poll_gap():
     """The cron is */30 but the Actions throttle really runs it 80-256 min apart, so the
     budget has to hold a 256-minute window's worth of completed runs."""
     assert MAX_PAGES * PER_PAGE >= 1000
+
+
+# --- W3.1 backstop: reading WHY a run went red ----------------------------
+
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
+
+from scripts import record_workflow_failures as rwf  # noqa: E402
+
+
+class _Resp:
+    def __init__(self, body: bytes, headers: dict[str, str] | None = None) -> None:
+        self._body = body
+        self.headers = headers or {}
+
+    def read(self, n: int = -1) -> bytes:
+        return self._body if n < 0 else self._body[:n]
+
+    def __enter__(self) -> "_Resp":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        return None
+
+
+def _job(**kw: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "id": 555, "name": "drain", "conclusion": "failure",
+        "steps": [{"name": "Checkout", "conclusion": "success"},
+                  {"name": "Run drain", "conclusion": "failure"}],
+    }
+    base.update(kw)
+    return base
+
+
+def test_select_failed_job_names_the_step_that_broke():
+    got = rwf.select_failed_job([_job(id=1, conclusion="success"), _job(id=2)])
+    assert got == {"job_id": 2, "job_name": "drain",
+                   "step_name": "Run drain", "exit_code": "failure"}
+
+
+def test_select_failed_job_distinguishes_a_timeout_kill():
+    """The Actions API never exposes a process exit code; the step conclusion is what
+    separates a timeout kill from a plain non-zero exit in the fallback key."""
+    got = rwf.select_failed_job([_job(conclusion="cancelled", steps=[
+        {"name": "Run drain", "conclusion": "cancelled"}])])
+    assert got["exit_code"] == "cancelled"
+
+
+def test_select_failed_job_returns_none_when_every_job_passed():
+    assert rwf.select_failed_job([_job(conclusion="success")]) is None
+
+
+def test_log_fetch_never_forwards_the_token_to_the_signed_blob(monkeypatch):
+    """CPython's redirect handler copies EVERY header onto the redirect, Authorization
+    included. That leaks GITHUB_TOKEN to a third-party host AND does not work — Azure
+    answers 401 when the bearer header is present."""
+    signed = "https://productionresultssa15.blob.core.windows.net/x?sig=abc"
+
+    class _Opener:
+        def open(self, req: Any, timeout: int = 0) -> Any:
+            assert req.get_header("Authorization") is not None   # the API call is authed
+            raise urllib.error.HTTPError(
+                req.full_url, 302, "Found", {"Location": signed}, None)
+
+    seen: list[tuple[str, dict[str, str]]] = []
+
+    def _bare(req: Any, timeout: int = 0) -> Any:
+        seen.append((req.full_url, dict(req.header_items())))
+        rng = req.get_header("Range")
+        if rng == "bytes=0-0":
+            return _Resp(b"x", {"Content-Range": "bytes 0-0/27247"})
+        return _Resp(b"##[error]boom")
+
+    monkeypatch.setattr(rwf, "_NO_REDIRECT_OPENER", _Opener())
+    monkeypatch.setattr(urllib.request, "urlopen", _bare)
+
+    out = rwf.fetch_job_log("waiff/sreality", "ghs_secret", 555, cap_bytes=1024)
+    assert out == "##[error]boom"
+    assert [u for u, _h in seen] == [signed, signed]
+    for _u, headers in seen:
+        assert not any(k.lower() == "authorization" for k in headers)
+        assert "ghs_secret" not in str(headers)
+
+
+def test_log_fetch_asks_for_a_closed_range_not_a_suffix_range(monkeypatch):
+    """Azure IGNORES suffix ranges: `Range: bytes=-500` came back 200 with the whole
+    27KB body. The length has to be learned first."""
+    ranges: list[str] = []
+
+    class _Opener:
+        def open(self, req: Any, timeout: int = 0) -> Any:
+            raise urllib.error.HTTPError(
+                req.full_url, 302, "Found", {"Location": "https://blob/x"}, None)
+
+    def _bare(req: Any, timeout: int = 0) -> Any:
+        ranges.append(req.get_header("Range"))
+        if len(ranges) == 1:
+            return _Resp(b"x", {"Content-Range": "bytes 0-0/27247"})
+        return _Resp(b"tail")
+
+    monkeypatch.setattr(rwf, "_NO_REDIRECT_OPENER", _Opener())
+    monkeypatch.setattr(urllib.request, "urlopen", _bare)
+    rwf.fetch_job_log("r", "t", 1, cap_bytes=1000)
+    assert ranges == ["bytes=0-0", "bytes=26247-27246"]
+
+
+def test_log_fetch_tolerates_an_evicted_blob(monkeypatch):
+    """The signed URL 404s (BlobNotFound) on very fresh or very old runs; that is a
+    degraded incident, never a poller failure."""
+    class _Opener:
+        def open(self, req: Any, timeout: int = 0) -> Any:
+            raise urllib.error.HTTPError(
+                req.full_url, 302, "Found", {"Location": "https://blob/gone"}, None)
+
+    def _bare(req: Any, timeout: int = 0) -> Any:
+        raise urllib.error.HTTPError("https://blob/gone", 404, "BlobNotFound", {}, None)
+
+    monkeypatch.setattr(rwf, "_NO_REDIRECT_OPENER", _Opener())
+    monkeypatch.setattr(urllib.request, "urlopen", _bare)
+    assert rwf.fetch_job_log("r", "t", 1) is None
+
+
+class _IncidentConn:
+    """Stands in for toolkit.ops_incidents, which record_incidents imports lazily."""
+
+    def cursor(self) -> Any:
+        raise AssertionError("record_incidents must go through ops_incidents")
+
+
+def _patch_incidents(monkeypatch, *, already_recorded: set[int] | None = None) -> list[dict]:
+    from toolkit import ops_incidents as oi
+
+    calls: list[dict] = []
+    claimed = set(already_recorded or ())
+
+    def _claim(_c: Any, run_id: int | None) -> bool:
+        if run_id is None:
+            return True
+        if run_id in claimed:
+            return False
+        claimed.add(run_id)
+        return True
+
+    monkeypatch.setattr(oi, "claim_run", _claim)
+    monkeypatch.setattr(oi, "excerpt_byte_budget", lambda _c: 4000)
+    monkeypatch.setattr(oi, "record_failure_signature",
+                        lambda _c, sig, **kw: calls.append({"sig": sig, **kw}))
+    monkeypatch.setattr(oi, "auto_resolve", lambda _c, **_k: {"resolved_success": 0})
+    return calls
+
+
+def _failure(**kw: Any) -> dict[str, Any]:
+    base = {"run_id": 900, "workflow_path": ".github/workflows/drain.yml",
+            "conclusion": "failure", "html_url": "https://gh/run/900"}
+    base.update(kw)
+    return base
+
+
+def test_record_incidents_extracts_the_reason_from_the_log(monkeypatch):
+    calls = _patch_incidents(monkeypatch)
+    monkeypatch.setattr(rwf, "_fetch_failed_job", lambda *_a: {"job_id": 5, "step_name": "s", "exit_code": "failure"})
+    monkeypatch.setattr(
+        rwf, "fetch_job_log",
+        lambda *_a, **_k: "2026-08-26T20:15:03.1234567Z psycopg.errors.CheckViolation: "
+                          'new row for relation "listings" violates check constraint '
+                          '"listings_area_basis_check"\n')
+    stats = rwf.record_incidents(_IncidentConn(), "r", "t", [_failure()])
+    assert stats["fetched"] == 1 and stats["recorded"] == 1
+    assert calls[0]["sig"].startswith("checkviolation|")
+    assert "listings_area_basis_check" in calls[0]["sig"]
+    assert calls[0]["workflow_path"] == ".github/workflows/drain.yml"
+
+
+def test_a_run_the_chokepoint_already_recorded_is_neither_fetched_nor_counted(monkeypatch):
+    """The double-count fix AND the API-budget saver, in one mechanism. The in-process
+    producer records the crash at t+0 and the run then concludes `failure`; when the
+    poller meets that same run 80-256 minutes later it must NOT bump failure_count a
+    second time (a lone crash would cross the measured onset threshold on its own) and
+    must not spend a job-log download re-deriving a reason already on file."""
+    calls = _patch_incidents(monkeypatch, already_recorded={900})
+    monkeypatch.setattr(rwf, "fetch_job_log", lambda *_a, **_k: _must_not_fetch())
+    monkeypatch.setattr(rwf, "_fetch_failed_job", lambda *_a: _must_not_fetch())
+    stats = rwf.record_incidents(_IncidentConn(), "r", "t", [_failure(run_id=900)])
+    assert stats["already_recorded"] == 1 and stats["fetched"] == 0
+    assert calls == []
+
+
+def test_record_incidents_claims_the_run_so_it_cannot_be_counted_twice(monkeypatch):
+    """Every recorded red carries its run id through to the incident write, with
+    `run_claimed` set — the poller already won the claim above."""
+    calls = _patch_incidents(monkeypatch)
+    monkeypatch.setattr(rwf, "_fetch_failed_job", lambda *_a: None)
+    monkeypatch.setattr(rwf, "fetch_job_log", lambda *_a, **_k: None)
+    rwf.record_incidents(_IncidentConn(), "r", "t", [_failure(run_id=900)])
+    assert calls[0]["run_id"] == 900 and calls[0]["run_claimed"] is True
+
+
+def test_a_new_reason_is_never_folded_into_the_last_incident_for_that_workflow(monkeypatch):
+    """The misattribution the workflow-keyed `known` map committed: index_walk.yml opens
+    a CheckViolation incident at 10:00 and then TIMES OUT at 10:30 for an unrelated
+    reason. Reusing the workflow's last signature recorded the timeout as a
+    CheckViolation, kept the wrong sample_run_url, and meant the timeout's own signature
+    was never derived — so it could never open an incident or alert."""
+    calls = _patch_incidents(monkeypatch)
+    monkeypatch.setattr(rwf, "_fetch_failed_job",
+                        lambda *_a: {"job_id": 5, "step_name": "Run walk", "exit_code": "timed_out"})
+    monkeypatch.setattr(rwf, "fetch_job_log", lambda *_a, **_k: "##[error]The job running on runner X has exceeded the maximum execution time\n")
+    stats = rwf.record_incidents(
+        _IncidentConn(), "r", "t",
+        [_failure(run_id=901, workflow_path=".github/workflows/index_walk.yml",
+                  conclusion="timed_out")])
+    assert stats["fetched"] == 1
+    assert "checkviolation" not in calls[0]["sig"]
+
+
+def test_record_incidents_stops_at_its_wall_clock_budget(monkeypatch):
+    """MAX_LOG_FETCHES is not a time budget: 25 fetches x up to 4 round trips x
+    API_TIMEOUT_S=30 is ~50 minutes inside a job with `timeout-minutes: 5`, and a job
+    kill is not an exception anything can catch."""
+    calls = _patch_incidents(monkeypatch)
+    monkeypatch.setattr(rwf, "_fetch_failed_job", lambda *_a: None)
+    monkeypatch.setattr(rwf, "fetch_job_log", lambda *_a, **_k: None)
+    failures = [_failure(run_id=i, workflow_path=f".github/workflows/w{i}.yml")
+                for i in range(5)]
+    stats = rwf.record_incidents(_IncidentConn(), "r", "t", failures, budget_seconds=0.0)
+    assert stats["expired"] == 5 and calls == []
+
+
+def _must_not_fetch() -> None:
+    raise AssertionError("must not fetch a log")
+
+
+def test_record_incidents_falls_back_scoped_when_the_log_is_unreadable(monkeypatch):
+    calls = _patch_incidents(monkeypatch)
+    monkeypatch.setattr(rwf, "_fetch_failed_job",
+                        lambda *_a: {"job_id": 5, "step_name": "Run tests", "exit_code": "timed_out"})
+    monkeypatch.setattr(rwf, "fetch_job_log", lambda *_a, **_k: None)
+    stats = rwf.record_incidents(_IncidentConn(), "r", "t", [_failure()])
+    assert stats["unreadable"] == 1
+    assert calls[0]["sig"].endswith("@.github/workflows/drain.yml")
+
+
+def test_record_incidents_respects_the_api_budget(monkeypatch):
+    """Never open an incident for a run we chose not to read: a scoped fallback key
+    there would assert nothing while looking like a finding."""
+    calls = _patch_incidents(monkeypatch)
+    monkeypatch.setattr(rwf, "MAX_LOG_FETCHES", 1)
+    monkeypatch.setattr(rwf, "_fetch_failed_job", lambda *_a: None)
+    monkeypatch.setattr(rwf, "fetch_job_log", lambda *_a, **_k: None)
+    failures = [_failure(run_id=i, workflow_path=f".github/workflows/w{i}.yml")
+                for i in range(4)]
+    stats = rwf.record_incidents(_IncidentConn(), "r", "t", failures)
+    assert stats["skipped"] == 3 and len(calls) == 1
+
+
+def test_the_cursor_is_written_before_the_incident_pass_runs():
+    """Ordering, pinned. record_incidents does network I/O inside a job with
+    `timeout-minutes: 5`; a job kill is not an exception, so running it before
+    `_write_cursor` put the poller's input-coverage guarantee behind a best-effort
+    bookkeeping pass. Incidents annotate rows already committed — they can wait."""
+    import inspect
+
+    src = inspect.getsource(rwf.main)
+    assert src.index("_write_cursor(conn, new_cursor)") < src.index("record_incidents(conn")
+
+
+def test_record_incidents_resolves_even_with_nothing_new(monkeypatch):
+    """Auto-resolve must run on a quiet poll — that is exactly the poll on which the
+    fleet has recovered."""
+    _patch_incidents(monkeypatch)
+    assert rwf.record_incidents(_IncidentConn(), "r", "t", [])["resolved_success"] == 0

@@ -51,7 +51,7 @@ truth enforced only in production, and N identical emails for one cause.
 | W0.5 the second week's fires | (a) ceskereality contract v4 + contract-immutability lockfile rail in `test.yml` — un-wedges the intake lane, closes the merged≠enforced gap for portal contracts; (b) `llm_liveness` recalibrated 4h → 13h to the real (post-dedup) producer cadence | 🟡 in progress (2026-08-31, shipped as hotfix PRs ahead of wave order — the lane was down) |
 | W1 survivable write path | Non-transient errors at `_flush_drain_batch` become a bounded, loud quarantine (per-item replay → existing `_drain_record_failure` → `given_up` at 5) behind a circuit breaker; `write_rejects` counter + a `drain_write_rejects` check (`ingest_freshness` largely covered in parallel by the walk sprint's `acquisition_lag` + `walk_coverage` checks) | ⚪ proposed — needs operator sign-off |
 | W2 migration file as contract | `-- apply:` / `-- assert:` header tokens above a watermark (≥ 444), asserts executed inside `migrations.yml`'s existing per-file apply loop and *validated as able to fail*, plus schema-vocabulary parity and the hot-DDL doctrine rails. **W2.3's live-catalog drift check shipped in parallel as PR #1204 (`check_migration_drift`)** — remaining W2.3 scope is hardening it, not building it | ⚪ proposed — needs operator sign-off (part shipped in parallel) |
-| W3 one alert, one place, cause attached | Failure signatures produced in-process at the write chokepoint (`checkviolation\|listings_area_basis_check` on all six portals), an `ops_incidents` table that exits through the **existing** `system_health` spine (no parallel channel), and the re-escalation ladder placed in `toolkit/system_alerts` where all 14 checks inherit it | ⚪ proposed — needs operator sign-off |
+| W3 one alert, one place, cause attached | Failure signatures produced in-process at the write chokepoint (`checkviolation\|listings_area_basis_check` on all six portals), an `ops_incidents` table that exits through the **existing** `system_health` spine (no parallel channel), and the re-escalation ladder placed in `toolkit/system_alerts` where all 19 checks inherit it | 🟡 W3.1–W3.3 shipped (migration 462), routing not flipped; W3.4 ladder outstanding |
 | W4 apply becomes a job | Hot-table DDL applied out-of-band by a tested, extracted lock primitive (`attempts=1`, fail fast, escalate to a window — the retry-loop pattern is retired, not tuned); the existing PK-swap applier generalised into a dispatchable maintenance window | ⚪ proposed — needs operator sign-off + one human step (`REALTIME_WORKER_ENABLED`) |
 | W5 constraint-only catalog diff | Named successor: diff CI's replayed schema against the live catalog. Catches 438 exactly, plus the ~241 migrations with no ledger row and no assert, plus the reverse drift direction W2 structurally cannot see — with zero per-migration convention | ⚪ named only, not built (open question 8) |
 
@@ -77,6 +77,52 @@ topped up~~ — **resolved 2026-08-30: credits topped up, pipeline verified heal
 ok / 0 err calls in 24h). The remaining W0 risk is rebase drift: the walk-coverage
 sprint (merged 2026-08-27..30) rewrote parts of `idnes_main.py`, `ceskereality_main.py`
 and `portal_runner.py` under W0.2's feet; both W0 code PRs are being rebased onto it.
+
+## W3 — W3.1–W3.3 shipped (2026-08-31)
+
+Built on the corpus the design doc asked for first: 554 real failures over 14 days,
+36 distinct signatures, so every threshold below is measured rather than guessed.
+
+- **W3.1 signatures** — `scripts/failure_signature.py`, pure stdlib. The key comes from
+  the error TEXT and never from `workflow_path`; the one shape that IS scoped by
+  workflow is the unreadable-red fallback (unscoped, `step:|exit:1` merged 13 runs
+  across 10 unrelated workflows into one meaningless mega-incident). Producers:
+  `portal_runner._record_run_crash` (in-process, t+0, zero API cost) **and** the two
+  `realtime_worker` lanes, which bypass `run_phase` entirely and had no failure record
+  of any kind — both through one `record_failure_signature` seam, not two producers.
+- **W3.2 `ops_incidents`** (migration 462) — one OPEN row per signature behind a partial
+  unique index. Onset at `failure_count >= 2` **or** 2 distinct workflows, whichever
+  first (the breadth arm is measurably faster: 8 min to the 2nd workflow vs up to 164
+  min to a 2nd same-workflow failure under the Actions throttle). Closes on member-
+  workflow success, at 168 h, or manually.
+- **Review fixes, same wave (migration 463).** Two producers over one counter needed a
+  correlation key and had none: the chokepoint recorded a portal crash at t+0 and the
+  poller recorded the SAME concluded run hours later, so `failure_count` was ~2x reality
+  and a lone crash crossed the measured onset threshold by itself. `ops_incident_runs`
+  makes one Actions run at most one failure, and the poller claims before it downloads —
+  which also replaces the earlier workflow-keyed signature reuse, whose lack of run
+  correlation folded unrelated new reds into whatever incident last touched that workflow.
+  With it: the onset claim and its emit became one transaction (autocommit connections
+  were committing the claim alone, so a failed emit silenced that incident's only alert
+  forever), the incident pass moved after the cursor write and gained a wall-clock budget,
+  and the worker's recorder moved onto `asyncio.to_thread` — it was the one blocking DB
+  call left on the event loop, worst exactly during a DB outage.
+- **W3.3 exits through the existing spine** — one `system_health`
+  `notification_dispatches` row per incident. **No new alert table, no parallel
+  channel.** The outbox RETRY allowlist bug is fixed with it, so an ops alert now gets
+  the same five delivery attempts a price drop gets instead of one.
+
+**Corrections to the design doc, from the measurement pass.** The "~100 failures/day"
+baseline counts cancellations; true `failure` volume is **39.8/day** and cancels are
+concurrency-group evictions carrying no error (excluded). Portal workflows are only
+**22%** of the corpus, so the log backstop is the majority path, not an optional extra.
+The `listings_area_basis_check` cluster spans **8** workflows (iDNES included) and its
+onset was **2026-08-24 23:09 UTC**, ~45 h earlier than the doc states. Migration 220's
+`consecutive_failures`/`is_chronic` are computed over GitHub workflow runs, not
+`pipeline_check_results`, so W3.4's ladder cannot consume them.
+
+**Not flipped, on purpose:** `system_health_channels` is still `[]`. Incidents ring the
+in-app bell only until the operator chooses routing.
 
 ## Open questions blocking W1–W4
 

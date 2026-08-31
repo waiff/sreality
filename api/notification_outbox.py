@@ -237,7 +237,13 @@ def drain_once(
             "WHERE cs.status = 'failed' AND cs.attempts < %(max_attempts)s "
             "  AND cs.channel = ANY(%(channels)s) "
             "  AND (cs.next_attempt_at IS NULL OR cs.next_attempt_at <= now()) "
-            "  AND cs.consumer IN ('watchdog', 'collection_monitor') "
+            # No consumer allowlist. It used to read IN ('watchdog','collection_monitor'),
+            # which silently gave ops alerts ONE delivery attempt where a price-drop gets
+            # five — the entire delta between "ops alerting exists" and "ops alerting is
+            # reliable" (reliability program W3.3). Re-adding a third arm would just leave
+            # the next producer to rediscover this: the JOIN above already scopes the pass
+            # to notification-backed sends, so `outreach` (notification_id IS NULL) can
+            # never appear here and the list was doing no work at all.
             "ORDER BY cs.created_at "
             "LIMIT %(limit)s",
             {"max_attempts": max_attempts, "channels": configured, "limit": limit},
