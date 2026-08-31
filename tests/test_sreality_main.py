@@ -99,8 +99,16 @@ def test_drain_finalize_is_non_destructive_index_is_not(monkeypatch):
     assert [kw["bump_already_applied"] for kw in finals] == [False, True]
 
 
-def test_drain_finalize_runs_even_when_runner_crashes(monkeypatch):
+def test_crashed_drain_records_an_error_instead_of_finalizing_green(monkeypatch):
+    """The 2026-08-26 signature, end to end through the real entrypoint.
+
+    This test used to assert the opposite ("a crashed drain still stamps ended_at"),
+    which is precisely the bug: finalize under `bump_already_applied` never writes
+    `errors`, so a hard crash recorded ended_at set and errors=0 — clean-looking, and
+    invisible to BOTH health arms. A crash now bumps errors and leaves ended_at NULL.
+    """
     finals: list[dict[str, Any]] = []
+    bumps: list[tuple[int, dict[str, Any]]] = []
     monkeypatch.setattr(sreality_main, "_load_config", lambda dry_run: _config())
     monkeypatch.setattr(sreality_main.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
@@ -109,6 +117,10 @@ def test_drain_finalize_runs_even_when_runner_crashes(monkeypatch):
     monkeypatch.setattr(
         sreality_main.db, "scrape_run_finalize",
         lambda _c, run_id, **kw: finals.append(kw),
+    )
+    monkeypatch.setattr(
+        sreality_main.db, "bump_scrape_run_counts",
+        lambda _c, run_id, **kw: bumps.append((run_id, kw)),
     )
 
     def _boom(portal, dry_run, **kw):
@@ -120,9 +132,8 @@ def test_drain_finalize_runs_even_when_runner_crashes(monkeypatch):
         sreality_main.main(["--drain-only"])
     except RuntimeError:
         pass
-    # A crashed drain still stamps ended_at without zeroing per-chunk counters.
-    assert len(finals) == 1
-    assert finals[0]["bump_already_applied"] is True
+    assert finals == []                      # no ended_at: the phase never completed
+    assert bumps == [(9, {"errors": 1})]     # and the run says so
 
 
 def _stub_phases(monkeypatch, calls):

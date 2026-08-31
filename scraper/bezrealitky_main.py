@@ -320,47 +320,6 @@ def _load_config(dry_run: bool) -> PortalConfig:
         return default_config(SOURCE)
 
 
-def _finalize(run_id: int | None, agg: dict[str, Any], *, drain: bool = False) -> None:
-    if run_id is None or (not agg and not drain):
-        return
-    try:
-        with db.connect() as conn:
-            db.scrape_run_finalize(
-                conn, run_id,
-                index_pages=agg.get("index_pages", 0),
-                listings_found_new=agg.get("listings_found_new", 0),
-                listings_scraped_new=agg.get("listings_scraped_new", 0),
-                listings_updated=agg.get("listings_updated", 0),
-                listings_inactive=agg.get("listings_inactive", 0),
-                images_discovered=agg.get("images_discovered", 0),
-                images_stored=0,  # crawl records image-URL rows only; bytes uploaded async by images.yml
-                errors=agg.get("errors", 0),
-                by_category=agg.get("by_category", []),
-                bump_already_applied=drain,
-            )
-    except Exception as exc:
-        LOG.warning("scrape_run_finalize failed: %s", exc)
-
-
-def _run_phase(
-    portal: BezrealitkyPortal, run_type: str, runner: Any, dry_run: bool, **kw: Any,
-) -> int:
-    run_id: int | None = None
-    if not dry_run:
-        try:
-            with db.connect() as conn:
-                run_id = db.scrape_run_start(conn, run_type, source=SOURCE)
-        except Exception as exc:
-            LOG.warning("scrape_run_start failed: %s", exc)
-    agg: dict[str, Any] = {}
-    rc = 0
-    try:
-        kw = {**kw, "run_id": run_id}
-        rc, agg = runner(portal, dry_run=dry_run, **kw)
-    finally:
-        if not dry_run:
-            _finalize(run_id, agg, drain=runner is portal_runner.run_detail_drain)
-    return rc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -387,12 +346,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Index-walk (enqueue) then detail-drain (fetch + ingest), through the one
     # shared runner. Two scrape_runs rows ('index' + 'detail'), like sreality.
-    rc = _run_phase(
+    rc = portal_runner.run_phase(
         portal, "index", portal_runner.run_index_walk, args.dry_run,
         max_seconds=args.max_seconds,
     )
     if rc == 0:
-        rc = _run_phase(
+        rc = portal_runner.run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,
             max_claims=max_detail, detail_workers=workers, detail_rate=rate,
         )

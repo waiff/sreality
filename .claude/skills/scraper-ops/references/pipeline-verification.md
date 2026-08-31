@@ -116,3 +116,37 @@ applied yet) is `warn` naming the cause, never `ok` and never four red tiles.
 The six dedup-specific checks (street/geo debt, eligibility funnel,
 merge latency, engine health, merge-precision sample) went with the engine, along with their
 `pipeline_check_thresholds` rows.
+
+## The `scrape_runs` crash contract (`portal_runner.run_phase`, W0.2)
+
+Both scraper health arms read one row, so what that row records on a bad ending is the whole
+question. `run_phase` is the single seam (rule #21): it opens the row (`scrape_run_start`, with
+`source` taken off the portal, not a per-module constant), runs the phase, and records **how it
+ended**.
+
+- **`ended_at` means the phase COMPLETED.** Only the return path calls `scrape_run_finalize`.
+- A phase that raises bumps `scrape_runs.errors` by 1 via `bump_scrape_run_counts` — *additive*,
+  on top of whatever the drain already committed per chunk, because a crash is one more error
+  event and not a replacement aggregate — and deliberately leaves `ended_at` NULL before
+  re-raising. A crashed run therefore lights up **both** arms of `scraper_health_checks()`:
+  `stuck` (which keys on `ended_at is null`) and `err_pct` (which keys on `errors`).
+- It catches `BaseException`, not `Exception`: a SIGINT or `SystemExit` out of a phase leaves the
+  run just as unfinished as a `CheckViolation`, and "did not finish" must never read as green.
+- Crash recording is best-effort — a failing bump can never mask the original exception.
+
+Reading a finished row:
+
+| `ended_at` | `errors` | meaning |
+| --- | --- | --- |
+| set | 0 | clean run |
+| set | > 0 | finished, with N failures — the honest count |
+| NULL | > 0 | **crashed** |
+| NULL | 0 | SIGKILLed, or still running |
+
+Before W0.2 this lifecycle was copy-pasted into nine `*_main.py` files and finalized from a bare
+`finally`, so a crash still landed `_finalize(run_id, {}, drain=True)` — and finalize under
+`bump_already_applied` never writes `errors` at all. A hard crash thus recorded `ended_at` set and
+`errors = 0`, indistinguishable from a clean run and invisible to both arms; the index lane's
+mirror-image bug (`_finalize` returned early on an empty agg) wrote nothing at all. That is why the
+six portals that fell over on 2026-08-26 showed no error count anywhere
+(`docs/design/reliability-program.md`). Never re-add a per-portal copy.

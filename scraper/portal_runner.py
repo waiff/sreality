@@ -16,6 +16,10 @@ district-split lives inside its `walk_category`, not here — justified in revie
 - run_index_probe: the newest-first delta probe (Wave C-2 of the real-time
   program) — first index page(s) only, diff + enqueue, NEVER mark_inactive,
   NO scrape_runs row.
+- run_phase: the scrape_runs lifecycle around one of the two loops above —
+  open the row, run the phase, and record how it ENDED. Lifted here from nine
+  identical `*_main.py` copies (rule #21); see its docstring for the crash
+  contract.
 """
 
 from __future__ import annotations
@@ -656,3 +660,90 @@ def run_detail_drain(
         "by_category":          [],
     }
     return (0, scrape_agg)
+
+
+def _finalize_run(
+    run_id: int | None, agg: dict[str, Any], *, drain: bool = False,
+) -> None:
+    """Close out the scrape_runs row of a phase that RETURNED. Never called on
+    the crash path — see run_phase."""
+    if run_id is None or (not agg and not drain):
+        return
+    try:
+        with db.connect() as conn:
+            db.scrape_run_finalize(
+                conn, run_id,
+                index_pages=agg.get("index_pages", 0),
+                listings_found_new=agg.get("listings_found_new", 0),
+                listings_scraped_new=agg.get("listings_scraped_new", 0),
+                listings_updated=agg.get("listings_updated", 0),
+                listings_inactive=agg.get("listings_inactive", 0),
+                images_discovered=agg.get("images_discovered", 0),
+                images_stored=0,  # bytes are uploaded async by images.yml, not here
+                errors=agg.get("errors", 0),
+                by_category=agg.get("by_category", []),
+                # The drain persists its counters per chunk (crash-survivable);
+                # finalize must not re-write them (PR #403 semantics).
+                bump_already_applied=drain,
+            )
+    except Exception as exc:
+        LOG.warning("scrape_run_finalize failed: %s", exc)
+
+
+def _record_run_crash(run_id: int | None, exc: BaseException) -> None:
+    """Record that a phase died mid-flight: bump errors, leave ended_at NULL.
+
+    Additive (bump_scrape_run_counts) rather than a finalize write, because the
+    drain has already been bumping the same columns per chunk — the crash is one
+    more error event on top of whatever committed, not a replacement aggregate.
+    """
+    if run_id is None:
+        return
+    LOG.error("PHASE crashed, recording it on scrape_run %s: %r", run_id, exc)
+    try:
+        with db.connect() as conn:
+            db.bump_scrape_run_counts(conn, run_id, errors=1)
+    except Exception as bump_exc:
+        LOG.warning("could not record the crash on scrape_run %s: %r", run_id, bump_exc)
+
+
+def run_phase(
+    portal: Portal, run_type: str, runner: Any, dry_run: bool, **kw: Any,
+) -> int:
+    """Open a scrape_runs row, run one phase, and record HOW IT ENDED.
+
+    Lifted out of nine byte-identical `*_main.py` copies (rule #21). Those copies
+    finalized from a bare `finally`, so a phase that died mid-flight still landed
+    `_finalize(run_id, {}, drain=True)` — which stamps `ended_at` and, under
+    `bump_already_applied`, never writes `errors` at all. A hard crash therefore
+    recorded `ended_at` set and `errors = 0`: indistinguishable from a clean run,
+    and invisible to BOTH health arms (`stuck`, which keys on `ended_at is null`,
+    and `err_pct`, which keys on `errors`). That is exactly why none of the six
+    portals that crashed on 2026-08-26 showed an error count.
+
+    The contract is now explicit: **`ended_at` means the phase completed.** A
+    crash bumps `errors` and deliberately leaves `ended_at` NULL before
+    re-raising, so a crashed run lights up both arms instead of neither.
+    """
+    run_id: int | None = None
+    if not dry_run:
+        try:
+            with db.connect() as conn:
+                run_id = db.scrape_run_start(conn, run_type, source=portal.source)
+        except Exception as exc:
+            LOG.warning("scrape_run_start failed: %s", exc)
+    rc = 0
+    agg: dict[str, Any] = {}
+    try:
+        rc, agg = runner(portal, dry_run=dry_run, **{**kw, "run_id": run_id})
+    except BaseException as exc:
+        # BaseException, not Exception: a SIGINT or a SystemExit out of a phase
+        # leaves the run just as incomplete as a CheckViolation does, and the
+        # whole point here is that "did not finish" is never recorded as green.
+        if not dry_run:
+            _record_run_crash(run_id, exc)
+        raise
+    else:
+        if not dry_run:
+            _finalize_run(run_id, agg, drain=runner is run_detail_drain)
+    return rc
