@@ -385,6 +385,19 @@ reads the last 30 days of `pipeline_check_results` (index `..._key_run_idx (chec
 and collapses each check to `(status, incident_started_at, last_fail_at, last_run_at, fail_runs)`.
 `latest_statuses()` is now the status-only view of it.
 
+**The anchor must never be the window edge.** For a check red LONGER than the 30-day read, every
+row in the window is a `fail`, so the collapsed `incident_started_at` is just the oldest row still
+inside it — a value that advances by one cadence on every run as rows age out. Every dedupe key is
+built from that anchor, so `ON CONFLICT DO NOTHING` would stop suppressing anything and the ladder
+would re-emit **onset on every run, forever** (hourly on the acute lane) — worse than the
+pre-ladder silence it replaces. `_collapse` therefore flags `onset_truncated` when the streak runs
+off the edge of the window, and `_resolve_truncated_onset` pins the real onset with one extra
+query per affected check (first `fail` after the last non-`fail` preceding the window). The
+cooldown is deliberately not re-applied out there — an incident that old is one long red by any
+reading, and the goal is a STABLE key, not a second opinion. Residual, accepted: a green blip that
+the cooldown absorbed can shift the anchor ONCE, on the run it ages out of the window. A failed or
+slow resolver degrades to the window edge rather than raising.
+
 **The policy is scalar keys, and that is load-bearing.** `load_thresholds` merges only
 `isinstance(v, (int, float))` values from `app_settings.pipeline_check_thresholds`, so a JSON
 *array* threshold would be dropped silently and the code default would win forever, undetectably.

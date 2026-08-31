@@ -154,6 +154,14 @@ table, no migration and no routing decision — it changes only *when* the exist
 - Policy is five scalar `pipeline_check_thresholds` keys (`load_thresholds` drops
   non-scalars, so an array would have been ignored undetectably); code defaults ship
   live, no migration.
+- **Review fix — the anchor cannot be the history window's edge.** `check_states` reads
+  30 days, so a check red for longer than that had every in-window row a `fail` and took
+  the oldest surviving row as its onset — a value that advances one cadence per run as
+  rows age out. Every dedupe key hangs off that anchor, so the ladder would have
+  re-emitted **onset every run, forever** on an incident older than a month: the flood
+  it exists to remove, in a new shape, and strictly worse than main's silence.
+  `onset_truncated` now flags a streak that runs off the window edge and one extra query
+  pins its real onset.
 
 **Not** wired: migration 220's `consecutive_failures`/`is_chronic`, which the design doc
 named. They are computed inside `workflow_failure_summary(int)` over `workflow_failures`

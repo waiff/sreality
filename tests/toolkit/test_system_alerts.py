@@ -28,6 +28,13 @@ class _FakeCursor:
                 None if self._conn.channels_value is _MISSING
                 else (self._conn.channels_value,)
             )
+        elif "min(run_at)" in sql:
+            # The truncated-onset resolver: one row, the true first fail of a streak
+            # that started before the history window.
+            self._conn.true_onset_queries.append(params)
+            self._conn._fetch = (
+                None if self._conn.true_onset is None else (self._conn.true_onset,)
+            )
         elif "pipeline_check_results" in sql:
             self._conn._fetchall = self._conn.latest_rows
         elif "INSERT INTO notification_dispatches" in sql:
@@ -67,7 +74,10 @@ class _FakeConn:
     def __init__(
         self, *, channels_value: Any = _MISSING, insert_rowcount: int = 1,
         latest_rows: list[tuple[str, str]] | None = None,
+        true_onset: _dt.datetime | None = None,
     ) -> None:
+        self.true_onset = true_onset
+        self.true_onset_queries: list[Any] = []
         self.channels_value = channels_value
         self.insert_rowcount = insert_rowcount
         self.executed: list[tuple[str, Any]] = []
@@ -395,6 +405,80 @@ def test_unbroken_red_survives_a_throttled_observation_gap() -> None:
         out, [{"check_key": "x", "status": "fail", "message": "red"}], {"x": "fail"},
         _RUN_AT, states={"x": s})
     assert _dedupe_keys(out)[0] == f"sys:x:onset:{_RUN_AT - _h(19):%Y-%m-%dT%H:%M:%SZ}"
+
+
+# --- the anchor must not slide with the history window ---------------------
+
+
+def test_a_streak_older_than_the_window_resolves_its_true_onset() -> None:
+    """The window-edge anchor bug. `check_states` reads 30 days of history; for a check
+    that has been red LONGER than that, every row in the window is a fail, so
+    `incident_started_at` was simply the oldest row STILL INSIDE the window — a value
+    that advances by one cadence on every run as rows age out. Since every dedupe key is
+    `sys:{k}:...:{anchor}`, `ON CONFLICT DO NOTHING` then suppressed nothing and the
+    ladder re-emitted ONSET on every run, forever (hourly, on the acute lane). Silence
+    was the pre-ladder behaviour, so that is a regression in the flood direction."""
+    true_start = _RUN_AT - _h(24 * 45)
+    conn = _FakeConn(
+        latest_rows=[("x", "fail", _RUN_AT - _h(h)) for h in (1, 7, 13, 24 * 30 - 1)],
+        true_onset=true_start,
+    )
+    s = check_states(conn)["x"]
+    assert s.onset_truncated is True
+    assert s.incident_started_at == true_start
+    # ...and the resolver asked about THIS check, bounded by the window cutoff.
+    assert conn.true_onset_queries and conn.true_onset_queries[0]["key"] == "x"
+
+
+def test_the_resolver_is_not_consulted_when_the_window_holds_the_whole_incident() -> None:
+    conn = _FakeConn(latest_rows=[
+        ("x", "fail", _RUN_AT - _h(1)),
+        ("x", "ok", _RUN_AT - _h(20)),
+        ("x", "fail", _RUN_AT - _h(30)),
+    ])
+    assert check_states(conn)["x"].onset_truncated is False
+    assert conn.true_onset_queries == []
+
+
+def test_a_stable_anchor_means_the_next_run_re_emits_nothing() -> None:
+    """End to end: two consecutive runs of a 45-day-red check, the window having slid
+    by one cadence between them. The onset key must be byte-identical, so the second
+    run's insert is a no-op."""
+    true_start = _RUN_AT - _h(24 * 45)
+    keys: list[str] = []
+    for slide in (0.0, 6.0):
+        at = _RUN_AT + _h(slide)
+        conn = _FakeConn(
+            latest_rows=[("x", "fail", at - _h(h)) for h in (1, 7, 24 * 30 - 1)],
+            true_onset=true_start,
+        )
+        s = check_states(conn)["x"]
+        out = _FakeConn()
+        emit_transition_alerts(
+            out, [{"check_key": "x", "status": "fail", "message": "red"}],
+            {"x": "fail"}, at, states={"x": s})
+        keys.append(_dedupe_keys(out)[0])
+    assert keys[0] == keys[1] == f"sys:x:onset:{true_start:%Y-%m-%dT%H:%M:%SZ}"
+
+
+def test_a_resolver_failure_degrades_to_the_window_edge_rather_than_raising() -> None:
+    """A slow or broken tail query must never cost the run its alerts."""
+    class _Boom(_FakeConn):
+        def cursor(self) -> Any:
+            cur = super().cursor()
+            inner = cur.execute
+
+            def _execute(sql: str, params: Any = None) -> None:
+                if "min(run_at)" in sql:
+                    raise RuntimeError("statement timeout")
+                inner(sql, params)
+
+            cur.execute = _execute  # type: ignore[method-assign]
+            return cur
+
+    conn = _Boom(latest_rows=[("x", "fail", _RUN_AT - _h(h)) for h in (1, 7)])
+    s = check_states(conn)["x"]
+    assert s.incident_started_at == _RUN_AT - _h(7)
 
 
 def test_latest_statuses_is_the_status_only_view() -> None:

@@ -141,6 +141,12 @@ class CheckState:
     last_fail_at: _dt.datetime | None = None
     last_run_at: _dt.datetime | None = None
     fail_runs: int = 0
+    # True when the streak walked off the oldest row in the history window without ever
+    # meeting a green stretch — i.e. the incident is OLDER than the window and
+    # `incident_started_at` is only the window edge. Every key is anchored on that
+    # timestamp, so a window-edge anchor would slide forward by one cadence on every
+    # run and re-emit "onset" forever (see `_resolve_truncated_onset`).
+    onset_truncated: bool = False
 
     @property
     def timestamped(self) -> bool:
@@ -166,18 +172,67 @@ def _collapse(rows: list[tuple[str, _dt.datetime]], cooldown_h: float) -> CheckS
     last_fail_at = rows[first_fail][1]
     started_at, anchor, runs = last_fail_at, last_fail_at, 1
     blip = False  # a non-fail row stands between `anchor` and the row being examined
+    truncated = True  # falsified by any green stretch that ends the streak in-window
     for s, at in rows[first_fail + 1:]:
         if s != "fail":
             if anchor - at > cooldown:
+                truncated = False
                 break  # green for longer than the cooldown: the incident starts after it
             blip = True
             continue
         if blip and anchor - at > cooldown:
+            truncated = False
             break
         started_at, anchor, runs, blip = at, at, runs + 1, False
     return CheckState(
         status=status, incident_started_at=started_at, last_fail_at=last_fail_at,
-        last_run_at=last_run_at, fail_runs=runs,
+        last_run_at=last_run_at, fail_runs=runs, onset_truncated=truncated,
+    )
+
+
+_TRUE_ONSET_SQL = """
+SELECT min(run_at) FROM pipeline_check_results
+ WHERE check_key = %(key)s
+   AND status = 'fail'
+   AND run_at > coalesce(
+       (SELECT max(run_at) FROM pipeline_check_results
+         WHERE check_key = %(key)s AND status <> 'fail' AND run_at < %(cutoff)s),
+       '-infinity'::timestamptz)
+"""
+
+
+def _resolve_truncated_onset(
+    conn: Any, key: str, cutoff: _dt.datetime, state: CheckState,
+) -> CheckState:
+    """Pin the anchor of an incident that started BEFORE the history window.
+
+    Without this the anchor is whatever the oldest row still inside the window happens
+    to be, which advances by one cadence every run as rows age out — and since every
+    dedupe key is `sys:{k}:...:{anchor}`, `ON CONFLICT DO NOTHING` stops suppressing
+    anything. A check red for longer than the window would emit a fresh ONSET alert on
+    every single run (hourly, on the acute lane), which is worse than the pre-ladder
+    behaviour it replaces: silence. The 114 alternating alerts of 2026-08 in a new shape.
+
+    One extra query, and only for a check whose streak ran off the edge of the window —
+    the fixed 19-check registry bounds it, and in practice nothing is red for 30 days.
+    The cooldown is deliberately not re-applied out there: an incident that old is one
+    long red by any reading, and the point is a STABLE key, not a second opinion.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_TRUE_ONSET_SQL, {"key": key, "cutoff": cutoff})
+            row = cur.fetchone()
+    except Exception:  # noqa: BLE001 — a slow tail must never cost the run its alerts
+        return state
+    if not row or row[0] is None:
+        return state
+    started = _as_utc(row[0])
+    if state.incident_started_at is not None and started >= state.incident_started_at:
+        return state
+    return CheckState(
+        status=state.status, incident_started_at=started,
+        last_fail_at=state.last_fail_at, last_run_at=state.last_run_at,
+        fail_runs=state.fail_runs, onset_truncated=True,
     )
 
 
@@ -187,8 +242,11 @@ def check_states(
     """Per-check stored history (call BEFORE writing this run's rows, so it is the
     baseline this run's results are compared against).
 
-    Bounded to `history_days` because an incident older than that has already climbed
-    every rung; the index is `pipeline_check_results_key_run_idx (check_key, run_at desc)`.
+    Bounded to `history_days` for the bulk read; the index is
+    `pipeline_check_results_key_run_idx (check_key, run_at desc)`. A streak that runs
+    off the edge of that window has its onset resolved exactly, by one extra query per
+    affected check — the anchor has to be STABLE across runs or every dedupe key built
+    from it changes and the ladder re-alerts onset forever.
     """
     pol = policy or AlertPolicy()
     cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=history_days)
@@ -202,7 +260,13 @@ def check_states(
     grouped: dict[str, list[tuple[str, _dt.datetime]]] = {}
     for key, status, run_at in rows:
         grouped.setdefault(str(key), []).append((str(status), _as_utc(run_at)))
-    return {k: _collapse(v, pol.flap_cooldown_hours) for k, v in grouped.items()}
+    out: dict[str, CheckState] = {}
+    for k, v in grouped.items():
+        st = _collapse(v, pol.flap_cooldown_hours)
+        if st.onset_truncated and st.incident_started_at is not None:
+            st = _resolve_truncated_onset(conn, k, cutoff, st)
+        out[k] = st
+    return out
 
 
 def latest_statuses(conn: Any) -> dict[str, str]:
