@@ -299,7 +299,8 @@ def test_a_preexisting_label_is_frozen_onto_the_member(conn: _FakeConn) -> None:
     conn.preexisting = {4242: [{"tag_id": 22, "state": "positive", "source": "human"}]}
     cohort = _open(conn)
     te.draw_pure_random(conn, cohort_id=cohort["id"], count=1)
-    assert conn.members[0]["preexisting_labels"] == [
+    # Wrapped for the driver (the gold_v1 crash); the frozen content matters.
+    assert conn.members[0]["preexisting_labels"].obj == [
         {"tag_id": 22, "state": "positive", "source": "human"}
     ]
 
@@ -414,3 +415,27 @@ def test_a_skip_outside_the_routing_set_is_refused(
     with pytest.raises(ValueError, match="not routing tags"):
         te.record_answer(conn, cohort_id=1, image_id=5,
                          tag_ids=[22], picked=[], skipped=[999])
+
+
+def test_preexisting_labels_are_wrapped_for_the_driver(conn: _FakeConn) -> None:
+    """The crash the gold_v1 draw found live: parsed JSON inserted without the
+    Jsonb wrapper cannot be adapted by psycopg. Latent since 458 because random
+    draws almost never land on a labeled image; the curated draw seats ONLY
+    labeled images, so every row exercises this arm."""
+    from psycopg.types.json import Jsonb
+
+    conn.cohort = {"id": 1, "name": "gold_v1", "purpose": "curated",
+                   "frame_size": 10, "model": "m", "revision": None,
+                   "drawn_at": "t", "sealed_at": None, "sealed_by": None,
+                   "note": None}
+    conn.preexisting = {5: [{"tag_id": 25, "state": "positive",
+                             "source": "human_draft"}]}
+    te.add_members(conn, cohort_id=1, rows=[
+        {"image_id": 5, "frame": "curated", "stratum": "curated:25",
+         "inclusion_probability": 1.0},
+        {"image_id": 6, "frame": "curated", "stratum": "curated:25",
+         "inclusion_probability": 1.0},
+    ])
+    by_image = {m["image_id"]: m for m in conn.members}
+    assert isinstance(by_image[5]["preexisting_labels"], Jsonb)
+    assert by_image[6]["preexisting_labels"] is None
