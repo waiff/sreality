@@ -171,9 +171,9 @@ Generalise it: a failure is superseded only by a newer success.
 
 The symmetric pathology from the same edge-triggered rule: `property_maintenance` was `fail`
 continuously from 2026-08-20 13:08 UTC with its last alert at 11:37 UTC — six days red, six
-days silent. One rule produces both. The re-escalation ladder that fixes it belongs in
-`toolkit/system_alerts.emit_transition_alerts`, where all checks inherit it (W3.4), not in any
-one check.
+days silent. One rule produces both — and one fix retires both: the re-escalation ladder in
+`toolkit/system_alerts.emit_transition_alerts`, where all checks inherit it (W3.4, shipped;
+see "The escalation ladder" below), never in any one check.
 
 **2. A zero is ambiguous — name the arm.** `llm_burn_rate` had only upper arms ($90 warn /
 $150 fail), and `_record_failure` writes `cost_usd=0.0`, so a **total outage drives 24h spend
@@ -342,3 +342,76 @@ dropped and the code default would win forever.
 in-app bell only. The flip is two `app_settings` rows plus a transport secret on the API
 service — see the `toolkit-api` skill for `RESEND_API_KEY` / `TELEGRAM_BOT_TOKEN`;
 `api/main.py` starts `outbox_loop` only when a transport `is_configured()`.
+
+## The escalation ladder — one incident, not one edge (W3.4, 2026-08-31)
+
+`docs/design/reliability-program.md` W3.4. Edge-triggered alerting produced two opposite
+pathologies from **one rule**: `property_maintenance` was red from 2026-08-20 13:08 UTC with
+its last alert at 11:37 — six days red, six days silent — while `llm_errors` oscillating on
+unchanged inputs produced **114 alerts** alternating onset with a literal "✓ Recovered" for an
+outage that never recovered. Both live in `toolkit/system_alerts.emit_transition_alerts`, so
+both are fixed there, once, for every check — never in any one check.
+
+**The unit of alerting is an INCIDENT, not an edge.** An incident opens at a check's first
+`fail` and stays open while the check keeps failing *or* returns to `fail` within
+`alert_flap_cooldown_hours` (6h). Every dedupe key for that incident is anchored on its onset
+timestamp, so `ON CONFLICT (dedupe_key) DO NOTHING` gives exactly-once semantics across every
+lane and cadence without any new table or any run-to-run state:
+
+| key | when |
+| --- | --- |
+| `sys:{k}:onset:{incident_start}` | the first `fail` |
+| `sys:{k}:reesc:{rung}:{incident_start}` | 6h / 24h / 72h, then `w1`, `w2`, … weekly forever |
+| `sys:{k}:recovery:{incident_start}` | once, after the cooldown has elapsed since the last `fail` |
+
+Three consequences worth keeping straight:
+
+- **Only the HIGHEST due rung fires per run.** An incident that predates the ladder's deploy,
+  or one whose lane was down for days, emits *one* alert (the 72h rung for a six-day red), not
+  a backlog of every rung it slept through. `AlertPolicy.due_rung` owns that rule.
+- **A flap re-enters the same incident.** The green half of a flap announces nothing (the
+  cooldown has not elapsed), and the red half re-computes the *original* anchor, so the DB
+  swallows the duplicate onset. 114 alerts become one onset and one recovery.
+- **Recovery is deliberately late.** It fires on the first run that observes the check has
+  held non-fail for the cooldown — `CheckState.last_run_at` is what makes "first run to
+  observe it" exact, so the alert lands once and never repeats. Up to ~6h of latency on a
+  *recovery* notice is the price of not shipping the flap noise; onset latency is unchanged.
+
+**The streak comes from `pipeline_check_results`, not from migration 220.** `consecutive_failures`
+and `is_chronic` (streak ≥ 3) are computed inside `public.workflow_failure_summary(int)` over
+`workflow_failures` ⋈ `workflow_run_health` — the **GitHub workflow-run** domain. They are not
+columns and they do not describe pipeline checks; the two domains stay separate. `check_states()`
+reads the last 30 days of `pipeline_check_results` (index `..._key_run_idx (check_key, run_at desc)`)
+and collapses each check to `(status, incident_started_at, last_fail_at, last_run_at, fail_runs)`.
+`latest_statuses()` is now the status-only view of it.
+
+**The anchor must never be the window edge.** For a check red LONGER than the 30-day read, every
+row in the window is a `fail`, so the collapsed `incident_started_at` is just the oldest row still
+inside it — a value that advances by one cadence on every run as rows age out. Every dedupe key is
+built from that anchor, so `ON CONFLICT DO NOTHING` would stop suppressing anything and the ladder
+would re-emit **onset on every run, forever** (hourly on the acute lane) — worse than the
+pre-ladder silence it replaces. `_collapse` therefore flags `onset_truncated` when the streak runs
+off the edge of the window, and `_resolve_truncated_onset` pins the real onset with one extra
+query per affected check (first `fail` after the last non-`fail` preceding the window). The
+cooldown is deliberately not re-applied out there — an incident that old is one long red by any
+reading, and the goal is a STABLE key, not a second opinion. Residual, accepted: a green blip that
+the cooldown absorbed can shift the anchor ONCE, on the run it ages out of the window. A failed or
+slow resolver degrades to the window edge rather than raising.
+
+**The policy is scalar keys, and that is load-bearing.** `load_thresholds` merges only
+`isinstance(v, (int, float))` values from `app_settings.pipeline_check_thresholds`, so a JSON
+*array* threshold would be dropped silently and the code default would win forever, undetectably.
+Hence one key per rung: `alert_reescalate_{1,2,3}_hours`, `alert_reescalate_weekly_hours`,
+`alert_flap_cooldown_hours`. A rung set to `0` is disabled. The cooldown must stay **above the
+acute lane's hourly cadence** or hourly flapping rings again.
+
+**The weekly heartbeat rides the existing `--weekly` lane** (`emit_weekly_heartbeat`, called from
+`main()`), so no new schedule and no new workflow. It is the operator-facing half of a dead-man
+switch: migration 274's `emit_verification_stale_alert` (pg_cron, hourly) catches a harness that
+stopped writing rows from *inside* the database, but it cannot catch a harness that runs fine
+while the whole delivery path is broken — a heartbeat that stops arriving can. **It is keyed
+`sys:heartbeat:{ISO-week}` because `verify_pipeline.yml` appends `--weekly` on `date +%u = 1`,
+i.e. to all four of Monday's 6-hourly runs** — a day-grain or run-grain key would emit 4×. The
+two watchdogs share no key namespace: `sys:verification_stale:{YYYY-MM-DD}` is the pg_cron
+function's alone, and a test pins that (an accidental collision would let `ON CONFLICT` swallow
+the dead-man switch's insert and silence it).

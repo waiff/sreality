@@ -3,9 +3,11 @@
 Computes a fixed set of pipeline-health metrics (LLM error rate + liveness + burn
 rate, DB saturation, worker liveness, dual-write parity, property maintenance,
 broker-resolution freshness),
-writes one `pipeline_check_results` row per check, and rings the in-app bell on
-STATE TRANSITIONS only (toolkit.system_alerts.emit_transition_alerts): once when a check
-goes red, once when it recovers — not on every red run.
+writes one `pipeline_check_results` row per check, and rings the in-app bell once per
+INCIDENT (toolkit.system_alerts.emit_transition_alerts): at onset, again at 6h / 24h /
+72h / weekly while it stays red, and once when it recovers — not on every red run, and
+not on every edge (a check that flaps back to red inside the cooldown re-enters the same
+incident rather than opening a new one).
 
 Born from the 2026-07 incident: the pipeline stalled silently for two days
 (Anthropic credit exhaustion; 38k+ failed LLM calls) with no in-app signal. This
@@ -25,7 +27,7 @@ and never `ok`.
 
     python -m scripts.verify_pipeline            # compute + write + alert
     python -m scripts.verify_pipeline --dry-run  # compute + log only, no writes
-    python -m scripts.verify_pipeline --weekly   # also run the weekly-only checks
+    python -m scripts.verify_pipeline --weekly   # weekly-only checks + the heartbeat
 
 Needs only SUPABASE_DB_URL.
 """
@@ -46,7 +48,12 @@ from typing import Any, Callable
 
 from scraper.db import QUEUE_PRIORITY_NEW, connect
 from toolkit.listing_identity import R2_CARRIERS as _PARITY_CARRIERS
-from toolkit.system_alerts import emit_transition_alerts, latest_statuses
+from toolkit.system_alerts import (
+    AlertPolicy,
+    check_states,
+    emit_transition_alerts,
+    emit_weekly_heartbeat,
+)
 
 LOG = logging.getLogger("verify_pipeline")
 
@@ -243,6 +250,20 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # what a quiet week looks like. The cursor is the only thing that distinguishes them.
     "workflow_poller_stale_warn_hours": 6.0,
     "workflow_poller_stale_fail_hours": 12.0,
+    # --- alert escalation policy (W3.4) -------------------------------------
+    # Not per-check thresholds: these govern toolkit.system_alerts, so EVERY check
+    # inherits one escalation policy instead of each one growing its own. Scalars, one
+    # key per rung, because load_thresholds drops any non-scalar from the DB merge — a
+    # JSON array here would be silently ignored and the code default would win forever.
+    # The rungs answer "red for six days, silent for six" (property_maintenance,
+    # 2026-08-20..26); the cooldown answers its mirror image, the 114 alternating
+    # onset/recovery alerts llm_errors produced for an outage that never recovered. It
+    # must stay above the acute lane's hourly cadence or hourly flapping still rings.
+    "alert_reescalate_1_hours": 6.0,
+    "alert_reescalate_2_hours": 24.0,
+    "alert_reescalate_3_hours": 72.0,
+    "alert_reescalate_weekly_hours": 168.0,
+    "alert_flap_cooldown_hours": 6.0,
 }
 
 # --- lane + per-check wall-clock budgets (W0.4) -----------------------------
@@ -2347,8 +2368,9 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("delist_flip_refused", check_delist_flip_refused),
 ]
 
-# --weekly stays a valid (currently empty) lane so the scheduled invocation keeps
-# working; the merge-precision sample went with the legacy decision engine.
+# No weekly-only CHECKS today (the merge-precision sample went with the legacy decision
+# engine), but the lane is no longer inert: main() emits the once-per-ISO-week health
+# heartbeat under --weekly (toolkit.system_alerts.emit_weekly_heartbeat).
 _WEEKLY_CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = []
 
 
@@ -2474,19 +2496,23 @@ def insert_result(conn: Any, result: dict[str, Any], run_at: _dt.datetime) -> No
 
 def write_results(
     conn: Any, results: list[dict[str, Any]], run_at: _dt.datetime,
+    *, policy: AlertPolicy | None = None,
 ) -> dict[str, int]:
-    """Persist one row per check, then ring the bell on TRANSITIONS only (onset /
-    recovery), not on every red run. Returns {onset, recovery} counts.
+    """Persist one row per check, then ring the bell per INCIDENT (onset / re-escalation
+    / recovery), not on every red run. Returns {onset, recovery, reescalation} counts.
 
-    The previous stored status is read BEFORE this run's rows are inserted, so the
-    baseline is the prior run — see toolkit.system_alerts.emit_transition_alerts.
+    The stored history is read BEFORE this run's rows are inserted, so the baseline is
+    the prior run — see toolkit.system_alerts.emit_transition_alerts.
 
     main() no longer takes this path (it persists and alerts per check so a job timeout
     keeps what it computed); kept for callers that already hold a full result list."""
-    prev = latest_statuses(conn)
+    pol = policy or AlertPolicy()
+    states = check_states(conn, policy=pol)
+    prev = {k: s.status for k, s in states.items() if s.status is not None}
     for r in results:
         insert_result(conn, r, run_at)
-    return emit_transition_alerts(conn, results, prev, run_at)
+    return emit_transition_alerts(
+        conn, results, prev, run_at, states=states, policy=pol)
 
 
 def main() -> int:
@@ -2494,7 +2520,9 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="Compute + log, write nothing (no result rows, no alerts).")
     parser.add_argument("--weekly", action="store_true",
-                        help="Also run the weekly-only checks.")
+                        help="Also run the weekly-only checks and emit the once-per-ISO"
+                             "-week health heartbeat (idempotent: the workflow appends "
+                             "this to all four of Monday's runs).")
     parser.add_argument("--only", default="",
                         help="Comma-separated check keys to run (e.g. 'llm_errors,llm_liveness' "
                              "for the hourly LLM lane). Empty = all checks.")
@@ -2527,14 +2555,18 @@ def main() -> int:
 
     only = {k.strip() for k in args.only.split(",") if k.strip()} or None
     run_at = _dt.datetime.now(_dt.timezone.utc)
-    counts = {"onset": 0, "recovery": 0}
+    counts = {"onset": 0, "recovery": 0, "reescalation": 0}
     written = 0
     with connect() as conn:
         thresholds = load_thresholds(conn)
-        # The transition baseline must be read BEFORE this run writes anything, and this
+        policy = AlertPolicy.from_thresholds(thresholds)
+        # The alerting baseline must be read BEFORE this run writes anything, and this
         # run now writes incrementally — so it is captured here rather than inside a
-        # batch writer (see toolkit.system_alerts.emit_transition_alerts).
-        prev = latest_statuses(conn) if not args.dry_run else {}
+        # batch writer (see toolkit.system_alerts.emit_transition_alerts). It carries
+        # the stored history, not just the last status: the ladder needs each open
+        # incident's onset time to know which rung is due.
+        states = check_states(conn, policy=policy) if not args.dry_run else {}
+        prev = {k: s.status for k, s in states.items() if s.status is not None}
 
         def _persist(result: dict[str, Any]) -> None:
             """Persist + alert on THIS check, immediately. Both are per-check so a job
@@ -2549,18 +2581,30 @@ def main() -> int:
                 return
             insert_result(conn, result, run_at)
             written += 1
-            emitted = emit_transition_alerts(conn, [result], prev, run_at)
-            counts["onset"] += emitted["onset"]
-            counts["recovery"] += emitted["recovery"]
+            emitted = emit_transition_alerts(
+                conn, [result], prev, run_at, states=states, policy=policy)
+            for kind in counts:
+                counts[kind] += emitted[kind]
 
         results = run_checks(
             conn, thresholds, weekly=args.weekly, only=only, on_result=_persist)
         if args.dry_run:
             LOG.info("dry-run: %d checks computed, no rows written", len(results))
             return 0
+        if args.weekly:
+            # The weekly lane's heartbeat: one digest per ISO week, so the operator can
+            # tell "nothing is wrong" from "nothing is running". --weekly rides all four
+            # of Monday's runs, hence the week-grain dedupe key. Best-effort, like every
+            # other write here: a failed heartbeat must not discard the run's results.
+            try:
+                if emit_weekly_heartbeat(conn, results, states, run_at):
+                    LOG.info("emitted the weekly health heartbeat")
+            except Exception:  # noqa: BLE001
+                LOG.exception("could not emit the weekly health heartbeat")
     LOG.info(
-        "verify_pipeline wrote %d rows, emitted %d onset + %d recovery alerts",
-        written, counts["onset"], counts["recovery"],
+        "verify_pipeline wrote %d rows, emitted %d onset + %d re-escalation + "
+        "%d recovery alerts",
+        written, counts["onset"], counts["reescalation"], counts["recovery"],
     )
     if args.exit_nonzero_on_fail and any(r["status"] == "fail" for r in results):
         return 1
