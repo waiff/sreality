@@ -103,6 +103,19 @@ cadence + throttle slack), docstring rewritten to name the real producer.
   fleet-wide). That is the standing problem the realtime-worker program owns; this
   program does not fork into scheduling.
 
+**Shipped in parallel — do not rebuild.** The walk-coverage sprint (other sessions,
+2026-08-27..30) independently landed pieces of this program's W1/W2 scope, discovered
+during the W0 rebase: **`check_migration_drift` (PR #1204)** probes the live catalog for
+objects declared by the newest N merged migrations — W2.3's core mechanism, already in
+`_CHECKS` and running inside W0.4's budget loop. Alongside it: `acquisition_lag`
+(discovered-but-never-fetched wait per portal) and `walk_coverage` (collected vs
+portal-advertised inventory), which together cover most of W1's planned
+`ingest_freshness` check, plus `worker_lane_stall` and `delist_flip_refused`. Revised
+scope: **W2.3 narrows to hardening #1204's check** (assert-power validation, the
+first-observation warn discipline, the W2.1/W2.2 header-token + per-file assert
+convention remain); **W1's check scope narrows to `drain_write_rejects`** — the
+quarantine mechanism, breaker, and reject counter remain W1's substance.
+
 ---
 
 ## Design principles
