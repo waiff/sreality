@@ -34,9 +34,11 @@ from typing import Any
 
 import psycopg
 
-from toolkit.tag_holdout import exclusion_for
 
-FRAMES = ("pure_random", "stratified")
+# 'curated' (migration 464): operator-marked images seated for careful
+# re-labeling — probability 1, never weighted into population statistics, and
+# NOT excluded from training (their answers are the gold seed).
+FRAMES = ("pure_random", "stratified", "curated")
 
 # Probes per wanted image. Every probe is a PK lookup, so overshooting is cheap;
 # undershooting means a short draw. The eligible fraction is high (an image only
@@ -46,9 +48,10 @@ PROBE_FACTOR = 60
 PROBE_MAX = 40_000
 
 _CREATE_COHORT_SQL = """
-    INSERT INTO tag_exam_cohorts (name, frame_size, model, revision, note)
-    VALUES (%(name)s, %(frame_size)s, %(model)s, %(revision)s, %(note)s)
-    RETURNING id, name, frame_size, model, revision, drawn_at, sealed_at, sealed_by, note
+    INSERT INTO tag_exam_cohorts (name, purpose, frame_size, model, revision, note)
+    VALUES (%(name)s, %(purpose)s, %(frame_size)s, %(model)s, %(revision)s, %(note)s)
+    RETURNING id, name, purpose, frame_size, model, revision, drawn_at, sealed_at,
+              sealed_by, note
 """
 
 # The eligible frame: an image carrying a vector from the pinned encoder. An image
@@ -127,13 +130,13 @@ _COMPOSITION_SQL = """
     ORDER BY m.frame, m.stratum
 """
 
-_COHORT_KEYS = ("id", "name", "frame_size", "model", "revision", "drawn_at",
-                "sealed_at", "sealed_by", "note")
+_COHORT_KEYS = ("id", "name", "purpose", "frame_size", "model", "revision",
+                "drawn_at", "sealed_at", "sealed_by", "note")
 
 
 def create_cohort(
     conn: psycopg.Connection, *, name: str, model: str, revision: str | None = None,
-    note: str | None = None,
+    note: str | None = None, purpose: str = "holdout",
 ) -> dict[str, Any]:
     """Open a cohort. It accepts members until `seal_cohort`; the frame size is
     measured NOW and stored, so a corpus that grows later cannot silently rewrite
@@ -144,9 +147,11 @@ def create_cohort(
         frame_size = int(row[0]) if row else 0
         if frame_size <= 0:
             raise ValueError(f"no embeddings for model {model!r}; nothing to draw from")
+        if purpose not in ("holdout", "curated"):
+            raise ValueError(f"unknown cohort purpose {purpose!r}")
         cur.execute(_CREATE_COHORT_SQL, {
-            "name": name, "frame_size": frame_size, "model": model,
-            "revision": revision, "note": note,
+            "name": name, "purpose": purpose, "frame_size": frame_size,
+            "model": model, "revision": revision, "note": note,
         })
         created = cur.fetchone()
     return dict(zip(_COHORT_KEYS, created))
@@ -249,7 +254,8 @@ def draw_pure_random(
 
 
 _GET_COHORT_BY_ID_SQL = """
-    SELECT id, name, frame_size, model, revision, drawn_at, sealed_at, sealed_by, note
+    SELECT id, name, purpose, frame_size, model, revision, drawn_at, sealed_at,
+           sealed_by, note
     FROM tag_exam_cohorts WHERE id = %(cohort_id)s
 """
 
@@ -261,6 +267,82 @@ def _get_cohort_by_id(
         cur.execute(_GET_COHORT_BY_ID_SQL, {"cohort_id": cohort_id})
         row = cur.fetchone()
     return dict(zip(_COHORT_KEYS, row)) if row else None
+
+
+# The curated seed: the operator's own draft-positive marks for one tag, on
+# images no exam holds yet. Reads image_tag_labels deliberately (censused): it
+# SELECTS the re-labeling worklist, not a training population — the training
+# labels are the careful answers written later, over these very rows.
+_CURATED_SEED_SQL = """
+    SELECT l.image_id
+    FROM image_tag_labels l
+    JOIN images i ON i.id = l.image_id AND i.storage_path IS NOT NULL
+    WHERE l.tag_id = %(tag_id)s
+      AND l.state = 'positive'
+      AND l.source = 'human_draft'
+      AND NOT EXISTS (
+            SELECT 1 FROM tag_exam_members m WHERE m.image_id = l.image_id
+          )
+      AND NOT (l.image_id = ANY(%(taken)s::bigint[]))
+    ORDER BY random()
+    LIMIT %(per_tag)s
+"""
+
+_DRAFT_POSITIVE_COUNTS_SQL = """
+    SELECT l.tag_id, count(*)::int
+    FROM image_tag_labels l
+    WHERE l.tag_id = ANY(%(tag_ids)s::bigint[])
+      AND l.state = 'positive' AND l.source = 'human_draft'
+    GROUP BY l.tag_id
+"""
+
+
+def draw_curated_from_drafts(
+    conn: psycopg.Connection, *, cohort_id: int, tag_ids: list[int], per_tag: int,
+) -> dict[str, Any]:
+    """Seat up to `per_tag` of the operator's draft-marked images per tag in a
+    CURATED cohort, for careful re-labeling through the exam UI.
+
+    Rarest-first: tags with the fewest draft positives pick before the common
+    ones, so kuchyně cannot consume an image jídelna needed. An image already in
+    ANY exam is never re-seated (one exam per image); an image drafted for
+    several tags is seated once and serves every tag's re-label anyway, since an
+    exam answer covers the whole question list. frame='curated', probability 1 —
+    drawn with certainty from a curated list, excluded from population-weighted
+    statistics by frame, never by luck."""
+    cohort = _get_cohort_by_id(conn, cohort_id=cohort_id)
+    if cohort is None:
+        raise KeyError(cohort_id)
+    if cohort["purpose"] != "curated":
+        raise ValueError(
+            f"cohort {cohort['name']!r} is {cohort['purpose']!r}; a curated draw "
+            "into a holdout would put training material inside the yardstick")
+    with conn.cursor() as cur:
+        cur.execute(_DRAFT_POSITIVE_COUNTS_SQL, {"tag_ids": tag_ids})
+        counts = {int(r[0]): int(r[1]) for r in cur.fetchall()}
+    ordered = sorted(tag_ids, key=lambda t: (counts.get(t, 0), t))
+    taken: list[int] = []
+    per_tag_found: dict[int, int] = {}
+    for tag_id in ordered:
+        with conn.cursor() as cur:
+            cur.execute(_CURATED_SEED_SQL, {
+                "tag_id": tag_id, "taken": taken, "per_tag": per_tag,
+            })
+            ids = [int(r[0]) for r in cur.fetchall()]
+        per_tag_found[tag_id] = len(ids)
+        if ids:
+            add_members(conn, cohort_id=cohort_id, rows=[
+                {"image_id": i, "frame": "curated",
+                 "stratum": f"curated:{tag_id}", "inclusion_probability": 1.0}
+                for i in ids
+            ])
+            taken.extend(ids)
+    return {
+        "requested_per_tag": per_tag,
+        "tags": {t: {"draft_positives": counts.get(t, 0),
+                     "seated": per_tag_found.get(t, 0)} for t in ordered},
+        "seated_total": len(taken),
+    }
 
 
 def seal_cohort(
@@ -350,16 +432,20 @@ _IS_MEMBER_SQL = """
     WHERE cohort_id = %(cohort_id)s AND image_id = %(image_id)s
 """
 
-# Warm-up images come from OUTSIDE the exam on purpose: they exist to settle the
-# operator's hand, and spending real exam images on that would shrink the sample
-# that has to grade everything.
-_WARMUP_SQL = f"""
+# Warm-up images come from OUTSIDE every exam on purpose: they exist to settle
+# the operator's hand. This anti-join is deliberately COHORT-BLIND — not the
+# narrowed holdout exclusion — because the answer-refusal rail only refuses
+# NON-members: a curated member served as practice would be silently accepted
+# as a real answer the moment a mis-wired client posted it.
+_WARMUP_SQL = """
     SELECT DISTINCT l.image_id, i.storage_path
     FROM image_tag_labels l
     JOIN images i ON i.id = l.image_id AND i.storage_path IS NOT NULL
     WHERE l.source IN ('human', 'human_confirmed')
       AND l.state = 'positive'
-      {exclusion_for("l")}
+      AND NOT EXISTS (
+            SELECT 1 FROM tag_exam_members wm WHERE wm.image_id = l.image_id
+          )
     ORDER BY l.image_id
     LIMIT %(limit)s
 """

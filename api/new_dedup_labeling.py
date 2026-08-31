@@ -712,6 +712,26 @@ def _cohort_or_404(conn: Any, name: str) -> dict[str, Any]:
     return cohort
 
 
+@router.get("/exam-cohorts")
+def list_exam_cohorts(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
+    """Every exam cohort with its purpose, for the exam page's cohort bar.
+
+    purpose (migration 464): 'holdout' = graded measurement, excluded from
+    training; 'curated' = operator-marked images re-labeled carefully through
+    the same UI, feeding training."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT c.name, c.purpose, c.sealed_at IS NOT NULL, "
+            "       (SELECT count(*) FROM tag_exam_members m WHERE m.cohort_id = c.id) "
+            "FROM tag_exam_cohorts c ORDER BY c.id"
+        )
+        rows = cur.fetchall()
+    return {"data": [
+        {"name": r[0], "purpose": r[1], "sealed": bool(r[2]), "members": int(r[3])}
+        for r in rows
+    ]}
+
+
 @router.get("/exam/{cohort_name}")
 def get_exam_state(
     cohort_name: str, set: str | None = None, conn: Any = Depends(deps.get_db_conn),

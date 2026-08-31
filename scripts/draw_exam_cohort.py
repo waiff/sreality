@@ -1,6 +1,7 @@
 """Draw and seal the sealed exam cohort (migration 458).
 
     python -m scripts.draw_exam_cohort --cohort exam_v1 --pure-random 100
+    python -m scripts.draw_exam_cohort --cohort gold_v1 --curated-per-tag 20
     python -m scripts.draw_exam_cohort --cohort exam_v1 --status
     python -m scripts.draw_exam_cohort --cohort exam_v1 --seal
 
@@ -29,6 +30,11 @@ def main() -> int:
     ap.add_argument("--cohort", required=True, help="Cohort name, e.g. exam_v1.")
     ap.add_argument("--pure-random", type=int, default=0,
                     help="Draw N uniformly at random from the embedded corpus.")
+    ap.add_argument("--curated-per-tag", type=int, default=0,
+                    help="Seat up to N of the operator's draft-marked images per "
+                         "flagged tag in a CURATED cohort (migration 462) for "
+                         "careful re-labeling. Creates the cohort with "
+                         "purpose='curated' on first use.")
     ap.add_argument("--seal", action="store_true",
                     help="Close the cohort. Irreversible.")
     ap.add_argument("--status", action="store_true",
@@ -46,11 +52,13 @@ def main() -> int:
     from toolkit import tag_definitions as td
     from toolkit import tag_exam, tag_holdout
 
-    if args.pure_random < 0:
-        LOG.error("EXAM --pure-random must not be negative")
+    if args.pure_random < 0 or args.curated_per_tag < 0:
+        LOG.error("EXAM counts must not be negative")
         return 1
-    if not (args.pure_random or args.seal or args.status):
-        LOG.error("EXAM nothing to do: pass --pure-random, --seal or --status")
+    if sum(1 for x in (args.pure_random, args.curated_per_tag, args.seal,
+                       args.status) if x) != 1:
+        LOG.error("EXAM pass exactly one of --pure-random, --curated-per-tag, "
+                  "--seal or --status")
         return 1
     # Sealing in the same breath as drawing would close the exam before the
     # stratified half could be added — the one ordering mistake that cannot be
@@ -83,8 +91,10 @@ def main() -> int:
             return 0
 
         if args.dry_run:
-            LOG.info("EXAM dry-run cohort=%r exists=%s pure_random=%d seal=%s model=%s",
-                     args.cohort, cohort is not None, args.pure_random, args.seal, model)
+            LOG.info("EXAM dry-run cohort=%r exists=%s pure_random=%d "
+                     "curated_per_tag=%d seal=%s model=%s",
+                     args.cohort, cohort is not None, args.pure_random,
+                     args.curated_per_tag, args.seal, model)
             return 0
 
         if args.seal:
@@ -96,15 +106,34 @@ def main() -> int:
                      args.cohort, out["status"], out["sealed_at"])
             return 0
 
+        purpose = "curated" if args.curated_per_tag else "holdout"
         if cohort is None:
             cohort = tag_exam.create_cohort(
-                conn, name=args.cohort, model=model, revision=revision, note=args.note,
+                conn, name=args.cohort, model=model, revision=revision,
+                note=args.note, purpose=purpose,
             )
-            LOG.info("EXAM created cohort=%r id=%d frame_size=%d",
-                     cohort["name"], cohort["id"], cohort["frame_size"])
+            LOG.info("EXAM created cohort=%r id=%d purpose=%s frame_size=%d",
+                     cohort["name"], cohort["id"], cohort["purpose"],
+                     cohort["frame_size"])
         elif cohort["sealed_at"] is not None:
             LOG.error("EXAM cohort=%r is sealed; it cannot take members", args.cohort)
             return 1
+
+        if args.curated_per_tag:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM tag_taxonomy "
+                    "WHERE routing_categories IS NOT NULL AND active ORDER BY id")
+                tag_ids = [int(r[0]) for r in cur.fetchall()]
+            res = tag_exam.draw_curated_from_drafts(
+                conn, cohort_id=cohort["id"], tag_ids=tag_ids,
+                per_tag=args.curated_per_tag,
+            )
+            LOG.info("EXAM curated %s", json.dumps(res, default=str))
+            for t, row in sorted(res["tags"].items()):
+                LOG.info("EXAM   tag=%-4s draft_positives=%-4d seated=%d",
+                         t, row["draft_positives"], row["seated"])
+            return 0
 
         res = tag_exam.draw_pure_random(
             conn, cohort_id=cohort["id"], count=args.pure_random,

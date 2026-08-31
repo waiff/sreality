@@ -266,6 +266,12 @@ W1 (shared prerequisites + labeling program):
       (`/new-dedup/exam/review`) — every answered image in a list, same click semantics,
       every correction re-answering the whole image through the exam's own /answer route
       (one write path; review can never produce a row shape the exam could not).
+- [x] **Cohort purposes + draft labels (2026-08-31, migration 464)** — the exam UI now serves two
+      roles: 'holdout' cohorts stay the excluded, weighted yardstick (exam_v1 untouched);
+      'curated' cohorts re-seat the operator's draft-marked images for careful re-labeling whose
+      answers feed training. Pre-exam labels demoted to `human_draft` (never win an upsert, read
+      by no truth path); candidate queues cleared; warm-up made cohort-blind; gold_v1 = up to
+      20/tag across all 16 flagged categories, rarest-first.
 - [ ] **NEXT — W1 remainder:** one definition renderer with two outputs (the machine prompt and
       a plain-language handbook card, so the operator never meets `counts` / `does_not_count` /
       `confusable_with` / `leave_out_when` while labeling); the machine-label store (a SEPARATE

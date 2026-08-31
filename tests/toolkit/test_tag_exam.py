@@ -39,13 +39,15 @@ class _Cur:
             self._rows = [(c.frame_size,)]
         elif s.startswith("INSERT INTO tag_exam_cohorts"):
             c.cohort = dict(c.cohort or {}, **{
-                "id": 1, "name": params["name"], "frame_size": params["frame_size"],
+                "id": 1, "name": params["name"],
+                "purpose": params.get("purpose", "holdout"),
+                "frame_size": params["frame_size"],
                 "model": params["model"], "revision": params["revision"],
                 "drawn_at": "t", "sealed_at": None, "sealed_by": None,
                 "note": params["note"],
             })
             self._rows = [tuple(c.cohort[k] for k in te._COHORT_KEYS)]
-        elif s.startswith("SELECT id, name, frame_size, model, revision, drawn_at"):
+        elif s.startswith("SELECT id, name, purpose, frame_size, model, revision"):
             self._rows = [tuple(c.cohort[k] for k in te._COHORT_KEYS)] if c.cohort else []
         elif s.startswith("WITH bounds AS"):
             self._rows = [(i,) for i in c.probe_hits[: params["count"]]]

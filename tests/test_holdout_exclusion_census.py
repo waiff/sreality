@@ -36,7 +36,11 @@ from toolkit import tag_holdout
 # that JOINS the exam deliberately (the exam-sitting reads) mentions the table but
 # does not carry this, and must therefore be censused by name — which is the honest
 # outcome: "excludes the exam" and "reads the exam on purpose" are different facts.
-_MARKER = "NOT EXISTS ( SELECT 1 FROM tag_exam_members hx"
+# Since migration 464 the exclusion is PURPOSE-narrowed: only holdout cohorts
+# protect. The marker pins the join — a bare member anti-join no longer counts
+# as the holdout exclusion (it would also exclude curated training material).
+_MARKER = ("NOT EXISTS ( SELECT 1 FROM tag_exam_members hx "
+           "JOIN tag_exam_cohorts hc")
 
 
 def _norm(sql: str) -> str:
@@ -79,6 +83,20 @@ _EXEMPT: dict[str, str] = {
         "tag_candidates, which cannot contain a holdout image.",
 
     # --- reads that are ABOUT the exam ----------------------------------------
+    "_WARMUP_SQL":
+        "Practice images must come from outside EVERY exam — curated included — "
+        "because the answer-refusal rail only refuses NON-members: a curated "
+        "member served as practice would be accepted as a real answer. So this "
+        "carries its own cohort-blind member anti-join, deliberately NOT the "
+        "purpose-narrowed exclusion.",
+    "_CURATED_SEED_SQL":
+        "The curated draw's worklist: the operator's own draft-positive marks, "
+        "selected for RE-labeling through the exam UI (migration 464). Drafts "
+        "are not training labels — the careful answers written over them are — "
+        "and the cohort-blind member anti-join stops any re-seating.",
+    "_DRAFT_POSITIVE_COUNTS_SQL":
+        "Sizes the curated draw's rarest-first order by counting DRAFT positives "
+        "per tag. Drafts are outside every training and grading read by source.",
     "_NEXT_MEMBER_SQL":
         "Serves the next unanswered exam image. It reads the exam deliberately — "
         "excluding it would leave nothing to answer.",

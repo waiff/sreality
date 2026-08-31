@@ -920,7 +920,7 @@ def test_the_upsert_never_erases_an_existing_verification(conn: _FakeConn) -> No
     assert "verified_at = coalesce(excluded.verified_at, image_tag_labels.verified_at)" in sql
     assert (
         "WHERE excluded.source <> 'machine' OR image_tag_labels.source IN "
-        "('machine', 'backfill_442')" in sql
+        "('machine', 'backfill_442', 'human_draft')" in sql
     )
 
 
@@ -1222,4 +1222,4 @@ def test_a_human_write_always_lands_on_a_backfill_442_cell() -> None:
     for sql in (ta._UPSERT_STATE_SQL, ta._UPSERT_STATE_RETURNING_SQL):
         assert "ON CONFLICT (image_id, tag_id) DO UPDATE SET" in sql
         assert "WHERE excluded.source <> 'machine'" in sql
-        assert "OR image_tag_labels.source IN ('machine', 'backfill_442')" in sql
+        assert "OR image_tag_labels.source IN ('machine', 'backfill_442', 'human_draft')" in sql

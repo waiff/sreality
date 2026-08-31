@@ -95,12 +95,26 @@ def test_source_is_not_null_with_no_default() -> None:
 
 
 def test_the_source_vocabulary_matches_the_toolkits() -> None:
+    # 446 stated the vocabulary of its day; 464 restated it (drop-and-add) with
+    # 'human_draft'. History must stay a SUBSET of today's tuple, and the LATEST
+    # restatement must match it exactly — a value in only one place is either a
+    # write that will start failing or a vocabulary nobody can insert.
     m = re.search(
         r"add constraint image_tag_labels_source_check check \(source in \(([^)]*)\)\)",
         _norm(),
     )
     assert m, "the source CHECK is missing"
-    assert {v.strip().strip("'") for v in m.group(1).split(",")} == set(ta.SOURCES)
+    historical = {v.strip().strip("'") for v in m.group(1).split(",")}
+    assert historical <= set(ta.SOURCES)
+    import pathlib as _pl
+    latest = (_pl.Path(__file__).resolve().parents[1] / "migrations" /
+              "464_exam_cohort_purpose_and_draft_labels.sql").read_text()
+    m2 = re.search(
+        r"add constraint image_tag_labels_source_check\s+check \(source in \(([^)]*)\)\)",
+        " ".join(latest.split()),
+    )
+    assert m2, "464 must restate the source CHECK"
+    assert {v.strip().strip("'") for v in m2.group(1).split(",")} == set(ta.SOURCES)
 
 
 def test_the_backfill_never_condemns_a_hand_labelled_positive() -> None:
