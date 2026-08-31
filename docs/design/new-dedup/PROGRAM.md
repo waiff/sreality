@@ -140,6 +140,23 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-08-31 — **The exam instrument decouples from the holdout role; drafts declared (operator
+  ruling; migration 464).** The operator's reframing, accepted after working the inconsistencies
+  through: the pre-exam labels (1,522 cells, mostly positives, made without guidelines) are NOT
+  the training set — they are DRAFTS, and the trusted labeling instrument is the exam UI. So
+  cohorts carry a PURPOSE: 'holdout' (unchanged contract — random/stratified, weighted, excluded
+  from training; exam_v1 + its 84 careful answers stay the yardstick) and 'curated'
+  (operator-marked images re-seated for careful re-labeling through the same UI; their answers
+  ARE training material; frame='curated', p=1, excluded from population-weighted statistics by
+  FRAME, never by luck). The one-exam-per-image index now works FOR the split: a trained-on image
+  can never later enter a holdout. Mechanics: HOLDOUT_EXCLUSION narrowed to purpose='holdout'
+  (one constant; census marker updated); the WARM-UP deliberately stays cohort-blind (the
+  answer-refusal rail only refuses NON-members, so a curated member served as practice would be
+  silently accepted — caught by the inventory pass); existing 'human' labels off holdout members
+  demoted to source='human_draft' (drafts never win an upsert, are read by no truth path, and
+  seed the curated draw); tag_candidates cleared on operator order (2,282 rows; backups
+  backup_464_*). The curated draw is rarest-first, 20/tag across all 16 flagged categories.
+
 - 2026-08-30 — **Exam keys become letters, sets cap 12, machine suggestions ON (operator
   ruling; PR: exam letters + suggestions, migration 461).** Three operator instructions in one
   turn: (1) set_2 extended by "chodba / předsíň, ložnice, chodba / schodiště, vstupní dveře" —

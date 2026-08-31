@@ -1970,15 +1970,24 @@
         },
         {
           "name": "action",
-          "description": "draw | status | seal. Sealing is IRREVERSIBLE.",
+          "description": "draw | curated (seat draft-marked images per tag) | status | seal. Sealing is IRREVERSIBLE.",
           "required": false,
           "type": "choice",
           "default": "status",
           "options": [
             "status",
             "draw",
+            "curated",
             "seal"
           ]
+        },
+        {
+          "name": "per_tag",
+          "description": "For curated: seat up to N draft-marked images per flagged tag.",
+          "required": false,
+          "type": "string",
+          "default": "20",
+          "options": null
         },
         {
           "name": "dry_run",

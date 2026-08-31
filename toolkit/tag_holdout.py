@@ -26,15 +26,25 @@ from typing import Any
 
 import psycopg
 
-# Membership alone excludes — sealed or not. Protecting only sealed cohorts would
-# leave the whole drawing window open, and that window is exactly when the images
-# are chosen but not yet answered: a training run inside it would consume the exam
-# before the exam existed. `sealed_at` means "finished", never "protected".
+# HOLDOUT membership excludes — sealed or not. Protecting only sealed cohorts
+# would leave the whole drawing window open, and that window is exactly when the
+# images are chosen but not yet answered: a training run inside it would consume
+# the exam before the exam existed. `sealed_at` means "finished", never
+# "protected".
+#
+# Since migration 464 a cohort carries a PURPOSE, and only 'holdout' cohorts
+# exclude: 'curated' cohorts hold operator-marked images re-labeled carefully
+# through the exam UI, and their answers ARE training material — excluding them
+# would defeat the reason they were seated. The one-exam-per-image index keeps
+# the split sound in the direction that matters: an image in a curated cohort
+# can never later be drawn into a holdout, so nothing trained-on ever grades.
 #
 # `{alias}` is the statement's own alias for the row carrying image_id.
 HOLDOUT_EXCLUSION = """
       AND NOT EXISTS (
             SELECT 1 FROM tag_exam_members hx
+            JOIN tag_exam_cohorts hc
+              ON hc.id = hx.cohort_id AND hc.purpose = 'holdout'
             WHERE hx.image_id = {alias}.image_id
           )"""
 
@@ -57,7 +67,8 @@ _TRAINING_LABEL_ROWS_SQL = f"""
 """
 
 _COHORT_SQL = """
-    SELECT id, name, frame_size, model, revision, drawn_at, sealed_at, sealed_by, note
+    SELECT id, name, purpose, frame_size, model, revision, drawn_at, sealed_at,
+           sealed_by, note
     FROM tag_exam_cohorts WHERE name = %(name)s
 """
 
@@ -65,7 +76,10 @@ _COHORT_SIZE_SQL = """
     SELECT count(*)::int FROM tag_exam_members WHERE cohort_id = %(cohort_id)s
 """
 
-_HOLDOUT_SIZE_SQL = "SELECT count(*)::int FROM tag_exam_members"
+_HOLDOUT_SIZE_SQL = (
+    "SELECT count(*)::int FROM tag_exam_members hx "
+    "JOIN tag_exam_cohorts hc ON hc.id = hx.cohort_id AND hc.purpose = 'holdout'"
+)
 
 TRAINING_STATES = ("positive", "negative")
 
@@ -98,7 +112,7 @@ def get_cohort(conn: psycopg.Connection, *, name: str) -> dict[str, Any] | None:
         row = cur.fetchone()
     if row is None:
         return None
-    keys = ("id", "name", "frame_size", "model", "revision", "drawn_at",
+    keys = ("id", "name", "purpose", "frame_size", "model", "revision", "drawn_at",
             "sealed_at", "sealed_by", "note")
     return dict(zip(keys, row))
 

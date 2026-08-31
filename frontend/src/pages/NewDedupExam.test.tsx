@@ -45,6 +45,7 @@ beforeEach(() => {
   vi.mocked(api.getExamState).mockResolvedValue({ data: examState() });
   // No warm-up by default; the warm-up path has its own tests below.
   vi.mocked(api.getExamWarmup).mockResolvedValue({ data: [] });
+  vi.mocked(api.getExamCohorts).mockResolvedValue({ data: [] });
   vi.mocked(api.getTagDefinitionCard).mockResolvedValue({ data: null });
   vi.mocked(api.answerExamQuestion).mockResolvedValue({
     data: { image_id: 555, cells_written: 4 },
@@ -434,5 +435,40 @@ describe('<NewDedupExam> suggestions and the warm-up', () => {
     expect(await screen.findByText(/Warm-up 1 of 1/)).toBeInTheDocument();
     expect(screen.queryByTestId('suggested-22')).toBeNull();
     expect(screen.queryByTestId('suggested-none')).toBeNull();
+  });
+});
+
+describe('<NewDedupExam> cohort bar', () => {
+  it('offers every cohort with its purpose, preserving the sitting set', async () => {
+    // Since migration 464 the exam is plural: the sealed holdout yardstick plus
+    // curated re-label cohorts. Switching must not mean hand-editing a URL.
+    vi.mocked(api.getExamCohorts).mockResolvedValue({
+      data: [
+        { name: 'exam_v1', purpose: 'holdout', sealed: true, members: 250 },
+        { name: 'gold_v1', purpose: 'curated', sealed: true, members: 300 },
+      ],
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={['/new-dedup/exam?cohort=exam_v1&set=set_2']}>
+          <NewDedupExam />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await screen.findByText(/Which of these/);
+    const gold = await screen.findByRole('link', { name: /gold_v1/ });
+    expect(gold).toHaveAttribute('href', '/new-dedup/exam?cohort=gold_v1&set=set_2');
+    expect(gold.textContent).toContain('curated');
+    expect(screen.getByRole('link', { name: /exam_v1/ }).textContent).toContain('holdout');
+  });
+
+  it('shows no bar while there is only one cohort', async () => {
+    vi.mocked(api.getExamCohorts).mockResolvedValue({
+      data: [{ name: 'exam_v1', purpose: 'holdout', sealed: true, members: 250 }],
+    });
+    renderPage();
+    await screen.findByText(/Which of these/);
+    expect(screen.queryByRole('link', { name: /exam_v1/ })).toBeNull();
   });
 });

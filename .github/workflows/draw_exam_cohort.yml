@@ -25,11 +25,16 @@ on:
         default: "0"
         type: string
       action:
-        description: "draw | status | seal. Sealing is IRREVERSIBLE."
+        description: "draw | curated (seat draft-marked images per tag) | status | seal. Sealing is IRREVERSIBLE."
         required: false
         default: "status"
         type: choice
-        options: ["status", "draw", "seal"]
+        options: ["status", "draw", "curated", "seal"]
+      per_tag:
+        description: "For curated: seat up to N draft-marked images per flagged tag."
+        required: false
+        default: "20"
+        type: string
       dry_run:
         description: "Report what would happen; write nothing."
         required: false
@@ -62,6 +67,7 @@ jobs:
         env:
           COHORT: ${{ inputs.cohort }}
           PURE_RANDOM: ${{ inputs.pure_random }}
+          PER_TAG: ${{ inputs.per_tag }}
           ACTION: ${{ inputs.action }}
           DRY_RUN: ${{ inputs.dry_run }}
         # Inputs reach the script through env, never interpolated into the command,
@@ -81,6 +87,11 @@ jobs:
                 ''|*[!0-9]*) echo "::error::pure_random must be a number"; exit 1 ;;
               esac
               ARGS="${ARGS} --pure-random ${PURE_RANDOM}" ;;
+            curated)
+              case "${PER_TAG:-20}" in
+                ''|*[!0-9]*) echo "::error::per_tag must be a number"; exit 1 ;;
+              esac
+              ARGS="${ARGS} --curated-per-tag ${PER_TAG:-20}" ;;
             *) echo "::error::unknown action ${ACTION}"; exit 1 ;;
           esac
           if [ "${DRY_RUN:-false}" = "true" ]; then ARGS="${ARGS} --dry-run"; fi

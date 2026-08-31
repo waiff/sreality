@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   answerExamQuestion,
+  getExamCohorts,
   getExamState,
   getExamWarmup,
   getTagDefinitionCard,
@@ -72,6 +73,16 @@ export default function NewDedupExam() {
     queryFn: () => getExamState(cohort, setName),
   });
   const exam: ExamState | undefined = stateQ.data?.data;
+
+  /* The cohort bar: since migration 464 the exam is plural — the sealed holdout
+   * yardstick plus curated re-label cohorts — and switching must not mean
+   * hand-editing a URL. Only rendered when there is a choice to make. */
+  const cohortsQ = useQuery({
+    queryKey: ['new-dedup', 'exam', 'cohorts'],
+    queryFn: getExamCohorts,
+    staleTime: 60_000,
+  });
+  const cohorts = cohortsQ.data?.data ?? [];
 
   /* The warm-up exists to settle a COLD hand, so it runs only while the sitting
    * has zero answers. It used to replay all ten practice images on every page
@@ -256,6 +267,28 @@ export default function NewDedupExam() {
           )}
         </div>
       </header>
+
+      {cohorts.length > 1 && (
+        <nav className="mt-3 flex items-center gap-2 flex-wrap">
+          {cohorts.map((c) => (
+            <Link
+              key={c.name}
+              to={`/new-dedup/exam?cohort=${encodeURIComponent(c.name)}${setName ? `&set=${encodeURIComponent(setName)}` : ''}`}
+              aria-current={c.name === cohort ? 'page' : undefined}
+              className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
+                c.name === cohort
+                  ? 'border-[var(--color-ink-2)] text-[var(--color-ink)]'
+                  : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]'
+              }`}
+            >
+              {c.name}
+              <span className="ml-1.5 text-[0.65rem] tracking-[0.08em] uppercase text-[var(--color-ink-4)]">
+                {c.purpose === 'curated' ? 'curated' : 'holdout'} · {c.members}
+              </span>
+            </Link>
+          ))}
+        </nav>
+      )}
 
       {finished ? (
         <p className="mt-10 text-center text-sm text-[var(--color-ink-2)]">

@@ -58,7 +58,7 @@ def test_inputs_reach_the_script_through_env_not_interpolation(
 ) -> None:
     step = _step(lane)
     assert "${{" not in step["run"]
-    assert set(step["env"]) == {"COHORT", "PURE_RANDOM", "ACTION", "DRY_RUN"}
+    assert set(step["env"]) == {"COHORT", "PURE_RANDOM", "PER_TAG", "ACTION", "DRY_RUN"}
 
 
 def test_the_cohort_name_is_validated_as_an_identifier(lane: dict[str, Any]) -> None:

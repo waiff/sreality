@@ -25,7 +25,7 @@ class _Cur:
         self._conn.executed.append((s, params))
         if s.startswith("SELECT itl.image_id, itl.state"):
             self._rows = list(self._conn.training_rows)
-        elif s.startswith("SELECT id, name, frame_size"):
+        elif s.startswith("SELECT id, name, purpose, frame_size"):
             self._rows = list(self._conn.cohorts)
         elif s.startswith("SELECT count(*)::int FROM tag_exam_members WHERE cohort_id"):
             self._rows = [(self._conn.cohort_member_count,)]
@@ -122,7 +122,7 @@ def test_an_unknown_cohort_is_none_not_an_error(conn: _FakeConn) -> None:
 
 
 def test_a_cohort_reads_back_as_a_named_mapping(conn: _FakeConn) -> None:
-    conn.cohorts = [(1, "exam_v1", 10_400_000, "m", "abc", "t0", None, None, None)]
+    conn.cohorts = [(1, "exam_v1", "holdout", 10_400_000, "m", "abc", "t0", None, None, None)]
     got = th.get_cohort(conn, name="exam_v1")
     assert got is not None
     assert got["name"] == "exam_v1"

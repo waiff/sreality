@@ -35,9 +35,14 @@ IMAGE_LIST_MAX = 200
 
 SOURCE_HUMAN = "human"
 SOURCE_HUMAN_CONFIRMED = "human_confirmed"
+# A demoted pre-exam label (migration 464): kept as the curated draw's seed
+# list, read by NO training or grading path, overwritten by everything. No code
+# writes this value — only the migration's bulk demotion did.
+SOURCE_HUMAN_DRAFT = "human_draft"
 SOURCE_MACHINE = "machine"
 SOURCE_BACKFILL_442 = "backfill_442"
-SOURCES = (SOURCE_HUMAN, SOURCE_HUMAN_CONFIRMED, SOURCE_MACHINE, SOURCE_BACKFILL_442)
+SOURCES = (SOURCE_HUMAN, SOURCE_HUMAN_CONFIRMED, SOURCE_HUMAN_DRAFT,
+           SOURCE_MACHINE, SOURCE_BACKFILL_442)
 # backfill_442 is historical fact, never something a caller may claim.
 WRITABLE_SOURCES = (SOURCE_HUMAN, SOURCE_HUMAN_CONFIRMED, SOURCE_MACHINE)
 HUMAN_SOURCES = (SOURCE_HUMAN, SOURCE_HUMAN_CONFIRMED)
@@ -241,7 +246,7 @@ _UPSERT_STATE_RETURNING_SQL = """
       verified_at = coalesce(excluded.verified_at, image_tag_labels.verified_at),
       updated_at = now()
     WHERE excluded.source <> 'machine'
-       OR image_tag_labels.source IN ('machine', 'backfill_442')
+       OR image_tag_labels.source IN ('machine', 'backfill_442', 'human_draft')
     RETURNING image_id, tag_id, state, source, excluded_reason, definition_id,
               verified_at, updated_at
 """
@@ -267,7 +272,7 @@ _UPSERT_STATE_SQL = """
       verified_at = coalesce(excluded.verified_at, image_tag_labels.verified_at),
       updated_at = now()
     WHERE excluded.source <> 'machine'
-       OR image_tag_labels.source IN ('machine', 'backfill_442')
+       OR image_tag_labels.source IN ('machine', 'backfill_442', 'human_draft')
 """
 
 _READ_STATE_SQL = """

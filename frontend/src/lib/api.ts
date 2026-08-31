@@ -1416,6 +1416,18 @@ export interface ExamState {
   question: ExamQuestion | null;
 }
 
+export interface ExamCohortRow {
+  name: string;
+  /* holdout = the graded yardstick (excluded from training); curated = your
+   * marked images re-labeled carefully, feeding training. */
+  purpose: 'holdout' | 'curated';
+  sealed: boolean;
+  members: number;
+}
+
+export const getExamCohorts = (): Promise<{ data: ExamCohortRow[] }> =>
+  request<{ data: ExamCohortRow[] }>('/new-dedup/labeling/exam-cohorts', { jwt: true });
+
 export const getExamState = (cohort: string, set?: string): Promise<{ data: ExamState }> =>
   request<{ data: ExamState }>(
     `/new-dedup/labeling/exam/${cohort}${set ? `?set=${encodeURIComponent(set)}` : ''}`,
