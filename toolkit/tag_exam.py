@@ -33,6 +33,7 @@ from __future__ import annotations
 from typing import Any
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 
 # 'curated' (migration 464): operator-marked images seated for careful
@@ -211,7 +212,13 @@ def add_members(
                 "stratum": r["stratum"],
                 "inclusion_probability": float(r["inclusion_probability"]),
                 "screen_guess_tag_ids": r.get("screen_guess_tag_ids"),
-                "preexisting_labels": labels.get(image_id),
+                # Parsed JSON needs the Jsonb wrapper or psycopg cannot adapt
+                # it. Latent since 458: a random draw lands on a labeled image
+                # ~0.014% of the time, so this arm first RAN when the curated
+                # draw seated nothing but labeled images — every gold row
+                # freezes the draft state it will be re-labeled over.
+                "preexisting_labels": (
+                    Jsonb(labels[image_id]) if image_id in labels else None),
                 "position": position + i,
             })
             written += cur.rowcount
