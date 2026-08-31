@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from typing import Any
 
 import pytest
@@ -213,6 +214,26 @@ def test_probe_pass_portal_error_never_ends_the_pass(monkeypatch):
     assert ran == list(rw.REALTIME_SOURCES)
     assert state["lanes"]["probe"]["last"]["errors"] == 1
     assert state["lanes"]["probe"]["last"]["portals"] == len(rw.REALTIME_SOURCES) - 1
+
+
+def test_lane_failure_recording_never_runs_on_the_event_loop(monkeypatch):
+    """`_record_lane_failure` calls `db.connect()`, which is `_connect_with_retry`:
+    3 attempts with `time.sleep(10.0)` between, and `is_transient_db_error` is true for
+    every OperationalError. A bare call therefore sleeps ~20s per source ON THE LOOP
+    during a pooler outage — nine sources per drain pass, with the 30s heartbeat lane a
+    sibling coroutine — i.e. it would blind `worker_liveness` during exactly the DB
+    incident it exists to record. Every other DB touch in both passes is offloaded."""
+    monkeypatch.setattr(rw, "_read_disabled_sources", lambda: set())
+    loop_thread: list[bool] = []
+
+    def _blocking(source: str, lane: str, exc: BaseException) -> None:
+        loop_thread.append(threading.current_thread() is threading.main_thread())
+
+    monkeypatch.setattr(rw, "_record_lane_failure", _blocking)
+    monkeypatch.setattr(rw, "_run_probe_sync",
+                        lambda s: (_ for _ in ()).throw(RuntimeError("db down")))
+    asyncio.run(rw._probe_pass(asyncio.Event(), rw._new_state()))
+    assert loop_thread and not any(loop_thread)
 
 
 # --- drain pass ----------------------------------------------------------------

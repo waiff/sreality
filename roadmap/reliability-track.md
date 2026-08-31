@@ -95,6 +95,18 @@ Built on the corpus the design doc asked for first: 554 real failures over 14 da
   first (the breadth arm is measurably faster: 8 min to the 2nd workflow vs up to 164
   min to a 2nd same-workflow failure under the Actions throttle). Closes on member-
   workflow success, at 168 h, or manually.
+- **Review fixes, same wave (migration 463).** Two producers over one counter needed a
+  correlation key and had none: the chokepoint recorded a portal crash at t+0 and the
+  poller recorded the SAME concluded run hours later, so `failure_count` was ~2x reality
+  and a lone crash crossed the measured onset threshold by itself. `ops_incident_runs`
+  makes one Actions run at most one failure, and the poller claims before it downloads —
+  which also replaces the earlier workflow-keyed signature reuse, whose lack of run
+  correlation folded unrelated new reds into whatever incident last touched that workflow.
+  With it: the onset claim and its emit became one transaction (autocommit connections
+  were committing the claim alone, so a failed emit silenced that incident's only alert
+  forever), the incident pass moved after the cursor write and gained a wall-clock budget,
+  and the worker's recorder moved onto `asyncio.to_thread` — it was the one blocking DB
+  call left on the event loop, worst exactly during a DB outage.
 - **W3.3 exits through the existing spine** — one `system_health`
   `notification_dispatches` row per incident. **No new alert table, no parallel
   channel.** The outbox RETRY allowlist bug is fixed with it, so an ops alert now gets

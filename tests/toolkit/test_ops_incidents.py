@@ -33,6 +33,8 @@ class _Cur:
         elif "INSERT INTO ops_incidents" in norm:
             self._rows = [c.upsert_row] if c.upsert_row else []
         elif "INSERT INTO notification_dispatches" in norm:
+            if c.alert_emit_raises is not None:
+                raise c.alert_emit_raises
             c.alerts.append(params)
             self.rowcount = 1
         elif "SET alerted_at = now()" in norm:
@@ -41,8 +43,10 @@ class _Cur:
             self._rows = c.resolved_by_success
         elif "resolve_reason = 'max_age'" in norm:
             self._rows = c.resolved_by_max_age
-        elif "SELECT signature, workflow_paths FROM ops_incidents" in norm:
-            self._rows = c.open_rows
+        elif "INSERT INTO ops_incident_runs" in norm:
+            run_id = params[0]
+            self.rowcount = 0 if run_id in c.claimed_runs else 1
+            c.claimed_runs.add(run_id)
         elif "UPDATE ops_incidents SET resolved_at" in norm:
             self.rowcount = c.manual_rowcount
 
@@ -59,6 +63,26 @@ class _Cur:
         return None
 
 
+class _Tx:
+    """Stands in for psycopg's `conn.transaction()`. It records that the block ran and,
+    on an exception, that the block was ABANDONED — which is the whole point of wrapping
+    the alert claim: on these autocommit connections an un-wrapped claim commits alone."""
+
+    def __init__(self, conn: "_Conn") -> None:
+        self._conn = conn
+
+    def __enter__(self) -> "_Tx":
+        self._conn.tx_depth += 1
+        self._conn.tx_entered += 1
+        return self
+
+    def __exit__(self, exc_type: Any, *_: Any) -> bool:
+        self._conn.tx_depth -= 1
+        if exc_type is not None:
+            self._conn.tx_rolled_back += 1
+        return False
+
+
 class _Conn:
     def __init__(self, **kw: Any) -> None:
         self.executed: list[tuple[str, Any]] = []
@@ -68,11 +92,18 @@ class _Conn:
         self.claim_rowcount: int = kw.get("claim_rowcount", 1)
         self.resolved_by_success: list = kw.get("resolved_by_success", [])
         self.resolved_by_max_age: list = kw.get("resolved_by_max_age", [])
-        self.open_rows: list = kw.get("open_rows", [])
         self.manual_rowcount: int = kw.get("manual_rowcount", 1)
+        self.claimed_runs: set = set(kw.get("claimed_runs", ()))
+        self.alert_emit_raises: BaseException | None = kw.get("alert_emit_raises")
+        self.tx_depth = 0
+        self.tx_entered = 0
+        self.tx_rolled_back = 0
 
     def cursor(self) -> _Cur:
         return _Cur(self)
+
+    def transaction(self) -> _Tx:
+        return _Tx(self)
 
 
 def _row(*, inc_id: int = 7, count: int = 1, paths: list[str] | None = None,
@@ -232,14 +263,91 @@ def test_manual_resolve_on_an_already_closed_incident_is_false() -> None:
     assert oi.resolve_incident(conn, 7) is False
 
 
+# --- run-grain dedupe (migration 463) --------------------------------------
+
+
+def test_one_actions_run_is_counted_once_across_both_producers() -> None:
+    """The double-count bug. portal_runner records the crash in-process at t+0, the
+    run then concludes `failure`, and the poller finds the SAME run 80-256 minutes
+    later — so a LONE portal crash reached failure_count=2 and crossed the measured
+    onset threshold on its own."""
+    conn = _Conn(upsert_row=_row(count=1, paths=["a.yml"]))
+    first = oi.record_failure_signature(conn, SIG, workflow_path="a.yml", run_id=42)
+    assert first.get("duplicate_run") is not True
+    second = oi.record_failure_signature(conn, SIG, workflow_path="a.yml", run_id=42)
+    assert second == {"duplicate_run": True}
+    assert sum(1 for s, _p in conn.executed if "INSERT INTO ops_incidents" in s) == 1
+
+
+def test_a_run_less_producer_is_never_deduped() -> None:
+    """The always-on Railway worker has no Actions run and no second observer."""
+    conn = _Conn(upsert_row=_row(count=1))
+    assert oi.claim_run(conn, None) is True
+    oi.record_failure_signature(conn, SIG, origin="mmreality/drain")
+    oi.record_failure_signature(conn, SIG, origin="mmreality/drain")
+    assert sum(1 for s, _p in conn.executed if "INSERT INTO ops_incidents" in s) == 2
+
+
+def test_a_caller_that_already_won_the_claim_is_not_asked_to_claim_again() -> None:
+    """The poller claims first so it can skip the job-log download for a run the
+    chokepoint already recorded; the record call must not then self-reject."""
+    conn = _Conn(upsert_row=_row(count=1, paths=["a.yml"]))
+    assert oi.claim_run(conn, 77) is True
+    inc = oi.record_failure_signature(conn, SIG, run_id=77, run_claimed=True)
+    assert inc.get("duplicate_run") is not True
+    assert inc["id"] == 7
+
+
+def test_the_claimed_run_is_linked_to_its_incident() -> None:
+    conn = _Conn(upsert_row=_row(inc_id=7, count=1))
+    oi.record_failure_signature(conn, SIG, run_id=99)
+    link = next((p for s, p in conn.executed if "UPDATE ops_incident_runs" in s), None)
+    assert link == (7, 99)
+
+
+def test_auto_resolve_prunes_the_claim_ledger() -> None:
+    conn = _Conn()
+    oi.auto_resolve(conn)
+    prune = next((p for s, p in conn.executed if "DELETE FROM ops_incident_runs" in s), None)
+    assert prune == (oi._RUN_CLAIM_RETENTION_DAYS,)
+
+
+# --- the onset alert is atomic ---------------------------------------------
+
+
+def test_the_alert_claim_and_the_emit_are_one_transaction() -> None:
+    conn = _Conn(upsert_row=_row(count=2, paths=["a.yml"]))
+    assert oi.maybe_alert(conn, oi.record_failure(conn, SIG)) is True
+    assert conn.tx_entered == 1 and conn.tx_depth == 0
+
+
+def test_a_failed_emit_does_not_leave_a_claimed_but_unsent_onset() -> None:
+    """On these autocommit connections an un-wrapped `alerted_at = now()` commits by
+    itself, and maybe_alert's own `alerted_at is not None` guard then makes the loss
+    permanent: the incident could never alert again, and the eventual recovery notice
+    would close a red the operator never received."""
+    conn = _Conn(upsert_row=_row(count=2, paths=["a.yml"]),
+                 alert_emit_raises=RuntimeError("pooler dropped the connection"))
+    try:
+        oi.maybe_alert(conn, oi.record_failure(conn, SIG))
+    except RuntimeError:
+        pass
+    else:  # pragma: no cover — the emit must not be swallowed here
+        raise AssertionError("the emit failure must propagate to the caller's guard")
+    assert conn.tx_rolled_back == 1     # the claim goes back with it
+    assert conn.alerts == []
+
+
 # --- poller helpers --------------------------------------------------------
 
 
-def test_open_signature_by_workflow_maps_every_member_path() -> None:
-    conn = _Conn(open_rows=[(SIG, ["a.yml", "b.yml"]), ("other|x", ["b.yml"])])
-    out = oi.open_signature_by_workflow(conn)
-    assert out["a.yml"] == SIG
-    assert out["b.yml"] == SIG      # newest-first wins; the older row does not clobber
+def test_actions_run_id_reads_the_env(monkeypatch: Any) -> None:
+    monkeypatch.setenv("GITHUB_RUN_ID", "32788072691")
+    assert oi.actions_run_id() == 32788072691
+    monkeypatch.setenv("GITHUB_RUN_ID", "")
+    assert oi.actions_run_id() is None
+    monkeypatch.delenv("GITHUB_RUN_ID")
+    assert oi.actions_run_id() is None
 
 
 def test_actions_context_parses_the_workflow_ref(monkeypatch: Any) -> None:

@@ -6,6 +6,11 @@ t+0, with the exception object in hand) and `scripts/record_workflow_failures.py
 log-tail backstop (the majority of the corpus: CI, backfills, jobs, LLM lanes, and
 every red with no Python traceback). Both call `record_failure_signature`.
 
+Both can see the SAME Actions run, so `failure_count` is deduped at run grain by
+`ops_incident_runs` (migration 463): one run is at most one failure, in at most one
+incident, whoever gets there first. Without it a lone portal crash counted twice and
+crossed the measured onset threshold on its own.
+
 Deliberately dependency-free (stdlib + a caller-passed psycopg connection), like
 `toolkit.system_alerts` next to it: the Actions poller installs base deps only, so a
 single `api/` import here would silently break a lane that has no test.
@@ -86,6 +91,57 @@ UPDATE ops_incidents
    AND last_seen_at < now() - make_interval(hours => %(hours)s::int)
 RETURNING id, signature, alerted_at
 """
+
+# The run-grain dedupe ledger (migration 463). Rows are ephemeral bookkeeping — the poller's
+# window is hours, so a run pruned here can never be re-observed.
+_RUN_CLAIM_RETENTION_DAYS = 30
+
+
+def actions_run_id() -> int | None:
+    """`GITHUB_RUN_ID` as an int, or None off-CI (the always-on Railway worker)."""
+    raw = os.environ.get("GITHUB_RUN_ID") or ""
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def claim_run(conn: Any, run_id: int | None) -> bool:
+    """May THIS caller count `run_id` as a failure? True at most once per run, ever.
+
+    The two W3.1 producers observe the same Actions run from opposite ends — the
+    chokepoint has the exception at t+0, the poller finds the concluded run 80–256
+    minutes later — and `_UPSERT_SQL` bumps `failure_count` unconditionally, so without
+    this every portal crash counted twice and a LONE failure crossed the measured
+    `ops_incident_min_failures = 2` onset threshold.
+
+    `run_id=None` (the Railway worker, which has no Actions run) always claims: it has no
+    second observer to collide with.
+    """
+    if run_id is None:
+        return True
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO ops_incident_runs (run_id) VALUES (%s) "
+            "ON CONFLICT (run_id) DO NOTHING",
+            (int(run_id),),
+        )
+        return (cur.rowcount or 0) > 0
+
+
+def _link_run(conn: Any, run_id: int | None, incident_id: Any) -> None:
+    """Attach the claimed run to the incident it landed in (best-effort provenance)."""
+    if run_id is None or incident_id is None:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE ops_incident_runs SET incident_id = %s "
+                " WHERE run_id = %s AND incident_id IS NULL",
+                (incident_id, int(run_id)),
+            )
+    except Exception as exc:  # noqa: BLE001 — provenance is never worth losing a record over
+        LOG.warning("ops_incidents: run link failed for run %s (%s)", run_id, exc)
 
 
 def actions_context() -> tuple[str | None, str | None]:
@@ -217,20 +273,29 @@ def maybe_alert(conn: Any, incident: dict[str, Any], *, min_failures: int | None
     # Claim the alert BEFORE emitting: two producers can observe the same incident in
     # the same second, and the dispatch's dedupe_key alone would let the second one
     # believe it alerted. rowcount=0 means somebody else already owns this onset.
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE ops_incidents SET alerted_at = now(), alert_count = alert_count + 1 "
-            "WHERE id = %s AND alerted_at IS NULL",
-            (incident["id"],),
+    #
+    # Claim and emit are ONE transaction, explicitly. Every caller here connects with
+    # autocommit=True (scraper.db.connect and the poller both), so an un-wrapped claim
+    # commits on its own — and if the emit then failed (pooler drop, statement timeout)
+    # the incident would carry `alerted_at` with no dispatch row, which `maybe_alert`'s
+    # own `alerted_at is not None` guard makes permanent. The one onset alert would be
+    # lost silently, and the eventual "Resolved (#N, …)" notice would close a red the
+    # operator never received.
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE ops_incidents SET alerted_at = now(), alert_count = alert_count + 1 "
+                "WHERE id = %s AND alerted_at IS NULL",
+                (incident["id"],),
+            )
+            if (cur.rowcount or 0) == 0:
+                return False
+        emit_system_alert(
+            conn,
+            "ops_incident",
+            _format_alert(incident),
+            dedupe_key=f"sys:ops_incident:{incident['id']}:onset",
         )
-        if (cur.rowcount or 0) == 0:
-            return False
-    emit_system_alert(
-        conn,
-        "ops_incident",
-        _format_alert(incident),
-        dedupe_key=f"sys:ops_incident:{incident['id']}:onset",
-    )
     return True
 
 
@@ -242,38 +307,27 @@ def record_failure_signature(
     origin: str | None = None,
     sample_run_url: str | None = None,
     sample_excerpt: str | None = None,
+    run_id: int | None = None,
+    run_claimed: bool = False,
 ) -> dict[str, Any]:
-    """The one entry point both producers call: upsert, then alert if earned."""
+    """The one entry point both producers call: claim the run, upsert, alert if earned.
+
+    `run_id` is the Actions run this failure belongs to; it is counted at most once
+    across both producers (see `claim_run`). Returns `{"duplicate_run": True}` when
+    somebody already counted it. `run_claimed=True` says the caller already won the
+    claim itself — the poller does, so it can skip the job-log download too.
+    """
+    if not run_claimed and not claim_run(conn, run_id):
+        return {"duplicate_run": True}
     incident = record_failure(
         conn, signature,
         workflow_path=workflow_path, origin=origin,
         sample_run_url=sample_run_url, sample_excerpt=sample_excerpt,
     )
     if incident:
+        _link_run(conn, run_id, incident.get("id"))
         incident["alerted"] = maybe_alert(conn, incident)
     return incident
-
-
-def open_signature_by_workflow(conn: Any, *, within_minutes: int = 60) -> dict[str, str]:
-    """`{workflow_path: signature}` for OPEN incidents touched recently.
-
-    The poller's API-budget saver: if the in-process producer already recorded why a
-    workflow is failing, downloading its job log to re-derive the same signature buys
-    nothing."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT signature, workflow_paths FROM ops_incidents "
-            " WHERE resolved_at IS NULL "
-            "   AND last_seen_at > now() - make_interval(mins => %s::int) "
-            " ORDER BY last_seen_at DESC",
-            (int(within_minutes),),
-        )
-        rows = cur.fetchall()
-    out: dict[str, str] = {}
-    for signature, paths in rows:
-        for p in paths or []:
-            out.setdefault(str(p), str(signature))
-    return out
 
 
 def _emit_recovery(conn: Any, rows: list[tuple[Any, ...]], reason: str) -> int:
@@ -312,6 +366,13 @@ def auto_resolve(conn: Any, *, max_age_hours: int | None = None) -> dict[str, in
         by_success = cur.fetchall()
         cur.execute(_RESOLVE_MAX_AGE_SQL, {"hours": int(hours)})
         by_age = cur.fetchall()
+        # Keep the run-claim ledger bounded. Safe at any horizon far longer than the
+        # poller's window (hours): a pruned run can never be observed a second time.
+        cur.execute(
+            "DELETE FROM ops_incident_runs "
+            " WHERE recorded_at < now() - make_interval(days => %s::int)",
+            (_RUN_CLAIM_RETENTION_DAYS,),
+        )
     notified = _emit_recovery(conn, list(by_success), "member workflows recovered")
     notified += _emit_recovery(conn, list(by_age), f"no activity for {int(hours)}h")
     return {

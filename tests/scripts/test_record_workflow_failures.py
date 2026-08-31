@@ -367,12 +367,21 @@ class _IncidentConn:
         raise AssertionError("record_incidents must go through ops_incidents")
 
 
-def _patch_incidents(monkeypatch, *, known: dict[str, str] | None = None) -> list[dict]:
+def _patch_incidents(monkeypatch, *, already_recorded: set[int] | None = None) -> list[dict]:
     from toolkit import ops_incidents as oi
 
     calls: list[dict] = []
-    monkeypatch.setattr(oi, "open_signature_by_workflow",
-                        lambda _c, **_k: dict(known or {}))
+    claimed = set(already_recorded or ())
+
+    def _claim(_c: Any, run_id: int | None) -> bool:
+        if run_id is None:
+            return True
+        if run_id in claimed:
+            return False
+        claimed.add(run_id)
+        return True
+
+    monkeypatch.setattr(oi, "claim_run", _claim)
     monkeypatch.setattr(oi, "excerpt_byte_budget", lambda _c: 4000)
     monkeypatch.setattr(oi, "record_failure_signature",
                         lambda _c, sig, **kw: calls.append({"sig": sig, **kw}))
@@ -402,14 +411,59 @@ def test_record_incidents_extracts_the_reason_from_the_log(monkeypatch):
     assert calls[0]["workflow_path"] == ".github/workflows/drain.yml"
 
 
-def test_record_incidents_skips_the_download_when_the_reason_is_already_known(monkeypatch):
-    """The API-budget saver: the in-process producer already said why this workflow is
-    red, so re-deriving the same signature from a log buys nothing."""
-    calls = _patch_incidents(monkeypatch, known={".github/workflows/drain.yml": "checkviolation|x"})
+def test_a_run_the_chokepoint_already_recorded_is_neither_fetched_nor_counted(monkeypatch):
+    """The double-count fix AND the API-budget saver, in one mechanism. The in-process
+    producer records the crash at t+0 and the run then concludes `failure`; when the
+    poller meets that same run 80-256 minutes later it must NOT bump failure_count a
+    second time (a lone crash would cross the measured onset threshold on its own) and
+    must not spend a job-log download re-deriving a reason already on file."""
+    calls = _patch_incidents(monkeypatch, already_recorded={900})
     monkeypatch.setattr(rwf, "fetch_job_log", lambda *_a, **_k: _must_not_fetch())
-    stats = rwf.record_incidents(_IncidentConn(), "r", "t", [_failure()])
-    assert stats["reused"] == 1 and stats["fetched"] == 0
-    assert calls[0]["sig"] == "checkviolation|x"
+    monkeypatch.setattr(rwf, "_fetch_failed_job", lambda *_a: _must_not_fetch())
+    stats = rwf.record_incidents(_IncidentConn(), "r", "t", [_failure(run_id=900)])
+    assert stats["already_recorded"] == 1 and stats["fetched"] == 0
+    assert calls == []
+
+
+def test_record_incidents_claims_the_run_so_it_cannot_be_counted_twice(monkeypatch):
+    """Every recorded red carries its run id through to the incident write, with
+    `run_claimed` set — the poller already won the claim above."""
+    calls = _patch_incidents(monkeypatch)
+    monkeypatch.setattr(rwf, "_fetch_failed_job", lambda *_a: None)
+    monkeypatch.setattr(rwf, "fetch_job_log", lambda *_a, **_k: None)
+    rwf.record_incidents(_IncidentConn(), "r", "t", [_failure(run_id=900)])
+    assert calls[0]["run_id"] == 900 and calls[0]["run_claimed"] is True
+
+
+def test_a_new_reason_is_never_folded_into_the_last_incident_for_that_workflow(monkeypatch):
+    """The misattribution the workflow-keyed `known` map committed: index_walk.yml opens
+    a CheckViolation incident at 10:00 and then TIMES OUT at 10:30 for an unrelated
+    reason. Reusing the workflow's last signature recorded the timeout as a
+    CheckViolation, kept the wrong sample_run_url, and meant the timeout's own signature
+    was never derived — so it could never open an incident or alert."""
+    calls = _patch_incidents(monkeypatch)
+    monkeypatch.setattr(rwf, "_fetch_failed_job",
+                        lambda *_a: {"job_id": 5, "step_name": "Run walk", "exit_code": "timed_out"})
+    monkeypatch.setattr(rwf, "fetch_job_log", lambda *_a, **_k: "##[error]The job running on runner X has exceeded the maximum execution time\n")
+    stats = rwf.record_incidents(
+        _IncidentConn(), "r", "t",
+        [_failure(run_id=901, workflow_path=".github/workflows/index_walk.yml",
+                  conclusion="timed_out")])
+    assert stats["fetched"] == 1
+    assert "checkviolation" not in calls[0]["sig"]
+
+
+def test_record_incidents_stops_at_its_wall_clock_budget(monkeypatch):
+    """MAX_LOG_FETCHES is not a time budget: 25 fetches x up to 4 round trips x
+    API_TIMEOUT_S=30 is ~50 minutes inside a job with `timeout-minutes: 5`, and a job
+    kill is not an exception anything can catch."""
+    calls = _patch_incidents(monkeypatch)
+    monkeypatch.setattr(rwf, "_fetch_failed_job", lambda *_a: None)
+    monkeypatch.setattr(rwf, "fetch_job_log", lambda *_a, **_k: None)
+    failures = [_failure(run_id=i, workflow_path=f".github/workflows/w{i}.yml")
+                for i in range(5)]
+    stats = rwf.record_incidents(_IncidentConn(), "r", "t", failures, budget_seconds=0.0)
+    assert stats["expired"] == 5 and calls == []
 
 
 def _must_not_fetch() -> None:
@@ -437,6 +491,17 @@ def test_record_incidents_respects_the_api_budget(monkeypatch):
                 for i in range(4)]
     stats = rwf.record_incidents(_IncidentConn(), "r", "t", failures)
     assert stats["skipped"] == 3 and len(calls) == 1
+
+
+def test_the_cursor_is_written_before_the_incident_pass_runs():
+    """Ordering, pinned. record_incidents does network I/O inside a job with
+    `timeout-minutes: 5`; a job kill is not an exception, so running it before
+    `_write_cursor` put the poller's input-coverage guarantee behind a best-effort
+    bookkeeping pass. Incidents annotate rows already committed — they can wait."""
+    import inspect
+
+    src = inspect.getsource(rwf.main)
+    assert src.index("_write_cursor(conn, new_cursor)") < src.index("record_incidents(conn")
 
 
 def test_record_incidents_resolves_even_with_nothing_new(monkeypatch):

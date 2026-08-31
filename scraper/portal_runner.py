@@ -702,9 +702,16 @@ def record_failure_signature(
 
     Best-effort by construction: every caller is already inside a crash path, and a
     bookkeeping write must never mask the exception that got us here.
+
+    `run_id` is what stops this crash being counted a second time when the poller finds
+    the same red run in the Actions API 80–256 minutes later (migration 463). Off-CI —
+    the always-on Railway worker — it is None, which is correct: nothing else observes
+    those lanes.
     """
     from scripts.failure_signature import signature_from_exception
-    from toolkit.ops_incidents import actions_context, record_failure_signature as _record
+    from toolkit.ops_incidents import (
+        actions_context, actions_run_id, record_failure_signature as _record,
+    )
 
     workflow_path, run_url = actions_context()
     _record(
@@ -714,6 +721,7 @@ def record_failure_signature(
         origin=f"{source}/{lane}",
         sample_run_url=run_url,
         sample_excerpt=f"{type(exc).__name__}: {exc}"[:4000],
+        run_id=actions_run_id(),
     )
 
 

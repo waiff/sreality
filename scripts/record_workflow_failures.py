@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -220,6 +221,12 @@ MAX_LOG_FETCHES = 25          # Actions API budget guard: one poll, at most this
 LOG_TAIL_BYTES = 64 * 1024    # measured job logs run 27KB-172KB; a drain log is far larger
 _JOB_FAIL_CONCLUSIONS = frozenset({"failure", "timed_out", "cancelled", "startup_failure"})
 
+# Wall-clock ceiling for the whole incident pass. MAX_LOG_FETCHES alone is not a time
+# budget: each fetch is up to 4 round trips (jobs list, the 302, then _fetch_blob_tail's
+# two ranged reads) at API_TIMEOUT_S=30 each, so 25 of them is a ~50-minute worst case
+# inside a job with `timeout-minutes: 5`. A killed job is not caught by any try/except.
+INCIDENT_PASS_BUDGET_S = 90.0
+
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Refuse to follow, so the caller can re-request the target BARE.
@@ -333,49 +340,74 @@ def fetch_job_log(repo: str, token: str, job_id: int, *, cap_bytes: int = LOG_TA
 
 def record_incidents(
     conn: Any, repo: str, token: str, failures: list[dict[str, Any]],
+    *, budget_seconds: float = INCIDENT_PASS_BUDGET_S,
 ) -> dict[str, int]:
     """Give every newly recorded red a REASON, and close the ones the fleet answered.
 
-    `known` is the API-budget saver the design asks for: when the in-process producer
-    has already opened an incident for this workflow in the last hour, downloading its
-    job log to re-derive the same signature buys nothing."""
+    The API-budget saver is the RUN CLAIM (`ops_incident_runs`, migration 463), not a
+    workflow→signature guess: a run the in-process producer already recorded costs zero
+    fetches here and — the part that matters — cannot be counted a second time. The
+    earlier `open_signature_by_workflow` reuse did neither. It was keyed on
+    `workflow_path` alone with no run correlation, so it (a) still fell through to the
+    unconditional `failure_count + 1` bump, double-counting every portal crash, and
+    (b) folded a NEW reason into whatever incident last touched that workflow within the
+    hour — a workflow that opened a CheckViolation incident at 10:00 and then timed out
+    at 10:30 recorded the timeout as a CheckViolation, and the timeout's own signature
+    was never derived, so it could never alert.
+
+    `budget_seconds` bounds the pass: the caller's job has `timeout-minutes: 5` and a
+    kill is not an exception, so overrunning here would cost the poller its cursor
+    advance (the input-coverage guarantee W3 rests on).
+    """
     from scripts import failure_signature
     from toolkit import ops_incidents
 
-    stats = {"recorded": 0, "reused": 0, "fetched": 0, "unreadable": 0, "skipped": 0}
+    stats = {"recorded": 0, "already_recorded": 0, "fetched": 0,
+             "unreadable": 0, "skipped": 0, "expired": 0}
     if not failures:
         return {**stats, **ops_incidents.auto_resolve(conn)}
 
-    known = ops_incidents.open_signature_by_workflow(conn, within_minutes=60)
     excerpt_cap = ops_incidents.excerpt_byte_budget(conn)
     budget = MAX_LOG_FETCHES
+    deadline = time.monotonic() + float(budget_seconds)
 
     for f in failures:
         path = f.get("workflow_path")
-        signature = known.get(path) if path else None
+        run_id = f.get("run_id")
+        # Claim first: it is both the dedupe and the cheapest possible skip.
+        try:
+            if not ops_incidents.claim_run(conn, run_id):
+                stats["already_recorded"] += 1
+                continue
+        except Exception as exc:  # noqa: BLE001 — incidents must never break the poller
+            LOG.warning("ops incident claim failed for run %s: %r", run_id, exc)
+            continue
+        signature: str | None = None
         excerpt: str | None = None
-        if signature is not None:
-            stats["reused"] += 1
-        elif budget <= 0:
+        if time.monotonic() >= deadline:
+            # Out of wall clock, not out of API budget. Same disposition as `skipped`:
+            # the run stays in workflow_failures with no incident asserting nothing.
+            stats["expired"] += 1
+            continue
+        if budget <= 0:
             # Not "unreadable" — unread. A scoped fallback key here would open an
             # incident asserting nothing, so the run stays in workflow_failures only.
             stats["skipped"] += 1
             continue
-        else:
-            budget -= 1
-            job = _fetch_failed_job(repo, token, f["run_id"])
-            text = fetch_job_log(repo, token, job["job_id"]) if job else None
-            if text:
-                stats["fetched"] += 1
-                signature = failure_signature.signature_from_log(text)
-                excerpt = failure_signature.excerpt_from_log(text, max_bytes=excerpt_cap)
-            if signature is None:
-                stats["unreadable"] += 1
-                signature = failure_signature.fallback_signature(
-                    workflow_path=path,
-                    step_name=(job or {}).get("step_name"),
-                    exit_code=(job or {}).get("exit_code"),
-                )
+        budget -= 1
+        job = _fetch_failed_job(repo, token, run_id)
+        text = fetch_job_log(repo, token, job["job_id"]) if job else None
+        if text:
+            stats["fetched"] += 1
+            signature = failure_signature.signature_from_log(text)
+            excerpt = failure_signature.excerpt_from_log(text, max_bytes=excerpt_cap)
+        if signature is None:
+            stats["unreadable"] += 1
+            signature = failure_signature.fallback_signature(
+                workflow_path=path,
+                step_name=(job or {}).get("step_name"),
+                exit_code=(job or {}).get("exit_code"),
+            )
         try:
             ops_incidents.record_failure_signature(
                 conn, signature,
@@ -383,10 +415,12 @@ def record_incidents(
                 origin=f"actions/{f.get('conclusion')}",
                 sample_run_url=f.get("html_url"),
                 sample_excerpt=excerpt,
+                run_id=run_id,
+                run_claimed=True,
             )
             stats["recorded"] += 1
         except Exception as exc:  # noqa: BLE001 — incidents must never break the poller
-            LOG.warning("ops incident write failed for run %s: %r", f.get("run_id"), exc)
+            LOG.warning("ops incident write failed for run %s: %r", run_id, exc)
 
     return {**stats, **ops_incidents.auto_resolve(conn)}
 
@@ -533,14 +567,13 @@ def main() -> int:
                     inserted += cur.rowcount
                     newly_recorded.append(f)
 
-        # Only NEWLY inserted rows: a re-scanned run inside the cursor overlap has
-        # already had its reason recorded, and re-counting it would inflate the
-        # incident's failure_count past the number of real failures.
-        try:
-            incidents = record_incidents(conn, repo, token, newly_recorded)
-        except Exception as exc:  # noqa: BLE001 — the poller's own job comes first
-            LOG.warning("ops incident pass failed: %r", exc)
-
+        # The cursor advance goes FIRST, before the incident pass. record_incidents
+        # talks to the Actions API and to Azure blob storage inside a job with
+        # `timeout-minutes: 5`, and a job kill is not an exception the try/except below
+        # can catch — so anything slow there used to cost the poller its cursor advance,
+        # which is the input-coverage guarantee the whole W3 clustering rests on.
+        # Incidents are best-effort bookkeeping over rows already committed above;
+        # the cursor is not.
         completions = [c for c in (parse_ts(r.get("updated_at")) for r in runs) if c is not None]
         new_cursor = _advance_cursor(completions, reached_since=reached_since)
         if new_cursor is not None:
@@ -554,6 +587,15 @@ def main() -> int:
                 "repeats.",
                 MAX_PAGES, MAX_PAGES * PER_PAGE, since, min(completions), gap_min,
             )
+
+        # Only NEWLY inserted rows: a re-scanned run inside the cursor overlap has
+        # already had its reason recorded, and re-counting it would inflate the
+        # incident's failure_count past the number of real failures. (The run claim in
+        # record_incidents enforces that across producers too, not just across polls.)
+        try:
+            incidents = record_incidents(conn, repo, token, newly_recorded)
+        except Exception as exc:  # noqa: BLE001 — the poller's own job comes first
+            LOG.warning("ops incident pass failed: %r", exc)
 
     LOG.info(
         "WORKFLOW_FAILURES scanned=%d failed=%d inserted=%d successes_tracked=%d reached_since=%s",

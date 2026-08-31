@@ -472,7 +472,15 @@ def _record_lane_failure(source: str, lane: str, exc: BaseException) -> None:
     (run_id=None, deliberately — a 30s cadence would write thousands of bookkeeping
     rows/day), so they bypass `run_phase` and its crash accounting entirely: a
     CheckViolation on the latency-critical drain used to produce a log line and
-    nothing else, forever. One shared function, not a second producer."""
+    nothing else, forever. One shared function, not a second producer.
+
+    BLOCKING — callers must `await asyncio.to_thread(...)` it, like every other DB touch
+    in this file. `db.connect()` is `_connect_with_retry` (3 attempts, `time.sleep(10.0)`
+    between), and `is_transient_db_error` is true for every `OperationalError`, so on a
+    pooler outage a bare call sleeps ~20s per source ON THE EVENT LOOP. A drain pass
+    iterates all nine sources, and the 30s heartbeat lane is a sibling coroutine on the
+    same loop — i.e. the recorder would blind `worker_liveness` and `worker_lane_stall`
+    during exactly the DB incident it exists to record."""
     try:
         with db.connect() as conn:
             portal_runner.record_failure_signature(conn, exc, source=source, lane=lane)
@@ -497,7 +505,7 @@ async def _probe_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
             agg = await asyncio.to_thread(_run_probe_sync, source)
         except Exception as exc:  # noqa: BLE001 - one portal must not end the pass
             LOG.exception("PROBE lane source=%s failed", source)
-            _record_lane_failure(source, "probe", exc)
+            await asyncio.to_thread(_record_lane_failure, source, "probe", exc)
             totals["errors"] += 1
             continue
         totals["portals"] += 1
@@ -545,7 +553,7 @@ async def _drain_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
             agg = await asyncio.to_thread(_run_drain_sync, source, slice_)
         except Exception as exc:  # noqa: BLE001 - one portal must not end the pass
             LOG.exception("DRAIN lane source=%s failed", source)
-            _record_lane_failure(source, "drain", exc)
+            await asyncio.to_thread(_record_lane_failure, source, "drain", exc)
             totals["errors"] += 1
             continue
         totals["sources"] += 1

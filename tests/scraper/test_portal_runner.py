@@ -780,6 +780,25 @@ def test_record_failure_signature_derives_the_key_from_the_text_only(monkeypatch
     assert seen[0]["workflow_path"] == ".github/workflows/x.yml"
 
 
+def test_the_chokepoint_stamps_its_actions_run_id(monkeypatch):
+    """The run id is what stops the poller counting this same crash a second time when
+    it meets the concluded run 80-256 minutes later (migration 463). Off-CI it is None
+    — the always-on worker's lanes have no second observer."""
+    seen: list[dict[str, Any]] = []
+    import toolkit.ops_incidents as oi
+
+    monkeypatch.setattr(oi, "record_failure_signature",
+                        lambda _c, sig, **kw: seen.append({"sig": sig, **kw}))
+    monkeypatch.setattr(oi, "actions_context", lambda: (None, None))
+    monkeypatch.setenv("GITHUB_RUN_ID", "32788072691")
+    portal_runner.record_failure_signature(
+        _Conn(), RuntimeError("boom"), source="mmreality", lane="detail")
+    monkeypatch.delenv("GITHUB_RUN_ID")
+    portal_runner.record_failure_signature(
+        _Conn(), RuntimeError("boom"), source="mmreality", lane="drain")
+    assert [s["run_id"] for s in seen] == [32788072691, None]
+
+
 def test_run_phase_passes_run_id_and_kwargs_through_to_the_runner(monkeypatch):
     _PhaseRecorder(monkeypatch)
     seen: dict[str, Any] = {}

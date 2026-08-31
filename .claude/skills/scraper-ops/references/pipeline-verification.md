@@ -288,11 +288,28 @@ lane=)` is the single seam (rule 21):
 - `realtime_worker._record_lane_failure` — the probe and drain lanes call `portal_runner`
   directly (`run_id=None`, deliberately) and so bypass `run_phase` entirely. Before W3 a
   `CheckViolation` on the latency-critical drain produced a log line and nothing else, forever.
+  **Always `await asyncio.to_thread(...)` it**, like every other DB touch in that file:
+  `db.connect()` sleeps up to ~20s per source on a transient failure, and a bare call would
+  stall the heartbeat lane during exactly the DB incident it exists to record.
 - `record_workflow_failures.record_incidents` — the backstop, and the MAJORITY path (portal
   workflows are only ~22% of the failure corpus). For each NEWLY inserted failed run it reads
-  the failed job's log and extracts the terminal error. Budget: `MAX_LOG_FETCHES` per poll, and
-  it skips the download entirely when the in-process producer already opened an incident for
-  that workflow in the last hour.
+  the failed job's log and extracts the terminal error. Two budgets, both real:
+  `MAX_LOG_FETCHES` per poll, and `INCIDENT_PASS_BUDGET_S` of wall clock — a fetch is up to 4
+  round trips at `API_TIMEOUT_S`, so the fetch cap alone is a ~50-minute worst case inside a
+  job with `timeout-minutes: 5`. The pass runs **after** `_write_cursor`, because a job kill is
+  not an exception and the cursor advance is the input-coverage guarantee W3 rests on.
+
+**One run is one failure (`ops_incident_runs`, migration 463).** Both producers see the same
+Actions run — the chokepoint at t+0, the poller 80–256 minutes later — and the upsert bumps
+`failure_count` unconditionally, so before 463 every portal crash counted **twice** and a LONE
+crash crossed the measured onset threshold on its own. `claim_run(conn, run_id)` inserts the
+run id and returns whether this caller won it; the poller claims **before** downloading, so a
+run the chokepoint already recorded costs zero fetches too. That claim replaced an earlier
+workflow-keyed signature-reuse map, which had no run correlation and folded an unrelated new
+red (a timeout, say) into whatever incident last touched that workflow within the hour — the
+real reason was then never derived and could never alert. `run_id=None` (the Railway worker)
+always claims: it has no second observer. The ledger self-prunes at 30 days inside
+`auto_resolve`.
 
 **The log fetch has three hazards, all live-verified — do not simplify it.**
 `/actions/jobs/{id}/logs` answers **302** to a SAS-signed Azure blob URL, and CPython's
@@ -310,7 +327,10 @@ the signature spanning 2 distinct workflows, whichever first — the breadth arm
 the 2026-08-26 signature reached its 2nd workflow 8 minutes after onset while a same-workflow
 2nd failure can be 164 minutes away under the Actions throttle. Exactly one dispatch per
 incident (`sys:ops_incident:{id}:onset`), claimed with a conditional UPDATE before emitting so
-two producers racing cannot both alert. Closing: every member workflow posting a newer
+two producers racing cannot both alert — **claim and emit share one explicit
+`conn.transaction()`**, because every caller here is autocommit and a claim that committed
+alone before a failed emit would set `alerted_at` with no dispatch, permanently silencing that
+incident's only onset. Closing: every member workflow posting a newer
 `workflow_run_health.last_success_at` (primary), `ops_incident_max_age_hours` (168 — the
 backstop for retired/disabled/renamed workflows and for worker-origin incidents that have no
 member workflow at all), or `toolkit.ops_incidents.resolve_incident` (manual; there is no admin
