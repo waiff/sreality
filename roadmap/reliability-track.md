@@ -29,11 +29,26 @@ was applied 2026-08-26 22:06 UTC, **29 hours later, by the session investigating
 outage**, because migration apply and PR merge are wholly uncoupled and four independent
 monitoring gaps kept the failure invisible (`scrape_runs.errors = 0` on all six portals).
 
+## 2026-08-31 addendum
+
+The original incident is closed, verified with data (`area_basis='plot'` 0 → 344+; one
+transient portal failure in four days; OpenAI topped up, LLM pipeline healthy). Two NEW
+fires filled the inbox since — full analysis in the design doc's addendum:
+**(a)** the location claim-intake lane dead since 2026-08-27 (PR #1209 edited prose
+inside the ceskereality contract's governed hash without a version bump; no CI gate
+exists over contract immutability → W0.5a: v4 bump + lockfile rail in `test.yml`), and
+**(b)** hourly acute-health false-reds from `llm_liveness`'s 4h threshold, calibrated to
+the dedup-vision workload deleted 2026-08-06 (→ W0.5b: 13h default, folded into W0.3's
+PR). Neither is a portal-scraper defect — the fleet is green; W1 stays queued but is not
+the urgent lane. Both fires are the program's thesis in new domains: a repo-declared
+truth enforced only in production, and N identical emails for one cause.
+
 ## Wave status
 
 | Wave | Scope | Status |
 | --- | --- | --- |
 | W0 stop the silent losses | Four one-file fixes, each currently *discarding* information: poller cursor loss + a poller-liveness check (W0.1), honest crash accounting at the shared `portal_runner` seam (W0.2), LLM check keyed on state not recency + a per-`called_for` starvation arm (W0.3), graceful degradation of the acute health lane under its 120s budget (W0.4) | 🟡 in progress (approved 2026-08-27) |
+| W0.5 the second week's fires | (a) ceskereality contract v4 + contract-immutability lockfile rail in `test.yml` — un-wedges the intake lane, closes the merged≠enforced gap for portal contracts; (b) `llm_liveness` recalibrated 4h → 13h to the real (post-dedup) producer cadence | 🟡 in progress (2026-08-31, shipped as hotfix PRs ahead of wave order — the lane was down) |
 | W1 survivable write path | Non-transient errors at `_flush_drain_batch` become a bounded, loud quarantine (per-item replay → existing `_drain_record_failure` → `given_up` at 5) behind a circuit breaker; `write_rejects` counter + two new ingest `_CHECKS` entries | ⚪ proposed — needs operator sign-off |
 | W2 migration file as contract | `-- apply:` / `-- assert:` header tokens above a watermark (≥ 444), asserts executed inside `migrations.yml`'s existing per-file apply loop and *validated as able to fail*, a live-catalog `check_migration_drift`, plus schema-vocabulary parity and the hot-DDL doctrine rails | ⚪ proposed — needs operator sign-off |
 | W3 one alert, one place, cause attached | Failure signatures produced in-process at the write chokepoint (`checkviolation\|listings_area_basis_check` on all six portals), an `ops_incidents` table that exits through the **existing** `system_health` spine (no parallel channel), and the re-escalation ladder placed in `toolkit/system_alerts` where all 14 checks inherit it | ⚪ proposed — needs operator sign-off |
@@ -57,16 +72,16 @@ separately would only create merge-order pain:
   staleness window; `llm_burn_rate` gains a per-`called_for` starvation arm; the acute
   lane persists each check as it completes under per-check and total wall-clock budgets.
 
-**Risk carried into the wave:** W0.3 correctly reds the acute lane on merge and
-`--exit-nonzero-on-fail` emails hourly until the OpenAI account is topped up (open
-question 1). Recovery latency after a top-up is the *producer's* cadence — expect a
-bounded red tail of up to ~6h, not minutes. A bounded red tail beats a permanent false
-green.
+**Risk carried into the wave:** ~~W0.3 reds the acute lane until the OpenAI account is
+topped up~~ — **resolved 2026-08-30: credits topped up, pipeline verified healthy** (595
+ok / 0 err calls in 24h). The remaining W0 risk is rebase drift: the walk-coverage
+sprint (merged 2026-08-27..30) rewrote parts of `idnes_main.py`, `ceskereality_main.py`
+and `portal_runner.py` under W0.2's feet; both W0 code PRs are being rebased onto it.
 
 ## Open questions blocking W1–W4
 
-Eight, listed in full in the design doc. The load-bearing ones for sequencing: the
-OpenAI top-up (gates W0.3's landing), **branch protection — `main` is currently not
-protected, so every CI rail W2 adds is advisory until that changes**, alert routing +
-volume tolerance (W3), the two-human-step Railway procedure (W4), and the disposition of
-migrations 433 and 434.
+Eight in the design doc; question 1 (OpenAI top-up) is **resolved**. Still load-bearing
+for sequencing: **branch protection — `main` is currently not protected, so every CI
+rail W2 adds AND the new W0.5a contract lockfile rail are advisory until that changes**,
+alert routing + volume tolerance (W3), the two-human-step Railway procedure (W4), and
+the disposition of migrations 433 and 434.

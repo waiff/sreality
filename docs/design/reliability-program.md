@@ -46,6 +46,65 @@ The symmetric failure on the same surface: `property_maintenance` has been `fail
 
 ---
 
+## Addendum — the second week's fires (2026-08-31)
+
+Four days on, the original incident is **closed and verified with data, not green runs**:
+`area_basis='plot'` went 0 → 344+ rows across mmreality/ceskereality/bezrealitky within
+hours of the constraint fix, and the portal fleet has had exactly **one** failure since
+2026-08-27 (a transient mmreality 403 through the residential proxy, recovered next run).
+OpenAI credits were topped up ~2026-08-30; the LLM pipeline is measurably healthy again
+(595 ok / 0 err calls, $1.53 spend in the trailing 24h).
+
+The operator's inbox, however, kept filling — from two NEW sources, and the pattern is
+the program's thesis restated:
+
+**Fire 1 — the location claim-intake lane, dead since 2026-08-27 22:32 UTC (14
+consecutive failures).** PR #1209 (the walk-coverage sprint's ceskereality kraj
+partition) edited two *prose* fields in `contracts/portals/ceskereality.yaml`
+(`fetch.robots_note`, one `extractions[].notes`). Both sit inside the bytes
+`contract_sha256` governs (everything minus `persistence:`/`shadow:`, W2a-3e), the
+version was not bumped, and `project()` — correctly — refuses the mismatch at startup,
+killing intake for **all** portals, not just ceskereality. There is **no CI gate** over
+contract immutability: the invariant is enforced only in production, only after merge,
+only by the failing job itself. That is the migration-438 shape again in a different
+domain: *a repo-declared truth whose sole enforcement point is production runtime*.
+Fix shipped as **W0.5a**: contract v4 bump (the doctrine's own remedy, 02 §2.1.8 — the
+prose is now the accurate operational record, so reverting it would be the dishonest
+fix) plus a **lockfile rail** — `contracts/portals/contracts.lock.json` mapping each
+portal to its (version, governed-hash), verified by a test that imports the loader's own
+`contract_body_hash` (no second parser), so an edit-without-bump fails `test.yml`
+pre-merge.
+
+**Fire 2 — the acute-health monitor false-redding hourly (8 failures).**
+`check_llm_liveness` fails at 4h of LLM silence. Its docstring's own justification —
+"dedup vision on the always-on worker … p99 inter-call gap ~1 min, so the 4h default
+never trips in normal operation" — describes a workload **deleted 2026-08-06** (rule 15).
+The only recurring producer left is the enrichment cron: nominal 6h, observed 7h+ under
+Actions throttle. A 4h threshold against a ≥6h producer is a guaranteed periodic
+false-red — principle 2's exact failure mode (an arm calibrated to a dead premise).
+Fix shipped as **W0.5b**, folded into W0.3's PR: default raised to 13h (2× nominal
+cadence + throttle slack), docstring rewritten to name the real producer.
+
+**What this changes in the program — and what it does not.**
+- It **answers "would W1+ have helped?" honestly: no.** W1 hardens the portal write path,
+  which is currently green. Neither fire is a portal-scraper defect. W1 stays queued as
+  designed — the next poison-row event remains a matter of time — but it is not the
+  urgent lane.
+- It **generalizes W2's principle** beyond migrations: the program's first guarantee
+  should read "every merged *declaration* is a live, enforced guarantee" — migrations
+  (W2), portal contracts (W0.5a's lockfile, shipped early because the lane was down),
+  and code-side vocabularies (W2.4's parity check) are three instances of one class.
+- It **strengthens W3's evidence base**: 14 identical `ContractError` emails over three
+  days, plus 8 identical liveness false-reds, with nothing grouping either cluster — the
+  ten-email symptom reproduced twice in one week. W3 remains the highest-leverage
+  operator-facing wave.
+- **Timeliness note, out of scope here:** mmreality data ran ~7.3h stale on a 6h-cadence
+  portal overnight — GitHub Actions cron throttle jitter (runs observed 80–256 min late
+  fleet-wide). That is the standing problem the realtime-worker program owns; this
+  program does not fork into scheduling.
+
+---
+
 ## Design principles
 
 1. **Assert against the catalog, never the ledger, never a replay.** The ledger is not an oracle: 195 of 470 rows carry no `NNN` prefix; one file routinely produces N rows; 424–427 are applied with *no ledger row at all*; 434 has two ledger rows and no repo file. A naive existence check fires ~6 false alarms per 20 migrations against 1 true positive. And CI is structurally blind by construction — on a fresh replay 423's guard finds nothing and creates the *correct* constraint, so the broken and fixed production states produce **byte-identical green runs**. Only the live catalog can see this.
