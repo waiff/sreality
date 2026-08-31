@@ -411,7 +411,9 @@ wrapped in a scalar subquery, not called bare — see the `database` skill's Ini
 scheduled job that writes one `pipeline_check_results` row per health metric (`ok`/`warn`/`fail`)
 and is the origin of the notification system's third producer, `system_health` (see
 `docs/architecture.md` rule #16) — a `fail` rings the same in-app bell the SPA nav badge polls,
-on state TRANSITIONS only. Born from the 2026-07 two-day silent stall (Anthropic credit
+once per INCIDENT — onset, then 6h/24h/72h/weekly while red, then one recovery (W3.4's ladder +
+flap cooldown in `toolkit/system_alerts`, inherited by every check; reference below). Born from
+the 2026-07 two-day silent stall (Anthropic credit
 exhaustion, 38k+ failed LLM calls) whose only alarm was a cron the operator happened to miss.
 Two lanes: `llm_health.yml` hourly (the acute checks, `--only ... --exit-nonzero-on-fail`, so a
 `fail` also reds the run and emails) and `verify_pipeline.yml` 6-hourly (everything). Live checks:

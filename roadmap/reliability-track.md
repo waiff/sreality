@@ -51,7 +51,7 @@ truth enforced only in production, and N identical emails for one cause.
 | W0.5 the second week's fires | (a) ceskereality contract v4 + contract-immutability lockfile rail in `test.yml` — un-wedges the intake lane, closes the merged≠enforced gap for portal contracts; (b) `llm_liveness` recalibrated 4h → 13h to the real (post-dedup) producer cadence | 🟡 in progress (2026-08-31, shipped as hotfix PRs ahead of wave order — the lane was down) |
 | W1 survivable write path | Non-transient errors at `_flush_drain_batch` become a bounded, loud quarantine (per-item replay → existing `_drain_record_failure` → `given_up` at 5) behind a circuit breaker; `write_rejects` counter + a `drain_write_rejects` check (`ingest_freshness` largely covered in parallel by the walk sprint's `acquisition_lag` + `walk_coverage` checks) | ⚪ proposed — needs operator sign-off |
 | W2 migration file as contract | `-- apply:` / `-- assert:` header tokens above a watermark (≥ 444), asserts executed inside `migrations.yml`'s existing per-file apply loop and *validated as able to fail*, plus schema-vocabulary parity and the hot-DDL doctrine rails. **W2.3's live-catalog drift check shipped in parallel as PR #1204 (`check_migration_drift`)** — remaining W2.3 scope is hardening it, not building it | ⚪ proposed — needs operator sign-off (part shipped in parallel) |
-| W3 one alert, one place, cause attached | Failure signatures produced in-process at the write chokepoint (`checkviolation\|listings_area_basis_check` on all six portals), an `ops_incidents` table that exits through the **existing** `system_health` spine (no parallel channel), and the re-escalation ladder placed in `toolkit/system_alerts` where all 19 checks inherit it | 🟡 W3.1–W3.3 shipped (migration 462), routing not flipped; W3.4 ladder outstanding |
+| W3 one alert, one place, cause attached | Failure signatures produced in-process at the write chokepoint (`checkviolation\|listings_area_basis_check` on all six portals), an `ops_incidents` table that exits through the **existing** `system_health` spine (no parallel channel), and the re-escalation ladder placed in `toolkit/system_alerts` where all 19 checks inherit it | 🟢 shipped 2026-08-31 — W3.1–W3.3 (migs 462+463, PR #1247) + W3.4's ladder, flap cooldown and weekly heartbeat (PR #1246); one residue: external alert routing (`system_health_channels` / `notification_email_to`) awaits the operator — until flipped, incidents ring the in-app bell only |
 | W4 apply becomes a job | Hot-table DDL applied out-of-band by a tested, extracted lock primitive (`attempts=1`, fail fast, escalate to a window — the retry-loop pattern is retired, not tuned); the existing PK-swap applier generalised into a dispatchable maintenance window | ⚪ proposed — needs operator sign-off + one human step (`REALTIME_WORKER_ENABLED`) |
 | W5 constraint-only catalog diff | Named successor: diff CI's replayed schema against the live catalog. Catches 438 exactly, plus the ~241 migrations with no ledger row and no assert, plus the reverse drift direction W2 structurally cannot see — with zero per-migration convention | ⚪ named only, not built (open question 8) |
 
@@ -131,3 +131,31 @@ for sequencing: **branch protection — `main` is currently not protected, so ev
 rail W2 adds AND the new W0.5a contract lockfile rail are advisory until that changes**,
 alert routing + volume tolerance (W3), the two-human-step Railway procedure (W4), and
 the disposition of migrations 433 and 434.
+
+## W3.4 — shipped 2026-08-31
+
+The escalation ladder, landed on its own ahead of the rest of W3 because it needs no new
+table, no migration and no routing decision — it changes only *when* the existing
+`system_health` bell rings.
+
+- **The unit of alerting is an incident, not an edge.** One incident opens at the first
+  `fail` and survives flaps inside a 6h cooldown; every dedupe key hangs off its onset
+  timestamp, so `ON CONFLICT` gives exactly-once across both lanes with no new state.
+- **6h / 24h / 72h / weekly rungs**, highest-due-only, so a six-day red says so four
+  times instead of once (`property_maintenance`, 2026-08-20..26) and a six-day-old
+  incident discovered on deploy emits one alert, not five.
+- **Flap damping both ways**: a return to red inside the cooldown re-enters the same
+  incident, and a recovery is announced only once the check has held non-fail for the
+  cooldown — `llm_errors`' 114 alternating alerts collapse to one onset + one recovery.
+- **A weekly heartbeat on the existing (empty) `--weekly` lane**, keyed per ISO week
+  because the workflow appends `--weekly` to all four of Monday's runs. It is the half
+  of the dead-man switch migration 274's in-DB `emit_verification_stale_alert` cannot
+  cover: a harness that runs while delivery is silently broken.
+- Policy is five scalar `pipeline_check_thresholds` keys (`load_thresholds` drops
+  non-scalars, so an array would have been ignored undetectably); code defaults ship
+  live, no migration.
+
+**Not** wired: migration 220's `consecutive_failures`/`is_chronic`, which the design doc
+named. They are computed inside `workflow_failure_summary(int)` over `workflow_failures`
+— the GitHub workflow-run domain, not `pipeline_check_results`. The pipeline-check streak
+is read from its own table; the two domains stay separate.
