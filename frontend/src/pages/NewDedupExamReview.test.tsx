@@ -131,6 +131,23 @@ describe('<NewDedupExamReview>', () => {
     await waitFor(() => expect(btn).toHaveAttribute('aria-pressed', 'true'));
   });
 
+  it('marks a recorded negative apart from anything undecided', async () => {
+    // Review shows only fully answered images, so a plain button IS a negative
+    // — but plain looks exactly like the exam's "not yet decided". The dash
+    // makes the decision visible; it must vanish under "can't tell", where the
+    // cells are excluded rather than negative.
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/2 answered/);
+    const rows = screen.getAllByRole('listitem');
+    // Row 1: koupelna picked (no dash), kuchyně negative (dash).
+    expect(rows[0].textContent).toContain('–interier - kuchyně');
+    expect(rows[0].textContent).not.toContain('–interier - koupelna');
+    await user.click(screen.getAllByRole('button', { name: /can’t tell/ })[0]);
+    await waitFor(() =>
+      expect(rows[0].textContent).not.toContain('–interier - kuchyně'));
+  });
+
   it('says so when nothing is answered yet', async () => {
     vi.mocked(api.getExamAnswers).mockResolvedValue({
       data: { set: 'set_1', tags: TAGS, rows: [] },

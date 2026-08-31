@@ -140,7 +140,7 @@ export default function NewDedupExamReview() {
             )}
           </h1>
           <p className="text-xs text-[var(--color-ink-3)] mt-0.5">
-            {rows.length} answered · a click once = it applies · again = leave it out of that tag · again = untouched · every change saves immediately
+            {rows.length} answered · everything here is a decision: &ndash; = negative · a click once = it applies · again = leave it out of that tag · again = back to negative · every change saves immediately
           </p>
         </div>
         <Link to={examHref} className="text-xs text-[var(--color-copper)] hover:underline">
@@ -201,6 +201,13 @@ export default function NewDedupExamReview() {
                                 : 'border-[var(--color-rule)] text-[var(--color-ink-2)]'
                           } ${st.cantTell ? 'opacity-60' : ''}`}
                         >
+                          {/* An unmarked cell here is NOT "untagged" — review only
+                            * shows fully answered images, so plain = a recorded
+                            * NEGATIVE. The dash says so, and it disappears under
+                            * "can't tell" (those cells are excluded, not negative). */}
+                          {v == null && !st.cantTell && (
+                            <span aria-hidden className="mr-1 text-[var(--color-ink-4)]">&ndash;</span>
+                          )}
                           {t.label}
                           {v === 'skipped' && (
                             <span className="ml-1.5 text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-copper)]">
