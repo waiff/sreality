@@ -434,8 +434,18 @@ def test_the_bumped_contracts_appended_entries_and_kept_the_earlier_ones():
     # re-stamps extractor_version and contract_entry_id on every claim the next
     # incremental scan re-walks, and archive configuration must not be able to spend
     # that. What versions these ARE is the record of extraction changes only.
+    #
+    # ceskereality@4 is the ONE bump in this census that appended nothing, and it is not
+    # an exception to the rule above — it is the rest of it. The governed hash is the file
+    # minus `persistence:` and `shadow:`, so PROSE is hashed exactly like a selector: PR
+    # #1209 rewrote `fetch.robots_note` and one entry's `notes:` without a bump, v3's hash
+    # moved under a row already on record, and `project()` refused the fleet's whole
+    # projection for 14 consecutive hourly runs. The prose was the accurate one, entries
+    # are immutable, so the bump is the remedy doctrine names. Its claim set is
+    # byte-identical to v3's (`golden/ceskereality@{3,4}.json` differ in one field), and
+    # `test_contract_immutability` is what now catches the unbumped edit before merge.
     assert {s: c.version for s, c in ALL.items()} == {
-        "remax": 2, "ceskereality": 3, "realitymix": 3,
+        "remax": 2, "ceskereality": 4, "realitymix": 3,
         "sreality": 1, "bezrealitky": 1, "bazos": 1, "idnes": 1, "mmreality": 1,
         "maxima": 1,
     }
