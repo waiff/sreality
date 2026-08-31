@@ -225,3 +225,26 @@ portals that failed on 2026-08-26 were ever recorded. The in-code comment claimi
 to oldest-seen so the gap is picked up next poll" was false. The cursor now advances *only* on
 a poll that reached back past `since`, and the page budget doubled to 10 pages / 1,000 runs
 (≤10 Actions API requests per poll against a 1,000/hour per-repo budget).
+
+**4. A threshold outlives the workload it was sized for** (W0.5, `llm_silence_fail_hours`
+4h → 13h). `check_llm_liveness` documented its own premise: "the platform runs paid LLM
+traffic continuously (dedup vision on the always-on worker) … p99 inter-call gap is ~1 min,
+so the 4h default never trips in normal operation." That premise died on **2026-08-06**, when
+the dedup decision engine was removed wholesale (rule 15) and took the continuous vision
+traffic with it. The threshold stayed. The only recurring LLM producer left is bazos
+description enrichment (`enrich_bazos.yml`) — condition scoring is paused and every other LLM
+workflow is dispatch-only — so the healthy inter-call gap stopped being a minute and became a
+cron period stretched by the Actions throttle (observed run-to-run gaps of 2.4–15.0 h over
+Aug 27-30). The check has **no warn tier**, so every overshoot is a hard red: it fired
+`fail value=4.195` and reddened "Monitoring: acute health (hourly)" **8 times between Aug 27
+and Aug 30** while the pipeline was demonstrably healthy — 595 successful calls and 0 errors
+in the trailing 24 h, $1.53 spent, last success minutes earlier. 13 h is 2× the 6 h nominal
+cadence plus throttle slack, still inside one 6 h lane tick of a genuinely dead pipeline.
+
+The transferable rule: **a threshold is a claim about a workload, so deleting the workload
+invalidates the threshold.** When a producer is retired, grep the health harness for the
+numbers that were sized on it — `DEFAULT_THRESHOLDS` carries its own rationale per key for
+exactly this reason. `llm_silence_fail_hours` is **not** in the migration-274 seed and no
+later migration adds it, so it resolves from the code default; if an operator ever adds it to
+`app_settings.pipeline_check_thresholds`, that row wins over the code (`load_thresholds`
+merges the DB over the defaults) and the deploy alone will not move it.

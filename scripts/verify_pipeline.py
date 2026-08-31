@@ -56,7 +56,18 @@ LOG = logging.getLogger("verify_pipeline")
 # default until a future seed migration includes it.
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "llm_error_rate_warn": 0.2,
-    "llm_silence_fail_hours": 4,
+    # Sized to the workload that ACTUALLY runs (W0.5). The old 4h was sized for
+    # dedup vision on the always-on worker — a p99 inter-call gap of ~1 minute —
+    # and that workload was deleted on 2026-08-06 with the decision engine (rule
+    # 15). The only recurring producer left is bazos description enrichment
+    # (`enrich_bazos.yml`); every other LLM workflow is dispatch-only or paused.
+    # Its schedule reads `20 */3` but its own name still says "every 6h", and
+    # under the Actions cron throttle the observed run-to-run gaps over Aug 27-30
+    # were 2.4-15.0h. 13h = 2x the 6h nominal cadence plus throttle slack: above
+    # every gap this check has actually fired on (the false reds were 4.2-7h+)
+    # while still catching a genuinely dead pipeline within one 6h lane tick.
+    # This check has no warn tier, so a too-tight number is pure false red.
+    "llm_silence_fail_hours": 13.0,
     "llm_spend_24h_warn_usd": 90,
     "llm_spend_24h_fail_usd": 150,
     # The llm-cost rollup (migration 437) absorbs late arrivals by re-scanning the
@@ -872,11 +883,22 @@ from llm_calls
 
 
 def check_llm_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    """Total-silence guard: the platform runs paid LLM traffic continuously (enrichment and
-    estimation lanes), so a stretch with ZERO llm_calls means the pipeline is dead —
-    worker down, key unset, or an outage so hard nothing is even attempted. This is the
-    failure mode error-rate checks are structurally blind to (no calls → no errors → false
-    green). p99 inter-call gap is ~1 min, so the 4h default never trips in normal operation.
+    """Total-silence guard: a stretch with ZERO llm_calls means the paid pipeline is dead —
+    key unset, provider unreachable, or an outage so hard nothing is even attempted. This is
+    the failure mode error-rate checks are structurally blind to (no calls → no errors → false
+    green).
+
+    **The threshold is sized to the cadence of the one recurring producer, not to a
+    continuous stream** (W0.5). This check used to document itself as "p99 inter-call gap is
+    ~1 min, so the 4h default never trips in normal operation" — true only while dedup vision
+    ran on the always-on worker, which was deleted on 2026-08-06 with the decision engine
+    (rule 15). Nothing has run continuously since. The recurring producer today is bazos
+    description enrichment (`enrich_bazos.yml`, the only LLM workflow still on a schedule —
+    condition scoring is paused and the rest are dispatch-only), so the healthy inter-call gap
+    is a CRON PERIOD stretched by the Actions throttle, not a minute. At 4h that made the
+    check a false-red generator: it fired `fail value=4.195` and reds against a perfectly
+    healthy pipeline. See `llm_silence_fail_hours` in DEFAULT_THRESHOLDS for the 13h sizing.
+
     Folds in the unique liveness intent of the retired check_llm_health.py, but UNGATED — the
     old probe hid behind a condition-scoring `pending` gate that is dead while scoring is paused."""
     fail_hours = float(thresholds["llm_silence_fail_hours"])

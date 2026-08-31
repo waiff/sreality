@@ -77,6 +77,26 @@ def test_llm_silence_fails_when_stale_or_absent() -> None:
     assert _status_for_llm_silence(None, fail_h) == "fail"    # no calls on record at all
 
 
+def test_llm_silence_default_is_sized_for_the_enrichment_cron_not_dedup_vision() -> None:
+    """W0.5: pin the default and the boundary it moved to.
+
+    4h was sized for dedup vision on the always-on worker (p99 inter-call gap ~1 min),
+    a workload deleted 2026-08-06 with the decision engine (rule 15). The recurring
+    producer left is the 6h-nominal description-enrichment cron, which the Actions
+    throttle stretches past 7h — so 4h red the acute lane 8 times over Aug 27-30 while
+    the pipeline was healthy (595 ok / 0 error calls in 24h, $1.53 spend). This check has
+    no warn tier, so every one of those was a hard false red.
+    """
+    fail_h = T["llm_silence_fail_hours"]
+    assert fail_h == 13.0
+    # The gaps that produced the false reds are now ok, up to and including the boundary.
+    for healthy in (4.195, 6.0, 7.5, 12.9, 13.0):
+        assert _status_for_llm_silence(healthy, fail_h) == "ok"
+    # Past 13h it still fails: a genuinely dead pipeline is caught within one 6h lane tick.
+    assert _status_for_llm_silence(13.01, fail_h) == "fail"
+    assert _status_for_llm_silence(24.0, fail_h) == "fail"
+
+
 def test_burn_rate_thresholds() -> None:
     warn, fail = T["llm_spend_24h_warn_usd"], T["llm_spend_24h_fail_usd"]
     assert _status_for_burn(10.0, warn, fail) == "ok"          # normal daily burn
