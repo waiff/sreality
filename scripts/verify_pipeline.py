@@ -15,6 +15,14 @@ Each check is isolated (one failing check writes a `fail` row with the error in
 `details`, never kills the run). Thresholds live in
 `app_settings.pipeline_check_thresholds` with the code defaults below as fallbacks.
 
+Each result is persisted AND alerted the moment its check completes, under a per-check
+and a whole-lane wall-clock budget (`_LANE_BUDGET_S`). The lane runs inside a job with
+`timeout-minutes: 5`, and it used to compute every result before writing any — so a
+timeout wrote zero rows and fired zero alerts, blinding `db_saturation` and
+`worker_liveness` at exactly the moment DB saturation would make the checks slow. A
+check that overruns its budget reports `warn` ("I could not measure this"), never `fail`
+and never `ok`.
+
     python -m scripts.verify_pipeline            # compute + write + alert
     python -m scripts.verify_pipeline --dry-run  # compute + log only, no writes
     python -m scripts.verify_pipeline --weekly   # also run the weekly-only checks
@@ -31,8 +39,9 @@ import logging
 import os
 import re
 import sys
-from pathlib import Path
+import time as _time
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Callable
 
 from scraper.db import QUEUE_PRIORITY_NEW, connect
@@ -47,7 +56,18 @@ LOG = logging.getLogger("verify_pipeline")
 # default until a future seed migration includes it.
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "llm_error_rate_warn": 0.2,
-    "llm_silence_fail_hours": 4,
+    # Sized to the workload that ACTUALLY runs (W0.5). The old 4h was sized for
+    # dedup vision on the always-on worker — a p99 inter-call gap of ~1 minute —
+    # and that workload was deleted on 2026-08-06 with the decision engine (rule
+    # 15). The only recurring producer left is bazos description enrichment
+    # (`enrich_bazos.yml`); every other LLM workflow is dispatch-only or paused.
+    # Its schedule reads `20 */3` but its own name still says "every 6h", and
+    # under the Actions cron throttle the observed run-to-run gaps over Aug 27-30
+    # were 2.4-15.0h. 13h = 2x the 6h nominal cadence plus throttle slack: above
+    # every gap this check has actually fired on (the false reds were 4.2-7h+)
+    # while still catching a genuinely dead pipeline within one 6h lane tick.
+    # This check has no warn tier, so a too-tight number is pure false red.
+    "llm_silence_fail_hours": 13.0,
     "llm_spend_24h_warn_usd": 90,
     "llm_spend_24h_fail_usd": 150,
     # The llm-cost rollup (migration 437) absorbs late arrivals by re-scanning the
@@ -214,7 +234,68 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "ppm2_coverage_gap_warn": 0.95,
     "ppm2_coverage_gap_fail_7d": 0.90,
     "ppm2_coverage_min_rows": 200,
+    # Workflow-failure poller liveness, keyed on the AGE of its own high-water cursor.
+    # Its cron is `*/30`, but the Actions throttle really runs it 80-256 min apart, so
+    # the fail tier has to clear the worst observed gap (~4.3h) with room to spare: warn
+    # at 6h is "two throttled polls missed", fail at 12h is unambiguous. The poller
+    # deliberately excludes its own runs from workflow_failures, so a dead poller cannot
+    # show up in the table it feeds — it just stops accumulating rows, which is exactly
+    # what a quiet week looks like. The cursor is the only thing that distinguishes them.
+    "workflow_poller_stale_warn_hours": 6.0,
+    "workflow_poller_stale_fail_hours": 12.0,
 }
+
+# --- lane + per-check wall-clock budgets (W0.4) -----------------------------
+#
+# The acute lane runs under `timeout-minutes: 5`. Before W0.4 `run_checks` computed EVERY
+# result before `write_results` persisted ANY of them, so a job timeout wrote zero rows and
+# fired zero alerts — blinding db_saturation and worker_liveness at exactly the moment (DB
+# saturation) that made the checks slow in the first place. Results are now persisted as
+# each check completes, and these budgets keep one slow check from eating the lane.
+#
+# 120s of the job's 300s. The remaining 180s is deliberate headroom: process start, the
+# threshold read, alert emission, and the checks W2/W3 will add. This wave owns the number;
+# later waves spend against it.
+_LANE_BUDGET_S = 120.0
+# No single check may hold the lane for more than this. The slowest today is the shared
+# measure_plausibility read at ~12s, so 45s is ~4x headroom over the known worst case.
+_CHECK_BUDGET_S = 45.0
+# Outside run_checks (ad-hoc use, tests) keep the historical 10-minute ceiling.
+_DEFAULT_STATEMENT_TIMEOUT_MS = 600_000
+
+
+class _LaneBudget:
+    """Mutable per-run budget state, reset at the top of every run_checks."""
+
+    def __init__(self) -> None:
+        self.deadline: float | None = None
+        self.statement_timeout_ms: float = _DEFAULT_STATEMENT_TIMEOUT_MS
+
+    def start(self, budget_s: float) -> None:
+        self.deadline = _time.monotonic() + budget_s
+
+    def reset(self) -> None:
+        self.deadline = None
+        self.statement_timeout_ms = _DEFAULT_STATEMENT_TIMEOUT_MS
+
+    def remaining(self) -> float | None:
+        if self.deadline is None:
+            return None
+        return self.deadline - _time.monotonic()
+
+    def arm_for_check(self, check_budget_s: float) -> float | None:
+        """Give the next check the smaller of its own budget and what the lane has
+        left; returns the remaining lane seconds (None = unbudgeted)."""
+        left = self.remaining()
+        if left is None:
+            self.statement_timeout_ms = _DEFAULT_STATEMENT_TIMEOUT_MS
+            return None
+        self.statement_timeout_ms = max(1000.0, min(check_budget_s, left) * 1000.0)
+        return left
+
+
+_LANE = _LaneBudget()
+
 
 # --- pure status derivation (unit-tested without a DB) ---------------------
 
@@ -247,6 +328,37 @@ def _status_for_llm_errors(
     return ("fail" if offenders else "ok"), offenders
 
 
+def _llm_live_state(
+    last_err_at: Any, last_ok_at: Any, last_credit_err_at: Any,
+) -> tuple[bool, bool]:
+    """Derive (currently_failing, credit_live) from STATE, not recency.
+
+    `currently_failing` is simply "the newest call is a failure": `last_ok_at <
+    last_err_at`. It used to additionally require the failure to be newer than a
+    90-minute window (`min_live_at`), which is wrong for a reason worth stating —
+    **silence is not recovery.** A failure is superseded only by a newer SUCCESS,
+    never by elapsed time. The producers here have circuit breakers (the enrichment
+    loop aborts at 5 consecutive errors), so once an outage is total the traffic
+    stops, the last error ages past the window, and the check reads `ok`.
+
+    Measured: OpenAI was credit-exhausted for 11 days (63,547 error rows, zero
+    successes) and `llm_errors` read `ok` for most of it, flapping `fail` -> `ok`
+    within an hour on unchanged inputs and emitting 114 alerts alternating onset with
+    a literal "Recovered: llm_errors is healthy again" for an outage that never
+    recovered. Edge-triggered alerting turns a duty-cycle sample into a siren.
+    """
+    currently_failing = bool(
+        last_err_at is not None
+        and (last_ok_at is None or last_err_at > last_ok_at)
+    )
+    credit_live = bool(
+        currently_failing
+        and last_credit_err_at is not None
+        and (last_ok_at is None or last_credit_err_at > last_ok_at)
+    )
+    return currently_failing, credit_live
+
+
 def _status_for_llm_silence(hours: float | None, fail_hours: float) -> str:
     """Fail when the newest llm_call is older than `fail_hours` (or there are none at all)."""
     if hours is None or hours > fail_hours:
@@ -254,17 +366,76 @@ def _status_for_llm_silence(hours: float | None, fail_hours: float) -> str:
     return "ok"
 
 
+def _status_for_poller_staleness(
+    hours: float | None, warn_hours: float, fail_hours: float,
+) -> str:
+    """Age of the workflow-failure poller's cursor -> status.
+
+    `None` (no cursor row at all) is `warn`, not `fail`: it is also the legitimate
+    first-run state, and a check that is red from the moment it ships teaches the
+    operator to ignore every check.
+    """
+    if hours is None:
+        return "warn"
+    if hours > fail_hours:
+        return "fail"
+    if hours > warn_hours:
+        return "warn"
+    return "ok"
+
+
 def _status_for_burn(spend_24h: float, warn_usd: float, fail_usd: float) -> str:
-    """Credit-depletion early warning: the account has run dry four times in a week
-    (Jul 3-10) because paid dedup-vision burn (~$75-100/day, cost-mix-driven — Jul 9 had
-    FEWER calls than Jul 8 yet 40% higher cost) silently outpaces manual top-ups. Balance
-    isn't queryable via API, so trailing-24h SPEND is the runway proxy: warn = top-up
-    cadence risk, fail = runaway burn worth an email before the hard gate hits."""
+    """Credit-depletion early warning: the account has run dry repeatedly (Jul 3-10)
+    because paid burn silently outpaces manual top-ups. Balance isn't queryable via
+    API, so trailing-24h SPEND is the runway proxy: warn = top-up cadence risk, fail =
+    runaway burn worth an email before the hard gate hits.
+
+    Upper arms only — see _status_for_burn_lanes for the arm that catches the OPPOSITE
+    failure, where spend collapses to zero because nothing is succeeding."""
     if spend_24h > fail_usd:
         return "fail"
     if spend_24h > warn_usd:
         return "warn"
     return "ok"
+
+
+def _starved_lanes(per_called_for: list[dict[str, Any]]) -> list[str]:
+    """`called_for` lanes that are trying and getting nothing: attempts but no
+    success and no spend. Evaluated PER LANE on purpose — a 24h aggregate arm is
+    defeated by a single unrelated cheap success, which is exactly what happened: one
+    `summarize_region_dispositions` call held `llm_burn_rate` at $0.01 for ~24 of 30
+    sampled hours while the only recurring lane was totally dead."""
+    return [
+        c["called_for"] for c in per_called_for
+        if c.get("attempts", 0) > 0
+        and c.get("successes", 0) == 0
+        and (c.get("spend", 0) or 0) == 0
+    ]
+
+
+def _status_for_burn_lanes(
+    per_called_for: list[dict[str, Any]],
+    spend_24h: float,
+    warn_usd: float,
+    fail_usd: float,
+) -> tuple[str, str, list[str]]:
+    """Return (status, arm, starved lanes) for llm_burn_rate.
+
+    Three arms on two different axes, because `value=0.0` is otherwise ambiguous —
+    it is the maximally healthy number AND the signature of a total outage:
+      - `starved`: some lane has attempts but zero successes and zero spend -> fail.
+        `_record_failure` writes `cost_usd=0.0`, so a total outage drives spend DOWN.
+      - `idle`: nothing was attempted at all -> ok. Silence is llm_liveness's axis.
+      - `runaway`/`ok`: the existing upper spend arms.
+    The arm is carried in `details.arm` so a red or green zero is legible in logs.
+    """
+    starved = _starved_lanes(per_called_for)
+    if starved:
+        return "fail", "starved", starved
+    if not any(c.get("attempts", 0) for c in per_called_for):
+        return "ok", "idle", []
+    status = _status_for_burn(spend_24h, warn_usd, fail_usd)
+    return status, ("runaway" if status != "ok" else "ok"), []
 
 
 def _status_for_long_open_txn(oldest_minutes: float, warn_minutes: float) -> str:
@@ -583,16 +754,28 @@ def load_thresholds(conn: Any) -> dict[str, Any]:
     return merged
 
 
+def _statement_timeout_clause() -> str:
+    """The `SET LOCAL statement_timeout` value for the check currently running.
+
+    Server-side enforcement is what gives a check a real wall-clock bound: the
+    connection is autocommit and shared by every check, so a Python-side timeout
+    (a thread we cannot cancel, or a signal raised mid-query) would leave the
+    connection wedged for everyone after it. Postgres cancelling its own query is
+    the only mechanism that hands the connection back clean.
+    """
+    return f"{int(_LANE.statement_timeout_ms)}ms"
+
+
 def _fetchone(conn: Any, sql: str, params: Any = None) -> tuple[Any, ...] | None:
     with conn.transaction(), conn.cursor() as cur:
-        cur.execute("SET LOCAL statement_timeout = '10min'")
+        cur.execute(f"SET LOCAL statement_timeout = '{_statement_timeout_clause()}'")
         cur.execute(sql, params or ())
         return cur.fetchone()
 
 
 def _fetchall(conn: Any, sql: str, params: Any = None) -> list[tuple[Any, ...]]:
     with conn.transaction(), conn.cursor() as cur:
-        cur.execute("SET LOCAL statement_timeout = '10min'")
+        cur.execute(f"SET LOCAL statement_timeout = '{_statement_timeout_clause()}'")
         cur.execute(sql, params or ())
         return cur.fetchall()
 
@@ -615,14 +798,14 @@ where called_at > now() - interval '24 hours' and (error ilike %s or error ilike
 """
 
 # Liveness: is the provider failing RIGHT NOW? Compares the newest failure vs the newest
-# success (a success after the last error means recovered). `min_ok_at` bounds staleness so
-# a lone error hours ago with no traffic since doesn't read as a live outage.
+# success — a success after the last error means recovered, and nothing else does. The
+# `min_live_at` staleness column this used to select was removed in W0.3: see
+# _llm_live_state for why bounding "live" by elapsed time made a total outage read `ok`.
 _LLM_LIVENESS_SQL = """
 select
   max(called_at) filter (where error is not null) as last_err_at,
   max(called_at) filter (where error is null) as last_ok_at,
-  max(called_at) filter (where error ilike %s or error ilike %s) as last_credit_err_at,
-  now() - interval '90 minutes' as min_live_at
+  max(called_at) filter (where error ilike %s or error ilike %s) as last_credit_err_at
 from llm_calls
 where called_at > now() - interval '24 hours'
 """
@@ -639,20 +822,11 @@ def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     credit_errors = int(credit_row[0]) if credit_row and credit_row[0] is not None else 0
 
     live = _fetchone(conn, _LLM_LIVENESS_SQL, _CREDIT_ERROR_PATTERNS)
-    last_err_at, last_ok_at, last_credit_err_at, min_live_at = (
-        (live[0], live[1], live[2], live[3]) if live else (None, None, None, None)
+    last_err_at, last_ok_at, last_credit_err_at = (
+        (live[0], live[1], live[2]) if live else (None, None, None)
     )
-    # Currently failing = newest call is a failure AND that failure is recent (not stale).
-    currently_failing = bool(
-        last_err_at is not None
-        and (last_ok_at is None or last_err_at > last_ok_at)
-        and (min_live_at is None or last_err_at > min_live_at)
-    )
-    credit_live = bool(
-        currently_failing
-        and last_credit_err_at is not None
-        and (last_ok_at is None or last_credit_err_at > last_ok_at)
-    )
+    currently_failing, credit_live = _llm_live_state(
+        last_err_at, last_ok_at, last_credit_err_at)
 
     per_called_for: list[dict[str, Any]] = []
     tot = err = 0
@@ -671,9 +845,10 @@ def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
 
     if credit_live:
         message = (
-            "LLM calls are failing with credit-balance errors right now — the Anthropic "
-            "account is out of credit. Every paid LLM path (dedup vision, estimations, "
-            f"summaries, condition scoring) is down ({credit_errors} credit errors in 24h)."
+            "LLM calls are failing with credit-balance errors right now — the provider "
+            "account is out of credit. Every paid LLM path (estimations, summaries, "
+            "listing enrichment, URL parsing) is down "
+            f"({credit_errors} credit errors in 24h, no successful call since)."
         )
     elif offenders:
         message = (
@@ -708,11 +883,22 @@ from llm_calls
 
 
 def check_llm_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    """Total-silence guard: the platform runs paid LLM traffic continuously (dedup vision
-    on the always-on worker), so a stretch with ZERO llm_calls means the pipeline is dead —
-    worker down, key unset, or an outage so hard nothing is even attempted. This is the
-    failure mode error-rate checks are structurally blind to (no calls → no errors → false
-    green). p99 inter-call gap is ~1 min, so the 4h default never trips in normal operation.
+    """Total-silence guard: a stretch with ZERO llm_calls means the paid pipeline is dead —
+    key unset, provider unreachable, or an outage so hard nothing is even attempted. This is
+    the failure mode error-rate checks are structurally blind to (no calls → no errors → false
+    green).
+
+    **The threshold is sized to the cadence of the one recurring producer, not to a
+    continuous stream** (W0.5). This check used to document itself as "p99 inter-call gap is
+    ~1 min, so the 4h default never trips in normal operation" — true only while dedup vision
+    ran on the always-on worker, which was deleted on 2026-08-06 with the decision engine
+    (rule 15). Nothing has run continuously since. The recurring producer today is bazos
+    description enrichment (`enrich_bazos.yml`, the only LLM workflow still on a schedule —
+    condition scoring is paused and the rest are dispatch-only), so the healthy inter-call gap
+    is a CRON PERIOD stretched by the Actions throttle, not a minute. At 4h that made the
+    check a false-red generator: it fired `fail value=4.195` and reds against a perfectly
+    healthy pipeline. See `llm_silence_fail_hours` in DEFAULT_THRESHOLDS for the 13h sizing.
+
     Folds in the unique liveness intent of the retired check_llm_health.py, but UNGATED — the
     old probe hid behind a condition-scoring `pending` gate that is dead while scoring is paused."""
     fail_hours = float(thresholds["llm_silence_fail_hours"])
@@ -742,25 +928,57 @@ select coalesce(sum(cost_usd), 0) as spend_24h
 from llm_calls where called_at > now() - interval '24 hours'
 """
 
-_LLM_BURN_TOP_SQL = """
-select called_for, round(sum(cost_usd)::numeric, 2) as spend
+# Per-lane attempts / successes / spend. NOT filtered on `cost_usd > 0` — that filter is
+# precisely what made a starved lane invisible: a lane that attempts and never succeeds
+# books cost_usd=0.0 on every row and simply vanishes from a spend-ranked query.
+_LLM_BURN_BY_LANE_SQL = """
+select called_for,
+       count(*) as attempts,
+       count(*) filter (where error is null) as successes,
+       round(coalesce(sum(cost_usd), 0)::numeric, 2) as spend
 from llm_calls
-where called_at > now() - interval '24 hours' and cost_usd > 0
-group by called_for order by spend desc limit 3
+where called_at > now() - interval '24 hours'
+group by called_for order by spend desc, attempts desc
 """
 
 
 def check_llm_burn_rate(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    """Spend-based credit-runway guard (see _status_for_burn). Names the top spenders so
-    the alert says what to throttle, not just that money is burning."""
+    """Credit-runway guard on TWO axes (see _status_for_burn_lanes).
+
+    Upper arms catch runaway burn. The starvation arm catches the opposite and far more
+    common failure: `_record_failure` writes `cost_usd=0.0`, so a total provider outage
+    drives 24h spend toward zero — the maximally healthy number. This check reported
+    `ok value=0.0` for the entire 11-day OpenAI outage. Evaluated per `called_for` so one
+    unrelated cheap success cannot mask a dead lane.
+    """
     warn_usd = float(thresholds["llm_spend_24h_warn_usd"])
     fail_usd = float(thresholds["llm_spend_24h_fail_usd"])
     row = _fetchone(conn, _LLM_BURN_SQL)
     spend = float(row[0]) if row and row[0] is not None else 0.0
-    top = [(str(cf), float(s)) for (cf, s) in _fetchall(conn, _LLM_BURN_TOP_SQL)]
-    status = _status_for_burn(spend, warn_usd, fail_usd)
+    per_called_for = [
+        {"called_for": str(cf), "attempts": int(a), "successes": int(s), "spend": float(c)}
+        for (cf, a, s, c) in _fetchall(conn, _LLM_BURN_BY_LANE_SQL)
+    ]
+    top = [(c["called_for"], c["spend"]) for c in per_called_for if c["spend"] > 0][:3]
+    status, arm, starved = _status_for_burn_lanes(
+        per_called_for, spend, warn_usd, fail_usd)
     top_str = ", ".join(f"{cf} ${s:.2f}" for cf, s in top) or "none"
-    if status == "fail":
+
+    if arm == "starved":
+        attempts = sum(
+            c["attempts"] for c in per_called_for if c["called_for"] in starved)
+        message = (
+            f"LLM lanes are burning attempts and producing nothing: {', '.join(starved)} "
+            f"({attempts} calls in 24h, zero successes, $0.00 spent). Spend near zero here "
+            "is the SYMPTOM, not health — the provider is refusing every call (credit "
+            "exhausted, key revoked, or model access lost)."
+        )
+    elif arm == "idle":
+        message = (
+            "No LLM calls attempted in 24h — nothing to bill and nothing to judge. "
+            "Whether that silence is itself wrong is llm_liveness's call."
+        )
+    elif status == "fail":
         message = (
             f"LLM spend is ${spend:.2f} in 24h (> ${fail_usd:.0f}) — at this burn the credit "
             f"balance drains in days; check Plans & Billing / top up or throttle. Top spenders: {top_str}."
@@ -776,8 +994,65 @@ def check_llm_burn_rate(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]
         "check_key": "llm_burn_rate",
         "status": status,
         "value": round(spend, 2),
-        "details": {"spend_24h_usd": round(spend, 2), "warn_usd": warn_usd,
-                    "fail_usd": fail_usd, "top_spenders": dict(top)},
+        "details": {
+            "spend_24h_usd": round(spend, 2), "warn_usd": warn_usd,
+            "fail_usd": fail_usd, "top_spenders": dict(top),
+            # Which arm decided this, so a red or green `value=0.0` is legible.
+            "arm": arm, "starved_called_for": starved,
+            "per_called_for": per_called_for,
+        },
+        "message": message,
+    }
+
+
+# The cursor is stored as a jsonb scalar by record_workflow_failures._write_cursor, so it
+# comes back out with #>> '{}' exactly as that module's _read_cursor does.
+_WORKFLOW_POLLER_CURSOR_SQL = """
+select extract(epoch from (now() - (value #>> '{}')::timestamptz)) / 3600.0 as age_hours
+from app_settings where key = 'workflow_failures_cursor'
+"""
+
+
+def check_workflow_poller_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Is the workflow-failure poller still polling?
+
+    `workflow_failures` cannot answer this about itself. The poller excludes its own runs
+    from the table it feeds (or one red poll would re-alarm the surface forever), so when
+    it dies the table simply stops growing — indistinguishable from a healthy week. On
+    2026-08-26 the ingest fleet was red for hours and the ops surface stayed quiet.
+
+    The liveness signal is the age of its high-water cursor in `app_settings`, which every
+    successful poll rewrites. O(1): one indexed row by primary key.
+    """
+    warn_hours = float(thresholds["workflow_poller_stale_warn_hours"])
+    fail_hours = float(thresholds["workflow_poller_stale_fail_hours"])
+    row = _fetchone(conn, _WORKFLOW_POLLER_CURSOR_SQL)
+    hours = float(row[0]) if row and row[0] is not None else None
+    status = _status_for_poller_staleness(hours, warn_hours, fail_hours)
+    if hours is None:
+        message = (
+            "The workflow-failure poller has no cursor on record — it has never completed "
+            "a poll, or the app_settings row was cleared. Until it does, nothing is "
+            "watching for red workflow runs."
+        )
+    elif status == "ok":
+        message = f"Workflow-failure poller last advanced its cursor {hours:.1f}h ago."
+    else:
+        message = (
+            f"The workflow-failure poller has not advanced its cursor in {hours:.1f}h "
+            f"(warn > {warn_hours:.0f}h, fail > {fail_hours:.0f}h) — monitor_workflow_failures.yml "
+            "is failing, disabled, or wedged. Red workflow runs are going unrecorded right "
+            "now, and the Health page's failure list is silently frozen, not empty."
+        )
+    return {
+        "check_key": "workflow_poller_liveness",
+        "status": status,
+        "value": round(hours, 2) if hours is not None else None,
+        "details": {
+            "cursor_age_hours": round(hours, 2) if hours is not None else None,
+            "warn_hours": warn_hours, "fail_hours": fail_hours,
+            "cursor_present": hours is not None,
+        },
         "message": message,
     }
 
@@ -2057,6 +2332,10 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("property_maintenance", check_property_maintenance),
     ("broker_resolution_freshness", check_broker_resolution_freshness),
     ("broker_merge_suppression", check_broker_merge_suppression),
+    # Registered here (6h lane) but deliberately NOT in llm_health.yml's hourly --only
+    # list yet: ship, soak, then promote. Registration alone rings the in-app bell;
+    # the hourly lane is what emails.
+    ("workflow_poller_liveness", check_workflow_poller_liveness),
     ("ppm2_median_shift", check_ppm2_median_shift),
     ("ppm2_basis_floor_share", check_ppm2_basis_floor_share),
     ("area_vs_usable_divergence", check_area_vs_usable_divergence),
@@ -2073,13 +2352,68 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
 _WEEKLY_CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = []
 
 
+def _is_timeout_error(exc: BaseException) -> bool:
+    """A statement cancelled by our own per-check budget, vs a genuinely broken check."""
+    name = type(exc).__name__
+    if name in ("QueryCanceled", "QueryCanceledError"):
+        return True
+    return "canceling statement due to statement timeout" in str(exc)
+
+
+def _timed_out_result(key: str, budget_s: float, exc: BaseException | None) -> dict[str, Any]:
+    """A check that ran past its budget is `warn`, never `fail`.
+
+    It reports "I could not measure this", which is a different claim from "I measured
+    this and it is broken" — and a lane under DB pressure would otherwise manufacture a
+    wall of false reds at the exact moment the operator needs to read the real one."""
+    return {
+        "check_key": key,
+        "status": "warn",
+        "value": None,
+        "details": {"timed_out": True, "budget_seconds": round(budget_s, 1),
+                    "error": str(exc) if exc is not None else None},
+        "message": (
+            f"Check '{key}' exceeded its {budget_s:.0f}s budget and was cancelled — its "
+            "result is UNKNOWN this run, not healthy. Usually DB pressure; if it persists, "
+            "the check's query needs work."
+        ),
+    }
+
+
+def _not_run_result(key: str, budget_s: float) -> dict[str, Any]:
+    return {
+        "check_key": key,
+        "status": "warn",
+        "value": None,
+        "details": {"not_run": True, "lane_budget_seconds": round(budget_s, 1)},
+        "message": (
+            f"Check '{key}' did not run: the verification lane exhausted its "
+            f"{budget_s:.0f}s budget first. Result UNKNOWN this run."
+        ),
+    }
+
+
 def run_checks(
     conn: Any, thresholds: dict[str, Any], *, weekly: bool = False,
     only: set[str] | None = None,
+    on_result: Callable[[dict[str, Any]], None] | None = None,
+    lane_budget_s: float | None = _LANE_BUDGET_S,
+    check_budget_s: float = _CHECK_BUDGET_S,
 ) -> list[dict[str, Any]]:
-    """Run every check in isolation — a raising check becomes a `fail` row carrying
-    the error, so one broken check never aborts the run. `only` restricts to the named
-    check keys (the hourly LLM-liveness lane runs just the two llm_* checks)."""
+    """Run every check in isolation, handing each result to `on_result` AS IT COMPLETES.
+
+    A raising check becomes a `fail` row carrying the error, so one broken check never
+    aborts the run. `only` restricts to the named check keys (the acute lane's `--only`).
+
+    Two budgets bound the lane (W0.4). Each check gets `check_budget_s` (or whatever the
+    lane has left, whichever is smaller) enforced server-side as `statement_timeout`; if
+    it is cancelled it reports `warn` "timed out", not `fail`. When the lane budget is
+    gone the remaining checks are not started and report `warn` "not run". Both say
+    UNKNOWN rather than healthy — silence is never recovery.
+
+    `on_result` is what makes a timeout survivable: persisting per check means a killed
+    job keeps every result it had already computed instead of losing all of them.
+    """
     results: list[dict[str, Any]] = []
     # The measure checks share one 12 s read of measure_plausibility_by_source; the
     # cache is per RUN, never across runs.
@@ -2087,19 +2421,55 @@ def run_checks(
     checks = list(_CHECKS) + (list(_WEEKLY_CHECKS) if weekly else [])
     if only:
         checks = [(k, fn) for (k, fn) in checks if k in only]
-    for key, fn in checks:
-        try:
-            results.append(fn(conn, thresholds))
-        except Exception as exc:  # noqa: BLE001
-            LOG.exception("check %s errored", key)
-            results.append({
-                "check_key": key,
-                "status": "fail",
-                "value": None,
-                "details": {"error": str(exc)},
-                "message": f"Pipeline verification check '{key}' errored: {exc}",
-            })
+
+    _LANE.reset()
+    if lane_budget_s is not None:
+        _LANE.start(lane_budget_s)
+    try:
+        for key, fn in checks:
+            left = _LANE.arm_for_check(check_budget_s)
+            if left is not None and left <= 0:
+                LOG.error(
+                    "lane budget %.0fs exhausted; check %s not run", lane_budget_s, key)
+                result = _not_run_result(key, lane_budget_s or 0.0)
+            else:
+                started = _time.monotonic()
+                try:
+                    result = fn(conn, thresholds)
+                except Exception as exc:  # noqa: BLE001
+                    elapsed = _time.monotonic() - started
+                    if _is_timeout_error(exc):
+                        LOG.error("check %s timed out after %.1fs", key, elapsed)
+                        result = _timed_out_result(key, elapsed, exc)
+                    else:
+                        LOG.exception("check %s errored", key)
+                        result = {
+                            "check_key": key,
+                            "status": "fail",
+                            "value": None,
+                            "details": {"error": str(exc)},
+                            "message": f"Pipeline verification check '{key}' errored: {exc}",
+                        }
+            results.append(result)
+            if on_result is not None:
+                try:
+                    on_result(result)
+                except Exception:  # noqa: BLE001 - persisting one result must not end the lane
+                    LOG.exception("could not persist result for check %s", key)
+    finally:
+        _LANE.reset()
     return results
+
+
+def insert_result(conn: Any, result: dict[str, Any], run_at: _dt.datetime) -> None:
+    """Persist ONE check result. Called as each check completes (W0.4)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO pipeline_check_results (run_at, check_key, status, value, details) "
+            "VALUES (%s, %s, %s, %s, %s::jsonb)",
+            (run_at, result["check_key"], result["status"],
+             result.get("value"), json.dumps(result.get("details") or {})),
+        )
 
 
 def write_results(
@@ -2109,16 +2479,13 @@ def write_results(
     recovery), not on every red run. Returns {onset, recovery} counts.
 
     The previous stored status is read BEFORE this run's rows are inserted, so the
-    baseline is the prior run — see toolkit.system_alerts.emit_transition_alerts."""
+    baseline is the prior run — see toolkit.system_alerts.emit_transition_alerts.
+
+    main() no longer takes this path (it persists and alerts per check so a job timeout
+    keeps what it computed); kept for callers that already hold a full result list."""
     prev = latest_statuses(conn)
-    with conn.cursor() as cur:
-        for r in results:
-            cur.execute(
-                "INSERT INTO pipeline_check_results (run_at, check_key, status, value, details) "
-                "VALUES (%s, %s, %s, %s, %s::jsonb)",
-                (run_at, r["check_key"], r["status"],
-                 r.get("value"), json.dumps(r.get("details") or {})),
-            )
+    for r in results:
+        insert_result(conn, r, run_at)
     return emit_transition_alerts(conn, results, prev, run_at)
 
 
@@ -2160,18 +2527,40 @@ def main() -> int:
 
     only = {k.strip() for k in args.only.split(",") if k.strip()} or None
     run_at = _dt.datetime.now(_dt.timezone.utc)
+    counts = {"onset": 0, "recovery": 0}
+    written = 0
     with connect() as conn:
         thresholds = load_thresholds(conn)
-        results = run_checks(conn, thresholds, weekly=args.weekly, only=only)
-        for r in results:
-            LOG.info("CHECK %s status=%s value=%s", r["check_key"], r["status"], r.get("value"))
+        # The transition baseline must be read BEFORE this run writes anything, and this
+        # run now writes incrementally — so it is captured here rather than inside a
+        # batch writer (see toolkit.system_alerts.emit_transition_alerts).
+        prev = latest_statuses(conn) if not args.dry_run else {}
+
+        def _persist(result: dict[str, Any]) -> None:
+            """Persist + alert on THIS check, immediately. Both are per-check so a job
+            timeout mid-lane keeps the results it already has AND their alerts, instead
+            of losing every row (the pre-W0.4 behavior)."""
+            nonlocal written
+            LOG.info(
+                "CHECK %s status=%s value=%s",
+                result["check_key"], result["status"], result.get("value"),
+            )
+            if args.dry_run:
+                return
+            insert_result(conn, result, run_at)
+            written += 1
+            emitted = emit_transition_alerts(conn, [result], prev, run_at)
+            counts["onset"] += emitted["onset"]
+            counts["recovery"] += emitted["recovery"]
+
+        results = run_checks(
+            conn, thresholds, weekly=args.weekly, only=only, on_result=_persist)
         if args.dry_run:
             LOG.info("dry-run: %d checks computed, no rows written", len(results))
             return 0
-        counts = write_results(conn, results, run_at)
     LOG.info(
         "verify_pipeline wrote %d rows, emitted %d onset + %d recovery alerts",
-        len(results), counts["onset"], counts["recovery"],
+        written, counts["onset"], counts["recovery"],
     )
     if args.exit_nonzero_on_fail and any(r["status"] == "fail" for r in results):
         return 1

@@ -77,6 +77,26 @@ def test_llm_silence_fails_when_stale_or_absent() -> None:
     assert _status_for_llm_silence(None, fail_h) == "fail"    # no calls on record at all
 
 
+def test_llm_silence_default_is_sized_for_the_enrichment_cron_not_dedup_vision() -> None:
+    """W0.5: pin the default and the boundary it moved to.
+
+    4h was sized for dedup vision on the always-on worker (p99 inter-call gap ~1 min),
+    a workload deleted 2026-08-06 with the decision engine (rule 15). The recurring
+    producer left is the 6h-nominal description-enrichment cron, which the Actions
+    throttle stretches past 7h — so 4h red the acute lane 8 times over Aug 27-30 while
+    the pipeline was healthy (595 ok / 0 error calls in 24h, $1.53 spend). This check has
+    no warn tier, so every one of those was a hard false red.
+    """
+    fail_h = T["llm_silence_fail_hours"]
+    assert fail_h == 13.0
+    # The gaps that produced the false reds are now ok, up to and including the boundary.
+    for healthy in (4.195, 6.0, 7.5, 12.9, 13.0):
+        assert _status_for_llm_silence(healthy, fail_h) == "ok"
+    # Past 13h it still fails: a genuinely dead pipeline is caught within one 6h lane tick.
+    assert _status_for_llm_silence(13.01, fail_h) == "fail"
+    assert _status_for_llm_silence(24.0, fail_h) == "fail"
+
+
 def test_burn_rate_thresholds() -> None:
     warn, fail = T["llm_spend_24h_warn_usd"], T["llm_spend_24h_fail_usd"]
     assert _status_for_burn(10.0, warn, fail) == "ok"          # normal daily burn
@@ -585,6 +605,346 @@ def test_weekly_flag_adds_weekly_checks(monkeypatch: Any) -> None:
     )
     assert run_checks(None, {}, weekly=False) == []
     assert [r["check_key"] for r in run_checks(None, {}, weekly=True)] == ["weekly_one"]
+
+
+# --- W0.3: currently_failing is derived from STATE, not recency -------------
+#
+# The old tests injected `currently_failing` as a literal into _status_for_llm_errors and
+# never exercised the derivation — which is where the bug actually lived. These drive it
+# from raw last_ok_at / last_err_at instead.
+
+
+def _t(**kw: Any) -> Any:
+    import datetime as dt
+    base = dt.datetime(2026, 8, 26, 12, 0, tzinfo=dt.timezone.utc)
+    return base + dt.timedelta(**kw)
+
+
+def test_live_state_newest_call_is_a_failure() -> None:
+    from scripts.verify_pipeline import _llm_live_state
+
+    failing, credit = _llm_live_state(
+        last_err_at=_t(minutes=10), last_ok_at=_t(minutes=5), last_credit_err_at=None)
+    assert failing is True and credit is False
+
+
+def test_live_state_a_newer_success_clears_it() -> None:
+    from scripts.verify_pipeline import _llm_live_state
+
+    failing, credit = _llm_live_state(
+        last_err_at=_t(minutes=5), last_ok_at=_t(minutes=10),
+        last_credit_err_at=_t(minutes=5))
+    assert failing is False and credit is False
+
+
+def test_live_state_stale_failure_with_no_traffic_since_is_still_failing() -> None:
+    """The regression. A total outage stops producing traffic (the enrichment loop
+    breaks at 5 consecutive errors), so the last error ages past the old 90-minute
+    window and the check flipped to `ok` — 11 days of real outage read healthy, and
+    edge-triggered alerting emitted 114 alerts alternating onset with a literal
+    'Recovered' for something that never recovered. Silence is not recovery."""
+    from scripts.verify_pipeline import _llm_live_state
+
+    failing, credit = _llm_live_state(
+        last_err_at=_t(hours=-20),          # 20h old, far outside any staleness window
+        last_ok_at=_t(hours=-23),           # and the last success is older still
+        last_credit_err_at=_t(hours=-20),
+    )
+    assert failing is True
+    assert credit is True
+
+
+def test_live_state_no_calls_at_all_is_not_failing() -> None:
+    from scripts.verify_pipeline import _llm_live_state
+
+    assert _llm_live_state(None, None, None) == (False, False)
+
+
+def test_live_state_errors_but_never_a_success_is_failing() -> None:
+    from scripts.verify_pipeline import _llm_live_state
+
+    failing, credit = _llm_live_state(
+        last_err_at=_t(hours=-6), last_ok_at=None, last_credit_err_at=_t(hours=-6))
+    assert failing is True and credit is True
+
+
+class _LlmErrorsConn:
+    """Three-query fake for check_llm_errors: rates, credit count, liveness."""
+
+    def __init__(self, rates: list[tuple[Any, ...]], credit_count: int,
+                 live_row: tuple[Any, ...]) -> None:
+        self._rates, self._credit, self._live = rates, credit_count, live_row
+        self._last = ""
+
+    def cursor(self) -> "_LlmErrorsConn":
+        return self
+
+    def transaction(self) -> "_LlmErrorsConn":
+        return self
+
+    def __enter__(self) -> "_LlmErrorsConn":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self._last = sql
+
+    def fetchall(self) -> Any:
+        return self._rates
+
+    def fetchone(self) -> Any:
+        if "last_err_at" in self._last:
+            return self._live
+        if "count(*)" in self._last:
+            return (self._credit,)
+        return None
+
+
+def test_check_llm_errors_reds_on_a_days_old_credit_outage() -> None:
+    """End-to-end through the real check: a credit outage with no success since must
+    be `fail` no matter how old the last error is."""
+    from scripts.verify_pipeline import check_llm_errors
+
+    conn = _LlmErrorsConn(
+        rates=[("enrich_listing_description", 500, 500)],
+        credit_count=63547,
+        live_row=(_t(hours=-30), _t(hours=-40), _t(hours=-30)),
+    )
+    out = check_llm_errors(conn, T)
+    assert out["status"] == "fail"
+    assert out["details"]["currently_failing"] is True
+    assert out["details"]["credit_live"] is True
+    # Operator copy must not name a provider we may not be on, nor a subsystem that
+    # was deleted 2026-08-06 (rule 15).
+    assert "Anthropic" not in out["message"]
+    assert "dedup vision" not in out["message"]
+
+
+def test_check_llm_errors_is_ok_once_a_success_lands() -> None:
+    from scripts.verify_pipeline import check_llm_errors
+
+    conn = _LlmErrorsConn(
+        rates=[("enrich_listing_description", 500, 400)],
+        credit_count=63547,          # still in the 24h window, but superseded
+        live_row=(_t(hours=-30), _t(minutes=-2), None),
+    )
+    out = check_llm_errors(conn, T)
+    assert out["status"] == "ok"
+    assert out["details"]["currently_failing"] is False
+
+
+# --- W0.3: llm_burn_rate starvation arm ------------------------------------
+
+
+def test_burn_starvation_arm_fails_a_lane_that_spends_nothing() -> None:
+    from scripts.verify_pipeline import _status_for_burn_lanes
+
+    lanes = [{"called_for": "enrich_listing_description",
+              "attempts": 5000, "successes": 0, "spend": 0.0}]
+    status, arm, starved = _status_for_burn_lanes(lanes, 0.0, T["llm_spend_24h_warn_usd"],
+                                                  T["llm_spend_24h_fail_usd"])
+    assert status == "fail" and arm == "starved"
+    assert starved == ["enrich_listing_description"]
+
+
+def test_burn_starvation_is_per_lane_so_one_cheap_success_cannot_mask_it() -> None:
+    """Measured: a single `summarize_region_dispositions` call held the 24h aggregate at
+    $0.01 for ~24 of 30 sampled hours while the only recurring lane was totally dead. An
+    aggregate arm cannot see that; a per-lane arm must."""
+    from scripts.verify_pipeline import _status_for_burn_lanes
+
+    lanes = [
+        {"called_for": "enrich_listing_description", "attempts": 5000,
+         "successes": 0, "spend": 0.0},
+        {"called_for": "summarize_region_dispositions", "attempts": 1,
+         "successes": 1, "spend": 0.01},
+    ]
+    status, arm, starved = _status_for_burn_lanes(lanes, 0.01, 90, 150)
+    assert status == "fail" and arm == "starved"
+    assert starved == ["enrich_listing_description"]
+
+
+def test_burn_idle_is_ok_and_flagged_not_starved() -> None:
+    """No attempts is a different axis (llm_liveness owns it), not a burn failure."""
+    from scripts.verify_pipeline import _status_for_burn_lanes
+
+    status, arm, starved = _status_for_burn_lanes([], 0.0, 90, 150)
+    assert status == "ok" and arm == "idle" and starved == []
+
+
+def test_burn_healthy_traffic_keeps_the_upper_arms() -> None:
+    from scripts.verify_pipeline import _status_for_burn_lanes
+
+    lanes = [{"called_for": "parse_url", "attempts": 100, "successes": 98, "spend": 200.0}]
+    assert _status_for_burn_lanes(lanes, 200.0, 90, 150)[:2] == ("fail", "runaway")
+    assert _status_for_burn_lanes(lanes, 100.0, 90, 150)[:2] == ("warn", "runaway")
+    assert _status_for_burn_lanes(lanes, 10.0, 90, 150)[:2] == ("ok", "ok")
+
+
+def test_burn_lane_with_successes_but_zero_cost_is_not_starved() -> None:
+    """A free/cached model books cost_usd=0 on a SUCCESS. Only attempts-without-
+    successes is starvation."""
+    from scripts.verify_pipeline import _status_for_burn_lanes
+
+    lanes = [{"called_for": "parse_url", "attempts": 10, "successes": 10, "spend": 0.0}]
+    assert _status_for_burn_lanes(lanes, 0.0, 90, 150)[:2] == ("ok", "ok")
+
+
+# --- W0.1: workflow poller liveness ----------------------------------------
+
+
+def test_poller_staleness_arms() -> None:
+    from scripts.verify_pipeline import _status_for_poller_staleness
+
+    warn_h = T["workflow_poller_stale_warn_hours"]
+    fail_h = T["workflow_poller_stale_fail_hours"]
+    assert _status_for_poller_staleness(0.5, warn_h, fail_h) == "ok"
+    assert _status_for_poller_staleness(4.3, warn_h, fail_h) == "ok"   # worst real cadence
+    assert _status_for_poller_staleness(warn_h, warn_h, fail_h) == "ok"   # at, not over
+    assert _status_for_poller_staleness(warn_h + 0.1, warn_h, fail_h) == "warn"
+    assert _status_for_poller_staleness(fail_h + 0.1, warn_h, fail_h) == "fail"
+
+
+def test_poller_staleness_missing_cursor_is_warn_not_fail() -> None:
+    """A check that is red the moment it ships trains the operator to ignore every
+    check; no-cursor-yet is also the legitimate first-run state."""
+    from scripts.verify_pipeline import _status_for_poller_staleness
+
+    assert _status_for_poller_staleness(None, 6.0, 12.0) == "warn"
+
+
+def test_poller_liveness_check_reads_the_cursor_age() -> None:
+    from scripts.verify_pipeline import check_workflow_poller_liveness
+
+    out = check_workflow_poller_liveness(_OneRow((30.0,)), T)
+    assert out["status"] == "fail"
+    assert out["details"]["cursor_age_hours"] == 30.0
+    assert out["details"]["cursor_present"] is True
+
+
+def test_poller_liveness_check_handles_no_row() -> None:
+    from scripts.verify_pipeline import check_workflow_poller_liveness
+
+    out = check_workflow_poller_liveness(_OneRow(None), T)
+    assert out["status"] == "warn"
+    assert out["details"]["cursor_present"] is False
+    assert out["value"] is None
+
+
+def test_poller_liveness_is_registered() -> None:
+    from scripts.verify_pipeline import _CHECKS
+
+    assert "workflow_poller_liveness" in {k for k, _ in _CHECKS}
+
+
+# --- W0.4: the acute lane degrades gracefully ------------------------------
+
+
+def test_results_are_persisted_as_each_check_completes(monkeypatch: Any) -> None:
+    """The W0.4 fix: a job killed mid-lane must keep the results it already computed.
+    Before this, run_checks computed ALL results before write_results persisted ANY, so
+    a 5-min timeout wrote zero rows and fired zero alerts."""
+    import scripts.verify_pipeline as vp
+
+    persisted: list[str] = []
+
+    def slow_then_boom(conn: Any, thresholds: Any) -> dict[str, Any]:
+        raise RuntimeError("the lane died here")
+
+    monkeypatch.setattr(vp, "_CHECKS", [
+        ("first", lambda c, t: {"check_key": "first", "status": "ok", "value": 1,
+                                "details": {}}),
+        ("second", lambda c, t: {"check_key": "second", "status": "ok", "value": 2,
+                                 "details": {}}),
+        ("third", slow_then_boom),
+    ])
+    monkeypatch.setattr(vp, "_WEEKLY_CHECKS", [])
+
+    results = run_checks(None, {}, on_result=lambda r: persisted.append(r["check_key"]))
+    # Every result reached the sink at the moment it completed, in order.
+    assert persisted == ["first", "second", "third"]
+    assert [r["status"] for r in results] == ["ok", "ok", "fail"]
+
+
+def test_a_failing_sink_does_not_end_the_lane(monkeypatch: Any) -> None:
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_CHECKS", [
+        ("a", lambda c, t: {"check_key": "a", "status": "ok", "value": 1, "details": {}}),
+        ("b", lambda c, t: {"check_key": "b", "status": "ok", "value": 1, "details": {}}),
+    ])
+    monkeypatch.setattr(vp, "_WEEKLY_CHECKS", [])
+
+    def _explode(_r: dict[str, Any]) -> None:
+        raise RuntimeError("insert failed")
+
+    results = run_checks(None, {}, on_result=_explode)
+    assert [r["check_key"] for r in results] == ["a", "b"]
+
+
+def test_a_timed_out_check_warns_rather_than_failing(monkeypatch: Any) -> None:
+    """"I could not measure this" is a different claim from "this is broken". Under DB
+    pressure a fail-on-timeout rule manufactures a wall of false reds at exactly the
+    moment the operator needs to read the real one."""
+    import scripts.verify_pipeline as vp
+
+    def _cancelled(conn: Any, thresholds: Any) -> dict[str, Any]:
+        raise RuntimeError("canceling statement due to statement timeout")
+
+    monkeypatch.setattr(vp, "_CHECKS", [("slow", _cancelled)])
+    monkeypatch.setattr(vp, "_WEEKLY_CHECKS", [])
+
+    (result,) = run_checks(None, {})
+    assert result["status"] == "warn"
+    assert result["details"]["timed_out"] is True
+    assert "UNKNOWN" in result["message"]
+
+
+def test_lane_budget_exhaustion_marks_the_rest_unknown_not_healthy(monkeypatch: Any) -> None:
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_CHECKS", [
+        ("first", lambda c, t: {"check_key": "first", "status": "ok", "value": 1,
+                                "details": {}}),
+        ("second", lambda c, t: {"check_key": "second", "status": "ok", "value": 1,
+                                 "details": {}}),
+    ])
+    monkeypatch.setattr(vp, "_WEEKLY_CHECKS", [])
+
+    # A budget already spent by the time the loop starts.
+    results = run_checks(None, {}, lane_budget_s=-1.0)
+    assert [r["status"] for r in results] == ["warn", "warn"]
+    assert all(r["details"]["not_run"] for r in results)
+
+
+def test_lane_budget_is_reset_after_a_run(monkeypatch: Any) -> None:
+    """State leaking between runs would silently shrink a later lane's statement
+    timeout to whatever the previous run had left."""
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_CHECKS", [])
+    monkeypatch.setattr(vp, "_WEEKLY_CHECKS", [])
+    run_checks(None, {}, lane_budget_s=5.0)
+    assert vp._LANE.deadline is None
+    assert vp._LANE.statement_timeout_ms == vp._DEFAULT_STATEMENT_TIMEOUT_MS
+
+
+def test_per_check_statement_timeout_is_capped_by_the_lane_remainder(monkeypatch: Any) -> None:
+    import scripts.verify_pipeline as vp
+
+    seen: list[float] = []
+
+    def _peek(conn: Any, thresholds: Any) -> dict[str, Any]:
+        seen.append(vp._LANE.statement_timeout_ms)
+        return {"check_key": "peek", "status": "ok", "value": 0, "details": {}}
+
+    monkeypatch.setattr(vp, "_CHECKS", [("peek", _peek)])
+    monkeypatch.setattr(vp, "_WEEKLY_CHECKS", [])
+    # Lane has 2s left but the per-check budget is 45s -> the lane wins.
+    run_checks(None, {}, lane_budget_s=2.0, check_budget_s=45.0)
+    assert 0 < seen[0] <= 2000
 
 
 # --- R2 dual-write parity --------------------------------------------------

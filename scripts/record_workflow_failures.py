@@ -12,7 +12,13 @@ not a fixed lookback. The monitor's cron is `*/30` but the GitHub Actions thrott
 runs it 80–256 min apart, so the old fixed 40-min lookback silently dropped every
 red run that completed in the uncovered gap (13 liveness reds → only 2 recorded).
 The cursor advances to the newest run seen each poll and pages back until it
-reaches the previous cursor, so no completed run is skipped.
+reaches the previous cursor, so no completed run is skipped. Crucially, it advances
+ONLY on a poll that reached back past the cursor — a poll that hit the page cap
+first has an uncovered window and holds the cursor instead (see _advance_cursor).
+
+A dead poller is invisible in `workflow_failures` itself — it just stops
+accumulating rows, which looks exactly like "nothing failed". The liveness signal is
+the AGE of this cursor, watched by verify_pipeline's `workflow_poller_liveness`.
 
 `cancelled` is recorded ONLY when the run ran at least
 `CANCELLED_MIN_DURATION_MINUTES`: a `timeout-minutes` kill (which GitHub reports as
@@ -46,7 +52,13 @@ CANCELLED_MIN_DURATION_MINUTES = 8   # >= this ⇒ a timeout-minutes kill, not a
 BOOTSTRAP_MINUTES = 120              # first-ever run: how far back to seed the cursor
 CURSOR_OVERLAP_MINUTES = 5           # re-scan slightly before the cursor (ON CONFLICT makes it safe)
 PER_PAGE = 100
-MAX_PAGES = 5                        # 500 runs — ample for the real 80–256-min gap; crawls if exceeded
+# 1,000 runs. Raised from 5 (500) in W0.2 of the reliability program: at ~100 failures/day
+# and a real inter-poll gap of 80–256 min, 500 was close enough to the ceiling that the cap
+# was reachable — and hitting it used to drop runs permanently (see _advance_cursor). Cost is
+# bounded and cheap: at most 10 list requests per poll against the Actions API's 1,000/hour
+# per-repo budget for GITHUB_TOKEN, and the loop still stops as soon as a page reaches back
+# past `since`, so the extra pages are only ever fetched when they are actually needed.
+MAX_PAGES = 10
 CURSOR_KEY = "workflow_failures_cursor"
 
 API_TIMEOUT_S = 30
@@ -234,6 +246,29 @@ def _fetch_since_cursor(
     return runs, reached_since
 
 
+def _advance_cursor(
+    completions: list[datetime], *, reached_since: bool,
+) -> datetime | None:
+    """Where the high-water mark goes after a poll. None = leave it where it is.
+
+    Only a poll that reached back past `since` has covered its whole window, and only
+    that poll may move the cursor — to the newest completion it saw.
+
+    When the page cap is hit first, the pages fetched are the NEWEST N runs, so every
+    completion seen is *newer* than `since` and the uncovered runs are older than all
+    of them. The old code advanced to `min(completions)` here, believing it was
+    "crawling to oldest-seen so the gap is picked up next poll" — but the next poll
+    filters on `completed_at < since`, and the skipped runs are older than the new
+    cursor, so they were dropped **permanently**. That is why only 2 of the 6 portals
+    that failed on 2026-08-26 were ever recorded. Holding the cursor keeps the window
+    open instead: the poll re-scans, and the gap closes as soon as volume drops back
+    under the page budget.
+    """
+    if not reached_since or not completions:
+        return None
+    return max(completions)
+
+
 def main() -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -309,17 +344,19 @@ def main() -> int:
                 )
                 inserted += cur.rowcount
 
-        # Advance the cursor. Full coverage → jump to the newest completion; if the page cap
-        # was hit first, crawl to the oldest seen so the uncovered gap is picked up next poll.
         completions = [c for c in (parse_ts(r.get("updated_at")) for r in runs) if c is not None]
-        if completions:
-            new_cursor = max(completions) if reached_since else min(completions)
-            if not reached_since:
-                LOG.warning(
-                    "WORKFLOW_FAILURES page cap (%d) hit before reaching the cursor; "
-                    "crawling to oldest-seen %s", MAX_PAGES, new_cursor,
-                )
+        new_cursor = _advance_cursor(completions, reached_since=reached_since)
+        if new_cursor is not None:
             _write_cursor(conn, new_cursor)
+        elif completions:
+            gap_min = (min(completions) - since).total_seconds() / 60.0
+            LOG.error(
+                "WORKFLOW_FAILURES page cap (%d pages / %d runs) hit before reaching the "
+                "cursor: runs completed between %s and %s were NOT fetched (a %.0f-min "
+                "window). Holding the cursor so they stay eligible; raise MAX_PAGES if this "
+                "repeats.",
+                MAX_PAGES, MAX_PAGES * PER_PAGE, since, min(completions), gap_min,
+            )
 
     LOG.info(
         "WORKFLOW_FAILURES scanned=%d failed=%d inserted=%d successes_tracked=%d reached_since=%s",
