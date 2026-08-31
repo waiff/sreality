@@ -467,6 +467,19 @@ def _record_pass_start(state: dict[str, Any], lane: str) -> None:
     state["lanes"][lane] = prev
 
 
+def _record_lane_failure(source: str, lane: str, exc: BaseException) -> None:
+    """The worker's half of W3.1. Both portal lanes here call `portal_runner` DIRECTLY
+    (run_id=None, deliberately — a 30s cadence would write thousands of bookkeeping
+    rows/day), so they bypass `run_phase` and its crash accounting entirely: a
+    CheckViolation on the latency-critical drain used to produce a log line and
+    nothing else, forever. One shared function, not a second producer."""
+    try:
+        with db.connect() as conn:
+            portal_runner.record_failure_signature(conn, exc, source=source, lane=lane)
+    except Exception as rec_exc:  # noqa: BLE001 - observability must never end a pass
+        LOG.warning("could not record %s lane failure for %s: %r", lane, source, rec_exc)
+
+
 async def _probe_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
     disabled: set[str] = set()
     try:
@@ -482,8 +495,9 @@ async def _probe_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
             continue
         try:
             agg = await asyncio.to_thread(_run_probe_sync, source)
-        except Exception:  # noqa: BLE001 - one portal must not end the pass
+        except Exception as exc:  # noqa: BLE001 - one portal must not end the pass
             LOG.exception("PROBE lane source=%s failed", source)
+            _record_lane_failure(source, "probe", exc)
             totals["errors"] += 1
             continue
         totals["portals"] += 1
@@ -529,8 +543,9 @@ async def _drain_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
             continue
         try:
             agg = await asyncio.to_thread(_run_drain_sync, source, slice_)
-        except Exception:  # noqa: BLE001 - one portal must not end the pass
+        except Exception as exc:  # noqa: BLE001 - one portal must not end the pass
             LOG.exception("DRAIN lane source=%s failed", source)
+            _record_lane_failure(source, "drain", exc)
             totals["errors"] += 1
             continue
         totals["sources"] += 1

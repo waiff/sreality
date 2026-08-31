@@ -30,7 +30,11 @@ if TYPE_CHECKING:
 
 LOG = logging.getLogger(__name__)
 
-Consumer = Literal["watchdog", "collection_monitor", "outreach"]
+# Must stay in step with channel_sends_consumer_check (migration 274). `system_health`
+# was widened into the DB CHECK there but never into this Literal, so drain_once —
+# which passes `consumer=source_kind` straight through — has been sending a value the
+# type surface denies exists.
+Consumer = Literal["watchdog", "collection_monitor", "outreach", "system_health"]
 
 
 class ChannelClient:

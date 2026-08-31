@@ -88,6 +88,7 @@ class _Cur:
 
     def execute(self, sql: str, params: Any = None) -> None:
         norm = " ".join(sql.split())
+        self._conn.executed.append(norm)
         if "FROM app_settings" in norm:
             self._rows = [(self._conn.recipient,)] if self._conn.recipient else [(None,)]
         elif "CROSS JOIN LATERAL" in norm:
@@ -115,6 +116,7 @@ class _Conn:
         self.recipient = recipient
         self.new_rows = new_rows
         self.retry_rows = retry_rows
+        self.executed: list[str] = []
 
     def cursor(self) -> _Cur:
         return _Cur(self)
@@ -204,3 +206,46 @@ def test_drain_retries_failed_due_rows() -> None:
     assert stats["retried"] == 1
     assert client.retries[0]["send_id"] == 42
     assert client.retries[0]["channel"] == "email"
+
+
+# --- W3.3: ops alerts get the same five attempts as a price drop -----------
+
+
+def test_retry_pass_has_no_consumer_allowlist() -> None:
+    """It used to read `cs.consumer IN ('watchdog','collection_monitor')`, so a
+    system_health send got ONE delivery attempt where a price drop gets five — the
+    entire delta between "ops alerting exists" and "ops alerting is reliable"."""
+    client = _FakeClient(configured={"email"})
+    conn = _Conn(recipient="op@example.cz", new_rows=[], retry_rows=[])
+    ob.drain_once(conn, client)  # type: ignore[arg-type]
+    retry_sql = next(s for s in conn.executed if "FROM channel_sends cs JOIN" in s)
+    assert "cs.consumer IN" not in retry_sql
+    # The JOIN is what scopes the pass; `outreach` has notification_id IS NULL and so
+    # can never appear here anyway.
+    assert "JOIN notification_dispatches d ON d.id = cs.notification_id" in retry_sql
+
+
+def test_drain_retries_a_system_health_send() -> None:
+    retry_row = (77, "email", "op@example.cz", "system_health", "system_health",
+                 "system_alert", None, None, None, None, None, None, None, None,
+                 None, None, "Ops incident #7: checkviolation|listings_area_basis_check")
+    client = _FakeClient(configured={"email"})
+    conn = _Conn(recipient="op@example.cz", new_rows=[], retry_rows=[retry_row])
+    stats = ob.drain_once(conn, client)  # type: ignore[arg-type]
+    assert stats["retried"] == 1
+    call = client.retries[0]
+    assert call["send_id"] == 77
+    # The composer's system_health branch must survive the retry path too: the message
+    # is rendered verbatim, not squeezed into a listing template.
+    assert call["message"].subject == "Systémové upozornění"
+    assert "checkviolation" in call["message"].body_text
+
+
+def test_system_health_is_a_declared_consumer() -> None:
+    """drain_once passes `consumer=source_kind` straight through; migration 274 widened
+    the DB CHECK for system_health but the Literal was never updated with it."""
+    from typing import get_args
+
+    from api.channel_client import Consumer
+
+    assert "system_health" in get_args(Consumer)

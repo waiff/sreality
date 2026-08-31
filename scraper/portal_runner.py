@@ -690,19 +690,55 @@ def _finalize_run(
         LOG.warning("scrape_run_finalize failed: %s", exc)
 
 
-def _record_run_crash(run_id: int | None, exc: BaseException) -> None:
+def record_failure_signature(
+    conn: Any, exc: BaseException, *, source: str, lane: str,
+) -> None:
+    """W3.1's primary producer: turn the exception in hand into an ops incident.
+
+    The signature is derived from the error TEXT only — never from the workflow — so
+    the six portals that died on 2026-08-26 with byte-identical `CheckViolation` text
+    become ONE incident instead of ten emails. Doing it here, at the shared chokepoint
+    (rule #21), gets that at t+0 with zero log downloads and zero Actions-API cost.
+
+    Best-effort by construction: every caller is already inside a crash path, and a
+    bookkeeping write must never mask the exception that got us here.
+    """
+    from scripts.failure_signature import signature_from_exception
+    from toolkit.ops_incidents import actions_context, record_failure_signature as _record
+
+    workflow_path, run_url = actions_context()
+    _record(
+        conn,
+        signature_from_exception(exc),
+        workflow_path=workflow_path,
+        origin=f"{source}/{lane}",
+        sample_run_url=run_url,
+        sample_excerpt=f"{type(exc).__name__}: {exc}"[:4000],
+    )
+
+
+def _record_run_crash(
+    run_id: int | None, exc: BaseException, *, source: str, run_type: str,
+) -> None:
     """Record that a phase died mid-flight: bump errors, leave ended_at NULL.
 
     Additive (bump_scrape_run_counts) rather than a finalize write, because the
     drain has already been bumping the same columns per chunk — the crash is one
     more error event on top of whatever committed, not a replacement aggregate.
+
+    The ops-incident write rides the SAME connection: `scrape_runs.errors` says a run
+    failed, the incident says why, and splitting them across two connections would
+    double the chance the interesting half is the one that gets lost.
     """
-    if run_id is None:
-        return
-    LOG.error("PHASE crashed, recording it on scrape_run %s: %r", run_id, exc)
+    LOG.error(
+        "PHASE crashed (source=%s lane=%s), recording it on scrape_run %s: %r",
+        source, run_type, run_id, exc,
+    )
     try:
         with db.connect() as conn:
-            db.bump_scrape_run_counts(conn, run_id, errors=1)
+            if run_id is not None:
+                db.bump_scrape_run_counts(conn, run_id, errors=1)
+            record_failure_signature(conn, exc, source=source, lane=run_type)
     except Exception as bump_exc:
         LOG.warning("could not record the crash on scrape_run %s: %r", run_id, bump_exc)
 
@@ -741,7 +777,7 @@ def run_phase(
         # leaves the run just as incomplete as a CheckViolation does, and the
         # whole point here is that "did not finish" is never recorded as green.
         if not dry_run:
-            _record_run_crash(run_id, exc)
+            _record_run_crash(run_id, exc, source=portal.source, run_type=run_type)
         raise
     else:
         if not dry_run:

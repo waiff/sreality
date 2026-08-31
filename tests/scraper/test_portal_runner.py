@@ -555,7 +555,13 @@ class _PhaseRecorder:
         self.starts: list[tuple[str, str]] = []
         self.finals: list[tuple[int, dict[str, Any]]] = []
         self.bumps: list[tuple[int, dict[str, Any]]] = []
+        self.signatures: list[tuple[str, str, str]] = []
         monkeypatch.setattr(portal_runner.db, "connect", lambda: _Conn())
+        monkeypatch.setattr(
+            portal_runner, "record_failure_signature",
+            lambda _c, exc, *, source, lane: self.signatures.append(
+                (type(exc).__name__, source, lane)),
+        )
         monkeypatch.setattr(
             portal_runner.db, "scrape_run_start",
             lambda _c, run_type, source: (
@@ -699,6 +705,79 @@ def test_run_phase_crash_recording_failure_never_masks_the_real_exception(monkey
 
     with pytest.raises(ValueError, match="the real problem"):
         portal_runner.run_phase(_FakePortal(), "detail", _crash, False)
+
+
+# --- W3.1: the crash path is also the failure-signature producer -----------
+
+
+def test_run_phase_crash_records_a_failure_signature_with_portal_and_lane(monkeypatch):
+    """The chokepoint has portal + lane in scope; _record_run_crash never did. Without
+    them an incident cannot say which portal it came from."""
+    rec = _PhaseRecorder(monkeypatch)
+
+    def _crash(portal, dry_run, **kw):
+        raise psycopg.errors.CheckViolation(
+            'new row for relation "listings" violates check constraint '
+            '"listings_area_basis_check"'
+        )
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        portal_runner.run_phase(_FakePortal(), "detail", _crash, False)
+    assert rec.signatures == [("CheckViolation", "fake", "detail")]
+
+
+def test_run_phase_records_a_signature_even_with_no_scrape_run_row(monkeypatch):
+    """The old early-return on run_id=None meant a crash after a failed
+    scrape_run_start left NO trace anywhere at all."""
+    rec = _PhaseRecorder(monkeypatch)
+    monkeypatch.setattr(
+        portal_runner.db, "scrape_run_start",
+        lambda _c, run_type, source: (_ for _ in ()).throw(RuntimeError("no db")),
+    )
+
+    def _crash(portal, dry_run, **kw):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        portal_runner.run_phase(_FakePortal(), "index", _crash, False)
+    assert rec.bumps == []                                   # no row to bump
+    assert rec.signatures == [("RuntimeError", "fake", "index")]
+
+
+def test_a_failing_signature_write_never_masks_the_real_exception(monkeypatch):
+    _PhaseRecorder(monkeypatch)
+    monkeypatch.setattr(
+        portal_runner, "record_failure_signature",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("incident table missing")),
+    )
+
+    def _crash(portal, dry_run, **kw):
+        raise ValueError("the real problem")
+
+    with pytest.raises(ValueError, match="the real problem"):
+        portal_runner.run_phase(_FakePortal(), "detail", _crash, False)
+
+
+def test_record_failure_signature_derives_the_key_from_the_text_only(monkeypatch):
+    """The asymmetry the whole wave rests on: same error, different portal and lane,
+    one signature."""
+    seen: list[dict[str, Any]] = []
+    import toolkit.ops_incidents as oi
+
+    monkeypatch.setattr(oi, "record_failure_signature",
+                        lambda _c, sig, **kw: seen.append({"sig": sig, **kw}))
+    monkeypatch.setattr(oi, "actions_context",
+                        lambda: (".github/workflows/x.yml", "https://gh/run/9"))
+    exc = psycopg.errors.CheckViolation(
+        'new row for relation "listings" violates check constraint '
+        '"listings_area_basis_check"'
+    )
+    portal_runner.record_failure_signature(_Conn(), exc, source="mmreality", lane="detail")
+    portal_runner.record_failure_signature(_Conn(), exc, source="remax", lane="index")
+    assert seen[0]["sig"] == seen[1]["sig"]
+    assert "listings_area_basis_check" in seen[0]["sig"]
+    assert [s["origin"] for s in seen] == ["mmreality/detail", "remax/index"]
+    assert seen[0]["workflow_path"] == ".github/workflows/x.yml"
 
 
 def test_run_phase_passes_run_id_and_kwargs_through_to_the_runner(monkeypatch):

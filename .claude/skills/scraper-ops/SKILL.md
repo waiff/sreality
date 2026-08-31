@@ -359,7 +359,7 @@ immediately after each category's walk, so even a timed-out index walk leaves a 
 partial result.
 
 The detail-drain writes `scrape_runs` rows too (`run_type='detail'`), but only the **index walk** sets `index_pages>0` — so "last scrape", the liveness check, and reconciliation track the index walk specifically, while the 24h new/updated/error counters sum across the drain's `index_pages=0` rows too (see `scraper_health_checks()`, migration 105). The image backfill (`--images-only`) deliberately writes NO `scrape_runs` row — recording it once polluted liveness/reconciliation with `index_pages=0` noise.
-**The lifecycle around both phases lives in ONE place, `portal_runner.run_phase`** (rule #21; never re-add a per-portal copy): `ended_at` means the phase COMPLETED, so a phase that raises bumps `errors` and deliberately leaves `ended_at` NULL, lighting up both the `stuck` and `err_pct` health arms instead of neither. **The crash contract and how to read a finished row: `references/pipeline-verification.md`.**
+**The lifecycle around both phases lives in ONE place, `portal_runner.run_phase`** (rule #21; never re-add a per-portal copy): `ended_at` means the phase COMPLETED, so a phase that raises bumps `errors` and deliberately leaves `ended_at` NULL, lighting up both the `stuck` and `err_pct` health arms instead of neither. That same crash path is W3's failure-signature producer (`ops_incidents`, migration 462). **The crash contract, the signature grammar and the log-tail backstop: `references/pipeline-verification.md`.**
 
 ## The real-time worker (`scraper/realtime_worker.py`)
 

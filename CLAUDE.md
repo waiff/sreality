@@ -199,11 +199,11 @@ incident history: `docs/architecture.md` § Architectural rules.
     **Never resurrect or consult the removed engine or its design docs**; the operator owns all
     merge/no-merge logic. Full detail: `docs/architecture.md` § rule 15.
 16. **Watchdog + Browse share one definition of "matches"** (`_shared_filter_where` + `_city_quality_clauses`).
-    `notification_dispatches` is the unified, property-grain, append-only event table with **two producers**
-    (`watchdog` + `collection_monitor`), a per-event `dedupe_key` (`:new:` once-ever, `:price_drop:{snapshot_id}`
-    per-snapshot), producer-stamped `target_channels`, and a `monitor_since` anchor so a change predating
-    membership never fires. **Delivery is separate from detection**: in-app = the row itself; external channels
-    drain via a `channel_sends` ledger, not a `channel`-column widen. Merges re-point rows (rule #18).
+    `notification_dispatches` is the unified append-only event table with **three producers**: `watchdog` +
+    `collection_monitor` (property-grain; `dedupe_key` `:new:` once-ever / `:price_drop:{snapshot_id}` per-snapshot;
+    a `monitor_since` anchor so a change predating membership never fires) and `system_health` (**NOT** property-
+    grain — no listing, no subscription; verify_pipeline checks + `ops_incidents`, migration 462). **Delivery is
+    separate from detection**: in-app = the row itself; external = the `channel_sends` ledger. Merges re-point (#18).
 17. **City-quality indexes are a normalized, operator-curated time series** (`curated_cities` + `city_index_*`
     + `city_population`) — a new index needs no migration; latest revision wins; agenda-gated to **Browse +
     Watchdog only** (the estimation agent never sees them, preserving deterministic estimates).

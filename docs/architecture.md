@@ -889,7 +889,22 @@ renumber.** Navigate by area:
     isn't about any one listing, verbatim text in a new `message` column, `change_kind =
     'system_alert'`. It rings the same in-app bell the SPA nav badge already polls; a
     SECURITY DEFINER dead-man-switch function (the migration-136 exception-guarded pg_cron
-    pattern) fires if the hourly job itself stops running. The unified in-app **Notifications**
+    pattern) fires if the hourly job itself stops running. **The `system_health` arm is the one
+    producer that is NOT property-grain** — it is about the pipeline, not a listing, so
+    `listing_id` / `sreality_id` / `subscription_id` / `collection_id` are all NULL, the
+    operator-state merge reconciler has nothing to re-point on it, and `compose_message()`
+    renders its stored `message` verbatim instead of building a listing subject. Since the
+    reliability program's W3 (migration 462) it has a **second emitter beside verify_pipeline:
+    `ops_incidents`** — one open row per failure SIGNATURE (`scripts/failure_signature.py`, a key
+    derived from the error TEXT and never from `workflow_path`, so N workflows failing for one
+    reason are one incident), fed by `scraper.portal_runner`'s crash path in-process and by
+    `scripts/record_workflow_failures.py`'s job-log backstop. Crossing
+    `ops_incident_min_failures` writes exactly ONE dispatch here; there is deliberately no
+    second alert table, no `ops_alert_email`, and no parallel bell namespace. Incidents close
+    when every member workflow posts a newer `workflow_run_health.last_success_at`, on
+    `ops_incident_max_age_hours`, or manually (`toolkit.ops_incidents.resolve_incident`).
+    Delivery detail: `.claude/skills/scraper-ops/references/pipeline-verification.md`.
+    The unified in-app **Notifications**
     page (`/notifications`) reads all THREE producers off one LEFT-join feed (the watchdog-only
     INNER join became a LEFT join + a `collections` join so monitor and system_health rows
     aren't dropped), and a red nav unread badge polls `GET /notifications/unread-count`;
