@@ -424,7 +424,10 @@ def test_a_parser_street_is_the_last_signal_the_silent_parse_cohort_has():
     # do — so this entry declares the write path known (§6.6 rule 3).
     assert claim.legacy_write_path_unknown is False
     assert claim.history_completeness == "locality_text_only"
-    assert claim.extractor_version == "contract:ceskereality@3"
+    # v4, not the v3 this entry arrived in: the bump carried no entry change at all (a
+    # prose edit inside the governed hash, PR #1209), but `extractor_version` stamps the
+    # CONTRACT version, not the version an entry first appeared under.
+    assert claim.extractor_version == "contract:ceskereality@4"
 
 
 def test_a_resolver_or_unattributed_street_is_never_a_claim():
@@ -506,7 +509,10 @@ def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
     # every other portal is still on its original version. Moving the volatile profiles
     # into these files (W2a-3e) bumped none of them: `persistence` is outside
     # `contract_sha256` (mig 408), so archive configuration cannot re-stamp a claim.
-    expected_version = {"remax": 2, "ceskereality": 3, "realitymix": 3}
+    # ceskereality's fourth (2026-08-31) closed no gap: prose IS inside the governed hash,
+    # PR #1209 edited it without a bump, and `project()` refused the whole fleet's
+    # projection until the version caught up with the bytes.
+    expected_version = {"remax": 2, "ceskereality": 4, "realitymix": 3}
     for source, payload, lat, lon in cases:
         result = extract_listing(listing(source, payload, lat=lat, lon=lon),
                                  entries_for(source))

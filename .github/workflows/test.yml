@@ -38,6 +38,16 @@ jobs:
       - name: Check workflow docs codegen is fresh
         run: python scripts/generate_workflow_docs.py --check
 
+      # The contract-immutability rail. `project()` already refuses a contract whose
+      # governed bytes moved under a version on record, but it refuses at DEPLOY time
+      # and the projection is one transaction for all nine portals — so one unbumped
+      # prose edit takes the whole claim-intake lane down (#1209, 14 consecutive
+      # failures from 2026-08-27). Named as its own step so the fix is legible without
+      # reading a pytest tail; `tests/location_data/test_contract_immutability.py`
+      # asserts the same thing inside the suite.
+      - name: Check the portal contract lockfile is fresh
+        run: python -m location_data.contract_lock --check
+
       - name: Run pytest
         run: pytest -q
 
