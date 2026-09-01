@@ -109,7 +109,7 @@ def main() -> int:
 
         rows = sugg.unsuggested_members(
             conn, cohort_id=cohort["id"], set_id=exam_set["id"],
-            limit=max(1, args.count),
+            tag_ids=exam_set["tag_ids"], limit=max(1, args.count),
         )
         LOG.info("SUGGEST cohort=%r set=%r tags=%d to_suggest=%d model=%s",
                  args.cohort, args.set_name, len(tags), len(rows), args.model)

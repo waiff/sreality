@@ -66,6 +66,18 @@ def test_a_failed_suggestion_is_offered_again() -> None:
     assert "s.error IS NULL" in sql
 
 
+def test_a_stale_suggestion_is_refilled_not_just_refused() -> None:
+    """Serve-time refusal is only half the staleness mechanism. Measured live:
+    set_2 grew 8 -> 10 tags, the API correctly refused every stored suggestion,
+    and both 'successful' re-runs found zero members to suggest — the lane's
+    resume filter counted the stale rows as done. The resume query must demand
+    the CURRENT question list (mutual containment = set equality, no dups)."""
+    from toolkit import exam_suggestions
+    sql = " ".join(exam_suggestions._UNSUGGESTED_MEMBERS_SQL.split())
+    assert "s.asked_tag_ids <@ %(tag_ids)s::bigint[]" in sql
+    assert "s.asked_tag_ids @> %(tag_ids)s::bigint[]" in sql
+
+
 def test_both_lanes_share_one_engine() -> None:
     # A copied worker loop is the kind of drift where one copy learns a lesson
     # (the budget lock, the per-worker connection) and the other repeats it.
