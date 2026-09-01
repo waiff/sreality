@@ -60,8 +60,14 @@ _SET_TAGS_SQL = """
     ORDER BY o.pos
 """
 
-# Members still needing a suggestion for this set. A row with an error is NOT a
-# suggestion — it is retried here, exactly as a failed screen is re-offered.
+# Members still needing a suggestion for this set. Two rows do NOT count as
+# suggestions and are re-offered here: an ERRORED one (an absence of evidence,
+# exactly as a failed screen is re-offered) and a STALE one — its frozen
+# asked_tag_ids no longer equal the set's current list. Staleness alone is
+# only half a mechanism: the API refusing to SERVE a stale row (by design)
+# means nothing if the lane never re-FILLS it — measured live when set_2 grew
+# 8 -> 10 and both "successful" re-runs found zero members to suggest. The
+# mutual containment pair is set equality (neither array carries duplicates).
 _UNSUGGESTED_MEMBERS_SQL = """
     SELECT m.image_id, i.storage_path
     FROM tag_exam_members m
@@ -71,6 +77,8 @@ _UNSUGGESTED_MEMBERS_SQL = """
             SELECT 1 FROM tag_exam_suggestions s
             WHERE s.cohort_id = m.cohort_id AND s.image_id = m.image_id
               AND s.set_id = %(set_id)s AND s.error IS NULL
+              AND s.asked_tag_ids <@ %(tag_ids)s::bigint[]
+              AND s.asked_tag_ids @> %(tag_ids)s::bigint[]
           )
     ORDER BY m.position
     LIMIT %(limit)s
@@ -121,11 +129,13 @@ def set_tags(conn: psycopg.Connection, *, tag_ids: list[int]) -> list[dict[str, 
 
 
 def unsuggested_members(
-    conn: psycopg.Connection, *, cohort_id: int, set_id: int, limit: int,
+    conn: psycopg.Connection, *, cohort_id: int, set_id: int,
+    tag_ids: list[int], limit: int,
 ) -> list[tuple[int, str]]:
     with conn.cursor() as cur:
         cur.execute(_UNSUGGESTED_MEMBERS_SQL, {
-            "cohort_id": cohort_id, "set_id": set_id, "limit": limit,
+            "cohort_id": cohort_id, "set_id": set_id,
+            "tag_ids": list(tag_ids), "limit": limit,
         })
         return [(int(r[0]), r[1]) for r in cur.fetchall()]
 
