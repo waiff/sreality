@@ -1425,6 +1425,11 @@ export interface ExamCohortRow {
   members: number;
 }
 
+export const getExamSets = (): Promise<{ data: Array<{ name: string; tag_count: number }> }> =>
+  request<{ data: Array<{ name: string; tag_count: number }> }>(
+    '/new-dedup/labeling/exam-sets', { jwt: true },
+  );
+
 export const getExamCohorts = (): Promise<{ data: ExamCohortRow[] }> =>
   request<{ data: ExamCohortRow[] }>('/new-dedup/labeling/exam-cohorts', { jwt: true });
 

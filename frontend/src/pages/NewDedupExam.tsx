@@ -4,6 +4,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import {
   answerExamQuestion,
   getExamCohorts,
+  getExamSets,
   getExamState,
   getExamWarmup,
   getTagDefinitionCard,
@@ -83,6 +84,16 @@ export default function NewDedupExam() {
     staleTime: 60_000,
   });
   const cohorts = cohortsQ.data?.data ?? [];
+
+  /* The set bar, the cohort bar's twin: a sitting is (cohort x set), and
+   * switching either must not mean hand-editing a URL. Active = the SERVER's
+   * resolved set, so the bare URL's default lights the right chip. */
+  const setsQ = useQuery({
+    queryKey: ['new-dedup', 'exam', 'sets'],
+    queryFn: getExamSets,
+    staleTime: 60_000,
+  });
+  const sets = setsQ.data?.data ?? [];
 
   /* The warm-up exists to settle a COLD hand, so it runs only while the sitting
    * has zero answers. It used to replay all ten practice images on every page
@@ -268,9 +279,9 @@ export default function NewDedupExam() {
         </div>
       </header>
 
-      {cohorts.length > 1 && (
+      {(cohorts.length > 1 || sets.length > 1) && (
         <nav className="mt-3 flex items-center gap-2 flex-wrap">
-          {cohorts.map((c) => (
+          {cohorts.length > 1 && cohorts.map((c) => (
             <Link
               key={c.name}
               to={`/new-dedup/exam?cohort=${encodeURIComponent(c.name)}${setName ? `&set=${encodeURIComponent(setName)}` : ''}`}
@@ -284,6 +295,26 @@ export default function NewDedupExam() {
               {c.name}
               <span className="ml-1.5 text-[0.65rem] tracking-[0.08em] uppercase text-[var(--color-ink-4)]">
                 {c.purpose === 'curated' ? 'curated' : 'holdout'} · {c.members}
+              </span>
+            </Link>
+          ))}
+          {cohorts.length > 1 && sets.length > 1 && (
+            <span aria-hidden className="mx-1 text-[var(--color-rule)]">|</span>
+          )}
+          {sets.length > 1 && sets.map((t) => (
+            <Link
+              key={t.name}
+              to={`/new-dedup/exam?cohort=${encodeURIComponent(cohort)}&set=${encodeURIComponent(t.name)}`}
+              aria-current={t.name === exam.set ? 'page' : undefined}
+              className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
+                t.name === exam.set
+                  ? 'border-[var(--color-ink-2)] text-[var(--color-ink)]'
+                  : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]'
+              }`}
+            >
+              {t.name}
+              <span className="ml-1.5 text-[0.65rem] tracking-[0.08em] uppercase text-[var(--color-ink-4)]">
+                {t.tag_count} tags
               </span>
             </Link>
           ))}

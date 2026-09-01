@@ -46,6 +46,7 @@ beforeEach(() => {
   // No warm-up by default; the warm-up path has its own tests below.
   vi.mocked(api.getExamWarmup).mockResolvedValue({ data: [] });
   vi.mocked(api.getExamCohorts).mockResolvedValue({ data: [] });
+  vi.mocked(api.getExamSets).mockResolvedValue({ data: [] });
   vi.mocked(api.getTagDefinitionCard).mockResolvedValue({ data: null });
   vi.mocked(api.answerExamQuestion).mockResolvedValue({
     data: { image_id: 555, cells_written: 4 },
@@ -470,5 +471,35 @@ describe('<NewDedupExam> cohort bar', () => {
     renderPage();
     await screen.findByText(/Which of these/);
     expect(screen.queryByRole('link', { name: /exam_v1/ })).toBeNull();
+  });
+});
+
+describe('<NewDedupExam> set bar', () => {
+  it('offers every set, keeping the current cohort, with the resolved set lit', async () => {
+    // A sitting is (cohort x set); the bare URL resolves to the FIRST set
+    // server-side, so the active chip follows the SERVER's answer, not the URL.
+    vi.mocked(api.getExamState).mockResolvedValue({
+      data: examState({ set: 'set_1' }),
+    });
+    vi.mocked(api.getExamSets).mockResolvedValue({
+      data: [
+        { name: 'set_1', tag_count: 8 },
+        { name: 'set_2', tag_count: 10 },
+      ],
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={['/new-dedup/exam?cohort=gold_v1']}>
+          <NewDedupExam />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await screen.findByText(/Which of these/);
+    const set2 = screen.getByRole('link', { name: /set_2/ });
+    expect(set2).toHaveAttribute('href', '/new-dedup/exam?cohort=gold_v1&set=set_2');
+    expect(set2.textContent).toContain('10 tags');
+    expect(screen.getByRole('link', { name: /set_1/ }))
+      .toHaveAttribute('aria-current', 'page');
   });
 });
