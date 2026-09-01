@@ -183,3 +183,18 @@ describe('<NewDedupExamReview> the 466 backfill fence', () => {
     ));
   });
 });
+
+describe('<NewDedupExamReview> photo size', () => {
+  it('offers S/M/L and applies the chosen size to every thumbnail box', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/2 answered/);
+    const large = screen.getByRole('button', { name: /^l$/i });
+    await user.click(large);
+    expect(large).toHaveAttribute('aria-pressed', 'true');
+    const img = screen.getAllByAltText(/Exam photo/)[0];
+    expect(img.className).toContain('max-h-[32rem]');
+    // Full-size inspection: the thumbnail links out to the image itself.
+    expect(img.closest('a')).toHaveAttribute('href', 'blob:photo');
+  });
+});
