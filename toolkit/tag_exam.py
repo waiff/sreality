@@ -422,7 +422,8 @@ _PROGRESS_SQL = """
 _ANSWERS_SQL = """
     SELECT m.image_id, m.position,
            jsonb_object_agg(l.tag_id::text, jsonb_build_object(
-             'state', l.state, 'reason', l.excluded_reason)) AS cells
+             'state', l.state, 'reason', l.excluded_reason,
+             'by', l.created_by)) AS cells
     FROM tag_exam_members m
     JOIN image_tag_labels l
       ON l.image_id = m.image_id
@@ -504,12 +505,17 @@ def answers(
         rows = cur.fetchall()
     out: list[dict[str, Any]] = []
     for image_id, position, cells in rows:
-        picked, skipped = [], []
+        picked, skipped, auto = [], [], []
         ambiguous = 0
         for tag_id in tag_ids:
             cell = (cells or {}).get(str(tag_id))
             if cell is None:
                 continue
+            # A backfilled cell is a DECLARED DEFAULT, not a judgment (466's
+            # bulk negatives). The review page fences these off visually; the
+            # marker disappears cell-by-cell as the operator re-answers.
+            if str(cell.get("by") or "").startswith("backfill:"):
+                auto.append(tag_id)
             if cell["state"] == "positive":
                 picked.append(tag_id)
             elif cell["state"] == "excluded" and cell["reason"] == ta.EXCLUDED_PRUNED:
@@ -519,6 +525,7 @@ def answers(
         out.append({
             "image_id": int(image_id), "position": int(position),
             "picked_tag_ids": picked, "skipped_tag_ids": skipped,
+            "auto_tag_ids": auto,
             # record_answer writes 'ambiguous' on EVERY tag or none, so a full
             # sweep is the only honest cant_tell; anything partial renders as
             # its per-tag states.

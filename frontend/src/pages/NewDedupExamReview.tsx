@@ -182,8 +182,8 @@ export default function NewDedupExamReview() {
                       <span className="ml-2 text-[var(--color-brick)]">can&rsquo;t tell</span>
                     )}
                   </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {tags.map((t) => {
+                  <div className="flex flex-wrap items-start gap-1.5">
+                    {tags.filter((t) => !(r.auto_tag_ids ?? []).includes(t.id)).map((t) => {
                       const v = st.cantTell ? null
                         : st.picked.has(t.id) ? 'picked'
                           : st.skipped.has(t.id) ? 'skipped' : null;
@@ -193,7 +193,7 @@ export default function NewDedupExamReview() {
                           type="button"
                           onClick={() => cycleTag(r, t.id)}
                           aria-pressed={v === 'picked'}
-                          className={`px-2.5 py-1.5 text-xs text-left rounded-[var(--radius-sm)] border transition-colors ${
+                          className={`px-2.5 py-2 text-sm text-left rounded-[var(--radius-sm)] border transition-colors ${
                             v === 'picked'
                               ? 'border-[var(--color-sage)] bg-[var(--color-sage)]/10 text-[var(--color-ink)]'
                               : v === 'skipped'
@@ -217,6 +217,46 @@ export default function NewDedupExamReview() {
                         </button>
                       );
                     })}
+                    {(r.auto_tag_ids ?? []).length > 0 && (
+                      /* The 466 backfill: declared defaults, not judgments. The
+                       * fence makes the unreviewed columns scannable; it empties
+                       * (on reload) as rows are re-answered. */
+                      <span className="flex flex-wrap items-start gap-1.5 border border-dashed border-[var(--color-copper)]/60 rounded-[var(--radius-sm)] p-1.5">
+                        <span className="w-full text-[0.6rem] tracking-[0.12em] uppercase text-[var(--color-copper)]">
+                          new · auto-negative — confirm or fix
+                        </span>
+                        {tags.filter((t) => (r.auto_tag_ids ?? []).includes(t.id)).map((t) => {
+                          const v = st.cantTell ? null
+                            : st.picked.has(t.id) ? 'picked'
+                              : st.skipped.has(t.id) ? 'skipped' : null;
+                          return (
+                            <button
+                              key={t.id}
+                              type="button"
+                              onClick={() => cycleTag(r, t.id)}
+                              aria-pressed={v === 'picked'}
+                              className={`px-2.5 py-2 text-sm text-left rounded-[var(--radius-sm)] border transition-colors ${
+                                v === 'picked'
+                                  ? 'border-[var(--color-sage)] bg-[var(--color-sage)]/10 text-[var(--color-ink)]'
+                                  : v === 'skipped'
+                                    ? 'border-dashed border-[var(--color-copper)] text-[var(--color-ink-2)]'
+                                    : 'border-[var(--color-rule)] text-[var(--color-ink-2)]'
+                              } ${st.cantTell ? 'opacity-60' : ''}`}
+                            >
+                              {v == null && !st.cantTell && (
+                                <span aria-hidden className="mr-1 text-[var(--color-ink-4)]">&ndash;</span>
+                              )}
+                              {t.label}
+                              {v === 'skipped' && (
+                                <span className="ml-1.5 text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-copper)]">
+                                  left out
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </span>
+                    )}
                     <button
                       type="button"
                       onClick={() => toggleCantTell(r)}

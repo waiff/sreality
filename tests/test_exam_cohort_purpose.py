@@ -164,3 +164,18 @@ def test_the_lane_offers_the_curated_action() -> None:
                 if s.get("name") == "Draw exam cohort")
     assert "--curated-per-tag" in step["run"]
     assert "PER_TAG" in step["env"]
+
+
+MIG466 = " ".join(
+    (ROOT / "migrations" / "466_one_set_of_18.sql").read_text().split())
+
+
+def test_466_backfills_declared_defaults_with_provenance() -> None:
+    # A bulk negative is a DEFAULT: it must carry the backfill marker (the
+    # review fence + the unreviewed-count audit hang off it), touch ONLY
+    # exam_v1's fully-answered members, and never overwrite an existing cell.
+    assert "'backfill:466'" in MIG466
+    assert "c.name = 'exam_v1'" in MIG466
+    assert "on conflict (image_id, tag_id) do nothing" in MIG466
+    assert "8 = (select count(*)" in MIG466
+    assert "check (array_length(tag_ids, 1) between 1 and 18)" in MIG466
