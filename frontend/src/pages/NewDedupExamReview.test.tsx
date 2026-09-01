@@ -156,3 +156,30 @@ describe('<NewDedupExamReview>', () => {
     expect(await screen.findByText(/Nothing answered in this sitting yet/)).toBeInTheDocument();
   });
 });
+
+describe('<NewDedupExamReview> the 466 backfill fence', () => {
+  it('fences auto-negative buttons apart and still saves whole-image', async () => {
+    // A backfilled cell is a declared default, not a judgment — the fence is
+    // what makes the unreviewed columns scannable row by row.
+    vi.mocked(api.getExamAnswers).mockResolvedValue({
+      data: {
+        set: 'all',
+        tags: TAGS,
+        rows: [{
+          image_id: 555, position: 1, picked_tag_ids: [22], skipped_tag_ids: [],
+          cant_tell: false, auto_tag_ids: [25],
+        }],
+      },
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/1 answered/);
+    expect(screen.getByText(/auto-negative/)).toBeInTheDocument();
+    // The fenced button still edits through the same whole-image write path.
+    await user.click(screen.getByRole('button', { name: /interier - kuchyně/ }));
+    await waitFor(() => expect(api.answerExamQuestion).toHaveBeenCalledWith(
+      'exam_v1',
+      { image_id: 555, picked_tag_ids: [22, 25], skipped_tag_ids: [], cant_tell: false },
+    ));
+  });
+});

@@ -214,7 +214,7 @@ describe('<NewDedupExam>', () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByText(/Which of these/);
-    await user.keyboard('e');
+    await user.keyboard('w');
     expect(screen.getByRole('button', { name: /interier - kuchyně/ }))
       .toHaveAttribute('aria-pressed', 'true');
   });
@@ -236,10 +236,10 @@ describe('<NewDedupExam>', () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByText(/Which of these/);
-    await user.keyboard('e');
+    await user.keyboard('w');
     expect(screen.getByRole('button', { name: /interier - kuchyně/ }))
       .toHaveAttribute('aria-pressed', 'true');
-    await user.keyboard('e');
+    await user.keyboard('w');
     expect(screen.getByText('left out')).toBeInTheDocument();
   });
 
@@ -255,7 +255,7 @@ describe('<NewDedupExam>', () => {
     const input = document.createElement('input');
     document.body.appendChild(input);
     input.focus();
-    await user.keyboard('i');
+    await user.keyboard('e');
     expect(screen.getByRole('button', { name: /podklad - půdorys/ }))
       .toHaveAttribute('aria-pressed', 'false');
     input.remove();
@@ -362,7 +362,7 @@ describe('<NewDedupExam> iterations (sets)', () => {
       expect.stringContaining('jídelna'),
       expect.stringContaining('nezařízená'),
     ]);
-    await user.keyboard('e');
+    await user.keyboard('w');
     await user.keyboard(' ');
     await waitFor(() => expect(api.answerExamQuestion).toHaveBeenCalledWith(
       'exam_v1',
@@ -377,22 +377,22 @@ describe('<NewDedupExam> iterations (sets)', () => {
     expect(screen.queryByText('routing')).toBeNull();
   });
 
-  it('the letter grid reaches all twelve buttons of a full set', async () => {
-    // Twelve positions, keyboard-shaped: w e i o / s d k l / y x n m. Sets are
-    // capped at 12 (migration 461) because this is where the keys run out.
+  it('the letter grid reaches all eighteen buttons of a full set', async () => {
+    // Eighteen positions, keyboard-shaped: q w e i o p / a s d j k l /
+    // y x c b n m (migration 466: one set holds every tag).
     vi.mocked(api.getExamState).mockResolvedValue({
       data: examState({
-        tags: Array.from({ length: 12 }, (_, i) => ({ id: 100 + i, label: `tag ${i + 1}` })),
+        tags: Array.from({ length: 18 }, (_, i) => ({ id: 100 + i, label: `tag ${i + 1}` })),
       }),
     });
     const user = userEvent.setup();
     renderPage();
     await screen.findByText(/Which of these/);
-    await user.keyboard('x');
+    await user.keyboard('j');
     expect(screen.getByRole('button', { name: /tag 10/ }))
       .toHaveAttribute('aria-pressed', 'true');
     await user.keyboard('m');
-    expect(screen.getByRole('button', { name: /tag 12/ }))
+    expect(screen.getByRole('button', { name: /tag 18/ }))
       .toHaveAttribute('aria-pressed', 'true');
   });
 });

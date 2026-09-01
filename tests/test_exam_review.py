@@ -49,7 +49,8 @@ def test_answers_speak_record_answers_vocabulary() -> None:
     out = tag_exam.answers(_Conn(rows), cohort_id=1, tag_ids=[22, 25, 46])
     assert out == [{
         "image_id": 555, "position": 13,
-        "picked_tag_ids": [22], "skipped_tag_ids": [25], "cant_tell": False,
+        "picked_tag_ids": [22], "skipped_tag_ids": [25],
+        "auto_tag_ids": [], "cant_tell": False,
     }]
 
 
@@ -87,3 +88,17 @@ def test_only_fully_answered_images_qualify() -> None:
     assert "HAVING count(*) = %(tag_count)s" in sql
     assert "ORDER BY m.position" in sql
     assert "l.source IN ('human', 'human_confirmed')" in sql
+
+
+def test_a_backfilled_default_is_flagged_not_hidden() -> None:
+    # 466's bulk negatives are declared defaults; the review page fences them
+    # until the operator re-answers, and that fence is driven by created_by.
+    from toolkit import tag_exam
+
+    rows = [(1, 1, {
+        "22": {"state": "positive", "reason": None, "by": "operator"},
+        "25": {"state": "negative", "reason": None, "by": "backfill:466"},
+    })]
+    out = tag_exam.answers(_Conn(rows), cohort_id=1, tag_ids=[22, 25])
+    assert out[0]["auto_tag_ids"] == [25]
+    assert out[0]["picked_tag_ids"] == [22]

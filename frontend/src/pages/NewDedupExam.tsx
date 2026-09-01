@@ -47,10 +47,12 @@ const EXAM_KEY = (cohort: string) => ['new-dedup', 'exam', cohort];
 const WARMUP_KEY = (cohort: string) => ['new-dedup', 'exam', cohort, 'warmup'];
 const WARMUP_COUNT = 10;
 
-/* Position -> key, reading the keyboard like the buttons: two columns per hand,
- * three rows. Sets are capped at 12 tags (migration 461) because this is where
- * the keys run out. */
-const EXAM_KEYS = ['w', 'e', 'i', 'o', 's', 'd', 'k', 'l', 'y', 'x', 'n', 'm'];
+/* Position -> key, reading the keyboard like the buttons: three columns per
+ * hand, three rows — 18 positions (migration 466: one set holds all 18 tags,
+ * on the operator's ruling). 'u' stays reserved for "can't tell". */
+const EXAM_KEYS = ['q', 'w', 'e', 'i', 'o', 'p',
+                   'a', 's', 'd', 'j', 'k', 'l',
+                   'y', 'x', 'c', 'b', 'n', 'm'];
 
 export default function NewDedupExam() {
   const qc = useQueryClient();
@@ -243,7 +245,7 @@ export default function NewDedupExam() {
   /* The buttons sit where the keys sit: rows of four (two per hand, a gutter
    * between hands), staggered like the keyboard, short rows padded so every
    * button keeps the same width. */
-  const keyRows = [tags.slice(0, 4), tags.slice(4, 8), tags.slice(8, 12)]
+  const keyRows = [tags.slice(0, 6), tags.slice(6, 12), tags.slice(12, 18)]
     .filter((row) => row.length > 0);
 
   return (
@@ -353,13 +355,13 @@ export default function NewDedupExam() {
                     className="flex gap-2"
                     style={{ paddingLeft: `${r * 1.25}rem` }}
                   >
-                    {Array.from({ length: 4 }, (_, c) => {
+                    {Array.from({ length: 6 }, (_, c) => {
                       const t = row[c];
-                      const gutter = c === 2 ? 'ml-5' : '';
+                      const gutter = c === 3 ? 'ml-5' : '';
                       if (!t) {
                         return <div key={`pad-${c}`} className={`flex-1 basis-0 ${gutter}`} />;
                       }
-                      const i = r * 4 + c;
+                      const i = r * 6 + c;
                       const v = verdicts.get(t.id);
                       const isSuggested = suggested.has(t.id);
                       return (
@@ -370,7 +372,7 @@ export default function NewDedupExam() {
                           onMouseEnter={() => setHoveredTag(t.id)}
                           onFocus={() => setHoveredTag(t.id)}
                           aria-pressed={v === 'picked'}
-                          className={`flex-1 basis-0 min-w-0 flex items-center gap-2 px-3 py-2 text-sm text-left rounded-[var(--radius-sm)] border transition-colors ${gutter} ${
+                          className={`flex-1 basis-0 min-w-0 flex items-start gap-2 px-2.5 py-2.5 text-sm text-left rounded-[var(--radius-sm)] border transition-colors ${gutter} ${
                             v === 'picked'
                               ? 'border-[var(--color-sage)] bg-[var(--color-sage)]/10 text-[var(--color-ink)]'
                               : v === 'skipped'
@@ -392,7 +394,7 @@ export default function NewDedupExam() {
                               className="w-1.5 h-1.5 rounded-full bg-[var(--color-sage)]/80 shrink-0"
                             />
                           )}
-                          <span className="truncate">{t.label}</span>
+                          <span className="min-w-0 break-words leading-snug">{t.label}</span>
                           {v === 'skipped' && (
                             <span className="ml-auto shrink-0 text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-copper)]">
                               left out

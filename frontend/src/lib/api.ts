@@ -1447,6 +1447,10 @@ export interface ExamAnswerRow {
   picked_tag_ids: number[];
   skipped_tag_ids: number[];
   cant_tell: boolean;
+  /* Cells written by migration 466's bulk default (created_by backfill:*) —
+   * declared negatives the operator has not personally confirmed yet. The
+   * review page fences these buttons off until the row is re-answered. */
+  auto_tag_ids?: number[];
 }
 
 /* Every fully-answered image of one sitting with its current verdicts, draw
