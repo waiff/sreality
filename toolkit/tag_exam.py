@@ -444,11 +444,16 @@ _IS_MEMBER_SQL = """
 # narrowed holdout exclusion — because the answer-refusal rail only refuses
 # NON-members: a curated member served as practice would be silently accepted
 # as a real answer the moment a mis-wired client posted it.
+# Drafts are ADMITTED here on purpose: after migration 464 every truth-labeled
+# non-member image ceased to exist (truth lives only on holdout members now), so
+# a truth-only pool is empty and the warm-up silently vanishes — measured live
+# on gold_v1's first sitting. Practice only ever DISPLAYS an image; nothing is
+# written, so an unreliable draft is a perfectly good hand-settler.
 _WARMUP_SQL = """
     SELECT DISTINCT l.image_id, i.storage_path
     FROM image_tag_labels l
     JOIN images i ON i.id = l.image_id AND i.storage_path IS NOT NULL
-    WHERE l.source IN ('human', 'human_confirmed')
+    WHERE l.source IN ('human', 'human_confirmed', 'human_draft')
       AND l.state = 'positive'
       AND NOT EXISTS (
             SELECT 1 FROM tag_exam_members wm WHERE wm.image_id = l.image_id

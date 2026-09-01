@@ -712,6 +712,17 @@ def _cohort_or_404(conn: Any, name: str) -> dict[str, Any]:
     return cohort
 
 
+@router.get("/exam-sets")
+def list_exam_sets(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
+    """Every exam set (question list) for the exam page's set bar — the sitting
+    is (cohort x set), and switching either must not mean hand-editing a URL."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT name, array_length(tag_ids, 1) FROM tag_exam_sets ORDER BY id")
+        rows = cur.fetchall()
+    return {"data": [{"name": r[0], "tag_count": int(r[1])} for r in rows]}
+
+
 @router.get("/exam-cohorts")
 def list_exam_cohorts(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
     """Every exam cohort with its purpose, for the exam page's cohort bar.

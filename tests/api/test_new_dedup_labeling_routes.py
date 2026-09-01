@@ -1281,6 +1281,33 @@ def test_the_routing_fallback_never_asks_for_suggestions(client, monkeypatch):
     assert res.json()["data"]["question"]["suggested_tag_ids"] is None
 
 
+def test_the_set_listing_serves_every_question_list(client, monkeypatch):
+    from toolkit import tag_holdout
+    import api.new_dedup_labeling as mod
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            self._rows = [("set_1", 8), ("set_2", 10)]
+        def fetchall(self): return self._rows
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: _Conn()
+    try:
+        res = client.get("/new-dedup/labeling/exam-sets")
+        assert res.status_code == 200
+        assert res.json()["data"] == [
+            {"name": "set_1", "tag_count": 8},
+            {"name": "set_2", "tag_count": 10},
+        ]
+    finally:
+        api_main.app.dependency_overrides.pop(deps.get_db_conn, None)
+    _ = mod, tag_holdout
+
+
 def test_the_review_read_serves_the_sittings_own_answers(client, monkeypatch):
     # The review subpage: answers come back in record_answer's vocabulary, for
     # the SAME resolved set the corrections will be posted against.
