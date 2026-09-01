@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
@@ -29,6 +30,26 @@ import { pushToast } from '@/lib/toast';
  * grid's own lesson: a list that reorders or refetches under a correcting
  * hand causes the very mis-clicks it exists to fix.
  */
+
+type PhotoSize = 's' | 'm' | 'l';
+
+/* Per-viewer convenience only — safe to lose. localStorage can throw (blocked
+ * site data), so both sides are guarded and 's' is the working fallback. */
+const PHOTO_SIZE_KEY = 'new-dedup-exam-review-photo-size';
+const readPhotoSize = (): PhotoSize => {
+  try {
+    const v = localStorage.getItem(PHOTO_SIZE_KEY);
+    return v === 'm' || v === 'l' ? v : 's';
+  } catch { return 's'; }
+};
+const PHOTO_BOX: Record<PhotoSize, string> = {
+  s: 'w-40 min-h-[6rem]',
+  m: 'w-72 min-h-[10rem]',
+  l: 'w-[30rem] min-h-[14rem]',
+};
+const PHOTO_IMG: Record<PhotoSize, string> = {
+  s: 'max-h-40', m: 'max-h-80', l: 'max-h-[32rem]',
+};
 
 type RowState = { picked: Set<number>; skipped: Set<number>; cantTell: boolean };
 
@@ -62,6 +83,11 @@ export default function NewDedupExamReview() {
   /* Server state overlaid with local edits. Only edited rows live here, so a
    * refetch elsewhere cannot silently drop an in-flight correction. */
   const [edited, setEdited] = useState<Map<number, RowState>>(new Map());
+  const [photoSize, setPhotoSize] = useState<PhotoSize>(readPhotoSize);
+  const pickPhotoSize = (v: PhotoSize) => {
+    setPhotoSize(v);
+    try { localStorage.setItem(PHOTO_SIZE_KEY, v); } catch { /* convenience only */ }
+  };
   const stateOf = (r: ExamAnswerRow): RowState => edited.get(r.image_id) ?? rowStateOf(r);
 
   const saveMut = useMutation({
@@ -143,9 +169,29 @@ export default function NewDedupExamReview() {
             {rows.length} answered · everything here is a decision: &ndash; = negative · a click once = it applies · again = leave it out of that tag · again = back to negative · every change saves immediately
           </p>
         </div>
-        <Link to={examHref} className="text-xs text-[var(--color-copper)] hover:underline">
-          ← back to the exam
-        </Link>
+        <div className="flex items-center gap-3">
+          <span className="flex items-center gap-1" role="group" aria-label="photo size">
+            <span className="text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)] mr-0.5">photo</span>
+            {(['s', 'm', 'l'] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => pickPhotoSize(v)}
+                aria-pressed={photoSize === v}
+                className={`px-2 py-1 text-xs uppercase rounded-[var(--radius-sm)] border ${
+                  photoSize === v
+                    ? 'border-[var(--color-ink-2)] text-[var(--color-ink)]'
+                    : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]'
+                }`}
+              >
+                {v}
+              </button>
+            ))}
+          </span>
+          <Link to={examHref} className="text-xs text-[var(--color-copper)] hover:underline">
+            ← back to the exam
+          </Link>
+        </div>
       </header>
 
       {rows.length === 0 ? (
@@ -162,14 +208,17 @@ export default function NewDedupExamReview() {
                 key={r.image_id}
                 className="flex gap-4 items-start border border-[var(--color-rule)] rounded-[var(--radius-sm)] p-3"
               >
-                <div className="w-40 shrink-0 bg-[var(--color-paper-2)] rounded-[var(--radius-sm)] flex items-center justify-center min-h-[6rem]">
+                <div className={`shrink-0 bg-[var(--color-paper-2)] rounded-[var(--radius-sm)] flex items-center justify-center ${PHOTO_BOX[photoSize]}`}>
                   {photo ? (
-                    <img
-                      src={imageSrc(photo)}
-                      alt={`Exam photo ${r.position}`}
-                      loading="lazy"
-                      className="max-h-40 w-auto max-w-full object-contain rounded-[var(--radius-sm)]"
-                    />
+                    /* Opens the full image in a new tab for close inspection. */
+                    <a href={imageSrc(photo)} target="_blank" rel="noreferrer">
+                      <img
+                        src={imageSrc(photo)}
+                        alt={`Exam photo ${r.position}`}
+                        loading="lazy"
+                        className={`w-auto max-w-full object-contain rounded-[var(--radius-sm)] ${PHOTO_IMG[photoSize]}`}
+                      />
+                    </a>
                   ) : (
                     <Spinner size={14} />
                   )}
