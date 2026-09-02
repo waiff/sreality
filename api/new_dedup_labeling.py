@@ -794,17 +794,6 @@ def get_exam_answers(
     }}
 
 
-@router.get("/exam/{cohort_name}/warmup")
-def get_exam_warmup(
-    cohort_name: str, limit: int = 10, conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    """Practice images from OUTSIDE the exam. They settle the operator's hand;
-    spending real exam images on that would shrink the sample that has to grade
-    everything, and answers posted for them are refused by design."""
-    _cohort_or_404(conn, cohort_name)
-    return {"data": tag_exam.warmup_images(conn, limit=max(0, min(limit, 25)))}
-
-
 @router.post("/exam/{cohort_name}/answer")
 def post_exam_answer(
     cohort_name: str, body: ExamAnswerIn, conn: Any = Depends(deps.get_db_conn),

@@ -10,6 +10,7 @@ import {
 } from '@/lib/api';
 import { fetchImagesByImageIds } from '@/lib/queries';
 import { imageSrc } from '@/lib/imageUrl';
+import { splitTagLabel } from '@/lib/tagLabel';
 import Spinner from '@/components/Spinner';
 import ErrorBanner from '@/components/ErrorBanner';
 import { pushToast } from '@/lib/toast';
@@ -145,6 +146,51 @@ export default function NewDedupExamReview() {
       : { picked: new Set(), skipped: new Set(), cantTell: true });
   };
 
+  const reviewButton = (r: ExamAnswerRow, st: RowState, t: ExamTag) => {
+    const v = st.cantTell ? null
+      : st.picked.has(t.id) ? 'picked'
+        : st.skipped.has(t.id) ? 'skipped' : null;
+    const { family, name } = splitTagLabel(t.label);
+    return (
+      <button
+        key={t.id}
+        type="button"
+        onClick={() => cycleTag(r, t.id)}
+        aria-pressed={v === 'picked'}
+        aria-label={t.label}
+        title={t.label}
+        data-verdict={v ?? (st.cantTell ? 'excluded' : 'negative')}
+        className={`flex items-start gap-1.5 px-2.5 py-2 text-left rounded-[var(--radius-sm)] border transition-colors ${
+          v === 'picked'
+            ? 'border-[var(--color-sage)] bg-[var(--color-sage)]/10 text-[var(--color-ink)]'
+            : v === 'skipped'
+              ? 'border-dashed border-[var(--color-copper)] text-[var(--color-ink-2)]'
+              : 'border-[var(--color-rule)] text-[var(--color-ink-2)]'
+        } ${st.cantTell ? 'opacity-60' : ''}`}
+      >
+        {/* An unmarked cell here is NOT "untagged" — review only shows fully
+          * answered images, so plain = a recorded NEGATIVE. The dash says so,
+          * and it disappears under "can't tell" (excluded, not negative). */}
+        {v == null && !st.cantTell && (
+          <span aria-hidden className="mt-0.5 text-[var(--color-ink-4)]">&ndash;</span>
+        )}
+        <span className="min-w-0 flex-1">
+          {family && (
+            <span className="block text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)] leading-none mb-0.5">
+              {family}
+            </span>
+          )}
+          <span className="block text-[0.8125rem] leading-snug text-pretty">{name}</span>
+        </span>
+        {v === 'skipped' && (
+          <span className="shrink-0 mt-0.5 text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-copper)]">
+            left out
+          </span>
+        )}
+      </button>
+    );
+  };
+
   if (answersQ.isLoading) return <div className="p-6"><Spinner /></div>;
   if (answersQ.error) {
     return <div className="p-6"><ErrorBanner message={(answersQ.error as Error).message} /></div>;
@@ -154,7 +200,7 @@ export default function NewDedupExamReview() {
     setName ? `&set=${encodeURIComponent(setName)}` : ''}`;
 
   return (
-    <div className="max-w-[68rem] mx-auto px-4 py-6">
+    <div className="max-w-[112rem] mx-auto px-4 py-6">
       <header className="flex items-baseline justify-between flex-wrap gap-3 border-b border-[var(--color-rule)] pb-3">
         <div>
           <h1 className="text-lg font-medium text-[var(--color-ink)]">
@@ -231,81 +277,31 @@ export default function NewDedupExamReview() {
                       <span className="ml-2 text-[var(--color-brick)]">can&rsquo;t tell</span>
                     )}
                   </p>
-                  <div className="flex flex-wrap items-start gap-1.5">
-                    {tags.filter((t) => !(r.auto_tag_ids ?? []).includes(t.id)).map((t) => {
-                      const v = st.cantTell ? null
-                        : st.picked.has(t.id) ? 'picked'
-                          : st.skipped.has(t.id) ? 'skipped' : null;
-                      return (
-                        <button
-                          key={t.id}
-                          type="button"
-                          onClick={() => cycleTag(r, t.id)}
-                          aria-pressed={v === 'picked'}
-                          className={`px-2.5 py-2 text-sm text-left rounded-[var(--radius-sm)] border transition-colors ${
-                            v === 'picked'
-                              ? 'border-[var(--color-sage)] bg-[var(--color-sage)]/10 text-[var(--color-ink)]'
-                              : v === 'skipped'
-                                ? 'border-dashed border-[var(--color-copper)] text-[var(--color-ink-2)]'
-                                : 'border-[var(--color-rule)] text-[var(--color-ink-2)]'
-                          } ${st.cantTell ? 'opacity-60' : ''}`}
-                        >
-                          {/* An unmarked cell here is NOT "untagged" — review only
-                            * shows fully answered images, so plain = a recorded
-                            * NEGATIVE. The dash says so, and it disappears under
-                            * "can't tell" (those cells are excluded, not negative). */}
-                          {v == null && !st.cantTell && (
-                            <span aria-hidden className="mr-1 text-[var(--color-ink-4)]">&ndash;</span>
-                          )}
-                          {t.label}
-                          {v === 'skipped' && (
-                            <span className="ml-1.5 text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-copper)]">
-                              left out
-                            </span>
-                          )}
-                        </button>
-                      );
-                    })}
-                    {(r.auto_tag_ids ?? []).length > 0 && (
-                      /* The 466 backfill: declared defaults, not judgments. The
-                       * fence makes the unreviewed columns scannable; it empties
-                       * (on reload) as rows are re-answered. */
-                      <span className="flex flex-wrap items-start gap-1.5 border border-dashed border-[var(--color-copper)]/60 rounded-[var(--radius-sm)] p-1.5">
-                        <span className="w-full text-[0.6rem] tracking-[0.12em] uppercase text-[var(--color-copper)]">
-                          new · auto-negative — confirm or fix
-                        </span>
-                        {tags.filter((t) => (r.auto_tag_ids ?? []).includes(t.id)).map((t) => {
-                          const v = st.cantTell ? null
-                            : st.picked.has(t.id) ? 'picked'
-                              : st.skipped.has(t.id) ? 'skipped' : null;
-                          return (
-                            <button
-                              key={t.id}
-                              type="button"
-                              onClick={() => cycleTag(r, t.id)}
-                              aria-pressed={v === 'picked'}
-                              className={`px-2.5 py-2 text-sm text-left rounded-[var(--radius-sm)] border transition-colors ${
-                                v === 'picked'
-                                  ? 'border-[var(--color-sage)] bg-[var(--color-sage)]/10 text-[var(--color-ink)]'
-                                  : v === 'skipped'
-                                    ? 'border-dashed border-[var(--color-copper)] text-[var(--color-ink-2)]'
-                                    : 'border-[var(--color-rule)] text-[var(--color-ink-2)]'
-                              } ${st.cantTell ? 'opacity-60' : ''}`}
-                            >
-                              {v == null && !st.cantTell && (
-                                <span aria-hidden className="mr-1 text-[var(--color-ink-4)]">&ndash;</span>
-                              )}
-                              {t.label}
-                              {v === 'skipped' && (
-                                <span className="ml-1.5 text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-copper)]">
-                                  left out
-                                </span>
-                              )}
-                            </button>
-                          );
-                        })}
-                      </span>
-                    )}
+                  {/* One shared button renderer for both groups: the family
+                    * is demoted to an eyebrow so the NAME gets the width (six
+                    * inline labels per row broke Czech words mid-syllable), and
+                    * the full label stays the accessible name. */}
+                  <div className="grid gap-1.5 [grid-template-columns:repeat(auto-fill,minmax(12rem,1fr))]">
+                    {tags.filter((t) => !(r.auto_tag_ids ?? []).includes(t.id))
+                      .map((t) => reviewButton(r, st, t))}
+                  </div>
+
+                  {(r.auto_tag_ids ?? []).length > 0 && (
+                    /* The 466 backfill: declared defaults, not judgments. The
+                     * fence makes the unreviewed columns scannable; it empties
+                     * (on reload) as rows are re-answered. */
+                    <div className="mt-2 border border-dashed border-[var(--color-copper)]/60 rounded-[var(--radius-sm)] p-2">
+                      <p className="text-[0.6rem] tracking-[0.12em] uppercase text-[var(--color-copper)] mb-1.5">
+                        new · auto-negative — confirm or fix
+                      </p>
+                      <div className="grid gap-1.5 [grid-template-columns:repeat(auto-fill,minmax(12rem,1fr))]">
+                        {tags.filter((t) => (r.auto_tag_ids ?? []).includes(t.id))
+                          .map((t) => reviewButton(r, st, t))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="mt-2">
                     <button
                       type="button"
                       onClick={() => toggleCantTell(r)}

@@ -440,30 +440,6 @@ _IS_MEMBER_SQL = """
     WHERE cohort_id = %(cohort_id)s AND image_id = %(image_id)s
 """
 
-# Warm-up images come from OUTSIDE every exam on purpose: they exist to settle
-# the operator's hand. This anti-join is deliberately COHORT-BLIND — not the
-# narrowed holdout exclusion — because the answer-refusal rail only refuses
-# NON-members: a curated member served as practice would be silently accepted
-# as a real answer the moment a mis-wired client posted it.
-# Drafts are ADMITTED here on purpose: after migration 464 every truth-labeled
-# non-member image ceased to exist (truth lives only on holdout members now), so
-# a truth-only pool is empty and the warm-up silently vanishes — measured live
-# on gold_v1's first sitting. Practice only ever DISPLAYS an image; nothing is
-# written, so an unreliable draft is a perfectly good hand-settler.
-_WARMUP_SQL = """
-    SELECT DISTINCT l.image_id, i.storage_path
-    FROM image_tag_labels l
-    JOIN images i ON i.id = l.image_id AND i.storage_path IS NOT NULL
-    WHERE l.source IN ('human', 'human_confirmed', 'human_draft')
-      AND l.state = 'positive'
-      AND NOT EXISTS (
-            SELECT 1 FROM tag_exam_members wm WHERE wm.image_id = l.image_id
-          )
-    ORDER BY l.image_id
-    LIMIT %(limit)s
-"""
-
-
 def next_question(
     conn: psycopg.Connection, *, cohort_id: int, tag_ids: list[int],
 ) -> dict[str, Any] | None:
@@ -532,14 +508,6 @@ def answers(
             "cant_tell": ambiguous == len(tag_ids) and len(tag_ids) > 0,
         })
     return out
-
-
-def warmup_images(
-    conn: psycopg.Connection, *, limit: int = 10,
-) -> list[dict[str, Any]]:
-    with conn.cursor() as cur:
-        cur.execute(_WARMUP_SQL, {"limit": limit})
-        return [{"image_id": int(r[0]), "storage_path": r[1]} for r in cur.fetchall()]
 
 
 def is_member(conn: psycopg.Connection, *, cohort_id: int, image_id: int) -> bool:
