@@ -133,19 +133,20 @@ describe('<NewDedupExamReview>', () => {
 
   it('marks a recorded negative apart from anything undecided', async () => {
     // Review shows only fully answered images, so a plain button IS a negative
-    // — but plain looks exactly like the exam's "not yet decided". The dash
-    // makes the decision visible; it must vanish under "can't tell", where the
-    // cells are excluded rather than negative.
+    // — but plain looks exactly like the exam's "not yet decided". The verdict
+    // is stated on the element (and drawn as a dash) rather than inferred from
+    // colour; under "can't tell" those cells are excluded, not negative.
     const user = userEvent.setup();
     renderPage();
     await screen.findByText(/2 answered/);
-    const rows = screen.getAllByRole('listitem');
-    // Row 1: koupelna picked (no dash), kuchyně negative (dash).
-    expect(rows[0].textContent).toContain('–interier - kuchyně');
-    expect(rows[0].textContent).not.toContain('–interier - koupelna');
+    const kitchen = screen.getAllByRole('button', { name: /interier - kuchyně/ })[0];
+    const bath = screen.getAllByRole('button', { name: /interier - koupelna/ })[0];
+    expect(kitchen).toHaveAttribute('data-verdict', 'negative');
+    expect(bath).toHaveAttribute('data-verdict', 'picked');
     await user.click(screen.getAllByRole('button', { name: /can’t tell/ })[0]);
     await waitFor(() =>
-      expect(rows[0].textContent).not.toContain('–interier - kuchyně'));
+      expect(screen.getAllByRole('button', { name: /interier - kuchyně/ })[0])
+        .toHaveAttribute('data-verdict', 'excluded'));
   });
 
   it('says so when nothing is answered yet', async () => {

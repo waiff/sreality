@@ -1439,8 +1439,6 @@ export const getExamState = (cohort: string, set?: string): Promise<{ data: Exam
     { jwt: true },
   );
 
-/* Practice images from OUTSIDE the exam — they settle the hand without spending
- * real exam images, and answers for them are refused server-side. */
 export interface ExamAnswerRow {
   image_id: number;
   position: number;
@@ -1462,13 +1460,6 @@ export const getExamAnswers = (
   request<{ data: { set: string; tags: ExamTag[]; rows: ExamAnswerRow[] } }>(
     `/new-dedup/labeling/exam/${cohort}/answers${set ? `?set=${encodeURIComponent(set)}` : ''}`,
     { jwt: true },
-  );
-
-export const getExamWarmup = (
-  cohort: string, limit = 10,
-): Promise<{ data: Array<{ image_id: number; storage_path: string | null }> }> =>
-  request<{ data: Array<{ image_id: number; storage_path: string | null }> }>(
-    `/new-dedup/labeling/exam/${cohort}/warmup?limit=${limit}`, { jwt: true },
   );
 
 /* Every routing tag in NEITHER list becomes a NEGATIVE — that is what lets one

@@ -35,16 +35,6 @@ def test_the_protection_census_counts_only_holdouts() -> None:
     assert "purpose = 'holdout'" in sql
 
 
-def test_the_warmup_stays_cohort_blind() -> None:
-    # The answer-refusal rail only refuses NON-members: a curated member served
-    # as practice would be silently accepted as a real answer. So the warm-up
-    # excludes members of EVERY cohort, deliberately not the narrowed exclusion.
-    from toolkit import tag_exam
-    sql = " ".join(tag_exam._WARMUP_SQL.split())
-    assert "NOT EXISTS ( SELECT 1 FROM tag_exam_members wm" in sql
-    assert "purpose" not in sql
-
-
 def test_the_curated_seed_never_reseats_a_member_of_any_exam() -> None:
     from toolkit import tag_exam
     sql = " ".join(tag_exam._CURATED_SEED_SQL.split())

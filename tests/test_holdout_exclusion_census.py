@@ -83,12 +83,6 @@ _EXEMPT: dict[str, str] = {
         "tag_candidates, which cannot contain a holdout image.",
 
     # --- reads that are ABOUT the exam ----------------------------------------
-    "_WARMUP_SQL":
-        "Practice images must come from outside EVERY exam — curated included — "
-        "because the answer-refusal rail only refuses NON-members: a curated "
-        "member served as practice would be accepted as a real answer. So this "
-        "carries its own cohort-blind member anti-join, deliberately NOT the "
-        "purpose-narrowed exclusion.",
     "_CURATED_SEED_SQL":
         "The curated draw's worklist: the operator's own draft-positive marks, "
         "selected for RE-labeling through the exam UI (migration 464). Drafts "
