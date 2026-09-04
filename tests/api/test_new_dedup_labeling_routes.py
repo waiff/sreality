@@ -1311,6 +1311,7 @@ def test_the_set_listing_serves_every_question_list(client, monkeypatch):
 def test_the_review_read_serves_the_sittings_own_answers(client, monkeypatch):
     # The review subpage: answers come back in record_answer's vocabulary, for
     # the SAME resolved set the corrections will be posted against.
+    from toolkit import exam_machine_review as mr
     from toolkit import tag_exam, tag_holdout
     import api.new_dedup_labeling as mod
 
@@ -1324,6 +1325,7 @@ def test_the_review_read_serves_the_sittings_own_answers(client, monkeypatch):
                         lambda conn, **kw: got.update(kw) or [
                             {"image_id": 5, "position": 1, "picked_tag_ids": [22],
                              "skipped_tag_ids": [], "cant_tell": False}])
+    monkeypatch.setattr(mr, "reviews_for_answers", lambda conn, **kw: {})
     res = client.get("/new-dedup/labeling/exam/exam_v1/answers")
     assert res.status_code == 200
     data = res.json()["data"]
@@ -1331,6 +1333,70 @@ def test_the_review_read_serves_the_sittings_own_answers(client, monkeypatch):
     assert [t["id"] for t in data["tags"]] == [22, 25]
     assert data["rows"][0]["picked_tag_ids"] == [22]
     assert got["tag_ids"] == [22, 25]
+    # No current review for that image is an explicit null, not a missing key:
+    # the page distinguishes "not reviewed" from "the machine agrees".
+    assert data["rows"][0]["machine"] is None
+
+
+def test_the_review_read_attaches_the_machine_verdicts(client, monkeypatch):
+    # The definition-driven review (467) rides along with the answers, keyed by
+    # image, for the SAME resolved tag list.
+    from toolkit import exam_machine_review as mr
+    from toolkit import tag_exam, tag_holdout
+    import api.new_dedup_labeling as mod
+
+    seen: dict = {}
+    monkeypatch.setattr(tag_holdout, "get_cohort",
+                        lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
+    monkeypatch.setattr(mod, "_exam_tag_set",
+                        lambda conn, name: ("all", 1,
+                                            [{"id": 22, "label": "k"}, {"id": 25, "label": "u"}]))
+    monkeypatch.setattr(tag_exam, "answers", lambda conn, **kw: [
+        {"image_id": 5, "position": 1, "picked_tag_ids": [22], "skipped_tag_ids": [],
+         "cant_tell": False},
+        {"image_id": 6, "position": 2, "picked_tag_ids": [], "skipped_tag_ids": [],
+         "cant_tell": False}])
+    monkeypatch.setattr(mr, "reviews_for_answers", lambda conn, **kw: seen.update(kw) or {
+        5: {"verdicts": {22: "yes", 25: "yes"}, "dismissed_tag_ids": [],
+            "reviewed_at": "t"}})
+    res = client.get("/new-dedup/labeling/exam/exam_v1/answers?set=all")
+    assert res.status_code == 200
+    rows = {r["image_id"]: r for r in res.json()["data"]["rows"]}
+    assert rows[5]["machine"]["verdicts"] == {"22": "yes", "25": "yes"}
+    assert rows[6]["machine"] is None
+    assert seen["tag_ids"] == [22, 25]
+
+
+def test_dismissing_a_machine_proposal_without_a_review_is_a_404(client, monkeypatch):
+    from toolkit import exam_machine_review as mr
+    from toolkit import tag_holdout
+
+    monkeypatch.setattr(tag_holdout, "get_cohort",
+                        lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
+
+    def _boom(conn, **kw):
+        raise KeyError(kw["image_id"])
+
+    monkeypatch.setattr(mr, "dismiss_proposal", _boom)
+    res = client.post("/new-dedup/labeling/exam/exam_v1/machine-review/dismiss",
+                      json={"image_id": 5, "tag_id": 22})
+    assert res.status_code == 404
+
+
+def test_dismissing_a_machine_proposal_returns_the_new_dismissal_set(client, monkeypatch):
+    from toolkit import exam_machine_review as mr
+    from toolkit import tag_holdout
+
+    got: dict = {}
+    monkeypatch.setattr(tag_holdout, "get_cohort",
+                        lambda conn, **kw: {"id": 1, "name": "exam_v1", "sealed_at": "t"})
+    monkeypatch.setattr(mr, "dismiss_proposal",
+                        lambda conn, **kw: got.update(kw) or [22])
+    res = client.post("/new-dedup/labeling/exam/exam_v1/machine-review/dismiss",
+                      json={"image_id": 5, "tag_id": 22})
+    assert res.status_code == 200
+    assert res.json()["data"]["dismissed_tag_ids"] == [22]
+    assert got["cohort_id"] == 1 and got["image_id"] == 5 and got["tag_id"] == 22
 
 
 def test_an_unknown_exam_set_is_a_404(client, monkeypatch):

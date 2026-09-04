@@ -28,9 +28,12 @@ again. Anything else would hide a disagreement the new definitions created.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import psycopg
+
+LOG = logging.getLogger(__name__)
 
 VERDICTS = ("yes", "no", "skip")
 
@@ -242,12 +245,22 @@ def reviews_for_answers(
     if len(versions) != len(tag_ids):
         # Some tag has no active definition: no review can be current.
         return {}
-    with conn.cursor() as cur:
-        cur.execute(_REVIEWS_FOR_ANSWERS_SQL, {
-            "cohort_id": cohort_id, "tag_ids": list(tag_ids),
-            "versions": json.dumps(versions),
-        })
-        rows = cur.fetchall()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_REVIEWS_FOR_ANSWERS_SQL, {
+                "cohort_id": cohort_id, "tag_ids": list(tag_ids),
+                "versions": json.dumps(versions),
+            })
+            rows = cur.fetchall()
+    except psycopg.errors.UndefinedTable:
+        # A merge is not a deploy and a deploy is not an applied migration: this
+        # read ships in the same PR as 467 and would otherwise take the whole
+        # review page down for the window between the two. Narrow on purpose —
+        # only the table's absence is tolerated, and only as "no reviews yet".
+        # The API connection is autocommit, so the failed statement poisons
+        # nothing after it.
+        LOG.warning("tag_exam_machine_reviews is absent — migration 467 not applied yet")
+        return {}
     current = set(tag_ids)
     out: dict[int, dict[str, Any]] = {}
     for image_id, verdicts, dismissed, reviewed_at in rows:
