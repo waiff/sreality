@@ -1,0 +1,122 @@
+name: "Labeling: bulk machine labels"
+
+# The LLM builds the training set for named heads: one call per image carrying
+# the ACTIVE definitions, verdicts written to image_tag_labels as source='machine'
+# (migration 468 gives the pass its own called_for so its price is measured
+# separately). See scripts/label_images.py for the rails.
+#
+# THIS LANE SPENDS MONEY, against a hard $50 programme budget. Two habits, both
+# cheap: run it with dry_run first (it prints the pre-flight estimate and writes
+# nothing), and run a small count once before a large one — the reply must carry
+# a verdict for EVERY named head or the image is recorded as an error, and it is
+# better to learn that from ten images than from a thousand.
+#
+# HEADS ARE NAMED EXPLICITLY. There is no "all heads" input, because bulk
+# labeling is only justified for a head the agreement gate has cleared
+# (scripts/exam_agreement.py) and that judgment is the operator's.
+#
+# Exam members are never labeled: the holdout stays unseen by training and a
+# curated member is the operator's to answer.
+#
+# Required secrets: SUPABASE_DB_URL, OPENAI_API_KEY, R2_*.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: "Comma-separated tag ids to label, e.g. 22,25,28."
+        required: true
+        type: string
+      count:
+        description: "At most this many images this run."
+        required: false
+        default: "25"
+        type: string
+      max_usd:
+        description: "Hard pre-flight ceiling for this run, in USD."
+        required: false
+        default: "2"
+        type: string
+      sample_pct:
+        description: "Block-sample percentage for the random draw (raise it when few rows come back)."
+        required: false
+        default: "1"
+        type: string
+      workers:
+        description: "Parallel workers (1-16). The work is I/O-bound on R2 and the model."
+        required: false
+        default: "8"
+        type: string
+      status_only:
+        description: "Print the training set as it stands and exit. Spends nothing."
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      dry_run:
+        description: "Report what would happen; spend nothing, write nothing."
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+concurrency:
+  group: label-images
+  cancel-in-progress: false
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e ".[api]"
+      - name: Label
+        env:
+          TAGS: ${{ inputs.tags }}
+          COUNT: ${{ inputs.count }}
+          MAX_USD: ${{ inputs.max_usd }}
+          SAMPLE_PCT: ${{ inputs.sample_pct }}
+          WORKERS: ${{ inputs.workers }}
+          STATUS_ONLY: ${{ inputs.status_only }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        # --max-seconds 1500 under a 30min runner timeout, so the pass stops
+        # between images and reports what it spent rather than being killed
+        # mid-flight. Inputs travel via env, never interpolation.
+        run: |
+          set -euo pipefail
+          case "${TAGS}" in
+            ''|*[!0-9,\ ]*) echo "::error::tags must be a comma-separated list of ids"; exit 1 ;;
+          esac
+          case "${COUNT}" in
+            ''|*[!0-9]*) echo "::error::count must be a number"; exit 1 ;;
+          esac
+          case "${MAX_USD}" in
+            ''|*[!0-9.]*) echo "::error::max_usd must be a number"; exit 1 ;;
+          esac
+          case "${SAMPLE_PCT:-1}" in
+            ''|*[!0-9.]*) echo "::error::sample_pct must be a number"; exit 1 ;;
+          esac
+          case "${WORKERS:-8}" in
+            ''|*[!0-9]*) echo "::error::workers must be a number"; exit 1 ;;
+          esac
+          ARGS="--tags ${TAGS} --count ${COUNT} --max-usd ${MAX_USD} --sample-pct ${SAMPLE_PCT:-1} --max-seconds 1500 --workers ${WORKERS:-8}"
+          if [ "${STATUS_ONLY:-false}" = "true" ]; then ARGS="--tags ${TAGS} --status"; fi
+          if [ "${DRY_RUN:-true}" = "true" ] && [ "${STATUS_ONLY:-false}" != "true" ]; then ARGS="${ARGS} --dry-run"; fi
+          echo "python -m scripts.label_images ${ARGS}"
+          python -m scripts.label_images ${ARGS}

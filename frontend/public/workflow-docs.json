@@ -2846,6 +2846,95 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/ingest_boundaries.yml"
     },
     {
+      "filename": "label_images.yml",
+      "name": "Labeling: bulk machine labels",
+      "description": "The LLM builds the training set for named heads: one call per image carrying the ACTIVE definitions, verdicts written to image_tag_labels as source='machine' (migration 468 gives the pass its own called_for so its price is measured separately). See scripts/label_images.py for the rails.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "tags",
+          "description": "Comma-separated tag ids to label, e.g. 22,25,28.",
+          "required": true,
+          "type": "string",
+          "default": null,
+          "options": null
+        },
+        {
+          "name": "count",
+          "description": "At most this many images this run.",
+          "required": false,
+          "type": "string",
+          "default": "25",
+          "options": null
+        },
+        {
+          "name": "max_usd",
+          "description": "Hard pre-flight ceiling for this run, in USD.",
+          "required": false,
+          "type": "string",
+          "default": "2",
+          "options": null
+        },
+        {
+          "name": "sample_pct",
+          "description": "Block-sample percentage for the random draw (raise it when few rows come back).",
+          "required": false,
+          "type": "string",
+          "default": "1",
+          "options": null
+        },
+        {
+          "name": "workers",
+          "description": "Parallel workers (1-16). The work is I/O-bound on R2 and the model.",
+          "required": false,
+          "type": "string",
+          "default": "8",
+          "options": null
+        },
+        {
+          "name": "status_only",
+          "description": "Print the training set as it stands and exit. Spends nothing.",
+          "required": false,
+          "type": "choice",
+          "default": "false",
+          "options": [
+            "false",
+            "true"
+          ]
+        },
+        {
+          "name": "dry_run",
+          "description": "Report what would happen; spend nothing, write nothing.",
+          "required": false,
+          "type": "choice",
+          "default": "true",
+          "options": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "secrets": [
+        "OPENAI_API_KEY",
+        "R2_ACCESS_KEY_ID",
+        "R2_ACCOUNT_ID",
+        "R2_BUCKET_NAME",
+        "R2_SECRET_ACCESS_KEY",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "label-images",
+      "cancelInProgress": false,
+      "timeoutMinutes": 30,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/label_images.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/label_images.yml"
+    },
+    {
       "filename": "label_proposal_backfill.yml",
       "name": "NEW DEDUP — Labeling secondary-CLIP proposals (sharded, dispatch-only)",
       "description": "Wave 1 (docs/design/new-dedup/PROGRAM.md): scores every image currently in dedup_sim.labeling_sample against the operator's active Taxonomy v1 labels (dedup_sim.taxonomy_labels) using the stronger secondary CLIP checkpoint (dedup_sim_settings' labeling_secondary_model), writing one proposal row per image into dedup_sim.label_proposals for review on the Labeling page. Dispatch-only, not cron — the sample grows in bursts as the operator works through the program, not continuously. No-op if R2 is unconfigured or the taxonomy is still empty. Horizontally sharded (image_id %% 2), like the production clip_tag.yml but smaller (this is a curated sample, not the full corpus).",
