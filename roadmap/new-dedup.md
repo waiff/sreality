@@ -272,6 +272,15 @@ W1 (shared prerequisites + labeling program):
       answers feed training. Pre-exam labels demoted to `human_draft` (never win an upsert, read
       by no truth path); candidate queues cleared; warm-up made cohort-blind; gold_v1 = up to
       20/tag across all 16 flagged categories, rarest-first.
+- [x] **One ruleset on every tag + the definition-driven machine review (2026-09-04, migration
+      467)** — the operator's left-out-vs-negative audit rewrote all 18 definitions in the same
+      words (subject = what the definition says, never the object inside it; three tiers on every
+      space tag; exclusivity on every document tag; fasáda = one building even in a joined block;
+      a closed garage door is negative). `review` action on the screen lane: every exam image
+      judged against ALL definitions in one call, verdicts in `tag_exam_machine_reviews` (never
+      labels; provenance frozen; stale never served), shown on the review page as per-row
+      proposals with apply (whole-image /answer) / keep mine (dismiss). PROGRAM.md ledger has the
+      full ruleset.
 - [ ] **NEXT — W1 remainder:** one definition renderer with two outputs (the machine prompt and
       a plain-language handbook card, so the operator never meets `counts` / `does_not_count` /
       `confusable_with` / `leave_out_when` while labeling); the machine-label store (a SEPARATE

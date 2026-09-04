@@ -4,9 +4,11 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   answerExamQuestion,
+  dismissExamMachineProposal,
   getExamAnswers,
   type ExamAnswerRow,
   type ExamTag,
+  type MachineVerdict,
 } from '@/lib/api';
 import { fetchImagesByImageIds } from '@/lib/queries';
 import { imageSrc } from '@/lib/imageUrl';
@@ -60,6 +62,52 @@ const rowStateOf = (r: ExamAnswerRow): RowState => ({
   cantTell: r.cant_tell,
 });
 
+/* The human's verdict on one cell in the machine's vocabulary, so the two can
+ * be compared cell by cell. "Can't tell" is excluded everywhere = skip. */
+export const humanVerdictOf = (st: RowState, tagId: number): MachineVerdict =>
+  st.cantTell ? 'skip' : st.picked.has(tagId) ? 'yes' : st.skipped.has(tagId) ? 'skip' : 'no';
+
+export type Proposal = { tag: ExamTag; machine: MachineVerdict; human: MachineVerdict };
+
+/* Where the machine's definition-driven verdict differs from the row's LIVE
+ * state (not the server's copy, so an applied proposal disappears at once).
+ * On a can't-tell row only the machine's yes is worth raising: proposing "no"
+ * against "I can't tell" would turn a whole-row abstention into one negative. */
+export const proposalsOf = (
+  tags: ExamTag[], st: RowState, verdicts: Record<string, MachineVerdict> | undefined,
+  dismissed: Set<number>,
+): Proposal[] => {
+  if (!verdicts) return [];
+  const out: Proposal[] = [];
+  for (const tag of tags) {
+    const machine = verdicts[String(tag.id)];
+    if (!machine || dismissed.has(tag.id)) continue;
+    const human = humanVerdictOf(st, tag.id);
+    if (machine === human) continue;
+    if (st.cantTell && machine !== 'yes') continue;
+    out.push({ tag, machine, human });
+  }
+  return out;
+};
+
+/* The row after accepting one proposal: that cell takes the machine's verdict,
+ * every other cell keeps the human's. A can't-tell row starts over from the
+ * accepted pick, exactly as a tag click on such a row does. */
+export const applyProposal = (st: RowState, tagId: number, machine: MachineVerdict): RowState => {
+  const next: RowState = st.cantTell
+    ? { picked: new Set(), skipped: new Set(), cantTell: false }
+    : { picked: new Set(st.picked), skipped: new Set(st.skipped), cantTell: false };
+  next.picked.delete(tagId);
+  next.skipped.delete(tagId);
+  if (machine === 'yes') next.picked.add(tagId);
+  if (machine === 'skip') next.skipped.add(tagId);
+  return next;
+};
+
+const VERDICT_WORD: Record<MachineVerdict, string> = {
+  yes: 'applies', no: 'negative', skip: 'left out',
+};
+
 export default function NewDedupExamReview() {
   const [params] = useSearchParams();
   const cohort = params.get('cohort') || 'exam_v1';
@@ -106,6 +154,35 @@ export default function NewDedupExamReview() {
       });
     },
   });
+
+  /* Dismissals patch local state like edits do; the server copy is the seed. */
+  const [dismissed, setDismissed] = useState<Map<number, Set<number>>>(new Map());
+  const dismissedOf = (r: ExamAnswerRow): Set<number> =>
+    dismissed.get(r.image_id) ?? new Set(r.machine?.dismissed_tag_ids ?? []);
+
+  const dismissMut = useMutation({
+    mutationFn: (body: { image_id: number; tag_id: number }) =>
+      dismissExamMachineProposal(cohort, body),
+    onError: (e: Error, body) => {
+      pushToast('err', e.message);
+      setDismissed((prev) => {
+        const next = new Map(prev);
+        const cur = new Set(next.get(body.image_id) ?? []);
+        cur.delete(body.tag_id);
+        next.set(body.image_id, cur);
+        return next;
+      });
+    },
+  });
+
+  const keepMine = (r: ExamAnswerRow, tagId: number) => {
+    setDismissed((prev) => {
+      const next = new Map(prev);
+      next.set(r.image_id, new Set([...dismissedOf(r), tagId]));
+      return next;
+    });
+    dismissMut.mutate({ image_id: r.image_id, tag_id: tagId });
+  };
 
   const commit = (imageId: number, next: RowState) => {
     setEdited((prev) => new Map(prev).set(imageId, next));
@@ -219,7 +296,7 @@ export default function NewDedupExamReview() {
             )}
           </h1>
           <p className="text-xs text-[var(--color-ink-3)] mt-0.5">
-            {rows.length} answered · everything here is a decision: &ndash; = negative · a click once = it applies · again = leave it out of that tag · again = back to negative · dot = the machine\u2019s suggestion · every change saves immediately
+            {rows.length} answered · everything here is a decision: &ndash; = negative · a click once = it applies · again = leave it out of that tag · again = back to negative · dot = the machine\u2019s suggestion · proposals = where the machine\u2019s definition-driven verdict differs from yours · every change saves immediately
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -307,6 +384,62 @@ export default function NewDedupExamReview() {
                       </div>
                     </div>
                   )}
+
+                  {r.machine && (() => {
+                    const proposals = proposalsOf(tags, st, r.machine.verdicts, dismissedOf(r));
+                    return (
+                      /* The definition-driven machine review (467) beside the
+                       * answer. A proposal is a DISAGREEMENT with the row as it
+                       * stands; "apply" is a normal whole-image re-answer with
+                       * that one cell changed, "keep mine" records a dismissal. */
+                      <section
+                        data-testid={`machine-review-${r.image_id}`}
+                        className="mt-2 border border-[var(--color-rule)] rounded-[var(--radius-sm)] p-2 bg-[var(--color-paper-2)]/40"
+                      >
+                        <p className="text-[0.6rem] tracking-[0.12em] uppercase text-[var(--color-ink-3)] mb-1.5">
+                          machine review · {proposals.length === 0
+                            ? 'agrees with every cell'
+                            : `${proposals.length} proposal${proposals.length === 1 ? '' : 's'}`}
+                        </p>
+                        {proposals.length > 0 && (
+                          <ul className="flex flex-col gap-1">
+                            {proposals.map((p) => {
+                              const { name } = splitTagLabel(p.tag.label);
+                              return (
+                                <li
+                                  key={p.tag.id}
+                                  data-testid={`proposal-${r.image_id}-${p.tag.id}`}
+                                  className="flex items-center gap-2 flex-wrap text-[0.8125rem]"
+                                >
+                                  <span className="text-[var(--color-ink)]">{name}</span>
+                                  <span className="text-[var(--color-ink-3)]">
+                                    machine: <b className="font-medium text-[var(--color-ink-2)]">{VERDICT_WORD[p.machine]}</b>
+                                    {' · '}you: {VERDICT_WORD[p.human]}
+                                  </span>
+                                  <span className="ml-auto flex gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => commit(r.image_id, applyProposal(st, p.tag.id, p.machine))}
+                                      className="px-2 py-0.5 text-xs rounded-[var(--radius-sm)] border border-[var(--color-sage)] text-[var(--color-ink)] hover:bg-[var(--color-sage)]/10"
+                                    >
+                                      apply
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => keepMine(r, p.tag.id)}
+                                      className="px-2 py-0.5 text-xs rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]"
+                                    >
+                                      keep mine
+                                    </button>
+                                  </span>
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        )}
+                      </section>
+                    );
+                  })()}
 
                   <div className="mt-2">
                     <button

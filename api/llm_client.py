@@ -67,6 +67,7 @@ CalledFor = Literal[
     "enrich_listing_description",
     "screen_exam_image",
     "suggest_exam_answer",
+    "review_exam_image",
 ]
 
 

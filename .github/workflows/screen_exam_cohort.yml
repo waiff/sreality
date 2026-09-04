@@ -27,18 +27,18 @@ on:
         default: "exam_v1"
         type: string
       action:
-        description: "calibrate (measure cost) | screen | stratify | suggest (pre-answer a sitting)"
+        description: "calibrate (measure cost) | screen | stratify | suggest (pre-answer a sitting) | review (definition-driven verdicts beside the answers)"
         required: false
         default: "calibrate"
         type: choice
-        options: ["calibrate", "screen", "stratify", "suggest"]
+        options: ["calibrate", "screen", "stratify", "suggest", "review"]
       set:
-        description: "For suggest: the exam set (tag_exam_sets.name) whose question list to pre-answer."
+        description: "For suggest/review: the exam set (tag_exam_sets.name) whose question list to answer against."
         required: false
         default: ""
         type: string
       count:
-        description: "Images to screen, members to draw when stratifying, or max members to suggest."
+        description: "Images to screen, members to draw when stratifying, or max members to suggest/review."
         required: false
         default: "25"
         type: string
@@ -124,6 +124,16 @@ jobs:
                 ''|*[!a-zA-Z0-9_-]*) echo "::error::suggest needs set=[A-Za-z0-9_-]+"; exit 1 ;;
               esac
               MODULE="scripts.suggest_exam_answers"
+              FLAG="--set ${EXAM_SET} --count ${COUNT}" ;;
+            review)
+              # The definition-driven review: every set tag's ACTIVE definition
+              # in one call per image, yes/no/skip per tag, stored beside the
+              # human answers as review-page proposals (migration 467). Same
+              # engine and rails; refuses a tag without a definition.
+              case "${EXAM_SET}" in
+                ''|*[!a-zA-Z0-9_-]*) echo "::error::review needs set=[A-Za-z0-9_-]+"; exit 1 ;;
+              esac
+              MODULE="scripts.review_exam_answers"
               FLAG="--set ${EXAM_SET} --count ${COUNT}" ;;
             *) echo "::error::unknown action ${ACTION}"; exit 1 ;;
           esac
