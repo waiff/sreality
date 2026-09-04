@@ -50,7 +50,7 @@ def test_answers_speak_record_answers_vocabulary() -> None:
     assert out == [{
         "image_id": 555, "position": 13,
         "picked_tag_ids": [22], "skipped_tag_ids": [25],
-        "auto_tag_ids": [], "cant_tell": False,
+        "auto_tag_ids": [], "cant_tell": False, "suggested_tag_ids": None,
     }]
 
 
@@ -95,10 +95,40 @@ def test_a_backfilled_default_is_flagged_not_hidden() -> None:
     # until the operator re-answers, and that fence is driven by created_by.
     from toolkit import tag_exam
 
+    # 'auto' is computed IN SQL: marker AND untouched since insert. created_by
+    # is insert-only, so a re-answered default must stop being auto — the first
+    # version keyed on the marker alone and fenced every row forever.
     rows = [(1, 1, {
-        "22": {"state": "positive", "reason": None, "by": "operator"},
-        "25": {"state": "negative", "reason": None, "by": "backfill:466"},
+        "22": {"state": "positive", "reason": None, "auto": False},
+        "25": {"state": "negative", "reason": None, "auto": True},
     })]
     out = tag_exam.answers(_Conn(rows), cohort_id=1, tag_ids=[22, 25])
     assert out[0]["auto_tag_ids"] == [25]
     assert out[0]["picked_tag_ids"] == [22]
+
+
+def test_auto_means_marker_and_untouched_since_insert() -> None:
+    from toolkit import tag_exam
+    sql = " ".join(tag_exam._ANSWERS_SQL.split())
+    assert "l.created_by = 'backfill:466'" in sql
+    assert "l.updated_at <= l.created_at" in sql
+
+
+def test_suggestions_ride_along_when_the_set_is_known() -> None:
+    from toolkit import tag_exam
+
+    class _Cur:
+        def __init__(self, owner): self.o = owner
+        def __enter__(self): return self
+        def __exit__(self, *a): ...
+        def execute(self, sql, params=None): self._sql = " ".join(sql.split())
+        def fetchall(self):
+            if "tag_exam_suggestions" in self._sql:
+                return [(555, [22, 99])]           # 99 is not asked any more
+            return [(555, 1, {"22": {"state": "negative", "reason": None, "auto": False}})]
+
+    class _Conn:
+        def cursor(self): return _Cur(self)
+
+    out = tag_exam.answers(_Conn(), cohort_id=1, tag_ids=[22], set_id=1)
+    assert out[0]["suggested_tag_ids"] == [22]     # filtered to the current list

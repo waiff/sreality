@@ -785,12 +785,13 @@ def get_exam_answers(
     /answer route the exam uses: one write path, re-answering the whole image,
     so review can never produce a row shape the exam could not."""
     cohort = _cohort_or_404(conn, cohort_name)
-    set_name, _set_id, tags = _exam_tag_set(conn, set)
+    set_name, set_id, tags = _exam_tag_set(conn, set)
     tag_ids = [t["id"] for t in tags]
     return {"data": {
         "set": set_name,
         "tags": tags,
-        "rows": tag_exam.answers(conn, cohort_id=cohort["id"], tag_ids=tag_ids),
+        "rows": tag_exam.answers(conn, cohort_id=cohort["id"], tag_ids=tag_ids,
+                                 set_id=set_id),
     }}
 
 

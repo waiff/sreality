@@ -199,3 +199,25 @@ describe('<NewDedupExamReview> photo size', () => {
     expect(img.closest('a')).toHaveAttribute('href', 'blob:photo');
   });
 });
+
+describe('<NewDedupExamReview> machine suggestion beside the final', () => {
+  it('marks what the machine would have pressed, without touching the verdict', async () => {
+    vi.mocked(api.getExamAnswers).mockResolvedValue({
+      data: {
+        set: 'all',
+        tags: TAGS,
+        rows: [{
+          image_id: 555, position: 1, picked_tag_ids: [22], skipped_tag_ids: [],
+          cant_tell: false, suggested_tag_ids: [25],
+        }],
+      },
+    });
+    renderPage();
+    await screen.findByText(/1 answered/);
+    expect(screen.getByTestId('review-suggested-25')).toBeInTheDocument();
+    expect(screen.queryByTestId('review-suggested-22')).toBeNull();
+    // The dot is audit, not a verdict: kuchyně stays a recorded negative.
+    expect(screen.getByRole('button', { name: /interier - kuchyně/ }))
+      .toHaveAttribute('data-verdict', 'negative');
+  });
+});

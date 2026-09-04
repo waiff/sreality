@@ -66,6 +66,21 @@ _TRAINING_LABEL_ROWS_SQL = f"""
     ORDER BY itl.image_id
 """
 
+# The operator's 2026-09-01 ruling: exam (holdout) labels MAY be used for
+# training — "there is no reason we should not". This is the explicit door for
+# it: identical to the guarded read minus the anti-join, opened only by name.
+# What it costs, stated where the door is: a model trained through this door
+# can no longer be graded on the holdout it consumed, so its evaluation must
+# come from a fresh holdout or k-fold — the trainer that opens it owns that.
+_TRAINING_LABEL_ROWS_ALL_SQL = """
+    SELECT itl.image_id, itl.state
+    FROM image_tag_labels itl
+    WHERE itl.tag_id = %(tag_id)s::bigint
+      AND itl.source IN ('human', 'human_confirmed')
+      AND itl.state = ANY(%(states)s::text[])
+    ORDER BY itl.image_id
+"""
+
 _COHORT_SQL = """
     SELECT id, name, purpose, frame_size, model, revision, drawn_at, sealed_at,
            sealed_by, note
@@ -86,9 +101,13 @@ TRAINING_STATES = ("positive", "negative")
 
 def training_label_rows(
     conn: psycopg.Connection, *, tag_id: int,
-    states: tuple[str, ...] = TRAINING_STATES,
+    states: tuple[str, ...] = TRAINING_STATES, include_holdout: bool = False,
 ) -> list[tuple[int, str]]:
     """Every (image_id, state) a probe for this tag may train on.
+
+    `include_holdout=True` opens the operator-sanctioned door to the exam's own
+    labels (see _TRAINING_LABEL_ROWS_ALL_SQL for what that costs). Default off:
+    a caller that wants the holdout has to say so, in code, by name.
 
     THE one sanctioned read of training labels. A trainer that reaches
     image_tag_labels directly is a censused exception or a bug — see this module's
@@ -101,8 +120,9 @@ def training_label_rows(
     bad = [s for s in states if s not in TRAINING_STATES]
     if bad:
         raise ValueError(f"not trainable states: {', '.join(bad)}")
+    sql = _TRAINING_LABEL_ROWS_ALL_SQL if include_holdout else _TRAINING_LABEL_ROWS_SQL
     with conn.cursor() as cur:
-        cur.execute(_TRAINING_LABEL_ROWS_SQL, {"tag_id": tag_id, "states": list(states)})
+        cur.execute(sql, {"tag_id": tag_id, "states": list(states)})
         return [(int(r[0]), str(r[1])) for r in cur.fetchall()]
 
 

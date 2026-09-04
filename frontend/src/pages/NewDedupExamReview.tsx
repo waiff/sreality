@@ -174,6 +174,13 @@ export default function NewDedupExamReview() {
         {v == null && !st.cantTell && (
           <span aria-hidden className="mt-0.5 text-[var(--color-ink-4)]">&ndash;</span>
         )}
+        {/* The machine's pre-answer beside your final — audit, never a verdict. */}
+        {(r.suggested_tag_ids ?? []).includes(t.id) && (
+          <span
+            data-testid={`review-suggested-${t.id}`}
+            className="shrink-0 mt-1.5 w-1.5 h-1.5 rounded-full bg-[var(--color-sage)]/80"
+          />
+        )}
         <span className="min-w-0 flex-1">
           {family && (
             <span className="block text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)] leading-none mb-0.5">
@@ -212,7 +219,7 @@ export default function NewDedupExamReview() {
             )}
           </h1>
           <p className="text-xs text-[var(--color-ink-3)] mt-0.5">
-            {rows.length} answered · everything here is a decision: &ndash; = negative · a click once = it applies · again = leave it out of that tag · again = back to negative · every change saves immediately
+            {rows.length} answered · everything here is a decision: &ndash; = negative · a click once = it applies · again = leave it out of that tag · again = back to negative · dot = the machine\u2019s suggestion · every change saves immediately
           </p>
         </div>
         <div className="flex items-center gap-3">
