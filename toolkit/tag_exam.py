@@ -416,6 +416,18 @@ _PROGRESS_SQL = """
     WHERE m.cohort_id = %(cohort_id)s
 """
 
+# The machine's pre-answer per member, for the review subpage — the same rows
+# the exam serves, restricted to suggestions that answered the CURRENT question
+# list (a stale one would mark a subset of the buttons while looking complete).
+_ANSWER_SUGGESTIONS_SQL = """
+    SELECT s.image_id, s.suggested_tag_ids
+    FROM tag_exam_suggestions s
+    WHERE s.cohort_id = %(cohort_id)s AND s.set_id = %(set_id)s
+      AND s.error IS NULL
+      AND s.asked_tag_ids <@ %(tag_ids)s::bigint[]
+      AND s.asked_tag_ids @> %(tag_ids)s::bigint[]
+"""
+
 # Fully-answered members with their current per-tag verdicts, for the review
 # subpage. "Fully answered" mirrors _PROGRESS_SQL: a verdict on EVERY tag of the
 # sitting — a half-answered image still belongs to the exam screen, not review.
@@ -423,7 +435,12 @@ _ANSWERS_SQL = """
     SELECT m.image_id, m.position,
            jsonb_object_agg(l.tag_id::text, jsonb_build_object(
              'state', l.state, 'reason', l.excluded_reason,
-             'by', l.created_by)) AS cells
+             -- A DECLARED DEFAULT (466's bulk negatives) that the operator has
+             -- not touched since. created_by is insert-only, so the marker
+             -- alone would flag a row forever; updated_at moves on every
+             -- re-answer, so "untouched since insert" is the honest test.
+             'auto', (l.created_by = 'backfill:466'
+                      AND l.updated_at <= l.created_at))) AS cells
     FROM tag_exam_members m
     JOIN image_tag_labels l
       ON l.image_id = m.image_id
@@ -466,6 +483,7 @@ def progress(
 
 def answers(
     conn: psycopg.Connection, *, cohort_id: int, tag_ids: list[int],
+    set_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """Every fully-answered exam image with its verdicts, in draw order — the
     read behind the review subpage. The verdict vocabulary is record_answer's
@@ -479,6 +497,15 @@ def answers(
             "cohort_id": cohort_id, "tag_ids": tag_ids, "tag_count": len(tag_ids),
         })
         rows = cur.fetchall()
+    suggested: dict[int, list[int]] = {}
+    if set_id is not None:
+        with conn.cursor() as cur:
+            cur.execute(_ANSWER_SUGGESTIONS_SQL, {
+                "cohort_id": cohort_id, "set_id": set_id, "tag_ids": tag_ids,
+            })
+            current = set(tag_ids)
+            suggested = {int(r[0]): [int(x) for x in (r[1] or []) if int(x) in current]
+                         for r in cur.fetchall()}
     out: list[dict[str, Any]] = []
     for image_id, position, cells in rows:
         picked, skipped, auto = [], [], []
@@ -487,10 +514,7 @@ def answers(
             cell = (cells or {}).get(str(tag_id))
             if cell is None:
                 continue
-            # A backfilled cell is a DECLARED DEFAULT, not a judgment (466's
-            # bulk negatives). The review page fences these off visually; the
-            # marker disappears cell-by-cell as the operator re-answers.
-            if str(cell.get("by") or "").startswith("backfill:"):
+            if cell.get("auto"):
                 auto.append(tag_id)
             if cell["state"] == "positive":
                 picked.append(tag_id)
@@ -502,6 +526,10 @@ def answers(
             "image_id": int(image_id), "position": int(position),
             "picked_tag_ids": picked, "skipped_tag_ids": skipped,
             "auto_tag_ids": auto,
+            # The machine's pre-answer beside the human's final: the standing
+            # anchoring / disagreement audit, now visible per row. None = no
+            # current suggestion for this image.
+            "suggested_tag_ids": suggested.get(int(image_id)),
             # record_answer writes 'ambiguous' on EVERY tag or none, so a full
             # sweep is the only honest cant_tell; anything partial renders as
             # its per-tag states.

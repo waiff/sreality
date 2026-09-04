@@ -1449,6 +1449,10 @@ export interface ExamAnswerRow {
    * declared negatives the operator has not personally confirmed yet. The
    * review page fences these buttons off until the row is re-answered. */
   auto_tag_ids?: number[];
+  /* The machine's pre-answer for this image against the current question
+   * list, beside your final — the anchoring/disagreement audit made visible.
+   * null/absent = no current suggestion. */
+  suggested_tag_ids?: number[] | null;
 }
 
 /* Every fully-answered image of one sitting with its current verdicts, draw

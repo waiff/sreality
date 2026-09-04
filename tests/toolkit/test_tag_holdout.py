@@ -142,3 +142,17 @@ def test_cohort_size_is_scoped_to_one_cohort(conn: _FakeConn) -> None:
     conn.cohort_member_count = 100
     assert th.cohort_size(conn, cohort_id=1) == 100
     assert conn.executed[-1][1] == {"cohort_id": 1}
+
+
+def test_the_training_door_opens_only_by_name(conn: _FakeConn) -> None:
+    """The operator's ruling: exam labels may train. The guarded read stays the
+    default; the door is a keyword a caller must write, and the SQL it runs is
+    the same read minus the anti-join — nothing else changes."""
+    conn.training_rows = [(1, "positive")]
+    th.training_label_rows(conn, tag_id=22)
+    guarded = conn.executed[-1][0]
+    th.training_label_rows(conn, tag_id=22, include_holdout=True)
+    opened = conn.executed[-1][0]
+    assert "tag_exam_members" in guarded
+    assert "tag_exam_members" not in opened
+    assert "itl.source IN ('human', 'human_confirmed')" in opened

@@ -82,6 +82,13 @@ _EXEMPT: dict[str, str] = {
         "Counts a tag's OPEN candidates to decide whether to draw more. Reads "
         "tag_candidates, which cannot contain a holdout image.",
 
+    # --- the operator-sanctioned training door --------------------------------
+    "_TRAINING_LABEL_ROWS_ALL_SQL":
+        "The operator's 2026-09-01 ruling: exam labels may train. Opened only by "
+        "training_label_rows(include_holdout=True) — a caller names it in code — "
+        "and the cost (that model can no longer be graded on the holdout it "
+        "consumed) is stated on the constant. Default stays the guarded read.",
+
     # --- reads that are ABOUT the exam ----------------------------------------
     "_CURATED_SEED_SQL":
         "The curated draw's worklist: the operator's own draft-positive marks, "
