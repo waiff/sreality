@@ -281,6 +281,17 @@ W1 (shared prerequisites + labeling program):
       labels; provenance frozen; stale never served), shown on the review page as per-row
       proposals with apply (whole-image /answer) / keep mine (dismiss). PROGRAM.md ledger has the
       full ruleset.
+- [x] **The agreement gate + bulk machine labeling (2026-09-04, migration 468)** — the gate
+      (`scripts/exam_agreement.py`) scores the machine review per head against the human exam
+      answers, abstentions reported apart and never as negatives; the labeler
+      (`scripts/label_images.py`, lane `label_images.yml`) then labels ONLY heads named
+      explicitly, into `image_tag_labels` as machine cells stamped with the definition that
+      produced them, never touching an exam member and never writing a failed call as a
+      negative. Operator direction: thin heads (wc, parkoviště) are left alone — the LLM builds
+      the training sets for the heads already defined.
+- [ ] **NEXT — apply 467 + 468, run the review, read the gate.** Then choose the sampling
+      strategy WITH those numbers: ~$47 of the $50 buys ~4-8k labeled images once, and a random
+      draw spends most of it on heads that are already strong.
 - [ ] **NEXT — W1 remainder:** one definition renderer with two outputs (the machine prompt and
       a plain-language handbook card, so the operator never meets `counts` / `does_not_count` /
       `confusable_with` / `leave_out_when` while labeling); the machine-label store (a SEPARATE
