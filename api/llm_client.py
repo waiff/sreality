@@ -68,6 +68,7 @@ CalledFor = Literal[
     "screen_exam_image",
     "suggest_exam_answer",
     "review_exam_image",
+    "label_image_bulk",
 ]
 
 

@@ -50,6 +50,24 @@ def _norm(sql: str) -> str:
 # Keyed by "<file>::<constant>" or "<file>:<line>" as sql_corpus reports it; the
 # value is why. Adding an entry is a deliberate act — that is the whole point.
 _EXEMPT: dict[str, str] = {
+    # --- bulk machine labeling (468) -----------------------------------------
+    # These read image_tag_labels to answer "has this image already been labeled
+    # by the machine under the current definition", never to select training
+    # material. They exclude the exam more strictly than the marker does: EVERY
+    # member of EVERY cohort, holdout and curated alike, since a curated member
+    # is the operator's to answer by hand. Adding the marker would WEAKEN them.
+    "_SAMPLE_SQL":
+        "Bulk-label candidate draw. Excludes every exam member outright (all "
+        "cohorts, not only holdout); the labels read are the machine's own resume "
+        "marker, not training material.",
+    "_BY_IDS_SQL":
+        "Same draw from an explicit id list, same outright member exclusion — so a "
+        "hand-supplied id naming an exam member still cannot be labeled.",
+    "_LABELLED_COUNTS_SQL":
+        "Counts the machine's OWN labels under the active definition, to report the "
+        "training set's size. Machine cells cannot exist on exam members (the draws "
+        "above forbid it), and this grades nothing.",
+
     # --- the write path -------------------------------------------------------
     "_UPSERT_STATE_RETURNING_SQL":
         "The write. The operator's exam answers go THROUGH it — excluding the exam "
