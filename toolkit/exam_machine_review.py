@@ -303,3 +303,69 @@ def measured_cost(conn: psycopg.Connection, *, model: str) -> tuple[int, float]:
         cur.execute(_MEASURED_COST_SQL, {"called_for": CALLED_FOR, "model": model})
         row = cur.fetchone()
     return (int(row[0]), float(row[1])) if row else (0, 0.0)
+
+
+# ---------------------------------------------------------------- the yardstick
+
+# A cell GRADES only when both sides committed to yes or no. "Left out" (skip)
+# trains nothing and grades nothing — that is the operator's ratified rule, and
+# scoring a skip as a no would punish the model for obeying it. Abstentions are
+# counted and reported separately, never folded into precision or recall.
+GRADED = ("yes", "no")
+
+
+def agreement(
+    *, rows: list[dict[str, Any]], reviews: dict[int, dict[str, Any]],
+    tag_ids: list[int],
+) -> dict[int, dict[str, int]]:
+    """Per-head confusion counts of machine verdicts against the human answers.
+
+    `rows` are tag_exam.answers' output; `reviews` is reviews_for_answers'. Pure:
+    the caller supplies both reads, so this is testable without a database and
+    identical whichever cohort it is pointed at."""
+    out = {tag_id: {"tp": 0, "fp": 0, "fn": 0, "tn": 0,
+                    "human_skip": 0, "machine_skip": 0, "unreviewed": 0}
+           for tag_id in tag_ids}
+    picked_key, skipped_key = "picked_tag_ids", "skipped_tag_ids"
+    for row in rows:
+        review = reviews.get(int(row["image_id"]))
+        verdicts = (review or {}).get("verdicts") or {}
+        picked = set(row.get(picked_key) or [])
+        skipped = set(row.get(skipped_key) or [])
+        cant_tell = bool(row.get("cant_tell"))
+        for tag_id in tag_ids:
+            cell = out[tag_id]
+            if not review:
+                cell["unreviewed"] += 1
+                continue
+            machine = verdicts.get(tag_id)
+            if machine is None:
+                cell["unreviewed"] += 1
+                continue
+            # A can't-tell row is an abstention on every cell, exactly as the
+            # exam records it (excluded/'ambiguous' across the board).
+            human = "skip" if (cant_tell or tag_id in skipped) else (
+                "yes" if tag_id in picked else "no")
+            if human not in GRADED:
+                cell["human_skip"] += 1
+                continue
+            if machine not in GRADED:
+                cell["machine_skip"] += 1
+                continue
+            if human == "yes":
+                cell["tp" if machine == "yes" else "fn"] += 1
+            else:
+                cell["fp" if machine == "yes" else "tn"] += 1
+    return out
+
+
+def scored(counts: dict[str, int]) -> dict[str, Any]:
+    """Precision / recall / graded total for one head. Division by zero is None,
+    never 0.0 — "no positive was ever proposed" and "every proposal was wrong"
+    are opposite facts and must not render the same."""
+    tp, fp, fn = counts["tp"], counts["fp"], counts["fn"]
+    graded = tp + fp + fn + counts["tn"]
+    precision = tp / (tp + fp) if (tp + fp) else None
+    recall = tp / (tp + fn) if (tp + fn) else None
+    return {**counts, "graded": graded, "precision": precision, "recall": recall,
+            "human_positives": tp + fn}
