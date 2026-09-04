@@ -168,12 +168,18 @@ def render_prompt(definition: dict[str, Any], *, tag_label: str) -> str:
     # leave-out, exactly as the operator labels it on the exam screen, so the
     # machine and the human answer the same question the same way.
     lines.append(
-        "ANSWER yes / no / skip. Answer yes when the photo is OF this thing — a "
-        "co-subject counts, a photo framed on something else does not. Answer no "
-        "when it does not apply — an incidental hint in the background is a "
-        "valuable no. Answer skip in two cases ONLY: the image is genuinely "
-        "undecidable, or this tag's subject is clearly and substantially present "
-        "but the photo is of something else. Never answer no in that second case: "
-        "leave it out instead."
+        "THE QUESTION IS WHAT THIS PHOTO IS AN IMAGE OF, never what is visible in "
+        "it.\n"
+        "ANSWER yes / no / skip.\n"
+        "yes — this tag is what the photo is of. If two or three things are "
+        "equally the subject and you cannot tell which is primary, answer yes for "
+        "each of them.\n"
+        "no — it does not apply. An incidental appearance in the background is a "
+        "valuable no. A case listed under DOES NOT COUNT is ALWAYS a no, however "
+        "similar it looks: those boundaries are the ones worth learning.\n"
+        "skip — two cases only: the image is genuinely undecidable or unreadable, "
+        "or this tag's subject is clearly and substantially present, yet the photo "
+        "is plainly composed on something else. Never answer no in that second "
+        "case: leave it out instead."
     )
     return "\n".join(lines)
