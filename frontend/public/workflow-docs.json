@@ -5131,7 +5131,7 @@
         },
         {
           "name": "action",
-          "description": "calibrate (measure cost) | screen | stratify | suggest (pre-answer a sitting)",
+          "description": "calibrate (measure cost) | screen | stratify | suggest (pre-answer a sitting) | review (definition-driven verdicts beside the answers)",
           "required": false,
           "type": "choice",
           "default": "calibrate",
@@ -5139,12 +5139,13 @@
             "calibrate",
             "screen",
             "stratify",
-            "suggest"
+            "suggest",
+            "review"
           ]
         },
         {
           "name": "set",
-          "description": "For suggest: the exam set (tag_exam_sets.name) whose question list to pre-answer.",
+          "description": "For suggest/review: the exam set (tag_exam_sets.name) whose question list to answer against.",
           "required": false,
           "type": "string",
           "default": "",
@@ -5152,7 +5153,7 @@
         },
         {
           "name": "count",
-          "description": "Images to screen, members to draw when stratifying, or max members to suggest.",
+          "description": "Images to screen, members to draw when stratifying, or max members to suggest/review.",
           "required": false,
           "type": "string",
           "default": "25",
