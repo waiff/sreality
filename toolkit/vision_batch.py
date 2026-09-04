@@ -37,7 +37,7 @@ class RecordFn(Protocol):
 
 def run_vision_batch(
     r2: Any, *, rows: list[tuple[int, str]], prompt: str,
-    parse: Callable[[str], list[int]], record: RecordFn,
+    parse: Callable[[str], Any], record: RecordFn,
     model: str, called_for: str, max_tokens: int,
     max_usd: float, max_seconds: int, workers: int,
 ) -> dict[str, Any]:

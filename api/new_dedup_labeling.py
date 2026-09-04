@@ -784,15 +784,46 @@ def get_exam_answers(
     draw order — the review subpage. Corrections are POSTed back to the same
     /answer route the exam uses: one write path, re-answering the whole image,
     so review can never produce a row shape the exam could not."""
+    from toolkit import exam_machine_review as mr
+
     cohort = _cohort_or_404(conn, cohort_name)
     set_name, set_id, tags = _exam_tag_set(conn, set)
     tag_ids = [t["id"] for t in tags]
-    return {"data": {
-        "set": set_name,
-        "tags": tags,
-        "rows": tag_exam.answers(conn, cohort_id=cohort["id"], tag_ids=tag_ids,
-                                 set_id=set_id),
-    }}
+    rows = tag_exam.answers(conn, cohort_id=cohort["id"], tag_ids=tag_ids,
+                            set_id=set_id)
+    # The definition-driven verdicts (467) beside each answer. Only CURRENT
+    # reviews are served — same provenance rule as suggestions, plus the
+    # definition versions. The page derives the proposals from the row's live
+    # state, so an applied proposal disappears without a refetch.
+    reviews = mr.reviews_for_answers(conn, cohort_id=cohort["id"], tag_ids=tag_ids)
+    for row in rows:
+        row["machine"] = reviews.get(row["image_id"])
+    return {"data": {"set": set_name, "tags": tags, "rows": rows}}
+
+
+class DismissProposalIn(BaseModel):
+    image_id: int
+    tag_id: int
+
+
+@router.post("/exam/{cohort_name}/machine-review/dismiss")
+def post_dismiss_machine_proposal(
+    cohort_name: str, body: DismissProposalIn, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """The operator keeps their own answer on one cell against the machine's
+    verdict. Accepting a proposal is NOT a route here: it is a normal /answer
+    re-answering the whole image, so review can never write a row shape the
+    exam could not."""
+    from toolkit import exam_machine_review as mr
+
+    cohort = _cohort_or_404(conn, cohort_name)
+    try:
+        dismissed = mr.dismiss_proposal(
+            conn, cohort_id=cohort["id"], image_id=body.image_id, tag_id=body.tag_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail=f"image {body.image_id} has no machine review") from exc
+    return {"data": {"image_id": body.image_id, "dismissed_tag_ids": dismissed}}
 
 
 @router.post("/exam/{cohort_name}/answer")

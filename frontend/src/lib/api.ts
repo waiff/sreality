@@ -1439,6 +1439,14 @@ export const getExamState = (cohort: string, set?: string): Promise<{ data: Exam
     { jwt: true },
   );
 
+export type MachineVerdict = 'yes' | 'no' | 'skip';
+
+export interface ExamMachineReview {
+  verdicts: Record<string, MachineVerdict>;
+  dismissed_tag_ids: number[];
+  reviewed_at: string | null;
+}
+
 export interface ExamAnswerRow {
   image_id: number;
   position: number;
@@ -1449,6 +1457,10 @@ export interface ExamAnswerRow {
    * declared negatives the operator has not personally confirmed yet. The
    * review page fences these buttons off until the row is re-answered. */
   auto_tag_ids?: number[];
+  /* The definition-driven machine review (migration 467): one verdict per
+   * tag against the ACTIVE definitions. The page derives proposals from the
+   * row's live state; null/absent = no current review for this image. */
+  machine?: ExamMachineReview | null;
   /* The machine's pre-answer for this image against the current question
    * list, beside your final — the anchoring/disagreement audit made visible.
    * null/absent = no current suggestion. */
@@ -1479,6 +1491,16 @@ export const answerExamQuestion = (
 ): Promise<{ data: { image_id: number; cells_written: number } }> =>
   request<{ data: { image_id: number; cells_written: number } }>(
     `/new-dedup/labeling/exam/${cohort}/answer`,
+    { method: 'POST', json: body, jwt: true },
+  );
+
+/* "Keep mine" on one machine proposal. Accepting one is NOT a separate call:
+ * it is answerExamQuestion with that cell changed — the single write path. */
+export const dismissExamMachineProposal = (
+  cohort: string, body: { image_id: number; tag_id: number },
+): Promise<{ data: { image_id: number; dismissed_tag_ids: number[] } }> =>
+  request<{ data: { image_id: number; dismissed_tag_ids: number[] } }>(
+    `/new-dedup/labeling/exam/${cohort}/machine-review/dismiss`,
     { method: 'POST', json: body, jwt: true },
   );
 

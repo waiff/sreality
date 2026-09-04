@@ -117,8 +117,32 @@ def render_card(definition: dict[str, Any], *, tag_label: str) -> HandbookCard:
     )
 
 
-def render_prompt(definition: dict[str, Any], *, tag_label: str) -> str:
-    """The vision model's rendering: the same content, kept structured.
+# The BRIEF's three-state rule, verbatim in spirit — the first version of this
+# paragraph "sharpened" the present-but-not-the-subject case into a yes, which
+# was a quiet guideline change hiding in a renderer. Restored: that case is a
+# leave-out, exactly as the operator labels it on the exam screen, so the
+# machine and the human answer the same question the same way. A constant, not
+# a line inside the renderer, so a prompt that carries EVERY definition (the
+# machine review) states it once after all of them instead of eighteen times.
+THREE_TIER_RULE = (
+    "THE QUESTION IS WHAT THIS PHOTO IS AN IMAGE OF, never what is visible in "
+    "it.\n"
+    "ANSWER yes / no / skip.\n"
+    "yes — this tag is what the photo is of. If two or three things are "
+    "equally the subject and you cannot tell which is primary, answer yes for "
+    "each of them.\n"
+    "no — it does not apply. An incidental appearance in the background is a "
+    "valuable no. A case listed under DOES NOT COUNT is ALWAYS a no, however "
+    "similar it looks: those boundaries are the ones worth learning.\n"
+    "skip — two cases only: the image is genuinely undecidable or unreadable, "
+    "or this tag's subject is clearly and substantially present, yet the photo "
+    "is plainly composed on something else. Never answer no in that second "
+    "case: leave it out instead."
+)
+
+
+def render_prompt_block(definition: dict[str, Any], *, tag_label: str) -> str:
+    """The vision model's rendering of ONE definition, without the closing rule.
 
     The model keeps the `confusable_with` / `does_not_count` distinction the card
     collapses, because it acts on them differently — a confusable names a rival tag
@@ -159,27 +183,12 @@ def render_prompt(definition: dict[str, Any], *, tag_label: str) -> str:
 
     leave_out = _clean(definition.get("leave_out_when"))
     if leave_out:
-        lines.append(f"GENUINELY UNDECIDABLE WHEN: {leave_out}")
+        lines.append(f"LEAVE OUT (answer skip) WHEN: {leave_out}")
 
-    # Stated last so it is the final instruction the model reads, and it is the
-    # BRIEF's three-state rule verbatim in spirit — the first version of this
-    # paragraph "sharpened" the present-but-not-the-subject case into a yes, which
-    # was a quiet guideline change hiding in a renderer. Restored: that case is a
-    # leave-out, exactly as the operator labels it on the exam screen, so the
-    # machine and the human answer the same question the same way.
-    lines.append(
-        "THE QUESTION IS WHAT THIS PHOTO IS AN IMAGE OF, never what is visible in "
-        "it.\n"
-        "ANSWER yes / no / skip.\n"
-        "yes — this tag is what the photo is of. If two or three things are "
-        "equally the subject and you cannot tell which is primary, answer yes for "
-        "each of them.\n"
-        "no — it does not apply. An incidental appearance in the background is a "
-        "valuable no. A case listed under DOES NOT COUNT is ALWAYS a no, however "
-        "similar it looks: those boundaries are the ones worth learning.\n"
-        "skip — two cases only: the image is genuinely undecidable or unreadable, "
-        "or this tag's subject is clearly and substantially present, yet the photo "
-        "is plainly composed on something else. Never answer no in that second "
-        "case: leave it out instead."
-    )
     return "\n".join(lines)
+
+
+def render_prompt(definition: dict[str, Any], *, tag_label: str) -> str:
+    """One tag's full instruction: its block, then the three-tier rule — stated
+    last so it is the final thing the model reads."""
+    return render_prompt_block(definition, tag_label=tag_label) + "\n" + THREE_TIER_RULE

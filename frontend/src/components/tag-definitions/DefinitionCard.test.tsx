@@ -43,7 +43,7 @@ describe('<DefinitionCard>', () => {
     // A heading over an empty list would make "this tag has no exclusions" and
     // "the exclusions failed to load" look identical.
     render(<DefinitionCard card={card({ cant_tell: [] })} />);
-    expect(screen.queryByText(/Can't tell/)).toBeNull();
+    expect(screen.queryByText(/Leave out/)).toBeNull();
     expect(screen.getByText('Count it')).toBeInTheDocument();
   });
 

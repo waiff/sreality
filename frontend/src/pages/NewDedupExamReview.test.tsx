@@ -221,3 +221,79 @@ describe('<NewDedupExamReview> machine suggestion beside the final', () => {
       .toHaveAttribute('data-verdict', 'negative');
   });
 });
+
+describe('<NewDedupExamReview> machine review proposals', () => {
+  const withMachine = (verdicts: Record<string, 'yes' | 'no' | 'skip'>, dismissed: number[] = []) => {
+    vi.mocked(api.getExamAnswers).mockResolvedValue({
+      data: {
+        set: 'all',
+        tags: TAGS,
+        rows: [{
+          image_id: 555, position: 1, picked_tag_ids: [22], skipped_tag_ids: [],
+          cant_tell: false,
+          machine: { verdicts, dismissed_tag_ids: dismissed, reviewed_at: null },
+        }],
+      },
+    });
+  };
+
+  it('raises only the cells where the machine disagrees with the row', async () => {
+    withMachine({ '22': 'yes', '25': 'yes' });
+    renderPage();
+    await screen.findByText(/1 answered/);
+    expect(screen.getByText(/1 proposal$/)).toBeInTheDocument();
+    expect(screen.getByTestId('proposal-555-25')).toBeInTheDocument();
+    expect(screen.queryByTestId('proposal-555-22')).toBeNull();
+  });
+
+  it('says so when the machine agrees with every cell', async () => {
+    withMachine({ '22': 'yes', '25': 'no' });
+    renderPage();
+    await screen.findByText(/1 answered/);
+    expect(screen.getByText(/agrees with every cell/)).toBeInTheDocument();
+  });
+
+  it('apply re-answers the WHOLE image with that one cell changed', async () => {
+    withMachine({ '22': 'skip', '25': 'no' });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/1 answered/);
+    await user.click(screen.getByRole('button', { name: /^apply$/ }));
+    await waitFor(() => expect(api.answerExamQuestion).toHaveBeenCalledWith(
+      'exam_v1',
+      { image_id: 555, picked_tag_ids: [], skipped_tag_ids: [22], cant_tell: false },
+    ));
+    // Applied = the row now matches the machine, so the proposal is gone.
+    expect(screen.queryByTestId('proposal-555-22')).toBeNull();
+    expect(screen.getByText(/agrees with every cell/)).toBeInTheDocument();
+  });
+
+  it('keep mine records a dismissal and hides the proposal without touching the answer', async () => {
+    vi.mocked(api.dismissExamMachineProposal).mockResolvedValue({
+      data: { image_id: 555, dismissed_tag_ids: [25] },
+    });
+    withMachine({ '22': 'yes', '25': 'yes' });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/1 answered/);
+    await user.click(screen.getByRole('button', { name: /keep mine/ }));
+    await waitFor(() => expect(api.dismissExamMachineProposal).toHaveBeenCalledWith(
+      'exam_v1', { image_id: 555, tag_id: 25 },
+    ));
+    expect(screen.queryByTestId('proposal-555-25')).toBeNull();
+    expect(api.answerExamQuestion).not.toHaveBeenCalled();
+  });
+
+  it('a dismissed cell from the server is not raised again', async () => {
+    withMachine({ '22': 'yes', '25': 'yes' }, [25]);
+    renderPage();
+    await screen.findByText(/1 answered/);
+    expect(screen.getByText(/agrees with every cell/)).toBeInTheDocument();
+  });
+
+  it('renders no section when there is no current review', async () => {
+    renderPage();
+    await screen.findByText(/2 answered/);
+    expect(screen.queryByText(/machine review/)).toBeNull();
+  });
+});

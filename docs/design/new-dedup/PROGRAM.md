@@ -140,6 +140,32 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-04 — **One ruleset, written the same way on every tag; the machine reviews the exam
+  against it (migration 467).** The operator's audit question — is "left out" vs "negative"
+  applied by one logic across fasáda-among-houses, open-plan kitchen/dining/living, the three
+  document kinds, a bathroom seen through a door, a toilet inside a bathroom — exposed that the
+  eighteen definitions carried the ratified three-tier calculus unevenly (only kuchyně spelled
+  out the present-but-secondary tier; koupelna/wc wrote the same case as a named exclusion, i.e.
+  a NO). The ruleset, now stated once: the question is what the photo is an image OF; the tag's
+  SUBJECT is what the definition says (a room kind, a composed shot, a document kind), never the
+  object inside it — so a toilet is not a wc room and a building among many is not a fasáda
+  (absent subject = negative), while "left out" is reserved for the subject itself being present
+  but secondary. Documents are the deliberate exception: kinds are exclusive, one decisive
+  feature assigns exactly one, the rival is negative. Three rulings: fasáda = ONE building even
+  inside a joined block (a long angled/distant stretch of 3+ is the street, negative); a CLOSED
+  garage door in a house photo is negative (subject absent), reversing the earlier left-out; every
+  space tag now carries the same three sentences (composed on it → yes; glimpsed → no; clearly
+  and substantially in frame but composed elsewhere → skip), every document tag the same
+  exclusivity sentence, and the prompt/card label for that field reads "leave out (skip)" instead
+  of "undecidable". Definitions saved live (all 18 bumped). Then the mechanism the operator asked
+  for: a definition-driven machine review — one gpt-5-mini call per exam image carrying ALL
+  eighteen definitions and the three-tier rule once, yes/no/skip per tag, stored in its own table
+  (`tag_exam_machine_reviews`, provenance = asked list + definition versions frozen per row; stale
+  rows never served, re-offered by the lane; dismissals reset on re-review) and rendered on the
+  review page as PROPOSALS per row: apply = the exam's own whole-image /answer, keep mine = a
+  dismissal. Never labels. The 461 suggestions (name-only, pre-definition) stay as the anchoring
+  audit and are not the same thing.
+
 - 2026-08-31 — **The exam instrument decouples from the holdout role; drafts declared (operator
   ruling; migration 464).** The operator's reframing, accepted after working the inconsistencies
   through: the pre-exam labels (1,522 cells, mostly positives, made without guidelines) are NOT

@@ -69,7 +69,7 @@ export default function DefinitionCard({ card, draft = false }: Props) {
 
       <Section heading="Count it" tone="yes" items={card.count_it} />
       <Section heading="Don't count it" tone="no" items={card.dont_count_it} />
-      <Section heading="Can't tell — skip" tone="unsure" items={card.cant_tell} />
+      <Section heading="Leave out — skip" tone="unsure" items={card.cant_tell} />
 
       {card.count_it.length === 0
         && card.dont_count_it.length === 0
