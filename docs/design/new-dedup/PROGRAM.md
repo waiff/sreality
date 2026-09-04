@@ -140,6 +140,32 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-04 (b) — **The LLM builds the training sets; the gate decides which heads it may
+  build (operator direction; migration 468).** Ruling: stop drawing human cohorts to rescue thin
+  heads — wc and parkoviště are left alone — and push instead on the model labeling in quantity
+  for the heads already defined. Two pieces, in the order evidence demands. First
+  `scripts/exam_agreement.py`: per-head precision / recall of the machine review against the
+  human exam answers, with the ratified grading rule enforced — a cell grades ONLY when both
+  sides said yes or no, an abstention on either side trains nothing and grades nothing (scoring
+  it as a negative would punish the model for obeying the leave-out rule and inflate the
+  denominator), and precision/recall are None rather than 0.00 when nothing was proposed, since
+  "never proposed" and "always wrong" are opposite facts. Second `scripts/label_images.py` +
+  `label_images.yml`: one call per image carrying the ACTIVE definitions of the NAMED heads,
+  verdicts written to `image_tag_labels` as `source='machine'` — no new store, because that
+  upsert already refuses to overwrite a human cell and stamps `definition_id` + `model` (the
+  exam keeps its separate table only because there the suppression would hide the disagreement
+  worth reading). Rails: no exam member is ever labeled (holdout unseen, curated is the
+  operator's); heads named explicitly, no label-everything switch, since bulk labeling is only
+  justified for a head the gate cleared; a leave-out stored as excluded/'pruned', NEVER as a
+  negative; an unusable reply writes nothing at all; resume by provenance, so a definition edit
+  re-opens exactly the heads whose wording moved; lane defaults to dry_run.
+  **Cost structure, measured from the rendered prompt:** the 768px photo and the reasoning
+  dominate — the eighteen definitions add only ~$0.0016/image — so a cheap screen-then-verify
+  two-stage would pay for the photo twice and save almost nothing. One good pass per image is
+  the right shape. With ~$47 of the $50 left, that is roughly 4-8k labeled images IN TOTAL,
+  once; a purely random draw would spend most of it re-confirming the already-strong heads, so
+  the sampling strategy is an open operator decision to be taken WITH the agreement numbers.
+
 - 2026-09-04 — **One ruleset, written the same way on every tag; the machine reviews the exam
   against it (migration 467).** The operator's audit question — is "left out" vs "negative"
   applied by one logic across fasáda-among-houses, open-plan kitchen/dining/living, the three
