@@ -37,7 +37,8 @@ WHAT THIS LANE IS
     before it opens a batch row (see `run()`) rather than stamping 'ok' over a corpus it
     never mined: a batch stamped 'ok' moves the incremental watermark, and a watermark is a
     claim of coverage. The lane stops being inert on the first portal activation
-    (W2-6…W2-12), and it has no dispatcher until W2-13 either way.
+    (W2-6…W2-12); its dispatcher is `.github/workflows/location_claims_remine_archive.yml`
+    (W2-13).
   * EVERY reader here is portal-AGNOSTIC and stays that way (rule 21). They differ by the
     QUESTION they ask of a node — its own text, a pattern over its text, a pattern over one
     attribute, whether a marker is present, one scalar of a JSON document it carries — never
@@ -83,9 +84,14 @@ A READER STATES WHAT IT READ; IT DOES NOT STAMP WHAT THAT MEANS
   first-party pin. `position_branch` is required on a coordinate read and refused on
   anything else; the ladder, not the reader, then stamps the class.
 
-CLI:
+CLI (dispatched by `.github/workflows/location_claims_remine_archive.yml`, one portal per
+run):
     python -m location_data.claims_remine_archive --mode full --max-seconds 2400
     python -m location_data.claims_remine_archive --mode incremental --source remax
+`--batch-size` defaults to 500 and is clamped to this lane's OWN bounds (50-5000), not W1's
+10,000 floor: one batch holds a single transaction across that many sequential R2 GETs.
+`--allow-zero-claims` waives the tripwire that exits 3 when a source mined nothing out of
+bodies its own entries applied to.
 Required: SUPABASE_DB_URL, plus the R2_* env vars — W2a made the bucket the bodies' home
 (the spill threshold is Postgres's own ~2 KB TOAST boundary, migrations 403/406), so a
 run with a reader and no store is refused rather than left to mine the handful of
@@ -114,11 +120,8 @@ import psycopg
 from location_data import loader_db, payloads
 from location_data.claims_intake import (
     ARCHIVED_COORDINATE_RULES,
-    DEFAULT_BATCH_SIZE,
     EMITTABLE_LICENCE_CLASSES,
     LEGACY_COLUMNS,
-    MAX_BATCH_SIZE,
-    MIN_BATCH_SIZE,
     SOURCES,
     SUBSTRATE_ARCHIVED_HTML,
     Absence,
@@ -235,6 +238,40 @@ STATEMENT_TIMEOUT_ENV = "LOCATION_REMINE_ARCHIVE_TIMEOUT_S"
 DEFAULT_STATEMENT_TIMEOUT_S = 600
 _FAILURE_STAMP_TIMEOUT_S = 30
 DEFAULT_OVERLAP_HOURS = 3
+
+# THIS LANE'S BATCH IS NOT W1's BATCH. `claims_intake.MIN_BATCH_SIZE` is 10,000 because a W1
+# batch is a keyset page over `listings` — cheap rows, one statement. One iteration HERE holds
+# a single transaction across `batch_size` SEQUENTIAL R2 GETs (one per body, no concurrency),
+# every decompressed body in memory at once (41-245 KB each, so 10,000 bodies is 0.4-2.4 GB)
+# and the batch's writes. The shared floor would make every dispatch a multi-gigabyte
+# transaction holding thousands of network round trips open against the transaction-mode
+# pooler, and `--limit` — the only way to shrink it today — also ends the run. Own bounds.
+ARCHIVE_MIN_BATCH_SIZE = 50
+ARCHIVE_MAX_BATCH_SIZE = 5_000
+ARCHIVE_DEFAULT_BATCH_SIZE = 500
+
+# Below this many applicable bodies a run is a trial (`--limit 10`, a first dispatch), and a
+# zero there is not evidence of anything.
+ZERO_CLAIM_TRIPWIRE_MIN_PAYLOADS = 500
+
+
+def clamp_batch_size(requested: int) -> int:
+    """The lane's own bounds, as a function so the rule is testable without a database."""
+    return max(ARCHIVE_MIN_BATCH_SIZE, min(ARCHIVE_MAX_BATCH_SIZE, requested))
+
+
+def zero_claim_sources(stats: dict[str, Any], *,
+                       minimum: int = ZERO_CLAIM_TRIPWIRE_MIN_PAYLOADS) -> list[str]:
+    """Sources whose batch saw bodies an entry APPLIED to and produced no claim.
+
+    Not `payloads > 0`: a portal whose DOM entries are all `detail` entries legitimately scans
+    its `index` bodies and claims nothing from them, so `payloads` counts a population a zero
+    says nothing about. `applicable_payloads` counts only the bodies at least one entry was
+    declared for — the population a zero IS a statement about."""
+    return sorted(
+        source for source, s in stats.get("per_source", {}).items()
+        if s.get("applicable_payloads", 0) >= minimum and s.get("claims", 0) == 0
+    )
 
 
 class BodyStore(Protocol):
@@ -2172,8 +2209,9 @@ def run(
     remaining = limit
 
     totals: dict[str, Any] = {
-        "payloads": 0, "claims": 0, "claims_inserted": 0, "observations": 0,
-        "enqueued": 0, "absences": 0, "bodies_from_r2": 0, "oversized_values": 0,
+        "payloads": 0, "applicable_payloads": 0, "claims": 0, "claims_inserted": 0,
+        "observations": 0, "enqueued": 0, "absences": 0, "bodies_from_r2": 0,
+        "oversized_values": 0,
     }
     per_source: dict[str, dict[str, Any]] = {}
     for scan_source in readable:
@@ -2276,8 +2314,9 @@ def _run_source(
             batch_id = int(cur.fetchone()[0])
 
     stats: dict[str, Any] = {
-        "payloads": 0, "claims": 0, "claims_inserted": 0, "observations": 0,
-        "enqueued": 0, "absences": 0, "bodies_from_r2": 0, "oversized_values": 0,
+        "payloads": 0, "applicable_payloads": 0, "claims": 0, "claims_inserted": 0,
+        "observations": 0, "enqueued": 0, "absences": 0, "bodies_from_r2": 0,
+        "oversized_values": 0,
         "stopped_early": False, "reached_end": False, "resumed_from_id": after_id,
         "source": source,
     }
@@ -2307,11 +2346,18 @@ def _run_source(
                     break
 
                 scanned = [_row_from_payload_record(record) for record in records]
-                wanted_bodies = [
+                # The bodies at least one entry was DECLARED for. Counted, because
+                # `outcome='ok'` only ever meant "the scan ran out of rows": a portal whose
+                # selectors have gone stale sweeps the whole archive, writes nothing, stamps
+                # `ok` and moves the watermark. `zero_claim_sources` reads this counter, and
+                # `payloads` would not do — a detail-only contract scans index bodies it was
+                # never meant to claim from.
+                applicable = [
                     payload.id for payload, _ in scanned
                     if archive_entries(entries, payload.page_kind)
                 ]
-                bodies, from_r2 = load_bodies(cur, wanted_bodies, store=store)
+                stats["applicable_payloads"] += len(applicable)
+                bodies, from_r2 = load_bodies(cur, applicable, store=store)
                 stats["bodies_from_r2"] += from_r2
 
                 result = IntakeResult()
@@ -2336,10 +2382,12 @@ def _run_source(
                     stats["claims_inserted"] += inserted
                     stats["observations"] += observed
                     stats["enqueued"] += enqueued
-            LOG.info("REMINE-ARCHIVE progress source=%s payloads=%d claims=%d inserted=%d "
-                     "observed=%d absences=%d oversized=%d from_r2=%d through_id=%d",
-                     source, stats["payloads"], stats["claims"], stats["claims_inserted"],
-                     stats["observations"], stats["absences"], stats["oversized_values"],
+            LOG.info("REMINE-ARCHIVE progress source=%s payloads=%d applicable=%d claims=%d "
+                     "inserted=%d observed=%d absences=%d oversized=%d from_r2=%d "
+                     "through_id=%d",
+                     source, stats["payloads"], stats["applicable_payloads"],
+                     stats["claims"], stats["claims_inserted"], stats["observations"],
+                     stats["absences"], stats["oversized_values"],
                      stats["bodies_from_r2"], after_id)
     except Exception as exc:
         if batch_id is not None:
@@ -2366,6 +2414,7 @@ def _run_source(
                 "cursor_after_id": after_id,
                 "cursor_after_ts": after_ts if mode == "incremental" else None,
                 "note": f"payloads={stats['payloads']} "
+                        f"applicable={stats['applicable_payloads']} "
                         f"stopped_early={stats['stopped_early']} "
                         f"reached_end={stats['reached_end']} through_id={after_id} "
                         f"bodies_from_r2={stats['bodies_from_r2']}",
@@ -2380,7 +2429,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("full", "incremental"), default="incremental")
     parser.add_argument("--source", choices=SOURCES, default=None)
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--batch-size", type=int, default=ARCHIVE_DEFAULT_BATCH_SIZE)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max-seconds", type=float, default=None)
     parser.add_argument("--start-after-id", type=int, default=0)
@@ -2391,6 +2440,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lease-ttl-seconds", type=int, default=DEFAULT_LEASE_TTL_S)
     parser.add_argument("--dry-run", action="store_true",
                         help="Extract and report; write nothing.")
+    parser.add_argument("--allow-zero-claims", action="store_true",
+                        help="do not fail the run when a source mines nothing from bodies "
+                             "its entries applied to")
     parser.add_argument("--note", default=None)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -2402,7 +2454,7 @@ def main(argv: list[str] | None = None) -> int:
     if not os.environ.get("SUPABASE_DB_URL"):
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
-    batch_size = max(MIN_BATCH_SIZE, min(MAX_BATCH_SIZE, args.batch_size))
+    batch_size = clamp_batch_size(args.batch_size)
 
     with db.connect() as conn:
         # Lease-row CAS, never an advisory lock: the transaction-mode pooler strands a lock
@@ -2428,6 +2480,16 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"REFUSED: {exc}", file=sys.stderr)
                 return 2
     LOG.info("REMINE-ARCHIVE done %s", json.dumps(stats, default=str, sort_keys=True))
+    zero = [] if args.allow_zero_claims else zero_claim_sources(stats)
+    if zero:
+        LOG.error(
+            "REMINE-ARCHIVE mined 0 claims from bodies its own entries applied to, for %s. "
+            "The batch is stamped 'ok' because the SCAN ran out of rows, which is not the "
+            "same as having read anything: an active contract whose selectors have gone "
+            "stale sweeps the whole archive, writes nothing and still moves the incremental "
+            "watermark. Re-check the locators against a live page (and the exclusion-zone "
+            "register's zones_unmatched) before re-dispatching.", ", ".join(zero))
+        return 3
     return 0
 
 

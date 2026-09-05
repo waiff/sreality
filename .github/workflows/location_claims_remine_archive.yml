@@ -1,0 +1,183 @@
+name: "Jobs: Location archived-HTML sweep (W2)"
+
+# Re-mines location claims out of the ARCHIVED page bodies — `portal_raw_payloads`, the
+# store W2a filled from `portal_raw_pages` and now dual-writes, whose bytes live in R2. It
+# runs `location_data.claims_remine_archive`: the latest OK body per (source,
+# source_id_native, page_kind), scoped through that portal's exclusion-zone register, read
+# by the DOM readers its contract names, and written under `surface='archived_html'` with
+# the C6 licence ladder stamped onto every coordinate. Dispatch-only, one portal at a time.
+#
+# NOT `location_claims_remine.yml`. That file is W3 and re-mines `listing_snapshots.raw_json`
+# — a different substrate, a different lane string, a different lease row. Two waves designed
+# a "re-mine" lane independently and both drafts wanted the same name; `LANE`, `JOB_NAME` and
+# the extractor version are PRIMARY KEYS in `location_claim_batches` (resume cursor),
+# `location_jobs` (lease CAS) and the retraction scope, so one shared string would have been a
+# silent coverage hole rather than a crash. This lane is disambiguated end to end: module
+# `claims_remine_archive`, lane `location_claims_remine_archive`, inner concurrency group
+# `location-remine-archive`, and this filename. `tests/location_data/test_lane_identifiers.py`
+# is the standing gate on the pair.
+#
+# DISPATCH-ONLY ON PURPOSE — no `schedule:` trigger. The first pass is a corpus-wide sweep
+# over ~472k archived bodies, every one of them a separate R2 GET, against the shared
+# production instance that four concurrent location lanes have already knocked over once
+# (2026-08-10 incident, roadmap/location-data.md "Standing decisions"). It must not start on
+# its own the moment this workflow merges. A follow-up PR may add a `schedule:` cron for
+# `mode=incremental` once every activated portal has reached the end of a full pass — not
+# before.
+#
+# ONE PORTAL PER DISPATCH is the operating mode. `run()` opens ONE BATCH PER READABLE SOURCE
+# and they share a SINGLE `max_seconds` budget, so a blank `source` lets the first portal
+# alphabetically spend the whole window while the rest record no coverage at all. Coverage is
+# keyed `(lane, source, scan_mode)`, which is what makes each portal's coverage its own fact.
+# Leave `source` blank only for a short incremental catch-up after every portal has had its
+# own full pass.
+#
+# BEFORE A LONG DISPATCH, PAUSE BOTH CRONS. `location-batch` is measurably oversubscribed:
+# the hourly intake (`35 * * * *`) holds the group for its whole 2700 s budget and the `*/15`
+# resolve tick SUPERSEDES whatever is pending, so a queued sweep is cancelled by a tick with
+# no work to do (measured: 23 of 40 intake runs cancelled). W3 set the precedent — pause
+# `location_claims_intake.yml` and `location_resolve.yml` for the duration and restore them
+# the moment the scan finishes. Do NOT answer a cancellation with a retry: a retry dispatches
+# a new run into the same race.
+#
+# A run that hits its budget stamps `outcome='stopped'`, never `ok`. The incremental watermark
+# reads `ok` only, so a budgeted run leaves the floor where it found it and the next run
+# resumes from the keyset cursor on its batch row. `ok` means exactly one thing: the scan ran
+# out of rows.
+#
+# Shadow-safe: a shadowed contract's entries are still loaded and still mined — shadow hides
+# claims from `location_claims_live`, it does not stop the lane. Required secrets:
+# SUPABASE_DB_URL plus R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY /
+# R2_BUCKET_NAME. The bodies live in the bucket (the spill threshold is Postgres's own ~2 KB
+# TOAST boundary, so effectively every body is spilled) and a run with a reader and no store
+# is REFUSED at the first body, not quietly degraded to the handful of database-resident rows.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "ONE portal (blank = every portal with a reader, sharing ONE budget — prefer naming one)"
+        required: false
+        default: ""
+        type: choice
+        options:
+          - ""
+          - sreality
+          - bezrealitky
+          - bazos
+          - idnes
+          - mmreality
+          - remax
+          - ceskereality
+          - realitymix
+          - maxima
+      mode:
+        description: "full = every archived body; incremental = only bodies first observed since the last ok batch"
+        required: false
+        default: full
+        type: choice
+        options: [full, incremental]
+      max_seconds:
+        description: "wall-clock budget; stops BETWEEN batches (blank = 2700)"
+        required: false
+        default: "2700"
+        type: string
+      batch_size:
+        description: "bodies per batch (50-5000; blank = 500). Each body is one R2 GET inside the batch's transaction — do not raise this casually"
+        required: false
+        default: ""
+        type: string
+      limit:
+        description: "stop after this many payloads (blank = no limit). Use it for a first trial dispatch"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "extract and report; write nothing"
+        required: false
+        default: false
+        type: boolean
+      note:
+        description: "free text stamped on the batch row"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  # OUTER, cross-lane: shared with the registry load, the claim intake, the Mapy inventory,
+  # the resolve drain, the churn probe, the payload backfill/prune and the W3 re-mine, so at
+  # most ONE heavy location lane runs at a time (2026-08-10 incident — see
+  # location_registry_load.yml for the full account). This lane belongs in it on three axes
+  # at once: R2 egress, runner memory, and a write into the same claim spine the hourly
+  # intake writes.
+  group: location-batch
+  cancel-in-progress: false
+
+jobs:
+  remine-archive:
+    runs-on: ubuntu-latest
+    concurrency:
+      # INNER, per-lane: two concurrent sweeps would fight over the same
+      # (lane, source, scan_mode) watermark and each would resume from the other's cursor.
+      # Distinct from W3's `location-remine` on purpose — the two lanes write to one claim
+      # store but scan different substrates and must not serialise behind each other. Never
+      # cancel in flight: a cancelled batch rolls back whole, but the `location_jobs` lease
+      # of a cancelled run strands until its TTL expires and locks the lane out for an hour.
+      group: location-remine-archive
+      cancel-in-progress: false
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # The [dev] extra carries PyYAML for the deploy-time contract projection; the
+      # extractor itself reads the already-projected DB tables.
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Project the portal contracts from git
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python -m location_data.contracts --load --git-ref "$GITHUB_SHA"
+
+      - name: Sweep the archived bodies
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # The bodies' HOME, not an optional extra. `payloads.open_store()` returns None
+          # when any one of these is missing, the run then proceeds through preflight, opens
+          # a batch row, and raises inside `load_bodies` on the first spilled row — which
+          # stamps that batch 'failed'. This repo has shipped "flag on, credentials absent"
+          # twice already.
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          SOURCE: ${{ inputs.source }}
+          MODE: ${{ inputs.mode }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+          BATCH_SIZE: ${{ inputs.batch_size }}
+          LIMIT: ${{ inputs.limit }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          NOTE: ${{ inputs.note }}
+        # A bash ARRAY, not a string: an unquoted "$ARGS" word-splits, and `note` is free
+        # text that will contain spaces.
+        run: |
+          ARGS=(--mode "${MODE:-full}")
+          if [ -n "$SOURCE" ]; then ARGS+=(--source "$SOURCE"); fi
+          if [ -n "$BATCH_SIZE" ]; then ARGS+=(--batch-size "$BATCH_SIZE"); fi
+          if [ -n "$LIMIT" ]; then ARGS+=(--limit "$LIMIT"); fi
+          if [ -n "$NOTE" ]; then ARGS+=(--note "$NOTE"); fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS+=(--dry-run); fi
+          # Default the budget under the job ceiling so the run stops cleanly BETWEEN batches
+          # and stamps a resumable `stopped` row, rather than being killed mid-batch by the
+          # runner and leaving its batch row `running`.
+          ARGS+=(--max-seconds "${MAX_SECONDS:-2700}")
+          echo "python -m location_data.claims_remine_archive ${ARGS[*]}"
+          python -m location_data.claims_remine_archive "${ARGS[@]}"

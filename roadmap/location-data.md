@@ -16,7 +16,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 **backfill COMPLETE; gate (a) blocked on a verifier fix, not on the data** (2026-08-18) — migrations 405–408 applied; bodies to R2, storage bounded by construction (cap 2 + 7-day floor). **`payload_dual_write` ON globally since 2026-08-17 12:29 UTC, verified on all nine portals** (fresh rows per portal, mmreality last; corpus-wide evidence: the backfill's 12,044 `skipped_existing` are pages the live dual-write path archived before the scan reached them). `payload_index_archive` remains **OFF** (operator decision 2026-08-16: index keys are week-stamped so the cap bounds detail but not index; ~100 % churn on a surface nobody has diffed). #1074/#1075 wired the R2 secrets that made the flag real. **Backfill terminal 2026-08-18 01:59 UTC** — `reached_end=true`, `outcome='ok'`, 11 budgeted dispatches across two driver sessions: **472,429 pages scanned, 460,385 inserted, 12,044 skipped (dual-write overlap), 0 unmapped**, 39.68 GB read → **8.53 GB stored (4.65x)**, final cursor 5,617,479, batch 274. **The 445,191 inventory count is superseded — do not compute a percentage against it**: the archive grew 6.1 % while the scan walked it; `reached_end` is the only completion signal. Compression settled at 4.65x (the proving run's 7.5x and the mid-run ≈7.9 GB projection were both optimistic); one-time footprint 8.53 GB, still well inside the ~28.6 GB steady-state R2 projection (the ~4 GB figure elsewhere in this file is the POSTGRES metadata allowance, a different budget). **Gate (a) verify over the complete corpus (run 32090281321): FAIL, 31/1000 mismatch — diagnosed as a comparator artifact, not damage.** 0 missing / 0 unreadable (every sampled page was found in R2 and decoded cleanly). Every checkable failure (25/25 from the run log) had its `portal_raw_pages` source refetched **5–13 h AFTER the payload was stored** (idnes 18 / realitymix 5 / ceskereality 1 / mmreality 1 — exactly the live-drain portals, in proportion to measured churn; the no-drain portals produced zero), and the writer's **7-day append floor refuses by design to chase the refetch**, so the live source legitimately diverges from the stored copy for up to 7 days. The verifier's own `hash_matches` compares the writer-time hash against the LIVE source hash — it measures drift, not fidelity — and R2 keys are content-addressed on `body_sha256`, so key⇒content at write time. **As written, gate (a) cannot pass while any portal is being scraped — structurally unsignable — and that is the finding, not "31 bad pages".** Follow-ups (recorded, unstarted): (1) verifier compares like-for-like (`prp.fetched_at = payload.fetched_at`) or classifies source-refetched-after-store-with-floor-active as its own `stale-source` category instead of `mismatch`; (2) verifier should re-hash the downloaded R2 object against `body_sha256` — content-addressing proves key⇒content at write time but nothing re-checks the object after write; (3) raise `max_pool_connections` in the uploader's botocore config (urllib3 "pool is full" warnings across all 11 runs — throughput left on the table, correctness unaffected). `location-batch` saturation during the run is recorded as structure in #1084/#1086/#1087. **Gate (a), once fixed and green, licenses the STORAGE decision only** — nothing reads the archive until W2-13 gives the re-mine lane a workflow (#1082) |
-| W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 **infrastructure shipped, lane deliberately inert** (2026-08-17) — W2-0/W2-1 (#1048/#1045), W2-3 the exclusion-zone scoper (#1053), W2-4 the contract shadow mechanism (#1050, mig 404), W2-5 the permanent fixture-diff gate (#1058) and W2-2 the evidence-bearing claims + archived-HTML re-mine lane (#1079) are all merged. The lane still mines **nothing**, but the reason moved: `ARCHIVE_READERS` now holds four generic DOM readers (#1081 `html_text`/`html_attr`/`html_point_dms`, #1090 `html_point_attrs`) and **no contract entry names one**, so a run finds no executable entry and returns *before* it opens a batch row — a batch stamped `'ok'` would move the incremental watermark over a corpus it never opened. **W2-6…W2-12 is READER work, not YAML work** (see the verification table below): six portals need a JSON-pointer reader, a regex reader with capture-group spans, and splitting transforms before their contracts become one-line activations, and no contract may activate before W2-13 anyway (#1082) |
+| W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 **infrastructure shipped, lane deliberately inert** (2026-08-17) — W2-0/W2-1 (#1048/#1045), W2-3 the exclusion-zone scoper (#1053), W2-4 the contract shadow mechanism (#1050, mig 404), W2-5 the permanent fixture-diff gate (#1058) and W2-2 the evidence-bearing claims + archived-HTML re-mine lane (#1079) are all merged. The lane still mines **nothing**, but the reason moved: `ARCHIVE_READERS` now holds four generic DOM readers (#1081 `html_text`/`html_attr`/`html_point_dms`, #1090 `html_point_attrs`) and **no contract entry names one**, so a run finds no executable entry and returns *before* it opens a batch row — a batch stamped `'ok'` would move the incremental watermark over a corpus it never opened. **W2-6…W2-12 is READER work, not YAML work** (see the verification table below): six portals need a JSON-pointer reader, a regex reader with capture-group spans, and splitting transforms before their contracts become one-line activations, and no contract may activate before W2-13 anyway (#1082). **W2-13 SHIPPED** — the archived-HTML sweep now has a dispatch-only workflow (`location_claims_remine_archive.yml`, in `location-batch`) and the W2 gate is readable per portal (`scripts/location_w2_gate_report.py` + its own read-only workflow); the lane also gained its own batch bounds (50-5000, default 500) and a zero-claim tripwire. The seven portal activations, SHADOWED, in one wave are all that is left |
 | W3 history backfill | claims from `listing_snapshots.raw_json` | ✅ **shipped 2026-08-19 — scan complete (`reached_end=true`) and all four gate arms PASS** (verify run 32223331085). **1,634,096 snapshots mined over five windows → 92,312 historical location claims + ~10.85 M observations**, terminal batch 289 / cursor 1,634,096. Note the terminal denominator against the 1,574,313 the wave opened with: `listing_snapshots` grew ~60 k rows while the scan walked it, so **`reached_end` is the only completion signal** — the same lesson W2a's backfill recorded (#1088). Unblocking it needed BOTH `location-batch` crons paused (#1100 intake, #1101 resolve), because resolve oversubscribes the group by itself — measured over eleven ticks, a run occupies it 11–27 min on a 15-min cadence, so ~1 tick in 3 completed and the rest superseded each other; both restored (#1105) the moment the scan finished. Gate arm 4 (the corpus arm) needed a lane that did not exist: `claims_remine_verify` + its own read-only workflow (#1102), then two corrections — scoping by anchor/observation rather than `extractor_version` (#1104), and **partitioning the series by contract entry (#1106), without which the gate PASSED on an artifact** (165,706 of 165,708 listings "oscillating"; the real figure is 324). See the W3 section for the measured oscillation and what it says about the program's churn premise |
 | W4 targeted refetch cohorts | sreality legacy-shape + truncated refetch, bezrealitky remainder | 🟡 **build started (2026-08-18)** — the consumer for the cohort W1 has been filling since 2026-08-12 (#1083) + its dispatch lane. **Nothing dispatched**; substrate-disjoint from W2/W3 and outside `location-batch`. See the W4 section |
 | W5–W6 | LLM lane, serving flip | ⚪ not started |
@@ -1395,6 +1395,75 @@ written, reviewed, and then deliberately not merged — twice.
 České Budějovice page, so the documented `"Praha (okres Praha)"` shape is untested; and mmreality's
 carries exactly ONE `:property` blob, so the zone that strips non-subject blobs — which that
 contract calls its principal hazard — is entirely unexercised.
+
+### W2-13 — sweep lane + per-portal gate report (SHIPPED)
+
+`.github/workflows/location_claims_remine_archive.yml` (dispatch-only, outer group
+`location-batch` + inner `location-remine-archive`, SUPABASE_DB_URL + the four `R2_*` secrets, a
+contracts projection step) and `scripts/location_w2_gate_report.py` +
+`.github/workflows/location_w2_gate_report.yml` (read-only, no lease, its own
+`location-w2-gate` group so it is runnable *while* a sweep is in flight). No reader, no contract
+entry, no `contract_version` bump, no migration: the shadow rail stays green because it fires only
+when a dispatcher AND an executable DOM entry both exist, and no shipped contract names one yet.
+
+**Two lane fixes, both measured.** (1) The batch bounds are now this lane's own — 50/5000, default
+500 (`ARCHIVE_MIN/MAX/DEFAULT_BATCH_SIZE`, `clamp_batch_size`) — because `claims_intake`'s shared
+10,000 floor is sized for a keyset page over `listings`, while one iteration here holds a single
+transaction across `batch_size` sequential R2 GETs plus every decompressed body at once (41–245 KB
+each: 0.4–2.4 GB at 10,000). Even at 500 the transaction holds ~10–25 s of sequential HTTP; moving
+the body fetches outside it is a named follow-up, not a fix in this wave. (2) An
+`applicable_payloads` counter (bodies at least one entry was *declared* for) now rides the stats
+dict, the progress log and the batch note, and feeds a zero-claim tripwire: `zero_claim_sources`
+exits 3 (waivable with `--allow-zero-claims`) when a source saw ≥500 applicable bodies and mined
+nothing. Until now a portal whose selectors had gone stale swept the whole archive, wrote nothing,
+stamped `ok` and **moved the incremental watermark** — indistinguishable from success. Note the
+watermark still moves in that case (`ok` honestly means "the scan ran out of rows"), so the repair
+after a stale-selector sweep is a re-run in `mode=full`; an incremental re-run would skip the ground
+it covered.
+
+**Four CLI gaps declined, with reasons.** `--page-kind`: the fixture-diff gate's archived arm scores
+only `page_kind='detail'`, so an index/map reader would ship ungated; land it *with* the first such
+activation and with the watermark rule (a restricted run must not stamp a watermark covering the
+kinds it skipped). `--json-out` on the lane: the durable record is the `location_claim_batches` row
+the gate report already reads, and `main()` already logs the full stats dict as one JSON line.
+`zones_unmatched` plumbing: `scope_html` runs *inside* `extract_payload`, so the document never
+reaches `_run_source` — surfacing it means changing the extraction contract, and it stays the
+sharpest open follow-up (a register whose zone stops matching while claims still flow is the one
+failure the tripwire does NOT catch). Fetching bodies outside the batch transaction: a refactor of
+`load_bodies`' cursor-taking signature.
+
+**Deferred: the per-source `FLOORS` override.** `toolkit.location_labels.FLOORS` stays uniform.
+`portal_contracts` has no floor column, and a governed top-level YAML key would make a floor edit a
+`contract_version` bump — which changes `contract_entry_id` + `extractor_version`, both inputs to
+`location_claim_fingerprint`, re-writing the whole 5.1 M-row / 2.6 GB claim corpus for a threshold
+tweak. Two candidate homes when it is wanted: a new additive `portal_contracts` column (operational
+state, like `shadow`) or the existing `precision_priors` jsonb. Whichever it is, it must be threaded
+through `_block()` so `score_sample` and `score_shadow_claims` cannot disagree about which floor a
+field was judged against. **Also still open:** house number is not scored (`_SCORE_SQL` computes no
+counters and the NEW side is three columns against one free-text label), the old system's precision
+class is structurally unscorable (mig 399 snapshots no granularity), and O18 — whether gate outcomes
+persist to `location_metrics_rollup` — is untouched; the report writes nothing.
+
+**Operating rule for a sweep dispatch:** pause BOTH `location_claims_intake.yml` (`35 * * * *`) and
+`location_resolve.yml` (`*/15`) for the duration and restore them the moment the scan finishes. The
+group holds one pending slot and a resolve tick with zero work supersedes a queued sweep purely by
+arriving later. Do not answer a cancellation with a retry — a retry dispatches a new run into the
+same race. One portal per dispatch: `run()` opens one batch per readable source and they share a
+single `max_seconds` budget.
+
+**O8 — the seven frozen-sample draws, and they are a one-way door.** Every draw must happen BEFORE
+that portal's first sweep dispatch: the member row snapshots `legacy_street/_street_source/
+_house_number/_obec/_okres/_zip` at draw time so the old system is scored "as it stood", and the
+sweep plus the resolve drain rewrite exactly those serving values. Per portal, in order
+(remax, ceskereality, realitymix, idnes, bazos, mmreality, maxima): dispatch
+`location_labelled_sample.yml` with `source=<portal>, n=120, seed=(blank), write=false` for the
+count-only dry run, then the same with `write=true`. `replace=true` is only for a deliberate
+re-draw. Then label ≥100 members per portal through the admin-gated surface
+(`frontend/src/pages/LocationQuality.tsx`, `GET/POST /location/sample/{source}`) — 2–4 h per portal,
+14–28 h total. Check `portals.supports_complete_walk` first: ceskereality (mig 449) and idnes (453)
+may be parked and `coverage_gate.yml` can un-park either autonomously four times a day, which
+changes the population a sample is drawn from. Until a portal has ≥100 labels the gate report
+correctly reads `NO SAMPLE` for it.
 
 ## W4 — build started (targeted refetch cohorts)
 
