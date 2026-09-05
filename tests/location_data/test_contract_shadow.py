@@ -341,9 +341,11 @@ def test_the_hash_is_the_file_minus_the_two_blocks_that_are_not_extraction():
     migration's literals can be re-derived from the repo."""
     import hashlib
 
+    # Not "no file carries `shadow:`" any more — the W2 activations ship shadowed, and a
+    # contract that DOES carry the line is the stronger input to this arithmetic anyway:
+    # it exercises the subtraction rather than assuming there is nothing to subtract.
     for path in sorted(contracts.CONTRACT_DIR.glob("*.yaml")):
         body = path.read_bytes()
-        assert b"\nshadow:" not in b"\n" + body, path.name
         assert b"\npersistence:" in b"\n" + body, path.name
         assert contracts.contract_body_hash(body) != hashlib.sha256(body).digest(), (
             path.name)
