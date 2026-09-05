@@ -290,3 +290,47 @@ describe('<NewDedupTrainingSet> reading the page', () => {
     expect(document.body.textContent).not.toMatch(/\\u20/);
   });
 });
+
+describe('<NewDedupTrainingSet> a corrected tile stays put', () => {
+  it('does not refetch the list after a correction, so the note field survives', async () => {
+    // The operator clicked "no" on a positive under the Applies filter; the
+    // list refetched, the row no longer matched, and the tile vanished with
+    // the note field on it. The list is patched in place instead.
+    const user = userEvent.setup();
+    renderPage(['/new-dedup/training-set?set=all']);
+    const tile = await screen.findByTestId('training-tile-11');
+    expect(api.listTrainingSet).toHaveBeenCalledTimes(1);
+    await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledTimes(1));
+    // Still here, now a human negative, note field present, list not refetched.
+    const after = screen.getByTestId('training-tile-11');
+    expect(after).toHaveAttribute('data-state', 'negative');
+    expect(within(after).getByText('yours')).toBeInTheDocument();
+    expect(screen.getByTestId('note-form-11')).toBeInTheDocument();
+    expect(api.listTrainingSet).toHaveBeenCalledTimes(1);
+    // And it says where the photo now lives.
+    expect(within(after).getByText(/now under/i)).toBeInTheDocument();
+  });
+});
+
+describe('<NewDedupTrainingSet> the filter groups', () => {
+  it('names the three groups and locks two of them under "To review"', async () => {
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByRole('group', { name: 'cutoff' })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'verdict' })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'decided by' })).toBeInTheDocument();
+    // "To review" fixes verdict=applies and decided-by=machine; the other two
+    // groups are visibly locked rather than silently ignored.
+    expect(screen.getByRole('button', { name: /Does not/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Yours' })).toBeDisabled();
+    expect(screen.getAllByText(/set by “To review”/i).length).toBeGreaterThan(0);
+  });
+
+  it('unlocks them under any other cutoff', async () => {
+    renderPage(['/new-dedup/training-set?set=all']);
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByRole('button', { name: /Does not/ })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Yours' })).toBeEnabled();
+  });
+});
