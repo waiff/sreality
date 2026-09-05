@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isPlainLeftClick, spaNavHrefForClick } from './linkGestures';
+import { isPlainLeftClick, isSafeInternalPath, spaNavHrefForClick } from './linkGestures';
 
 /* A minimal stand-in for the anchor ancestry the predicate walks. Structural
  * typing is the point: no DOM event constructor, no map, no mount. */
@@ -88,5 +88,30 @@ describe('spaNavHrefForClick', () => {
 
   it('ignores an anchor with no href', () => {
     expect(spaNavHrefForClick(clickOn({}))).toBeNull();
+  });
+});
+
+/* The one predicate that decides "is this ours to route" — for delegated map
+ * clicks today and for any post-login / OAuth `next=` redirect. An open
+ * redirect is exactly a path that passes this by accident. */
+describe('isSafeInternalPath', () => {
+  it('accepts an in-app path', () => {
+    expect(isSafeInternalPath('/browse')).toBe(true);
+    expect(isSafeInternalPath('/listing/bazos/abc-1?run=3#estimations')).toBe(true);
+    expect(isSafeInternalPath('/')).toBe(true);
+  });
+
+  it('refuses protocol-relative and backslash-normalised hosts', () => {
+    expect(isSafeInternalPath('//evil.example/x')).toBe(false);
+    // Browsers normalise a backslash after the first slash into a second
+    // slash, turning this into //evil.example — the arm the inline check lacked.
+    expect(isSafeInternalPath('/\\evil.example')).toBe(false);
+  });
+
+  it('refuses schemes and relative paths', () => {
+    expect(isSafeInternalPath('https://evil.example')).toBe(false);
+    expect(isSafeInternalPath('javascript:alert(1)')).toBe(false);
+    expect(isSafeInternalPath('browse')).toBe(false);
+    expect(isSafeInternalPath('')).toBe(false);
   });
 });

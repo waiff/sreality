@@ -13,6 +13,8 @@ import ErrorBoundary from './ErrorBoundary';
 import AccountMenu from './AccountMenu';
 import { APP_NAME } from '@/lib/brand';
 import { useBuildSkew } from '@/lib/useBuildSkew';
+import { MAIN_ID, useRouteFocus } from '@/lib/useRouteFocus';
+import SkipLink from './SkipLink';
 import { ROUTES } from '@/lib/routes';
 
 type NavItem = { to: string; label: string; disabled?: boolean; title?: string; admin?: boolean; agenda?: string };
@@ -81,6 +83,8 @@ export function activeNavTo(pathname: string, tos: ReadonlyArray<string>): strin
 
 export default function Shell() {
   const location = useLocation();
+  // Where focus GOES on a route change: the <main> landmark below.
+  useRouteFocus();
   /* Offer a reload when a newer build is deployed — see lib/buildSkew.ts. */
   useBuildSkew();
   return (
@@ -88,12 +92,16 @@ export default function Shell() {
       <ExploreAreaProvider>
         <ExploreBrokerProvider>
           <div className="min-h-dvh flex flex-col bg-[var(--color-paper)] text-[var(--color-ink)]">
+            <SkipLink />
             <TopBar />
             {/* Keyed on pathname so a crashed page recovers on the next nav.
               * Scoped to the route body on purpose: a page crash must not take
               * the nav, the footer or the toast surface with it — the fallback
               * says "use the back button", which needs the nav to still exist. */}
-            <main className="flex-1">
+            {/* id + tabIndex=-1: the skip link's target and where useRouteFocus
+              * lands keyboard focus after every navigation. -1 keeps it out of
+              * the tab order while letting it be focused programmatically. */}
+            <main id={MAIN_ID} tabIndex={-1} className="flex-1 outline-none">
               <ErrorBoundary key={location.pathname} label="route">
                 <Outlet />
               </ErrorBoundary>

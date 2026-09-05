@@ -68,11 +68,20 @@ export function spaNavHrefForClick(
   if (target && target !== '_self') return null;
 
   const href = anchor.getAttribute('href');
-  // Same-origin app paths only. `//host/x` is protocol-relative — an EXTERNAL
-  // destination that merely starts with a slash — so it must not be captured.
-  if (!href || !href.startsWith('/') || href.startsWith('//')) return null;
+  if (!href || !isSafeInternalPath(href)) return null;
 
   return href;
+}
+
+/* A same-origin, in-app path and nothing else. `//host/x` is protocol-relative
+ * — an EXTERNAL destination that merely starts with a slash — and browsers
+ * also normalise a backslash after the first slash (`/\evil.example`) into
+ * `//evil.example`, so both are refused. Anything without a leading slash is
+ * a scheme or a relative path and is not ours to route. The same predicate
+ * gates any post-login / OAuth `next=` redirect: an open redirect is exactly
+ * a path that fails this check. */
+export function isSafeInternalPath(href: string): boolean {
+  return href.startsWith('/') && !href.startsWith('//') && !href.startsWith('/\\');
 }
 
 /* Route in-app clicks from a subtree React does not render — a MapLibre popup,
