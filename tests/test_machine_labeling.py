@@ -162,3 +162,53 @@ def test_the_lane_defaults_to_dry_run_and_validates_its_inputs() -> None:
     run = next(s for s in lane["jobs"]["label"]["steps"] if s.get("name") == "Label")["run"]
     assert "tags must be a comma-separated list of ids" in run
     assert "max_usd must be a number" in run
+
+
+# ------------------------------------------------------------------ the targeted draw
+def test_the_near_tag_draw_seeds_only_on_positives_outside_the_holdout() -> None:
+    # Seeding a training draw on the yardstick's own images would let the
+    # holdout shape the material it is supposed to grade.
+    from toolkit import machine_labeling as ml
+
+    # The marker is baked into the constant, not formatted in by a caller —
+    # that is what lets the holdout census SEE it.
+    sql = ml._NEAR_TAG_SQL
+    assert "itl.state = 'positive'" in sql
+    assert "tag_exam_members hx" in sql and "tag_exam_cohorts hc" in sql
+    # And the eligibility rails still apply to what it returns.
+    assert "FROM tag_exam_members m WHERE m.image_id = i.id" in sql
+    assert "l.definition_id = d.id" in sql
+
+
+def test_the_near_tag_draw_is_bounded_and_refuses_a_thin_centroid() -> None:
+    # No ann index exists on 9.4M embeddings, so the draw samples a slice and
+    # ranks within it; and a centroid over three images would concentrate the
+    # whole budget on three images' worth of the corpus.
+    from toolkit import machine_labeling as ml
+
+    sql = ml._NEAR_TAG_SQL
+    assert "TABLESAMPLE SYSTEM (%(pct)s)" in sql
+    assert "c.seeds >= %(min_seeds)s::int" in sql
+    assert "ORDER BY e.embedding <=> c.vec" in sql
+
+
+def test_the_bias_of_the_targeted_draw_is_written_down() -> None:
+    # It returns what CLIP already believes; a head trained only on it will
+    # evaluate better than it performs. That has to be stated where it is read.
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "toolkit" / "machine_labeling.py").read_text()
+    assert "blind spots" in src
+    assert "look better in evaluation than it is in the world" in src
+
+
+def test_the_lane_validates_near_tag_as_digits_only() -> None:
+    import pathlib
+    import yaml
+
+    lane = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1]
+                           / ".github" / "workflows" / "label_images.yml").read_text())
+    run = next(s for s in lane["jobs"]["label"]["steps"] if s.get("name") == "Label")["run"]
+    # `*[0-9]` would accept "abc1"; the exclusion class is the correct test.
+    assert "*[!0-9]*) echo \"::error::near_tag must be a tag id\"" in run

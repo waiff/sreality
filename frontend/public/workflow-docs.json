@@ -2881,8 +2881,16 @@
           "options": null
         },
         {
+          "name": "near_tag",
+          "description": "Draw images resembling THIS head's positives (a tag id) instead of at random. For rare heads only, and always beside a random draw — it inherits CLIP's blind spots.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
           "name": "sample_pct",
-          "description": "Block-sample percentage for the random draw (raise it when few rows come back).",
+          "description": "Block-sample percentage for the random or near-tag draw (raise it when few rows come back).",
           "required": false,
           "type": "string",
           "default": "1",
