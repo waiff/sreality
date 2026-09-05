@@ -77,7 +77,7 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from scraper import db, image_storage, portal_runner
+from scraper import db, image_storage, portal_factory, portal_runner
 from scraper.portal import PortalConfig, default_config, load_portal_config
 
 LOG = logging.getLogger("scraper.realtime_worker")
@@ -150,30 +150,19 @@ REALTIME_SOURCES: tuple[str, ...] = (
     "maxima", "realitymix", "remax", "sreality",
 )
 
-_PORTAL_CLASSES: dict[str, tuple[str, str]] = {
-    "bezrealitky": ("scraper.bezrealitky_main", "BezrealitkyPortal"),
-    "ceskereality": ("scraper.ceskereality_main", "CeskerealityPortal"),
-    "idnes": ("scraper.idnes_main", "IdnesPortal"),
-    "maxima": ("scraper.maxima_main", "MaximaPortal"),
-    "realitymix": ("scraper.realitymix_main", "RealitymixPortal"),
-    "remax": ("scraper.remax_main", "RemaxPortal"),
-    # sreality is special-cased in _build_portal (like bazos) — SrealityPortal
-    # predates the config-taking constructor and builds its own category list
-    # internally, so this entry is unused; kept for _CLIENT_CLASSES symmetry
-    # and so a future refactor toward the uniform constructor has one place
-    # to update.
-    "sreality": ("scraper.main", "SrealityPortal"),
+# The class MAPPING lives in scraper.portal_factory, because the coverage gate
+# needs the same table to ask a portal what its declared categories canonicalise
+# to. The SCOPE stays here and stays narrower: the factory knows every portal,
+# while this worker deliberately drains only REALTIME_SOURCES — mmreality is out
+# by design (proxied, low-frequency) and bazos predates the uniform constructor.
+# Shared mapping, local scope, so neither caller can silently widen the other.
+_PORTAL_CLASSES = {
+    k: v for k, v in portal_factory.PORTAL_CLASSES.items()
+    if k in REALTIME_SOURCES and k != "bazos"
 }
-
-_CLIENT_CLASSES: dict[str, tuple[str, str]] = {
-    "bazos": ("scraper.bazos_client", "BazosClient"),
-    "bezrealitky": ("scraper.bezrealitky_client", "BezrealitkyClient"),
-    "ceskereality": ("scraper.ceskereality_client", "CeskerealityClient"),
-    "idnes": ("scraper.idnes_client", "IdnesClient"),
-    "maxima": ("scraper.maxima_client", "MaximaClient"),
-    "realitymix": ("scraper.realitymix_client", "RealitymixClient"),
-    "remax": ("scraper.remax_client", "RemaxClient"),
-    "sreality": ("scraper.sreality_client", "SrealityClient"),
+_CLIENT_CLASSES = {
+    k: v for k, v in portal_factory.CLIENT_CLASSES.items()
+    if k in REALTIME_SOURCES
 }
 
 # log-once-per-process guard for proxied portals skipped without SCRAPER_PROXY_URL.
@@ -313,34 +302,10 @@ def _load_config(source: str) -> PortalConfig:
 
 
 def _build_portal(source: str, config: PortalConfig) -> Any:
-    if source == "bazos":
-        # Bazos predates the config-taking constructor: it takes scopes +
-        # geocoder and reads its limits off attributes (the bazos_main.main
-        # wiring, reproduced here).
-        from scraper import bazos_main, location
-
-        scopes = [
-            c for c in config.categories
-            if bazos_main.SALE_TYPE.get(c.get("sale_type"))
-            and bazos_main.CATEGORY_MAIN.get(c.get("category"))
-        ]
-        portal = bazos_main.BazosPortal(
-            categories=scopes, geocoder=location.build_geocoder(),
-        )
-        portal.index_rate = config.limits.index_rate
-        portal.shared_rate_limiter = config.limits.shared_rate_limiter
-        portal.supports_complete_walk = config.supports_complete_walk
-        return portal
-    if source == "sreality":
-        # Also predates the config-taking constructor (main.SrealityPortal
-        # takes index_rate, not a PortalConfig, and builds its own category
-        # list internally — see the _PORTAL_CLASSES comment).
-        from scraper import main as sreality_main
-
-        return sreality_main.SrealityPortal(index_rate=config.limits.index_rate)
-    mod_name, cls_name = _PORTAL_CLASSES[source]
-    cls = getattr(importlib.import_module(mod_name), cls_name)
-    return cls(config)
+    # Delegated: the coverage gate builds portals from the same table for the same
+    # reason (to read a portal's own category canonicalisation), so the two
+    # constructor exceptions live in one place.
+    return portal_factory.build_portal(source, config)
 
 
 def _skip_for_proxy(source: str) -> bool:

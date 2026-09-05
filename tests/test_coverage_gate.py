@@ -200,3 +200,61 @@ def test_the_gate_only_ever_looks_at_parked_portals() -> None:
     assert "supports_complete_walk = false" in body   # the selection predicate
     assert "supports_complete_walk = true" in body    # the only write
     assert body.count("update portals set") == 1
+
+
+# --- the denominator is CANONICAL categories, not config entries --------------
+#
+# This kept ceskereality parked for a week with no path out. It declares both
+# `rodinne-domy` and `chaty-chalupy`, and BOTH canonicalise to `dum` (sreality
+# lumps chata/chalupa under "dům"), so its 12 config entries can only ever write
+# 10 slice-ledger rows. A gate demanding 12 can never be satisfied — it reported
+# "8/12 categories fully covered" every single cycle.
+
+
+def test_ceskereality_config_collapses_to_fewer_canonical_categories() -> None:
+    """The live shape, resolved through the framework's own `category_labels`
+    seam rather than a restated mapping."""
+    from scraper.portal_factory import canonical_category_count
+
+    cesk = [{"sale_type": s, "category": c} for s in ("prodej", "pronajem")
+            for c in ("byty", "rodinne-domy", "chaty-chalupy", "pozemky",
+                      "komercni-prostory", "ostatni")]
+    assert len(cesk) == 12
+    assert canonical_category_count("ceskereality", cesk) == 10
+
+
+def test_a_one_to_one_portal_is_unaffected() -> None:
+    from scraper.portal_factory import canonical_category_count
+
+    idn = [{"sale_type": s, "category": c} for s in ("prodej", "pronajem")
+           for c in ("byty", "domy", "pozemky", "komercni-nemovitosti",
+                     "male-objekty-garaze")]
+    assert canonical_category_count("idnes", idn) == len(idn) == 10
+
+
+def test_the_collapsed_portal_can_now_pass() -> None:
+    """The regression: 10 covered canonical categories against a 12-entry config
+    must read as complete, because 10 is all the ledger can ever hold."""
+    coverage = [("byt", "prodej", 14, 14), ("byt", "pronajem", 14, 14),
+                ("dum", "prodej", 14, 14), ("dum", "pronajem", 14, 14),
+                ("pozemek", "prodej", 14, 14), ("pozemek", "pronajem", 14, 14),
+                ("komercni", "prodej", 14, 14), ("komercni", "pronajem", 14, 14),
+                ("ostatni", "prodej", 14, 14), ("ostatni", "pronajem", 14, 14)]
+    conn = _Conn(coverage, candidates=39000,
+                 history=_covered_history(2, candidates=39000))
+    row = cg.evaluate(conn, "ceskereality", 10, dry_run=False)
+    assert row["covered"] is True
+    assert row["verdict"] == "unparked"
+    # …and the OLD denominator would still have held it shut, which is the bug.
+    conn2 = _Conn(coverage, candidates=39000,
+                  history=_covered_history(2, candidates=39000))
+    assert cg.evaluate(conn2, "ceskereality", 12, dry_run=False)["covered"] is False
+
+
+def test_an_unresolvable_mapping_falls_back_to_the_STRICT_count(monkeypatch) -> None:
+    """The fallback direction is the whole safety argument: the raw config count
+    is always >= the canonical count, so falling back can only hold a gate shut,
+    never open one by accident."""
+    monkeypatch.setattr(cg, "canonical_category_count", lambda *a, **k: None)
+    cats = [{"sale_type": "prodej", "category": "byty"}] * 12
+    assert cg._declared_categories("whatever", cats) == 12

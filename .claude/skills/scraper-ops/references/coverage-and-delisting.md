@@ -200,6 +200,16 @@ reset a streak that had done nothing wrong.
 
 Two questions, both from data:
 
+**The denominator is CANONICAL categories, not config entries.** ceskereality
+declares both `rodinne-domy` and `chaty-chalupy` and both canonicalise to `dum`,
+so its 12 config entries can only ever write 10 slice-ledger rows. A gate
+demanding 12 could never be satisfied, and was not — it reported "8/12 categories
+fully covered" every cycle for a week with no path out. `portal_factory.
+canonical_category_count` resolves it through the framework's own
+`category_labels` seam rather than restating the mapping, and falls back to the
+raw count when it cannot, which is the strict direction: raw >= canonical, so a
+fallback can only hold a gate shut, never open one.
+
 1. **Covered** — did every slice of every *declared* category finish inside
    `FRESHNESS_HOURS` (30)? The **declared** count is the denominator, not the
    observed one: a never-walked category has no ledger rows at all, so counting
