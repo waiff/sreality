@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 
+from location_data import contracts
 from location_data.resolver import core, uncertainty
 from location_data.resolver.core import SURVIVORSHIP_FIELDS
 from location_data.resolver.version import RESOLVER_VERSION
@@ -141,6 +142,42 @@ def test_every_survivorship_field_has_a_v1_policy_row():
         "location_field_policy has no v1 row for survivorship field(s), so no claim for "
         f"them can ever win: {missing}"
     )
+
+
+def test_every_producer_a_shipped_contract_can_emit_has_a_v1_policy_row():
+    """The same failure as the test above, one axis over — and the one the seven-portal
+    W2-6…W2-12 activation actually walked into.
+
+    A field with no policy row is structurally NULL. A field/METHOD pair with no row is
+    exactly as dead and much harder to see: the field has rows, other producers win it,
+    and one producer's claims are simply never counted. Before migration 470, SEVEN of the
+    ten `location_extraction_method` labels had no v1 row at all, which cost nothing while
+    no contract emitted them and would have cost the whole activation wave the moment
+    seven contracts did — correct claims, correct evidence spans, declined at S7 forever.
+
+    So the gate is stated where it can fire before a merge rather than after a corpus:
+    every EXECUTABLE contract entry that emits a survivorship field must have a policy row
+    for its (method, field) pair. Activating an eighth portal on a method nobody seeded
+    reds here."""
+    seeded = mm.v1_field_policy_pairs()
+    # Sanity: the parse found the shipped seed, so an empty answer cannot read as "all
+    # covered" if a glob or a statement shape ever moves.
+    assert ("registry_derived", "street_name") in seeded
+    assert ("llm_text", "psc") in seeded
+
+    required = {
+        (entry.extraction_method, entry.claim_type): f"{contract.source}/{entry.entry_id}"
+        for contract in contracts.load_all()
+        for entry in contract.entries
+        # `reader is None` is the contract's own "declared ahead, executes nowhere" state;
+        # such an entry emits nothing, so it needs no rung until it is activated.
+        if entry.reader and entry.claim_type in SURVIVORSHIP_FIELDS
+    }
+    missing = sorted(f"{m}/{f} ({required[(m, f)]})"
+                     for (m, f) in required if (m, f) not in seeded)
+    assert not missing, (
+        "a shipped contract entry emits a survivorship field through a producer with no "
+        f"location_field_policy v1 row, so its claims can never win: {missing}")
 
 
 def test_a_field_that_produces_no_winner_is_surfaced_as_blocked():

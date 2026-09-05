@@ -285,13 +285,25 @@ def archived_html_for(source: str) -> Path | None:
 ARCHIVE_FIXTURE_NATIVE: dict[str, str] = {"idnes": "6a71888887e5da33ca081ad8"}
 
 
+# Widened by the W2-6…W2-12 activation wave. `value_text` + `value_geom_wkt` were enough
+# while every archived reader returned a string or a point; the wave ships readers that
+# return a NUMBER (maxima's map zoom, mmreality's obec code, realitymix's accuracy flag), a
+# SHAPE (`json_geometry`'s `uncertainty_geometry` arm), a JSON blob, and a portal-declared
+# precision label with a radius. Left un-widened, a maxima Circle body would land in the
+# golden as a claim_type with an all-null value — the diff would show the entry firing and
+# say nothing about WHAT it claimed, which is the one thing this gate exists to pin.
 def project_archived(read: Any) -> dict[str, Any]:
     claim = read.claim
     return {
         "extractor_id": claim.extractor_id,
         "claim_type": claim.claim_type,
         "value_text": claim.value_text,
+        "value_num": claim.value_num,
         "value_geom_wkt": claim.value_geom_wkt,
+        "value_shape_wkt": claim.value_shape_wkt,
+        "value_jsonb": claim.value_jsonb,
+        "declared_precision_label": claim.declared_precision_label,
+        "declared_radius_m": claim.declared_radius_m,
         "surface": claim.surface,
         "page_kind": claim.page_kind,
         "licence_class": claim.licence_class,

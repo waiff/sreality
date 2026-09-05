@@ -1,35 +1,35 @@
 {
   "bazos": {
-    "sha256": "4cd371edb293caf925621e94ca029b7b48ead69883f7ae469376cbbb44c885b4",
-    "version": 1
+    "sha256": "9ec0e0de6db855d53c2608b9f9ae566c470d35c278f36be164ea592ce29ad68f",
+    "version": 2
   },
   "bezrealitky": {
     "sha256": "06dea09a3e8db1e77661a5fe0c29e30cc6ebd00404f634d96d97e2c393bcb1c6",
     "version": 1
   },
   "ceskereality": {
-    "sha256": "c439eb4bf9b3f6d10c27eab2bc935a3759c1c94d6a287800316822d8b46f1639",
-    "version": 4
+    "sha256": "bcd63de909903c2dedbb94a9bc7f5c596f3290d3b3a4f1f974df7a6382fa33f9",
+    "version": 5
   },
   "idnes": {
-    "sha256": "85f9f201cdbe251726834973dc6a17c7a137eca5e1eeb6fdd1888dc3443acfc6",
-    "version": 1
+    "sha256": "8e0aa8e3169c228b858da1a073cbd114aee946797bb499bcb97e01a455b61e36",
+    "version": 2
   },
   "maxima": {
-    "sha256": "6e31edcb67c4ffc03c8b819b7d278a6eefeab0ad13930d40e6080b84cc72cae0",
-    "version": 1
+    "sha256": "74e6c85c53c30e61a5917168a78351c5995bfd47d5c997179428db5aa3aa2805",
+    "version": 2
   },
   "mmreality": {
-    "sha256": "4901c13f6153d8e7a24b1bcb9dd421377b8efb9bdb13f6efe331cb46ca23a6b8",
-    "version": 1
+    "sha256": "1c56cb31c9100fec59e4650bfff5117205968e11af5572f19aa7be46a06f03a7",
+    "version": 2
   },
   "realitymix": {
-    "sha256": "4cdb35f38b53256b18187a316c11ca4c7e9131cd7567e2002ec46a6171bc8185",
-    "version": 3
+    "sha256": "f2615174e9da8406bfe7df1cde5c9409818bea62a0cf54a68677523796201a22",
+    "version": 4
   },
   "remax": {
-    "sha256": "3cbde78ca3c5c308a3775d1157699fe3a3d97b9016e51e117f76ee5fc454ce5f",
-    "version": 2
+    "sha256": "95a2f024746d6350d480c9db54905e405f1563d1cfab0fb7446d925f9f2ded4e",
+    "version": 3
   },
   "sreality": {
     "sha256": "eb465adf36e21cc49e1edd4b12a5c9aa72d942a4ae13b77347a3679a1dde0a29",
