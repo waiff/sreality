@@ -487,6 +487,39 @@ correctness resting on an invisible setting. Verified empirically against prod
   cohorts grow); `fetchBrokerListings` shows ≤500 of a 20k-listing mega-broker
   (brokers rebuild owns it).
 
+### Broker explore map (done, 2026-09-05)
+"Explore this broker's listings" on `/brokers/:id`. NOT a new map component — a
+Browse cohort scope: `ListingFilters.brokerId`, resolved over the bearer-gated
+`GET /brokers/{id}/listing-ids` (`toolkit.brokers.broker_listing_ids`, geom-only,
+cap 50k + `capped`) into a `BrowsePrefilters.brokerListingIds` allowlist, and an
+`ExploreBrokerModal` (sibling of `ExploreAreaModal`, provider in Shell) mounting
+`<BrowseExperience>` with two new feature flags, `sidebar:false` + `stats:false`.
+Seeds from the page's own Typ/Nabídka pills (state lifted to the page). Chosen over
+a bespoke `BrokerMap` because that would be the 4th hand-rolled MapLibre
+clustering/hover copy; broker data is dark to anon/authenticated PostgREST
+(migration 299 A6), so the scope is an id prefilter like `pipeline`, never a
+column on the public views. Listing-grain by construction: `isBrokerScoped` is
+OR'd into `isListingGrain`, which now drives the relation swap AND the map's
+point-lane guard (`tests/test_browse_map_read_contract.py` pins both, and now
+checks every `applyPrefilters` id space by pair, not by column). Entry-only:
+no sidebar control; `?broker=` round-trips; a "Broker scope applied ×" chip in
+FilterSummary is the way out on `/browse`. Outside preset identity; listed as
+unmonitored for watchdogs.
+- Reported, not fixed: the broker allowlist rides the same GET `.in()` as tags /
+  pipeline, so the ~1–2k-id URL ceiling above applies — the largest real broker
+  (~1.9k active properties, more listings) can trip it, loudly (map error, not a
+  silent subset); the server-side predicate is the strategic fix for all of them.
+  `broker_listings()` ≤500/2000 truncation behind the Inventory table (see U-CAP);
+  a shared `PointsMap` primitive (ListingMap + ComparablesMap + DatasetMap still
+  duplicate the layer setup); a Watchdog broker dimension; Stats-tab parity (the
+  modal hides Stats instead, mirroring the portal filter's accepted gap). WebGL
+  page-crash isolation for the 6 map mount sites was declined again this sprint.
+- Also surfaced, untouched: the agent tool schema advertises 10 comparables
+  filters `_FCR_OVERRIDE_FIELDS` drops; `api/main.py:_build_comparables_inputs`
+  drops `tom_days_*`/`*_seen_*_days` that `estimation_runs._build_filters` passes;
+  5 registry ids falsely claim `Agenda.WATCHDOG`; the portal filter is
+  mode-dependent (single portal → listing grain, else representative-only).
+
 ### Phase U3: Toolkit-backed views (later)
 Surfacing `describe_neighborhood`, `find_distribution_outliers`, and
 the velocity tools through the UI. Auth-gated; specific shape decided

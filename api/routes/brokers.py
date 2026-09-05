@@ -156,6 +156,20 @@ def get_broker_listings(
     return _policy(brokers.broker_listings(conn, broker_id, limit=limit), claims)
 
 
+@router.get("/{broker_id}/listing-ids")
+def get_broker_listing_ids(
+    broker_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    claims: dict = Depends(deps.verify_jwt),
+) -> dict[str, Any]:
+    # A bare id list carries no PII, so _policy is a no-op on `data` here -- but
+    # every non-admin /brokers route runs through it uniformly (see
+    # test_the_pii_gate_covers_every_non_admin_broker_route), so this one does too
+    # rather than being a hand-picked exception someone has to remember to update.
+    # Feeds Browse's brokerId prefilter (see toolkit.brokers.broker_listing_ids).
+    return _policy(brokers.broker_listing_ids(conn, broker_id), claims)
+
+
 @router.get("/{broker_id}/contacts")
 def get_broker_contacts(
     broker_id: int,

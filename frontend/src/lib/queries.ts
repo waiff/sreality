@@ -5,7 +5,7 @@ import {
   PIPELINE_BOARD_COLS,
   type PipelineBoardRow,
 } from './pipelineBoardModel';
-import type { ListingBroker } from './brokers';
+import { fetchBrokerListingIds, type ListingBroker } from './brokers';
 import type { LlmCostDailyRow, LlmCostHourlyRow } from './llmCosts';
 import {
   type CenterRadius,
@@ -257,6 +257,18 @@ export const portalMirrorSource = (f: ListingFilters): string | null =>
 export const isPortalMirror = (f: ListingFilters): boolean =>
   portalMirrorSource(f) != null;
 
+/* A broker scope (rule #22-style prefilter, "Explore this broker's listings")
+ * has the SAME grain problem as the single-portal case above: a merged
+ * `properties` row can have listings from two different brokers, with no
+ * tiebreak column and no reconciliation in the merge chokepoint (rule #15),
+ * so a property-grain view can't safely represent "only this broker's
+ * listings" either. Its own named condition — not folded into
+ * isPortalMirror — so a future change to one can't silently change the
+ * other's meaning. */
+export const isBrokerScoped = (f: ListingFilters): boolean => f.brokerId != null;
+
+const isListingGrain = (f: ListingFilters): boolean => isPortalMirror(f) || isBrokerScoped(f);
+
 /* Relation names, in one place so a fetcher cannot read one grain and count
  * another. */
 const PORTAL_FEED_RELATION = 'listing_feed_public';
@@ -264,10 +276,10 @@ const BROWSE_LIST_RELATION = 'browse_list';
 const MAP_RELATION = 'properties_map_mv';
 
 const listRelation = (f: ListingFilters): string =>
-  isPortalMirror(f) ? PORTAL_FEED_RELATION : BROWSE_LIST_RELATION;
+  isListingGrain(f) ? PORTAL_FEED_RELATION : BROWSE_LIST_RELATION;
 
 const mapRelation = (f: ListingFilters): string =>
-  isPortalMirror(f) ? PORTAL_FEED_RELATION : MAP_RELATION;
+  isListingGrain(f) ? PORTAL_FEED_RELATION : MAP_RELATION;
 
 /* Keyset tiebreak — REQUIRED to differ per grain, not a stylistic choice.
  * `property_id` is not unique on the listing-grain feed: 7,951 properties hold
@@ -277,7 +289,7 @@ const mapRelation = (f: ListingFilters): string =>
  * would collapse those rows out of the list entirely. `listing_id` (the
  * surrogate `listings.id`) is unique and never null on both read models. */
 export const keysetTiebreak = (f: ListingFilters): string =>
-  isPortalMirror(f) ? 'listing_id' : 'property_id';
+  isListingGrain(f) ? 'listing_id' : 'property_id';
 
 /* "Newest first" means something different once we are mirroring a portal: not
  * "newest in OUR archive" (first_seen_at, stamped at batched detail-drain write
@@ -795,6 +807,21 @@ async function resolvePipelinePrefilter(
   return pipelineIdsForScope(await fetchPipelineMembers(), f.pipeline);
 }
 
+/* Broker scope prefilter ("Explore this broker's listings"). Broker data is
+ * architecturally dark to the anon path this whole file otherwise reads —
+ * migration 299 revoked every broker relation from anon AND authenticated —
+ * so this is the one prefilter resolved over the bearer-gated /brokers/*
+ * API (fetchBrokerListingIds, real Supabase JWT) instead of PostgREST. A
+ * resolution failure (e.g. no session) throws and surfaces as a normal query
+ * error like any other prefilter failing — it must never silently degrade to
+ * "no constraint" (the fail-open filter trap). Listing-grain by construction
+ * (see isBrokerScoped above), so this is a listing_id allowlist, not a
+ * property_id one. */
+async function resolveBrokerPrefilter(f: ListingFilters): Promise<number[] | null> {
+  if (f.brokerId == null) return null;
+  return fetchBrokerListingIds(f.brokerId);
+}
+
 /* Intersect two prefilter id sets (null = "no constraint"). Used so a
  * filter that combines tags + city-quality applies both prefilters
  * before paging the main query. */
@@ -816,13 +843,14 @@ export interface BrowsePrefilters {
   listingIds: number[] | null;    // LEGACY city-quality path only (?cityQualityLegacy=1); W7 deletes this field
   obecIds: number[] | null;       // market growth (price-stats datasets)
   propertyIds: number[] | null;   // tags ∩ with-estimates (property grain)
+  brokerListingIds: number[] | null;  // broker scope (listing grain) — see resolveBrokerPrefilter
   empty: boolean;
 }
 
 async function resolveBrowsePrefilters(
   f: ListingFilters,
 ): Promise<BrowsePrefilters> {
-  const [tagProps, cityObec, cityLegacyIds, growthObec, estimateProps, pipelineProps] =
+  const [tagProps, cityObec, cityLegacyIds, growthObec, estimateProps, pipelineProps, brokerListingIds] =
     await Promise.all([
       resolveTagPrefilter(f),
       CITY_QUALITY_LEGACY ? Promise.resolve(null) : resolveCityQualityObecPrefilter(f),
@@ -830,6 +858,7 @@ async function resolveBrowsePrefilters(
       resolvePriceGrowthPrefilter(f),
       resolveEstimatesPrefilter(f),
       resolvePipelinePrefilter(f),
+      resolveBrokerPrefilter(f),
     ]);
   // Tags are now property-grain (properties_with_tags) — intersect them with the
   // with-estimates and pipeline property prefilters and apply via
@@ -845,8 +874,9 @@ async function resolveBrowsePrefilters(
   const empty =
     (obecIds != null && obecIds.length === 0)
     || (cityLegacyIds != null && cityLegacyIds.length === 0)
-    || (propertyIds != null && propertyIds.length === 0);
-  return { listingIds: cityLegacyIds, obecIds, propertyIds, empty };
+    || (propertyIds != null && propertyIds.length === 0)
+    || (brokerListingIds != null && brokerListingIds.length === 0);
+  return { listingIds: cityLegacyIds, obecIds, propertyIds, brokerListingIds, empty };
 }
 
 /* Exported for queries.test.ts — pins that the city-quality allowlist filters on
@@ -860,6 +890,7 @@ export const applyPrefilters = <T>(q: T, p: BrowsePrefilters): T => {
   if (p.listingIds != null) r = r.in('listing_id', p.listingIds);
   if (p.obecIds != null) r = r.in('obec_id', p.obecIds);
   if (p.propertyIds != null) r = r.in('property_id', p.propertyIds);
+  if (p.brokerListingIds != null) r = r.in('listing_id', p.brokerListingIds);
   return r as unknown as T;
 };
 
@@ -969,8 +1000,18 @@ export const fetchListingsForMap = async (
    *    — the pill says so, and closing it is FILED, not attempted here.
    *  - ?map=legacy is the bisect hatch (lib/mapLegacy.ts).
    *
+   * The BROKER SCOPE takes the same point lane, for the same reason: it is
+   * listing-grain by construction (isBrokerScoped — a merged property can carry
+   * two brokers' listings with no tiebreak), and browse_map_cells aggregates the
+   * property-grain projection. Its `listing_ids_filter` matches the REPRESENTATIVE
+   * listing, so a property whose repr is another broker's listing would vanish
+   * — the repr lottery this whole scope exists to avoid. A broker's cohort is
+   * far below MAP_CAP (the largest real one is ~1.9k), so the lane's truncation
+   * caveat does not bite here. `isListingGrain`, not two conditions, so the
+   * relation swap and the lane choice can never disagree.
+   *
    * Everything else asks the server for a bounded answer first. */
-  if (MAP_LEGACY || isPortalMirror(f)) {
+  if (MAP_LEGACY || isListingGrain(f)) {
     const rows = await fetchMapPoints(f, pre);
     return {
       rows,
@@ -994,7 +1035,16 @@ export const fetchListingsForMap = async (
    *   browse_stats_properties has no such parameter because the legacy
    *   city-quality path reaches it as city_index_rules instead; the map resolves
    *   it to listing ids, and an RPC carrying only obec_id and property_id would
-   *   drop it silently. Live whenever ?cityQualityLegacy=1 is in localStorage. */
+   *   drop it silently. Live whenever ?cityQualityLegacy=1 is in localStorage.
+   *
+   *   The broker allowlist is the FOURTH `.in()` applyPrefilters emits, on the
+   *   same listing_id column — so it is handed over intersected into the same
+   *   parameter (listing_id ∈ A ∩ B is exact). A broker scope never actually
+   *   reaches this lane (it is listing-grain and routed above), so this is the
+   *   contract being kept complete, not the path that plots a broker's pins:
+   *   if a future lane change ever did send one here, it would be constrained
+   *   (repr-grain, degraded) rather than silently widened to the whole market.
+   *   tests/test_browse_map_read_contract.py pins every emitted id space. */
   const { data, error } = await supabase.rpc('browse_map_cells', {
     ...buildBrowseStatsArgs(f, {
       obec_ids_filter: pre.obecIds,
@@ -1003,7 +1053,7 @@ export const fetchListingsForMap = async (
     tag_ids: null,
     with_estimates: false,
     city_index_rules: null,
-    listing_ids_filter: pre.listingIds,
+    listing_ids_filter: intersectPrefilters(pre.listingIds, pre.brokerListingIds),
     point_budget: MAP_POINT_BUDGET,
   });
   if (error) throw error;
