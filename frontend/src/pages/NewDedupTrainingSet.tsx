@@ -63,6 +63,10 @@ const SOURCES: ReadonlyArray<{ key: SourceFilter; label: string; title: string }
   { key: 'human', label: 'Yours', title: 'Your own labels — a machine pass can never overwrite these' },
 ];
 
+const VERDICT_LABEL: Record<Verdict, string> = {
+  positive: 'Applies', negative: 'Does not', excluded: 'Left out',
+};
+
 const VERDICT_STYLE: Record<Verdict, string> = {
   positive: 'border-[var(--color-sage)] bg-[var(--color-sage)]/10',
   negative: 'border-[var(--color-rule)]',
@@ -112,12 +116,14 @@ export default function NewDedupTrainingSet() {
 
   /* 'review' = set membership + machine source + positive verdict, composed
    * from the three server filters so it can never disagree with them. */
+  const locked = membership === 'review';
   const effective = membership === 'review'
     ? { verdict: 'positive' as const, source: 'machine' as const, member: 'set' as const }
     : { verdict, source, member: membership === 'all' ? null : membership };
 
+  const rowsKey = ['training-set', activeId, effective.verdict, effective.source, effective.member, offset];
   const rowsQ = useQuery({
-    queryKey: ['training-set', activeId, effective.verdict, effective.source, effective.member, offset],
+    queryKey: rowsKey,
     queryFn: () =>
       listTrainingSet({
         tag_id: activeId as number,
@@ -156,9 +162,24 @@ export default function NewDedupTrainingSet() {
       setChanged((prev) => new Map(prev).set(vars.imageId, {
         from: prev.get(vars.imageId)?.from ?? vars.from, to: vars.state,
       }));
-      /* Refetch the page, not the whole surface: the head counts move too, and
-       * a reviewer who corrects a tile expects the totals to agree. */
-      qc.invalidateQueries({ queryKey: ['training-set'] });
+      /* PATCH THE LIST, NEVER REFETCH IT under a correcting hand. Measured live:
+       * a "no" on a positive under the Applies filter refetched, the row no
+       * longer matched, and the tile vanished with its note field before the
+       * operator could type. The tile now stays where it is, showing its new
+       * mark and where it will live next time; only the head totals refetch. */
+      qc.setQueryData(rowsKey, (old: typeof rowsQ.data) => {
+        if (!old) return old;
+        const rows = old.data.rows.map((row) => row.image_id === vars.imageId
+          ? { ...row, state: vars.state, source: 'human' as const,
+              excluded_reason: vars.state === 'excluded' ? ('pruned' as const) : null }
+          : row);
+        const c = { ...old.data.counts } as Record<string, number>;
+        if (vars.from !== vars.state) {
+          c[vars.from] = Math.max(0, (c[vars.from] ?? 0) - 1);
+          c[vars.state] = (c[vars.state] ?? 0) + 1;
+        }
+        return { ...old, data: { ...old.data, rows, counts: c as typeof old.data.counts } };
+      });
       qc.invalidateQueries({ queryKey: ['training-set-heads'] });
     },
     onError: (e: Error) => pushToast('err', e.message),
@@ -264,6 +285,12 @@ export default function NewDedupTrainingSet() {
           ))}
         </div>
         {changed.has(r.image_id) && (
+          <p className="text-[0.65rem] text-[var(--color-ink-3)] leading-snug">
+            Now under <b>{VERDICT_LABEL[changed.get(r.image_id)!.to]}</b> · <b>Yours</b>.
+            Stays here until you change the filter or leave the page.
+          </p>
+        )}
+        {changed.has(r.image_id) && (
           <form
             data-testid={`note-form-${r.image_id}`}
             className="flex gap-1"
@@ -334,7 +361,10 @@ export default function NewDedupTrainingSet() {
             ))}
           </select>
 
-          <span className="flex gap-1" role="group" aria-label="cutoff">
+          <fieldset className="flex items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--color-rule)]/70 px-2 py-1" role="group" aria-label="cutoff">
+            <legend className="px-1 text-[0.6rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)]">
+              1 · cutoff
+            </legend>
             {MEMBERSHIPS.map((m) => (
               <button
                 key={m.key}
@@ -360,17 +390,29 @@ export default function NewDedupTrainingSet() {
                 )}
               </button>
             ))}
-          </span>
+          </fieldset>
 
-          <span className="flex gap-1" role="group" aria-label="verdict">
+          {/* Under "To review" the next two groups are FIXED (applies + machine),
+            * so they are shown locked rather than silently ignored — a filter
+            * that looks live but does nothing is worse than one that says so. */}
+          <fieldset
+            className={`flex items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--color-rule)]/70 px-2 py-1 ${locked ? 'opacity-50' : ''}`}
+            role="group"
+            aria-label="verdict"
+            disabled={locked}
+          >
+            <legend className="px-1 text-[0.6rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)]">
+              2 · verdict{locked && ' — set by “To review”'}
+            </legend>
             {VERDICTS.map((v) => (
               <button
                 key={v.key}
                 type="button"
-                aria-pressed={verdict === v.key}
+                disabled={locked}
+                aria-pressed={(locked ? 'positive' : verdict) === v.key}
                 onClick={() => patch({ verdict: v.key, offset: null })}
                 className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
-                  verdict === v.key
+                  (locked ? 'positive' : verdict) === v.key
                     ? 'border-[var(--color-ink-2)] text-[var(--color-ink)]'
                     : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]'
                 }`}
@@ -381,18 +423,27 @@ export default function NewDedupTrainingSet() {
                 )}
               </button>
             ))}
-          </span>
+          </fieldset>
 
-          <span className="flex gap-1" role="group" aria-label="decided by">
+          <fieldset
+            className={`flex items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--color-rule)]/70 px-2 py-1 ${locked ? 'opacity-50' : ''}`}
+            role="group"
+            aria-label="decided by"
+            disabled={locked}
+          >
+            <legend className="px-1 text-[0.6rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)]">
+              3 · decided by{locked && ' — set by “To review”'}
+            </legend>
             {SOURCES.map((s) => (
               <button
                 key={s.key}
                 type="button"
                 title={s.title}
-                aria-pressed={source === s.key}
+                disabled={locked}
+                aria-pressed={(locked ? 'machine' : source) === s.key}
                 onClick={() => patch({ source: s.key, offset: null })}
                 className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
-                  source === s.key
+                  (locked ? 'machine' : source) === s.key
                     ? 'border-[var(--color-copper)] text-[var(--color-ink)]'
                     : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]'
                 }`}
@@ -400,8 +451,12 @@ export default function NewDedupTrainingSet() {
                 {s.label}
               </button>
             ))}
-          </span>
+          </fieldset>
         </div>
+        <p className="mt-1.5 text-[0.7rem] text-[var(--color-ink-4)]">
+          The three groups combine: pick a slice of the cutoff (1), then narrow it by the current
+          mark (2) and by who made it (3). “To review” is a preset that fixes 2 and 3 for you.
+        </p>
 
         {activeHead && (
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--color-ink-3)]">
@@ -489,10 +544,18 @@ export default function NewDedupTrainingSet() {
               just the backdrop”) is enough. Notes are gathered per head and distilled into one general
               rule in the definition, never one line per note, so keep them short.
             </p>
-            <p className="mt-2 font-medium text-[var(--color-ink)]">Verdict and “decided by”</p>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">How the three filter groups combine</p>
             <p className="mt-0.5">
-              <b>Applies / Does not / Left out / All</b> filter by the current mark. <b>Anyone / Machine / Yours</b>
-              filter by who made it. Both are ignored under <b>To review</b>, which is always machine positives in the set.
+              <b>1 · cutoff</b> picks a slice (to review, in set, reserve, everything). <b>2 · verdict</b>
+              narrows it by the current mark. <b>3 · decided by</b> narrows it by who made that mark.
+              They stack. <b>To review</b> is a preset: it fixes 2 to “Applies” and 3 to “Machine”, and
+              shows those groups locked so nothing is silently ignored.
+            </p>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">After you change a mark</p>
+            <p className="mt-0.5">
+              The photo stays where it is, showing its new mark and the filter it now belongs to, so
+              you can add your note. It moves on your next filter change or page load. To find it
+              later: <b>Everything</b> → its new verdict → <b>Yours</b>.
             </p>
           </div>
         </div>
