@@ -73,8 +73,10 @@ abroad bucket.
 
 ## Descending when paging cannot reach the tail
 
-**idnes's result ordering is not stable between requests**, so successive pages
-of one query overlap, and the loss compounds with page count:
+**A pagination pass of an idnes slice is close to a RANDOM 75% SAMPLE of it —
+not a slightly-lossy walk.** That is the single most important fact about this
+portal's index, and it took two measurements to see properly. First, that pages
+of one query overlap and the loss compounds with page count:
 
 | slice | pages | collected / declared | |
 | --- | --- | --- | --- |
@@ -82,7 +84,20 @@ of one query overlap, and the loss compounds with page count:
 | `jihomoravsky-kraj` | 71 | 1,693 / 1,698 | 99.7% |
 | `praha` | 154 | 2,948 / 3,839 | **76.8%** — 27% of page slots were repeats |
 
-Paging harder does not help; the pager genuinely ends there. Two things follow.
+Then, that two full passes of the SAME url, back to back, barely agree:
+
+| praha, same URL, twice | rows | pages |
+| --- | --- | --- |
+| pass 1 | 2,847 | 153 |
+| pass 2 | 2,860 | 153 |
+| **union** | **3,576** | — |
+
+They overlap on only ~2,131 of 3,818 declared, and pass 2 held **729 rows pass 1
+never showed**. Paging harder within one pass does not help — the pager genuinely
+ends. Reading the slice AGAIN does, and that is a different remedy: the right
+response to a sample is more samples.
+
+Three things follow.
 
 **The `new_on_page == 0` stop was actively harmful.** It existed to defend
 against idnes clamping an out-of-range `?page` to the last page — but with
@@ -102,6 +117,16 @@ that decided the design, and neither half of it is optional:
 
 Verified end-to-end through the real code path: `praha` → 3,825 / 3,840 =
 **99.61%, `exhausted`**, 308 pages, 289s.
+
+**A slice still short after descending is RESAMPLED** (`_RESAMPLE_PASSES`, 2).
+This is what makes praha reliable rather than a coin flip: it was landing at
+99.35 / 99.61 / 99.74% across runs against a 99.5% bar, so its category passed
+only sometimes — and the gate needs THREE CONSECUTIVE passes, which a coin flip
+essentially never delivers. Bounded and self-limiting: only a short slice
+resamples, and it stops the moment a pass adds `<= _RESAMPLE_MIN_GAIN` rows,
+because a pass that adds nothing means the union has converged and the shortfall
+is not sampling loss. A slice that can never converge costs **two extra fetches**,
+not a budget.
 
 ### Two axes, tried in order
 
