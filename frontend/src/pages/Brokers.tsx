@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { listBrokerMergeCandidates } from '../lib/api';
@@ -17,7 +17,7 @@ import {
 } from '../lib/brokers';
 import type { DistrictChip } from '../lib/filters';
 import { LocationTypeahead } from '../components/filter-controls/LocationTypeahead';
-import { PickButton, Switch } from '../components/controls';
+import { Field, PickButton, Segmented, Switch } from '../components/controls';
 import { BufferedNumberInput } from '../components/FilterForm';
 import { SUBTYPE_LABELS_BY_MAIN } from '@/lib/enums';
 import { ROUTES } from '@/lib/routes';
@@ -438,45 +438,6 @@ function CompanyFilter({
           <span className="font-[family-name:var(--font-mono)] tabular-nums opacity-70">
             ({fmtCount(f.broker_count)})
           </span>
-        </PickButton>
-      ))}
-    </div>
-  );
-}
-
-function Field({
-  label,
-  children,
-  className = '',
-}: {
-  label: string;
-  children: ReactNode;
-  className?: string;
-}) {
-  return (
-    <label className={`flex flex-col gap-1 ${className}`}>
-      <span className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
-        {label}
-      </span>
-      {children}
-    </label>
-  );
-}
-
-function Segmented<T extends string | number | null>({
-  options,
-  value,
-  onChange,
-}: {
-  options: ReadonlyArray<{ value: T; label: string }>;
-  value: T;
-  onChange: (v: T) => void;
-}) {
-  return (
-    <div className="flex flex-wrap gap-1">
-      {options.map((o) => (
-        <PickButton key={o.label} on={value === o.value} onClick={() => onChange(o.value)}>
-          {o.label}
         </PickButton>
       ))}
     </div>

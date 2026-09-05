@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -9,7 +9,7 @@ import {
 import { chipsToGeoArrays } from '../lib/brokers';
 import type { DistrictChip } from '../lib/filters';
 import { LocationTypeahead } from '../components/filter-controls/LocationTypeahead';
-import { PickButton } from '../components/controls';
+import { Field, Segmented } from '../components/controls';
 import { fmtCount, fmtRelative } from '../lib/format';
 import { ROUTES } from '@/lib/routes';
 
@@ -82,7 +82,7 @@ export default function Outreach() {
           nová kampaň
         </p>
         <div className="mt-3 grid gap-x-6 gap-y-3 sm:grid-cols-2">
-          <Field label="Název" className="sm:col-span-2">
+          <Field label="Název" as="control" className="sm:col-span-2">
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -90,7 +90,7 @@ export default function Outreach() {
               className={inputCls}
             />
           </Field>
-          <Field label="Cíl (volně)" className="sm:col-span-2">
+          <Field label="Cíl (volně)" as="control" className="sm:col-span-2">
             <textarea
               value={goal}
               onChange={(e) => setGoal(e.target.value)}
@@ -99,7 +99,7 @@ export default function Outreach() {
               className={inputCls}
             />
           </Field>
-          <Field label="Pokyny pro koncept (volitelné)" className="sm:col-span-2">
+          <Field label="Pokyny pro koncept (volitelné)" as="control" className="sm:col-span-2">
             <textarea
               value={guidance}
               onChange={(e) => setGuidance(e.target.value)}
@@ -227,29 +227,3 @@ export function StatusChip({ status }: { status: string }) {
 const inputCls =
   'w-full text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper-3)] px-3 py-2 text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:ring-2 focus:ring-[var(--color-focus)]';
 
-function Field({ label, children, className = '' }: { label: string; children: ReactNode; className?: string }) {
-  return (
-    <label className={`flex flex-col gap-1 ${className}`}>
-      <span className="text-[0.7rem] tracking-[0.08em] uppercase text-[var(--color-ink-3)]">{label}</span>
-      {children}
-    </label>
-  );
-}
-
-function Segmented<T extends string | number | null>({
-  options, value, onChange,
-}: {
-  options: ReadonlyArray<{ value: T; label: string }>;
-  value: T;
-  onChange: (v: T) => void;
-}) {
-  return (
-    <div className="flex flex-wrap gap-1">
-      {options.map((o) => (
-        <PickButton key={String(o.value)} on={o.value === value} onClick={() => onChange(o.value)}>
-          {o.label}
-        </PickButton>
-      ))}
-    </div>
-  );
-}

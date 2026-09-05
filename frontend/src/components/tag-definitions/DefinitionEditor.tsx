@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { Field } from '@/components/controls';
 import type {
   NewDedupTag,
   TagDefinitionConfusable,
@@ -59,26 +60,6 @@ const ADD =
   'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] ' +
   'hover:border-[var(--color-rule-strong)]';
 
-function Field({
-  label,
-  help,
-  children,
-}: {
-  label: string;
-  help: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="border-t border-[var(--color-rule-soft)] pt-3 first:border-t-0 first:pt-0">
-      <p className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
-        {label}
-      </p>
-      <p className="mb-1.5 text-[0.7rem] text-[var(--color-ink-4)]">{help}</p>
-      {children}
-    </div>
-  );
-}
-
 export default function DefinitionEditor({
   draft,
   onChange,
@@ -103,10 +84,9 @@ export default function DefinitionEditor({
 
   return (
     <div className="space-y-3">
-      <Field label="means" help="one sentence — the meaning a second person must land on too">
+      <Field label="means" as="control" help="one sentence — the meaning a second person must land on too">
         <input
           type="text"
-          aria-label="means"
           value={draft.means}
           maxLength={MEANS_MAX}
           placeholder="one sentence: what this tag means"

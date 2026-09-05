@@ -86,6 +86,28 @@ export default [
           message:
             'Build route paths from ROUTES (lib/routes.ts) instead of interpolating them into navigate().',
         },
+        {
+          // A <label> wrapping a BUTTON is the "caption over a group" bug: the
+          // first pill inherits the whole caption as its accessible name, the
+          // rest get no association, and clicking the caption activates the
+          // first pill (HTML label activation — clicking the word "Nabídka"
+          // selected "Prodej"). Field as="group" (components/controls.tsx) is
+          // the primitive; as="control" is the sanctioned single-child wrap and
+          // carries the one per-line exemption. Position-scoped via :has so a
+          // legitimate <label><input/></label> is untouched.
+          selector:
+            "JSXElement[openingElement.name.name='label']:has(JSXElement[openingElement.name.name='button'])",
+          message:
+            'A <label> must not wrap buttons — it names only the first and makes the caption click it. Use <Field label=…> (components/controls.tsx), which renders role="group".',
+        },
+        {
+          // Six local `function Field` copies existed before the shared one;
+          // a seventh must not appear. The primitive lives in controls.tsx and
+          // is exempted there per line.
+          selector: "FunctionDeclaration[id.name='Field']",
+          message:
+            'Do not redefine Field — import it from components/controls.tsx. The shared one names groups correctly (role="group" + aria-labelledby).',
+        },
       ],
     },
   },

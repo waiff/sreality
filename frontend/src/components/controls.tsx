@@ -152,20 +152,112 @@ export function ControlGroup({
 /* tracking, ink-tertiary. They mark fields inside a group, never groups.    */
 /* -------------------------------------------------------------------------- */
 
-export function Section({ label, children }: { label: string; children: ReactNode }) {
+/* Field — the ONE caption-over-control(s) primitive.
+ *
+ * Six copies of this existed (Section here, plus a local `Field` in Brokers,
+ * Outreach, Datasets, Settings and DefinitionEditor). Three of them wrapped
+ * their children in a bare <label>. For a single <input> that is correct HTML;
+ * for a GROUP of pills it is two defects at once: the first pill inherits the
+ * whole row's text as its accessible name (and the rest get no association at
+ * all), and a click on the caption ACTIVATES that first pill — clicking the
+ * word "Nabídka" silently selected "Prodej". Tests had grown textContent
+ * workarounds to route around it.
+ *
+ * `as="group"` is the DEFAULT and the safe form: role="group" +
+ * aria-labelledby. A group name is ancestor context — it never replaces or
+ * pollutes a child's name, a group of one is legal, and the element has no
+ * activation behaviour, so a mis-classified site degrades to "no click-to-
+ * focus", never to a false relationship. `as="control"` is the plain <label>
+ * wrap, for exactly one labelable child (input / textarea / select / button).
+ *
+ * `help` renders under the caption and is announced via aria-describedby on
+ * the group form. */
+// eslint-disable-next-line no-restricted-syntax -- THE Field; the ban exists so a seventh local copy cannot appear
+export function Field({
+  label,
+  help,
+  as = 'group',
+  className = '',
+  children,
+}: {
+  label: string;
+  help?: string;
+  as?: 'group' | 'control';
+  className?: string;
+  children: ReactNode;
+}) {
+  const captionId = useId();
+  const helpId = useId();
+  const caption = <Label id={captionId}>{label}</Label>;
+  const helpEl = help ? (
+    <p id={helpId} className="mt-0.5 text-[0.7rem] text-[var(--color-ink-4)]">
+      {help}
+    </p>
+  ) : null;
+
+  if (as === 'control') {
+    // Help sits OUTSIDE the <label>: everything inside a label joins the
+    // control's accessible name, and "System prompt one sentence — …" is not a
+    // name. The wrap itself is sanctioned: exactly one labelable child.
+    return (
+      <div className={className}>
+        <label className="block">
+          {caption}
+          <div className="mt-2">{children}</div>
+        </label>
+        {helpEl}
+      </div>
+    );
+  }
   return (
-    <div>
-      <Label>{label}</Label>
+    <div
+      role="group"
+      aria-labelledby={captionId}
+      aria-describedby={help ? helpId : undefined}
+      className={className}
+    >
+      {caption}
+      {helpEl}
       <div className="mt-2">{children}</div>
     </div>
   );
 }
 
-export function Label({ children }: { children: ReactNode }) {
+/* Section is Field's original name in the Browse sidebar. Kept as an alias so
+ * its 18 call sites stay untouched and pixel-stable; it now carries the group
+ * role and name it always should have. */
+export function Section({ label, children }: { label: string; children: ReactNode }) {
+  return <Field label={label}>{children}</Field>;
+}
+
+export function Label({ children, id }: { children: ReactNode; id?: string }) {
   return (
-    <p className="text-[0.62rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+    <p id={id} className="text-[0.62rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
       {children}
     </p>
+  );
+}
+
+/* Segmented — a row of PickButtons acting as a single-value choice. Lived as
+ * two byte-for-byte copies in Brokers and Outreach; a Field caption is what
+ * names it, so it belongs beside Field. */
+export function Segmented<T extends string | number | null>({
+  options,
+  value,
+  onChange,
+}: {
+  options: ReadonlyArray<{ value: T; label: string }>;
+  value: T;
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      {options.map((o) => (
+        <PickButton key={String(o.value)} on={o.value === value} onClick={() => onChange(o.value)}>
+          {o.label}
+        </PickButton>
+      ))}
+    </div>
   );
 }
 
