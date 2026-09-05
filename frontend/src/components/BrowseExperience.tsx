@@ -119,6 +119,18 @@ export interface BrowseFeatures {
   /* The big "Browse" heading in the summary block — hidden in the modal,
    * which has its own header. */
   title?: boolean;
+  /* The filter sidebar (+ its resize handle) — hidden for a fully-scoped,
+   * non-interactive explore view (the broker-explore modal), which seeds its
+   * own fixed cohort and has no sidebar-driven filter for the operator to
+   * change. Page and the area-explore modal both keep it shown. */
+  sidebar?: boolean;
+  /* The Stats tab — property-grain and deliberately NOT scoped by a broker
+   * (mirrors the portal filter's own accepted Stats-tab gap, queries.ts
+   * fetchBrowseStats). Showing it inside a broker-scoped view would display
+   * the WHOLE market's numbers next to that one broker's map/cards, which
+   * reads as a bug rather than a documented limitation — so the broker
+   * modal hides the tab outright instead of shipping a self-contradiction. */
+  stats?: boolean;
 }
 
 const DEFAULT_FEATURES: Required<BrowseFeatures> = {
@@ -126,6 +138,8 @@ const DEFAULT_FEATURES: Required<BrowseFeatures> = {
   watchdog: true,
   mergeMode: true,
   title: true,
+  sidebar: true,
+  stats: true,
 };
 
 export default function BrowseExperience({
@@ -710,7 +724,7 @@ export default function BrowseExperience({
   const tabs: ReadonlyArray<Tab<TabKey>> = [
     { key: 'map', label: 'Listings', badge: cohortTotal != null ? `${cohortTotalApprox ? '~' : ''}${cohortTotal.toLocaleString('cs-CZ')}` : undefined },
     { key: 'table', label: 'Table' },
-    { key: 'stats', label: 'Stats' },
+    ...(f.stats ? [{ key: 'stats', label: 'Stats' } as Tab<TabKey>] : []),
   ];
 
   /* The listings PANEL's error drives the page banner. On the map tab that's the
@@ -732,25 +746,29 @@ export default function BrowseExperience({
 
   return (
     <div className={`flex${isModal ? ' h-full' : ''}`} ref={outerRef}>
-      <FilterSidebar
-        filters={filters}
-        onChange={view.setFilters}
-        onLocationPick={handleLocationPick}
-        width={sidebar.value}
-        layout={layout}
-      />
+      {f.sidebar && (
+        <>
+          <FilterSidebar
+            filters={filters}
+            onChange={view.setFilters}
+            onLocationPick={handleLocationPick}
+            width={sidebar.value}
+            layout={layout}
+          />
 
-      <ResizeHandle
-        ariaLabel="Resize the filters sidebar"
-        onMove={onSidebarDrag}
-        onEnd={sidebar.persist}
-        onReset={sidebar.reset}
-        className={
-          isModal
-            ? 'hidden lg:flex self-stretch h-full w-3 -mx-1.5'
-            : 'hidden lg:flex sticky top-14 self-start h-[calc(100dvh-3.5rem)] w-3 -mx-1.5'
-        }
-      />
+          <ResizeHandle
+            ariaLabel="Resize the filters sidebar"
+            onMove={onSidebarDrag}
+            onEnd={sidebar.persist}
+            onReset={sidebar.reset}
+            className={
+              isModal
+                ? 'hidden lg:flex self-stretch h-full w-3 -mx-1.5'
+                : 'hidden lg:flex sticky top-14 self-start h-[calc(100dvh-3.5rem)] w-3 -mx-1.5'
+            }
+          />
+        </>
+      )}
 
       <div
         className={`flex-1 min-w-0 flex flex-col${
@@ -778,6 +796,11 @@ export default function BrowseExperience({
               false
             }
             onClearBounds={filters.bounds ? () => view.setBounds(null) : undefined}
+            onClearBroker={
+              filters.brokerId != null
+                ? () => view.setFilters({ ...filters, brokerId: null })
+                : undefined
+            }
             onCreateWatchdog={f.watchdog ? () => setWatchdogModalOpen(true) : undefined}
           />
           <RowGrainNotice
@@ -1051,6 +1074,7 @@ function FilterSummary({
   loading,
   showTitle,
   onClearBounds,
+  onClearBroker,
   onCreateWatchdog,
 }: {
   filters: ListingFilters;
@@ -1074,6 +1098,11 @@ function FilterSummary({
   loading: boolean;
   showTitle: boolean;
   onClearBounds?: () => void;
+  /* No sidebar control sets brokerId (see ListingFilters.brokerId) — reachable
+   * only via the explore-broker modal's seed or a `?broker=` URL param, so
+   * without this a scoped /browse?broker=<id> view (reached via "Go to
+   * Browse") would be a dead end with no way to leave the scope. */
+  onClearBroker?: () => void;
   onCreateWatchdog?: () => void;
 }) {
   return (
@@ -1123,6 +1152,19 @@ function FilterSummary({
               title="Clear the map area filter and widen back to the full cohort"
             >
               <span>Map area applied</span>
+              <span aria-hidden className="opacity-60 group-hover:opacity-100">
+                ×
+              </span>
+            </button>
+          )}
+          {onClearBroker && (
+            <button
+              type="button"
+              onClick={onClearBroker}
+              className="group inline-flex items-center gap-1 px-2 py-0.5 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:bg-[var(--color-copper)]/15 transition-colors"
+              title="Clear the broker scope and widen back to the full cohort"
+            >
+              <span>Broker scope applied</span>
               <span aria-hidden className="opacity-60 group-hover:opacity-100">
                 ×
               </span>

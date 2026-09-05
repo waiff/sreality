@@ -12,6 +12,7 @@ import { fmtCount, fmtCzk, fmtArea, fmtRelative } from '../lib/format';
 import { portalShort } from '../lib/portals';
 import { PickButton } from '../components/controls';
 import BrokerContactCard from '@/components/BrokerContactCard';
+import { useExploreBrokerModal } from '@/components/ExploreBrokerModal';
 import { listingRowPath } from '@/lib/listingUrl';
 import { categoryMainLabel, categoryTypeLabel, listingKindLabel } from '@/lib/enums';
 import { usePageTitle } from '@/lib/pageTitle';
@@ -35,6 +36,13 @@ const OFFER_OPTIONS: ReadonlyArray<{ value: string | null; label: string }> = [
 export default function BrokerDetail() {
   const { id } = useParams<{ id: string }>();
   const brokerId = Number(id);
+
+  // Lifted out of Inventory so the "Explore this broker's listings" modal
+  // seeds from the SAME Typ/Nabídka selection the table is filtered to —
+  // one cohort definition for both, not two that happen to agree.
+  const [categoryMain, setCategoryMain] = useState<string | null>(null);
+  const [categoryType, setCategoryType] = useState<string | null>(null);
+  const { open: openExploreBroker } = useExploreBrokerModal();
 
   // One call: identity + firms + regional footprint (+ contacts for an admin).
   // Region names arrive joined, so the old geo-options query and the
@@ -93,6 +101,22 @@ export default function BrokerDetail() {
                   </span>
                 )}
               </div>
+              <button
+                type="button"
+                onClick={() =>
+                  openExploreBroker({
+                    brokerId,
+                    brokerName: b.display_name ?? 'Neznámý makléř',
+                    categoryMain,
+                    categoryType,
+                  })
+                }
+                className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 text-[0.8rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink-2)] hover:border-[var(--color-copper)] hover:text-[var(--color-copper)] transition-colors"
+                title="See this broker's listings on the map — same Typ/Nabídka selection as below"
+              >
+                <MapPinGlyph />
+                <span>Explore this broker's listings</span>
+              </button>
             </div>
             <BrokerContactCard broker={b} />
           </header>
@@ -125,6 +149,10 @@ export default function BrokerDetail() {
             loading={listingsQ.isLoading}
             error={listingsQ.isError ? (listingsQ.error as Error) : null}
             total={b.listing_count}
+            categoryMain={categoryMain}
+            categoryType={categoryType}
+            onCategoryMainChange={setCategoryMain}
+            onCategoryTypeChange={setCategoryType}
           />
         </>
       )}
@@ -234,15 +262,20 @@ function Inventory({
   loading,
   error,
   total,
+  categoryMain,
+  categoryType,
+  onCategoryMainChange,
+  onCategoryTypeChange,
 }: {
   rows: BrokerListing[];
   loading: boolean;
   error: Error | null;
   total: number;
+  categoryMain: string | null;
+  categoryType: string | null;
+  onCategoryMainChange: (v: string | null) => void;
+  onCategoryTypeChange: (v: string | null) => void;
 }) {
-  const [categoryMain, setCategoryMain] = useState<string | null>(null);
-  const [categoryType, setCategoryType] = useState<string | null>(null);
-
   const filtered = useMemo(
     () =>
       rows.filter(
@@ -273,8 +306,8 @@ function Inventory({
 
       {rows.length > 0 && (
         <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2">
-          <InvSegment label="Typ" options={CATEGORY_OPTIONS} value={categoryMain} onChange={setCategoryMain} />
-          <InvSegment label="Nabídka" options={OFFER_OPTIONS} value={categoryType} onChange={setCategoryType} />
+          <InvSegment label="Typ" options={CATEGORY_OPTIONS} value={categoryMain} onChange={onCategoryMainChange} />
+          <InvSegment label="Nabídka" options={OFFER_OPTIONS} value={categoryType} onChange={onCategoryTypeChange} />
         </div>
       )}
 
@@ -362,6 +395,20 @@ function Inventory({
         )}
       </div>
     </section>
+  );
+}
+
+function MapPinGlyph() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M8 1.5c2.5 0 4.5 2 4.5 4.5 0 3-4.5 8-4.5 8S3.5 9 3.5 6C3.5 3.5 5.5 1.5 8 1.5z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <circle cx="8" cy="6" r="1.6" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
   );
 }
 

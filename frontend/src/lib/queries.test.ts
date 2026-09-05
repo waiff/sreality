@@ -17,6 +17,7 @@ import {
   districtsFilterClause,
   effectiveBbox,
   effectiveSort,
+  isBrokerScoped,
   isPortalMirror,
   keysetTiebreak,
   matchesDistricts,
@@ -69,6 +70,7 @@ describe('applyPrefilters (city-quality id-space)', () => {
     listingIds: null,
     obecIds: null,
     propertyIds: null,
+    brokerListingIds: null,
     empty: false,
   };
 
@@ -98,6 +100,21 @@ describe('applyPrefilters (city-quality id-space)', () => {
     const { q, calls } = record();
     applyPrefilters(q, base);
     expect(calls).toEqual([]);
+  });
+
+  /* The broker scope is listing-grain by construction (see isBrokerScoped), so
+   * its allowlist ANDs onto the cohort on `listing_id` — its OWN field, not the
+   * legacy city-quality `listingIds` slot that W7 is deleting. */
+  it('filters the broker allowlist on listing_id, on its own field', () => {
+    const { q, calls } = record();
+    applyPrefilters(q, { ...base, brokerListingIds: [40, 41] });
+    expect(calls).toEqual([{ col: 'listing_id', vals: [40, 41] }]);
+  });
+
+  it('applies an EMPTY broker allowlist — "scope on, nothing mappable" is not "no constraint"', () => {
+    const { q, calls } = record();
+    applyPrefilters(q, { ...base, brokerListingIds: [] });
+    expect(calls).toEqual([{ col: 'listing_id', vals: [] }]);
   });
 });
 
@@ -444,6 +461,38 @@ describe('portal-mirror mode selection', () => {
   it('keeps portal_sort_key out of the user-selectable sorts, so no URL can pin it', () => {
     /* It is derived from the filter state, never round-tripped through ?sort=. */
     expect(parseSort('-portal_sort_key')).toEqual(DEFAULT_SORT);
+  });
+});
+
+/* The broker scope ("Explore this broker's listings") forces the SAME
+ * listing-grain relation swap as a single portal, for the same reason: a merged
+ * property can carry listings from two brokers with no tiebreak, so a
+ * property-grain row can't represent "only this broker's listings". It is its
+ * own named condition rather than a widening of isPortalMirror, so the
+ * portal-only behaviours (the portal_sort_key remap) don't leak onto it. */
+describe('broker scope (listing-grain)', () => {
+  const withBroker = (brokerId: number | null) => ({ ...DEFAULT_FILTERS, brokerId });
+
+  it('engages on a broker id and stays off otherwise', () => {
+    expect(isBrokerScoped(withBroker(527))).toBe(true);
+    expect(isBrokerScoped(withBroker(null))).toBe(false);
+    expect(isBrokerScoped(DEFAULT_FILTERS)).toBe(false);
+  });
+
+  it('is not a portal mirror — the two scopes are independent conditions', () => {
+    expect(isPortalMirror(withBroker(527))).toBe(false);
+    expect(portalMirrorSource(withBroker(527))).toBeNull();
+  });
+
+  it('anchors the keyset cursor on listing_id, like the portal mirror does', () => {
+    expect(keysetTiebreak(withBroker(527))).toBe('listing_id');
+    /* Both scopes together are still listing-grain. */
+    expect(keysetTiebreak({ ...withBroker(527), portals: ['idnes'] })).toBe('listing_id');
+  });
+
+  it('does NOT remap "newest first" onto portal_sort_key — that key is a portal-feed concept', () => {
+    expect(effectiveSort(withBroker(527), { field: 'first_seen_at', direction: 'desc' }))
+      .toEqual({ field: 'first_seen_at', direction: 'desc' });
   });
 });
 

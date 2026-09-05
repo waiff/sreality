@@ -7,6 +7,7 @@ import { useAuth } from '@/lib/auth';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { NewEstimationProvider } from './NewEstimationModal';
 import { ExploreAreaProvider } from './ExploreAreaModal';
+import { ExploreBrokerProvider } from './ExploreBrokerModal';
 import ToastViewport from './ToastViewport';
 import ErrorBoundary from './ErrorBoundary';
 import AccountMenu from './AccountMenu';
@@ -83,20 +84,22 @@ export default function Shell() {
   return (
     <NewEstimationProvider>
       <ExploreAreaProvider>
-        <div className="min-h-dvh flex flex-col bg-[var(--color-paper)] text-[var(--color-ink)]">
-          <TopBar />
-          {/* Keyed on pathname so a crashed page recovers on the next nav.
-            * Scoped to the route body on purpose: a page crash must not take
-            * the nav, the footer or the toast surface with it — the fallback
-            * says "use the back button", which needs the nav to still exist. */}
-          <main className="flex-1">
-            <ErrorBoundary key={location.pathname} label="route">
-              <Outlet />
-            </ErrorBoundary>
-          </main>
-          <Footer />
-        </div>
-        <ToastViewport />
+        <ExploreBrokerProvider>
+          <div className="min-h-dvh flex flex-col bg-[var(--color-paper)] text-[var(--color-ink)]">
+            <TopBar />
+            {/* Keyed on pathname so a crashed page recovers on the next nav.
+              * Scoped to the route body on purpose: a page crash must not take
+              * the nav, the footer or the toast surface with it — the fallback
+              * says "use the back button", which needs the nav to still exist. */}
+            <main className="flex-1">
+              <ErrorBoundary key={location.pathname} label="route">
+                <Outlet />
+              </ErrorBoundary>
+            </main>
+            <Footer />
+          </div>
+          <ToastViewport />
+        </ExploreBrokerProvider>
       </ExploreAreaProvider>
     </NewEstimationProvider>
   );

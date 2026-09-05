@@ -372,6 +372,26 @@ describe('pipeline scope URL codec', () => {
   });
 });
 
+describe('broker scope URL codec', () => {
+  it('round-trips a broker id', () => {
+    const f: ListingFilters = { ...DEFAULT_FILTERS, brokerId: 527 };
+    const sp = toSearchParams(f);
+    expect(sp.get('broker')).toBe('527');
+    expect(fromSearchParams(sp)).toEqual(f);
+  });
+
+  it('emits nothing when the scope is off', () => {
+    expect(toSearchParams(DEFAULT_FILTERS).has('broker')).toBe(false);
+    expect(fromSearchParams(new URLSearchParams()).brokerId).toBeNull();
+  });
+
+  it('drops an unparseable id to off, like every other integer param', () => {
+    // There is no "any broker" to degrade to (unlike the pipeline's "any
+    // stage"), so this follows parkingLotsMin & co: not a number → unset.
+    expect(fromSearchParams(new URLSearchParams('broker=abc')).brokerId).toBeNull();
+  });
+});
+
 describe('isDefault', () => {
   it('returns true for the canonical default state', () => {
     expect(isDefault(DEFAULT_FILTERS)).toBe(true);
@@ -561,6 +581,14 @@ describe('filtersToWatchdogSpec', () => {
     expect(spec.city_index_rules).toBeNull();
   });
 
+  it('reports the broker scope as unmonitored instead of silently dropping it', () => {
+    // The matcher has no broker join; a watchdog created from a broker-scoped
+    // Browse view must SAY the scope is not part of what it watches.
+    const { spec, unsupported } = filtersToWatchdogSpec({ ...DEFAULT_FILTERS, brokerId: 527 });
+    expect(unsupported).toContain('broker');
+    expect(Object.keys(spec).some((k) => k.includes('broker'))).toBe(false);
+  });
+
   it('carries the advanced predicates the matcher honours', () => {
     const f: ListingFilters = {
       ...DEFAULT_FILTERS,
@@ -702,6 +730,17 @@ describe('filter presets', () => {
         { ...saved, priceMax: 4_000_000, pipeline: { stage_ids: [] } },
         saved,
       ),
+    ).toBe(false);
+  });
+
+  it('treats the broker scope as a lens too: stripped from presets, never dirtying one', () => {
+    const f: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 6_000_000, brokerId: 527 };
+    expect(filtersForPreset(f, false).brokerId).toBeNull();
+    expect(filtersForPreset(f, true).brokerId).toBeNull();
+    const saved: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 5_000_000 };
+    expect(filtersEqualForPreset({ ...saved, brokerId: 527 }, saved)).toBe(true);
+    expect(
+      filtersEqualForPreset({ ...saved, priceMax: 4_000_000, brokerId: 527 }, saved),
     ).toBe(false);
   });
 

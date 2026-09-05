@@ -282,6 +282,21 @@ def test_by_listing_flags_a_broker_with_neither_channel(client, monkeypatch):
     assert "primary_email" not in row
 
 
+def test_get_broker_listing_ids_returns_bare_ids(client, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        broker_routes.brokers, "broker_listing_ids",
+        lambda conn, bid: captured.update(broker_id=bid)
+        or {"data": [10, 11, 12], "metadata": {"capped": False}})
+    res = client.get("/brokers/1/listing-ids")
+    assert res.status_code == 200
+    assert captured["broker_id"] == 1
+    body = res.json()
+    assert body["data"] == [10, 11, 12]  # a bare id list is a no-op under the mask
+    assert body["metadata"]["capped"] is False
+    assert body["metadata"]["pii_masked"] is True  # the policy runs uniformly regardless
+
+
 def test_brokers_by_ids_repeated_query_params(client, monkeypatch):
     captured = {}
     monkeypatch.setattr(broker_routes.brokers, "brokers_by_ids",
@@ -425,10 +440,12 @@ _NON_ADMIN_CALLS = [
     ("POST", "/brokers/by-listings", "/brokers/by-listings", {"listing_ids": [1]}),
     ("GET", "/brokers/{broker_id}", "/brokers/1", None),
     ("GET", "/brokers/{broker_id}/listings", "/brokers/1/listings", None),
+    ("GET", "/brokers/{broker_id}/listing-ids", "/brokers/1/listing-ids", None),
 ]
 
 _TOOLKIT_READS = ("brokers_by_ids", "leaderboard", "search", "geo_options", "firm_options",
-                  "listing_broker", "listing_brokers", "get_broker", "broker_listings")
+                  "listing_broker", "listing_brokers", "get_broker", "broker_listings",
+                  "broker_listing_ids")
 
 
 def _stub_every_toolkit_read(monkeypatch) -> None:

@@ -141,6 +141,36 @@ def test_batch_reads_are_bounded() -> None:
     assert len(conn.cur.seen[0][1][0]) == 1000
 
 
+def test_broker_listing_ids_selects_bare_ids_excluding_null_geom() -> None:
+    conn = _Conn([{"id": 10}, {"id": 11}])
+    out = brokers.broker_listing_ids(conn, 4, limit=100)
+    sql, params = conn.cur.seen[0]
+    assert "geom IS NOT NULL" in sql
+    assert params == (4, 101)  # limit+1, to detect overflow without a second COUNT
+    assert out["data"] == [10, 11]
+    assert out["metadata"]["capped"] is False
+    assert out["metadata"]["result_count"] == 2
+
+
+def test_broker_listing_ids_reports_and_trims_an_overflow() -> None:
+    """The limit+1 fetch is how `capped` is detected without a second COUNT query.
+
+    RED by: fetching exactly `limit` rows and always reporting capped=False — a
+    truly-oversized broker would then silently under-plot the map with no signal.
+    """
+    conn = _Conn([{"id": 1}, {"id": 2}, {"id": 3}])
+    out = brokers.broker_listing_ids(conn, 4, limit=2)
+    assert out["data"] == [1, 2]
+    assert out["metadata"]["capped"] is True
+
+
+def test_broker_listing_ids_clamps_limit() -> None:
+    conn = _Conn([])
+    brokers.broker_listing_ids(conn, 4, limit=999_999)
+    _, params = conn.cur.seen[0]
+    assert params == (4, 50_001)
+
+
 def test_geo_options_rejects_an_unknown_level() -> None:
     """Falling back to "no filter" answered `obec` with every region AND okres."""
     with pytest.raises(ValueError):
