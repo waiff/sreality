@@ -17,8 +17,10 @@ as an overall score.
 
 A cell grades only when both sides said yes or no. A "left out" on either side
 is an abstention: it trains nothing and grades nothing, and scoring it as a no
-would punish the model for obeying the rule. Abstentions are reported, not
-folded in. Reads only; spends nothing.
+would punish the model for obeying the rule. So is an untouched migration-466
+default — a declared default is not a judgment, and grading against one measures
+the backfill; it is counted in its own column, because it is the one abstention
+a sitting can still convert into a real answer. Reads only; spends nothing.
 """
 
 from __future__ import annotations
@@ -78,15 +80,17 @@ def main() -> int:
         LOG.warning("No current machine review for this sitting — run the review "
                     "lane first (action=review), or the definitions changed since.")
         return 0
-    LOG.info("%-38s %6s %6s %5s %5s %5s %5s %7s %7s",
-             "head", "human+", "graded", "tp", "fp", "fn", "abst", "prec", "recall")
+    LOG.info("%-38s %6s %6s %5s %5s %5s %5s %6s %7s %7s",
+             "head", "human+", "graded", "tp", "fp", "fn", "abst", "deflt",
+             "prec", "recall")
     def _sort_key(item: tuple[int, dict]) -> tuple:
         return (-(item[1]["human_positives"]), item[0])
     for tag_id, s in sorted(scored.items(), key=_sort_key):
         abstain = s["human_skip"] + s["machine_skip"]
-        LOG.info("%-38s %6d %6d %5d %5d %5d %5d %7s %7s",
+        LOG.info("%-38s %6d %6d %5d %5d %5d %5d %6d %7s %7s",
                  labels.get(tag_id, str(tag_id))[:38], s["human_positives"],
                  s["graded"], s["tp"], s["fp"], s["fn"], abstain,
+                 s.get("auto_default", 0),
                  "-" if s["precision"] is None else f"{s['precision']:.2f}",
                  "-" if s["recall"] is None else f"{s['recall']:.2f}")
     unreviewed = max((s["unreviewed"] for s in scored.values()), default=0)
