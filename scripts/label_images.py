@@ -82,6 +82,24 @@ def _label_batch(
     )
 
 
+def _exit_code(stats: dict[str, Any], tag: str) -> int:
+    """A run that mostly failed must not report success. The live case: 461 of
+    2,500 images landed and the pass exited 0, because the old test only asked
+    whether ANY image had succeeded — so an exhausted API key read as a green
+    run."""
+    if stats.get("fatal"):
+        LOG.error("LABEL FAILED: %s", stats["fatal"])
+        return 1
+    if stats["errors"] > stats["ok"]:
+        LOG.error("LABEL FAILED: %d errors against %d successes",
+                  stats["errors"], stats["ok"])
+        return 1
+    if stats["errors"]:
+        LOG.warning("LABEL %d images errored and stay eligible for the next run",
+                    stats["errors"])
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tags", required=True,
@@ -206,7 +224,7 @@ def main() -> int:
         LOG.info("LABEL done ok=%d errors=%d spent=$%.4f per_image=$%.5f aborted=%s",
                  stats["ok"], stats["errors"], stats["spent"], per_image,
                  stats["aborted"])
-        return 1 if stats["errors"] and not stats["ok"] else 0
+        return _exit_code(stats, "LABEL")
 
 
 if __name__ == "__main__":
