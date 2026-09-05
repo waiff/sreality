@@ -114,6 +114,13 @@ Dynamic state lives outside Git — don't ask, fetch it:
   NOT the Supabase MCP (its verbose output persists in context). Ready-made commands + the
   reserved-for-migrations MCP policy are in the `database` skill: after a heavy MCP phase run
   `/compact`; disable the server with `/mcp` in sessions that don't touch the DB.
+  **When `psql` is not on PATH or `SUPABASE_DB_URL` is not in the environment** — a cloud-only
+  session, or any shell that never sourced `.env` — that command silently cannot run, and the
+  fallback is the Supabase MCP `execute_sql`. The reason for preferring `psql` is context cost,
+  not correctness, so carry the intent across: ONE aggregate row per question
+  (`count(*)`, `string_agg`, `md5(string_agg(...))` to compare a list without printing it),
+  never `SELECT *`, and never a wide result set. Migrations still go through `apply_migration`,
+  never `execute_sql` — a missing semicolon is silently swallowed there.
 
 ## Roadmap maintenance
 

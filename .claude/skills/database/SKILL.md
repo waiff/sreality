@@ -251,9 +251,10 @@ table**, blue-green rebuilt every 5 minutes by a `SECURITY DEFINER` pg_cron func
 (`rebuild_browse_list()`, `pg_try_advisory_lock` guards overlapping runs, `ANALYZE`
 *before* the swap is mandatory or the planner uses stale stats on the fresh table).
 `properties_map_mv` stays a real `MATERIALIZED VIEW` (30-min cadence) fed from the same
-projection. (The projection still carries the old publication-gate predicate in SQL, but the
-gate is **inert** — `dedup_publication_gate_enabled` is `false` and its code side is gone,
-rule #15; the predicate itself comes out in the NEW DEDUP teardown migration.) This retired the old `scripts/refresh_map_mv.py` GH Actions cron entirely —
+projection. (The publication-gate predicate is **gone** from the projection as of migration
+474 — flipped inert in August, then removed with the rest of the legacy dedup engine, rule
+#15. `properties.published_at` survives as a frozen historical column that constrains
+nothing.) This retired the old `scripts/refresh_map_mv.py` GH Actions cron entirely —
 pg_cron runs on-the-minute where GH Actions cron was measured ~2× jittered (see
 `gh-actions-cron-throttle-fleet` if you need the numbers).
 
@@ -355,7 +356,10 @@ column predicate.** Three cases, don't conflate them:
   NULL)`) — the Var defeats the pseudoconstant fold and the function runs **once per
   candidate row**. This is the actual migration 275 / PR #707 incident: ~87k calls for one
   cohort, shared buffers 33.5k→172k, warm latency 146ms→914ms, timing out cold under the
-  anon 3s budget — what broke Browse market-wide.
+  anon 3s budget — what broke Browse market-wide. (That function no longer exists: migration
+  474 dropped it with the gate. The case is kept because it is the clearest measured example
+  we have, and case 2 stays reachable by any `SECURITY DEFINER` gate — the RLS policies below
+  are the live one.)
 - **Scalar-subquery wrap** (`(NOT (SELECT publication_gate_enabled()) OR ...)`) — folds the
   combined case to a one-time `InitPlan` (211 buffers instead of 172k). It is the rescue for
   case 2, not a requirement for case 1.

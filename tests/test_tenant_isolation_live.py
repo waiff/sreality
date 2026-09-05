@@ -83,13 +83,18 @@ _MARKET_VIEWS: list[str] = ["property_estimates_public", "listing_feed_public"]
 # data read by many legitimately open views (listings_public, properties_public,
 # browse_*, price_stat_*), so listing them would force a large, churny allowlist
 # and train people to add entries reflexively. The residual blind spot — an
-# admin-only aggregate over ONLY those tables, e.g. data_quality_by_source or
-# publication_gate_health_public — stays covered by the enumerated lists below.
+# admin-only aggregate over ONLY those tables, e.g. data_quality_by_source —
+# stays covered by the enumerated lists below.
 # Tenant tables are excluded too: they are scoped by RLS + security_invoker, a
 # different mechanism with its own tests.
+#
+# Migration 474 (NEW DEDUP Wave 0) dropped dedup_engine_runs, dedup_scan_state and
+# property_identity_candidates with the legacy decision engine. dedup_vision_bakeoff_results
+# and dedup_decision_feedback stay: FROZEN, not dead — a paid verdict cache and the manual
+# decision notes, still admin-only.
 _ADMIN_ONLY_RELATIONS: list[str] = [
-    "dedup_engine_runs", "dedup_scan_state", "dedup_vision_bakeoff_results",
-    "dedup_decision_feedback", "property_identity_candidates", "property_merge_events",
+    "dedup_vision_bakeoff_results",
+    "dedup_decision_feedback", "property_merge_events",
     "listing_detail_queue", "listing_fetch_failures", "detail_queue_completions",
     "llm_calls", "parsed_url_cache", "pipeline_check_results",
     # tag_taxonomy + image_tag_labels (migration 442) replace image_training_examples:
@@ -826,16 +831,16 @@ def test_tenant_view_scopes_both_ways(
 # readable to every authenticated user for Browse). Instead each one embeds
 # `is_platform_admin()` directly as a query filter -- evaluated per-request,
 # independent of RLS/security_invoker/ownership.
+# The six dedup engine views and publication_gate_health_public came out with
+# migration 474; dedup_vision_bakeoff_results_public stays (frozen verdict cache).
 _ADMIN_GATED_VIEWS: list[str] = [
-    "data_quality_by_source", "dedup_engine_flow_public", "dedup_engine_runs_public",
-    "dedup_label_events", "dedup_queue_snapshot_public",
-    "dedup_recency_backlog", "dedup_scan_state_public",
+    "data_quality_by_source",
     "dedup_vision_bakeoff_results_public", "detail_latency_recent",
     "image_border_cases_public", "image_tag_annotations_public",
     "image_training_examples_public", "listing_detail_queue_public",
     "listing_fetch_failures_public", "llm_cost_daily_public", "llm_cost_hourly_public",
     "parsed_url_activity", "phash_pair_notes_public", "pipeline_check_history_public",
-    "pipeline_checks_public", "publication_gate_health_public",
+    "pipeline_checks_public",
     "scrape_runs_public",
 ]
 _ADMIN_GATED_FUNCTIONS: list[str] = [
@@ -928,13 +933,12 @@ def test_no_ungated_relation_reads_admin_only_data(svc: Any) -> None:
 # Views whose gate the seed fixture below can prove BEHAVIOURALLY (a service-role
 # read returns >= 1 row, so a non-admin's 0 is the gate rather than an empty table).
 # Established by seeding production inside a rolled-back transaction and diffing each
-# view's count. Deliberately absent: dedup_recency_backlog and detail_latency_recent
-# (aggregates whose row count does not move for one extra base row), plus the two
-# matview-backed views and the set-returning functions, which need a refresh chain the
-# replay never runs -- those keep a structural-only deny assertion.
+# view's count. Deliberately absent: detail_latency_recent (an aggregate whose row
+# count does not move for one extra base row), plus the two matview-backed views and
+# the set-returning functions, which need a refresh chain the replay never runs --
+# those keep a structural-only deny assertion.
 _SEEDED_ADMIN_VIEWS: frozenset[str] = frozenset({
-    "dedup_engine_runs_public", "dedup_label_events", "dedup_queue_snapshot_public",
-    "dedup_scan_state_public", "dedup_vision_bakeoff_results_public",
+    "dedup_vision_bakeoff_results_public",
     "image_border_cases_public", "image_tag_annotations_public",
     "image_training_examples_public", "listing_detail_queue_public",
     "listing_fetch_failures_public", "llm_cost_daily_public", "llm_cost_hourly_public",
@@ -980,9 +984,6 @@ def seeded_admin_rows(svc: Any) -> "Iterator[None]":
         ib = cur.fetchone()[0]
         ilo, ihi = min(ia, ib), max(ia, ib)  # CHECK image_id_a < image_id_b
 
-        cur.execute("INSERT INTO dedup_engine_runs DEFAULT VALUES RETURNING id")
-        run_id = cur.fetchone()[0]
-        cur.execute("INSERT INTO dedup_scan_state (lane) VALUES (%s)", (n,))
         cur.execute("INSERT INTO listing_detail_queue (source, native_id) VALUES ('sreality', %s)", (n,))
         cur.execute("INSERT INTO listing_fetch_failures (sreality_id) VALUES (%s)", (rid2,))
         cur.execute(
@@ -1000,11 +1001,6 @@ def seeded_admin_rows(svc: Any) -> "Iterator[None]":
         cur.execute("INSERT INTO image_border_cases (image_id) VALUES (%s)", (ilo,))
         cur.execute("INSERT INTO image_tag_annotations (image_id) VALUES (%s)", (ilo,))
         cur.execute("INSERT INTO image_training_examples (image_id, label) VALUES (%s, 'iso')", (ilo,))
-        cur.execute(
-            "INSERT INTO property_identity_candidates (left_property_id, right_property_id, "
-            "tier, status) VALUES (%s, %s, 'street_disposition', 'proposed')",
-            (lo, hi),
-        )
         # `id` is identity-generated here — do not supply it.
         cur.execute(
             "INSERT INTO dedup_decision_feedback (left_property_id, right_property_id, "
@@ -1028,15 +1024,12 @@ def seeded_admin_rows(svc: Any) -> "Iterator[None]":
             cur.execute("DELETE FROM image_training_examples WHERE image_id = %s", (ilo,))
             cur.execute("DELETE FROM phash_pair_notes WHERE image_id_a = %s AND image_id_b = %s", (ilo, ihi))
             cur.execute("DELETE FROM dedup_decision_feedback WHERE left_property_id = %s AND right_property_id = %s", (lo, hi))
-            cur.execute("DELETE FROM property_identity_candidates WHERE left_property_id = %s AND right_property_id = %s", (lo, hi))
             cur.execute("DELETE FROM dedup_vision_bakeoff_results WHERE run_label = %s", (n,))
             cur.execute("DELETE FROM pipeline_check_results WHERE check_key = %s", (n,))
             cur.execute("DELETE FROM parsed_url_cache WHERE url_hash = %s", (n,))
             cur.execute("DELETE FROM llm_calls WHERE model = %s", (n,))
             cur.execute("DELETE FROM listing_fetch_failures WHERE sreality_id = %s", (rid2,))
             cur.execute("DELETE FROM listing_detail_queue WHERE native_id = %s", (n,))
-            cur.execute("DELETE FROM dedup_scan_state WHERE lane = %s", (n,))
-            cur.execute("DELETE FROM dedup_engine_runs WHERE id = %s", (run_id,))
             cur.execute("DELETE FROM scrape_runs WHERE id = %s", (scrape_id,))
             cur.execute("DELETE FROM images WHERE id IN (%s, %s)", (ia, ib))
             cur.execute("DELETE FROM listings WHERE id = %s", (lid,))
