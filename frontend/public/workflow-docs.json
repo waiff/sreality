@@ -4277,6 +4277,63 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/migrations.yml"
     },
     {
+      "filename": "mirror_model_weights.yml",
+      "name": "Mirror model weights to R2 (one-off)",
+      "description": "Copies externally-licensed model weight files (first use: DINOv3) into our own R2 bucket under models/<name>/ with a sha256 manifest, so no production job ever depends on Meta's time-limited download links or on a Hugging Face token. Dispatch only. The URLs are pasted as a workflow input: they are signed, short-lived links, masked in the job log by the script and never stored — the manifest records only the host, file name, size and hash. Default is a DRY RUN (download + hash, upload nothing); tick `apply` to upload.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "urls",
+          "description": "Weight file URLs, one per line (from Meta's download e-mail)",
+          "required": true,
+          "type": "string",
+          "default": null,
+          "options": null
+        },
+        {
+          "name": "prefix",
+          "description": "R2 key prefix",
+          "required": false,
+          "type": "string",
+          "default": "models/dinov3",
+          "options": null
+        },
+        {
+          "name": "apply",
+          "description": "Upload to R2 and write the manifest (unticked = dry run)",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        },
+        {
+          "name": "note",
+          "description": "Manifest note, e.g. 'licence accepted by <who> on <date> via <route>'",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "R2_ACCESS_KEY_ID",
+        "R2_ACCOUNT_ID",
+        "R2_BUCKET_NAME",
+        "R2_SECRET_ACCESS_KEY"
+      ],
+      "concurrencyGroup": "mirror-model-weights",
+      "cancelInProgress": false,
+      "timeoutMinutes": 45,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/mirror_model_weights.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/mirror_model_weights.yml"
+    },
+    {
       "filename": "monitor_workflow_failures.yml",
       "name": "Monitoring: workflow failures",
       "description": "Polls the GitHub Actions API on a `*/30` cron (the Actions throttle actually runs it 80–256 min apart) and records failed runs (failure / timed_out / startup_failure, plus `cancelled` that ran long enough to be a timeout-kill rather than a supersession) into `workflow_failures`, so the Health page can list them — GitHub only emails about failed SCHEDULED runs, leaving every other red run invisible unless the operator opens the Actions tab. Coverage is a high-water-mark cursor (app_settings.workflow_failures_cursor), not a fixed lookback, so no red run is dropped in the throttle gap.",
