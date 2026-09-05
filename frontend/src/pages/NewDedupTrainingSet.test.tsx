@@ -16,16 +16,20 @@ vi.mock('@/lib/imageUrl', () => ({ imageSrc: () => 'blob:photo' }));
 
 const HEADS = [
   { id: 3, label: 'exterier - fasáda', positive: 1131, negative: 9166, excluded: 247,
-    machine_positive: 1113, human_positive: 18 },
+    machine_positive: 1113, human_positive: 18,
+    target: 300, in_set: 300, reserve: 831, in_set_unreviewed: 282 },
   { id: 2, label: 'exterier - domovní vchod', positive: 173, negative: 10153,
-    excluded: 218, machine_positive: 159, human_positive: 14 },
+    excluded: 218, machine_positive: 159, human_positive: 14,
+    target: 300, in_set: 173, reserve: 0, in_set_unreviewed: 159 },
 ];
 
 const ROWS = [
   { image_id: 11, storage_path: 'img/1/11.jpg', state: 'positive', source: 'machine',
-    excluded_reason: null, updated_at: null, definition_version: 9, definition_stale: false },
+    excluded_reason: null, updated_at: null, definition_version: 9, definition_stale: false,
+    set_rank: 19, in_set: true },
   { image_id: 12, storage_path: 'img/1/12.jpg', state: 'positive', source: 'human',
-    excluded_reason: null, updated_at: null, definition_version: 8, definition_stale: true },
+    excluded_reason: null, updated_at: null, definition_version: 8, definition_stale: true,
+    set_rank: 1, in_set: true },
 ];
 
 function renderPage(entries = ['/new-dedup/training-set']) {
@@ -47,10 +51,14 @@ beforeEach(() => {
 });
 
 describe('<NewDedupTrainingSet>', () => {
-  it('opens on the head with the most positives and asks for its applies', async () => {
+  it('opens on the head with the most positives, on the bounded review', async () => {
+    // 'To review' = in the set + machine + positive, composed from the three
+    // server filters so it cannot disagree with them.
     renderPage();
     await waitFor(() => expect(api.listTrainingSet).toHaveBeenCalledWith(
-      expect.objectContaining({ tag_id: 3, state: 'positive', limit: 60, offset: 0 }),
+      expect.objectContaining({
+        tag_id: 3, state: 'positive', source: 'machine', membership: 'set', limit: 60, offset: 0,
+      }),
     ));
     expect(await screen.findByTestId('training-tile-11')).toBeInTheDocument();
   });
@@ -62,7 +70,7 @@ describe('<NewDedupTrainingSet>', () => {
 
   it('filters by verdict AT THE SERVER, not in the loaded page', async () => {
     const user = userEvent.setup();
-    renderPage();
+    renderPage(['/new-dedup/training-set?set=all']);
     await screen.findByTestId('training-tile-11');
     await user.click(screen.getByRole('button', { name: /Does not/ }));
     await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
@@ -72,7 +80,7 @@ describe('<NewDedupTrainingSet>', () => {
 
   it('filters by who decided, and drops the filter for "anyone"', async () => {
     const user = userEvent.setup();
-    renderPage();
+    renderPage(['/new-dedup/training-set?set=all']);
     await screen.findByTestId('training-tile-11');
     await user.click(screen.getByRole('button', { name: 'Yours' }));
     await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
@@ -181,5 +189,68 @@ describe('<NewDedupTrainingSet> the reason for a change', () => {
     expect(within(form).getByRole('button', { name: 'save' })).toBeDisabled();
     await user.type(within(form).getByRole('textbox'), '   ');
     expect(within(form).getByRole('button', { name: 'save' })).toBeDisabled();
+  });
+});
+
+
+describe('<NewDedupTrainingSet> the cutoff', () => {
+  it('shows the bounded review count, the set against its target, and the reserve', async () => {
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByRole('button', { name: /To review/ })).toHaveTextContent('282');
+    expect(screen.getByRole('button', { name: /In set/ })).toHaveTextContent('300/300');
+    expect(screen.getByRole('button', { name: /Reserve/ })).toHaveTextContent('831');
+  });
+
+  it('the reserve view asks the server for positives past the cutoff', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    await user.click(screen.getByRole('button', { name: /Reserve/ }));
+    await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
+      expect.objectContaining({ membership: 'reserve' }),
+    ));
+  });
+
+  it('each positive tile says whether it is in the set', async () => {
+    vi.mocked(api.listTrainingSet).mockResolvedValue({
+      data: {
+        rows: [
+          ROWS[0],
+          { ...ROWS[0], image_id: 13, set_rank: 512, in_set: false },
+        ] as never,
+        counts: HEADS[0] as never, limit: 60, offset: 0,
+      },
+    });
+    renderPage(['/new-dedup/training-set?set=all']);
+    expect(await screen.findByTestId('membership-11')).toHaveTextContent('in set');
+    expect(screen.getByTestId('membership-13')).toHaveTextContent('reserve');
+  });
+
+  it('changing the target moves the boundary; an empty target restores the default', async () => {
+    vi.mocked(api.setTrainingTarget).mockResolvedValue({
+      data: { tag_id: 3, target: 200, is_default: false },
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    const input = screen.getByLabelText('target');
+    await user.clear(input);
+    await user.type(input, '200');
+    await user.click(screen.getByRole('button', { name: 'set' }));
+    await waitFor(() => expect(api.setTrainingTarget).toHaveBeenCalledWith(3, 200));
+    await user.clear(input);
+    await user.click(screen.getByRole('button', { name: 'set' }));
+    await waitFor(() => expect(api.setTrainingTarget).toHaveBeenLastCalledWith(3, null));
+  });
+
+  it('the pressed applies button on a machine tile is a confirm', async () => {
+    renderPage();
+    const tile = await screen.findByTestId('training-tile-11');
+    expect(within(tile).getByRole('button', { name: /^positive 11$/ }))
+      .toHaveAttribute('title', expect.stringMatching(/Confirm/));
+    const yours = screen.getByTestId('training-tile-12');
+    expect(within(yours).getByRole('button', { name: /^positive 12$/ }))
+      .toHaveAttribute('title', 'Applies');
   });
 });
