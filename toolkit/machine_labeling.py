@@ -354,3 +354,96 @@ def draft_pool_counts(
         for tag_id, count in cur.fetchall():
             out[int(tag_id)] = int(count)
     return out
+
+
+# --- reviewing the training set ---------------------------------------------
+#
+# What the operator reads when checking what the model built. Deliberately a
+# separate read from the labeling page's tag grid: that one is built around the
+# candidate queue (now empty) and cannot page, cannot separate the machine's
+# work from the operator's, and cannot say which wording produced a label.
+#
+# The HOLDOUT IS EXCLUDED, as everywhere a label is treated as training
+# material. Those 250 images are the yardstick; showing them here would invite
+# corrections that quietly train on the thing that grades us.
+TRAINING_SOURCES = ("machine", "human", "human_confirmed")
+
+_TRAINING_COUNTS_SQL = f"""
+    SELECT l.tag_id, l.state, (l.source = 'machine') AS is_machine,
+           count(*)::bigint
+    FROM image_tag_labels l
+    WHERE l.tag_id = ANY(%(tag_ids)s::bigint[])
+      AND l.source = ANY(%(sources)s::text[])
+      {exclusion_for("l")}
+    GROUP BY l.tag_id, l.state, (l.source = 'machine')
+"""
+
+# updated_at alone would reshuffle equal timestamps between pages — a bulk
+# write stamps thousands of rows in the same second — so image_id is the
+# mandatory tiebreaker, not decoration.
+_TRAINING_PAGE_SQL = f"""
+    SELECT l.image_id, i.storage_path, l.state, l.source, l.excluded_reason,
+           l.updated_at, d.version, d.status
+    FROM image_tag_labels l
+    JOIN images i ON i.id = l.image_id AND i.storage_path IS NOT NULL
+    LEFT JOIN tag_definitions d ON d.id = l.definition_id
+    WHERE l.tag_id = %(tag_id)s::bigint
+      AND l.source = ANY(%(sources)s::text[])
+      AND (%(state)s::text IS NULL OR l.state = %(state)s::text)
+      AND (%(source_class)s::text IS NULL
+           OR (%(source_class)s::text = 'machine' AND l.source = 'machine')
+           OR (%(source_class)s::text = 'human' AND l.source <> 'machine'))
+      {exclusion_for("l")}
+    ORDER BY l.updated_at DESC, l.image_id DESC
+    LIMIT %(limit)s OFFSET %(offset)s
+"""
+
+
+def training_set_counts(
+    conn: psycopg.Connection, *, tag_ids: list[int],
+) -> dict[int, dict[str, int]]:
+    """Per-head totals split by verdict AND by who decided it, so a head that
+    looks well covered by machine work alone is visibly different from one the
+    operator has personally confirmed."""
+    empty = {"positive": 0, "negative": 0, "excluded": 0,
+             "machine_positive": 0, "human_positive": 0}
+    out = {int(t): dict(empty) for t in tag_ids}
+    with conn.cursor() as cur:
+        cur.execute(_TRAINING_COUNTS_SQL,
+                    {"tag_ids": list(tag_ids), "sources": list(TRAINING_SOURCES)})
+        for tag_id, state, is_machine, count in cur.fetchall():
+            row = out.setdefault(int(tag_id), dict(empty))
+            row[str(state)] = row.get(str(state), 0) + int(count)
+            if state == "positive":
+                row["machine_positive" if is_machine else "human_positive"] += int(count)
+    return out
+
+
+def training_set_page(
+    conn: psycopg.Connection, *, tag_id: int, state: str | None = None,
+    source_class: str | None = None, limit: int = 60, offset: int = 0,
+) -> list[dict[str, Any]]:
+    """One page of a head's training material, newest decision first."""
+    if state is not None and state not in ("positive", "negative", "excluded"):
+        raise ValueError(f"state must be positive/negative/excluded, got {state!r}")
+    if source_class is not None and source_class not in ("machine", "human"):
+        raise ValueError(f"source must be machine/human, got {source_class!r}")
+    with conn.cursor() as cur:
+        cur.execute(_TRAINING_PAGE_SQL, {
+            "tag_id": int(tag_id), "sources": list(TRAINING_SOURCES),
+            "state": state, "source_class": source_class,
+            "limit": max(1, min(int(limit), 200)), "offset": max(0, int(offset)),
+        })
+        return [
+            {
+                "image_id": int(r[0]), "storage_path": r[1], "state": r[2],
+                "source": r[3], "excluded_reason": r[4],
+                "updated_at": r[5].isoformat() if r[5] else None,
+                "definition_version": int(r[6]) if r[6] is not None else None,
+                # A label written under wording that has since been replaced is
+                # not wrong, but it describes a rule the operator has changed —
+                # the one fact a reviewer needs and cannot see in the photo.
+                "definition_stale": (r[7] is not None and r[7] != "active"),
+            }
+            for r in cur.fetchall()
+        ]

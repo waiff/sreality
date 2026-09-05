@@ -56,6 +56,9 @@ _EXEMPT: dict[str, str] = {
     # material. They exclude the exam more strictly than the marker does: EVERY
     # member of EVERY cohort, holdout and curated alike, since a curated member
     # is the operator's to answer by hand. Adding the marker would WEAKEN them.
+    # --- reviewing the training set ------------------------------------------
+    # (these two DO carry the marker; listed here only if the scanner ever
+    # stops seeing it, never as a licence to drop it)
     "_FROM_DRAFTS_SQL":
         "Draws images the operator once DRAFTED as positive for one head. Excludes "
         "every exam member outright (all cohorts), so a drafted image already seated "
