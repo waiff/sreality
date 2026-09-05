@@ -2,7 +2,7 @@
 
 Three invariant families, all deterministic and offline (no database):
 
-1. NO GATE — the publication gate is GONE (migration 474, NEW DEDUP Wave 0:
+1. NO GATE — the publication gate is GONE (migration 475, NEW DEDUP Wave 0:
    its only stamper was the removed dedup engine). The EFFECTIVE
    (latest-migration) definitions of `properties_public` (live view: detail
    pages, watchdog matcher), `browse_projection` (migration 276: the ONE
@@ -57,7 +57,7 @@ def _assert_no_gate(raw: str, where: str) -> None:
     """Executable `raw` (comments stripped) must not call the publication gate.
 
     Scoped to ONE view definition by the callers below, not to a whole migration
-    file — migration 474 legitimately names the function in its own
+    file — migration 475 legitimately names the function in its own
     `drop function publication_gate_enabled()`."""
     sql = _strip_comments(raw)
     m = GATE_CALL.search(sql)
@@ -65,7 +65,7 @@ def _assert_no_gate(raw: str, where: str) -> None:
         return
     raise AssertionError(
         f"{where}: publication_gate_enabled() is back in this view. The gate was "
-        f"removed with the legacy dedup engine (migration 474) and the function no "
+        f"removed with the legacy dedup engine (migration 475) and the function no "
         f"longer exists, so this cannot even resolve. It was also a SECURITY DEFINER "
         f"call the planner cannot inline — how PR-#707 turned one predicate into ~87k "
         f"per-row evaluations. Context: ...{sql[max(0, m.start() - 40):m.end() + 5]!r}"

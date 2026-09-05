@@ -88,7 +88,7 @@ _MARKET_VIEWS: list[str] = ["property_estimates_public", "listing_feed_public"]
 # Tenant tables are excluded too: they are scoped by RLS + security_invoker, a
 # different mechanism with its own tests.
 #
-# Migration 474 (NEW DEDUP Wave 0) dropped dedup_engine_runs, dedup_scan_state and
+# Migration 475 (NEW DEDUP Wave 0) dropped dedup_engine_runs, dedup_scan_state and
 # property_identity_candidates with the legacy decision engine. dedup_vision_bakeoff_results
 # and dedup_decision_feedback stay: FROZEN, not dead — a paid verdict cache and the manual
 # decision notes, still admin-only.
@@ -832,7 +832,7 @@ def test_tenant_view_scopes_both_ways(
 # `is_platform_admin()` directly as a query filter -- evaluated per-request,
 # independent of RLS/security_invoker/ownership.
 # The six dedup engine views and publication_gate_health_public came out with
-# migration 474; dedup_vision_bakeoff_results_public stays (frozen verdict cache).
+# migration 475; dedup_vision_bakeoff_results_public stays (frozen verdict cache).
 _ADMIN_GATED_VIEWS: list[str] = [
     "data_quality_by_source",
     "dedup_vision_bakeoff_results_public", "detail_latency_recent",

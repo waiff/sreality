@@ -28,7 +28,7 @@ session-by-session detail; this file tracks only the phase-to-phase status.
 
 W0 was recorded done on 2026-08-25 and was not. Migration 432 dropped only the two funnel/cost
 matviews; every other CUTOFF §4 object, the whole publication gate (§3 step 2) and the
-verification checklist were still outstanding. A 2026-09-05 review caught it, migration 474
+verification checklist were still outstanding. A 2026-09-05 review caught it, migration 475
 finished the job, and the checklist was run and recorded item by item.
 
 - [x] PR-0: design docs landed (#960).
@@ -41,7 +41,7 @@ finished the job, and the checklist was run and recorded item by item.
 - [x] PR-1 (backend decision-layer removal) — merged (#966), including the CUTOFF §6 doc pass.
 - [x] PR-2 (frontend decision-layer removal) — merged (#967), shipped a minimal NEW DEDUP nav
       placeholder (Dashboard + Settings stub) that W1 is now filling in.
-- [x] PR-3 (migration 474: table drops + view redefinition + legacy stamp) — #1286, applied
+- [x] PR-3 (migration 475: table drops + view redefinition + legacy stamp) — #1286, applied
       live 2026-09-05 11:26:48 UTC. Dropped `property_identity_candidates` (159,260 rows) +
       `_archive` (5,542), `dedup_dirty_properties` (15,357), `dedup_scan_state` (3),
       `dedup_batches` (265), `dedup_batch_requests` (18,250), `dedup_engine_runs` (9,932), the

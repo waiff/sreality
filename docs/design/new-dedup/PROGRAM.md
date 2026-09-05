@@ -146,9 +146,9 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
-- 2026-09-05 (d) — **GATE 0 CLOSED. Wave 0 finished for real (migration 474, #1286),
+- 2026-09-05 (e) — **GATE 0 CLOSED. Wave 0 finished for real (migration 475, #1286),
   eleven days after it was recorded closed.** Entry (b) above corrected the record; this one
-  discharges it. Migration 474 applied live at **11:26:48 UTC**, verified immediately after.
+  discharges it. Migration 475 applied live at **11:26:48 UTC**, verified immediately after.
 
   **Dropped** (all seven re-dumped to `backups/new-dedup-teardown/2026-09-05/` first — run
   33962204424, COPY row counts read out of the artifacts themselves and matching live
@@ -201,7 +201,7 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   **CUTOFF §7 step-8 verification checklist — six items, ALL PASS** (run 2026-09-05, live):
   1. **CI green** — `CI: tests` and `CI: schema replay + SQL correctness` both succeeded on
      the branch. The replay job rebuilds the schema from migration zero, so it is what
-     validated 474 itself. 6,374 tests pass locally, 247 skipped.
+     validated 475 itself. 6,374 tests pass locally, 247 skipped.
   2. **A brand-new property appears everywhere without a stamp** — of the properties created
      after the apply, 100% have `published_at IS NULL` and 100% are returned by
      `properties_public`, `browse_projection` and the watchdog matcher's own query shape
@@ -236,6 +236,28 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
   Nothing in Wave 1, the encoder decision or Wave 2 was touched. No dedup rule, threshold or
   setting was added or changed — the 24 deleted keys configured code that no longer exists.
+
+  **Numbering footnote.** This shipped as 474 and was renumbered to **475** when entry (d)
+  below merged 474 first — `tests/test_migration_numbers.py` caught the collision, which is
+  what it is for. The file had already been applied live under its old number, and the only
+  place the number reached the DATABASE was the `generation` column's comment, which was
+  corrected in place so live matches the file. Worth knowing for next time: this collision is
+  structural, not carelessness — `ls migrations | tail` reads the number free WHEN YOU LOOK,
+  and a long session between looking and merging is exactly the window another branch lands in.
+- 2026-09-05 (d) — **The cutoff: a head's training set is a QUERY, not a list (migration 474).**
+  The operator's objection: reviewing 1,149 fasáda positives is exactly the manual work the
+  programme exists to remove. Answer: each head has a TARGET (`tag_taxonomy.training_target`,
+  NULL = 300 — the per-class count past which a logistic probe on frozen CLIP features shows
+  little further gain), and its set is defined as the ranked positives up to that target: the
+  operator's own first (confirmed), then the machine's oldest-first in a total order. Past the
+  target is the RESERVE. Because it is a query, removing a wrong positive pulls the first
+  reserve image in with no bookkeeping, and confirming one (writing it as a human label) keeps
+  it in. The review is therefore bounded: "To review" on `/new-dedup/training-set` = in-set
+  positives still on the machine's word alone (fasáda: 282 of 1,149). **The trainer reads the
+  same list** — `training_set_positive_ids` is the second sanctioned door beside
+  `tag_holdout.training_label_rows` (which reads human labels ONLY, so the 10,544 machine labels
+  would otherwise train nothing) — so what was reviewed and what is trained on cannot diverge.
+  Every read tolerates 474 not being applied (default target for all heads).
 
 - 2026-09-05 (c) — **Training-set review surface + the operator's reasons (migration 473).**
   10,544 machine labels existed with no way to look at them; `/new-dedup/training-set` reads

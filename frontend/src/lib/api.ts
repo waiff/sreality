@@ -1189,6 +1189,14 @@ export interface TrainingSetHead {
   excluded: number;
   machine_positive: number;
   human_positive: number;
+  /* The cutoff view. The set is a QUERY: your positives first, then the
+   * machine's oldest-first, up to `target`; the rest is the reserve, which
+   * steps in automatically when a positive is removed. `in_set_unreviewed` is
+   * the bounded review: in-set positives still on the machine's word alone. */
+  target: number;
+  in_set: number;
+  reserve: number;
+  in_set_unreviewed: number;
 }
 
 export interface TrainingSetRow {
@@ -1203,6 +1211,10 @@ export interface TrainingSetRow {
    * describes a rule that has changed, which is the one thing a reviewer
    * cannot see in the photo. */
   definition_stale: boolean;
+  /* Position in the head's ranked positives (null for non-positives) and
+   * whether that position is inside the cutoff. */
+  set_rank: number | null;
+  in_set: boolean;
 }
 
 export const listTrainingSetHeads = (): Promise<{ data: TrainingSetHead[] }> =>
@@ -1214,6 +1226,7 @@ export const listTrainingSet = (params: {
   tag_id: number;
   state?: 'positive' | 'negative' | 'excluded';
   source?: 'machine' | 'human';
+  membership?: 'set' | 'reserve';
   limit?: number;
   offset?: number;
 }): Promise<{
@@ -1232,6 +1245,15 @@ export const listTrainingSet = (params: {
       offset: number;
     };
   }>('/new-dedup/labeling/training-set', { query: params, jwt: true });
+
+/* The operator's per-head cutoff; null restores the programme default. */
+export const setTrainingTarget = (
+  tagId: number, target: number | null,
+): Promise<{ data: { tag_id: number; target: number; is_default: boolean } }> =>
+  request<{ data: { tag_id: number; target: number; is_default: boolean } }>(
+    `/new-dedup/labeling/tags/${tagId}/training-target`,
+    { method: 'PUT', json: { target }, jwt: true },
+  );
 
 /* Tag-centric browse: this tag's candidate queue (migration 450) plus every
  * image already decided for the tag, each with its state — reaches images the

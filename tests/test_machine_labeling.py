@@ -350,3 +350,75 @@ def test_a_label_written_under_replaced_wording_is_flagged() -> None:
     rows = ml.training_set_page(conn, tag_id=22)
     assert rows[0]["definition_stale"] is True and rows[0]["definition_version"] == 3
     assert rows[1]["definition_stale"] is False
+
+
+# ------------------------------------------------------------------ the cutoff
+def test_the_set_is_a_query_ranked_human_first_then_machine_oldest_first() -> None:
+    # Confirmed positives are always in; the machine's fill the rest in a total
+    # order, so "position 300" is the same image on every read and removing one
+    # pulls exactly the next one in.
+    from toolkit import machine_labeling as ml
+
+    cte = ml._RANKED_POSITIVES_CTE
+    assert "ORDER BY (l.source = 'machine') ASC, l.created_at ASC, l.image_id ASC" in cte
+    assert "PARTITION BY l.tag_id" in cte
+    assert "coalesce(t.training_target, %(default_target)s::int)" in cte
+    assert "tag_exam_cohorts hc" in cte  # the holdout never ranks into a set
+
+
+def test_the_summary_counts_set_reserve_and_the_review_backlog() -> None:
+    from toolkit import machine_labeling as ml
+
+    conn = _Conn([(3, 300, 300, 849, 282)])
+    out = ml.set_summary(conn, tag_ids=[3, 2])
+    assert out[3] == {"target": 300, "in_set": 300, "reserve": 849, "in_set_unreviewed": 282}
+    # A head the query returned nothing for still carries the default target.
+    assert out[2] == {"target": 300, "in_set": 0, "reserve": 0, "in_set_unreviewed": 0}
+
+
+def test_the_ranked_page_filters_membership_in_sql_and_orders_by_rank() -> None:
+    from toolkit import machine_labeling as ml
+
+    sql = ml._TRAINING_PAGE_RANKED_SQL
+    assert "%(membership)s::text = 'set' AND r.set_rank <= tg.target" in sql
+    assert "%(membership)s::text = 'reserve' AND r.set_rank > tg.target" in sql
+    assert "ORDER BY r.set_rank ASC NULLS LAST, l.updated_at DESC, l.image_id DESC" in sql
+    with pytest.raises(ValueError):
+        ml.training_set_page_ranked(_Conn([]), tag_id=3, membership="maybe")
+
+
+def test_the_target_is_bounded_and_none_restores_the_default() -> None:
+    from toolkit import machine_labeling as ml
+
+    with pytest.raises(ValueError):
+        ml.set_training_target(_Conn([]), tag_id=3, target=0)
+    with pytest.raises(ValueError):
+        ml.set_training_target(_Conn([]), tag_id=3, target=99_999)
+    out = ml.set_training_target(_Conn([(3, 300)]), tag_id=3, target=None)
+    assert out == {"tag_id": 3, "target": 300, "is_default": True}
+    with pytest.raises(KeyError):
+        ml.set_training_target(_Conn([]), tag_id=999, target=200)
+
+
+def test_the_reads_survive_474_not_being_applied() -> None:
+    # Merge is not apply: until the column exists every head has the default.
+    import psycopg
+
+    from toolkit import machine_labeling as ml
+
+    class _NoColumn(_Conn):
+        def cursor(self) -> _Cur:
+            raise psycopg.errors.UndefinedColumn("column training_target does not exist")
+
+    out = ml.set_summary(_NoColumn(), tag_ids=[3])
+    assert out[3]["target"] == ml.DEFAULT_TRAINING_TARGET
+    assert ml.training_set_positive_ids(_NoColumn(), tag_id=3) == []
+
+
+def test_a_trainer_reads_the_set_never_the_reserve() -> None:
+    # What was reviewed and what is trained on must be one list.
+    from toolkit import machine_labeling as ml
+
+    assert "WHERE r.set_rank <= tg.target" in ml._SET_POSITIVE_IDS_SQL
+    conn = _Conn([(11,), (12,), (13,)])
+    assert ml.training_set_positive_ids(conn, tag_id=3) == [11, 12, 13]

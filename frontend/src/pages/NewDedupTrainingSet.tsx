@@ -6,6 +6,7 @@ import {
   listTrainingSet,
   listTrainingSetHeads,
   setNewDedupTagAnnotation,
+  setTrainingTarget,
   type TagState,
   type TrainingSetRow,
 } from '@/lib/api';
@@ -36,6 +37,17 @@ import { pushToast } from '@/lib/toast';
 
 type Verdict = 'positive' | 'negative' | 'excluded';
 type SourceFilter = 'all' | 'machine' | 'human';
+/* The cutoff view. 'review' is the bounded job: in-set positives that are still
+ * the machine's word alone. 'set' is everything a probe trains on; 'reserve' is
+ * what steps in when a set positive is removed. */
+type Membership = 'review' | 'set' | 'reserve' | 'all';
+
+const MEMBERSHIPS: ReadonlyArray<{ key: Membership; label: string; title: string }> = [
+  { key: 'review', label: 'To review', title: 'In the set, still on the machine\u2019s word alone \u2014 the bounded job' },
+  { key: 'set', label: 'In set', title: 'What a probe trains on: your positives first, then the machine\u2019s oldest-first, up to the target' },
+  { key: 'reserve', label: 'Reserve', title: 'Past the target. Steps into the set automatically when a set positive is removed' },
+  { key: 'all', label: 'Everything', title: 'No cutoff' },
+];
 
 const PAGE = 60;
 
@@ -71,6 +83,8 @@ export default function NewDedupTrainingSet() {
   const tagId = Number(params.get('tag') ?? 0) || null;
   const verdict = (params.get('verdict') ?? 'positive') as Verdict | 'all';
   const source = (params.get('source') ?? 'all') as SourceFilter;
+  /* Opens on the bounded review by default: that is the work worth doing. */
+  const membership = (params.get('set') ?? 'review') as Membership;
   const offset = Math.max(0, Number(params.get('offset') ?? 0) || 0);
 
   const patch = (next: Record<string, string | null>) => {
@@ -96,17 +110,37 @@ export default function NewDedupTrainingSet() {
   const activeId = tagId ?? ordered[0]?.id ?? null;
   const activeHead = ordered.find((h) => h.id === activeId) ?? null;
 
+  /* 'review' = set membership + machine source + positive verdict, composed
+   * from the three server filters so it can never disagree with them. */
+  const effective = membership === 'review'
+    ? { verdict: 'positive' as const, source: 'machine' as const, member: 'set' as const }
+    : { verdict, source, member: membership === 'all' ? null : membership };
+
   const rowsQ = useQuery({
-    queryKey: ['training-set', activeId, verdict, source, offset],
+    queryKey: ['training-set', activeId, effective.verdict, effective.source, effective.member, offset],
     queryFn: () =>
       listTrainingSet({
         tag_id: activeId as number,
-        ...(verdict === 'all' ? {} : { state: verdict }),
-        ...(source === 'all' ? {} : { source }),
+        ...(effective.verdict === 'all' ? {} : { state: effective.verdict }),
+        ...(effective.source === 'all' ? {} : { source: effective.source }),
+        ...(effective.member ? { membership: effective.member } : {}),
         limit: PAGE,
         offset,
       }),
     enabled: activeId != null,
+  });
+
+  const targetMut = useMutation({
+    mutationFn: ({ tagId, target }: { tagId: number; target: number | null }) =>
+      setTrainingTarget(tagId, target),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['training-set'] });
+      qc.invalidateQueries({ queryKey: ['training-set-heads'] });
+      pushToast('ok', res.data.is_default
+        ? `Target back to the default (${res.data.target})`
+        : `Target ${res.data.target}`);
+    },
+    onError: (e: Error) => pushToast('err', e.message),
   });
 
   const rows = rowsQ.data?.data.rows ?? [];
@@ -179,6 +213,17 @@ export default function NewDedupTrainingSet() {
           <span title={mine ? 'Your label — no machine pass can overwrite it' : 'Written by the model'}>
             {mine ? 'yours' : 'machine'}
           </span>
+          {r.state === 'positive' && (
+            <span
+              data-testid={`membership-${r.image_id}`}
+              className={r.in_set ? 'text-[var(--color-sage)]' : ''}
+              title={r.in_set
+                ? `In the set at position ${r.set_rank}`
+                : `Reserve, position ${r.set_rank} — steps in when a set positive is removed`}
+            >
+              · {r.in_set ? 'in set' : 'reserve'}
+            </span>
+          )}
           {r.definition_stale && (
             <span
               className="text-[var(--color-copper)]"
@@ -195,7 +240,9 @@ export default function NewDedupTrainingSet() {
               type="button"
               aria-label={`${v} ${r.image_id}`}
               aria-pressed={r.state === v}
-              title={v === 'positive' ? 'Applies' : v === 'negative' ? 'Does not apply' : 'Leave out'}
+              title={v === 'positive'
+                ? (r.state === 'positive' && !mine ? 'Confirm — makes this your label' : 'Applies')
+                : v === 'negative' ? 'Does not apply' : 'Leave out'}
               disabled={correctMut.isPending}
               onClick={() => correctMut.mutate({ imageId: r.image_id, state: v, from: r.state })}
               className={`flex-1 py-0.5 text-[0.7rem] rounded-[var(--radius-xs)] border transition-colors ${
@@ -250,6 +297,7 @@ export default function NewDedupTrainingSet() {
               A correction here is yours and final — no machine pass can overwrite it.
               After you change a mark, a small field appears to say why; those reasons are
               distilled into the head&rsquo;s definition, as one general rule, not one line per note.
+              Only the positives inside a head&rsquo;s cutoff need your eyes: &ldquo;To review&rdquo; is that list.
               The sealed exam images are excluded: they grade the model, so they never appear
               on a training surface.
             </p>
@@ -277,6 +325,34 @@ export default function NewDedupTrainingSet() {
               </option>
             ))}
           </select>
+
+          <span className="flex gap-1" role="group" aria-label="cutoff">
+            {MEMBERSHIPS.map((m) => (
+              <button
+                key={m.key}
+                type="button"
+                title={m.title}
+                aria-pressed={membership === m.key}
+                onClick={() => patch({ set: m.key, offset: null })}
+                className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
+                  membership === m.key
+                    ? 'border-[var(--color-sage)] text-[var(--color-ink)]'
+                    : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]'
+                }`}
+              >
+                {m.label}
+                {activeHead && m.key === 'review' && (
+                  <span className="ml-1 text-[var(--color-ink-4)]">{activeHead.in_set_unreviewed}</span>
+                )}
+                {activeHead && m.key === 'set' && (
+                  <span className="ml-1 text-[var(--color-ink-4)]">{activeHead.in_set}/{activeHead.target}</span>
+                )}
+                {activeHead && m.key === 'reserve' && (
+                  <span className="ml-1 text-[var(--color-ink-4)]">{activeHead.reserve}</span>
+                )}
+              </button>
+            ))}
+          </span>
 
           <span className="flex gap-1" role="group" aria-label="verdict">
             {VERDICTS.map((v) => (
@@ -320,10 +396,46 @@ export default function NewDedupTrainingSet() {
         </div>
 
         {activeHead && (
-          <p className="mt-2 text-xs text-[var(--color-ink-3)]">
-            {activeHead.positive} applies · {activeHead.machine_positive} by the machine,{' '}
-            {activeHead.human_positive} yours
-          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--color-ink-3)]">
+            <span>
+              {activeHead.positive} applies · {activeHead.machine_positive} by the machine,{' '}
+              {activeHead.human_positive} yours
+            </span>
+            <form
+              className="flex items-center gap-1"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const raw = (new FormData(e.currentTarget).get('target') as string).trim();
+                const n = Number(raw);
+                if (!raw) targetMut.mutate({ tagId: activeHead.id, target: null });
+                else if (Number.isInteger(n) && n >= 1) targetMut.mutate({ tagId: activeHead.id, target: n });
+              }}
+            >
+              <label htmlFor="target" className="text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)]">
+                target
+              </label>
+              <input
+                id="target"
+                name="target"
+                key={`${activeHead.id}-${activeHead.target}`}
+                defaultValue={activeHead.target}
+                inputMode="numeric"
+                className="w-16 px-1.5 py-0.5 text-xs rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-transparent text-[var(--color-ink)]"
+                title="How many positives make up this head\u2019s set. Empty = the default. Changing it moves a boundary; nothing is copied."
+              />
+              <button
+                type="submit"
+                disabled={targetMut.isPending}
+                className="px-2 py-0.5 text-[0.7rem] rounded-[var(--radius-xs)] border border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]"
+              >
+                set
+              </button>
+            </form>
+            <span className="text-[var(--color-ink-4)]">
+              set = your positives, then the machine\u2019s oldest-first, up to the target; the
+              reserve refills it when you remove one
+            </span>
+          </div>
         )}
       </header>
 

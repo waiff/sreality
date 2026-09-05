@@ -787,14 +787,14 @@ renumber.** Navigate by area:
     ordinary properties was the old engine, so leaving the gate up would have hidden the entire
     market. The gate was flipped inert first (`dedup_publication_gate_enabled=false`), then its
     code removed; the watchdog matcher's "new property" cursor is re-anchored on arrival
-    (`listings.first_seen_at`), which is what it keyed on before migration 273. **Migration 474
+    (`listings.first_seen_at`), which is what it keyed on before migration 273. **Migration 475
     finished it:** the predicate is out of `properties_public` / `browse_projection` /
     `listing_feed_public`, and `publication_gate_enabled()` + `publication_gate_health_public`
     are dropped.
     `properties.published_at` / `publish_reason` are kept frozen as a historical record. The
     legacy decision ledger (`dedup_pair_audit`), the manual-feedback and golden-pair tables, and
     the paid LLM verdict caches are **frozen, not dropped**: no code writes them and the new
-    design never reads them. The engine's queue/state tables went in that **same migration 474**,
+    design never reads them. The engine's queue/state tables went in that **same migration 475**,
     after operator confirmation and a `pg_dump` to R2: `property_identity_candidates` + archive,
     `dedup_dirty_properties`, `dedup_scan_state`, `dedup_batches`, `dedup_batch_requests`,
     `dedup_engine_runs`, their six admin views, and the unused migration-127 eligibility index.

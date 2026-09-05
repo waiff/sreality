@@ -1,4 +1,4 @@
--- 474_new_dedup_teardown_finish.sql
+-- 475_new_dedup_teardown_finish.sql
 -- NEW DEDUP Wave 0 (PR-3) — finish the teardown docs/design/new-dedup/CUTOFF.md §4 specifies.
 --
 -- WHY THIS EXISTS. Wave 0 was recorded closed on 2026-08-25. It was not. Migration 432
@@ -93,7 +93,7 @@ alter table property_merge_events add column if not exists generation text;
 update property_merge_events set generation = 'legacy' where generation is null;
 comment on column property_merge_events.generation is
   'Which dedup engine made this merge: ''legacy'' = the pre-2026-08 engine removed in NEW DEDUP '
-  'Wave 0 (backfilled by migration 474), ''v2'' = the rebuilt engine from Wave 8 onward. NULL '
+  'Wave 0 (backfilled by migration 475), ''v2'' = the rebuilt engine from Wave 8 onward. NULL '
   'means an operator merge made in between. No default: ''legacy'' is a fact about rows that '
   'existed on 2026-09-05, not a value new rows should inherit.';
 
@@ -462,7 +462,7 @@ update app_settings
          - 'street_debt_warn'
          - 'unpublished_overdue_fail'      -- the publication gate's own check
      , updated_at = now()
-     , updated_by = 'migration_474'
+     , updated_by = 'migration_475'
  where key = 'pipeline_check_thresholds';
 
 reset lock_timeout;
