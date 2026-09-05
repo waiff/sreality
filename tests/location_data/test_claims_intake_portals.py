@@ -538,7 +538,7 @@ def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
     # the whole fleet's projection until the version caught up with the bytes. Moving the
     # volatile profiles into these files (W2a-3e) bumped nothing: `persistence` is outside
     # `contract_sha256` (mig 408), so archive configuration cannot re-stamp a claim.
-    expected_version = {"remax": 3, "ceskereality": 5, "realitymix": 4, "bazos": 2,
+    expected_version = {"remax": 3, "ceskereality": 5, "realitymix": 4, "bazos": 3,
                         "idnes": 2, "maxima": 2, "mmreality": 2}
     for source, payload, lat, lon in cases:
         result = extract_listing(listing(source, payload, lat=lat, lon=lon),

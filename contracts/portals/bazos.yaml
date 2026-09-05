@@ -50,9 +50,73 @@
 # `python -m location_data.contracts --unshadow bazos@2`. That is a freeze, not a blackout —
 # claims already written under bazos@1's entry ids stay in `location_claims_live` — and it is
 # the accepted price of activating the seven DOM contracts in one wave.
+#
+# VERSION 3 (2026-09-05) — sixteen entries added for the free-text LLM lane, no v2 entry
+# edited and no v2 entry given a reader (02 §2.1.8). This is the SECOND half of v2's own
+# ruling ("Location priority on this portal is free text > headline/title > town-anchor slug
+# + PSČ > pin; v2 ships the third rung only. The first two are the LLM lane's (bazos@3)").
+# It is a separate bump on purpose: `location_data/claims_llm.py` shipped INERT because W1
+# hard-refuses a contract naming a reader its registry does not carry, so the third registry
+# (`LLM_READERS` / `claims_intake.LLM_ONLY_READERS` /
+# `contracts.READER_CONTRACTS['llm_location_text']`) had to exist on main before any contract
+# could name `llm_location_text`. It exists now; these entries are what turns the lane on.
+#
+# MEASURED CAUSE, unchanged from v2's own note: bazos `raw_json` carries no description at
+# all [db-raw §3.4], so every street, část obce and house number an ad states in prose is
+# invisible to W1; the deterministic regex path is junk-prone (regression 220870847 mined
+# street='Nový' out of "Nový 2 pokojový byt" and geocoded ~130 km off, which is why
+# `bzs.det.street_text` and `bzs.det.mm_trailer` stay inert and their two phantom-street
+# guards stay unimplemented); and the maps pin cannot stand in for the text, because the
+# pin-derived obec is itself wrong (Zbinohy stored as Větrný Jeníkov, Moravany/Platěnice as
+# Dašice). 29,546 active rows share only 90 distinct `locality` values.
+#
+# THE SHAPE, and it is the operator's option (b), not the two-family design the spec drafted:
+# ONE structured call per archived body asks the model for `from_description` and
+# `from_title` SEPARATELY, and `claims_llm` then emits exactly ONE claim per output field per
+# listing, DESCRIPTION-FIRST — the title is a FALLBACK rung, consulted only where the
+# description says nothing about that field. So the two entry families below are not two
+# claim families and never race: they are the two RUNGS of one ladder, and the ladder is
+# walked in the LANE (`claims_llm.BLOCK_ORDER`), which is the only place it is expressible.
+# `location_field_policy` matches on (source, extraction_method) alone — never on `surface` —
+# so two `llm_text` claims from one portal cannot be ranked against each other as data, and
+# stamping the title family a grade lower would have been a rank game rather than a rule.
+# Both families are declared because a rung the contract does not declare is a rung the lane
+# skips: with no title entry the headline is never read at all, and `bzs.det.title_country`'s
+# own note records that the title alone carries the whole location on some ads (222359425 —
+# Bulharsko/Kosharitsa in the TITLE only).
+#
+# ONE ENTRY PER (BLOCK × OUTPUT FIELD), and the output field is `(claim_type, transform)`,
+# not the model's field name: one stated "1216/46" is one answer that legitimately produces a
+# `house_number_cp` claim and a `house_number_co` one, which is why `split_cp_co:cp` and
+# `:co` are two entries over one `llm_field: house_number`. `claims_llm._validated_groups`
+# refuses a contract that declares the same (block, claim_type, transform) twice, or one
+# block with two different selectors — one block is one node, and one call reads it once.
+#
+# WHAT GATES THESE CLAIMS, so the entries can stay short. The lane refuses before the reader
+# ever runs: a value the model did not state, a model confidence of 'low', a quote that is
+# not locatable INSIDE the declared node (the hallucination guard — an unlocatable quote is a
+# claim with no evidence and `loc_claim_text_evidence` would refuse it at the constraint),
+# and, for every admin-bearing field, a RÚIAN membership test (`obec_name`/`cast_obce_name`
+# must name a real admin unit; `street_name` must be a `ruian_streets.name_norm` inside the
+# candidate obec; a house number must resolve to a real `ruian_address_points` row). Each
+# refusal is written as an absence with its reason, never as a silent skip. `landmark` and
+# `address_line_verbatim` are `is_admin_bearing = FALSE` permanently and are stored un-gated.
+#
+# STILL SHADOWED. `shadow: true` carries forward unchanged — the header-grain freeze v2
+# introduced stays in force, and un-shadowing bazos is one operator command
+# (`python -m location_data.contracts --unshadow bazos@3`) taken deliberately, not a side
+# effect of this bump. The lane is separately gated by `location_jobs.enabled` and is
+# dispatch-only.
+#
+# COST OF THE BUMP, budgeted rather than discovered: `location_claim_fingerprint` (migration
+# 386) hashes `extractor_version` AND `contract_entry_id`, and both move for every bazos
+# entry, so every claim the W1 and archived lanes re-walk after this bump INSERTS again
+# rather than deduping and enqueues its listing into `dirty_locations`. That is the standing
+# price of any bump on this portal and the corpus is small (~29.5k active rows plus the
+# delisted tail).
 
 portal: bazos
-contract_version: 2
+contract_version: 3
 shadow: true
 extractor_runtime: ">=1.0"
 identity_ladder: [text_geocode]
@@ -373,3 +437,296 @@ extractions:
     required: best_effort
     notes: "835 active rows sit in the literal 'Zahraničí' bucket with NULL geom;
       title-only classifier ≈ $0.12 for the whole bucket [mine-syn §4.4]."
+
+  # ---- v3: the LLM free-text lane, DESCRIPTION block (rung 1 of the ladder) --------------
+  # All eight read the SAME node (`div.popisdetail`), scoped by `exclusion_zones` above
+  # before any selector runs, and are executed by `location_data.claims_llm` and by nothing
+  # else: `llm_location_text` lives in a THIRD reader registry, so W1 SKIPS these entries
+  # (its substrate is raw_json, which on this portal carries no description at all) and the
+  # archived DOM lane skips them too (`ARCHIVE_READERS` does not carry the name).
+
+  - id: bzs.desc.obec_name
+    locator_kind: description
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "div.popisdetail",
+              llm_block: description, llm_field: obec}
+    claim_type: obec_name
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    cardinality: one
+    required: best_effort
+    notes: >
+      The first rung of the whole portal's ladder. A name RÚIAN does not carry, or one that
+      resolves to more than one obec, produces an absence (`stated_but_ambiguous`), never a
+      claim. It outranks the town-anchor slug and the pin because both are measurably wrong
+      here — the anchor's TEXT is the okres and the pin-derived obec misplaces whole villages.
+
+  - id: bzs.desc.cast_obce_name
+    locator_kind: description
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "div.popisdetail",
+              llm_block: description, llm_field: cast_obce}
+    claim_type: cast_obce_name
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    cardinality: one
+    required: best_effort
+    notes: "Čtvrť / část obce ('Karlín', 'Žižkov'). Same registry membership gate as the obec."
+
+  - id: bzs.desc.psc
+    locator_kind: description
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "div.popisdetail",
+              llm_block: description, llm_field: psc}
+    claim_type: psc
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    transform: ["psc_normalise"]
+    cardinality: one
+    required: best_effort
+    notes: >
+      A PSČ stated in the prose, normalised to the same five-digit shape `bzs.det.psc` and
+      `bzs.det.legacy_psc` write ("69681"), so all three agree on `value_norm` rather than
+      contradicting each other on punctuation. The STORED psc reaches this lane too, but only
+      as a gazetteer key for the candidate obec — it never enters the prompt, because with
+      stored columns in it the design measured high-confidence "stored echo" claims where the
+      model simply reads back what we already believed.
+
+  - id: bzs.desc.street_name
+    locator_kind: description
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "div.popisdetail",
+              llm_block: description, llm_field: street}
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    cardinality: one
+    required: best_effort
+    notes: >
+      The phantom-street guard is a REGISTRY MEMBERSHIP TEST, not morphology: the value must
+      be a `ruian_streets.name_norm` inside the candidate obec or no claim is written. That is
+      what regression 220870847 asked for, and it is why `bzs.det.street_text`'s two
+      unimplemented guards are not needed to make this entry safe. Numeric-leading names
+      ('28. října', regression 220059906) are ordinary values here — nothing strips them.
+
+  - id: bzs.desc.house_number_cp
+    locator_kind: description
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "div.popisdetail",
+              llm_block: description, llm_field: house_number}
+    claim_type: house_number_cp
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    transform: ["split_cp_co:cp"]
+    cardinality: one
+    required: best_effort
+    notes: >
+      The model returns the number verbatim ("234" or "1216/46") and `split_cp_co:cp` takes
+      the čp half. The gate runs on what would be WRITTEN, never on the raw answer: the
+      transformed number must resolve to a real `ruian_address_points` row on the candidate
+      obec + the street this listing itself claimed. "No address point exists here" is an
+      honest absence, never a nearest-neighbour snap.
+
+  - id: bzs.desc.house_number_co
+    locator_kind: description
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "div.popisdetail",
+              llm_block: description, llm_field: house_number}
+    claim_type: house_number_co
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    transform: ["split_cp_co:co"]
+    cardinality: one
+    required: best_effort
+    notes: >
+      The orientační half of a "čp/čo" pair, from the SAME answer as the entry above — one
+      stated number, two output fields, which is the whole reason the lane groups on
+      `(claim_type, transform)` rather than on the model's field name. A BARE number yields
+      nothing here by construction (`split_cp_co:co` returns None without a slash) and is
+      claimed as čp instead: a measured limitation, recorded rather than guessed at.
+
+  - id: bzs.desc.landmark
+    locator_kind: description
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "div.popisdetail",
+              llm_block: description, llm_field: landmark}
+    claim_type: landmark
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    cardinality: one
+    required: best_effort
+    notes: >
+      "u kostela", "naproti Kauflandu". `is_admin_bearing = FALSE` permanently and NOT one of
+      the thirteen fields S7 arbitrates — stored, evidence-quoted and auditable for a later
+      wave, never reconciled against an admin unit and therefore not registry-gated and
+      carrying no `location_field_policy` row.
+
+  - id: bzs.desc.address_line_verbatim
+    locator_kind: description
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "div.popisdetail",
+              llm_block: description, llm_field: lokalita_line}
+    claim_type: address_line_verbatim
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    cardinality: one
+    required: best_effort
+    notes: >
+      The verbatim "Lokalita: …" trailer — the M&M reality pattern, "the single highest-yield
+      pattern on the portal" [mine-bazos finding 5], and the line the operator ruled beats the
+      headline (headline "v Moravanech" vs "Lokalita: Platěnice" → Platěnice). Kept WHOLE, so
+      the split into street / quarter above stays auditable against the line it came from.
+      Not a survivorship field: it is the receipt, not the answer.
+
+  # ---- v3: the LLM free-text lane, TITLE block (rung 2, the fallback) --------------------
+  # Same reader, same single call, a different node (`h1.nadpisdetail`). A field claimed from
+  # here is a field the DESCRIPTION said nothing about — `claims_llm` walks
+  # `BLOCK_ORDER = (description, title)` per output field and stops at the first block that
+  # states it, so these entries can never overwrite or race the ones above. Every output
+  # field gets a title rung, including the ones an h1 will almost never carry: the tool schema
+  # asks for all seven fields in BOTH blocks regardless, so the answer is already paid for,
+  # and an UNDECLARED rung is the one shape that turns a real answer into neither a claim nor
+  # an absence. A rung that never fires costs nothing — absences are written once per output
+  # field, not once per entry.
+
+  - id: bzs.title.obec_name
+    locator_kind: html_selector
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "h1.nadpisdetail",
+              llm_block: title, llm_field: obec}
+    claim_type: obec_name
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    cardinality: one
+    required: best_effort
+    notes: >
+      Headline obec, registry-gated exactly like the description one. `locator_kind` is
+      `html_selector` and not `description` because the text genuinely comes from an `h1` and
+      the surface is what the evidence span is anchored into — the claim must say which node
+      it read.
+
+  - id: bzs.title.cast_obce_name
+    locator_kind: html_selector
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "h1.nadpisdetail",
+              llm_block: title, llm_field: cast_obce}
+    claim_type: cast_obce_name
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    cardinality: one
+    required: best_effort
+    notes: "Headline část obce — 'Prodej bytu 3+1 Brno-Žabovřesky'."
+
+  - id: bzs.title.psc
+    locator_kind: html_selector
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "h1.nadpisdetail",
+              llm_block: title, llm_field: psc}
+    claim_type: psc
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    transform: ["psc_normalise"]
+    cardinality: one
+    required: best_effort
+    notes: "Rare in an h1 and declared anyway (see the block note above)."
+
+  - id: bzs.title.street_name
+    locator_kind: html_selector
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "h1.nadpisdetail",
+              llm_block: title, llm_field: street}
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    cardinality: one
+    required: best_effort
+    notes: >
+      Headline street, registry-gated exactly like the description one. The headline is where
+      regression 220870847's phantom lived ("Nový 2 pokojový byt"), so this is the rung the
+      RÚIAN membership test was written for.
+
+  - id: bzs.title.house_number_cp
+    locator_kind: html_selector
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "h1.nadpisdetail",
+              llm_block: title, llm_field: house_number}
+    claim_type: house_number_cp
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    transform: ["split_cp_co:cp"]
+    cardinality: one
+    required: best_effort
+    notes: "Headline čp, address-point-gated like the description rung."
+
+  - id: bzs.title.house_number_co
+    locator_kind: html_selector
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "h1.nadpisdetail",
+              llm_block: title, llm_field: house_number}
+    claim_type: house_number_co
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    transform: ["split_cp_co:co"]
+    cardinality: one
+    required: best_effort
+    notes: "Headline čo, from the same answer as the entry above."
+
+  - id: bzs.title.landmark
+    locator_kind: html_selector
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "h1.nadpisdetail",
+              llm_block: title, llm_field: landmark}
+    claim_type: landmark
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    cardinality: one
+    required: best_effort
+    notes: "Headline orientation point; not admin-bearing, not registry-gated, no policy row."
+
+  - id: bzs.title.address_line_verbatim
+    locator_kind: html_selector
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {reader: llm_location_text, css: "h1.nadpisdetail",
+              llm_block: title, llm_field: lokalita_line}
+    claim_type: address_line_verbatim
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true}
+    cardinality: one
+    required: best_effort
+    notes: >
+      A "Lokalita:" trailer is a description artefact and an h1 carrying one would be
+      surprising — declared anyway, for the reason the block note gives: the answer already
+      exists and a rung that never fires costs nothing, while a missing rung would silently
+      discard a real one.

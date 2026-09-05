@@ -305,14 +305,15 @@ def test_the_executable_and_inert_split_is_exactly_what_w1_ran():
     activated seven portal contracts at once and moved it to 112 / 47 — the single largest
     census move the fleet has taken, and the reason it is restated here rather than
     relaxed: an entry that stops being executable is exactly as invisible as one that was
-    never declared. Note that `reader is not None` is NOT the same as "runs on the W1
-    lane": most of the 43 newly-executable entries name an ARCHIVE-ONLY reader, which W1
-    skips by construction (`test_w1_executes_no_evidence_bearing_method`)."""
+    never declared. bazos@3 then added sixteen more (8 -> 24), all of them LLM-lane
+    entries. Note that `reader is not None` is NOT the same as "runs on the W1 lane": most
+    of the newly-executable entries name an ARCHIVE-ONLY or LLM-ONLY reader, which W1 skips
+    by construction (`test_w1_executes_no_evidence_bearing_method`)."""
     split = {source: (sum(1 for e in c.entries if e.reader),
                       sum(1 for e in c.entries if not e.reader))
              for source, c in ALL.items()}
     assert split == {
-        "bazos": (8, 5),
+        "bazos": (24, 5),
         "bezrealitky": (11, 6),
         "ceskereality": (8, 9),
         "idnes": (8, 6),
@@ -322,15 +323,16 @@ def test_the_executable_and_inert_split_is_exactly_what_w1_ran():
         "remax": (7, 7),
         "sreality": (23, 6),
     }
-    assert sum(e for e, _ in split.values()) == 112
+    assert sum(e for e, _ in split.values()) == 128
     assert sum(i for _, i in split.values()) == 47
-    # The same 112 entries seen down the other axis, so a swap could not preserve both.
+    # The same 128 entries seen down the other axis, so a swap could not preserve both.
     # W1's ten readers are unmoved except `point_pair` 3 -> 2: mmreality's `mm.det.point`
     # moved to the archived substrate's `json_point`, which is a re-read of the same fact
     # out of a different document, not a lost signal.
     per_reader = Counter(e.reader for c in ALL.values() for e in c.entries if e.reader)
     assert per_reader == Counter({
-        "scalar": 36, "html_attr": 10, "namespaced_id": 9, "json_scalar": 8,
+        "scalar": 36, "llm_location_text": 16, "html_attr": 10,
+        "namespaced_id": 9, "json_scalar": 8,
         "geom_column": 6, "coords_stamp_quality": 5, "legacy_text_column": 5,
         "html_marker": 4, "html_text": 4, "json_breadcrumb": 4, "html_attr_regex": 3,
         "declared_quality": 2, "html_regex": 2, "json_geometry": 2, "json_point": 2,
@@ -504,7 +506,7 @@ def test_the_bumped_contracts_appended_entries_and_kept_the_earlier_ones():
     # was for prose). Both facts are asserted below: what each version appended, and which
     # already-shipped ids the wave turned on rather than replaced.
     assert {s: c.version for s, c in ALL.items()} == {
-        "remax": 3, "ceskereality": 5, "realitymix": 4, "bazos": 2, "idnes": 2,
+        "remax": 3, "ceskereality": 5, "realitymix": 4, "bazos": 3, "idnes": 2,
         "mmreality": 2, "maxima": 2,
         "sreality": 1, "bezrealitky": 1,
     }

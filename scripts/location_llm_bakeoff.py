@@ -43,20 +43,23 @@ from location_data.claims_llm import (
     FIELD_ORDER,
     LOCATION_TOOL,
     MAX_TOKENS,
+    PAGE_KIND,
     PROMPT_VERSION,
     SYSTEM_PROMPT,
     ArchivedPayload,
     Refusal,
+    _validated_groups,
     block_texts,
     build_user_message,
     estimated_cost_usd,
     gazetteer_refusal,
+    llm_entries,
     load_bodies,
     load_register,
     open_gazetteer,
     parse_field_answer,
 )
-from location_data.claims_intake import IntakeRefused, guarded
+from location_data.claims_intake import IntakeRefused, guarded, load_entries
 from location_data.html_scope import scope_html
 from location_data.name_index import normalize_name, normalize_street_name
 from scraper import db
@@ -78,15 +81,28 @@ STATEMENT_TIMEOUT_S = 120
 # nothing about free-text extraction.
 MIN_DESCRIPTION_CHARS = 120
 
-# The two bazos nodes one call reads. The production lane takes these from the CONTRACT
-# (`locator.css` on each entry); the contract entries that declare them land with bazos@3,
-# which has not shipped, so the harness names them here and this is the one place that has
-# to be re-pointed at the contract once they exist. Deliberately the same selectors the
-# lane's own fixture uses, so a green bake-off and a green unit test describe one page.
-BAKEOFF_BLOCK_CSS: dict[str, str] = {
-    "description": "div.popisdetail",
-    "title": "h1.nadpisdetail",
-}
+
+def block_css(conn: Any) -> dict[str, str]:
+    """The bazos nodes one call reads, taken from the DEPLOYED contract.
+
+    Not a constant any more: bazos@3 is the bump that declares them (`locator.css` on each
+    `llm_location_text` entry), and a harness holding its own copy would, the first time a
+    selector moved, measure a page the production lane does not read — while still reporting
+    a yield. Read the same way `load_register` reads the exclusion zones: from the projection
+    of the contract that is actually deployed, never re-parsed from the YAML on disk.
+    `_validated_groups` is the lane's own refusal, applied here for free: one block is one
+    node, and one call reads it once.
+    """
+    entries = load_entries(conn).get(SOURCE) or []
+    readable = llm_entries(entries, PAGE_KIND)
+    if not readable:
+        raise IntakeRefused(
+            f"no ACTIVE {SOURCE} contract entry names a reader from the LLM registry, so "
+            f"there is no block to read; load the bazos@3 contract with "
+            f"`python -m location_data.contracts --load`")
+    css_by_block, _groups = _validated_groups(readable)
+    return css_by_block
+
 
 # `listings.description` is a COHORT FILTER here and never reaches the prompt — the prompt
 # is built from the scoped body alone (with stored columns in it the design measured 11
@@ -433,6 +449,7 @@ def run(
         raise IntakeRefused(
             f"no active portal_contracts row for {SOURCE}: run "
             f"`python -m location_data.contracts --load` first")
+    blocks_css = block_css(conn)
     gazetteer, _version_id, version_label = open_gazetteer(conn)
     store = payloads.open_store()
 
@@ -474,8 +491,8 @@ def run(
         if not document.is_complete:
             LOG.warning("BAKEOFF listing_id=%s scoping incomplete; skipped", listing_id)
             continue
-        blocks = block_texts(document, BAKEOFF_BLOCK_CSS)
-        nodes = {b: document.css_first(css) for b, css in BAKEOFF_BLOCK_CSS.items()}
+        blocks = block_texts(document, blocks_css)
+        nodes = {b: document.css_first(css) for b, css in blocks_css.items()}
         user = build_user_message(blocks)
         if dry_run:
             LOG.info("BAKEOFF dry-run listing_id=%s payload=%s chars=%d",
