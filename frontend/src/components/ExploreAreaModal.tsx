@@ -16,7 +16,8 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
+import { isPlainLeftClick } from '@/lib/linkGestures';
 import BrowseExperience from '@/components/BrowseExperience';
 import OriginPropertyPanel from '@/components/OriginPropertyPanel';
 import type { AnchorPoint } from '@/components/ListingMap';
@@ -75,7 +76,6 @@ function ExploreAreaModal({
   payload: ExploreAreaPayload;
   onClose: () => void;
 }) {
-  const navigate = useNavigate();
   const initialFilters = useMemo(() => browseFiltersForArea(payload), [payload]);
   const view = useMemoryBrowseState({ filters: initialFilters });
 
@@ -143,22 +143,23 @@ function ExploreAreaModal({
             </h2>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <a
-              href={browseHref}
+            {/* A real <Link>: the hand-rolled guard this replaces tested
+              * `e.button === 1` for middle-click, which never fires on `click`,
+              * and omitted altKey — so alt-click (download the link) was
+              * swallowed into an SPA navigation. Closing the modal stays gated
+              * on a PLAIN click, preserving the deliberate behaviour that a
+              * modifier-click opens a tab and leaves the modal open. */}
+            <Link
+              to={browseHref}
               onClick={(e) => {
-                // Let modifier / middle clicks open a new tab; otherwise
-                // SPA-navigate and close the modal.
-                if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
-                e.preventDefault();
-                navigate(browseHref);
-                onClose();
+                if (isPlainLeftClick(e)) onClose();
               }}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
               title="Open the full Browse page in this same area + filters"
             >
               <span>Go to Browse</span>
               <span aria-hidden>→</span>
-            </a>
+            </Link>
             <button
               type="button"
               onClick={onClose}

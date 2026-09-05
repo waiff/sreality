@@ -1,11 +1,20 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
-import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
+import {
+  Link,
+  Navigate,
+  useLocation,
+  useNavigate,
+  type Location,
+  type To,
+} from 'react-router-dom';
 import { useAuth } from '../lib/auth';
+import { ROUTES } from '@/lib/routes';
 
 /**
  * Phase 1 auth — sign-in screen (email/password + Google). Full-page, outside
  * the app Shell; every Shell page sits behind <RequireAuth>, which redirects
- * here with the original location in `state.from`.
+ * here with the WHOLE original location in `state.from` — pathname, search
+ * and hash — all three of which this screen hands back after sign-in.
  */
 export default function Login() {
   const { signInWithPassword, signUpWithPassword, signInWithGoogle, session, loading } = useAuth();
@@ -18,8 +27,16 @@ export default function Login() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const from =
-    (location.state as { from?: { pathname?: string } } | null)?.from?.pathname ?? '/browse';
+  // guards.tsx stashes the whole location (`state={{ from: location }}`), so
+  // carry search AND hash through the round trip. A shared Browse cohort lives
+  // entirely in the query string and a run deep-link lives in the hash
+  // (#estimations) — reading only `pathname` silently landed the user on a
+  // filterless /browse with no error. Kept as a `To` object rather than a
+  // concatenated string so react-router owns the joining.
+  const stashed = (location.state as { from?: Partial<Location> } | null)?.from;
+  const from: To = stashed?.pathname
+    ? { pathname: stashed.pathname, search: stashed.search ?? '', hash: stashed.hash ?? '' }
+    : ROUTES.browse.build();
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();

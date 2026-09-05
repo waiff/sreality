@@ -12,6 +12,7 @@
  *   - useMemoryBrowseState() — plain useState (the modal). Precedent: WatchdogEdit
  *                             already runs the registry FilterForm URL-free.
  */
+import { ROUTES } from './routes';
 import { useCallback, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import type { RentVk } from '@/components/ListingMap';
@@ -363,5 +364,8 @@ export const browseUrlFromState = (s: {
   if (s.overlay.showKraje) sp.set('kraje', '1');
   if (s.overlay.priceMetric === 'per_m2') sp.set('pm', 'per_m2');
   const qs = sp.toString();
-  return qs ? `/browse?${qs}` : '/browse';
+  // Concatenated rather than withQuery(): `sp` is built here key by key and may
+  // one day carry a repeated key, which a Record round-trip would collapse.
+  const base = ROUTES.browse.build();
+  return qs ? `${base}?${qs}` : base;
 };

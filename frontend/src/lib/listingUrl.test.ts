@@ -98,3 +98,32 @@ describe('listingCanonicalPath (natural-key form)', () => {
     expect(listingCanonicalPath('mmreality', 'a/b c')).toBe('/listing/mmreality/a%2Fb%20c');
   });
 });
+
+/* A row with no natural key, no sreality_id and no property_id has NOWHERE to
+ * go. Callers used to hide that with `property_id ?? 0`, producing
+ * `/listing?property=0` — a link that type-checks and 404s. The nullable
+ * overload returns null so the caller has to decide what to render. */
+describe('listingRowPath (nothing to link to)', () => {
+  it('returns null rather than fabricating a property id', () => {
+    const path = listingRowPath({ sreality_id: null, property_id: null });
+    expect(path).toBeNull();
+    expect(path).not.toBe('/listing?property=0');
+  });
+
+  it('still resolves a nullable-typed row that does carry a property id', () => {
+    expect(listingRowPath({ sreality_id: null, property_id: 42 as number | null })).toBe(
+      '/listing?property=42',
+    );
+  });
+
+  it('still prefers the canonical form on a nullable-typed row', () => {
+    expect(
+      listingRowPath({
+        source: 'bazos',
+        source_id_native: 'abc-1',
+        sreality_id: null,
+        property_id: null,
+      }),
+    ).toBe('/listing/bazos/abc-1');
+  });
+});

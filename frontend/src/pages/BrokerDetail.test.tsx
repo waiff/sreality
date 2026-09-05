@@ -148,6 +148,43 @@ describe('<BrokerDetail> honest error states', () => {
   });
 });
 
+/* broker_listings_public declares BOTH sreality_id and property_id nullable and
+ * carries no source_id_native, so a row here can genuinely have no in-app
+ * destination. The cell used to pass `property_id ?? 0` and render a link to
+ * `/listing?property=0`, which 404s. */
+describe('<BrokerDetail> locality cell never fabricates a listing link', () => {
+  it('renders inert text when the row has no resolvable destination', async () => {
+    vi.mocked(brokers.fetchBrokerListings).mockResolvedValue([
+      listing({ listing_id: 1, sreality_id: null, property_id: null, locality: 'Bez cile' }),
+    ]);
+    const { container } = renderPage();
+
+    expect(await screen.findByText('Bez cile')).toBeInTheDocument();
+    expect(container.querySelector('a[href*="property=0"]')).toBeNull();
+    expect(screen.queryByRole('link', { name: /Bez cile/ })).toBeNull();
+  });
+
+  it('still links a row that carries a property id', async () => {
+    vi.mocked(brokers.fetchBrokerListings).mockResolvedValue([
+      listing({ listing_id: 2, sreality_id: null, property_id: 42, locality: 'S cilem' }),
+    ]);
+    renderPage();
+
+    const link = await screen.findByRole('link', { name: /S cilem/ });
+    expect(link).toHaveAttribute('href', '/listing?property=42');
+  });
+
+  it('still links a row that carries a sreality id', async () => {
+    vi.mocked(brokers.fetchBrokerListings).mockResolvedValue([
+      listing({ listing_id: 3, sreality_id: -284913, property_id: null, locality: 'Legacy' }),
+    ]);
+    renderPage();
+
+    const link = await screen.findByRole('link', { name: /Legacy/ });
+    expect(link).toHaveAttribute('href', '/listing/-284913');
+  });
+});
+
 /* The modal seeds from the SAME Typ/Nabídka selection the inventory table is
  * filtered to (the state is lifted to the page for exactly this) — so what the
  * operator narrowed the table to is what the map opens scoped to. */
