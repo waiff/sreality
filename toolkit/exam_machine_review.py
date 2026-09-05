@@ -324,7 +324,8 @@ def agreement(
     the caller supplies both reads, so this is testable without a database and
     identical whichever cohort it is pointed at."""
     out = {tag_id: {"tp": 0, "fp": 0, "fn": 0, "tn": 0,
-                    "human_skip": 0, "machine_skip": 0, "unreviewed": 0}
+                    "human_skip": 0, "machine_skip": 0, "unreviewed": 0,
+                    "auto_default": 0}
            for tag_id in tag_ids}
     picked_key, skipped_key = "picked_tag_ids", "skipped_tag_ids"
     for row in rows:
@@ -332,6 +333,13 @@ def agreement(
         verdicts = (review or {}).get("verdicts") or {}
         picked = set(row.get(picked_key) or [])
         skipped = set(row.get(skipped_key) or [])
+        # A migration-466 backfill cell the operator has not touched is a
+        # DECLARED DEFAULT, not a judgment. Grading the machine against it
+        # measures the backfill — and it reads as a false positive every time
+        # the machine is RIGHT about something the default got wrong. Measured
+        # live: exam_v1 carried 1,510 such cells, and they alone took jídelna to
+        # 0.00 precision on a cohort where the same head scores 0.96.
+        auto = set(row.get("auto_tag_ids") or [])
         cant_tell = bool(row.get("cant_tell"))
         for tag_id in tag_ids:
             cell = out[tag_id]
@@ -344,10 +352,14 @@ def agreement(
                 continue
             # A can't-tell row is an abstention on every cell, exactly as the
             # exam records it (excluded/'ambiguous' across the board).
-            human = "skip" if (cant_tell or tag_id in skipped) else (
+            human = "skip" if (cant_tell or tag_id in skipped or tag_id in auto) else (
                 "yes" if tag_id in picked else "no")
             if human not in GRADED:
-                cell["human_skip"] += 1
+                # An untouched default and a deliberate leave-out are both
+                # abstentions, counted apart: one is the operator's judgment,
+                # the other is work a sitting can still turn into one.
+                cell["auto_default" if (tag_id in auto and not cant_tell)
+                     else "human_skip"] += 1
                 continue
             if machine not in GRADED:
                 cell["machine_skip"] += 1

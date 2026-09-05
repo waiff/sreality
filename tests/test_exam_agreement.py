@@ -110,3 +110,40 @@ def test_the_script_reads_only() -> None:
            / "scripts" / "exam_agreement.py").read_text()
     for forbidden in ("INSERT", "UPDATE ", "DELETE", "run_vision_batch", "record_"):
         assert forbidden not in src, forbidden
+
+
+def test_an_untouched_backfill_default_grades_nothing() -> None:
+    # Migration 466 declared ten heads negative on exam_v1 rather than re-sit
+    # 250 images. A cell the operator has not touched since is a DEFAULT, not a
+    # judgment: grading the machine against it measures the backfill, and it
+    # reads as a false positive exactly when the machine is right.
+    from toolkit import exam_machine_review as mr
+
+    rows = [{**_row(1, []), "auto_tag_ids": [25, 36]}]
+    out = mr.agreement(rows=rows, reviews={1: _review(t22="no", t25="yes", t36="no")},
+                       tag_ids=TAGS)
+    assert out[25]["fp"] == 0 and out[25]["auto_default"] == 1
+    assert out[36]["tn"] == 0 and out[36]["auto_default"] == 1
+    # A head with no backfill on it still grades normally.
+    assert out[22]["tn"] == 1 and out[22]["auto_default"] == 0
+
+
+def test_a_default_the_operator_has_since_answered_grades_again() -> None:
+    # answers() drops the auto marker on re-answer, so the cell simply becomes
+    # a judgment — no special case needed here beyond honouring the marker.
+    from toolkit import exam_machine_review as mr
+
+    out = mr.agreement(rows=[{**_row(1, [25]), "auto_tag_ids": []}],
+                       reviews={1: _review(t22="no", t25="yes", t36="no")},
+                       tag_ids=TAGS)
+    assert out[25]["tp"] == 1 and out[25]["auto_default"] == 0
+
+
+def test_the_two_abstention_kinds_are_counted_apart() -> None:
+    from toolkit import exam_machine_review as mr
+
+    rows = [{**_row(1, [], skipped=[22]), "auto_tag_ids": [25]}]
+    out = mr.agreement(rows=rows, reviews={1: _review(t22="yes", t25="yes", t36="no")},
+                       tag_ids=TAGS)
+    assert out[22]["human_skip"] == 1 and out[22]["auto_default"] == 0
+    assert out[25]["auto_default"] == 1 and out[25]["human_skip"] == 0
