@@ -80,8 +80,13 @@ _DETAIL_DIGESTS: dict[tuple[str, str], str] = {
         "279fb3024d238ba2c1927b271b642019f9a647f0e605d35591a6ad8d02d4a8a1",
     ("maxima", "location_w2/maxima_detail.html"):
         "e0ea3cac396f989e62012b15a840fd843013b3b469dd5c05f3ca5360c2e639e8",
+    # Moved once, in the mmreality@2 activation: the pinned fixture was re-authored so its
+    # `:property` attribute is HTML-entity-encoded and its accented values `\uXXXX`-escaped,
+    # exactly as production serves them, and so the subject blob carries the id the
+    # fixture-diff gate scores it under. `NORMALIZER_VERSION` and mmreality's volatile
+    # profile are untouched — this is new BYTES, not a new normalisation.
     ("mmreality", "location_w2/mmreality_detail.html"):
-        "56799418831b5ac6d16933e5a16d70b2049aaabbe1fe2149d727089a9a21a94e",
+        "58ad159d133699cd22b8e752c8c839044463898eac90d37c0302cb8324cc818d",
     # Moved by contract realitymix@4 (W2-8): the modelled page's `data-address` was
     # restated to the comma shape the portal serves and its `data-form-address` moved to
     # the div that really carries it. The PROFILE is untouched, which is the property this
