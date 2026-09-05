@@ -515,7 +515,15 @@ light mode (the base palette) — under WCAG 2.4.11's 3:1; dark passes at 3.16:1
 Raising it is a `globals.css` `@theme` change reserved for you; no conformance
 claim is made until it lands.
 
-**Remaining waves, in the review's order, W2–W3 done:** W2 composite widgets
+**W4 — focus has a destination (merged).** `<main id="main" tabIndex={-1}>`
+is now both the skip link's target (first Tab stop on every page; WCAG 2.4.1
+was unmet) and where `useRouteFocus` lands keyboard focus after every
+navigation — keyed on pathname only, so a Browse filter click never hijacks
+focus, and skipping the first render so a deep link is not stolen.
+`isSafeInternalPath` extracted and hardened with the backslash arm the inline
+check lacked; it is what the OAuth deep-link PR will gate `next=` on.
+
+**Remaining waves, in the review's order, W2–W4 done:** W2 composite widgets
 name their internals (63 controls with no name from any source); W3 focus is
 visible (65 `focus:outline-none`, 33 with a 1.18:1 replacement — a deletion
 wave, plus the `--color-focus` token which is operator territory); W4 focus has
