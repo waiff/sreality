@@ -89,6 +89,11 @@ class SetAnnotationIn(BaseModel):
     image_id: int
     state: str
     excluded_reason: str | None = None
+    # Why the mark changed — the training-set page's optional reason. Recorded
+    # in tag_label_notes (473) beside the write, so the mark and its reason can
+    # never drift apart. from_state is what the tile showed before the click.
+    note: str | None = None
+    from_state: str | None = None
 
 
 class BulkSetAnnotationIn(BaseModel):
@@ -379,14 +384,61 @@ def post_annotation(
     _check_state(body.state)
     _check_excluded_reason(body.state, body.excluded_reason)
     try:
-        return {
-            "data": tag_annotations.set_state(
-                conn, image_id=body.image_id, tag_id=tag_id, state=body.state,
-                excluded_reason=body.excluded_reason,
+        cell = tag_annotations.set_state(
+            conn, image_id=body.image_id, tag_id=tag_id, state=body.state,
+            excluded_reason=body.excluded_reason,
+        )
+        if body.note and body.note.strip():
+            from toolkit import tag_label_notes
+
+            cell["note"] = tag_label_notes.record_note(
+                conn, image_id=body.image_id, tag_id=tag_id, to_state=body.state,
+                from_state=body.from_state, note=body.note,
             )
-        }
+        return {"data": cell}
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class AbsorbNotesIn(BaseModel):
+    definition_id: int
+    note_ids: list[int]
+
+
+@router.get("/tags/{tag_id}/notes")
+def get_tag_notes(
+    tag_id: int, include_absorbed: bool = False, limit: int = 200,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """The operator's reasons for changing marks on this head — the raw
+    material for its next definition revision. Open ones by default."""
+    from toolkit import tag_label_notes
+
+    return {"data": tag_label_notes.list_notes(
+        conn, tag_id=tag_id, include_absorbed=include_absorbed, limit=limit)}
+
+
+@router.get("/notes/open-counts")
+def get_open_note_counts(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
+    from toolkit import tag_label_notes
+
+    return {"data": {str(k): v for k, v in tag_label_notes.open_counts(conn).items()}}
+
+
+@router.post("/tags/{tag_id}/notes/absorb")
+def post_absorb_notes(
+    tag_id: int, body: AbsorbNotesIn, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Mark notes absorbed by ONE definition version of this tag, after the
+    reviser has distilled them into it. The tag match is enforced in SQL; a
+    definition of another tag absorbs nothing, and the caller sees the
+    shortfall in `absorbed` vs what it sent."""
+    from toolkit import tag_label_notes
+
+    absorbed = tag_label_notes.absorb(
+        conn, definition_id=body.definition_id, note_ids=body.note_ids)
+    return {"data": {"tag_id": tag_id, "absorbed": absorbed,
+                     "requested": len(body.note_ids)}}
 
 
 @router.post("/tags/{tag_id}/annotations/bulk")

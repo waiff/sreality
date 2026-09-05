@@ -1145,6 +1145,38 @@ export interface NewDedupTagImage {
   category_main: string | null;
   pool_rank: number | null;
 }
+/* The operator's reasons for changing marks on a head — raw material for its
+ * next definition revision. Absorbed notes carry the version that took them. */
+export interface TagLabelNote {
+  id: number;
+  image_id: number;
+  storage_path: string;
+  from_state: TagState | null;
+  to_state: TagState;
+  note: string;
+  created_at: string | null;
+}
+
+export const listTagLabelNotes = (
+  tagId: number, params: { include_absorbed?: boolean; limit?: number } = {},
+): Promise<{ data: TagLabelNote[] }> =>
+  request<{ data: TagLabelNote[] }>(`/new-dedup/labeling/tags/${tagId}/notes`, {
+    query: params, jwt: true,
+  });
+
+export const getOpenNoteCounts = (): Promise<{ data: Record<string, number> }> =>
+  request<{ data: Record<string, number> }>('/new-dedup/labeling/notes/open-counts', {
+    jwt: true,
+  });
+
+export const absorbTagLabelNotes = (
+  tagId: number, body: { definition_id: number; note_ids: number[] },
+): Promise<{ data: { tag_id: number; absorbed: number[]; requested: number } }> =>
+  request<{ data: { tag_id: number; absorbed: number[]; requested: number } }>(
+    `/new-dedup/labeling/tags/${tagId}/notes/absorb`,
+    { method: 'POST', json: body, jwt: true },
+  );
+
 /* Reviewing the TRAINING SET: what the model built, per head, with the
  * operator's own labels beside it. A separate read from the tag-centric browse
  * below, which is built around the (now empty) candidate queue and can neither
@@ -1220,6 +1252,10 @@ export const setNewDedupTagAnnotation = (
   imageId: number,
   state: TagState,
   excludedReason?: TagExcludedReason | null,
+  /* Why the mark changed, with what the tile showed before. Recorded beside
+   * the write (migration 473) so the mark and its reason cannot drift apart;
+   * it is the raw material for the head's next definition revision. */
+  note?: { text: string; from_state: TagState | null },
 ): Promise<{
   data: {
     image_id: number;
@@ -1237,7 +1273,7 @@ export const setNewDedupTagAnnotation = (
 }> =>
   request(`/new-dedup/labeling/tags/${tagId}/annotations`, {
     method: 'POST',
-    json: { image_id: imageId, state, excluded_reason: excludedReason ?? null },
+    json: { image_id: imageId, state, excluded_reason: excludedReason ?? null, ...(note ? { note: note.text, from_state: note.from_state } : {}) },
     jwt: true,
   });
 

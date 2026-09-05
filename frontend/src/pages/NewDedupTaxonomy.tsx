@@ -11,6 +11,8 @@ import {
   listTagNeighbours,
   listTagPositiveImages,
   previewTagDefinitionCard,
+  listTagLabelNotes,
+  absorbTagLabelNotes,
   removeNewDedupTag,
   renameNewDedupTag,
   saveTagDefinition,
@@ -37,6 +39,7 @@ import DefinitionEditor, {
 import DefinitionReadOnly from '@/components/tag-definitions/DefinitionReadOnly';
 import DefinitionCard from '@/components/tag-definitions/DefinitionCard';
 import OverlapEvidence from '@/components/tag-definitions/OverlapEvidence';
+import DefinitionNotes from '@/components/tag-definitions/DefinitionNotes';
 import TagContentsGallery, {
   type BatchFileRequest,
   type BatchFileResult,
@@ -93,6 +96,7 @@ const versionKey = (tagId: number, v: number) => [
   v,
 ];
 const neighboursKey = (tagId: number) => ['new-dedup', 'labeling', 'neighbours', tagId];
+const notesKey = (tagId: number) => ['new-dedup', 'labeling', 'label-notes', tagId];
 const photosKey = (ids: string) => ['new-dedup', 'taxonomy', 'photos', ids];
 /* Prefixes, for the writes that dirty EVERY tag's copy of a label-carrying
  * read rather than one tag's. Local consts, not additions to newDedupKeys:
@@ -191,6 +195,27 @@ export default function NewDedupTaxonomy() {
     queryKey: neighboursKey(selectedTagId ?? 0),
     queryFn: () => listTagNeighbours(selectedTagId as number, NEIGHBOUR_LIMIT),
     enabled: selectedTagId != null,
+  });
+
+  /* The operator's reasons for changing marks on this head (training-set
+   * page) — read together, distilled into one rule, then marked absorbed. */
+  const notesQ = useQuery({
+    queryKey: notesKey(selectedTagId ?? 0),
+    queryFn: () => listTagLabelNotes(selectedTagId as number),
+    enabled: selectedTagId != null,
+  });
+  const absorbMut = useMutation({
+    mutationFn: (vars: { tagId: number; definitionId: number; noteIds: number[] }) =>
+      absorbTagLabelNotes(vars.tagId, { definition_id: vars.definitionId, note_ids: vars.noteIds }),
+    onSuccess: (res, vars) => {
+      qc.invalidateQueries({ queryKey: notesKey(vars.tagId) });
+      const short = res.data.requested - res.data.absorbed.length;
+      pushToast(short ? 'err' : 'ok',
+        short
+          ? `${res.data.absorbed.length} of ${res.data.requested} absorbed — the rest were another tag's or already absorbed`
+          : `${res.data.absorbed.length} notes absorbed`);
+    },
+    onError: (err: Error) => pushToast('err', err.message),
   });
 
   /* ONE fetch per tag, always the distance order — "Newest first" is a
@@ -1160,6 +1185,19 @@ export default function NewDedupTaxonomy() {
                     onAddConfusable={addConfusable}
                     loading={neighboursQ.isLoading}
                     minPositives={MIN_POSITIVES_FOR_CENTROID}
+                  />
+                  <DefinitionNotes
+                    notes={notesQ.data?.data ?? []}
+                    loading={notesQ.isLoading}
+                    activeDefinitionId={definition?.id ?? null}
+                    activeVersion={definition?.version ?? null}
+                    absorbing={absorbMut.isPending}
+                    onAbsorb={(noteIds) => {
+                      if (selectedTagId == null || definition == null) return;
+                      absorbMut.mutate({
+                        tagId: selectedTagId, definitionId: definition.id, noteIds,
+                      });
+                    }}
                   />
                 </>
               )}

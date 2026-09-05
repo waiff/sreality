@@ -140,6 +140,25 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-05 (c) — **Training-set review surface + the operator's reasons (migration 473).**
+  10,544 machine labels existed with no way to look at them; `/new-dedup/training-set` reads
+  them head by head (server-side filters by verdict and by who decided; paging with a unique
+  tiebreaker; each tile names who decided and flags a label written under since-replaced
+  wording; the holdout excluded and said so). A correction there is a HUMAN label, which the
+  store's human-wins rail protects from every later machine pass. Then the operator's ask: a
+  NOTE with each changed mark, so the why reaches the definition. `tag_label_notes` records
+  (from_state, to_state, note) beside the write — one request for mark and reason — and the
+  taxonomy page shows a head's open notes beside its editor with an "absorbed into vN" action.
+  **THE ABSORPTION RULE (operator's words, ratified):** notes are NOT copied into the definition
+  one sentence per note. The definition is read by a model and by a person, and either absorbs
+  a short general rule and drowns in a list of specifics — think of a human annotator who must
+  hold the whole definition in their head. The reviser reads a head's open notes TOGETHER,
+  finds the rule they point at, states it ONCE at the level of the existing lines (most often
+  as a DOES NOT COUNT boundary — the model treats that list as law and `confusable_with` as
+  advice, measured on fasáda), saves, and marks the batch absorbed by that version so no note is
+  read into two revisions. The rule lives in the migration comment and the module docstring,
+  not only here.
+
 - 2026-09-05 — **Program review + encoder decision draft (docs only; nothing decided).** A
   12-agent review pass (progress audit, four encoder studies, one-encoder feasibility, cost
   model, synthesis, three adversarial refuters, revision). Findings:

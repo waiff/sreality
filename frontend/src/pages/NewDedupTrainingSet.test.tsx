@@ -149,3 +149,37 @@ describe('<NewDedupTrainingSet>', () => {
     expect(await screen.findByText(/Nothing labeled for this head/)).toBeInTheDocument();
   });
 });
+
+describe('<NewDedupTrainingSet> the reason for a change', () => {
+  it('offers a note field only on a tile whose mark changed, and sends it with from/to', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const tile = await screen.findByTestId('training-tile-11');
+    // No field before any change.
+    expect(screen.queryByTestId('note-form-11')).toBeNull();
+    await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledTimes(1));
+    // The change came from a machine "positive"; the field appears on THIS tile only.
+    const form = await screen.findByTestId('note-form-11');
+    expect(screen.queryByTestId('note-form-12')).toBeNull();
+    await user.type(within(form).getByRole('textbox'), 'entrance door, facade is only the backdrop');
+    await user.click(within(form).getByRole('button', { name: 'save' }));
+    // The note re-states the SAME mark with the reason attached — one write
+    // path for mark and reason — and carries what the tile showed before.
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenLastCalledWith(
+      3, 11, 'negative', null,
+      { text: 'entrance door, facade is only the backdrop', from_state: 'positive' },
+    ));
+  });
+
+  it('will not save an empty note', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const tile = await screen.findByTestId('training-tile-11');
+    await user.click(within(tile).getByRole('button', { name: /^excluded 11$/ }));
+    const form = await screen.findByTestId('note-form-11');
+    expect(within(form).getByRole('button', { name: 'save' })).toBeDisabled();
+    await user.type(within(form).getByRole('textbox'), '   ');
+    expect(within(form).getByRole('button', { name: 'save' })).toBeDisabled();
+  });
+});

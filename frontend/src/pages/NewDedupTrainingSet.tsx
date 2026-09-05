@@ -62,6 +62,11 @@ export default function NewDedupTrainingSet() {
   const [params, setParams] = useSearchParams();
   const qc = useQueryClient();
   const [large, setLarge] = useState(false);
+  /* Tiles whose mark changed in THIS session, with what they showed before —
+   * the note field appears only there, and from_state travels with the note
+   * so the reason is recorded against the change it explains. */
+  const [changed, setChanged] = useState<Map<number, { from: TagState; to: TagState }>>(new Map());
+  const [drafts, setDrafts] = useState<Map<number, string>>(new Map());
 
   const tagId = Number(params.get('tag') ?? 0) || null;
   const verdict = (params.get('verdict') ?? 'positive') as Verdict | 'all';
@@ -108,16 +113,39 @@ export default function NewDedupTrainingSet() {
   const counts = rowsQ.data?.data.counts;
 
   const correctMut = useMutation({
-    mutationFn: ({ imageId, state }: { imageId: number; state: TagState }) =>
+    mutationFn: ({ imageId, state }: { imageId: number; state: TagState; from: TagState }) =>
       setNewDedupTagAnnotation(
         activeId as number, imageId, state,
         state === 'excluded' ? 'pruned' : null,
       ),
-    onSuccess: () => {
+    onSuccess: (_res, vars) => {
+      setChanged((prev) => new Map(prev).set(vars.imageId, {
+        from: prev.get(vars.imageId)?.from ?? vars.from, to: vars.state,
+      }));
       /* Refetch the page, not the whole surface: the head counts move too, and
        * a reviewer who corrects a tile expects the totals to agree. */
       qc.invalidateQueries({ queryKey: ['training-set'] });
       qc.invalidateQueries({ queryKey: ['training-set-heads'] });
+    },
+    onError: (e: Error) => pushToast('err', e.message),
+  });
+
+  /* The reason, sent as a re-statement of the SAME mark with the note attached
+   * — one write path for mark and reason, so they cannot drift apart. */
+  const noteMut = useMutation({
+    mutationFn: ({ imageId, text }: { imageId: number; text: string }) => {
+      const ch = changed.get(imageId);
+      if (!ch) throw new Error('note without a change');
+      return setNewDedupTagAnnotation(
+        activeId as number, imageId, ch.to,
+        ch.to === 'excluded' ? 'pruned' : null,
+        { text, from_state: ch.from },
+      );
+    },
+    onSuccess: (_res, vars) => {
+      setDrafts((prev) => { const n = new Map(prev); n.delete(vars.imageId); return n; });
+      setChanged((prev) => { const n = new Map(prev); n.delete(vars.imageId); return n; });
+      pushToast('ok', 'Note saved');
     },
     onError: (e: Error) => pushToast('err', e.message),
   });
@@ -169,7 +197,7 @@ export default function NewDedupTrainingSet() {
               aria-pressed={r.state === v}
               title={v === 'positive' ? 'Applies' : v === 'negative' ? 'Does not apply' : 'Leave out'}
               disabled={correctMut.isPending}
-              onClick={() => correctMut.mutate({ imageId: r.image_id, state: v })}
+              onClick={() => correctMut.mutate({ imageId: r.image_id, state: v, from: r.state })}
               className={`flex-1 py-0.5 text-[0.7rem] rounded-[var(--radius-xs)] border transition-colors ${
                 r.state === v
                   ? 'border-[var(--color-ink-2)] text-[var(--color-ink)]'
@@ -180,6 +208,33 @@ export default function NewDedupTrainingSet() {
             </button>
           ))}
         </div>
+        {changed.has(r.image_id) && (
+          <form
+            data-testid={`note-form-${r.image_id}`}
+            className="flex gap-1"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const text = (drafts.get(r.image_id) ?? '').trim();
+              if (text) noteMut.mutate({ imageId: r.image_id, text });
+            }}
+          >
+            <input
+              aria-label={`why ${r.image_id}`}
+              value={drafts.get(r.image_id) ?? ''}
+              onChange={(e) => setDrafts((prev) => new Map(prev).set(r.image_id, e.target.value))}
+              placeholder="why? (optional)"
+              maxLength={600}
+              className="min-w-0 flex-1 px-1.5 py-0.5 text-[0.75rem] rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-transparent text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)]"
+            />
+            <button
+              type="submit"
+              disabled={noteMut.isPending || !(drafts.get(r.image_id) ?? '').trim()}
+              className="px-2 py-0.5 text-[0.7rem] rounded-[var(--radius-xs)] border border-[var(--color-copper)] text-[var(--color-ink)] disabled:opacity-40"
+            >
+              save
+            </button>
+          </form>
+        )}
       </li>
     );
   };
@@ -193,6 +248,8 @@ export default function NewDedupTrainingSet() {
             <p className="text-xs text-[var(--color-ink-3)] mt-0.5">
               What the model labeled from your definitions, with your own labels beside it.
               A correction here is yours and final — no machine pass can overwrite it.
+              After you change a mark, a small field appears to say why; those reasons are
+              distilled into the head&rsquo;s definition, as one general rule, not one line per note.
               The sealed exam images are excluded: they grade the model, so they never appear
               on a training surface.
             </p>
