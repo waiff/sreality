@@ -266,3 +266,22 @@ def test_the_near_tag_draw_raises_the_timeout_for_its_own_scan_and_restores_it()
     assert "SET statement_timeout = %s" in fn
     assert "finally:" in fn
     assert "SET statement_timeout = DEFAULT" in fn
+
+
+def test_no_statement_carries_a_bare_percent_sign() -> None:
+    # A literal % in executed SQL — prose in a comment counts — is read by
+    # psycopg as the start of a placeholder, and Postgres then raises a syntax
+    # error. It has bitten this repo before; the SQL gate catches it a CI round
+    # trip later, this catches it instantly.
+    import re
+
+    from toolkit import machine_labeling as ml
+
+    for name in dir(ml):
+        if not name.endswith("_SQL"):
+            continue
+        sql = getattr(ml, name)
+        if not isinstance(sql, str):
+            continue
+        bare = re.findall(r"%(?!\()", sql)
+        assert not bare, f"{name} carries {len(bare)} bare percent sign(s)"

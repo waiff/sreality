@@ -228,8 +228,12 @@ _NEAR_TAG_SQL = f"""
     ),
     -- Rank FIRST, filter after. The eligibility rails cost a NOT EXISTS and a
     -- per-tag definition join EACH, so applying them to every sampled vector
-    -- is what timed this query out live at 5% of 9.4M rows. Ranking narrows the
-    -- set to `pool` rows and the rails then run on those alone.
+    -- is what timed this query out live at five percent of 9.4M rows. Ranking
+    -- narrows the set to `pool` rows and the rails run on those alone.
+    -- (No literal percent sign anywhere in this statement, comments included:
+    -- psycopg reads one as the start of a placeholder and Postgres then fails
+    -- with a syntax error. Caught here by the SQL gate, and again by the unit
+    -- test that sweeps every statement in this module.)
     ranked AS (
       SELECT e.image_id, (e.embedding <=> c.vec) AS dist
       FROM image_clip_embeddings e TABLESAMPLE SYSTEM (%(pct)s)
