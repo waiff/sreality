@@ -37,6 +37,7 @@ import { PINNED_SLUGS, indexLabel } from '@/lib/cityIndexes';
 import { fmtCount, fmtPct, fmtPP } from '@/lib/format';
 import { PPM2_UNIT } from '@/lib/measure';
 import DatasetMap, { METRICS, type DatasetMetric } from '@/components/DatasetMap';
+import { Field } from '@/components/controls';
 import CityPicker from '@/components/CityPicker';
 import { buildHoverData } from '@/lib/growthChoropleth';
 import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
@@ -913,17 +914,17 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
     <form onSubmit={(e) => { e.preventDefault(); if (canSubmit) mutation.mutate(); }}
       className="mt-4 border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] p-4">
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        <Field label="Name" className="lg:col-span-3">
+        <Field label="Name" as="control" className="lg:col-span-3">
           <input value={name} onChange={(e) => setName(e.target.value)}
             placeholder="Byty · novostavba · cihla · 60–120 m²" className={SELECT_CLS + ' w-full'} />
         </Field>
-        <Field label="Type"><SelectBox value={categoryMain} onChange={setCategoryMain} options={TYPE_OPTS} /></Field>
-        <Field label="Condition (stav)"><SelectBox value={condition} onChange={setCondition} options={COND_OPTS} /></Field>
-        <Field label="Construction (konstrukce)"><SelectBox value={construction} onChange={setConstruction} options={CONSTR_OPTS} /></Field>
-        <Field label="Ownership (vlastnictví)"><SelectBox value={ownership} onChange={setOwnership} options={OWN_OPTS} /></Field>
-        <Field label="Area from (m²)"><input type="number" min={0} value={areaFrom} onChange={(e) => setAreaFrom(e.target.value)} className={SELECT_CLS + ' w-full'} /></Field>
-        <Field label="Area to (m²)"><input type="number" min={0} value={areaTo} onChange={(e) => setAreaTo(e.target.value)} className={SELECT_CLS + ' w-full'} /></Field>
-        <Field label="Municipalities">
+        <Field label="Type" as="control"><SelectBox value={categoryMain} onChange={setCategoryMain} options={TYPE_OPTS} /></Field>
+        <Field label="Condition (stav)" as="control"><SelectBox value={condition} onChange={setCondition} options={COND_OPTS} /></Field>
+        <Field label="Construction (konstrukce)" as="control"><SelectBox value={construction} onChange={setConstruction} options={CONSTR_OPTS} /></Field>
+        <Field label="Ownership (vlastnictví)" as="control"><SelectBox value={ownership} onChange={setOwnership} options={OWN_OPTS} /></Field>
+        <Field label="Area from (m²)" as="control"><input type="number" min={0} value={areaFrom} onChange={(e) => setAreaFrom(e.target.value)} className={SELECT_CLS + ' w-full'} /></Field>
+        <Field label="Area to (m²)" as="control"><input type="number" min={0} value={areaTo} onChange={(e) => setAreaTo(e.target.value)} className={SELECT_CLS + ' w-full'} /></Field>
+        <Field label="Municipalities" as="control">
           <button type="button" onClick={() => setPickerOpen(true)}
             className={SELECT_CLS + ' w-full text-left ' + (obecIds.length ? 'text-[var(--color-ink)]' : 'text-[var(--color-ink-3)]')}>
             {obecIds.length ? `${obecIds.length} selected` : 'All standard cities'}
@@ -1016,7 +1017,7 @@ function ExpandDatasetForm({
         so you can start small/fast and grow — more cities or earlier months.
       </p>
       <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-        <Field label="Municipalities">
+        <Field label="Municipalities" as="control">
           <button type="button" onClick={() => setPickerOpen(true)}
             className={SELECT_CLS + ' w-full text-left ' + (obecIds.length ? 'text-[var(--color-ink)]' : 'text-[var(--color-ink-3)]')}>
             {obecIds.length ? `${obecIds.length} selected` : 'All standard cities'}
@@ -1051,15 +1052,6 @@ function ExpandDatasetForm({
         />
       )}
     </div>
-  );
-}
-
-function Field({ label, className, children }: { label: string; className?: string; children: ReactNode }) {
-  return (
-    <label className={`block ${className ?? ''}`}>
-      <span className="block mb-1 text-xs text-[var(--color-ink-3)]">{label}</span>
-      {children}
-    </label>
   );
 }
 

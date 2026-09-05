@@ -182,18 +182,16 @@ describe('<Brokers> company filter', () => {
   });
 });
 
-// Field wraps each control group in a <label>, so the FIRST pill in a group inherits the
-// whole row's text as its accessible name (pre-existing on every filter group on this
-// page — the company-filter test above works around the same thing). Match on
-// textContent instead of the computed accessible name.
+// Every pill is found by its own accessible name now that Field names the GROUP
+// (role="group" + aria-labelledby) instead of wrapping it in a <label> that
+// leaked the caption into the first pill's name. These are the rail: if a
+// caption ever pollutes a pill's name again, the role query fails.
 function pill(text: string): HTMLElement {
-  const found = screen.getAllByRole('button').find((b) => b.textContent?.includes(text));
-  if (!found) throw new Error(`no pill containing ${text}`);
-  return found;
+  return screen.getByRole('button', { name: text });
 }
 
 function hasPill(text: string): boolean {
-  return screen.getAllByRole('button').some((b) => b.textContent?.includes(text));
+  return screen.queryByRole('button', { name: text }) != null;
 }
 
 describe('<Brokers> subtype filter', () => {
@@ -370,8 +368,7 @@ describe('<Brokers> value filter', () => {
     );
 
     // Three "Vše" pills exist (Typ / Nabídka / Počet) — scope to Nabídka's field.
-    const nabidkaField = screen.getByText('Nabídka').closest('label');
-    if (!nabidkaField) throw new Error('Nabídka field not found');
+    const nabidkaField = screen.getByRole('group', { name: 'Nabídka' });
     fireEvent.click(within(nabidkaField).getByRole('button', { name: 'Vše' }));
 
     expect(screen.queryByLabelText('Minimální cena')).not.toBeInTheDocument();

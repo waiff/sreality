@@ -52,7 +52,7 @@ import {
 } from '@/lib/api';
 import { fmtAbsolute } from '@/lib/format';
 import { useTheme, type ThemeMode } from '@/lib/theme';
-import { PickButton, Switch } from '@/components/controls';
+import { PickButton, Switch, Field } from '@/components/controls';
 import TiersSection from '@/components/TiersSection';
 import { useWorkflowDocs, type WorkflowDoc } from '@/lib/workflowDocs';
 import {
@@ -409,7 +409,7 @@ function SkillEditor({ skill, tools }: { skill: Skill; tools: AgentTool[] }) {
 
   return (
     <div className="px-4 pt-2 pb-4 border-t border-[var(--color-rule-soft)] space-y-4">
-      <Field label="System prompt">
+      <Field label="System prompt" as="control">
         <textarea
           className="w-full min-h-[14rem] font-mono text-xs leading-relaxed px-3 py-2 rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)]"
           value={systemPrompt}
@@ -615,31 +615,34 @@ function RecipientField({
 
   return (
     <div>
-      <label className="block">
-        <span className="flex items-center gap-1.5">
-          <span className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-            {label}
+      {/* The <label> wraps ONLY the caption and the input. The Save button used
+        * to sit inside it too, so "Save" joined the input's accessible name and
+        * a click on the button also fired label activation. */}
+      <div className="mt-1 flex items-end gap-2">
+        <label className="block flex-1 min-w-0">
+          <span className="flex items-center gap-1.5">
+            <span className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+              {label}
+            </span>
+            {!infoExpanded && <InfoHint text={hint} />}
           </span>
-          {!infoExpanded && <InfoHint text={hint} />}
-        </span>
-        <div className="mt-1 flex items-center gap-2">
           <input
             type="text"
             value={text}
             onChange={(e) => setText(e.target.value)}
             placeholder={placeholder}
-            className="flex-1 min-w-0 px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+            className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
           />
-          <button
-            type="button"
-            onClick={() => mutation.mutate()}
-            disabled={!dirty || mutation.isPending}
-            className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors disabled:opacity-50"
-          >
-            {mutation.isPending ? 'Saving…' : 'Save'}
-          </button>
-        </div>
-      </label>
+        </label>
+        <button
+          type="button"
+          onClick={() => mutation.mutate()}
+          disabled={!dirty || mutation.isPending}
+          className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors disabled:opacity-50"
+        >
+          {mutation.isPending ? 'Saving…' : 'Save'}
+        </button>
+      </div>
       {infoExpanded && <p className="mt-1 text-[0.72rem] text-[var(--color-ink-4)]">{hint}</p>}
       {toast && (
         <p
@@ -1534,13 +1537,3 @@ function FilterCategoryRows({
 /* Shared                                                                */
 /* -------------------------------------------------------------------- */
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <div className="text-xs tracking-[0.12em] uppercase text-[var(--color-ink-3)] mb-1.5">
-        {label}
-      </div>
-      {children}
-    </div>
-  );
-}
