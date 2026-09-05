@@ -64,6 +64,10 @@ export interface FilterUpdate {
 export interface CustomFilterWidgetProps {
   value: unknown;
   onChange: (next: unknown) => void;
+  /** The row's visible caption — the same string the wrapping <Section>
+   *  renders. A group name is ancestor context, so any widget with an inner
+   *  input must be handed the words to name it with. */
+  label: string;
 }
 
 export type CustomFilterWidget = (
@@ -185,6 +189,7 @@ export function FilterForm({
           {custom({
             value: state[f.id],
             onChange: (v) => onChange([{ id: f.id, value: v }]),
+            label,
           })}
         </Section>
       );
@@ -397,6 +402,7 @@ function FilterRow({
         <Section label={label}>
           <SingleSelectRow
             def={def}
+            label={label}
             value={value as string | number | null}
             onChange={onChange}
           />
@@ -408,6 +414,7 @@ function FilterRow({
         <Section label={label}>
           <MultiselectRow
             def={def}
+            label={label}
             value={(value as Array<string | number> | null) ?? []}
             onChange={onChange}
           />
@@ -463,7 +470,7 @@ function FilterRow({
     case 'csv_input':
       return (
         <Section label={label}>
-          <CsvRow def={def} value={value} onChange={onChange} />
+          <CsvRow def={def} ariaLabel={label} value={value} onChange={onChange} />
         </Section>
       );
 
@@ -617,16 +624,19 @@ function PillRow({
 
 function SingleSelectRow({
   def,
+  label,
   value,
   onChange,
 }: {
   def: FilterDef;
+  label: string;
   value: string | number | null;
   onChange: (v: string | number | null) => void;
 }) {
   const opts = optionsFor(def);
   return (
     <SingleSelectDropdown
+      label={label}
       value={value}
       options={opts}
       onChange={onChange}
@@ -636,10 +646,12 @@ function SingleSelectRow({
 
 function MultiselectRow({
   def,
+  label,
   value,
   onChange,
 }: {
   def: FilterDef;
+  label: string;
   value: ReadonlyArray<string | number>;
   onChange: (v: Array<string | number> | null) => void;
 }) {
@@ -649,6 +661,7 @@ function MultiselectRow({
     return (
       <CsvRow
         def={def}
+        ariaLabel={label}
         value={value}
         onChange={(v) => onChange(v as Array<string | number> | null)}
       />
@@ -666,10 +679,13 @@ function MultiselectRow({
 
 function CsvRow({
   def,
+  ariaLabel,
   value,
   onChange,
 }: {
   def: FilterDef;
+  /* This file's idiom (BufferedNumberInput takes ariaLabel too). */
+  ariaLabel: string;
   value: unknown;
   onChange: (v: unknown) => void;
 }) {
@@ -678,6 +694,7 @@ function CsvRow({
   return (
     <input
       type="text"
+      aria-label={ariaLabel}
       value={arr.map((x) => String(x)).join(', ')}
       placeholder="comma-separated"
       onChange={(e) => {

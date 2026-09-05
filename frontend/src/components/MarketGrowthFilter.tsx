@@ -11,7 +11,7 @@ import {
   type PriceStatDataset,
 } from '@/lib/priceStats';
 import type { PriceGrowthRule } from '@/lib/filters';
-import { YmPicker, YM_CUR } from '@/components/YmPicker';
+import { YmPicker, YM_CUR, YM_PARTS } from '@/components/YmPicker';
 
 /* "N of M municipalities have insufficient data" — the scraper checked them and
  * found no prodej/pronájem series, so they can never satisfy a growth threshold
@@ -109,9 +109,9 @@ export default function MarketGrowthFilter({ value, onChange }: Props) {
               {on && rule && (
                 <div className="mt-1.5 ml-5 flex flex-col gap-1.5">
                   <div className="flex items-center gap-1 text-[0.7rem] text-[var(--color-ink-3)]">
-                    <YmPicker value={rule.fromYm ?? d.start_ym ?? '2015-01'} onChange={(v) => setRule(d.id, { fromYm: v })} />
+                    <YmPicker label={`${d.name} from`} parts={YM_PARTS.en} value={rule.fromYm ?? d.start_ym ?? '2015-01'} onChange={(v) => setRule(d.id, { fromYm: v })} />
                     <span className="text-[var(--color-ink-3)]">→</span>
-                    <YmPicker value={rule.toYm ?? d.end_ym ?? YM_CUR} onChange={(v) => setRule(d.id, { toYm: v })} />
+                    <YmPicker label={`${d.name} to`} parts={YM_PARTS.en} value={rule.toYm ?? d.end_ym ?? YM_CUR} onChange={(v) => setRule(d.id, { toYm: v })} />
                   </div>
                   <label className="flex items-center justify-between gap-2 text-[0.7rem] text-[var(--color-ink-2)]">
                     <span>Rent growth ≥ %/yr</span>

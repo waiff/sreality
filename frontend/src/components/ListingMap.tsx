@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useSpaLinkDelegation } from '@/lib/linkGestures';
+import { YmPicker, YM_SELECT_CLS } from '@/components/YmPicker';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
 import { createMap } from '@/lib/basemap';
 import { useMapFeatureHover } from '@/lib/useMapFeatureHover';
@@ -1829,29 +1830,6 @@ export default function ListingMap({
   );
 }
 
-const PSG_FIRST_YEAR = 2015;
-const PSG_NOW = new Date();
-const PSG_YEARS = Array.from(
-  { length: PSG_NOW.getFullYear() - PSG_FIRST_YEAR + 1 },
-  (_, i) => String(PSG_FIRST_YEAR + i),
-);
-const PSG_MONTHS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '0'));
-const PSG_SELECT_CLS =
-  'text-[0.7rem] bg-[var(--color-paper-2)] border border-[var(--color-rule)] rounded px-1 py-0.5';
-
-function PsgYmPicker({ value, onChange }: { value: string; onChange?: (v: string) => void }) {
-  const [y, m] = (value || `${PSG_FIRST_YEAR}-01`).split('-');
-  return (
-    <span className="inline-flex items-center gap-0.5">
-      <select value={y} onChange={(e) => onChange?.(`${e.target.value}-${m}`)} className={PSG_SELECT_CLS}>
-        {PSG_YEARS.map((yr) => <option key={yr} value={yr}>{yr}</option>)}
-      </select>
-      <select value={m} onChange={(e) => onChange?.(`${y}-${e.target.value}`)} className={PSG_SELECT_CLS}>
-        {PSG_MONTHS.map((mo) => <option key={mo} value={mo}>{mo}</option>)}
-      </select>
-    </span>
-  );
-}
 
 function GrowthMapControls({
   showGrowth, datasets, datasetId, metric, from, to, rowCount,
@@ -1873,6 +1851,8 @@ function GrowthMapControls({
   chartOnHover?: boolean;
   onToggleChartOnHover?: (next: boolean) => void;
 }) {
+  // A literal radio `name` is a page-global token; two mounts would share one group.
+  const metricName = useId();
   const cfg = GROWTH_METRICS[metric];
   const gradient = `linear-gradient(to right, ${cfg.ramp.map(([, c]) => c).join(', ')})`;
   return (
@@ -1889,7 +1869,8 @@ function GrowthMapControls({
             <span className="text-[0.7rem] text-[var(--color-ink-3)]">Žádné datasety</span>
           ) : (
             <select
-              className={PSG_SELECT_CLS + ' max-w-[200px]'}
+              aria-label="Dataset"
+              className={YM_SELECT_CLS + ' max-w-[200px]'}
               value={datasetId ?? ''}
               onChange={(e) => onDatasetChange?.(Number(e.target.value))}
             >
@@ -1899,15 +1880,15 @@ function GrowthMapControls({
           <div className="flex flex-col gap-1">
             {GROWTH_METRIC_ORDER.map((gm) => (
               <label key={gm} className="inline-flex items-center gap-1.5 text-[0.75rem] text-[var(--color-ink-2)] cursor-pointer">
-                <input type="radio" name="psg-metric" checked={metric === gm} onChange={() => onMetricChange?.(gm)} />
+                <input type="radio" name={metricName} checked={metric === gm} onChange={() => onMetricChange?.(gm)} />
                 <span>{GROWTH_METRICS[gm].label}</span>
               </label>
             ))}
           </div>
           <div className="flex items-center gap-1 border-t border-[var(--color-rule)] pt-1.5 text-[0.7rem] text-[var(--color-ink-2)]">
-            <PsgYmPicker value={from} onChange={onFromChange} />
+            <YmPicker label="Od" value={from} onChange={onFromChange} />
             <span className="text-[var(--color-ink-3)]">→</span>
-            <PsgYmPicker value={to} onChange={onToChange} />
+            <YmPicker label="Do" value={to} onChange={onToChange} />
           </div>
           <label className="inline-flex items-center gap-1.5 text-[0.75rem] text-[var(--color-ink-2)] cursor-pointer border-t border-[var(--color-rule)] pt-1.5">
             <input type="checkbox" checked={!!chartOnHover} onChange={(e) => onToggleChartOnHover?.(e.target.checked)} />
@@ -1954,6 +1935,7 @@ function RentMapControls({
   onRentVkChange?: (vk: RentVk) => void;
   onToggleShowKraje?: (next: boolean) => void;
 }) {
+  const vkName = useId();
   const rampGradient = `linear-gradient(to right, ${RENT_RAMP
     .map(([, color]) => color)
     .join(', ')})`;
@@ -1979,7 +1961,7 @@ function RentMapControls({
               >
                 <input
                   type="radio"
-                  name="rent-vk"
+                  name={vkName}
                   checked={rentVk === vk}
                   onChange={() => onRentVkChange?.(vk)}
                 />

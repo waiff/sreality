@@ -109,7 +109,7 @@ export default function Outreach() {
             />
           </Field>
           <Field label="Lokalita" className="min-w-[16rem]">
-            <LocationTypeahead value={districts} onChange={(n) => setDistricts(n ?? [])} />
+            <LocationTypeahead label="Lokalita" value={districts} onChange={(n) => setDistricts(n ?? [])} />
           </Field>
           <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
             <Field label="Typ">

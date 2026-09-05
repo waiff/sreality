@@ -79,10 +79,15 @@ const sameChip = (a: DistrictChip, b: DistrictChip): boolean =>
   a.name === b.name && a.context === b.context;
 
 export function LocationTypeahead({
+  label,
   value,
   onChange,
   onPick,
 }: {
+  /* REQUIRED. The caption the user sees above/beside this field. A wrapping
+   * Field/Section is role="group" — ancestor context, never this input's
+   * name — and the placeholder self-changes once a chip exists. */
+  label: string;
   value: ReadonlyArray<DistrictChip> | null;
   onChange: (next: DistrictChip[] | null) => void;
   /* Fires once per picked suggestion. The Browse map listens for this
@@ -192,6 +197,7 @@ export function LocationTypeahead({
       <div ref={ref} className="relative">
         <input
           type="text"
+          aria-label={label}
           value={query}
           onChange={(e) => {
             setQuery(e.target.value);

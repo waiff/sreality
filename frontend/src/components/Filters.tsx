@@ -331,6 +331,7 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
           <ControlGroup title="Location" bordered={false}>
             <Section label="District">
               <LocationTypeahead
+                label="District"
                 value={filters.districts}
                 onChange={(next) =>
                   onChange({ ...filters, districts: next ?? [] })

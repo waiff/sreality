@@ -293,6 +293,7 @@ export default function Pipeline() {
             </span>
             <div className="min-w-0 flex-1 max-w-xl">
               <LocationTypeahead
+                label="Lokalita"
                 value={districts}
                 onChange={(n) => setDistricts(n ?? [])}
               />

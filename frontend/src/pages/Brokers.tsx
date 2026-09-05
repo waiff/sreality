@@ -178,6 +178,7 @@ export default function Brokers() {
         <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
           <Field label="Lokalita" className="min-w-[16rem] flex-1">
             <LocationTypeahead
+              label="Lokalita"
               value={districts}
               onChange={(next) => setDistricts(next ?? [])}
             />

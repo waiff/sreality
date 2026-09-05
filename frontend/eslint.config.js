@@ -101,6 +101,15 @@ export default [
             'A <label> must not wrap buttons — it names only the first and makes the caption click it. Use <Field label=…> (components/controls.tsx), which renders role="group".',
         },
         {
+          // Three near-identical YmPicker copies existed (components/YmPicker,
+          // ListingMap's PsgYmPicker, pages/Datasets' page-local); all three
+          // shipped two selects with an accessible name of "". The primitive
+          // lives in components/YmPicker.tsx and is exempted there per line.
+          selector: "FunctionDeclaration[id.name=/YmPicker$/]",
+          message:
+            'Do not redefine YmPicker — import it from components/YmPicker.tsx. The shared one takes a required `label` and names both selects.',
+        },
+        {
           // Six local `function Field` copies existed before the shared one;
           // a seventh must not appear. The primitive lives in controls.tsx and
           // is exempted there per line.
