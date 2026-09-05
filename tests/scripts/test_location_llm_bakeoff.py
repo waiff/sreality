@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from scripts.location_llm_bakeoff import (
-    BAKEOFF_BLOCK_CSS,
     CallRecord,
     FieldObservation,
     compare_values,
@@ -21,8 +20,15 @@ from scripts.location_llm_bakeoff import (
     score,
     summary_markdown,
 )
-from location_data.claims_llm import BLOCK_ORDER, FIELD_ORDER
+from location_data.claims_llm import (
+    BLOCK_ORDER,
+    FIELD_ORDER,
+    PAGE_KIND,
+    _validated_groups,
+    llm_entries,
+)
 from location_data.html_scope import ScopeRegister, scope_html
+from tests.location_data.claim_intake_fixtures import entries_for
 
 _ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = (_ROOT / "tests" / "fixtures" / "location_w2" / "bazos_detail.html").read_bytes()
@@ -30,6 +36,11 @@ REGISTER = ScopeRegister.from_zones("bazos", (
     {"locator_kind": "html_selector", "locator": {"css": ".podobne, #podobne"}},
     {"locator_kind": "html_selector", "locator": {"css": "footer, .hlavicka"}},
 ))
+# `scripts.location_llm_bakeoff.block_css` reads the two nodes off the DEPLOYED bazos
+# contract, so this reads them off the same contract on disk. Pinning a second copy of the
+# selectors here would let the harness and its test agree with each other while both drifted
+# away from the page production reads.
+BLOCK_CSS, _GROUPS = _validated_groups(llm_entries(entries_for("bazos"), PAGE_KIND))
 
 
 class FakeGazetteer:
@@ -193,7 +204,7 @@ def test_evaluate_answer_uses_the_production_quote_and_gazetteer_checks():
     """A bake-off scored by a looser validator than production would pick the model that
     is best at fooling the looser validator."""
     document = scope_html(FIXTURE, register=REGISTER)
-    nodes = {b: document.css_first(css) for b, css in BAKEOFF_BLOCK_CSS.items()}
+    nodes = {b: document.css_first(css) for b, css in BLOCK_CSS.items()}
     answer = {
         "from_description": _blocks(
             obec={"value": "Praha 8", "quote": "Praha 8 - Karlín", "confidence": "high"},
@@ -224,7 +235,7 @@ def test_evaluate_answer_uses_the_production_quote_and_gazetteer_checks():
 
 def test_evaluate_answer_records_a_null_field_without_inventing_a_refusal():
     document = scope_html(FIXTURE, register=REGISTER)
-    nodes = {b: document.css_first(css) for b, css in BAKEOFF_BLOCK_CSS.items()}
+    nodes = {b: document.css_first(css) for b, css in BLOCK_CSS.items()}
     observations = evaluate_answer(
         model="a", listing_id=1, answer={"from_description": _blocks(),
                                          "from_title": _blocks()},

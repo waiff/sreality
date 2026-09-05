@@ -9,10 +9,11 @@ archived arm filters on `ARCHIVE_READERS`, and this lane's reader is in `LLM_REA
 the golden files will be green while proving nothing about it. Do not read a green golden
 as coverage of the free-text lane — read this module.
 
-The lane is INERT in production today (no shipped contract entry names
-`llm_location_text`), so the entries below are built by hand exactly as the bazos@3 bump
-will declare them. When that bump lands, `test_every_bazos_llm_entry_is_executable` should
-be extended to load them off disk instead.
+The entries below are built BY HAND rather than loaded, so the hermetic assertions stay
+readable and independent of a contract edit. bazos@3 has since shipped the real ones, and
+`test_every_bazos_llm_entry_is_executable` loads those off disk and asserts the two sets are
+identical — which is what keeps this file's fixtures from drifting away from what production
+actually executes.
 """
 
 from __future__ import annotations
@@ -53,6 +54,7 @@ from location_data.claims_llm import (
 )
 from location_data.claims_remine_archive import ARCHIVE_READERS
 from location_data.html_scope import ScopeRegister, scope_html
+from tests.location_data.claim_intake_fixtures import entries_for
 import location_data.claims_llm as claims_llm
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -106,13 +108,18 @@ def street_entries() -> list[Entry]:
 
 
 def full_entries() -> list[Entry]:
-    """The thirteen entries bazos@3 will declare, built by hand."""
+    """The sixteen entries bazos@3 declares, built by hand (eight output fields x two
+    blocks). Pinned against the shipped contract by
+    `test_every_bazos_llm_entry_is_executable`."""
     made: list[Entry] = []
     pk = 7200
     plan: list[tuple[str, str, tuple[str, ...]]] = [
         ("obec", "obec_name", ()),
         ("cast_obce", "cast_obce_name", ()),
-        ("psc", "psc", ()),
+        # `psc_normalise` keeps the five-digit run only, so a stated "186 00" lands
+        # byte-identical to what `bzs.det.psc` and `bzs.det.legacy_psc` write and the three
+        # agree on `value_norm` instead of contradicting each other on punctuation.
+        ("psc", "psc", ("psc_normalise",)),
         ("street", "street_name", ()),
         ("house_number", "house_number_cp", ("split_cp_co:cp",)),
         ("house_number", "house_number_co", ("split_cp_co:co",)),
@@ -829,16 +836,93 @@ def test_the_bakeoff_writes_no_claims_and_declares_no_lane():
     assert "location_llm_bakeoff" in text
 
 
-def test_the_lane_is_inert_until_a_contract_names_its_reader():
-    """No shipped contract entry names `llm_location_text`, so `run()` returns 'inert'
-    before opening a batch row. A batch stamped 'ok' moves the incremental watermark and
-    would claim coverage of an archive nothing ever read."""
-    named = [e.entry_id for contract in contracts.load_all()
-             for e in contract.entries if e.reader in LLM_READERS]
-    assert named == [], (
-        f"{named} now name an LLM reader — the lane is live. Extend "
-        f"test_every_bazos_llm_entry_is_executable to load them off disk, and re-check "
-        f"that a `location_field_policy` rung exists for bazos llm_text.")
+def test_every_bazos_llm_entry_is_executable():
+    """bazos@3 is the bump that names `llm_location_text`, so this reads the SHIPPED
+    contract off disk rather than the hand-built `full_entries()` above.
+
+    "Executable" is four things at once, and each has its own failure mode: the reader
+    resolves in `LLM_READERS` (a name resolving in the wrong registry reads the wrong
+    substrate); the entry is declared for the page kind the lane actually scans; the
+    contract's own `(block, field, claim_type, transform)` quadruple is one
+    `_validated_groups` accepts (a contradiction here refuses the run AFTER the batch is
+    open, so it must red in CI instead); and the on-disk set is exactly the plan the rest of
+    this module drives, so the hermetic fixtures cannot drift away from what production
+    executes.
+    """
+    entries = entries_for("bazos")
+    llm = llm_entries(entries, claims_llm.PAGE_KIND)
+    assert llm, "bazos@3 declares no executable LLM entry — the lane is inert again"
+
+    shipped = {
+        (str(e.locator["llm_block"]), str(e.locator["llm_field"]), e.claim_type,
+         e.transform, str(e.locator["css"]))
+        for e in llm
+    }
+    planned = {
+        (str(e.locator["llm_block"]), str(e.locator["llm_field"]), e.claim_type,
+         e.transform, str(e.locator["css"]))
+        for e in full_entries()
+    }
+    assert shipped == planned, (
+        "the shipped bazos LLM entries and this module's hand-built set have diverged; "
+        "every hermetic assertion below drives the hand-built one, so a difference here "
+        "means production runs something nothing in this file tests")
+
+    for entry_ in llm:
+        assert entry_.reader in LLM_READERS
+        assert entry_.extraction_method == "llm_text"
+        assert entry_.page_kind == claims_llm.PAGE_KIND
+        assert entry_.claim_type in FIELD_CLAIM_TYPES[str(entry_.locator["llm_field"])]
+
+    css_by_block, groups = _validated_groups(llm)
+    assert set(css_by_block) == set(BLOCK_ORDER)
+    # Every output field carries BOTH rungs: a block the contract does not declare is a
+    # block the lane never reads, so an undeclared title rung would silently discard the
+    # headline answer the model was paid to produce.
+    for key, rungs in groups.items():
+        assert list(rungs) == list(BLOCK_ORDER), key
+
+
+def test_no_other_portal_contract_names_an_llm_reader():
+    """The lane is bazos-only by design (`DEFAULT_SOURCE`), and a second portal naming
+    `llm_location_text` needs its own `location_field_policy` rung or its claims are stored
+    and declined at S7 forever — which looks exactly like a lane that is not running."""
+    named = {contract.source: [e.entry_id for e in contract.entries
+                               if e.reader in LLM_READERS]
+             for contract in contracts.load_all()}
+    assert {s: ids for s, ids in named.items() if ids and s != "bazos"} == {}
+
+
+def test_a_field_policy_rung_exists_for_every_survivorship_field_bazos_llm_emits():
+    """Migration 472, read off disk. A claim whose (source, extraction_method) matches no
+    `location_field_policy` row is not "unranked" — `_best_policy` returns None, the claim
+    is SKIPPED, and the field lands in `survivorship_blocked` forever. So the contract bump
+    and its policy rows are one change, and this is the test that says so.
+
+    The intersection is deliberate: `landmark` and `address_line_verbatim` are real claim
+    types that no field is ever won from, so they must NOT have rows (dead config), and the
+    six that remain must.
+    """
+    from location_data.resolver.core import SURVIVORSHIP_FIELDS
+
+    sql = (_ROOT / "migrations" / "472_location_bazos_llm_field_policy.sql").read_text(
+        "utf-8")
+    body = sql.split("begin;", 1)[1]
+    assert "'portal:bazos', 'llm_text', 350" in body
+    for flag in ("'medium'::match_confidence", "true, false, false"):
+        assert flag in body, flag
+
+    emitted = {e.claim_type for e in llm_entries(entries_for("bazos"),
+                                                 claims_llm.PAGE_KIND)}
+    arbitrated = emitted & set(SURVIVORSHIP_FIELDS)
+    assert arbitrated == {"obec_name", "cast_obce_name", "psc", "street_name",
+                          "house_number_cp", "house_number_co"}
+    seeded = set(re.findall(r"'([a-z_]+)'", body.split("unnest(array[", 1)[1]
+                            .split("]::location_claim_type[]", 1)[0]))
+    assert seeded == arbitrated, (
+        f"migration 472 seeds {sorted(seeded)} but bazos@3 emits {sorted(arbitrated)} "
+        f"survivorship fields through llm_text")
+    assert not (emitted - set(SURVIVORSHIP_FIELDS)) & seeded
 
 
 def test_the_estimate_used_by_the_preflight_cap_is_never_zero():

@@ -282,11 +282,13 @@ def test_an_archived_bazos_pin_is_unlicensable_by_construction():
 
 # ------------------------------------------------------------------ the contract shape
 
-def test_bazos_two_ships_shadowed():
+def test_bazos_ships_shadowed():
     """`shadow` is HEADER-grain, so this freezes bazos' four already-live W1 legacy entries
     as well — the accepted price of activating the DOM contracts in one wave, cleared with
-    `python -m location_data.contracts --unshadow bazos@2`."""
-    assert (CONTRACT.version, CONTRACT.shadow) == (2, True)
+    `python -m location_data.contracts --unshadow bazos@<version>`. The version moved to 3
+    with the LLM lane's entries; the freeze carried forward unchanged, which is the point of
+    asserting the pair rather than the flag."""
+    assert (CONTRACT.version, CONTRACT.shadow) == (3, True)
 
 
 def test_the_activation_appended_one_id_and_edited_none():
