@@ -140,6 +140,47 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-05 — **Program review + encoder decision draft (docs only; nothing decided).** A
+  12-agent review pass (progress audit, four encoder studies, one-encoder feasibility, cost
+  model, synthesis, three adversarial refuters, revision). Findings:
+  1. **Correction to the 2026-08-27 entry: Gate 0 is NOT closed.** Migration 432 (#1167) dropped
+     only the funnel/cost matviews + their `_public` views, archived the funnel matview and
+     unscheduled its cron job. It did NOT drop the six legacy tables
+     (`property_identity_candidates` + archive, `dedup_dirty_properties`, `dedup_scan_state`,
+     `dedup_batches`, `dedup_batch_requests`, `dedup_engine_runs`), the six other views, or the
+     127 eligibility index; did not add `property_merge_events.generation` (the legacy stamp W8
+     needs); and the `app_settings` sweep + the CUTOFF §7 step-8 verification checklist were
+     never run or recorded. W0 stays open on exactly those.
+  2. **W1 tooling is complete** through #1280; seven 2026-09-05 PRs (#1263, #1264, #1265,
+     #1266, #1268, #1269, #1280) were unrecorded until this entry. Live training-set state
+     (measured today): 18 active heads carry human labels — 459 human positives (max 40 on one
+     head), ~9.4k human negatives, 90 excluded, 1,054 `human_draft` cells; 13 heads carry
+     250–1,130 gpt-5-mini machine positives over 10,544 labeled images (7,501 positives / 118k
+     negatives), 5 heads none (předsíň/chodba, letecký snímek s ohraničením, chodba/schodiště,
+     domovní vchod/chodba, wc, parkoviště); exam holdout = 250 images.
+  3. **No trainer exists** (grep for sklearn / LogisticRegression / GroupKFold across toolkit,
+     scripts, api = zero hits; no training extra in pyproject). W2–W8 not started. Note the
+     numbering trap: roadmap's "W2 SHIPPED (#1228–#1231)" is the labeling sub-programme's wave
+     (the sealed exam), not this file's W2 (Level 0 candidates), which has no code.
+  4. **Gate 1 has three live ambiguities the operator must rule on** (not resolved here): the
+     target list (11 spec-named tags vs 18 defined heads vs the 8 routing tags flagged
+     `priority`); whether machine positives count toward "150 per tag" (today's `gate_count` is
+     source-blind, so they do count on every surface); and the per-head agreement threshold that
+     clears a head for machine building (deliberately not in code).
+  5. **Encoder decision**: `docs/design/new-dedup/ENCODER-DECISION.md` (DRAFT — proposed,
+     gated, operator-owned) recommends ONE encoder serving the tag heads, L3 similarity and path
+     B — DINOv3 ViT-B/16, 768-d `halfvec` — gated on a ~$2 bake-off, a defined licence review,
+     scikit-learn + faiss approvals under rule 7, and a disk-headroom check; DINOv2
+     ViT-L/14-with-registers (Apache-2.0) is the licence-clean near-equal; SigLIP2 wins the tag
+     job but fails near-duplicate retrieval; keeping CLIP B/32 is the zero-cost stick option with
+     no licence grant and no measurement on job (b). Pre-flight readout run live today:
+     `image_clip_embeddings` = 11,301,885 rows (10,489,289 `revision NULL` = pre-pin, 812,596
+     pinned), table 31 GB, database 150 GB; 11,303,863 images stored in R2; velocity ≈ 55–60k
+     images/day (39,794 listings first seen in the last 7 days). **No ledger decision moves until
+     the operator rules.**
+  Next session: operator rulings (Gate 1 meaning, bake-off go/no-go, dependency approvals,
+  embedding cadence, sampling strategy for the remaining labeling budget); independently and
+  in parallel, close W0 for real (the proper PR-3 migration + the recorded checklist).
 - 2026-09-04 (b) — **The LLM builds the training sets; the gate decides which heads it may
   build (operator direction; migration 468).** Ruling: stop drawing human cohorts to rescue thin
   heads — wc and parkoviště are left alone — and push instead on the model labeling in quantity
@@ -268,7 +309,7 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   `taxonomy_labels` needs a non-destructive **probe-target flag** so the coverage strip + Gate-1
   bar track target tags only (today the only lever is the cascading DELETE). Also noting for the
   record: the W0 teardown migration (the long-open "PR-3" blocker) **landed 2026-08-25 via
-  #1167 (mig 432, cardinality W0b)** — Gate 0's remaining item is done. Next session: implement
+  #1167 (mig 432, cardinality W0b)** — Gate 0's remaining item is done. **[CORRECTED 2026-09-05: overstated — 432 closed only part of CUTOFF §4; Gate 0 is still open. See the 2026-09-05 entry.]** Next session: implement
   the probe-target flag + scope the coverage UI to it; then labeling rounds continue.
 - 2026-08-21 (part 2) — **Gate 1 stops counting border cases** (operator decision, reversing the
   call recorded in part 1 below — which had deliberately left `confirmed_count` alone rather than
