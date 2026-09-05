@@ -37,7 +37,6 @@ from tests.location_data.claim_intake_fixtures import (
     IDNES_CARRY_FORWARD,
     IDNES_PAGE,
     IDNES_UNSTAMPED,
-    MMREALITY_ACCURATE,
     REALITYMIX_GEOCODE,
     REMAX,
     SREALITY_POST_CUTOVER,
@@ -97,10 +96,14 @@ def test_carry_forward_is_admitted_only_when_absent_from_the_inventory():
     assert admitted[0].value_jsonb["ladder"] == "carry_forward_absent_from_mapy_inventory"
 
 
+# mmreality left this list at mmreality@2: `mm.det.point` moved onto the archived lane
+# (`json_point`), so W1 emits no mmreality coordinate to veto. The veto itself did not
+# narrow — it is a JOIN on listing_id and applies to the archived read too
+# (`_licensed_coordinate` -> `coordinate_verdict(..., in_mapy_inventory=...)`); what
+# changed is only which lane produces the portal's coordinate.
 @pytest.mark.parametrize("source,payload", (
     ("sreality", SREALITY_POST_CUTOVER),
     ("bezrealitky", BEZREALITKY),
-    ("mmreality", MMREALITY_ACCURATE),
     ("bazos", BAZOS_LINK),
     ("idnes", IDNES_PAGE),
 ))

@@ -10,6 +10,7 @@ from dataclasses import replace
 
 import pytest
 
+from location_data import claims_intake
 from location_data.claims_intake import (
     IntakeRefused,
     extract_listing,
@@ -167,7 +168,10 @@ def test_mmreality_point_accurate_true_and_municipality_id():
     result = extract_listing(row, entries_for("mmreality"))
     by_type = claims_by_type(result)
 
-    assert by_type["coordinate"][0].value_geom_wkt == "POINT(15.7712123456 50.0296123456)"
+    assert "coordinate" not in by_type, (
+        "mmreality@2 moved mm.det.point onto the archived lane (json_point); W1's raw_json "
+        "read cannot say WHICH `:property` blob the parser handed it, which is the whole "
+        "reason W2-11 re-reads the body under id_match")
     accurate = claim_by_extractor(result, "mm.det.accurate")
     assert accurate.declared_precision_label == "accurate"
     assert accurate.blur_evidence == "none"
@@ -185,9 +189,11 @@ def test_mmreality_accurate_false_declares_blur():
     accurate = claim_by_extractor(result, "mm.det.accurate")
     assert accurate.declared_precision_label == "not_accurate"
     assert accurate.blur_evidence == "declared"
-    # The coordinate is still stored — the cap is the resolver's business, not the
-    # extractor's (02 §2.1.2 rule 2).
-    assert claims_by_type(result)["coordinate"][0].value_geom_wkt.startswith("POINT(")
+    # The coordinate the cap applies to is the ARCHIVED one from mmreality@2 onwards
+    # (mm.det.point -> json_point), so W1 emits none here. The cap is still the resolver's
+    # business and not the extractor's (02 §2.1.2 rule 2) — what moved is the lane that
+    # produces the position, not what the declaration means.
+    assert "coordinate" not in claims_by_type(result)
     assert "cast_obce_name" not in claims_by_type(result)   # municipalityPart is null
 
 
@@ -215,8 +221,15 @@ def test_which_declared_bool_label_is_blurred_comes_from_the_contract():
 
 
 def test_mmreality_original_title_street_is_not_mined_in_w1():
-    """`mm.det.original_title_street` is regex_text: evidence-bearing, so it waits for the
-    content-addressed payload store (W2a) rather than writing an unverifiable span."""
+    """`mm.det.original_title_street` is regex_text: evidence-bearing, so its span needs a
+    retrievable, content-addressed document. W2a filled that store, and mmreality@2 gives
+    the entry a reader — `json_regex`, one of `claims_remine_archive`'s. W1 SKIPS it
+    (`ARCHIVE_ONLY_READERS`), because `listings.raw_json` is not content-addressed and a
+    span into it can never be re-checked."""
+    entries = {e.entry_id: e for e in entries_for("mmreality")}
+    assert entries["mm.det.original_title_street"].reader == "json_regex"
+    assert (entries["mm.det.original_title_street"].reader
+            in claims_intake.ARCHIVE_ONLY_READERS)
     row = listing("mmreality", MMREALITY_ACCURATE, lat=50.0, lon=15.0)
     result = extract_listing(row, entries_for("mmreality"))
     assert all(c.extraction_method not in ("regex_text", "llm_text") for c in result.claims)
@@ -424,10 +437,12 @@ def test_a_parser_street_is_the_last_signal_the_silent_parse_cohort_has():
     # do — so this entry declares the write path known (§6.6 rule 3).
     assert claim.legacy_write_path_unknown is False
     assert claim.history_completeness == "locality_text_only"
-    # v4, not the v3 this entry arrived in: the bump carried no entry change at all (a
-    # prose edit inside the governed hash, PR #1209), but `extractor_version` stamps the
-    # CONTRACT version, not the version an entry first appeared under.
-    assert claim.extractor_version == "contract:ceskereality@4"
+    # v5, not the v3 this entry arrived in: `extractor_version` stamps the CONTRACT
+    # version, not the version an entry first appeared under. v4 carried no entry change
+    # at all (a prose edit inside the governed hash, PR #1209); v5 is the W2-7 activation,
+    # which added `cr.det.title_okres` and gave three entries archive readers — neither
+    # touched this legacy-column entry, and both re-stamp it.
+    assert claim.extractor_version == "contract:ceskereality@5"
 
 
 def test_a_resolver_or_unattributed_street_is_never_a_claim():
@@ -504,15 +519,27 @@ def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
     expected_history = {
         "sreality": "full", "bezrealitky": "payload_only", "mmreality": "payload_only",
     }
-    # The portals whose contract was bumped to close a measured coverage gap — remax once
-    # (2026-08-11), ceskereality and realitymix twice (the street column, 2026-08-13);
-    # every other portal is still on its original version. Moving the volatile profiles
-    # into these files (W2a-3e) bumped none of them: `persistence` is outside
+    # Contract versions as of the W2-6…W2-12 activation wave (2026-09-05), which bumped
+    # seven at once: bazos@2, ceskereality@5, idnes@2, maxima@2, mmreality@2,
+    # realitymix@4, remax@3. Only sreality and bezrealitky are still on their original
+    # version — they name no archive reader and were not part of the wave.
+    #
+    # The point this line makes for W1 specifically: the wave is an ARCHIVED-lane change,
+    # yet it re-stamps `extractor_version` on every W1 claim these portals emit, because
+    # the stamp is the contract version and the contract is one document. That is the
+    # designed behaviour (a claim must say which bytes produced it), and it is why the
+    # `shadow: true` the wave also carries matters — the seven contracts project dark
+    # until the operator un-shadows each one.
+    #
+    # Earlier history, kept because it is the record of what a bump can be: remax@2
+    # (2026-08-11) and ceskereality@3 / realitymix@3 (the street column, 2026-08-13)
+    # closed measured coverage gaps; ceskereality@4 (2026-08-31) closed none — prose IS
+    # inside the governed hash, PR #1209 edited it without a bump, and `project()` refused
+    # the whole fleet's projection until the version caught up with the bytes. Moving the
+    # volatile profiles into these files (W2a-3e) bumped nothing: `persistence` is outside
     # `contract_sha256` (mig 408), so archive configuration cannot re-stamp a claim.
-    # ceskereality's fourth (2026-08-31) closed no gap: prose IS inside the governed hash,
-    # PR #1209 edited it without a bump, and `project()` refused the whole fleet's
-    # projection until the version caught up with the bytes.
-    expected_version = {"remax": 2, "ceskereality": 4, "realitymix": 3}
+    expected_version = {"remax": 3, "ceskereality": 5, "realitymix": 4, "bazos": 2,
+                        "idnes": 2, "maxima": 2, "mmreality": 2}
     for source, payload, lat, lon in cases:
         result = extract_listing(listing(source, payload, lat=lat, lon=lon),
                                  entries_for(source))

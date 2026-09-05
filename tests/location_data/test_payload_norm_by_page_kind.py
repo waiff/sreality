@@ -80,12 +80,25 @@ _DETAIL_DIGESTS: dict[tuple[str, str], str] = {
         "279fb3024d238ba2c1927b271b642019f9a647f0e605d35591a6ad8d02d4a8a1",
     ("maxima", "location_w2/maxima_detail.html"):
         "e0ea3cac396f989e62012b15a840fd843013b3b469dd5c05f3ca5360c2e639e8",
+    # Moved once, in the mmreality@2 activation: the pinned fixture was re-authored so its
+    # `:property` attribute is HTML-entity-encoded and its accented values `\uXXXX`-escaped,
+    # exactly as production serves them, and so the subject blob carries the id the
+    # fixture-diff gate scores it under. `NORMALIZER_VERSION` and mmreality's volatile
+    # profile are untouched — this is new BYTES, not a new normalisation.
     ("mmreality", "location_w2/mmreality_detail.html"):
-        "56799418831b5ac6d16933e5a16d70b2049aaabbe1fe2149d727089a9a21a94e",
+        "58ad159d133699cd22b8e752c8c839044463898eac90d37c0302cb8324cc818d",
+    # Moved by contract realitymix@4 (W2-8): the modelled page's `data-address` was
+    # restated to the comma shape the portal serves and its `data-form-address` moved to
+    # the div that really carries it. The PROFILE is untouched, which is the property this
+    # table exists to pin — a fixture edit moves the body's digest, never the cohort key.
     ("realitymix", "location_w2/realitymix_detail.html"):
-        "155a814e80a7c992c33be8aadff7f8425591e5fd97a5d63a8ca0fe5f67a11b70",
+        "34f9c30bc9dfe34c17ae1d213e53b449055561c1af8844508133d80ef2534a64",
+    # W2-6 re-pinned: the FIXTURE moved, not the normaliser. remax's pinned body carried a
+    # hand-written one-line `h2.pd-header__address`, which hid the nested `mapa` jump-link
+    # every real remax page carries; the block is now copied verbatim from the archived
+    # capture. The digest below is that file under the SAME payload_norm@3 profile.
     ("remax", "location_w2/remax_detail.html"):
-        "36452f1bb87e4b0659ca39ef394f3ce933664fe749b2d93f5591674a22912e36",
+        "2874e1972b6a7eee638167b24ebcc8ac24f991a1c709c78ab4b31591c00dcbc9",
     ("sreality", "location_w2/sreality_detail.json"):
         "58f277d33ee9bd08f243602a236934f0ecbd0b5b8a4654f1bdb3ea367c246af1",
     ("ceskereality", "location_w2a_refetch/ceskereality_a1.html"):
@@ -122,12 +135,20 @@ _DETAIL_DIGESTS: dict[tuple[str, str], str] = {
     # W2 set above. They are committed detail bodies too, so they belong in the pin:
     # what it protects is the claim "detail output did not move", and a fixture left
     # out of it is a page the claim was never checked against.
+    # bazos joined this set with the W2 activation (ad 222916664, captured 2026-09-05):
+    # it is the portal's FIRST genuinely archived body in the repo, so until now every
+    # bazos selector was only ever proven against a hand-written page.
+    ("bazos", "portal_html/bazos_detail.html"):
+        "ca6a521eacf6a5d3dd1b5567fdd39071d7936af7bbc4b833428b8ab7159ae437",
     ("idnes", "portal_html/idnes_detail.html"):
         "6952b4899e1ecc7e3ddbcaa22fcf43ffb71f92a8096758fea0d94a6b359dc965",
     ("mmreality", "portal_html/mmreality_detail.html"):
         "2f97d89cbf626c931839708a9eea195052bfcd30c1faedce1c1a8ead202d473c",
+    # Moved by the W2-8 PII scrub: the captured page still carried a real agent name in a
+    # public repo, replaced with the placeholder by
+    # `scripts/fetch_and_anonymize_fixtures.py --scrub-contacts --name …`.
     ("realitymix", "portal_html/realitymix_detail.html"):
-        "7d67a39a587f1582b400a2537c9b093f80d4bbeda170f01f438e4c7521dbe224",
+        "0d8d874e7f2cba09f7acda8a53ef9f16d7052a1032b5609b4997eba73575ebd2",
     ("remax", "portal_html/remax_detail.html"):
         "d1557becec21011c9253421cbf4be0172f0f2d85fe2d20bdd09f7c96a7e51c8b",
 }

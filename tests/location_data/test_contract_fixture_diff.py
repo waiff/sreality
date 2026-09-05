@@ -68,6 +68,10 @@ PINNED_REGRESSIONS: dict[str, tuple[str, ...]] = {
     "sreality": ("520268", "1588965452", "3067969612"),
     "realitymix": ("8375963", "8375983", "8595551"),
     "maxima": ("f60012522", "d40026367", "f60012682"),
+    # W2-11 pinned 951845 (the committed archived body, whose neighbour blob is the LARGER
+    # one) beside 943671, so the two listings that name mmreality's subject-selection defect
+    # cannot leave the contract silently.
+    "mmreality": ("943671", "951845"),
 }
 
 # A regression line is prose: "<id>[ / <id>…] — what went wrong". Only the head before the
@@ -271,13 +275,35 @@ def archived_html_for(source: str) -> Path | None:
     return path if path.exists() else None
 
 
+# The native id the archived fixture's own markup is keyed by. A subject-scoped reader
+# (`subject_scope: {kind: id_match, on_miss: fail}`) picks its object by this value, so a
+# portal whose fixture carries a real page's id has to be SCORED under that id — otherwise
+# every subject-scoped entry misses, `SubjectNotFound` takes the scorer down, and after a
+# bless the golden would read as "this PR extracts nothing", which is the exact false
+# positive this arm exists to prevent. `"fixture"` remains the default for every portal
+# whose pinned body carries no id of its own.
+ARCHIVE_FIXTURE_NATIVE: dict[str, str] = {"idnes": "6a71888887e5da33ca081ad8"}
+
+
+# Widened by the W2-6…W2-12 activation wave. `value_text` + `value_geom_wkt` were enough
+# while every archived reader returned a string or a point; the wave ships readers that
+# return a NUMBER (maxima's map zoom, mmreality's obec code, realitymix's accuracy flag), a
+# SHAPE (`json_geometry`'s `uncertainty_geometry` arm), a JSON blob, and a portal-declared
+# precision label with a radius. Left un-widened, a maxima Circle body would land in the
+# golden as a claim_type with an all-null value — the diff would show the entry firing and
+# say nothing about WHAT it claimed, which is the one thing this gate exists to pin.
 def project_archived(read: Any) -> dict[str, Any]:
     claim = read.claim
     return {
         "extractor_id": claim.extractor_id,
         "claim_type": claim.claim_type,
         "value_text": claim.value_text,
+        "value_num": claim.value_num,
         "value_geom_wkt": claim.value_geom_wkt,
+        "value_shape_wkt": claim.value_shape_wkt,
+        "value_jsonb": claim.value_jsonb,
+        "declared_precision_label": claim.declared_precision_label,
+        "declared_radius_m": claim.declared_radius_m,
         "surface": claim.surface,
         "page_kind": claim.page_kind,
         "licence_class": claim.licence_class,
@@ -298,13 +324,14 @@ def score_archived(contract: contracts.PortalContract) -> list[dict[str, Any]]:
                if e.reader in ARCHIVE_READERS and e.page_kind == "detail"]
     if path is None or not entries:
         return []
+    native = ARCHIVE_FIXTURE_NATIVE.get(contract.source, "fixture")
     register = ScopeRegister.from_zones(contract.source, contract.exclusion_zones)
     document = scope_html(path.read_bytes(), register=register)
     payload = ArchivedPayload(
-        id=1, source=contract.source, source_id_native="fixture", page_kind="detail",
+        id=1, source=contract.source, source_id_native=native, page_kind="detail",
         payload_sha256="0" * 64, first_observed_at=_ARCHIVE_CLOCK,
         body=path.read_bytes())
-    row = fx.listing(contract.source, {}, native="fixture")
+    row = fx.listing(contract.source, {}, native=native)
     out: list[dict[str, Any]] = []
     for entry in sorted(entries, key=lambda e: e.entry_id):
         for read in ARCHIVE_READERS[entry.reader](entry, row, payload, document):

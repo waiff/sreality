@@ -1,0 +1,17 @@
+{
+  "_provenance": "scraper.realitymix_parser.parse_detail over the committed real capture tests/fixtures/portal_html/realitymix_detail.html (listing 8662169, the page contracts/portals/realitymix.yaml v4 pins as a regression). Kept: the location-bearing raw_json keys W1 reads. Dropped: description, image_urls, params and the broker id block — none reach a claim, and the broker block is the one PII carrier on the page.",
+  "raw_json": {
+    "id": "8662169",
+    "title": "Pronájem domu/vily, 120 m²",
+    "locality_text": "Stráň, Potůčky, okres Karlovy Vary",
+    "coords": {
+      "source": "page"
+    }
+  },
+  "lat": 50.427238,
+  "lon": 12.742544,
+  "in_mapy_inventory": false,
+  "listings.locality": "Stráň, Potůčky, okres Karlovy Vary",
+  "listings.street": null,
+  "listings.street_source": null
+}

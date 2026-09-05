@@ -1,0 +1,27 @@
+{
+  "_captured_from": "https://nemovitosti.maxima.cz/nemovitosti/f60012522/",
+  "_captured_at": "2026-09-05",
+  "_http_status": 200,
+  "_provenance": "scraper.maxima_parser.parse_detail over the live page, verbatim; `image_urls` dropped (no entry reads it) and nothing else edited. The page carries no broker name, phone or e-mail in any parsed field — title, params and locality_text are property facts only.",
+  "_why_pinned": "THE D6 HOMONYM REGRESSION. The page states only 'Krásný Les' and serves NO map script at all, so coords.source is null and the archived body can mint no coordinate — the stored pin 50.76764,13.93526 (the other Krásný Les, ~100 km west) has no portal-declared geometry behind it.",
+  "raw_json": {
+    "id": "f60012522",
+    "title": "Prodej pozemku trvalý travní porost, 22 432 m 2",
+    "price_text": "1 100 000 Kč",
+    "locality_text": "Krásný Les",
+    "maxima_ref": "F60012522",
+    "coords": {
+      "source": null
+    },
+    "params": {
+      "id zakázky": "F60012522",
+      "plocha pozemku": "22 432 m 2"
+    }
+  },
+  "lat": null,
+  "lon": null,
+  "in_mapy_inventory": false,
+  "listings.locality": "Krásný Les",
+  "listings.street": null,
+  "listings.street_source": null
+}

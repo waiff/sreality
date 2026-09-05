@@ -1,0 +1,29 @@
+{
+  "raw_json": {
+    "id": 951845,
+    "point": {
+      "latitude": 50.060813844,
+      "longitude": 17.389086312
+    },
+    "originalTitle": "Prodej rodinného domu, 200 m², Andělská Hora",
+    "title": "Prodej, Rodinný dům, 200 m², Andělská Hora",
+    "location": "Andělská Hora",
+    "slug": "prodej-rodinny-dum-200-m2-andelska-hora",
+    "municipality": "Andělská Hora",
+    "municipalityId": 551929,
+    "municipalityPart": "Andělská Hora",
+    "district": "Bruntál",
+    "districtId": 3801,
+    "country": "Česká republika",
+    "countryCode": "cz",
+    "countryId": 1,
+    "placement": {
+      "id": 1,
+      "name": "centrum obce"
+    },
+    "accurate": true,
+    "poi": []
+  },
+  "lat": 50.060813844,
+  "lon": 17.389086312
+}
