@@ -6,14 +6,34 @@
      `footer` — so the register's own selectors are exercised in both directions.
      [mine-remax finding 5]: the broker block is the SOLE source of PSČ on all 12
      mined pages. [mine-syn §1c]: the first `data-address` in the document is a
-     neighbour card's, and it reached listings.street on 2 rows. -->
+     neighbour card's, and it reached listings.street on 2 rows.
+
+     W2-6: the `h2.pd-header__address` block below is copied VERBATIM (tabs included)
+     from the real archived page at tests/fixtures/portal_html/remax_detail.html,
+     because the hand-written one-line version this fixture used to carry hid the
+     defect the activation exists to avoid: the header nests an `<a>mapa</a>`
+     jump-link on 12/12 mined pages, so a deep text read appends the link's own
+     label to the subject's address and carries the source line-break's tab run
+     with it. `html_own_text` reads the element's direct text children instead.
+     No line of this comment repeats the header's value: an HTML comment is part
+     of the serialised document `find_span` searches, so a quoted address here
+     would become the first textual occurrence of that string on the page.
+     `#printMap` / `#listingMap` deliberately carry `data-gps` and NO `data-address`.
+     That is not an omission: no captured remax page in this repo, and neither live
+     recon sample (recon §5.7), has ever carried a subject-map `data-address`.
+     Planting one to make `rx.det.map_address` produce a golden row would be
+     fabricating a claim; that entry's correctness is gated by unit tests instead
+     (tests/location_data/test_claims_remine_archive_remax.py). -->
 <html lang="cs">
 <head><title>Prodej bytu 3+kk, Pod Slovany, Úvaly | RE/MAX</title></head>
 <body>
 
 <div class="pd-header">
   <h1>Prodej bytu 3+kk 74 m²</h1>
-  <h2 class="pd-header__address">ulice Pod Slovany, Úvaly</h2>
+  <h2 class="pd-header__address">
+						ulice Pod Slovany,
+															Úvaly <a href="#" data-scroll-to-anchor="#map" class="link link--ar">mapa <i class="icon-arrow-right"></i></a>
+					</h2>
   <div class="pd-header__location">Úvaly, okres Praha-východ</div>
 </div>
 

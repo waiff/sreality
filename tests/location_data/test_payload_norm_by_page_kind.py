@@ -84,8 +84,12 @@ _DETAIL_DIGESTS: dict[tuple[str, str], str] = {
         "56799418831b5ac6d16933e5a16d70b2049aaabbe1fe2149d727089a9a21a94e",
     ("realitymix", "location_w2/realitymix_detail.html"):
         "155a814e80a7c992c33be8aadff7f8425591e5fd97a5d63a8ca0fe5f67a11b70",
+    # W2-6 re-pinned: the FIXTURE moved, not the normaliser. remax's pinned body carried a
+    # hand-written one-line `h2.pd-header__address`, which hid the nested `mapa` jump-link
+    # every real remax page carries; the block is now copied verbatim from the archived
+    # capture. The digest below is that file under the SAME payload_norm@3 profile.
     ("remax", "location_w2/remax_detail.html"):
-        "36452f1bb87e4b0659ca39ef394f3ce933664fe749b2d93f5591674a22912e36",
+        "2874e1972b6a7eee638167b24ebcc8ac24f991a1c709c78ab4b31591c00dcbc9",
     ("sreality", "location_w2/sreality_detail.json"):
         "58f277d33ee9bd08f243602a236934f0ecbd0b5b8a4654f1bdb3ea367c246af1",
     ("ceskereality", "location_w2a_refetch/ceskereality_a1.html"):
