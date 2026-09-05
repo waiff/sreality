@@ -10,6 +10,7 @@
  * points the operator to Settings → Delivery rather than failing silently. */
 
 import { Link } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 
 export const DELIVERY_CHANNELS: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'email', label: 'Email' },
@@ -86,7 +87,7 @@ export function DeliveryChannelsPicker({
           <>
             Email / Telegram also need a recipient in{' '}
             <Link
-              to="/settings"
+              to={ROUTES.settings.build()}
               className="underline underline-offset-2 hover:text-[var(--color-ink-2)]"
             >
               Settings → Delivery

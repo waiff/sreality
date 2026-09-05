@@ -12,6 +12,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import { useMutation } from '@tanstack/react-query';
 import { ApiError, createWatchdogSubscription } from '@/lib/api';
 import type { WatchdogFilterSpec } from '@/lib/types';
@@ -59,7 +60,7 @@ export default function CreateWatchdogModal({
         channels,
       }),
     onSuccess: () => {
-      navigate('/watchdog/manage');
+      navigate(ROUTES.watchdogManage.build());
     },
   });
 

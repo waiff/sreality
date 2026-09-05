@@ -16,6 +16,7 @@
 
 import { useMemo, useRef, useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import {
   useMutation,
   useQuery,
@@ -137,7 +138,7 @@ function CollectionsRow({ property_id }: { property_id: number }) {
       <div className="flex items-baseline justify-between">
         <SectionLabel>Collections</SectionLabel>
         <Link
-          to="/collections"
+          to={ROUTES.collections.build()}
           className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
         >
           Manage →
@@ -154,7 +155,7 @@ function CollectionsRow({ property_id }: { property_id: number }) {
         <p className="mt-3 text-sm text-[var(--color-ink-3)]">
           No collections yet.{' '}
           <Link
-            to="/collections"
+            to={ROUTES.collections.build()}
             className="text-[var(--color-copper)] hover:underline"
           >
             Start one

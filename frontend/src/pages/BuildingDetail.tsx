@@ -12,6 +12,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ApiError,
@@ -157,7 +158,7 @@ function Page({ children }: { children: React.ReactNode }) {
 function Crumb({ id }: { id: number }) {
   return (
     <nav className="text-[0.7rem] tracking-[0.16em] uppercase text-[var(--color-ink-3)]">
-      <Link to="/estimations" className="hover:text-[var(--color-ink)]">
+      <Link to={ROUTES.estimations.build()} className="hover:text-[var(--color-ink)]">
         Estimations
       </Link>
       <span className="mx-2">/</span>
@@ -480,8 +481,11 @@ function UnitEstimateBlock({
           </p>
         </div>
       )}
+      {/* Not runSurfaceUrl: BuildingChildRun carries no input_sreality_id, so
+        * there is no subject to resolve a listing surface from. Routing this
+        * through the run helper needs the wire type widened first. */}
       <Link
-        to={`/estimation/${child.id}`}
+        to={ROUTES.estimationDetail.build({ id: child.id })}
         className="mt-2 inline-block text-[0.75rem] text-[var(--color-copper)] hover:text-[var(--color-copper-2)]"
       >
         View estimate →

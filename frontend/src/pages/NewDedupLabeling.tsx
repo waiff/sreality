@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
+import { ROUTES, withQuery } from '@/lib/routes';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   getNewDedupLabelingOverview,
@@ -1621,7 +1622,7 @@ function AmbiguityChip({
   }
   return (
     <Link
-      to={`/new-dedup/labeling/taxonomy?tag=${tag.id}`}
+      to={withQuery(ROUTES.newDedupTaxonomy.build(), { tag: tag.id })}
       title={title}
       aria-label={`Fix the definition for ${tag.label} — ${pct}% of its decisions are ambiguous`}
       className="shrink-0 text-[0.68rem] font-medium text-[var(--color-brick)] underline decoration-dotted underline-offset-2 hover:text-[var(--color-copper-2)]"

@@ -94,7 +94,7 @@ export default function Login() {
           onClick={() => setMode(mode === 'signin' ? 'signup' : 'signin')}>
           {mode === 'signin' ? 'Create an account' : 'Have an account? Sign in'}
         </button>
-        <Link className={link} to="/forgot-password">Forgot password?</Link>
+        <Link className={link} to={ROUTES.forgotPassword.build()}>Forgot password?</Link>
       </div>
     </AuthShell>
   );

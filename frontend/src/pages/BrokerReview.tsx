@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   dismissBrokerCandidate,
@@ -74,7 +75,7 @@ export default function BrokerReview() {
 
   return (
     <div className="px-6 py-8 max-w-4xl mx-auto text-[var(--color-ink)]">
-      <Link to="/brokers" className="text-xs text-[var(--color-ink-3)] hover:text-[var(--color-copper)]">
+      <Link to={ROUTES.brokers.build()} className="text-xs text-[var(--color-ink-3)] hover:text-[var(--color-copper)]">
         ← Makléři
       </Link>
       <header className="mt-2">
@@ -268,7 +269,7 @@ function BrokerRow({ b, checked, onToggle }: {
       <input type="checkbox" checked={checked} onChange={onToggle}
         className="accent-[var(--color-copper)]" aria-label="zahrnout do sloučení" />
       <div className="min-w-0 flex-1">
-        <Link to={`/brokers/${b.broker_id}`}
+        <Link to={ROUTES.brokerDetail.build({ id: b.broker_id })}
           className="text-sm text-[var(--color-ink)] hover:text-[var(--color-copper)]">
           {b.display_name ?? `#${b.broker_id}`}
         </Link>
@@ -313,7 +314,7 @@ function RecentMerges() {
               <li key={m.merge_group_id}
                 className="flex items-center justify-between gap-3 text-sm border border-[var(--color-rule-soft)] rounded-[var(--radius-sm)] px-3 py-1.5">
                 <span className="min-w-0 truncate">
-                  <Link to={`/brokers/${m.survivor_broker_id}`} className="hover:text-[var(--color-copper)]">
+                  <Link to={ROUTES.brokerDetail.build({ id: m.survivor_broker_id })} className="hover:text-[var(--color-copper)]">
                     {m.survivor_name ?? `#${m.survivor_broker_id}`}
                   </Link>
                   <span className="text-[var(--color-ink-4)]">

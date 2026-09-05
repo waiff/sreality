@@ -49,14 +49,62 @@ export default [
           message:
             'Use lazyChunk (lib/lazyChunk.ts) instead of React.lazy so a stale chunk after a deploy self-heals instead of painting an error page.',
         },
+        {
+          // Route paths come from lib/routes.ts. A hand-typed one drifts
+          // silently: rename the route and the literal falls through to
+          // routes.tsx's `path: '*'`, rendering NotFound with an HTTP 200 — the
+          // host serves the SPA at every depth, so there is no server 404, no
+          // type error and no failing test. Scoped to POSITION (a `to`/`href`
+          // JSX attribute, or navigate()'s first argument), never to content:
+          // lib/api.ts and lib/brokers.ts hold ~120 byte-identical API endpoint
+          // strings (`/brokers/${id}` is both an SPA route and an API path) and
+          // a content-matching selector would fire on every one of them.
+          //
+          // This rail is ergonomics, not the gate. It cannot see a route string
+          // passed through a prop — the bug that started this program was
+          // `onClick={() => onOpen(id)}` with the path two levels away. Only a
+          // test asserting the rendered role proves anchor-ness.
+          selector:
+            "JSXAttribute[name.name=/^(to|href)$/] > Literal[value=/^\\/(?!\\/)/]",
+          message:
+            'Build route paths from ROUTES (lib/routes.ts) instead of typing them: ROUTES.brokerDetail.build({ id }). A hand-typed path drifts into the 404 catch-all silently.',
+        },
+        {
+          selector:
+            "JSXAttribute[name.name=/^(to|href)$/] > JSXExpressionContainer > TemplateLiteral > TemplateElement[value.raw=/^\\/(?!\\/)/]",
+          message:
+            'Build route paths from ROUTES (lib/routes.ts) instead of interpolating them: ROUTES.brokerDetail.build({ id }). A hand-typed path drifts into the 404 catch-all silently.',
+        },
+        {
+          selector: "CallExpression[callee.name='navigate'] > Literal:first-child[value=/^\\/(?!\\/)/]",
+          message:
+            'Build route paths from ROUTES (lib/routes.ts) instead of typing them into navigate().',
+        },
+        {
+          selector:
+            "CallExpression[callee.name='navigate'] > TemplateLiteral:first-child > TemplateElement[value.raw=/^\\/(?!\\/)/]",
+          message:
+            'Build route paths from ROUTES (lib/routes.ts) instead of interpolating them into navigate().',
+        },
       ],
     },
   },
   {
-    // The two files that IMPLEMENT the bans above are the only ones allowed to
-    // use the banned syntax. Listing them together is safe: neither file
-    // contains the other's construct.
-    files: ['src/lib/fetchAllRows.ts', 'src/lib/lazyChunk.ts'],
+    // The files that IMPLEMENT the bans above are the only ones allowed to use
+    // the banned syntax. Safe to list together: no file contains another's
+    // construct. routes.ts owns every route pattern; listingUrl/runLinks/
+    // browseState are the domain resolvers that build on it and are allowed to
+    // compose paths; routes.tsx is the router's own table, which reads
+    // ROUTES.*.childPath but still declares the structural '/' and '*'.
+    files: [
+      'src/lib/fetchAllRows.ts',
+      'src/lib/lazyChunk.ts',
+      'src/lib/routes.ts',
+      'src/lib/listingUrl.ts',
+      'src/lib/runLinks.ts',
+      'src/lib/browseState.ts',
+      'src/routes.tsx',
+    ],
     rules: { 'no-restricted-syntax': 'off' },
   },
 ];

@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import {
   useMutation,
   useQuery,
@@ -88,13 +89,13 @@ function Header() {
       </div>
       <div className="flex items-center gap-3">
         <Link
-          to="/watchdog"
+          to={ROUTES.watchdog.build()}
           className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)] hover:border-[var(--color-rule-strong)] transition-colors"
         >
           ← Back to feed
         </Link>
         <Link
-          to="/browse"
+          to={ROUTES.browse.build()}
           className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
           title="Watchdogs are created by saving a filter on the Browse page."
         >
@@ -158,7 +159,7 @@ function SubRow({
     <tr className="border-b border-[var(--color-rule-soft)] last:border-b-0 hover:bg-[var(--color-paper)] transition-colors">
       <td className="px-4 py-2.5 align-middle">
         <Link
-          to={`/watchdog/${encodeURIComponent(sub.id)}/edit`}
+          to={ROUTES.watchdogEdit.build({ id: sub.id })}
           className="text-[var(--color-ink)] hover:text-[var(--color-copper)] hover:underline underline-offset-2"
         >
           {sub.name}
@@ -203,7 +204,7 @@ function SubRow({
       </td>
       <td className="px-4 py-2.5 align-middle text-right">
         <Link
-          to={`/watchdog/${encodeURIComponent(sub.id)}/edit`}
+          to={ROUTES.watchdogEdit.build({ id: sub.id })}
           className="mr-3 text-[0.75rem] text-[var(--color-copper)] hover:underline underline-offset-2"
         >
           edit
@@ -252,7 +253,7 @@ function EmptyState() {
         notifications whenever a new listing matches.
       </p>
       <Link
-        to="/browse"
+        to={ROUTES.browse.build()}
         className="mt-4 inline-block text-sm text-[var(--color-copper)] hover:underline underline-offset-2"
       >
         Go to Browse →

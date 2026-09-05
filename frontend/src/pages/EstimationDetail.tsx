@@ -8,6 +8,7 @@
  * subject_attributes, and the run body is the same shared RunBody the
  * listing page embeds. */
 import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { estimationKeys, fetchEstimation, submitEstimation } from '@/lib/queries';
 import { fmtAbsolute, fmtRelative } from '@/lib/format';
@@ -182,7 +183,7 @@ function Hairline() {
 function Crumb() {
   return (
     <Link
-      to="/estimations"
+      to={ROUTES.estimations.build()}
       className="inline-flex items-center gap-1.5 text-[0.75rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
     >
       <BackArrow />
@@ -234,7 +235,7 @@ function NotFoundState({ reason, id }: { reason: 'invalid' | 'missing'; id: stri
           {headline}
         </h1>
         <Link
-          to="/estimations"
+          to={ROUTES.estimations.build()}
           className="mt-4 inline-block text-sm text-[var(--color-copper)] hover:underline underline-offset-2"
         >
           Browse all estimations →

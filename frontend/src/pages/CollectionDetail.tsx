@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import {
   useMutation,
   useQuery,
@@ -101,7 +102,7 @@ function Page({ children }: { children: React.ReactNode }) {
 function Crumb() {
   return (
     <Link
-      to="/collections"
+      to={ROUTES.collections.build()}
       className="inline-flex items-center gap-1.5 text-[0.75rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
     >
       <BackArrow />
@@ -183,7 +184,7 @@ function EditBlock({ collection }: { collection: Collection }) {
     mutationFn: () => deleteCollection(collection.id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: curationKeys.collections });
-      navigate('/collections', { replace: true });
+      navigate(ROUTES.collections.build(), { replace: true });
     },
     onError: (err: Error) => setError(err.message || 'Failed to delete'),
   });
@@ -549,7 +550,7 @@ function NotFoundState({
         <p className="mt-3 text-sm text-[var(--color-ink-3)]">
           The id may be wrong, or the collection was deleted.
           <Link
-            to="/collections"
+            to={ROUTES.collections.build()}
             className="ml-1 text-[var(--color-copper)] hover:underline"
           >
             All collections

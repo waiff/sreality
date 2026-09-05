@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   generateOutreachDrafts,
@@ -71,7 +72,7 @@ export default function OutreachDetail() {
 
   return (
     <div className="px-6 py-8 max-w-4xl mx-auto text-[var(--color-ink)]">
-      <Link to="/outreach" className="text-xs text-[var(--color-ink-3)] hover:text-[var(--color-copper)]">
+      <Link to={ROUTES.outreach.build()} className="text-xs text-[var(--color-ink-3)] hover:text-[var(--color-copper)]">
         ← Oslovení
       </Link>
 
@@ -173,7 +174,7 @@ function MessageCard({ m, onChanged }: { m: OutreachMessage; onChanged: () => vo
       {/* margin note: who + footprint */}
       <div className="flex items-center justify-between gap-3 border-b border-[var(--color-rule-soft)] px-4 py-2.5">
         <div className="min-w-0">
-          <Link to={`/brokers/${m.broker_id}`}
+          <Link to={ROUTES.brokerDetail.build({ id: m.broker_id })}
             className="text-sm text-[var(--color-ink)] hover:text-[var(--color-copper)]">
             {m.broker_name ?? 'Neznámý makléř'}
           </Link>
@@ -264,7 +265,7 @@ function SuppressionPanel() {
             {rows.map((s) => (
               <li key={s.broker_id}
                 className="flex items-center justify-between gap-3 text-sm border border-[var(--color-rule-soft)] rounded-[var(--radius-sm)] px-3 py-1.5">
-                <Link to={`/brokers/${s.broker_id}`} className="truncate hover:text-[var(--color-copper)]">
+                <Link to={ROUTES.brokerDetail.build({ id: s.broker_id })} className="truncate hover:text-[var(--color-copper)]">
                   {s.broker_name ?? `#${s.broker_id}`}
                   {s.reason ? <span className="text-[var(--color-ink-4)]"> · {s.reason}</span> : null}
                 </Link>

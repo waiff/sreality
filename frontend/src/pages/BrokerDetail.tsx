@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import { useQuery } from '@tanstack/react-query';
 import {
   fetchBrokerDossier,
@@ -65,7 +66,7 @@ export default function BrokerDetail() {
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto text-[var(--color-ink)]">
       <Link
-        to="/brokers"
+        to={ROUTES.brokers.build()}
         className="text-xs tracking-[0.12em] uppercase text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
       >
         ← Žebříček makléřů

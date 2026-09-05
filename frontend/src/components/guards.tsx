@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import { useAuth } from '@/lib/auth';
 import { isSupabaseConfigured } from '@/lib/supabase';
 
@@ -21,7 +22,7 @@ export function RequireAuth({ children }: { children: ReactNode }) {
   }
   if (loading) return null;
   if (!session) {
-    return <Navigate to="/login" replace state={{ from: location }} />;
+    return <Navigate to={ROUTES.login.build()} replace state={{ from: location }} />;
   }
   return <>{children}</>;
 }
@@ -30,6 +31,6 @@ export function RequireAdmin({ children }: { children: ReactNode }) {
   const { loading, isAdmin } = useAuth();
   if (!isSupabaseConfigured()) return <>{children}</>;
   if (loading) return null;
-  if (!isAdmin) return <Navigate to="/browse" replace />;
+  if (!isAdmin) return <Navigate to={ROUTES.browse.build()} replace />;
   return <>{children}</>;
 }
