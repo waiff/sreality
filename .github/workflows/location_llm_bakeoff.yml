@@ -1,0 +1,124 @@
+name: "Jobs: Location LLM model bake-off (W2-10)"
+
+# READ-ONLY. Sends the SAME scoped bazos free text to three candidate models
+# (gpt-5-nano, gpt-5.6-luna, qwen3.7-flash) over one deterministic md5-seeded sample and
+# reports which one extracts locations best: per-field yield, gazetteer-resolution rate,
+# evidence-quote validity, latency, cost, and the pairwise agreement matrix. It writes NO
+# claims, NO absences and NO batch rows — only the `llm_calls` audit rows for the calls it
+# makes, stamped `called_for='location_llm_bakeoff'` so its spend and its failures are
+# scored separately from the production lane's.
+#
+# DISPATCH-ONLY, no cron: this exists to be run a handful of times while the operator
+# chooses a model, and `llm_burn_rate`'s starvation arm is evaluated per called_for.
+# It takes NO lease (it writes nothing there is anything to serialise), so the workflow
+# concurrency group is its only rail against a double bill; it is deliberately its OWN
+# group rather than the lane's, so a bake-off and a mining run never block each other.
+#
+# NOT in the `location-batch` group: the group serialises corpus-wide sweeps against the
+# shared instance, and a 150-row read-only sample is not one.
+#
+# THE COST CAP IS PRE-FLIGHT (--max-usd, default $5): the script refuses to start when the
+# estimate exceeds it, because `api.llm_client`'s daily-cost check only LOGS and on a long
+# run it notices after the money is gone. Re-measure the per-call estimates from
+# `llm_calls` after the first real pass — a pre-flight sized from a guess is a cap in name
+# only.
+#
+# Required secrets: SUPABASE_DB_URL, OPENAI_API_KEY, QWEN_API_KEY, R2_ACCOUNT_ID,
+# R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample:
+        description: "listings in the seeded sample"
+        required: false
+        default: "150"
+        type: string
+      seed:
+        description: "md5 shuffle seed; the same seed scores the same listings"
+        required: false
+        default: "w2-10"
+        type: string
+      models:
+        description: "comma-separated model ids"
+        required: false
+        default: "gpt-5-nano,gpt-5.6-luna,qwen3.7-flash"
+        type: string
+      max_usd:
+        description: "PRE-FLIGHT cap; the run refuses to start above it"
+        required: false
+        default: "5.00"
+        type: string
+      max_seconds:
+        description: "wall-clock budget; stops between listings"
+        required: false
+        default: "3000"
+        type: string
+      dry_run:
+        description: "sample, load and scope; call NOTHING"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: location-llm-bakeoff
+  cancel-in-progress: false
+
+jobs:
+  bakeoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[dev,api]"
+
+      - name: Run the bake-off
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          SAMPLE: ${{ inputs.sample }}
+          SEED: ${{ inputs.seed }}
+          MODELS: ${{ inputs.models }}
+          MAX_USD: ${{ inputs.max_usd }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS="--summary-md bakeoff-summary.md"
+          if [ -n "$SAMPLE" ]; then ARGS="$ARGS --sample $SAMPLE"; fi
+          if [ -n "$SEED" ]; then ARGS="$ARGS --seed $SEED"; fi
+          if [ -n "$MODELS" ]; then ARGS="$ARGS --models $MODELS"; fi
+          if [ -n "$MAX_USD" ]; then ARGS="$ARGS --max-usd $MAX_USD"; fi
+          if [ -n "$MAX_SECONDS" ]; then ARGS="$ARGS --max-seconds $MAX_SECONDS"; fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          echo "python -m scripts.location_llm_bakeoff $ARGS"
+          python -m scripts.location_llm_bakeoff $ARGS
+
+      - name: Publish the summary
+        if: always()
+        run: |
+          if [ -f bakeoff-summary.md ]; then cat bakeoff-summary.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: location-llm-bakeoff
+          path: |
+            bakeoff-*.json
+            bakeoff-summary.md
+          if-no-files-found: warn
+          retention-days: 30

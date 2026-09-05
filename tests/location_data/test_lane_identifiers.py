@@ -65,6 +65,11 @@ _NAMESPACE_OF: dict[str, str] = {
     "REMINE_VERSION": "extractor_version",
     "PRUNER_VERSION": "extractor_version",
     "BACKFILL_VERSION": "extractor_version",
+    # W2-10's free-text lane. A fifth spelling of the SAME column
+    # (`location_claim_batches.extractor_version`), registered here rather than renamed,
+    # because `test_a_lane_also_declares_the_version_it_stamps_on_its_batches` is what
+    # forces a new lane to land in this map at all.
+    "LLM_VERSION": "extractor_version",
 }
 
 # `concurrency_group` is scanned (the lease-halves test reads it) but exempt from
@@ -77,16 +82,18 @@ _VERSION_NAMES = frozenset(
 # A soft floor, not a pin: adding a lane must not break this file, but a parser that stops
 # finding anything must. Every value here is load-bearing in production today.
 _KNOWN_LANES = frozenset({
-    "location_claims_intake", "location_claims_remine_archive",
+    "location_claims_intake", "location_claims_remine_archive", "location_claims_llm",
     "location_payload_prune", "location_payload_backfill",
 })
 _KNOWN_JOB_NAMES = frozenset({
-    "location_claims_remine_archive", "location_resolve_incremental",
+    "location_claims_remine_archive", "location_claims_llm",
+    "location_resolve_incremental",
     "pin_collision_recompute", "location_payload_refetch_probe",
     "payload_archive_prune", "location_payload_backfill",
 })
 _KNOWN_VERSIONS = frozenset({
-    "claims_intake@3", "claims_remine_archive@1", "payload_prune@1", "payload_backfill@1",
+    "claims_intake@3", "claims_remine_archive@1", "claims_llm@1",
+    "payload_prune@1", "payload_backfill@1",
 })
 
 

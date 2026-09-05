@@ -46,8 +46,20 @@ _TERMINAL_BATCH_STATUSES = frozenset(
 # (developers.openai.com/api/docs/pricing) still lists only gpt-5.4-mini, not
 # gpt-5-mini, though gpt-5-mini remains a live, callable model id. The definitive
 # post-hoc check is the OpenAI billing dashboard vs recorded llm_calls.cost_usd.
+# gpt-5-nano / gpt-5.6-luna: the two OpenAI candidates of the W2-10 location bake-off
+# (location_data.claims_llm + scripts/location_llm_bakeoff.py). A model id ABSENT from
+# this dict records `cost_usd = 0.0` with only a log warning (api/providers/base.py's
+# compute_cost_usd), which silently blinds llm_burn_rate's 24h total, llm_cost_today_usd
+# AND the lane's own `--max-usd` cap — so the rows ship with the lane, not after it.
+# Cached input is 10% of input, the standard OpenAI 90%-off cached rate and the ratio the
+# gpt-5-mini row above already uses (0.25 -> 0.025). Prices taken 2026-09-05 from
+# developers.openai.com/api/docs/pricing; as with gpt-5-mini, the definitive post-hoc
+# check is the OpenAI billing dashboard reconciled against recorded llm_calls.cost_usd —
+# do that after the first bake-off pass and correct these numbers if they disagree.
 PRICES: dict[str, ModelPrice] = {
     "gpt-5-mini": ModelPrice(0.25, 2.00, 0.025, 0.0),
+    "gpt-5-nano": ModelPrice(0.05, 0.40, 0.005, 0.0),
+    "gpt-5.6-luna": ModelPrice(0.20, 1.20, 0.02, 0.0),
 }
 
 

@@ -19,6 +19,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 **infrastructure shipped, lane deliberately inert** (2026-08-17) — W2-0/W2-1 (#1048/#1045), W2-3 the exclusion-zone scoper (#1053), W2-4 the contract shadow mechanism (#1050, mig 404), W2-5 the permanent fixture-diff gate (#1058) and W2-2 the evidence-bearing claims + archived-HTML re-mine lane (#1079) are all merged. The lane still mines **nothing**, but the reason moved: `ARCHIVE_READERS` now holds four generic DOM readers (#1081 `html_text`/`html_attr`/`html_point_dms`, #1090 `html_point_attrs`) and **no contract entry names one**, so a run finds no executable entry and returns *before* it opens a batch row — a batch stamped `'ok'` would move the incremental watermark over a corpus it never opened. **W2-6…W2-12 is READER work, not YAML work** (see the verification table below): six portals need a JSON-pointer reader, a regex reader with capture-group spans, and splitting transforms before their contracts become one-line activations, and no contract may activate before W2-13 anyway (#1082). **W2-13 SHIPPED** — the archived-HTML sweep now has a dispatch-only workflow (`location_claims_remine_archive.yml`, in `location-batch`) and the W2 gate is readable per portal (`scripts/location_w2_gate_report.py` + its own read-only workflow); the lane also gained its own batch bounds (50-5000, default 500) and a zero-claim tripwire. **W2-6…W2-12 SHIPPED 2026-09-05 — all seven portal contracts activated and SHADOWED in one wave** (bazos@2, ceskereality@5, idnes@2, maxima@2, mmreality@2, realitymix@4, remax@3): 43 entries moved inert→executable (fleet split 69/70 → 112/47), every one on an archive-only reader, and **migration 470 closes the policy gap that would have blocked the lot** — four of the ten extraction methods had no `location_field_policy` v1 row, so their claims would have been skipped at S7 forever. **The lane is no longer inert and no longer dark-free**: it can mine, and nothing it mines reaches `location_claims_live` until the operator un-shadows each portal off the W2-13 gate report. `shadow` is header-grain, so each of the seven also parks its own already-live W1 entries meanwhile — a freeze, not a blackout, and the reason the un-shadow decision is per portal and not a wave flip. See the W2-6…W2-12 section |
 | W3 history backfill | claims from `listing_snapshots.raw_json` | ✅ **shipped 2026-08-19 — scan complete (`reached_end=true`) and all four gate arms PASS** (verify run 32223331085). **1,634,096 snapshots mined over five windows → 92,312 historical location claims + ~10.85 M observations**, terminal batch 289 / cursor 1,634,096. Note the terminal denominator against the 1,574,313 the wave opened with: `listing_snapshots` grew ~60 k rows while the scan walked it, so **`reached_end` is the only completion signal** — the same lesson W2a's backfill recorded (#1088). Unblocking it needed BOTH `location-batch` crons paused (#1100 intake, #1101 resolve), because resolve oversubscribes the group by itself — measured over eleven ticks, a run occupies it 11–27 min on a 15-min cadence, so ~1 tick in 3 completed and the rest superseded each other; both restored (#1105) the moment the scan finished. Gate arm 4 (the corpus arm) needed a lane that did not exist: `claims_remine_verify` + its own read-only workflow (#1102), then two corrections — scoping by anchor/observation rather than `extractor_version` (#1104), and **partitioning the series by contract entry (#1106), without which the gate PASSED on an artifact** (165,706 of 165,708 listings "oscillating"; the real figure is 324). See the W3 section for the measured oscillation and what it says about the program's churn premise |
 | W4 targeted refetch cohorts | sreality legacy-shape + truncated refetch, bezrealitky remainder | 🟡 **build started (2026-08-18)** — the consumer for the cohort W1 has been filling since 2026-08-12 (#1083) + its dispatch lane. **Nothing dispatched**; substrate-disjoint from W2/W3 and outside `location-batch`. See the W4 section |
+| W2-10 bazos free-text LLM lane | one structured LLM call per archived bazos body → evidence-quoted `llm_text` claims | 🟡 **lane + 3-model bake-off shipped, lane INERT** (2026-09-05) — `location_data/claims_llm.py` (LANE `location_claims_llm`, `claims_llm@1`, group `location-llm`), a THIRD reader registry (`LLM_READERS` / `claims_intake.LLM_ONLY_READERS` / `contracts.READER_CONTRACTS['llm_location_text']`, with the three shipped equalities re-scoped in the same commit), migration 470 (`called_for` += `extract_location_claims`, `location_llm_bakeoff`), `QwenProvider` registered + `PRICES` rows for gpt-5-nano / gpt-5.6-luna / qwen3.7-flash, and `scripts/location_llm_bakeoff.py` + two dispatch-only workflows. **No contract entry names the reader yet**, so `run()` returns `outcome='inert'` before opening a batch row and before calling any model. **Deferred to a follow-up, deliberately: the bazos@3 contract bump (13 entries) and the `location_field_policy` rungs** — without both, a single-source bazos LLM claim is stored but can never win a field |
 | W5–W6 | LLM lane, serving flip | ⚪ not started |
 
 ## W0 — done
@@ -1777,3 +1778,81 @@ versions nothing.
   before it exists).
 - W0 discipline held: no new precision columns on `listings`; precision signals ride
   in raw_json / archived pages until the claims spine exists.
+
+## W2-10 — the bazos free-text LLM lane (2026-09-05, shipped inert)
+
+bazos' `raw_json` carries no description at all, so every street, část obce and house number
+an ad states in prose is invisible to W1; the regex path is junk-prone (regression 220870847
+mined `street='Nový'` out of "Nový 2 pokojový byt" and geocoded ~130 km off); and the pin
+cannot stand in for the text (the pin-derived obec is measurably wrong). 29,546 active bazos
+rows share only 90 distinct `locality` values. `location_data/claims_llm.py` is the follower
+lane that answers that: it reads archived DETAIL bodies out of the content-addressed payload
+store, scopes them through the DEPLOYED exclusion-zone register, and makes ONE forced-tool
+call per listing.
+
+**Ranking is an EXTRACTOR decision, not a resolution one.** The call asks for
+`from_description` and `from_title` separately; the lane emits exactly ONE claim per field,
+description-first, and consults the title only where the description is silent. That is the
+operator's "free text beats headline" rule expressed where it is expressible:
+`survivorship.matches` sees only `(source, extraction_method)` and `tie_breaker` is loaded
+and never read, so two `llm_text` claims from one portal cannot be ranked as data at all.
+The alternative considered and rejected was ranking the two blocks by `claim_confidence` —
+that would have made `claim_confidence` mean "which node did this come from" rather than
+"how sure is the extractor", and it hands a same-rank tie to `claim.id`.
+
+**What the lane refuses, and records instead of dropping:**
+- an unlocatable evidence quote — the hallucination guard, a skip PLUS an absence, never a
+  raise (`assert_evidence_complete` would otherwise take a batch of paid work down on one
+  bad response);
+- a quote that exists only inside a stripped exclusion zone — recorded as
+  `only_in_excluded_block`, which is how "the model invented it" stays distinguishable from
+  "the model read the neighbour carousel";
+- a name RÚIAN does not carry; a street the candidate obec does not carry (the
+  phantom-street guard, a REGISTRY membership test rather than the morphology heuristic
+  `bzs.det.street_text` declared and never implemented); a house number with no address
+  point, and a house number with no candidate obec at all — doctrine #5's "no address point
+  exists here" is an honest answer, never a nearest-neighbour snap. The street gate PASSES
+  when the obec is unknown, mirroring S7 exactly, so the lane never drops a claim the
+  resolver would have accepted.
+
+**The one real divergence from the archived-HTML lane: the model is never called inside a
+transaction.** That lane holds one `guarded()` block across its scan, its R2 GETs, its
+extraction and its write; here a single call takes seconds, and holding a transaction across
+a batch of them is idle-in-transaction on the transaction-mode pooler for the whole batch.
+Each iteration is scan / body-load / (no transaction: scope, prompt, call, extract) / write.
+An AST test asserts it structurally rather than by review.
+
+**The three-model bake-off** (`scripts/location_llm_bakeoff.py`, dispatch-only, read-only,
+`$5` PRE-FLIGHT cap) sends the IDENTICAL scoped text to `gpt-5-nano`, `gpt-5.6-luna` and
+`qwen3.7-flash` over a deterministic md5-seeded sample and scores per-field yield,
+gazetteer-resolution rate, evidence-quote validity (the exact production check — a bake-off
+scored by a looser validator picks the model best at fooling it), latency, cost and the
+pairwise agreement matrix. It writes no claims. Adjudication happens outside the repo.
+
+**Recorded, unstarted, and each one blocks something:**
+1. **the bazos@3 contract bump** (13 entries in two families, `bzs.desc.*` / `bzs.title.*`).
+   Until it lands the lane is inert by construction. It costs a full bazos claim re-insert
+   (`location_claim_fingerprint` hashes `extractor_version` AND `contract_entry_id`, and both
+   move) — the second such re-insert this portal will have paid, so fold the pin fix into
+   the same bump if the operator wants it.
+2. **the `location_field_policy` rungs.** Seven of the ten extraction methods have no v1 row
+   at all, and the generic `('llm_text','llm_text',900)` row sets
+   `requires_independent_agreement=true` — which counts DISTINCT SOURCES, so a bazos-only
+   LLM claim can never fill even a NULL. Without a per-portal row at `requires_independent_
+   agreement=false` the lane writes claims that are live, auditable and permanently unusable.
+   That relaxation is a real weakening of D7's graded write-back guard and belongs in a PR
+   body, not buried in a migration.
+3. **re-measure `ESTIMATED_USD_PER_CALL` from `llm_calls` after the first real pass.** The
+   pre-flight cap is sized from planning figures today, and a cap sized from a guess is a cap
+   in name only.
+4. **the spend anti-join is asymmetric.** A payload the model extracted NOTHING from leaves
+   no claim row and is re-called on a later `--mode full` pass. Bounded by the incremental
+   watermark; the durable fix is a `location_llm_attempts` table keyed
+   `(payload_sha256, model, prompt_version)`.
+5. **all three prices are unverified against a live call.** Nothing in this repo has ever
+   dispatched to DashScope. A missing or wrong `PRICES` row records `cost_usd=0.0` with only
+   a log line, and every downstream spend signal then under-reports; the bake-off flags any
+   model whose total cost is exactly zero.
+6. **the fixture-diff golden will NOT cover this lane** — `score_archived` filters on
+   `ARCHIVE_READERS` and this reader is in `LLM_READERS`. `tests/location_data/test_claims_llm.py`
+   is the only coverage; do not read a green golden as coverage of the free-text lane.

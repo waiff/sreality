@@ -16,6 +16,7 @@ import pytest
 
 from location_data import claims_intake, claims_remine_archive, contracts
 from location_data.claims_intake import GUARDS, LEGACY_COLUMNS, READERS, SOURCES, TRANSFORMS
+from location_data.claims_llm import LLM_READERS
 from location_data.claims_remine_archive import ARCHIVE_READERS
 from location_data.contracts import (
     CLAIM_TYPES,
@@ -136,9 +137,12 @@ def test_every_reader_named_in_a_contract_exists_in_the_registry():
     for contract in ALL.values():
         for entry in contract.entries:
             if entry.reader:
-                # Either registry: W1 payload readers or the archived lane's DOM readers.
-                # `_check_executable` already refuses a name in neither.
-                assert entry.reader in set(READERS) | set(ARCHIVE_READERS), entry.entry_id
+                # Any of the THREE registries: W1's payload readers, the archived lane's
+                # DOM readers, or W2-10's free-text ones. `_check_executable` already
+                # refuses a name in none of them.
+                assert entry.reader in (
+                    set(READERS) | set(ARCHIVE_READERS) | set(LLM_READERS)
+                ), entry.entry_id
 
 
 def test_every_executable_entry_matches_its_readers_contract():
@@ -175,10 +179,16 @@ def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
     # skipped by the hourly W1 intake and starts being REFUSED by it — taking that portal's
     # intake down the moment a contract naming it loads. Pinned, not left to review.
     assert claims_intake.ARCHIVE_ONLY_READERS == set(ARCHIVE_READERS)
-    # TWO runtime registries since W2-6, deliberately separate objects (a name in one must
-    # not silently resolve in the other) with ONE deploy-time record covering both.
-    assert set(READER_CONTRACTS) == set(READERS) | set(ARCHIVE_READERS)
+    # The same mirror, for the same reason, over W2-10's free-text registry.
+    assert claims_intake.LLM_ONLY_READERS == set(LLM_READERS)
+    # THREE runtime registries since W2-10, deliberately separate objects (a name in one
+    # must not silently resolve in another — the three take three different substrates)
+    # with ONE deploy-time record covering all of them.
+    assert set(READER_CONTRACTS) == (
+        set(READERS) | set(ARCHIVE_READERS) | set(LLM_READERS))
     assert not set(READERS) & set(ARCHIVE_READERS)
+    assert not set(READERS) & set(LLM_READERS)
+    assert not set(ARCHIVE_READERS) & set(LLM_READERS)
     assert READER_SUBSTRATES == {n: s.substrates for n, s in READER_CONTRACTS.items()}
     surfaces = {s for legal in READER_SUBSTRATES.values() for s in legal}
     assert surfaces <= contracts.CLAIM_SURFACES
@@ -190,6 +200,10 @@ def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
     assert surfaces == {
         "api_json", "graphql", "embedded_json", "legacy_column",
         "html_selector", "archived_html", "map_config", "url_slug", "jsonld",
+        # W2-10: `description` is the prose block the free-text lane reads. It has been an
+        # enum member since migration 380 and was minted for exactly this producer; the
+        # headline block reuses `html_selector`.
+        "description",
     }
     methods = {m for spec in READER_CONTRACTS.values() for m in spec.methods}
     assert methods <= EXTRACTION_METHODS
@@ -202,6 +216,11 @@ def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
         "portal_structured_field", "portal_declared_quality", "legacy_column",
         "html_selector_parse", "map_widget_parse", "url_slug_parse", "regex_text",
         "breadcrumb_parse",
+        # W2-10. `llm_text` is the second evidence-bearing method AND the only
+        # attribution-bearing one: `loc_claim_llm_model` additionally demands `model` and
+        # `prompt_version`. Like `regex_text` it is admissible only because W2a filled the
+        # content-addressed body store the span indexes into.
+        "llm_text",
     }
 
 
@@ -322,21 +341,21 @@ def test_the_executable_and_inert_split_is_exactly_what_w1_ran():
 
 
 def test_w1_executes_no_evidence_bearing_method():
-    """`regex_text` / `llm_text` need a span into a retrievable document. W2a filled the
-    content-addressed body store (01 §4.2), so an evidence-bearing entry may now name a
-    reader — but ONLY one of `claims_remine_archive`'s, which W1 skips
-    (`ARCHIVE_ONLY_READERS`) because `listings.raw_json` is not content-addressed and a span
-    into it cannot be re-checked. `llm_text` still names none: no LLM reader is registered in
-    any registry, and `assert_evidence_complete` refuses a model-less llm claim anyway.
+    """`regex_text` / `llm_text` need a span into a retrievable document, which W1's
+    substrate (`listings.raw_json`) is not (01 §4.2).
 
-    Narrowed, never deleted: without it a future `regex_text` entry could land on the W1
-    lane, where the span it asserts is unverifiable by construction."""
+    Re-scoped by W2-10, and the invariant it protects is unchanged: W1 NEVER EXECUTES an
+    evidence-bearing method. "No such entry has a reader" was only ever a proxy for that,
+    and it stopped being a true one the moment a reader belonged to a lane that is not W1
+    — the archived-HTML re-mine lane, and now the free-text one. Both registries are
+    SKIPPED by `claims_intake.extract_listing`, never run by it, so an entry naming one is
+    still invisible to the hourly intake."""
     for contract in ALL.values():
         for entry in contract.entries:
-            if entry.extraction_method == "llm_text":
-                assert entry.reader is None, entry.entry_id
-            elif entry.extraction_method == "regex_text" and entry.reader is not None:
-                assert entry.reader in claims_intake.ARCHIVE_ONLY_READERS, entry.entry_id
+            if entry.extraction_method in ("regex_text", "llm_text"):
+                assert (entry.reader is None
+                        or entry.reader in claims_intake.ARCHIVE_ONLY_READERS
+                        or entry.reader in claims_intake.LLM_ONLY_READERS), entry.entry_id
 
 
 def test_the_w2_surfaces_are_still_declared():
