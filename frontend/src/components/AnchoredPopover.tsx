@@ -111,6 +111,28 @@ export default function AnchoredPopover({
       onClose();
     };
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Tab') {
+        /* APG disclosure: Tab past the panel's last control (or Shift+Tab past
+         * its first) CLOSES it and continues from the trigger — the panel is
+         * transient, not a place to trap focus in. Without this, a one-control
+         * panel (a new account's collection list) tabbed straight out to
+         * wherever the portal's neighbour in <body> happened to be. Focus moves
+         * to the anchor here and the browser's default action then steps to
+         * the next element after it, which is exactly where Tab should land. */
+        const panel = panelRef.current;
+        const active = document.activeElement;
+        if (!panel || !(active instanceof Element) || !panel.contains(active)) return;
+        const items = Array.from(
+          panel.querySelectorAll<HTMLElement>(
+            'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),select,textarea,[tabindex]:not([tabindex="-1"])',
+          ),
+        );
+        const atEdge = e.shiftKey ? active === items[0] : active === items[items.length - 1];
+        if (!atEdge) return;
+        anchorRef.current?.focus({ preventScroll: true });
+        onClose();
+        return;
+      }
       if (e.key !== 'Escape') return;
       e.stopPropagation();
       // Escape is a deliberate dismissal, so focus goes back where it came

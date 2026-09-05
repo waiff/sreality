@@ -68,3 +68,37 @@ describe('<AnchoredPopover>', () => {
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'anchor' }));
   });
 });
+
+/* APG disclosure: Tab past the edge closes the panel and continues from the
+ * trigger. A one-control panel (a new account's empty collection list) used to
+ * tab straight out to the portal's neighbour at the end of <body>. */
+describe('<AnchoredPopover> Tab at the edges', () => {
+  const tab = (shift = false) =>
+    act(() => {
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Tab', shiftKey: shift, bubbles: true }),
+      );
+    });
+
+  it('Tab from the first of two controls stays inside', () => {
+    render(<Harness label="Menu" />);
+    tab();
+    expect(screen.getByRole('group', { name: 'Menu' })).toBeInTheDocument();
+  });
+
+  it('Tab from the LAST control closes the panel and hands focus to the anchor', () => {
+    render(<Harness label="Menu" />);
+    screen.getByRole('button', { name: 'second' }).focus();
+    tab();
+    expect(screen.queryByRole('group')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'anchor' }));
+  });
+
+  it('Shift+Tab from the FIRST control closes the panel and hands focus to the anchor', () => {
+    render(<Harness label="Menu" />);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'first' }));
+    tab(true);
+    expect(screen.queryByRole('group')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'anchor' }));
+  });
+});
