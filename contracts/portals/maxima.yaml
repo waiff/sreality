@@ -17,9 +17,43 @@
 #
 # W1 sees only the slim dict {id, title, coords, params, maxima_ref, price_text,
 # locality_text, image_urls}: coords.source is `page` on 29 of a 31-row window.
+#
+# VERSION 2 (2026-09-05) — the W2 archived-HTML surfaces are switched on. Two entry ids are
+# added (mx.det.locality_quarter, mx.det.locality_street) and five existing ids gain a
+# `locator.reader`; v1's rows are untouched and every id keeps the meaning 02 §2.1.8 fixed
+# for it. Four restatements are not cosmetic and are named here rather than buried in a
+# diff: (1) mx.det.map_features drops `guards: [reject_empty_geometry]` — the guard registry
+# is a `(lat, lon) -> bool` predicate and an empty `features` array has no point to hand it,
+# so "features: [] emits no coordinate" is enforced STRUCTURALLY by the entry's own
+# `then: /features/0` pointer missing, and declaring a guard the runtime cannot evaluate is
+# the silent no-op `_check_executable` exists to refuse; (2) the shared `script_match` regex
+# replaces a greedy `.*` with a JS-string-literal body `(?:[^'\\]|\\.)*`, because `.*` spans
+# from the first `JSON.parse('` to the LAST `')` on a line and maxima's map script is not
+# guaranteed to hold only one call; (3) the zoom rail becomes executable contract data
+# (`locator.reject_zoom_at_or_below: 12`) beside the declarative
+# `precision_cap.reject_when: [empty_features, zoom_le_12]` it restates — d40031686 serves
+# centre 49.989445/14.972620 at zoom 10.20 with `features: []`, ~9.2 km east of its stored
+# pin and in a DIFFERENT OKRES [live-C §3.4], and that page is the whole reason this portal
+# was re-mined; (4) mx.det.zoom addresses the config by `json_pointer: /zoom` rather than
+# `then:` — on the canonical readers `then` narrows the SUBJECT object and `json_pointer`
+# addresses the scalar inside it, and the two keys are not interchangeable.
+#
+# LIVE CONFIRMATION 2026-09-05, the fact v1 could not state: a Circle feature is spelled
+# `{"type":"Circle","center":[lon,lat],"radius":<degrees>}` — `center`, not `coordinates`
+# (d40026367 and f60012682, HTTP 200, fetched 2026-09-05). d40026367 additionally carries
+# TWO features (a Point then a Circle), so `/features/0` is a Point on that page; f60012522
+# serves NO map script at all and therefore emits no map claim of any kind.
+#
+# mx.det.view_centre stays declared and INERT: the view centre is 130 m and 660 m from the
+# circle centre on the two Circle rows and 9.2 km out on the empty-features row, so it is
+# never a subject coordinate and this wave mints no claim for it. mx.desc.homonym likewise
+# stays inert — the LLM lane is not in this wave. Shipped `shadow: true` (06 §6.4.0(2)) with
+# the rest of the W2 wave; cleared by `python -m location_data.contracts --unshadow maxima@2`
+# once the frozen-sample floors pass.
 
 portal: maxima
-contract_version: 1
+contract_version: 2
+shadow: true
 extractor_runtime: ">=1.0"
 identity_ladder: [portal_precise_coord, text_geocode]
 
@@ -135,14 +169,16 @@ extractions:
     notes: "A 3-level path ('Liberec, Liberec XIV-Ruprechtice, Baltská', 'Praha 6, Suchdol,
       U Hotelu') whose MIDDLE level is dropped today; street is LAST [db-raw §3.4]."
 
-  # ---- W2 map / HTML surfaces: declared, no reader ----
+  # ---- W2 map / HTML surfaces: executable at v2 (mx.det.view_centre stays inert) ----
 
   - id: mx.det.map_features
     locator_kind: map_config
     extraction_method: map_widget_parse
     page_kind: detail
-    locator: {script_match: "JSON.parse\\('(?P<config>.*)'\\)", decode: js_string,
-              then: "/features/0", geometry_reader: openlayers}
+    locator: {reader: json_geometry, css: "script",
+              script_match: "JSON\\.parse\\('(?P<config>(?:[^'\\\\]|\\\\.)*)'\\)",
+              decode: js_string, then: "/features/0", geometry_reader: openlayers,
+              position_branch: portal_pin, reject_zoom_at_or_below: 12}
     claim_type: coordinate
     licence_class: portal
     blur_evidence: none
@@ -153,38 +189,58 @@ extractions:
       uncertainty_radius_m: {rule: from_geometry_ladder}
       reject_when: [empty_features, zoom_le_12]
     prior: {position_source: portal_pin, match_confidence: low}
-    guards: [reject_outside_cz_bbox, reject_empty_geometry]
+    guards: [reject_outside_cz_bbox]
     required: when_present
     notes: >
       Parse the ENTIRE JSON.parse('…') OpenLayers config (quotes are backslash-escaped in
-      source), not the first "center" [live-C §3.3]. The Circle geometry sets
-      blur_evidence='declared' on the coordinate claim — the portal is drawing its own
-      imprecision, which is the one sanctioned case where blur rides on the coordinate
-      rather than on a separate declaration.
+      source), not the first "center" [live-C §3.3]. The feature TYPE is the declared
+      precision: Point -> the point; LineString -> the linear-referenced midpoint of the
+      segment; Circle -> the circle centre, with blur_evidence='declared' on the coordinate
+      — the portal is drawing its own imprecision, which is the one sanctioned case where
+      blur rides on the coordinate rather than on a separate declaration. An empty
+      `features` array makes this entry's own `then` pointer miss and therefore emits NO
+      coordinate at all (never a low-confidence one), which is why v1's
+      `reject_empty_geometry` guard is gone rather than implemented. `position_branch:
+      portal_pin` is the C6 branch `ARCHIVED_COORDINATE_RULES['maxima']` licenses as
+      'portal'; this portal has no geocoder fallback branch to license.
 
   - id: mx.det.map_shape
     locator_kind: map_config
     extraction_method: map_widget_parse
     page_kind: detail
-    locator: {script_match: "JSON.parse\\('(?P<config>.*)'\\)", then: "/features/0"}
+    locator: {reader: json_geometry, css: "script",
+              script_match: "JSON\\.parse\\('(?P<config>(?:[^'\\\\]|\\\\.)*)'\\)",
+              decode: js_string, then: "/features/0", geometry_reader: openlayers}
     claim_type: uncertainty_geometry
     licence_class: portal
     blur_evidence: none
+    guards: [reject_outside_cz_bbox]
     required: when_present
-    notes: "LineString -> half the segment length (108 m -> ±55 m; 700 m -> ±350 m);
-      Circle -> radius° × ~111 km (observed 1.36 km and 2.26 km)."
+    notes: "LineString -> the vertices as a LINESTRING plus half the polyline length
+      (108 m -> ±55 m; 700 m -> ±350 m); Circle -> the centre as a POINT plus radius° ×
+      111 000 (observed 0.01225° -> 1.36 km, 0.02032° -> 2.26 km, and live on 2026-09-05
+      0.0037507 -> 416 m on d40026367). A Point declares no uncertainty shape and emits
+      nothing here — migration 383's class default is the honest bound. NO zoom rail on
+      this arm, deliberately: the rail exists to stop a coarse view being stored as a
+      POSITION, and a shape is evidence, never a position. This is the claim 383's
+      derivation='declared_shape' / radius_semantics='declared' rows for maxima read."
 
   - id: mx.det.zoom
     locator_kind: map_config
     extraction_method: map_widget_parse
     page_kind: detail
-    locator: {script_match: "JSON.parse\\('(?P<config>.*)'\\)", then: /zoom}
+    locator: {reader: json_scalar, css: "script",
+              script_match: "JSON\\.parse\\('(?P<config>(?:[^'\\\\]|\\\\.)*)'\\)",
+              decode: js_string, json_pointer: /zoom, value_kind: num}
     claim_type: map_zoom
     licence_class: portal
     blur_evidence: none
     required: when_present
     notes: "Observed ladder ~17.2 street segment, 15.7 long street, 13.3 circle, 10.2
-      nothing; anything ≤ ~12 must not produce a stored coordinate [live-C §3.5.3]."
+      nothing; anything ≤ ~12 must not produce a stored coordinate [live-C §3.5.3]. The
+      EXECUTED threshold is mx.det.map_features' locator.reject_zoom_at_or_below; this
+      entry is the record that makes a refusal legible, so that 'rejected at zoom 10.2'
+      and 'the config key moved' are not the same empty result."
 
   - id: mx.det.view_centre
     locator_kind: map_config
@@ -199,31 +255,46 @@ extractions:
     notes: >
       NEVER a subject coordinate — it is the map VIEW CENTRE. For the two Circle cases it
       is 130 m and 660 m from the circle centre. Declared (subject_scoped=false) so the
-      contradiction ledger can see it; never a position source.
+      contradiction ledger can see it; never a position source. DELIBERATELY LEFT INERT at
+      v2: no reader, so nothing mints a claim for it. The ledger that would consume it has
+      no producer on this lane, and a coordinate-shaped value the doctrine forbids anything
+      from using is a trap, not a record.
 
   - id: mx.det.locality
     locator_kind: html_selector
     extraction_method: html_selector_parse
     page_kind: detail
-    locator: {css: "div.locality", text: true}
+    locator: {reader: html_text, css: "div.locality", text: true}
     claim_type: mestsky_obvod_name
     licence_class: portal
     blur_evidence: none
+    transform: ["comma_segment:1@2+"]
     required: when_present
-    notes: "'Praha 3, Žižkov, Jeseniova' — obvod/quarter/street, street LAST. Today only the
-      last segment is taken and locality_quarter_id is 0/421 [live-C §3.3]."
+    notes: >
+      'Praha 3, Žižkov, Jeseniova' — obvod/quarter/street, street LAST; today only the last
+      segment is taken and locality_quarter_id is 0/421 [live-C §3.3]. This id keeps the
+      meaning it was minted with and takes the FIRST segment, and only on a line that has
+      at least two: on a one-segment line ('Krásný Les', live 2026-09-05) that token is the
+      obec, and emitting it here would type an obec as a městský obvod on every village
+      row. The `@2+` arity is the refusal that stops it; the whole line is still carried
+      verbatim by mx.det.locality_text (W1) and mx.det.title. On a non-Praha line
+      ('Údrnice, Únětice') the first segment is the obec and this claim simply misses in
+      the cast_obce bucket — a miss, not a wrong admin level.
 
   - id: mx.det.title
     locator_kind: html_selector
     extraction_method: html_selector_parse
     page_kind: detail
-    locator: {css: "title", text: true}
+    locator: {reader: html_text, css: "title", text: true}
     claim_type: address_line_verbatim
     licence_class: portal
     blur_evidence: none
     on_conflict: emit_both
     required: best_effort
-    notes: "Duplicate of div.locality [live-C §3.2]."
+    notes: "Duplicate of div.locality [live-C §3.2], captured VERBATIM and never parsed —
+      the title carries agency branding ('… | MAXIMA REALITY') and reverses the segment
+      order, so it is evidence and a survivability hedge if the WordPress theme renames
+      div.locality, never a granularity source."
 
   - id: mx.desc.homonym
     locator_kind: description
@@ -235,4 +306,43 @@ extractions:
     blur_evidence: none
     required: best_effort
     notes: "41 of 45 recoveries came from the description alone [mine-maxima]. Run once,
-      because it is free: 268 active listings ≈ $0.35."
+      because it is free: 268 active listings ≈ $0.35. INERT at v2 — the LLM lane is not in
+      this wave, so this entry declares no reader and nothing executes it."
+
+  # ---- v2 additions. Appended at the END because 02 §2.1.8 forbids reordering and the
+  # fixture-diff gate reports a whole-group reorder as drift. ----
+
+  - id: mx.det.locality_quarter
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {reader: html_text, css: "div.locality", text: true}
+    claim_type: quarter_name
+    licence_class: portal
+    blur_evidence: none
+    transform: ["comma_segment:2@3"]
+    required: best_effort
+    notes: >
+      The MIDDLE segment, and only on a three-segment line, which is the one shape whose
+      middle is unambiguous: 'Žižkov' on a Praha line, 'Liberec XIV-Ruprechtice' on a
+      Liberec one — both a část obce / městská část, and the resolver buckets quarter_name,
+      cast_obce_name and mestsky_obvod_name together. On a two-segment line the middle does
+      not exist and this emits nothing.
+
+  - id: mx.det.locality_street
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {reader: html_text, css: "div.locality", text: true}
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    transform: ["comma_segment:-1@2+"]
+    required: when_present
+    notes: >
+      The LAST segment, on a line that has at least two — 'Jeseniova', 'Pod Višňovkou',
+      'Baltská'. Street is LAST on every multi-segment line observed [live-C §3.2, §3.4].
+      Unlike the live parser this applies NO morphology filter
+      (require_czech_street_morphology is declared fleet-wide and implemented nowhere), so
+      a two-segment 'Údrnice, Únětice' claims a neighbouring village as a street; the
+      gazetteer is what fails that lookup. Recorded here rather than guessed at.
