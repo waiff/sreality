@@ -146,6 +146,44 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-05 (f) — **DINOv3 readiness build started, per entry (b)'s directive.** Four
+  independent PRs, each with its own tests: (1) `migrations/480_dinov3_image_embeddings.sql` —
+  the vector store (this entry), draft PR opened; (2) the bake-off harness rewrite
+  (ENCODER-DECISION.md §5); (3) the production embedding job (RunPod, checkpoint/resume, write
+  throttle) + its dispatch workflow; (4) the per-tag heads trainer + eval harness. **None of
+  this is run against real data** — no corpus pass, no bake-off dispatch, no training — per
+  entry (b)'s "training set is not finalized" ruling; everything is built and tested on
+  synthetic/offline fixtures only.
+
+  **Migration 480**: one row per (image, full six-fact encoder configuration) — model, revision,
+  library, pooling, resolution, preprocessing, dtype are all part of the primary key (not a
+  synthetic `encoder_id` some writer could set inconsistently), so a knob change adds a row
+  instead of silently overwriting a differently-configured vector for the same image. `halfvec(768)`
+  (pgvector 0.8.0 confirmed live) sits below the ~2 KB TOAST threshold that `vector(512)` on
+  `image_clip_embeddings` sits above (ENCODER-DECISION.md §2.1) — a genuine read-cost win, not
+  just a size one. RLS + REVOKE posture (migrations 237/447) replayed at creation, inside the
+  same pgvector-conditional `DO` block migration 226 uses for CI replay. Additive; **not yet
+  applied to production** — pending operator OK per the migration-safety gate.
+
+  **Gate 1's 12th tag resolved differently than expected.** Asked the operator which
+  "domovní vchod" tag (exteriér id 2 / interiér id 19) was the 12th target; the answer was
+  that BOTH stay, now under separated names (`tag_taxonomy` live: id 2 = "exterier - domovní
+  vchod", id 19 = "interier - domovní vchod / chodba") — the choice between them was never
+  meant to be made, the ambiguity was in the shared name. Consequence for the heads trainer
+  (PR 4): it takes a target tag id as a plain argument rather than hard-coding a resolved
+  12-tag list, so it needs no further change whichever way Gate 1's list finally reads.
+
+  **RunPod / HF acquisition note for PR 2/3**: `scripts/mirror_model_weights.py` +
+  `mirror_model_weights.yml` already exist (an earlier session's prep, never run —
+  `MANIFEST.json` does not exist in R2 yet) for mirroring Meta's raw, licence-accepted
+  `.pth` download-e-mail files into R2, avoiding both Meta's time-limited links and an
+  HF_TOKEN dependency for an unattended job. That consumption path (loading a raw state
+  dict rather than `from_pretrained`) is NOT built here — out of scope for this readiness
+  pass. The bake-off and the production job instead load gated weights the standard HF way
+  (`from_pretrained(model_id, revision=..., token=...)`, the operator's `HF_TOKEN`), matching
+  `scraper/clip_tagger.py`'s existing pin discipline. Revisit the R2-mirror consumption path
+  later if an HF-token-free production lane becomes worth building.
+
 - 2026-09-05 (e) — **GATE 0 CLOSED. Wave 0 finished for real (migration 475, #1286),
   eleven days after it was recorded closed.** Entry (b) above corrected the record; this one
   discharges it. Migration 475 applied live at **11:26:48 UTC**, verified immediately after.
