@@ -270,7 +270,12 @@ def near_tag_candidates(
     from toolkit import tag_definitions as td
 
     with conn.cursor() as cur:
-        cur.execute("SET statement_timeout = %s", (int(timeout_ms),))
+        # SET takes a LITERAL, never a parameter — a bound value there is a
+        # syntax error at "$1" (and, with a caller-supplied value, an injection
+        # surface). set_config is the parameterised form. RESET restores it;
+        # the connection is autocommit, so SET LOCAL would apply to nothing.
+        cur.execute("SELECT set_config('statement_timeout', %s, false)",
+                    (f"{int(timeout_ms)}ms",))
         try:
             cur.execute(_NEAR_TAG_SQL, {
                 "seed_tag_id": int(seed_tag_id), "tag_ids": list(tag_ids),
@@ -281,7 +286,7 @@ def near_tag_candidates(
             })
             return [(int(r[0]), r[1]) for r in cur.fetchall()]
         finally:
-            cur.execute("SET statement_timeout = DEFAULT")
+            cur.execute("RESET statement_timeout")
 
 
 # --- mining the operator's own drafts ---------------------------------------
