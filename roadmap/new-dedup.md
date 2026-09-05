@@ -333,9 +333,10 @@ W1 (shared prerequisites + labeling program):
       relying on either) — not a blocker for W1's actual goal, which was proving the launch→
       bill→terminate pipeline itself works.
 - [ ] **DINOv3 readiness build (2026-09-05, PROGRAM.md ledger (f)):** vector table
-      (migration 480, draft PR), bake-off harness rewrite, production embedding job, and the
-      per-tag heads trainer — four independent PRs, built and tested but not run against real
-      data (training set still unfinalized). See PROGRAM.md for the full breakdown.
+      (migration 480, #1296), bake-off harness (#1300), production embedding job (#1298), and
+      the per-tag heads trainer (#1297) — four independent draft PRs, all CI green, built and
+      tested but not run against real data (training set still unfinalized; no money spent, no
+      gated weights downloaded). See PROGRAM.md for the full breakdown.
 
 Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
 

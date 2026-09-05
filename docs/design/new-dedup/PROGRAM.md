@@ -146,14 +146,17 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
-- 2026-09-05 (f) — **DINOv3 readiness build started, per entry (b)'s directive.** Four
-  independent PRs, each with its own tests: (1) `migrations/480_dinov3_image_embeddings.sql` —
-  the vector store (this entry), draft PR opened; (2) the bake-off harness rewrite
-  (ENCODER-DECISION.md §5); (3) the production embedding job (RunPod, checkpoint/resume, write
-  throttle) + its dispatch workflow; (4) the per-tag heads trainer + eval harness. **None of
-  this is run against real data** — no corpus pass, no bake-off dispatch, no training — per
-  entry (b)'s "training set is not finalized" ruling; everything is built and tested on
-  synthetic/offline fixtures only.
+- 2026-09-05 (f) — **DINOv3 readiness build: all four PRs up, draft, CI green, per entry
+  (b)'s directive.** #1296 (migration 480, the vector store), #1300 (the bake-off harness),
+  #1298 (the production embedding job + dispatch workflow), #1297 (the per-tag heads trainer +
+  eval harness). **None of it has been run against real data** — no corpus pass, no bake-off
+  dispatch, no training, no money spent, no gated weights downloaded, no vectors written
+  anywhere — per entry (b)'s "training set is not finalized" ruling; everything is built and
+  tested on synthetic/offline fixtures only. Merge order matters only for one mechanical
+  cleanup: #1297 and #1298 each carry a temporary `tests/test_sql_schema_prepare.py` allowlist
+  entry (self-flagged in both) excusing `image_dinov3_embeddings` from the schema-replay check
+  because migration 480 isn't live in their branches — **delete both entries the day #1296
+  merges**, or they'll silently keep masking a real PREPARE failure if the table is ever renamed.
 
   **Migration 480**: one row per (image, full six-fact encoder configuration) — model, revision,
   library, pooling, resolution, preprocessing, dtype are all part of the primary key (not a
