@@ -122,6 +122,11 @@ _DETAIL_DIGESTS: dict[tuple[str, str], str] = {
     # W2 set above. They are committed detail bodies too, so they belong in the pin:
     # what it protects is the claim "detail output did not move", and a fixture left
     # out of it is a page the claim was never checked against.
+    # bazos joined this set with the W2 activation (ad 222916664, captured 2026-09-05):
+    # it is the portal's FIRST genuinely archived body in the repo, so until now every
+    # bazos selector was only ever proven against a hand-written page.
+    ("bazos", "portal_html/bazos_detail.html"):
+        "ca6a521eacf6a5d3dd1b5567fdd39071d7936af7bbc4b833428b8ab7159ae437",
     ("idnes", "portal_html/idnes_detail.html"):
         "6952b4899e1ecc7e3ddbcaa22fcf43ffb71f92a8096758fea0d94a6b359dc965",
     ("mmreality", "portal_html/mmreality_detail.html"):

@@ -30,14 +30,16 @@ WHAT THIS LANE IS
     the archived-body stamping (C9/C10/C4 below), (c) the D7 evidence discipline the
     archived substrate is the first to need at all, and (d) the archived arm of the
     coordinate ladder.
-  * INERT ON MERGE, and structurally so: an entry runs here only when its locator names a
+  * PER-SOURCE INERT, and structurally so: an entry runs here only when its locator names a
     reader from `ARCHIVE_READERS`. Fourteen readers are registered — the four generic DOM
     ones W2-6 shipped plus the ten of the W2 reader canon (four DOM, five embedded-JSON,
-    one JSON-LD breadcrumb) — but NO shipped contract names one yet, so a run still returns
+    one JSON-LD breadcrumb). A source whose contract names none of them still returns
     before it opens a batch row (see `run()`) rather than stamping 'ok' over a corpus it
     never mined: a batch stamped 'ok' moves the incremental watermark, and a watermark is a
-    claim of coverage. The lane stops being inert on the first portal activation
-    (W2-6…W2-12), and it has no dispatcher until W2-13 either way.
+    claim of coverage. bazos@2 is the FIRST contract to name any (four entries: the town
+    anchor's obec + PSČ, the maps anchor's zoom + declared-blur marker), so bazos is the
+    first source this lane can actually mine. It still has no dispatcher until W2-13, so it
+    is invocable only by hand.
   * EVERY reader here is portal-AGNOSTIC and stays that way (rule 21). They differ by the
     QUESTION they ask of a node — its own text, a pattern over its text, a pattern over one
     attribute, whether a marker is present, one scalar of a JSON document it carries — never
