@@ -1,5 +1,6 @@
 import type { EstimationRun } from './types';
 import { listingPath } from './listingUrl';
+import { ROUTES, withHash, withQuery, type RoutePath } from './routes';
 
 /* The one place that decides where an estimation run "lives" in the UI.
  *
@@ -14,9 +15,13 @@ import { listingPath } from './listingUrl';
 export function runSurfaceUrl(
   run: Pick<EstimationRun, 'id' | 'input_sreality_id'>,
   hash: '#estimations' | '#feedback' = '#estimations',
-): string {
+): RoutePath {
   if (run.input_sreality_id != null) {
-    return `${listingPath(run.input_sreality_id)}?run=${run.id}${hash}`;
+    return withHash(withQuery(listingPath(run.input_sreality_id), { run: run.id }), hash);
   }
-  return `/estimation/${run.id}${hash === '#feedback' ? '#feedback' : ''}`;
+  // The standalone page renders an `id="feedback"` anchor (RunPanel) but has no
+  // `#estimations` target, so the hash that cannot resolve is dropped rather
+  // than left to scroll nowhere. Not a redundancy — deleting it is a behaviour
+  // change.
+  return withHash(ROUTES.estimationDetail.build({ id: run.id }), hash === '#feedback' ? '#feedback' : '');
 }

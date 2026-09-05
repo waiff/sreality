@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { listBrokerMergeCandidates } from '../lib/api';
 import { useAuth } from '@/lib/auth';
@@ -20,6 +20,7 @@ import { LocationTypeahead } from '../components/filter-controls/LocationTypeahe
 import { PickButton, Switch } from '../components/controls';
 import { BufferedNumberInput } from '../components/FilterForm';
 import { SUBTYPE_LABELS_BY_MAIN } from '@/lib/enums';
+import { ROUTES } from '@/lib/routes';
 import { fmtCount } from '../lib/format';
 
 const CATEGORY_OPTIONS: ReadonlyArray<{ value: string | null; label: string }> = [
@@ -46,7 +47,6 @@ const LIMIT_OPTIONS: ReadonlyArray<{ value: number; label: string }> = [
 ];
 
 export default function Brokers() {
-  const navigate = useNavigate();
   const [districts, setDistricts] = useState<DistrictChip[]>([]);
   const [firmIds, setFirmIds] = useState<number[]>([]);
   const [categoryMain, setCategoryMain] = useState<string | null>('byt');
@@ -161,14 +161,14 @@ export default function Brokers() {
           </p>
         </div>
         {reviewCount > 0 && (
-          <Link to="/brokers/review"
+          <Link to={ROUTES.brokersReview.build()}
             className="shrink-0 mt-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-copper)] bg-[var(--color-copper-soft)] px-3 py-1.5 text-[var(--color-copper)] hover:bg-[var(--color-copper)] hover:text-[var(--color-paper)] transition-colors">
             Sloučit duplicity ({reviewCount})
           </Link>
         )}
       </header>
 
-      <NameSearch onPick={(id) => navigate(`/brokers/${id}`)} />
+      <NameSearch />
 
       {/* Filter ledger header. Firma sits on its own row, full width: it can
           run to dozens of pills wrapping across several lines, and sharing a
@@ -297,7 +297,6 @@ export default function Brokers() {
               metric={metric}
               placeLabel={placeLabel}
               capped={rows.length >= limit}
-              onOpen={(id) => navigate(`/brokers/${id}`)}
             />
           </>
         )}
@@ -318,7 +317,7 @@ function useDebouncedTerm(delayMs = 200): [string, string, (next: string) => voi
   return [q, debounced, setQ];
 }
 
-function NameSearch({ onPick }: { onPick: (brokerId: number) => void }) {
+function NameSearch() {
   const [q, debounced, setQ] = useDebouncedTerm();
   const [open, setOpen] = useState(false);
 
@@ -357,11 +356,13 @@ function NameSearch({ onPick }: { onPick: (brokerId: number) => void }) {
             <p className="px-3 py-2 text-sm text-[var(--color-ink-4)]">Nic nenalezeno.</p>
           ) : (
             results.map((b) => (
-              <button
+              /* onMouseDown-preventDefault keeps the input's onBlur from
+                 closing the list before the click lands; it does NOT suppress
+                 the anchor's own navigation, which fires on click. */
+              <Link
                 key={b.broker_id}
-                type="button"
+                to={ROUTES.brokerDetail.build({ id: b.broker_id })}
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => onPick(b.broker_id)}
                 className="w-full text-left px-3 py-2 flex items-center justify-between gap-3 border-b border-[var(--color-rule-soft)] last:border-0 hover:bg-[var(--color-copper-soft)]"
               >
                 <span className="min-w-0">
@@ -382,7 +383,7 @@ function NameSearch({ onPick }: { onPick: (brokerId: number) => void }) {
                     <span className="text-[var(--color-ink-4)]"> / {fmtCount(b.active_property_count)}</span>
                   )}
                 </span>
-              </button>
+              </Link>
             ))
           )}
         </div>
@@ -487,13 +488,11 @@ function Ledger({
   metric,
   placeLabel,
   capped,
-  onOpen,
 }: {
   rows: BrokerLeaderRow[];
   metric: LeaderMetric;
   placeLabel: string;
   capped: boolean;
-  onOpen: (brokerId: number) => void;
 }) {
   return (
     <div className="border border-[var(--color-rule)] rounded-[var(--radius-md)] overflow-hidden">
@@ -508,9 +507,12 @@ function Ledger({
       <ol>
         {rows.map((r, i) => (
           <li key={r.broker_id}>
-            <button
-              type="button"
-              onClick={() => onOpen(r.broker_id)}
+            {/* A real anchor, not a button with a navigate() handler: an analyst
+              * comparing brokers needs right-click → open in a new tab,
+              * ctrl/middle-click, and a copyable link address. Every child here
+              * is a <span>, so there is no nested-interactive problem. */}
+            <Link
+              to={ROUTES.brokerDetail.build({ id: r.broker_id })}
               className="w-full text-left px-4 py-3 flex items-center gap-4 border-b border-[var(--color-rule-soft)] last:border-0 hover:bg-[var(--color-copper-soft)] transition-colors group"
             >
               <span className="w-7 shrink-0 text-right font-[family-name:var(--font-display)] text-lg text-[var(--color-copper)] tabular-nums">
@@ -537,7 +539,7 @@ function Ledger({
                 label="inzerátů"
                 emphasized={metric === 'listing_count' || metric === 'active_listing_count'}
               />
-            </button>
+            </Link>
           </li>
         ))}
       </ol>

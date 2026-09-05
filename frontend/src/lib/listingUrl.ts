@@ -1,3 +1,5 @@
+import { ROUTES, withQuery, type RoutePath } from './routes';
+
 /* The ONE place that builds an internal listing-detail URL.
  *
  * The route is `/listing/:sreality_id` (see `routes.tsx`); `sreality_id` is the
@@ -7,8 +9,8 @@
  * collections, Health, the Chrome extension's mirror) routes through here so a
  * route change is a single edit. Pairs with `runLinks.runSurfaceUrl`, which
  * builds the run-on-listing variant on top of `listingPath`. */
-export function listingPath(srealityId: number): string {
-  return `/listing/${srealityId}`;
+export function listingPath(srealityId: number): RoutePath {
+  return ROUTES.listingLegacy.build({ sreality_id: srealityId });
 }
 
 /* Canonical, self-describing listing URL: `/listing/{source}/{native_id}`.
@@ -21,16 +23,17 @@ export function listingPath(srealityId: number): string {
  * on land, so the id-bar shows the clean form regardless of entry point. The
  * legacy numeric route stays forever as a resolver (`listingPath` above):
  * positive → sreality's real id, negative → frozen pre-cutover alias. */
-export function listingCanonicalPath(source: string, sourceIdNative: string): string {
-  return `/listing/${encodeURIComponent(source)}/${encodeURIComponent(sourceIdNative)}`;
+export function listingCanonicalPath(source: string, sourceIdNative: string): RoutePath {
+  // ROUTES.build percent-encodes every param, so the hand-rolled
+  // encodeURIComponent this used to carry is now structural, not per-call.
+  return ROUTES.listingCanonical.build({ source, nativeId: sourceIdNative });
 }
 
 /* Property-grain entry: `/listing?property=<id>` lands on `ListingDetail`,
  * which resolves the property's representative listing and redirects to its
- * canonical detail URL. Used where only the property id is known (the dedup
- * merge feed). */
-export function propertyListingPath(propertyId: number): string {
-  return `/listing?property=${propertyId}`;
+ * canonical detail URL. Used where only the property id is known. */
+export function propertyListingPath(propertyId: number): RoutePath {
+  return withQuery(ROUTES.listing.build(), { property: propertyId });
 }
 
 /* The detail link for a PROPERTY-GRAIN row (Browse Map / Table / Cards, the
@@ -60,7 +63,7 @@ export function listingRowPath(row: {
   source_id_native?: string | null;
   sreality_id: number | null;
   property_id: number;
-}): string {
+}): RoutePath {
   if (row.source && row.source_id_native) {
     return listingCanonicalPath(row.source, row.source_id_native);
   }

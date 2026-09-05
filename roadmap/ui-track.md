@@ -333,6 +333,65 @@ End-to-end browser flow over the U1b backend.
   of the operational surface. Revisit if `limen:chunkEvents` shows this is still
   happening often.
 
+### Link semantics + the route registry (done — W1)
+
+Reported as "I want to right-click a broker in the žebříček and open it in a
+new window". The row was a `<button onClick={navigate(...)}>`, so it offered no
+open-in-new-tab, no ctrl/middle-click, no status-bar URL, no copyable address,
+and screen readers announced a button rather than a link.
+
+Audited app-wide before fixing (66 affordances confirmed by an adversarial
+second reader). The verdict: **the affordance defect is small — four elements —
+but the layer under it was not.** Only 20 of the 66 were straightforward
+anchor conversions; 24 correctly are not navigation at all, and 7 sit inside
+another anchor and must NOT become one.
+
+**Shipped:**
+- `frontend/src/lib/routes.ts` — one table of route patterns. `def()` derives
+  `build()` from the pattern via react-router's `generatePath`, so the pattern
+  is the only authored string and a builder cannot drift from it. `build()`
+  percent-encodes params: `generatePath` substitutes RAW (verified against
+  6.30.3), so an unencoded `/` in a portal's native id would have silently
+  changed a URL's route shape.
+- `routes.tsx` CONSUMES the registry (`.childPath` / `.pattern`). The router
+  and the registry are one table with two readers, not two tables reconciled by
+  a test — 76 hand-typed paths previously had no owner and `routes.tsx` was
+  imported by zero tests.
+- Four affordances became real anchors: the Brokers leaderboard row (the
+  report), the broker name-search result, the Outreach campaign row (which also
+  fixes invalid markup — its `<div>` root was inside a `<button>`), and
+  AccountMenu's "Sign in".
+- `Shell`'s 20 nav entries, `listingUrl.ts` and `runLinks.ts` now read the
+  registry. NotFound gained a link home — the host serves the SPA at every
+  depth (verified: `/nonexistent` returns HTTP 200), so a drifted URL was a
+  dead end with nothing to click.
+
+**Rails:** `lib/routes.test.ts` — every pattern resolves against the real
+router and not the `*` catch-all; every destination the router declares has a
+registry entry (mutation-proven: an unregistered route is named in the
+failure). Plus role-based `getByRole('link')` href assertions on all four
+converted surfaces, asserted against `ROUTES.*.build()` so a rename moves the
+test instead of leaving it stale-but-green.
+
+**Deliberately NOT done, and why:** the `ListingCards` restructure (a card-wide
+`<Link>` forced a `stopPropagation` regime and hosts a nested `<Link>` that is
+invalid HTML today — it needs its own risk budget); the accessibility track,
+where most of the 66 findings actually live (`Field`'s bare `<label>` steals
+the first pill's accessible name, `role="menu"`/`"tab"` without keyboard
+contracts, 65 `focus:outline-none` sites); external-link hygiene; and the
+remaining ~46 route literals plus the lint ban that closes the door on them.
+Those are the next waves, not this one.
+
+**Known gap, stated honestly:** no lint selector can catch the reported bug's
+shape. The row's handler was `onClick={() => onOpen(id)}` — the route string
+lived in a prop two levels away, so there is nothing for a syntax rule to
+match. Anchor-ness is only provable by a test that asserts the rendered role,
+which is why the per-surface assertions are the real rail.
+
+**Still open (the operator's likely next want):** the Brokers board's own
+filters live in `useState`, not the URL, so the leaderboard view itself is
+still unshareable and Back from a broker returns to a reset board.
+
 ### Phase U-Nav: Unified browse → detail navigation (next)
 
 Today the top nav exposes `Listing` and (historically) `Estimate` as

@@ -14,6 +14,7 @@ import * as api from '@/lib/api';
 import * as auth from '@/lib/auth';
 import * as brokers from '@/lib/brokers';
 import type { BrokerLeaderRow } from '@/lib/brokers';
+import { ROUTES } from '@/lib/routes';
 
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
@@ -27,6 +28,7 @@ vi.mock('@/lib/brokers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/brokers')>()),
   fetchBrokerLeaderboard: vi.fn(),
   searchBrokerFirms: vi.fn(),
+  searchBrokersByName: vi.fn(),
 }));
 vi.mock('@/lib/supabase', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/supabase')>()),
@@ -57,6 +59,7 @@ function renderPage() {
 beforeEach(() => {
   vi.mocked(brokers.fetchBrokerLeaderboard).mockResolvedValue([]);
   vi.mocked(brokers.searchBrokerFirms).mockResolvedValue([]);
+  vi.mocked(brokers.searchBrokersByName).mockResolvedValue([]);
   vi.mocked(api.listBrokerMergeCandidates).mockResolvedValue({
     data: [],
     count: 0,
@@ -378,5 +381,61 @@ describe('<Brokers> value filter', () => {
         expect.objectContaining({ categoryType: null, minPriceCzk: null, includeUnpriced: false }),
       ),
     );
+  });
+});
+
+/* Link semantics. An analyst comparing brokers opens several in tabs, so these
+ * rows must be real anchors — a <button> with a navigate() handler offers no
+ * right-click "open in new tab", no ctrl/middle-click and no copyable address.
+ * Asserted via getByRole('link'), which encodes "this IS a link" rather than
+ * merely "an ancestor anchor exists", and against ROUTES.*.build() so a route
+ * rename moves this test instead of leaving it stale-but-green. */
+describe('<Brokers> leaderboard rows are links, not buttons', () => {
+  it('renders each ledger row as an anchor to that broker', async () => {
+    asUser(false);
+    vi.mocked(brokers.fetchBrokerLeaderboard).mockResolvedValue([
+      leaderRow(7, 'Jan Fleischner'),
+      leaderRow(42, 'Michaela Koudelova'),
+    ]);
+    renderPage();
+
+    const first = await screen.findByRole('link', { name: /Jan Fleischner/ });
+    expect(first).toHaveAttribute('href', ROUTES.brokerDetail.build({ id: 7 }));
+    expect(screen.getByRole('link', { name: /Michaela Koudelova/ })).toHaveAttribute(
+      'href',
+      ROUTES.brokerDetail.build({ id: 42 }),
+    );
+  });
+
+  it('exposes no row-shaped button once the ledger has rendered', async () => {
+    asUser(false);
+    vi.mocked(brokers.fetchBrokerLeaderboard).mockResolvedValue([
+      leaderRow(7, 'Jan Fleischner'),
+    ]);
+    renderPage();
+    await screen.findByRole('link', { name: /Jan Fleischner/ });
+    expect(screen.queryByRole('button', { name: /Jan Fleischner/ })).toBeNull();
+  });
+
+  it('renders each name-search result as an anchor to that broker', async () => {
+    asUser(false);
+    vi.mocked(brokers.searchBrokersByName).mockResolvedValue([
+      {
+        broker_id: 99,
+        display_name: 'Hledany Makler',
+        firm_name: null,
+        firm_domain: null,
+        cz_active_property_count: 3,
+        active_property_count: 5,
+      } as unknown as Awaited<ReturnType<typeof brokers.searchBrokersByName>>[number],
+    ]);
+    renderPage();
+
+    fireEvent.change(screen.getByPlaceholderText(/Hledat makl/), {
+      target: { value: 'Hledany' },
+    });
+
+    const hit = await screen.findByRole('link', { name: /Hledany Makler/ }, { timeout: 3000 });
+    expect(hit).toHaveAttribute('href', ROUTES.brokerDetail.build({ id: 99 }));
   });
 });
