@@ -477,13 +477,15 @@ Scraper orchestration:
 - `GITHUB_ACTOR` — CI context, used for curated-cities upload attribution.
 
 NEW DEDUP (docs/design/new-dedup/PROGRAM.md, Wave 1):
-- `RUNPOD_API_KEY` — GitHub Actions secret only (no Railway/frontend use). Auths
-  `scripts/runpod_client.py`'s REST (`rest.runpod.io/v1`) and GraphQL (`api.runpod.io/graphql`)
-  calls to launch/poll/terminate on-demand GPU pods for DINOv2 embedding batches (Wave 5) —
-  today exercised only by the `new_dedup_runpod_smoke_test.yml` workflow_dispatch. Every job
-  goes through `RunPodClient.run_job`, which terminates the pod in a `finally` regardless of
-  how the job ends — the actual cost-safety guarantee, since RunPod's pod API has no
-  documented "run once and stop" flag.
+- `RUNPOD_API_KEY` — Actions secret only (no Railway/frontend use). Auths `scripts/runpod_client.py`'s REST
+  (`rest.runpod.io/v1`) + GraphQL (`api.runpod.io/graphql`) calls to launch/poll/terminate on-demand GPU pods.
+  Two `workflow_dispatch` lanes: `new_dedup_runpod_smoke_test.yml` (infra proof) and `dinov3_embed_backfill.yml`
+  (the DINOv3 corpus embedding pass, never yet run on real data). Every job goes through `RunPodClient.run_job`,
+  which terminates the pod in a `finally` however the job ends — the actual cost-safety guarantee (the pod API has no "run
+  once and stop" flag). Credentials reach a pod ONLY via the optional `env: dict[str, str]` on
+  `launch_pod`/`run_job`/`run_job_with_fallback` — the REST body's `env` **object** (`{"K": "v"}`, not GraphQL's
+  `[{key, value}]` list; omitted when empty), never `start_cmd`, which is argv in the pod record. Never logged.
+- `HF_TOKEN` — Actions secret only. HuggingFace token for **gated** weights (`facebook/dinov3-*` is `gated: manual`; even `config.json` 401s), read by `scraper/dinov3_tagger.py` and forwarded into the pod.
 
 Frontend / extension (build-time only, inlined into the browser bundle — *not* backend
 runtime): `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` (the publishable anon key, safe in

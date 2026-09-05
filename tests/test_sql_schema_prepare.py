@@ -70,6 +70,14 @@ _ALLOWLIST: list[tuple[str, str, str]] = [
         "a SPARQL query to the Wikidata endpoint, not Postgres SQL",
     ),
     (
+        "dinov3_embed_backfill.py",
+        "image_dinov3_embeddings",
+        "the table is created by migration 480 (PR #1296), which is a separate PR in "
+        "the same DINOv3-readiness build; until it merges the replayed schema cannot "
+        "see it. REMOVE THIS ENTRY once 480 is on main — the sweep is exactly the "
+        "guard this lane's six-fact key wants.",
+    ),
+    (
         "apply_listings_pk_swap.py",
         "cron.",
         "pg_cron's `cron` schema is extension-managed and absent from migrations, "

@@ -847,6 +847,17 @@ renumber.** Navigate by area:
     `image_clip_tags` + `image_clip_embeddings`), and the operator's labeling corpus
     (`tag_taxonomy`, `image_tag_labels`, `image_border_cases`). `listing_image_comparisons`
     (the agent-facing `compare_listing_images` tool) is unrelated to dedup and unaffected.
+    A fourth producer now exists as infrastructure: the **DINOv3 embedding lane**
+    (`dinov3_embed_backfill.yml` → `scripts/dinov3_embed_dispatch.py` launching a RunPod GPU
+    pod that runs `scripts/dinov3_embed_backfill.py`, writing `image_dinov3_embeddings`) — the
+    encoder the operator accepted on 2026-09-05 for the tag heads, Level-3 similarity and
+    candidate path B (`docs/design/new-dedup/ENCODER-DECISION.md`). It is **dispatch-only and
+    has never been run against real data**: manual `workflow_dispatch`, no schedule, and inert
+    until the bake-off fills in `data/dinov3_config.json` — the loader refuses to run while any
+    of the six facts that identify a vector (model, revision, library, pooling, resolution,
+    preprocessing, dtype) is null. Those six are the target table's primary key, because any
+    one of them changing means a **new population, not a new value**. The CLIP lane keeps
+    running in parallel for comparison; nothing has been retired.
 16. **Watchdog and Browse share one definition of "matches."** Saved watchdog filters live
     in `notification_subscriptions` (migration 056); the background matcher in
     `api/notifications.py` builds its WHERE clauses from the **same** logic Browse uses

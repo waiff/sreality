@@ -1843,6 +1843,93 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/detail_drain.yml"
     },
     {
+      "filename": "dinov3_embed_backfill.yml",
+      "name": "NEW DEDUP: DINOv3 corpus embedding (RunPod)",
+      "description": "Embeds stored images with DINOv3 ViT-B/16 on a rented GPU pod, writing one 768-d halfvec per image into image_dinov3_embeddings under the six-fact encoder identity (model, revision, library, pooling, resolution, preprocessing, dtype). Manual dispatch only — this is not a steady-state lane, and it is INERT until the bake-off fills in data/dinov3_config.json: the loader refuses to run while any of the six facts is null.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "max_write_mb_per_hour",
+          "description": "REQUIRED. Vector-write ceiling in MB/hour. No safe default exists — read the Supabase dashboard's live disk utilisation first; 90% auto-expands the disk, 95% with no quota left puts the WHOLE project in read-only.",
+          "required": true,
+          "type": "string",
+          "default": null,
+          "options": null
+        },
+        {
+          "name": "limit",
+          "description": "Max images this pass.",
+          "required": false,
+          "type": "string",
+          "default": "20000",
+          "options": null
+        },
+        {
+          "name": "shard",
+          "description": "Shard index (image_id % shards == shard).",
+          "required": false,
+          "type": "string",
+          "default": "0",
+          "options": null
+        },
+        {
+          "name": "shards",
+          "description": "Shard count. 1 = no sharding.",
+          "required": false,
+          "type": "string",
+          "default": "1",
+          "options": null
+        },
+        {
+          "name": "workers",
+          "description": "Parallel R2 downloads inside the pod (JPEG decode is CPU-side).",
+          "required": false,
+          "type": "string",
+          "default": "16",
+          "options": null
+        },
+        {
+          "name": "job_max_seconds",
+          "description": "The payload's own time budget. The pod's wait window is this plus a 900s startup grace, so teardown lands after a clean stop, never mid-batch.",
+          "required": false,
+          "type": "string",
+          "default": "3600",
+          "options": null
+        },
+        {
+          "name": "dry_run",
+          "description": "Print the resolved identity, the pending count and the pod plan. Launches nothing, writes nothing, spends nothing.",
+          "required": false,
+          "type": "choice",
+          "default": "true",
+          "options": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "secrets": [
+        "HF_TOKEN",
+        "R2_ACCESS_KEY_ID",
+        "R2_ACCOUNT_ID",
+        "R2_BUCKET_NAME",
+        "R2_SECRET_ACCESS_KEY",
+        "RUNPOD_API_KEY",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "dinov3-embed-backfill",
+      "cancelInProgress": false,
+      "timeoutMinutes": 90,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/dinov3_embed_backfill.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dinov3_embed_backfill.yml"
+    },
+    {
       "filename": "discover_condition_markers.yml",
       "name": "Dev: discover condition markers (one-off Phase A bootstrap)",
       "description": "One-off Phase A driver for the building/apartment condition-scoring feature. Runs scripts/discover_condition_markers.py against the real Supabase DB and the Anthropic API to mine Czech condition markers from a stratified sample of listings.",
