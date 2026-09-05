@@ -75,6 +75,20 @@ clip = [
   # four tagging workflows, which is a breakage risk, not a drift risk.
   "transformers>=4.40,<5",
 ]
+# Per-tag DINOv3 head training (toolkit/tag_heads.py) — training-only, never in a
+# runtime image; inference from a trained artifact needs no ML library at all
+# (docs/design/clip-linear-probe.md D5). Pre-approved in
+# docs/design/new-dedup/PROGRAM.md's 2026-09-05 ledger ruling (b).
+training = [
+  "scikit-learn>=1.4",
+]
+# Nearest-neighbor diagnostics for the heads' eval harness (toolkit/tag_heads_eval.py)
+# — analysis-only, read-only, never influences training or a threshold. Also
+# pre-clears the dependency PROGRAM.md's W3 (candidate path B batch k-NN) will
+# need later, per the same 2026-09-05 ledger ruling (b).
+analysis = [
+  "faiss-cpu>=1.8",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

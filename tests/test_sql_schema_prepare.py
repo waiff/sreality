@@ -84,6 +84,18 @@ _ALLOWLIST: list[tuple[str, str, str]] = [
         "in migrations, so the replayed schema can't see it; check_db_saturation "
         "reads it defensively and warns if unreadable",
     ),
+    (
+        "toolkit/tag_heads.py",
+        "image_dinov3_embeddings",
+        "TEMPORARY, and it should be deleted the day PR #1296 merges. The DINOv3 "
+        "embedding store's migration is a sibling PR of the one adding this "
+        "trainer; until it lands, the replayed schema has no such table and these "
+        "two statements fail 42P01 for a reason that is not a defect. Everything "
+        "else the trainer executes (the `images` group-key read) is swept "
+        "normally, and the labels it trains on never come from SQL of its own — "
+        "they come through toolkit.machine_labeling / toolkit.tag_holdout, which "
+        "tests/test_holdout_exclusion_census.py governs.",
+    ),
 ]
 
 
