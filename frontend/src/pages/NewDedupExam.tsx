@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
+import { ROUTES, withQuery, type RoutePath } from '@/lib/routes';
+
+/* The exam surfaces address each other by (cohort, set). Spelled by hand at
+ * four sites before this, each re-implementing the same optional-set rule. */
+export function examHref(
+  route: { build: () => RoutePath },
+  cohort: string,
+  setName?: string | null,
+): RoutePath {
+  return withQuery(route.build(), { cohort, set: setName || null });
+}
 import {
   answerExamQuestion,
   getExamCohorts,
@@ -289,7 +300,7 @@ export default function NewDedupExam() {
         </div>
         <div className="flex items-baseline gap-3">
           <Link
-            to={`/new-dedup/exam/review?cohort=${encodeURIComponent(cohort)}${setName ? `&set=${encodeURIComponent(setName)}` : ''}`}
+            to={examHref(ROUTES.newDedupExamReview, cohort, setName)}
             className="text-xs text-[var(--color-copper)] hover:underline"
           >
             review answers →
@@ -307,7 +318,7 @@ export default function NewDedupExam() {
           {cohorts.length > 1 && cohorts.map((c) => (
             <Link
               key={c.name}
-              to={`/new-dedup/exam?cohort=${encodeURIComponent(c.name)}${setName ? `&set=${encodeURIComponent(setName)}` : ''}`}
+              to={examHref(ROUTES.newDedupExam, c.name, setName)}
               aria-current={c.name === cohort ? 'page' : undefined}
               className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
                 c.name === cohort
@@ -327,7 +338,7 @@ export default function NewDedupExam() {
           {sets.length > 1 && sets.map((t) => (
             <Link
               key={t.name}
-              to={`/new-dedup/exam?cohort=${encodeURIComponent(cohort)}&set=${encodeURIComponent(t.name)}`}
+              to={examHref(ROUTES.newDedupExam, cohort, t.name)}
               aria-current={t.name === exam.set ? 'page' : undefined}
               className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
                 t.name === exam.set

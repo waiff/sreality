@@ -13,6 +13,7 @@
 
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import { CSS } from '@dnd-kit/utilities';
 import { useDraggable } from '@dnd-kit/core';
 import { fmtArea, fmtCzk, fmtMeasuredPricePerM2 } from '@/lib/format';
@@ -166,7 +167,7 @@ export function CardFace({
           {broker ? (
             <p className="mt-0.5 truncate text-[0.7rem] text-[var(--color-ink-3)]">
               <Link
-                to={`/brokers/${broker.broker_id}`}
+                to={ROUTES.brokerDetail.build({ id: broker.broker_id })}
                 title={brokerHoverTitle(broker)}
                 className="hover:text-[var(--color-copper)] hover:underline underline-offset-2"
               >

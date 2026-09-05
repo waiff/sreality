@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react';
 
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
+import { examHref } from './NewDedupExam';
 import {
   answerExamQuestion,
   dismissExamMachineProposal,
@@ -280,8 +282,7 @@ export default function NewDedupExamReview() {
     return <div className="p-6"><ErrorBanner message={(answersQ.error as Error).message} /></div>;
   }
 
-  const examHref = `/new-dedup/exam?cohort=${encodeURIComponent(cohort)}${
-    setName ? `&set=${encodeURIComponent(setName)}` : ''}`;
+  const backToExam = examHref(ROUTES.newDedupExam, cohort, setName);
 
   return (
     <div className="max-w-[112rem] mx-auto px-4 py-6">
@@ -318,7 +319,7 @@ export default function NewDedupExamReview() {
               </button>
             ))}
           </span>
-          <Link to={examHref} className="text-xs text-[var(--color-copper)] hover:underline">
+          <Link to={backToExam} className="text-xs text-[var(--color-copper)] hover:underline">
             ← back to the exam
           </Link>
         </div>

@@ -1,6 +1,7 @@
 import { Suspense, useEffect, useState } from 'react';
 import { lazyChunk } from '@/lib/lazyChunk';
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import {
   useMutation,
   useQuery,
@@ -72,7 +73,7 @@ export default function WatchdogEdit() {
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: watchdogKeys.all });
-      navigate('/watchdog/manage');
+      navigate(ROUTES.watchdogManage.build());
     },
   });
 
@@ -85,7 +86,7 @@ export default function WatchdogEdit() {
 
   // Watchdog creation now lives on Browse ("Create watchdog" from a saved
   // filter). This page is edit-only; a missing id has nowhere to go.
-  if (!id) return <Navigate to="/watchdog/manage" replace />;
+  if (!id) return <Navigate to={ROUTES.watchdogManage.build()} replace />;
 
   return (
     <div className="px-6 py-8 max-w-3xl mx-auto">
@@ -223,7 +224,7 @@ export default function WatchdogEdit() {
 
         <div className="flex items-center justify-between gap-3 border-t border-[var(--color-rule)] pt-5">
           <Link
-            to="/watchdog/manage"
+            to={ROUTES.watchdogManage.build()}
             className="text-sm text-[var(--color-ink-3)] hover:text-[var(--color-ink)]"
           >
             ← Cancel

@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import ImageCarousel from '@/components/ImageCarousel';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
@@ -364,7 +365,7 @@ function CollectionSaveButton({
             </p>
           ) : sorted.length === 0 ? (
             <Link
-              to="/collections"
+              to={ROUTES.collections.build()}
               className="block px-1.5 py-1.5 text-[0.78rem] text-[var(--color-copper)] hover:underline"
             >
               Create a collection →

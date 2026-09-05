@@ -36,6 +36,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   ApiError,
@@ -205,7 +206,7 @@ function NewEstimationModal({
     },
     onSuccess: (run) => {
       onClose();
-      navigate(`/building/${run.id}`);
+      navigate(ROUTES.buildingDetail.build({ id: run.id }));
     },
   });
 
