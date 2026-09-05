@@ -119,6 +119,7 @@ export const ROUTES = {
   newDedupSettings: def('/new-dedup/settings'),
   newDedupLabeling: def('/new-dedup/labeling'),
   newDedupTaxonomy: def('/new-dedup/labeling/taxonomy'),
+  newDedupTrainingSet: def('/new-dedup/training-set'),
   newDedupExam: def('/new-dedup/exam'),
   newDedupExamReview: def('/new-dedup/exam/review'),
   scrapers: def('/scrapers'),

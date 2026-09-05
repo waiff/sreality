@@ -618,6 +618,43 @@ def get_tag_neighbours(
     return {"data": td.nearest_tags(conn, tag_id=tag_id, limit=limit)}
 
 
+# --- reviewing the training set ---------------------------------------------
+
+
+@router.get("/training-set/heads")
+def get_training_set_heads(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
+    """Every routing head with what the training set holds for it, split by who
+    decided. Populates the review page's head picker AND answers "is this head
+    ready" in one read."""
+    from toolkit import machine_labeling as ml
+
+    tags = _routing_tags(conn)
+    counts = ml.training_set_counts(conn, tag_ids=[t["id"] for t in tags])
+    return {"data": [{**t, **counts.get(t["id"], {})} for t in tags]}
+
+
+@router.get("/training-set")
+def get_training_set(
+    tag_id: int, state: str | None = None, source: str | None = None,
+    limit: int = 60, offset: int = 0, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """One page of a head's training material. The holdout is excluded here as
+    everywhere a label is treated as training material — correcting a yardstick
+    image from this page would quietly train on the thing that grades us."""
+    from toolkit import machine_labeling as ml
+
+    try:
+        rows = ml.training_set_page(
+            conn, tag_id=tag_id, state=state, source_class=source,
+            limit=limit, offset=offset,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    counts = ml.training_set_counts(conn, tag_ids=[tag_id]).get(tag_id, {})
+    return {"data": {"rows": rows, "counts": counts,
+                     "limit": limit, "offset": offset}}
+
+
 # --- the sealed exam (migrations 458 + 459) ---------------------------------
 #
 # The exam GRADES the probes, so this is the one surface that shows an operator a

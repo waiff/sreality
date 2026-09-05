@@ -59,6 +59,7 @@ const newDedupItems: ReadonlyArray<MenuItem> = [
   // this straight to NavLink, whose default prefix match would light both.
   { to: ROUTES.newDedupLabeling.build(), label: 'Labeling', end: true },
   { to: ROUTES.newDedupTaxonomy.build(), label: 'Taxonomy' },
+  { to: ROUTES.newDedupTrainingSet.build(), label: 'Training set' },
   { to: ROUTES.newDedupExam.build(), label: 'Exam' },
 ];
 

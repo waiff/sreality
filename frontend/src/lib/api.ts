@@ -1145,6 +1145,62 @@ export interface NewDedupTagImage {
   category_main: string | null;
   pool_rank: number | null;
 }
+/* Reviewing the TRAINING SET: what the model built, per head, with the
+ * operator's own labels beside it. A separate read from the tag-centric browse
+ * below, which is built around the (now empty) candidate queue and can neither
+ * page nor tell the two apart. The holdout is excluded server-side. */
+export interface TrainingSetHead {
+  id: number;
+  label: string;
+  positive: number;
+  negative: number;
+  excluded: number;
+  machine_positive: number;
+  human_positive: number;
+}
+
+export interface TrainingSetRow {
+  image_id: number;
+  storage_path: string;
+  state: TagState;
+  source: TagSource;
+  excluded_reason: TagExcludedReason | null;
+  updated_at: string | null;
+  definition_version: number | null;
+  /* Written under wording that has since been replaced — not wrong, but it
+   * describes a rule that has changed, which is the one thing a reviewer
+   * cannot see in the photo. */
+  definition_stale: boolean;
+}
+
+export const listTrainingSetHeads = (): Promise<{ data: TrainingSetHead[] }> =>
+  request<{ data: TrainingSetHead[] }>('/new-dedup/labeling/training-set/heads', {
+    jwt: true,
+  });
+
+export const listTrainingSet = (params: {
+  tag_id: number;
+  state?: 'positive' | 'negative' | 'excluded';
+  source?: 'machine' | 'human';
+  limit?: number;
+  offset?: number;
+}): Promise<{
+  data: {
+    rows: TrainingSetRow[];
+    counts: Omit<TrainingSetHead, 'id' | 'label'>;
+    limit: number;
+    offset: number;
+  };
+}> =>
+  request<{
+    data: {
+      rows: TrainingSetRow[];
+      counts: Omit<TrainingSetHead, 'id' | 'label'>;
+      limit: number;
+      offset: number;
+    };
+  }>('/new-dedup/labeling/training-set', { query: params, jwt: true });
+
 /* Tag-centric browse: this tag's candidate queue (migration 450) plus every
  * image already decided for the tag, each with its state — reaches images the
  * model never proposed this tag for, and backs "kitchen = excluded" filtering.

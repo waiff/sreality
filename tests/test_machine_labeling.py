@@ -288,3 +288,65 @@ def test_no_statement_carries_a_bare_percent_sign() -> None:
             continue
         bare = re.findall(r"%(?!\()", sql)
         assert not bare, f"{name} carries {len(bare)} bare percent sign(s)"
+
+
+# ------------------------------------------------------------------ the review read
+def test_the_training_set_read_excludes_the_holdout() -> None:
+    # Correcting a yardstick image from a training-review page would quietly
+    # train on the thing that grades us.
+    from toolkit import machine_labeling as ml
+
+    for sql in (ml._TRAINING_PAGE_SQL, ml._TRAINING_COUNTS_SQL):
+        assert "tag_exam_members hx" in sql and "tag_exam_cohorts hc" in sql
+
+
+def test_the_page_orders_by_a_unique_tiebreaker() -> None:
+    # A bulk write stamps thousands of rows in the same second; updated_at
+    # alone would reshuffle rows between pages and show duplicates.
+    from toolkit import machine_labeling as ml
+
+    assert "ORDER BY l.updated_at DESC, l.image_id DESC" in ml._TRAINING_PAGE_SQL
+
+
+def test_the_page_refuses_a_state_or_source_it_does_not_understand() -> None:
+    from toolkit import machine_labeling as ml
+
+    with pytest.raises(ValueError):
+        ml.training_set_page(_Conn([]), tag_id=22, state="maybe")
+    with pytest.raises(ValueError):
+        ml.training_set_page(_Conn([]), tag_id=22, source_class="robot")
+
+
+def test_the_page_caps_its_limit_and_floors_its_offset() -> None:
+    from toolkit import machine_labeling as ml
+
+    conn = _Conn([])
+    ml.training_set_page(conn, tag_id=22, limit=10_000, offset=-5)
+    params = conn.log[0][2]
+    assert params["limit"] == 200 and params["offset"] == 0
+
+
+def test_counts_split_positives_by_who_decided_them() -> None:
+    # A head carried entirely by machine work reads differently from one the
+    # operator has confirmed, and the picker has to show that.
+    from toolkit import machine_labeling as ml
+
+    conn = _Conn([(22, "positive", True, 400), (22, "positive", False, 20),
+                  (22, "negative", True, 5000)])
+    out = ml.training_set_counts(conn, tag_ids=[22, 25])
+    assert out[22]["positive"] == 420
+    assert out[22]["machine_positive"] == 400 and out[22]["human_positive"] == 20
+    assert out[22]["negative"] == 5000
+    assert out[25]["positive"] == 0
+
+
+def test_a_label_written_under_replaced_wording_is_flagged() -> None:
+    from toolkit import machine_labeling as ml
+
+    import datetime as dt
+    now = dt.datetime(2026, 9, 5)
+    conn = _Conn([(5, "img/a.jpg", "positive", "machine", None, now, 3, "superseded"),
+                  (6, "img/b.jpg", "positive", "machine", None, now, 4, "active")])
+    rows = ml.training_set_page(conn, tag_id=22)
+    assert rows[0]["definition_stale"] is True and rows[0]["definition_version"] == 3
+    assert rows[1]["definition_stale"] is False
