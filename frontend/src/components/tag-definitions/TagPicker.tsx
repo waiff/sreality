@@ -61,7 +61,7 @@ const TagPicker = forwardRef<HTMLSelectElement, Props>(function TagPicker(
       className={[
         'min-w-0 px-1.5 py-1 text-[0.76rem] font-mono rounded-[var(--radius-xs)]',
         'border border-[var(--color-rule)] bg-[var(--color-inset)] text-[var(--color-ink-2)]',
-        'focus:outline-none focus:border-[var(--color-copper)]',
+        ' focus-visible:border-[var(--color-copper)]',
         className,
       ].join(' ')}
     >

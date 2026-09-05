@@ -250,7 +250,7 @@ export function RunDetailModal({
           type="button"
           onClick={onClose}
           aria-label="Close"
-          className="absolute top-3 right-3 z-10 w-9 h-9 flex items-center justify-center text-[var(--color-ink-3)] hover:text-[var(--color-ink)] rounded-[var(--radius-sm)] focus:outline-none focus-visible:border focus-visible:border-[var(--color-copper)]"
+          className="absolute top-3 right-3 z-10 w-9 h-9 flex items-center justify-center text-[var(--color-ink-3)] hover:text-[var(--color-ink)] rounded-[var(--radius-sm)] focus-visible:border focus-visible:border-[var(--color-copper)]"
         >
           <CloseGlyph />
         </button>
@@ -712,7 +712,7 @@ function YieldNumField({
             if (Number.isFinite(n)) onChange(n);
           }}
           className={[
-            'flex-1 min-w-0 px-3 py-2 text-sm font-mono tabular-nums rounded-[var(--radius-sm)] border text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]',
+            'flex-1 min-w-0 px-3 py-2 text-sm font-mono tabular-nums rounded-[var(--radius-sm)] border text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)]',
             readOnly
               ? 'bg-[var(--color-paper-2)] border-[var(--color-rule)] text-[var(--color-ink-2)] cursor-default'
               : 'bg-[var(--color-inset)] border-[var(--color-rule)]',
@@ -1752,7 +1752,7 @@ function NumField({
             const n = Number(raw);
             if (Number.isFinite(n)) onChange(n);
           }}
-          className="flex-1 min-w-0 px-3 py-2 text-sm font-mono tabular-nums rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+          className="flex-1 min-w-0 px-3 py-2 text-sm font-mono tabular-nums rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)]"
         />
         {suffix && (
           <span className="self-center text-[0.78rem] tracking-wide text-[var(--color-ink-3)]">
@@ -2085,7 +2085,7 @@ function FloatingFeedbackPanel({
               onChange={(e) => setText(e.target.value)}
               maxLength={4000}
               placeholder="e.g. The cohort was too broad — it kept three 4+kk listings even though the target is 2+kk. Tighten the disposition match before relaxing it."
-              className="mt-1.5 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] resize-y"
+              className="mt-1.5 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] resize-y"
             />
             <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
               {text.length} / 4000
@@ -2171,7 +2171,7 @@ function FloatingFeedbackPanel({
                 rows={12}
                 value={promptDraft ?? skillQ.data?.system_prompt ?? ''}
                 onChange={(e) => setPromptDraft(e.target.value)}
-                className="w-full px-3 py-2 text-[0.78rem] font-mono rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)] resize-y"
+                className="w-full px-3 py-2 text-[0.78rem] font-mono rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] resize-y"
               />
               {updatePromptMut.error && (
                 <p className="text-[0.7rem] text-[var(--color-brick)]">

@@ -320,7 +320,7 @@ export default function Pipeline() {
                 );
                 if (picked) setSort({ field: picked.field, direction: picked.direction });
               }}
-              className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-2 py-1 text-[0.78rem] text-[var(--color-ink-2)] transition-colors hover:border-[var(--color-rule-strong)] focus:border-[var(--color-rule-strong)] focus:outline-none"
+              className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-2 py-1 text-[0.78rem] text-[var(--color-ink-2)] transition-colors hover:border-[var(--color-rule-strong)]"
             >
               {PIPELINE_SORT_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
@@ -607,7 +607,7 @@ function StageManager({ stages }: { stages: PipelineStage[] }) {
           }}
           placeholder="Nová fáze…"
           maxLength={80}
-          className="flex-1 px-2 py-1 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+          className="flex-1 px-2 py-1 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)]"
         />
         <button
           type="button"
@@ -714,7 +714,7 @@ function StageEditorRow({
           placeholder={String(ordinal)}
           aria-label="Značka fáze"
           title={'Značka ve trychtýři (např. „1“, „9“). Prázdné = pořadí fáze.'}
-          className="w-10 shrink-0 rounded-[var(--radius-sm)] border border-transparent bg-[var(--color-inset)] px-1 py-1 text-center font-mono text-sm tabular-nums text-[var(--color-ink)] hover:border-[var(--color-rule)] focus:border-[var(--color-rule-strong)] focus:outline-none"
+          className="w-10 shrink-0 rounded-[var(--radius-sm)] border border-transparent bg-[var(--color-inset)] px-1 py-1 text-center font-mono text-sm tabular-nums text-[var(--color-ink)] hover:border-[var(--color-rule)]"
         />
         <input
           value={label}
@@ -725,7 +725,7 @@ function StageEditorRow({
           }}
           maxLength={80}
           aria-label="Název fáze"
-          className="flex-1 min-w-0 px-2 py-1 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-transparent hover:border-[var(--color-rule)] focus:border-[var(--color-rule-strong)] focus:outline-none text-[var(--color-ink)]"
+          className="flex-1 min-w-0 px-2 py-1 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-transparent hover:border-[var(--color-rule)] text-[var(--color-ink)]"
         />
         <span className="flex shrink-0 items-center gap-0.5">
           <button

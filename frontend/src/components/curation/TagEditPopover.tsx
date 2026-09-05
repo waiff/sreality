@@ -156,7 +156,7 @@ function Popover({
         onChange={(e) => setName(e.target.value)}
         maxLength={50}
         autoFocus
-        className="mt-1.5 w-full px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+        className="mt-1.5 w-full px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)]"
       />
       <div className="mt-2 flex items-center gap-1 flex-wrap">
         <TagColorPicker value={color} onChange={(c) => c && setColor(c)} size="sm" />

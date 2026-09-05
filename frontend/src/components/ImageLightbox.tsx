@@ -95,7 +95,7 @@ export default function ImageLightbox({
           onClose();
         }}
         aria-label="Close"
-        className="absolute top-3 right-3 w-9 h-9 flex items-center justify-center text-[var(--color-ink-4)] hover:text-[var(--color-paper)] focus:outline-none focus-visible:border focus-visible:border-[var(--color-copper)] rounded-[var(--radius-sm)]"
+        className="absolute top-3 right-3 w-9 h-9 flex items-center justify-center text-[var(--color-ink-4)] hover:text-[var(--color-paper)] focus-visible:border focus-visible:border-[var(--color-copper)] rounded-[var(--radius-sm)]"
       >
         <CloseGlyph />
       </button>
@@ -109,7 +109,7 @@ export default function ImageLightbox({
               prev();
             }}
             aria-label="Previous photo"
-            className="absolute left-2 md:left-6 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center rounded-full text-[var(--color-ink-4)] hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10 focus:outline-none focus-visible:border focus-visible:border-[var(--color-copper)]"
+            className="absolute left-2 md:left-6 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center rounded-full text-[var(--color-ink-4)] hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10 focus-visible:border focus-visible:border-[var(--color-copper)]"
           >
             <ArrowGlyph dir="left" />
           </button>
@@ -120,7 +120,7 @@ export default function ImageLightbox({
               next();
             }}
             aria-label="Next photo"
-            className="absolute right-2 md:right-6 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center rounded-full text-[var(--color-ink-4)] hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10 focus:outline-none focus-visible:border focus-visible:border-[var(--color-copper)]"
+            className="absolute right-2 md:right-6 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center rounded-full text-[var(--color-ink-4)] hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10 focus-visible:border focus-visible:border-[var(--color-copper)]"
           >
             <ArrowGlyph dir="right" />
           </button>

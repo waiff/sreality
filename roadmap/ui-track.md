@@ -503,7 +503,19 @@ card, a layout change on the Brokers search box, stale hunks, a required prop
 with no caller). New lint rail: a nameless `input|textarea|select` outside a
 `<label>` / `Field as="control"` fails lint — 50 → 0. 15 test files added.
 
-**Remaining waves, in the review's order, W2 done:** W2 composite widgets
+**W3 — focus is visible (merged).** 63 controls had opted out of the global
+`:focus-visible` ring with `focus:outline-none`, 32 of them swapping it for a
+border that computes to 1.18:1. All deleted, mechanically and reported per
+file (32 source files, +79/−63); the surviving real indicators normalised to
+`focus-visible:`. A first pass with a generic whitespace tidy collapsed
+indentation across 136 files and was reverted before commit. Unconditional lint
+ban on the literal; a source-level test guards the global rule the 63 now rely
+on. **Operator ask, not smuggled:** `--color-focus` composites to 1.86:1 in
+light mode (the base palette) — under WCAG 2.4.11's 3:1; dark passes at 3.16:1.
+Raising it is a `globals.css` `@theme` change reserved for you; no conformance
+claim is made until it lands.
+
+**Remaining waves, in the review's order, W2–W3 done:** W2 composite widgets
 name their internals (63 controls with no name from any source); W3 focus is
 visible (65 `focus:outline-none`, 33 with a 1.18:1 replacement — a deletion
 wave, plus the `--color-focus` token which is operator territory); W4 focus has

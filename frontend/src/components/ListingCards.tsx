@@ -905,7 +905,7 @@ function SortDropdown({
           );
           if (picked) onChange(picked.spec);
         }}
-        className="px-2 py-1 text-[0.7rem] rounded-[var(--radius-sm)] bg-[var(--color-paper-2)] border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] focus:outline-none focus:border-[var(--color-rule-strong)] transition-colors"
+        className="px-2 py-1 text-[0.7rem] rounded-[var(--radius-sm)] bg-[var(--color-paper-2)] border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] transition-colors"
       >
         {!SORT_PRESETS.some((p) => sortToParam(p.spec) === current) && (
           <option value={current}>Default</option>

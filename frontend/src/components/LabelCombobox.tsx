@@ -112,7 +112,7 @@ export default function LabelCombobox({
         }}
         onBlur={commitTypedText}
         placeholder={placeholder}
-        className="w-full px-2 py-1 text-[0.78rem] rounded-[var(--radius-xs)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+        className="w-full px-2 py-1 text-[0.78rem] rounded-[var(--radius-xs)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)]"
       />
       {open && (matches.length > 0 || showCreate) && (
         <ul

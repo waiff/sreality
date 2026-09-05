@@ -108,7 +108,7 @@ function FieldRow({ row }: { row: Row }) {
         type="text"
         defaultValue={row.exampleValue}
         readOnly
-        className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none"
+        className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)]"
       />
     </div>
   );

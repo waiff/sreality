@@ -49,7 +49,7 @@ const LINE_MAX = 300;
 const INPUT =
   'w-full min-w-0 px-2 py-1 text-[0.82rem] rounded-[var(--radius-xs)] border ' +
   'border-[var(--color-rule)] bg-[var(--color-inset)] text-[var(--color-ink)] ' +
-  'placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-copper)]';
+  'placeholder:text-[var(--color-ink-4)] focus-visible:border-[var(--color-copper)]';
 
 const REMOVE =
   'shrink-0 px-1.5 py-1 text-[0.75rem] leading-none rounded-[var(--radius-xs)] ' +

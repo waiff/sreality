@@ -56,7 +56,7 @@ function Thumbnail({
     <button
       type="button"
       onClick={onClick}
-      className="group relative block w-full aspect-[4/3] cursor-zoom-in overflow-hidden rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-inset)] focus:outline-none focus-visible:border-[var(--color-copper)]"
+      className="group relative block w-full aspect-[4/3] cursor-zoom-in overflow-hidden rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-inset)] focus-visible:border-[var(--color-copper)]"
       aria-label={`Photo ${image.sequence ?? image.id}`}
     >
       {errored ? (

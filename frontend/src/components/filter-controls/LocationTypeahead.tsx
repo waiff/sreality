@@ -208,7 +208,7 @@ export function LocationTypeahead({
             selected.length === 0 ? 'Type a city, district, or street…' : 'Add another…'
           }
           disabled={notConfigured}
-          className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-60"
+          className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] disabled:opacity-60"
         />
         {open && !notConfigured && (
           <SuggestPanel

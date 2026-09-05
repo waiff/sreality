@@ -195,7 +195,7 @@ function PortalCard({ portal }: { portal: PortalAdminRow }) {
                           onChange={(e) =>
                             setDraft((d) => ({ ...d, [f.key]: e.target.value }))
                           }
-                          className="w-24 px-2 py-1 text-right font-mono text-xs rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)]"
+                          className="w-24 px-2 py-1 text-right font-mono text-xs rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus-visible:border-[var(--color-copper)]"
                         />
                       </span>
                     </label>
@@ -272,7 +272,7 @@ function GlobalCard({ setting }: { setting: AppSetting }) {
               value={draft[f.key]}
               placeholder="unset"
               onChange={(e) => setDraft((d) => ({ ...d, [f.key]: e.target.value }))}
-              className="w-24 px-2 py-1 text-right font-mono text-xs rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)]"
+              className="w-24 px-2 py-1 text-right font-mono text-xs rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus-visible:border-[var(--color-copper)]"
             />
           </label>
         ))}

@@ -291,7 +291,7 @@ function NumberField({
         onKeyDown={(e) => {
           if (e.key === 'Enter') commit();
         }}
-        className="w-20 px-2 py-1 font-mono text-sm text-right rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)] disabled:opacity-60"
+        className="w-20 px-2 py-1 font-mono text-sm text-right rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus-visible:border-[var(--color-copper)] disabled:opacity-60"
       />
       {dirty && (
         <button
@@ -333,7 +333,7 @@ function TextField({
         onKeyDown={(e) => {
           if (e.key === 'Enter' && dirty) onSave(draft);
         }}
-        className="w-32 px-2 py-1 font-mono text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)] disabled:opacity-60"
+        className="w-32 px-2 py-1 font-mono text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus-visible:border-[var(--color-copper)] disabled:opacity-60"
       />
       {dirty && (
         <button

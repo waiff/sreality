@@ -65,7 +65,7 @@ export default function ComparableModal({
           type="button"
           onClick={onClose}
           aria-label="Close"
-          className="absolute top-3 right-3 w-9 h-9 flex items-center justify-center text-[var(--color-ink-3)] hover:text-[var(--color-ink)] rounded-[var(--radius-sm)] focus:outline-none focus-visible:border focus-visible:border-[var(--color-copper)]"
+          className="absolute top-3 right-3 w-9 h-9 flex items-center justify-center text-[var(--color-ink-3)] hover:text-[var(--color-ink)] rounded-[var(--radius-sm)] focus-visible:border focus-visible:border-[var(--color-copper)]"
         >
           <CloseGlyph />
         </button>
@@ -192,7 +192,7 @@ function Carousel({ images, isActive }: { images: ImagePublic[]; isActive: boole
                 onClick={() => setI(idx)}
                 aria-label={`Photo ${idx + 1}`}
                 className={[
-                  'w-full aspect-[4/3] rounded-[var(--radius-xs)] overflow-hidden border bg-[var(--color-inset)] focus:outline-none',
+                  'w-full aspect-[4/3] rounded-[var(--radius-xs)] overflow-hidden border bg-[var(--color-inset)]',
                   idx === safe
                     ? 'border-[var(--color-copper)]'
                     : 'border-[var(--color-rule)]',

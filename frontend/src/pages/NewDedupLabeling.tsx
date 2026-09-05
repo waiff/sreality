@@ -1104,7 +1104,7 @@ export default function NewDedupLabeling() {
                   onChange={(e) => setGrowCount(e.target.value)}
                   disabled={growMut.isPending}
                   aria-label="Images to add to the proposal pool"
-                  className="w-20 px-2 py-1 font-mono text-sm text-right rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)] disabled:opacity-50"
+                  className="w-20 px-2 py-1 font-mono text-sm text-right rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus-visible:border-[var(--color-copper)] disabled:opacity-50"
                 />
                 <select
                   value={growCategory}
@@ -1463,7 +1463,7 @@ function CandidateQueuePanel({
               onChange={(e) => onCountChange(e.target.value)}
               disabled={drawing}
               aria-label="Candidates to draw"
-              className="w-20 px-2 py-1 font-mono text-sm text-right rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)] disabled:opacity-50"
+              className="w-20 px-2 py-1 font-mono text-sm text-right rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus-visible:border-[var(--color-copper)] disabled:opacity-50"
             />
             <select
               value={category}
@@ -1704,7 +1704,7 @@ function TaxonomyBarChart({
               onChange={(e) => onMaxTrainedChange(e.target.value)}
               placeholder="any"
               aria-label="Max training images per tag"
-              className="w-16 px-1.5 py-1 font-mono text-xs text-right rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)]"
+              className="w-16 px-1.5 py-1 font-mono text-xs text-right rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus-visible:border-[var(--color-copper)]"
             />
             imgs
           </label>
@@ -1914,7 +1914,7 @@ function ProposalTile({
             type="button"
             onClick={onOpen}
             aria-label={`Open photo ${image.id}`}
-            className="absolute inset-0 block h-full w-full cursor-zoom-in focus:outline-none focus-visible:border focus-visible:border-[var(--color-copper)]"
+            className="absolute inset-0 block h-full w-full cursor-zoom-in focus-visible:border focus-visible:border-[var(--color-copper)]"
           >
             <img src={imageSrc(image)} alt="" loading="lazy" className="h-full w-full object-cover" />
           </button>
@@ -2016,7 +2016,7 @@ function TagImageTile({
             type="button"
             onClick={onOpen}
             aria-label={`Open photo ${image.id}`}
-            className="absolute inset-0 block h-full w-full cursor-zoom-in focus:outline-none focus-visible:border focus-visible:border-[var(--color-copper)]"
+            className="absolute inset-0 block h-full w-full cursor-zoom-in focus-visible:border focus-visible:border-[var(--color-copper)]"
           >
             <img src={imageSrc(image)} alt="" loading="lazy" className="h-full w-full object-cover" />
           </button>
