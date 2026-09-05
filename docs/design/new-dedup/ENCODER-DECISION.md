@@ -4,8 +4,14 @@
 > **31 GB**; whole database **150 GB**; images stored in R2 = 11,303,863; velocity ≈ 55–60k new
 > images/day (39,794 listings first seen in the last 7 days). Every "10.36M" figure below scales
 > by ×1.09 (a `halfvec(768)` store ≈ 17.5 GB payload, ~19–20 GB on disk). Provisioned disk size
-> and utilisation % still need the Supabase dashboard readout. Status unchanged: **DRAFT,
-> proposed, operator-owned; nothing here is decided.**
+> and utilisation % still need the Supabase dashboard readout.
+>
+> **Status (2026-09-05, later the same day): ACCEPTED by the operator** — DINOv3 ViT-B/16 becomes the
+> primary embedding for the tag heads, Level 3 and path B, **conditional on the operator accepting
+> the DINOv3 licence** (§2.8; free of charge and commercial use permitted, with terms that are the
+> operator's to accept). Fallback if declined: option E (DINOv2 ViT-L/14-reg, Apache-2.0). The
+> CLIP lane keeps running on new images in parallel for later comparison. The bake-off (§5) still
+> runs before the corpus write, as the measurement that confirms the choice on our own photos.
 
 # Encoder decision — which model produces the embeddings for the NEW DEDUP program
 

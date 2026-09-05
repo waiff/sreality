@@ -36,9 +36,9 @@ until the whole stack is approved end-to-end. Other rules:
 | Clique guard | **PARKED** — operator runs separate location data-quality sessions; candidate audit ships pin/clique statistics only |
 | Family semantics | First-shared-family vs waterfall = settings **toggle**, per level (pHash and embeddings separately); **default waterfall** |
 | pHash | Global default ≤11 + per-tag overrides (drawing-tag risk) |
-| Embeddings | DINOv2 on RunPod, **candidate-scoped** (embed only images of listings in candidate pairs), vectors in Supabase; ≥0.98 starting threshold, expect recalibration. **Unchanged by path B** — B generates candidates from the existing CLIP vectors; DINOv2 stays the L3 decision signal |
-| Candidate path B (2026-08-27) | **Image-similarity candidate generation runs in parallel with path A**, all property types: batch k-NN over per-type priority **same-tag** image embeddings proposes pairs, using the **existing corpus-wide CLIP 512-d vectors** (already stored — no new backfill) once W3's retag supplies the new tags. **B is only another way to FIND pairs** — everything downstream (levels, rules, settings) is identical to A; nothing B-specific exists. B's two search parameters (neighbor count, minimum similarity to propose a pair) are not yet specified — the operator is asked at build time. Audit C (W5) shows whether CLIP vectors suffice or B should read DINOv2 vectors — operator decides |
-| Probe scope (2026-08-27) | **v1 trains exactly the 11 tags the operator's spec names** in the per-type priority families (list in the 2026-08-27 part-2 ledger entry; operator confirms at the next labeling round). Gate 1 applies to target tags only; existing granular labels fold in via the training-time collapse map; non-target images stay proposal/zero-shot-labeled. Open operator question: how ostatní's any-two-interior rule is represented at labeling time. More tags later = the same create→sample→train loop, when the operator asks |
+| Embeddings (ruled 2026-09-05) | **DINOv3 ViT-B/16, 768-d `halfvec`, corpus-wide, is the PRIMARY embedding for all three consumers — the tag heads, Level 3 similarity, and path B** — conditional on the operator accepting the DINOv3 licence (free of charge + commercial use permitted; the terms in ENCODER-DECISION.md §2.8 are the operator's to accept). If declined: DINOv2 ViT-L/14-with-registers (Apache-2.0). ≥0.98 starting L3 threshold, expect recalibration. **The CLIP lane keeps running on new images in parallel** so results can be compared later. Cadence for new images: OPEN (see 2026-09-05 (b)) |
+| Candidate path B (2026-08-27; vectors re-ruled 2026-09-05) | **Image-similarity candidate generation runs in parallel with path A**, all property types: batch k-NN over per-type priority **same-tag** image embeddings proposes pairs, using the **DINOv3 vectors** (same store as the heads and L3) once W3's retag supplies the new tags. **B is only another way to FIND pairs** — everything downstream (levels, rules, settings) is identical to A; nothing B-specific exists. B's two search parameters (neighbor count, minimum similarity to propose a pair) are not yet specified — the operator is asked at build time. Audit C (W5) shows whether CLIP vectors suffice or B should read DINOv2 vectors — operator decides |
+| Gate 1 (ruled 2026-09-05; supersedes "Probe scope 2026-08-27") | **Target tags = 12**: fasáda, nezařízená místnost, půdorys, katastrální mapa, kuchyně, obývací pokoj, koupelna, garáž, jídelna, ložnice, technické zařízení, domovní vchod (open: which of the two "domovní vchod" tags — exteriér id 2 or interiér id 19). **Machine-made labels COUNT** toward the per-tag target; the operator expects ~300–400 positives per head, machine-labeled under the operator-approved definitions and process. The per-head agreement report stays a **diagnostic the operator reads**, not a threshold in code. **The training set is not finalized or reviewed yet — no training on it until the operator says so.** Open question carried: how ostatní's any-two-interior rule is represented at labeling time |
 | RunPod | Set up in Wave 1; serverless/on-demand only, **<$1/day** run-rate; may reuse PR #804 harness |
 | Vision | GPT-5-mini, manual batches only; qwen pluggable later |
 | Taxonomy v1 | The operator-curated `image_training_examples` label set (49 labels: `interier -*`, `exterier -*`, `podklad -*`, standalone garáž/technické zařízení/other); "katastr" ≙ `podklad - katastrální mapa`; tag-family defaults reconfirmed at training-set finalization |
@@ -83,7 +83,7 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   gallery-flip hazard); iterate sample until 300 proposals for ≥50% of the **target** categories,
   then assess coverage with operator. Operator confirms/dismisses into the training set. ⛳ per
   sample round.
-  **Gate 1: 150 training images per probe-target tag (the 11 spec-named tags — see Probe scope).**
+  **Gate 1: 150 training images (human or machine) per target tag — the 12 tags ruled 2026-09-05 — AND the operator has reviewed and finalized the set.**
 - **W2 — Level 0: candidate selection.** Primary path + 2 fallbacks + byt floor rule, sim
   candidate store, **Candidate audit page** (type × path matrix, **with a path-B column from day
   one** — empty until W3; missing-field tables overall + per portal per type; pin/clique
@@ -94,7 +94,7 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 - **W3 — Linear probe + full retag + candidate path B.** Train probe on the gated training set
   (grouped splits, pinned encoder, versioned artifact); validate on the Labeling page;
   campaign-retag the corpus into the sim tag store. Then **path B generation**: a batch k-NN job
-  over per-type priority same-tag images on the existing CLIP vectors (off-DB, e.g. FAISS on a
+  over per-type priority same-tag images on the DINOv3 vectors (off-DB, e.g. FAISS on a
   pod/runner; writes candidate pairs + best-similarity evidence into the sim store; candidate
   audit + funnel gain their B numbers; B's two search parameters asked of the operator at build
   time). **Gate 3: operator accepts tag quality; per-type default tag-family orders
@@ -106,11 +106,11 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   **Suspicious-properties page** (concurrent price divergence; ≥N listings merged, default 6;
   best-pair-vs-next-tag divergence filter). ⛳ evidence / decisions / each page.
   **Gate 4: visual validation — no easy merges missed, no strong signal underused, threshold calibrated.**
-- **W5 — Level 3: embeddings.** DINOv2 on RunPod (candidate-scoped — path B does not widen this;
-  it reads the CLIP vectors), vectors in Supabase;
+- **W5 — Level 3: embeddings.** DINOv3 ViT-B/16 vectors (corpus-wide, computed on RunPod — the
+  same store the heads and path B read), in Supabase;
   evidence + decisions; audit A (pHash-style with similarity), B (click-an-image search),
-  C (all-candidates pHash-vs-embeddings comparison — also the evidence for whether path B should
-  upgrade to DINOv2 vectors); dismiss-decision validation; DINOv2 audit
+  C (all-candidates pHash-vs-embeddings comparison, plus CLIP-vs-DINOv3 on the same pairs, since
+  the CLIP lane keeps running); dismiss-decision validation; DINOv2 audit
   page. **Gate 5: measurable lift over pHash; similarity calibrated; dismiss confidence decided.**
 - **W6 — Level 4: vision.** Batch selector (cohort filters, model routing), robust prompt +
   3-outcome contract, decision counts per type (all operator-editable in settings); results/
@@ -278,6 +278,30 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   read into two revisions. The rule lives in the migration comment and the module docstring,
   not only here.
 
+- 2026-09-05 (b) — **Operator rulings on Gate 1, the labeling budget and the encoder** (docs
+  only; the decisions-ledger rows above were rewritten to match). Gate 1: 12 target tags (listed
+  in the ledger row); machine-made labels count; the agreement report is a diagnostic, not a
+  gate; **the training set is not finalized — no training on it yet.** Budget: the remaining
+  ~$47 is NOT to be spent unless needed; no paid next step had been agreed, so nothing is
+  scheduled. Encoder: **DINOv3 ViT-B/16 as the primary embedding for heads + L3 + path B**,
+  conditional on the operator accepting the licence (free + commercial-use yes; §2.8 terms are
+  theirs to accept — needs the operator's Hugging Face click-through so an acceptance record
+  exists); the CLIP lane continues on new images in parallel for later comparison (storage
+  grows on both stores, ~6 GB/month combined). Directive: get the DINOv3 embedding job and the
+  per-tag heads trainer READY so training starts the moment the set is finalized. Dependencies
+  to be added with rule-7 justification as analysis/training-only extras: scikit-learn (heads),
+  faiss (path B k-NN). Open, to be answered by the operator: (a) which "domovní vchod" tag is
+  the 12th target (exteriér id 2 / interiér id 19); (b) embedding cadence for new images —
+  near-real-time question raised; options costed in chat (nightly batch ≈ $0.05/day, up to 24 h
+  latency · hourly pods ≈ $0.30–0.50/day, ~1 h · RunPod serverless per-request ≈ $0.3–1/day
+  estimated, minutes — needs a measured number; CPU on the always-on worker rejected as a risk to
+  the scrape loops). Design rule regardless of cadence: embedding + tagging are an asynchronous
+  stage AFTER publication; nothing in the ingest path waits for them; the LLM labeler is never
+  in the pipeline at all (training-set construction only). Next session (fresh context): the
+  readiness build — bake-off harness rewrite, new vector table migration (RLS/REVOKE posture
+  replayed, pgvector-conditional for CI), DINOv3 embedding job on RunPod with checkpoint/resume +
+  write throttle, heads trainer + eval harness reading `image_tag_labels` with the holdout
+  excluded — none of it run against the unfinalized training set.
 - 2026-09-05 — **Program review + encoder decision draft (docs only; nothing decided).** A
   12-agent review pass (progress audit, four encoder studies, one-encoder feasibility, cost
   model, synthesis, three adversarial refuters, revision). Findings:
