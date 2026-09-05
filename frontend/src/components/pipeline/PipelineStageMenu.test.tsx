@@ -6,6 +6,7 @@
  * portal on <body> rather than inside its (clipped) anchor.
  */
 
+import { expectNoNestedInteractive, expectRovingGroup } from '@/test/a11y';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { createRef } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -127,5 +128,32 @@ describe('<PipelineStageMenu>', () => {
     const menu = await screen.findByRole('menu');
     expect(container.contains(menu)).toBe(false);
     expect(document.body.contains(menu)).toBe(true);
+  });
+});
+
+/* The proof that src/test/a11y.ts can pass a component that is genuinely
+ * correct — this menu already implements the APG menu contract (arrow keys,
+ * Home/End, programmatic focus, every item parked at tabindex -1). */
+describe('<PipelineStageMenu> is the reference roving menu', () => {
+  it('honours ArrowDown / ArrowUp / Home / End', async () => {
+    const { findByRole } = renderMenu(1);
+    const menu = await findByRole('menu');
+    // The stage list arrives from the (mocked) query; wait for an item before
+    // asserting the keyboard contract over the list.
+    await screen.findByRole('menuitemradio', { name: /For Call/ });
+    expectRovingGroup(menu, {
+      // The handler at PipelineStageMenu.tsx traverses [role^="menuitem"]:
+      // the stage radios AND the plain "Odebrat z pipeline" item.
+      itemRole: ['menuitemradio', 'menuitem'],
+      next: 'ArrowDown',
+      prev: 'ArrowUp',
+      homeEnd: true,
+    });
+  });
+
+  it('nests no interactive element inside another', async () => {
+    const { container } = renderMenu(1);
+    await screen.findByRole('menuitemradio', { name: /For Call/ });
+    expectNoNestedInteractive(container);
   });
 });
