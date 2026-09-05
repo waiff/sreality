@@ -271,6 +271,16 @@ def archived_html_for(source: str) -> Path | None:
     return path if path.exists() else None
 
 
+# The native id the archived fixture's own markup is keyed by. A subject-scoped reader
+# (`subject_scope: {kind: id_match, on_miss: fail}`) picks its object by this value, so a
+# portal whose fixture carries a real page's id has to be SCORED under that id — otherwise
+# every subject-scoped entry misses, `SubjectNotFound` takes the scorer down, and after a
+# bless the golden would read as "this PR extracts nothing", which is the exact false
+# positive this arm exists to prevent. `"fixture"` remains the default for every portal
+# whose pinned body carries no id of its own.
+ARCHIVE_FIXTURE_NATIVE: dict[str, str] = {"idnes": "6a71888887e5da33ca081ad8"}
+
+
 def project_archived(read: Any) -> dict[str, Any]:
     claim = read.claim
     return {
@@ -298,13 +308,14 @@ def score_archived(contract: contracts.PortalContract) -> list[dict[str, Any]]:
                if e.reader in ARCHIVE_READERS and e.page_kind == "detail"]
     if path is None or not entries:
         return []
+    native = ARCHIVE_FIXTURE_NATIVE.get(contract.source, "fixture")
     register = ScopeRegister.from_zones(contract.source, contract.exclusion_zones)
     document = scope_html(path.read_bytes(), register=register)
     payload = ArchivedPayload(
-        id=1, source=contract.source, source_id_native="fixture", page_kind="detail",
+        id=1, source=contract.source, source_id_native=native, page_kind="detail",
         payload_sha256="0" * 64, first_observed_at=_ARCHIVE_CLOCK,
         body=path.read_bytes())
-    row = fx.listing(contract.source, {}, native="fixture")
+    row = fx.listing(contract.source, {}, native=native)
     out: list[dict[str, Any]] = []
     for entry in sorted(entries, key=lambda e: e.entry_id):
         for read in ARCHIVE_READERS[entry.reader](entry, row, payload, document):
