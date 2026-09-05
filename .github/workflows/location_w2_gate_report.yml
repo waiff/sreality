@@ -1,0 +1,96 @@
+name: "Jobs: Location W2 gate report"
+
+# Read-only. Prints the W2 acceptance gate per portal: precision on that portal's FROZEN
+# labelled sample (street / obec / okres / precision class) for the SHADOWED contract and for
+# the served projection, the OLD system scored from the same sample's `legacy_*` snapshot on
+# the same labels and the same normalizer, the archive lane's yield expressed against the W2-0
+# archived denominator, and the resulting shadow / un-shadow verdict. This is the surface
+# operator action O10 reads before running `python -m location_data.contracts --unshadow`.
+#
+# It writes nothing and takes no lease — every statement is a SELECT and no gate outcome is
+# persisted (O18, whether these numbers belong in `location_metrics_rollup`, is still open and
+# a report that quietly seeded an unseeded table would decide it by accident).
+#
+# Deliberately NOT in the `location-batch` group, for the reason location_claims_remine_verify.yml
+# states: that group serialises the heavy lanes and is oversubscribed by its own crons, and
+# queueing an audit behind the lane it audits would make it unrunnable. It arms its own
+# statement timeouts instead.
+#
+# A FAIL verdict does not fail the job. The report exists to be READ — "no sample yet" is the
+# correct and expected reading for every portal until the O8 labelling is done, and a job that
+# went red on that would train the operator to ignore it. `fail_on_gate` turns the verdict into
+# an exit code for whoever automates it later.
+#
+# Required secret: SUPABASE_DB_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "one portal (blank = all seven W2 HTML portals)"
+        required: false
+        default: ""
+        type: choice
+        options:
+          - ""
+          - remax
+          - ceskereality
+          - realitymix
+          - idnes
+          - bazos
+          - mmreality
+          - maxima
+      json_output:
+        description: "emit JSON instead of the table"
+        required: false
+        default: false
+        type: boolean
+      skip_denominator:
+        description: "skip the W2-0 archived denominator scan (faster re-read; the report then says the citation is missing)"
+        required: false
+        default: false
+        type: boolean
+      fail_on_gate:
+        description: "exit non-zero when any scored portal fails its floors"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  # Own group, per the note above: a read-only audit, not a heavy lane.
+  group: location-w2-gate
+  cancel-in-progress: false
+
+jobs:
+  gate-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Print the W2 gate report
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SOURCE: ${{ inputs.source }}
+          JSON_OUTPUT: ${{ inputs.json_output }}
+          SKIP_DENOMINATOR: ${{ inputs.skip_denominator }}
+          FAIL_ON_GATE: ${{ inputs.fail_on_gate }}
+        run: |
+          ARGS=()
+          if [ -n "$SOURCE" ]; then ARGS+=(--source "$SOURCE"); fi
+          if [ "$JSON_OUTPUT" = "true" ]; then ARGS+=(--json); fi
+          if [ "$SKIP_DENOMINATOR" = "true" ]; then ARGS+=(--skip-denominator); fi
+          if [ "$FAIL_ON_GATE" = "true" ]; then ARGS+=(--fail-on-gate); fi
+          echo "python -m scripts.location_w2_gate_report ${ARGS[*]}"
+          python -m scripts.location_w2_gate_report "${ARGS[@]}"

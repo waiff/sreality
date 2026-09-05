@@ -776,6 +776,9 @@ class _Conn:
         self.listings = {(p.source, p.native): 1000 + p.id for p in self.payload_rows}
         self.batches: list[dict[str, Any]] = []
         self.seen: list[int] = []
+        # Which payload ids the lane actually asked R2/Postgres for a body for. A body is
+        # fetched only for a row some entry applies to, and that is a measured property.
+        self.body_ids: list[int] = []
         self.now = OBSERVED_AT
         self.exclusion_sources = ["remax"]
 
@@ -812,6 +815,7 @@ class _Conn:
             batch["outcome"] = params["outcome"]
             batch["cursor_after_id"] = params["cursor_after_id"]
             batch["cursor_after_ts"] = params["cursor_after_ts"]
+            batch["note"] = params.get("note")
             return
         if "SELECT max(coalesce(coverage_since, started_at))" in sql:
             oks = [b["coverage_since"] for b in self.batches
@@ -834,6 +838,7 @@ class _Conn:
             self.seen.extend(r[0] for r in cur._result)
             return
         if sql.startswith("SELECT id, body, body_r2_key, content_encoding"):
+            self.body_ids.extend(params["ids"])
             cur._result = [(pid, BODY, None, "identity") for pid in params["ids"]]
             return
         if "INSERT INTO location_claims" in sql:
@@ -1450,3 +1455,87 @@ def test_a_non_finite_coordinate_is_refused_even_with_no_guard_declared():
         assert ARCHIVE_READERS["html_point_attrs"](
             entry, listing_row(source="realitymix"), payload(source="realitymix"),
             document) == [], bad
+
+
+# ------------------------------------------------- W2-13: the lane's own batch bounds
+
+def test_the_batch_size_bounds_are_this_lanes_own_not_w1s():
+    """One iteration HERE is a single transaction spanning `batch_size` SEQUENTIAL R2 GETs
+    (one per body, no concurrency) with every decompressed body alive at once — where a W1
+    batch is a cheap keyset page over `listings`. Sharing W1's 10,000 floor would make every
+    dispatch a multi-gigabyte transaction holding thousands of round trips open."""
+    assert claims_remine_archive.ARCHIVE_MIN_BATCH_SIZE < claims_intake.MIN_BATCH_SIZE
+    assert claims_remine_archive.ARCHIVE_MAX_BATCH_SIZE < claims_intake.MAX_BATCH_SIZE
+    clamp = claims_remine_archive.clamp_batch_size
+    assert clamp(1) == claims_remine_archive.ARCHIVE_MIN_BATCH_SIZE
+    assert clamp(500) == 500
+    assert clamp(50_000) == claims_remine_archive.ARCHIVE_MAX_BATCH_SIZE
+    assert (claims_remine_archive.ARCHIVE_MIN_BATCH_SIZE
+            <= claims_remine_archive.ARCHIVE_DEFAULT_BATCH_SIZE
+            <= claims_remine_archive.ARCHIVE_MAX_BATCH_SIZE)
+
+
+def test_applicable_payloads_counts_only_bodies_an_entry_applied_to(monkeypatch):
+    """`payloads` counts a population a zero says nothing about: a detail-only contract
+    legitimately scans its `index` bodies and claims nothing from them. The tripwire needs
+    the population a zero IS a statement about — and no body is fetched for the rest."""
+    monkeypatch.setattr(claims_remine_archive, "missing_relations", lambda conn: [])
+    monkeypatch.setattr(claims_remine_archive, "assert_inventory_ready", lambda conn: 2201)
+    monkeypatch.setattr(claims_remine_archive, "load_entries",
+                        lambda conn: {"remax": [archive_entry()]})   # page_kind='detail'
+    monkeypatch.setitem(
+        ARCHIVE_READERS, "fake_html",
+        lambda entry, row, payload, document: [ArchiveRead(_base(entry, row, value_text="K"))])
+
+    conn = _Conn(0, payloads=[
+        _Payload(1, "remax", "r1", "detail"),
+        _Payload(2, "remax", "r2", "index"),
+        _Payload(3, "remax", "r3", "detail"),
+        _Payload(4, "remax", "r4", "index"),
+    ])
+    stats = _run(conn)
+
+    per_source = stats["per_source"]["remax"]
+    assert per_source["payloads"] == 4
+    assert per_source["applicable_payloads"] == 2
+    assert per_source["payloads"] > per_source["applicable_payloads"]
+    assert sorted(conn.body_ids) == [1, 3], "an index body was fetched for a detail entry"
+    assert stats["applicable_payloads"] == 2, "the run-level total carries it too"
+
+
+def test_the_batch_note_records_the_applicable_population(monkeypatch):
+    """Durable, because the batch row is the run's record once the runner is gone — and it
+    is what `scripts/location_w2_gate_report.py` reads back."""
+    monkeypatch.setattr(claims_remine_archive, "missing_relations", lambda conn: [])
+    monkeypatch.setattr(claims_remine_archive, "assert_inventory_ready", lambda conn: 2201)
+    monkeypatch.setattr(claims_remine_archive, "load_entries",
+                        lambda conn: {"remax": [archive_entry()]})
+    monkeypatch.setitem(ARCHIVE_READERS, "fake_html",
+                        lambda entry, row, payload, document: [])
+    conn = _Conn(3)
+    _run(conn)
+    assert "applicable=3" in conn.batches[0]["note"]
+
+
+def test_zero_claim_sources_ignores_a_trial_run():
+    """`--limit 10` and a first dispatch see too few bodies for a zero to mean anything."""
+    assert claims_remine_archive.zero_claim_sources(
+        {"per_source": {"remax": {"applicable_payloads": 10, "claims": 0}}}) == []
+
+
+def test_zero_claim_sources_names_a_source_that_mined_nothing():
+    """`outcome='ok'` means only "the scan ran out of rows". A portal whose selectors have
+    gone stale sweeps the whole archive, writes nothing, stamps 'ok' and MOVES the
+    incremental watermark — indistinguishable from success at every other surface."""
+    stats = {"per_source": {"remax": {"applicable_payloads": 5_000, "claims": 0}}}
+    assert claims_remine_archive.zero_claim_sources(stats) == ["remax"]
+    stats["per_source"]["remax"]["claims"] = 1
+    assert claims_remine_archive.zero_claim_sources(stats) == []
+
+
+def test_zero_claim_sources_ignores_a_page_kind_with_no_entry():
+    """50,000 bodies scanned and none of them applicable is a detail-only contract doing
+    exactly what it should; a tripwire on `payloads` would fire on every such run."""
+    assert claims_remine_archive.zero_claim_sources(
+        {"per_source": {"remax": {"applicable_payloads": 0, "payloads": 50_000,
+                                  "claims": 0}}}) == []

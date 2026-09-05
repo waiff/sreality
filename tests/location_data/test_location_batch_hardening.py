@@ -55,6 +55,12 @@ LOCATION_BATCH_WORKFLOWS = (
     # instance a claims intake or a registry load hits — exactly the corpus-wide-sweep
     # collision the outer group exists to serialize away.
     "location_claims_remine.yml",
+    # W2-13. The archived-HTML sweep: ~472k bodies, each pulled from R2 with its own GET,
+    # decompressed and scoped in the runner, with the batch's claim writes in the SAME
+    # transaction as those fetches. Heavy on egress, on runner memory and on the instance at
+    # once — and it writes into the very claim spine the hourly intake writes, so it is the
+    # one lane that must never overlap it.
+    "location_claims_remine_archive.yml",
 )
 OUTER_GROUP = "location-batch"
 

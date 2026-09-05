@@ -3208,6 +3208,102 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_remine.yml"
     },
     {
+      "filename": "location_claims_remine_archive.yml",
+      "name": "Jobs: Location archived-HTML sweep (W2)",
+      "description": "Re-mines location claims out of the ARCHIVED page bodies — `portal_raw_payloads`, the store W2a filled from `portal_raw_pages` and now dual-writes, whose bytes live in R2. It runs `location_data.claims_remine_archive`: the latest OK body per (source, source_id_native, page_kind), scoped through that portal's exclusion-zone register, read by the DOM readers its contract names, and written under `surface='archived_html'` with the C6 licence ladder stamped onto every coordinate. Dispatch-only, one portal at a time.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "source",
+          "description": "ONE portal (blank = every portal with a reader, sharing ONE budget — prefer naming one)",
+          "required": false,
+          "type": "choice",
+          "default": "",
+          "options": [
+            "",
+            "sreality",
+            "bezrealitky",
+            "bazos",
+            "idnes",
+            "mmreality",
+            "remax",
+            "ceskereality",
+            "realitymix",
+            "maxima"
+          ]
+        },
+        {
+          "name": "mode",
+          "description": "full = every archived body; incremental = only bodies first observed since the last ok batch",
+          "required": false,
+          "type": "choice",
+          "default": "full",
+          "options": [
+            "full",
+            "incremental"
+          ]
+        },
+        {
+          "name": "max_seconds",
+          "description": "wall-clock budget; stops BETWEEN batches (blank = 2700)",
+          "required": false,
+          "type": "string",
+          "default": "2700",
+          "options": null
+        },
+        {
+          "name": "batch_size",
+          "description": "bodies per batch (50-5000; blank = 500). Each body is one R2 GET inside the batch's transaction — do not raise this casually",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "limit",
+          "description": "stop after this many payloads (blank = no limit). Use it for a first trial dispatch",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "dry_run",
+          "description": "extract and report; write nothing",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        },
+        {
+          "name": "note",
+          "description": "free text stamped on the batch row",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "R2_ACCESS_KEY_ID",
+        "R2_ACCOUNT_ID",
+        "R2_BUCKET_NAME",
+        "R2_SECRET_ACCESS_KEY",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "location-batch",
+      "cancelInProgress": false,
+      "timeoutMinutes": 55,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_claims_remine_archive.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_remine_archive.yml"
+    },
+    {
       "filename": "location_claims_remine_verify.yml",
       "name": "Jobs: Location history gate check (W3)",
       "description": "Read-only. Checks the four arms of the W3 gate against the claims the history backfill actually wrote, and fails the run when any arm fails.",
@@ -3935,6 +4031,69 @@
       "permissions": "contents: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_resolve.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_resolve.yml"
+    },
+    {
+      "filename": "location_w2_gate_report.yml",
+      "name": "Jobs: Location W2 gate report",
+      "description": "Read-only. Prints the W2 acceptance gate per portal: precision on that portal's FROZEN labelled sample (street / obec / okres / precision class) for the SHADOWED contract and for the served projection, the OLD system scored from the same sample's `legacy_*` snapshot on the same labels and the same normalizer, the archive lane's yield expressed against the W2-0 archived denominator, and the resulting shadow / un-shadow verdict. This is the surface operator action O10 reads before running `python -m location_data.contracts --unshadow`.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "source",
+          "description": "one portal (blank = all seven W2 HTML portals)",
+          "required": false,
+          "type": "choice",
+          "default": "",
+          "options": [
+            "",
+            "remax",
+            "ceskereality",
+            "realitymix",
+            "idnes",
+            "bazos",
+            "mmreality",
+            "maxima"
+          ]
+        },
+        {
+          "name": "json_output",
+          "description": "emit JSON instead of the table",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        },
+        {
+          "name": "skip_denominator",
+          "description": "skip the W2-0 archived denominator scan (faster re-read; the report then says the citation is missing)",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        },
+        {
+          "name": "fail_on_gate",
+          "description": "exit non-zero when any scored portal fails its floors",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "location-w2-gate",
+      "cancelInProgress": false,
+      "timeoutMinutes": 20,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_w2_gate_report.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_w2_gate_report.yml"
     },
     {
       "filename": "migrations.yml",
