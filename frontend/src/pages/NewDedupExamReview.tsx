@@ -261,12 +261,15 @@ export default function NewDedupExamReview() {
           />
         )}
         <span className="min-w-0 flex-1">
-          {family && (
-            <span className="block text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)] leading-none mb-0.5">
-              {family}
-            </span>
-          )}
-          <span className="block text-[0.8125rem] leading-snug text-pretty">{name}</span>
+          {/* The family is PART of the tag, shown inline at full size: two tags
+            * differ only by it (exterier vs interier - domovní vchod), and a
+            * demoted eyebrow was measured to fail exactly there. */}
+          <span className="block text-[0.8125rem] leading-snug text-pretty">
+            {family && (
+              <span className="text-[var(--color-ink-3)]">{family} &ndash; </span>
+            )}
+            {name}
+          </span>
         </span>
         {v === 'skipped' && (
           <span className="shrink-0 mt-0.5 text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-copper)]">
@@ -405,14 +408,13 @@ export default function NewDedupExamReview() {
                         {proposals.length > 0 && (
                           <ul className="flex flex-col gap-1">
                             {proposals.map((p) => {
-                              const { name } = splitTagLabel(p.tag.label);
                               return (
                                 <li
                                   key={p.tag.id}
                                   data-testid={`proposal-${r.image_id}-${p.tag.id}`}
                                   className="flex items-center gap-2 flex-wrap text-[0.8125rem]"
                                 >
-                                  <span className="text-[var(--color-ink)]">{name}</span>
+                                  <span className="text-[var(--color-ink)]">{p.tag.label}</span>
                                   <span className="text-[var(--color-ink-3)]">
                                     machine: <b className="font-medium text-[var(--color-ink-2)]">{VERDICT_WORD[p.machine]}</b>
                                     {' · '}you: {VERDICT_WORD[p.human]}

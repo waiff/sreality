@@ -1,15 +1,15 @@
 /* Tag labels carry their family in the text: "interier - koupelna",
- * "podklad - letecký snímek s ohraničením subjektu". On a button that prefix
- * costs the width the actual name needs, and it repeats on nearly every button
- * in the set — so surfaces render it as a small eyebrow above the name instead
- * of inline.
+ * "podklad - letecký snímek s ohraničením subjektu".
  *
- * NOT a truncation and NOT a rename: the family is still shown, because two
- * tags differ ONLY by it — "exterier - domovní vchod" (photographed from the
- * street) versus "interier - domovní vchod / chodba" (from inside). Dropping
- * the prefix would make those two buttons read identically, which is exactly
- * the mislabel this whole programme exists to avoid. The full label stays the
- * button's accessible name.
+ * THE FAMILY IS PART OF THE TAG. It is rendered inline, at the same size as
+ * the name, on every surface. An earlier version demoted it to a small eyebrow
+ * above the name to save width — and that was measured to fail on the one pair
+ * that differs ONLY by family: "exterier - domovní vchod" (from the street)
+ * versus "interier - domovní vchod / chodba" (from inside). A reader, human or
+ * otherwise, skimmed past the eyebrow and could not tell them apart. So this
+ * helper exists only to let a surface tint the family differently; it never
+ * licenses dropping or shrinking it, and the full label stays the accessible
+ * name everywhere.
  */
 
 const FAMILY = /^(interier|exterier|podklad)\s*-\s*(.+)$/i;

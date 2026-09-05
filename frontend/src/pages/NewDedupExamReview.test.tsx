@@ -297,3 +297,30 @@ describe('<NewDedupExamReview> machine review proposals', () => {
     expect(screen.queryByText(/machine review/)).toBeNull();
   });
 });
+
+describe('<NewDedupExamReview> the family is part of the tag', () => {
+  it('shows the family inline at full size, so the entrance pair reads differently', async () => {
+    vi.mocked(api.getExamAnswers).mockResolvedValue({
+      data: {
+        set: 'all',
+        tags: [
+          { id: 2, label: 'exterier - domovní vchod' },
+          { id: 19, label: 'interier - domovní vchod / chodba' },
+        ],
+        rows: [{ image_id: 555, position: 1, picked_tag_ids: [2], skipped_tag_ids: [],
+          cant_tell: false, machine: { verdicts: { '2': 'no', '19': 'yes' },
+            dismissed_tag_ids: [], reviewed_at: null } }],
+      },
+    });
+    renderPage();
+    await screen.findByText(/1 answered/);
+    const ext = screen.getByRole('button', { name: 'exterier - domovní vchod' });
+    const int = screen.getByRole('button', { name: 'interier - domovní vchod / chodba' });
+    // The visible text carries the family; nothing is demoted to a tiny eyebrow.
+    expect(ext.textContent).toMatch(/exterier – domovní vchod/);
+    expect(int.textContent).toMatch(/interier – domovní vchod/);
+    expect(ext.querySelector('.text-\\[0\\.6rem\\]')).toBeNull();
+    // And a proposal names the head in full.
+    expect(screen.getByTestId('proposal-555-2').textContent).toMatch(/exterier - domovní vchod/);
+  });
+});

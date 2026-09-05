@@ -255,15 +255,15 @@ export default function NewDedupExam() {
           {EXAM_KEYS[i]}
         </kbd>
         <span className="min-w-0 flex-1">
-          {family && (
-            /* The family, kept but demoted: two tags differ ONLY by it
-             * (exterier vs interier - domovní vchod), so it cannot be dropped —
-             * but inline it eats the width the name needs. */
-            <span className="block text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)] leading-none mb-0.5">
-              {family}
-            </span>
-          )}
-          <span className="block text-[0.8125rem] leading-snug text-pretty">{name}</span>
+          {/* The family is PART of the tag, shown inline at full size: two tags
+            * differ only by it (exterier vs interier - domovní vchod), and a
+            * demoted eyebrow was measured to fail exactly there. */}
+          <span className="block text-[0.8125rem] leading-snug text-pretty">
+            {family && (
+              <span className="text-[var(--color-ink-3)]">{family} &ndash; </span>
+            )}
+            {name}
+          </span>
           {v === 'skipped' && (
             <span className="block mt-0.5 text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-copper)]">
               left out
