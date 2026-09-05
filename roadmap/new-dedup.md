@@ -289,7 +289,15 @@ W1 (shared prerequisites + labeling program):
       produced them, never touching an exam member and never writing a failed call as a
       negative. Operator direction: thin heads (wc, parkoviště) are left alone — the LLM builds
       the training sets for the heads already defined.
-- [ ] **NEXT — apply 467 + 468, run the review, read the gate.** Then choose the sampling
+- [x] **Training sets BUILT (2026-09-05): 10,544 images, 12 heads, ~$31 of $50.** Gate read on
+      553 reviewed exam images; fasáda's entrance boundary promoted from advice to law
+      (0.60→0.95 precision). Draw yields measured: operator drafts 96%, CLIP near-tag 41%,
+      random 0.9% (garáž). Review surface `/new-dedup/training-set` + `tag_label_notes` (mig
+      473) so a changed mark carries its reason into the next definition revision — distilled
+      as ONE rule per batch, never one line per note.
+- [ ] **NEXT — apply 473; train the CLIP linear probe on the 12 heads; evaluate on exam_v1;**
+      spend the remaining ~$19 where the probe's per-head numbers show labels actually help.
+ Then choose the sampling
       strategy WITH those numbers: ~$47 of the $50 buys ~4-8k labeled images once, and a random
       draw spends most of it on heads that are already strong.
 - [ ] **NEXT — W1 remainder:** one definition renderer with two outputs (the machine prompt and
