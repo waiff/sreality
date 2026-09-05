@@ -134,7 +134,6 @@ describe('<NewDedupTrainingSet>', () => {
   });
 
   it('pages forward, and stops when the page is short', async () => {
-    const user = userEvent.setup();
     renderPage();
     await screen.findByTestId('training-tile-11');
     // Two rows against a 60-row page means there is no next page.
