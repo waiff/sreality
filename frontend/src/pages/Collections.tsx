@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import {
   keepPreviousData,
   useMutation,
@@ -216,7 +217,7 @@ function CollectionRow({ c }: { c: Collection }) {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <Link
-            to={`/collection/${c.id}`}
+            to={ROUTES.collectionDetail.build({ id: c.id })}
             className="text-base text-[var(--color-ink)] hover:text-[var(--color-copper)] hover:underline underline-offset-2 truncate"
           >
             {c.name}

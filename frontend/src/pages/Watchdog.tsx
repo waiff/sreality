@@ -5,6 +5,8 @@ import {
   type InfiniteData,
 } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
+import { runSurfaceUrl } from '@/lib/runLinks';
 
 import {
   kickoffWatchdogDispatchEstimate,
@@ -281,7 +283,7 @@ function Header({
       </div>
       <div className="flex items-center gap-3">
         <Link
-          to="/watchdog/manage"
+          to={ROUTES.watchdogManage.build()}
           className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
         >
           Manage watchdogs
@@ -624,7 +626,10 @@ function EstimationCell({ dispatch }: { dispatch: WatchdogDispatch }) {
   if (status === 'failed') {
     return (
       <Link
-        to={`/estimation/${dispatch.estimation_run_id}`}
+        to={runSurfaceUrl({
+          id: dispatch.estimation_run_id,
+          input_sreality_id: dispatch.sreality_id,
+        })}
         className="text-[0.75rem] text-[var(--color-brick)] hover:underline underline-offset-2"
       >
         failed
@@ -637,7 +642,10 @@ function EstimationCell({ dispatch }: { dispatch: WatchdogDispatch }) {
     : dispatch.estimated_sale_price_czk;
   return (
     <Link
-      to={`/estimation/${dispatch.estimation_run_id}`}
+      to={runSurfaceUrl({
+          id: dispatch.estimation_run_id,
+          input_sreality_id: dispatch.sreality_id,
+        })}
       className="block hover:text-[var(--color-copper)] hover:underline underline-offset-2"
     >
       <span className="block font-mono tabular-nums text-[var(--color-ink)]">
@@ -692,7 +700,10 @@ function KickoffButton({
     }
     return (
       <Link
-        to={`/estimation/${dispatch.estimation_run_id}`}
+        to={runSurfaceUrl({
+          id: dispatch.estimation_run_id,
+          input_sreality_id: dispatch.sreality_id,
+        })}
         className="text-[0.75rem] text-[var(--color-copper)] hover:underline underline-offset-2"
       >
         open →
@@ -737,7 +748,7 @@ function EmptyState({
       </p>
       {!hasAnyWatchdog ? (
         <Link
-          to="/browse"
+          to={ROUTES.browse.build()}
           className="mt-4 inline-block text-sm text-[var(--color-copper)] hover:underline underline-offset-2"
         >
           Create a watchdog in Browse →

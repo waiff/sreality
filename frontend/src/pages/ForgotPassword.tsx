@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import { useAuth } from '../lib/auth';
 import { AuthShell } from './Login';
 
@@ -49,7 +50,7 @@ export default function ForgotPassword() {
           </button>
         </form>
       )}
-      <Link className="text-sm text-blue-600 hover:underline" to="/login">Back to sign in</Link>
+      <Link className="text-sm text-blue-600 hover:underline" to={ROUTES.login.build()}>Back to sign in</Link>
     </AuthShell>
   );
 }

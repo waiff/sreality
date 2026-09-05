@@ -1,5 +1,6 @@
 import { Suspense, useLayoutEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import {
   useNewEstimationModal,
   type NewEstimationPrefill,
@@ -633,7 +634,7 @@ function BrokerVizitka({ listingId }: { listingId: number }) {
       <div className="mt-3 flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
           <Link
-            to={`/brokers/${b.broker_id}`}
+            to={ROUTES.brokerDetail.build({ id: b.broker_id })}
             title={b.broker_display_name ?? undefined}
             className="inline-flex items-center gap-1.5 text-[1.05rem] leading-tight text-[var(--color-ink)] hover:text-[var(--color-copper-2)] transition-colors"
           >
@@ -697,7 +698,7 @@ function Crumb() {
     );
   }
   return (
-    <Link to="/browse" className={className}>
+    <Link to={ROUTES.browse.build()} className={className}>
       <BackArrow />
       <span>Back to browse</span>
     </Link>
@@ -1201,7 +1202,7 @@ function NoListingState({ id, reason }: { id: string | null; reason: 'invalid' |
         </h1>
         <p className="mt-3 text-sm text-[var(--color-ink-3)]">
           The id may be wrong, or the record was never imported.
-          <Link to="/browse" className="ml-1 text-[var(--color-copper)] hover:underline">
+          <Link to={ROUTES.browse.build()} className="ml-1 text-[var(--color-copper)] hover:underline">
             Browse all listings
           </Link>
           .

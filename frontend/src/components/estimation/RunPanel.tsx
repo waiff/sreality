@@ -16,6 +16,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { lazyChunk } from '@/lib/lazyChunk';
 import { Link, useLocation } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import {
   keepPreviousData,
   useMutation,
@@ -869,7 +870,7 @@ function InputRecap({ run }: { run: EstimationRun }) {
         <p className="mt-4 text-[0.78rem] text-[var(--color-ink-3)]">
           Re-run of{' '}
           <Link
-            to={`/estimation/${run.parent_run_id}`}
+            to={ROUTES.estimationDetail.build({ id: run.parent_run_id })}
             className="font-mono tabular-nums text-[var(--color-copper)] hover:underline underline-offset-2"
           >
             #{run.parent_run_id}

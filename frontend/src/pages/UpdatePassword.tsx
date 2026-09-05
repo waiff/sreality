@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
 import { useAuth } from '../lib/auth';
 import { AuthShell } from './Login';
 
@@ -23,7 +24,7 @@ export default function UpdatePassword() {
     try {
       await updatePassword(password);
       setDone(true);
-      setTimeout(() => navigate('/browse'), 1200);
+      setTimeout(() => navigate(ROUTES.browse.build()), 1200);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not update password');
     } finally {

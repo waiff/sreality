@@ -10,6 +10,7 @@ import {
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Session, User } from '@supabase/supabase-js';
 import { supabase } from './supabase';
+import { ROUTES } from './routes';
 
 /**
  * Phase 1 auth context. Tracks the Supabase session and exposes sign-in/out.
@@ -130,13 +131,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       async signInWithGoogle() {
         const { error } = await supabase.auth.signInWithOAuth({
           provider: 'google',
-          options: { redirectTo: `${window.location.origin}/browse` },
+          options: { redirectTo: `${window.location.origin}${ROUTES.browse.build()}` },
         });
         if (error) throw error;
       },
       async sendPasswordReset(email) {
         const { error } = await supabase.auth.resetPasswordForEmail(email, {
-          redirectTo: `${window.location.origin}/reset-password`,
+          redirectTo: `${window.location.origin}${ROUTES.resetPassword.build()}`,
         });
         if (error) throw error;
       },
