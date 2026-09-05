@@ -29,6 +29,15 @@ psql "$SUPABASE_DB_URL" -c "\d listings" | head -60
   safety policy below), and anything needing its confirmation gate. It *can* run SELECTs,
   but after a heavy MCP phase run `/compact`; in a session that never touches the DB,
   disable the server via `/mcp`.
+- **When there is no `psql` on PATH and no `SUPABASE_DB_URL`** — a cloud-only session, or any
+  shell that never sourced `.env` — the command above silently cannot run and MCP
+  `execute_sql` is the only read path. The preference for `psql` was about CONTEXT COST, not
+  correctness, so carry that intent across: **one aggregate row per question**, never a wide
+  result set. `count(*) FILTER (WHERE …)` for several counts in one row; `string_agg(name, ',')`
+  to list what exists; `md5(string_agg(col, ',' ORDER BY ordinal_position))` to compare a long
+  column list against something you computed locally **without printing either**. Migrations
+  still go through `apply_migration`, never `execute_sql` — a missing semicolon is silently
+  swallowed there (see the migration section below).
 - The production-safety warnings below are unchanged.
 
 ## Database access
