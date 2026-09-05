@@ -57,17 +57,37 @@ export function propertyListingPath(propertyId: number): RoutePath {
  *      through the legacy sreality route — the id-spaces overlap.
  *
  * `source`/`source_id_native` are optional so pre-existing callers that pass only
- * `{ sreality_id, property_id }` keep the legacy→property behavior unchanged. */
+ * `{ sreality_id, property_id }` keep the legacy→property behavior unchanged.
+ *
+ * TWO OVERLOADS, because not every surface has a property grain to fall back on.
+ * A property-grain row always has a `property_id`, so it always yields a path.
+ * A row whose `property_id` is nullable (the broker listings view, which selects
+ * neither `property_id` NOT NULL nor `source_id_native`) can have NO resolvable
+ * destination — and the honest answer there is `null`, so the caller renders
+ * inert text. Callers used to launder that away with `property_id ?? 0`, which
+ * type-checked and built `/listing?property=0` — a link that 404s. The overload
+ * makes the laundering unrepresentable rather than merely discouraged. */
 export function listingRowPath(row: {
   source?: string | null;
   source_id_native?: string | null;
   sreality_id: number | null;
   property_id: number;
-}): RoutePath {
+}): RoutePath;
+export function listingRowPath(row: {
+  source?: string | null;
+  source_id_native?: string | null;
+  sreality_id: number | null;
+  property_id: number | null;
+}): RoutePath | null;
+export function listingRowPath(row: {
+  source?: string | null;
+  source_id_native?: string | null;
+  sreality_id: number | null;
+  property_id: number | null;
+}): RoutePath | null {
   if (row.source && row.source_id_native) {
     return listingCanonicalPath(row.source, row.source_id_native);
   }
-  return row.sreality_id != null
-    ? listingPath(row.sreality_id)
-    : propertyListingPath(row.property_id);
+  if (row.sreality_id != null) return listingPath(row.sreality_id);
+  return row.property_id != null ? propertyListingPath(row.property_id) : null;
 }

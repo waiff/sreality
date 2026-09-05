@@ -132,6 +132,45 @@ export default function BrokerDetail() {
   );
 }
 
+
+/* The locality cell links to the listing when a destination exists, and renders
+ * inert text when one does not. `broker_listings_public` declares BOTH
+ * `sreality_id` and `property_id` nullable and carries no `source_id_native`, so
+ * a row can genuinely have nowhere to go. This used to pass `property_id ?? 0`,
+ * which built `/listing?property=0` — a link that type-checked and 404'd. The
+ * Portál column still carries `source_url`, so the operator is never stranded. */
+function LocalityCell({ l }: { l: BrokerListing }) {
+  const label = l.locality ?? l.district ?? '—';
+  const dot = !l.is_active && (
+    <span
+      className="w-1.5 h-1.5 rounded-full bg-[var(--color-brick)] shrink-0"
+      title="neaktivní"
+    />
+  );
+  const path = listingRowPath({
+    sreality_id: l.sreality_id,
+    property_id: l.property_id,
+  });
+
+  if (path == null) {
+    return (
+      <span
+        className="flex items-center gap-2 text-[var(--color-ink-3)]"
+        title="Tento inzerát nemá v aplikaci vlastní stránku — otevřete jej přes odkaz na portál."
+      >
+        {dot}
+        <span className="truncate font-[family-name:var(--font-sans)]">{label}</span>
+      </span>
+    );
+  }
+
+  return (
+    <Link to={path} className="flex items-center gap-2 hover:text-[var(--color-copper-2)]">
+      {dot}
+      <span className="truncate font-[family-name:var(--font-sans)]">{label}</span>
+    </Link>
+  );
+}
 function Stat({
   label,
   value,
@@ -316,20 +355,7 @@ function Inventory({
                   className="border-b border-[var(--color-rule-soft)] last:border-0 hover:bg-[var(--color-paper-2)]"
                 >
                   <td className="px-3 py-1.5 max-w-[16rem]">
-                    <Link
-                      to={listingRowPath({ sreality_id: l.sreality_id, property_id: l.property_id ?? 0 })}
-                      className="flex items-center gap-2 hover:text-[var(--color-copper-2)]"
-                    >
-                      {!l.is_active && (
-                        <span
-                          className="w-1.5 h-1.5 rounded-full bg-[var(--color-brick)] shrink-0"
-                          title="neaktivní"
-                        />
-                      )}
-                      <span className="truncate font-[family-name:var(--font-sans)]">
-                        {l.locality ?? l.district ?? '—'}
-                      </span>
-                    </Link>
+                    <LocalityCell l={l} />
                   </td>
                   <td className="px-3 py-1.5 whitespace-nowrap text-[var(--color-ink-2)] font-[family-name:var(--font-sans)]">
                     {[

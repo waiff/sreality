@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSpaLinkDelegation } from '@/lib/linkGestures';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
 import { createMap } from '@/lib/basemap';
 import { useMapFeatureHover } from '@/lib/useMapFeatureHover';
@@ -1594,6 +1595,18 @@ export default function ListingMap({
     const id = requestAnimationFrame(() => mapRef.current?.resize());
     return () => cancelAnimationFrame(id);
   }, [ready]);
+
+  /* The listing popup's "View details →" is a raw <a> in a MapLibre-owned HTML
+   * string (see popupHtml below), so <Link> cannot reach it and a plain click
+   * used to do a FULL DOCUMENT LOAD — discarding the bundle, the react-query
+   * cache, the viewport and the active filter cohort, with Back re-downloading
+   * all of it. Delegated on the CONTAINER (MapLibre parents every popup to
+   * map.getContainer()), so any link added to any popup later is covered by
+   * construction. Its own effect on purpose: folding it into the map-init effect
+   * would add `navigate` to that effect's deps and rebuild the map on every
+   * navigation. Modifier/middle clicks and external links pass straight
+   * through — see lib/linkGestures. */
+  useSpaLinkDelegation(containerRef);
 
   /* Project the shared hoveredIds set onto maplibre's feature-state so the
    * 'point' layer paint expressions light up. Extracted to a shared hook so the
