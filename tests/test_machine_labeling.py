@@ -263,9 +263,12 @@ def test_the_near_tag_draw_raises_the_timeout_for_its_own_scan_and_restores_it()
     src = (pathlib.Path(__file__).resolve().parents[1]
            / "toolkit" / "machine_labeling.py").read_text()
     fn = src.split("def near_tag_candidates(")[1].split("\ndef ")[0]
-    assert "SET statement_timeout = %s" in fn
+    # SET takes a literal, never a bound parameter: `SET x = %s` is a syntax
+    # error at "$1". set_config is the parameterised form.
+    assert "set_config('statement_timeout', %s, false)" in fn
+    assert "SET statement_timeout = %s" not in fn
     assert "finally:" in fn
-    assert "SET statement_timeout = DEFAULT" in fn
+    assert "RESET statement_timeout" in fn
 
 
 def test_no_statement_carries_a_bare_percent_sign() -> None:
