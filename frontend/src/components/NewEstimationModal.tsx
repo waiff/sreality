@@ -310,6 +310,7 @@ function NewEstimationModal({
   return (
     <div
       className="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[16vh] pb-10 bg-[var(--color-ink)]/40 backdrop-blur-[2px]"
+      // eslint-disable-next-line no-restricted-syntax -- W6b migrates this dialog
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}

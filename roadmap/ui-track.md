@@ -536,7 +536,23 @@ below modals at z-40, six dead tooltips, lost whole-card focus ring, a
 hard-coded z rung). Trades stated: no drag-select over the `::after`; the title
 link is the 4th tab stop per card. 5 → 21 tests in the card's file.
 
-**Remaining waves, in the review's order, W2–W5 done:** W2 composite widgets
+**W6a — one Dialog primitive, proved on two pilots (merged).**
+`lib/useDialog` (module-level layer stack, ONE window Escape listener, top
+layer only, Tab containment, mount-only initial focus, focus restore, a
+ref-counted scroll lock) + `components/Dialog` (role/aria-modal on the PANEL,
+backdrop `role="presentation"`, naming a type union, portalled with the
+reasons stated) + `useCloseOnNavigation`. Pilots ExploreArea/ExploreBroker.
+The first cut was **rejected** by its reviewer: layers ordered by effect push
+order, which is child-before-parent within a commit, so a same-commit nested
+pair inverted "top" and the inner became un-closable. Rebuilt on a
+render-phase sequence; then three more re-review findings fixed by hand (trap
+yanking focus out of a popover opened from a modal; initial focus in the
+outer layer; a backwards first-paint claim). Rails: `expectDialogContract`,
+a same-commit pair, an outer remount, a portalled companion. `role="dialog"`
+banned outside the primitive; the ten unmigrated modals carry per-line
+exemptions naming W6b.
+
+**Remaining waves, in the review's order, W2–W6a done:** W2 composite widgets
 name their internals (63 controls with no name from any source); W3 focus is
 visible (65 `focus:outline-none`, 33 with a 1.18:1 replacement — a deletion
 wave, plus the `--color-focus` token which is operator territory); W4 focus has

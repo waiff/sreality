@@ -155,6 +155,10 @@ export default function AnchoredPopover({
     <div
       ref={panelRef}
       id={id}
+      // Read by lib/useDialog's focus trap: focus in here counts as inside the
+      // dialog that opened this panel, not as an escape to be yanked back.
+      data-transient-layer=""
+
       role={ariaLabel ? 'group' : undefined}
       tabIndex={-1}
       aria-label={ariaLabel}

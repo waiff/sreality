@@ -234,6 +234,7 @@ export function RunDetailModal({
 
   return (
     <div
+      // eslint-disable-next-line no-restricted-syntax -- W6b migrates this dialog
       role="dialog"
       aria-modal="true"
       aria-label="Estimation detail"

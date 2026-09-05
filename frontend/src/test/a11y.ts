@@ -31,6 +31,13 @@
 import { expect } from 'vitest';
 import { fireEvent } from '@testing-library/react';
 
+/* The focus trap's OWN definition of "focusable". Imported rather than
+ * restated: an assertion written against a second list could cycle a different
+ * set of controls than lib/useDialog does and still go green. INTERACTIVE_
+ * SELECTOR below answers a different question — "is this thing interactive at
+ * all", for the nesting and name checks — and the two are not interchangeable. */
+import { focusablesIn, topDialogPanel } from '@/lib/useDialog';
+
 /* Everything the HTML spec calls "interactive content", plus the ARIA roles
  * that make a generic element behave as one. `tabindex="-1"` is excluded on
  * purpose: it marks a programmatically-focusable but not tab-reachable
@@ -131,4 +138,100 @@ export function expectRovingGroup(
     fireEvent.keyDown(items[items.length - 1], { key: 'Home' });
     expect(document.activeElement, 'Home should move focus to the first item').toBe(items[0]);
   }
+}
+
+/* Assert the whole modal-dialog contract against a rendered trigger + dialog:
+ * focus goes INSIDE on open, Tab wraps at both ends, Escape closes exactly ONE
+ * layer, focus comes back to the trigger, and the body scroll lock is
+ * released. `open` is whatever gesture opens it (usually a click on the
+ * trigger); `trigger` is where focus must return.
+ *
+ * WHAT jsdom CAN see here: document.activeElement (so every focus claim is
+ * real), the presence and count of role="dialog" nodes, the `key` on a
+ * dispatched keydown, and document.body.style.overflow.
+ *
+ * WHAT IT CANNOT, so nobody over-trusts a green run:
+ *   - no layout and no CSS, so a control hidden by a Tailwind class still
+ *     counts as focusable and still takes a turn in the Tab cycle. The trap's
+ *     ORDER is proved; its visual truthfulness is not.
+ *   - Tab does not natively move focus in jsdom. `fireEvent.keyDown(…, { key:
+ *     'Tab' })` exercises the dialog's own handler — which IS the code under
+ *     test — but the assertions below therefore start focus on a known control
+ *     rather than assuming a Tab walked there, and they cannot prove that the
+ *     browser's native sequencing between the wrap points is also correct.
+ *   - `aria-modal` is an announcement, not enforcement: nothing here proves
+ *     the page behind the dialog is inert, because in a browser it is not
+ *     either (only <dialog>.showModal() gives that).
+ *   - the scroll lock is read off document.body.style.overflow only. A lock
+ *     implemented on <html>, or with `position: fixed`, would read as absent. */
+export function expectDialogContract(opts: {
+  /* Opens the dialog. Runs inside the helper so the BEFORE state (focus,
+   * overflow, layer count) is captured first. */
+  open: () => void;
+  /* The control that opened it — focus must come back here on close. */
+  trigger: HTMLElement;
+  /* Where to look for the dialog. Defaults to document.body, which is right
+   * for a portalled dialog and harmless for one rendered in place. */
+  within?: ParentNode;
+}): void {
+  const root = opts.within ?? document.body;
+  const dialogs = () => Array.from(root.querySelectorAll<HTMLElement>('[role="dialog"]'));
+
+  const overflowBefore = document.body.style.overflow;
+  const layersBefore = dialogs().length;
+  opts.trigger.focus();
+
+  opts.open();
+
+  const openDialogs = dialogs();
+  expect(openDialogs.length, 'opening should add exactly one role="dialog"').toBe(
+    layersBefore + 1,
+  );
+  /* The newest layer is the one on top — and the one that must answer. */
+  // The stack says who is on top; DOM order is exactly the heuristic the
+  // ordering bug hid behind.
+  const dialog = topDialogPanel() ?? openDialogs[openDialogs.length - 1];
+  expect(
+    dialog.getAttribute('aria-modal'),
+    'a modal dialog must say so — and on the PANEL, not the backdrop',
+  ).toBe('true');
+  expect(dialog, 'a dialog is always named').toHaveAccessibleName();
+
+  expect(
+    dialog.contains(document.activeElement),
+    `focus should land inside the dialog on open, not stay on ${describeEl(opts.trigger)}`,
+  ).toBe(true);
+  expect(document.body.style.overflow, 'an open dialog locks body scroll').toBe('hidden');
+
+  /* Tab containment, against the trap's own FOCUSABLE_SELECTOR so the two can
+   * never disagree. `tabindex="-1"` is excluded there because it is how the
+   * panel itself parks; the filter here drops what is present but not
+   * operable, mirroring lib/useDialog's focusablesIn plus aria-disabled. */
+  // The trap's OWN definition of focusable, not a second list that could
+  // drift and stay green.
+  const items = focusablesIn(dialog);
+  expect(items.length, 'a dialog with no focusable control cannot be operated').toBeGreaterThan(0);
+  const first = items[0];
+  const last = items[items.length - 1];
+
+  last.focus();
+  fireEvent.keyDown(last, { key: 'Tab' });
+  expect(document.activeElement, 'Tab from the last control wraps to the first').toBe(first);
+
+  first.focus();
+  fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+  expect(document.activeElement, 'Shift+Tab from the first control wraps to the last').toBe(last);
+
+  /* Escape closes exactly one layer — dispatched from inside the dialog, the
+   * way a real key press reaches it. */
+  fireEvent.keyDown(document.activeElement ?? document, { key: 'Escape' });
+  expect(dialogs().length, 'Escape should close exactly one layer').toBe(layersBefore);
+
+  expect(
+    document.activeElement,
+    `focus should return to ${describeEl(opts.trigger)} after close`,
+  ).toBe(opts.trigger);
+  expect(document.body.style.overflow, 'closing releases the body scroll lock').toBe(
+    overflowBefore,
+  );
 }
