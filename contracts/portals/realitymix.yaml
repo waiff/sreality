@@ -30,8 +30,52 @@
 # is class B where `street_source='parser'` and class D otherwise, and 10,055 ACTIVE
 # realitymix rows carry a parser street that reaches no claim on any surface today.
 
+#
+# VERSION 4 (2026-09-05) — the W2-8 archived-HTML activation. Five v1–v3 entry ids are
+# RESTATED with corrected locators and ten entries are appended. Restating is not editing:
+# entries are immutable PER contract_version (02 §2.1.8) and v4 is a new row set, so the v3
+# rows stay exactly as they were. No id changes its `claim_type`, so no id comes to mean
+# something new. Every correction below was measured against the archived body of listing
+# 8662169 (tests/fixtures/portal_html/realitymix_detail.html):
+#   (a) BOTH `.advert-map__text--gps` and `--estimated` are served on every page — the map
+#       JS reveals one — so a first-match selector over the pair reports "gps" 100% of the
+#       time and can never see the orientational branch. The discriminator is the predicate
+#       the portal's own JS uses: the presence of `data-gps-lat`/`data-gps-lon`. The canon's
+#       `html_marker` is presence-ONLY, so the absent branch is its own entry with its own
+#       `:not([...])` selector rather than a two-label reader.
+#   (b) The breadcrumb geo chain starts at position 4 on a two-level category path
+#       (domy/pronajem) and at 5 on a three-level one (byty/2+1/pronajem), and it ends at the
+#       obec where there is no quarter. `positions: [5,6,7,8]` is therefore wrong on this page
+#       and unfixable positionally; the levels are anchored on the kraj slug and counted
+#       forward, and the reader fails closed when no declared slug anchors the chain.
+#   (c) `input[data-form-address]` matches NOTHING — the carrier is a
+#       `div[data-advert-detail-contact-form]` (gallery / sidebar / propose_price, all three
+#       stamping the same value).
+#   (d) `data-address` segment 0 is a street on some pages ("Křimická, Plzeň 3, Plzeň, okres
+#       Plzeň-město") and a část obce on others ("Stráň, Potůčky, okres Karlovy Vary",
+#       corroborated by data-form-address and by the breadcrumb tail). Typing it street_name
+#       positionally would fabricate a street on the second shape, so the street role runs
+#       `address_part_street`, whose three gates are the shared `scraper.street` ones.
+#   (e) The v3 exclusion zones matched nothing on the served page: `.broker-contact` /
+#       `.contact-box` do not occur in it, while the agent block, the agency office address
+#       (the 5-digit decoy finding 8 names), the similar-adverts carousel and the operator's
+#       own footer address were all in scope. Both v3 zones are RETAINED — a zone that
+#       compiles and matches nothing is not a hole (`is_complete` stays true and
+#       `zones_unmatched` records it) — and four measured ones are added beside them.
+# The městský obvod is claimed with `comma_segment:2@4` rather than a bespoke part: the canon
+# implements no `address_part_mestsky_obvod`, and the arity condition is what stops a three-
+# segment line from typing its obec as an obvod.
+# What v4 does NOT change: `persistence:` is untouched, so `payload_norm@3+profile@c3c5f164`
+# and `portal_payload_churn`'s accumulated counters are unmoved (02 §2.3.2).
+
 portal: realitymix
-contract_version: 3
+contract_version: 4
+# 06 §6.4.0(2). Header-grain, and the cost is stated rather than hidden: from the moment v4
+# projects, EVERY realitymix claim — the five live W1 legacy-column entries included — lands
+# in `location_claims_shadow`. Claims already written under v3 stay live, so this is a freeze
+# and not a blackout, and it lasts until an operator runs
+# `python -m location_data.contracts --unshadow realitymix@4` on a passing frozen sample.
+shadow: true
 extractor_runtime: ">=1.0"
 identity_ladder: [structured_address, portal_precise_coord, text_geocode]
 
@@ -82,6 +126,30 @@ exclusion_zones:
   - locator_kind: html_selector
     locator: {css: "nav a[href*='zahranicni']"}
     reason: "The site nav 'Zahraniční nemovitosti'."
+  - locator_kind: html_selector
+    locator: {css: ".offer-detail-sidebar__agent"}
+    reason: >
+      V4, measured on 8662169: the listing agent's own block — name, photo, phone and
+      e-mail. Never the property's location, and the one block on this page carrying
+      personal data.
+  - locator_kind: html_selector
+    locator: {css: ".offer-detail-sidebar__company"}
+    reason: >
+      V4: the agency office address ("Karla Čapka 1357, Sokolov, 35601" on 8662169) — the
+      exact shape of [mine-realitymix finding 8]. This is the block the two zones above it
+      were WRITTEN for; those class names occur nowhere in the served page.
+  - locator_kind: html_selector
+    locator: {css: ".similarAdverts, .propertyCarousel"}
+    reason: >
+      V4: the similar-adverts carousel — OTHER listings' obec slugs and titles, inside the
+      subject's own DOM. remax's contamination class (live-B §3.5.1), and the reason every
+      DOM reader here is first-match rather than all-matches.
+  - locator_kind: html_selector
+    locator: {css: "footer"}
+    reason: >
+      V4: the portal operator's own seat ("DALTEN media s.r.o., Na Harfě …, 190 00 Praha 9")
+      plus the per-response version badge `persistence:` already normalises away. Carries no
+      listing geo at any time.
 
 precision_caps:
   gps_attr_present: {position_source_max: portal_pin}
@@ -102,6 +170,10 @@ regressions:
      diacritics-stripped locality_text 'Bilovec'. All 16 out-of-bbox rows share this pin."
   - "8595551 — the village Kliny (okres Most) matched a STREET named Kliny in Brno, ~250 km
      away [db-raw §3.4]"
+  - "8662169 — data-address 'Stráň, Potůčky, okres Karlovy Vary': the first segment is a
+     ČÁST OBCE, not a street (corroborated by data-form-address='Stráň' and by breadcrumb
+     position 7, slug .../potucky/stran). Typing segment 0 street_name positionally would
+     fabricate a street here; `address_part_street`'s morphology gate is what stops it."
 
 extractions:
   - id: rm.det.legacy_pin
@@ -207,63 +279,95 @@ extractions:
       need `rm.det.slug` / `rm.det.address_all_segments`, which is where §6.2.3 always put
       them.
 
-  # ---- W2 HTML surfaces: declared, no reader ----
+  # ---- W2 HTML surfaces: ACTIVATED in v4 (readers named, W2 lane executes them) ----
 
   - id: rm.det.gps
     locator_kind: html_selector
     extraction_method: html_selector_parse
     page_kind: detail
-    locator: {css: "div#print-map", attr: ["data-gps-lat", "data-gps-lon"]}
+    locator: {reader: html_point_attrs, css: "div#print-map",
+              attr: ["data-gps-lat", "data-gps-lon"], position_branch: portal_pin}
     claim_type: coordinate
     licence_class: portal
     blur_evidence: none
     precision_cap: {granularity_max: address_point, position_source_max: portal_pin}
     guards: [reject_outside_cz_bbox]
     required: when_present
-    notes: "53.7% of geom rows have ≥11 decimals, 39.2% ≤6 [live-C §2.5]."
+    notes: >
+      53.7% of geom rows have ≥11 decimals, 39.2% ≤6 [live-C §2.5]. `position_branch:
+      portal_pin` is the whole C6 statement: this attribute pair exists ONLY when the agency
+      supplied GPS ("na základě GPS informací dodaných realitní kanceláří"). The Nominatim
+      fallback runs in the BROWSER and its result never reaches the HTML, so
+      `portal_geocoded` has no carrier on this substrate and no archived realitymix
+      coordinate is ever odbl — `ARCHIVED_COORDINATE_RULES`' `geocoded_licence_class="odbl"`
+      stays declared for the day a server-rendered fallback appears, and is unreachable
+      until then. `#print-map` and not `#map`: both divs carry the identical attributes,
+      `#print-map` is first in document order, and it is the id 02 §2.2.8 fixed.
 
   - id: rm.det.agency_gps_flag
     locator_kind: html_selector
     extraction_method: portal_declared_quality
     page_kind: detail
-    locator: {css: ".advert-map__text--gps, .advert-map__text--estimated"}
+    locator: {reader: html_marker, css: "div#print-map[data-gps-lat][data-gps-lon]",
+              attr: ["data-gps-lat", "data-gps-lon"], value_label: gps}
     claim_type: precision_declaration
-    blur_evidence: declared
-    licence_class: odbl
-    precision_cap:
-      granularity_max: {gps: street, estimated: obec}
-      position_source_max: {gps: portal_pin, estimated: derived_geocode}
-      blurred_labels: [estimated]
+    blur_evidence: none
+    licence_class: portal
+    precision_cap: {granularity_max: street, position_source_max: portal_pin}
     required: when_present
     notes: >
-      Verified in /build/maps.913b4199.js: absent data-gps -> Nominatim -> "Pozice na mapě
-      je pouze orientační". The --estimated branch is ODbL lineage (02 §2.1.9); the --gps
-      branch is `portal` and the loader splits the licence class per observed label.
+      Verified in /build/maps.913b4199.js: `if (gpsLat && gpsLon) show('--gps') else
+      nominatim(address) -> show('--estimated')`. v3 read the two SENTENCES, which cannot
+      work: BOTH divs are served on every page and the JS toggles them, so a first-match
+      selector over the pair reports "gps" on 100% of pages (verified on 8662169). This
+      entry reads the JS's OWN predicate instead — the presence of the attribute pair.
+      `html_marker` is presence-only, so the orientational branch is `rm.det.agency_est_flag`
+      below with its own selector; a page whose attributes are present but BLANK matches
+      neither and gets no declaration at all, which is an honest under-claim rather than a
+      guess about which branch the JS took.
+      `licence_class` moves from v3's `odbl` to `portal`, and that is a correction rather
+      than a policy change: this claim is the portal's own declaration about its map, and
+      the ODbL lineage attaches to the POSITION, which `ARCHIVED_COORDINATE_RULES` owns
+      (02 §2.1.9). Stamping `odbl` here filed a portal sentence as OSM-derived.
 
   - id: rm.det.address_all_segments
     locator_kind: html_selector
     extraction_method: html_selector_parse
     page_kind: detail
-    locator: {css: "div#print-map", attr: "data-address"}
+    locator: {reader: html_attr, css: "div#print-map", attr: "data-address"}
+    transform: ["comma_segment:2@4"]
     claim_type: mestsky_obvod_name
     licence_class: portal
     blur_evidence: none
     on_conflict: emit_both
     required: when_present
-    notes: "'Křimická, Plzeň 3, Plzeň, okres Plzeň-město' — today _address_parts takes
-      body[0] and body[-1] and DROPS everything between, losing the městský obvod
-      [live-C §2.4]."
+    notes: >
+      "'Křimická, Plzeň 3, Plzeň, okres Plzeň-město' — today _address_parts takes body[0]
+      and body[-1] and DROPS everything between, losing the městský obvod [live-C §2.4]."
+      The obvod is exactly that dropped middle. `comma_segment:2@4` and not a bespoke
+      `address_part_mestsky_obvod` (the canon implements none): the ARITY is the whole
+      safety argument — on the three-segment shape (8662169's "Stráň, Potůčky, okres Karlovy
+      Vary") segment 2 is the obec, and an unconditional positional read would type it as an
+      obvod on every short line. The residual risk is stated rather than hidden: on a
+      four-segment line `leading[-1]` is a městský obvod in Plzeň/Praha/Brno/Ostrava and a
+      čtvrť elsewhere, while this entry's claim_type says obvod either way.
 
   - id: rm.det.form_address
     locator_kind: html_selector
     extraction_method: html_selector_parse
     page_kind: detail
-    locator: {css: "input[data-form-address]", attr: "data-form-address"}
+    locator: {reader: html_attr, css: "[data-advert-detail-contact-form][data-form-address]",
+              attr: "data-form-address"}
     claim_type: cast_obce_name
     licence_class: portal
     blur_evidence: none
     required: when_present
-    notes: "listings.locality_quarter_id is 0 / 63,772 for this portal [live-C §2.4]."
+    notes: >
+      listings.locality_quarter_id is 0 / 63,772 for this portal [live-C §2.4]. v3's
+      `input[data-form-address]` matched NOTHING: the carrier is a
+      `div[data-advert-detail-contact-form]` (gallery / sidebar / propose_price, all three
+      stamping the same value). First-match is safe because the similar-adverts carousel —
+      the only other place a contact form appears — is an exclusion zone.
 
   - id: rm.det.og_psc
     locator_kind: og_meta
@@ -281,17 +385,32 @@ extractions:
     locator_kind: jsonld
     extraction_method: breadcrumb_parse
     page_kind: detail
-    locator: {type: BreadcrumbList, json_pointer: "/itemListElement", positions: [5, 6, 7, 8]}
+    locator: {reader: json_breadcrumb, css: "script[type='application/ld+json']",
+              type: BreadcrumbList, level: okres,
+              anchor_slugs: [praha, hlavni-mesto-praha, stredocesky, jihocesky, plzensky,
+                             karlovarsky, ustecky, liberecky, kralovehradecky, pardubicky,
+                             vysocina, jihomoravsky, olomoucky, zlinsky, moravskoslezsky]}
     claim_type: okres_name
-    cardinality: many
+    cardinality: one
     licence_class: portal
     blur_evidence: none
+    on_conflict: emit_both
     required: when_present
     notes: >
       'Plzeňský kraj → Plzeň-město → Plzeň → Skvrňany', each with a stable slug path.
       category_from_breadcrumb reads positions 2 and 3 and breaks — "the kraj/okres/obec/
       quarter slugs are parsed and thrown away in the same function"; [repo-scr §8(a)] calls
       it "the single largest unexploited structured location signal in the repo".
+      v3's `positions: [5,6,7,8]` is measurably wrong: on 8662169 (domy/pronajem, a two-level
+      category path) the chain sits at 4–7, while the recon's byty/2+1/pronajem sample puts
+      it at 5–8. The offset moves with the CATEGORY path, so the levels are anchored on the
+      kraj slug and counted forward. `cardinality` narrows from `many` to `one` because one
+      entry carries one claim_type: the other three levels are their own entries below, each
+      typed as the admin level it actually is.
+      ANCHOR VERIFICATION DUTY: only `karlovarsky` (measured here) and `plzensky` / `zlinsky`
+      (recon §2.2 / §2.7) are observed; the other eleven are the conventional ČSÚ slugs and
+      both Prague spellings are listed defensively. The reader FAILS CLOSED, so a wrong slug
+      costs coverage and never correctness — W2-13's per-kraj claim rate is how one is found.
 
   - id: rm.det.slug
     locator_kind: url_slug
@@ -317,3 +436,203 @@ extractions:
     notes: "no_street rows volunteer cadastral locators: 'parcelní číslo 5265/158'
       (k.ú. Strání), '1134' (k.ú. Podbořánky, obec Jesenice — a highly ambiguous obec name)
       [mine-realitymix finding 5]."
+
+  # ---- V4, appended. Three entries above stay INERT on purpose: `rm.det.og_psc` (surface
+  # og_meta) and `rm.det.slug` (url_slug) have no reader in the canon that admits those
+  # substrates, and `rm.desc.cadastral` is llm_text, which no registry implements yet. The
+  # breadcrumb chain already supplies the obec accented and better than the slug would, and
+  # the PSČ regex belongs with whichever wave builds the shared og_meta reader (ceskereality
+  # `cr.det.og_title` and idnes `id.det.og_description` want the same one).
+
+  - id: rm.det.agency_est_flag
+    locator_kind: html_selector
+    extraction_method: portal_declared_quality
+    page_kind: detail
+    locator: {reader: html_marker,
+              css: "div#print-map:not([data-gps-lat]):not([data-gps-lon])",
+              value_label: estimated}
+    claim_type: precision_declaration
+    blur_evidence: declared
+    licence_class: portal
+    precision_cap:
+      granularity_max: obec
+      position_source_max: derived_geocode
+      blurred_labels: [estimated]
+    required: when_present
+    notes: >
+      The other half of `rm.det.agency_gps_flag`, and a separate entry because the canon's
+      `html_marker` is a PRESENCE detector: an absent-branch has to be spelled as a selector
+      (`:not([data-gps-lat]):not([data-gps-lon])`), not as a second label on one reader.
+      This is the cohort whose position the page computes CLIENT-SIDE through Nominatim, so
+      the archived body carries the declaration and no coordinate at all — the blur is
+      recorded (`blurred_labels: [estimated]`) while `rm.det.gps` stays silent, which is the
+      honest pair. `licence_class: portal` for the same reason as its twin: the sentence is
+      the portal's, and the ODbL lineage would attach to a position that never reaches us.
+
+  - id: rm.det.map_address
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {reader: html_attr, css: "div#print-map", attr: "data-address"}
+    claim_type: address_line_verbatim
+    licence_class: portal
+    blur_evidence: none
+    on_conflict: emit_both
+    required: when_present
+    notes: >
+      The whole declared string, unsplit. It is the GRANULARITY AXIS the operator ruling
+      names ("granularity comes from the declared address text"): a four-segment value
+      declares street level and a one-segment value ("Zlín") declares obec level, and no
+      split entry below can express that shape because each of them is one field. It is also
+      the audit anchor for the five split claims — every one of them is a substring of this.
+
+  - id: rm.det.map_obec
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {reader: html_attr, css: "div#print-map", attr: "data-address"}
+    transform: ["address_part_obec"]
+    claim_type: obec_name
+    licence_class: portal
+    blur_evidence: none
+    on_conflict: emit_both
+    required: when_present
+    notes: >
+      The segment immediately before the trailing "okres X"; where there is no okres tail,
+      the last segment (the "Zlín" shape). Accented, from the map code — this is the repair
+      side of `rm.det.locality_text`'s note: 8590773's stored 'Hranicka, Prerov' is the
+      geocode backfill's ASCII fold, and 03's reconciler compares it against this.
+
+  - id: rm.det.map_okres
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {reader: html_attr, css: "div#print-map", attr: "data-address"}
+    transform: ["address_part_okres"]
+    claim_type: okres_name
+    licence_class: portal
+    blur_evidence: none
+    on_conflict: emit_both
+    required: when_present
+    notes: >
+      The PORTAL-DECLARED okres, which is the free QA rail the file preamble names:
+      listings.okres is derived from geom and 525 of 21,244 rows disagree (2.47%)
+      [live-C §2.6]. `on_conflict: emit_both` so 03 owns the ledger entry rather than one of
+      the two silently winning. `address_part_okres` is keyed on the QUALIFIER and handles
+      both spellings ("okres X" / "okr. X"), and emits nothing at all when the tail is not an
+      okres — `strip_prefix:"okres "` would silently publish "okr. Karlovy Vary" instead.
+
+  - id: rm.det.map_street
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {reader: html_attr, css: "div#print-map", attr: "data-address"}
+    transform: ["address_part_street"]
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    on_conflict: emit_both
+    required: best_effort
+    notes: >
+      Segment 0, and ONLY when it survives `scraper.street`'s don't-fabricate trio:
+      `clean_street`, `reject_as_town` cross-checked against this line's own other segments,
+      and `looks_like_czech_street`. The morphology gate is not optional here and 8662169 is
+      why: its segment 0 is "Stráň", a část obce, and without the gate this entry would
+      publish it as a street. Measured outcomes — "Křimická" claims, "Stráň" does not,
+      "Plzeň 3" does not, single-segment "Zlín" does not. The gate cuts both ways: a real
+      street that is a bare noun ("Zahrádky") is dropped too, and under-claiming was chosen
+      over fabrication. `best_effort` because a large share of this portal's pages
+      legitimately carry no street.
+
+  - id: rm.det.map_house_number_cp
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {reader: html_attr, css: "div#print-map", attr: "data-address"}
+    transform: ["address_part_house_number", "split_cp_co:cp"]
+    claim_type: house_number_cp
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: >
+      The trailing number of segment 0 ("Křimická 655/31" -> "655/31" -> cp 655), emitted
+      ONLY when the street role of the same string also fires (`address_part_house_number`
+      runs the identical gates), so "Plzeň 3" can never yield a house number 3. NOT OBSERVED
+      on any sampled page, which is exactly why the gate is structural rather than trusted:
+      the entry costs nothing while the number is absent and needs no bump when it appears.
+      W2-13 should report its corpus-wide fire rate; a rate of 0 is a reason to retire it in
+      the next bump, not to widen it.
+
+  - id: rm.det.map_house_number_co
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {reader: html_attr, css: "div#print-map", attr: "data-address"}
+    transform: ["address_part_house_number", "split_cp_co:co"]
+    claim_type: house_number_co
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: >
+      The orientation number of a "čp/čo" pair. `split_cp_co:co` yields nothing when there is
+      no slash, so a bare "12" produces the cp claim only — the pair is not two alternatives
+      and a single number is never split in two.
+
+  - id: rm.det.breadcrumb_kraj
+    locator_kind: jsonld
+    extraction_method: breadcrumb_parse
+    page_kind: detail
+    locator: {reader: json_breadcrumb, css: "script[type='application/ld+json']",
+              type: BreadcrumbList, level: kraj,
+              anchor_slugs: [praha, hlavni-mesto-praha, stredocesky, jihocesky, plzensky,
+                             karlovarsky, ustecky, liberecky, kralovehradecky, pardubicky,
+                             vysocina, jihomoravsky, olomoucky, zlinsky, moravskoslezsky]}
+    claim_type: kraj_name
+    cardinality: one
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "The anchor level itself — 'Karlovarský kraj' on 8662169."
+
+  - id: rm.det.breadcrumb_obec
+    locator_kind: jsonld
+    extraction_method: breadcrumb_parse
+    page_kind: detail
+    locator: {reader: json_breadcrumb, css: "script[type='application/ld+json']",
+              type: BreadcrumbList, level: obec,
+              anchor_slugs: [praha, hlavni-mesto-praha, stredocesky, jihocesky, plzensky,
+                             karlovarsky, ustecky, liberecky, kralovehradecky, pardubicky,
+                             vysocina, jihomoravsky, olomoucky, zlinsky, moravskoslezsky]}
+    claim_type: obec_name
+    cardinality: one
+    licence_class: portal
+    blur_evidence: none
+    on_conflict: emit_both
+    required: when_present
+    notes: >
+      Two anchor levels down. This is the map-less path the operator ruling names: when
+      `#print-map` or `data-address` is absent the breadcrumb chain is the only structured
+      carrier left, and the registry resolves the name with an honest granularity label. No
+      external geocoder is involved on any branch.
+
+  - id: rm.det.breadcrumb_quarter
+    locator_kind: jsonld
+    extraction_method: breadcrumb_parse
+    page_kind: detail
+    locator: {reader: json_breadcrumb, css: "script[type='application/ld+json']",
+              type: BreadcrumbList, level: quarter,
+              anchor_slugs: [praha, hlavni-mesto-praha, stredocesky, jihocesky, plzensky,
+                             karlovarsky, ustecky, liberecky, kralovehradecky, pardubicky,
+                             vysocina, jihomoravsky, olomoucky, zlinsky, moravskoslezsky]}
+    claim_type: cast_obce_name
+    cardinality: one
+    licence_class: portal
+    blur_evidence: none
+    on_conflict: emit_both
+    required: best_effort
+    notes: >
+      Three anchor levels down — 'Stráň' on 8662169, 'Skvrňany' on the recon's Plzeň sample.
+      `best_effort` because the level is genuinely optional: the Zlín pozemek's chain is
+      kraj -> okres -> obec and stops, so the reader returns nothing rather than reading past
+      the end of the chain. Typed `cast_obce_name` to agree with `rm.det.form_address`, which
+      states the same string from a different surface.

@@ -4,7 +4,27 @@
      decoys are that file's exclusion_zones. [mine-realitymix finding 8]: "every
      5-digit hit in the corpus resolves to a broker office, an IČO fragment, or a
      Kč/m² price value" — so the ONLY admissible PSČ on this page is og:title's,
-     and the broker block's must be unreachable. -->
+     and the broker block's must be unreachable.
+
+     V4 (W2-8 activation) touched three things and nothing else, so every literal
+     four shipped tests pin (data-gps-lat="49.73561", the single ld+json block, the
+     two broker decoys) is unmoved:
+       * `data-address` now carries the SHAPE the portal actually serves — a comma
+         address "street, obvod, obec, okres X" — instead of the admin chain
+         "kraj, okres X, obec, quarter", which no realitymix page emits and which
+         made the split entries certify nonsense (obec="Plzeň 2-Slovany",
+         městský obvod="okres Plzeň-město"). Strings are the ones this fixture
+         already published in its own og:title.
+       * `data-form-address` moved from an <input> to the
+         div[data-advert-detail-contact-form] that really carries it (v3's
+         `input[data-form-address]` matched nothing on the archived body either).
+       * both advert-map sentences are present, in served order, because the live
+         page serves BOTH and the map JS reveals one — which is why the declared
+         mode is read from the data-gps attributes and not from these sentences.
+     The breadcrumb block deliberately still states names with NO @id: that is the
+     fail-closed case tests/location_data/test_archive_reader_canon.py pins, so the
+     four rm.det.breadcrumb_* entries are exercised against the real archived body
+     (tests/fixtures/portal_html/realitymix_detail.html), not against this page. -->
 <html lang="cs">
 <head>
   <title>Prodej bytu 3+1, Slovanská alej, 326 00 Plzeň | RealityMix</title>
@@ -29,9 +49,10 @@
 <div id="print-map"
      data-gps-lat="49.73561"
      data-gps-lon="13.39051"
-     data-address="Plzeňský kraj, okres Plzeň-město, Plzeň, Plzeň 2-Slovany"></div>
-<span class="advert-map__text--gps">Přesná pozice na mapě</span>
-<input type="hidden" data-form-address="Slovany">
+     data-address="Slovanská alej, Plzeň 2-Slovany, Plzeň, okres Plzeň-město"></div>
+<div class="advert-map__text advert-map__text--gps">* Umístění na mapě je na základě GPS informací dodaných realitní kanceláří.</div>
+<div class="advert-map__text advert-map__text--estimated">* Pozice na mapě je pouze orientační.</div>
+<div id="gallery-form" data-advert-detail-contact-form="gallery" data-form-address="Slovany"></div>
 
 <div class="broker-contact">
   Molík reality s.r.o., Okružní 3407/11, 434 01 Most<br>

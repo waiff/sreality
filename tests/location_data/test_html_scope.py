@@ -383,9 +383,13 @@ def test_realitymix_broker_and_operator_addresses_go_with_the_subject_intact() -
     pin = scoped.css_first("div#print-map")
     assert pin is not None
     assert pin.attributes["data-gps-lat"] == "49.73561"
-    assert pin.attributes["data-address"].endswith("Plzeň 2-Slovany")
+    # v4 restated the fixture's `data-address` to the shape the portal serves — a comma
+    # address ending in the okres qualifier, not the admin chain kraj→okres→obec→quarter.
+    assert pin.attributes["data-address"].endswith("okres Plzeň-město")
     assert scoped.contains("Slovanská alej")
     assert len(scoped.css("script[type='application/ld+json']")) == 1
+    # The v4 carrier for `rm.det.form_address`: a div, not the <input> v3 declared.
+    assert scoped.css_first("[data-advert-detail-contact-form][data-form-address]") is not None
 
 
 def test_a_node_from_a_raw_parse_is_not_owned_by_the_scoped_document() -> None:
@@ -819,8 +823,11 @@ REGISTER_GAPS = (
      ".grid-similar-offers", "Josefův Důl - Dolní Maxov", "Na Balkáně"),
     ("idnes", "idnes_detail.html", ".b-similar, .broker, nav",
      ".b-detail-contact", "Arbesova", "Na Balkáně"),
-    ("realitymix", "realitymix_detail.html", ".broker-contact, .contact-box",
-     ".offer-detail-sidebar__company", "Karla Čapka 1357", "Stráň, Potůčky"),
+    # realitymix's row is GONE: contract v4 (the W2-8 activation) declared
+    # `.offer-detail-sidebar__company` — plus the agent block, the similar-adverts carousel
+    # and the footer — so the gap this table pinned is closed and the test's own failure
+    # message ("drop this row from REGISTER_GAPS") is what removed it. The two v3 zones that
+    # matched nothing are retained in the YAML and still enumerated by ZERO_MATCH_ZONES.
 )
 
 # Every archived page in this repo, and every declared zone COMPONENT that matches
