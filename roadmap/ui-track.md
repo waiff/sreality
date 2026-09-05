@@ -333,7 +333,7 @@ End-to-end browser flow over the U1b backend.
   of the operational surface. Revisit if `limen:chunkEvents` shows this is still
   happening often.
 
-### Link semantics + the route registry (done — W1)
+### Link semantics + the route registry (done — W1–W4, program closed)
 
 Reported as "I want to right-click a broker in the žebříček and open it in a
 new window". The row was a `<button onClick={navigate(...)}>`, so it offered no
@@ -391,6 +391,63 @@ which is why the per-surface assertions are the real rail.
 **Still open (the operator's likely next want):** the Brokers board's own
 filters live in `useState`, not the URL, so the leaderboard view itself is
 still unshareable and Back from a broker returns to a reset board.
+
+**North star for the program:** *every in-app destination is a real `<a href>`,
+built from the one route registry, carrying the whole state the user asked for —
+and a path that cannot resolve fails loudly, never silently.*
+
+**W2 — links carry the whole destination (#1275).**
+- `Login` read only `.pathname` from the location `RequireAuth` stashes whole, so
+  a logged-out session opening a shared Browse cohort (filters live in the query
+  string) or a `#estimations` deep link authenticated and then landed on a bare
+  `/browse` — no error, no filters. Both consumers dropped it. Highest-severity
+  item in the whole audit, and the cheapest to fix.
+- `listingRowPath` gained a second overload: a nullable `property_id` returns
+  `RoutePath | null`. `BrokerDetail` had been passing `property_id ?? 0`,
+  building `/listing?property=0` — a link that type-checked and 404'd. The
+  laundering is now unrepresentable, not merely discouraged.
+- New `lib/linkGestures.ts` owns the browser-gesture rules once. MapLibre popups
+  render anchors from a raw HTML string, so `<Link>` cannot reach them and a
+  plain click did a **full document load**, discarding the bundle, the cache,
+  the viewport and the filter cohort. Now delegated on the map container —
+  verified in MapLibre's source that it parents every popup to
+  `map.getContainer()`.
+- `ExploreAreaModal`'s hand-rolled guard deleted: it tested `e.button === 1`
+  for middle-click (dead code — that fires `auxclick`) and omitted `altKey`, so
+  alt-click was being swallowed.
+
+**W3 — the sweep, and the door closes (#1277).** 47 literals across 25 files now
+build from the registry, including `lib/auth.tsx`'s two OAuth/reset redirects,
+which are mirrored in Supabase's redirect allowlist — renaming either route
+would have broken production sign-in while every test stayed green. Watchdog's
+three direct `/estimation/${id}` links now route through `runSurfaceUrl`, so one
+run resolves to one surface. Four selectors appended to the single
+`no-restricted-syntax` array, scoped to POSITION not content (an API path and an
+SPA route are byte-identical, so content matching was never an option). The rail
+immediately found 12 sites the manual sweep had missed.
+
+**W4 — the grammar that leaves the SPA (#1278).** A pytest in the unfiltered
+`test.yml` pins the three patterns the API and the extension emit. It CALLS the
+Python builder rather than diffing strings, and a guard test fails if the
+contract ever pins something nothing outside the SPA emits.
+
+**Corrections the waves made to their own audit** — recorded because the audit
+reads authoritative and is wrong in these three places: `ListingMap` has ONE
+popup anchor, not three; `BuildingChildRun` carries no `input_sreality_id`, so
+that site cannot route through `runSurfaceUrl` without widening the wire type;
+and `/brokers/:id` is not emitted outside the SPA at all, while `/notifications`
+is.
+
+**Still open, in priority order:** the `ListingCards` restructure (a card-wide
+`<Link>` forced a `stopPropagation` regime and hosts a nested `<Link>` that is
+invalid HTML today, masked because it only renders in the zero-collections empty
+state); the accessibility track, where most of the audit's 66 findings live;
+`ExploreAreaProvider` surviving a route change (fix must be applied symmetrically
+to `NewEstimationProvider`); `mark seen` missing `onAuxClick` on four
+notification anchors; the Google OAuth `redirectTo` hardcode, which is the Login
+bug's defect class through a full-page round trip; and making the Brokers board's
+own filters URL-addressable, which is what would let an operator share a
+leaderboard view rather than only open one broker per tab.
 
 ### Phase U-Nav: Unified browse → detail navigation (next)
 
