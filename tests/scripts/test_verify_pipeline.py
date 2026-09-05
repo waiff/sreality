@@ -1828,7 +1828,16 @@ def test_migration_drift_fails_when_a_migration_is_wholly_absent() -> None:
     rather than for any real drift.
     """
     migs = load_migrations(_MIGRATIONS_DIR, newest=T["migration_drift_window"])
-    target = next(m for m in migs if m.objects and all(_SAFE_IDENT.match(o.ident) for o in m.objects))
+    # The target's objects must be DISJOINT from every other in-window migration's:
+    # two migrations may legitimately restate one object (468 and 471 both restate
+    # llm_calls' called_for CHECK), and marking a shared object absent fails BOTH,
+    # breaking the exactly-one assertion for a reason that is not drift.
+    target = next(
+        m for m in migs
+        if m.objects and all(_SAFE_IDENT.match(o.ident) for o in m.objects)
+        and not any(
+            {(o.kind, o.ident) for o in m.objects} & {(o.kind, o.ident) for o in other.objects}
+            for other in migs if other is not m and other.objects))
     conn = _DriftConn({(o.kind, o.ident): False for o in target.objects}, default=True)
     out = check_migration_drift(conn, T)
     assert out["status"] == "fail"

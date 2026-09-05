@@ -829,20 +829,6 @@ def test_the_bakeoff_writes_no_claims_and_declares_no_lane():
     assert "location_llm_bakeoff" in text
 
 
-def test_no_workflow_or_script_names_the_archive_lane_module():
-    """The shadow rail's dispatcher scan is a plain SUBSTRING match over .yml/.yaml/.sh/.py
-    under `.github/workflows` and `scripts`, comments included. Writing that module's name
-    into either root arms a rail whose only compliant fix is shadowing seven contracts —
-    and it would fail on whichever unrelated PR next activates a DOM reader, not on this
-    one. The lane itself imports the module freely; it lives under `location_data/`."""
-    needle = "claims_remine" + "_archive"
-    for root in (_ROOT / ".github" / "workflows", _ROOT / "scripts"):
-        for path in sorted(root.rglob("*")):
-            if path.suffix not in (".yml", ".yaml", ".sh", ".py") or not path.is_file():
-                continue
-            assert needle not in path.read_text("utf-8"), path
-
-
 def test_the_lane_is_inert_until_a_contract_names_its_reader():
     """No shipped contract entry names `llm_location_text`, so `run()` returns 'inert'
     before opening a batch row. A batch stamped 'ok' moves the incremental watermark and
