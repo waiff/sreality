@@ -1,0 +1,36 @@
+{
+  "_note": "CAPTURED, not synthesised: the live remax detail page for listing 437234 (fetched 2026-09-05, one request, normal UA), run through scraper.remax_parser.parse_detail — the same function the drain writes listings.raw_json from. Two keys are REMOVED and nothing is rewritten: `broker` (agent name + e-mail, PII) and `image_urls` (30 CDN links, no location content). 437234 is the operator's pre-W2 control regression: the resolver's 'Bukovická 297' was human-confirmed correct, and the page still states 'ulice Bukovická, Velké Losiny' in its own header while a neighbour card states 'Petrov nad Desnou, okres Šumperk' — the carousel contamination this portal's contract is built around, in one real body.",
+  "raw_json": {
+    "id": "437234",
+    "title": "Prodej domu 850 m², Velké Losiny (ID 083-NP04623)",
+    "price_text": null,
+    "display_address": "ulice Bukovická, Velké Losiny",
+    "carousel_address": "Petrov nad Desnou, okres Šumperk",
+    "remax_ref": "ID 083-NP04623",
+    "params": {
+      "cislo zakazky": "ID 083-NP04623",
+      "poloha objektu": "Řadový",
+      "pocet podlazi v objektu": "3",
+      "uzitna plocha": "850 m²",
+      "plocha parcely": "1 383 m²",
+      "druh objektu": "Cihlová",
+      "stav objektu": "Velmi dobrý",
+      "typ nemovitosti": "Domy a vily",
+      "k nastehovani": "13. 3. 2026",
+      "doprava": "Vlak, Silnice, Autobus",
+      "odpad": "Kanalizace",
+      "zastavena plocha": "336 m²",
+      "pocet parkovacich mist": "8",
+      "typ domu": "Patrový",
+      "voda": "Zdroj pro celý objekt",
+      "vybaveno": "Ano",
+      "energeticka narocnost budovy": "G"
+    }
+  },
+  "lat": 50.053749999999994,
+  "lon": 17.05588888888889,
+  "in_mapy_inventory": false,
+  "listings.locality": "Velké Losiny",
+  "listings.street": "Bukovická",
+  "listings.street_source": "parser"
+}

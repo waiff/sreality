@@ -723,7 +723,12 @@ def test_find_span_points_into_the_scoped_document() -> None:
     span = scoped.find_span("ulice Pod Slovany, Úvaly")
     assert span is not None
     start, end = span
-    assert scoped.html[start:end] == "ulice Pod Slovany, Úvaly"
+    # W2-6 put the real archived header block into this fixture, so the span indexes the
+    # UNCOLLAPSED source — the portal breaks that one line across two, with a tab run
+    # between them. The quote is the collapsed value and the span is where it was read;
+    # the two are the same text, not the same bytes (`_span_pattern`'s whole purpose).
+    quoted = scoped.html[start:end]
+    assert " ".join(quoted.split()) == "ulice Pod Slovany, Úvaly"
     assert scoped.find_span("Oleška, okres Praha-východ") is None
 
 

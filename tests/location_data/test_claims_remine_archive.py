@@ -1262,10 +1262,18 @@ def test_html_text_reads_the_subject_header_and_not_a_neighbour_card():
     entry = dom_entry("html_text", css="h2.pd-header__address")
     reads = ARCHIVE_READERS["html_text"](entry, listing_row(), payload(), document)
 
-    assert [r.claim.value_text for r in reads] == ["ulice Pod Slovany, Úvaly"]
+    # W2-6 replaced this fixture's hand-written one-line header with the real archived
+    # block, so the DEEP read now states what it really states on a live remax page: the
+    # subject's line, the source line-break's tab run, and the nested jump-link's own
+    # label. What this test asserts is unchanged — the SELECTOR reaches the subject and
+    # never a neighbour card; that the value needs `html_own_text` to be usable is the
+    # next test's subject.
+    assert len(reads) == 1
+    value = reads[0].claim.value_text
+    assert value.startswith("ulice Pod Slovany,") and value.endswith("Úvaly mapa")
     body = _REMAX_HTML.read_text(encoding="utf-8", errors="replace")
     assert "Oleška" in body and "Stará Boleslav" in body   # the decoys are really there
-    assert "Oleška" not in reads[0].claim.value_text
+    assert "Oleška" not in value
 
 
 def test_html_point_dms_reads_the_subject_map_and_converts_the_pair():
@@ -1283,8 +1291,13 @@ def test_html_point_dms_reads_the_subject_map_and_converts_the_pair():
 
 def test_a_dom_read_carries_an_evidence_quote_and_a_span_that_contains_it():
     document = remax_document()
-    entry = dom_entry("html_text", css="h2.pd-header__address")
-    claim = ARCHIVE_READERS["html_text"](entry, listing_row(), payload(), document)[0].claim
+    # `html_own_text`, because W2-6 put the real nested header into this fixture: the deep
+    # read's value ("… Úvaly mapa") is not contiguous in the source — the link's tag sits
+    # between the two words — so it resolves to no span at all, which is the opposite of
+    # what this test is about.
+    entry = dom_entry("html_own_text", css="h2.pd-header__address")
+    claim = ARCHIVE_READERS["html_own_text"](
+        entry, listing_row(), payload(), document)[0].claim
 
     assert claim.evidence_quote == "ulice Pod Slovany, Úvaly"
     assert claim.span_start is not None and claim.span_end > claim.span_start
