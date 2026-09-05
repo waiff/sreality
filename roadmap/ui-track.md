@@ -449,6 +449,65 @@ bug's defect class through a full-page round trip; and making the Brokers board'
 own filters URL-addressable, which is what would let an operator share a
 leaderboard view rather than only open one broker per tab.
 
+### Interactive semantics (in progress — W0 + W1 up as stacked drafts #1281 / #1282)
+
+The successor to the link-semantics program: that one fixed *destinations*;
+this one fixes the *elements*. Audited first (eight clusters, each
+adversarially re-read): **62 defect classes across ~388 sites**, 16 high.
+They are not 388 mistakes — six missing primitives multiplied by their call
+sites, one structural mistake on the Browse card, and one CSS token.
+
+**North star:** *every interactive element is the right element — correct role,
+named by the words the user sees, keyboard-reachable with a visible focus ring,
+never nested inside another interactive — and when the view changes, focus
+lands somewhere sensible. Each property comes from one shared primitive and is
+proved by a rendered-role test, never inferred from a class string.*
+
+**W0 — the rail (#1281).** `src/test/a11y.ts`: `expectNoNestedInteractive`,
+`expectRovingGroup`, each shown failing on its defect and passing the correct
+shape; proven on `PipelineStageMenu`, the tree's one honest APG menu.
+**Decision reversed by measurement:** the design review wanted `axe-core` as
+the program's one new dependency, on the claim that its `nested-interactive`
+rule catches the Browse card generically. Probed in this jsdom: it fires for a
+`<button>`/`role="button"` wrapping a control and *never* for an `<a>` wrapping
+one — ARIA's `link` role is not children-presentational, so the rule's scope
+excludes exactly the flagship case. Installed, measured, uninstalled; the
+ten-line query in `a11y.ts` does see it. No new dependency.
+
+**W1 — one Field primitive (#1282).** Six copies of "a caption over a control"
+collapsed onto `Field` in `controls.tsx`; `as="group"` (role + aria-labelledby)
+is the default, `as="control"` the sanctioned single-child `<label>` wrap.
+Three of the six had wrapped pill GROUPS in `<label>`: the first pill inherited
+the whole caption as its name and **clicking the caption selected it** —
+clicking "Nabídka" chose "Prodej". `Section` (18 sidebar sites, not the 53 the
+review counted) is now an alias and finally carries a group role. `Segmented`,
+duplicated verbatim in Brokers and Outreach, moved beside it. The new
+`label:has(button)` lint ban found a **seventh** site live (`Settings.tsx`, a
+Save button inside its input's label). Rail mutation-proven: 8 tests fail if
+the group form becomes a `<label>` again. Visible change for review: five
+pages' captions converge on Section's typography.
+
+**Remaining waves, in the review's order, none started:** W2 composite widgets
+name their internals (63 controls with no name from any source); W3 focus is
+visible (65 `focus:outline-none`, 33 with a 1.18:1 replacement — a deletion
+wave, plus the `--color-focus` token which is operator territory); W4 focus has
+a destination (route change + the three modal providers above `<Outlet>`); W5
+the Browse card stops being an anchor around eight controls (the highest-value,
+highest-risk change; stretched-link pattern; needs a real-browser pass); W6
+one Dialog primitive over the 13 hand-rolled modals; W7 delete the decorative
+ARIA and build one real Combobox (a role swap + ~19 test rewrites in one
+2400-line file, not a deletion); W8 the five mouse-only `<tr>`/`<th>` surfaces;
+W9 one `ExternalLink` and the middle-click gesture gap.
+
+**Named adjacent, not folded in:** the Google OAuth `redirectTo` drop (needs a
+Supabase dashboard allowlist step and shares that field with password reset —
+own PR, early); `javascript:` scheme safety on five interpolated `href`s
+(security, not a11y); the forms-and-tables tier (aria-describedby/invalid,
+table header association) which Field *enables*; Brokers' URL-addressable
+filters (a feature); MapLibre string-built popups (permanently unguarded by any
+JSX rail — stated, not pretended); no screen reader has been run against the
+app at any point.
+
 ### Phase U-Nav: Unified browse → detail navigation (next)
 
 Today the top nav exposes `Listing` and (historically) `Estimate` as
