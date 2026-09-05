@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   createOutreachCampaign,
@@ -11,6 +11,7 @@ import type { DistrictChip } from '../lib/filters';
 import { LocationTypeahead } from '../components/filter-controls/LocationTypeahead';
 import { PickButton } from '../components/controls';
 import { fmtCount, fmtRelative } from '../lib/format';
+import { ROUTES } from '@/lib/routes';
 
 const CATEGORY_OPTIONS: ReadonlyArray<{ value: string | null; label: string }> = [
   { value: 'byt', label: 'Byty' },
@@ -55,7 +56,7 @@ export default function Outreach() {
       }),
     onSuccess: (c) => {
       qc.invalidateQueries({ queryKey: ['outreach-campaigns'] });
-      navigate(`/outreach/${c.id}`);
+      navigate(ROUTES.outreachDetail.build({ id: c.id }));
     },
   });
 
@@ -153,13 +154,15 @@ export default function Outreach() {
           <ul className="mt-3 space-y-2">
             {campaigns.map((c) => (
               <li key={c.id}>
-                <button
-                  type="button"
-                  onClick={() => navigate(`/outreach/${c.id}`)}
-                  className="w-full text-left border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] px-4 py-3 hover:border-[var(--color-copper)] transition-colors"
+                {/* An anchor, not a button: the row is a destination. It also
+                  * makes the markup valid — CampaignRow's root is a <div>, which
+                  * a <button> (phrasing content only) may not contain. */}
+                <Link
+                  to={ROUTES.outreachDetail.build({ id: c.id })}
+                  className="block w-full text-left border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] px-4 py-3 hover:border-[var(--color-copper)] transition-colors"
                 >
                   <CampaignRow c={c} />
-                </button>
+                </Link>
               </li>
             ))}
           </ul>

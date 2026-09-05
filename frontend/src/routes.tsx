@@ -1,6 +1,7 @@
 import { Suspense, type ReactNode } from 'react';
 import { lazyChunk } from '@/lib/lazyChunk';
-import { Navigate, type RouteObject } from 'react-router-dom';
+import { ROUTES } from '@/lib/routes';
+import { Link, Navigate, type RouteObject } from 'react-router-dom';
 import Shell from './components/Shell';
 import Skeleton from './components/Skeleton';
 import { RequireAdmin, RequireAuth } from './components/guards';
@@ -59,9 +60,9 @@ function AdminPage({ children }: { children: ReactNode }) {
 export const routes: RouteObject[] = [
   // Full-page auth screens (outside the app Shell, so they stay reachable
   // while logged out — everything under the Shell requires a session).
-  { path: '/login', element: <Login />, handle: { title: 'Sign in' } },
-  { path: '/forgot-password', element: <ForgotPassword />, handle: { title: 'Reset password' } },
-  { path: '/reset-password', element: <UpdatePassword />, handle: { title: 'New password' } },
+  { path: ROUTES.login.pattern, element: <Login />, handle: { title: 'Sign in' } },
+  { path: ROUTES.forgotPassword.pattern, element: <ForgotPassword />, handle: { title: 'Reset password' } },
+  { path: ROUTES.resetPassword.pattern, element: <UpdatePassword />, handle: { title: 'New password' } },
   {
     path: '/',
     element: (
@@ -74,49 +75,49 @@ export const routes: RouteObject[] = [
       // single source of truth, read by TitleController via matchRoutes).
       // Dynamic pages (a listing, a broker, …) carry a generic fallback here
       // and refine it at runtime with usePageTitle — see lib/pageTitle.tsx.
-      { index: true, element: <Navigate to="/browse" replace /> },
-      { path: 'browse', element: <Browse />, handle: { title: 'Browse' } },
+      { index: true, element: <Navigate to={ROUTES.browse.build()} replace /> },
+      { path: ROUTES.browse.childPath, element: <Browse />, handle: { title: 'Browse' } },
       // Bare /listing handles the ?property=ID query form (Browse merge links
       // use it); ListingDetail resolves it to the property's representative
       // listing and redirects to /listing/:id.
-      { path: 'listing', element: <ListingDetail />, handle: { title: 'Listing' } },
+      { path: ROUTES.listing.childPath, element: <ListingDetail />, handle: { title: 'Listing' } },
       // Canonical natural-key form (migration 091). ListingDetail redirects the
       // legacy numeric route below to this one so no negative synthetic id
       // (migration 097) is ever shown in the URL bar.
-      { path: 'listing/:source/:nativeId', element: <ListingDetail />, handle: { title: 'Listing' } },
+      { path: ROUTES.listingCanonical.childPath, element: <ListingDetail />, handle: { title: 'Listing' } },
       // Legacy/resolver form, kept forever: positive → sreality's real id,
       // negative → frozen pre-cutover alias; also the target of every deep link
       // ever sent before the natural-key cutover.
-      { path: 'listing/:sreality_id', element: <ListingDetail />, handle: { title: 'Listing' } },
-      { path: 'health', element: <AdminPage><Health /></AdminPage>, handle: { title: 'Health' } },
-      { path: 'costs', element: <AdminPage><Costs /></AdminPage>, handle: { title: 'LLM costs' } },
-      { path: 'estimate', element: <Navigate to="/estimations" replace /> },
-      { path: 'estimations', element: <EstimationList />, handle: { title: 'Estimations' } },
-      { path: 'estimation/:id', element: <EstimationDetail />, handle: { title: 'Estimation' } },
-      { path: 'brokers', element: <Brokers />, handle: { title: 'Brokers' } },
-      { path: 'brokers/review', element: <AdminPage><BrokerReview /></AdminPage>, handle: { title: 'Brokers · Review' } },
-      { path: 'brokers/:id', element: <BrokerDetail />, handle: { title: 'Broker' } },
-      { path: 'outreach', element: <AdminPage><Outreach /></AdminPage>, handle: { title: 'Outreach' } },
-      { path: 'outreach/:id', element: <AdminPage><OutreachDetail /></AdminPage>, handle: { title: 'Campaign' } },
-      { path: 'building/:id', element: <BuildingDetail />, handle: { title: 'Building' } },
-      { path: 'collections', element: <Collections />, handle: { title: 'Collections' } },
-      { path: 'collection/:id', element: <CollectionDetail />, handle: { title: 'Collection' } },
-      { path: 'pipeline', element: <Pipeline />, handle: { title: 'Pipeline' } },
-      { path: 'datasets', element: <AdminPage><Datasets /></AdminPage>, handle: { title: 'Datasets' } },
-      { path: 'watchdog', element: <Watchdog />, handle: { title: 'Watchdogs' } },
-      { path: 'watchdog/manage', element: <WatchdogManage />, handle: { title: 'Watchdogs · Manage' } },
-      { path: 'watchdog/:id/edit', element: <WatchdogEdit />, handle: { title: 'Edit watchdog' } },
-      { path: 'notifications', element: <Notifications />, handle: { title: 'Notifications' } },
-      { path: 'location-quality', element: <AdminPage><LocationQuality /></AdminPage>, handle: { title: 'Location quality' } },
-      { path: 'settings', element: <AdminPage><Settings /></AdminPage>, handle: { title: 'Settings' } },
-      { path: 'new-dedup', element: <AdminPage><NewDedupDashboard /></AdminPage>, handle: { title: 'NEW DEDUP' } },
-      { path: 'new-dedup/settings', element: <AdminPage><NewDedupSettings /></AdminPage>, handle: { title: 'NEW DEDUP · Settings' } },
-      { path: 'new-dedup/labeling', element: <AdminPage><NewDedupLabeling /></AdminPage>, handle: { title: 'NEW DEDUP · Labeling' } },
-      { path: 'new-dedup/labeling/taxonomy', element: <AdminPage><NewDedupTaxonomy /></AdminPage>, handle: { title: 'NEW DEDUP · Taxonomy' } },
-      { path: 'new-dedup/exam', element: <AdminPage><NewDedupExam /></AdminPage>, handle: { title: 'NEW DEDUP · Exam' } },
-      { path: 'new-dedup/exam/review', element: <AdminPage><NewDedupExamReview /></AdminPage>, handle: { title: 'NEW DEDUP · Exam review' } },
-      { path: 'scrapers', element: <AdminPage><Scrapers /></AdminPage>, handle: { title: 'Scrapers' } },
-      { path: 'dev/confidence-indicator', element: <AdminPage><DevConfidencePreview /></AdminPage>, handle: { title: 'Confidence indicator (dev)' } },
+      { path: ROUTES.listingLegacy.childPath, element: <ListingDetail />, handle: { title: 'Listing' } },
+      { path: ROUTES.health.childPath, element: <AdminPage><Health /></AdminPage>, handle: { title: 'Health' } },
+      { path: ROUTES.costs.childPath, element: <AdminPage><Costs /></AdminPage>, handle: { title: 'LLM costs' } },
+      { path: 'estimate', element: <Navigate to={ROUTES.estimations.build()} replace /> },
+      { path: ROUTES.estimations.childPath, element: <EstimationList />, handle: { title: 'Estimations' } },
+      { path: ROUTES.estimationDetail.childPath, element: <EstimationDetail />, handle: { title: 'Estimation' } },
+      { path: ROUTES.brokers.childPath, element: <Brokers />, handle: { title: 'Brokers' } },
+      { path: ROUTES.brokersReview.childPath, element: <AdminPage><BrokerReview /></AdminPage>, handle: { title: 'Brokers · Review' } },
+      { path: ROUTES.brokerDetail.childPath, element: <BrokerDetail />, handle: { title: 'Broker' } },
+      { path: ROUTES.outreach.childPath, element: <AdminPage><Outreach /></AdminPage>, handle: { title: 'Outreach' } },
+      { path: ROUTES.outreachDetail.childPath, element: <AdminPage><OutreachDetail /></AdminPage>, handle: { title: 'Campaign' } },
+      { path: ROUTES.buildingDetail.childPath, element: <BuildingDetail />, handle: { title: 'Building' } },
+      { path: ROUTES.collections.childPath, element: <Collections />, handle: { title: 'Collections' } },
+      { path: ROUTES.collectionDetail.childPath, element: <CollectionDetail />, handle: { title: 'Collection' } },
+      { path: ROUTES.pipeline.childPath, element: <Pipeline />, handle: { title: 'Pipeline' } },
+      { path: ROUTES.datasets.childPath, element: <AdminPage><Datasets /></AdminPage>, handle: { title: 'Datasets' } },
+      { path: ROUTES.watchdog.childPath, element: <Watchdog />, handle: { title: 'Watchdogs' } },
+      { path: ROUTES.watchdogManage.childPath, element: <WatchdogManage />, handle: { title: 'Watchdogs · Manage' } },
+      { path: ROUTES.watchdogEdit.childPath, element: <WatchdogEdit />, handle: { title: 'Edit watchdog' } },
+      { path: ROUTES.notifications.childPath, element: <Notifications />, handle: { title: 'Notifications' } },
+      { path: ROUTES.locationQuality.childPath, element: <AdminPage><LocationQuality /></AdminPage>, handle: { title: 'Location quality' } },
+      { path: ROUTES.settings.childPath, element: <AdminPage><Settings /></AdminPage>, handle: { title: 'Settings' } },
+      { path: ROUTES.newDedup.childPath, element: <AdminPage><NewDedupDashboard /></AdminPage>, handle: { title: 'NEW DEDUP' } },
+      { path: ROUTES.newDedupSettings.childPath, element: <AdminPage><NewDedupSettings /></AdminPage>, handle: { title: 'NEW DEDUP · Settings' } },
+      { path: ROUTES.newDedupLabeling.childPath, element: <AdminPage><NewDedupLabeling /></AdminPage>, handle: { title: 'NEW DEDUP · Labeling' } },
+      { path: ROUTES.newDedupTaxonomy.childPath, element: <AdminPage><NewDedupTaxonomy /></AdminPage>, handle: { title: 'NEW DEDUP · Taxonomy' } },
+      { path: ROUTES.newDedupExam.childPath, element: <AdminPage><NewDedupExam /></AdminPage>, handle: { title: 'NEW DEDUP · Exam' } },
+      { path: ROUTES.newDedupExamReview.childPath, element: <AdminPage><NewDedupExamReview /></AdminPage>, handle: { title: 'NEW DEDUP · Exam review' } },
+      { path: ROUTES.scrapers.childPath, element: <AdminPage><Scrapers /></AdminPage>, handle: { title: 'Scrapers' } },
+      { path: ROUTES.devConfidenceIndicator.childPath, element: <AdminPage><DevConfidencePreview /></AdminPage>, handle: { title: 'Confidence indicator (dev)' } },
       { path: '*', element: <NotFound />, handle: { title: 'Not found' } },
     ],
   },
@@ -132,6 +133,15 @@ function NotFound() {
       <p className="mt-2 text-sm text-[var(--color-ink-3)]">
         That page doesn't exist in the browser.
       </p>
+      {/* The host serves the SPA at every path depth, so a mistyped or drifted
+        * URL lands here with an HTTP 200 rather than a server 404 — this was a
+        * dead end with nothing to click. */}
+      <Link
+        to={ROUTES.browse.build()}
+        className="inline-block mt-5 text-sm text-[var(--color-copper)] hover:text-[var(--color-copper-2)] underline underline-offset-4"
+      >
+        Back to Browse
+      </Link>
     </div>
   );
 }

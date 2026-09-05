@@ -12,6 +12,7 @@ import ErrorBoundary from './ErrorBoundary';
 import AccountMenu from './AccountMenu';
 import { APP_NAME } from '@/lib/brand';
 import { useBuildSkew } from '@/lib/useBuildSkew';
+import { ROUTES } from '@/lib/routes';
 
 type NavItem = { to: string; label: string; disabled?: boolean; title?: string; admin?: boolean; agenda?: string };
 
@@ -19,20 +20,20 @@ type NavItem = { to: string; label: string; disabled?: boolean; title?: string; 
 // link to the session plan's agenda-visibility map (Settings › Tiers). Both
 // are UX — the routes themselves carry the security gates.
 const navItems: ReadonlyArray<NavItem> = [
-  { to: '/browse',      label: 'Browse', agenda: 'browse' },
-  { to: '/pipeline',    label: 'Pipeline', agenda: 'pipeline' },
-  { to: '/estimations', label: 'Estimations', agenda: 'estimations' },
-  { to: '/watchdog',    label: 'Watchdogs', agenda: 'watchdogs' },
-  { to: '/notifications', label: 'Notifications', agenda: 'notifications' },
-  { to: '/brokers',     label: 'Brokers', agenda: 'brokers' },
+  { to: ROUTES.browse.build(),      label: 'Browse', agenda: 'browse' },
+  { to: ROUTES.pipeline.build(),    label: 'Pipeline', agenda: 'pipeline' },
+  { to: ROUTES.estimations.build(), label: 'Estimations', agenda: 'estimations' },
+  { to: ROUTES.watchdog.build(),    label: 'Watchdogs', agenda: 'watchdogs' },
+  { to: ROUTES.notifications.build(), label: 'Notifications', agenda: 'notifications' },
+  { to: ROUTES.brokers.build(),     label: 'Brokers', agenda: 'brokers' },
   // The merge-review queue is a real admin surface (routes.tsx wraps it in
   // AdminPage) that was only reachable from a conditional chip on /brokers —
   // invisible whenever the queue happened to be empty.
-  { to: '/brokers/review', label: 'Broker Review', admin: true },
-  { to: '/datasets',    label: 'Datasets', admin: true },
-  { to: '/outreach',    label: 'Outreach', disabled: true, admin: true,
+  { to: ROUTES.brokersReview.build(), label: 'Broker Review', admin: true },
+  { to: ROUTES.datasets.build(),    label: 'Datasets', admin: true },
+  { to: ROUTES.outreach.build(),    label: 'Outreach', disabled: true, admin: true,
     title: 'Outreach is paused — not available yet.' },
-  { to: '/collections', label: 'Collections', agenda: 'collections' },
+  { to: ROUTES.collections.build(), label: 'Collections', agenda: 'collections' },
 ];
 
 type MenuItem = { to: string; label: string; end?: boolean };
@@ -40,24 +41,24 @@ type MenuItem = { to: string; label: string; end?: boolean };
 // Grouped under the "Settings" dropdown trigger — all admin-only, so the
 // whole group renders (or not) alongside the other admin-gated nav items.
 const settingsItems: ReadonlyArray<MenuItem> = [
-  { to: '/health',   label: 'Health' },
-  { to: '/costs',    label: 'LLM Costs' },
-  { to: '/location-quality', label: 'Location Quality' },
-  { to: '/scrapers', label: 'Scrapers' },
-  { to: '/settings', label: 'General Settings' },
+  { to: ROUTES.health.build(),   label: 'Health' },
+  { to: ROUTES.costs.build(),    label: 'LLM Costs' },
+  { to: ROUTES.locationQuality.build(), label: 'Location Quality' },
+  { to: ROUTES.scrapers.build(), label: 'Scrapers' },
+  { to: ROUTES.settings.build(), label: 'General Settings' },
 ];
 
 // The NEW DEDUP program's own group. Admin-only, same posture as the
 // Settings group. Dashboard is still a Wave 0 placeholder (real content
 // lands with the funnel/cost work); Settings + Labeling are real (Wave 1).
 const newDedupItems: ReadonlyArray<MenuItem> = [
-  { to: '/new-dedup', label: 'Dashboard', end: true },
-  { to: '/new-dedup/settings', label: 'Settings' },
+  { to: ROUTES.newDedup.build(), label: 'Dashboard', end: true },
+  { to: ROUTES.newDedupSettings.build(), label: 'Settings' },
   // `end` so /new-dedup/labeling/taxonomy lights only Taxonomy — NavMenu passes
   // this straight to NavLink, whose default prefix match would light both.
-  { to: '/new-dedup/labeling', label: 'Labeling', end: true },
-  { to: '/new-dedup/labeling/taxonomy', label: 'Taxonomy' },
-  { to: '/new-dedup/exam', label: 'Exam' },
+  { to: ROUTES.newDedupLabeling.build(), label: 'Labeling', end: true },
+  { to: ROUTES.newDedupTaxonomy.build(), label: 'Taxonomy' },
+  { to: ROUTES.newDedupExam.build(), label: 'Exam' },
 ];
 
 function isPathActive(pathname: string, to: string): boolean {

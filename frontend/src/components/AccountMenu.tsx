@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { useAuth } from '@/lib/auth';
+import { ROUTES } from '@/lib/routes';
 
 /* Additive UI only — does not gate anything. Anonymous users see a "Sign in"
  * link; logged-in users see who they are + a sign-out affordance. */
 export default function AccountMenu() {
   const { user, loading, signOut } = useAuth();
-  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -23,13 +23,12 @@ export default function AccountMenu() {
 
   if (!user) {
     return (
-      <button
-        type="button"
-        onClick={() => navigate('/login')}
-        className="px-3 py-1.5 text-sm tracking-wide rounded-[var(--radius-xs)] border border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)]"
+      <Link
+        to={ROUTES.login.build()}
+        className="inline-block px-3 py-1.5 text-sm tracking-wide rounded-[var(--radius-xs)] border border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)]"
       >
         Sign in
-      </button>
+      </Link>
     );
   }
 
