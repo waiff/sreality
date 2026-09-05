@@ -41,8 +41,10 @@
  *   - Tab / Shift+Tab containment inside the panel (APG modal dialog): Tab
  *     from the last control wraps to the first, Shift+Tab from the first wraps
  *     to the last, and focus that has escaped the panel is pulled back.
- *   - initial focus to the first focusable control, or the panel itself when
- *     it has none (the panel therefore needs `tabIndex={-1}`).
+ *   - initial focus to the consumer's `initialFocus` when it is rendered, else
+ *     the first focusable control that is NOT the close glyph, else the panel
+ *     itself (which therefore needs `tabIndex={-1}`). ONE guarded effect, so
+ *     no consumer re-argues effect ordering or forgets the top-layer guard.
  *   - focus RESTORE on unmount to whatever had focus at mount.
  *   - a REF-COUNTED body scroll lock: n open dialogs take one lock and the
  *     last close releases it, restoring the `overflow` value from before the
@@ -252,6 +254,19 @@ function acquireScrollLock(): () => void {
   };
 }
 
+/* Where a freshly opened dialog puts focus. An explicit `initialFocus` wins
+ * when it is rendered (a field not on this path leaves the ref empty and the
+ * default takes over). The default is the first focusable control that is NOT
+ * the close glyph: half the migrated dialogs render <DialogClose> first in DOM
+ * order, and a dialog that opens on its own dismiss control tells a keyboard
+ * user nothing about what it is for. The glyph is still the fallback for a
+ * panel with nothing else, and the panel itself (tabIndex=-1) after that. */
+export function initialFocusTarget(panel: HTMLElement, explicit: HTMLElement | null): HTMLElement {
+  if (explicit && explicit.isConnected) return explicit;
+  const items = focusablesIn(panel);
+  return items.find((el) => !el.hasAttribute('data-dialog-close')) ?? items[0] ?? panel;
+}
+
 export interface DialogOptions {
   /* Dismiss this layer. Read through a ref, so a handler recreated on every
    * render never re-registers the layer or re-runs the focus effect. */
@@ -263,6 +278,12 @@ export interface DialogOptions {
    * layer's rank; applied imperatively on every stack change so the first
    * painted frame is already correct. Optional for bespoke-chrome consumers. */
   zRef?: RefObject<HTMLElement | null>;
+  /* Where focus lands on open, when the first control is the wrong place: the
+   * field the dialog was opened to type into, or a destructive confirm's
+   * Cancel. Read once, at mount, inside the same top-layer-guarded effect as
+   * the default; an empty ref (the field is not rendered on this path) falls
+   * back to the default. See initialFocusTarget. */
+  initialFocus?: RefObject<HTMLElement | null>;
 }
 
 export interface DialogHandle {
@@ -276,7 +297,7 @@ export interface DialogHandle {
   zIndex: number;
 }
 
-export function useDialog({ onClose, panelRef, zRef }: DialogOptions): DialogHandle {
+export function useDialog({ onClose, panelRef, zRef, initialFocus }: DialogOptions): DialogHandle {
   /* Taken in RENDER, where parent runs before child. A useState initializer
    * runs exactly once per mount, so a REMOUNT takes a fresh, higher number —
    * which is right: the remounted dialog is a new layer, and re-keying an
@@ -339,8 +360,7 @@ export function useDialog({ onClose, panelRef, zRef }: DialogOptions): DialogHan
      * one effect phase over. By the time this runs both layers are pushed
      * (layout effects already ran), so topLayer() is the truth. */
     if (panel && topLayer() === layerRef.current) {
-      const first = focusablesIn(panel)[0];
-      (first ?? panel).focus();
+      initialFocusTarget(panel, initialFocus?.current ?? null).focus();
     }
     return () => {
       /* Not `instanceof HTMLElement`: an <svg> control is an SVGElement and

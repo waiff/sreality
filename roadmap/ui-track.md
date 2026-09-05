@@ -552,7 +552,41 @@ a same-commit pair, an outer remount, a portalled companion. `role="dialog"`
 banned outside the primitive; the ten unmigrated modals carry per-line
 exemptions naming W6b.
 
-**Remaining waves, in the review's order, W2–W6a done:** W2 composite widgets
+**Two follow-ups the W6a live check found (merged, #1302 / #1303).** The
+anchored popover took focus on mount while still `visibility: hidden` (React
+flushes the first commit's passive effects before a layout-effect setState;
+Chromium refuses to focus a hidden element, jsdom does not care) — focus-in is
+now keyed on the panel's position. And Tab past a one-control popover's edge
+tabbed straight out to the portal's neighbour at the end of `<body>` — it now
+closes the panel and continues from the trigger (APG disclosure). Both were
+invisible to jsdom and caught only by the real-browser pass.
+
+**W6b — the eleven remaining dialogs on the primitive (merged).** Four
+disjoint clusters, each built in an isolated worktree and adversarially
+re-read. Eight run on `<Dialog>` (NewEstimation, CreateWatchdog, PresetSave,
+CityPicker, TaxonomyManage, ImageTagDetail, TagDeleteConfirm, Comparable); two
+keep bespoke chrome over `useDialog` (RunDetail, ImageLightbox — the census
+`dialogChrome.test.ts` proves the import behind every exemption); one was
+reclassified (TagEditPopover announced `role="dialog"` with no modality at all
+and is now a named AnchoredPopover). Behaviour kept on purpose: the
+NewEstimation in-flight guard (one `requestClose`; the glyph DISABLED, not
+dimmed), select-on-open for the two name fields, the destructive confirm
+opening on Cancel. The reviewers' notes converged on the primitive and were
+fixed there once: `initialFocus` inside the one guarded effect (five
+hand-rolled `[]` focus effects deleted) plus a default that never opens on the
+close glyph; a viewport-safe panel with two overflow LONGHANDS (three
+migrations had bet on Tailwind's emission order for `overflow-y-auto` vs
+`overflow-hidden`); `DialogClose` takes `disabled` and a `tone` instead of a
+competing `text-*` class. Also: Escape in the taxonomy rename field no longer
+closes the whole modal (one `preventDefault` + a test); CityPicker's six
+buttons say `type="button"` so the fix does not rest on the portal; a
+popover-in-dialog Escape test pins the `document`-vs-`window` listener
+pairing. Chrome the operator will SEE: every panel centred, `shadow-2xl`, a
+2px backdrop blur; the CurationBlock add-tag dropdown learned the
+`[data-transient-layer]` guard (the one out-of-cluster edit, forced by
+portalling). Zero W6b lint exemptions remain.
+
+**Remaining waves, in the review's order, W2–W6 done:** W2 composite widgets
 name their internals (63 controls with no name from any source); W3 focus is
 visible (65 `focus:outline-none`, 33 with a 1.18:1 replacement — a deletion
 wave, plus the `--color-focus` token which is operator territory); W4 focus has

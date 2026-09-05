@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -79,5 +79,38 @@ describe('<CurationBlock> control names', () => {
     const editor = screen.getByRole('textbox', { name: 'Edit note' });
     expect(editor).toHaveAccessibleName('Edit note');
     expect(document.activeElement).toBe(editor);
+  });
+});
+
+/* The tag-edit popover on each row of this dropdown is portalled to <body>
+ * now (it used to be an `absolute` panel clipped by the listbox's
+ * `overflow-y-auto`). This dropdown dismisses itself with a document
+ * mousedown + `ref.contains`, which a portalled child fails — so the first
+ * press inside the edit panel closed the dropdown and unmounted the panel
+ * mid-edit. The guard is the `[data-transient-layer]` marker AnchoredPopover
+ * sets, the same one lib/useDialog's focus trap reads. */
+describe('<CurationBlock> the add-tag dropdown and its portalled edit popover', () => {
+  it('stays open while the operator presses inside the edit popover', async () => {
+    const user = userEvent.setup();
+    renderBlock();
+
+    await user.click(await screen.findByRole('button', { name: 'Add tag' }));
+    await user.click(screen.getByRole('button', { name: `Edit tag ${TAG.name}` }));
+
+    const field = screen.getByRole('textbox', { name: 'Edit tag' });
+    fireEvent.mouseDown(field);
+
+    expect(screen.getByRole('textbox', { name: 'Find or create a tag' })).toBeInTheDocument();
+    expect(field).toBeInTheDocument();
+  });
+
+  it('still closes on a press that is genuinely outside', async () => {
+    const user = userEvent.setup();
+    renderBlock();
+
+    await user.click(await screen.findByRole('button', { name: 'Add tag' }));
+    fireEvent.mouseDown(document.body);
+
+    expect(screen.queryByRole('textbox', { name: 'Find or create a tag' })).toBeNull();
   });
 });

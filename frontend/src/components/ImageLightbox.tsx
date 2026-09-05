@@ -1,13 +1,39 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { ImagePublic } from '@/lib/types';
 import { imageSrc } from '@/lib/imageUrl';
 import ImageTagBadge from '@/components/ImageTagBadge';
 import ImageRenderBadge from '@/components/ImageRenderBadge';
+import { DialogClose } from '@/components/Dialog';
+import { useDialog } from '@/lib/useDialog';
 
-/* The full-screen photo modal — Escape/arrow-key nav, focus trap, the tag/render badges
- * on the enlarged photo. Extracted from listing-detail/Gallery (the property-detail image
+/* The full-screen photo modal — arrow-key nav, the tag/render badges on the
+ * enlarged photo. Extracted from listing-detail/Gallery (the property-detail image
  * expand) so the CLIP/pHash audit pages open the SAME modal instead of a second one-off —
- * it already operates on ImagePublic[], the exact shape images_public rows already are. */
+ * it already operates on ImagePublic[], the exact shape images_public rows already are.
+ *
+ * BESPOKE CHROME over lib/useDialog, not <Dialog>: there is no card here. The
+ * viewer is full-bleed — the photo centred in the dim, its counter, close and
+ * arrows pinned to the VIEWPORT's edges — so <Dialog>'s backdrop+panel pair
+ * would put the arrows at the photo's edges instead. So the element carrying
+ * the role is viewport-sized too — which is NOT the backdrop mistake <Dialog>'s
+ * header describes: the dim behind it is a separate presentation layer, and
+ * everything reachable (counter, close, arrows, photo) sits INSIDE the element
+ * that announces itself. The hook still owns
+ * Escape layering, the focus trap, initial/restored focus, the z rank and the
+ * ref-counted scroll lock; only the chrome is local.
+ *
+ * Portalled to <body> for the same reason <Dialog> is: this opens from deep
+ * inside three different page bodies (the listing gallery, the labeling review
+ * grids, the tag-contents gallery), and a `position: fixed` overlay left in the
+ * tree inherits any ancestor's stacking context — which would cap its z-index
+ * below the layer opened FROM it and make the rank meaningless.
+ *
+ * WHAT LEFT: its own document keydown listener (Escape), its own body
+ * scroll-lock copy, its own close-glyph, and the four `stopPropagation`s that
+ * existed only to keep a click on the chrome from reaching the dim's
+ * `onClick={onClose}` — the dismissal is a target check now, so nothing needs
+ * undoing. */
 
 interface Props {
   images: ImagePublic[];
@@ -32,7 +58,10 @@ export default function ImageLightbox({
   const [index, setIndex] = useState(startIndex);
   const [errored, setErrored] = useState(false);
   const total = images.length;
-  const closeBtnRef = useRef<HTMLButtonElement>(null);
+  const counterId = useId();
+  const dimRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const { isTopLayer, zIndex } = useDialog({ onClose, panelRef, zRef: dimRef });
 
   // The grid behind can shrink while the modal is open (a reviewed tile leaving
   // its tab), so the stored index is clamped rather than trusted — an
@@ -49,21 +78,34 @@ export default function ImageLightbox({
     setIndex((i + 1) % total);
   }, [i, total]);
 
+  /* Read through a ref so the arrow-key effect below never has to list the
+   * handle — which is a fresh object every render — among its dependencies. */
+  const isTopRef = useRef(isTopLayer);
+  isTopRef.current = isTopLayer;
+
+  /* THE ARROW KEYS, AND NOTHING ELSE. This effect used to also call
+   * `closeBtnRef.current?.focus()` while depending on [onClose, prev, next] —
+   * and prev/next take a new identity on every step — so each arrow press
+   * re-ran the whole effect and slammed focus back onto Close, out of whatever
+   * the operator had tabbed to. Initial focus belongs to useDialog now and is
+   * mount-only by contract; what is left here only adds and removes a
+   * listener, so re-registering as the position moves costs nothing.
+   *
+   * `window`, matching useDialog's own listener: an event dispatched at
+   * `document` still bubbles up to it, so this is the superset of the two
+   * placements. Only the frontmost layer answers, the same rule Escape
+   * follows — an arrow press must not walk the gallery underneath a dialog
+   * opened over it. */
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-      else if (e.key === 'ArrowLeft') prev();
+      if (e.defaultPrevented) return;
+      if (!isTopRef.current()) return;
+      if (e.key === 'ArrowLeft') prev();
       else if (e.key === 'ArrowRight') next();
     };
-    document.addEventListener('keydown', handler);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    closeBtnRef.current?.focus();
-    return () => {
-      document.removeEventListener('keydown', handler);
-      document.body.style.overflow = prevOverflow;
-    };
-  }, [onClose, prev, next]);
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [prev, next]);
 
   const current = images[i];
   if (!current) return null;
@@ -72,107 +114,110 @@ export default function ImageLightbox({
     confidence: current.clip_confidence,
   };
 
-  return (
+  return createPortal(
     <div
-      // eslint-disable-next-line no-restricted-syntax -- W6b migrates this dialog
-      role="dialog"
-      aria-modal="true"
-      onClick={onClose}
-      className="fixed inset-0 z-50 flex items-center justify-center"
-      style={{ background: 'rgba(20, 22, 27, 0.92)' }}
+      /* Presentational: it is the dim, not the dialog. */
+      ref={dimRef}
+      role="presentation"
+      className="fixed inset-0"
+      /* NOT a `z-50` class: the layer's rank decides, so a dialog opened from
+       * inside this one paints over it. See the ledger in lib/useDialog. */
+      style={{ zIndex, background: 'rgba(20, 22, 27, 0.92)' }}
     >
       <div
-        className="absolute top-3 left-1/2 -translate-x-1/2 px-2.5 py-1 text-[0.72rem] tracking-[0.18em] uppercase text-[var(--color-ink-4)] font-mono tabular-nums"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {i + 1} / {total}
-      </div>
-
-      <button
-        ref={closeBtnRef}
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onClose();
+        ref={panelRef}
+        /* The viewer IS the dialog: full-bleed by design, with the photo and
+         * every control inside it. The role sits here and not on the dim
+         * above, which is the split six of the modals this program replaces
+         * had backwards. */
+        // eslint-disable-next-line no-restricted-syntax -- bespoke chrome over lib/useDialog (see the header); the layering, trap, Escape and scroll lock all come from the hook.
+        role="dialog"
+        aria-modal="true"
+        /* Named by the visible counter — the rule ComparableModal's eyebrow
+         * follows too: never a literal that could drift from the words on
+         * screen. */
+        aria-labelledby={counterId}
+        /* Focusable but not tab-reachable: where useDialog parks focus if the
+         * viewer ever renders without a control. */
+        tabIndex={-1}
+        onMouseDown={(e) => {
+          // mousedown, not click: a drag that starts on the photo and ends on
+          // the surrounding dark must not count as a dismissal. Only a press
+          // that both starts and lands on the empty surface closes, and only
+          // for the frontmost layer.
+          if (e.target === e.currentTarget && isTopLayer()) onClose();
         }}
-        aria-label="Close"
-        className="absolute top-3 right-3 w-9 h-9 flex items-center justify-center text-[var(--color-ink-4)] hover:text-[var(--color-paper)] focus-visible:border focus-visible:border-[var(--color-copper)] rounded-[var(--radius-sm)]"
+        className="absolute inset-0 flex items-center justify-center"
       >
-        <CloseGlyph />
-      </button>
+        <div
+          id={counterId}
+          className="absolute top-3 left-1/2 -translate-x-1/2 px-2.5 py-1 text-[0.72rem] tracking-[0.18em] uppercase text-[var(--color-ink-4)] font-mono tabular-nums"
+        >
+          {i + 1} / {total}
+        </div>
 
-      {total > 1 && (
-        <>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              prev();
-            }}
-            aria-label="Previous photo"
-            className="absolute left-2 md:left-6 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center rounded-full text-[var(--color-ink-4)] hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10 focus-visible:border focus-visible:border-[var(--color-copper)]"
-          >
-            <ArrowGlyph dir="left" />
-          </button>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              next();
-            }}
-            aria-label="Next photo"
-            className="absolute right-2 md:right-6 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center rounded-full text-[var(--color-ink-4)] hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10 focus-visible:border focus-visible:border-[var(--color-copper)]"
-          >
-            <ArrowGlyph dir="right" />
-          </button>
-        </>
-      )}
+        <DialogClose
+          onClick={onClose}
+          tone="onDark"
+          className="absolute top-3 right-3 w-9 h-9 flex items-center justify-center focus-visible:border focus-visible:border-[var(--color-copper)] rounded-[var(--radius-sm)]"
+        />
 
-      <div
-        className="relative max-w-[92vw] max-h-[88vh] flex items-center justify-center"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {errored ? (
-          <div
-            className="px-12 py-10 border border-[var(--color-rule-strong)] text-[var(--color-ink-4)] tracking-[0.14em] uppercase text-sm"
-          >
-            Image unavailable
-          </div>
-        ) : (
+        {total > 1 && (
           <>
-            <img
-              key={current.id}
-              src={imageSrc(current)}
-              alt=""
-              onError={() => setErrored(true)}
-              className={[
-                'max-w-[92vw] max-h-[88vh] object-contain',
-                'border border-[var(--color-copper)]/40',
-                dim,
-              ].join(' ')}
-            />
-            <ImageTagBadge
-              tag={badge.tag}
-              confidence={badge.confidence}
-              className="absolute bottom-2 left-2 text-[0.7rem]"
-            />
-            <ImageRenderBadge
-              renderScore={current.clip_render_score}
-              className="absolute bottom-2 right-2 text-[0.7rem]"
-            />
+            <button
+              type="button"
+              onClick={prev}
+              aria-label="Previous photo"
+              className="absolute left-2 md:left-6 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center rounded-full text-[var(--color-ink-4)] hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10 focus-visible:border focus-visible:border-[var(--color-copper)]"
+            >
+              <ArrowGlyph dir="left" />
+            </button>
+            <button
+              type="button"
+              onClick={next}
+              aria-label="Next photo"
+              className="absolute right-2 md:right-6 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center rounded-full text-[var(--color-ink-4)] hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10 focus-visible:border focus-visible:border-[var(--color-copper)]"
+            >
+              <ArrowGlyph dir="right" />
+            </button>
           </>
         )}
-      </div>
-    </div>
-  );
-}
 
-function CloseGlyph() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
-      <line x1="3" y1="3" x2="13" y2="13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      <line x1="13" y1="3" x2="3" y2="13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
+        <div className="relative max-w-[92vw] max-h-[88vh] flex items-center justify-center">
+          {errored ? (
+            <div
+              className="px-12 py-10 border border-[var(--color-rule-strong)] text-[var(--color-ink-4)] tracking-[0.14em] uppercase text-sm"
+            >
+              Image unavailable
+            </div>
+          ) : (
+            <>
+              <img
+                key={current.id}
+                src={imageSrc(current)}
+                alt=""
+                onError={() => setErrored(true)}
+                className={[
+                  'max-w-[92vw] max-h-[88vh] object-contain',
+                  'border border-[var(--color-copper)]/40',
+                  dim,
+                ].join(' ')}
+              />
+              <ImageTagBadge
+                tag={badge.tag}
+                confidence={badge.confidence}
+                className="absolute bottom-2 left-2 text-[0.7rem]"
+              />
+              <ImageRenderBadge
+                renderScore={current.clip_render_score}
+                className="absolute bottom-2 right-2 text-[0.7rem]"
+              />
+            </>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

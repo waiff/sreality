@@ -24,11 +24,12 @@
 import { createPortal } from 'react-dom';
 import { describe, expect, it } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 import { expectDialogContract, expectNoNestedInteractive } from '@/test/a11y';
 import Dialog, { DialogClose } from './Dialog';
-import { MODAL_Z_BASE, openDialogLayerCount, topDialogPanel } from '@/lib/useDialog';
+import { MODAL_Z_BASE, focusablesIn, openDialogLayerCount, topDialogPanel } from '@/lib/useDialog';
+import AnchoredPopover from './AnchoredPopover';
 
 function Simple({ label = 'Details' }: { label?: string }) {
   const [open, setOpen] = useState(false);
@@ -353,5 +354,101 @@ describe('<Dialog> with a transient companion', () => {
     // The trap left it alone: focus is still inside the companion (jsdom
     // does not move focus natively on Tab, so "still on a" is the signal).
     expect(document.activeElement).toBe(a);
+  });
+});
+
+/* Initial focus. Half the migrated dialogs render <DialogClose> first in DOM
+ * order, and a dialog that opens on its own dismiss control tells a keyboard
+ * user nothing. The rule lives in ONE guarded effect (lib/useDialog
+ * initialFocusTarget), so no consumer re-argues effect ordering or forgets
+ * the top-layer guard by hand-rolling a `[]` focus effect of its own. */
+describe('<Dialog> initial focus', () => {
+  it('skips the close glyph and opens on the first real control', () => {
+    render(
+      <Dialog open onClose={() => {}} label="Skip">
+        <DialogClose onClick={() => {}} />
+        <input aria-label="Name" />
+      </Dialog>,
+    );
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Name' }));
+  });
+
+  it('falls back to the glyph when it is the only control', () => {
+    render(
+      <Dialog open onClose={() => {}} label="Only">
+        <DialogClose onClick={() => {}} />
+      </Dialog>,
+    );
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }));
+  });
+
+  function WithInitialFocus({ field }: { field: boolean }) {
+    const ref = useRef<HTMLInputElement>(null);
+    return (
+      <Dialog open onClose={() => {}} label="Typed" initialFocus={ref}>
+        <button type="button">first</button>
+        {field && <input ref={ref} aria-label="Url" />}
+      </Dialog>
+    );
+  }
+
+  it('honours initialFocus over DOM order', () => {
+    render(<WithInitialFocus field />);
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Url' }));
+  });
+
+  it('uses the default when the initialFocus target is not rendered on this path', () => {
+    render(<WithInitialFocus field={false} />);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'first' }));
+  });
+});
+
+describe('<DialogClose> disabled', () => {
+  it('is announced disabled and left out of the trap while a submit is in flight', () => {
+    render(
+      <Dialog open onClose={() => {}} label="Busy">
+        <DialogClose onClick={() => {}} disabled />
+        <button type="button" disabled>
+          submit
+        </button>
+      </Dialog>,
+    );
+    expect(screen.getByRole('button', { name: 'Close' })).toBeDisabled();
+    const panel = screen.getByRole('dialog', { name: 'Busy' });
+    expect(focusablesIn(panel)).toHaveLength(0);
+    expect(document.activeElement).toBe(panel);
+  });
+});
+
+/* Escape inside an AnchoredPopover opened from a dialog closes the POPOVER
+ * only. The isolation rests on the popover's `document` keydown listener
+ * stopping propagation before useDialog's `window` listener sees the key — a
+ * load-bearing pairing that no single-component test could notice. */
+describe('<Dialog> with an AnchoredPopover companion', () => {
+  function HostWithPopover() {
+    const anchorRef = useRef<HTMLButtonElement>(null);
+    const [open, setOpen] = useState(true);
+    return (
+      <Dialog open onClose={() => {}} label="Host">
+        <button ref={anchorRef} type="button" onClick={() => setOpen(true)}>
+          anchor
+        </button>
+        {open && (
+          <AnchoredPopover anchorRef={anchorRef} onClose={() => setOpen(false)} ariaLabel="Menu">
+            <button type="button">inside</button>
+          </AnchoredPopover>
+        )}
+      </Dialog>
+    );
+  }
+
+  it('Escape closes the popover and leaves the dialog open, focus back on the anchor', () => {
+    render(<HostWithPopover />);
+    const inside = screen.getByRole('button', { name: 'inside' });
+    inside.focus();
+    fireEvent.keyDown(inside, { key: 'Escape' });
+    expect(screen.queryByRole('group', { name: 'Menu' })).toBeNull();
+    expect(screen.getByRole('dialog', { name: 'Host' })).toBeInTheDocument();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'anchor' }));
   });
 });

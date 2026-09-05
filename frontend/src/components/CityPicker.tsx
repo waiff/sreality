@@ -2,9 +2,24 @@
  * checkboxes (check a kraj → all its eligible obce) + indeterminate states, and
  * min/max population bounds that constrain which obce are eligible. Modal over
  * the dataset form. Returns the selected obec_ids + the population bounds.
- * Civic-archive tokens. Only obce with a sreality_id are offered (scrapeable). */
-import { useMemo, useState } from 'react';
+ * Civic-archive tokens. Only obce with a sreality_id are offered (scrapeable).
+ *
+ * The modal itself is <Dialog> (components/Dialog.tsx). What this file used to
+ * hand-roll was the emptiest version of the thirteen: a `fixed inset-0` div
+ * with an `onClick={onClose}` backdrop and a panel-wide `stopPropagation` to
+ * undo it, and NOTHING else — no role, no accessible name, no Escape, no focus
+ * trap, no initial or restored focus, no scroll lock. Datasets mounts it twice
+ * (the create form and the expand panel), so the operator met that twice.
+ *
+ * A second-order bug went with it. The create-dataset mount sits INSIDE that
+ * form's <form> element, and no <button> in here set a `type` — so each one
+ * defaulted to `submit`, and "Cancel" (or "Clear", or a kraj's expand caret)
+ * submitted the form underneath. Every button now says `type="button"`, and
+ * being portalled to <body> they have no form ancestor in the DOM either — the
+ * fix does not rest on the portal staying. */
+import { useId, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import Dialog, { DialogClose } from '@/components/Dialog';
 import { fetchObecTree, priceStatsKeys, type ObecNode } from '@/lib/priceStats';
 
 const SELECT_CLS =
@@ -87,6 +102,9 @@ export default function CityPicker({ initialObecIds, initialMin, initialMax, onC
   const [max, setMax] = useState<string>(initialMax != null ? String(initialMax) : '');
   const [openKraj, setOpenKraj] = useState<Set<number>>(new Set());
   const [openOkres, setOpenOkres] = useState<Set<number>>(new Set());
+  /* The visible heading names the dialog — better than a literal `label`,
+   * which would be a second copy of the same words free to drift from it. */
+  const headingId = useId();
 
   const minN = min ? Number(min) : null;
   const maxN = max ? Number(max) : null;
@@ -130,94 +148,99 @@ export default function CityPicker({ initialObecIds, initialMin, initialMax, onC
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-ink)]/30 p-4" onClick={onClose}>
-      <div className="w-full max-w-2xl max-h-[85vh] flex flex-col bg-[var(--color-paper)] border border-[var(--color-rule-strong)] rounded-[var(--radius-lg)]"
-        onClick={(e) => e.stopPropagation()}>
-        <div className="px-5 py-3 border-b border-[var(--color-rule)] flex items-center justify-between">
-          <h2 className="font-[family-name:var(--font-display)] text-lg">Select municipalities</h2>
+    <Dialog
+      open
+      onClose={onClose}
+      labelledBy={headingId}
+      className="w-full max-w-2xl max-h-[85vh] flex flex-col"
+    >
+      <div className="px-5 py-3 border-b border-[var(--color-rule)] flex items-center justify-between">
+        <h2 id={headingId} className="font-[family-name:var(--font-display)] text-lg">Select municipalities</h2>
+        <div className="flex items-center gap-3">
           <span className="text-sm tabular-nums text-[var(--color-copper)]">{selected.size} selected</span>
-        </div>
-
-        <div className="px-5 py-3 border-b border-[var(--color-rule)] flex flex-wrap items-center gap-3 text-sm">
-          <span className="text-xs uppercase tracking-[0.14em] text-[var(--color-ink-3)]">Population</span>
-          <label className="flex items-center gap-1 text-[var(--color-ink-2)]">min
-            <input type="number" min={0} value={min}
-              onChange={(e) => { setMin(e.target.value); applyBounds(e.target.value, max); }} className={SELECT_CLS} /></label>
-          <label className="flex items-center gap-1 text-[var(--color-ink-2)]">max
-            <input type="number" min={0} value={max}
-              onChange={(e) => { setMax(e.target.value); applyBounds(min, e.target.value); }} className={SELECT_CLS} /></label>
-          <div className="ml-auto flex gap-3">
-            <button onClick={selectAllInRange} className="text-[var(--color-copper)] hover:text-[var(--color-copper-2)]">Select all in range</button>
-            <button onClick={clearAll} className="text-[var(--color-ink-3)] hover:text-[var(--color-ink)]">Clear</button>
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-2 py-2 text-sm">
-          {treeQ.isLoading || !built ? (
-            <p className="px-3 py-6 text-[var(--color-ink-3)]">Loading municipalities…</p>
-          ) : (
-            built.kraje.map((k) => {
-              const kObce = built.obceByKraj.get(k.id) ?? [];
-              const kState = groupState(kObce, selected, minN, maxN);
-              const isOpen = openKraj.has(k.id);
-              return (
-                <div key={k.id}>
-                  <Row depth={0} state={kState}
-                    onToggle={() => toggleGroup(kObce, kState !== 'on')}
-                    onExpand={() => setOpenKraj((s) => toggleSet(s, k.id))}
-                    expanded={isOpen} label={k.name}
-                    meta={`${kObce.filter((o) => eligible(o, minN, maxN)).length} obcí`} />
-                  {isOpen && (built.okresyByKraj.get(k.id) ?? []).map((ok) => {
-                    const oObce = built.obceByOkres.get(ok.id) ?? [];
-                    const oState = groupState(oObce, selected, minN, maxN);
-                    const okOpen = openOkres.has(ok.id);
-                    return (
-                      <div key={ok.id}>
-                        <Row depth={1} state={oState}
-                          onToggle={() => toggleGroup(oObce, oState !== 'on')}
-                          onExpand={() => setOpenOkres((s) => toggleSet(s, ok.id))}
-                          expanded={okOpen} label={ok.name}
-                          meta={`${oObce.filter((o) => eligible(o, minN, maxN)).length}`} />
-                        {okOpen && oObce.map((o) => {
-                          const elig = eligible(o, minN, maxN);
-                          return (
-                            <Row key={o.id} depth={2}
-                              state={selected.has(o.id) ? 'on' : 'off'}
-                              disabled={!elig}
-                              onToggle={() => toggleOne(o)}
-                              label={o.name}
-                              meta={o.population != null ? o.population.toLocaleString('cs-CZ') : '—'} />
-                          );
-                        })}
-                      </div>
-                    );
-                  })}
-                  {isOpen && (built.directObceByKraj.get(k.id) ?? []).map((o) => {
-                    const elig = eligible(o, minN, maxN);
-                    return (
-                      <Row key={o.id} depth={1}
-                        state={selected.has(o.id) ? 'on' : 'off'}
-                        disabled={!elig}
-                        onToggle={() => toggleOne(o)}
-                        label={o.name}
-                        meta={o.population != null ? o.population.toLocaleString('cs-CZ') : '—'} />
-                    );
-                  })}
-                </div>
-              );
-            })
-          )}
-        </div>
-
-        <div className="px-5 py-3 border-t border-[var(--color-rule)] flex justify-end gap-3">
-          <button onClick={onClose} className="text-sm text-[var(--color-ink-3)] hover:text-[var(--color-ink)]">Cancel</button>
-          <button onClick={() => onApply([...selected], minN, maxN)}
-            className="text-sm rounded-[var(--radius-sm)] px-3 py-1.5 border border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)]">
-            Use {selected.size} municipalities
-          </button>
+          <DialogClose onClick={onClose} />
         </div>
       </div>
-    </div>
+
+      <div className="px-5 py-3 border-b border-[var(--color-rule)] flex flex-wrap items-center gap-3 text-sm">
+        <span className="text-xs uppercase tracking-[0.14em] text-[var(--color-ink-3)]">Population</span>
+        <label className="flex items-center gap-1 text-[var(--color-ink-2)]">min
+          <input type="number" min={0} value={min}
+            onChange={(e) => { setMin(e.target.value); applyBounds(e.target.value, max); }} className={SELECT_CLS} /></label>
+        <label className="flex items-center gap-1 text-[var(--color-ink-2)]">max
+          <input type="number" min={0} value={max}
+            onChange={(e) => { setMax(e.target.value); applyBounds(min, e.target.value); }} className={SELECT_CLS} /></label>
+        <div className="ml-auto flex gap-3">
+          <button type="button" onClick={selectAllInRange} className="text-[var(--color-copper)] hover:text-[var(--color-copper-2)]">Select all in range</button>
+          <button type="button" onClick={clearAll} className="text-[var(--color-ink-3)] hover:text-[var(--color-ink)]">Clear</button>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-2 py-2 text-sm">
+        {treeQ.isLoading || !built ? (
+          <p className="px-3 py-6 text-[var(--color-ink-3)]">Loading municipalities…</p>
+        ) : (
+          built.kraje.map((k) => {
+            const kObce = built.obceByKraj.get(k.id) ?? [];
+            const kState = groupState(kObce, selected, minN, maxN);
+            const isOpen = openKraj.has(k.id);
+            return (
+              <div key={k.id}>
+                <Row depth={0} state={kState}
+                  onToggle={() => toggleGroup(kObce, kState !== 'on')}
+                  onExpand={() => setOpenKraj((s) => toggleSet(s, k.id))}
+                  expanded={isOpen} label={k.name}
+                  meta={`${kObce.filter((o) => eligible(o, minN, maxN)).length} obcí`} />
+                {isOpen && (built.okresyByKraj.get(k.id) ?? []).map((ok) => {
+                  const oObce = built.obceByOkres.get(ok.id) ?? [];
+                  const oState = groupState(oObce, selected, minN, maxN);
+                  const okOpen = openOkres.has(ok.id);
+                  return (
+                    <div key={ok.id}>
+                      <Row depth={1} state={oState}
+                        onToggle={() => toggleGroup(oObce, oState !== 'on')}
+                        onExpand={() => setOpenOkres((s) => toggleSet(s, ok.id))}
+                        expanded={okOpen} label={ok.name}
+                        meta={`${oObce.filter((o) => eligible(o, minN, maxN)).length}`} />
+                      {okOpen && oObce.map((o) => {
+                        const elig = eligible(o, minN, maxN);
+                        return (
+                          <Row key={o.id} depth={2}
+                            state={selected.has(o.id) ? 'on' : 'off'}
+                            disabled={!elig}
+                            onToggle={() => toggleOne(o)}
+                            label={o.name}
+                            meta={o.population != null ? o.population.toLocaleString('cs-CZ') : '—'} />
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+                {isOpen && (built.directObceByKraj.get(k.id) ?? []).map((o) => {
+                  const elig = eligible(o, minN, maxN);
+                  return (
+                    <Row key={o.id} depth={1}
+                      state={selected.has(o.id) ? 'on' : 'off'}
+                      disabled={!elig}
+                      onToggle={() => toggleOne(o)}
+                      label={o.name}
+                      meta={o.population != null ? o.population.toLocaleString('cs-CZ') : '—'} />
+                  );
+                })}
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      <div className="px-5 py-3 border-t border-[var(--color-rule)] flex justify-end gap-3">
+        <button type="button" onClick={onClose} className="text-sm text-[var(--color-ink-3)] hover:text-[var(--color-ink)]">Cancel</button>
+        <button type="button" onClick={() => onApply([...selected], minN, maxN)}
+          className="text-sm rounded-[var(--radius-sm)] px-3 py-1.5 border border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)]">
+          Use {selected.size} municipalities
+        </button>
+      </div>
+    </Dialog>
   );
 }
 
@@ -244,6 +267,7 @@ function Row({
       style={{ paddingLeft: 8 + depth * 18 }}>
       {onExpand ? (
         <button
+          type="button"
           onClick={onExpand}
           aria-label={label}
           aria-expanded={!!expanded}
@@ -252,7 +276,7 @@ function Row({
           <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
         </button>
       ) : <span className="w-4" />}
-      <button onClick={disabled ? undefined : onToggle} disabled={disabled}
+      <button type="button" onClick={disabled ? undefined : onToggle} disabled={disabled}
         className={`flex items-center gap-2 flex-1 text-left ${disabled ? 'text-[var(--color-ink-4)]' : 'text-[var(--color-ink-2)] hover:text-[var(--color-ink)]'}`}>
         <Checkbox state={state} disabled={disabled} />
         <span className={depth === 0 ? 'font-[family-name:var(--font-sans)]' : ''}>{label}</span>
