@@ -2881,6 +2881,14 @@
           "options": null
         },
         {
+          "name": "from_drafts",
+          "description": "Draw images the operator once DRAFTED as positive for THIS head (a tag id). Their own earlier guesses — the best-value pool for a rare head.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
           "name": "near_tag",
           "description": "Draw images resembling THIS head's positives (a tag id) instead of at random. For rare heads only, and always beside a random draw — it inherits CLIP's blind spots.",
           "required": false,

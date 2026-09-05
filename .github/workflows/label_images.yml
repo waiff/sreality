@@ -37,6 +37,11 @@ on:
         required: false
         default: "2"
         type: string
+      from_drafts:
+        description: "Draw images the operator once DRAFTED as positive for THIS head (a tag id). Their own earlier guesses — the best-value pool for a rare head."
+        required: false
+        default: ""
+        type: string
       near_tag:
         description: "Draw images resembling THIS head's positives (a tag id) instead of at random. For rare heads only, and always beside a random draw — it inherits CLIP's blind spots."
         required: false
@@ -98,6 +103,7 @@ jobs:
           MAX_USD: ${{ inputs.max_usd }}
           SAMPLE_PCT: ${{ inputs.sample_pct }}
           NEAR_TAG: ${{ inputs.near_tag }}
+          FROM_DRAFTS: ${{ inputs.from_drafts }}
           WORKERS: ${{ inputs.workers }}
           STATUS_ONLY: ${{ inputs.status_only }}
           DRY_RUN: ${{ inputs.dry_run }}
@@ -125,8 +131,13 @@ jobs:
             '') : ;;
             *[!0-9]*) echo "::error::near_tag must be a tag id"; exit 1 ;;
           esac
+          case "${FROM_DRAFTS:-}" in
+            '') : ;;
+            *[!0-9]*) echo "::error::from_drafts must be a tag id"; exit 1 ;;
+          esac
           ARGS="--tags ${TAGS} --count ${COUNT} --max-usd ${MAX_USD} --sample-pct ${SAMPLE_PCT:-1} --max-seconds 1500 --workers ${WORKERS:-8}"
           if [ -n "${NEAR_TAG:-}" ]; then ARGS="${ARGS} --near-tag ${NEAR_TAG}"; fi
+          if [ -n "${FROM_DRAFTS:-}" ]; then ARGS="${ARGS} --from-drafts ${FROM_DRAFTS}"; fi
           if [ "${STATUS_ONLY:-false}" = "true" ]; then ARGS="--tags ${TAGS} --status"; fi
           if [ "${DRY_RUN:-true}" = "true" ] && [ "${STATUS_ONLY:-false}" != "true" ]; then ARGS="${ARGS} --dry-run"; fi
           echo "python -m scripts.label_images ${ARGS}"

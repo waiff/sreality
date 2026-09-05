@@ -212,3 +212,39 @@ def test_the_lane_validates_near_tag_as_digits_only() -> None:
     run = next(s for s in lane["jobs"]["label"]["steps"] if s.get("name") == "Label")["run"]
     # `*[0-9]` would accept "abc1"; the exclusion class is the correct test.
     assert "*[!0-9]*) echo \"::error::near_tag must be a tag id\"" in run
+
+
+# ------------------------------------------------------------------ mining drafts
+def test_the_draft_draw_takes_only_drafted_positives_and_still_excludes_the_exam() -> None:
+    # A draft is the operator's earlier GUESS, demoted deliberately. It selects
+    # the candidate; it never becomes the label.
+    from toolkit import machine_labeling as ml
+
+    sql = ml._FROM_DRAFTS_SQL
+    assert "dl.state = 'positive'" in sql and "dl.source = 'human_draft'" in sql
+    assert "FROM tag_exam_members m WHERE m.image_id = i.id" in sql
+    assert "l.definition_id = d.id" in sql
+
+
+def test_the_draft_pool_is_reportable_before_anything_is_spent() -> None:
+    from toolkit import machine_labeling as ml
+
+    conn = _Conn([(17, 61), (2, 8)])
+    out = ml.draft_pool_counts(conn, tag_ids=[17, 2, 48])
+    assert out == {17: 61, 2: 8, 48: 0}
+
+
+def test_the_two_targeted_draws_are_mutually_exclusive() -> None:
+    # They answer different questions; silently letting one win would make the
+    # run's provenance unreadable afterwards.
+    src = (ROOT / "scripts" / "label_images.py").read_text()
+    assert "--from-drafts and --near-tag are different draws; pick one" in src
+
+
+def test_the_lane_validates_from_drafts_as_digits_only() -> None:
+    import yaml
+
+    lane = yaml.safe_load((ROOT / ".github" / "workflows" / "label_images.yml").read_text())
+    assert "from_drafts" in lane[True]["workflow_dispatch"]["inputs"]
+    run = next(s for s in lane["jobs"]["label"]["steps"] if s.get("name") == "Label")["run"]
+    assert "*[!0-9]*) echo \"::error::from_drafts must be a tag id\"" in run
