@@ -1843,6 +1843,102 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/detail_drain.yml"
     },
     {
+      "filename": "dinov3_bakeoff_manifest.yml",
+      "name": "Dedup — DINOv3 bake-off manifest",
+      "description": "Builds the MANIFEST for the DINOv3 encoder bake-off and nothing else. It draws the five near-duplicate populations of ENCODER-DECISION.md §5.2 out of Postgres, mints a 7-day presigned R2 URL per image, and writes one JSON file — so the GPU pod that eventually reads it needs no database and no credentials. This lane does NOT launch a pod, does not download any model weights, and spends nothing: running `scripts/dinov3_bakeoff.py` against the manifest on a real GPU is a separate, MANUAL step the operator performs by hand when they choose to spend the ~$2 the design doc estimates.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "dry_run",
+          "description": "Report population sizes and exit. Mints no URL, uploads nothing.",
+          "required": false,
+          "type": "choice",
+          "default": "true",
+          "options": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "max_images",
+          "description": "Distinct-image budget across all five populations (§5.3 sizes it at ~20000).",
+          "required": false,
+          "type": "string",
+          "default": "20000",
+          "options": null
+        },
+        {
+          "name": "p1a_mode",
+          "description": "P1a draw: sample (cheap, a recall floor) or full (one sequential scan of images, complete).",
+          "required": false,
+          "type": "choice",
+          "default": "sample",
+          "options": [
+            "sample",
+            "full"
+          ]
+        },
+        {
+          "name": "p1a_scan_images",
+          "description": "Sample mode only: how many images P1a pairs are matched within. Raise it if the yield is thin.",
+          "required": false,
+          "type": "string",
+          "default": "1000000",
+          "options": null
+        },
+        {
+          "name": "p1a_hamming",
+          "description": "pHash distance that DEFINES a P1a pair. Independent of the pod harness's contamination filter.",
+          "required": false,
+          "type": "string",
+          "default": "2",
+          "options": null
+        },
+        {
+          "name": "document_tags",
+          "description": "ILIKE patterns selecting P4's document tags (comma-separated). Check the dry-run log for what matched.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "seed",
+          "description": "Pair-draw seed, so a re-run reproduces the same populations.",
+          "required": false,
+          "type": "string",
+          "default": "20260905",
+          "options": null
+        },
+        {
+          "name": "r2_key",
+          "description": "R2 object key to upload the manifest to (blank = artifact only).",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "R2_ACCESS_KEY_ID",
+        "R2_ACCOUNT_ID",
+        "R2_BUCKET_NAME",
+        "R2_SECRET_ACCESS_KEY",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "dinov3-bakeoff-manifest",
+      "cancelInProgress": false,
+      "timeoutMinutes": 45,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/dinov3_bakeoff_manifest.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dinov3_bakeoff_manifest.yml"
+    },
+    {
       "filename": "discover_condition_markers.yml",
       "name": "Dev: discover condition markers (one-off Phase A bootstrap)",
       "description": "One-off Phase A driver for the building/apartment condition-scoring feature. Runs scripts/discover_condition_markers.py against the real Supabase DB and the Anthropic API to mine Czech condition markers from a stratified sample of listings.",
