@@ -264,7 +264,7 @@ def assemble_dataset(
 ) -> DatasetSnapshot:
     """One tag's trainable population, through the two sanctioned doors only.
 
-    `encoder` defaults to whichever six-plus-one identity facts have the most rows
+    `encoder` defaults to whichever of the seven identity facts have the most rows
     stored (`dominant_encoder`); pass it explicitly whenever the run means a
     particular encoder. An image the operator labeled but that has no vector under
     that encoder is REPORTED (`missing_embedding`), never silently dropped: a head
