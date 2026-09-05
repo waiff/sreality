@@ -1,9 +1,14 @@
 /* The helpers must be able to FAIL, or a green run proves nothing. Each one is
  * shown here catching the defect it exists for and passing the correct shape. */
 import { describe, expect, it } from 'vitest';
-import { render } from '@testing-library/react';
-import { useRef, type KeyboardEvent } from 'react';
-import { expectNoNestedInteractive, expectRovingGroup, findNestedInteractive } from './a11y';
+import { fireEvent, render } from '@testing-library/react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import {
+  expectDialogContract,
+  expectNoNestedInteractive,
+  expectRovingGroup,
+  findNestedInteractive,
+} from './a11y';
 
 describe('expectNoNestedInteractive', () => {
   it('catches a button inside an anchor — the Browse-card shape axe cannot see', () => {
@@ -109,5 +114,82 @@ describe('expectRovingGroup', () => {
     expect(() =>
       expectRovingGroup(getByRole('menu'), { itemRole: 'menuitem', next: 'ArrowDown', prev: 'ArrowUp' }),
     ).toThrow(/ArrowDown should move focus/);
+  });
+});
+
+/* The pre-W6a modal, reproduced: the role and aria-modal on the viewport-sized
+ * BACKDROP (6 of the 12 did this), no initial focus, no trap, no scroll lock,
+ * an Escape listener that closes on any keydown anywhere. It renders, it looks
+ * right, and it fails every clause of the contract — which is the point. The
+ * passing side is proved on the real primitive in components/Dialog.test.tsx. */
+function HandRolled({ lockScroll = false }: { lockScroll?: boolean }) {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open || !lockScroll) return;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, [open, lockScroll]);
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>
+        open
+      </button>
+      {open && (
+        <div
+          // eslint-disable-next-line no-restricted-syntax -- the NEGATIVE control: this fixture exists to be the banned shape, so the helper can be shown failing on it.
+          role="dialog"
+          aria-modal="true"
+          aria-label="Hand-rolled"
+        >
+          <button type="button">first</button>
+          <button type="button">second</button>
+          <button type="button" onClick={() => setOpen(false)}>
+            close
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+describe('expectDialogContract', () => {
+  it('fails a dialog that sets no initial focus', () => {
+    const { getByRole } = render(<HandRolled lockScroll />);
+    const trigger = getByRole('button', { name: 'open' });
+    expect(() =>
+      expectDialogContract({ trigger, open: () => fireEvent.click(trigger) }),
+    ).toThrow(/focus should land inside the dialog/);
+  });
+
+  it('fails a dialog that does not lock body scroll', () => {
+    const { getByRole } = render(<HandRolled />);
+    const trigger = getByRole('button', { name: 'open' });
+    expect(() =>
+      expectDialogContract({
+        trigger,
+        // Give it the one thing it lacks least, so the FIRST failure reported
+        // is the missing lock rather than the missing focus.
+        open: () => {
+          fireEvent.click(trigger);
+          document.querySelector<HTMLElement>('[role="dialog"] button')!.focus();
+        },
+      }),
+    ).toThrow(/locks body scroll/);
+  });
+
+  it('fails a dialog with no Tab containment', () => {
+    const { getByRole } = render(<HandRolled lockScroll />);
+    const trigger = getByRole('button', { name: 'open' });
+    expect(() =>
+      expectDialogContract({
+        trigger,
+        open: () => {
+          fireEvent.click(trigger);
+          document.querySelector<HTMLElement>('[role="dialog"] button')!.focus();
+        },
+      }),
+    ).toThrow(/Tab from the last control wraps to the first/);
   });
 });

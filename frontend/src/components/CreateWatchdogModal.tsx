@@ -86,6 +86,7 @@ export default function CreateWatchdogModal({
       <div
         className="w-full max-w-md rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-5 shadow-lg"
         onClick={(e) => e.stopPropagation()}
+        // eslint-disable-next-line no-restricted-syntax -- W6b migrates this dialog
         role="dialog"
         aria-modal="true"
         aria-label="Create watchdog"

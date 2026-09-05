@@ -141,6 +141,7 @@ function Popover({
 
   return (
     <div
+      // eslint-disable-next-line no-restricted-syntax -- W6b migrates this dialog
       role="dialog"
       aria-label={`Edit tag ${tag.name}`}
       onClick={(e) => e.stopPropagation()}
