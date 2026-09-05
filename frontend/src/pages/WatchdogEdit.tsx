@@ -108,7 +108,7 @@ export default function WatchdogEdit() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. 2+kk Praha 2 under 25 000"
-                className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+                className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)]"
                 required
               />
             )}

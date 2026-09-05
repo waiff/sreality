@@ -127,6 +127,22 @@ export default [
             'This control has no accessible name. Wrap exactly one control in <Field label=… as="control">, or pass the visible caption as aria-label / aria-labelledby (never a placeholder).',
         },
         {
+          // The design system paints ONE focus indicator: the global
+          // :focus-visible ring in globals.css. 65 sites had opted out with
+          // focus:outline-none, 33 of them for a border swap that computes to
+          // 1.18:1 — measurably worse than nothing. There is nothing to
+          // allowlist: an element that needs a different indicator adds a
+          // focus-visible: utility ON TOP of the ring, never instead of it.
+          selector: "Literal[value=/focus:outline-none/]",
+          message:
+            'Do not opt out of the global :focus-visible ring. Add a focus-visible: utility on top of it if the element needs more, never focus:outline-none.',
+        },
+        {
+          selector: "TemplateElement[value.raw=/focus:outline-none/]",
+          message:
+            'Do not opt out of the global :focus-visible ring. Add a focus-visible: utility on top of it if the element needs more, never focus:outline-none.',
+        },
+        {
           // Six local `function Field` copies existed before the shared one;
           // a seventh must not appear. The primitive lives in controls.tsx and
           // is exempted there per line.

@@ -304,7 +304,7 @@ function EstimateForm({
             value={rentCzk}
             onChange={(e) => setRentCzk(e.target.value)}
             required
-            className="px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)] tabular-nums"
+            className="px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] tabular-nums"
           />
         </label>
         <label className="flex flex-col gap-1 min-w-[10rem] flex-1">
@@ -318,7 +318,7 @@ function EstimateForm({
             onChange={(e) => setAuthor(e.target.value)}
             required
             placeholder="who recorded this"
-            className="px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+            className="px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)]"
           />
         </label>
         <label className="flex flex-col gap-1 min-w-[10rem]">
@@ -330,7 +330,7 @@ function EstimateForm({
             onChange={(e) =>
               setSourceKind(e.target.value as ManualEstimateSourceKind)
             }
-            className="px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+            className="px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)]"
           >
             {MANUAL_ESTIMATE_SOURCE_KINDS.map((kind) => (
               <option key={kind} value={kind}>
@@ -350,7 +350,7 @@ function EstimateForm({
           rows={2}
           maxLength={4000}
           placeholder="context, caveats, who you spoke to…"
-          className="w-full px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] resize-y"
+          className="w-full px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] resize-y"
         />
       </label>
       <div className="flex items-center justify-end gap-2">

@@ -106,7 +106,7 @@ export default function TaxonomyManageModal({
                 if (e.key === 'Enter' && newLabelText.trim()) onAdd();
               }}
               placeholder="new label, e.g. interier - kuchyne"
-              className="w-full px-2 py-1 text-sm font-mono rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)]"
+              className="w-full px-2 py-1 text-sm font-mono rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus-visible:border-[var(--color-copper)]"
             />
           </Field>
           <button

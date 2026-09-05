@@ -411,7 +411,7 @@ function SkillEditor({ skill, tools }: { skill: Skill; tools: AgentTool[] }) {
     <div className="px-4 pt-2 pb-4 border-t border-[var(--color-rule-soft)] space-y-4">
       <Field label="System prompt" as="control">
         <textarea
-          className="w-full min-h-[14rem] font-mono text-xs leading-relaxed px-3 py-2 rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)]"
+          className="w-full min-h-[14rem] font-mono text-xs leading-relaxed px-3 py-2 rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus-visible:border-[var(--color-copper)]"
           value={systemPrompt}
           onChange={(e) => setSystemPrompt(e.target.value)}
         />
@@ -450,7 +450,7 @@ function SkillEditor({ skill, tools }: { skill: Skill; tools: AgentTool[] }) {
               </span>
               <input
                 type="text"
-                className="w-full px-2 py-1 font-mono text-xs rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)]"
+                className="w-full px-2 py-1 font-mono text-xs rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus-visible:border-[var(--color-copper)]"
                 value={models[prov] ?? ''}
                 onChange={(e) =>
                   setModels({ ...models, [prov]: e.target.value })
@@ -532,7 +532,7 @@ function LimitInput({
       <input
         type="number"
         step={step}
-        className="w-full px-2 py-1 font-mono text-xs rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)]"
+        className="w-full px-2 py-1 font-mono text-xs rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus-visible:border-[var(--color-copper)]"
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
       />
@@ -631,7 +631,7 @@ function RecipientField({
             value={text}
             onChange={(e) => setText(e.target.value)}
             placeholder={placeholder}
-            className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+            className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)]"
           />
         </label>
         <button
@@ -742,7 +742,7 @@ function AppSettingRow({ setting, infoExpanded }: { setting: AppSetting; infoExp
         <div className="px-4 pt-2 pb-4 border-t border-[var(--color-rule-soft)] space-y-3">
           <textarea
             aria-labelledby={keyId}
-            className="w-full min-h-[10rem] font-mono text-xs leading-relaxed px-3 py-2 rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)]"
+            className="w-full min-h-[10rem] font-mono text-xs leading-relaxed px-3 py-2 rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus-visible:border-[var(--color-copper)]"
             value={text}
             onChange={(e) => setText(e.target.value)}
           />

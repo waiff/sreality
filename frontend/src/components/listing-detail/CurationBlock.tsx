@@ -392,7 +392,7 @@ function TagPicker({
             aria-label="Find or create a tag"
             autoFocus
             maxLength={50}
-            className="w-full px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+            className="w-full px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)]"
           />
           <ul role="listbox" className="mt-1.5 max-h-56 overflow-y-auto">
             {matches.map((t) => (
@@ -573,7 +573,7 @@ function NotesRow({
           placeholder="Add a note…"
           rows={2}
           maxLength={4000}
-          className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] resize-y"
+          className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] resize-y"
         />
         <div className="mt-2 flex items-center justify-between gap-3">
           <p className="text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
@@ -650,7 +650,7 @@ function NoteRow({
           rows={2}
           maxLength={4000}
           autoFocus
-          className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)] resize-y"
+          className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] resize-y"
         />
         <div className="mt-1.5 flex items-center justify-between gap-3">
           <p className="text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">

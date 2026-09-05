@@ -390,7 +390,7 @@ function NewEstimationModal({
                 }}
                 placeholder={placeholder}
                 disabled={pending}
-                className="flex-1 min-w-0 px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-60"
+                className="flex-1 min-w-0 px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] disabled:opacity-60"
               />
             )}
             <button
@@ -492,7 +492,7 @@ function OperatorInputs({
             rows={2}
             maxLength={10_000}
             placeholder="e.g. Use a 1500m radius. Weight comparables in the same block heavier."
-            className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-60"
+            className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] disabled:opacity-60"
           />
           <p className="mt-1 text-[0.7rem] text-[var(--color-ink-3)]">
             Wrapped in &lt;operator_instructions&gt; in the agent's prompt.
@@ -513,7 +513,7 @@ function OperatorInputs({
             rows={3}
             maxLength={20_000}
             placeholder="Anything the listing doesn't say: legal status, recent renovations, neighbours, planning, etc."
-            className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-60"
+            className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] disabled:opacity-60"
           />
         </div>
         {allowAttachments && (

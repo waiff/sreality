@@ -342,7 +342,7 @@ function NameSearch() {
         onBlur={() => setTimeout(() => setOpen(false), 150)}
         aria-label="Hledat makléře podle jména"
         placeholder="Hledat makléře podle jména…"
-        className="w-full text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper-3)] px-3 py-2 text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:ring-2 focus:ring-[var(--color-focus)]"
+        className="w-full text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper-3)] px-3 py-2 text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus-visible:ring-2 focus-visible:ring-[var(--color-focus)]"
       />
       {open && debounced.length >= 2 && (
         <div className="absolute z-20 mt-1 w-full border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-3)] shadow-sm max-h-80 overflow-y-auto">

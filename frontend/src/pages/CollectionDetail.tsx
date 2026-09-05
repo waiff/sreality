@@ -205,7 +205,7 @@ function EditBlock({ collection }: { collection: Collection }) {
             placeholder="Name"
             disabled={collection.is_system}
             title={collection.is_system ? "The default collection can't be renamed." : undefined}
-            className="w-full px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] disabled:opacity-50 disabled:cursor-not-allowed"
           />
         </Field>
         <Field label="Description" as="control">
@@ -214,7 +214,7 @@ function EditBlock({ collection }: { collection: Collection }) {
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="Description (optional)"
-            className="w-full px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+            className="w-full px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)]"
           />
         </Field>
         <div className="flex items-center gap-3">

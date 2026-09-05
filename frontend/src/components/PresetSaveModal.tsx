@@ -99,7 +99,7 @@ export default function PresetSaveModal({
               if (e.key === 'Enter') submit();
             }}
             placeholder="e.g. 2+kk Praha pod 6M"
-            className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-copper)]"
+            className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)] focus-visible:border-[var(--color-copper)]"
           />
         </label>
 

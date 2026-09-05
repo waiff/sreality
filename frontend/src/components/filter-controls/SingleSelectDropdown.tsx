@@ -35,7 +35,7 @@ export function SingleSelectDropdown<T extends string | number>({
         const matched = options.find((o) => String(o.value) === raw);
         onChange(matched ? matched.value : null);
       }}
-      className="w-full px-2 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+      className="w-full px-2 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)]"
     >
       <option value="">{placeholder}</option>
       {options.map((opt) => (
