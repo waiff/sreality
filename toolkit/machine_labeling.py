@@ -36,6 +36,8 @@ from typing import Any
 
 import psycopg
 
+from toolkit.tag_holdout import exclusion_for
+
 # Verdict -> the label vocabulary. "skip" is the ratified leave-out: the subject
 # is present but the photo is of something else. It is stored, not dropped, so
 # the training reader can exclude it explicitly rather than mistake it for an
@@ -189,3 +191,67 @@ def measured_cost(
         cur.execute(_MEASURED_COST_SQL, {"called_for": called_for, "model": model})
         row = cur.fetchone()
     return (int(row[0]), float(row[1])) if row else (0, 0.0)
+
+
+# --- the targeted draw for rare heads ---------------------------------------
+#
+# Random sampling is the honest default and it solves the common heads. It
+# cannot solve the rare ones at any budget: measured on 1,200 random images,
+# domovní vchod appeared 4 times and garáž 11, so the whole remaining budget
+# would still not reach a trainable count. Their scarcity is the corpus, not
+# the sample.
+#
+# So: seed from what a head's positives already look like, and spend the calls
+# on images that look like them. This is approximate on purpose — there is NO
+# ann index on image_clip_embeddings (9.4M rows), so an exact nearest-neighbour
+# scan would be a full table scan inside a timed lane. Sampling a slice and
+# ranking WITHIN it costs a bounded amount and still concentrates the draw
+# enormously compared with random.
+#
+# THE BIAS IS REAL AND MUST BE STATED: this returns images CLIP already thinks
+# resemble the seeds, so a head trained only on such a draw inherits CLIP's
+# blind spots — it will look better in evaluation than it is in the world. Use
+# it to lift a head off the floor, alongside the random draw, never instead of
+# it.
+#
+# The centroid reads POSITIVES ONLY and excludes the holdout, so the yardstick
+# never seeds the training material.
+_NEAR_TAG_SQL = f"""
+    WITH centroid AS (
+      SELECT avg(e.embedding) AS vec, count(*)::int AS seeds
+      FROM image_tag_labels itl
+      JOIN image_clip_embeddings e
+        ON e.image_id = itl.image_id AND e.model = %(model)s::text
+      WHERE itl.tag_id = %(seed_tag_id)s::bigint
+        AND itl.state = 'positive'
+        {exclusion_for("itl")}
+    )
+    SELECT i.id, i.storage_path
+    FROM image_clip_embeddings e TABLESAMPLE SYSTEM (%(pct)s)
+    JOIN images i ON i.id = e.image_id
+    CROSS JOIN centroid c
+    WHERE e.model = %(model)s::text
+      AND c.seeds >= %(min_seeds)s::int
+      AND {_ELIGIBLE}
+    ORDER BY e.embedding <=> c.vec
+    LIMIT %(limit)s
+"""
+
+
+def near_tag_candidates(
+    conn: psycopg.Connection, *, seed_tag_id: int, tag_ids: list[int], limit: int,
+    pct: float = 5.0, min_seeds: int = 8, model: str | None = None,
+) -> list[tuple[int, str]]:
+    """Eligible images closest to one head's labeled positives, drawn from a
+    sampled slice. Returns [] rather than raising when the head has too few
+    embedded positives to have a meaningful centroid — a draw seeded on three
+    images would concentrate the budget on three images' worth of the corpus."""
+    from toolkit import tag_definitions as td
+
+    with conn.cursor() as cur:
+        cur.execute(_NEAR_TAG_SQL, {
+            "seed_tag_id": int(seed_tag_id), "tag_ids": list(tag_ids),
+            "limit": int(limit), "pct": float(pct), "min_seeds": int(min_seeds),
+            "model": model or td.embedding_model(),
+        })
+        return [(int(r[0]), r[1]) for r in cur.fetchall()]

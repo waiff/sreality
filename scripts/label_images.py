@@ -92,7 +92,13 @@ def main() -> int:
                     help="Label these image ids (one per line) instead of a random "
                          "sample — the hook for a targeted draw.")
     ap.add_argument("--sample-pct", type=float, default=1.0,
-                    help="Block-sample percentage for the random strategy.")
+                    help="Block-sample percentage for the random/near-tag draw.")
+    ap.add_argument("--near-tag", type=int,
+                    help="Draw images that look like this head's known positives "
+                         "(CLIP centroid over a sampled slice) instead of at random. "
+                         "For rare heads that a random draw cannot reach — the draw "
+                         "inherits CLIP's blind spots, so use it BESIDE the random "
+                         "one, never instead of it.")
     ap.add_argument("--max-usd", type=float, default=1.0)
     ap.add_argument("--max-seconds", type=int, default=1500)
     ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
@@ -133,7 +139,21 @@ def main() -> int:
                          c.get("positive", 0), c.get("negative", 0), c.get("excluded", 0))
             return 0
 
-        if args.ids_file:
+        if args.near_tag and args.near_tag not in tag_ids:
+            LOG.error("LABEL --near-tag %d must be one of the heads being labeled",
+                      args.near_tag)
+            return 1
+
+        if args.near_tag:
+            rows = ml.near_tag_candidates(
+                conn, seed_tag_id=args.near_tag, tag_ids=tag_ids,
+                limit=max(1, args.count), pct=args.sample_pct or 5.0)
+            LOG.info("LABEL near-tag=%d (%s) drew=%d",
+                     args.near_tag, labels.get(args.near_tag, "?"), len(rows))
+            if not rows:
+                LOG.warning("LABEL no candidates — the head may have too few embedded "
+                            "positives for a centroid, or the sampled slice held none")
+        elif args.ids_file:
             with open(args.ids_file, encoding="utf-8") as fh:
                 image_ids = [int(line) for line in fh.read().split() if line.strip()]
             rows = ml.candidates_by_ids(conn, tag_ids=tag_ids, image_ids=image_ids,
