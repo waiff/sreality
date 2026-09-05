@@ -34,6 +34,13 @@ from api.providers.openai_compatible import OpenAICompatibleProvider
 PRICES: dict[str, ModelPrice] = {
     "qwen3-vl-235b-a22b-instruct": ModelPrice(0.40, 1.60, 0.0, 0.0),
     "qwen3-vl-30b-a3b-instruct": ModelPrice(0.20, 0.80, 0.0, 0.0),
+    # W2-10's third bake-off candidate (the bazos free-text location lane). Same
+    # INTERNATIONAL (Singapore) tier and the same cache_read=0.0 rule as the two rows
+    # above. UNVERIFIED against a live QWEN_API_KEY call as of 2026-09-05: nothing in
+    # this repo has ever dispatched to DashScope, so the bake-off's first successful
+    # call is the actual verification — reconcile the recorded llm_calls.cost_usd
+    # against the DashScope billing dashboard afterwards and correct this row.
+    "qwen3.7-flash": ModelPrice(0.03, 0.13, 0.0, 0.0),
 }
 
 

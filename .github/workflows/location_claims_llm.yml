@@ -1,0 +1,118 @@
+name: "Jobs: Location free-text claims (W2-10, bazos)"
+
+# Mines street, část obce, house number, PSČ and the verbatim "Lokalita:" line out of the
+# free text of ARCHIVED bazos detail pages with one structured LLM call per listing, and
+# writes evidence-quoted `llm_text` location claims. A follower lane: it reads the
+# content-addressed payload store minutes behind the scrape and is never inline in the
+# detail drain.
+#
+# INERT UNTIL THE CONTRACT BUMP. No shipped bazos contract entry names the `llm_location_text`
+# reader yet, so a run today returns `outcome=inert` before opening a batch row and before
+# calling any model. That is deliberate: a batch stamped 'ok' moves the incremental
+# watermark and would claim coverage of an archive nothing ever read.
+#
+# DISPATCH-ONLY ON PURPOSE — no `schedule:`. `llm_burn_rate`'s starvation arm fails the
+# hourly `llm_health` run for any called_for with attempts>0, successes==0 and spend==0,
+# and W3.4 alerting re-escalates that at 6h/24h/72h. The first exercises are, in order:
+# dry_run=true (no model call at all), then limit=5, then the bake-off, then a capped
+# campaign. A cron is added only once a model has been chosen and a run has succeeded.
+#
+# NOT in the `location-batch` group, deliberately: this lane never holds a Postgres
+# transaction across a model call (scan, body-load and write are three short transactions
+# with the calls between them), its batches are tens of rows rather than tens of thousands,
+# and the outer group is oversubscribed by the hourly intake and the */15 resolve drain —
+# queueing a latency-bound lane behind them would make it unrunnable. Its real
+# serialisation rail is the `location_jobs` lease (`location-llm`), which also covers a
+# hand-run local invocation.
+#
+# Required secrets: SUPABASE_DB_URL, OPENAI_API_KEY, QWEN_API_KEY, R2_ACCOUNT_ID,
+# R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME. R2 is load-bearing: essentially
+# every archived body is spilled to the bucket (the threshold is Postgres's 2 KB TOAST
+# boundary), and a spilled row with no store configured is an error, not a skipped page.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "full = every active bazos detail body; incremental = only bodies since the last ok batch"
+        required: false
+        default: incremental
+        type: choice
+        options: [incremental, full]
+      limit:
+        description: "listings this run may process at all (START SMALL: 5)"
+        required: false
+        default: "5"
+        type: string
+      max_usd:
+        description: "pre-flight cost cap; the run REFUSES to start above it"
+        required: false
+        default: "2.00"
+        type: string
+      max_seconds:
+        description: "wall-clock budget; stops between batches"
+        required: false
+        default: "2700"
+        type: string
+      model:
+        description: "blank = app_settings.location_llm_model"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "scan and scope, call NOTHING, write NOTHING"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: location-llm
+  cancel-in-progress: false
+
+jobs:
+  mine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[dev,api]"
+
+      - name: Project the portal contracts from git
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python -m location_data.contracts --load --git-ref "$GITHUB_SHA"
+
+      - name: Mine the free text
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          MODE: ${{ inputs.mode }}
+          LIMIT: ${{ inputs.limit }}
+          MAX_USD: ${{ inputs.max_usd }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+          MODEL: ${{ inputs.model }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS="--source bazos --mode ${MODE:-incremental}"
+          if [ -n "$LIMIT" ]; then ARGS="$ARGS --limit $LIMIT"; fi
+          if [ -n "$MAX_USD" ]; then ARGS="$ARGS --max-usd $MAX_USD"; fi
+          if [ -n "$MAX_SECONDS" ]; then ARGS="$ARGS --max-seconds $MAX_SECONDS"; fi
+          if [ -n "$MODEL" ]; then ARGS="$ARGS --model $MODEL"; fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          echo "python -m location_data.claims_llm $ARGS"
+          python -m location_data.claims_llm $ARGS

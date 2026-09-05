@@ -191,6 +191,17 @@ _JSONLD_SURFACES = frozenset({"jsonld", "archived_html"})
 _REGEX_METHOD = frozenset({"regex_text"})
 _SLUG_METHOD = frozenset({"url_slug_parse"})
 _BREADCRUMB_METHOD = frozenset({"breadcrumb_parse"})
+# W2-10: the two blocks the free-text lane reads out of ONE archived detail body. Unlike
+# `_DOM_SURFACES` these are NOT paired with `archived_html`: the lane keeps the entry's
+# DECLARED surface on the claim (C9 is a ruling about the DOM re-mine lane specifically),
+# and `payload_id` / `payload_sha256` / `payload_scope_version` already record that the
+# text came from an archived body.
+_TEXT_SURFACES = frozenset({"description", "html_selector"})
+# `llm_text` is evidence-bearing AND attribution-bearing: 01 §4.2's `loc_claim_text_evidence`
+# demands the quote-plus-span set and `loc_claim_llm_model` additionally demands model +
+# prompt_version. It is its own frozenset so no entry can silently swap into it from a
+# method whose claims carry neither.
+_LLM_METHOD = frozenset({"llm_text"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +381,26 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     "legacy_text_column": ReaderContract(
         substrates=_LEGACY_SURFACE, methods=_LEGACY_METHOD,
         locator_keys=frozenset({"legacy_source_column"}),
+        consults_transforms=True),
+    # --- W2-10: the free-text family, executed by `location_data.claims_llm` and by
+    # nothing else. It is a THIRD runtime registry (`claims_llm.LLM_READERS`, mirrored by
+    # name in `claims_intake.LLM_ONLY_READERS`) because its readers take a scoped document
+    # PLUS one structured answer from a model, which neither of the other two signatures
+    # can carry.
+    #
+    # `substrates` covers both blocks one call reads: the prose block is `description` (an
+    # enum member since migration 380, minted for exactly this producer) and the headline
+    # block is `html_selector` (the text genuinely comes from an `h1`, and the entry's
+    # `css` is what anchors the evidence span). `consults_transforms` is TRUE and honest —
+    # the reader calls `apply_transforms`, which is what lets one `house_number` answer
+    # serve a `split_cp_co:cp` entry and a `split_cp_co:co` one. `consults_guards` stays
+    # FALSE: no member of `IMPLEMENTED_GUARDS` applies to free text, and declaring True
+    # without calling `guard_admits` is the exact defect class `_check_executable` exists
+    # to catch. `claim_confidence` is deliberately NOT a locator key — it is the MODEL's
+    # own confidence, read off the answer, never a constant the contract asserts.
+    "llm_location_text": ReaderContract(
+        substrates=_TEXT_SURFACES, methods=_LLM_METHOD,
+        locator_keys=frozenset({"css", "llm_block", "llm_field"}),
         consults_transforms=True),
 }
 

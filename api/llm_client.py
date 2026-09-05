@@ -69,6 +69,10 @@ CalledFor = Literal[
     "suggest_exam_answer",
     "review_exam_image",
     "label_image_bulk",
+    # W2-10, migration 470. Annotation only — the DB CHECK is the enforcement, and this
+    # Literal has drifted from it before; keeping it honest costs nothing.
+    "extract_location_claims",
+    "location_llm_bakeoff",
 ]
 
 

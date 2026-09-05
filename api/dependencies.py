@@ -75,6 +75,7 @@ def _build_providers() -> dict[str, Any]:
     from api.providers.anthropic import AnthropicProvider
     from api.providers.gemini import GeminiProvider
     from api.providers.openai import OpenAIProvider
+    from api.providers.qwen import QwenProvider
     return {
         "anthropic": AnthropicProvider(),
         "gemini":    GeminiProvider(),
@@ -82,6 +83,13 @@ def _build_providers() -> dict[str, Any]:
         # app_settings model is a gpt-* id resolves (llm_client.provider_for_model).
         # Lazy key (OPENAI_API_KEY) — absent, it fails only at the call that uses it.
         "openai":    OpenAIProvider(),
+        # W2-10's location bake-off candidate. `provider_for_model` has always routed a
+        # `qwen*` id here and `llm_calls_provider_check` has always permitted 'qwen'
+        # (migration 302) — but NOTHING constructed the provider, and an unregistered
+        # provider raises in `LLMClient.call` BEFORE the try/except that writes the
+        # failure row, so a qwen misroute left ZERO llm_calls evidence and was invisible
+        # to llm_errors, llm_burn_rate and llm_liveness alike. Lazy key (QWEN_API_KEY).
+        "qwen":      QwenProvider(),
     }
 
 

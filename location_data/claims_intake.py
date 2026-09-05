@@ -257,6 +257,17 @@ ARCHIVE_ONLY_READERS = frozenset({
     "json_breadcrumb",
 })
 
+# The readers implemented by `claims_llm` (W2-10), as NAMES only — the same
+# name-mirror-not-import arrangement as `ARCHIVE_ONLY_READERS` above, and for the same two
+# reasons: importing `claims_llm` here would be circular, and the hourly W1 lane must not
+# grow an import that needs R2 credentials and a provider key to load.
+#
+# The registry is a THIRD one rather than an extension of either, because the three readers
+# take three different substrates: W1's take `(entry, row)` over `raw_json`, the archive
+# lane's take a scoped DOM, and these take a scoped DOM PLUS one structured answer from a
+# model. A name that resolved in the wrong registry would silently read the wrong thing.
+LLM_ONLY_READERS = frozenset({"llm_location_text"})
+
 ARCHIVED_COORDINATE_RULES: dict[str, ArchivedCoordinateRule] = {
     # `#printMap[data-gps], #listingMap[data-gps]`, scoped by element id — never "the first
     # data-gps in the document", which is the neighbour carousel [live-B §3.5.1].
@@ -1362,12 +1373,13 @@ def extract_listing(
         name = entry.reader
         if not name:
             continue  # declared for a later wave, no reader at all; inert here.
-        if name in ARCHIVE_ONLY_READERS:
-            # A DOM reader belonging to `claims_remine_archive`. Skipped, not refused: this
-            # lane's substrate is `listings.raw_json`, which carries no DOM, so there is
-            # nothing here for it to read. Refusing would take the HOURLY W1 intake down for
-            # the whole portal the moment a W2 contract version loads — which is exactly
-            # what happened the first time remax@3 met this loop.
+        if name in ARCHIVE_ONLY_READERS or name in LLM_ONLY_READERS:
+            # A reader belonging to another lane — `claims_remine_archive`'s DOM family or
+            # `claims_llm`'s free-text one. Skipped, not refused: this lane's substrate is
+            # `listings.raw_json`, which carries neither a DOM nor a scoped document, so
+            # there is nothing here for either to read. Refusing would take the HOURLY W1
+            # intake down for the whole portal the moment a W2 contract version loads —
+            # which is exactly what happened the first time remax@3 met this loop.
             continue
         fn = READERS.get(name)
         if fn is None:

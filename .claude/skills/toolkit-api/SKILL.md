@@ -190,9 +190,15 @@ it (`api/`). They do not apply to the scraper.
     seed `INSERT` in a new migration, apply.
 11. **LLM provider is pluggable; `llm_calls.provider` records which backend served each call.**
     `api/providers/` defines a `CompletionProvider` Protocol with neutral message / tool /
-    completion types; today `anthropic` and `gemini` are wired up (default `anthropic`).
-    Adding a third provider is a new file implementing the same Protocol, registered in
-    `api/dependencies.py:_build_providers`. `LLMClient` is the audit orchestrator — every call
+    completion types; `anthropic`, `gemini`, `openai` and (since W2-10) `qwen` are wired up
+    (default `anthropic`). `provider_for_model` derives the backend from the model id
+    prefix, so a lane that only knows its `app_settings` model routes without threading a
+    provider argument. Adding a provider is a new file implementing the same Protocol,
+    registered in `api/dependencies.py:_build_providers` — AND, separately, in each cron
+    script's own provider map: no script under `scripts/` uses `get_providers()`, and a
+    model whose provider is unregistered raises in `LLMClient.call` BEFORE the try/except
+    that writes the failure row, so a misroute leaves ZERO `llm_calls` evidence and is
+    invisible to `llm_errors`, `llm_burn_rate` and `llm_liveness` alike. `LLMClient` is the audit orchestrator — every call
     writes one row to `llm_calls` with provider, model, tokens, USD cost, and a `called_for`
     tag. An unmapped model id records `cost_usd=0` rather than raising — silent, not loud;
     check `api/providers/gemini.py`'s `_PRICES` table after any Gemini model bump.
@@ -398,6 +404,12 @@ LLM + maps (FastAPI service + scoring jobs):
   scoring, and the agent under `provider='anthropic'`.
 - `GEMINI_API_KEY` — Google AI Studio key; required for the agent under `provider='gemini'`.
   A request selecting an unconfigured provider returns 502; missing at boot is not fatal.
+- `OPENAI_API_KEY` — any `gpt-*` / `o*` model id (`provider='openai'`): the bazos
+  description enrichment lane and the W2-10 location free-text lane / bake-off.
+- `QWEN_API_KEY` — Alibaba DashScope, INTERNATIONAL (Singapore) endpoint; any `qwen*` model
+  id. Read lazily, so it is only needed by a lane the operator has pointed at a qwen model
+  (today: `scripts/location_llm_bakeoff.py`). Actions secret for those workflows; Railway
+  needs it only if the API service is expected to call qwen.
 - `MAPY_GEOCODE_ENABLED` — **the W0 Mapy kill switch (location-data program, remediation
   step R1), default OFF.** Mapy.com's terms prohibit storing/caching API results and every
   geocode path persisted them, so `scraper.geocoding.geocode()` raises and
