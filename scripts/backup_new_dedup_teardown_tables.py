@@ -26,6 +26,11 @@ LOG = logging.getLogger(__name__)
 # with nothing to back up; their definitions live in migration history. The two non-empty
 # matviews are included since they're cheap and derived-but-not-trivially-recomputable once the
 # source engine is gone.
+#
+# The two matviews were dropped ahead of the rest by migration 432 (2026-08-25), so a run after
+# that date can no longer dump them — they survive in the 2026-08-05 dump under the same R2
+# prefix. Keeping them listed is deliberate: the tuple is the CUTOFF inventory, and a run that
+# reports one as ALREADY GONE says so out loud instead of silently shipping a shorter backup.
 TABLES = (
     "property_identity_candidates",
     "property_identity_candidates_archive",
@@ -39,13 +44,41 @@ TABLES = (
 )
 
 
-def _dump_table(db_url: str, table: str) -> bytes:
+class _Gone(Exception):
+    """The relation no longer exists — dropped by an earlier migration, not a failure."""
+
+
+def _dump_table(db_url: str, table: str) -> tuple[bytes, int]:
+    """Gzipped pg_dump of one table, plus its COPY row count.
+
+    The count is read out of the dump itself rather than a second connection, so the
+    number reported is provably the number of rows in the artifact being uploaded.
+    """
     proc = subprocess.run(
         ["pg_dump", db_url, "--no-owner", "--no-privileges", "--table", table],
         capture_output=True,
-        check=True,
+        check=False,
     )
-    return gzip.compress(proc.stdout)
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode(errors="replace")
+        if "no matching tables were found" in stderr:
+            raise _Gone(table)
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, proc.stdout, proc.stderr)
+    return gzip.compress(proc.stdout), _copy_rows(proc.stdout)
+
+
+def _copy_rows(dump: bytes) -> int:
+    """Rows between `COPY ... FROM stdin;` and its terminating `\\.` line."""
+    rows, in_copy = 0, False
+    for line in dump.split(b"\n"):
+        if in_copy:
+            if line == b"\\.":
+                in_copy = False
+            else:
+                rows += 1
+        elif line.startswith(b"COPY ") and line.endswith(b"FROM stdin;"):
+            in_copy = True
+    return rows
 
 
 def main() -> int:
@@ -64,23 +97,32 @@ def main() -> int:
     run_prefix = f"backups/new-dedup-teardown/{datetime.now(timezone.utc):%Y-%m-%d}"
     r2 = None if args.dry_run else R2Client.from_env()
 
-    failures = []
+    failures: list[str] = []
+    gone: list[str] = []
+    dumped = 0
     for table in TABLES:
         try:
-            data = _dump_table(db_url, table)
+            data, rows = _dump_table(db_url, table)
+        except _Gone:
+            LOG.warning("ALREADY GONE %s — dropped by an earlier migration, nothing to dump", table)
+            gone.append(table)
+            continue
         except subprocess.CalledProcessError as exc:
             LOG.error("FAILED dumping %s: %s", table, exc.stderr.decode(errors="replace"))
             failures.append(table)
             continue
         key = f"{run_prefix}/{table}.sql.gz"
-        LOG.info("%s -> %s (%d bytes gzipped)", table, key, len(data))
+        LOG.info("%s -> %s (%d rows, %d bytes gzipped)", table, key, rows, len(data))
         if r2 is not None:
             r2.upload_bytes(key, data, content_type="application/gzip")
+        dumped += 1
 
     if failures:
         LOG.error("Failed tables: %s", ", ".join(failures))
         return 1
-    LOG.info("Backup complete: %d tables under %s", len(TABLES), run_prefix)
+    if gone:
+        LOG.warning("Not dumped (already dropped): %s", ", ".join(gone))
+    LOG.info("Backup complete: %d/%d tables under %s", dumped, len(TABLES), run_prefix)
     return 0
 
 
