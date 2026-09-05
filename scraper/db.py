@@ -1274,6 +1274,11 @@ def record_media(
 
 
 TOUCH_CHUNK_SIZE = 250
+# touch_listings deadlock retry: a lock race with a concurrent writer over the
+# same rows. Postgres has already rolled back the victim, so the other side
+# finishes and a short pause suffices; three attempts covers a double race.
+_TOUCH_DEADLOCK_ATTEMPTS = 3
+_TOUCH_DEADLOCK_DELAY = 0.5
 
 
 def touch_listings(
@@ -1300,40 +1305,72 @@ def touch_listings(
     with conn.cursor() as cur:
         for start in range(0, len(ids), TOUCH_CHUNK_SIZE):
             chunk = ids[start : start + TOUCH_CHUNK_SIZE]
-            # Phase 3: a re-sighting that flips a listing back to active changes
-            # its property's lifecycle rollup with NO snapshot, so it would not
-            # be caught by the snapshot-driven dirty mark. Capture exactly the
-            # reactivated subset (was inactive) and enqueue their properties.
-            # The bulk last_seen bump below covers the active majority.
-            cur.execute(
-                """
-                WITH react AS (
-                    UPDATE listings
-                    SET is_active = true, inactive_at = NULL, last_seen_at = now()
-                    FROM unnest(%s::bigint[]) AS u(sreality_id)
-                    WHERE listings.sreality_id = u.sreality_id
-                      AND listings.is_active = false
-                    RETURNING listings.property_id
-                )
-                INSERT INTO dirty_properties (property_id)
-                SELECT DISTINCT property_id FROM react WHERE property_id IS NOT NULL
-                ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
-                """,
-                (chunk,),
-            )
-            cur.execute(
-                """
-                UPDATE listings
-                SET last_seen_at = now(),
-                    is_active = true,
-                    inactive_at = NULL
-                FROM unnest(%s::bigint[]) AS u(sreality_id)
-                WHERE listings.sreality_id = u.sreality_id
-                """,
-                (chunk,),
-            )
-            total += cur.rowcount or 0
+            total += _touch_chunk_with_deadlock_retry(cur, chunk)
     return total
+
+
+def _touch_chunk_with_deadlock_retry(cur: Any, chunk: list[int]) -> int:
+    """One touch_listings chunk, retried on a deadlock.
+
+    A DeadlockDetected here is a lock race with a concurrent writer (the drain,
+    the realtime worker, a detail refetch) over the same listing rows. Before
+    this, one such race raised out of the whole category walk: on 2026-09-05
+    10:38 a fully-paged komercni/prodej walk -- every page fetched, every id in
+    hand -- was recorded as collected=0 and its delisting sweep skipped, because
+    the LAST step lost a lock race. Three of 46 runs. The work was already done;
+    only the bookkeeping failed.
+
+    Retrying is safe: the walk connection is autocommit, so a deadlock aborts
+    only this statement, and both statements are idempotent (SET last_seen_at =
+    now(), and an INSERT ... ON CONFLICT). Postgres has already rolled back the
+    victim, so the other side of the race completes and a short pause is enough.
+    """
+    for attempt in range(1, _TOUCH_DEADLOCK_ATTEMPTS + 1):
+        try:
+            return _touch_chunk(cur, chunk)
+        except psycopg.errors.DeadlockDetected:
+            if attempt == _TOUCH_DEADLOCK_ATTEMPTS:
+                raise
+            LOG.warning("touch_listings: deadlock on chunk of %d (attempt %d/%d); retrying",
+                        len(chunk), attempt, _TOUCH_DEADLOCK_ATTEMPTS)
+            time.sleep(_TOUCH_DEADLOCK_DELAY * attempt)
+    raise AssertionError("unreachable")
+
+
+def _touch_chunk(cur: Any, chunk: list[int]) -> int:
+    # Phase 3: a re-sighting that flips a listing back to active changes
+    # its property's lifecycle rollup with NO snapshot, so it would not
+    # be caught by the snapshot-driven dirty mark. Capture exactly the
+    # reactivated subset (was inactive) and enqueue their properties.
+    # The bulk last_seen bump below covers the active majority.
+    cur.execute(
+        """
+        WITH react AS (
+            UPDATE listings
+            SET is_active = true, inactive_at = NULL, last_seen_at = now()
+            FROM unnest(%s::bigint[]) AS u(sreality_id)
+            WHERE listings.sreality_id = u.sreality_id
+              AND listings.is_active = false
+            RETURNING listings.property_id
+        )
+        INSERT INTO dirty_properties (property_id)
+        SELECT DISTINCT property_id FROM react WHERE property_id IS NOT NULL
+        ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+        """,
+        (chunk,),
+    )
+    cur.execute(
+        """
+        UPDATE listings
+        SET last_seen_at = now(),
+            is_active = true,
+            inactive_at = NULL
+        FROM unnest(%s::bigint[]) AS u(sreality_id)
+        WHERE listings.sreality_id = u.sreality_id
+        """,
+        (chunk,),
+    )
+    return cur.rowcount or 0
 
 
 def touch_listings_by_id(
