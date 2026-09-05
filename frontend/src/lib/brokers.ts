@@ -174,6 +174,14 @@ export interface LeaderboardParams {
   // listing with no price ("cena na vyžádání") counts as meeting it.
   minPriceCzk?: number | null;
   includeUnpriced?: boolean;
+  /* Portal-agnostic `listings.subtype` slugs from the shared filter registry
+   * (lib/enums SUBTYPE_LABELS_BY_MAIN), meaningful only for categoryMain in
+   * (dum, komercni). Empty = no filter. includeUnknownSubtype is the twin of
+   * includeUnpriced — and it matters: subtype coverage is a PORTAL gap (sreality
+   * labels everything, ceskereality/realitymix/mmreality label nothing), so
+   * excluding unlabelled rows also ranks by which portals a broker lists on. */
+  subtypes?: string[];
+  includeUnknownSubtype?: boolean;
 }
 
 /* The attributed broker for one listing, contact included (migration 419).
@@ -287,6 +295,8 @@ export async function fetchBrokerLeaderboard(
       firm_ids: p.firmIds ?? [],
       min_price_czk: p.minPriceCzk ?? null,
       include_unpriced: p.includeUnpriced ?? false,
+      subtypes: p.subtypes ?? [],
+      include_unknown_subtype: p.includeUnknownSubtype ?? false,
     },
     undefined,
     JWT,

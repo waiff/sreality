@@ -85,6 +85,29 @@ def test_leaderboard_defaults_value_filter_to_unset(client, monkeypatch):
     assert captured["include_unpriced"] is False
 
 
+def test_leaderboard_passes_subtypes(client, monkeypatch):
+    captured = {}
+    def fake(conn, **kw):
+        captured.update(kw)
+        return {"data": [], "metadata": {}}
+    monkeypatch.setattr(broker_routes.brokers, "leaderboard", fake)
+    client.get("/brokers/leaderboard",
+               params={"subtypes": ["kancelar", "sklad"], "include_unknown_subtype": True})
+    assert captured["subtypes"] == ["kancelar", "sklad"]
+    assert captured["include_unknown_subtype"] is True
+
+
+def test_leaderboard_defaults_subtypes_to_empty(client, monkeypatch):
+    captured = {}
+    def fake(conn, **kw):
+        captured.update(kw)
+        return {"data": [], "metadata": {}}
+    monkeypatch.setattr(broker_routes.brokers, "leaderboard", fake)
+    client.get("/brokers/leaderboard")
+    assert captured["subtypes"] == []
+    assert captured["include_unknown_subtype"] is False
+
+
 def test_leaderboard_rejects_a_negative_min_price(client, monkeypatch):
     monkeypatch.setattr(broker_routes.brokers, "leaderboard",
                         lambda conn, **kw: {"data": [], "metadata": {}})

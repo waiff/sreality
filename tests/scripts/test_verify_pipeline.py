@@ -1817,12 +1817,23 @@ def test_migration_drift_ok_when_everything_is_present() -> None:
 
 def test_migration_drift_fails_when_a_migration_is_wholly_absent() -> None:
     """The 2026-08-25 signature: merged, never applied, so NONE of its objects
-    exist. Nothing else in the platform noticed for 29 hours."""
-    conn = _DriftConn({("column", "listings.discovered_at"): False}, default=True)
+    exist. Nothing else in the platform noticed for 29 hours.
+
+    The subject migration is DERIVED from the current window, like the
+    half-present test below, not hardcoded: this test used to pin migration 444's
+    `listings.discovered_at`, which silently stopped exercising the failure path
+    the moment 25 newer migrations pushed 444 out of `migration_drift_window` —
+    it then passed `default=True` for everything and asserted "fail" against an
+    all-present database, so it went red for the next PR to cross that boundary
+    rather than for any real drift.
+    """
+    migs = load_migrations(_MIGRATIONS_DIR, newest=T["migration_drift_window"])
+    target = next(m for m in migs if m.objects and all(_SAFE_IDENT.match(o.ident) for o in m.objects))
+    conn = _DriftConn({(o.kind, o.ident): False for o in target.objects}, default=True)
     out = check_migration_drift(conn, T)
     assert out["status"] == "fail"
     assert out["value"] == 1
-    assert any("444" in m for m in out["details"]["missing_entirely"])
+    assert any(target.filename in m for m in out["details"]["missing_entirely"])
 
 
 def test_migration_drift_only_warns_when_a_migration_is_half_present() -> None:

@@ -46,9 +46,11 @@ def test_leaderboard_threads_firm_ids_into_the_rpc_call() -> None:
     conn = _Conn([{"broker_id": 1}])
     brokers.leaderboard(conn, firm_ids=[5, 9])
     sql, params = conn.cur.seen[0]
-    assert "broker_leaderboard(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)" in sql
+    assert ("broker_leaderboard("
+            "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)") in sql
     assert params == (
-        None, None, None, None, None, "active_property_count", 100, [5, 9], None, False)
+        None, None, None, None, None, "active_property_count", 100, [5, 9], None,
+        False, None, False)
 
 
 def test_leaderboard_omits_firm_ids_when_not_given() -> None:
@@ -63,7 +65,7 @@ def test_leaderboard_threads_min_price_czk_and_include_unpriced() -> None:
     conn = _Conn([{"broker_id": 1}])
     out = brokers.leaderboard(conn, min_price_czk=5_000_000, include_unpriced=True)
     _, params = conn.cur.seen[0]
-    assert params[-2:] == (5_000_000, True)
+    assert params[8:10] == (5_000_000, True)
     assert out["metadata"]["filters_used"]["min_price_czk"] == 5_000_000
     assert out["metadata"]["filters_used"]["include_unpriced"] is True
 
@@ -72,9 +74,34 @@ def test_leaderboard_defaults_min_price_czk_none_and_include_unpriced_false() ->
     conn = _Conn([{"broker_id": 1}])
     out = brokers.leaderboard(conn)
     _, params = conn.cur.seen[0]
-    assert params[-2:] == (None, False)
+    assert params[8:10] == (None, False)
     assert out["metadata"]["filters_used"]["min_price_czk"] is None
     assert out["metadata"]["filters_used"]["include_unpriced"] is False
+
+
+def test_leaderboard_threads_subtypes_and_include_unknown_subtype() -> None:
+    conn = _Conn([{"broker_id": 1}])
+    out = brokers.leaderboard(conn, subtypes=["kancelar", "sklad"],
+                              include_unknown_subtype=True)
+    _, params = conn.cur.seen[0]
+    assert params[-2:] == (["kancelar", "sklad"], True)
+    assert out["metadata"]["filters_used"]["subtypes"] == ["kancelar", "sklad"]
+    assert out["metadata"]["filters_used"]["include_unknown_subtype"] is True
+
+
+def test_leaderboard_sends_null_not_empty_array_when_no_subtype_is_selected() -> None:
+    """Load-bearing, not cosmetic: the SQL gates its live branch on `p_subtypes is not
+    null`, so an empty array would route to the live branch with a predicate matching no
+    row — an empty leaderboard instead of the unfiltered one. Same `x or None` treatment
+    firm_ids gets, for the same class of reason.
+
+    RED by: passing `subtypes` straight through instead of `subtypes or None`.
+    """
+    conn = _Conn([{"broker_id": 1}])
+    out = brokers.leaderboard(conn, subtypes=[])
+    _, params = conn.cur.seen[0]
+    assert params[-2:] == (None, False)
+    assert out["metadata"]["filters_used"]["subtypes"] == []
 
 
 def test_listing_broker_prefers_the_surrogate_id() -> None:

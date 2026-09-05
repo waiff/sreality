@@ -59,6 +59,8 @@ def get_leaderboard(
     firm_ids: list[int] = Query(default=[]),
     min_price_czk: int | None = Query(default=None, ge=0),
     include_unpriced: bool = Query(default=False),
+    subtypes: list[str] = Query(default=[]),
+    include_unknown_subtype: bool = Query(default=False),
     conn: Any = Depends(deps.get_db_conn),
     claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
@@ -66,7 +68,8 @@ def get_leaderboard(
         conn, region_ids=region_ids, okres_ids=okres_ids, obec_ids=obec_ids,
         category_main=category_main, category_type=category_type,
         metric=metric, limit=limit, firm_ids=firm_ids,
-        min_price_czk=min_price_czk, include_unpriced=include_unpriced), claims)
+        min_price_czk=min_price_czk, include_unpriced=include_unpriced,
+        subtypes=subtypes, include_unknown_subtype=include_unknown_subtype), claims)
 
 
 @router.get("/firm-options")

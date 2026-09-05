@@ -1,13 +1,14 @@
-"""Offline contracts W4 must not break (migrations 435, 448).
+"""Offline contracts W4 must not break (migrations 435, 469).
 
 Load-bearing things about the broker leaderboard, invisible in the normal test suite, and
 each would fail only in production:
 
   * `api/outreach.py` calls the function with SEVEN positional arguments regardless of how
     many parameters it has grown to. That is legal only because every parameter added since
-    migration 410 (`p_firm_ids`, then 448's `p_min_price_czk`/`p_include_unpriced`) is
-    TRAILING and carries a DEFAULT. Dropping a default, or inserting a new parameter
-    anywhere but the end, breaks that call at runtime with CI green —
+    migration 410 (`p_firm_ids`, then 448's `p_min_price_czk`/`p_include_unpriced`, then
+    469's `p_subtypes`/`p_include_unknown_subtype`) is TRAILING and carries a DEFAULT.
+    Dropping a default, or inserting a new parameter anywhere but the end, breaks that
+    call at runtime with CI green —
     `tests/api/test_outreach_routes.py` mentions neither `leaderboard` nor `select_targets`.
   * `CREATE OR REPLACE` preserves a function's ACL; `DROP` + `CREATE` resets it to the
     default, `EXECUTE TO PUBLIC`. Since this function returns `primary_email` and
@@ -18,7 +19,7 @@ each would fail only in production:
     parameter COUNT via CREATE OR REPLACE (verified live while building migration 448 — it
     silently created a second, overloaded function instead of replacing the first, which
     briefly left THAT overload at the anon/authenticated-executable default until caught and
-    revoked by hand). Migrations 410 and 448 both DROP the old signature and immediately
+    revoked by hand). Migrations 410, 448 and 469 all DROP the old signature and immediately
     CREATE + fully REVOKE the new one in the SAME file — that pairing is exactly as safe as
     CREATE OR REPLACE, so the gate below checks for the pairing, not for the DROP's absence.
   * The active-broker set must be resolved ONCE, via `AS MATERIALIZED`. Written as an
@@ -44,7 +45,7 @@ from tests.test_migration_rls_grants import _statements, _strip_comments
 _ROOT = Path(__file__).resolve().parent.parent
 _MIGRATIONS = _ROOT / "migrations"
 
-_FN_MIGRATION = _MIGRATIONS / "448_broker_leaderboard_value_filter.sql"
+_FN_MIGRATION = _MIGRATIONS / "469_broker_leaderboard_subtype_filter.sql"
 _OUTREACH = _ROOT / "api" / "outreach.py"
 
 
@@ -89,14 +90,14 @@ def test_every_function_parameter_carries_a_default():
     signature it is retiring) — `body.index("broker_leaderboard(")` alone would find that
     DROP first and silently check the wrong parameter list.
 
-    RED by: un-defaulting any parameter in 448.
+    RED by: un-defaulting any parameter in 469.
     """
     body = _sql(_FN_MIGRATION)
     create_at = body.index("create or replace function public.broker_leaderboard(")
     start = create_at + len("create or replace function public.broker_leaderboard(")
     params = body[start : body.index(")\nreturns", start)]
     lines = [p.strip() for p in params.split(",\n") if p.strip()]
-    assert len(lines) == 10, f"expected 10 parameters, found {len(lines)}: {lines}"
+    assert len(lines) == 12, f"expected 12 parameters, found {len(lines)}: {lines}"
     missing = [p for p in lines if "default" not in p.lower()]
     assert not missing, (
         "every broker_leaderboard parameter must carry a DEFAULT — api/outreach.py:123 "
@@ -158,7 +159,7 @@ def test_every_leaderboard_drop_is_immediately_recreated_and_fully_revoked():
     since it never touches the ACL.
 
     RED by: a DROP with no matching same-file CREATE + full 3-role REVOKE (migrations 410
-    and 448 both must stay green here).
+    and 469 both must stay green here).
     """
     offenders: list[str] = []
     for path in sorted(_MIGRATIONS.glob("*.sql")):
@@ -188,34 +189,35 @@ def test_every_leaderboard_drop_is_immediately_recreated_and_fully_revoked():
 
 
 def test_the_function_migration_replaces_and_reasserts_the_revokes():
-    """RED by: dropping the three REVOKE statements from 448, or losing CREATE OR REPLACE
+    """RED by: dropping the three REVOKE statements from 469, or losing CREATE OR REPLACE
     for the new signature (a plain CREATE would also work for a from-empty CI replay, but
     would fail "already exists" replayed against a database where this exact signature was
     already created live — see the migration's own header)."""
     statements = [" ".join(s.split()).lower() for s in _statements(_FN_MIGRATION.read_text())]
     assert any(s.startswith("create or replace function") and "broker_leaderboard" in s
                for s in statements), (
-        "448 must use CREATE OR REPLACE FUNCTION for the new signature"
+        "469 must use CREATE OR REPLACE FUNCTION for the new signature"
     )
     revoked = _revoked_roles(statements)
     assert revoked == {"public", "anon", "authenticated"}, (
-        f"448 must re-assert EXECUTE revokes for all three roles, got {sorted(revoked)}"
+        f"469 must re-assert EXECUTE revokes for all three roles, got {sorted(revoked)}"
     )
 
 
 # --- the two branches -------------------------------------------------------
 #
-# 448 adds a live branch (reads `listings` directly when p_min_price_czk is set) beside
-# the unfiltered fast path (unchanged from 435, reads broker_region_type_stats). Both are
-# ONE `language sql` function — a `language plpgsql` if/else was tried and reverted (see
-# the migration's own header): PL/pgSQL is never inlined, so it made the function an
-# opaque "Function Scan" to EXPLAIN and broke every assertion in
+# 448 added a live branch (reads `listings` directly) beside the unfiltered fast path
+# (unchanged from 435, reads broker_region_type_stats); 469 added the SECOND filter that
+# routes to it (subtype), which is what turned "price is special" into the general rule:
+# a filter the matview cannot express routes to the live branch. Both are ONE `language
+# sql` function — a `language plpgsql` if/else was tried and reverted (see the migration's
+# own header): PL/pgSQL is never inlined, so it made the function an opaque "Function
+# Scan" to EXPLAIN and broke every assertion in
 # tests/test_broker_leaderboard_plan_shape.py. The two branches are instead two
-# independently-gated CTE chains (`fast_...` / `live_...`, `where p_min_price_czk is
-# null` / `is not null`) UNIONed in a `combined` CTE — confirmed live that Postgres
-# prunes whichever branch's gate is false, even under a real bound parameter (PREPARE/
-# EXECUTE), so this keeps both the inlining (hence EXPLAIN visibility) AND the "only one
-# branch's cost is ever paid" property the plpgsql version would have had.
+# independently-gated CTE chains (`fast_...` / `live_...`) UNIONed in a `combined` CTE —
+# confirmed live that Postgres prunes whichever branch's gate is false, even under a real
+# bound parameter (PREPARE/EXECUTE), so this keeps both the inlining (hence EXPLAIN
+# visibility) AND the "only one branch's cost is ever paid" property.
 #
 # `active_brokers` itself is SHARED (one CTE, defined before either branch) rather than
 # duplicated per branch — also measured, not assumed (see the migration header): a
@@ -333,7 +335,7 @@ def test_the_final_combined_order_by_carries_the_same_tiebreaker():
 
 
 def test_each_branch_ranking_cte_has_exactly_one_limit():
-    """The whole point of W4 (and why 448 preserves it in the new branch too): each
+    """The whole point of W4 (and why 469 preserves it in the new branch too): each
     branch truncates to p_limit rows BEFORE `combined` ever joins `brokers`/`firms` — a
     CTE can only be referenced after it is fully defined, so Postgres's own grammar
     already forces the ranking-then-hydrate ORDER here; this pins the ranking half of
@@ -376,16 +378,69 @@ def test_combined_hydrates_from_the_ranked_top_cte_not_the_raw_aggregate():
     )
 
 
-def test_combined_arms_are_gated_by_the_opposite_price_filter_condition():
-    """The two arms of `combined` must be MUTUALLY EXCLUSIVE gates on the same
-    parameter, or a call could double-count (both arms contribute) or under-fill (both
-    suppressed) instead of cleanly selecting one branch's already-complete answer.
+# The two gate expressions, spelled once here and asserted verbatim below. They must be
+# exact logical complements over the SAME parameters: if a call could satisfy both, its
+# rows are double-counted; if it could satisfy neither, the leaderboard comes back empty.
+# Adding a THIRD live-path filter means updating both spellings AND this pair — which is
+# the point of pinning the literal text rather than a loose substring.
+_FAST_GATE = "p_min_price_czk is null and p_subtypes is null"
+_LIVE_GATE = "p_min_price_czk is not null or p_subtypes is not null"
 
-    RED by: gating both arms the same way, or gating neither.
+
+def test_combined_arms_are_gated_by_complementary_live_filter_conditions():
+    """The two arms of `combined` must be MUTUALLY EXCLUSIVE and jointly exhaustive, or a
+    call could double-count (both arms contribute) or under-fill (both suppressed)
+    instead of cleanly selecting one branch's already-complete answer.
+
+    RED by: gating both arms the same way, gating neither, or adding a live-path filter
+    to one gate and forgetting the other (the failure mode 469 introduced by adding
+    subtype — a subtype-only call would otherwise have matched the FAST arm too).
     """
     combined = _combined_cte(_fn_body()).lower()
-    assert combined.count("where p_min_price_czk is null") == 1
-    assert combined.count("where p_min_price_czk is not null") == 1
+    assert combined.count(f"where {_FAST_GATE}") == 1, (
+        f"combined's fast arm must be gated exactly `where {_FAST_GATE}`"
+    )
+    assert combined.count(f"where {_LIVE_GATE}") == 1, (
+        f"combined's live arm must be gated exactly `where {_LIVE_GATE}`"
+    )
+
+
+def test_every_fast_branch_arm_carries_the_full_fast_gate():
+    """Each of the four matview arms repeats the WHOLE gate. Missing the subtype half on
+    any one arm would let a subtype-only call fall through to the matview — which cannot
+    express subtype at all, so it would silently answer with UNFILTERED counts.
+
+    RED by: leaving `and p_subtypes is null` off any arm (or hoisting the gate into a CTE,
+    which would also defeat the plan-time pruning the whole design rests on).
+    """
+    fast, _ = _branches(_fn_body())
+    arms = fast.lower().count("from broker_region_type_stats s")
+    gates = fast.lower().count(f"where {_FAST_GATE}")
+    assert arms == 4, f"expected the 4 geo arms, found {arms}"
+    assert gates == arms, (
+        f"{arms} matview arms but only {gates} carry the full fast gate `{_FAST_GATE}`"
+    )
+
+
+def test_the_live_branch_predicates_are_each_inert_when_unset():
+    """Both live-path filters must be written `p_x is null or <match>`, so the branch can
+    run for EITHER filter alone. 448 wrote the price predicate without that escape —
+    correct while price was the only thing that could trigger the live branch, and a
+    silently EMPTY leaderboard the moment 469 let a subtype-only call in
+    (`l.price_czk >= NULL` is NULL, so every row failed).
+
+    RED by: dropping either `p_x is null or` escape.
+    """
+    _, live = _branches(_fn_body())
+    lowered = " ".join(live.lower().split())
+    assert "p_min_price_czk is null or l.price_czk >= p_min_price_czk" in lowered, (
+        "the price predicate lost its `p_min_price_czk is null or` escape — a "
+        "subtype-only call would match no rows"
+    )
+    assert "p_subtypes is null or l.subtype = any(p_subtypes)" in lowered, (
+        "the subtype predicate lost its `p_subtypes is null or` escape — a price-only "
+        "call would match no rows"
+    )
 
 
 def test_the_activity_filter_is_joined_before_the_limit_in_both_branches():

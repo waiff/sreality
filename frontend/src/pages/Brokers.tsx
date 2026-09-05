@@ -19,6 +19,7 @@ import type { DistrictChip } from '../lib/filters';
 import { LocationTypeahead } from '../components/filter-controls/LocationTypeahead';
 import { PickButton, Switch } from '../components/controls';
 import { BufferedNumberInput } from '../components/FilterForm';
+import { SUBTYPE_LABELS_BY_MAIN } from '@/lib/enums';
 import { fmtCount } from '../lib/format';
 
 const CATEGORY_OPTIONS: ReadonlyArray<{ value: string | null; label: string }> = [
@@ -54,6 +55,34 @@ export default function Brokers() {
   const [limit, setLimit] = useState<number>(100);
   const [minPriceCzk, setMinPriceCzk] = useState<number | null>(null);
   const [includeUnpriced, setIncludeUnpriced] = useState(false);
+  const [subtypes, setSubtypes] = useState<string[]>([]);
+  const [includeUnknownSubtype, setIncludeUnknownSubtype] = useState(false);
+
+  // Subtype is only populated for houses and commercial (the registry's own dum /
+  // komercni partition), so the control only exists for those two — same rule Browse
+  // applies in its sidebar, from the same SUBTYPE_LABELS_BY_MAIN vocabulary.
+  const subtypeOptions =
+    categoryMain === 'dum' || categoryMain === 'komercni'
+      ? SUBTYPE_LABELS_BY_MAIN[categoryMain]
+      : null;
+
+  // Clear the subtype filter whenever Typ actually changes: the slugs are partitioned
+  // by category_main, so a house subtype carried into Komerční matches nothing and
+  // would silently empty the ledger (Browse clears its own subtype filter for exactly
+  // this reason). Guarded so re-clicking the selected pill is a no-op.
+  const handleCategoryMainChange = (next: string | null) => {
+    if (next !== categoryMain) {
+      setSubtypes([]);
+      setIncludeUnknownSubtype(false);
+    }
+    setCategoryMain(next);
+  };
+
+  const toggleSubtype = (slug: string) => {
+    setSubtypes((prev) =>
+      prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug],
+    );
+  };
 
   // price_czk means something different per offer type (total price for a sale,
   // monthly rent for a rental — same dual meaning Browse's own price filter has), so
@@ -98,11 +127,12 @@ export default function Brokers() {
       'broker-leaderboard',
       geo.regionIds, geo.okresIds, geo.obecIds,
       categoryMain, categoryType, metric, limit, firmIds, minPriceCzk, includeUnpriced,
+      subtypes, includeUnknownSubtype,
     ],
     queryFn: () =>
       fetchBrokerLeaderboard({
         ...geo, categoryMain, categoryType, metric, limit, firmIds,
-        minPriceCzk, includeUnpriced,
+        minPriceCzk, includeUnpriced, subtypes, includeUnknownSubtype,
       }),
     staleTime: 60_000,
     // Every filter control (region, type, metric, firm) changes this query's
@@ -153,7 +183,7 @@ export default function Brokers() {
             />
           </Field>
           <Field label="Typ">
-            <Segmented options={CATEGORY_OPTIONS} value={categoryMain} onChange={setCategoryMain} />
+            <Segmented options={CATEGORY_OPTIONS} value={categoryMain} onChange={handleCategoryMainChange} />
           </Field>
           <Field label="Nabídka">
             <Segmented options={OFFER_OPTIONS} value={categoryType} onChange={handleCategoryTypeChange} />
@@ -196,6 +226,42 @@ export default function Brokers() {
             <Segmented options={LIMIT_OPTIONS} value={limit} onChange={setLimit} />
           </Field>
         </div>
+        {/* Podtyp sits on its own row for the same reason Firma does: up to twelve
+            pills that wrap across lines would otherwise drive the single-line
+            controls' flex-wrap basis. Only rendered for dum / komercni — the two
+            category_main values the registry defines subtypes for. */}
+        {subtypeOptions && (
+          <div className="mt-3.5 pt-3.5 border-t border-[var(--color-rule-soft)]">
+            <Field label="Podtyp">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <div className="flex flex-wrap gap-1">
+                  {subtypeOptions.map((o) => (
+                    <PickButton
+                      key={o.slug}
+                      on={subtypes.includes(o.slug)}
+                      onClick={() => toggleSubtype(o.slug)}
+                    >
+                      {o.label}
+                    </PickButton>
+                  ))}
+                </div>
+                <label
+                  className="flex items-center gap-1.5 text-xs text-[var(--color-ink-3)] cursor-pointer select-none"
+                  title="Počítat i nabídky bez uvedeného podtypu, jako by vybraný podtyp splňovaly."
+                >
+                  <Switch
+                    on={includeUnknownSubtype}
+                    onChange={setIncludeUnknownSubtype}
+                    disabled={subtypes.length === 0}
+                    ariaLabel="Počítat nabídky bez podtypu"
+                  />
+                  bez podtypu
+                </label>
+              </div>
+            </Field>
+            {subtypes.length > 0 && <SubtypeCoverageNote />}
+          </div>
+        )}
         <div className="mt-3.5 pt-3.5 border-t border-[var(--color-rule-soft)]">
           <Field label="Firma">
             <CompanyFilter value={firmIds} onChange={setFirmIds} />
@@ -219,6 +285,7 @@ export default function Brokers() {
             placeLabel={placeLabel}
             hasFirmFilter={firmIds.length > 0}
             hasValueFilter={minPriceCzk != null}
+            hasSubtypeFilter={subtypes.length > 0}
           />
         ) : (
           <>
@@ -529,17 +596,42 @@ function Count({
   );
 }
 
+/* Subtype coverage is a PORTAL gap, not random sparsity — measured on active,
+   attributed, CZ-resolved rows: sreality labels 100% of houses and commercial,
+   idnes most of them, while ceskereality, realitymix and mmreality label NONE and
+   remax almost none. Half of all active houses carry no subtype at all. Because
+   brokers cluster by portal that bias is not noise: two of the top fifteen brokers
+   by unfiltered commercial inventory have zero labelled rows and drop out of a
+   subtype-filtered ranking entirely. Stating it inline is the point — a silently
+   portal-biased leaderboard would be worse than no filter, and the "bez podtypu"
+   switch is the lever that puts the unlabelled rows back. */
+function SubtypeCoverageNote() {
+  return (
+    <p className="mt-2 text-xs text-[var(--color-ink-4)] max-w-3xl">
+      Podtyp uvádí jen některé portály (sreality a iDNES ano, ceskereality,
+      realitymix a mmreality ne) — u poloviny domů a 39 % komerčních nabídek chybí.
+      Žebříček proto zvýhodňuje makléře inzerující na portálech s podtypem; přepínač
+      „bez podtypu“ zahrne i neoznačené nabídky.
+    </p>
+  );
+}
+
 function Empty({
   placeLabel,
   hasFirmFilter,
   hasValueFilter,
+  hasSubtypeFilter,
 }: {
   placeLabel: string;
   hasFirmFilter: boolean;
   hasValueFilter: boolean;
+  hasSubtypeFilter: boolean;
 }) {
-  const extras = [hasFirmFilter && 'firmu', hasValueFilter && 'cenu']
-    .filter((x): x is string => Boolean(x));
+  const extras = [
+    hasFirmFilter && 'firmu',
+    hasValueFilter && 'cenu',
+    hasSubtypeFilter && 'podtyp',
+  ].filter((x): x is string => Boolean(x));
   const hint = extras.length === 0
     ? 'Zkuste jiný typ nemovitosti nebo nabídku.'
     : `Zkuste jiný typ nemovitosti, nabídku nebo ${extras.join(' a ')}.`;
