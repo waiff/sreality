@@ -53,8 +53,81 @@
 # `tests/location_data/test_contract_immutability.py` now pin the governed hash itself, so
 # the next edit-without-a-bump fails on the push instead of in production.
 
+#
+# VERSION 5 (2026-09-05) — the W2 ACTIVATION. ONE entry added (`cr.det.title_okres`) and TWO
+# earlier entries RESTATED with an archive reader (`cr.det.title_line`, `cr.det.data_city`).
+# No earlier entry's MEANING changed and no id was reused (02 §2.1.8). Both restated entries
+# were inert in v1-v4 — declared with no `locator.reader`, therefore never executed and never
+# stamped on one claim — so restating them orphans nothing: the v4 rows keep their own ids
+# and their own (empty) claim history, and v5 gets brand-new `portal_contract_entries` rows.
+#
+# Measured cause: this portal's streets are 2.1% diacritic-bearing (862/40,147) against 72.8%
+# realitymix and 82.6% sreality — "effectively every ceskereality street is ASCII-folded,
+# which breaks any exact string join to a RÚIAN street registry" [live-C §1.3]. The accented
+# form survives in the `<title>`: on the two archived bodies re-read for this bump
+# (tests/fixtures/location_w2a_refetch/ceskereality_b1.html, listing 3861311, and
+# ceskereality_a1.html, listing 3680359) the title reads `…, ulice Májová, okres Karlovy Vary
+# - ČESKÉREALITY.cz inzerce realit`. So ONE locator repairs the de-accented street AND carries
+# the portal-declared okres that `data-city` also states and that production discards today.
+#
+# The title is also the DECLARED-GRANULARITY axis for this portal (operator ruling,
+# 2026-08-27): a title carrying `, ulice X,` is street-tier, a title without one is town-tier
+# — b1 has the street, a1 does not, and the claim set differs accordingly. The axis is
+# recorded as each entry's `precision_cap.granularity_max`; nothing consumes it yet. The
+# address-point tier of that rule (street + č.p.) lives in the perex and in JSON-LD
+# `streetAddress` (1,104/72,267 = 1.5% coverage) and is NOT claimed here: the operator
+# declined a second street-text claim for this portal, and `cr.det.perex` is permanently
+# typed `street_name` while its live value is a variable-depth address LINE
+# ("Májová 843, Ostrov"). Ids are never re-typed, so it stays inert.
+#
+# `cr.det.data_city` publishes obec and okres in ONE string, `Ostrov (okres Karlovy Vary)`, on
+# 2 of 2 archived bodies — hence the shared `split_paren_okres` transform, which claims only
+# the obec half. The okres is claimed from the title instead: in `data-city` the obec name
+# often repeats inside the okres name (`Praha (okres Praha)`), so a transformed okres value
+# could not carry an evidence span distinguishable from the obec's occurrence, and
+# `find_span`'s own docstring calls a span pointing at the wrong occurrence worse than none.
+#
+# NO coordinate entry and NO `ARCHIVED_COORDINATE_RULES` row. This portal's pin already
+# reaches the claims spine through `cr.det.legacy_pin` (`listings.geom`, admitted for
+# `coords.source='page'`, which is read off this very `input#driving_calculator_from`), so
+# re-mining it from the archived body would add a second fingerprint for the same position
+# and would license a locator nobody asked to license.
+#
+# The map surface stays declared-with-no-reader. OQ1 IS ANSWERED (2026-08-27): both
+# `/mapa/{deal}/{cat}/` — 500 markers per request in `div#mapCanvas[data-markers]`, `nid` IS
+# `listings.source_id_native` — and `POST /real-estate/ajax/map-refresh/` with
+# `filter[gpsSwLat/Lng,gpsNeLat/Lng,zoom,strana]` work, and the bbox POST returns markers
+# carrying `exact` with NO category filter, so a bbox partition can harvest
+# (nid, lat, lng, exact) corpus-wide rather than a first-500-per-category prefix. That is a
+# BULK HARVEST LANE against a live endpoint, not an archived-body re-mine — there is no
+# archived `page_kind: map` body to read — so `cr.map.exact` / `cr.map.coordinate` stay inert
+# and the harvest is a recorded follow-up. `cr.idx.locality` stays inert for a different
+# reason: the fixture-diff gate's archived arm scores `page_kind == "detail"` only, so an
+# index entry would ship completely ungated.
+#
+# `exclusion_zones` gains `section.s-estates-slide`. On both archived bodies `.similar` and
+# `.podobne` match ZERO nodes while the live "Podobné nemovitosti" carousel renders as
+# `section.s-estates-slide` and carries up to 20 other listings with obec+street ("Ostrov,
+# Štúrova"; "…, Masarykova"). The retired selectors are KEPT rather than deleted: they cost
+# nothing and they record which markup the block used to have.
+#
+# `required: always` on `cr.det.data_city` is DECLARATIVE — no lane implements a raise-on-miss
+# for it today. "Raise, not shrug" is discharged by the pinned-fixture non-vacuity test and by
+# W2-13's per-source zero-claim tripwire, for which this entry is the named floor. This portal
+# has the fleet's documented silent-parse-failure history: 8,432 active rows carry
+# `description IS NULL` behind an http-200 archived body with `parse_error` NULL, and
+# `parse_index` still reads a class that matches nothing.
+#
+# Ships SHADOWED. `shadow` is HEADER-grain, so this darkens ceskereality's LIVE W1 claims from
+# the moment @5 activates until an operator runs
+# `python -m location_data.contracts --unshadow ceskereality@5`. That is the price the
+# sweep-lane rail (tests/location_data/test_contract_shadow.py) charges once a dispatcher for
+# `claims_remine_archive` exists, and the operator ordered all seven portals paid in one wave
+# so the claim-corpus re-insert is paid once.
+
 portal: ceskereality
-contract_version: 4
+contract_version: 5
+shadow: true
 extractor_runtime: ">=1.0"
 identity_ladder: [structured_address, portal_precise_coord, text_geocode]
 
@@ -133,6 +206,14 @@ exclusion_zones:
   - locator_kind: html_selector
     locator: {css: "select[name*='region'], nav a[href*='zahranicni']"}
     reason: "The region dropdown and the footer nav item 'Zahraniční', on every page."
+  - locator_kind: html_selector
+    locator: {css: "section.s-estates-slide"}
+    reason: >
+      The LIVE "Podobné nemovitosti" carousel (v5). `.similar, .podobne` above matched ZERO
+      nodes on both archived bodies re-read for this bump (3861311, 3680359) while this
+      section carried other listings' obec+street ("Ostrov, Štúrova", "…, Masarykova"); the
+      same class is already named in `persistence.volatile_paths` as this portal's churn
+      node, so the markup was known and only the zone was stale.
 
 precision_caps:
   map_exact_true: {granularity_max: address_point, position_source_max: portal_pin}
@@ -255,7 +336,7 @@ extractions:
       `write_path_unknown: false` — unlike `cr.det.legacy_locality`. §6.6 rule 3 asks a
       claim that CANNOT name its writer to say so; this one names it in the guard.
 
-  # ---- W2 HTML / map surfaces: declared, no reader ----
+  # ---- W2 HTML / map surfaces (v5: three of these now name an archive reader) ----
 
   - id: cr.map.exact
     locator_kind: map_config
@@ -304,13 +385,29 @@ extractions:
     locator_kind: html_selector
     extraction_method: html_selector_parse
     page_kind: detail
-    locator: {css: "input#driving_calculator_from", attr: "data-city"}
+    locator: {reader: html_attr, css: "input#driving_calculator_from",
+              attr: "data-city"}
     claim_type: obec_name
     licence_class: portal
     blur_evidence: none
-    required: when_present
-    notes: "'Praha (okres Praha)' — a portal-DECLARED okres, discarded today while okres is
-      instead derived from geom by trigger [live-C §1.3]."
+    transform: [split_paren_okres]
+    precision_cap: {granularity_max: obec, position_source_max: admin_centroid}
+    required: always
+    notes: >
+      'Praha (okres Praha)' — a portal-DECLARED okres, discarded today while okres is
+      instead derived from geom by trigger [live-C §1.3]. v5 activates the OBEC HALF only:
+      `split_paren_okres` keeps the text before '(okres ', measured present on 2 of 2
+      archived bodies ('Ostrov (okres Karlovy Vary)', 'Špindlerův Mlýn (okres Trutnov)').
+      The okres half is claimed from the title (`cr.det.title_okres`) instead, because the
+      obec name frequently repeats inside the okres name here and a transformed okres value
+      could not carry an evidence span distinguishable from the obec's occurrence. The
+      claimed value being a NORMALISED form is also why the reader quotes the raw attribute:
+      quoting 'České Budějovice' resolved the span onto the node's OWN `value=` attribute
+      instead of onto `data-city`.
+      `required: always` is the alarm this portal's silent-parse-failure history asks for
+      (8,432 active rows with a NULL description behind an http-200 body); no lane
+      implements raise-on-miss today, so it is read by the pinned-fixture non-vacuity test
+      and by W2-13's zero-claim tripwire.
 
   - id: cr.det.og_title
     locator_kind: og_meta
@@ -331,13 +428,24 @@ extractions:
     locator_kind: html_selector
     extraction_method: regex_text
     page_kind: detail
-    locator: {css: "title", pattern: ", ulice (?P<street>[^,]+),"}
+    locator: {reader: html_regex, css: "title",
+              pattern: ", ulice (?P<street>[^,]+),", group: "street"}
     claim_type: street_name
     licence_class: portal
     blur_evidence: none
+    precision_cap: {granularity_max: street, position_source_max: derived_geocode}
     required: best_effort
-    notes: "okres+obec 12/12, street 3/12 — 'the single most reliable structured locator on
-      this portal' [mine-ceskereality]."
+    notes: >
+      okres+obec 12/12, street 3/12 — "the single most reliable structured locator on this
+      portal" [mine-ceskereality]. v5 gives it the `html_regex` reader: this is the ACCENTED
+      form (`Májová`, `Nádražní`), and it is the repair path for the 862/40,147 = 2.1%
+      diacritic rate on `listings.street`. It is also the granularity signal: a title
+      WITHOUT `, ulice X,` is a town-tier page (archived body 3680359, Špindlerův Mlýn,
+      yields no claim here at all), which is why `required` stays `best_effort` — the 3/12
+      street rate is over arbitrary pages, while the ≥90% target is over the archived subset
+      of rows that HAVE a stored street. The first sweep reports the measured yield.
+      The evidence quote is the WHOLE MATCH, not the bare street, so the span points at the
+      pattern rather than at some other occurrence of a common street name.
 
   - id: cr.det.jsonld_area_served
     locator_kind: jsonld
@@ -393,3 +501,26 @@ extractions:
     required: when_present
     notes: "The locality moved into the title anchor; the old .i-estate__header-locality
       class matches nothing [live-C §1.3]."
+
+  - id: cr.det.title_okres
+    locator_kind: html_selector
+    extraction_method: regex_text
+    page_kind: detail
+    locator: {reader: html_regex, css: "title",
+              pattern: ",\\s*okres\\s+(?P<okres>[^,]+?)\\s+-\\s+ČESKÉREALITY\\.cz",
+              group: "okres"}
+    claim_type: okres_name
+    licence_class: portal
+    blur_evidence: none
+    precision_cap: {granularity_max: okres, position_source_max: admin_centroid}
+    required: when_present
+    notes: >
+      NEW in v5. The portal-declared okres, which production discards entirely (okres is
+      derived from geom by trigger [live-C §1.3]). Present on 12/12 mined pages and on 2/2
+      archived bodies re-read for this bump. The pattern terminates on the SITE SUFFIX, not
+      on a bare hyphen, because Czech okres names carry unspaced hyphens — `Frýdek-Místek`,
+      `Praha-východ` — and a `[^-]` class would truncate them; verified against both.
+      Taken from the title rather than from `cr.det.data_city`'s `(okres …)` half because
+      the obec name repeats inside the okres name there and the span would be ambiguous.
+      A branding change to the `<title>` suffix stops this claim silently; that is what
+      W2-13's per-source zero-claim tripwire is for, and this entry is one of its floors.
