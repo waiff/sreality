@@ -29,7 +29,7 @@ on:
         default: ""
         type: string
       max_seconds:
-        description: wall-clock budget; the walk finalizes cleanly before this (blank = 9000 = 150 min).
+        description: wall-clock budget; the walk finalizes cleanly before this (blank = 13000 = 217 min).
         required: false
         default: ""
         type: string
@@ -42,11 +42,15 @@ jobs:
   index-walk:
     runs-on: ubuntu-latest
     # The full walk normally completes well inside the --max-seconds budget
-    # (9000 = 150 min); the budget makes it finalize CLEANLY even on a slow/grown
+    # (13000 = 217 min); the budget makes it finalize CLEANLY even on a slow/grown
+# WHY 217 and not 150 (2026-09-05): a full walk is ~4,360 pages and per-page
+# latency through the residential proxy swings 1.4-4.0 s with the time of day.
+# Break-even at 9000 s was ~2.06 s/page: 6 of 12 runs fit (night), 6 hit the
+# deadline (afternoon). 13000 s covers 3.0 s/page. The 6 h cron leaves ~2 h slack.
     # day instead of being SIGKILLed, and this timeout is just the generous outer
     # backstop (budget + finalize headroom). Don't re-tune the timeout to the walk
     # size — the --max-seconds clean-stop is what keeps it drift-proof.
-    timeout-minutes: 180
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v6
 
@@ -75,7 +79,7 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
           MAX_PAGES: ${{ inputs.max_pages }}
-          MAX_SECONDS: ${{ inputs.max_seconds || '9000' }}
+          MAX_SECONDS: ${{ inputs.max_seconds || '13000' }}
         run: |
           ARGS="--index-only --max-seconds $MAX_SECONDS"
           if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi

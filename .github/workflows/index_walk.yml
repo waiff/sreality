@@ -24,7 +24,13 @@ name: "Scraping: Sreality index walk (Phase 2)"
 # #3) so a truncated page never mass-flips live listings. GitHub throttles
 # scheduled workflows, so effective cadence is slower; Health liveness is tuned
 # to this (warn >90 min, fail >180 min). The --max-seconds budget (default
-# 1200 = 20 min) makes a slow/grown walk finalize CLEANLY between categories
+# 1800 = 30 min) makes a slow/grown walk finalize CLEANLY between categories
+# WHY 30 and not 20 (2026-09-05): a full walk of all 20 categories needs ~24 min,
+# ~425 of its ~465 pages being the 77-district split of the five categories over
+# SPLIT_THRESHOLD. At 20 min, 18 of 22 runs in three days stopped short, and
+# GitHub throttles this */15 cron to ~7 runs/day, so each run is the only walk
+# for ~2 h. Politeness is not the constraint: the limiter sits at 14% of its
+# 2 req/s ceiling and sreality has never sent a 429.
 # instead of being SIGKILLed by the job timeout; already-walked categories are
 # complete (their sweep stays safe), the rest refresh next tick.
 #
@@ -41,7 +47,7 @@ on:
   workflow_dispatch:
     inputs:
       max_seconds:
-        description: "wall-clock budget; the walk finalizes cleanly before this (blank = 1200 = 20 min)"
+        description: "wall-clock budget; the walk finalizes cleanly before this (blank = 1800 = 30 min)"
         required: false
         default: ""
         type: string
@@ -62,7 +68,7 @@ jobs:
     # detail fetches). The --max-seconds clean-stop is the real bound; this
     # timeout is the generous outer backstop (budget + finalize headroom),
     # kept under the API's sweep_stuck_scrape_runs cutoff (90 min).
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
 
@@ -85,7 +91,7 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-          MAX_SECONDS: ${{ inputs.max_seconds || '1200' }}
+          MAX_SECONDS: ${{ inputs.max_seconds || '1800' }}
         run: |
           ARGS="--index-only --max-seconds $MAX_SECONDS"
           if [ "${{ inputs.dry_run }}" = "true" ]; then

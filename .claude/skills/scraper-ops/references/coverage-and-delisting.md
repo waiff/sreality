@@ -265,6 +265,45 @@ select evaluated_at, source, verdict, covered, categories_ok, categories,
   from portal_coverage_gate order by evaluated_at desc limit 20;
 ```
 
+## Why walks still stop short, and what that costs (2026-09-05)
+
+Every "walk that did not finish" on sreality and idnes in the last three days was
+the `--max-seconds` budget expiring cleanly — 20.1-20.4 min and 150.3-151.0 min
+respectively, never a crash. The budget is a few minutes smaller than the work,
+and the work is set by how the walk is SLICED, not by listing count.
+
+**sreality.** Twenty category pairs; any pair over `SPLIT_THRESHOLD` (10,000) is
+walked as 77 okres queries because the national list cannot page that deep. Five
+pairs are over the line, and they cost ~425 of a full walk's ~465 pages; the other
+fifteen cost ~39 combined. A full walk needs ~24 min. The category ORDER rotates by
+run hour (`_rotated_categories`, `scraper/main.py`), so nothing starves at that
+level — every pair completed >=27 times in 7 days. **The fairness hole is inside
+the split**: `DISTRICT_IDS` is walked in fixed order with no memory, so a pair cut
+at district 29 restarts at district 1 next run. Politeness is not the constraint
+(limiter at 14% of 2 req/s, never a 429); ~41% of per-page time is the DB phase
+(`index_summary` + `touch_listings`). The `*/15` cron is throttled by GitHub to
+~7 runs/day, so each 20-min run was the only walk for ~2 h. Budget raised to 1800 s.
+
+**idnes.** ~4,360 pages per full cycle. Per-page latency through the residential
+proxy swings 1.4-4.0 s with the time of day; break-even at 9000 s was ~2.06 s/page,
+so half the runs fit (night) and half hit the deadline (afternoon). The ledger
+rotation makes that harmless for coverage — all 150 slices stay fresh — but each
+truncated run reports one category incomplete. Budget raised to 13000 s (3.0 s/page).
+
+**The worker's probe does NOT keep sreality fresh.** `PROBE_PAGES = 1` and sreality's
+API ignores sort, so it re-touches the same ~10,000 rows every pass. The walks are
+the only coverage mechanism.
+
+**A lock race that discards a finished walk.** `touch_listings` lost a
+`DeadlockDetected` to a concurrent writer AFTER every page of komercni/prodej had
+been fetched; the category was recorded as collected=0 and its sweep skipped
+(3 of 46 runs). Now retried per chunk, up to three attempts — safe because the walk
+connection is autocommit and both statements are idempotent.
+
+**Not budget stops:** ceskereality's and bazos's "short" categories all sit at
+99.0-99.5% — the declared count drifting a few rows during the walk, on slices
+where one row is half a percent. A threshold artefact, not a coverage failure.
+
 ## The four layers, in order
 
 1. **Coverage** — the sliced walk reaches everything (or records that it didn't).

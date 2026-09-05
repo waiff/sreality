@@ -2565,7 +2565,7 @@
         },
         {
           "name": "max_seconds",
-          "description": "wall-clock budget; the walk finalizes cleanly before this (blank = 9000 = 150 min).",
+          "description": "wall-clock budget; the walk finalizes cleanly before this (blank = 13000 = 217 min).",
           "required": false,
           "type": "string",
           "default": "",
@@ -2582,7 +2582,7 @@
       ],
       "concurrencyGroup": "idnes-index-walk",
       "cancelInProgress": false,
-      "timeoutMinutes": 180,
+      "timeoutMinutes": 240,
       "permissions": null,
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/idnes_index_walk.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/idnes_index_walk.yml"
@@ -2708,7 +2708,7 @@
       "inputs": [
         {
           "name": "max_seconds",
-          "description": "wall-clock budget; the walk finalizes cleanly before this (blank = 1200 = 20 min)",
+          "description": "wall-clock budget; the walk finalizes cleanly before this (blank = 1800 = 30 min)",
           "required": false,
           "type": "string",
           "default": "",
@@ -2732,7 +2732,7 @@
       ],
       "concurrencyGroup": "sreality-index-walk",
       "cancelInProgress": false,
-      "timeoutMinutes": 25,
+      "timeoutMinutes": 40,
       "permissions": null,
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/index_walk.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/index_walk.yml"
