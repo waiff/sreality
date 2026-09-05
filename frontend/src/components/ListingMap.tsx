@@ -2023,6 +2023,9 @@ function CityMapControls({
   onColorByMinChange?: (next: number | null) => void;
   cityCount: number;
 }) {
+  // The two overlay controls take their names from the captions beside them.
+  const colorById = useId();
+  const minById = useId();
   return (
     <>
       <div className="pointer-events-auto flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)]">
@@ -2038,8 +2041,9 @@ function CityMapControls({
       </div>
       {showCities && (
         <div className="pointer-events-auto flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)] text-[0.75rem]">
-          <span className="text-[var(--color-ink-2)] font-medium">Color by:</span>
+          <span id={colorById} className="text-[var(--color-ink-2)] font-medium">Color by:</span>
           <select
+            aria-labelledby={colorById}
             className="text-[0.75rem] bg-[var(--color-paper-2)] border border-[var(--color-rule)] rounded px-1.5 py-0.5 max-w-[200px]"
             value={colorByIndex?.index_name ?? ''}
             onChange={(e) => onColorByIndexChange?.(e.target.value || null)}
@@ -2086,8 +2090,9 @@ function CityMapControls({
             </span>
           </div>
           <div className="flex items-center gap-1.5 pt-0.5">
-            <span className="text-[0.65rem] text-[var(--color-ink-2)]">Min:</span>
+            <span id={minById} className="text-[0.65rem] text-[var(--color-ink-2)]">Min:</span>
             <input
+              aria-labelledby={minById}
               type="number"
               inputMode="decimal"
               step="any"

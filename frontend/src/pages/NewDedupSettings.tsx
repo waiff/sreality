@@ -216,6 +216,7 @@ function SettingControl({
     return (
       <select
         value={String(setting.value)}
+        aria-label={setting.key}
         disabled={pending || setting.enum_choices.length <= 1}
         onChange={(e) => onSave(e.target.value)}
         className="px-2 py-1 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)] shrink-0 disabled:opacity-60"
@@ -231,6 +232,7 @@ function SettingControl({
   if (setting.value_type === 'integer' || setting.value_type === 'numeric') {
     return (
       <NumberField
+        label={setting.key}
         value={setting.value as number}
         step={setting.value_type === 'integer' ? 1 : 0.01}
         minimum={setting.minimum}
@@ -241,11 +243,12 @@ function SettingControl({
     );
   }
   return (
-    <TextField value={setting.value as string} pending={pending} onSave={onSave} />
+    <TextField label={setting.key} value={setting.value as string} pending={pending} onSave={onSave} />
   );
 }
 
 function NumberField({
+  label,
   value,
   step,
   minimum,
@@ -253,6 +256,7 @@ function NumberField({
   pending,
   onSave,
 }: {
+  label: string;
   value: number;
   step: number;
   minimum: number | null;
@@ -277,6 +281,7 @@ function NumberField({
     <div className="shrink-0 flex items-center gap-1.5">
       <input
         type="number"
+        aria-label={label}
         step={step}
         min={minimum ?? undefined}
         max={maximum ?? undefined}
@@ -303,10 +308,12 @@ function NumberField({
 }
 
 function TextField({
+  label,
   value,
   pending,
   onSave,
 }: {
+  label: string;
   value: string;
   pending: boolean;
   onSave: (value: string) => void;
@@ -319,6 +326,7 @@ function TextField({
     <div className="shrink-0 flex items-center gap-1.5">
       <input
         type="text"
+        aria-label={label}
         value={draft}
         disabled={pending}
         onChange={(e) => setDraft(e.target.value)}

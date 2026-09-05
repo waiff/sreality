@@ -904,10 +904,10 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
           <input value={name} onChange={(e) => setName(e.target.value)}
             placeholder="Byty · novostavba · cihla · 60–120 m²" className={SELECT_CLS + ' w-full'} />
         </Field>
-        <Field label="Type" as="control"><SelectBox value={categoryMain} onChange={setCategoryMain} options={TYPE_OPTS} /></Field>
-        <Field label="Condition (stav)" as="control"><SelectBox value={condition} onChange={setCondition} options={COND_OPTS} /></Field>
-        <Field label="Construction (konstrukce)" as="control"><SelectBox value={construction} onChange={setConstruction} options={CONSTR_OPTS} /></Field>
-        <Field label="Ownership (vlastnictví)" as="control"><SelectBox value={ownership} onChange={setOwnership} options={OWN_OPTS} /></Field>
+        <Field label="Type" as="control"><SelectBox label="Type" value={categoryMain} onChange={setCategoryMain} options={TYPE_OPTS} /></Field>
+        <Field label="Condition (stav)" as="control"><SelectBox label="Condition (stav)" value={condition} onChange={setCondition} options={COND_OPTS} /></Field>
+        <Field label="Construction (konstrukce)" as="control"><SelectBox label="Construction (konstrukce)" value={construction} onChange={setConstruction} options={CONSTR_OPTS} /></Field>
+        <Field label="Ownership (vlastnictví)" as="control"><SelectBox label="Ownership (vlastnictví)" value={ownership} onChange={setOwnership} options={OWN_OPTS} /></Field>
         <Field label="Area from (m²)" as="control"><input type="number" min={0} value={areaFrom} onChange={(e) => setAreaFrom(e.target.value)} className={SELECT_CLS + ' w-full'} /></Field>
         <Field label="Area to (m²)" as="control"><input type="number" min={0} value={areaTo} onChange={(e) => setAreaTo(e.target.value)} className={SELECT_CLS + ' w-full'} /></Field>
         <Field label="Municipalities" as="control">
@@ -1041,9 +1041,13 @@ function ExpandDatasetForm({
   );
 }
 
-function SelectBox({ value, onChange, options }: { value: string; onChange: (v: string) => void; options: Array<[string, string]> }) {
+/* Every mount sits inside <Field as="control">, which names it through the
+ * <label> wrap; the explicit aria-label makes the name travel with the widget
+ * so a future mount outside a Field is still named (a lint selector cannot see
+ * across a component boundary). */
+function SelectBox({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: Array<[string, string]> }) {
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value)} className={SELECT_CLS + ' w-full'}>
+    <select aria-label={label} value={value} onChange={(e) => onChange(e.target.value)} className={SELECT_CLS + ' w-full'}>
       {options.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
     </select>
   );

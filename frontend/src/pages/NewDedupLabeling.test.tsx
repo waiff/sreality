@@ -1021,6 +1021,15 @@ describe('<NewDedupLabeling>', () => {
       expect.stringMatching(/^Negative/),
       expect.stringMatching(/^Excluded/),
     ]);
+    // The words are the NAME too, not only a tooltip — a glyph-only button
+    // announces as "✓" otherwise.
+    expect(
+      within(group).getByRole('button', { name: 'Positive — this tag applies' }),
+    ).toBe(buttons[0]);
+    expect(buttons[1]).toHaveAccessibleName('Negative — this tag does not apply');
+    expect(buttons[2]).toHaveAccessibleName(
+      "Excluded — ambiguous (dropped from this tag's training set)",
+    );
     // Untouched: nothing is pressed, and the negative slot is dashed to say
     // "this is the default, not a decision".
     expect(buttons.map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'false']);

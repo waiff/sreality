@@ -1,3 +1,4 @@
+import { useId } from 'react';
 import {
   useMutation,
   useQuery,
@@ -315,12 +316,17 @@ function SubscriptionFilter({
   subscriptions: WatchdogSubscription[];
   onChange: (v: string | null) => void;
 }) {
+  const captionId = useId();
   return (
     <div className="flex items-center gap-2">
-      <span className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+      <span
+        id={captionId}
+        className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]"
+      >
         Watchdog
       </span>
       <select
+        aria-labelledby={captionId}
         value={value ?? ''}
         onChange={(e) => onChange(e.target.value || null)}
         className="px-2 py-1 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)]"

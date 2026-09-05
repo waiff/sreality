@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
@@ -59,6 +59,7 @@ const VERDICT_STYLE: Record<Verdict, string> = {
 };
 
 export default function NewDedupTrainingSet() {
+  const headId = useId();
   const [params, setParams] = useSearchParams();
   const qc = useQueryClient();
   const [large, setLarge] = useState(false);
@@ -262,11 +263,11 @@ export default function NewDedupTrainingSet() {
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <label className="text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)]" htmlFor="head">
+          <label className="text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)]" htmlFor={headId}>
             head
           </label>
           <select
-            id="head"
+            id={headId}
             value={activeId ?? ''}
             onChange={(e) => patch({ tag: e.target.value, offset: null })}
             className="px-2 py-1 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-transparent text-[var(--color-ink)]"

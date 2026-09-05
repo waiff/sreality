@@ -599,6 +599,7 @@ function StageManager({ stages }: { stages: PipelineStage[] }) {
       </ul>
       <div className="mt-4 flex items-center gap-2 border-t border-[var(--color-rule)] pt-3">
         <input
+          aria-label="Nová fáze"
           value={newLabel}
           onChange={(e) => setNewLabel(e.target.value)}
           onKeyDown={(e) => {

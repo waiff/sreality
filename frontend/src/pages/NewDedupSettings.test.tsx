@@ -80,6 +80,19 @@ const SETTINGS: NewDedupSetting[] = [
     minimum: null,
     maximum: null,
   },
+  {
+    key: 'l3_embeddings_encoder',
+    category: 'l3_embeddings',
+    value_type: 'text',
+    value: 'dinov3',
+    default: 'dinov3',
+    is_override: false,
+    decided: true,
+    explanation: 'Which image encoder produces the embeddings L3 compares.',
+    enum_choices: null,
+    minimum: null,
+    maximum: null,
+  },
 ];
 
 function renderPage() {
@@ -184,6 +197,22 @@ describe('<NewDedupSettings>', () => {
     await waitFor(() =>
       expect(api.resetNewDedupSetting).toHaveBeenCalledWith('l2_phash_hamming_threshold'),
     );
+  });
+
+  it('every value type announces itself by its setting key', async () => {
+    renderPage();
+    await screen.findByText('l0_geo_radius_m');
+    // The four arms of SettingControl — switch, select, number, text — all
+    // carry the key a sighted operator reads in the row's header.
+    expect(
+      screen.getByRole('button', { name: 'l1_exact_attrs_enabled' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('combobox', { name: 'l2_phash_family_semantics' }),
+    ).toHaveAccessibleName('l2_phash_family_semantics');
+    expect(screen.getByRole('spinbutton', { name: 'l0_geo_radius_m' })).toHaveValue(75);
+    expect(screen.getByRole('spinbutton', { name: 'l2_phash_hamming_threshold' })).toHaveValue(8);
+    expect(screen.getByRole('textbox', { name: 'l3_embeddings_encoder' })).toHaveValue('dinov3');
   });
 
   it('enum select changes fire the update immediately', async () => {

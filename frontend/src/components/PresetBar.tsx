@@ -16,7 +16,7 @@
  * The whole bar hides when the API base URL isn't configured (presets need the
  * service to read or write). */
 
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useId, useRef, useState, type CSSProperties } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   DndContext,
@@ -444,6 +444,7 @@ function SortablePresetChip({
     transition,
     isDragging,
   } = useSortable({ id: preset.id, disabled: !reorderable });
+  const dirtyId = useId();
 
   /* The chip's accent comes from its colour (shared tag palette) or copper when
    * uncolored — exposed as CSS vars so active/hover states reuse one source.
@@ -497,17 +498,23 @@ function SortablePresetChip({
           type="button"
           onClick={() => onLoad(preset)}
           className={`${reorderable ? 'pl-0.5' : 'pl-2.5'} pr-2.5 py-1 max-w-[16rem] truncate`}
+          aria-describedby={isActive && dirty ? dirtyId : undefined}
           title={`Load preset: ${preset.name}`}
         >
           {preset.name}
           {isActive && dirty ? (
-            <span
-              className="ml-1 text-[var(--preset-accent)]"
-              title="Edited since loaded — use Update to save changes"
-              aria-label="edited"
-            >
-              •
-            </span>
+            <>
+              <span
+                className="ml-1 text-[var(--preset-accent)]"
+                title="Edited since loaded — use Update to save changes"
+                aria-hidden
+              >
+                •
+              </span>
+              <span id={dirtyId} hidden>
+                Edited since loaded
+              </span>
+            </>
           ) : null}
         </button>
         <button
@@ -516,6 +523,7 @@ function SortablePresetChip({
           className="px-1.5 py-1 border-l border-[var(--color-rule)] opacity-60 hover:opacity-100"
           aria-haspopup="menu"
           aria-expanded={menuOpen}
+          aria-label={`Preset options: ${preset.name}`}
           title="Preset options"
         >
           ⋯

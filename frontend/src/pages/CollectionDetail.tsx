@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ROUTES } from '@/lib/routes';
 import {
@@ -17,6 +17,7 @@ import { curationKeys } from '@/lib/queries';
 import { listingPath } from '@/lib/listingUrl';
 import { usePageTitle } from '@/lib/pageTitle';
 import { DeliveryChannelsPicker } from '@/components/DeliveryChannelsPicker';
+import { Field } from '@/components/controls';
 import {
   fmtAbsolute,
   fmtArea,
@@ -195,23 +196,27 @@ function EditBlock({ collection }: { collection: Collection }) {
         Edit
       </p>
       <div className="mt-3 flex flex-col gap-2.5 max-w-2xl">
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          maxLength={200}
-          placeholder="Name"
-          disabled={collection.is_system}
-          title={collection.is_system ? "The default collection can't be renamed." : undefined}
-          className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-50 disabled:cursor-not-allowed"
-        />
-        <input
-          type="text"
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          placeholder="Description (optional)"
-          className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
-        />
+        <Field label="Name" as="control">
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            maxLength={200}
+            placeholder="Name"
+            disabled={collection.is_system}
+            title={collection.is_system ? "The default collection can't be renamed." : undefined}
+            className="w-full px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-50 disabled:cursor-not-allowed"
+          />
+        </Field>
+        <Field label="Description" as="control">
+          <input
+            type="text"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Description (optional)"
+            className="w-full px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+          />
+        </Field>
         <div className="flex items-center gap-3">
           <button
             type="button"
@@ -292,10 +297,14 @@ function MonitoringBlock({ collection }: { collection: Collection }) {
   });
 
   const on = collection.monitoring_enabled;
+  const labelId = useId();
 
   return (
     <div>
-      <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+      <p
+        id={labelId}
+        className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium"
+      >
         Monitoring
       </p>
       <div className="mt-3 flex items-start gap-3 max-w-2xl">
@@ -303,6 +312,7 @@ function MonitoringBlock({ collection }: { collection: Collection }) {
           type="button"
           role="switch"
           aria-checked={on}
+          aria-labelledby={labelId}
           disabled={toggle.isPending}
           onClick={() => toggle.mutate(!on)}
           className={[
@@ -311,6 +321,7 @@ function MonitoringBlock({ collection }: { collection: Collection }) {
           ].join(' ')}
         >
           <span
+            aria-hidden="true"
             className={[
               'inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform',
               on ? 'translate-x-[1.15rem]' : 'translate-x-[0.15rem]',

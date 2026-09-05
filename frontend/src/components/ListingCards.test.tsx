@@ -81,7 +81,7 @@ const counterIs = (want: string) => (_t: string, el: Element | null) =>
 const anyCounter = (_t: string, el: Element | null) =>
   el != null && el.children.length === 0 && /^\d+ \/ \d+$/.test(el.textContent?.trim() ?? '');
 
-function renderGrid() {
+function renderGrid(merge?: { selected: boolean }) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
@@ -104,8 +104,8 @@ function renderGrid() {
             onSort={() => {}}
             onClearFilters={() => {}}
             onClearBounds={() => {}}
-            mergeMode={false}
-            selectedPropertyIds={new Set()}
+            mergeMode={merge != null}
+            selectedPropertyIds={new Set(merge?.selected ? [42] : [])}
             onToggleSelect={() => {}}
             pipelineScoped={false}
             estimates={undefined}
@@ -199,5 +199,25 @@ describe('<ListingCards> photo hydration', () => {
     expect(await screen.findByText(/Sadová/)).toBeInTheDocument();
     expect(queries.fetchListingCovers).not.toHaveBeenCalled();
     expect(brokers.fetchListingBrokersByIds).not.toHaveBeenCalled();
+  });
+});
+
+/* Merge mode turns the card into a toggle. The selection state has to live ON
+ * that toggle — a decorative checkbox facsimile carrying aria-label="Selected"
+ * makes "Selected" the FIRST word of a name otherwise built from the card's own
+ * title, place and price. */
+describe('<ListingCards> merge-mode selection', () => {
+  it('names the card from its own copy and carries the state as aria-pressed', () => {
+    renderGrid({ selected: false });
+    const card = screen.getByRole('button', { name: /2\+kk/ });
+    expect(card).toHaveAttribute('aria-pressed', 'false');
+    expect(card).not.toHaveAccessibleName(/Not selected/);
+  });
+
+  it('flips aria-pressed when the card is selected', () => {
+    renderGrid({ selected: true });
+    const card = screen.getByRole('button', { name: /2\+kk/ });
+    expect(card).toHaveAttribute('aria-pressed', 'true');
+    expect(card).not.toHaveAccessibleName(/^Selected/);
   });
 });

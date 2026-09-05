@@ -97,9 +97,9 @@ vi.mock('@/lib/api', async (orig) => ({
 
 import BuildingDetail from './BuildingDetail';
 
-function renderPage() {
+function renderPage(run: BuildingRun = building) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  qc.setQueryData(['building', 7], building);
+  qc.setQueryData(['building', 7], run);
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={['/building/7']}>
@@ -137,5 +137,32 @@ describe('<BuildingDetail> B2 rollup', () => {
       '/estimation/101', '/estimation/102',
       '/estimation/103', '/estimation/104',
     ]);
+  });
+});
+
+/* Every editable control on the page must carry the name the operator reads:
+ * the two operator-context textareas are named by their own captions, and the
+ * attachment file input by the section's visible "Attachments" heading. The
+ * caption ids come from useId(), so mounting the same building twice can no
+ * longer point both labels at the first textarea. */
+describe('<BuildingDetail> control names', () => {
+  const editableBuilding: BuildingRun = { ...building, status: 'awaiting_input' };
+
+  it('names the operator-context textareas by their visible captions', () => {
+    renderPage(editableBuilding);
+    const instr = screen.getByRole('textbox', { name: 'Special instructions' });
+    const ctx = screen.getByRole('textbox', { name: 'Property context' });
+    expect(instr).toHaveAccessibleName('Special instructions');
+    expect(ctx).toHaveAccessibleName('Property context');
+    // ids are generated, never the data-derived literal `building-7-instr`
+    expect(instr.id).not.toContain('building-7');
+    expect(ctx.id).not.toContain('building-7');
+  });
+
+  it('names the attachment upload input by the Attachments heading', () => {
+    const { container } = renderPage(editableBuilding);
+    const file = container.querySelector('input[type="file"]');
+    expect(file).not.toBeNull();
+    expect(file!).toHaveAccessibleName('Attachments');
   });
 });

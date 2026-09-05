@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import type {
   NewDedupTag,
   TagExcludedReason,
@@ -199,6 +199,9 @@ export default function TagContentsGallery({
   centroidPositives,
   minPositives,
 }: Props) {
+  /* Instance-scoped: the outcome radios' group `name` must not join two
+     galleries into one group, and their helper-text ids must not collide. */
+  const uid = useId();
   const [lightboxAt, setLightboxAt] = useState<number | null>(null);
   const examples = useMemo(() => new Set(exampleIds), [exampleIds]);
 
@@ -388,9 +391,9 @@ export default function TagContentsGallery({
                 <label key={o.key} className="flex items-start gap-1.5 cursor-pointer">
                   <input
                     type="radio"
-                    name="batch-source-outcome"
+                    name={`${uid}-batch-source-outcome`}
                     aria-label={o.label}
-                    aria-describedby={`batch-outcome-help-${o.key}`}
+                    aria-describedby={`${uid}-batch-outcome-help-${o.key}`}
                     checked={outcome === o.key}
                     onChange={() => setOutcome(o.key)}
                     className="mt-[0.2rem] h-3 w-3 shrink-0"
@@ -398,7 +401,7 @@ export default function TagContentsGallery({
                   <span className="min-w-0">
                     <span className="text-[0.72rem] text-[var(--color-ink-2)]">{o.label}</span>
                     <span
-                      id={`batch-outcome-help-${o.key}`}
+                      id={`${uid}-batch-outcome-help-${o.key}`}
                       className="block text-[0.68rem] leading-snug text-[var(--color-ink-4)]"
                     >
                       {o.helper}

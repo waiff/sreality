@@ -183,12 +183,18 @@ function TopBar() {
                   <NavLabel active={isActive}>
                     {item.label}
                     {item.to === '/notifications' && unread > 0 && (
-                      <span
-                        className="ml-1.5 inline-flex items-center justify-center min-w-[1.05rem] h-[1.05rem] px-1 rounded-full bg-[var(--color-brick)] text-white text-[0.6rem] font-medium tabular-nums"
-                        aria-label={`${unread} unread notifications`}
-                      >
-                        {unread > 99 ? '99+' : unread}
-                      </span>
+                      <>
+                        {/* The badge is a glyph; the count reaches the link's
+                            accessible name through the hidden suffix, so an
+                            aria-label can't overwrite "Notifications". */}
+                        <span
+                          className="ml-1.5 inline-flex items-center justify-center min-w-[1.05rem] h-[1.05rem] px-1 rounded-full bg-[var(--color-brick)] text-white text-[0.6rem] font-medium tabular-nums"
+                          aria-hidden="true"
+                        >
+                          {unread > 99 ? '99+' : unread}
+                        </span>
+                        <span className="sr-only"> {unread} unread notifications</span>
+                      </>
                     )}
                   </NavLabel>
                 )}

@@ -9,7 +9,7 @@
  * cache so renamed/recoloured chips repaint everywhere without a reload.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { deleteTag, updateTag } from '@/lib/api';
 import { curationKeys } from '@/lib/queries';
@@ -90,6 +90,7 @@ function Popover({
   const [color, setColor] = useState<TagColor>(tag.color);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const captionId = useId();
 
   const trimmed = name.trim();
   const dup =
@@ -145,11 +146,12 @@ function Popover({
       onClick={(e) => e.stopPropagation()}
       className="absolute z-30 right-0 top-6 w-[18rem] rounded-[var(--radius-md)] bg-[var(--color-paper-3)] border border-[var(--color-rule-strong)] shadow-[0_4px_16px_rgba(0,0,0,0.06)] p-2.5"
     >
-      <p className="text-[0.65rem] tracking-[0.18em] uppercase text-[var(--color-ink-4)]">
+      <p id={captionId} className="text-[0.65rem] tracking-[0.18em] uppercase text-[var(--color-ink-4)]">
         Edit tag
       </p>
       <input
         type="text"
+        aria-labelledby={captionId}
         value={name}
         onChange={(e) => setName(e.target.value)}
         maxLength={50}
