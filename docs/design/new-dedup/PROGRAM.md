@@ -135,11 +135,115 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   is wanted is entirely the operator's call, made then.
 - Qwen vision provider route (W6).
 - Near-duplicate training labels flagged 2026-08-05 (operator cleanup via batch reassign).
-- Interim unmerge has no UI home (API-only) until W8.
-- CLAUDE.md "psql" guidance inoperable in cloud-only mode — fix text in W0 docs pass.
+- Interim unmerge has no UI home (API-only) until W8. Confirmed again on 2026-09-05 while
+  running the Gate 0 checklist: the merge went through Browse's own `POST /properties/merge`,
+  the unmerge had to go through the API by hand.
+- ~~CLAUDE.md "psql" guidance inoperable in cloud-only mode~~ — FIXED 2026-09-05 (#1286). The
+  bullet now says what to do when `psql` is absent or `SUPABASE_DB_URL` is unset: fall back to
+  the Supabase MCP `execute_sql`, and carry the INTENT of the psql preference across (it was
+  about context cost, not correctness) — one aggregate row per question, `md5(string_agg(...))`
+  to compare a list without printing it, never a wide result set.
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-05 (e) — **GATE 0 CLOSED. Wave 0 finished for real (migration 475, #1286),
+  eleven days after it was recorded closed.** Entry (b) above corrected the record; this one
+  discharges it. Migration 475 applied live at **11:26:48 UTC**, verified immediately after.
+
+  **Dropped** (all seven re-dumped to `backups/new-dedup-teardown/2026-09-05/` first — run
+  33962204424, COPY row counts read out of the artifacts themselves and matching live
+  exactly): `property_identity_candidates` 159,260 + `_archive` 5,542,
+  `dedup_dirty_properties` 15,357, `dedup_scan_state` 3, `dedup_batches` 265,
+  `dedup_batch_requests` 18,250, `dedup_engine_runs` 9,932 — **112 MB** — plus the six admin
+  views (`dedup_engine_runs_public`, `dedup_scan_state_public`, `dedup_engine_flow_public`,
+  `dedup_queue_snapshot_public`, `dedup_recency_backlog`, `dedup_label_events`) and
+  `listings_dedup_eligible_idx` (migration 127), which pg_stat_user_indexes reported at
+  **idx_scan = 0** while costing 6 MB of write amplification on every `listings` write. The
+  backup script needed one fix to run at all: two of its nine relations were already dropped by
+  migration 432 and `pg_dump --table` on a missing relation exits non-zero, so `check=True` had
+  been turning the whole run red — a missing relation is now `ALREADY GONE`, named, and
+  excluded from the failure list (both matviews are in the 2026-08-05 dump).
+
+  **The publication gate is gone, not just inert.** CUTOFF §3 step 2 was never done in August:
+  the dead predicate was still in `properties_public`, `browse_projection` AND
+  `listing_feed_public` (that third one is not in CUTOFF's list — found by asking the catalog
+  which view definitions mention the function, rather than trusting the doc). All three
+  redefined without it, then `publication_gate_enabled()` and `publication_gate_health_public`
+  dropped. `properties.published_at` / `publish_reason` kept frozen. **Note for anyone reading
+  the old incident:** the PR-#707 InitPlan lesson now has no live example — the function is
+  gone — but case 2 is still reachable through any `SECURITY DEFINER` gate, and the RLS
+  policies are where it lives now. The `database` skill says so.
+
+  **Two things the doc got wrong and live state settled.** (1) `properties_map_mv` does not
+  embed the gate — it reads `browse_projection`, so redefining the projection was enough; no
+  rebuild function mentions the gate at all. (2) CUTOFF says "the four `realtime_dedup_*`
+  worker keys"; exactly one still existed. 24 `app_settings` keys deleted by literal name,
+  never by `LIKE` — `dedup_%` would have swept away Wave 1's own `dedup_sim` keys. Inside
+  `pipeline_check_thresholds`, which is a LIVE key (verify_pipeline / ops_incidents /
+  system_alerts all read it), only the 11 dedup-engine checks came out; the 6 that are still
+  code defaults survive, verified by grepping each key across the whole repo first.
+
+  **A near miss worth keeping.** The three view definitions were taken from the latest
+  migration that defines each, then checked against live by md5 of the ordered column list
+  before anything was written. `properties_public` came back 82 columns against live's 83 —
+  because migration 425 writes `create or replace view public.properties_public` and the
+  "latest defining migration" regex (in `tests/test_browse_read_path_guardrail.py`, reused
+  here) does not allow a schema prefix, so it had been resolving to migration 375, one column
+  stale, for months. Its read-contract test was reading the wrong select list. The regex is
+  fixed and all three hashes matched before the migration was written. **Hash-check a live
+  object before restating it** — the lesson from the migration-438 outage, earning its keep.
+
+  **Legacy stamp:** `property_merge_events.generation` = `'legacy'` on all 124,363 existing
+  rows, nullable with no default so new rows cannot inherit the claim. Confirmed on a real
+  merge during the checklist below: an operator merge writes `generation = NULL`, which is
+  correct — it is neither the removed engine's nor Wave 8's.
+
+  **CUTOFF §7 step-8 verification checklist — six items, ALL PASS** (run 2026-09-05, live):
+  1. **CI green** — `CI: tests` and `CI: schema replay + SQL correctness` both succeeded on
+     the branch. The replay job rebuilds the schema from migration zero, so it is what
+     validated 475 itself. 6,374 tests pass locally, 247 skipped.
+  2. **A brand-new property appears everywhere without a stamp** — of the properties created
+     after the apply, 100% have `published_at IS NULL` and 100% are returned by
+     `properties_public`, `browse_projection` and the watchdog matcher's own query shape
+     (`properties_public` filtered on `first_seen_at`). They flow into `browse_list` and
+     `properties_map_mv` on the next rebuild of each (15-minute and :07/:37 cadences — the
+     lag is the cron, not the gate). 152,049 active properties carry no stamp and are visible.
+  3. **Scrape lanes unaffected** — in the first three minutes after the apply, all eight
+     portals wrote: sreality 2,057, bezrealitky 782, realitymix 526, bazos 280, idnes 260,
+     ceskereality 235, remax 39, maxima 28. Realtime worker heartbeat 11 s old.
+  4. **Image + tag lanes unaffected** — 983 image download attempts in the same window;
+     `clip_tag.yml` and `compute_image_phash.yml` both green on their last runs, 5,830 CLIP
+     tags written in the most recent lane run.
+  5. **Health clean** — every active pg_cron job succeeded after the apply, including
+     `refresh-health-dashboard` and `browse-list-rebuild`. The only failures in the table are
+     pre-existing statement timeouts on health matview refreshes (the ~35% rate migration 432
+     documented), none of them touching a dropped object.
+  6. **Merge → carry-over → browse → unmerge, end to end** — performed by CLAUDE under the
+     operator's explicit authorization in this session, through the real admin auth path (the
+     `+claude-admin` smoke-test account's Supabase JWT; every merge route is `require_admin`,
+     so no shared token was involved). Properties 227457 (survivor, older) and 258581, a
+     genuine same-street/same-disposition/same-area/same-price byt pair on different portals.
+     `POST /properties/merge` → retired went `merged_away`, its listing re-pointed, survivor
+     `source_count` 1→2, **its notification_dispatch and status event carried onto the
+     survivor**, one `property_merge_events` row, and `browse_list` updated synchronously
+     (retired gone, survivor present — read-your-writes held). `POST
+     /properties/merges/{id}/unmerge` → `conflicts: []`, both properties active again with one
+     listing each, both back in `browse_list` and `properties_public`, event marked undone.
+     **Recorded asymmetry, expected and not a regression:** the carried notification_dispatch
+     and the status events stayed on the survivor rather than returning. That is CLAUDE.md
+     rule 18's documented "unmerge/split are best-effort" for operator state, and append-only
+     journals do not un-append; it predates this migration.
+
+  Nothing in Wave 1, the encoder decision or Wave 2 was touched. No dedup rule, threshold or
+  setting was added or changed — the 24 deleted keys configured code that no longer exists.
+
+  **Numbering footnote.** This shipped as 474 and was renumbered to **475** when entry (d)
+  below merged 474 first — `tests/test_migration_numbers.py` caught the collision, which is
+  what it is for. The file had already been applied live under its old number, and the only
+  place the number reached the DATABASE was the `generation` column's comment, which was
+  corrected in place so live matches the file. Worth knowing for next time: this collision is
+  structural, not carelessness — `ls migrations | tail` reads the number free WHEN YOU LOOK,
+  and a long session between looking and merging is exactly the window another branch lands in.
 - 2026-09-05 (d) — **The cutoff: a head's training set is a QUERY, not a list (migration 474).**
   The operator's objection: reviewing 1,149 fasáda positives is exactly the manual work the
   programme exists to remove. Answer: each head has a TARGET (`tag_taxonomy.training_target`,

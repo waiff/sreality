@@ -111,9 +111,9 @@ Dynamic state lives outside Git — don't ask, fetch it:
 - Recent activity → `git log --oneline -10`; branch / tree → `git status`, `git branch --show-current`.
 - Migrations on disk → `ls migrations/ | tail -5`; Actions runs → `gh run list --limit 10`.
 - **DB reads (counts, freshness, schema, verification SELECTs) → `psql "$SUPABASE_DB_URL" -c "…" | head`**,
-  NOT the Supabase MCP (its verbose output persists in context). Ready-made commands + the
-  reserved-for-migrations MCP policy are in the `database` skill: after a heavy MCP phase run
-  `/compact`; disable the server with `/mcp` in sessions that don't touch the DB.
+  NOT the Supabase MCP (its verbose output persists in context) — but when `psql` or that env
+  var is absent (cloud-only sessions) the fallback IS MCP `execute_sql`, one aggregate row per
+  question. Both recipes + the reserved-for-migrations MCP policy: the `database` skill.
 
 ## Roadmap maintenance
 

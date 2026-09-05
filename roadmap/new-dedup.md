@@ -22,10 +22,14 @@ non-negotiables" for the full rationale.
 
 ## Status
 
-🟡 **W0 nearly done** (Wave 0 — backup + teardown + scaffolding: legacy engine removed, only the
-teardown migration + verification checklist left), **W1 in progress in parallel** (Wave 1 —
-shared prerequisites). See PROGRAM.md's progress ledger for session-by-session detail; this file
-tracks only the phase-to-phase status.
+🟢 **W0 DONE — Gate 0 closed 2026-09-05** (Wave 0 — backup + teardown + scaffolding),
+**W1 in progress** (Wave 1 — shared prerequisites). See PROGRAM.md's progress ledger for
+session-by-session detail; this file tracks only the phase-to-phase status.
+
+W0 was recorded done on 2026-08-25 and was not. Migration 432 dropped only the two funnel/cost
+matviews; every other CUTOFF §4 object, the whole publication gate (§3 step 2) and the
+verification checklist were still outstanding. A 2026-09-05 review caught it, migration 475
+finished the job, and the checklist was run and recorded item by item.
 
 - [x] PR-0: design docs landed (#960).
 - [x] Backup branch `backup/pre-new-dedup-2026-08` + tag `backup-pre-new-dedup` cut.
@@ -37,8 +41,20 @@ tracks only the phase-to-phase status.
 - [x] PR-1 (backend decision-layer removal) — merged (#966), including the CUTOFF §6 doc pass.
 - [x] PR-2 (frontend decision-layer removal) — merged (#967), shipped a minimal NEW DEDUP nav
       placeholder (Dashboard + Settings stub) that W1 is now filling in.
-- [ ] PR-3 (migration: table drops + view redefinition + legacy stamp) — not started.
-- [ ] W0 verification checklist green → Gate 0 closes (blocked only on PR-3 now).
+- [x] PR-3 (migration 475: table drops + view redefinition + legacy stamp) — #1286, applied
+      live 2026-09-05 11:26:48 UTC. Dropped `property_identity_candidates` (159,260 rows) +
+      `_archive` (5,542), `dedup_dirty_properties` (15,357), `dedup_scan_state` (3),
+      `dedup_batches` (265), `dedup_batch_requests` (18,250), `dedup_engine_runs` (9,932), the
+      six admin views over them, and the unused migration-127 `listings_dedup_eligible_idx`
+      (idx_scan = 0) — 112 MB reclaimed, every table re-dumped to
+      `backups/new-dedup-teardown/2026-09-05/` first with counts matching live.
+      Added `property_merge_events.generation`, `'legacy'` on all 124,363 existing rows.
+      Also finished CUTOFF §3 step 2, which August never did: the gate predicate is out of
+      `properties_public` / `browse_projection` / `listing_feed_public`, and
+      `publication_gate_enabled()` + `publication_gate_health_public` are dropped. 24
+      `app_settings` keys deleted plus 11 dead dedup keys inside `pipeline_check_thresholds`.
+- [x] W0 verification checklist (CUTOFF §7 step 8) — **all six items pass**, run 2026-09-05
+      and recorded item by item in PROGRAM.md's ledger entry for that date. → **Gate 0 CLOSED.**
 
 W1 (shared prerequisites + labeling program):
 - [x] `dedup_sim` schema + `settings`/`settings_history`/`simulation_runs` (migration 372, #965).

@@ -2,14 +2,20 @@
 
 Three invariant families, all deterministic and offline (no database):
 
-1. GATE WRAP — the publication gate `publication_gate_enabled()` is a SECURITY
-   DEFINER SQL function the planner CANNOT inline. Called BARE in a WHERE it
-   runs ONCE PER ROW (~87k times for the byt+pronájem cohort — the PR-#707
-   incident); wrapped as a scalar subquery `(SELECT publication_gate_enabled())`
-   it runs ONCE as an InitPlan. The EFFECTIVE (latest-migration) definitions of
-   `properties_public` (live view: detail pages, watchdog matcher) and
-   `browse_projection` (migration 276: the ONE projection both Browse read
-   models materialize from) must wrap it.
+1. NO GATE — the publication gate is GONE (migration 475, NEW DEDUP Wave 0:
+   its only stamper was the removed dedup engine). The EFFECTIVE
+   (latest-migration) definitions of `properties_public` (live view: detail
+   pages, watchdog matcher), `browse_projection` (migration 276: the ONE
+   projection both Browse read models materialize from) and
+   `listing_feed_public` must not call `publication_gate_enabled()` at all.
+
+   Why this is still worth a test rather than a deletion: the function was
+   SECURITY DEFINER and the planner cannot inline it, so a bare call in a WHERE
+   ran ONCE PER ROW — ~87k times for the byt+pronájem cohort, the PR-#707
+   incident. It survived as a scalar subquery `(SELECT publication_gate_enabled())`
+   only because that made it an InitPlan. Anything re-introducing a per-row
+   SECURITY DEFINER call into these three definitions repeats that outage, so
+   the guard now watches for the whole class returning, not for its wrapping.
 
 2. REBUILD INVARIANTS — the pg_cron rebuild functions (migration 277) must
    ANALYZE the replacement relation BEFORE swapping it live (autovacuum never
@@ -29,6 +35,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from toolkit.filter_registry import REGISTRY, Agenda
 
 REPO = Path(__file__).resolve().parents[1]
@@ -45,27 +53,23 @@ def _strip_comments(src: str) -> str:
     return LINE_COMMENT.sub("", src)
 
 
-def _assert_gate_wrapped(raw: str, where: str) -> None:
-    """Every `publication_gate_enabled()` call in executable `raw` (comments
-    stripped) must be a scalar SUBQUERY — `(select publication_gate_enabled())`.
-    Requiring the open paren before `select` rejects both the bare WHERE form
-    (`not publication_gate_enabled()`) AND a bare projection form
-    (`select publication_gate_enabled() as g from …`), which is also per-row."""
+def _assert_no_gate(raw: str, where: str) -> None:
+    """Executable `raw` (comments stripped) must not call the publication gate.
+
+    Scoped to ONE view definition by the callers below, not to a whole migration
+    file — migration 475 legitimately names the function in its own
+    `drop function publication_gate_enabled()`."""
     sql = _strip_comments(raw)
-    for m in GATE_CALL.finditer(sql):
-        preceding = sql[: m.start()].rstrip().lower()
-        # strip the trailing `select`, then any ws, then require an open paren:
-        # only `(select …)` — a scalar subquery — passes.
-        wrapped = (
-            preceding.endswith("select")
-            and preceding[: -len("select")].rstrip().endswith("(")
-        )
-        assert wrapped, (
-            f"{where}: publication_gate_enabled() is not a scalar subquery — it "
-            f"must be wrapped as `(select publication_gate_enabled())` so the "
-            f"planner evaluates it ONCE (InitPlan), not once per row. Context: "
-            f"...{sql[max(0, m.start() - 40):m.end() + 5]!r}"
-        )
+    m = GATE_CALL.search(sql)
+    if m is None:
+        return
+    raise AssertionError(
+        f"{where}: publication_gate_enabled() is back in this view. The gate was "
+        f"removed with the legacy dedup engine (migration 475) and the function no "
+        f"longer exists, so this cannot even resolve. It was also a SECURITY DEFINER "
+        f"call the planner cannot inline — how PR-#707 turned one predicate into ~87k "
+        f"per-row evaluations. Context: ...{sql[max(0, m.start() - 40):m.end() + 5]!r}"
+    )
 
 
 def _latest_migration_matching(pattern: str, what: str) -> Path:
@@ -77,8 +81,13 @@ def _latest_migration_matching(pattern: str, what: str) -> Path:
 
 
 def _latest_migration_defining(view: str) -> Path:
+    # `(public\.)?` is load-bearing: migration 425 writes
+    # `create or replace view public.properties_public`, and without the optional
+    # schema prefix this resolved the "effective" definition to migration 375 —
+    # one column stale, so the read-contract check below was reading the wrong
+    # select list. Found while removing the gate (2026-09-05).
     return _latest_migration_matching(
-        rf"create\s+(or\s+replace\s+)?(materialized\s+)?view\s+{re.escape(view)}\b",
+        rf"create\s+(or\s+replace\s+)?(materialized\s+)?view\s+(public\.)?{re.escape(view)}\b",
         view,
     )
 
@@ -89,41 +98,52 @@ def _latest_migration_defining_function(fn: str) -> Path:
     )
 
 
-# ---------------------------------------------------------------- gate wrap --
+# ------------------------------------------------------------------- no gate --
 
-def test_properties_public_wraps_the_publication_gate() -> None:
-    src = _latest_migration_defining("properties_public")
-    _assert_gate_wrapped(src.read_text(), src.name)
+def _view_block(view: str) -> tuple[str, str]:
+    """(sql, label) for just the effective CREATE VIEW statement of `view`."""
+    src = _latest_migration_defining(view)
+    lines = src.read_text().split("\n")
+    pat = re.compile(
+        rf"create\s+(or\s+replace\s+)?(materialized\s+)?view\s+(public\.)?{re.escape(view)}\b",
+        re.IGNORECASE,
+    )
+    start = next(i for i, line in enumerate(lines) if pat.search(line))
+    depth, out = 0, []
+    for i in range(start, len(lines)):
+        out.append(lines[i])
+        code = re.sub(r"--.*$", "", lines[i])
+        depth += code.count("(") - code.count(")")
+        if depth <= 0 and ";" in code:
+            break
+    return "\n".join(out), f"{src.name}:{view}"
 
 
-def test_browse_projection_wraps_the_publication_gate() -> None:
-    src = _latest_migration_defining("browse_projection")
-    _assert_gate_wrapped(src.read_text(), src.name)
+@pytest.mark.parametrize(
+    "view", ["properties_public", "browse_projection", "listing_feed_public"]
+)
+def test_read_path_view_has_no_publication_gate(view: str) -> None:
+    sql, label = _view_block(view)
+    _assert_no_gate(sql, label)
 
 
-def test_guardrail_detects_a_bare_call() -> None:
-    """The check itself must fail on a bare call (so it can't silently pass)."""
-    import pytest
-
-    # bare WHERE form
+def test_guardrail_detects_a_returning_gate() -> None:
+    """The check itself must fail on a gate call (so it can't silently pass)."""
     with pytest.raises(AssertionError):
-        _assert_gate_wrapped(
+        _assert_no_gate(
             "create view v as select 1 where not publication_gate_enabled();",
             "synthetic",
         )
-    # bare projection form (also per-row) — must be caught too
+    # the scalar-subquery form was the SAFE spelling while the gate existed; now
+    # that the function is dropped it must be caught too.
     with pytest.raises(AssertionError):
-        _assert_gate_wrapped(
-            "create view v as select publication_gate_enabled() as g from t;",
+        _assert_no_gate(
+            "create view v as select 1 where not (select publication_gate_enabled());",
             "synthetic",
         )
-    # ...and accept the scalar-subquery form (incl. inner whitespace).
-    _assert_gate_wrapped(
-        "create view v as select 1 where not (select publication_gate_enabled());",
-        "synthetic",
-    )
-    _assert_gate_wrapped(
-        "create view v as select 1 where not ( select publication_gate_enabled() );",
+    # a comment naming it is not a call.
+    _assert_no_gate(
+        "-- publication_gate_enabled() used to live here\ncreate view v as select 1;",
         "synthetic",
     )
 
