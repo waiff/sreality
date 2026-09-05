@@ -82,8 +82,12 @@ _DETAIL_DIGESTS: dict[tuple[str, str], str] = {
         "e0ea3cac396f989e62012b15a840fd843013b3b469dd5c05f3ca5360c2e639e8",
     ("mmreality", "location_w2/mmreality_detail.html"):
         "56799418831b5ac6d16933e5a16d70b2049aaabbe1fe2149d727089a9a21a94e",
+    # Moved by contract realitymix@4 (W2-8): the modelled page's `data-address` was
+    # restated to the comma shape the portal serves and its `data-form-address` moved to
+    # the div that really carries it. The PROFILE is untouched, which is the property this
+    # table exists to pin — a fixture edit moves the body's digest, never the cohort key.
     ("realitymix", "location_w2/realitymix_detail.html"):
-        "155a814e80a7c992c33be8aadff7f8425591e5fd97a5d63a8ca0fe5f67a11b70",
+        "34f9c30bc9dfe34c17ae1d213e53b449055561c1af8844508133d80ef2534a64",
     # W2-6 re-pinned: the FIXTURE moved, not the normaliser. remax's pinned body carried a
     # hand-written one-line `h2.pd-header__address`, which hid the nested `mapa` jump-link
     # every real remax page carries; the block is now copied verbatim from the archived
@@ -130,8 +134,11 @@ _DETAIL_DIGESTS: dict[tuple[str, str], str] = {
         "6952b4899e1ecc7e3ddbcaa22fcf43ffb71f92a8096758fea0d94a6b359dc965",
     ("mmreality", "portal_html/mmreality_detail.html"):
         "2f97d89cbf626c931839708a9eea195052bfcd30c1faedce1c1a8ead202d473c",
+    # Moved by the W2-8 PII scrub: the captured page still carried a real agent name in a
+    # public repo, replaced with the placeholder by
+    # `scripts/fetch_and_anonymize_fixtures.py --scrub-contacts --name …`.
     ("realitymix", "portal_html/realitymix_detail.html"):
-        "7d67a39a587f1582b400a2537c9b093f80d4bbeda170f01f438e4c7521dbe224",
+        "0d8d874e7f2cba09f7acda8a53ef9f16d7052a1032b5609b4997eba73575ebd2",
     ("remax", "portal_html/remax_detail.html"):
         "d1557becec21011c9253421cbf4be0172f0f2d85fe2d20bdd09f7c96a7e51c8b",
 }
