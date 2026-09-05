@@ -1,0 +1,37 @@
+{
+  "_captured_from": "https://nemovitosti.maxima.cz/nemovitosti/d40026367/",
+  "_captured_at": "2026-09-05",
+  "_http_status": 200,
+  "_provenance": "scraper.maxima_parser.parse_detail over the live page, verbatim; `image_urls` dropped (no entry reads it) and nothing else edited. The page carries no broker name, phone or e-mail in any parsed field — title, params and locality_text are property facts only.",
+  "_why_pinned": "One half of the ~830 m pin-divergence pair. lat/lon below are the parser's own read of the map VIEW CENTRE (scraper.maxima_parser._resolve_coords keys on /center), which is the trap mx.det.map_features exists to replace: the page's /features/0 is a Point at 15.271187,50.370363 and its second feature a Circle centred 15.265556,50.360493 r=0.0037507°.",
+  "raw_json": {
+    "id": "d40026367",
+    "title": "Prodej rodinného domu, 121 m 2",
+    "price_text": "4 980 000 Kč",
+    "locality_text": "Údrnice, Únětice",
+    "maxima_ref": "D40026367",
+    "coords": {
+      "source": "page"
+    },
+    "params": {
+      "id zakázky": "D40026367",
+      "budova": "Dřevěná",
+      "stav objektu": "Ve výstavbě",
+      "poloha domu": "V bloku",
+      "typ domu": "Patrový",
+      "plocha užitná": "121 m 2",
+      "plocha pozemku": "2 621 m 2",
+      "parkovací stání": "Ano",
+      "voda": "Místní zdroj, Dálkový vodovod",
+      "odpad": "ČOV pro celý objekt",
+      "elektřina": "240V / 400V",
+      "penb": "G"
+    }
+  },
+  "lat": 50.36339611563554,
+  "lon": 15.259603745235422,
+  "in_mapy_inventory": false,
+  "listings.locality": "Údrnice, Únětice",
+  "listings.street": null,
+  "listings.street_source": null
+}

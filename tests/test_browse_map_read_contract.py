@@ -176,17 +176,50 @@ def test_the_map_rpc_carries_all_three_prefilter_id_spaces() -> None:
     src = _ts()
     at = src.index("export const applyPrefilters")
     body = _strip_ts_comments(_balanced_block(src, src.index("{", at)))
-    spaces = dict(re.findall(r"\.in\('([a-z_]+)',\s*p\.([A-Za-z]+)\)", body))
-    assert set(spaces) == {"listing_id", "obec_id", "property_id"}, (
-        f"applyPrefilters' id spaces changed: {spaces}"
+    # Every (column, field) pair, NOT a dict keyed on column: two allowlists share
+    # listing_id (the legacy city-quality one and the broker scope), and a dict
+    # would keep only the last, silently un-pinning the other.
+    pairs = re.findall(r"\.in\('([a-z_]+)',\s*p\.([A-Za-z]+)\)", body)
+    assert {column for column, _ in pairs} == {"listing_id", "obec_id", "property_id"}, (
+        f"applyPrefilters' id spaces changed: {pairs}"
     )
+    assert len(pairs) >= 4, f"applyPrefilters lost an allowlist: {pairs}"
 
     call = _rpc_call_block("browse_map_cells")
-    for column, field in spaces.items():
+    for column, field in pairs:
         assert re.search(rf"pre\.{field}\b", call), (
             f"applyPrefilters filters on `{column}` via `p.{field}`, but the "
             f"browse_map_cells call never passes `pre.{field}` — that allowlist is "
             "silently dropped on the map and applied everywhere else."
+        )
+
+
+def test_every_listing_grain_scope_takes_the_point_lane() -> None:
+    """A listing-grain scope must never be aggregated by the property-grain RPC.
+
+    The relation swap (`listRelation` / `mapRelation` / `keysetTiebreak`) and the map's
+    lane choice both key on ONE predicate, `isListingGrain` — the single portal mirror
+    and the broker scope. browse_map_cells aggregates the property-grain projection and
+    matches `listing_ids_filter` against the REPRESENTATIVE listing, so routing a broker
+    scope there would drop every property whose repr is another broker's listing (the
+    repr lottery), while the cards/table beside the map read the listing feed.
+
+    RED by: guarding the lane on `isPortalMirror(f)` alone again, or by swapping the
+    relations on a predicate the lane guard does not share.
+    """
+    src = _strip_ts_comments(_ts())
+    at = src.index("export const fetchListingsForMap")
+    body = _balanced_block(src, src.index("{", at))
+    assert re.search(r"if \(MAP_LEGACY \|\| isListingGrain\(f\)\)", body), (
+        "fetchListingsForMap's point-lane guard is no longer `MAP_LEGACY || isListingGrain(f)` "
+        "— a listing-grain scope can reach the property-grain browse_map_cells lane."
+    )
+    for fn in ("listRelation", "mapRelation", "keysetTiebreak"):
+        decl = src[src.index(f"const {fn} = "):]
+        decl = decl[: decl.index(";")]
+        assert "isListingGrain(f)" in decl, (
+            f"{fn} no longer keys on isListingGrain — the relation swap and the map lane "
+            "guard can now disagree on grain."
         )
 
 

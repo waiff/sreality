@@ -84,6 +84,14 @@ _MAX_SLICE_PAGES = 600
 # ladder, which is gone.
 _DESCENT_DEPTH = 2
 
+# Extra passes over a slice that is STILL short after descending. One pagination
+# pass of an idnes slice is close to a random 75% sample (measured: two passes of
+# praha shared only ~2,131 of 3,818, and the second held 729 rows the first never
+# showed), so the union converges fast — 74.6% -> 93.7% on a single repeat. Two
+# extra passes is ample; the loop also stops as soon as a pass stops paying.
+_RESAMPLE_PASSES = 2
+_RESAMPLE_MIN_GAIN = 5
+
 
 @dataclass(frozen=True)
 class SliceWalk:
@@ -331,8 +339,8 @@ class IdnesPortal:
         # and a `degraded` page carries no total at all; descending on either
         # would multiply failed requests and relabel a fetch problem as a
         # coverage one.
-        if outcome not in ("incomplete", "ceiling") or depth <= 0:
-            return rows, declared, pages, outcome
+        merged = {r[0]: r for r in rows}
+        may_descend = outcome in ("incomplete", "ceiling") and depth > 0
 
         # PLACE is the only descent axis. A price-band axis was tried and removed:
         # a price-filtered idnes search IGNORES ?page= — it serves page one
@@ -342,33 +350,71 @@ class IdnesPortal:
         # that contains it completes at the parent level (12,054 of 12,054). A
         # place with no children now stays honestly incomplete instead.
         children: list[tuple[str | None, str | None, str]] = []
-        if html is not None:
+        if may_descend and html is not None:
             paths, sls = sub_places(html, sale_type, cat, exclude=set(self.SLICES))
             children = (
                 [(c, None, c) for c in paths if (c, None) not in visited]
                 + [(None, c, c) for c in sls if (None, c) not in visited]
             )
-        if not children:
-            return rows, declared, pages, outcome
+        if children:
+            LOG.info("SLICE descend cm=%s ct=%s place=%s collected=%d declared=%s "
+                     "-> %d children (depth %d)",
+                     cat, sale_type, label, len(rows), declared, len(children), depth)
+            for c_loc, c_sl, c_label in children:
+                if deadline_reached(deadline):
+                    return list(merged.values()), declared, pages, "deadline"
+                c_rows, _cd, c_pages, _co = self._walk_tree(
+                    client, sale_type, cat, locality=c_loc, sl=c_sl,
+                    label=f"{label}/{c_label}", deadline=deadline,
+                    depth=depth - 1, visited=visited)
+                pages += c_pages
+                for r in c_rows:
+                    merged.setdefault(r[0], r)
+            rows = list(merged.values())
+            verdict = walk_coverage(len(rows), declared, stopped_early=False)
+            outcome = "exhausted" if verdict == "complete" else (
+                "degraded" if verdict == "unknown" else "incomplete")
 
-        LOG.info("SLICE descend cm=%s ct=%s place=%s collected=%d declared=%s "
-                 "-> %d children (depth %d)",
-                 cat, sale_type, label, len(rows), declared, len(children), depth)
-        merged = {r[0]: r for r in rows}
-        for c_loc, c_sl, c_label in children:
-            if deadline_reached(deadline):
-                return list(merged.values()), declared, pages, "deadline"
-            c_rows, _cd, c_pages, _co = self._walk_tree(
-                client, sale_type, cat, locality=c_loc, sl=c_sl,
-                label=f"{label}/{c_label}", deadline=deadline,
-                depth=depth - 1, visited=visited)
-            pages += c_pages
-            for r in c_rows:
+        # STILL SHORT? READ IT AGAIN — because one pass is a SAMPLE, not a walk.
+        #
+        # Measured on praha, two full passes of the same URL, back to back:
+        #     pass 1   2,847 rows over 153 pages
+        #     pass 2   2,860 rows over 153 pages
+        #     union    3,576  — pass 2 held 729 rows pass 1 never showed
+        # They overlap on only ~2,131 of 3,818 declared. So a pagination pass is
+        # not a slightly-lossy walk of the slice, it is close to a random 75%
+        # sample of it, and the right response to sampling is more samples: read
+        # until the union stops growing.
+        #
+        # This is what makes praha reliable rather than a coin flip. It was
+        # landing at 99.35 / 99.61 / 99.74% across runs against a 99.5% bar, so
+        # its category passed only sometimes — and the coverage gate needs THREE
+        # CONSECUTIVE passes, which a coin flip essentially never delivers.
+        #
+        # Bounded and self-limiting: only a slice that came up short resamples,
+        # it stops the moment a pass stops paying for itself, and the budget is
+        # small because the union converges fast (74.6% -> 93.7% on one repeat).
+        for attempt in range(_RESAMPLE_PASSES):
+            if outcome != "incomplete" or deadline_reached(deadline):
+                break
+            before = len(merged)
+            r_rows, _rd, r_pages, _ro, _rh = self._walk_place(
+                client, sale_type, cat, locality=locality, sl=sl,
+                deadline=deadline, label=f"{label}~{attempt + 2}")
+            pages += r_pages
+            for r in r_rows:
                 merged.setdefault(r[0], r)
-        rows = list(merged.values())
-        verdict = walk_coverage(len(rows), declared, stopped_early=False)
-        outcome = "exhausted" if verdict == "complete" else (
-            "degraded" if verdict == "unknown" else "incomplete")
+            gained = len(merged) - before
+            LOG.info("SLICE resample cm=%s ct=%s place=%s pass=%d gained=%d total=%d",
+                     cat, sale_type, label, attempt + 2, gained, len(merged))
+            rows = list(merged.values())
+            verdict = walk_coverage(len(rows), declared, stopped_early=False)
+            outcome = "exhausted" if verdict == "complete" else (
+                "degraded" if verdict == "unknown" else "incomplete")
+            # A pass that adds almost nothing means the union has converged and
+            # the shortfall is not sampling loss — more reads will not find it.
+            if gained <= _RESAMPLE_MIN_GAIN:
+                break
         return rows, declared, pages, outcome
 
     def _walk_slice(

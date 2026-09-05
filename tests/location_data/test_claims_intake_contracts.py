@@ -280,40 +280,63 @@ def test_the_transform_and_guard_vocabularies_stay_in_sync_with_the_runtime():
 
 def test_the_executable_and_inert_split_is_exactly_what_w1_ran():
     """Per-reader substrates replaced a fleet-wide gate, and a refactor of a validator is
-    only safe if the set of entries the extractor RUNS does not move. 69 executable / 70
-    declared-ahead, per portal, as of the W1 gate outcomes."""
+    only safe if the set of entries the extractor RUNS does not move.
+
+    Was 69 executable / 70 declared-ahead at the W1 gate outcomes. The W2-6…W2-12 wave
+    activated seven portal contracts at once and moved it to 112 / 47 — the single largest
+    census move the fleet has taken, and the reason it is restated here rather than
+    relaxed: an entry that stops being executable is exactly as invisible as one that was
+    never declared. Note that `reader is not None` is NOT the same as "runs on the W1
+    lane": most of the 43 newly-executable entries name an ARCHIVE-ONLY reader, which W1
+    skips by construction (`test_w1_executes_no_evidence_bearing_method`)."""
     split = {source: (sum(1 for e in c.entries if e.reader),
                       sum(1 for e in c.entries if not e.reader))
              for source, c in ALL.items()}
     assert split == {
-        "bazos": (4, 8),
+        "bazos": (8, 5),
         "bezrealitky": (11, 6),
-        "ceskereality": (5, 11),
-        "idnes": (3, 11),
-        "maxima": (3, 7),
-        "mmreality": (11, 4),
-        "realitymix": (5, 8),
-        "remax": (4, 9),
+        "ceskereality": (8, 9),
+        "idnes": (8, 6),
+        "maxima": (10, 2),
+        "mmreality": (17, 3),
+        "realitymix": (20, 3),
+        "remax": (7, 7),
         "sreality": (23, 6),
     }
-    assert sum(e for e, _ in split.values()) == 69
-    assert sum(i for _, i in split.values()) == 70
-    # The same 69 entries seen down the other axis, so a swap could not preserve both.
+    assert sum(e for e, _ in split.values()) == 112
+    assert sum(i for _, i in split.values()) == 47
+    # The same 112 entries seen down the other axis, so a swap could not preserve both.
+    # W1's ten readers are unmoved except `point_pair` 3 -> 2: mmreality's `mm.det.point`
+    # moved to the archived substrate's `json_point`, which is a re-read of the same fact
+    # out of a different document, not a lost signal.
     per_reader = Counter(e.reader for c in ALL.values() for e in c.entries if e.reader)
     assert per_reader == Counter({
-        "scalar": 36, "namespaced_id": 9, "geom_column": 6, "coords_stamp_quality": 5,
-        "legacy_text_column": 5, "point_pair": 3, "declared_quality": 2,
-        "bbox_envelope": 1, "conflict_signal": 1, "declared_bool_quality": 1,
+        "scalar": 36, "html_attr": 10, "namespaced_id": 9, "json_scalar": 8,
+        "geom_column": 6, "coords_stamp_quality": 5, "legacy_text_column": 5,
+        "html_marker": 4, "html_text": 4, "json_breadcrumb": 4, "html_attr_regex": 3,
+        "declared_quality": 2, "html_regex": 2, "json_geometry": 2, "json_point": 2,
+        "point_pair": 2, "bbox_envelope": 1, "conflict_signal": 1,
+        "declared_bool_quality": 1, "html_own_text": 1, "html_point_attrs": 1,
+        "html_point_dms": 1, "json_bool": 1, "json_regex": 1,
     })
 
 
 def test_w1_executes_no_evidence_bearing_method():
-    """`regex_text` / `llm_text` need a span into a retrievable document, and the
-    content-addressed body store does not fill until W2a (01 §4.2)."""
+    """`regex_text` / `llm_text` need a span into a retrievable document. W2a filled the
+    content-addressed body store (01 §4.2), so an evidence-bearing entry may now name a
+    reader — but ONLY one of `claims_remine_archive`'s, which W1 skips
+    (`ARCHIVE_ONLY_READERS`) because `listings.raw_json` is not content-addressed and a span
+    into it cannot be re-checked. `llm_text` still names none: no LLM reader is registered in
+    any registry, and `assert_evidence_complete` refuses a model-less llm claim anyway.
+
+    Narrowed, never deleted: without it a future `regex_text` entry could land on the W1
+    lane, where the span it asserts is unverifiable by construction."""
     for contract in ALL.values():
         for entry in contract.entries:
-            if entry.extraction_method in ("regex_text", "llm_text"):
+            if entry.extraction_method == "llm_text":
                 assert entry.reader is None, entry.entry_id
+            elif entry.extraction_method == "regex_text" and entry.reader is not None:
+                assert entry.reader in claims_intake.ARCHIVE_ONLY_READERS, entry.entry_id
 
 
 def test_the_w2_surfaces_are_still_declared():
@@ -452,10 +475,19 @@ def test_the_bumped_contracts_appended_entries_and_kept_the_earlier_ones():
     # are immutable, so the bump is the remedy doctrine names. Its claim set is
     # byte-identical to v3's (`golden/ceskereality@{3,4}.json` differ in one field), and
     # `test_contract_immutability` is what now catches the unbumped edit before merge.
+    #
+    # The W2-6…W2-12 activation wave bumped seven contracts in one merge. What the bump
+    # BUYS is different from every earlier one in this census: those appended entries,
+    # these mostly attach a `locator.reader` to entries that were already DECLARED and
+    # inert, so the archived-HTML lane can execute them. Attaching a reader rewrites the
+    # governed bytes, and entries are immutable per version, so it is a bump either way —
+    # `idnes@2` appends NOTHING and is a bump purely for that reason (as `ceskereality@4`
+    # was for prose). Both facts are asserted below: what each version appended, and which
+    # already-shipped ids the wave turned on rather than replaced.
     assert {s: c.version for s, c in ALL.items()} == {
-        "remax": 2, "ceskereality": 4, "realitymix": 3,
-        "sreality": 1, "bezrealitky": 1, "bazos": 1, "idnes": 1, "mmreality": 1,
-        "maxima": 1,
+        "remax": 3, "ceskereality": 5, "realitymix": 4, "bazos": 2, "idnes": 2,
+        "mmreality": 2, "maxima": 2,
+        "sreality": 1, "bezrealitky": 1,
     }
     for source, new_ids, earlier_ids in (
         ("remax", {"rx.det.legacy_display_address", "rx.det.legacy_locality"},
@@ -470,6 +502,47 @@ def test_the_bumped_contracts_appended_entries_and_kept_the_earlier_ones():
         ids = {e.entry_id for e in ALL[source].entries}
         assert new_ids <= ids, source
         assert earlier_ids <= ids, source
+
+    # W2-6…W2-12, per portal: (what the bump APPENDED, exactly) and (the already-shipped
+    # ids it ACTIVATED in place — the set most at risk of being quietly renamed, because
+    # renaming one looks like a working selector while orphaning every claim stamped with
+    # the old id).
+    wave: dict[str, tuple[set[str], set[str]]] = {
+        "bazos": ({"bzs.det.psc"},
+                  {"bzs.det.obec_slug", "bzs.det.zoom", "bzs.det.blur_hint",
+                   "bzs.det.legacy_psc"}),
+        "ceskereality": ({"cr.det.title_okres"},
+                         {"cr.det.title_line", "cr.det.data_city"}),
+        # Appends nothing: v2 is five inert entries given readers.
+        "idnes": (set(),
+                  {"id.det.subject_feature", "id.det.subject_address", "id.det.info_text",
+                   "id.det.no_exact_disclaimer", "id.det.zoom"}),
+        "maxima": ({"mx.det.locality_quarter", "mx.det.locality_street"},
+                   {"mx.det.map_features", "mx.det.map_shape", "mx.det.zoom",
+                    "mx.det.locality", "mx.det.title"}),
+        "mmreality": ({"mm.det.blob_accurate", "mm.det.blob_municipality",
+                       "mm.det.blob_municipality_id", "mm.det.blob_municipality_part",
+                       "mm.det.blob_street"},
+                      {"mm.det.point", "mm.det.original_title_street"}),
+        "realitymix": ({"rm.det.agency_est_flag", "rm.det.breadcrumb_kraj",
+                        "rm.det.breadcrumb_obec", "rm.det.breadcrumb_quarter",
+                        "rm.det.map_address", "rm.det.map_house_number_co",
+                        "rm.det.map_house_number_cp", "rm.det.map_obec",
+                        "rm.det.map_okres", "rm.det.map_street"},
+                       {"rm.det.gps", "rm.det.agency_gps_flag", "rm.det.form_address",
+                        "rm.det.address_all_segments", "rm.det.breadcrumb_geo"}),
+        "remax": ({"rx.det.map_address"},
+                  {"rx.det.gps", "rx.det.header_address"}),
+    }
+    for source, (appended, activated) in wave.items():
+        ids = {e.entry_id for e in ALL[source].entries}
+        executable = {e.entry_id for e in ALL[source].entries if e.reader}
+        assert appended <= ids, source
+        assert activated <= ids, source
+        # The activated ids must actually be executable — an id that lost its reader on
+        # the way through the merge would read as a silent de-activation, and the wave's
+        # whole purpose is that these entries RUN.
+        assert activated <= executable, source
 
 
 def test_coordinate_entries_carry_a_cap_and_a_licence_class():
@@ -510,7 +583,7 @@ def test_contract_sha256_is_taken_from_the_governed_bytes_on_disk():
     assert contract.sha256 != hashlib.sha256(body).digest(), (
         "maxima declares persistence.volatile_paths, so the governed hash must differ "
         "from a whole-file hash — otherwise this test proves nothing")
-    assert contracts.extractor_version(contract) == "contract:maxima@1"
+    assert contracts.extractor_version(contract) == "contract:maxima@2"
 
 
 # ------------------------------------------------------------------ format validation

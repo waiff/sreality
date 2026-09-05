@@ -238,10 +238,10 @@ export function chipsToGeoArrays(chips: DistrictChip[]): {
 }
 
 /* The standard toolkit envelope. `pii_masked` is stamped on every /brokers
- * response, masked or not. */
+ * response, masked or not. `capped` is stamped only by broker_listing_ids. */
 interface Envelope<T> {
   data: T;
-  metadata?: { pii_masked?: boolean };
+  metadata?: { pii_masked?: boolean; capped?: boolean };
 }
 
 const JWT = true;
@@ -428,5 +428,27 @@ export async function fetchBrokerListings(
     undefined,
     JWT,
   );
+  return r.data ?? [];
+}
+
+/* A broker's mappable listing ids only — the allowlist behind Browse's
+ * brokerId prefilter (lib/queries.ts resolveBrokerPrefilter). Deliberately a
+ * separate route from fetchBrokerListings above: that one is a 500/2000-row
+ * PAGE for the Inventory table; this one is COMPLETE up to a much larger
+ * server-side cap (toolkit.brokers.broker_listing_ids), because a truncated
+ * allowlist would silently under-plot the map rather than visibly truncate a
+ * table. `capped` is only ever true for the couple of foreign syndication
+ * accounts running an order of magnitude more listings than any real broker;
+ * logged rather than surfaced in the UI, since it essentially never happens. */
+export async function fetchBrokerListingIds(brokerId: number): Promise<number[]> {
+  const r = await apiGet<Envelope<number[]>>(
+    `/brokers/${brokerId}/listing-ids`,
+    undefined,
+    undefined,
+    JWT,
+  );
+  if (r.metadata?.capped) {
+    console.warn(`broker ${brokerId}: listing-ids capped — the explore map shows a subset`);
+  }
   return r.data ?? [];
 }

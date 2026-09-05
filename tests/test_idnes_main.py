@@ -868,3 +868,86 @@ def test_the_loop_guard_clears_the_largest_real_place() -> None:
     """482 pages is a real place (the abroad bucket), not a runaway pager. The
     guard has to sit above it or it fires on legitimate work."""
     assert idnes_main._MAX_SLICE_PAGES > 482
+
+
+# --- resampling a slice that is still short ----------------------------------
+#
+# One pagination pass of an idnes slice is close to a RANDOM 75% SAMPLE, not a
+# slightly-lossy walk. Measured on praha, two passes back to back:
+#     pass 1  2,847   pass 2  2,860   union  3,576   overlap ~2,131 of 3,818
+# The second pass held 729 rows the first never showed. The right response to
+# sampling is more samples.
+
+
+def _sampling_parse(samples):
+    """Each full pass yields the next id-set in `samples`, one page per pass."""
+    it = iter(samples)
+
+    def _parse(_h):
+        ids = next(it)
+        return SimpleNamespace(
+            total=10, next_offset=None, empty_confirmed=False,
+            items=[SimpleNamespace(
+                source_id_native=f"6a18deadbeefdeadbeef{i:04d}",
+                detail_path="https://reality.idnes.cz/detail/prodej/byt/x/y/",
+                price_text="5 000 000 Kč") for i in ids])
+    return _parse
+
+
+def _resample_walk(monkeypatch, samples, children=()):
+    monkeypatch.setattr(idnes_main, "parse_index", _sampling_parse(samples))
+    monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
+    monkeypatch.setattr(idnes_main, "sub_places",
+                        lambda *a, **k: (list(children), []))
+    portal = _portal()
+    return portal._walk_tree(
+        _IdxClient(), "prodej", "byty", locality="praha", sl=None, label="praha",
+        deadline=None, depth=0, visited=set())
+
+
+def test_a_short_slice_is_read_again(monkeypatch):
+    """The first pass sees 6 of 10, the second the other 4. Neither alone
+    clears the bar; the union does."""
+    rows, _d, _p, outcome = _resample_walk(
+        monkeypatch, [range(1, 7), range(5, 11)])
+    assert len(rows) == 10
+    assert outcome == "exhausted"
+
+
+def test_resampling_stops_once_it_stops_paying(monkeypatch):
+    """A pass that adds almost nothing means the union has converged and the
+    shortfall is not sampling loss — more reads will not find it. Without this
+    the walk would spend its whole budget re-reading a slice it cannot finish."""
+    # Pass 1 gets 5; every later pass returns the SAME 5, gaining nothing.
+    rows, _d, _p, outcome = _resample_walk(
+        monkeypatch, [range(1, 6), range(1, 6), range(1, 6)])
+    assert len(rows) == 5
+    assert outcome == "incomplete"      # honestly short, not silently passed
+
+
+def test_an_exhausted_slice_is_never_resampled(monkeypatch):
+    """Resampling is for a shortfall. Re-reading a slice that already reached
+    its declared tail would double its cost for nothing."""
+    calls = {"n": 0}
+
+    def _parse(_h):
+        calls["n"] += 1
+        return SimpleNamespace(
+            total=3, next_offset=None, empty_confirmed=False,
+            items=[SimpleNamespace(
+                source_id_native=f"6a18deadbeefdeadbeef{i:04d}",
+                detail_path="https://reality.idnes.cz/detail/prodej/byt/x/y/",
+                price_text="5 000 000 Kč") for i in range(1, 4)])
+
+    monkeypatch.setattr(idnes_main, "parse_index", _parse)
+    monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
+    _rows, _d, _p, outcome = _portal()._walk_tree(
+        _IdxClient(), "prodej", "byty", locality="praha", sl=None, label="praha",
+        deadline=None, depth=0, visited=set())
+    assert outcome == "exhausted"
+    assert calls["n"] == 1
+
+
+def test_the_resample_budget_is_bounded() -> None:
+    """It must not be able to spend a whole walk on one slice."""
+    assert idnes_main._RESAMPLE_PASSES <= 3

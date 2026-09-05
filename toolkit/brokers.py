@@ -317,6 +317,35 @@ def broker_listings(conn: Any, broker_id: int, *, limit: int = 500) -> dict[str,
                      len(rows), _iso(fresh))
 
 
+def broker_listing_ids(conn: Any, broker_id: int, *, limit: int = 50_000) -> dict[str, Any]:
+    """A broker's mappable listing ids only (id, no other columns) — cheap, PII-free,
+    and complete up to `limit`, not a 500/2000-row page.
+
+    Feeds Browse's `brokerId` cohort prefilter (frontend/src/lib/queries.ts
+    `resolveBrokerPrefilter`): a prefilter allowlist that silently truncated would
+    silently under-plot the map (the fail-open-filter class of bug), so this is
+    deliberately NOT `broker_listings()`'s cap. `geom IS NOT NULL` — a listing with no
+    coordinates can never appear on a map; it stays visible in the Inventory table via
+    the separate, unfiltered `broker_listings()` call, so nothing is hidden overall.
+    `limit + 1` detects an actual overflow without a second COUNT query.
+    """
+    limit = max(1, min(int(limit), 50_000))
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT l.id FROM listings l "
+            "JOIN broker_identities bi ON bi.id = l.broker_identity_id "
+            "WHERE bi.broker_id = %s AND l.geom IS NOT NULL "
+            "ORDER BY l.id LIMIT %s",
+            (broker_id, limit + 1))
+        ids = [r["id"] for r in cur.fetchall()]
+    capped = len(ids) > limit
+    if capped:
+        ids = ids[:limit]
+    envelope = _envelope("broker_listing_ids", ids, {"broker_id": broker_id}, len(ids), None)
+    envelope["metadata"]["capped"] = capped
+    return envelope
+
+
 def listing_broker(conn: Any, sreality_id: int | None = None, *,
                    listing_id: int | None = None) -> dict[str, Any] | None:
     """The broker behind one listing (listing_broker_public), or None if unattributed.

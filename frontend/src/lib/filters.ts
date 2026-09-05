@@ -260,6 +260,16 @@ export interface ListingFilters {
    * describes market criteria, the pipeline scope is a lens over the
    * operator's own state — so toggling it never dirties a loaded preset. */
   pipeline: PipelineScope | null;
+  /* Browse-only broker scope ("Explore this broker's listings"). Null = off.
+   * Deliberately NOT part of a saved preset's identity (PRESET_EXCLUDED_KEYS),
+   * NOT in toolkit/filter_registry.py (must stay invisible to the agent /
+   * comparables / estimation agendas), and NOT settable from the filter
+   * sidebar — reachable only via the explore-broker modal's seed or a
+   * `?broker=` URL param, the same entry-only treatment `pipeline` gets
+   * before its own dedicated chip. Forces listing-grain (see
+   * queries.ts:isBrokerScoped) because broker data has no property-grain
+   * attribution rule for a merged property with listings from two brokers. */
+  brokerId: number | null;
   /* Migration 025 — operator tags. AND-semantics: a listing must carry
    * every selected tag id. Stored as ids (not names) so renames /
    * recolour-by-delete-recreate stay queryable. */
@@ -347,6 +357,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   totalPriceChangePct: null,
   withEstimates: false,
   pipeline: null,
+  brokerId: null,
   tags: [],
   bounds: null,
   locationMode: 'viewport',
@@ -627,6 +638,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     totalPriceChangePct: parseFloatOrNull(sp.get('total_change_pct')),
     withEstimates: sp.get('with_est') === '1',
     pipeline: parsePipelineScope(sp.get('pipeline')),
+    brokerId: parseIntOrNull(sp.get('broker')),
     tags: parseIntList(sp.get('tags')),
     bounds: parseBounds(sp.get('bbox')),
     locationMode: sp.get('locmode') === 'center_radius'
@@ -887,6 +899,7 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
       f.pipeline.stage_ids.length ? f.pipeline.stage_ids.join(',') : 'any',
     );
   }
+  if (f.brokerId != null) sp.set('broker', String(f.brokerId));
   if (f.tags.length) sp.set('tags', f.tags.join(','));
   if (f.bounds) {
     const { west, south, east, north } = f.bounds;
@@ -1037,6 +1050,7 @@ export const summarise = (
     const n = f.pipeline.stage_ids.length;
     bits.push(n === 0 ? 'in pipeline' : `in pipeline (${n} stage${n > 1 ? 's' : ''})`);
   }
+  if (f.brokerId != null) bits.push('for one broker');
   if (f.bounds) bits.push('in this map area');
   return `Showing ${bits.join(' ')}`;
 };
@@ -1180,12 +1194,12 @@ export const pipelineViewFilters = (): ListingFilters => ({
  *
  * `bounds` is deliberately NOT here: it is opt-in per save (the "include map
  * area" toggle), which is a different rule, expressed below. */
-const PRESET_EXCLUDED_KEYS = ['pipeline'] as const satisfies ReadonlyArray<
+const PRESET_EXCLUDED_KEYS = ['pipeline', 'brokerId'] as const satisfies ReadonlyArray<
   keyof ListingFilters
 >;
 
 /* The same fields as URL params — the form preset equality is computed in. */
-const PRESET_EXCLUDED_PARAMS: readonly string[] = ['pipeline'];
+const PRESET_EXCLUDED_PARAMS: readonly string[] = ['pipeline', 'broker'];
 
 const stripPresetExcluded = (f: ListingFilters): ListingFilters => {
   const out = { ...f };
@@ -1541,6 +1555,9 @@ const UNSUPPORTED_LABELS: ReadonlyArray<{
    * only ever fire on properties they already put there — and "new listing"
    * events can't match a card that doesn't exist yet. */
   { test: (f) => f.pipeline != null, label: 'pipeline' },
+  /* "Alert me when broker X lists something new" is a real, separable feature
+   * idea, not built yet — the matcher has no broker join today. */
+  { test: (f) => f.brokerId != null, label: 'broker' },
 ];
 
 export interface FiltersToWatchdogResult {

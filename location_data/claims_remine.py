@@ -204,9 +204,11 @@ def _entries_for_remine(entries: list[Entry], source: str) -> list[Entry]:
 
 
 def _payload_lat_lon(raw_json: dict[str, Any], entries: list[Entry]) -> tuple[float | None, float | None]:
-    """Peek at a snapshot payload's own coordinate, via whichever entry declares the
-    `point_pair` reader — driven by the SAME contract locator `_read_point_pair` uses, so
-    this never drifts into a hardcoded per-portal pointer. Exists ONLY to feed
+    """Peek at a snapshot payload's own coordinate, via whichever entry declares
+    `lat_pointer` / `lon_pointer` — the same contract locator the coordinate readers use on
+    EITHER lane, so moving an entry from `point_pair` to `json_point` (mmreality@2) cannot
+    silently blind this peek, and this never drifts into a hardcoded per-portal pointer.
+    Exists ONLY to feed
     `extract_listing()`'s existing withheld-coordinate absence heuristic (it keys off
     `row.lat`/`row.lon`, which `claims_intake` derives from CURRENT `listings.geom` — a
     column `listing_snapshots` does not carry, so a `SnapshotRow` has to source the same
@@ -214,7 +216,7 @@ def _payload_lat_lon(raw_json: dict[str, Any], entries: list[Entry]) -> tuple[fl
     `geom_column`-substrate source, correctly: they have no coordinate in raw_json at all
     (06 §6.1.3), so there is nothing to withhold an absence FOR."""
     for entry in entries:
-        if entry.reader == "point_pair":
+        if entry.locator.get("lat_pointer") and entry.locator.get("lon_pointer"):
             lat = intake_number(json_pointer(raw_json, str(entry.locator["lat_pointer"])))
             lon = intake_number(json_pointer(raw_json, str(entry.locator["lon_pointer"])))
             if lat is not None and lon is not None:

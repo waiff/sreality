@@ -312,6 +312,39 @@ export const browseFiltersForArea = (
   };
 };
 
+/* The broker-explore modal's seed: the broker page's OWN Typ/Nabídka pill
+ * selection (BrokerDetail.tsx), carried over so filtering the inventory table
+ * first and then exploring opens the map already scoped the same way. */
+export interface ExploreBrokerSeed {
+  brokerId: number;
+  categoryMain: string | null;
+  categoryType: string | null;
+}
+
+/* Build the broker-explore modal's initial cohort filter. Unlike
+ * browseFiltersForArea above, an unset ("Vše") category must resolve to NO
+ * constraint (`[]` / `null`), not Browse's own narrow default (`['byt']` /
+ * `'pronajem'`) — a broker who mostly sells houses would otherwise show an
+ * empty or wrong map. No bounds/viewport seed either: ListingMap already
+ * auto-fits to the first non-empty result set, so the map frames itself
+ * around wherever this broker's listings actually are. */
+export const browseFiltersForBroker = (seed: ExploreBrokerSeed): ListingFilters => {
+  const categoryMain: ListingFilters['categoryMain'] =
+    seed.categoryMain != null && (CATEGORY_MAINS as readonly string[]).includes(seed.categoryMain)
+      ? [seed.categoryMain as ListingFilters['categoryMain'][number]]
+      : [];
+  const categoryType: ListingFilters['categoryType'] =
+    seed.categoryType != null && (CATEGORY_TYPES as readonly string[]).includes(seed.categoryType)
+      ? (seed.categoryType as ListingFilters['categoryType'])
+      : null;
+  return {
+    ...DEFAULT_FILTERS,
+    categoryMain,
+    categoryType,
+    brokerId: seed.brokerId,
+  };
+};
+
 /* Serialize a full Browse view-state to a `/browse?…` URL. The inverse of the
  * URL adapter's reads, so the modal's "Go to Browse" link reproduces exactly
  * what the operator built in the modal (filters + sort + tab + overlay). */

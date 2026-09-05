@@ -54,7 +54,7 @@ def snapshot_row(source: str, raw_json: dict, **overrides):
     """The SAME construction `location_data.claims_remine.run()` performs per snapshot
     row: no `listings.geom`-derived lat/lon (there is none historically), no legacy
     columns (there are none historically) — only what `_payload_lat_lon` can peek out of
-    the payload itself, via the contract's own `point_pair` locator."""
+    the payload itself, via whichever contract entry declares `lat_pointer`/`lon_pointer`."""
     entries = entries_for(source)
     lat, lon = _payload_lat_lon(raw_json, entries)
     kwargs = {"lat": lat, "lon": lon, "locality": None, "street": None,
@@ -86,10 +86,17 @@ def test_sreality_keeps_its_coordinate_entry():
 
 
 def test_mmreality_snapshot_never_produces_a_coordinate_claim_despite_a_payload_point():
-    """MMREALITY_ACCURATE carries a first-party `point{}` — W1's OWN `_read_point_pair`
-    reader would happily emit a coordinate claim from it (see
-    test_claims_intake_portals.py). W3 must not, because a snapshot's existence is not
-    evidence mmreality's coordinate was checked (its lat/lon sit outside `_HASH_FIELDS`)."""
+    """MMREALITY_ACCURATE carries a first-party `point{}`. W3 must not claim it, because a
+    snapshot's existence is not evidence mmreality's coordinate was checked (its lat/lon sit
+    outside `_HASH_FIELDS`). Two independent rails now say so — `_entries_for_remine` drops
+    every coordinate entry off the non-sreality lanes, and from mmreality@2 the entry names
+    an ARCHIVE reader W1's loop skips anyway.
+
+    The PEEK must survive both, and it is not a claim: `_payload_lat_lon` feeds
+    `extract_listing`'s withheld-coordinate absence heuristic, which a `SnapshotRow` has no
+    `listings.geom` to feed otherwise. Keying it on the reader NAME lost it the moment
+    mm.det.point stopped being `point_pair`, silently — hence the locator-key assertion."""
+    assert _payload_lat_lon(MMREALITY_ACCURATE, entries_for("mmreality")) != (None, None)
     row, entries = snapshot_row("mmreality", MMREALITY_ACCURATE)
     result = remine_snapshot(101, row, entries)
     assert "coordinate" not in claims_by_type(result)

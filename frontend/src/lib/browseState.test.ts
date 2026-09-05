@@ -3,6 +3,7 @@ import { bboxAround, fromSearchParams, DEFAULT_FILTERS } from './filters';
 import {
   DEFAULT_OVERLAY,
   browseFiltersForArea,
+  browseFiltersForBroker,
   browseUrlFromState,
   type ExploreAreaSeed,
   type ExploreOrigin,
@@ -91,6 +92,32 @@ describe('browseFiltersForArea', () => {
     // The cohort is computed purely from the seed fields; origin is display-only
     // (anchor pin + top panel), so the two filter sets must be identical.
     expect(withOrigin).toEqual(withoutOrigin);
+  });
+});
+
+/* Unlike browseFiltersForArea, an unset ("Vše") category must resolve to NO
+ * constraint — not Browse's narrow default (['byt'] / 'pronajem'). A broker who
+ * mostly sells houses would otherwise open to an empty or wrong map. */
+describe('browseFiltersForBroker', () => {
+  it('seeds only the broker id for Vše/Vše — no category constraint, no viewport', () => {
+    const f = browseFiltersForBroker({ brokerId: 527, categoryMain: null, categoryType: null });
+    expect(f.brokerId).toBe(527);
+    expect(f.categoryMain).toEqual([]);
+    expect(f.categoryType).toBeNull();
+    expect(f.bounds).toBeNull();
+    expect(f.status).toBe('any');
+  });
+
+  it('carries a picked Typ/Nabídka through', () => {
+    const f = browseFiltersForBroker({ brokerId: 527, categoryMain: 'dum', categoryType: 'prodej' });
+    expect(f.categoryMain).toEqual(['dum']);
+    expect(f.categoryType).toBe('prodej');
+  });
+
+  it("drops an unknown category to NO constraint, never to Browse's default", () => {
+    const f = browseFiltersForBroker({ brokerId: 527, categoryMain: 'spaceship', categoryType: 'lease' });
+    expect(f.categoryMain).toEqual([]);
+    expect(f.categoryType).toBeNull();
   });
 });
 

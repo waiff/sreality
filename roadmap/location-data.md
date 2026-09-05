@@ -16,7 +16,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 **backfill COMPLETE; gate (a) blocked on a verifier fix, not on the data** (2026-08-18) — migrations 405–408 applied; bodies to R2, storage bounded by construction (cap 2 + 7-day floor). **`payload_dual_write` ON globally since 2026-08-17 12:29 UTC, verified on all nine portals** (fresh rows per portal, mmreality last; corpus-wide evidence: the backfill's 12,044 `skipped_existing` are pages the live dual-write path archived before the scan reached them). `payload_index_archive` remains **OFF** (operator decision 2026-08-16: index keys are week-stamped so the cap bounds detail but not index; ~100 % churn on a surface nobody has diffed). #1074/#1075 wired the R2 secrets that made the flag real. **Backfill terminal 2026-08-18 01:59 UTC** — `reached_end=true`, `outcome='ok'`, 11 budgeted dispatches across two driver sessions: **472,429 pages scanned, 460,385 inserted, 12,044 skipped (dual-write overlap), 0 unmapped**, 39.68 GB read → **8.53 GB stored (4.65x)**, final cursor 5,617,479, batch 274. **The 445,191 inventory count is superseded — do not compute a percentage against it**: the archive grew 6.1 % while the scan walked it; `reached_end` is the only completion signal. Compression settled at 4.65x (the proving run's 7.5x and the mid-run ≈7.9 GB projection were both optimistic); one-time footprint 8.53 GB, still well inside the ~28.6 GB steady-state R2 projection (the ~4 GB figure elsewhere in this file is the POSTGRES metadata allowance, a different budget). **Gate (a) verify over the complete corpus (run 32090281321): FAIL, 31/1000 mismatch — diagnosed as a comparator artifact, not damage.** 0 missing / 0 unreadable (every sampled page was found in R2 and decoded cleanly). Every checkable failure (25/25 from the run log) had its `portal_raw_pages` source refetched **5–13 h AFTER the payload was stored** (idnes 18 / realitymix 5 / ceskereality 1 / mmreality 1 — exactly the live-drain portals, in proportion to measured churn; the no-drain portals produced zero), and the writer's **7-day append floor refuses by design to chase the refetch**, so the live source legitimately diverges from the stored copy for up to 7 days. The verifier's own `hash_matches` compares the writer-time hash against the LIVE source hash — it measures drift, not fidelity — and R2 keys are content-addressed on `body_sha256`, so key⇒content at write time. **As written, gate (a) cannot pass while any portal is being scraped — structurally unsignable — and that is the finding, not "31 bad pages".** Follow-ups (recorded, unstarted): (1) verifier compares like-for-like (`prp.fetched_at = payload.fetched_at`) or classifies source-refetched-after-store-with-floor-active as its own `stale-source` category instead of `mismatch`; (2) verifier should re-hash the downloaded R2 object against `body_sha256` — content-addressing proves key⇒content at write time but nothing re-checks the object after write; (3) raise `max_pool_connections` in the uploader's botocore config (urllib3 "pool is full" warnings across all 11 runs — throughput left on the table, correctness unaffected). `location-batch` saturation during the run is recorded as structure in #1084/#1086/#1087. **Gate (a), once fixed and green, licenses the STORAGE decision only** — nothing reads the archive until W2-13 gives the re-mine lane a workflow (#1082) |
-| W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 **infrastructure shipped, lane deliberately inert** (2026-08-17) — W2-0/W2-1 (#1048/#1045), W2-3 the exclusion-zone scoper (#1053), W2-4 the contract shadow mechanism (#1050, mig 404), W2-5 the permanent fixture-diff gate (#1058) and W2-2 the evidence-bearing claims + archived-HTML re-mine lane (#1079) are all merged. The lane still mines **nothing**, but the reason moved: `ARCHIVE_READERS` now holds four generic DOM readers (#1081 `html_text`/`html_attr`/`html_point_dms`, #1090 `html_point_attrs`) and **no contract entry names one**, so a run finds no executable entry and returns *before* it opens a batch row — a batch stamped `'ok'` would move the incremental watermark over a corpus it never opened. **W2-6…W2-12 is READER work, not YAML work** (see the verification table below): six portals need a JSON-pointer reader, a regex reader with capture-group spans, and splitting transforms before their contracts become one-line activations, and no contract may activate before W2-13 anyway (#1082). **W2-13 SHIPPED** — the archived-HTML sweep now has a dispatch-only workflow (`location_claims_remine_archive.yml`, in `location-batch`) and the W2 gate is readable per portal (`scripts/location_w2_gate_report.py` + its own read-only workflow); the lane also gained its own batch bounds (50-5000, default 500) and a zero-claim tripwire. The seven portal activations, SHADOWED, in one wave are all that is left |
+| W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 **infrastructure shipped, lane deliberately inert** (2026-08-17) — W2-0/W2-1 (#1048/#1045), W2-3 the exclusion-zone scoper (#1053), W2-4 the contract shadow mechanism (#1050, mig 404), W2-5 the permanent fixture-diff gate (#1058) and W2-2 the evidence-bearing claims + archived-HTML re-mine lane (#1079) are all merged. The lane still mines **nothing**, but the reason moved: `ARCHIVE_READERS` now holds four generic DOM readers (#1081 `html_text`/`html_attr`/`html_point_dms`, #1090 `html_point_attrs`) and **no contract entry names one**, so a run finds no executable entry and returns *before* it opens a batch row — a batch stamped `'ok'` would move the incremental watermark over a corpus it never opened. **W2-6…W2-12 is READER work, not YAML work** (see the verification table below): six portals need a JSON-pointer reader, a regex reader with capture-group spans, and splitting transforms before their contracts become one-line activations, and no contract may activate before W2-13 anyway (#1082). **W2-13 SHIPPED** — the archived-HTML sweep now has a dispatch-only workflow (`location_claims_remine_archive.yml`, in `location-batch`) and the W2 gate is readable per portal (`scripts/location_w2_gate_report.py` + its own read-only workflow); the lane also gained its own batch bounds (50-5000, default 500) and a zero-claim tripwire. **W2-6…W2-12 SHIPPED 2026-09-05 — all seven portal contracts activated and SHADOWED in one wave** (bazos@2, ceskereality@5, idnes@2, maxima@2, mmreality@2, realitymix@4, remax@3): 43 entries moved inert→executable (fleet split 69/70 → 112/47), every one on an archive-only reader, and **migration 470 closes the policy gap that would have blocked the lot** — four of the ten extraction methods had no `location_field_policy` v1 row, so their claims would have been skipped at S7 forever. **The lane is no longer inert and no longer dark-free**: it can mine, and nothing it mines reaches `location_claims_live` until the operator un-shadows each portal off the W2-13 gate report. `shadow` is header-grain, so each of the seven also parks its own already-live W1 entries meanwhile — a freeze, not a blackout, and the reason the un-shadow decision is per portal and not a wave flip. See the W2-6…W2-12 section |
 | W3 history backfill | claims from `listing_snapshots.raw_json` | ✅ **shipped 2026-08-19 — scan complete (`reached_end=true`) and all four gate arms PASS** (verify run 32223331085). **1,634,096 snapshots mined over five windows → 92,312 historical location claims + ~10.85 M observations**, terminal batch 289 / cursor 1,634,096. Note the terminal denominator against the 1,574,313 the wave opened with: `listing_snapshots` grew ~60 k rows while the scan walked it, so **`reached_end` is the only completion signal** — the same lesson W2a's backfill recorded (#1088). Unblocking it needed BOTH `location-batch` crons paused (#1100 intake, #1101 resolve), because resolve oversubscribes the group by itself — measured over eleven ticks, a run occupies it 11–27 min on a 15-min cadence, so ~1 tick in 3 completed and the rest superseded each other; both restored (#1105) the moment the scan finished. Gate arm 4 (the corpus arm) needed a lane that did not exist: `claims_remine_verify` + its own read-only workflow (#1102), then two corrections — scoping by anchor/observation rather than `extractor_version` (#1104), and **partitioning the series by contract entry (#1106), without which the gate PASSED on an artifact** (165,706 of 165,708 listings "oscillating"; the real figure is 324). See the W3 section for the measured oscillation and what it says about the program's churn premise |
 | W4 targeted refetch cohorts | sreality legacy-shape + truncated refetch, bezrealitky remainder | 🟡 **build started (2026-08-18)** — the consumer for the cohort W1 has been filling since 2026-08-12 (#1083) + its dispatch lane. **Nothing dispatched**; substrate-disjoint from W2/W3 and outside `location-batch`. See the W4 section |
 | W5–W6 | LLM lane, serving flip | ⚪ not started |
@@ -1464,6 +1464,99 @@ re-draw. Then label ≥100 members per portal through the admin-gated surface
 may be parked and `coverage_gate.yml` can un-park either autonomously four times a day, which
 changes the population a sample is drawn from. Until a portal has ≥100 labels the gate report
 correctly reads `NO SAMPLE` for it.
+
+## W2-6…W2-12 — shipped (2026-09-05)
+
+Seven portal contracts activated and **shadowed** in one wave, one PR, on top of the reader
+foundation (#1270) and the W2-13 sweep lane (#1271). Nothing about the archive substrate
+changed; what changed is that entries which had been *declared and inert* since W1 now name a
+reader, so `claims_remine_archive` finds executable work for the first time.
+
+The fleet census moved further in this one merge than in the whole of W1: **69 executable / 70
+inert → 112 / 47**. Two portals are untouched — sreality and bezrealitky name no archive reader,
+so they stay live and un-shadowed.
+
+Per portal, what the bump turns on (each verified end to end through the real `ScopeRegister`,
+`scope_html`, `stamp_archive_claim` and the C6 licence ladder, with every evidence span slicing
+back to its own quote):
+
+- **remax@3** — `rx.det.gps` (the DMS pin, licence `portal`, branch `portal_pin`) and
+  `rx.det.header_address`; `rx.det.map_address` appended and matches nothing today, which is its
+  expected steady state. The pinned fixture's hand-written one-line header was replaced with the
+  real nested block, which moved four shared pins (`test_html_scope`, the payload-norm digest).
+  Recorded finding, not fixed: `rx.det.raw_address_conflict` reads `/address`, a key the scraper
+  renamed to `carousel_address` post-W0-0d, so the contradiction ledger only receives material
+  from rows drained before that rename.
+- **ceskereality@5** — `cr.det.title_line` (street) and `cr.det.data_city` (obec) on the pinned
+  body, plus the new `cr.det.title_okres`, which is gated against the two REAL archived bodies
+  (3861311 → Karlovy Vary, 3680359 → Trutnov) because the pinned `<title>` predates v5 and carries
+  no okres suffix. ceskereality stays deliberately absent from `ARCHIVED_COORDINATE_RULES`: its
+  pin already comes from `listings.geom` under `cr.det.legacy_pin`, and a second fingerprint for
+  one position under an unlicensed locator is not an improvement.
+- **realitymix@4** — the largest single activation (13 → 23 entries, 20 executable): the map pin,
+  the four `map_*` address parts, the segmented `data-address`, both agency accuracy flags and
+  four JSON-LD breadcrumb entries. The breadcrumbs **fail closed** — the reader is anchored on the
+  kraj `@id` slug and only 3 of 14 kraj slugs are observed, so W2-13 must report per-kraj
+  breadcrumb claim rates before anyone reads a yield number from them.
+- **idnes@2** — the one bump that appends **nothing**: five already-declared entries given readers
+  (`subject_feature` pin, `subject_address`, `info_text`, `no_exact_disclaimer`, `zoom`), with
+  `on_miss=fail` subject selection, the three enumerated `reject_points`, the CZ bbox and the Mapy
+  inventory veto all asserted. Honest coverage gap: idnes' `regressions:` block names no listing
+  ids at all, and the repo's only real archived idnes page had its coordinate arrays destroyed by
+  an old PII scrub, so the archived arm scores these five entries against one 2.3 KB modelled page.
+- **bazos@2** — the town anchor's obec slug, the new `bzs.det.psc`, the maps anchor's zoom and the
+  declared-blur marker. `bzs.det.blur_hint` claims the CONTRACT's canonical label
+  (`approximate_location`) with bazos' own wording as the evidence rail, so a reword stops
+  asserting rather than restating a different fact. An archived bazos pin stays unlicensable by
+  construction (no `ARCHIVED_COORDINATE_RULES` row). The portal's first genuinely archived body is
+  now in-repo. The `llm_text` entries are **bazos@3** and ship with the LLM lane, not here.
+- **mmreality@2** — five new `blob_*` entries plus the pin, all id-matched on the subject blob
+  rather than positionally (scored under a neighbour's id the same page yields that neighbour's
+  obec, which is the test). `mm.det.point` moved from W1's `point_pair` to the archived
+  `json_point`; `claims_remine._payload_lat_lon` was re-keyed on `locator.lat_pointer`/`lon_pointer`
+  so W3's mmreality rows do not silently lose their lat/lon on that move. Pre-existing defect
+  recorded, not fixed: `mm.det.placement` reads a dict with W1's scalar reader and gets None.
+- **maxima@2** — the map pin, the uncertainty shape, the zoom and two new locality parts. A live
+  check settled the shape the spec had guessed: a maxima Circle is
+  `{"type":"Circle","center":[lon,lat],"radius":<degrees>}` — `center`, not `coordinates`. The
+  regression it was re-mined for is confirmed: `d40026367` and `f60012682` are the same plot with
+  stored pins ~830 m apart.
+
+**The policy-gap migration (470).** Ruling: the activation is worthless without it. Seven of the
+ten `location_extraction_method` labels had no `location_field_policy` v1 row, and
+`survivorship.evaluate_field` does not rank an unmatched claim — it SKIPS it, and the field lands
+in `survivorship_blocked` permanently. Deriving the (method × field) pairs the activated entries
+actually emit gives four methods, seeded into the EXISTING `policy_version='v1'` (never a new
+version — it is one of the five resolution-identity columns) with `ON CONFLICT DO NOTHING`:
+`breadcrumb_parse` 450, `url_slug_parse` 500, `regex_text` 550, `legacy_column` 600, all
+`may_fill_null=true`, `may_overwrite_non_null=FALSE` (D7's graded write-back: a new instrument may
+fill a hole, not correct a record) and `requires_independent_agreement=FALSE`. That last one is the
+deliberate relaxation and the C7 rule is why: agreement counts distinct **sources**, so a portal
+re-mined from a second substrate cannot corroborate itself; every claim these rows govern is one
+portal reading its own page, there is no second voice that could ever agree, and requiring one
+makes the claims permanently unusable rather than safer. `jsonld_parse`, `map_widget_parse` and
+`portal_declared_quality` get **no** rows on purpose — everything they emit is a pin, a shape, a
+zoom or a blur hint, arbitrated by S4/S6 where policy rows are inert. `legacy_column` is the only
+one of the four whose claims already exist, so the migration enqueues those listings into
+`dirty_locations` with reason `'policy_version'` itself, scoped to the exact pairs it governs.
+`tests/location_data/test_resolver_seed_policy.py::test_every_producer_a_shipped_contract_can_emit_has_a_v1_policy_row`
+is the standing gate that makes the next activation red instead of silent.
+
+**The un-shadow path, and it is per portal.** Nothing here promotes anything. The order is:
+dispatch `location_claims_remine_archive.yml` for one portal → read
+`scripts/location_w2_gate_report.py` for that portal (which needs its O8 frozen sample drawn
+FIRST — that draw is a one-way door) → the operator runs
+`python -m location_data.contracts --unshadow <portal>@<version>`, which writes the DB column, not
+the YAML, and enqueues that contract's listings so the promotion actually re-resolves. Until then
+the seven contracts' claims are stored and scored (`location_claims_shadow`) and excluded from
+`location_claims_live`.
+
+Two things to carry into the gate report rather than discover later: idnes' shipped exclusion
+register already names markup the portal no longer emits (`zones_unmatched == ('.b-similar',
+'.broker')`) and `claims_remine_archive` never reads `zones_unmatched`, so a corpus-wide register
+miss is invisible and every batch still stamps `'ok'`; and `reject_points` is compared at 5 dp
+(~1.1 m) with no measured false-positive rate, so a genuine address within ~1.1 m of a junk pin
+loses its coordinate claim with no absence emitted.
 
 ## W4 — build started (targeted refetch cohorts)
 

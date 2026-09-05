@@ -25,8 +25,36 @@
 # a new key after W0 0d, unreadable to v1) and `rx.det.legacy_locality` (06 §6.1.3 class B;
 # remax publishes no locality key at all, so the column is the only copy).
 
+#
+# VERSION 3 (2026-09-05) — W2-6 activation. One new entry (`rx.det.map_address`) and three
+# entries that gain a reader; no v1/v2 entry was edited in place (entries are immutable per
+# contract_version; a change is a bump, 02 §2.1.8) and v2's rows stay on record untouched.
+# Two of the three are RESTATED rather than merely annotated, and both restatements are
+# removals of declarations the runtime never evaluates: `rx.det.gps` drops
+# `transform: [dms_to_decimal]` (never implemented; `html_point_dms` applies no transform at
+# all) and `guards: [reject_outside_cz_bbox]` (the CZ envelope is intrinsic to
+# `scraper.remax_parser.parse_dms_pair`, which the reader calls — the check is not lost, only
+# the inert declaration), and gains the `position_branch: portal_pin` that C6's licence
+# ladder requires. Measured cause, on the pinned archived body
+# `tests/fixtures/portal_html/remax_detail.html` and the 12 mined pages under
+# mining/remax/: `h2.pd-header__address` is present on 12/12 and is the ONLY subject-owned
+# location string on the page, carrying both the `ulice <Street>, <Obec>` form (5/12) and the
+# `<Obec> – část obce <X>` / `, okres <X>` form (7/12); on 12/12 it also nests a
+# `<a …>mapa</a>` jump-link, so a deep text read states the address as "… Úvaly mapa" — which
+# is why this activation names the reader `html_own_text` rather than reusing `html_text`.
+# Street source is the SUBJECT-MAP-SCOPED `data-address` (`rx.det.map_address`), never the
+# headline: operator ruling W2-6, 2026-09-05 — "we do not know how the headline is built and
+# it could include misleading data, such as hotel name". That attribute is absent on both
+# committed bodies and on both live-recon samples (recon §5.7 records the absence as
+# unverified-either-way), so the entry is `when_present` and claims nothing until the portal
+# renders it; the ban it narrows was always about the carousel, not about the attribute.
+# Ships SHADOWED per the W2 sequencing ruling: all seven DOM contracts activate in one wave
+# so the claim-fingerprint re-insert is paid once, and the shadow stack's freeze is accepted
+# pre-W6 because nothing user-facing reads the claims spine yet.
+
 portal: remax
-contract_version: 2
+contract_version: 3
+shadow: true
 extractor_runtime: ">=1.0"
 identity_ladder: [structured_address, portal_precise_coord]
 
@@ -119,6 +147,11 @@ regressions:
      are wrong — only the description catches it [mine-syn §2c]"
   - "443317 / 445753 / 427629 — title vs address disagree (Michle vs Chodov, Braník vs
      Kunratice, Senomaty vs Skryje); listings.district silently takes one [db-raw §3.4]"
+  - "445356 — the street-highlight rendering: the detail-map pin degrades to a district
+     centroid (Modřany) while the header still reads street-level; the pin is 'specific'
+     and the granularity is not [operator validation 2026-09]"
+  - "437234 — 'Bukovická 297', the pre-W2 resolver output, human-confirmed CORRECT; the
+     control that the pin→address conversion is not systematically wrong"
 
 extractions:
   - id: rx.det.raw_address_conflict
@@ -214,30 +247,105 @@ extractions:
     locator_kind: html_selector
     extraction_method: html_selector_parse
     page_kind: detail
-    locator: {css: "h2.pd-header__address", text: true}
+    locator: {reader: html_own_text, css: "h2.pd-header__address", text: true}
     claim_type: address_line_verbatim
     licence_class: portal
     blur_evidence: none
-    subject_scope: {kind: subject_header}
+    subject_scope: {subject_scoped: true, kind: subject_header}
+    prior: {match_confidence: medium}
     required: always
-    notes: "THE SUBJECT'S OWN address, never read today [live-B §3.2]. It is the
-      replacement for the banned raw_json.address."
+    notes: >
+      THE SUBJECT'S OWN address line, and the replacement for the banned `raw_json.address`
+      [live-B §3.2]. Present on 12/12 mined pages and the ONLY subject-owned location string
+      the detail page carries; it holds BOTH declared forms — `ulice <Street>, <Obec>` (5/12)
+      and `<Obec> – část obce <X>` / `– městská část <X>` / `, okres <X>` (7/12) — which is
+      why `precision_caps.header_starts_with_ulice` and `header_okres_form` are both keyed on
+      this one element, and why `rx.det.location_line` describes the same string rather than
+      a second one.
+      `address_line_verbatim`, never a typed street: 04's ruling is that remax's STREET comes
+      from the subject-map-scoped `data-address` (`rx.det.map_address`), not from the
+      headline, because how the headline is composed is not known and it can carry a hotel or
+      agency name. This entry is the DECLARED-TEXT granularity axis and the contradiction
+      partner to `rx.det.raw_address_conflict`; splitting it into street/obec/okres is the
+      resolver's job (03), not the extractor's.
+      `html_own_text`, not `html_text`, and the difference is measured: on 12/12 pages the h2
+      nests `<a href="#" data-scroll-to-anchor="#map">mapa <i></i></a>`, so `node.text()`
+      returns "ulice Pod Slovany,<15 tabs>Úvaly mapa". The own-text read is stable against
+      that link's LABEL changing, which a suffix transform would not be.
 
   - id: rx.det.gps
     locator_kind: html_selector
     extraction_method: html_selector_parse
     page_kind: detail
-    locator: {css: "#printMap[data-gps], #listingMap[data-gps]", attr: "data-gps"}
+    locator: {reader: html_point_dms, css: "#printMap[data-gps], #listingMap[data-gps]",
+              attr: "data-gps", position_branch: portal_pin}
     claim_type: coordinate
     licence_class: portal
     blur_evidence: none
     precision_cap: {granularity_max: address_point, position_source_max: portal_pin}
     prior: {position_source: portal_pin, match_confidence: low}
-    transform: [dms_to_decimal]
-    guards: [reject_outside_cz_bbox]
     required: when_present
-    notes: "Scoped by element ID, never 'first data-gps in the document' [live-B §3.5.1].
-      Seconds may render as 60 (13°51'60\"E) and the arithmetic absorbs it."
+    notes: >
+      Scoped by element ID, never "first data-gps in the document" [live-B §3.5.1] — the
+      first-match rule is what put a neighbour card's position on the subject. Both ids carry
+      the identical subject pin (verified on both committed bodies); `#printMap` precedes
+      `#listingMap`, and the reader takes the first match. Seconds may render as 60
+      (13°51'60"E) and `parse_dms_pair`'s arithmetic absorbs it.
+      RESTATED at v3, and both removals are removals of an inert declaration:
+      `transform: [dms_to_decimal]` was never in `contracts.IMPLEMENTED_TRANSFORMS` and
+      `html_point_dms` declares `consults_transforms=False`, so it could never have run;
+      `guards: [reject_outside_cz_bbox]` was never evaluated either, because the reader
+      declares `consults_guards=False` — deliberately, since the CZ envelope is INTRINSIC to
+      `scraper.remax_parser.parse_dms_pair`, which returns (None, None) outside it. The bbox
+      check is unchanged; only the declaration the runtime ignored is gone. Keeping either
+      line would now be a projection-time ContractError (`contracts._check_executable`).
+      `position_branch: portal_pin` is contract DATA and required by C6: this attribute is
+      the portal's own supplied pin, never a client-side geocode, so the archived ladder
+      stamps `licence_class: portal`. The entry id is the one
+      `claims_intake.ARCHIVED_COORDINATE_RULES["remax"]` names; renaming it would silence the
+      licence ladder, so it is fixed permanently.
+      OPERATOR VALIDATION (2026-08/09): exact pins parcel-accurate ~14/15; a supplied
+      specific pin is CONFIDENT even accepting a residual false-pin rate (420430, a dům
+      pinned in an open field). One known degradation mode — listing 445356 (Modřany), the
+      street-highlight rendering, where the pin falls back to a district centroid — is
+      recorded, not detectable from this attribute alone, and left to corpus-level
+      shared-pin clique statistics rather than a per-listing check.
+
+  - id: rx.det.map_address
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {reader: html_attr, css: "#printMap[data-address], #listingMap[data-address]",
+              attr: "data-address"}
+    claim_type: address_line_verbatim
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: true, kind: subject_map}
+    prior: {match_confidence: medium}
+    on_conflict: emit_both
+    required: when_present
+    notes: >
+      THE RULED STREET SOURCE for this portal (operator, W2-6, 2026-09-05): location comes
+      from the map code, not the headline. The wholesale `data-address` ban was about the
+      CAROUSEL — the first `data-address` in the document belongs to a "Nemovitosti v okolí"
+      neighbour card and reached `listings.street` on live rows [mine-syn §1c] — and 02
+      §2.2.6 already permits reading `data-address` "scoped to elements that are not
+      `.area-listings__item`". Scoping it to the subject's OWN map element is the narrowest
+      expressible form of that permission: `#areaMap` (the neighbourhood map) is excluded by
+      id, and the register strips every `.area-listings__item[data-address]` before this
+      reader sees the tree, so the decoy is unreachable twice over.
+      MEASURED ABSENCE, stated rather than assumed: neither committed body carries the
+      attribute on either map id (0 nodes on `tests/fixtures/location_w2/remax_detail.html`
+      and on the archived `tests/fixtures/portal_html/remax_detail.html`), and recon §5.7
+      records "whether remax detail pages ever carry the subject's own data-address" as
+      unverified — two live samples had none. `required: when_present`, so the entry claims
+      nothing until the portal renders it, and the day it does the read is already correct
+      and already licensed. A zero-yield readout for this entry is the expected state, not an
+      alarm; what WOULD be an alarm is a value here that matches a carousel card's.
+      Whole-string, not segmented: the attribute's shape is
+      "<Street>, <Quarter>, <Obec>, okres <X>", and splitting it into typed parts is 03's
+      job — the same reason `rx.det.legacy_locality` is typed `address_line_verbatim`.
+      `on_conflict: emit_both`, never a fill.
 
   - id: rx.idx.display_address
     locator_kind: html_selector
@@ -249,9 +357,17 @@ extractions:
     blur_evidence: none
     precision_cap: {granularity_max: address_point, position_source_max: portal_pin}
     required: when_present
-    notes: "'Roháčova 1523 / 1523, Hlavní město Praha, Praha 3, …' on 13/21 page-1 cards;
+    notes: >
+      'Roháčova 1523 / 1523, Hlavní město Praha, Praha 3, …' on 13/21 page-1 cards;
       parse_index already parses it and the walk throws it away. Expected house_number
-      coverage 14% -> ~60% [live-B §0.4, §3.5.2]."
+      coverage 14% -> ~60% [live-B §0.4, §3.5.2].
+      v3: still inert, and the blocker is structural, not a missing reader.
+      `scraper/remax_main.py` archives index pages under `source_id_native = <index page
+      key>`, while `claims_remine_archive`'s scan joins `listings ON (source,
+      source_id_native)` — so an index payload matches zero listings and the lane can never
+      reach this entry. `test_contract_fixture_diff.score_archived` also filters
+      `page_kind == "detail"`, so activating it would be wholly ungated. Carrying index
+      attributes through is an index-walk change (live-B §3.5.2), not an archive re-mine one.
 
   - id: rx.idx.gps
     locator_kind: html_selector
@@ -263,19 +379,37 @@ extractions:
     blur_evidence: none
     precision_cap: {granularity_max: address_point, position_source_max: portal_pin}
     required: when_present
-    notes: "Present on 21/21 cards and identical to the detail subject pin (verified for
-      445781) [live-B §3.1]."
+    notes: >
+      Present on 21/21 cards and identical to the detail subject pin (verified for 445781)
+      [live-B §3.1].
+      v3: still inert, and the blocker is structural, not a missing reader.
+      `scraper/remax_main.py` archives index pages under `source_id_native = <index page
+      key>`, while `claims_remine_archive`'s scan joins `listings ON (source,
+      source_id_native)` — so an index payload matches zero listings and the lane can never
+      reach this entry. `test_contract_fixture_diff.score_archived` also filters
+      `page_kind == "detail"`, so activating it would be wholly ungated. There is a third
+      block here: this id is NOT the one `ARCHIVED_COORDINATE_RULES["remax"]` names, so every
+      read would be refused `unrecognised_archived_coordinate_locator` and write one absence
+      per row. Carrying index attributes through is an index-walk change (live-B §3.5.2), not
+      an archive re-mine one.
 
   - id: rx.det.breadcrumbs
     locator_kind: html_selector
     extraction_method: breadcrumb_parse
     page_kind: detail
-    locator: {css: ".breadcrumb a"}
+    locator: {css: ".breadcrumbs a"}
     claim_type: kraj_name
     licence_class: portal
     blur_evidence: none
     required: best_effort
-    notes: "The ONLY place a kraj is ever named — 11/12 [mine-remax]."
+    notes: "The ONLY place a kraj is ever named — 11/12 [mine-remax]. v3 corrects the
+      selector: `.breadcrumb a` matches 0 nodes on the pinned archived body while
+      `.breadcrumbs a` matches 5 (a schema.org BreadcrumbList: Reality REMAX / Domy a vily /
+      Prodej / Středočeský kraj / Praha-východ). Still INERT — the kraj sits at a category-
+      dependent offset in that chain, which is what `json_breadcrumb` anchors on the kraj
+      SLUG to survive; remax's chain is plain anchors, not JSON-LD, so no registered reader
+      addresses it — but a selector known to be wrong must not be what a later wave
+      activates."
 
   - id: rx.det.location_line
     locator_kind: html_selector
@@ -286,9 +420,15 @@ extractions:
     licence_class: portal
     blur_evidence: none
     required: when_present
-    notes: "'<Obec> – část obce <X>' / '<Obec> – městská část <X>' — the highest-yield
-      single string on the page, 9/12; 432678's 'Pstruží u Merklína' exists in NO other
-      surface [mine-remax]."
+    notes: "'<Obec> – část obce <X>' / '<Obec> – městská část <X>' — 9/12 [mine-remax];
+      432678's 'Pstruží u Merklína' exists in NO other surface. v3 records what W2-6
+      measured: there is NO `.pd-header__location` element. That class matches 0 nodes on the
+      pinned archived body, and the string it describes is the NON-`ulice` form of
+      `h2.pd-header__address` itself (Bílovec – část obce Ohrada, Merklín – část obce Pstruží
+      u Merklína, Opava – městská část Vávrovice, Bobrůvka, okres Žďár nad Sázavou — all
+      inside that one h2 on the 12 mined pages). `rx.det.header_address` therefore already
+      captures this fact. The id is kept, inert, rather than repointed: it was minted for a
+      TYPED cast_obce_name claim, and typing the header's tail is a segmenting act 03 owns."
 
   - id: rx.det.h1_tail
     locator_kind: html_selector

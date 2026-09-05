@@ -414,3 +414,47 @@ def v1_field_policy_fields() -> set[str]:
             for block in re.findall(r"array\[(.*?)\]::location_claim_type\[\]", stmt, re.S):
                 fields.update(re.findall(r"'([a-z0-9_]+)'", block))
     return fields
+
+
+# `location_extraction_method` verbatim (migration 380). Spelled out rather than read from
+# the enum's DDL because this list is the thing being checked AGAINST: a method that
+# vanished from the enum should red the parse, not silently shrink the answer.
+EXTRACTION_METHODS: frozenset[str] = frozenset({
+    "portal_structured_field", "portal_declared_quality", "html_selector_parse",
+    "url_slug_parse", "breadcrumb_parse", "jsonld_parse", "map_widget_parse",
+    "regex_text", "llm_text", "legacy_column", "registry_derived", "operator_manual",
+})
+
+
+def v1_field_policy_pairs() -> set[tuple[str, str]]:
+    """Every `(extraction_method, location_claim_type)` pair a `location_field_policy` v1
+    row can govern, read out of the migrations.
+
+    A companion to `v1_field_policy_fields`, and a WIDER glob on purpose: that one answers
+    "which field has any row at all" and only ever needed 383/388, while this one answers
+    "which PRODUCER can win this field", which is the question the seven-portal W2
+    activation turned into a live one and which migration 470 answers. Missing a migration
+    here reads as a missing policy row, i.e. it fails safe.
+
+    Every seeding statement in this table's history has one shape — an `unnest(array[…])`
+    of fields crossed with one or more (source_pattern, method_pattern, rank) rungs — so
+    the pairs are the product of the fields it names and the method labels it names. That
+    over-reads only if a statement ever names a method it does not actually pair with
+    every field it lists, which no migration does and which would be worth failing on."""
+    import re
+
+    from tests.test_migration_rls_grants import _statements, _strip_comments
+
+    pairs: set[tuple[str, str]] = set()
+    for path in sorted(_MIGRATIONS.glob("*_location_*.sql")):
+        sql = _strip_comments(path.read_text(encoding="utf-8")).lower()
+        for stmt in _statements(sql):
+            if not re.match(r"\s*insert into location_field_policy\b", stmt.lower()):
+                continue
+            fields: set[str] = set()
+            for block in re.findall(r"array\[(.*?)\]::location_claim_type\[\]", stmt, re.S):
+                fields.update(re.findall(r"'([a-z0-9_]+)'", block))
+            methods = {t for t in re.findall(r"'([a-z0-9_]+)'", stmt)
+                       if t in EXTRACTION_METHODS}
+            pairs.update((m, f) for m in methods for f in fields)
+    return pairs

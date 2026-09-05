@@ -12,9 +12,30 @@
 # reads the already-selected blob out of raw_json, so it inherits whatever the parser
 # picked — which is exactly why the W2 entry re-reads the archived page under the strict
 # rule.
+#
+# VERSION 2 (2026-09-05) — five entries added and two restated onto the archived-HTML
+# lane; no v1 entry was edited in place and no id was reused (02 §2.1.8). MEASURED CAUSE:
+# the committed archived body (tests/fixtures/portal_html/mmreality_detail.html, listing
+# 951845) carries THREE `:property` blobs, and the NEIGHBOUR's is the largest — 23,656
+# source characters against the subject's 13,827 — so `mmreality_parser.extract_property`'s
+# "largest blob by serialized length" fallback returns another listing's street, obec and
+# pin whenever the id match misses. `raw_json` inherits whatever that function picked and
+# cannot state which blob it read, so W1 can never satisfy the W2-11 gate; only a re-read
+# of the archived body under `subject_scope: {kind: id_match, on_miss: fail}` can. The
+# same re-read is what makes the portal's own `accurate` flag COHERENT with the pin it
+# caps: 3,917 of 10,538 active rows (37.2%) are `accurate:false`, that cohort shares a
+# pin 49.8% of the time against 13.2% for `true`, and a cap read off a different blob
+# than the coordinate it caps is not a cap. `mm.det.point` keeps its id because
+# `claims_intake.ARCHIVED_COORDINATE_RULES` names that one entry as the portal's only
+# licensable archived coordinate locator; changing the id would silently unlicense it.
+# `mm.det.original_title_street` becomes executable because W2a filled the
+# content-addressed body store, which is the retrievable document its span needs
+# (01 §4.2) — `raw_json.street` is populated on 1/12 sampled rows while `originalTitle`
+# carries `ul. <Street>` on 5/12.
 
 portal: mmreality
-contract_version: 1
+contract_version: 2
+shadow: true   # W2-13 dispatches claims_remine_archive; cleared with `python -m location_data.contracts --unshadow mmreality@2` once the frozen-sample floors pass. This whole LINE is outside contract_body_hash (_SHADOW_LINE, contracts.py), so deleting it later costs no version bump.
 extractor_runtime: ">=1.0"
 identity_ladder: [obec_code, structured_address, portal_precise_coord]
 
@@ -97,14 +118,20 @@ regressions:
   - "943671 — description says 'v katastrálním území Polepy u Kolína' while the payload
      asserts Kolín / 'Kolín I' / 'centrum obce'"
   - "the accurate:false cohort — 49.8% share a pin vs 13.2%, largest shared false pin = 46"
+  - "951845 — the id-matched subject blob on the committed archived body
+     (tests/fixtures/portal_html/mmreality_detail.html): three `:property` blobs, and the
+     NEIGHBOUR's (950647, 23,656 chars) is LARGER than the subject's (13,827), so the
+     largest-blob fallback returns Ludvíkov's location for an Andělská Hora listing"
 
 extractions:
   - id: mm.det.point
     locator_kind: embedded_json
     extraction_method: portal_structured_field
     page_kind: detail
-    locator: {reader: point_pair, lat_pointer: /point/latitude,
-              lon_pointer: /point/longitude}
+    locator: {reader: json_point, css: "[\\:property]", attr: ":property",
+              lat_pointer: /point/latitude, lon_pointer: /point/longitude,
+              position_branch: portal_pin,
+              match: {json_pointer: /id, equals_row_field: source_id_native}}
     claim_type: coordinate
     subject_scope: {kind: id_match, on_miss: fail}
     licence_class: portal
@@ -115,7 +142,20 @@ extractions:
     prior: {granularity: obec, position_source: portal_pin_blurred, match_confidence: low}
     guards: [reject_outside_cz_bbox]
     required: when_present
-    notes: "9 dp is SPURIOUS precision and must not be read as accuracy [live-B §2.3]."
+    notes: >
+      9 dp is SPURIOUS precision and must not be read as accuracy [live-B §2.3]. v2 moves
+      this entry from `point_pair` (raw_json, W1) to `json_point` (the archived body, W2):
+      the value is the same key, but only the archived read can say WHICH blob it came
+      from. `position_branch: portal_pin` and not `portal_geocoded` — the `accurate:false`
+      cohort is mmreality's OWN fallback position, republished under mmreality's own terms,
+      and `ARCHIVED_COORDINATE_RULES["mmreality"]` declares no geocoded class, so the
+      geocoded branch would be refused `coordinate_provenance_unestablished` on every row.
+      Approximateness rides on the blur/cap axis (mm.det.blob_accurate), never on licence.
+      COST, stated: W1 stops emitting a mmreality coordinate the moment v2 activates. The
+      claims W1 already wrote under v1 stay live (`location_claims_live` filters on
+      `shadow`, never on `is_active`), so this is a provenance switch and a latency change
+      — a newly discovered listing has no coordinate claim until the next archive sweep —
+      not a coverage loss.
 
   - id: mm.det.accurate
     locator_kind: embedded_json
@@ -267,17 +307,31 @@ extractions:
     locator_kind: embedded_json
     extraction_method: regex_text
     page_kind: detail
-    locator: {json_pointer: /originalTitle,
-              pattern: ",\\s*ul\\.\\s*(?P<street>[^,]+)$", first_only: true}
+    locator: {reader: json_regex, css: "[\\:property]", attr: ":property",
+              json_pointer: /originalTitle,
+              pattern: ",\\s*ul\\.\\s*(?P<street>[^,]+)$", group: street,
+              match: {json_pointer: /id, equals_row_field: source_id_native}}
     claim_type: street_name
+    subject_scope: {kind: id_match, on_miss: fail}
     licence_class: portal
     blur_evidence: none
+    prior: {granularity: street}
     required: best_effort
     notes: >
       raw_json.street is populated on 1/12 rows but originalTitle carries 'ul. <Street>' on
       5/12 — "a deterministic regex, not an LLM, is enough… the single highest-yield fix
-      for this portal" [mine-mmreality finding 1]. Evidence-bearing (regex_text), so it
-      waits for W2a: a span needs a retrievable document (01 §4.2).
+      for this portal" [mine-mmreality finding 1]. v2 activates it: W2a shipped the
+      content-addressed body store the span needs (01 §4.2). The regex runs over the
+      DECODED string; the claim quotes the JSON MEMBER SOURCE SLICE, because mmreality
+      JSON-escapes accents (`ul. Křižíkova`) and the decoded street is not a substring of
+      the scoped payload — the same reason `html_point_attrs` quotes `node.html`. The
+      member slice rather than the capture alone: the escaped street also occurs in
+      `title`, `location` and `slug`, and a span pointing at the wrong occurrence still
+      satisfies migration 382's substring CHECK, which makes it worse than no span.
+      `prior.granularity: street` is stated in v2 because without it the entry inherited
+      `precision_priors.granularity: obec` — an obec prior on a street claim. `first_only`
+      is gone because the canonical `json_regex` takes the FIRST match structurally; a
+      locator key the reader never consults is exactly as inert as a misspelt one.
 
   - id: mm.det.neighbours
     locator_kind: embedded_json
@@ -301,3 +355,116 @@ extractions:
     blur_evidence: none
     required: best_effort
     notes: "3/12 rows; the only signal that catches a wrong obec [mine-mmreality]."
+
+  # ---- W2 (v2): the archived detail body, re-read under strict id_match ----
+  #
+  # Twins of the raw_json entries above, NOT replacements: `claim_fingerprint` hashes
+  # `surface`, so the W1 row and the archived row are two rows and both survive into
+  # `location_claims_live` (resolver/survivorship.py), and `_independently_agreed` counts
+  # distinct SOURCES so a portal can never corroborate itself through them. Where they
+  # DISAGREE with their W1 twin, the disagreement is the largest-blob defect made visible —
+  # which is the whole point of the re-read. New ids rather than restating the W1 entries
+  # onto archive readers, because an archive reader is SKIPPED by `claims_intake`
+  # (ARCHIVE_ONLY_READERS) and restating them would take mmreality's hourly W1 admin claims
+  # dark for the sake of a corroboration.
+
+  - id: mm.det.blob_accurate
+    locator_kind: embedded_json
+    extraction_method: portal_declared_quality
+    page_kind: detail
+    locator: {reader: json_bool, css: "[\\:property]", attr: ":property",
+              json_pointer: /accurate,
+              labels: {"true": accurate, "false": not_accurate},
+              match: {json_pointer: /id, equals_row_field: source_id_native}}
+    claim_type: precision_declaration
+    subject_scope: {kind: id_match, on_miss: fail}
+    licence_class: portal
+    blur_evidence: none
+    precision_cap:
+      granularity_max: {accurate: address_point, not_accurate: obec}
+      position_source_max: {accurate: portal_pin, not_accurate: portal_pin_blurred}
+      blurred_labels: [not_accurate]
+    prior: {match_confidence: low}
+    required: always
+    notes: >
+      The archived twin of mm.det.accurate, and the entry that makes mm.det.point's cap
+      COHERENT: after v2 the coordinate is read from the id-matched blob, so the flag that
+      caps it has to come from the SAME blob or the cap is being read off a different
+      listing. `blur_evidence` on the entry is the DEFAULT; the reader overwrites it to
+      'declared' whenever the mapped label is in `blurred_labels` (06 §6.6 rule 7), which is
+      how `accurate:false` becomes the portal-declared approximate marker rather than a
+      silent downgrade. No separate `blur_hint` entry: the declared blur rides on this claim
+      and the ceiling rides on `precision_cap`; a second claim carrying the same bit would
+      be a duplicate with no consumer. The obec cap on `false` is NORMATIVE (02 §2.4) — that
+      cohort shares a pin 49.8% of the time with a largest shared pin of 46 listings, the
+      profile of a geocoder/centroid fallback — and `accurate` does NOT predict correctness:
+      it is a ceiling, not a certificate [mine-mmreality finding 2].
+
+  - id: mm.det.blob_street
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: json_scalar, css: "[\\:property]", attr: ":property",
+              json_pointer: /street,
+              match: {json_pointer: /id, equals_row_field: source_id_native}}
+    claim_type: street_name
+    subject_scope: {kind: id_match, on_miss: fail}
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: street}
+    required: when_present
+    notes: "The archived twin of mm.det.street. `listings.street` is NOT trusted for this
+      portal (W2-11 ruling), so the two street signals that ARE trusted are this one and
+      mm.det.original_title_street, and only the archived read can name the blob it came
+      from. Absent on the pinned archived body (listing 951845 publishes no `street` key) —
+      a real `when_present` miss, kept as the fixture's negative case."
+
+  - id: mm.det.blob_municipality
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: json_scalar, css: "[\\:property]", attr: ":property",
+              json_pointer: /municipality,
+              match: {json_pointer: /id, equals_row_field: source_id_native}}
+    claim_type: obec_name
+    subject_scope: {kind: id_match, on_miss: fail}
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: obec}
+    required: when_present
+
+  - id: mm.det.blob_municipality_part
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: json_scalar, css: "[\\:property]", attr: ":property",
+              json_pointer: /municipalityPart,
+              match: {json_pointer: /id, equals_row_field: source_id_native}}
+    claim_type: cast_obce_name
+    subject_scope: {kind: id_match, on_miss: fail}
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: cast_obce_or_quarter}
+    required: when_present
+    notes: "Present on 82.4% of rows; today collapsed into one free-text `locality`. Typed
+      cast_obce_name, never quarter_name — mmreality publishes the RÚIAN část obce."
+
+  - id: mm.det.blob_municipality_id
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: json_scalar, css: "[\\:property]", attr: ":property",
+              json_pointer: /municipalityId, value_kind: num,
+              match: {json_pointer: /id, equals_row_field: source_id_native}}
+    claim_type: obec_code
+    subject_scope: {kind: id_match, on_miss: fail}
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: obec, match_confidence: high}
+    required: when_present
+    notes: >
+      The official ČSÚ/RÚIAN kód obce (Andělská Hora 551929, Bochov 555029, Havlíčkův Brod
+      568414) — a REGISTRY CODE, not a portal id. Typed `obec_code`, NEVER
+      `portal_admin_id`: that typing would make it non-queryable under 01 §12 and would cost
+      the homonym rungs their strongest disambiguator on 10,538 rows. Contrast
+      mm.det.district_id, which IS a portal id and stays namespaced.
