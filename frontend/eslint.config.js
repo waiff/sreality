@@ -96,6 +96,12 @@ export default [
     // browseState are the domain resolvers that build on it and are allowed to
     // compose paths; routes.tsx is the router's own table, which reads
     // ROUTES.*.childPath but still declares the structural '/' and '*'.
+    //
+    // THIS LIST MUST NOT GROW. It switches no-restricted-syntax OFF wholesale
+    // for a file, so adding a primitive here would silently void every OTHER
+    // ban (.range(), lazy, route literals) inside it. A new ban exempts its
+    // own implementing primitive with a per-line `eslint-disable-next-line
+    // no-restricted-syntax` at the one site that needs it, never an entry here.
     files: [
       'src/lib/fetchAllRows.ts',
       'src/lib/lazyChunk.ts',
