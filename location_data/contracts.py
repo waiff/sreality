@@ -173,6 +173,24 @@ _DECLARED_QUALITY = frozenset({"portal_declared_quality"})
 _DOM_SURFACES = frozenset({"html_selector", "archived_html", "map_config"})
 _DOM_METHOD = frozenset({"html_selector_parse"})
 _MAP_METHOD = frozenset({"map_widget_parse"})
+# W2: the three surfaces the reader canon opened beside the DOM ones, each paired with
+# `archived_html` for the same reason `_DOM_SURFACES` is — that is what the archived lane
+# STAMPS on the claim (C9) while the entry keeps the `locator_kind` 02 §2.2 fixed for it,
+# so one entry id serves the live parse and the archived body.
+#   * embedded JSON: a JSON document carried inside the page (idnes' `data-maptiler-json`
+#     script, mmreality's `:property` attribute, maxima's `JSON.parse('…')` config). A
+#     portal calls the same document `map_config` when it is a map's, so both are admitted.
+#   * a fact a portal publishes only inside a LINK (`url_slug`).
+#   * schema.org JSON-LD (`jsonld`), where the geo chain is a breadcrumb.
+_EMBEDDED_JSON_SURFACES = frozenset({"embedded_json", "map_config", "archived_html"})
+_SLUG_SURFACES = _DOM_SURFACES | {"url_slug"}
+_JSONLD_SURFACES = frozenset({"jsonld", "archived_html"})
+# `regex_text` is EVIDENCE-BEARING (01 §4.2's `loc_claim_text_evidence`), so it is not
+# folded into `_DOM_METHOD`: an entry may not silently swap a method whose claims carry no
+# mandatory span for one whose claims do.
+_REGEX_METHOD = frozenset({"regex_text"})
+_SLUG_METHOD = frozenset({"url_slug_parse"})
+_BREADCRUMB_METHOD = frozenset({"breadcrumb_parse"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +288,82 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
         substrates=_DOM_SURFACES, methods=_DOM_METHOD | _MAP_METHOD,
         locator_keys=frozenset({"css", "attr", "position_branch"}),
         consults_guards=True),
+    # --- W2 reader canon, DOM family. Each one answers a DIFFERENT question about the same
+    # node, and every portal-specific fact (which element, which pattern, which label) stays
+    # contract data — that is the property that keeps these shared rather than nine forks.
+    #
+    # A subject header that NESTS chrome states its fact in its OWN text nodes; `html_text`'s
+    # deep read appends the chrome's label to the value (remax's `h2.pd-header__address`
+    # carries a `mapa` jump-link on 12/12 mined pages). Same substrates and method as
+    # `html_text`: a different READ of the same surface, not a new surface.
+    "html_own_text": ReaderContract(
+        substrates=_DOM_SURFACES, methods=_DOM_METHOD,
+        locator_keys=frozenset({"css"}),
+        consults_transforms=True),
+    # `group` is REQUIRED and never defaulted to "group 0" or "the only group": a pattern
+    # may carry several (bazos' slug carries the obec and the PSČ), and picking one by
+    # position would make the claim's meaning depend on the order the groups were written.
+    "html_regex": ReaderContract(
+        substrates=_DOM_SURFACES, methods=_REGEX_METHOD,
+        locator_keys=frozenset({"css", "pattern", "group"}),
+        consults_transforms=True),
+    # The same read over an ATTRIBUTE, and the reader that carries a fact published only in
+    # a link. It scans EVERY matching node and lets the PATTERN discriminate, because "the
+    # first node matching the selector" is the wrong node about as often as the right one
+    # when a cell holds two anchors.
+    "html_attr_regex": ReaderContract(
+        substrates=_SLUG_SURFACES, methods=_SLUG_METHOD | _REGEX_METHOD,
+        locator_keys=frozenset({"css", "attr", "pattern", "group"}),
+        consults_transforms=True),
+    # A presence detector: the claim's VALUE is the label the CONTRACT gives the marker and
+    # its EVIDENCE is the portal's own text or attribute. `consults_transforms` is FALSE
+    # deliberately — normalising a label the contract itself wrote is a no-op with a failure
+    # mode, since blur is decided by that label's membership of `precision_cap.blurred_labels`.
+    "html_marker": ReaderContract(
+        substrates=_DOM_SURFACES, methods=_DECLARED_QUALITY,
+        locator_keys=frozenset({"css", "value_label"})),
+    # --- W2 reader canon, embedded-JSON family: ONE acquisition layer (css + optional attr
+    # + optional decode + optional subject match) and five extractors over it. `css` is
+    # required on all of them, so a selector-less entry fails CI rather than matching nothing
+    # forever; `match` / `exclude_where` / `reject_points` are optional because the same
+    # reader serves a plain pointer read and a subject-scoped one, and the direction that can
+    # hurt (declaring a match on a reader that narrows nothing) is impossible here — every
+    # member of this family resolves its subject through the one shared selector.
+    "json_scalar": ReaderContract(
+        substrates=_EMBEDDED_JSON_SURFACES,
+        methods=_STRUCTURED | _MAP_METHOD | _DECLARED_QUALITY,
+        locator_keys=frozenset({"css", "json_pointer"}),
+        consults_transforms=True),
+    "json_regex": ReaderContract(
+        substrates=_EMBEDDED_JSON_SURFACES, methods=_REGEX_METHOD,
+        locator_keys=frozenset({"css", "json_pointer", "pattern", "group"}),
+        consults_transforms=True),
+    "json_bool": ReaderContract(
+        substrates=_EMBEDDED_JSON_SURFACES, methods=_DECLARED_QUALITY,
+        locator_keys=frozenset({"css", "json_pointer", "labels"})),
+    # `position_branch` is a required key for the same reason it is on `html_point_dms`: it
+    # decides the coordinate's licence class (C6) and the archived ladder refuses a read
+    # without one, so an entry omitting it must fail at projection time rather than per row.
+    "json_point": ReaderContract(
+        substrates=_EMBEDDED_JSON_SURFACES, methods=_STRUCTURED | _MAP_METHOD,
+        locator_keys=frozenset({"css", "position_branch"}),
+        consults_guards=True),
+    # The feature TYPE is the declared precision (Point -> a pin, LineString -> a segment,
+    # Circle -> a centre plus a declared radius), so ONE reader serves the coordinate entry
+    # and the uncertainty-geometry entry over the same feature; `position_branch` is checked
+    # in the coordinate arm rather than declared required here, because the shape entry has
+    # no position to license.
+    "json_geometry": ReaderContract(
+        substrates=_EMBEDDED_JSON_SURFACES, methods=_MAP_METHOD,
+        locator_keys=frozenset({"css", "then"}),
+        consults_guards=True),
+    # One level of a schema.org BreadcrumbList geo chain, anchored on a contract-declared
+    # kraj slug rather than an absolute position — the offset moves with the category path,
+    # so `positions: [5,6,7,8]` is wrong on any two-level category.
+    "json_breadcrumb": ReaderContract(
+        substrates=_JSONLD_SURFACES, methods=_BREADCRUMB_METHOD,
+        locator_keys=frozenset({"css", "type", "anchor_slugs", "level"}),
+        consults_transforms=True),
     "geom_column": ReaderContract(
         substrates=_LEGACY_SURFACE, methods=_LEGACY_METHOD,
         consults_guards=True, stamps_legacy_column="listings.geom"),
@@ -301,6 +395,12 @@ _GUARD_READERS = ", ".join(
 # name is exactly as inert as a misspelt one.
 IMPLEMENTED_TRANSFORMS = frozenset({
     "sentinel_drop", "psc_normalise", "split_cp_co", "strip_prefix",
+    # W2: selecting a typed part out of a whole address the page states in ONE string. They
+    # are transforms rather than readers because the READ is unchanged (`html_text` /
+    # `html_attr` over one node) and only the part this entry claims differs — one reader
+    # per admin level would be nine forks of the same act.
+    "address_part_street", "address_part_obec", "address_part_okres",
+    "address_part_house_number", "split_paren_okres", "comma_segment",
 })
 IMPLEMENTED_GUARDS = frozenset({"reject_outside_cz_bbox"})
 
