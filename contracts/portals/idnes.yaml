@@ -18,8 +18,54 @@
 # share a 5-dp pin [live-B §1.3]. Counter-example that forbids a naive rule: 50.12413,
 # 14.12853 carries 58 rows that are a LEGITIMATE development cluster.
 
+#
+# VERSION 2 (2026-09-05) — five W2 entries gained a reader; no entry was added, removed or
+# reordered, and none changed what it names (entries are immutable per contract_version; a
+# change is a bump, 02 §2.1.8). This is the W2-9 activation: `id.det.subject_feature`,
+# `id.det.subject_address`, `id.det.info_text`, `id.det.zoom` and
+# `id.det.no_exact_disclaimer` now name readers `location_data.claims_remine_archive`
+# implements, so the archived detail body becomes first-party readable. Three locators are
+# RESTATED in the executable form those readers address — the prose `match: "properties.id
+# == <native_id>"` becomes `match: {json_pointer: /properties/id, equals_row_field:
+# source_id_native}`, the wildcard `then: /geojson/features/*/properties/address` becomes
+# the same id match plus `json_pointer: /properties/address` inside the chosen feature, and
+# the coordinate entry gains `position_branch: portal_pin` (C6). A locator no reader can
+# execute is a declaration; W2 is where it becomes an extraction.
+#
+# Measured cause: 6,314 of a 20,423-row window carry `null` coordinate provenance and are
+# class E under v1 — no coordinate claim at all — while the page they were scraped from
+# carries a typed {coordinates, address} pair keyed by the listing id [live-B §1.4.1].
+# 16,833 active rows sit outside the CZ bbox with obec/okres/region/ku_id all NULL
+# [db-cov §4.2]; `reject_outside_cz_bbox` is genuinely evaluated on the recovered pin
+# (`json_point` calls `guard_admits`), so foreign inventory yields no claim rather than a
+# foreign pin.
+#
+# `locator.reject_points` is this portal's junk-pin calibration set, named one pin at a
+# time and never inferred from pin-sharing: 119 active rows sit on 49.19186,16.61109 and
+# 113 on 49.19752,16.65812 (Brno centre, street NULL, coords.source='page'), and 71 rows on
+# 49.81150,15.61824 — the CZ geographic centroid — span 56 municipalities [live-B §1.3].
+# 50.12413,14.12853 carries 58 rows and is deliberately ABSENT from the list: it is a
+# legitimate development cluster, which is why "many listings share this pin" is a corpus
+# statistic and not a reject rule.
+#
+# `id.det.locality_line` stays inert on purpose. `.b-detail__info` is 'Street, City -
+# Quarter[, okres X]' and its claim_type is `street_name`; `html_text` takes the node's
+# WHOLE text, so activating it would claim an address line as a street on every idnes
+# listing — the defect class the remax h1 tail-parse already demonstrated. The same text is
+# captured correctly typed by `id.det.subject_address`. `id.det.polygon` and
+# `id.det.neighbours` also stay inert: no Polygon feature appears in any archived idnes page
+# held here, so a shape reader would be written against a guess, and 20 neighbour features
+# per page across the idnes archive is a corpus-sized storage decision with no ruling behind
+# it.
+#
+# Ships SHADOWED (`shadow: true`, outside the governed hash). W2-13 puts a dispatcher on
+# `location_data.claims_remine_archive`, and `shadow` is HEADER-grain, so this portal's
+# already-live W1 claims freeze until the frozen sample passes and an operator runs
+# `python -m location_data.contracts --unshadow idnes@2` (06 §6.4.0(2)).
+
 portal: idnes
-contract_version: 1
+contract_version: 2
+shadow: true
 extractor_runtime: ">=1.0"
 identity_ladder: [portal_precise_coord, text_geocode]
 
@@ -145,8 +191,15 @@ extractions:
     locator_kind: embedded_json
     extraction_method: map_widget_parse
     page_kind: detail
-    locator: {css: "script[type='application/json'][data-maptiler-json]",
-              then: "/geojson/features", match: "properties.id == <native_id>"}
+    locator:
+      reader: json_point
+      css: "script[type='application/json'][data-maptiler-json]"
+      then: "/geojson/features"
+      match: {json_pointer: "/properties/id", equals_row_field: source_id_native}
+      exclude_where: {json_pointer: "/properties/isSimilar", equals: true}
+      feature: "/geometry"
+      position_branch: portal_pin
+      reject_points: ["49.19186,16.61109", "49.19752,16.65812", "49.81150,15.61824"]
     claim_type: coordinate
     licence_class: portal
     blur_evidence: none
@@ -155,19 +208,38 @@ extractions:
     subject_scope: {kind: id_match, on_miss: fail}
     guards: [reject_outside_cz_bbox]
     required: when_present
-    notes: "A typed {coordinates,address} pair keyed by the listing id [live-B §1.2]. The
-      first-party recovery for every class-E idnes coordinate."
+    notes: >
+      A typed {coordinates,address} pair keyed by the listing id [live-B §1.2]. The
+      first-party recovery for every class-E idnes coordinate. Selection is EQUALITY on
+      source_id_native — never features[0] and never mtMapOptions.center, which is the map
+      VIEW centre and is what the live regex parser reads. `exclude_where` honours the
+      exclusion zone `then: /geojson/features[isSimilar=true]`, which is a predicate no
+      RFC 6901 pop can execute, so `html_scope` defers it to this reader. `feature` names
+      the geometry inside the chosen object: RFC 7946 fixes [lon, lat], so the axis order
+      is the FORMAT here and is never taken as contract data.
 
   - id: id.det.subject_address
     locator_kind: embedded_json
     extraction_method: map_widget_parse
     page_kind: detail
-    locator: {css: "script[data-maptiler-json]", then: "/geojson/features/*/properties/address"}
+    locator:
+      reader: json_scalar
+      css: "script[data-maptiler-json]"
+      then: "/geojson/features"
+      match: {json_pointer: "/properties/id", equals_row_field: source_id_native}
+      exclude_where: {json_pointer: "/properties/isSimilar", equals: true}
+      json_pointer: "/properties/address"
     claim_type: address_line_verbatim
     licence_class: portal
     blur_evidence: none
     subject_scope: {kind: id_match, on_miss: fail}
     required: when_present
+    notes: >
+      The subject feature's OWN address string, typed as a verbatim line and never split
+      here — the granularity axis it carries (street present vs town-only) is the
+      resolver's reading (03), not the extractor's. v1's positional wildcard
+      `/geojson/features/*/properties/address` would have read all 21 features; the id
+      match reads one.
 
   - id: id.det.polygon
     locator_kind: embedded_json
@@ -184,7 +256,11 @@ extractions:
     locator_kind: html_selector
     extraction_method: portal_declared_quality
     page_kind: detail
-    locator: {css: "body", contains: "Nemovitost nemá přesnou adresu, nachází se ve vyznačené oblasti."}
+    locator:
+      reader: html_marker
+      css: "body"
+      contains: "Nemovitost nemá přesnou adresu, nachází se ve vyznačené oblasti."
+      value_label: no_exact_address
     claim_type: precision_declaration
     blur_evidence: declared
     licence_class: portal
@@ -192,29 +268,47 @@ extractions:
                     blurred_labels: ["no_exact_address"]}
     required: when_present
     notes: "Verbatim on 5/12 pages INCLUDING all 3 controls, while 'the resolver currently
-      writes street+h.n. on top of it' [mine-syn §4.0 #9]."
+      writes street+h.n. on top of it' [mine-syn §4.0 #9]. The claim's VALUE is this
+      contract's canonical label and its EVIDENCE is the portal's own sentence, so a
+      reworded disclaimer stops matching instead of restating a different fact under the
+      same label. Scoped to `body` on purpose: the sentence is page chrome about the
+      SUBJECT, it reaches the page twice (the visible paragraph and the map config's
+      infoText), and the neighbour/broker/nav blocks are already stripped before this
+      reader sees the document. `html_marker` is presence-only — the absent branch is a
+      different entry, not a false value on this one."
 
   - id: id.det.info_text
     locator_kind: embedded_json
     extraction_method: portal_declared_quality
     page_kind: detail
-    locator: {css: "script[data-maptiler-json]", then: /infoText}
+    locator: {reader: json_scalar, css: "script[data-maptiler-json]",
+              json_pointer: /infoText}
     claim_type: precision_declaration
     licence_class: portal
     blur_evidence: none
     required: best_effort
+    notes: "The machine-readable twin of the disclaimer, stored VERBATIM: idnes writes two
+      different sentences here ('Na mapě zobrazujeme jen nemovitosti s přesnou adresou.'
+      and the no-exact-address one), and mapping a sentence onto a label is calibration
+      that belongs on `id.det.no_exact_disclaimer`, which owns the blurred-label set.
+      `json_scalar` stamps no `declared_precision_label` for exactly that reason."
 
   - id: id.det.zoom
     locator_kind: embedded_json
     extraction_method: map_widget_parse
     page_kind: detail
-    locator: {css: "script[data-maptiler-json]", then: /mtMapOptions/zoom}
+    locator: {reader: json_scalar, css: "script[data-maptiler-json]",
+              json_pointer: /mtMapOptions/zoom, value_kind: num}
     claim_type: map_zoom
     licence_class: portal
     blur_evidence: none
     required: best_effort
     notes: "16 on both exact-address samples, but the zoom↔precision correlation could NOT
-      be falsified within budget — it caps nothing until OQ3 closes [live-B §1.4.2]."
+      be falsified within budget — it caps nothing until OQ3 closes [live-B §1.4.2]. Now
+      RECORDED so OQ3 can be answered from stored claims instead of a fresh crawl:
+      `resolver.position.read_declared_precision` reaches no `map_zoom` branch, so this
+      changes no position today. `value_kind: num` because a zoom is a number and the
+      correlation will be computed off `value_num`, not off a re-parsed string."
 
   - id: id.det.locality_line
     locator_kind: html_selector
