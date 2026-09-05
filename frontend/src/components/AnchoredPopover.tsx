@@ -138,18 +138,33 @@ export default function AnchoredPopover({
    * the panel itself) and back to the anchor on unmount — the APG disclosure
    * contract. Mount-only on purpose: re-running on prop change is the
    * focus-theft bug. */
+  /* Restore on unmount: capture the anchor at mount, hand focus back on close. */
   useEffect(() => {
-    const panel = panelRef.current;
     const anchor = anchorRef.current;
-    const first = panel?.querySelector<HTMLElement>(
-      'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),select,textarea,[tabindex]:not([tabindex="-1"])',
-    );
-    (first ?? panel)?.focus({ preventScroll: true });
     return () => {
       anchor?.focus({ preventScroll: true });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only by contract
   }, []);
+
+  /* Focus IN, keyed on `pos`, not on mount. The panel renders
+   * `visibility: hidden` until place() has measured it, and place() runs in a
+   * LAYOUT effect: React flushes the first commit's passive effects BEFORE
+   * processing that layout-effect state update, so a mount-only focus ran
+   * while the panel was still hidden — a no-op in Chromium (which refuses to
+   * focus a hidden element) and invisible in jsdom (which does not enforce
+   * visibility; the unit test passed while production did not). Once-only via
+   * the ref: repositioning on scroll/resize must not re-steal focus. */
+  const focusedIn = useRef(false);
+  useEffect(() => {
+    if (!pos || focusedIn.current) return;
+    focusedIn.current = true;
+    const panel = panelRef.current;
+    const first = panel?.querySelector<HTMLElement>(
+      'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),select,textarea,[tabindex]:not([tabindex="-1"])',
+    );
+    (first ?? panel)?.focus({ preventScroll: true });
+  }, [pos]);
 
   return createPortal(
     <div
