@@ -46,6 +46,7 @@ import sys
 from typing import Any
 
 from scraper import db
+from scraper.portal_factory import canonical_category_count
 
 LOG = logging.getLogger("coverage_gate")
 
@@ -96,6 +97,35 @@ select covered, candidates
  order by evaluated_at desc
  limit %(limit)s
 """
+
+
+def _declared_categories(source: str, categories: list[dict[str, Any]]) -> int:
+    """The gate's denominator: how many canonical categories this portal's config
+    maps to.
+
+    It is NOT len(categories), and getting that wrong parks a portal forever.
+    ceskereality declares both `rodinne-domy` and `chaty-chalupy` and both
+    canonicalise to `dum`, so its 12 config entries can only ever write 10
+    slice-ledger rows — a gate demanding 12 could never be satisfied, and it was
+    not: ceskereality sat at "8/12 categories" every cycle for a week with no
+    path out.
+
+    Falls back to the raw count when the mapping cannot be resolved, which is the
+    STRICT direction: the raw count is always >= the canonical count, so a
+    fallback keeps the flag DOWN and can never open a gate by accident.
+    """
+    resolved = canonical_category_count(source, categories)
+    if resolved is None:
+        LOG.warning(
+            "GATE %s: could not resolve canonical categories; using the raw "
+            "config count (%d) — strict, so this can only hold the gate shut",
+            source, len(categories),
+        )
+        return len(categories)
+    if resolved != len(categories):
+        LOG.info("GATE %s: %d config entries map to %d canonical categories",
+                 source, len(categories), resolved)
+    return resolved
 
 
 def _parked_sources(conn: Any, only: str | None) -> list[tuple[str, list[dict[str, Any]]]]:
@@ -251,7 +281,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     for source, categories in parked:
-        row = evaluate(conn, source, len(categories), dry_run=args.dry_run)
+        row = evaluate(conn, source, _declared_categories(source, categories),
+                       dry_run=args.dry_run)
         LOG.info(
             "GATE source=%s verdict=%s covered=%s categories=%d/%d slices=%d/%d "
             "candidates=%d streak=%d — %s",
