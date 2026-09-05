@@ -552,6 +552,15 @@ a same-commit pair, an outer remount, a portalled companion. `role="dialog"`
 banned outside the primitive; the ten unmigrated modals carry per-line
 exemptions naming W6b.
 
+**Two follow-ups the W6a live check found (merged, #1302 / #1303).** The
+anchored popover took focus on mount while still `visibility: hidden` (React
+flushes the first commit's passive effects before a layout-effect setState;
+Chromium refuses to focus a hidden element, jsdom does not care) — focus-in is
+now keyed on the panel's position. And Tab past a one-control popover's edge
+tabbed straight out to the portal's neighbour at the end of `<body>` — it now
+closes the panel and continues from the trigger (APG disclosure). Both were
+invisible to jsdom and caught only by the real-browser pass.
+
 **Remaining waves, in the review's order, W2–W6a done:** W2 composite widgets
 name their internals (63 controls with no name from any source); W3 focus is
 visible (65 `focus:outline-none`, 33 with a 1.18:1 replacement — a deletion
