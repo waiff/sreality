@@ -1,0 +1,15 @@
+{
+  "model": "facebook/dinov3-vitb16-pretrain-lvd1689m",
+  "revision": null,
+  "library": "transformers",
+  "pooling": "cls",
+  "resolution": null,
+  "preprocessing": null,
+  "dtype": null,
+  "_status": "PROVISIONAL — model is locked per the operator's 2026-09-05 ruling; revision/resolution/preprocessing/dtype are gated on the bake-off (docs/design/new-dedup/ENCODER-DECISION.md §5) and the operator's DINOv3 licence acceptance. Do not fill these in without both. The loader refuses to run while any of the six facts is null — this is intentional, not a bug to fix.",
+  "_identity_note": "These six facts ARE the vector's identity (ENCODER-DECISION §4.1): model, revision, library, pooling, resolution, preprocessing, dtype. Any of them changing means a NEW POPULATION, not a new value — which is why every one of them is a column in image_dinov3_embeddings' primary key. This file is the single source of truth for all six; nothing else in the tree may hardcode a second copy.",
+  "_revision_note": "The HF commit sha of the checkpoint. The model NAME is a moving pointer: facebook/dinov3-vitb16-pretrain-lvd1689m resolves to whatever `main` holds the day it downloads, and a silent re-upload would change every vector written from then on while the `model` column stayed identical. Deliberately left null — it is not known at authoring time, and inventing a plausible-looking sha would be worse than refusing to run.",
+  "_preprocessing_values": "One of square_squash | resize_center_crop | letterbox_pad — all three are implemented in scraper/dinov3_tagger.py so the code is ready the moment the bake-off picks one. ENCODER-DECISION §3.2 flags letterbox_pad as the likely winner for near-duplicate work: centre-cropping discards the left/right edges where portal watermarks live.",
+  "_dtype_values": "One of bf16 | fp32. fp16 is OUT (documented NaN risk, ENCODER-DECISION §3.2) and the loader raises rather than silently falling back.",
+  "_pooling_values": "cls only, today. For library=transformers this is outputs.pooler_output — the POST-LayerNorm CLS token, NOT last_hidden_state[:, 0] (the pre-LN raw CLS). ENCODER-DECISION §6: getting this wrong silently produces a different, incomparable population."
+}

@@ -121,7 +121,18 @@ class RunPodClient:
         container_disk_gb: int = 10,
         volume_gb: int = 1,
         cloud_type: str = "COMMUNITY",
+        env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        """`env` becomes the pod process's environment. A real batch job needs
+        credentials inside the pod (SUPABASE_DB_URL, R2_*, HF_TOKEN) and there is no
+        other channel: a start_cmd is argv, visible in the pod record, so secrets do
+        not belong there.
+
+        Shape: the REST API (rest.runpod.io/v1, what this client uses for pod CRUD)
+        takes `env` as a JSON OBJECT — `{"KEY": "value"}` — not the `[{key, value}]`
+        list the older GraphQL API used. Omitted entirely when empty so an env-less
+        launch sends the exact body it always did. Never logged: values are secrets.
+        """
         body = {
             "name": name,
             "imageName": image,
@@ -134,6 +145,8 @@ class RunPodClient:
             "dockerStartCmd": start_cmd,
             "interruptible": False,
         }
+        if env:
+            body["env"] = {str(k): str(v) for k, v in env.items()}
         resp = self._session.post(f"{REST_BASE}/pods", json=body, timeout=30)
         if resp.status_code >= 400:
             if _is_no_capacity(resp.text):
@@ -221,11 +234,13 @@ class RunPodClient:
         poll_interval_s: float = 10.0,
         container_disk_gb: int = 10,
         volume_gb: int = 1,
+        env: dict[str, str] | None = None,
     ) -> JobResult:
         """Launch → wait → collect logs → ALWAYS terminate, even if a step above
         raises. This is the one entry point every wave's RunPod usage should go
         through, so the teardown guarantee is enforced once, not re-implemented
-        per caller."""
+        per caller. `env` is passed to the pod's process environment (see
+        `launch_pod`) and is never logged."""
         t0 = time.monotonic()
         pod = self.launch_pod(
             name=name,
@@ -234,6 +249,7 @@ class RunPodClient:
             start_cmd=start_cmd,
             container_disk_gb=container_disk_gb,
             volume_gb=volume_gb,
+            env=env,
         )
         pod_id = pod["id"]
         cost_per_hr = pod.get("costPerHr")
@@ -267,6 +283,7 @@ class RunPodClient:
         poll_interval_s: float = 10.0,
         container_disk_gb: int = 10,
         volume_gb: int = 1,
+        env: dict[str, str] | None = None,
     ) -> JobResult:
         """Try each GPU type in order (cheapest first, per `eligible_gpus`) until
         one actually has capacity. Only `NoCapacityError` moves on to the next
@@ -287,6 +304,7 @@ class RunPodClient:
                     poll_interval_s=poll_interval_s,
                     container_disk_gb=container_disk_gb,
                     volume_gb=volume_gb,
+                    env=env,
                 )
             except NoCapacityError as exc:
                 LOG.warning("no capacity for %s, trying next option: %s", gpu.id, exc)

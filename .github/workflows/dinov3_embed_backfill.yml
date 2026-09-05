@@ -1,0 +1,152 @@
+name: "NEW DEDUP: DINOv3 corpus embedding (RunPod)"
+
+# Embeds stored images with DINOv3 ViT-B/16 on a rented GPU pod, writing one 768-d
+# halfvec per image into image_dinov3_embeddings under the six-fact encoder identity
+# (model, revision, library, pooling, resolution, preprocessing, dtype). Manual
+# dispatch only — this is not a steady-state lane, and it is INERT until the bake-off
+# fills in data/dinov3_config.json: the loader refuses to run while any of the six
+# facts is null.
+#
+# THIS LANE WRITES TO A DISK THAT CANNOT SHRINK. A full corpus pass is ~18 GB into a
+# live production database. Supabase gp3 disk auto-expands at 90% of allocated disk and
+# the project goes READ-ONLY at 95% with the quota exhausted — which takes down the
+# scrapers, the API's writes, the SPA and the pipeline, not just this job. That is why
+# `max_write_mb_per_hour` is REQUIRED with no default: read the Supabase dashboard's
+# live disk-utilisation figure FIRST, then pick a rate against today's headroom. See
+# docs/design/new-dedup/ENCODER-DECISION.md §5.0 and §5.5.
+#
+# Two habits, both cheap: run it with dry_run first (it prints the resolved identity,
+# the pending count and the pod plan, and launches nothing), and run a small limit once
+# before a large one.
+#
+# Resume is free and needs no state: the target table IS the checkpoint (pending = a
+# stored image with no row under this exact config), so a pod dying mid-pass costs
+# minutes. Completion is NOT read from the pod — on-demand Pods never flip
+# desiredStatus, so run_job always times out and tears the pod down in its `finally`.
+# Progress is a SQL question: count(rows for this config) / count(stored images).
+#
+# Requires migration 480 (PR #1296) to have been applied — the table does not exist
+# otherwise.
+#
+# Required secrets: RUNPOD_API_KEY, SUPABASE_DB_URL, HF_TOKEN, R2_*.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_write_mb_per_hour:
+        description: "REQUIRED. Vector-write ceiling in MB/hour. No safe default exists — read the Supabase dashboard's live disk utilisation first; 90% auto-expands the disk, 95% with no quota left puts the WHOLE project in read-only."
+        required: true
+        type: string
+      limit:
+        description: "Max images this pass."
+        required: false
+        default: "20000"
+        type: string
+      shard:
+        description: "Shard index (image_id % shards == shard)."
+        required: false
+        default: "0"
+        type: string
+      shards:
+        description: "Shard count. 1 = no sharding."
+        required: false
+        default: "1"
+        type: string
+      workers:
+        description: "Parallel R2 downloads inside the pod (JPEG decode is CPU-side)."
+        required: false
+        default: "16"
+        type: string
+      job_max_seconds:
+        description: "The payload's own time budget. The pod's wait window is this plus a 900s startup grace, so teardown lands after a clean stop, never mid-batch."
+        required: false
+        default: "3600"
+        type: string
+      dry_run:
+        description: "Print the resolved identity, the pending count and the pod plan. Launches nothing, writes nothing, spends nothing."
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+concurrency:
+  group: dinov3-embed-backfill
+  cancel-in-progress: false
+
+jobs:
+  embed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # The runner only dispatches — torch and the model live in the pod, so the
+      # `clip` extra is deliberately NOT installed here. psycopg/boto3/Pillow are
+      # base deps, which is all the dispatcher and the readout need.
+      - name: Install
+        run: pip install -e .
+
+      - name: Dispatch DINOv3 embedding pass
+        env:
+          MAX_WRITE_MB_PER_HOUR: ${{ inputs.max_write_mb_per_hour }}
+          LIMIT: ${{ inputs.limit }}
+          SHARD: ${{ inputs.shard }}
+          SHARDS: ${{ inputs.shards }}
+          WORKERS: ${{ inputs.workers }}
+          JOB_MAX_SECONDS: ${{ inputs.job_max_seconds }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        # Inputs travel via env and are case-validated before use, never interpolated
+        # into the shell by ${{ }}.
+        run: |
+          set -euo pipefail
+          case "${MAX_WRITE_MB_PER_HOUR}" in
+            ''|*[!0-9.]*) echo "::error::max_write_mb_per_hour must be a number — and it must be chosen against the Supabase dashboard's live disk utilisation"; exit 1 ;;
+          esac
+          case "${LIMIT:-20000}" in
+            ''|*[!0-9]*) echo "::error::limit must be a number"; exit 1 ;;
+          esac
+          case "${SHARD:-0}" in
+            ''|*[!0-9]*) echo "::error::shard must be a number"; exit 1 ;;
+          esac
+          case "${SHARDS:-1}" in
+            ''|*[!0-9]*) echo "::error::shards must be a number"; exit 1 ;;
+          esac
+          case "${WORKERS:-16}" in
+            ''|*[!0-9]*) echo "::error::workers must be a number"; exit 1 ;;
+          esac
+          case "${JOB_MAX_SECONDS:-3600}" in
+            ''|*[!0-9]*) echo "::error::job_max_seconds must be a number"; exit 1 ;;
+          esac
+          ARGS="--max-write-mb-per-hour ${MAX_WRITE_MB_PER_HOUR} --limit ${LIMIT:-20000}"
+          ARGS="${ARGS} --shard ${SHARD:-0} --shards ${SHARDS:-1} --workers ${WORKERS:-16}"
+          ARGS="${ARGS} --job-max-seconds ${JOB_MAX_SECONDS:-3600}"
+          if [ "${DRY_RUN:-true}" = "true" ]; then ARGS="${ARGS} --dry-run"; fi
+          echo "python -m scripts.dinov3_embed_dispatch ${ARGS}"
+          python -m scripts.dinov3_embed_dispatch ${ARGS}
+
+      # The dispatcher never touches the database; this is the operator-facing progress
+      # readout, and it is the same SQL anyone can run at any time to answer "how far
+      # along is it?" — the target table is the only progress record this lane keeps.
+      # Advisory: while data/dinov3_config.json is still provisional it raises the
+      # refuse-to-run rail, and while migration 480 is unapplied the table is absent —
+      # both are expected states for this lane and neither should fail the run. (The
+      # ceiling is a required flag; a dry run writes nothing, so the value is inert.)
+      - name: Pending readout (advisory)
+        if: always()
+        continue-on-error: true
+        run: python -m scripts.dinov3_embed_backfill --max-write-mb-per-hour 1 --dry-run
