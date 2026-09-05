@@ -190,6 +190,10 @@ def test_the_near_tag_draw_is_bounded_and_refuses_a_thin_centroid() -> None:
     assert "TABLESAMPLE SYSTEM (%(pct)s)" in sql
     assert "c.seeds >= %(min_seeds)s::int" in sql
     assert "ORDER BY e.embedding <=> c.vec" in sql
+    # Rank FIRST, filter after: applying the rails to every sampled vector is
+    # what timed this query out live. The pool bounds what they run on.
+    assert "LIMIT %(pool)s" in sql
+    assert sql.index("LIMIT %(pool)s") < sql.index("tag_exam_members m")
 
 
 def test_the_bias_of_the_targeted_draw_is_written_down() -> None:
@@ -248,3 +252,36 @@ def test_the_lane_validates_from_drafts_as_digits_only() -> None:
     assert "from_drafts" in lane[True]["workflow_dispatch"]["inputs"]
     run = next(s for s in lane["jobs"]["label"]["steps"] if s.get("name") == "Label")["run"]
     assert "*[!0-9]*) echo \"::error::from_drafts must be a tag id\"" in run
+
+
+def test_the_near_tag_draw_raises_the_timeout_for_its_own_scan_and_restores_it() -> None:
+    # A deliberate analytical scan over millions of vectors, on an AUTOCOMMIT
+    # connection — so SET LOCAL would apply to nothing and the session setting
+    # has to be put back.
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "toolkit" / "machine_labeling.py").read_text()
+    fn = src.split("def near_tag_candidates(")[1].split("\ndef ")[0]
+    assert "SET statement_timeout = %s" in fn
+    assert "finally:" in fn
+    assert "SET statement_timeout = DEFAULT" in fn
+
+
+def test_no_statement_carries_a_bare_percent_sign() -> None:
+    # A literal % in executed SQL — prose in a comment counts — is read by
+    # psycopg as the start of a placeholder, and Postgres then raises a syntax
+    # error. It has bitten this repo before; the SQL gate catches it a CI round
+    # trip later, this catches it instantly.
+    import re
+
+    from toolkit import machine_labeling as ml
+
+    for name in dir(ml):
+        if not name.endswith("_SQL"):
+            continue
+        sql = getattr(ml, name)
+        if not isinstance(sql, str):
+            continue
+        bare = re.findall(r"%(?!\()", sql)
+        assert not bare, f"{name} carries {len(bare)} bare percent sign(s)"

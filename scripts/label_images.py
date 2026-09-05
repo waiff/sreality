@@ -188,7 +188,7 @@ def main() -> int:
         elif args.near_tag:
             rows = ml.near_tag_candidates(
                 conn, seed_tag_id=args.near_tag, tag_ids=tag_ids,
-                limit=max(1, args.count), pct=args.sample_pct or 5.0)
+                limit=max(1, args.count), pct=args.sample_pct or 1.0)
             LOG.info("LABEL near-tag=%d (%s) drew=%d",
                      args.near_tag, labels.get(args.near_tag, "?"), len(rows))
             if not rows:
