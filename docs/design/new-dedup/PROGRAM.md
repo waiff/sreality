@@ -140,6 +140,21 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-05 (d) — **The cutoff: a head's training set is a QUERY, not a list (migration 474).**
+  The operator's objection: reviewing 1,149 fasáda positives is exactly the manual work the
+  programme exists to remove. Answer: each head has a TARGET (`tag_taxonomy.training_target`,
+  NULL = 300 — the per-class count past which a logistic probe on frozen CLIP features shows
+  little further gain), and its set is defined as the ranked positives up to that target: the
+  operator's own first (confirmed), then the machine's oldest-first in a total order. Past the
+  target is the RESERVE. Because it is a query, removing a wrong positive pulls the first
+  reserve image in with no bookkeeping, and confirming one (writing it as a human label) keeps
+  it in. The review is therefore bounded: "To review" on `/new-dedup/training-set` = in-set
+  positives still on the machine's word alone (fasáda: 282 of 1,149). **The trainer reads the
+  same list** — `training_set_positive_ids` is the second sanctioned door beside
+  `tag_holdout.training_label_rows` (which reads human labels ONLY, so the 10,544 machine labels
+  would otherwise train nothing) — so what was reviewed and what is trained on cannot diverge.
+  Every read tolerates 474 not being applied (default target for all heads).
+
 - 2026-09-05 (c) — **Training-set review surface + the operator's reasons (migration 473).**
   10,544 machine labels existed with no way to look at them; `/new-dedup/training-set` reads
   them head by head (server-side filters by verdict and by who decided; paging with a unique
