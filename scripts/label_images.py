@@ -93,6 +93,11 @@ def main() -> int:
                          "sample — the hook for a targeted draw.")
     ap.add_argument("--sample-pct", type=float, default=1.0,
                     help="Block-sample percentage for the random/near-tag draw.")
+    ap.add_argument("--from-drafts", type=int, dest="from_drafts",
+                    help="Draw images the operator once DRAFTED as positive for this "
+                         "head. Their own earlier guesses, so the hit-rate is far "
+                         "above random; the model still judges each one against the "
+                         "definition, and its verdict is what gets written.")
     ap.add_argument("--near-tag", type=int,
                     help="Draw images that look like this head's known positives "
                          "(CLIP centroid over a sampled slice) instead of at random. "
@@ -132,19 +137,37 @@ def main() -> int:
 
         if args.status:
             counts = ml.labelled_counts(conn, tag_ids=tag_ids)
-            LOG.info("%-38s %9s %9s %9s", "head", "positive", "negative", "left out")
+            drafts = ml.draft_pool_counts(conn, tag_ids=tag_ids)
+            LOG.info("%-38s %9s %9s %9s %9s",
+                     "head", "positive", "negative", "left out", "drafts")
             for tag_id in tag_ids:
                 c = counts.get(tag_id, {})
-                LOG.info("%-38s %9d %9d %9d", labels.get(tag_id, str(tag_id))[:38],
-                         c.get("positive", 0), c.get("negative", 0), c.get("excluded", 0))
+                LOG.info("%-38s %9d %9d %9d %9d", labels.get(tag_id, str(tag_id))[:38],
+                         c.get("positive", 0), c.get("negative", 0),
+                         c.get("excluded", 0), drafts.get(tag_id, 0))
+            LOG.info("drafts = images the operator once drafted as positive for that "
+                     "head and that are still eligible — the pool --from-drafts draws from")
             return 0
 
+        if args.from_drafts and args.near_tag:
+            LOG.error("LABEL --from-drafts and --near-tag are different draws; pick one")
+            return 1
+        if args.from_drafts and args.from_drafts not in tag_ids:
+            LOG.error("LABEL --from-drafts %d must be one of the heads being labeled",
+                      args.from_drafts)
+            return 1
         if args.near_tag and args.near_tag not in tag_ids:
             LOG.error("LABEL --near-tag %d must be one of the heads being labeled",
                       args.near_tag)
             return 1
 
-        if args.near_tag:
+        if args.from_drafts:
+            rows = ml.draft_candidates(
+                conn, seed_tag_id=args.from_drafts, tag_ids=tag_ids,
+                limit=max(1, args.count))
+            LOG.info("LABEL from-drafts=%d (%s) drew=%d",
+                     args.from_drafts, labels.get(args.from_drafts, "?"), len(rows))
+        elif args.near_tag:
             rows = ml.near_tag_candidates(
                 conn, seed_tag_id=args.near_tag, tag_ids=tag_ids,
                 limit=max(1, args.count), pct=args.sample_pct or 5.0)

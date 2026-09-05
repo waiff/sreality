@@ -255,3 +255,70 @@ def near_tag_candidates(
             "model": model or td.embedding_model(),
         })
         return [(int(r[0]), r[1]) for r in cur.fetchall()]
+
+
+# --- mining the operator's own drafts ---------------------------------------
+#
+# When the slate was cleared, 1,522 pre-guideline labels were demoted to
+# `human_draft`: never winning an upsert, read by no truth path. gold_v1 seated
+# only twenty per head from them, so most remain unused — and they are the
+# operator's OWN guesses at exactly these categories, which makes them a far
+# better candidate pool than random images for a head a random draw cannot
+# reach (measured: domovní vchod appeared 4 times in 1,200 random images).
+#
+# A draft is a guess, NOT an answer: the model still judges the image against
+# the definition, and its verdict is what gets written. The label store already
+# permits a machine write over a `human_draft` cell (it refuses only over
+# `human`/`human_confirmed`), so the draft is replaced by a judged label rather
+# than sitting alongside it.
+#
+# Exam members are excluded as everywhere else, which also means the drafts
+# already seated into gold_v1 are skipped: those are the operator's to answer.
+_FROM_DRAFTS_SQL = f"""
+    SELECT i.id, i.storage_path
+    FROM image_tag_labels dl
+    JOIN images i ON i.id = dl.image_id
+    WHERE dl.tag_id = %(seed_tag_id)s::bigint
+      AND dl.state = 'positive'
+      AND dl.source = 'human_draft'
+      AND {_ELIGIBLE}
+    ORDER BY random()
+    LIMIT %(limit)s
+"""
+
+# Per-head size of that pool, so the operator sees what a run would draw from
+# BEFORE any of it is spent.
+_DRAFT_POOL_SQL = f"""
+    SELECT dl.tag_id, count(*)::bigint
+    FROM image_tag_labels dl
+    JOIN images i ON i.id = dl.image_id
+    WHERE dl.tag_id = ANY(%(tag_ids)s::bigint[])
+      AND dl.state = 'positive'
+      AND dl.source = 'human_draft'
+      AND {_ELIGIBLE}
+    GROUP BY dl.tag_id
+"""
+
+
+def draft_candidates(
+    conn: psycopg.Connection, *, seed_tag_id: int, tag_ids: list[int], limit: int,
+) -> list[tuple[int, str]]:
+    """Eligible images the operator once drafted as positive for this head."""
+    with conn.cursor() as cur:
+        cur.execute(_FROM_DRAFTS_SQL, {
+            "seed_tag_id": int(seed_tag_id), "tag_ids": list(tag_ids),
+            "limit": int(limit)})
+        return [(int(r[0]), r[1]) for r in cur.fetchall()]
+
+
+def draft_pool_counts(
+    conn: psycopg.Connection, *, tag_ids: list[int],
+) -> dict[int, int]:
+    """{tag_id: unseated draft positives still eligible}. Reported by --status
+    so a run's yield can be predicted instead of discovered."""
+    out = {int(t): 0 for t in tag_ids}
+    with conn.cursor() as cur:
+        cur.execute(_DRAFT_POOL_SQL, {"tag_ids": list(tag_ids)})
+        for tag_id, count in cur.fetchall():
+            out[int(tag_id)] = int(count)
+    return out
