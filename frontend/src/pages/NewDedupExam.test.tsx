@@ -434,3 +434,21 @@ describe('<NewDedupExam> set bar', () => {
       .toHaveAttribute('aria-current', 'page');
   });
 });
+
+describe('<NewDedupExam> the family is part of the tag', () => {
+  it('shows the family inline at full size, so the entrance pair reads differently', async () => {
+    vi.mocked(api.getExamState).mockResolvedValue({ data: examState({
+      tags: [
+        { id: 2, label: 'exterier - domovní vchod' },
+        { id: 19, label: 'interier - domovní vchod / chodba' },
+      ],
+    }) });
+    renderPage();
+    const ext = await screen.findByRole('button', { name: 'exterier - domovní vchod' });
+    const int = screen.getByRole('button', { name: 'interier - domovní vchod / chodba' });
+    expect(ext.textContent).toMatch(/exterier – domovní vchod/);
+    expect(int.textContent).toMatch(/interier – domovní vchod/);
+    // Nothing demoted to a tiny eyebrow.
+    expect(ext.querySelector('.text-\\[0\\.6rem\\]')).toBeNull();
+  });
+});

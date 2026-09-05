@@ -11,7 +11,6 @@ import {
   type TrainingSetRow,
 } from '@/lib/api';
 import { imageSrc, type ImageRef } from '@/lib/imageUrl';
-import { splitTagLabel } from '@/lib/tagLabel';
 import Spinner from '@/components/Spinner';
 import ErrorBanner from '@/components/ErrorBanner';
 import ImageSizeToggle from '@/components/ImageSizeToggle';
@@ -43,8 +42,8 @@ type SourceFilter = 'all' | 'machine' | 'human';
 type Membership = 'review' | 'set' | 'reserve' | 'all';
 
 const MEMBERSHIPS: ReadonlyArray<{ key: Membership; label: string; title: string }> = [
-  { key: 'review', label: 'To review', title: 'In the set, still on the machine\u2019s word alone \u2014 the bounded job' },
-  { key: 'set', label: 'In set', title: 'What a probe trains on: your positives first, then the machine\u2019s oldest-first, up to the target' },
+  { key: 'review', label: 'To review', title: 'In the set, still on the machine’s word alone — the bounded job' },
+  { key: 'set', label: 'In set', title: 'What a probe trains on: your positives first, then the machine’s oldest-first, up to the target' },
   { key: 'reserve', label: 'Reserve', title: 'Past the target. Steps into the set automatically when a set positive is removed' },
   { key: 'all', label: 'Everything', title: 'No cutoff' },
 ];
@@ -201,12 +200,20 @@ export default function NewDedupTrainingSet() {
         data-state={r.state}
         className={`rounded-[var(--radius-sm)] border p-1.5 flex flex-col gap-1.5 ${VERDICT_STYLE[r.state as Verdict] ?? ''}`}
       >
-        <a href={imageSrc(ref)} target="_blank" rel="noreferrer">
+        <a
+          href={imageSrc(ref)}
+          target="_blank"
+          rel="noreferrer"
+          title="Open the full-size photo in a new tab"
+          className={`block bg-[var(--color-paper-2)] rounded-[var(--radius-xs)] ${large ? 'h-56' : 'h-28'}`}
+        >
+          {/* The WHOLE photo, letterboxed on a quiet ground — a review of what
+            * a photo is OF cannot be done on a crop that hides the edges. */}
           <img
             src={imageSrc(ref)}
             alt={`Training image ${r.image_id}`}
             loading="lazy"
-            className={`w-full object-cover rounded-[var(--radius-xs)] ${large ? 'h-56' : 'h-28'}`}
+            className="w-full h-full object-contain rounded-[var(--radius-xs)]"
           />
         </a>
         <div className="flex items-center gap-1 text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)]">
@@ -245,13 +252,13 @@ export default function NewDedupTrainingSet() {
                 : v === 'negative' ? 'Does not apply' : 'Leave out'}
               disabled={correctMut.isPending}
               onClick={() => correctMut.mutate({ imageId: r.image_id, state: v, from: r.state })}
-              className={`flex-1 py-0.5 text-[0.7rem] rounded-[var(--radius-xs)] border transition-colors ${
+              className={`flex-1 py-0.5 text-[0.65rem] whitespace-nowrap rounded-[var(--radius-xs)] border transition-colors ${
                 r.state === v
                   ? 'border-[var(--color-ink-2)] text-[var(--color-ink)]'
                   : 'border-[var(--color-rule)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]'
               }`}
             >
-              {v === 'positive' ? '✓' : v === 'negative' ? '✕' : '–'}
+              {v === 'positive' ? '✓ applies' : v === 'negative' ? '✕ no' : '– left out'}
             </button>
           ))}
         </div>
@@ -321,7 +328,7 @@ export default function NewDedupTrainingSet() {
           >
             {ordered.map((h) => (
               <option key={h.id} value={h.id}>
-                {splitTagLabel(h.label).name} · {h.positive}
+                {h.label} · {h.positive}
               </option>
             ))}
           </select>
@@ -421,7 +428,7 @@ export default function NewDedupTrainingSet() {
                 defaultValue={activeHead.target}
                 inputMode="numeric"
                 className="w-16 px-1.5 py-0.5 text-xs rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-transparent text-[var(--color-ink)]"
-                title="How many positives make up this head\u2019s set. Empty = the default. Changing it moves a boundary; nothing is copied."
+                title="How many positives make up this head’s set. Empty = the default. Changing it moves a boundary; nothing is copied."
               />
               <button
                 type="submit"
@@ -432,12 +439,63 @@ export default function NewDedupTrainingSet() {
               </button>
             </form>
             <span className="text-[var(--color-ink-4)]">
-              set = your positives, then the machine\u2019s oldest-first, up to the target; the
+              set = your positives, then the machine’s oldest-first, up to the target; the
               reserve refills it when you remove one
             </span>
           </div>
         )}
       </header>
+
+      <details className="mt-3 rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-3 py-2 text-xs text-[var(--color-ink-2)]">
+        <summary className="cursor-pointer select-none text-[var(--color-ink)]">
+          How to use this page
+        </summary>
+        <div className="mt-2 grid gap-3 md:grid-cols-2">
+          <div>
+            <p className="font-medium text-[var(--color-ink)]">What you are looking at</p>
+            <p className="mt-0.5">
+              The model read your definitions and labeled thousands of photos. Each head (a tag such as
+              <i> kuchyně</i>) has its own training set. You do not need to check all of it, only the
+              part inside the cutoff, and only the photos the machine decided alone.
+            </p>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">The cutoff chips</p>
+            <ul className="mt-0.5 list-disc pl-4 space-y-0.5">
+              <li><b>To review</b> — photos in the set that only the machine has judged. This is your job; the number is how many remain.</li>
+              <li><b>In set</b> — everything a classifier will train on: your positives first, then the machine’s oldest-first, up to the target.</li>
+              <li><b>Reserve</b> — positives past the target. When you remove one from the set, the first reserve photo steps in automatically.</li>
+              <li><b>Everything</b> — no cutoff; use the verdict and “decided by” filters freely.</li>
+            </ul>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">Target</p>
+            <p className="mt-0.5">
+              How many positives make up a head’s set (default 300, about where a classifier stops
+              improving). Change the number and press <b>set</b>; clear it to return to the default.
+              Nothing is copied or relabeled, only the boundary moves.
+            </p>
+          </div>
+          <div>
+            <p className="font-medium text-[var(--color-ink)]">Each photo</p>
+            <ul className="mt-0.5 list-disc pl-4 space-y-0.5">
+              <li>Click the photo to open it full-size in a new tab.</li>
+              <li><b>machine</b> / <b>yours</b> says who decided the current mark. <b>in set</b> / <b>reserve</b> says which side of the cutoff it is on.</li>
+              <li><b>old wording</b> means the label was written under a definition you have since changed. Not necessarily wrong, worth a look.</li>
+              <li><b>✓ applies</b> — the photo is of this head. On a machine tile, pressing the already-pressed ✓ <i>confirms</i> it as your own label.</li>
+              <li><b>✕ no</b> — the head does not apply. The photo leaves the set and the reserve refills it.</li>
+              <li><b>– left out</b> — the subject is there but the photo is of something else. Trains nothing, grades nothing.</li>
+            </ul>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">Why? field</p>
+            <p className="mt-0.5">
+              After you change a mark, a small field appears. A short reason (“entrance door, facade is
+              just the backdrop”) is enough. Notes are gathered per head and distilled into one general
+              rule in the definition, never one line per note, so keep them short.
+            </p>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">Verdict and “decided by”</p>
+            <p className="mt-0.5">
+              <b>Applies / Does not / Left out / All</b> filter by the current mark. <b>Anyone / Machine / Yours</b>
+              filter by who made it. Both are ignored under <b>To review</b>, which is always machine positives in the set.
+            </p>
+          </div>
+        </div>
+      </details>
 
       {rowsQ.isLoading ? (
         <div className="py-10 flex justify-center"><Spinner /></div>

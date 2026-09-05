@@ -254,3 +254,39 @@ describe('<NewDedupTrainingSet> the cutoff', () => {
       .toHaveAttribute('title', 'Applies');
   });
 });
+
+describe('<NewDedupTrainingSet> the family is part of the tag', () => {
+  it('names heads in full in the picker', async () => {
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByRole('option', { name: /exterier - domovní vchod · 173/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /exterier - fasáda · 1131/ })).toBeInTheDocument();
+  });
+});
+
+describe('<NewDedupTrainingSet> reading the page', () => {
+  it('shows the whole photo, never a crop, and opens it full-size', async () => {
+    renderPage();
+    const tile = await screen.findByTestId('training-tile-11');
+    const img = within(tile).getByRole('img');
+    expect(img.className).toContain('object-contain');
+    expect(img.className).not.toContain('object-cover');
+    expect(img.closest('a')).toHaveAttribute('target', '_blank');
+  });
+
+  it('labels the tile buttons in words, and explains the page on demand', async () => {
+    renderPage();
+    const tile = await screen.findByTestId('training-tile-11');
+    expect(within(tile).getByRole('button', { name: /^positive 11$/ })).toHaveTextContent('applies');
+    expect(within(tile).getByRole('button', { name: /^negative 11$/ })).toHaveTextContent('no');
+    expect(within(tile).getByRole('button', { name: /^excluded 11$/ })).toHaveTextContent('left out');
+    expect(screen.getByText('How to use this page')).toBeInTheDocument();
+    expect(screen.getByText(/the first reserve photo steps in automatically/)).toBeInTheDocument();
+  });
+
+  it('renders typographic characters, not their escape codes', async () => {
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(document.body.textContent).not.toMatch(/\\u20/);
+  });
+});
