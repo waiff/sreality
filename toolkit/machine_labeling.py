@@ -225,36 +225,59 @@ _NEAR_TAG_SQL = f"""
       WHERE itl.tag_id = %(seed_tag_id)s::bigint
         AND itl.state = 'positive'
         {exclusion_for("itl")}
+    ),
+    -- Rank FIRST, filter after. The eligibility rails cost a NOT EXISTS and a
+    -- per-tag definition join EACH, so applying them to every sampled vector
+    -- is what timed this query out live at 5% of 9.4M rows. Ranking narrows the
+    -- set to `pool` rows and the rails then run on those alone.
+    ranked AS (
+      SELECT e.image_id, (e.embedding <=> c.vec) AS dist
+      FROM image_clip_embeddings e TABLESAMPLE SYSTEM (%(pct)s)
+      CROSS JOIN centroid c
+      WHERE e.model = %(model)s::text
+        AND c.seeds >= %(min_seeds)s::int
+      ORDER BY e.embedding <=> c.vec
+      LIMIT %(pool)s
     )
     SELECT i.id, i.storage_path
-    FROM image_clip_embeddings e TABLESAMPLE SYSTEM (%(pct)s)
-    JOIN images i ON i.id = e.image_id
-    CROSS JOIN centroid c
-    WHERE e.model = %(model)s::text
-      AND c.seeds >= %(min_seeds)s::int
-      AND {_ELIGIBLE}
-    ORDER BY e.embedding <=> c.vec
+    FROM ranked r
+    JOIN images i ON i.id = r.image_id
+    WHERE {_ELIGIBLE}
+    ORDER BY r.dist
     LIMIT %(limit)s
 """
 
 
 def near_tag_candidates(
     conn: psycopg.Connection, *, seed_tag_id: int, tag_ids: list[int], limit: int,
-    pct: float = 5.0, min_seeds: int = 8, model: str | None = None,
+    pct: float = 1.0, min_seeds: int = 8, pool_multiple: int = 12,
+    model: str | None = None, timeout_ms: int = 180_000,
 ) -> list[tuple[int, str]]:
     """Eligible images closest to one head's labeled positives, drawn from a
     sampled slice. Returns [] rather than raising when the head has too few
     embedded positives to have a meaningful centroid — a draw seeded on three
-    images would concentrate the budget on three images' worth of the corpus."""
+    images would concentrate the budget on three images' worth of the corpus.
+
+    The statement timeout is raised for this ONE query: it is a deliberate
+    analytical scan over millions of vectors, and the connection's default
+    exists to stop a runaway transactional query, which this is not. The
+    connection is autocommit, so SET LOCAL would apply to nothing — hence a
+    session SET, restored afterwards."""
     from toolkit import tag_definitions as td
 
     with conn.cursor() as cur:
-        cur.execute(_NEAR_TAG_SQL, {
-            "seed_tag_id": int(seed_tag_id), "tag_ids": list(tag_ids),
-            "limit": int(limit), "pct": float(pct), "min_seeds": int(min_seeds),
-            "model": model or td.embedding_model(),
-        })
-        return [(int(r[0]), r[1]) for r in cur.fetchall()]
+        cur.execute("SET statement_timeout = %s", (int(timeout_ms),))
+        try:
+            cur.execute(_NEAR_TAG_SQL, {
+                "seed_tag_id": int(seed_tag_id), "tag_ids": list(tag_ids),
+                "limit": int(limit), "pct": float(pct),
+                "pool": int(limit) * max(2, int(pool_multiple)),
+                "min_seeds": int(min_seeds),
+                "model": model or td.embedding_model(),
+            })
+            return [(int(r[0]), r[1]) for r in cur.fetchall()]
+        finally:
+            cur.execute("SET statement_timeout = DEFAULT")
 
 
 # --- mining the operator's own drafts ---------------------------------------
