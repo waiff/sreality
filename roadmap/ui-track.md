@@ -487,7 +487,23 @@ Save button inside its input's label). Rail mutation-proven: 8 tests fail if
 the group form becomes a `<label>` again. Visible change for review: five
 pages' captions converge on Section's typography.
 
-**Remaining waves, in the review's order, none started:** W2 composite widgets
+**W2 — every form control is named by the words the user sees (merged).**
+The review counted 63 nameless controls; eight area sweeps with adversarial
+recounts found **148**. Fixed per shape: 40 `Field as="control"` wraps, 39
+widget `label` props (LocationTypeahead was mounted six times and named at
+zero; SingleSelectDropdown's `placeholder` only ever rendered as the blank
+option's text), 33 `aria-labelledby` to existing captions, 14 icon-only
+buttons, 11 decorative spans un-polluting an ancestor (the unread dot made a
+notification row's *name* change when read), 9 `useId`s. Three year/month
+pickers collapsed into one that names both selects; two dead components
+deleted rather than named. Eight isolated worktrees produced the diffs, each
+adversarially reviewed; six review findings were acted on (a placeholder trim
+that broke a test, a state folded into a name, 2N caption rows per Outreach
+card, a layout change on the Brokers search box, stale hunks, a required prop
+with no caller). New lint rail: a nameless `input|textarea|select` outside a
+`<label>` / `Field as="control"` fails lint — 50 → 0. 15 test files added.
+
+**Remaining waves, in the review's order, W2 done:** W2 composite widgets
 name their internals (63 controls with no name from any source); W3 focus is
 visible (65 `focus:outline-none`, 33 with a 1.18:1 replacement — a deletion
 wave, plus the `--color-focus` token which is operator territory); W4 focus has

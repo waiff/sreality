@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react';
 
 import type { NewDedupTag } from '@/lib/api';
+import { Field } from '@/components/controls';
 import { TrashIcon } from '@/components/icons';
 import Spinner from '@/components/Spinner';
 
@@ -94,18 +95,20 @@ export default function TaxonomyManageModal({
           </button>
         </div>
 
-        <div className="mt-3 flex items-center gap-2">
-          <input
-            type="text"
-            autoFocus
-            value={newLabelText}
-            onChange={(e) => onNewLabelTextChange(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && newLabelText.trim()) onAdd();
-            }}
-            placeholder="new label, e.g. interier - kuchyne"
-            className="min-w-0 flex-1 px-2 py-1 text-sm font-mono rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)]"
-          />
+        <div className="mt-3 flex items-end gap-2">
+          <Field label="New label" as="control" className="min-w-0 flex-1">
+            <input
+              type="text"
+              autoFocus
+              value={newLabelText}
+              onChange={(e) => onNewLabelTextChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && newLabelText.trim()) onAdd();
+              }}
+              placeholder="new label, e.g. interier - kuchyne"
+              className="w-full px-2 py-1 text-sm font-mono rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)]"
+            />
+          </Field>
           <button
             type="button"
             onClick={onAdd}
@@ -171,6 +174,7 @@ function ManageRow({
             <input
               autoFocus
               type="text"
+              aria-label="New tag label"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {

@@ -317,6 +317,13 @@ describe('<Pipeline> board', () => {
     expect(screen.getByText('Polní, Ostrava')).toBeInTheDocument();
   });
 
+  it('names the stage-manager create field by its visible words', async () => {
+    renderBoard();
+    fireEvent.click(await screen.findByRole('button', { name: 'Spravovat fáze' }));
+    const create = await screen.findByRole('textbox', { name: 'Nová fáze' });
+    expect(create).toHaveAccessibleName('Nová fáze');
+  });
+
   it('trash → confirm removes the card via removePipelineCard', async () => {
     renderBoard();
     const trash = await screen.findByLabelText('Odebrat z pipeline');

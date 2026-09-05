@@ -16,13 +16,13 @@ describe('<PriceDelta>', () => {
 
   it('renders a flat mark, not nothing, when the price was observed and never moved', () => {
     render(<PriceDelta pct={0} changes={0} />);
-    expect(screen.getByLabelText(/nezměnila/)).toBeInTheDocument();
+    expect(screen.getByTitle(/nezměnila/)).toBeInTheDocument();
   });
 
   it('distinguishes "moved and came back" from "never moved"', () => {
     render(<PriceDelta pct={0} changes={2} />);
-    expect(screen.getByLabelText(/vrátila/)).toBeInTheDocument();
-    expect(screen.getByLabelText(/2 změny ceny/)).toBeInTheDocument();
+    expect(screen.getByTitle(/vrátila/)).toBeInTheDocument();
+    expect(screen.getByTitle(/2 změny ceny/)).toBeInTheDocument();
   });
 
   /* A cut is favourable in a buyer's pipeline — sage, not the stock-market red.
@@ -42,8 +42,25 @@ describe('<PriceDelta>', () => {
     expect(screen.queryByText(/-4,2/)).not.toBeInTheDocument();
   });
 
-  it('describes the change in the accessible label', () => {
-    render(<PriceDelta pct={-4.2} changes={1} />);
-    expect(screen.getByLabelText(/Pokles.*-4,2/)).toBeInTheDocument();
+  /* The sentence belongs to the pointer, not to the accessibility tree. The chip
+   * ships inside the Browse card <Link>, and an aria-label here would REPLACE
+   * the visible "4,2 %" in that link's name with a whole Czech sentence. */
+  it('describes the change in the title and carries no aria-label', () => {
+    const { container } = render(<PriceDelta pct={-4.2} changes={1} />);
+    const chip = container.querySelector('span')!;
+    expect(chip).toHaveAttribute('title', expect.stringMatching(/Pokles.*-4,2/));
+    expect(chip).not.toHaveAttribute('aria-label');
+  });
+
+  it('leaves an ancestor link named by the visible text', () => {
+    render(
+      <a href="#listing-900">
+        Byt 2+kk
+        <PriceDelta pct={-4.2} changes={1} />
+      </a>,
+    );
+    const link = screen.getByRole('link');
+    expect(link).toHaveAccessibleName(/^Byt 2\+kk/);
+    expect(link).not.toHaveAccessibleName(/Pokles/);
   });
 });

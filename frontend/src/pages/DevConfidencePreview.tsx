@@ -1,3 +1,4 @@
+import { useId } from 'react';
 import ConfidenceIndicator from '@/components/ConfidenceIndicator';
 import type { Confidence } from '@/lib/types';
 
@@ -87,10 +88,14 @@ export default function DevConfidencePreview() {
 }
 
 function FieldRow({ row }: { row: Row }) {
+  const inputId = useId();
   return (
     <div className="grid grid-cols-[160px_1fr] items-center gap-4">
       <div className="flex items-baseline justify-between gap-2">
-        <label className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+        <label
+          htmlFor={inputId}
+          className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]"
+        >
           {row.fieldName}
         </label>
         <ConfidenceIndicator
@@ -99,6 +104,7 @@ function FieldRow({ row }: { row: Row }) {
         />
       </div>
       <input
+        id={inputId}
         type="text"
         defaultValue={row.exampleValue}
         readOnly

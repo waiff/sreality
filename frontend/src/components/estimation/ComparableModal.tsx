@@ -190,6 +190,7 @@ function Carousel({ images, isActive }: { images: ImagePublic[]; isActive: boole
               <button
                 type="button"
                 onClick={() => setI(idx)}
+                aria-label={`Photo ${idx + 1}`}
                 className={[
                   'w-full aspect-[4/3] rounded-[var(--radius-xs)] overflow-hidden border bg-[var(--color-inset)] focus:outline-none',
                   idx === safe

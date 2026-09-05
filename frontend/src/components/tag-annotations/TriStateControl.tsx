@@ -128,6 +128,7 @@ export default function TriStateControl({
             <button
               key={s}
               type="button"
+              aria-label={meta.label}
               aria-pressed={active}
               disabled={disabled}
               onClick={() => onChange(s, s === 'excluded' ? 'ambiguous' : null)}
@@ -151,7 +152,7 @@ export default function TriStateControl({
                       : 'border-[var(--color-rule)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]',
               ].join(' ')}
             >
-              {meta.icon}
+              <span aria-hidden="true">{meta.icon}</span>
             </button>
           );
         })}

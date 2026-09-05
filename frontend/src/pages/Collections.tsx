@@ -13,6 +13,7 @@ import {
   listCollections,
 } from '@/lib/api';
 import { curationKeys } from '@/lib/queries';
+import { Field } from '@/components/controls';
 import { fmtCount, fmtRelative, fmtAbsolute } from '@/lib/format';
 import type { Collection } from '@/lib/types';
 
@@ -137,25 +138,29 @@ function NewCollectionForm({
       <p className="text-[0.65rem] tracking-[0.22em] uppercase text-[var(--color-ink-2)] font-medium">
         New collection
       </p>
-      <div className="mt-3 flex flex-col sm:flex-row gap-3">
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => {
-            setName(e.target.value);
-            setError(null);
-          }}
-          placeholder="Name (e.g. Shortlist)"
-          maxLength={200}
-          className="flex-1 min-w-0 px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
-        />
-        <input
-          type="text"
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          placeholder="Optional description"
-          className="flex-1 min-w-0 px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
-        />
+      <div className="mt-3 flex flex-col sm:flex-row sm:items-end gap-3">
+        <Field label="Name" as="control" className="flex-1 min-w-0">
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => {
+              setName(e.target.value);
+              setError(null);
+            }}
+            placeholder="e.g. Shortlist"
+            maxLength={200}
+            className="w-full px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+          />
+        </Field>
+        <Field label="Description" as="control" className="flex-1 min-w-0">
+          <input
+            type="text"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="optional"
+            className="w-full px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+          />
+        </Field>
         <button
           type="submit"
           disabled={disabled}

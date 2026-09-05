@@ -38,6 +38,7 @@ import { fmtCount, fmtPct, fmtPP } from '@/lib/format';
 import { PPM2_UNIT } from '@/lib/measure';
 import DatasetMap, { METRICS, type DatasetMetric } from '@/components/DatasetMap';
 import { Field } from '@/components/controls';
+import { YmPicker, YM_PARTS } from '@/components/YmPicker';
 import CityPicker from '@/components/CityPicker';
 import { buildHoverData } from '@/lib/growthChoropleth';
 import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
@@ -560,7 +561,7 @@ export default function Datasets() {
             <div className="mt-3 pt-3 border-t border-[var(--color-rule-soft)] flex items-start gap-2.5">
               <span className="mt-2 shrink-0 text-xs uppercase tracking-[0.14em] text-[var(--color-ink-3)]">Location</span>
               <div className="w-full sm:max-w-sm">
-                <LocationTypeahead value={districts} onChange={(n) => setDistricts(n ?? [])} />
+                <LocationTypeahead label="Location" value={districts} onChange={(n) => setDistricts(n ?? [])} />
                 {districts.length > 0 && !loc.active && (
                   <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)]">
                     Couldn’t resolve this location, so the filter isn’t applied. Datasets matches
@@ -633,28 +634,13 @@ function DatasetPicker({
   if (loading || datasets.length === 0) return null;
   return (
     <select value={value ?? ''} onChange={(e) => onChange(Number(e.target.value))}
+      aria-label="Dataset"
       className={`${SELECT_CLS} max-w-xs px-3 py-2`}>
       {datasets.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
     </select>
   );
 }
 
-const MONTHS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '0'));
-const YEARS = Array.from({ length: now.getFullYear() - FIRST_YEAR + 1 }, (_, i) => String(FIRST_YEAR + i));
-
-function YmPicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const [y, m] = value.split('-');
-  return (
-    <span className="inline-flex items-center gap-1">
-      <select value={y} onChange={(e) => onChange(`${e.target.value}-${m}`)} className={SELECT_CLS}>
-        {YEARS.map((yr) => <option key={yr} value={yr}>{yr}</option>)}
-      </select>
-      <select value={m} onChange={(e) => onChange(`${y}-${e.target.value}`)} className={SELECT_CLS}>
-        {MONTHS.map((mo) => <option key={mo} value={mo}>{mo}</option>)}
-      </select>
-    </span>
-  );
-}
 
 function WindowControl({
   from, to, onFrom, onTo,
@@ -664,9 +650,9 @@ function WindowControl({
   return (
     <div className="flex items-center gap-2 text-sm text-[var(--color-ink-2)]">
       <span className="text-xs uppercase tracking-[0.14em] text-[var(--color-ink-3)]">Window</span>
-      <YmPicker value={from} onChange={onFrom} />
+      <YmPicker label="Window from" parts={YM_PARTS.en} size="md" value={from} onChange={onFrom} />
       <span className="text-[var(--color-ink-3)]">→</span>
-      <YmPicker value={to} onChange={onTo} />
+      <YmPicker label="Window to" parts={YM_PARTS.en} size="md" value={to} onChange={onTo} />
     </div>
   );
 }
@@ -918,10 +904,10 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
           <input value={name} onChange={(e) => setName(e.target.value)}
             placeholder="Byty · novostavba · cihla · 60–120 m²" className={SELECT_CLS + ' w-full'} />
         </Field>
-        <Field label="Type" as="control"><SelectBox value={categoryMain} onChange={setCategoryMain} options={TYPE_OPTS} /></Field>
-        <Field label="Condition (stav)" as="control"><SelectBox value={condition} onChange={setCondition} options={COND_OPTS} /></Field>
-        <Field label="Construction (konstrukce)" as="control"><SelectBox value={construction} onChange={setConstruction} options={CONSTR_OPTS} /></Field>
-        <Field label="Ownership (vlastnictví)" as="control"><SelectBox value={ownership} onChange={setOwnership} options={OWN_OPTS} /></Field>
+        <Field label="Type" as="control"><SelectBox label="Type" value={categoryMain} onChange={setCategoryMain} options={TYPE_OPTS} /></Field>
+        <Field label="Condition (stav)" as="control"><SelectBox label="Condition (stav)" value={condition} onChange={setCondition} options={COND_OPTS} /></Field>
+        <Field label="Construction (konstrukce)" as="control"><SelectBox label="Construction (konstrukce)" value={construction} onChange={setConstruction} options={CONSTR_OPTS} /></Field>
+        <Field label="Ownership (vlastnictví)" as="control"><SelectBox label="Ownership (vlastnictví)" value={ownership} onChange={setOwnership} options={OWN_OPTS} /></Field>
         <Field label="Area from (m²)" as="control"><input type="number" min={0} value={areaFrom} onChange={(e) => setAreaFrom(e.target.value)} className={SELECT_CLS + ' w-full'} /></Field>
         <Field label="Area to (m²)" as="control"><input type="number" min={0} value={areaTo} onChange={(e) => setAreaTo(e.target.value)} className={SELECT_CLS + ' w-full'} /></Field>
         <Field label="Municipalities" as="control">
@@ -931,10 +917,10 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
           </button>
         </Field>
         <Field label="Scrape from">
-          <YmPicker value={startYm} onChange={setStartYm} />
+          <YmPicker label="Scrape from" parts={YM_PARTS.en} size="md" value={startYm} onChange={setStartYm} />
         </Field>
         <Field label="Scrape to">
-          <YmPicker value={endYm} onChange={setEndYm} />
+          <YmPicker label="Scrape to" parts={YM_PARTS.en} size="md" value={endYm} onChange={setEndYm} />
         </Field>
       </div>
       <div className="mt-3 flex items-center gap-2 text-xs text-[var(--color-ink-3)]">
@@ -1023,8 +1009,8 @@ function ExpandDatasetForm({
             {obecIds.length ? `${obecIds.length} selected` : 'All standard cities'}
           </button>
         </Field>
-        <Field label="Scrape from"><YmPicker value={startYm} onChange={setStartYm} /></Field>
-        <Field label="Scrape to"><YmPicker value={endYm} onChange={setEndYm} /></Field>
+        <Field label="Scrape from"><YmPicker label="Scrape from" parts={YM_PARTS.en} size="md" value={startYm} onChange={setStartYm} /></Field>
+        <Field label="Scrape to"><YmPicker label="Scrape to" parts={YM_PARTS.en} size="md" value={endYm} onChange={setEndYm} /></Field>
       </div>
       <div className="mt-3 flex items-center gap-2 text-xs text-[var(--color-ink-3)]">
         <span className="uppercase tracking-[0.14em]">Est. scrape time</span>
@@ -1055,9 +1041,13 @@ function ExpandDatasetForm({
   );
 }
 
-function SelectBox({ value, onChange, options }: { value: string; onChange: (v: string) => void; options: Array<[string, string]> }) {
+/* Every mount sits inside <Field as="control">, which names it through the
+ * <label> wrap; the explicit aria-label makes the name travel with the widget
+ * so a future mount outside a Field is still named (a lint selector cannot see
+ * across a component boundary). */
+function SelectBox({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: Array<[string, string]> }) {
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value)} className={SELECT_CLS + ' w-full'}>
+    <select aria-label={label} value={value} onChange={(e) => onChange(e.target.value)} className={SELECT_CLS + ' w-full'}>
       {options.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
     </select>
   );

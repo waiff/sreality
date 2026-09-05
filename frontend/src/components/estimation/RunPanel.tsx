@@ -13,7 +13,7 @@
  * remount would show the previous run's edits. (A background refetch of
  * the SAME run deliberately does not reset them — that would wipe the
  * operator's in-progress edits.) */
-import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { lazyChunk } from '@/lib/lazyChunk';
 import { Link, useLocation } from 'react-router-dom';
 import { ROUTES } from '@/lib/routes';
@@ -699,6 +699,7 @@ function YieldNumField({
       <div className="mt-1.5 flex items-stretch gap-2 min-w-0">
         <input
           type="text"
+          aria-label={label}
           inputMode="decimal"
           readOnly={readOnly}
           value={value == null ? '' : String(value)}
@@ -1740,6 +1741,7 @@ function NumField({
       <div className="mt-1.5 flex items-stretch gap-2 min-w-0">
         <input
           type="text"
+          aria-label={label}
           inputMode="decimal"
           value={value == null ? '' : String(value)}
           placeholder={placeholder}
@@ -1768,15 +1770,17 @@ function NumField({
 }
 
 function FieldLabel({
+  id,
   required,
   children,
 }: {
+  id?: string;
   required?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <p className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-      {children}
+      <span id={id}>{children}</span>
       {required && <span className="ml-1 text-[var(--color-ink-4)]">·</span>}
     </p>
   );
@@ -1943,6 +1947,8 @@ function FloatingFeedbackPanel({
   run: EstimationRun;
 }) {
   const qc = useQueryClient();
+  const noteLabelId = useId();
+  const promptLabelId = useId();
 
   const skillNameFromTrace = useMemo(
     () => pickSkillNameFromTrace(run.trace),
@@ -2069,10 +2075,11 @@ function FloatingFeedbackPanel({
           </p>
 
           <div>
-            <FieldLabel required>
+            <FieldLabel id={noteLabelId} required>
               What did the skill get wrong on this run?
             </FieldLabel>
             <textarea
+              aria-labelledby={noteLabelId}
               rows={4}
               value={text}
               onChange={(e) => setText(e.target.value)}
@@ -2137,7 +2144,7 @@ function FloatingFeedbackPanel({
       {/* Panel 2 — skill prompt editor -------------------------------- */}
       <section className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] shadow-[0_8px_24px_rgba(0,0,0,0.08)] overflow-hidden">
         <div className="px-4 py-3 border-b border-[var(--color-rule)] flex items-center justify-between gap-3">
-          <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+          <p id={promptLabelId} className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
             Skill prompt · {effectiveSkillName}
           </p>
           <span className="text-[0.65rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
@@ -2160,6 +2167,7 @@ function FloatingFeedbackPanel({
           ) : (
             <>
               <textarea
+                aria-labelledby={promptLabelId}
                 rows={12}
                 value={promptDraft ?? skillQ.data?.system_prompt ?? ''}
                 onChange={(e) => setPromptDraft(e.target.value)}

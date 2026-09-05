@@ -113,6 +113,7 @@ export default function CityIndexRulesPicker({ value, onChange }: Props) {
               className="flex-1 min-w-0 bg-[var(--color-paper-2)] border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-1.5 py-1 text-[0.75rem]"
               value={rule.index_name}
               onChange={(e) => setRule(i, { index_name: e.target.value })}
+              aria-label="City index"
             >
               {groups.map((g) => (
                 <optgroup key={g.label} label={g.label}>
@@ -149,6 +150,7 @@ export default function CityIndexRulesPicker({ value, onChange }: Props) {
                 const n = Number(e.target.value);
                 if (Number.isFinite(n)) setRule(i, { value: n });
               }}
+              aria-label="Threshold value"
             />
             <button
               type="button"

@@ -25,11 +25,15 @@ export interface LabelOption {
 }
 
 export default function LabelCombobox({
+  label,
   value,
   onChange,
   options,
   placeholder = 'label…',
 }: {
+  /* REQUIRED. Rendered once per review tile; N nameless fields is what makes
+   * a grid unnavigable. The placeholder stays a hint, not a substitute. */
+  label: string;
   value: string;
   onChange: (next: string) => void;
   options: ReadonlyArray<LabelOption>;
@@ -95,6 +99,7 @@ export default function LabelCombobox({
     <div ref={ref} className="relative">
       <input
         type="text"
+        aria-label={label}
         value={text}
         onChange={(e) => {
           setText(e.target.value);

@@ -193,6 +193,7 @@ function MessageCard({ m, onChanged }: { m: OutreachMessage; onChanged: () => vo
           value={subject}
           disabled={locked}
           onChange={(e) => setSubject(e.target.value)}
+          aria-label="Předmět"
           placeholder="Předmět"
           className="w-full text-sm font-medium border border-transparent hover:border-[var(--color-rule)] focus:border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-transparent px-2 py-1 text-[var(--color-ink)] focus:outline-none focus:ring-2 focus:ring-[var(--color-focus)] disabled:opacity-70"
         />
@@ -201,6 +202,7 @@ function MessageCard({ m, onChanged }: { m: OutreachMessage; onChanged: () => vo
           disabled={locked}
           onChange={(e) => setBody(e.target.value)}
           rows={7}
+          aria-label="Text zprávy"
           className="w-full text-sm leading-relaxed border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper-3)] px-3 py-2 text-[var(--color-ink)] focus:outline-none focus:ring-2 focus:ring-[var(--color-focus)] disabled:opacity-70 font-[family-name:var(--font-mono)]"
         />
       </div>

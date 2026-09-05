@@ -14,7 +14,7 @@
  *     *_public Supabase views via the anon key. Writes always go through the API.
  */
 
-import { useMemo, useRef, useState, useEffect } from 'react';
+import { useId, useMemo, useRef, useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { ROUTES } from '@/lib/routes';
 import {
@@ -389,6 +389,7 @@ function TagPicker({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Find or create…"
+            aria-label="Find or create a tag"
             autoFocus
             maxLength={50}
             className="w-full px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
@@ -515,6 +516,7 @@ function NotesRow({
   const qc = useQueryClient();
   const [body, setBody] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const notesLabelId = useId();
 
   const notesQ = useQuery({
     queryKey: curationKeys.propertyNotes(property_id),
@@ -543,7 +545,7 @@ function NotesRow({
     <details className="group" open={notes.length > 0}>
       <summary className="cursor-pointer list-none flex items-baseline justify-between gap-4">
         <SectionLabel>
-          <span>Notes</span>
+          <span id={notesLabelId}>Notes</span>
           <span className="ml-2 font-mono tabular-nums text-[var(--color-ink-4)] tracking-normal">
             ({notes.length})
           </span>
@@ -565,6 +567,7 @@ function NotesRow({
         className="mt-3"
       >
         <textarea
+          aria-labelledby={notesLabelId}
           value={body}
           onChange={(e) => setBody(e.target.value)}
           placeholder="Add a note…"
@@ -641,6 +644,7 @@ function NoteRow({
     return (
       <div className="border-l-2 border-[var(--color-copper)]/40 pl-3">
         <textarea
+          aria-label="Edit note"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           rows={2}

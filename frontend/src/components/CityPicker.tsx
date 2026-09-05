@@ -243,8 +243,13 @@ function Row({
     <div className="flex items-center gap-2 py-1 pr-2 rounded-[var(--radius-xs)] hover:bg-[var(--color-paper-2)]"
       style={{ paddingLeft: 8 + depth * 18 }}>
       {onExpand ? (
-        <button onClick={onExpand} className="w-4 text-[var(--color-ink-3)] hover:text-[var(--color-ink)] text-xs">
-          {expanded ? '▾' : '▸'}
+        <button
+          onClick={onExpand}
+          aria-label={label}
+          aria-expanded={!!expanded}
+          className="w-4 text-[var(--color-ink-3)] hover:text-[var(--color-ink)] text-xs"
+        >
+          <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
         </button>
       ) : <span className="w-4" />}
       <button onClick={disabled ? undefined : onToggle} disabled={disabled}

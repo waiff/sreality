@@ -5,7 +5,7 @@
  * manage pages, and this feed stay distinct; this is where "what changed about
  * things I care about" lives, and it drives the red nav unread badge. */
 
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   keepPreviousData,
@@ -225,6 +225,7 @@ function NotificationRow({ dispatch: d }: { dispatch: WatchdogDispatch }) {
 function StandardNotificationRow({ dispatch: d }: { dispatch: WatchdogDispatch }) {
   const qc = useQueryClient();
   const unread = d.seen_at == null;
+  const unreadId = useId();
   const meta = CHANGE_META[d.change_kind] ?? {
     label: d.change_kind,
     dot: 'var(--color-ink-3)',
@@ -248,16 +249,23 @@ function StandardNotificationRow({ dispatch: d }: { dispatch: WatchdogDispatch }
       onClick={() => {
         if (unread) markSeen.mutate();
       }}
+      aria-describedby={unread ? unreadId : undefined}
       className="flex items-start gap-3 py-3.5 group"
     >
-      {/* unread dot */}
+      {/* unread dot — decorative; the state is announced via the Link's
+          description, so marking the row seen never renames the link. */}
       <span className="mt-1.5 w-1.5 shrink-0">
         {unread && (
-          <span
-            className="block w-1.5 h-1.5 rounded-full"
-            style={{ background: 'var(--color-copper)' }}
-            aria-label="unread"
-          />
+          <>
+            <span
+              className="block w-1.5 h-1.5 rounded-full"
+              style={{ background: 'var(--color-copper)' }}
+              aria-hidden
+            />
+            <span id={unreadId} hidden>
+              unread
+            </span>
+          </>
         )}
       </span>
 
@@ -310,6 +318,7 @@ function StandardNotificationRow({ dispatch: d }: { dispatch: WatchdogDispatch }
 function SystemNotificationRow({ dispatch: d }: { dispatch: WatchdogDispatch }) {
   const qc = useQueryClient();
   const unread = d.seen_at == null;
+  const unreadId = useId();
 
   const markSeen = useMutation({
     mutationFn: () => markWatchdogDispatchSeen(d.id),
@@ -324,16 +333,23 @@ function SystemNotificationRow({ dispatch: d }: { dispatch: WatchdogDispatch }) 
       onClick={() => {
         if (unread) markSeen.mutate();
       }}
+      aria-describedby={unread ? unreadId : undefined}
       className="w-full text-left flex items-start gap-3 py-3.5"
     >
-      {/* unread dot — brick for a system alert */}
+      {/* unread dot — brick for a system alert; decorative, the state rides on
+          the button's description so pressing it never renames the button. */}
       <span className="mt-1.5 w-1.5 shrink-0">
         {unread && (
-          <span
-            className="block w-1.5 h-1.5 rounded-full"
-            style={{ background: 'var(--color-brick)' }}
-            aria-label="unread"
-          />
+          <>
+            <span
+              className="block w-1.5 h-1.5 rounded-full"
+              style={{ background: 'var(--color-brick)' }}
+              aria-hidden
+            />
+            <span id={unreadId} hidden>
+              unread
+            </span>
+          </>
         )}
       </span>
 

@@ -26,6 +26,8 @@ export function CollapsibleGroup({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const panelId = useId();
+  const activeHintId = useId();
+  const showActive = active && !open;
   return (
     <section className="border-t border-[var(--color-rule-strong)] first:border-t-0">
       <h3 className="m-0">
@@ -34,6 +36,7 @@ export function CollapsibleGroup({
           onClick={() => setOpen((o) => !o)}
           aria-expanded={open}
           aria-controls={panelId}
+          aria-describedby={showActive ? activeHintId : undefined}
           className="group flex w-full items-center gap-2.5 py-4 text-left"
         >
           <span
@@ -42,9 +45,9 @@ export function CollapsibleGroup({
           >
             {title}
           </span>
-          {active && !open && (
+          {showActive && (
             <span
-              aria-label="has active filters"
+              aria-hidden="true"
               className="h-1.5 w-1.5 rounded-full bg-[var(--color-copper)]"
             />
           )}
@@ -70,6 +73,14 @@ export function CollapsibleGroup({
           </svg>
         </button>
       </h3>
+      {/* The dot's meaning, kept OUT of the trigger: text inside the button
+        * joins its accessible name, and "Essentials has active filters" is a
+        * state, not a name. */}
+      {showActive && (
+        <span id={activeHintId} className="sr-only">
+          has active filters
+        </span>
+      )}
       {open && (
         <div id={panelId} className="pb-6 space-y-6">
           {children}

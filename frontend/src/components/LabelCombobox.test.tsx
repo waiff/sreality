@@ -24,14 +24,14 @@ const OPTIONS: LabelOption[] = [
 
 describe('<LabelCombobox>', () => {
   it('shows every option on focus even though the field is prefilled with one of them', () => {
-    render(<LabelCombobox value="hallway" onChange={vi.fn()} options={OPTIONS} />);
+    render(<LabelCombobox label="Tag" value="hallway" onChange={vi.fn()} options={OPTIONS} />);
     fireEvent.focus(screen.getByRole('textbox'));
     const items = screen.getAllByRole('option');
     expect(items).toHaveLength(3);
   });
 
   it('filters options by label as the operator types', () => {
-    render(<LabelCombobox value="hallway" onChange={vi.fn()} options={OPTIONS} />);
+    render(<LabelCombobox label="Tag" value="hallway" onChange={vi.fn()} options={OPTIONS} />);
     const input = screen.getByRole('textbox');
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: 'kuch' } });
@@ -44,7 +44,7 @@ describe('<LabelCombobox>', () => {
 
   it('commits the canonical value (not the label) when an option is picked', () => {
     const onChange = vi.fn();
-    render(<LabelCombobox value="hallway" onChange={onChange} options={OPTIONS} />);
+    render(<LabelCombobox label="Tag" value="hallway" onChange={onChange} options={OPTIONS} />);
     const input = screen.getByRole('textbox');
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: 'kuch' } });
@@ -54,7 +54,7 @@ describe('<LabelCombobox>', () => {
 
   it('offers Create for free text matching no existing option, and commits it raw on click', () => {
     const onChange = vi.fn();
-    render(<LabelCombobox value="hallway" onChange={onChange} options={OPTIONS} />);
+    render(<LabelCombobox label="Tag" value="hallway" onChange={onChange} options={OPTIONS} />);
     const input = screen.getByRole('textbox');
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: 'vestavěná skříň' } });
@@ -64,7 +64,7 @@ describe('<LabelCombobox>', () => {
   });
 
   it('does not offer Create when the typed text case-insensitively matches an option', () => {
-    render(<LabelCombobox value="hallway" onChange={vi.fn()} options={OPTIONS} />);
+    render(<LabelCombobox label="Tag" value="hallway" onChange={vi.fn()} options={OPTIONS} />);
     const input = screen.getByRole('textbox');
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: 'KUCHYNĚ' } });
@@ -73,7 +73,7 @@ describe('<LabelCombobox>', () => {
 
   it('commits typed free text on blur (e.g. clicking a sibling Train button)', () => {
     const onChange = vi.fn();
-    render(<LabelCombobox value="hallway" onChange={onChange} options={OPTIONS} />);
+    render(<LabelCombobox label="Tag" value="hallway" onChange={onChange} options={OPTIONS} />);
     const input = screen.getByRole('textbox');
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: 'nová místnost' } });
@@ -83,11 +83,28 @@ describe('<LabelCombobox>', () => {
 
   it('resolves typed text matching an option to that option on blur, not the raw text', () => {
     const onChange = vi.fn();
-    render(<LabelCombobox value="hallway" onChange={onChange} options={OPTIONS} />);
+    render(<LabelCombobox label="Tag" value="hallway" onChange={onChange} options={OPTIONS} />);
     const input = screen.getByRole('textbox');
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: 'koupelna' } });
     fireEvent.blur(input);
     expect(onChange).toHaveBeenCalledWith('bathroom');
+  });
+});
+
+/* Rendered once per review tile; a nameless field per tile is what makes the
+ * grid unnavigable. The placeholder stays a hint, not a substitute. */
+describe('<LabelCombobox> accessible name', () => {
+  it('is named by the caption it is handed, not by its placeholder', () => {
+    render(
+      <LabelCombobox
+        label="Tag for image 7"
+        value="hallway"
+        onChange={vi.fn()}
+        options={OPTIONS}
+        placeholder="tag…"
+      />,
+    );
+    expect(screen.getByRole('textbox', { name: 'Tag for image 7' })).toBeInTheDocument();
   });
 });

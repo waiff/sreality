@@ -578,7 +578,7 @@ function Card({
                   ? 'bg-[var(--color-copper)] border-[var(--color-copper)] text-white'
                   : 'bg-[var(--color-paper)]/90 border-[var(--color-rule)] text-transparent',
               ].join(' ')}
-              aria-label={selected ? 'Selected' : 'Not selected'}
+              aria-hidden="true"
             >
               <svg width="14" height="14" viewBox="0 0 12 12" fill="none" stroke="currentColor"
                 strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -698,6 +698,10 @@ function Card({
         ref={setWrapperEl}
         role="button"
         tabIndex={0}
+        /* The selection state lives on the toggle itself, not on a decorative
+           checkbox facsimile whose aria-label would become the first word of a
+           name otherwise built from the card's own copy. */
+        aria-pressed={selected}
         onClick={() => onToggleSelect(r.property_id)}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {

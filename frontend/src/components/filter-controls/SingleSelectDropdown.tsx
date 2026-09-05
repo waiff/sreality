@@ -8,11 +8,15 @@
 import type { EnumOptionLite } from './types';
 
 export function SingleSelectDropdown<T extends string | number>({
+  label,
   value,
   options,
   onChange,
   placeholder = 'any',
 }: {
+  /* REQUIRED. `placeholder` only renders as the blank option's text — an
+   * option's text is a VALUE, never the select's name. */
+  label: string;
   value: T | null;
   options: ReadonlyArray<EnumOptionLite<T>>;
   onChange: (v: T | null) => void;
@@ -20,6 +24,7 @@ export function SingleSelectDropdown<T extends string | number>({
 }) {
   return (
     <select
+      aria-label={label}
       value={value == null ? '' : String(value)}
       onChange={(e) => {
         const raw = e.target.value;

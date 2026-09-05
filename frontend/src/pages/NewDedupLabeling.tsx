@@ -1955,7 +1955,7 @@ function ProposalTile({
 
       <div className="px-2 pb-2 flex items-center gap-1.5">
         <div className="min-w-0 flex-1">
-          <LabelCombobox value={draft} onChange={onDraftChange} options={labelOptions} placeholder="tag…" />
+          <LabelCombobox label={`Tag for image ${proposal.image_id}`} value={draft} onChange={onDraftChange} options={labelOptions} placeholder="tag…" />
         </div>
         <BorderCaseButton imageId={proposal.image_id} store={borderCases} />
       </div>

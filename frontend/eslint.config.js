@@ -101,6 +101,32 @@ export default [
             'A <label> must not wrap buttons — it names only the first and makes the caption click it. Use <Field label=…> (components/controls.tsx), which renders role="group".',
         },
         {
+          // Three near-identical YmPicker copies existed (components/YmPicker,
+          // ListingMap's PsgYmPicker, pages/Datasets' page-local); all three
+          // shipped two selects with an accessible name of "". The primitive
+          // lives in components/YmPicker.tsx and is exempted there per line.
+          selector: "FunctionDeclaration[id.name=/YmPicker$/]",
+          message:
+            'Do not redefine YmPicker — import it from components/YmPicker.tsx. The shared one takes a required `label` and names both selects.',
+        },
+        {
+          // A form control with no accessible name of its own: no aria-label,
+          // no aria-labelledby, no id (for a <label htmlFor>), and not wrapped
+          // in a <label> or in <Field as="control">. A placeholder is a hint,
+          // not a name; a role="group" caption above it is ancestor context
+          // that never becomes the control's name. Probed against the four
+          // shapes before shipping: fires on a bare control and on one inside
+          // a GROUP Field, silent on the two sanctioned wraps.
+          //
+          // Cannot see across a component boundary — a <Switch> or a widget
+          // that renders its own <input> is invisible here; the widget's own
+          // required `label` prop and the role+name tests are the gate.
+          selector:
+            "JSXOpeningElement[name.name=/^(input|textarea|select)$/]:not(:has(JSXAttribute[name.name=/^(aria-label|aria-labelledby|id)$/])):not(JSXElement[openingElement.name.name='label'] JSXOpeningElement[name.name=/^(input|textarea|select)$/]:not(:has(JSXAttribute[name.name=/^(aria-label|aria-labelledby|id)$/]))):not(JSXElement[openingElement.name.name='Field']:has(JSXAttribute[name.name='as'][value.value='control']) JSXOpeningElement[name.name=/^(input|textarea|select)$/]:not(:has(JSXAttribute[name.name=/^(aria-label|aria-labelledby|id)$/])))",
+          message:
+            'This control has no accessible name. Wrap exactly one control in <Field label=… as="control">, or pass the visible caption as aria-label / aria-labelledby (never a placeholder).',
+        },
+        {
           // Six local `function Field` copies existed before the shared one;
           // a seventh must not appear. The primitive lives in controls.tsx and
           // is exempted there per line.

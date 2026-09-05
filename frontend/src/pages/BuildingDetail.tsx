@@ -10,7 +10,7 @@
  * step so B1 ships standalone.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ROUTES } from '@/lib/routes';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -558,6 +558,8 @@ function OperatorInputsSection({
   onUpdated: (next: BuildingRun) => void;
 }) {
   const editable = EDITABLE_STATUSES.includes(building.status);
+  const instrId = useId();
+  const ctxId = useId();
   const [instr, setInstr] = useState(building.special_instructions ?? '');
   const [ctx, setCtx] = useState(building.contextual_text ?? '');
   const [error, setError] = useState<string | null>(null);
@@ -599,14 +601,14 @@ function OperatorInputsSection({
       <div className="p-5 space-y-3">
         <div>
           <label
-            htmlFor={`building-${building.id}-instr`}
+            htmlFor={instrId}
             className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
           >
             Special instructions
           </label>
           {editable ? (
             <textarea
-              id={`building-${building.id}-instr`}
+              id={instrId}
               value={instr}
               onChange={(e) => setInstr(e.target.value)}
               disabled={mut.isPending}
@@ -625,14 +627,14 @@ function OperatorInputsSection({
         </div>
         <div>
           <label
-            htmlFor={`building-${building.id}-ctx`}
+            htmlFor={ctxId}
             className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
           >
             Property context
           </label>
           {editable ? (
             <textarea
-              id={`building-${building.id}-ctx`}
+              id={ctxId}
               value={ctx}
               onChange={(e) => setCtx(e.target.value)}
               disabled={mut.isPending}
@@ -687,6 +689,7 @@ function AttachmentsSection({
   onChanged: (next: BuildingRun) => void;
 }) {
   const editable = EDITABLE_STATUSES.includes(building.status);
+  const headingId = useId();
   const attachments = building.attachments ?? [];
   const [error, setError] = useState<string | null>(null);
   const qc = useQueryClient();
@@ -742,7 +745,7 @@ function AttachmentsSection({
   return (
     <section className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)]">
       <header className="px-5 py-3 border-b border-[var(--color-rule)] flex items-baseline justify-between gap-4">
-        <h2 className="text-[0.85rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+        <h2 id={headingId} className="text-[0.85rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
           Attachments
         </h2>
         <span className="text-[0.7rem] text-[var(--color-ink-3)]">
@@ -778,6 +781,7 @@ function AttachmentsSection({
             <input
               type="file"
               multiple
+              aria-labelledby={headingId}
               accept={ATTACHMENT_MIME.join(',')}
               disabled={uploadMut.isPending}
               onChange={(e) => {

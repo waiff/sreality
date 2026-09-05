@@ -114,24 +114,28 @@ export default function BuildingUnitEditor({ building, onConfirmed }: Props) {
                 </td>
                 <td className="px-3 py-2">
                   <TextCell
+                    label={`Label — ${r.unit_id}`}
                     value={r.label}
                     onChange={(v) => patch(i, { label: v })}
                   />
                 </td>
                 <td className="px-3 py-2">
                   <TextCell
+                    label={`Floor — ${r.unit_id}`}
                     value={r.floor}
                     onChange={(v) => patch(i, { floor: v })}
                   />
                 </td>
                 <td className="px-3 py-2 text-right">
                   <NumberCell
+                    label={`Area m² — ${r.unit_id}`}
                     value={r.area_m2}
                     onChange={(v) => patch(i, { area_m2: v })}
                   />
                 </td>
                 <td className="px-3 py-2">
                   <TextCell
+                    label={`Disposition — ${r.unit_id}`}
                     value={r.disposition}
                     onChange={(v) => patch(i, { disposition: v })}
                   />
@@ -143,6 +147,7 @@ export default function BuildingUnitEditor({ building, onConfirmed }: Props) {
                       patch(i, { condition: e.target.value || null })
                     }
                     className="w-full bg-transparent border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-2 py-1 text-[0.83rem]"
+                    aria-label={`Condition — ${r.unit_id}`}
                   >
                     {_CONDITION_OPTS.map((o) => (
                       <option key={o.value} value={o.value}>{o.label}</option>
@@ -165,6 +170,7 @@ export default function BuildingUnitEditor({ building, onConfirmed }: Props) {
                 </td>
                 <td className="px-3 py-2">
                   <TextCell
+                    label={`Notes — ${r.unit_id}`}
                     value={r.notes}
                     onChange={(v) => patch(i, { notes: v })}
                   />
@@ -222,14 +228,16 @@ export default function BuildingUnitEditor({ building, onConfirmed }: Props) {
 /* ---------- cell editors ---------- */
 
 function TextCell({
-  value, onChange,
+  label, value, onChange,
 }: {
+  label: string;
   value: string | null;
   onChange: (v: string | null) => void;
 }) {
   return (
     <input
       type="text"
+      aria-label={label}
       value={value ?? ''}
       onChange={(e) => onChange(e.target.value === '' ? null : e.target.value)}
       className="w-full bg-transparent border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-2 py-1 text-[0.83rem]"
@@ -238,14 +246,16 @@ function TextCell({
 }
 
 function NumberCell({
-  value, onChange,
+  label, value, onChange,
 }: {
+  label: string;
   value: number | null;
   onChange: (v: number | null) => void;
 }) {
   return (
     <input
       type="number"
+      aria-label={label}
       min={0}
       step="0.1"
       value={value ?? ''}

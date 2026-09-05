@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
@@ -76,5 +76,21 @@ describe('<Shell> error containment', () => {
     renderShellWith(<p>page content</p>);
     expect(screen.getByText('page content')).toBeInTheDocument();
     expect(screen.queryByText('This page hit an error')).toBeNull();
+  });
+});
+
+/* The unread badge sits INSIDE the Notifications link, so an aria-label on it
+ * replaces the link's own name. The nav item has to stay findable by the word
+ * the operator reads. */
+describe('<Shell> notifications badge', () => {
+  it('keeps the nav item named "Notifications" and adds the count to it', async () => {
+    vi.mocked(api.getNotificationUnreadCount).mockResolvedValue({
+      unread_count: 5,
+    } as unknown as Awaited<ReturnType<typeof api.getNotificationUnreadCount>>);
+    renderShellWith(<p>page content</p>);
+    const link = await screen.findByRole('link', { name: /^Notifications/ });
+    await waitFor(() =>
+      expect(link).toHaveAccessibleName('Notifications 5 unread notifications'),
+    );
   });
 });

@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useState } from 'react';
+import { Suspense, useEffect, useId, useState } from 'react';
 import { lazyChunk } from '@/lib/lazyChunk';
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom';
 import { ROUTES } from '@/lib/routes';
@@ -101,14 +101,17 @@ export default function WatchdogEdit() {
       >
         <Section title="Identity">
           <Row label="Name">
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. 2+kk Praha 2 under 25 000"
-              className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
-              required
-            />
+            {(labelId) => (
+              <input
+                type="text"
+                aria-labelledby={labelId}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. 2+kk Praha 2 under 25 000"
+                className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+                required
+              />
+            )}
           </Row>
           <Row label="Status">
             <Toggle
@@ -295,14 +298,20 @@ function Row({
   children,
 }: {
   label: string;
-  children: React.ReactNode;
+  /* A leaf control takes the render form so it can point aria-labelledby at
+   * the caption — the caption is a SIBLING span, so nothing names it otherwise. */
+  children: React.ReactNode | ((labelId: string) => React.ReactNode);
 }) {
+  const labelId = useId();
   return (
     <div className="grid grid-cols-[140px_1fr] items-start gap-3">
-      <span className="pt-1.5 text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
+      <span
+        id={labelId}
+        className="pt-1.5 text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]"
+      >
         {label}
       </span>
-      <div>{children}</div>
+      <div>{typeof children === 'function' ? children(labelId) : children}</div>
     </div>
   );
 }

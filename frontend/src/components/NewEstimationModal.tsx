@@ -31,6 +31,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useState,
   type ReactNode,
@@ -160,6 +161,8 @@ function NewEstimationModal({
   const [uploadStage, setUploadStage] = useState<
     { done: number; total: number } | null
   >(null);
+  const titleId = useId();
+  const urlId = useId();
   const navigate = useNavigate();
   const qc = useQueryClient();
 
@@ -309,7 +312,7 @@ function NewEstimationModal({
       className="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[16vh] pb-10 bg-[var(--color-ink)]/40 backdrop-blur-[2px]"
       role="dialog"
       aria-modal="true"
-      aria-labelledby="new-estimation-title"
+      aria-labelledby={titleId}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget && !pending) onClose();
       }}
@@ -321,7 +324,7 @@ function NewEstimationModal({
               New {kind === 'building' ? 'building' : 'estimation'}
             </p>
             <h2
-              id="new-estimation-title"
+              id={titleId}
               className="mt-1 text-[1.35rem] leading-tight"
               style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
             >
@@ -359,7 +362,7 @@ function NewEstimationModal({
 
           {!urlLocked && (
             <label
-              htmlFor="new-estimation-url"
+              htmlFor={urlId}
               className="mt-4 block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
             >
               Listing URL
@@ -373,7 +376,7 @@ function NewEstimationModal({
           >
             {!urlLocked && (
               <input
-                id="new-estimation-url"
+                id={urlId}
                 type="url"
                 inputMode="url"
                 autoFocus
@@ -452,6 +455,9 @@ function OperatorInputs({
   onAttachmentsPicked: (files: FileList | null) => void;
   onRemoveAttachment: (idx: number) => void;
 }) {
+  const instructionsId = useId();
+  const contextId = useId();
+  const attachmentsId = useId();
   return (
     <details
       className="mt-4 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)]"
@@ -473,13 +479,13 @@ function OperatorInputs({
       <div className="px-3 pb-3 pt-1 space-y-3">
         <div>
           <label
-            htmlFor="new-est-instructions"
+            htmlFor={instructionsId}
             className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
           >
             Special instructions
           </label>
           <textarea
-            id="new-est-instructions"
+            id={instructionsId}
             value={specialInstructions}
             onChange={(e) => setSpecialInstructions(e.target.value)}
             disabled={disabled}
@@ -494,13 +500,13 @@ function OperatorInputs({
         </div>
         <div>
           <label
-            htmlFor="new-est-context"
+            htmlFor={contextId}
             className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
           >
             Property context
           </label>
           <textarea
-            id="new-est-context"
+            id={contextId}
             value={contextualText}
             onChange={(e) => setContextualText(e.target.value)}
             disabled={disabled}
@@ -512,10 +518,14 @@ function OperatorInputs({
         </div>
         {allowAttachments && (
           <div>
-            <label className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+            <label
+              htmlFor={attachmentsId}
+              className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
+            >
               Attachments — floor plans, photos, drawings
             </label>
             <input
+              id={attachmentsId}
               type="file"
               multiple
               accept={ATTACHMENT_MIME.join(',')}

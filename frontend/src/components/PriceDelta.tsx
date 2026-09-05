@@ -102,8 +102,10 @@ export default function PriceDelta({
 
   return (
     <span
+      /* title only, never aria-label: this chip rides inside card links, and an
+         aria-label here would replace the visible "4,2 %" in the link's name
+         with a whole sentence. */
       title={label}
-      aria-label={label}
       className={[
         'inline-flex shrink-0 items-center gap-0.5 font-mono tabular-nums',
         'text-[0.68rem] leading-none',

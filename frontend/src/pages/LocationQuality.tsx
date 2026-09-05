@@ -11,8 +11,9 @@
  * it fails CVD + normal-vision floors). The full per-cluster detail is the
  * table below it. */
 
-import { useMemo, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Field } from '@/components/controls';
 import {
   fetchCorpusSummary, fetchInspector, fetchInspectorByNative, fetchSample,
   fetchSampleScore, fetchSourceOverview, fetchW1vGate, saveMemberLabels,
@@ -300,7 +301,17 @@ function ScoreRow({ name, block }: { name: string; block: ScoreBlock }) {
   );
 }
 
-function MemberEditor({ source, member }: { source: string; member: SampleMember }) {
+/* One id per COLUMN, minted once in SampleSection and shared by every row: the
+ * column header IS the visible name of each cell's control, so every input
+ * points at it with aria-labelledby. Per-row ids would name nothing new. */
+type SampleColIds = {
+  street: string; houseNumber: string; obec: string; okres: string;
+  precision: string; note: string;
+};
+
+function MemberEditor({ source, member, colIds }: {
+  source: string; member: SampleMember; colIds: SampleColIds;
+}) {
   const qc = useQueryClient();
   const [form, setForm] = useState({
     label_street: member.label_street ?? '',
@@ -362,27 +373,32 @@ function MemberEditor({ source, member }: { source: string; member: SampleMember
         ) : null}
       </td>
       <td className="py-2 pr-2 min-w-36">
-        <input className={input} placeholder="street" value={form.label_street}
+        <input className={input} placeholder="street" aria-labelledby={colIds.street}
+          value={form.label_street}
           onChange={(e) => setForm((f) => ({ ...f, label_street: e.target.value }))} />
         {nd('label_street_nd', 'not determinable')}
       </td>
       <td className="py-2 pr-2 min-w-20">
-        <input className={input} placeholder="č." value={form.label_house_number}
+        <input className={input} placeholder="č." aria-labelledby={colIds.houseNumber}
+          value={form.label_house_number}
           onChange={(e) => setForm((f) => ({ ...f, label_house_number: e.target.value }))} />
         {nd('label_house_number_nd', 'n/d')}
       </td>
       <td className="py-2 pr-2 min-w-28">
-        <input className={input} placeholder="obec" value={form.label_obec}
+        <input className={input} placeholder="obec" aria-labelledby={colIds.obec}
+          value={form.label_obec}
           onChange={(e) => setForm((f) => ({ ...f, label_obec: e.target.value }))} />
         {nd('label_obec_nd', 'n/d')}
       </td>
       <td className="py-2 pr-2 min-w-28">
-        <input className={input} placeholder="okres" value={form.label_okres}
+        <input className={input} placeholder="okres" aria-labelledby={colIds.okres}
+          value={form.label_okres}
           onChange={(e) => setForm((f) => ({ ...f, label_okres: e.target.value }))} />
         {nd('label_okres_nd', 'n/d')}
       </td>
       <td className="py-2 pr-2">
-        <select className={input} value={form.label_precision_class}
+        <select className={input} aria-labelledby={colIds.precision}
+          value={form.label_precision_class}
           onChange={(e) => setForm((f) => ({ ...f, label_precision_class: e.target.value }))}>
           <option value="">precision…</option>
           {GRANULARITY_VALUES.map((g) => <option key={g} value={g}>{g}</option>)}
@@ -390,7 +406,8 @@ function MemberEditor({ source, member }: { source: string; member: SampleMember
         {nd('label_precision_nd', 'n/d')}
       </td>
       <td className="py-2 pr-2 min-w-32">
-        <input className={input} placeholder="note" value={form.label_note}
+        <input className={input} placeholder="note" aria-labelledby={colIds.note}
+          value={form.label_note}
           onChange={(e) => setForm((f) => ({ ...f, label_note: e.target.value }))} />
       </td>
       <td className="py-2 text-right">
@@ -409,6 +426,10 @@ function MemberEditor({ source, member }: { source: string; member: SampleMember
 
 function SampleSection({ source }: { source: string }) {
   const [unlabelledOnly, setUnlabelledOnly] = useState(true);
+  const colIds: SampleColIds = {
+    street: useId(), houseNumber: useId(), obec: useId(), okres: useId(),
+    precision: useId(), note: useId(),
+  };
   const sample = useQuery({
     queryKey: ['location', 'sample', source, unlabelledOnly],
     queryFn: () => fetchSample(source, unlabelledOnly),
@@ -477,18 +498,18 @@ function SampleSection({ source }: { source: string }) {
           <thead>
             <tr className="text-left text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)]">
               <th className="py-1.5 pr-3 font-medium">Listing</th>
-              <th className="py-1.5 pr-2 font-medium">Street</th>
-              <th className="py-1.5 pr-2 font-medium">No.</th>
-              <th className="py-1.5 pr-2 font-medium">Obec</th>
-              <th className="py-1.5 pr-2 font-medium">Okres</th>
-              <th className="py-1.5 pr-2 font-medium">Precision</th>
-              <th className="py-1.5 pr-2 font-medium">Note</th>
+              <th id={colIds.street} className="py-1.5 pr-2 font-medium">Street</th>
+              <th id={colIds.houseNumber} className="py-1.5 pr-2 font-medium">No.</th>
+              <th id={colIds.obec} className="py-1.5 pr-2 font-medium">Obec</th>
+              <th id={colIds.okres} className="py-1.5 pr-2 font-medium">Okres</th>
+              <th id={colIds.precision} className="py-1.5 pr-2 font-medium">Precision</th>
+              <th id={colIds.note} className="py-1.5 pr-2 font-medium">Note</th>
               <th className="py-1.5 font-medium" />
             </tr>
           </thead>
           <tbody>
             {s.members.map((m) => (
-              <MemberEditor key={m.listing_id} source={source} member={m} />
+              <MemberEditor key={m.listing_id} source={source} member={m} colIds={colIds} />
             ))}
           </tbody>
         </table>
@@ -520,15 +541,20 @@ function InspectorSection({ source }: { source: string }) {
   return (
     <Card title="Listing inspector (read-your-writes)">
       <form
-        className="flex gap-2 max-w-md"
+        className="flex items-end gap-2 max-w-md"
         onSubmit={(e) => { e.preventDefault(); setSubmitted(query); }}
       >
-        <input
-          className="flex-1 rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1.5 text-sm"
-          placeholder={`listing id, or ${source} native id`}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
+        {/* The submit button stays OUTSIDE the Field: anything inside the
+          * <label> would join the input's accessible name and fire label
+          * activation. */}
+        <Field label="Listing or native id" as="control" className="flex-1">
+          <input
+            className="w-full rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1.5 text-sm"
+            placeholder={`listing id, or ${source} native id`}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </Field>
         <button
           type="submit"
           className="rounded-[var(--radius-xs)] border border-[var(--color-copper)] px-3 py-1.5 text-sm text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)]"
@@ -622,21 +648,27 @@ function CorrectionForm({ listingId, onDone }: { listingId: number; onDone: () =
         Operator correction (appends a claim, resolves immediately)
       </div>
       <form
-        className="flex flex-wrap gap-2"
+        className="flex flex-wrap items-end gap-2"
         onSubmit={(e) => { e.preventDefault(); if (value.trim()) mut.mutate(); }}
       >
-        <select className={input} value={claimType} onChange={(e) => setClaimType(e.target.value)}>
-          {CORRECTABLE.map((t) => <option key={t} value={t}>{t}</option>)}
-        </select>
-        <input
-          className={`${input} flex-1 min-w-40`}
-          placeholder={claimType === 'address_point_id' ? 'kód ADM (digits)' : 'corrected value'}
-          value={value} onChange={(e) => setValue(e.target.value)}
-        />
-        <input
-          className={`${input} min-w-32`} placeholder="note (optional)"
-          value={note} onChange={(e) => setNote(e.target.value)}
-        />
+        <Field label="Claim type" as="control">
+          <select className={input} value={claimType} onChange={(e) => setClaimType(e.target.value)}>
+            {CORRECTABLE.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </Field>
+        <Field label="Corrected value" as="control" className="flex-1 min-w-40">
+          <input
+            className={`${input} w-full`}
+            placeholder={claimType === 'address_point_id' ? 'kód ADM (digits)' : 'corrected value'}
+            value={value} onChange={(e) => setValue(e.target.value)}
+          />
+        </Field>
+        <Field label="Note" as="control" className="min-w-32">
+          <input
+            className={`${input} w-full`} placeholder="note (optional)"
+            value={note} onChange={(e) => setNote(e.target.value)}
+          />
+        </Field>
         <button
           type="submit" disabled={mut.isPending || !value.trim()}
           className="rounded-[var(--radius-xs)] bg-[var(--color-copper)] px-3 py-1.5 text-sm text-white hover:bg-[var(--color-copper-2)] disabled:opacity-50"
@@ -684,13 +716,15 @@ export default function LocationQuality() {
     : null;
   const select = useMemo(
     () => (
-      <select
-        className="rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-2 py-1.5 text-sm"
-        value={source}
-        onChange={(e) => setSource(e.target.value)}
-      >
-        {LOCATION_SOURCES.map((s) => <option key={s} value={s}>{s}</option>)}
-      </select>
+      <Field label="Source" as="control">
+        <select
+          className="rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-2 py-1.5 text-sm"
+          value={source}
+          onChange={(e) => setSource(e.target.value)}
+        >
+          {LOCATION_SOURCES.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </Field>
     ),
     [source],
   );

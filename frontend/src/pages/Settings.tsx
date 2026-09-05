@@ -21,7 +21,7 @@
  * settings in one pass.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   listSkills,
@@ -683,6 +683,7 @@ function AppSettingRow({ setting, infoExpanded }: { setting: AppSetting; infoExp
   const [text, setText] = useState<string>(() => JSON.stringify(setting.value, null, 2));
   const [parseError, setParseError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ kind: 'ok' | 'err'; message: string } | null>(null);
+  const keyId = useId();
 
   const mutation = useMutation({
     mutationFn: (value: unknown) => updateAppSetting(setting.key, value),
@@ -722,7 +723,7 @@ function AppSettingRow({ setting, infoExpanded }: { setting: AppSetting; infoExp
         aria-expanded={open}
       >
         <div className="min-w-0 flex items-center gap-2">
-          <span className="font-mono text-sm">{setting.key}</span>
+          <span id={keyId} className="font-mono text-sm">{setting.key}</span>
           {setting.description && !infoExpanded && <InfoHint text={setting.description} />}
         </div>
         <div className="flex items-center gap-2.5 shrink-0">
@@ -740,6 +741,7 @@ function AppSettingRow({ setting, infoExpanded }: { setting: AppSetting; infoExp
       {open && (
         <div className="px-4 pt-2 pb-4 border-t border-[var(--color-rule-soft)] space-y-3">
           <textarea
+            aria-labelledby={keyId}
             className="w-full min-h-[10rem] font-mono text-xs leading-relaxed px-3 py-2 rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)]"
             value={text}
             onChange={(e) => setText(e.target.value)}

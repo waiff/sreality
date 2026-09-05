@@ -17,7 +17,7 @@ import { SingleSelectDropdown } from './SingleSelectDropdown';
 describe('<SingleSelectDropdown>', () => {
   it('renders the placeholder when value is null', () => {
     render(
-      <SingleSelectDropdown
+      <SingleSelectDropdown label="Ownership"
         value={null}
         options={[
           { value: 'osobni', label: 'Osobní' },
@@ -34,7 +34,7 @@ describe('<SingleSelectDropdown>', () => {
   it('emits a string value when a string option is picked', () => {
     const onChange = vi.fn();
     render(
-      <SingleSelectDropdown
+      <SingleSelectDropdown label="Ownership"
         value={null}
         options={[
           { value: 'osobni', label: 'Osobní' },
@@ -52,7 +52,7 @@ describe('<SingleSelectDropdown>', () => {
   it('preserves numeric option values across the DOM round-trip', () => {
     const onChange = vi.fn();
     render(
-      <SingleSelectDropdown
+      <SingleSelectDropdown label="Ownership"
         value={null}
         options={[
           { value: 6, label: '3+kk' },
@@ -72,7 +72,7 @@ describe('<SingleSelectDropdown>', () => {
   it('emits null when the placeholder is selected', () => {
     const onChange = vi.fn();
     render(
-      <SingleSelectDropdown
+      <SingleSelectDropdown label="Ownership"
         value={6}
         options={[
           { value: 6, label: '3+kk' },
@@ -84,5 +84,22 @@ describe('<SingleSelectDropdown>', () => {
       target: { value: '' },
     });
     expect(onChange).toHaveBeenCalledWith(null);
+  });
+});
+
+/* The select used to have an accessible name of "": `placeholder` renders only
+ * as the blank option's text, and an option's text is a VALUE, never the
+ * control's name. The caption now arrives as words. */
+describe('<SingleSelectDropdown> accessible name', () => {
+  it('is named by the caption it is handed', () => {
+    render(
+      <SingleSelectDropdown
+        label="Ownership"
+        value={null}
+        options={[{ value: 'osobni', label: 'Osobní' }]}
+        onChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('combobox', { name: 'Ownership' })).toBeInTheDocument();
   });
 });

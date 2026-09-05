@@ -165,6 +165,7 @@ export default function TiersSection() {
         <input
           value={newKey}
           onChange={(e) => setNewKey(e.target.value)}
+          aria-label="New tier key"
           placeholder="new tier key (e.g. pro)"
           pattern="[a-z0-9_]{1,40}"
           className="px-2 py-1 text-[0.8rem] border border-[var(--color-rule)] rounded-[var(--radius-xs)] bg-[var(--color-paper)]"
@@ -196,6 +197,7 @@ export default function TiersSection() {
                       assignMut.mutate({ accountId: row.account_id, plan: e.target.value })
                     }
                     disabled={assignMut.isPending}
+                    aria-label={`Tier for ${row.email ?? row.account_id}`}
                     className="px-1.5 py-0.5 text-[0.8rem] border border-[var(--color-rule)] rounded-[var(--radius-xs)] bg-[var(--color-paper)]"
                   >
                     {plans.map((p) => (
