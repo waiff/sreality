@@ -55,6 +55,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -67,7 +68,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from location_data import loader_db
-from scraper import db
+from scraper import db, street
 
 LOG = logging.getLogger("location_data.claims_intake")
 
@@ -250,7 +251,10 @@ class ArchivedCoordinateRule:
 # and the contracts test assert this set equals `ARCHIVE_READERS` exactly, so a reader added
 # there without a line here fails CI rather than taking the hourly intake down for a portal.
 ARCHIVE_ONLY_READERS = frozenset({
-    "html_text", "html_attr", "html_point_dms", "html_point_attrs",
+    "html_text", "html_own_text", "html_attr", "html_attr_regex", "html_regex",
+    "html_marker", "html_point_dms", "html_point_attrs",
+    "json_scalar", "json_regex", "json_bool", "json_point", "json_geometry",
+    "json_breadcrumb",
 })
 
 ARCHIVED_COORDINATE_RULES: dict[str, ArchivedCoordinateRule] = {
@@ -685,6 +689,141 @@ def _split_cp_co(value: str, arg: str) -> str | None:
 @transform("strip_prefix")
 def _strip_prefix(value: str, arg: str) -> str | None:
     return value[len(arg):].strip() if value.startswith(arg) else value
+
+
+# ---- W2: the comma-address vocabulary.
+#
+# Czech portals publish a whole address in ONE string — realitymix's
+# `data-address="Křimická, Plzeň 3, Plzeň, okres Plzeň-město"`, maxima's
+# `div.locality` "Praha 3, Žižkov, Jeseniova" — and the reader that lifts it is a plain
+# `html_text` / `html_attr` read. Selecting a typed part is therefore a NORMALISER on that
+# one value, not a family of per-portal readers: the reader states what the page said, the
+# transform states which part of it this entry claims, and both stay portal-agnostic.
+#
+# Every one of them REFUSES rather than guesses. A comma path whose meaning depends on how
+# many levels it has is the normal case ("Kostelec nad Černými Lesy" is one segment and its
+# only token is an obec), and a positional read with no arity condition types an obec as a
+# městský obvod on every short line. Emitting nothing is a miss; a wrong admin level is a
+# wrong answer that reads as a right one.
+# `okres X` and `okr. X`, and the boundary is spelled per spelling: after the dotted
+# form there is no word boundary to require (a `.` and a space are both non-word), so
+# `^okr(?:es|\.)\b` silently never matches the abbreviation.
+_OKRES_QUALIFIER_RE = re.compile(r"(?i)^okr(?:es\b|\.)")
+_TRAILING_HOUSE_NUMBER_RE = re.compile(r"\s+(\d{1,4}[a-z]?(?:/\d{1,4}[a-z]?)?)$", re.I)
+_COMMA_SEGMENT_RE = re.compile(r"^(?P<index>-?[1-9]\d*)@(?P<arity>\*|[1-9]\d*\+?)$")
+
+
+def _address_segments(value: str) -> list[str]:
+    return [part for part in (raw.strip() for raw in value.split(",")) if part]
+
+
+def _obec_index(segments: list[str]) -> int:
+    """Where the obec sits: last, or second-to-last behind an `okres …` qualifier."""
+    return len(segments) - 2 if _OKRES_QUALIFIER_RE.match(segments[-1]) else len(segments) - 1
+
+
+@transform("address_part_okres")
+def _address_part_okres(value: str, arg: str) -> str | None:
+    """The `okres X` tail of a comma address, without its qualifier word.
+
+    Keyed on the QUALIFIER, never on position: a line that does not end in `okres …` /
+    `okr. …` has no okres, and `strip_prefix:"okres "` on the same segment would silently
+    publish `okr. Karlovy Vary` as an okres name on the abbreviated spelling."""
+    segments = _address_segments(value)
+    if not segments or not _OKRES_QUALIFIER_RE.match(segments[-1]):
+        return None
+    return _OKRES_QUALIFIER_RE.sub("", segments[-1]).strip(" .,") or None
+
+
+@transform("address_part_obec")
+def _address_part_obec(value: str, arg: str) -> str | None:
+    segments = _address_segments(value)
+    if not segments:
+        return None
+    index = _obec_index(segments)
+    return segments[index] if index >= 0 else None
+
+
+@transform("address_part_street")
+def _address_part_street(value: str, arg: str) -> str | None:
+    """The LEADING segment, but only when it survives the street tests.
+
+    `data-address` segment[0] is not reliably a street — on realitymix's pinned archived
+    body it is `Stráň`, a část obce the same page also states as `data-form-address` and as
+    the breadcrumb tail — so typing it `street_name` blindly fabricates. The three gates are
+    the shared scraper ones (`clean_street`, `reject_as_town` against this line's OWN other
+    segments, `looks_like_czech_street`), not a second copy: the extractor and the live
+    parser must agree on what a Czech street looks like. `arg='loose'` drops only the
+    morphology test, for a portal whose leading segment is unambiguously a street."""
+    segments = _address_segments(value)
+    if len(segments) < 1:
+        return None
+    index = _obec_index(segments)
+    if index < 1:
+        return None
+    cleaned = street.clean_street(segments[0])
+    if cleaned is None:
+        return None
+    if street.reject_as_town(cleaned, geo_names=segments[1:]):
+        return None
+    if arg != "loose" and not street.looks_like_czech_street(cleaned):
+        return None
+    return cleaned
+
+
+@transform("address_part_house_number")
+def _address_part_house_number(value: str, arg: str) -> str | None:
+    """The house number glued to the street segment (`Křimická 655/31` -> `655/31`).
+
+    Gated on the SAME street tests as `address_part_street`, so a number can never be
+    claimed off a leading segment this vocabulary refuses to call a street. The čp/čo pair
+    is not split here — `split_cp_co:cp` / `:co` is the shared splitter that owns that, and
+    an entry chains it after this one."""
+    segments = _address_segments(value)
+    if _address_part_street(value, arg) is None:
+        return None
+    found = _TRAILING_HOUSE_NUMBER_RE.search(segments[0])
+    return found.group(1) if found else None
+
+
+@transform("split_paren_okres")
+def _split_paren_okres(value: str, arg: str) -> str | None:
+    """`Ostrov (okres Karlovy Vary)` — one string carrying an obec and its okres.
+
+    Keyed on the literal `(okres `, so a different parenthetical is left alone and visible
+    instead of being silently truncated. `arg` picks the half: the default is the obec,
+    `okres` is the qualifier's own value."""
+    head, separator, tail = value.partition("(okres ")
+    if arg == "okres":
+        return tail.rstrip().rstrip(")").strip() or None if separator else None
+    return head.strip() or None
+
+
+@transform("comma_segment")
+def _comma_segment(value: str, arg: str) -> str | None:
+    """`<index>@<arity>` — one segment of a comma address, under an arity condition.
+
+    The index is 1-based from the left or negative from the right; the arity is `k`
+    (exactly k segments), `k+` (at least k) or `*` (any). The arity is not decoration:
+    maxima's `div.locality` is `Praha 3, Žižkov, Jeseniova` on one row and
+    `Kostelec nad Černými Lesy` on the next, and taking segment 1 unconditionally types an
+    obec as a městský obvod on every village. A malformed arg yields no claim rather than
+    raising — `apply_transforms` is rollback-safe by design, and the rail that catches a
+    typo is `contracts._check_executable` plus the fixture gate."""
+    spec = _COMMA_SEGMENT_RE.match(arg)
+    if spec is None:
+        return None
+    segments = _address_segments(value)
+    arity = spec.group("arity")
+    if arity != "*":
+        want = int(arity.rstrip("+"))
+        if len(segments) < want or (not arity.endswith("+") and len(segments) != want):
+            return None
+    index = int(spec.group("index"))
+    position = index - 1 if index > 0 else len(segments) + index
+    if position < 0 or position >= len(segments):
+        return None
+    return segments[position] or None
 
 
 def apply_transforms(value: str | None, transforms: tuple[str, ...]) -> str | None:

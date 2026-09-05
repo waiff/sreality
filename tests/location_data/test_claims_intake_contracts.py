@@ -182,18 +182,26 @@ def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
     assert READER_SUBSTRATES == {n: s.substrates for n, s in READER_CONTRACTS.items()}
     surfaces = {s for legal in READER_SUBSTRATES.values() for s in legal}
     assert surfaces <= contracts.CLAIM_SURFACES
-    # W2-6 opened the DOM surfaces. Written as "no reader may be declared on a W2 surface
-    # until W2 gives it one" and updated here deliberately — still an exact set, so a fourth
-    # surface cannot arrive unreviewed.
+    # W2-6 opened the DOM surfaces; W2's reader canon opened the three that carry a fact the
+    # DOM readers cannot reach — a JSON document embedded in the page, a fact published only
+    # inside a link, and a schema.org JSON-LD block. Written as "no reader may be declared on
+    # a W2 surface until W2 gives it one" and updated here deliberately — still an exact set,
+    # so a further surface cannot arrive unreviewed.
     assert surfaces == {
         "api_json", "graphql", "embedded_json", "legacy_column",
-        "html_selector", "archived_html", "map_config",
+        "html_selector", "archived_html", "map_config", "url_slug", "jsonld",
     }
     methods = {m for spec in READER_CONTRACTS.values() for m in spec.methods}
     assert methods <= EXTRACTION_METHODS
+    # `regex_text` arrives with the canon and is the one that changes what a claim MUST
+    # carry: 01 §4.2 makes it evidence-bearing, so every claim from a reader declaring it
+    # needs the quote-plus-span set. It is admissible only because W2a filled the
+    # content-addressed body store the span indexes into — W1's `listings.raw_json` is not
+    # retrievable, which is why `test_w1_executes_no_evidence_bearing_method` still holds.
     assert methods == {
         "portal_structured_field", "portal_declared_quality", "legacy_column",
-        "html_selector_parse", "map_widget_parse",
+        "html_selector_parse", "map_widget_parse", "url_slug_parse", "regex_text",
+        "breadcrumb_parse",
     }
 
 

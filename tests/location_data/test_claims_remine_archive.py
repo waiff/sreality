@@ -152,9 +152,23 @@ def test_the_registered_archive_readers_are_the_declared_generic_set():
     First: the set is closed. These readers are portal-AGNOSTIC — a selector, an attribute, a
     DMS attribute — and every portal-specific fact belongs in contract data. A new name
     appearing here is how "one portal needed something special" becomes a branch in shared
-    code (rule 21), so adding one is a reviewed act, not an import side effect."""
+    code (rule 21), so adding one is a reviewed act, not an import side effect.
+
+    W2's reader canon adds ten, deliberately and in ONE reviewed act rather than seven portal
+    PRs each inventing its own: the nine portal specs proposed 14 reader names with heavy
+    overlap (`html_url_slug` / `html_attr_regex`, `html_contains` / `html_declared_quality` /
+    `html_attr_presence`, four `html_json_*` beside three `script_json_*` and three
+    `embedded_json_*`), and every one of those pairs asks the SAME question of a different
+    portal's markup. The canon collapses them onto four DOM readers (own text, a pattern over
+    text, a pattern over an attribute, a presence marker), five over a JSON document the page
+    carries — sharing ONE acquisition layer and ONE subject-selection rule — and one over a
+    JSON-LD breadcrumb. Each name states a QUESTION, never a portal: which element, which
+    pointer, which pattern, which junk pins and which labels all stay contract data."""
     assert set(ARCHIVE_READERS) == {
-        "html_text", "html_attr", "html_point_dms", "html_point_attrs",
+        "html_text", "html_own_text", "html_attr", "html_attr_regex", "html_regex",
+        "html_marker", "html_point_dms", "html_point_attrs",
+        "json_scalar", "json_regex", "json_bool", "json_point", "json_geometry",
+        "json_breadcrumb",
     }
 
 

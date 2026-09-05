@@ -749,8 +749,18 @@ def _in_any(needle: str, haystacks: Sequence[str]) -> bool:
     return bool(needle) and any(needle in haystack for haystack in haystacks)
 
 
-def _collapse(value: str) -> str:
+def collapse_ws(value: str) -> str:
+    """ONE whitespace normalisation for every consumer of a scoped document.
+
+    Public because the archive lane's presence readers have to compare a contract literal
+    against page text the portal broke across source lines. `str.split()` is the tempting
+    substitute and it is wrong on this substrate: it does not know the zero-width space a
+    scrubbed archive body carries, so a second implementation would disagree with the
+    scoper's own matching on exactly the pages where it matters."""
     return _WS_RE.sub(" ", value).strip()
+
+
+_collapse = collapse_ws
 
 
 def _document_haystacks(tree: Any, text: str) -> tuple[str, ...]:
