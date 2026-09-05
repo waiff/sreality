@@ -10,6 +10,7 @@ from dataclasses import replace
 
 import pytest
 
+from location_data import claims_intake
 from location_data.claims_intake import (
     IntakeRefused,
     extract_listing,
@@ -167,7 +168,10 @@ def test_mmreality_point_accurate_true_and_municipality_id():
     result = extract_listing(row, entries_for("mmreality"))
     by_type = claims_by_type(result)
 
-    assert by_type["coordinate"][0].value_geom_wkt == "POINT(15.7712123456 50.0296123456)"
+    assert "coordinate" not in by_type, (
+        "mmreality@2 moved mm.det.point onto the archived lane (json_point); W1's raw_json "
+        "read cannot say WHICH `:property` blob the parser handed it, which is the whole "
+        "reason W2-11 re-reads the body under id_match")
     accurate = claim_by_extractor(result, "mm.det.accurate")
     assert accurate.declared_precision_label == "accurate"
     assert accurate.blur_evidence == "none"
@@ -185,9 +189,11 @@ def test_mmreality_accurate_false_declares_blur():
     accurate = claim_by_extractor(result, "mm.det.accurate")
     assert accurate.declared_precision_label == "not_accurate"
     assert accurate.blur_evidence == "declared"
-    # The coordinate is still stored — the cap is the resolver's business, not the
-    # extractor's (02 §2.1.2 rule 2).
-    assert claims_by_type(result)["coordinate"][0].value_geom_wkt.startswith("POINT(")
+    # The coordinate the cap applies to is the ARCHIVED one from mmreality@2 onwards
+    # (mm.det.point -> json_point), so W1 emits none here. The cap is still the resolver's
+    # business and not the extractor's (02 §2.1.2 rule 2) — what moved is the lane that
+    # produces the position, not what the declaration means.
+    assert "coordinate" not in claims_by_type(result)
     assert "cast_obce_name" not in claims_by_type(result)   # municipalityPart is null
 
 
@@ -215,8 +221,15 @@ def test_which_declared_bool_label_is_blurred_comes_from_the_contract():
 
 
 def test_mmreality_original_title_street_is_not_mined_in_w1():
-    """`mm.det.original_title_street` is regex_text: evidence-bearing, so it waits for the
-    content-addressed payload store (W2a) rather than writing an unverifiable span."""
+    """`mm.det.original_title_street` is regex_text: evidence-bearing, so its span needs a
+    retrievable, content-addressed document. W2a filled that store, and mmreality@2 gives
+    the entry a reader — `json_regex`, one of `claims_remine_archive`'s. W1 SKIPS it
+    (`ARCHIVE_ONLY_READERS`), because `listings.raw_json` is not content-addressed and a
+    span into it can never be re-checked."""
+    entries = {e.entry_id: e for e in entries_for("mmreality")}
+    assert entries["mm.det.original_title_street"].reader == "json_regex"
+    assert (entries["mm.det.original_title_street"].reader
+            in claims_intake.ARCHIVE_ONLY_READERS)
     row = listing("mmreality", MMREALITY_ACCURATE, lat=50.0, lon=15.0)
     result = extract_listing(row, entries_for("mmreality"))
     assert all(c.extraction_method not in ("regex_text", "llm_text") for c in result.claims)

@@ -68,6 +68,10 @@ PINNED_REGRESSIONS: dict[str, tuple[str, ...]] = {
     "sreality": ("520268", "1588965452", "3067969612"),
     "realitymix": ("8375963", "8375983", "8595551"),
     "maxima": ("f60012522", "d40026367", "f60012682"),
+    # W2-11 pinned 951845 (the committed archived body, whose neighbour blob is the LARGER
+    # one) beside 943671, so the two listings that name mmreality's subject-selection defect
+    # cannot leave the contract silently.
+    "mmreality": ("943671", "951845"),
 }
 
 # A regression line is prose: "<id>[ / <id>…] — what went wrong". Only the head before the

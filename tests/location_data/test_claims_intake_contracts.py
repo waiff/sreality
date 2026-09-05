@@ -308,12 +308,21 @@ def test_the_executable_and_inert_split_is_exactly_what_w1_ran():
 
 
 def test_w1_executes_no_evidence_bearing_method():
-    """`regex_text` / `llm_text` need a span into a retrievable document, and the
-    content-addressed body store does not fill until W2a (01 §4.2)."""
+    """`regex_text` / `llm_text` need a span into a retrievable document. W2a filled the
+    content-addressed body store (01 §4.2), so an evidence-bearing entry may now name a
+    reader — but ONLY one of `claims_remine_archive`'s, which W1 skips
+    (`ARCHIVE_ONLY_READERS`) because `listings.raw_json` is not content-addressed and a span
+    into it cannot be re-checked. `llm_text` still names none: no LLM reader is registered in
+    any registry, and `assert_evidence_complete` refuses a model-less llm claim anyway.
+
+    Narrowed, never deleted: without it a future `regex_text` entry could land on the W1
+    lane, where the span it asserts is unverifiable by construction."""
     for contract in ALL.values():
         for entry in contract.entries:
-            if entry.extraction_method in ("regex_text", "llm_text"):
+            if entry.extraction_method == "llm_text":
                 assert entry.reader is None, entry.entry_id
+            elif entry.extraction_method == "regex_text" and entry.reader is not None:
+                assert entry.reader in claims_intake.ARCHIVE_ONLY_READERS, entry.entry_id
 
 
 def test_the_w2_surfaces_are_still_declared():

@@ -80,8 +80,13 @@ _DETAIL_DIGESTS: dict[tuple[str, str], str] = {
         "279fb3024d238ba2c1927b271b642019f9a647f0e605d35591a6ad8d02d4a8a1",
     ("maxima", "location_w2/maxima_detail.html"):
         "e0ea3cac396f989e62012b15a840fd843013b3b469dd5c05f3ca5360c2e639e8",
+    # Moved once, in the mmreality@2 activation: the pinned fixture was re-authored so its
+    # `:property` attribute is HTML-entity-encoded and its accented values `\uXXXX`-escaped,
+    # exactly as production serves them, and so the subject blob carries the id the
+    # fixture-diff gate scores it under. `NORMALIZER_VERSION` and mmreality's volatile
+    # profile are untouched — this is new BYTES, not a new normalisation.
     ("mmreality", "location_w2/mmreality_detail.html"):
-        "56799418831b5ac6d16933e5a16d70b2049aaabbe1fe2149d727089a9a21a94e",
+        "58ad159d133699cd22b8e752c8c839044463898eac90d37c0302cb8324cc818d",
     ("realitymix", "location_w2/realitymix_detail.html"):
         "155a814e80a7c992c33be8aadff7f8425591e5fd97a5d63a8ca0fe5f67a11b70",
     ("remax", "location_w2/remax_detail.html"):
