@@ -523,7 +523,20 @@ focus, and skipping the first render so a deep link is not stolen.
 `isSafeInternalPath` extracted and hardened with the backslash arm the inline
 check lacked; it is what the OAuth deep-link PR will gate `next=` on.
 
-**Remaining waves, in the review's order, W2–W4 done:** W2 composite widgets
+**W5 — the Browse card is a link on its title, not an anchor around eight
+controls (merged).** The audit's one structural mistake. Stretched-link
+pattern: a non-interactive card, ONE `<Link>` on the title (so the link's name
+IS the listing), an unlayered `::after` expanding its hit area, every control a
+DOM sibling raised on the `--z-card-action` rung; the estimate corner is a real
+`<Link>`, the collection popover is portalled, merge mode has a real checkbox.
+The whole `preventDefault`/`stopPropagation` regime is deleted. Built by an
+isolated agent, adversarially reviewed; six review findings fixed rather than
+carried (keyboard-orphaned popover, `aria-haspopup="true"` = menu, popover
+below modals at z-40, six dead tooltips, lost whole-card focus ring, a
+hard-coded z rung). Trades stated: no drag-select over the `::after`; the title
+link is the 4th tab stop per card. 5 → 21 tests in the card's file.
+
+**Remaining waves, in the review's order, W2–W5 done:** W2 composite widgets
 name their internals (63 controls with no name from any source); W3 focus is
 visible (65 `focus:outline-none`, 33 with a 1.18:1 replacement — a deletion
 wave, plus the `--color-focus` token which is operator territory); W4 focus has
