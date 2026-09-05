@@ -155,10 +155,12 @@ def leaderboard(conn: Any, *, region_ids: list[int] | None = None,
                 category_main: str | None = None, category_type: str | None = None,
                 metric: str = "active_property_count", limit: int = 100,
                 firm_ids: list[int] | None = None, min_price_czk: int | None = None,
-                include_unpriced: bool = False) -> dict[str, Any]:
+                include_unpriced: bool = False, subtypes: list[str] | None = None,
+                include_unknown_subtype: bool = False) -> dict[str, Any]:
     """Top brokers by a chosen metric, optionally scoped to admin regions +
     category + one or more companies (firm_ids, migration 410) + a minimum
-    property value (min_price_czk, migration 448).
+    property value (min_price_czk, migration 448) + property subtypes
+    (subtypes, migration 469).
 
     Thin wrapper over the broker_leaderboard RPC (the same one Browse calls), so the
     agent and Browse never disagree on the ranking. Empty id arrays = national /
@@ -172,16 +174,33 @@ def leaderboard(conn: Any, *, region_ids: list[int] | None = None,
     whether a listing with no price ("cena na vyžádání", i.e. price_czk IS NULL) counts
     as meeting the threshold. Defaults to excluding it: an unknown value should not be
     assumed to clear a numeric floor.
+
+    `subtypes` are the portal-agnostic `listings.subtype` slugs from the shared filter
+    registry (toolkit.filter_registry SUBTYPE_OPTIONS — the same vocabulary Browse and
+    the watchdog use), meaningful only for category_main in (dum, komercni).
+    `include_unknown_subtype` is its `include_unpriced` twin, and it matters more than
+    that name suggests: subtype coverage is a PORTAL gap (sreality 0% null, ceskereality
+    / realitymix / mmreality 100% null), so excluding unlabelled rows ranks by "who
+    lists on the portals that publish a subtype" as much as by inventory. Migration
+    469's header carries the measured per-portal table; the Brokers page states the
+    caveat inline whenever the filter is on.
+
+    An EMPTY list means "no filter", not "match nothing" — `subtypes or None` below,
+    mirroring how firm_ids is threaded. That conversion is load-bearing here rather than
+    cosmetic: the SQL gates its live branch on `p_subtypes is not null`, so passing `[]`
+    through would route to the live branch with a predicate matching no row at all.
     """
     if metric not in _VALID_METRICS:
         metric = "active_property_count"
     limit = max(1, min(int(limit), 2000))
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT * FROM broker_leaderboard(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "SELECT * FROM broker_leaderboard("
+            "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (region_ids or None, okres_ids or None, obec_ids or None,
              category_main, category_type, metric, limit, firm_ids or None,
-             min_price_czk, include_unpriced))
+             min_price_czk, include_unpriced, subtypes or None,
+             include_unknown_subtype))
         rows = cur.fetchall()
     return _envelope(
         "broker_leaderboard", rows,
@@ -189,7 +208,8 @@ def leaderboard(conn: Any, *, region_ids: list[int] | None = None,
          "obec_ids": obec_ids or [], "category_main": category_main,
          "category_type": category_type, "metric": metric, "limit": limit,
          "firm_ids": firm_ids or [], "min_price_czk": min_price_czk,
-         "include_unpriced": include_unpriced},
+         "include_unpriced": include_unpriced, "subtypes": subtypes or [],
+         "include_unknown_subtype": include_unknown_subtype},
         len(rows), None)
 
 

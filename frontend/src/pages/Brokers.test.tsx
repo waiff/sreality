@@ -179,6 +179,105 @@ describe('<Brokers> company filter', () => {
   });
 });
 
+// Field wraps each control group in a <label>, so the FIRST pill in a group inherits the
+// whole row's text as its accessible name (pre-existing on every filter group on this
+// page — the company-filter test above works around the same thing). Match on
+// textContent instead of the computed accessible name.
+function pill(text: string): HTMLElement {
+  const found = screen.getAllByRole('button').find((b) => b.textContent?.includes(text));
+  if (!found) throw new Error(`no pill containing ${text}`);
+  return found;
+}
+
+function hasPill(text: string): boolean {
+  return screen.getAllByRole('button').some((b) => b.textContent?.includes(text));
+}
+
+describe('<Brokers> subtype filter', () => {
+  // Subtype is only populated for houses / commercial, and its slugs are partitioned by
+  // category_main — the same rule (and the same SUBTYPE_LABELS_BY_MAIN vocabulary) Browse
+  // applies in its sidebar.
+  it('appears only for Domy / Komerční, not for the Byty default', async () => {
+    asUser(false);
+    renderPage();
+    await waitFor(() => expect(brokers.fetchBrokerLeaderboard).toHaveBeenCalled());
+    expect(screen.queryByText('Podtyp')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Komerční' }));
+    expect(await screen.findByText('Podtyp')).toBeInTheDocument();
+    expect(hasPill('Kancelář')).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Domy' }));
+    await waitFor(() => expect(hasPill('Rodinný dům')).toBe(true));
+    expect(hasPill('Kancelář')).toBe(false);
+  });
+
+  it('filters by the picked subtypes and gates the "bez podtypu" toggle on a selection', async () => {
+    asUser(false);
+    renderPage();
+    await waitFor(() => expect(brokers.fetchBrokerLeaderboard).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: 'Komerční' }));
+
+    const toggle = await screen.findByRole('button', { name: 'Počítat nabídky bez podtypu' });
+    expect(toggle).toBeDisabled();
+
+    fireEvent.click(pill('Kancelář'));
+    await waitFor(() =>
+      expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
+        expect.objectContaining({ subtypes: ['kancelar'], includeUnknownSubtype: false }),
+      ),
+    );
+    expect(toggle).not.toBeDisabled();
+
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
+        expect.objectContaining({ subtypes: ['kancelar'], includeUnknownSubtype: true }),
+      ),
+    );
+  });
+
+  // Subtype coverage is a PORTAL gap (sreality labels everything, ceskereality /
+  // realitymix / mmreality label nothing), so a subtype-filtered ranking is partly a
+  // ranking of which portals a broker lists on. Stating that inline is the point — the
+  // caveat must appear exactly when the filter is doing something.
+  it('states the portal-coverage caveat only while a subtype is selected', async () => {
+    asUser(false);
+    renderPage();
+    await waitFor(() => expect(brokers.fetchBrokerLeaderboard).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: 'Komerční' }));
+    await screen.findByText('Podtyp');
+    expect(screen.queryByText(/Podtyp uvádí jen některé portály/)).not.toBeInTheDocument();
+
+    fireEvent.click(pill('Sklad'));
+    expect(await screen.findByText(/Podtyp uvádí jen některé portály/)).toBeInTheDocument();
+  });
+
+  // The slugs are partitioned by category_main, so one carried across would match
+  // nothing and silently empty the ledger — Browse clears its own for the same reason.
+  it('clears the picked subtypes when Typ changes', async () => {
+    asUser(false);
+    renderPage();
+    await waitFor(() => expect(brokers.fetchBrokerLeaderboard).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: 'Komerční' }));
+    fireEvent.click(pill('Kancelář'));
+    await waitFor(() =>
+      expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
+        expect.objectContaining({ subtypes: ['kancelar'] }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Domy' }));
+    await waitFor(() =>
+      expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          categoryMain: 'dum', subtypes: [], includeUnknownSubtype: false,
+        }),
+      ),
+    );
+  });
+});
+
 describe('<Brokers> value filter', () => {
   it('filters by minimum price; the "bez ceny" toggle stays disabled until a value is set', async () => {
     asUser(false);

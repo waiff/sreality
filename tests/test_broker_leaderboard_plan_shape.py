@@ -1,13 +1,15 @@
-"""The LIMIT must sit BELOW the hydration join (migration 435), in BOTH of migration
-448's branches — and each branch's inactive twin must be fully pruned from the plan.
+"""The LIMIT must sit BELOW the hydration join (migration 435), in BOTH of the
+leaderboard's branches (448, 469) — and each branch's inactive twin must be fully
+pruned from the plan.
 
 W4's whole claim is that the leaderboard ranks on cheap columns alone, truncates, and only
 then joins `brokers` and `firms` to decorate at most `p_limit` rows. Measured before:
 between 87% and 99.2% of every joined-and-decorated row was discarded by the LIMIT — 2,067
 of the default shape's 3,140 blocks, and 20,355 of the region chip's 22,910.
 
-448 adds a second branch (reads `listings` directly when p_min_price_czk is set) beside the
-unfiltered one (reads broker_region_type_stats), UNIONed together in one `language sql`
+448 added a second branch (reads `listings` directly); 469 widened its gate so a SUBTYPE
+filter routes there too, making it the general "filters the matview cannot express" path.
+It sits beside the unfiltered one (reads broker_region_type_stats), UNIONed in one `sql`
 function so each stays plan-inlinable — see the migration's own header for why a `language
 plpgsql` if/else was tried and reverted (it made the whole function an opaque "Function
 Scan" to EXPLAIN, which would have made every test in this file vacuous). Both the
@@ -68,16 +70,16 @@ def conn():
         yield c
 
 
-def _explain(conn, *, min_price_czk):
+def _explain(conn, *, min_price_czk=None, subtypes=None, category_main="byt"):
     with conn.cursor() as cur:
         # Plain SET, not SET LOCAL: this connection is autocommit, and outside a
         # transaction SET LOCAL is a silent no-op (the trap migration 429's rail hit).
         cur.execute("set enable_seqscan = off")
         cur.execute(
             "explain (format json) select * from public.broker_leaderboard("
-            "null, null, null, 'byt', 'prodej', 'active_property_count', 100, "
-            "null, %s, false)",
-            (min_price_czk,),
+            "null, null, null, %s, 'prodej', 'active_property_count', 100, "
+            "null, %s, false, %s, false)",
+            (category_main, min_price_czk, subtypes),
         )
         return cur.fetchone()[0][0]["Plan"]
 
@@ -94,6 +96,17 @@ def plan_priced(conn):
     """A value-filtered call. Should be the live (`listings`) branch, with
     `broker_region_type_stats` nowhere in the plan."""
     return _explain(conn, min_price_czk=5_000_000)
+
+
+@pytest.fixture(scope="module")
+def plan_subtyped(conn):
+    """A SUBTYPE-filtered call with NO price filter (migration 469). This is the shape
+    that proves the live branch is gated on "any live-only filter", not on price
+    specifically: it must reach `listings` and prune the matview exactly like the priced
+    shape does. Before 469 widened the gate, this call would have fallen through to the
+    matview — which cannot express subtype at all, so it would have answered with
+    silently UNFILTERED counts."""
+    return _explain(conn, subtypes=["kancelar", "sklad"], category_main="komercni")
 
 
 def _nodes(node):
@@ -215,7 +228,7 @@ def test_the_active_set_resolves_once_below_the_limit_priced(plan_priced):
     )
 
 
-# --- migration 448's specific claim: the inactive branch costs nothing ------------
+# --- 448's specific claim: the inactive branch costs nothing ---------------------
 
 
 def test_unfiltered_call_never_touches_listings(plan_unfiltered):
@@ -261,4 +274,48 @@ def test_priced_call_does_touch_listings(plan_priced):
     assert "listings" in _relation_names(plan_priced), (
         "`listings` is missing from the price-filtered plan — the live branch is not "
         "running at all:\n" + json.dumps(plan_priced, indent=2)
+    )
+
+
+# --- migration 469: subtype routes to the same live branch, on its own ------------
+
+
+def test_subtype_only_call_reaches_listings_and_prunes_the_matview(plan_subtyped):
+    """The whole point of 469's gate widening, in one assertion pair: a subtype filter
+    with NO price filter must behave exactly like a price filter does — reach `listings`
+    and drop `broker_region_type_stats` from the plan.
+
+    RED by: gating the live branch on `p_min_price_czk is not null` alone (the pre-469
+    spelling), which sends this call to the matview — a table with no subtype column,
+    which would therefore answer it with unfiltered counts and no error anywhere.
+    """
+    names = _relation_names(plan_subtyped)
+    assert "listings" in names, (
+        "`listings` is missing from the subtype-only plan — the live branch is not "
+        "running, so the filter is being answered by the matview, which cannot express "
+        f"subtype at all: {names}\n" + json.dumps(plan_subtyped, indent=2)
+    )
+    assert "broker_region_type_stats" not in names, (
+        "`broker_region_type_stats` appears in the subtype-only plan — the fast branch "
+        f"was not pruned, so both branches are being paid for: {names}\n"
+        + json.dumps(plan_subtyped, indent=2)
+    )
+
+
+def test_the_subtype_only_plan_keeps_deferred_hydration(plan_subtyped):
+    """Every structural guarantee the other two shapes get, the subtype shape gets too —
+    a filter reaching the live branch by a different gate must not reach a different
+    plan shape."""
+    limit = _find_limit(plan_subtyped)
+    assert limit is not None, (
+        "no Limit node in the subtype-only plan:\n" + json.dumps(plan_subtyped, indent=2)
+    )
+    assert "firms" not in _relation_names(limit), (
+        "`firms` is scanned BELOW the Limit in the subtype-only plan — hydration is "
+        "running against the whole candidate set"
+    )
+    below_ids = {id(n) for n in _nodes(limit)}
+    above = {n.get("Relation Name") for n in _nodes(plan_subtyped) if id(n) not in below_ids}
+    assert "firms" in above, (
+        f"`firms` is not joined above the Limit — hydration is missing entirely: {above}"
     )

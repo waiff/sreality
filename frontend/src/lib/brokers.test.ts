@@ -157,6 +157,31 @@ describe('fetchBrokerLeaderboard', () => {
     expect(url.searchParams.get('include_unpriced')).toBe('true');
   });
 
+  it('sends each selected subtype as a repeated param, with the unknown-subtype flag', async () => {
+    const calls = stubFetch(() => ({ body: { data: [] } }));
+    const { fetchBrokerLeaderboard } = await loadBrokers();
+    await fetchBrokerLeaderboard({
+      regionIds: [], okresIds: [], obecIds: [],
+      categoryMain: 'komercni', categoryType: null, metric: 'active_property_count',
+      subtypes: ['kancelar', 'sklad'], includeUnknownSubtype: true,
+    });
+    const url = new URL(calls[0].url);
+    expect(url.searchParams.getAll('subtypes')).toEqual(['kancelar', 'sklad']);
+    expect(url.searchParams.get('include_unknown_subtype')).toBe('true');
+  });
+
+  it('omits subtypes entirely when none are selected', async () => {
+    const calls = stubFetch(() => ({ body: { data: [] } }));
+    const { fetchBrokerLeaderboard } = await loadBrokers();
+    await fetchBrokerLeaderboard({
+      regionIds: [], okresIds: [], obecIds: [],
+      categoryMain: null, categoryType: null, metric: 'listing_count',
+    });
+    const url = new URL(calls[0].url);
+    expect(url.searchParams.getAll('subtypes')).toEqual([]);
+    expect(url.searchParams.get('include_unknown_subtype')).toBe('false');
+  });
+
   // null/undefined must be OMITTED, not sent as the literal string "null" — the
   // API route's `int | None` default only applies when the param is absent.
   it('omits min_price_czk when unset and defaults include_unpriced to false', async () => {
