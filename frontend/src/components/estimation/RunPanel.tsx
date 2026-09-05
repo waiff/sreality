@@ -14,6 +14,7 @@
  * the SAME run deliberately does not reset them — that would wipe the
  * operator's in-progress edits.) */
 import { Suspense, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { lazyChunk } from '@/lib/lazyChunk';
 import { Link, useLocation } from 'react-router-dom';
 import { ROUTES } from '@/lib/routes';
@@ -52,6 +53,8 @@ import {
   type Skill,
   type YieldScenarioUpdate,
 } from '@/lib/api';
+import { DialogClose } from '@/components/Dialog';
+import { useDialog } from '@/lib/useDialog';
 import RangeStrip from '@/components/region/RangeStrip';
 import Timeline from '@/components/estimation/Timeline';
 import { MfReferenceCard } from '@/components/estimation/MfReferenceCard';
@@ -210,6 +213,22 @@ function EstimateHeadline({ run }: { run: EstimationRun }) {
 /* "Show estimation detail" popup — the deep analytics, off the main flow     */
 /* -------------------------------------------------------------------------- */
 
+/* BESPOKE CHROME over lib/useDialog, not <Dialog>: this is a full-height run
+ * report — the card is top-aligned in a SCROLLING backdrop with its own
+ * padding, and the feedback composer floats beside it at the viewport's right
+ * edge. <Dialog>'s centred, self-scrolling panel is the wrong shape for it.
+ * The hook still owns Escape layering, the focus trap, initial/restored focus,
+ * the z rank and the ref-counted scroll lock.
+ *
+ * PORTALLED, for the reason <Dialog> is: this opens from deep inside the
+ * Listing Detail body, and a `position: fixed` overlay left in the tree
+ * inherits any ancestor stacking context — which would cap its rank below the
+ * ComparableModal opened FROM it and make the z ledger a lie.
+ *
+ * THE NESTED PAIR. A comparable row opens <ComparableModal> INSIDE this one.
+ * Both used to keep their own `document` keydown listener, so one Escape closed
+ * BOTH and a backdrop click did the same. There is one listener now, on the
+ * module-level layer stack, and only the top layer answers it. */
 export function RunDetailModal({
   run,
   onClose,
@@ -217,44 +236,41 @@ export function RunDetailModal({
   run: EstimationRun;
   onClose: () => void;
 }) {
-  const closeBtnRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', handler);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    closeBtnRef.current?.focus();
-    return () => {
-      document.removeEventListener('keydown', handler);
-      document.body.style.overflow = prevOverflow;
-    };
-  }, [onClose]);
+  const backdropRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const { isTopLayer, zIndex } = useDialog({ onClose, panelRef, zRef: backdropRef });
 
-  return (
+  return createPortal(
     <div
-      // eslint-disable-next-line no-restricted-syntax -- W6b migrates this dialog
-      role="dialog"
-      aria-modal="true"
-      aria-label="Estimation detail"
-      onClick={onClose}
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto px-4 py-10"
-      style={{ background: 'rgba(20, 22, 27, 0.6)' }}
+      /* Presentational: it is the dim, not the dialog — and it is also the
+       * scroller, which is what lets the card be taller than the viewport. */
+      ref={backdropRef}
+      role="presentation"
+      className="fixed inset-0 flex items-start justify-center overflow-y-auto px-4 py-10"
+      /* NOT a `z-50` class: the layer's rank decides, so the ComparableModal
+       * opened from inside this one paints over it. See lib/useDialog. */
+      style={{ zIndex, background: 'rgba(20, 22, 27, 0.6)' }}
+      onMouseDown={(e) => {
+        // mousedown, not click: a drag that starts inside the card and ends on
+        // the dim must not count as a dismissal. Only a press that both starts
+        // and lands on the backdrop itself closes, and only for the frontmost
+        // layer — so a click out here while the ComparableModal is open cannot
+        // close this one out from under it.
+        if (e.target === e.currentTarget && isTopLayer()) onClose();
+      }}
     >
       <div
-        onClick={(e) => e.stopPropagation()}
+        ref={panelRef}
+        // eslint-disable-next-line no-restricted-syntax -- bespoke chrome over lib/useDialog (see above); the layering, trap, Escape and scroll lock all come from the hook.
+        role="dialog"
+        aria-modal="true"
+        aria-label="Estimation detail"
+        /* Focusable but not tab-reachable: where useDialog parks initial focus
+         * if the panel ever renders without a control of its own. */
+        tabIndex={-1}
         className="relative w-full max-w-3xl bg-[var(--color-paper)] rounded-[var(--radius-md)] border border-[var(--color-rule)] shadow-[0_24px_60px_rgba(0,0,0,0.18)]"
       >
-        <button
-          ref={closeBtnRef}
-          type="button"
-          onClick={onClose}
-          aria-label="Close"
-          className="absolute top-3 right-3 z-10 w-9 h-9 flex items-center justify-center text-[var(--color-ink-3)] hover:text-[var(--color-ink)] rounded-[var(--radius-sm)] focus-visible:border focus-visible:border-[var(--color-copper)]"
-        >
-          <CloseGlyph />
-        </button>
+        <DialogClose onClick={onClose} className="absolute top-3 right-3 z-10" />
 
         <div className="p-6">
           <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
@@ -293,22 +309,23 @@ export function RunDetailModal({
           <Hairline />
           <FeedbackBlock runId={run.id} />
         </div>
-      </div>
 
-      {/* Feedback composer floats above the modal; mounted only while the
-          popup is open, so the "Provide feedback" affordance lives with it. */}
-      <div onClick={(e) => e.stopPropagation()}>
+        {/* Feedback composer floats above the modal; mounted only while the
+            popup is open, so the "Provide feedback" affordance lives with it.
+
+            INSIDE the panel, not beside it. It is `position: fixed` and no
+            ancestor here transforms, so it paints in exactly the same place
+            either way — but the focus trap cycles what is inside the PANEL,
+            and as a sibling of it the composer, the prompt editor and its own
+            Close became unreachable by keyboard the moment the trap arrived.
+            The wrapper that used to sit here did nothing but `stopPropagation`
+            to keep a click on the panel from reaching the backdrop-wide
+            `onClick={onClose}`; that handler is a target check now, so the
+            wrapper went with it. */}
         <FloatingFeedbackPanel runId={run.id} run={run} />
       </div>
-    </div>
-  );
-}
-
-function CloseGlyph() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
-      <path d="M4 4 L12 12 M12 4 L4 12" />
-    </svg>
+    </div>,
+    document.body,
   );
 }
 

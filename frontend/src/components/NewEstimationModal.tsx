@@ -26,19 +26,12 @@
  * same defaults the form used to ship with (Claude + active).
  */
 
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useId,
-  useMemo,
-  useState,
-  type ReactNode,
-} from 'react';
+import { createContext, useCallback, useContext, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ROUTES } from '@/lib/routes';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import Dialog, { DialogClose } from '@/components/Dialog';
+import { useCloseOnNavigation } from '@/lib/useCloseOnNavigation';
 import {
   ApiError,
   createBuildingFromUrl,
@@ -93,6 +86,12 @@ export function useNewEstimationModal(): ModalCtx {
 export function NewEstimationProvider({ children }: { children: ReactNode }) {
   const [isOpen, setOpen] = useState(false);
   const [prefill, setPrefill] = useState<NewEstimationPrefill | null>(null);
+  /* This provider mounts above <Outlet> in Shell, so without this a navigation
+   * started from inside the modal — a submit that navigates to the run's
+   * surface, or anything a future body renders — would change the page BEHIND
+   * the open modal and leave the body scroll lock on. See
+   * lib/useCloseOnNavigation.ts. */
+  useCloseOnNavigation(() => setOpen(false));
   const value = useMemo<ModalCtx>(
     () => ({
       open: (p?: NewEstimationPrefill) => {
@@ -163,6 +162,8 @@ function NewEstimationModal({
   >(null);
   const titleId = useId();
   const urlId = useId();
+  const urlInputRef = useRef<HTMLInputElement>(null);
+  const submitRef = useRef<HTMLButtonElement>(null);
   const navigate = useNavigate();
   const qc = useQueryClient();
 
@@ -270,14 +271,16 @@ function NewEstimationModal({
     setAttachmentFiles((files) => files.filter((_, i) => i !== idx));
   }, []);
 
-  // Esc closes; Enter submits when the input is focused.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (pending) return;
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+  /* Escape, the focus trap, focus restore, the backdrop click and the body
+   * scroll lock all come from <Dialog> (lib/useDialog.ts) — the hand-rolled
+   * window listener that used to live here is gone. What does NOT come from
+   * the primitive is the in-flight guard: a submit is already running against
+   * the API, so every dismissal gesture (Escape, backdrop, the close glyph)
+   * stays inert until it settles, exactly as before. useDialog reads onClose
+   * through a ref, so this changing identity re-registers nothing. */
+  const requestClose = useCallback(() => {
+    if (pending) return;
+    onClose();
   }, [onClose, pending]);
 
   const title =
@@ -308,128 +311,123 @@ function NewEstimationModal({
       : 'Estimate';
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[16vh] pb-10 bg-[var(--color-ink)]/40 backdrop-blur-[2px]"
-      // eslint-disable-next-line no-restricted-syntax -- W6b migrates this dialog
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby={titleId}
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !pending) onClose();
-      }}
+    <Dialog
+      open
+      onClose={requestClose}
+      labelledBy={titleId}
+      /* Opened to type the URL. On the prefilled path (Listing Detail → New
+       * estimation) that field is not rendered and the primary action is the
+       * one thing left to do. */
+      initialFocus={urlLocked ? submitRef : urlInputRef}
+      className="w-full max-w-xl"
     >
-      <div className="w-full max-w-xl rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-2xl">
-        <header className="flex items-baseline justify-between gap-4 px-6 pt-5 pb-3">
-          <div>
-            <p className="text-[0.65rem] tracking-[0.22em] uppercase text-[var(--color-ink-3)]">
-              New {kind === 'building' ? 'building' : 'estimation'}
-            </p>
-            <h2
-              id={titleId}
-              className="mt-1 text-[1.35rem] leading-tight"
-              style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
-            >
-              {title}
-            </h2>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={pending}
-            aria-label="Close"
-            className="shrink-0 -mr-1 px-2 py-1 text-[var(--color-ink-3)] hover:text-[var(--color-ink)] disabled:opacity-40 disabled:cursor-not-allowed"
+      <header className="flex items-baseline justify-between gap-4 px-6 pt-5 pb-3">
+        <div>
+          <p className="text-[0.65rem] tracking-[0.22em] uppercase text-[var(--color-ink-3)]">
+            New {kind === 'building' ? 'building' : 'estimation'}
+          </p>
+          <h2
+            id={titleId}
+            className="mt-1 text-[1.35rem] leading-tight"
+            style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
           >
-            <CloseGlyph />
-          </button>
-        </header>
+            {title}
+          </h2>
+        </div>
+        {/* The one close glyph (components/Dialog.tsx), DISABLED — not merely
+          * dimmed — while a submit is in flight: a disabled control is announced
+          * as unavailable and stays out of the focus trap. requestClose guards
+          * the other two gestures (Escape, the backdrop) the same way. */}
+        <DialogClose onClick={requestClose} disabled={pending} className="-mr-1" />
+      </header>
 
-        <div className="px-6 pb-6">
-          <KindToggle kind={kind} setKind={setKind} disabled={pending} />
+      <div className="px-6 pb-6">
+        <KindToggle kind={kind} setKind={setKind} disabled={pending} />
 
-          {kind === 'apartment' && (
-            <div className="flex flex-wrap items-start gap-x-8 gap-y-2">
-              <CategoryMainToggle
-                categoryMain={categoryMain}
-                setCategoryMain={setCategoryMain}
-                disabled={pending}
-              />
-              <EstimateKindToggle
-                estimateKind={estimateKind}
-                setEstimateKind={setEstimateKind}
-                disabled={pending}
-              />
-            </div>
-          )}
+        {kind === 'apartment' && (
+          <div className="flex flex-wrap items-start gap-x-8 gap-y-2">
+            <CategoryMainToggle
+              categoryMain={categoryMain}
+              setCategoryMain={setCategoryMain}
+              disabled={pending}
+            />
+            <EstimateKindToggle
+              estimateKind={estimateKind}
+              setEstimateKind={setEstimateKind}
+              disabled={pending}
+            />
+          </div>
+        )}
 
+        {!urlLocked && (
+          <label
+            htmlFor={urlId}
+            className="mt-4 block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
+          >
+            Listing URL
+          </label>
+        )}
+        <div
+          className={[
+            'mt-2 flex items-stretch gap-2',
+            urlLocked ? 'mt-4 justify-end' : '',
+          ].join(' ')}
+        >
           {!urlLocked && (
-            <label
-              htmlFor={urlId}
-              className="mt-4 block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
-            >
-              Listing URL
-            </label>
+            <input
+              id={urlId}
+              ref={urlInputRef}
+              type="url"
+              inputMode="url"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              placeholder={placeholder}
+              disabled={pending}
+              className="flex-1 min-w-0 px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] disabled:opacity-60"
+            />
           )}
-          <div
+          <button
+            ref={submitRef}
+            type="button"
+            onClick={submit}
+            disabled={!url.trim() || pending}
             className={[
-              'mt-2 flex items-stretch gap-2',
-              urlLocked ? 'mt-4 justify-end' : '',
+              'shrink-0 px-4 py-2 text-sm rounded-[var(--radius-sm)] border transition-colors',
+              !url.trim() || pending
+                ? 'bg-[var(--color-rule-strong)] text-[var(--color-ink-4)] border-[var(--color-rule-strong)] cursor-not-allowed'
+                : 'bg-[var(--color-copper)] text-white border-[var(--color-copper)] hover:bg-[var(--color-copper-2)] hover:border-[var(--color-copper-2)]',
             ].join(' ')}
           >
-            {!urlLocked && (
-              <input
-                id={urlId}
-                type="url"
-                inputMode="url"
-                autoFocus
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    submit();
-                  }
-                }}
-                placeholder={placeholder}
-                disabled={pending}
-                className="flex-1 min-w-0 px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] disabled:opacity-60"
-              />
-            )}
-            <button
-              type="button"
-              onClick={submit}
-              disabled={!url.trim() || pending}
-              className={[
-                'shrink-0 px-4 py-2 text-sm rounded-[var(--radius-sm)] border transition-colors',
-                !url.trim() || pending
-                  ? 'bg-[var(--color-rule-strong)] text-[var(--color-ink-4)] border-[var(--color-rule-strong)] cursor-not-allowed'
-                  : 'bg-[var(--color-copper)] text-white border-[var(--color-copper)] hover:bg-[var(--color-copper-2)] hover:border-[var(--color-copper-2)]',
-              ].join(' ')}
-            >
-              {pending ? <Spinner label={submitLabel} /> : submitLabel}
-            </button>
-          </div>
-
-          {error && <ErrorBlock error={error} kind={kind} />}
-
-          <OperatorInputs
-            specialInstructions={specialInstructions}
-            setSpecialInstructions={setSpecialInstructions}
-            contextualText={contextualText}
-            setContextualText={setContextualText}
-            disabled={pending}
-            allowAttachments={kind === 'building'}
-            attachments={attachmentFiles}
-            attachmentError={attachmentError}
-            onAttachmentsPicked={onAttachmentsPicked}
-            onRemoveAttachment={removeAttachment}
-          />
-
-          <p className="mt-4 text-[0.75rem] text-[var(--color-ink-3)] leading-relaxed">
-            {helpCopy}
-          </p>
+            {pending ? <Spinner label={submitLabel} /> : submitLabel}
+          </button>
         </div>
+
+        {error && <ErrorBlock error={error} kind={kind} />}
+
+        <OperatorInputs
+          specialInstructions={specialInstructions}
+          setSpecialInstructions={setSpecialInstructions}
+          contextualText={contextualText}
+          setContextualText={setContextualText}
+          disabled={pending}
+          allowAttachments={kind === 'building'}
+          attachments={attachmentFiles}
+          attachmentError={attachmentError}
+          onAttachmentsPicked={onAttachmentsPicked}
+          onRemoveAttachment={removeAttachment}
+        />
+
+        <p className="mt-4 text-[0.75rem] text-[var(--color-ink-3)] leading-relaxed">
+          {helpCopy}
+        </p>
       </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -815,19 +813,6 @@ function Spinner({ label }: { label: string }) {
       </svg>
       <span>{label}</span>
     </span>
-  );
-}
-
-function CloseGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden>
-      <path
-        d="M3 3 L11 11 M11 3 L3 11"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      />
-    </svg>
   );
 }
 

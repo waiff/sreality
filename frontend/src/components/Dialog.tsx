@@ -33,7 +33,7 @@
  * A dialog is ALWAYS named — the type below demands exactly one of `label` /
  * `labelledBy`, because two of the thirteen shipped unnamed.
  */
-import { useRef, type ReactNode } from 'react';
+import { useRef, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { useDialog } from '@/lib/useDialog';
 
@@ -44,6 +44,9 @@ interface DialogBaseProps {
   /* Panel chrome — size and layout. Positioning, colour and the role live
    * here; callers set width/height the way AnchoredPopover's callers do. */
   className?: string;
+  /* Where focus lands on open when DOM order would pick the wrong control —
+   * see lib/useDialog's initialFocusTarget for the default it overrides. */
+  initialFocus?: RefObject<HTMLElement | null>;
 }
 
 /* Exactly one name, never zero. `label` is a literal string; `labelledBy` is
@@ -54,8 +57,17 @@ type DialogName =
 
 export type DialogProps = DialogBaseProps & DialogName;
 
+/* Viewport-safe by default: a panel can never be taller than the backdrop,
+ * and one that would be scrolls itself — so a tall form on a short viewport
+ * never spills its title off the top and its submit off the bottom. Two
+ * overflow LONGHANDS on purpose: a consumer's `overflow-y-auto` against a
+ * shorthand `overflow-hidden` here is decided by Tailwind's emission order,
+ * not by the class attribute, and three migrations placed that bet before the
+ * primitive settled it. Inner-scroll shapes (`flex flex-col` + a `flex-1
+ * min-h-0 overflow-y-auto` body) still work: their panel never overflows, so
+ * its own scrollbar never appears. */
 const PANEL_BASE =
-  'rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-2xl overflow-hidden';
+  'rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-2xl max-h-full overflow-x-hidden overflow-y-auto';
 
 export default function Dialog({ open, ...rest }: DialogProps) {
   /* Mounting IS opening — see lib/useDialog's header. The layer, the focus
@@ -71,10 +83,11 @@ function DialogLayer({
   className = '',
   label,
   labelledBy,
+  initialFocus,
 }: Omit<DialogBaseProps, 'open'> & Partial<Record<'label' | 'labelledBy', string>>) {
   const panelRef = useRef<HTMLDivElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
-  const { isTopLayer, zIndex } = useDialog({ onClose, panelRef, zRef: backdropRef });
+  const { isTopLayer, zIndex } = useDialog({ onClose, panelRef, zRef: backdropRef, initialFocus });
 
   return createPortal(
     <div
@@ -120,19 +133,37 @@ export function DialogClose({
   onClick,
   label = 'Close',
   className = '',
+  disabled = false,
+  tone = 'default',
 }: {
   onClick: () => void;
   /* Override only when "Close" would be ambiguous beside another close. */
   label?: string;
+  /* Layout only (position, size). Colour is `tone`, never a caller `text-*`:
+   * two equal-specificity colour utilities are decided by Tailwind's emission
+   * order, not by the class attribute. */
   className?: string;
+  /* A dismissal that must not happen yet (a submit in flight). Disabled — not
+   * dimmed — so it is announced as unavailable and leaves the focus trap. */
+  disabled?: boolean;
+  /* `onDark`: chrome over a near-black surface (the photo viewer). */
+  tone?: 'default' | 'onDark';
 }) {
+  const colour =
+    tone === 'onDark'
+      ? 'text-[var(--color-ink-4)] hover:text-[var(--color-paper)]'
+      : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink)]';
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       aria-label={label}
+      /* lib/useDialog's initial-focus default skips this control. */
+      data-dialog-close=""
       className={[
-        'shrink-0 px-2 py-1 text-[var(--color-ink-3)] hover:text-[var(--color-ink)] transition-colors',
+        'shrink-0 px-2 py-1 transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
+        colour,
         className,
       ]
         .filter(Boolean)
