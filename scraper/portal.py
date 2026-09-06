@@ -426,12 +426,19 @@ _DEFAULTS: dict[str, PortalConfig] = {
     ),
     "mmreality": PortalConfig(
         source="mmreality",
-        # A single mixed-category index (no per-category slice) that can't be
-        # gated per-(category_main, category_type) the way source-scoped
-        # mark_inactive needs, so it stays partial-walk: the runner never flips
-        # its listings inactive from index absence (bazos posture, rule #3).
+        # Ten per-(sale type, property type) indexes, each declaring its own
+        # result count (`metadata.count` in the page's SSR state), so a walk can
+        # be proved complete per canonical category the way rule #3 requires.
+        # The bare /nemovitosti/ feed the walk used until 2026-09 was prodej
+        # only (its count equals the prodej total; rentals never appeared).
+        # The flag stays False here: the coverage gate (migration 455) owns the
+        # flip on the live registry row, from ledger evidence.
         supports_complete_walk=False,
-        categories=[{"index": "nemovitosti"}],
+        categories=[
+            {"sale_type": sale, "category": cat}
+            for sale in ("prodej", "pronajem")
+            for cat in ("byty", "domy", "pozemky", "komercni-objekty", "ostatni")
+        ],
         split_threshold=None,
         # Routed through a residential proxy (mmreality_client.USE_PROXY = True),
         # so the Cloudflare datacenter-IP block is gone and we crawl at normal

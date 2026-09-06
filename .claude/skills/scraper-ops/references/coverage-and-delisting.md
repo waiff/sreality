@@ -191,6 +191,15 @@ select category_main, category_type, slice_key, outcome, collected, walked_at
   from portal_index_slices where source = 'idnes' order by walked_at;
 ```
 
+**mmreality writes one row per category.** Its ten per-(sale type, property type)
+indexes page to their tail with no second axis (the largest is ~300 pages of 12), so
+each category is one slice, `slice_key='national'`, `exhausted` only when the shared
+arithmetic accepts the collected count against the page's own `metadata.count`. A
+deadline stop records `deadline`, a page cap `ceiling`, a short or unmeasurable walk
+`degraded`. This is what un-parks it: the portal was parked in 2026-05 as "a single
+mixed index with no result total", and both halves were wrong (the bare feed was
+prodej-only and did declare a count — see `docs/architecture.md` § mmreality).
+
 ## The gate (`coverage_gate.yml`, migration 455)
 
 `scripts/coverage_gate.py`, cron `15 3,9,15,21` — three hours after each walk

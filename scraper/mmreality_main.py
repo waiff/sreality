@@ -2,24 +2,28 @@
 
 Runnable as `python -m scraper.mmreality_main`. M&M Reality is a `Portal`
 (MmRealityPortal) driven by the one generic `scraper.portal_runner`: an
-index-walk that pages the `/nemovitosti/` results and enqueues new/price-changed
-ids into the shared `listing_detail_queue` (source='mmreality', migration 108),
-then a detail-drain that fetches each listing page, parses its embedded
-`:property` estate object to a `ScrapedListing`, and ingests via
+index-walk that pages each per-(sale type, property type) index and enqueues
+new/price-changed ids into the shared `listing_detail_queue` (source='mmreality',
+migration 108), then a detail-drain that fetches each listing page, parses its
+embedded `:property` estate object to a `ScrapedListing`, and ingests via
 `db.ingest_scraped_listing` (Tier-0 idempotency + Tier-1 matching). No bespoke
 pipeline — only the per-portal fetcher (MmRealityClient) + parser
 (mmreality_parser) + config differ (the modularity rule in CLAUDE.md).
 
-mmreality exposes a SINGLE mixed-category index (no per-category URL slice), and
-each listing's category is read from its own detail JSON, so one descriptor walks
-everything. Because a single mixed walk can't be gated per-(category_main,
-category_type) the way the source-scoped `mark_inactive` requires, mmreality is
-`supports_complete_walk=false` (the bazos posture): the runner never flips its
-listings inactive from index-absence, so a partial/rate-limited walk can never
-falsely delist (architectural rule #3). Delisted ads still drop out via a gone
-detail fetch (immediate per-listing flip) and the toolkit's "active = seen within
-7 days" rule. Coordinates come from the estate JSON; a coords-less row falls back
-to carry-forward + locality geocoding via the shared scraper.location resolver.
+Until 2026-09 this walked the bare `/nemovitosti/` feed as "a single mixed index
+with no result total" and was parked on `supports_complete_walk=false` for it.
+Both halves of that were wrong: the feed's own SSR `metadata.count` equals the
+PRODEJ total (the 1,518 rentals never appeared in it — they were never scraped),
+and every per-type URL (`/nemovitosti/{prodej|pronajem}/{byty|domy|pozemky|
+komercni-objekty|ostatni}/`) declares its own count. So the walk is now one
+category per (sale type, property type) — ten in all, partitioning the portal
+exactly (the per-type prodej counts sum to the prodej total) — each proved by
+the shared `walk_is_complete` arithmetic against that declared count, recorded
+in the slice ledger (`portal_index_slices`, one row per category), and swept by
+the source- and category-scoped `mark_inactive_native` behind the 12 h staleness
+rail. The flag itself is flipped by the coverage gate from ledger evidence, not
+here. Coordinates come from the estate JSON; a coords-less row falls back to
+carry-forward + locality geocoding via the shared scraper.location resolver.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from scraper.portal import (
     default_config,
     deadline_reached,
     load_portal_config,
+    walk_is_complete,
     classify_index_sighting,
 )
 from scraper.portal_base import ListingGoneError
@@ -46,18 +51,56 @@ from scraper.rate_limit import RateLimiter
 LOG = logging.getLogger(__name__)
 SOURCE = "mmreality"
 
+# Index slug -> canonical label. The slugs are the portal's own "Typ nemovitosti"
+# groups, which also drive the detail JSON's `group.name` the parser maps with
+# the same prefixes — so a listing's index category and its stored category_main
+# agree, which is what makes a category-scoped sweep safe.
+CATEGORY_MAIN: dict[str, str] = {
+    "byty": "byt",
+    "domy": "dum",
+    "pozemky": "pozemek",
+    "komercni-objekty": "komercni",
+    "ostatni": "ostatni",
+}
+SALE_TYPE: dict[str, str] = {"prodej": "prodej", "pronajem": "pronajem"}
+
+# The staleness rail (rule #3): a row is flipped only if ALSO unseen this long,
+# so one walk's hiccup cannot delist what the previous walk just touched. 12 h on
+# the 6-hourly portals, same as ceskereality/bazos/bezrealitky.
+INACTIVE_MIN_UNSEEN_HOURS = 12
+
+# The ledger key for a category walked whole. mmreality's per-type indexes page
+# to their tail (the largest, pozemky/prodej, is ~300 pages of 12), so there is
+# no second axis; one row per category is the ledger's whole shape.
+SLICE_KEY = "national"
+
 
 class MmRealityPortal:
     """M&M Reality as a Portal: the seams the generic runner needs, wrapping the
     mmreality client + parser. Operational scope comes from the `portals`
-    registry config; the index is a single mixed-category walk."""
+    registry config; one category per (sale type, property type) index."""
 
     source = SOURCE
     index_rate = 1.0
 
     def __init__(self, config: PortalConfig, *, max_pages: int | None = None) -> None:
         self.supports_complete_walk = config.supports_complete_walk
-        self._categories = config.categories or [{"index": "nemovitosti"}]
+        usable = [
+            c for c in (config.categories or [])
+            if c.get("sale_type") in SALE_TYPE and c.get("category") in CATEGORY_MAIN
+        ]
+        if not usable:
+            # A registry row still on the pre-2026-09 shape ({"index": ...}) —
+            # or none at all — walks the baked-in ten rather than nothing; the
+            # gate reads the DB row's own categories, so this fallback cannot
+            # widen what the gate demands, only what the walk covers.
+            if config.categories:
+                LOG.warning(
+                    "mmreality: config categories %r carry no (sale_type, category) "
+                    "pairs; walking the baked-in per-type list", config.categories,
+                )
+            usable = [dict(c) for c in default_config(SOURCE).categories]
+        self._categories = usable
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
         self.shared_rate_limiter = config.limits.shared_rate_limiter
@@ -71,9 +114,10 @@ class MmRealityPortal:
         return list(self._categories)
 
     def category_labels(self, category: dict[str, Any]) -> tuple[str | None, str | None]:
-        # The index is mixed; a listing's real category is read from its detail
-        # JSON at drain time. No per-category label here.
-        return (None, None)
+        return (
+            CATEGORY_MAIN.get(category.get("category")),
+            SALE_TYPE.get(category.get("sale_type")),
+        )
 
     def connect_index(self) -> Any:
         return db.connect()
@@ -89,6 +133,7 @@ class MmRealityPortal:
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
         deadline: float | None = None,
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
+        sale_type, cat = category["sale_type"], category["category"]
         client = MmRealityClient(limiter=limiter)
 
         native_ids: list[str] = []
@@ -96,19 +141,28 @@ class MmRealityPortal:
         ref_map: dict[str, str] = {}
         pages = 0
         page: int | None = None  # None = the bare first page
+        declared: int | None = None
+        stopped_early = False
+        outcome = "exhausted"
 
         while True:
             if deadline_reached(deadline):
                 LOG.info(
-                    "INDEX time budget reached index=%s before page=%s "
+                    "INDEX time budget reached sale=%s cat=%s before page=%s "
                     "(pages=%d walked); stopping early, walk incomplete",
-                    category.get("index", "nemovitosti"), page or 1, pages,
+                    sale_type, cat, page or 1, pages,
                 )
+                stopped_early, outcome = True, "deadline"
                 break
-            html, status = client.fetch_index(page)
+            html, status = client.fetch_index(sale_type, cat, page)
             parsed = parse_index(html)
             pages += 1
-            LOG.info("INDEX page=%s items=%d", page or 1, len(parsed.items))
+            if pages == 1:
+                declared = parsed.total
+            LOG.info(
+                "INDEX sale=%s cat=%s page=%s items=%d declared=%s",
+                sale_type, cat, page or 1, len(parsed.items), declared,
+            )
             new_on_page = 0
             for item in parsed.items:
                 nid = item.source_id_native
@@ -120,14 +174,36 @@ class MmRealityPortal:
                 # see a value the write boundary would have nulled.
                 price_map[nid] = db.sane_price_czk(index_price(item.price_text))
             if self._max_pages and pages >= self._max_pages:
+                # A page cap is a partial walk by definition (rule #3).
+                stopped_early, outcome = True, "ceiling"
                 break
             # Stop on an empty page, no "next" link, or a page that added nothing
             # new (a clamped out-of-range page would otherwise loop forever).
             if not parsed.items or parsed.next_offset is None or new_on_page == 0:
                 break
+            if parsed.next_offset <= (page or 1):
+                LOG.warning(
+                    "INDEX sale=%s cat=%s pager did not advance at page=%s (next=%s); "
+                    "stopping", sale_type, cat, page or 1, parsed.next_offset,
+                )
+                outcome = "degraded"
+                break
             page = parsed.next_offset
 
         seen = set(native_ids)
+        # The shared two-sided verdict against the portal's OWN count for this
+        # index. An unmeasurable count (no SSR state on page 1) is `unknown`,
+        # never complete; a deadline or page cap short-circuits it.
+        complete = walk_is_complete(len(seen), declared, stopped_early=stopped_early)
+        if not complete and outcome == "exhausted":
+            outcome = "degraded"
+        LOG.info(
+            "RECONCILE-INDEX sale=%s cat=%s declared=%s collected=%d pages=%d "
+            "outcome=%s complete=%s",
+            sale_type, cat, declared, len(seen), pages, outcome, complete,
+        )
+        self._record_slice(conn, category, outcome, declared, len(seen), pages)
+
         existing = (
             db.index_summary_native(conn, SOURCE, native_ids)
             if conn is not None else {}
@@ -158,30 +234,48 @@ class MmRealityPortal:
             if conn is not None and entries else 0
         )
         LOG.info(
-            "ENQUEUE source=mmreality new=%d changed=%d unchanged=%d enqueued=%d",
-            len(new_ids), len(changed), len(unchanged_pks), enqueued,
+            "ENQUEUE source=mmreality sale=%s cat=%s new=%d changed=%d unchanged=%d "
+            "enqueued=%d",
+            sale_type, cat, len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        # supports_complete_walk is false, so the runner never marks inactive;
-        # `complete` is the literal False below to make that explicit — which
-        # also covers the deadline stop above (a truncated walk must never
-        # authorise delisting, rule #3). Never make this a computed boolean.
-        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, None, pages, False
+        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, declared, pages, complete
+
+    def _record_slice(
+        self, conn: Any, category: dict[str, Any], outcome: str,
+        declared: int | None, collected: int, pages: int,
+    ) -> None:
+        """One ledger row per category: the coverage gate (migration 455) reads
+        "every slice of every declared category exhausted inside the window",
+        and `exhausted` is the only positive outcome it accepts."""
+        if conn is None:
+            return
+        cm, ct = self.category_labels(category)
+        if cm is None or ct is None:
+            return
+        db.record_index_slice(
+            conn, source=SOURCE, category_main=cm, category_type=ct,
+            slice_key=SLICE_KEY, outcome=outcome, declared_total=declared,
+            collected=collected, pages=pages,
+        )
 
     def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
-        # Partial-walk portal (mixed index): never flip listings inactive from
-        # index absence (architectural rule #3). The runner won't call this
-        # while supports_complete_walk is false; defensive no-op regardless.
-        return 0
+        # Runner-gated: called only on a complete walk of THIS category while
+        # supports_complete_walk is true. Source- and category-scoped (rule #15),
+        # behind the staleness rail (rule #3). Each (sale type, property type)
+        # index maps to exactly one (category_main, category_type), so unlike
+        # ceskereality there is no sibling slice to buffer for.
+        cm, ct = self.category_labels(category)
+        if cm is None or ct is None:
+            return 0
+        return db.mark_inactive_native(
+            conn, SOURCE, cm, ct, seen, min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
+        )
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM listings "
-                "WHERE is_active = true AND source = %s",
-                (SOURCE,),
-            )
-            row = cur.fetchone()
-        return int(row[0]) if row else None
+        cm, ct = self.category_labels(category)
+        if cm is None or ct is None:
+            return None
+        return db.active_count(conn, cm, ct, source=SOURCE)
 
     # --- detail-drain seams ---
     def make_client(self, limiter: RateLimiter) -> MmRealityClient:

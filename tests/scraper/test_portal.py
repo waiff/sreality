@@ -91,10 +91,15 @@ def test_default_config_idnes():
 
 def test_default_config_mmreality():
     cfg = default_config("mmreality")
-    assert cfg.supports_complete_walk is False  # mixed single index → partial walk
+    # The flag lives on the live registry row; the coverage gate flips it from
+    # slice-ledger evidence (migration 455), so the baked-in default stays down.
+    assert cfg.supports_complete_walk is False
     assert cfg.split_threshold is None
     assert cfg.splits is False
-    assert cfg.categories == [{"index": "nemovitosti"}]
+    assert {"sale_type": "prodej", "category": "byty"} in cfg.categories
+    assert {"sale_type": "pronajem", "category": "komercni-objekty"} in cfg.categories
+    assert len(cfg.categories) == 10             # 5 property types × prodej + pronajem
+    assert {"index": "nemovitosti"} not in cfg.categories   # the prodej-only feed is gone
 
 
 def test_default_config_remax():

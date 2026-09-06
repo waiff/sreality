@@ -208,7 +208,8 @@ def evaluate(conn: Any, source: str, declared_categories: int, *, dry_run: bool)
     if not covered and slices_total == 0:
         # No ledger rows at all is a different statement from "walked and came up
         # short", and reading them the same way makes an uninstrumented portal
-        # look like a broken one. Only idnes writes the slice ledger today.
+        # look like a broken one. idnes, ceskereality and mmreality write the
+        # slice ledger today.
         note = ("no slice ledger for this portal — its walk does not record "
                 "portal_index_slices yet, so coverage cannot be evidenced")
     elif not covered:

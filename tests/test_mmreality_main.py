@@ -1,5 +1,5 @@
-"""mmreality_main on the portal framework: MmRealityPortal (partial-walk, mixed
-single index) seams + the main() that drives index-walk then detail-drain through
+"""mmreality_main on the portal framework: MmRealityPortal (ten per-type indexes,
+each proved against its own declared count) seams + the main() that drives index-walk then detail-drain through
 the shared runner, recording an 'index' + a 'detail' scrape_runs row tagged
 source='mmreality'.
 """
@@ -27,11 +27,19 @@ class _Conn:
         pass
 
 
+CATS = [
+    {"sale_type": sale, "category": cat}
+    for sale in ("prodej", "pronajem")
+    for cat in ("byty", "domy", "pozemky", "komercni-objekty", "ostatni")
+]
+BYTY = {"sale_type": "prodej", "category": "byty"}
+
+
 def _config() -> PortalConfig:
     return PortalConfig(
         source="mmreality",
         supports_complete_walk=False,
-        categories=[{"index": "nemovitosti"}],
+        categories=[dict(c) for c in CATS],
         split_threshold=None,
     )
 
@@ -127,73 +135,194 @@ def test_dry_run_records_no_scrape_run(monkeypatch):
 # --- MmRealityPortal seams --------------------------------------------------
 
 
-def test_portal_config_partial_walk():
+def test_portal_config_categories_and_labels():
     p = _portal()
     assert p.source == "mmreality"
+    # The flag is the live registry row's; the coverage gate flips it from
+    # ledger evidence, never code.
     assert p.supports_complete_walk is False
-    assert p.categories() == [{"index": "nemovitosti"}]
-    # The index is mixed; no per-category label (category comes from detail JSON).
+    assert len(p.categories()) == 10
+    assert p.category_labels(BYTY) == ("byt", "prodej")
+    assert p.category_labels({"sale_type": "pronajem", "category": "komercni-objekty"}) == (
+        "komercni", "pronajem")
     assert p.category_labels({"index": "nemovitosti"}) == (None, None)
+    assert {p.category_labels(c) for c in p.categories()} == {
+        (m, t) for m in ("byt", "dum", "pozemek", "komercni", "ostatni")
+        for t in ("prodej", "pronajem")
+    }
 
 
-class _IdxClient:
+def test_old_mixed_index_config_falls_back_to_the_per_type_list():
+    """A registry row still on the pre-2026-09 shape must walk the ten per-type
+    indexes, not nothing — and not the old prodej-only feed."""
+    cfg = PortalConfig(
+        source="mmreality", supports_complete_walk=False,
+        categories=[{"index": "nemovitosti"}], split_threshold=None,
+    )
+    p = MmRealityPortal(cfg)
+    assert len(p.categories()) == 10
+    assert all({"sale_type", "category"} <= set(c) for c in p.categories())
+
+
+class _ScriptedClient:
+    """fetch_index returns the page number as the 'html'; parse_index is
+    monkeypatched to look it up in a script."""
+
+    calls: list[tuple] = []
+
     def __init__(self, *a, **k):
-        self.calls = 0
+        pass
 
-    def fetch_index(self, *a, **k):
-        self.calls += 1
-        return ("<html>", 200)
+    def fetch_index(self, sale_type, category, page=None):
+        _ScriptedClient.calls.append((sale_type, category, page))
+        return (str(page or 1), 200)
 
 
-def test_walk_category_classifies_and_never_complete(monkeypatch):
-    a, b, c = "944001", "944002", "944003"  # new, changed, unchanged
-    base = "https://www.mmreality.cz/nemovitosti"
-    page = SimpleNamespace(
-        total=None, next_offset=None,
-        items=[
-            SimpleNamespace(source_id_native=a, detail_path=f"{base}/{a}/", price_text="5 000 000 Kč"),
-            SimpleNamespace(source_id_native=b, detail_path=f"{base}/{b}/", price_text="6 000 000 Kč"),
-            SimpleNamespace(source_id_native=c, detail_path=f"{base}/{c}/", price_text="7 000 000 Kč"),
-        ],
+def _item(nid: str, price: str = "5 000 000 Kč") -> SimpleNamespace:
+    return SimpleNamespace(
+        source_id_native=nid,
+        detail_path=f"https://www.mmreality.cz/nemovitosti/{nid}/",
+        price_text=price,
     )
-    monkeypatch.setattr(mmreality_main, "parse_index", lambda _h: page)
-    monkeypatch.setattr(mmreality_main, "MmRealityClient", _IdxClient)
+
+
+def _page(items, *, total, next_offset=None) -> SimpleNamespace:
+    return SimpleNamespace(total=total, next_offset=next_offset, items=list(items))
+
+
+def _stub_walk(monkeypatch, script: dict[str, SimpleNamespace], existing=None) -> dict[str, Any]:
+    """Wire the walk's DB seams to capture dicts; returns the capture."""
+    cap: dict[str, Any] = {"ledger": [], "touched": [], "entries": []}
+    _ScriptedClient.calls = []
+    monkeypatch.setattr(mmreality_main, "MmRealityClient", _ScriptedClient)
+    monkeypatch.setattr(mmreality_main, "parse_index", lambda h: script[h])
     monkeypatch.setattr(
-        mmreality_main, "index_price",
-        lambda t: int("".join(c for c in (t or "") if c.isdigit()) or 0) or None,
-    )
-    monkeypatch.setattr(mmreality_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
+        mmreality_main.db, "index_summary_native", lambda _c, _s, ids: dict(existing or {}))
     monkeypatch.setattr(
-        mmreality_main.db, "index_summary_native",
-        lambda _c, _s, ids: {
-            b: {"id": 8102, "sreality_id": -2, "price_czk": 5_500_000, "last_seen_at": None},  # differs
-            c: {"id": 8103, "sreality_id": -3, "price_czk": 7_000_000, "last_seen_at": None},  # same
-        },
-    )
-    touched: dict[str, Any] = {}
-    monkeypatch.setattr(mmreality_main.db, "touch_listings_by_id", lambda _c, pks: touched.update(pks=list(pks)))
-    captured: dict[str, Any] = {}
+        mmreality_main.db, "touch_listings_by_id", lambda _c, pks: cap["touched"].extend(pks))
     monkeypatch.setattr(
         mmreality_main.db, "enqueue_detail",
-        lambda _c, source, entries: (captured.update(source=source, entries=list(entries))
-                                     or len(captured["entries"])),
+        lambda _c, source, entries: (cap["entries"].extend(entries) or len(entries)))
+    monkeypatch.setattr(
+        mmreality_main.db, "record_index_slice", lambda _c, **kw: cap["ledger"].append(kw))
+    return cap
+
+
+def test_walk_category_classifies_and_proves_complete_against_the_declared_count(monkeypatch):
+    a, b, c = "944001", "944002", "944003"  # new, changed, unchanged
+    cap = _stub_walk(
+        monkeypatch,
+        {"1": _page([_item(a), _item(b, "6 000 000 Kč"), _item(c, "7 000 000 Kč")], total=3)},
+        existing={
+            b: {"id": 8102, "sreality_id": -2, "price_czk": 5_500_000, "last_seen_at": None},
+            c: {"id": 8103, "sreality_id": -3, "price_czk": 7_000_000, "last_seen_at": None},
+        },
     )
     seen, counts, total, pages, complete = _portal().walk_category(
-        {"index": "nemovitosti"}, object(), False, _Limiter(),
-    )
+        BYTY, object(), False, _Limiter())
     assert seen == {a, b, c}
-    assert total is None
-    assert complete is False           # partial-walk portal: never mark_inactive
-    assert touched["pks"] == [8103]    # unchanged listing touched by surrogate id
-    refs = {e[0]: e for e in captured["entries"]}
+    assert (total, pages, complete) == (3, 1, True)
+    assert _ScriptedClient.calls == [("prodej", "byty", None)]
+    assert cap["touched"] == [8103]
+    refs = {e[0]: e for e in cap["entries"]}
     assert refs[a][3] == mmreality_main.db.QUEUE_PRIORITY_NEW
     assert refs[b][3] == mmreality_main.db.QUEUE_PRIORITY_CHANGED
-    assert refs[a][1] == f"{base}/{a}/"
+    assert refs[a][1] == f"https://www.mmreality.cz/nemovitosti/{a}/"
     assert c not in refs
+    [row] = cap["ledger"]
+    assert row == {
+        "source": "mmreality", "category_main": "byt", "category_type": "prodej",
+        "slice_key": "national", "outcome": "exhausted", "declared_total": 3,
+        "collected": 3, "pages": 1,
+    }
 
 
-def test_mark_inactive_is_noop():
-    assert _portal().mark_inactive(object(), {"index": "nemovitosti"}, {"x", "y"}) == 0
+def test_walk_pages_to_the_tail_and_reports_every_page(monkeypatch):
+    cap = _stub_walk(monkeypatch, {
+        "1": _page([_item("1"), _item("2")], total=3, next_offset=2),
+        "2": _page([_item("3")], total=3),
+    })
+    seen, _c, total, pages, complete = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (len(seen), total, pages, complete) == (3, 3, 2, True)
+    assert _ScriptedClient.calls == [("prodej", "byty", None), ("prodej", "byty", 2)]
+    assert cap["ledger"][0]["outcome"] == "exhausted"
+
+
+def test_walk_short_of_the_declared_count_is_incomplete_and_degraded(monkeypatch):
+    """Rule #3: 3 of 10 is not a walk that saw everything, so no sweep and the
+    ledger says so."""
+    cap = _stub_walk(monkeypatch, {"1": _page([_item("1"), _item("2"), _item("3")], total=10)})
+    _s, _c, total, _p, complete = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (total, complete) == (10, False)
+    assert cap["ledger"][0]["outcome"] == "degraded"
+
+
+def test_walk_with_no_declared_count_is_never_complete(monkeypatch):
+    """An SSR-less page (throttle, error) measures nothing. 'unknown' must not
+    read as complete — that fail-open was the 2026-08-27 audit hole."""
+    cap = _stub_walk(monkeypatch, {"1": _page([_item("1")], total=None)})
+    _s, _c, total, _p, complete = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (total, complete) == (None, False)
+    assert cap["ledger"][0]["outcome"] == "degraded"
+
+
+def test_walk_of_an_empty_category_with_declared_zero_is_complete(monkeypatch):
+    cap = _stub_walk(monkeypatch, {"1": _page([], total=0)})
+    seen, _c, total, _p, complete = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (seen, total, complete) == (set(), 0, True)
+    assert cap["ledger"][0]["outcome"] == "exhausted"
+
+
+def test_deadline_stops_before_fetching_and_is_incomplete(monkeypatch):
+    cap = _stub_walk(monkeypatch, {"1": _page([_item("1")], total=1)})
+    monkeypatch.setattr(mmreality_main, "deadline_reached", lambda _d: True)
+    _s, _c, total, pages, complete = _portal().walk_category(
+        BYTY, object(), False, _Limiter(), deadline=1.0)
+    assert (total, pages, complete) == (None, 0, False)
+    assert _ScriptedClient.calls == []
+    assert cap["ledger"][0]["outcome"] == "deadline"
+
+
+def test_page_cap_is_a_partial_walk(monkeypatch):
+    cap = _stub_walk(monkeypatch, {
+        "1": _page([_item("1")], total=2, next_offset=2),
+        "2": _page([_item("2")], total=2),
+    })
+    _s, _c, _t, pages, complete = _portal(max_pages=1).walk_category(
+        BYTY, object(), False, _Limiter())
+    assert (pages, complete) == (1, False)
+    assert cap["ledger"][0]["outcome"] == "ceiling"
+
+
+def test_a_pager_that_does_not_advance_stops_the_walk(monkeypatch):
+    """A next link pointing at the current page would loop forever; stop, and
+    let the arithmetic call the result short."""
+    cap = _stub_walk(monkeypatch, {"1": _page([_item("1"), _item("2")], total=6, next_offset=1)})
+    _s, _c, _t, pages, complete = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (pages, complete) == (1, False)
+    assert cap["ledger"][0]["outcome"] == "degraded"
+
+
+def test_mark_inactive_is_category_scoped_behind_the_staleness_rail(monkeypatch):
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        mmreality_main.db, "mark_inactive_native",
+        lambda conn, source, cm, ct, seen, **kw: (calls.append((source, cm, ct, set(seen), kw)) or 7))
+    assert _portal().mark_inactive(object(), BYTY, {"x", "y"}) == 7
+    assert calls == [("mmreality", "byt", "prodej", {"x", "y"},
+                      {"min_unseen_hours": mmreality_main.INACTIVE_MIN_UNSEEN_HOURS})]
+    assert mmreality_main.INACTIVE_MIN_UNSEEN_HOURS == 12
+    # An unlabelled (old-shape) category can never sweep anything.
+    assert _portal().mark_inactive(object(), {"index": "nemovitosti"}, {"x"}) == 0
+    assert len(calls) == 1
+
+
+def test_active_count_is_category_scoped(monkeypatch):
+    monkeypatch.setattr(
+        mmreality_main.db, "active_count",
+        lambda conn, cm, ct, source: {("byt", "prodej", "mmreality"): 42}[(cm, ct, source)])
+    assert _portal().active_count(object(), BYTY) == 42
+    assert _portal().active_count(object(), {"index": "nemovitosti"}) is None
 
 
 class _DetailClient:

@@ -27,10 +27,15 @@ _GONE_MARKERS: tuple[str, ...] = (
 )
 
 
-def index_url(page: int | None = None) -> str:
-    """The mixed-category listing index. Page 1 is the bare URL; subsequent
-    pages are `?page=N` (the `<link rel="next">` carries the literal N)."""
-    url = f"{BASE_URL}/nemovitosti/"
+def index_url(sale_type: str, category: str, page: int | None = None) -> str:
+    """One (sale type, property type) index: `/nemovitosti/{sale}/{type}/`, page 1
+    bare, `?page=N` after (the `<link rel="next">` carries the literal N).
+
+    The bare `/nemovitosti/` feed the walk used until 2026-09 is NOT a mixed
+    index: its embedded `metadata.count` (8,703) equals the prodej total, and
+    the 1,518 rentals never appeared in it. Every per-type page declares its
+    own count, so this is the axis a complete walk can be proved on."""
+    url = f"{BASE_URL}/nemovitosti/{sale_type}/{category}/"
     if page is not None and page >= 2:
         url += f"?page={page}"
     return url
@@ -55,8 +60,10 @@ class MmRealityClient(BasePortalClient):
     # then 403s) — a misconfigured deploy fails loudly, never silently green.
     USE_PROXY = True
 
-    def fetch_index(self, page: int | None = None) -> tuple[str, int]:
-        response = self._request(index_url(page))
+    def fetch_index(
+        self, sale_type: str, category: str, page: int | None = None,
+    ) -> tuple[str, int]:
+        response = self._request(index_url(sale_type, category, page))
         return response.text, response.status_code
 
     def fetch_detail(self, id_or_path: str) -> tuple[str, int]:

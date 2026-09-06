@@ -220,14 +220,20 @@ that JSON rather than scraping markup: precise per-listing coordinates (`point`)
 condition/construction/ownership/energy, area, floors, and images all from one object —
 no `<dl>` table, no geocoding step. Typed fields are normalised to the SAME canonical
 labels sreality/idnes emit (`smíšená→smisena`, `velmi dobrý→velmi_dobry`,
-`Družstevní→druzstevni`, `2+1`). The index is a SINGLE MIXED-category feed
-(`/nemovitosti/?page=N`, no per-category slice); each listing's category is read from
-its own detail JSON, so one config descriptor walks everything. Because a single mixed
-walk can't be gated per-(category_main, category_type) the way the source-scoped
-`mark_inactive` requires, mmreality is `supports_complete_walk=false` (the bazos posture,
-rule #21): the runner never flips its listings inactive from index absence (rule #3) —
-delistings surface via a gone detail fetch (immediate per-listing flip via
-`mark_listing_inactive_native`) + the toolkit's "active = seen within 7 days" rule.
+`Družstevní→druzstevni`, `2+1`). The index is TEN per-(sale type, property
+type) feeds (`/nemovitosti/{prodej|pronajem}/{byty|domy|pozemky|komercni-objekty|ostatni}/`,
+`?page=N`, 12 cards a page), each declaring its own result count in the page's Vue SSR
+state (`metadata.count`); the five prodej counts sum to the prodej total, so the ten
+partition the portal exactly. Until 2026-09 the walk paged the bare `/nemovitosti/` feed
+as "a single mixed index with no total" — live-verified false on both counts: that feed's
+own count IS the prodej total (rentals never appeared in it, so 1,518 were never scraped)
+and every per-type page declares one. Each category is now proved by the shared
+`walk_is_complete` arithmetic against its declared count, written to the slice ledger
+(one row per category, `slice_key='national'`), and swept by the source- and
+category-scoped `mark_inactive_native` behind the 12 h staleness rail (rule #3); the
+coverage gate (migration 455) flips `supports_complete_walk` from that evidence
+(migration 481 set the ten descriptors). A gone detail fetch still flips a single
+listing immediately (`mark_listing_inactive_native`).
 Registered as a scraper portal (migration 117, sort 35).
 
 **Data source (remax-czech.cz).** A scheduled scraper (`scraper/remax_client.py`,
