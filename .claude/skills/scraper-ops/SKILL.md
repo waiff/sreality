@@ -1,6 +1,6 @@
 ---
 name: scraper-ops
-description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/estimation lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, clip_tag, compute_image_phash, verify_pipeline, llm_burn_rate.
+description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/estimation lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
 ---
 
 # Scraper operations
@@ -215,7 +215,9 @@ unwritten so the `property_maintenance` check alarms). The visual-signal produce
 (`scripts/retag_from_embeddings.py` — re-runs the zero-shot over each image's STORED embedding
 when the taxonomy changes, driven by `app_settings.clip_taxonomy_retag_after`; no R2 download,
 no re-inference) and `backfill_render_score.yml` (one-shot render-vs-photo axis backfill from
-stored embeddings).
+stored embeddings). Newest, GPU, **dispatch-only and never yet run on real data**:
+`dinov3_embed_backfill.yml` — **read `references/dinov3-embedding-lane.md` before touching it**
+(it is inert until the encoder config is complete, and its write-rate input is not optional).
 
 **There is NO scheduled dedup job any more.** The automatic decision layer — the engine, its
 queues, its batch warmer, its geo/byt-geo runs, the model-compare and vision A/B harnesses, and

@@ -154,6 +154,83 @@ def test_launch_pod_sends_expected_body():
     assert body["interruptible"] is False
 
 
+# A real batch job needs credentials INSIDE the pod (SUPABASE_DB_URL, R2_*, HF_TOKEN)
+# and until the DINOv3 embedding lane there was no channel for them: launch_pod's body
+# had no `env` field at all. The REST API (rest.runpod.io/v1, what this client uses for
+# pod CRUD) takes `env` as a JSON object — not the [{key, value}] list the older GraphQL
+# API used.
+
+
+def test_launch_pod_sends_env_as_a_rest_object():
+    session = _FakeSession()
+    session.launch_responses = [_FakeResponse(201, {"id": "pod123"})]
+    _client(session).launch_pod(
+        name="job", image="x", gpu_type_id="rtxa2000", start_cmd=["true"],
+        env={"SUPABASE_DB_URL": "postgres://x", "HF_TOKEN": "hf_secret"},
+    )
+    body = session.calls[0][2]
+    assert body["env"] == {"SUPABASE_DB_URL": "postgres://x", "HF_TOKEN": "hf_secret"}
+
+
+def test_launch_pod_omits_env_entirely_when_none_is_given():
+    # An env-less launch must send the exact body it always did.
+    session = _FakeSession()
+    session.launch_responses = [_FakeResponse(201, {"id": "pod123"})]
+    _client(session).launch_pod(
+        name="smoke", image="x", gpu_type_id="rtxa2000", start_cmd=["true"],
+    )
+    assert "env" not in session.calls[0][2]
+
+
+def test_launch_pod_omits_an_empty_env():
+    session = _FakeSession()
+    session.launch_responses = [_FakeResponse(201, {"id": "pod123"})]
+    _client(session).launch_pod(
+        name="smoke", image="x", gpu_type_id="rtxa2000", start_cmd=["true"], env={},
+    )
+    assert "env" not in session.calls[0][2]
+
+
+def test_launch_pod_stringifies_env_values():
+    session = _FakeSession()
+    session.launch_responses = [_FakeResponse(201, {"id": "pod123"})]
+    _client(session).launch_pod(
+        name="job", image="x", gpu_type_id="rtxa2000", start_cmd=["true"],
+        env={"WORKERS": 16},
+    )
+    assert session.calls[0][2]["env"] == {"WORKERS": "16"}
+
+
+def test_run_job_passes_env_through_to_the_launch():
+    session = _FakeSession()
+    session.launch_responses = [_FakeResponse(201, {"id": "pod123", "costPerHr": 0.11})]
+    session.get_responses = [_FakeResponse(200, {"desiredStatus": "EXITED"})]
+    session.get_logs_response = _FakeResponse(200, lines=[])
+    _client(session).run_job(
+        name="job", image="x", gpu_type_id="rtxa2000", start_cmd=["true"],
+        env={"HF_TOKEN": "hf_secret"}, max_wait_s=5, poll_interval_s=0,
+    )
+    assert session.calls[0][2]["env"] == {"HF_TOKEN": "hf_secret"}
+
+
+def test_run_job_with_fallback_passes_env_to_every_attempt():
+    session = _FakeSession()
+    session.launch_responses = [
+        _FakeResponse(500, text="There are no instances currently available"),
+        _FakeResponse(201, {"id": "pod123", "costPerHr": 0.22}),
+    ]
+    session.get_responses = [_FakeResponse(200, {"desiredStatus": "EXITED"})]
+    session.get_logs_response = _FakeResponse(200, lines=[])
+    gpus = [GpuOption("rtxa5000", "RTX A5000", 24, 0.16), GpuOption("rtx3090", "RTX 3090", 24, 0.22)]
+    _client(session).run_job_with_fallback(
+        name="job", image="x", gpu_options=gpus, start_cmd=["true"],
+        env={"HF_TOKEN": "hf_secret"}, max_wait_s=5, poll_interval_s=0,
+    )
+    launches = [c for c in session.calls if c[0] == "POST" and c[1].endswith("/pods")]
+    assert len(launches) == 2
+    assert all(c[2]["env"] == {"HF_TOKEN": "hf_secret"} for c in launches)
+
+
 def test_launch_pod_raises_on_error_status():
     session = _FakeSession()
     session.launch_responses = [_FakeResponse(400, text="bad gpu type")]
