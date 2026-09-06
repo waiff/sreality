@@ -1,0 +1,156 @@
+name: "Dedup — DINOv3 bake-off manifest"
+
+# Builds the MANIFEST for the DINOv3 encoder bake-off and nothing else. It draws the
+# five near-duplicate populations of ENCODER-DECISION.md §5.2 out of Postgres, mints a
+# 7-day presigned R2 URL per image, and writes one JSON file — so the GPU pod that
+# eventually reads it needs no database and no credentials. This lane does NOT launch
+# a pod, does not download any model weights, and spends nothing: running
+# `scripts/dinov3_bakeoff.py` against the manifest on a real GPU is a separate, MANUAL
+# step the operator performs by hand when they choose to spend the ~$2 the design doc
+# estimates.
+#
+# Read-only against the database (SELECT only) and presign-only against R2. It writes
+# no vectors anywhere — not to image_clip_embeddings, not to image_dinov3_embeddings.
+#
+# The sealed exam is excluded from every population: the one statement that reads
+# image_tag_labels carries toolkit.tag_holdout.exclusion_for(), and
+# tests/test_holdout_exclusion_census.py is the rail that keeps it there.
+#
+# Start with dry_run (the default): it reports population sizes, which document-tag
+# patterns actually matched a tag, and how thin the P1a yield is — without minting a
+# single URL or uploading anything. Raise p1a_scan_images, or switch p1a_mode to
+# "full" (one sequential scan of images — complete, and not cheap), if P1a comes back
+# thin.
+#
+# Required secrets: SUPABASE_DB_URL + the R2_* set. Deliberately NOT wired:
+# RUNPOD_API_KEY and HF_TOKEN — nothing here talks to RunPod or to the HuggingFace Hub.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report population sizes and exit. Mints no URL, uploads nothing."
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      max_images:
+        description: "Distinct-image budget across all five populations (§5.3 sizes it at ~20000)."
+        required: false
+        default: "20000"
+        type: string
+      p1a_mode:
+        description: "P1a draw: sample (cheap, a recall floor) or full (one sequential scan of images, complete)."
+        required: false
+        default: "sample"
+        type: choice
+        options: ["sample", "full"]
+      p1a_scan_images:
+        description: "Sample mode only: how many images P1a pairs are matched within. Raise it if the yield is thin."
+        required: false
+        default: "1000000"
+        type: string
+      p1a_hamming:
+        description: "pHash distance that DEFINES a P1a pair. Independent of the pod harness's contamination filter."
+        required: false
+        default: "2"
+        type: string
+      document_tags:
+        description: "ILIKE patterns selecting P4's document tags (comma-separated). Check the dry-run log for what matched."
+        required: false
+        default: ""
+        type: string
+      seed:
+        description: "Pair-draw seed, so a re-run reproduces the same populations."
+        required: false
+        default: "20260905"
+        type: string
+      r2_key:
+        description: "R2 object key to upload the manifest to (blank = artifact only)."
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: dinov3-bakeoff-manifest
+  cancel-in-progress: false
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        # No torch, no transformers: this job builds a manifest, it embeds nothing.
+        run: pip install -e .
+      - name: Build manifest
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          MAX_IMAGES: ${{ inputs.max_images }}
+          P1A_MODE: ${{ inputs.p1a_mode }}
+          P1A_SCAN_IMAGES: ${{ inputs.p1a_scan_images }}
+          P1A_HAMMING: ${{ inputs.p1a_hamming }}
+          DOCUMENT_TAGS: ${{ inputs.document_tags }}
+          SEED: ${{ inputs.seed }}
+          R2_KEY: ${{ inputs.r2_key }}
+        # Inputs travel via env and are validated with `case`, never interpolated into
+        # the shell — the pattern label_images.yml uses.
+        run: |
+          set -euo pipefail
+          case "${MAX_IMAGES:-20000}" in
+            ''|*[!0-9]*) echo "::error::max_images must be a number"; exit 1 ;;
+          esac
+          case "${P1A_MODE:-sample}" in
+            sample|full) : ;;
+            *) echo "::error::p1a_mode must be sample or full"; exit 1 ;;
+          esac
+          case "${P1A_SCAN_IMAGES:-1000000}" in
+            ''|*[!0-9]*) echo "::error::p1a_scan_images must be a number"; exit 1 ;;
+          esac
+          case "${P1A_HAMMING:-2}" in
+            ''|*[!0-9]*) echo "::error::p1a_hamming must be a number"; exit 1 ;;
+          esac
+          case "${SEED:-20260905}" in
+            ''|*[!0-9]*) echo "::error::seed must be a number"; exit 1 ;;
+          esac
+          # document_tags is the one input that legitimately carries Czech diacritics
+          # and `%` wildcards, so a character whitelist would fight it. It is passed
+          # as a single QUOTED argument below instead — quoting, not pattern matching,
+          # is what actually makes it inert.
+          case "${R2_KEY:-}" in
+            '') : ;;
+            *[!A-Za-z0-9/._-]*) echo "::error::r2_key must be a plain object key"; exit 1 ;;
+          esac
+          ARGS="--out dinov3_manifest.json --max-images ${MAX_IMAGES:-20000}"
+          ARGS="${ARGS} --p1a-mode ${P1A_MODE:-sample}"
+          ARGS="${ARGS} --p1a-scan-images ${P1A_SCAN_IMAGES:-1000000}"
+          ARGS="${ARGS} --p1a-hamming ${P1A_HAMMING:-2} --seed ${SEED:-20260905}"
+          if [ "${DRY_RUN:-true}" = "true" ]; then ARGS="${ARGS} --dry-run"; fi
+          if [ -n "${R2_KEY:-}" ] && [ "${DRY_RUN:-true}" != "true" ]; then
+            ARGS="${ARGS} --r2-key ${R2_KEY}"
+          fi
+          if [ -n "${DOCUMENT_TAGS:-}" ]; then
+            python -m scripts.dinov3_bakeoff_manifest ${ARGS} --document-tags "${DOCUMENT_TAGS}"
+          else
+            python -m scripts.dinov3_bakeoff_manifest ${ARGS}
+          fi
+      - name: Upload manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: dinov3-manifest
+          path: dinov3_manifest.json
+          retention-days: 14
