@@ -1,9 +1,9 @@
 /* Where focus goes on a route change. jsdom tracks document.activeElement and
  * fires real focus events, so this needs no browser. */
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
-import { MAIN_ID, useRouteFocus } from './useRouteFocus';
+import { MAIN_ID, resetRouteFocus, useRouteFocus } from './useRouteFocus';
 
 function Shell() {
   useRouteFocus();
@@ -36,6 +36,9 @@ function setup(initial = '/a') {
 }
 
 describe('useRouteFocus', () => {
+  // Module-level state (see the hook's header) must not leak between cases.
+  beforeEach(() => resetRouteFocus());
+
   it('does NOT move focus on the first render, so a deep link is not stolen', () => {
     setup();
     expect(document.activeElement).not.toBe(screen.getByTestId('main'));
@@ -72,5 +75,32 @@ describe('useRouteFocus', () => {
     });
     // Same pathname (/a), only the search changed: focus stays where it was.
     expect(document.activeElement).toBe(query);
+  });
+
+  it('still lands focus when the whole tree REMOUNTS on navigation — the production shape', () => {
+    // App.tsx keys the route tree on pathname, so every navigation unmounts the
+    // Shell and mounts a fresh one. An instance-level first-render guard
+    // skipped every navigation; the module-level one must not.
+    const first = setup('/a');
+    act(() => {
+      fireEvent.click(screen.getByRole('link', { name: 'to b' }));
+    });
+    expect(document.activeElement).toBe(screen.getByTestId('main'));
+    first.unmount();
+
+    // A brand-new tree at a NEW path: this is what the remounted Shell sees.
+    setup('/a');
+    expect(document.activeElement).toBe(screen.getByTestId('main'));
+  });
+
+  it('does not move focus on a same-path remount', () => {
+    const first = setup('/a');
+    act(() => {
+      fireEvent.click(screen.getByRole('link', { name: 'to b' }));
+    });
+    first.unmount();
+    setup('/b');
+    // /b was the last path focused; a remount at /b is not a navigation.
+    expect(document.activeElement).not.toBe(screen.getByTestId('main'));
   });
 });

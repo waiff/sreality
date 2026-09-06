@@ -389,12 +389,21 @@ def post_annotation(
             excluded_reason=body.excluded_reason,
         )
         if body.note and body.note.strip():
+            import psycopg
+
             from toolkit import tag_label_notes
 
-            cell["note"] = tag_label_notes.record_note(
-                conn, image_id=body.image_id, tag_id=tag_id, to_state=body.state,
-                from_state=body.from_state, note=body.note,
-            )
+            try:
+                cell["note"] = tag_label_notes.record_note(
+                    conn, image_id=body.image_id, tag_id=tag_id, to_state=body.state,
+                    from_state=body.from_state, note=body.note,
+                )
+            except psycopg.errors.UndefinedTable:
+                # The mark above is already written; the note has nowhere to go
+                # until migration 473 lands. Say so instead of failing the whole
+                # request, which would read as "your mark was lost".
+                cell["note"] = None
+                cell["note_unavailable"] = "notes need migration 473 (not applied yet)"
         return {"data": cell}
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

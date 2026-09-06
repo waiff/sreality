@@ -150,6 +150,23 @@ export default [
           message:
             'Do not redefine Field — import it from components/controls.tsx. The shared one names groups correctly (role="group" + aria-labelledby).',
         },
+        {
+          // Thirteen hand-rolled modals shipped 12 Escape listeners (split 8
+          // window / 4 document — which is why a nested pair double-closed), 5
+          // scroll-lock copies and 6 drifted close glyphs; 6 of the 12 put the
+          // role on the viewport-sized BACKDROP instead of the panel. The
+          // primitive is components/Dialog.tsx (over lib/useDialog.ts), which
+          // carries the one per-line exemption.
+          //
+          // Deliberately narrow: an ATTRIBUTE literal, so `role={x}` and the
+          // string 'dialog' in prose or a query selector are untouched. It
+          // therefore cannot see a modal that announces no role at all —
+          // components/CityPicker.tsx is exactly that, and is on the W6b list
+          // even though nothing here fires on it.
+          selector: "JSXAttribute[name.name='role'] > Literal[value='dialog']",
+          message:
+            'Do not hand-roll a modal — use <Dialog> (components/Dialog.tsx), or lib/useDialog.ts if the chrome is bespoke. It owns Escape layering, the focus trap, initial/restored focus and the ref-counted scroll lock.',
+        },
       ],
     },
   },

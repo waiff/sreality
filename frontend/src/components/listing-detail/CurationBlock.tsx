@@ -356,7 +356,16 @@ function TagPicker({
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node;
+      if (ref.current?.contains(target)) return;
+      /* A transient panel opened from INSIDE this dropdown — the tag-edit
+       * AnchoredPopover on each row — is portalled to <body>, so `contains`
+       * is false while the click is legitimately ours. Without this, the
+       * first mousedown in that panel closed this dropdown and unmounted the
+       * panel mid-edit, before its own click handler could run. Same marker
+       * lib/useDialog's focus trap treats as part of the layer. */
+      if (target instanceof Element && target.closest('[data-transient-layer]')) return;
+      setOpen(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);

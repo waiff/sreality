@@ -1,14 +1,17 @@
 import {
+  useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
   type ReactNode,
 } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { ROUTES } from '@/lib/routes';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import AnchoredPopover from '@/components/AnchoredPopover';
 import ImageCarousel from '@/components/ImageCarousel';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
 import Spinner from '@/components/Spinner';
@@ -270,7 +273,16 @@ export default function ListingCards({
  * affordance): a distinct "save to collection" control — a layers glyph that
  * opens a popover of collections with checkmarks (monitored ones first, marked
  * with a bell). Orthogonal to the pipeline: collections are m2m groupings,
- * monitoring opts a collection into change alerts. Stops the card Link. */
+ * monitoring opts a collection into change alerts.
+ *
+ * The panel is the shared <AnchoredPopover> (portalled to <body>), not the
+ * hand-rolled `absolute` div it used to be. That div lived inside the photo's
+ * `overflow-hidden` frame and inside the card's <Link>, which cost it a
+ * document-mousedown dismissal of its own, a panel-wide preventDefault, and an
+ * <a>-inside-an-<a> for its empty state. The portal removes all three: the
+ * popover escapes the clip, AnchoredPopover owns dismissal (outside
+ * pointerdown, Escape — which returns focus to the trigger — and the anchor
+ * scrolling out of view), and "Create a collection →" is a plain link again. */
 function CollectionSaveButton({
   property_id,
   collectionMembers,
@@ -282,16 +294,10 @@ function CollectionSaveButton({
 }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-  }, [open]);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const panelId = useId();
+  /* Stable so the popover's positioning effect doesn't re-subscribe each render. */
+  const close = useCallback(() => setOpen(false), []);
 
   const collectionsQ = useQuery({
     queryKey: curationKeys.collections,
@@ -328,16 +334,14 @@ function CollectionSaveButton({
   );
 
   return (
-    <div ref={ref} className="relative">
+    <>
       <button
+        ref={btnRef}
         type="button"
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          setOpen((v) => !v);
-        }}
+        onClick={() => setOpen((v) => !v)}
         aria-label="Uložit do kolekce"
         aria-expanded={open}
+        aria-controls={open ? panelId : undefined}
         title="Uložit do kolekce"
         className={[
           'flex items-center justify-center w-6 h-6 rounded-[var(--radius-xs)] border backdrop-blur transition-colors',
@@ -349,12 +353,12 @@ function CollectionSaveButton({
         <CollectionGlyph filled={inAny} />
       </button>
       {open && (
-        <div
-          className="absolute top-7 left-0 z-20 w-56 rounded-[var(--radius-md)] bg-[var(--color-paper-3)] border border-[var(--color-rule-strong)] shadow-[0_4px_16px_rgba(0,0,0,0.08)] p-1.5"
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-          }}
+        <AnchoredPopover
+          id={panelId}
+          anchorRef={btnRef}
+          onClose={close}
+          ariaLabel="Uložit do kolekce"
+          className="w-56 p-1.5"
         >
           <p className="px-1.5 py-1 text-[0.6rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
             Save to collection
@@ -379,11 +383,7 @@ function CollectionSaveButton({
                     <button
                       type="button"
                       disabled={pending}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        (member ? remove : add).mutate(c.id);
-                      }}
+                      onClick={() => (member ? remove : add).mutate(c.id)}
                       className="w-full flex items-center gap-2 px-1.5 py-1.5 text-left text-[0.82rem] rounded-[var(--radius-xs)] hover:bg-[var(--color-copper-soft)] disabled:opacity-60"
                     >
                       <span
@@ -414,9 +414,9 @@ function CollectionSaveButton({
               })}
             </ul>
           )}
-        </div>
+        </AnchoredPopover>
       )}
-    </div>
+    </>
   );
 }
 
@@ -490,8 +490,9 @@ function Card({
   pipelineScoped: boolean;
   collectionMembers: Map<number, number[]> | undefined;
 }) {
-  /* Callback ref so the one ref serves both wrappers (Link → anchor,
-   * merge-mode → div). */
+  /* The card element itself, for the map-origin scrollIntoView below. Both
+   * modes now render the SAME non-interactive wrapper, so this no longer has
+   * to bridge an anchor and a div. */
   const wrapperElRef = useRef<HTMLElement | null>(null);
   const setWrapperEl = (el: HTMLElement | null) => {
     wrapperElRef.current = el;
@@ -505,6 +506,8 @@ function Card({
     }
   }, [hovered, scrollOnHover]);
   const title = formatTitle(r);
+  /* Ties the merge-mode checkbox to the card-wide <label> below it. */
+  const selectId = useId();
   /* Precise place first (geo town when the free-text locality is just the okres
    * — the Bazoš "Jihlava"-for-Telč case), then the district/okres for context,
    * de-duped so we never render "Telč, Telč". */
@@ -555,40 +558,67 @@ function Card({
   const photos = useCardHydration().photosFor(r.listing_id);
   const images = useMemo(() => taggedImageUrls(photos), [photos]);
 
+  /* `relative` is load-bearing, not decoration: it is what the stretched
+   * link's / selection label's `::after` measures itself against. */
   const wrapperClass = [
-    'group block rounded-[var(--radius-sm)] border overflow-hidden',
+    'group relative rounded-[var(--radius-sm)] border overflow-hidden',
     'transition-[border-color,background-color,opacity] duration-150',
     dimmed ? 'opacity-50' : '',
     mergeMode ? 'cursor-pointer' : '',
     surface,
   ].join(' ');
 
-  // The card body, rendered once and wrapped below by either a <Link> (normal)
-  // or a selectable <div> (merge mode). Building it as a value — not a nested
-  // component — keeps ImageCarousel's internal state across re-renders.
-  const body = (
-    <>
+  /* ONE meaning per click at any moment (the rule TagContentsGallery states):
+   * normally the card opens the listing, in merge mode it toggles selection.
+   * Each is a single stretched target — the <Link> on the title, or the <label>
+   * for the corner checkbox — and NEITHER wraps the controls drawn on the card.
+   * The wrapper below is an ordinary, non-interactive div. */
+  return (
+    <div
+      ref={setWrapperEl}
+      /* Hover-sync stays a normal-mode affair, exactly as when these handlers
+       * lived on the <Link>: merge mode is not browsing. */
+      onMouseEnter={mergeMode ? undefined : () => onHover([r.listing_id])}
+      onMouseLeave={mergeMode ? undefined : () => onHover(null)}
+      className={wrapperClass}
+    >
       <ImageCarousel images={images} imgClassName={imageFilter} hoverZoom fadeChevrons>
         {mergeMode && (
-          <div className="absolute top-1 left-1 z-10">
-            <span
+          <div className="absolute top-1 left-1 z-[var(--z-card-action)] w-6 h-6">
+            {/* A REAL checkbox, not a drawn facsimile: it carries `checked`,
+                Space toggles it natively, and it is the card's one tab stop in
+                merge mode. Native rendering is dropped (appearance-none) so the
+                box keeps the card's own tokens unchanged; the ✓ is drawn over
+                it as decoration. Its click target is the whole card — see the
+                stretched <label> at the end of the card. */}
+            <input
+              id={selectId}
+              type="checkbox"
+              checked={selected}
+              onChange={() => onToggleSelect(r.property_id)}
+              aria-label={`Vybrat ke sloučení: ${title}`}
               className={[
-                'flex items-center justify-center w-6 h-6 rounded-[var(--radius-xs)] border',
+                'appearance-none block w-6 h-6 rounded-[var(--radius-xs)] border cursor-pointer',
                 selected
-                  ? 'bg-[var(--color-copper)] border-[var(--color-copper)] text-white'
-                  : 'bg-[var(--color-paper)]/90 border-[var(--color-rule)] text-transparent',
+                  ? 'bg-[var(--color-copper)] border-[var(--color-copper)]'
+                  : 'bg-[var(--color-paper)]/90 border-[var(--color-rule)]',
               ].join(' ')}
-              aria-hidden="true"
-            >
-              <svg width="14" height="14" viewBox="0 0 12 12" fill="none" stroke="currentColor"
-                strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                <path d="M2.5 6.2 5 8.5l4.5-5" />
-              </svg>
-            </span>
+            />
+            {selected && (
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 flex items-center justify-center text-white"
+              >
+                <svg width="14" height="14" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+                  strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M2.5 6.2 5 8.5l4.5-5" />
+                </svg>
+              </span>
+            )}
           </div>
         )}
         {!mergeMode && (
-          <div className="absolute top-1 left-1 z-10 flex items-center gap-1">
+          <div className="absolute top-1 left-1 z-[var(--z-card-action)] flex items-center gap-1">
             <PipelineFunnelButton
               property_id={r.property_id}
               cohortScoped={pipelineScoped}
@@ -631,7 +661,21 @@ function Card({
       </ImageCarousel>
       <div className="p-2">
         <h3 className={`text-[0.78rem] leading-snug line-clamp-2 ${titleColor}`}>
-          {title}
+          {mergeMode ? (
+            title
+          ) : (
+            /* THE card's link, and the only one: `.stretched-link` (globals.css)
+               spreads its hit area over the whole card, so the card still opens
+               end-to-end while the anchor's accessible name is the listing
+               itself rather than the card's every control and figure. */
+            <Link
+              to={listingRowPath(r)}
+              state={{ listingId: r.listing_id }}
+              className="stretched-link"
+            >
+              {title}
+            </Link>
+          )}
         </h3>
         {place && (
           <p className="mt-0.5 text-[0.68rem] text-[var(--color-ink-3)] truncate">
@@ -664,7 +708,7 @@ function Card({
         </div>
         {r.mf_gross_yield_pct != null && (
           <p
-            className="mt-0.5 text-[0.62rem] text-[var(--color-ink-3)] tabular-nums"
+            className="card-tip mt-0.5 text-[0.62rem] text-[var(--color-ink-3)] tabular-nums"
             title="Hrubý výnos dle cenové mapy nájemného MF (nájem ÷ cena)"
           >
             Výnos MF{' '}
@@ -676,8 +720,12 @@ function Card({
             </span>
           </p>
         )}
-        {r.category_main === 'byt' && r.sreality_id != null && (
-          <div className="mt-1 flex justify-end">
+        {/* Gated OFF in merge mode: with the card meaning "select", a control
+            that runs an estimate or opens a run would be a second meaning for
+            the same gesture. `.card-action` lifts it over the stretched link's
+            ::after — without it the corner would be inert. */}
+        {r.category_main === 'byt' && r.sreality_id != null && !mergeMode && (
+          <div className="card-action mt-1 flex justify-end">
             <EstimateCorner
               srealityId={r.sreality_id}
               estimate={estimate}
@@ -687,45 +735,18 @@ function Card({
           </div>
         )}
       </div>
-    </>
-  );
-
-  // In merge mode the card is a toggle, not a link — clicking selects it for
-  // the dedup merge instead of navigating to the detail page.
-  if (mergeMode) {
-    return (
-      <div
-        ref={setWrapperEl}
-        role="button"
-        tabIndex={0}
-        /* The selection state lives on the toggle itself, not on a decorative
-           checkbox facsimile whose aria-label would become the first word of a
-           name otherwise built from the card's own copy. */
-        aria-pressed={selected}
-        onClick={() => onToggleSelect(r.property_id)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            onToggleSelect(r.property_id);
-          }
-        }}
-        className={wrapperClass}
-      >
-        {body}
-      </div>
-    );
-  }
-  return (
-    <Link
-      ref={setWrapperEl}
-      to={listingRowPath(r)}
-      state={{ listingId: r.listing_id }}
-      onMouseEnter={() => onHover([r.listing_id])}
-      onMouseLeave={() => onHover(null)}
-      className={wrapperClass}
-    >
-      {body}
-    </Link>
+      {mergeMode && (
+        /* The whole card is the checkbox's click target, exactly as it was when
+           the card was a role="button" — but expressed as a <label for>, so the
+           gesture is the browser's own and nothing has to preventDefault its way
+           out of a wrapper. Deliberately EMPTY: the checkbox is named by its
+           aria-label, which takes precedence over a <label> (HTML-AAM), so any
+           text here would be ignored — it is a hit target, not a name. Its
+           ::after is stopped by every control carrying --z-card-action, so the
+           carousel chevrons still page instead of selecting. */
+        <label htmlFor={selectId} className="stretched-link" />
+      )}
+    </div>
   );
 }
 
@@ -748,8 +769,14 @@ function formatTitle(r: CardRow): string {
 /* result IN PLACE of the button: the gross yield when the asking price is     */
 /* known, otherwise the estimated monthly rent. Distinct from the muted        */
 /* "Výnos MF" line above (a statistical reference) — copper accent marks it as */
-/* our own estimate. Lives inside the card <Link> / merge toggle, so every     */
-/* handler stops propagation to avoid navigating / toggling selection.         */
+/* our own estimate.                                                           */
+/*                                                                             */
+/* Two variants, two elements. "Open the run" is a DESTINATION, so it is a     */
+/* real <Link> to runSurfaceUrl — middle-click, ⌘-click and "copy link" all    */
+/* work, and the URL is visible on hover. It used to be a <button> calling     */
+/* navigate() purely because it lived inside the card's own <a> and an anchor  */
+/* inside an anchor is invalid; the card wrapper was forcing the violation.    */
+/* "Run the estimate" stays a <button>: it is an action, not a place.          */
 /* -------------------------------------------------------------------------- */
 
 function EstimateCorner({
@@ -763,12 +790,6 @@ function EstimateCorner({
   estimating: boolean;
   onEstimate: (srealityId: number) => void;
 }) {
-  const navigate = useNavigate();
-  const stop = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-  };
-
   const running =
     estimating ||
     estimate?.status === 'pending' ||
@@ -798,19 +819,13 @@ function EstimateCorner({
           : null;
     if (label != null) {
       return (
-        <button
-          type="button"
-          onClick={(e) => {
-            stop(e);
-            navigate(
-              runSurfaceUrl({ id: estimate.run_id, input_sreality_id: estimate.sreality_id }),
-            );
-          }}
+        <Link
+          to={runSurfaceUrl({ id: estimate.run_id, input_sreality_id: estimate.sreality_id })}
           title="Náš odhad nájmu — otevřít detail odhadu"
           className="inline-flex items-center rounded-[var(--radius-xs)] border border-[var(--color-copper)] px-1.5 py-0.5 text-[0.62rem] font-medium tabular-nums text-[var(--color-copper)] hover:bg-[var(--color-copper)]/10 transition-colors"
         >
           {label}
-        </button>
+        </Link>
       );
     }
   }
@@ -819,10 +834,7 @@ function EstimateCorner({
   return (
     <button
       type="button"
-      onClick={(e) => {
-        stop(e);
-        onEstimate(srealityId);
-      }}
+      onClick={() => onEstimate(srealityId)}
       title={failed ? 'Odhad selhal — zkusit znovu' : 'Spustit odhad nájmu a výnosu'}
       className="inline-flex items-center gap-1 rounded-[var(--radius-xs)] border border-[var(--color-rule)] px-1.5 py-0.5 text-[0.62rem] font-medium text-[var(--color-ink-2)] hover:border-[var(--color-copper)] hover:text-[var(--color-copper)] transition-colors"
     >
@@ -853,6 +865,9 @@ function CardBadge({
     <span
       title={title}
       className={[
+        // A tooltip only shows if the badge is hit-testable: raised above the
+        // stretched link's ::after (card-tip), below every control.
+        title ? 'card-tip' : '',
         'inline-flex items-center px-1.5 py-0.5 text-[0.6rem] tracking-[0.12em]',
         'uppercase rounded-[var(--radius-xs)] border backdrop-blur-sm font-medium',
         'tabular-nums whitespace-nowrap',

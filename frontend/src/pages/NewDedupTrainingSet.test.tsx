@@ -57,7 +57,7 @@ describe('<NewDedupTrainingSet>', () => {
     renderPage();
     await waitFor(() => expect(api.listTrainingSet).toHaveBeenCalledWith(
       expect.objectContaining({
-        tag_id: 3, state: 'positive', source: 'machine', membership: 'set', limit: 60, offset: 0,
+        tag_id: 3, state: 'positive', source: 'machine', membership: 'set', limit: 50, offset: 0,
       }),
     ));
     expect(await screen.findByTestId('training-tile-11')).toBeInTheDocument();
@@ -144,7 +144,7 @@ describe('<NewDedupTrainingSet>', () => {
   it('pages forward, and stops when the page is short', async () => {
     renderPage();
     await screen.findByTestId('training-tile-11');
-    // Two rows against a 60-row page means there is no next page.
+    // Two rows against a 50-row page means there is no next page.
     expect(screen.getByRole('button', { name: /next/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: /previous/ })).toBeDisabled();
   });
@@ -288,5 +288,179 @@ describe('<NewDedupTrainingSet> reading the page', () => {
     renderPage();
     await screen.findByTestId('training-tile-11');
     expect(document.body.textContent).not.toMatch(/\\u20/);
+  });
+});
+
+describe('<NewDedupTrainingSet> a corrected tile stays put', () => {
+  it('does not refetch the list after a correction, so the note field survives', async () => {
+    // The operator clicked "no" on a positive under the Applies filter; the
+    // list refetched, the row no longer matched, and the tile vanished with
+    // the note field on it. The list is patched in place instead.
+    const user = userEvent.setup();
+    renderPage(['/new-dedup/training-set?set=all']);
+    const tile = await screen.findByTestId('training-tile-11');
+    expect(api.listTrainingSet).toHaveBeenCalledTimes(1);
+    await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledTimes(1));
+    // Still here, now a human negative, note field present, list not refetched.
+    const after = screen.getByTestId('training-tile-11');
+    expect(after).toHaveAttribute('data-state', 'negative');
+    expect(within(after).getByText('yours')).toBeInTheDocument();
+    expect(screen.getByTestId('note-form-11')).toBeInTheDocument();
+    expect(api.listTrainingSet).toHaveBeenCalledTimes(1);
+    // And it says where the photo now lives.
+    expect(within(after).getByText(/now under/i)).toBeInTheDocument();
+  });
+});
+
+describe('<NewDedupTrainingSet> the filter groups', () => {
+  it('names the three groups and locks two of them under "To review"', async () => {
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByRole('group', { name: 'cutoff' })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'verdict' })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'decided by' })).toBeInTheDocument();
+    // "To review" fixes verdict=applies and decided-by=machine; the other two
+    // groups are visibly locked rather than silently ignored.
+    expect(screen.getByRole('button', { name: /Does not/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Yours' })).toBeDisabled();
+    expect(screen.getAllByText(/set by “To review”/i).length).toBeGreaterThan(0);
+  });
+
+  it('unlocks them under any other cutoff', async () => {
+    renderPage(['/new-dedup/training-set?set=all']);
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByRole('button', { name: /Does not/ })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Yours' })).toBeEnabled();
+  });
+});
+
+describe('<NewDedupTrainingSet> before the cutoff exists', () => {
+  it('says the cutoff is not active instead of showing 0/300 beside "in set" tiles', async () => {
+    vi.mocked(api.listTrainingSetHeads).mockResolvedValue({
+      data: HEADS.map((h) => ({ ...h, in_set: 0, reserve: 0, in_set_unreviewed: 0,
+        cutoff_available: false })) as never,
+    });
+    vi.mocked(api.listTrainingSet).mockResolvedValue({
+      data: { rows: ROWS.map((r) => ({ ...r, set_rank: null, in_set: null })) as never,
+        counts: { ...HEADS[0], cutoff_available: false } as never, limit: 60, offset: 0 },
+    });
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByTestId('cutoff-unavailable')).toHaveTextContent(/migration 474/);
+    // Cutoff chips locked, no counts claimed, no membership badge on any tile,
+    // and the list is fetched with no membership filter at all.
+    expect(screen.getByRole('button', { name: /In set/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /In set/ })).not.toHaveTextContent('0/300');
+    expect(screen.queryByTestId('membership-11')).toBeNull();
+    expect(screen.queryByLabelText('target')).toBeNull();
+    const last = vi.mocked(api.listTrainingSet).mock.calls.at(-1)?.[0];
+    expect(last).not.toHaveProperty('membership');
+  });
+});
+
+describe('<NewDedupTrainingSet> confirming the rest of the page', () => {
+  it('confirms every untouched machine positive on the page in one write, and patches them to yours', async () => {
+    vi.mocked(api.bulkSetNewDedupTagAnnotation).mockResolvedValue({
+      data: { updated: 1, tag_id: 3, state: 'positive', excluded_reason: null, image_ids: [11] },
+    } as never);
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    // Row 11 is the machine's; row 12 is already yours — only 11 is pending.
+    const btn = screen.getByTestId('confirm-page');
+    expect(btn).toHaveTextContent('Confirm the other 1 on this page');
+    const user = userEvent.setup();
+    await user.click(btn);
+    await waitFor(() => expect(api.bulkSetNewDedupTagAnnotation)
+      .toHaveBeenCalledWith(3, [11], 'positive', null));
+    // Patched in place, no refetch: the tile now reads "yours" and the button is gone.
+    expect(within(screen.getByTestId('training-tile-11')).getByText('yours')).toBeInTheDocument();
+    expect(screen.queryByTestId('confirm-page')).toBeNull();
+    expect(api.listTrainingSet).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves out a tile the operator changed this session', async () => {
+    vi.mocked(api.bulkSetNewDedupTagAnnotation).mockResolvedValue({
+      data: { updated: 0, tag_id: 3, state: 'positive', excluded_reason: null, image_ids: [] },
+    } as never);
+    const user = userEvent.setup();
+    renderPage(['/new-dedup/training-set?set=all']);
+    const tile = await screen.findByTestId('training-tile-11');
+    await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalled());
+    // 11 was changed (and is no longer a positive); nothing is left to confirm.
+    expect(screen.queryByTestId('confirm-page')).toBeNull();
+  });
+});
+
+
+describe('<NewDedupTrainingSet> page size', () => {
+  it('offers 50 / 100 / 500 / 2000, sends the choice as the limit, and resets the offset', async () => {
+    const user = userEvent.setup();
+    renderPage(['/new-dedup/training-set?set=all&offset=100']);
+    await screen.findByTestId('training-tile-11');
+    const group = screen.getByRole('group', { name: 'per page' });
+    for (const n of ['50', '100', '500', '2000']) {
+      expect(within(group).getByRole('button', { name: n })).toBeInTheDocument();
+    }
+    await user.click(within(group).getByRole('button', { name: '2000' }));
+    await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
+      expect.objectContaining({ limit: 2000, offset: 0 }),
+    ));
+  });
+
+  it('steps by the chosen page size', async () => {
+    vi.mocked(api.listTrainingSet).mockResolvedValue({
+      data: {
+        rows: Array.from({ length: 100 }, (_, i) => ({ ...ROWS[0], image_id: 1000 + i })) as never,
+        counts: HEADS[0] as never, limit: 100, offset: 0,
+      },
+    });
+    const user = userEvent.setup();
+    renderPage(['/new-dedup/training-set?set=all&n=100']);
+    await screen.findByTestId('training-tile-1000');
+    await user.click(screen.getByRole('button', { name: /next/ }));
+    await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
+      expect.objectContaining({ limit: 100, offset: 100 }),
+    ));
+  });
+
+  it('confirming a big page writes in chunks of 200 and reports the total', async () => {
+    const rows = Array.from({ length: 450 }, (_, i) => ({ ...ROWS[0], image_id: 1000 + i }));
+    vi.mocked(api.listTrainingSet).mockResolvedValue({
+      data: { rows: rows as never, counts: HEADS[0] as never, limit: 500, offset: 0 },
+    });
+    vi.mocked(api.bulkSetNewDedupTagAnnotation).mockImplementation(async (_t, ids) => ({
+      data: { updated: ids.length, tag_id: 3, state: 'positive', excluded_reason: null, image_ids: ids },
+    }) as never);
+    const user = userEvent.setup();
+    renderPage(['/new-dedup/training-set?n=500']);
+    await screen.findByTestId('training-tile-1000');
+    await user.click(screen.getByTestId('confirm-page'));
+    await waitFor(() => expect(api.bulkSetNewDedupTagAnnotation).toHaveBeenCalledTimes(3));
+    const sizes = vi.mocked(api.bulkSetNewDedupTagAnnotation).mock.calls.map((c) => c[1].length);
+    expect(sizes).toEqual([200, 200, 50]);
+    await waitFor(() => expect(screen.queryByTestId('confirm-page')).toBeNull());
+  });
+});
+
+describe('<NewDedupTrainingSet> the confirm button previews its reach', () => {
+  it('highlights exactly the tiles it will claim, on hover and on focus', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    // Nothing highlighted at rest.
+    expect(screen.getByTestId('training-tile-11')).not.toHaveAttribute('data-previewed');
+    await user.hover(screen.getByTestId('confirm-page'));
+    // 11 is the untouched machine positive; 12 is already yours.
+    expect(screen.getByTestId('training-tile-11')).toHaveAttribute('data-previewed', 'true');
+    expect(screen.getByTestId('training-tile-12')).not.toHaveAttribute('data-previewed');
+    expect(screen.getByTestId('training-tile-12').className).toContain('opacity-40');
+    await user.unhover(screen.getByTestId('confirm-page'));
+    expect(screen.getByTestId('training-tile-11')).not.toHaveAttribute('data-previewed');
+    // Keyboard users get the same preview.
+    screen.getByTestId('confirm-page').focus();
+    await waitFor(() => expect(screen.getByTestId('training-tile-11'))
+      .toHaveAttribute('data-previewed', 'true'));
   });
 });
