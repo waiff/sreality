@@ -31,15 +31,12 @@ export interface PipelineFunnelButtonProps {
   /* Cards float this over the photo (translucent chrome); the table renders it
    * inline on the row background. */
   variant?: 'overlay' | 'inline';
-  /* Stop the click from triggering an enclosing Link / row navigation. */
-  stopPropagation?: boolean;
 }
 
 export default function PipelineFunnelButton({
   property_id,
   cohortScoped = false,
   variant = 'overlay',
-  stopPropagation = true,
 }: PipelineFunnelButtonProps) {
   const membersQ = useQuery({
     queryKey: pipelineKeys.members,
@@ -83,11 +80,12 @@ export default function PipelineFunnelButton({
       <button
         ref={btnRef}
         type="button"
-        onClick={(e) => {
-          if (stopPropagation) {
-            e.preventDefault();
-            e.stopPropagation();
-          }
+        /* No preventDefault/stopPropagation: the funnel used to sit INSIDE the
+         * Browse card's detail <Link>, and swallowing the event was the only
+         * thing keeping a bookmark click from navigating. It is a sibling of
+         * that link now (ListingCards), and the Table renders it in its own
+         * cell, so the click reaches nothing else either way. */
+        onClick={() => {
           if (pending) return;
           if (inPipeline) setMenuOpen((v) => !v);
           else add.mutate();

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useId, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   fmtArea,
@@ -14,7 +14,21 @@ import { imageSrc } from '@/lib/imageUrl';
 import ImageTagBadge from '@/components/ImageTagBadge';
 import { portalListingUrl, portalShort } from '@/lib/portals';
 import { listingPath } from '@/lib/listingUrl';
+import Dialog, { DialogClose } from '@/components/Dialog';
 
+/* The comparable's detail card, opened from a row of the estimation-detail
+ * comparables table — which is itself inside a dialog, so this is the app's
+ * one shipped NESTED pair. It renders through <Dialog> (components/Dialog.tsx):
+ * standard chrome, a centred card with a close glyph, and nothing about it
+ * needs a bespoke backdrop.
+ *
+ * WHAT LEFT: its own `document` keydown listener (which, with the run-detail
+ * modal's own listener on the same document, is exactly why one Escape used to
+ * close BOTH), its own body scroll-lock copy, its own initial-focus call, its
+ * own close glyph, and the `stopPropagation` on the card that existed only to
+ * keep a click inside it from reaching the backdrop's `onClick={onClose}`.
+ * <Dialog> dismisses on a mousedown that both starts and lands on the backdrop
+ * ITSELF, so there is no handler on the wrong element left to undo. */
 interface Props {
   listing: ListingPublic;
   images: ImagePublic[];
@@ -32,61 +46,39 @@ export default function ComparableModal({
   summaryLoading,
   onClose,
 }: Props) {
-  const closeBtnRef = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', handler);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    closeBtnRef.current?.focus();
-    return () => {
-      document.removeEventListener('keydown', handler);
-      document.body.style.overflow = prevOverflow;
-    };
-  }, [onClose]);
+  /* The dialog is named by the line the operator reads at the top of it
+   * ("Comparable · id 1234") rather than by a literal, so the name and the
+   * visible words cannot drift apart. */
+  const titleId = useId();
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      onClick={onClose}
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto px-4 py-10"
-      style={{ background: 'rgba(20, 22, 27, 0.6)' }}
+    <Dialog
+      open
+      onClose={onClose}
+      labelledBy={titleId}
+      /* `relative` for the pinned close glyph. Height and scrolling are the
+       * primitive's: a panel is viewport-safe and scrolls itself by default,
+       * which is what the scrolling backdrop this used to sit in provided. */
+      className="relative w-full max-w-2xl"
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="relative w-full max-w-2xl bg-[var(--color-paper)] rounded-[var(--radius-md)] border border-[var(--color-rule)] shadow-[0_24px_60px_rgba(0,0,0,0.18)]"
-      >
-        <button
-          ref={closeBtnRef}
-          type="button"
-          onClick={onClose}
-          aria-label="Close"
-          className="absolute top-3 right-3 w-9 h-9 flex items-center justify-center text-[var(--color-ink-3)] hover:text-[var(--color-ink)] rounded-[var(--radius-sm)] focus-visible:border focus-visible:border-[var(--color-copper)]"
-        >
-          <CloseGlyph />
-        </button>
+      <DialogClose onClick={onClose} className="absolute top-3 right-3 z-10" />
 
-        <div className="p-6">
-          <Header listing={listing} />
-          <Hairline />
-          <Carousel images={images} isActive={listing.is_active} />
-          <Hairline />
-          <SummarySection
-            summary={summary}
-            error={summaryError}
-            loading={summaryLoading}
-          />
-          <Hairline />
-          <Facts listing={listing} />
-          <Hairline />
-          <Footer listing={listing} />
-        </div>
+      <div className="p-6">
+        <Header listing={listing} titleId={titleId} />
+        <Hairline />
+        <Carousel images={images} isActive={listing.is_active} />
+        <Hairline />
+        <SummarySection
+          summary={summary}
+          error={summaryError}
+          loading={summaryLoading}
+        />
+        <Hairline />
+        <Facts listing={listing} />
+        <Hairline />
+        <Footer listing={listing} />
       </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -102,14 +94,14 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Header({ listing }: { listing: ListingPublic }) {
+function Header({ listing, titleId }: { listing: ListingPublic; titleId: string }) {
   const ppm = fmtMeasuredPricePerM2(
     listing.price_per_m2,
     ppm2BasisFromToken(listing.price_per_m2_basis),
   );
   return (
     <div className="pr-10">
-      <p className="text-[0.65rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
+      <p id={titleId} className="text-[0.65rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
         {/* sreality_id is NULL for a post-Gate-2-flip non-sreality-portal
          * listing (flip not live yet); fall back to the surrogate `id`,
          * which every row always has. */}
@@ -402,15 +394,6 @@ function Footer({ listing }: { listing: ListingPublic }) {
 function yesNo(v: boolean | null): string | null {
   if (v == null) return null;
   return v ? 'Yes' : 'No';
-}
-
-function CloseGlyph() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
-      <line x1="3" y1="3" x2="13" y2="13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      <line x1="13" y1="3" x2="3" y2="13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  );
 }
 
 function Arrow({ dir }: { dir: 'left' | 'right' }) {

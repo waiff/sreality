@@ -523,7 +523,70 @@ focus, and skipping the first render so a deep link is not stolen.
 `isSafeInternalPath` extracted and hardened with the backslash arm the inline
 check lacked; it is what the OAuth deep-link PR will gate `next=` on.
 
-**Remaining waves, in the review's order, W2–W4 done:** W2 composite widgets
+**W5 — the Browse card is a link on its title, not an anchor around eight
+controls (merged).** The audit's one structural mistake. Stretched-link
+pattern: a non-interactive card, ONE `<Link>` on the title (so the link's name
+IS the listing), an unlayered `::after` expanding its hit area, every control a
+DOM sibling raised on the `--z-card-action` rung; the estimate corner is a real
+`<Link>`, the collection popover is portalled, merge mode has a real checkbox.
+The whole `preventDefault`/`stopPropagation` regime is deleted. Built by an
+isolated agent, adversarially reviewed; six review findings fixed rather than
+carried (keyboard-orphaned popover, `aria-haspopup="true"` = menu, popover
+below modals at z-40, six dead tooltips, lost whole-card focus ring, a
+hard-coded z rung). Trades stated: no drag-select over the `::after`; the title
+link is the 4th tab stop per card. 5 → 21 tests in the card's file.
+
+**W6a — one Dialog primitive, proved on two pilots (merged).**
+`lib/useDialog` (module-level layer stack, ONE window Escape listener, top
+layer only, Tab containment, mount-only initial focus, focus restore, a
+ref-counted scroll lock) + `components/Dialog` (role/aria-modal on the PANEL,
+backdrop `role="presentation"`, naming a type union, portalled with the
+reasons stated) + `useCloseOnNavigation`. Pilots ExploreArea/ExploreBroker.
+The first cut was **rejected** by its reviewer: layers ordered by effect push
+order, which is child-before-parent within a commit, so a same-commit nested
+pair inverted "top" and the inner became un-closable. Rebuilt on a
+render-phase sequence; then three more re-review findings fixed by hand (trap
+yanking focus out of a popover opened from a modal; initial focus in the
+outer layer; a backwards first-paint claim). Rails: `expectDialogContract`,
+a same-commit pair, an outer remount, a portalled companion. `role="dialog"`
+banned outside the primitive; the ten unmigrated modals carry per-line
+exemptions naming W6b.
+
+**Two follow-ups the W6a live check found (merged, #1302 / #1303).** The
+anchored popover took focus on mount while still `visibility: hidden` (React
+flushes the first commit's passive effects before a layout-effect setState;
+Chromium refuses to focus a hidden element, jsdom does not care) — focus-in is
+now keyed on the panel's position. And Tab past a one-control popover's edge
+tabbed straight out to the portal's neighbour at the end of `<body>` — it now
+closes the panel and continues from the trigger (APG disclosure). Both were
+invisible to jsdom and caught only by the real-browser pass.
+
+**W6b — the eleven remaining dialogs on the primitive (merged).** Four
+disjoint clusters, each built in an isolated worktree and adversarially
+re-read. Eight run on `<Dialog>` (NewEstimation, CreateWatchdog, PresetSave,
+CityPicker, TaxonomyManage, ImageTagDetail, TagDeleteConfirm, Comparable); two
+keep bespoke chrome over `useDialog` (RunDetail, ImageLightbox — the census
+`dialogChrome.test.ts` proves the import behind every exemption); one was
+reclassified (TagEditPopover announced `role="dialog"` with no modality at all
+and is now a named AnchoredPopover). Behaviour kept on purpose: the
+NewEstimation in-flight guard (one `requestClose`; the glyph DISABLED, not
+dimmed), select-on-open for the two name fields, the destructive confirm
+opening on Cancel. The reviewers' notes converged on the primitive and were
+fixed there once: `initialFocus` inside the one guarded effect (five
+hand-rolled `[]` focus effects deleted) plus a default that never opens on the
+close glyph; a viewport-safe panel with two overflow LONGHANDS (three
+migrations had bet on Tailwind's emission order for `overflow-y-auto` vs
+`overflow-hidden`); `DialogClose` takes `disabled` and a `tone` instead of a
+competing `text-*` class. Also: Escape in the taxonomy rename field no longer
+closes the whole modal (one `preventDefault` + a test); CityPicker's six
+buttons say `type="button"` so the fix does not rest on the portal; a
+popover-in-dialog Escape test pins the `document`-vs-`window` listener
+pairing. Chrome the operator will SEE: every panel centred, `shadow-2xl`, a
+2px backdrop blur; the CurationBlock add-tag dropdown learned the
+`[data-transient-layer]` guard (the one out-of-cluster edit, forced by
+portalling). Zero W6b lint exemptions remain.
+
+**Remaining waves, in the review's order, W2–W6 done:** W2 composite widgets
 name their internals (63 controls with no name from any source); W3 focus is
 visible (65 `focus:outline-none`, 33 with a 1.18:1 replacement — a deletion
 wave, plus the `--color-focus` token which is operator territory); W4 focus has

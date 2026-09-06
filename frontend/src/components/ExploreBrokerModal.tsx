@@ -15,8 +15,10 @@
  * already auto-fits to the first non-empty result set, so the map frames
  * itself around wherever the broker's listings actually are.
  */
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { createContext, useContext, useMemo, useState, type ReactNode } from 'react';
+import { Link } from 'react-router-dom';
+import Dialog, { DialogClose } from '@/components/Dialog';
+import { useCloseOnNavigation } from '@/lib/useCloseOnNavigation';
 import BrowseExperience from '@/components/BrowseExperience';
 import {
   browseFiltersForBroker,
@@ -48,6 +50,10 @@ export function useExploreBrokerModal(): ModalCtx {
 
 export function ExploreBrokerProvider({ children }: { children: ReactNode }) {
   const [payload, setPayload] = useState<ExploreBrokerPayload | null>(null);
+  /* Mounted above <Outlet> in Shell, so a navigation from inside the modal
+   * would otherwise repaint the page behind it and strand the scroll lock.
+   * See lib/useCloseOnNavigation.ts. */
+  useCloseOnNavigation(() => setPayload(null));
   const value = useMemo<ModalCtx>(
     () => ({
       open: (p) => setPayload(p),
@@ -73,24 +79,11 @@ function ExploreBrokerModal({
   payload: ExploreBrokerPayload;
   onClose: () => void;
 }) {
-  const navigate = useNavigate();
   const initialFilters = useMemo(() => browseFiltersForBroker(payload), [payload]);
   const view = useMemoryBrowseState({ filters: initialFilters });
 
-  // ESC closes + lock body scroll while the (tall) modal is open.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      document.body.style.overflow = prevOverflow;
-    };
-  }, [onClose]);
-
+  /* Escape, the focus trap, initial + restored focus and the body scroll lock
+   * all come from <Dialog> (lib/useDialog.ts). */
   const browseHref = browseUrlFromState({
     filters: view.filters,
     sort: view.sort,
@@ -99,79 +92,56 @@ function ExploreBrokerModal({
   });
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-[var(--color-ink)]/40 backdrop-blur-[2px]"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Explore broker"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+    <Dialog
+      open
+      onClose={onClose}
+      label="Explore broker"
+      className="w-[96vw] max-w-[1600px] h-[90vh] flex flex-col"
     >
-      <div className="w-[96vw] max-w-[1600px] h-[90vh] flex flex-col rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-2xl overflow-hidden">
-        <header className="flex items-center justify-between gap-4 px-6 py-3 border-b border-[var(--color-rule)] shrink-0">
-          <div className="min-w-0">
-            <p className="text-[0.62rem] tracking-[0.22em] uppercase text-[var(--color-ink-3)]">
-              Explore broker
-            </p>
-            <h2
-              className="mt-0.5 text-[1.1rem] leading-tight truncate"
-              style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
-            >
-              {payload.brokerName}
-            </h2>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <a
-              href={browseHref}
-              onClick={(e) => {
-                // Let modifier / middle clicks open a new tab; otherwise
-                // SPA-navigate and close the modal.
-                if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
-                e.preventDefault();
-                navigate(browseHref);
-                onClose();
-              }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
-              title="Open the full Browse page scoped to this broker"
-            >
-              <span>Go to Browse</span>
-              <span aria-hidden>→</span>
-            </a>
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Close"
-              className="shrink-0 px-2 py-1 text-[var(--color-ink-3)] hover:text-[var(--color-ink)] transition-colors"
-            >
-              <CloseGlyph />
-            </button>
-          </div>
-        </header>
-        <div className="flex-1 min-h-0">
-          <BrowseExperience
-            view={view}
-            layout="modal"
-            features={{
-              presetBar: false,
-              mergeMode: false,
-              watchdog: false,
-              title: false,
-              sidebar: false,
-              stats: false,
-            }}
-          />
+      <header className="flex items-center justify-between gap-4 px-6 py-3 border-b border-[var(--color-rule)] shrink-0">
+        <div className="min-w-0">
+          <p className="text-[0.62rem] tracking-[0.22em] uppercase text-[var(--color-ink-3)]">
+            Explore broker
+          </p>
+          <h2
+            className="mt-0.5 text-[1.1rem] leading-tight truncate"
+            style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
+          >
+            {payload.brokerName}
+          </h2>
         </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {/* A real <Link>, like its sibling. The hand-rolled guard this
+            * replaces tested `e.button === 1` for middle-click — which fires
+            * `auxclick`, never `click`, so the arm was dead code — and omitted
+            * altKey, swallowing "download this link" into an SPA navigation.
+            * <Link> owns those rules; closing is the provider's job now
+            * (lib/useCloseOnNavigation.ts), so no onClick belongs here. */}
+          <Link
+            to={browseHref}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
+            title="Open the full Browse page scoped to this broker"
+          >
+            <span>Go to Browse</span>
+            <span aria-hidden>→</span>
+          </Link>
+          <DialogClose onClick={onClose} />
+        </div>
+      </header>
+      <div className="flex-1 min-h-0">
+        <BrowseExperience
+          view={view}
+          layout="modal"
+          features={{
+            presetBar: false,
+            mergeMode: false,
+            watchdog: false,
+            title: false,
+            sidebar: false,
+            stats: false,
+          }}
+        />
       </div>
-    </div>
-  );
-}
-
-function CloseGlyph() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <line x1="3.5" y1="3.5" x2="12.5" y2="12.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-      <line x1="12.5" y1="3.5" x2="3.5" y2="12.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
+    </Dialog>
   );
 }

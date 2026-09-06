@@ -1,12 +1,17 @@
-import { useState, type MouseEvent, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import ImageTagBadge from './ImageTagBadge';
 import ImageRenderBadge from './ImageRenderBadge';
 import { type TaggedImageUrl } from '@/lib/imageTags';
 
 /* Compact inline image carousel — the photo strip on Browse listing
- * cards. Local index state (the carousel never
- * outlives its mount); chevrons stopPropagation + preventDefault so paging
- * inside a wrapping <Link> doesn't navigate. Inline only — no lightbox.
+ * cards. Local index state (the carousel never outlives its mount). Inline
+ * only — no lightbox.
+ *
+ * The chevrons used to preventDefault + stopPropagation on every click,
+ * because the Browse card wrapped this whole carousel in its detail <Link> and
+ * paging would otherwise navigate. That wrapper is gone (the card is a plain
+ * div with a stretched link on its title), so the chevrons are plain buttons
+ * again and a click means exactly one thing.
  *
  * Overlays (status badges, etc.) are passed as children and absolutely
  * positioned by the caller; the carousel owns the aspect box, the image,
@@ -44,15 +49,19 @@ export default function ImageCarousel({
   const hasMany = images.length > 1;
   const current = images[safeIndex];
 
-  const step = (delta: number) => (e: MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+  const step = (delta: number) => () => {
     if (images.length === 0) return;
     setIndex((safeIndex + delta + images.length) % images.length);
   };
 
+  /* --z-card-action is the rung a Browse card reserves for its controls
+   * (globals.css): the card's stretched link paints an ::after over the whole
+   * card at z-1, and an unraised chevron would sit under it and stop paging.
+   * Read the TOKEN, not a literal, so the ledger is a constraint: change the
+   * token and the chevrons move with it. Harmless on the carousel's other
+   * mounts, which stack nothing over it. */
   const chevronBase =
-    'absolute top-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center'
+    'absolute top-1/2 -translate-y-1/2 z-[var(--z-card-action)] w-6 h-6 flex items-center justify-center'
     + ' rounded-full bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)]'
     + ' text-[var(--color-ink-2)] backdrop-blur-sm hover:text-[var(--color-copper)]'
     + ' hover:border-[var(--color-rule-strong)] transition-opacity'
@@ -92,7 +101,7 @@ export default function ImageCarousel({
           counter (mirrors the listing-detail gallery's placement; the room tag
           owns bottom-left). Kept off the top-left corner, which the caller's
           overlay controls (the Browse card's bookmark + collection buttons,
-          z-10) own — the badge used to sit behind them. */}
+          --z-card-action) own — the badge used to sit behind them. */}
       <div className="absolute bottom-1 right-1 z-[1] flex flex-col items-end gap-1">
         <ImageRenderBadge renderScore={current?.renderScore} />
         {hasMany && (

@@ -11,13 +11,13 @@
 import {
   createContext,
   useContext,
-  useEffect,
   useMemo,
   useState,
   type ReactNode,
 } from 'react';
 import { Link } from 'react-router-dom';
-import { isPlainLeftClick } from '@/lib/linkGestures';
+import Dialog, { DialogClose } from '@/components/Dialog';
+import { useCloseOnNavigation } from '@/lib/useCloseOnNavigation';
 import BrowseExperience from '@/components/BrowseExperience';
 import OriginPropertyPanel from '@/components/OriginPropertyPanel';
 import type { AnchorPoint } from '@/components/ListingMap';
@@ -51,6 +51,11 @@ export function useExploreAreaModal(): ModalCtx {
 
 export function ExploreAreaProvider({ children }: { children: ReactNode }) {
   const [payload, setPayload] = useState<ExploreAreaPayload | null>(null);
+  /* This provider mounts above <Outlet> in Shell, so without this a navigation
+   * from inside the modal — the "Go to Browse" link, a card in the embedded
+   * Browse experience — would change the page BEHIND the open modal and leave
+   * the body scroll lock on. See lib/useCloseOnNavigation.ts. */
+  useCloseOnNavigation(() => setPayload(null));
   const value = useMemo<ModalCtx>(
     () => ({
       open: (p) => setPayload(p),
@@ -98,20 +103,9 @@ function ExploreAreaModal({
     [origin, payload.lat, payload.lng],
   );
 
-  // ESC closes + lock body scroll while the (tall) modal is open.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      document.body.style.overflow = prevOverflow;
-    };
-  }, [onClose]);
-
+  /* Escape, the focus trap, initial + restored focus and the body scroll lock
+   * all come from <Dialog> (lib/useDialog.ts). The hand-rolled window listener
+   * and scroll-lock copy that used to live here are gone. */
   const browseHref = browseUrlFromState({
     filters: view.filters,
     sort: view.sort,
@@ -120,77 +114,55 @@ function ExploreAreaModal({
   });
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-[var(--color-ink)]/40 backdrop-blur-[2px]"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Explore area"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+    <Dialog
+      open
+      onClose={onClose}
+      label="Explore area"
+      className="w-[96vw] max-w-[1600px] h-[90vh] flex flex-col"
     >
-      <div className="w-[96vw] max-w-[1600px] h-[90vh] flex flex-col rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-2xl overflow-hidden">
-        <header className="flex items-center justify-between gap-4 px-6 py-3 border-b border-[var(--color-rule)] shrink-0">
-          <div className="min-w-0">
-            <p className="text-[0.62rem] tracking-[0.22em] uppercase text-[var(--color-ink-3)]">
-              Explore area
-            </p>
-            <h2
-              className="mt-0.5 text-[1.1rem] leading-tight truncate"
-              style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
-            >
-              {payload.label ?? 'Okolí nemovitosti'}
-            </h2>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            {/* A real <Link>: the hand-rolled guard this replaces tested
-              * `e.button === 1` for middle-click, which never fires on `click`,
-              * and omitted altKey — so alt-click (download the link) was
-              * swallowed into an SPA navigation. Closing the modal stays gated
-              * on a PLAIN click, preserving the deliberate behaviour that a
-              * modifier-click opens a tab and leaves the modal open. */}
-            <Link
-              to={browseHref}
-              onClick={(e) => {
-                if (isPlainLeftClick(e)) onClose();
-              }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
-              title="Open the full Browse page in this same area + filters"
-            >
-              <span>Go to Browse</span>
-              <span aria-hidden>→</span>
-            </Link>
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Close"
-              className="shrink-0 px-2 py-1 text-[var(--color-ink-3)] hover:text-[var(--color-ink)] transition-colors"
-            >
-              <CloseGlyph />
-            </button>
-          </div>
-        </header>
-        {origin && (
-          <OriginPropertyPanel listing={origin.listing} images={origin.images} />
-        )}
-        <div className="flex-1 min-h-0">
-          <BrowseExperience
-            view={view}
-            layout="modal"
-            anchor={anchor}
-            features={{ presetBar: false, mergeMode: false, watchdog: false, title: false }}
-          />
+      <header className="flex items-center justify-between gap-4 px-6 py-3 border-b border-[var(--color-rule)] shrink-0">
+        <div className="min-w-0">
+          <p className="text-[0.62rem] tracking-[0.22em] uppercase text-[var(--color-ink-3)]">
+            Explore area
+          </p>
+          <h2
+            className="mt-0.5 text-[1.1rem] leading-tight truncate"
+            style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
+          >
+            {payload.label ?? 'Okolí nemovitosti'}
+          </h2>
         </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {/* A plain <Link> with NO close handler. The per-click
+            * `isPlainLeftClick(e) && onClose()` that used to hang here was a
+            * symptom: it made this one link responsible for a property every
+            * link in the modal needs. The provider closes on the pathname
+            * change instead (lib/useCloseOnNavigation.ts), which also covers
+            * the cards inside the embedded Browse experience — and still
+            * leaves a modifier-click alone, because a modifier-click does not
+            * navigate at all. */}
+          <Link
+            to={browseHref}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
+            title="Open the full Browse page in this same area + filters"
+          >
+            <span>Go to Browse</span>
+            <span aria-hidden>→</span>
+          </Link>
+          <DialogClose onClick={onClose} />
+        </div>
+      </header>
+      {origin && (
+        <OriginPropertyPanel listing={origin.listing} images={origin.images} />
+      )}
+      <div className="flex-1 min-h-0">
+        <BrowseExperience
+          view={view}
+          layout="modal"
+          anchor={anchor}
+          features={{ presetBar: false, mergeMode: false, watchdog: false, title: false }}
+        />
       </div>
-    </div>
-  );
-}
-
-function CloseGlyph() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <line x1="3.5" y1="3.5" x2="12.5" y2="12.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-      <line x1="12.5" y1="3.5" x2="3.5" y2="12.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
+    </Dialog>
   );
 }

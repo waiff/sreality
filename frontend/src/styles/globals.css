@@ -482,3 +482,96 @@
   --color-tag-sand:        #ccb986;
   --color-tag-sand-soft:   rgba(204, 185, 134, 0.16);
 }
+
+/* ----------------------------------------------------------------------------
+ * The stretched-link card pattern (W5).
+ *
+ * A Browse card used to BE a link: <Link> wrapped the whole card body, and
+ * eight controls drawn on that card — the carousel chevrons, the pipeline
+ * funnel, the collection trigger and its popover, the estimate corner — were
+ * DOM descendants of that anchor. The anchor's accessible name absorbed every
+ * one of their labels, a single card was five tab stops nested inside one, and
+ * a preventDefault/stopPropagation regime existed for no reason other than to
+ * stop each control from navigating.
+ *
+ * Instead: the card is a plain `<div class="relative">`, ONE <a> sits on the
+ * card's TITLE (so the link is named by the listing it opens), and
+ * `.stretched-link` expands that anchor's hit area over the whole card via an
+ * absolutely-positioned ::after. Every control is a SIBLING of the anchor,
+ * raised over the ::after with `.card-action` — or, when it is already
+ * absolutely positioned and must stay that way, with
+ * `z-[var(--z-card-action)]`. Three surfaces in this app already keep their
+ * controls as SIBLINGS of one scoped link (pipeline/BoardCard,
+ * tag-definitions/TagContentsGallery, ListingTable); none of them stretches
+ * that link over the whole surface — this utility is the first to.
+ *
+ * UNLAYERED ON PURPOSE. This file opens with `@import "tailwindcss"`, which
+ * declares Tailwind's cascade layers; an UNLAYERED bare rule outranks every
+ * layered one regardless of specificity or source order. That is what makes
+ * `position: static` here unloseable to a stray positioning utility — and it is
+ * equally the reason NEITHER class may be put on an element that needs a
+ * `position` of its own: the unlayered rule would silently win.
+ *
+ * The accepted trade: the ::after covers the card, so text under it (the price,
+ * the place line) can no longer be drag-selected. Nothing selectable was lost —
+ * before this change that same drag started an anchor drag instead.
+ * -------------------------------------------------------------------------- */
+:root {
+  /* THE z-ledger for a card, bottom to top:
+   *    1  .stretched-link::after  the card-wide hit area
+   *   10  --z-card-action         every control that sits on the card: the
+   *                               carousel chevrons, the pipeline funnel, the
+   *                               collection trigger, the merge checkbox, the
+   *                               estimate corner
+   *    2  .card-tip               a badge whose only job above the ::after is
+   *                               to be hit-testable, so its title tooltip shows
+   *   50  every modal             (inline, z-50) — Explore modals render cards
+   *   60  AnchoredPopover         the portalled panel — on <body>, above any
+   *                               modal that opened it
+   * Nothing on a card sits between 2 and 10 any more: the collection popover's
+   * own z-20 panel moved onto AnchoredPopover. */
+  --z-card-action: 10;
+}
+
+.stretched-link {
+  /* Static so the ::after resolves against the card, not against the link. */
+  position: static;
+}
+
+.stretched-link::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  /* One rung above the carousel's own decoration badges (the CLIP tag pill and
+   * the photo counter, both z-1 and both EARLIER in the DOM), which would
+   * otherwise punch inert holes in the card's hit area. Nine rungs below
+   * --z-card-action, which every real control on the card carries. */
+  z-index: 1;
+}
+
+.card-action {
+  position: relative;
+  z-index: var(--z-card-action);
+}
+
+/* A non-interactive badge that carries a `title`: raise it just above the
+ * ::after so the browser can hit-test it and show the tooltip, but keep it
+ * below every control. A click on it is inert — the card opens from anywhere
+ * else, and the badge is a few characters wide. */
+.card-tip {
+  position: relative;
+  z-index: 2;
+}
+
+/* Keyboard focus outlines the CARD, not the title's inline text box: the ring
+ * moves from the static anchor onto its ::after, which is the card-sized box
+ * (W3 promised a visible ring; a fragment around two wrapped title lines is
+ * not it). */
+.stretched-link:focus-visible {
+  outline: none;
+}
+.stretched-link:focus-visible::after {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: inherit;
+}
