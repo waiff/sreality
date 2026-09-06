@@ -1219,6 +1219,10 @@ export interface TrainingSetRow {
   set_rank: number | null;
   /* null = unknown (no cutoff exists yet), never a guess. */
   in_set: boolean | null;
+  /* The open (unabsorbed) note on this image for this head, so it can be read
+   * and changed later. Null when there is none. */
+  note_id: number | null;
+  note: string | null;
 }
 
 export const listTrainingSetHeads = (): Promise<{ data: TrainingSetHead[] }> =>
@@ -1249,6 +1253,22 @@ export const listTrainingSet = (params: {
       offset: number;
     };
   }>('/new-dedup/labeling/training-set', { query: params, jwt: true });
+
+/* Change or drop a note. Only an OPEN note: an absorbed one already shaped a
+ * definition version, and the server answers 404 rather than rewriting it. */
+export const editTagLabelNote = (
+  noteId: number, note: string,
+): Promise<{ data: TagLabelNote }> =>
+  request<{ data: TagLabelNote }>(`/new-dedup/labeling/notes/${noteId}`, {
+    method: 'PATCH', json: { note }, jwt: true,
+  });
+
+export const deleteTagLabelNote = (
+  noteId: number,
+): Promise<{ data: { id: number; image_id: number; tag_id: number } }> =>
+  request<{ data: { id: number; image_id: number; tag_id: number } }>(
+    `/new-dedup/labeling/notes/${noteId}`, { method: 'DELETE', jwt: true },
+  );
 
 /* The operator's per-head cutoff; null restores the programme default. */
 export const setTrainingTarget = (

@@ -26,10 +26,10 @@ const HEADS = [
 const ROWS = [
   { image_id: 11, storage_path: 'img/1/11.jpg', state: 'positive', source: 'machine',
     excluded_reason: null, updated_at: null, definition_version: 9, definition_stale: false,
-    set_rank: 19, in_set: true },
+    set_rank: 19, in_set: true, note_id: null, note: null },
   { image_id: 12, storage_path: 'img/1/12.jpg', state: 'positive', source: 'human',
     excluded_reason: null, updated_at: null, definition_version: 8, definition_stale: true,
-    set_rank: 1, in_set: true },
+    set_rank: 1, in_set: true, note_id: 36, note: 'front shot, building is the subject' },
 ];
 
 function renderPage(entries = ['/new-dedup/training-set']) {
@@ -493,5 +493,64 @@ describe('<NewDedupTrainingSet> finding what the reserve pulled in', () => {
     await user.click(screen.getByRole('button', { name: 'Yours' }));
     await waitFor(() => expect(screen.getByTestId('page-range')).not.toHaveTextContent(/ of /));
     expect(screen.queryByTestId('jump-last')).toBeNull();
+  });
+});
+
+
+describe('<NewDedupTrainingSet> a note can be reread and changed', () => {
+  it('shows a saved note on its photo, with edit and remove', async () => {
+    renderPage(['/new-dedup/training-set?set=all']);
+    const tile = await screen.findByTestId('training-tile-12');
+    expect(within(tile).getByTestId('note-saved-12'))
+      .toHaveTextContent('front shot, building is the subject');
+    // A photo without a note offers to add one, without changing any mark.
+    expect(screen.getByTestId('note-add-11')).toBeInTheDocument();
+    expect(screen.queryByTestId('note-add-12')).toBeNull();
+  });
+
+  it('editing sends a PATCH with the new text and shows it in place', async () => {
+    vi.mocked(api.editTagLabelNote).mockResolvedValue({
+      data: { id: 36, image_id: 12, note: 'must be a frontal shot' } as never,
+    });
+    const user = userEvent.setup();
+    renderPage(['/new-dedup/training-set?set=all']);
+    await screen.findByTestId('training-tile-12');
+    await user.click(screen.getByRole('button', { name: 'edit note' }));
+    const input = screen.getByLabelText('why 12');
+    expect(input).toHaveValue('front shot, building is the subject');
+    await user.clear(input);
+    await user.type(input, 'must be a frontal shot');
+    await user.click(within(screen.getByTestId('note-form-12')).getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(api.editTagLabelNote)
+      .toHaveBeenCalledWith(36, 'must be a frontal shot'));
+    // Patched in place — the mark is untouched and the list is not refetched.
+    await waitFor(() => expect(screen.getByTestId('note-saved-12'))
+      .toHaveTextContent('must be a frontal shot'));
+    expect(api.setNewDedupTagAnnotation).not.toHaveBeenCalled();
+  });
+
+  it('removing drops the note and offers to add one again', async () => {
+    vi.mocked(api.deleteTagLabelNote).mockResolvedValue({
+      data: { id: 36, image_id: 12, tag_id: 3 },
+    });
+    const user = userEvent.setup();
+    renderPage(['/new-dedup/training-set?set=all']);
+    await screen.findByTestId('training-tile-12');
+    await user.click(screen.getByRole('button', { name: 'remove' }));
+    await waitFor(() => expect(api.deleteTagLabelNote).toHaveBeenCalledWith(36));
+    await waitFor(() => expect(screen.queryByTestId('note-saved-12')).toBeNull());
+    expect(screen.getByTestId('note-add-12')).toBeInTheDocument();
+  });
+
+  it('a note added without a mark change re-states the current mark, from null', async () => {
+    const user = userEvent.setup();
+    renderPage(['/new-dedup/training-set?set=all']);
+    await screen.findByTestId('training-tile-11');
+    await user.click(screen.getByTestId('note-add-11'));
+    await user.type(screen.getByLabelText('why 11'), 'clear frontal facade');
+    await user.click(within(screen.getByTestId('note-form-11')).getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(
+      3, 11, 'positive', null, { text: 'clear frontal facade', from_state: null },
+    ));
   });
 });

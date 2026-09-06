@@ -124,3 +124,40 @@ def test_the_absorption_rule_is_written_where_it_is_read() -> None:
         assert "ONCE" in text
     assert "revoke all on tag_label_notes from anon, authenticated" in mig
     assert "revoke all on sequence tag_label_notes_id_seq" in mig
+
+
+def test_only_an_open_note_can_be_changed_or_dropped() -> None:
+    # An absorbed note already shaped a definition version; rewriting it would
+    # falsify the answer to "what did v10 change and why".
+    from toolkit import tag_label_notes as n
+
+    for sql in (n._UPDATE_NOTE_SQL, n._DELETE_NOTE_SQL):
+        assert "absorbed_definition_id IS NULL" in sql
+    with pytest.raises(KeyError):
+        n.update_note(_Conn([]), note_id=36, note="new words")
+    with pytest.raises(KeyError):
+        n.delete_note(_Conn([]), note_id=36)
+
+
+def test_an_edited_note_is_validated_like_a_new_one() -> None:
+    from toolkit import tag_label_notes as n
+
+    for bad in ("", "   ", "x" * 601):
+        with pytest.raises(ValueError):
+            n.update_note(_Conn([]), note_id=36, note=bad)
+    # The row comes back as the DB stored it — which is the cleaned text, since
+    # that is what was sent. The bound parameter is the real assertion.
+    conn = _Conn([(36, 5, 3, "positive", "negative", "front shot")])
+    out = n.update_note(conn, note_id=36, note="  front   shot ")
+    assert out["note"] == "front shot" and out["id"] == 36
+    assert conn.log[0][1]["note"] == "front shot"
+
+
+def test_the_page_read_carries_the_open_note_so_it_can_be_changed() -> None:
+    from toolkit import machine_labeling as ml
+
+    sql = ml._TRAINING_PAGE_RANKED_SQL
+    assert "LEFT JOIN LATERAL" in sql
+    assert "n.absorbed_definition_id IS NULL" in sql
+    # Newest open note wins, deterministically.
+    assert "ORDER BY n.created_at DESC, n.id DESC" in sql

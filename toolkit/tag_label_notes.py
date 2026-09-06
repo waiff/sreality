@@ -142,3 +142,48 @@ def absorb(
             "note_ids": [int(i) for i in note_ids],
         })
         return [int(r[0]) for r in cur.fetchall()]
+
+
+# --- changing a note the operator has second thoughts about -----------------
+#
+# ONLY AN OPEN NOTE MAY CHANGE. Once a note is absorbed it has already shaped a
+# definition version, and the ledger's whole value is answering "what did v10
+# change and why" — rewriting the answer afterwards would falsify that. An
+# absorbed note is therefore not found by these, and the caller reports a 404
+# rather than silently doing nothing.
+_UPDATE_NOTE_SQL = """
+    UPDATE tag_label_notes
+       SET note = %(note)s
+     WHERE id = %(note_id)s AND absorbed_definition_id IS NULL
+    RETURNING id, image_id, tag_id, from_state, to_state, note
+"""
+
+_DELETE_NOTE_SQL = """
+    DELETE FROM tag_label_notes
+     WHERE id = %(note_id)s AND absorbed_definition_id IS NULL
+    RETURNING id, image_id, tag_id
+"""
+
+
+def update_note(conn: psycopg.Connection, *, note_id: int, note: str) -> dict[str, Any]:
+    text = " ".join((note or "").split())
+    if not text:
+        raise ValueError("a note needs words")
+    if len(text) > NOTE_MAX_CHARS:
+        raise ValueError(f"a note is at most {NOTE_MAX_CHARS} characters")
+    with conn.cursor() as cur:
+        cur.execute(_UPDATE_NOTE_SQL, {"note_id": int(note_id), "note": text})
+        row = cur.fetchone()
+    if row is None:
+        raise KeyError(note_id)
+    return {"id": int(row[0]), "image_id": int(row[1]), "tag_id": int(row[2]),
+            "from_state": row[3], "to_state": row[4], "note": row[5]}
+
+
+def delete_note(conn: psycopg.Connection, *, note_id: int) -> dict[str, Any]:
+    with conn.cursor() as cur:
+        cur.execute(_DELETE_NOTE_SQL, {"note_id": int(note_id)})
+        row = cur.fetchone()
+    if row is None:
+        raise KeyError(note_id)
+    return {"id": int(row[0]), "image_id": int(row[1]), "tag_id": int(row[2])}
