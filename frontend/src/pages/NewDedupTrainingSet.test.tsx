@@ -443,3 +443,24 @@ describe('<NewDedupTrainingSet> page size', () => {
     await waitFor(() => expect(screen.queryByTestId('confirm-page')).toBeNull());
   });
 });
+
+describe('<NewDedupTrainingSet> the confirm button previews its reach', () => {
+  it('highlights exactly the tiles it will claim, on hover and on focus', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    // Nothing highlighted at rest.
+    expect(screen.getByTestId('training-tile-11')).not.toHaveAttribute('data-previewed');
+    await user.hover(screen.getByTestId('confirm-page'));
+    // 11 is the untouched machine positive; 12 is already yours.
+    expect(screen.getByTestId('training-tile-11')).toHaveAttribute('data-previewed', 'true');
+    expect(screen.getByTestId('training-tile-12')).not.toHaveAttribute('data-previewed');
+    expect(screen.getByTestId('training-tile-12').className).toContain('opacity-40');
+    await user.unhover(screen.getByTestId('confirm-page'));
+    expect(screen.getByTestId('training-tile-11')).not.toHaveAttribute('data-previewed');
+    // Keyboard users get the same preview.
+    screen.getByTestId('confirm-page').focus();
+    await waitFor(() => expect(screen.getByTestId('training-tile-11'))
+      .toHaveAttribute('data-previewed', 'true'));
+  });
+});

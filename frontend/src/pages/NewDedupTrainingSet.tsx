@@ -90,6 +90,10 @@ export default function NewDedupTrainingSet() {
    * so the reason is recorded against the change it explains. */
   const [changed, setChanged] = useState<Map<number, { from: TagState; to: TagState }>>(new Map());
   const [drafts, setDrafts] = useState<Map<number, string>>(new Map());
+  /* Hovering the bulk-confirm button previews its reach: a click claims every
+   * machine positive the operator has not touched, and on a 500-row page that
+   * is otherwise an act of faith. */
+  const [previewing, setPreviewing] = useState(false);
 
   const tagId = Number(params.get('tag') ?? 0) || null;
   const verdict = (params.get('verdict') ?? 'positive') as Verdict | 'all';
@@ -211,6 +215,7 @@ export default function NewDedupTrainingSet() {
    * machine pass cannot overwrite them. */
   const pending = rows.filter((r) =>
     r.state === 'positive' && r.source === 'machine' && !changed.has(r.image_id));
+  const willConfirm = new Set(pending.map((r) => r.image_id));
   const confirmPageMut = useMutation({
     mutationFn: async (imageIds: number[]) => {
       /* Sequential chunks, in order, stopping at the first failure so a
@@ -279,7 +284,14 @@ export default function NewDedupTrainingSet() {
         key={r.image_id}
         data-testid={`training-tile-${r.image_id}`}
         data-state={r.state}
-        className={`rounded-[var(--radius-sm)] border p-1.5 flex flex-col gap-1.5 ${VERDICT_STYLE[r.state as Verdict] ?? ''}`}
+        data-previewed={previewing && willConfirm.has(r.image_id) ? 'true' : undefined}
+        className={`rounded-[var(--radius-sm)] border p-1.5 flex flex-col gap-1.5 transition-opacity ${VERDICT_STYLE[r.state as Verdict] ?? ''} ${
+          previewing
+            ? willConfirm.has(r.image_id)
+              ? 'ring-2 ring-[var(--color-sage)] ring-offset-1 ring-offset-[var(--color-paper)]'
+              : 'opacity-40'
+            : ''
+        }`}
       >
         <a
           href={imageSrc(ref)}
@@ -670,7 +682,11 @@ export default function NewDedupTrainingSet() {
                 type="button"
                 data-testid="confirm-page"
                 disabled={confirmPageMut.isPending}
-                onClick={() => confirmPageMut.mutate(pending.map((r) => r.image_id))}
+                onMouseEnter={() => setPreviewing(true)}
+                onMouseLeave={() => setPreviewing(false)}
+                onFocus={() => setPreviewing(true)}
+                onBlur={() => setPreviewing(false)}
+                onClick={() => { setPreviewing(false); confirmPageMut.mutate(pending.map((r) => r.image_id)); }}
                 className="px-3 py-1.5 text-xs rounded-[var(--radius-sm)] border border-[var(--color-sage)] text-[var(--color-ink)] hover:bg-[var(--color-sage)]/10 disabled:opacity-40"
               >
                 ✓ Confirm the other {pending.length} on this page as correct
@@ -678,6 +694,7 @@ export default function NewDedupTrainingSet() {
               <p className="text-[0.7rem] text-[var(--color-ink-4)] text-center max-w-prose">
                 Fix the wrong ones first, then press this: every remaining machine positive on
                 this page becomes your label. That is what takes them off “To review”.
+                Hover it to see exactly which photos it will claim.
               </p>
             </div>
           )}
