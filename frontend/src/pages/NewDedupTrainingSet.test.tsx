@@ -57,7 +57,7 @@ describe('<NewDedupTrainingSet>', () => {
     renderPage();
     await waitFor(() => expect(api.listTrainingSet).toHaveBeenCalledWith(
       expect.objectContaining({
-        tag_id: 3, state: 'positive', source: 'machine', membership: 'set', limit: 60, offset: 0,
+        tag_id: 3, state: 'positive', source: 'machine', membership: 'set', limit: 50, offset: 0,
       }),
     ));
     expect(await screen.findByTestId('training-tile-11')).toBeInTheDocument();
@@ -144,7 +144,7 @@ describe('<NewDedupTrainingSet>', () => {
   it('pages forward, and stops when the page is short', async () => {
     renderPage();
     await screen.findByTestId('training-tile-11');
-    // Two rows against a 60-row page means there is no next page.
+    // Two rows against a 50-row page means there is no next page.
     expect(screen.getByRole('button', { name: /next/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: /previous/ })).toBeDisabled();
   });
@@ -390,5 +390,56 @@ describe('<NewDedupTrainingSet> confirming the rest of the page', () => {
     await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalled());
     // 11 was changed (and is no longer a positive); nothing is left to confirm.
     expect(screen.queryByTestId('confirm-page')).toBeNull();
+  });
+});
+
+
+describe('<NewDedupTrainingSet> page size', () => {
+  it('offers 50 / 100 / 500 / 2000, sends the choice as the limit, and resets the offset', async () => {
+    const user = userEvent.setup();
+    renderPage(['/new-dedup/training-set?set=all&offset=100']);
+    await screen.findByTestId('training-tile-11');
+    const group = screen.getByRole('group', { name: 'per page' });
+    for (const n of ['50', '100', '500', '2000']) {
+      expect(within(group).getByRole('button', { name: n })).toBeInTheDocument();
+    }
+    await user.click(within(group).getByRole('button', { name: '2000' }));
+    await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
+      expect.objectContaining({ limit: 2000, offset: 0 }),
+    ));
+  });
+
+  it('steps by the chosen page size', async () => {
+    vi.mocked(api.listTrainingSet).mockResolvedValue({
+      data: {
+        rows: Array.from({ length: 100 }, (_, i) => ({ ...ROWS[0], image_id: 1000 + i })) as never,
+        counts: HEADS[0] as never, limit: 100, offset: 0,
+      },
+    });
+    const user = userEvent.setup();
+    renderPage(['/new-dedup/training-set?set=all&n=100']);
+    await screen.findByTestId('training-tile-1000');
+    await user.click(screen.getByRole('button', { name: /next/ }));
+    await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
+      expect.objectContaining({ limit: 100, offset: 100 }),
+    ));
+  });
+
+  it('confirming a big page writes in chunks of 200 and reports the total', async () => {
+    const rows = Array.from({ length: 450 }, (_, i) => ({ ...ROWS[0], image_id: 1000 + i }));
+    vi.mocked(api.listTrainingSet).mockResolvedValue({
+      data: { rows: rows as never, counts: HEADS[0] as never, limit: 500, offset: 0 },
+    });
+    vi.mocked(api.bulkSetNewDedupTagAnnotation).mockImplementation(async (_t, ids) => ({
+      data: { updated: ids.length, tag_id: 3, state: 'positive', excluded_reason: null, image_ids: ids },
+    }) as never);
+    const user = userEvent.setup();
+    renderPage(['/new-dedup/training-set?n=500']);
+    await screen.findByTestId('training-tile-1000');
+    await user.click(screen.getByTestId('confirm-page'));
+    await waitFor(() => expect(api.bulkSetNewDedupTagAnnotation).toHaveBeenCalledTimes(3));
+    const sizes = vi.mocked(api.bulkSetNewDedupTagAnnotation).mock.calls.map((c) => c[1].length);
+    expect(sizes).toEqual([200, 200, 50]);
+    await waitFor(() => expect(screen.queryByTestId('confirm-page')).toBeNull());
   });
 });

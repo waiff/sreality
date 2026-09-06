@@ -323,7 +323,7 @@ def test_the_page_caps_its_limit_and_floors_its_offset() -> None:
     conn = _Conn([])
     ml.training_set_page(conn, tag_id=22, limit=10_000, offset=-5)
     params = conn.log[0][2]
-    assert params["limit"] == 200 and params["offset"] == 0
+    assert params["limit"] == ml.PAGE_MAX == 2000 and params["offset"] == 0
 
 
 def test_counts_split_positives_by_who_decided_them() -> None:

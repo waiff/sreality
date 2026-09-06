@@ -435,7 +435,7 @@ def training_set_page(
         cur.execute(_TRAINING_PAGE_SQL, {
             "tag_id": int(tag_id), "sources": list(TRAINING_SOURCES),
             "state": state, "source_class": source_class,
-            "limit": max(1, min(int(limit), 200)), "offset": max(0, int(offset)),
+            "limit": max(1, min(int(limit), PAGE_MAX)), "offset": max(0, int(offset)),
         })
         return [
             {
@@ -471,6 +471,10 @@ def training_set_page(
 # linear-probe results; heads with fewer simply have everything in the set.
 DEFAULT_TRAINING_TARGET = 300
 TRAINING_TARGET_MAX = 5000
+# The review page may ask for up to a whole head's set at once (the operator
+# chose 50 / 100 / 500 / 2000 steps); the query is indexed and bounded, and
+# the images lazy-load, so the cost is the DOM, which is the operator's call.
+PAGE_MAX = 2000
 
 # `(l.source = 'machine') ASC` puts the operator's labels (false) first.
 # created_at then image_id makes the order total, so the cutoff never wobbles
@@ -598,7 +602,7 @@ def training_set_page_ranked(
         "tag_id": int(tag_id), "tag_ids": [int(tag_id)],
         "sources": list(TRAINING_SOURCES), "state": state,
         "source_class": source_class, "membership": membership,
-        "limit": max(1, min(int(limit), 200)), "offset": max(0, int(offset)),
+        "limit": max(1, min(int(limit), PAGE_MAX)), "offset": max(0, int(offset)),
         "default_target": int(default_target),
     }
 
