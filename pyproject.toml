@@ -64,16 +64,21 @@ pricestats = [
   "playwright>=1.40",
 ]
 # CLIP visual tagging (scraper/clip_tagger.py; clip_tag.yml / clip_retag.yml /
-# backfill_render_score.yml). Heavy (torch + transformers) — kept out of the default
-# install; ONLY the tagging workflows install it, and they install the CPU-only torch
-# wheel first, so this extra is NOT a runtime dep of the scraper/API images.
+# backfill_render_score.yml) AND the DINOv3 embedding lanes (scraper/dinov3_tagger.py;
+# docs/design/new-dedup/ENCODER-DECISION.md). Heavy (torch + transformers) — kept out
+# of the default install; ONLY the GPU workflows install it, and they install the
+# CPU/CUDA torch wheel separately first, so this extra is NOT a runtime dep of the
+# scraper/API images.
 clip = [
   # Upper bound, not an exact pin: what determines a vector's VALUE is the
-  # checkpoint (pinned by sha in data/clip_taxonomy.json), not the library
-  # version — the same weights give the same numbers across 4.x. The <5 guard is
-  # against a major release changing the from_pretrained/CLIPModel API under the
-  # four tagging workflows, which is a breakage risk, not a drift risk.
-  "transformers>=4.40,<5",
+  # checkpoint (pinned by sha in data/clip_taxonomy.json / the DINOv3 config), not
+  # the library version — the same weights give the same numbers across 4.x. The <5
+  # guard is against a major release changing the from_pretrained/*Model API under
+  # the tagging workflows, which is a breakage risk, not a drift risk. Floor raised
+  # 4.40 -> 4.56 for `Dinov3Model` support (ENCODER-DECISION.md §4.4) — strictly
+  # narrower than the range already floated (4.40-4.99), so no new drift risk for
+  # the existing CLIP lanes.
+  "transformers>=4.56,<5",
 ]
 
 [build-system]
