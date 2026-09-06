@@ -1279,6 +1279,10 @@ TOUCH_CHUNK_SIZE = 250
 # finishes and a short pause suffices; three attempts covers a double race.
 _TOUCH_DEADLOCK_ATTEMPTS = 3
 _TOUCH_DEADLOCK_DELAY = 0.5
+# A lock-wait cancel means the statement sat the FULL statement_timeout (2 min)
+# behind a long writer; by the time it fails the holder is usually committed,
+# so pause long enough for it to finish releasing rather than re-queue at once.
+_TOUCH_LOCKWAIT_DELAY = 5.0
 
 
 def touch_listings(
@@ -1305,35 +1309,52 @@ def touch_listings(
     with conn.cursor() as cur:
         for start in range(0, len(ids), TOUCH_CHUNK_SIZE):
             chunk = ids[start : start + TOUCH_CHUNK_SIZE]
-            total += _touch_chunk_with_deadlock_retry(cur, chunk)
+            total += _touch_chunk_with_retry(cur, chunk, _touch_chunk)
     return total
 
 
-def _touch_chunk_with_deadlock_retry(cur: Any, chunk: list[int]) -> int:
-    """One touch_listings chunk, retried on a deadlock.
+def _touch_chunk_with_retry(
+    cur: Any, chunk: list[int], touch: Callable[[Any, list[int]], int],
+) -> int:
+    """One touch chunk, retried when it loses a lock fight.
 
-    A DeadlockDetected here is a lock race with a concurrent writer (the drain,
-    the realtime worker, a detail refetch) over the same listing rows. Before
-    this, one such race raised out of the whole category walk: on 2026-09-05
-    10:38 a fully-paged komercni/prodej walk -- every page fetched, every id in
-    hand -- was recorded as collected=0 and its delisting sweep skipped, because
-    the LAST step lost a lock race. Three of 46 runs. The work was already done;
-    only the bookkeeping failed.
+    Two ways a touch loses one, both seen in production, both fatal to the
+    category walk that had already finished its real work:
 
-    Retrying is safe: the walk connection is autocommit, so a deadlock aborts
-    only this statement, and both statements are idempotent (SET last_seen_at =
-    now(), and an INSERT ... ON CONFLICT). Postgres has already rolled back the
-    victim, so the other side of the race completes and a short pause is enough.
+    * DeadlockDetected -- a lock-order race with a concurrent writer (the drain,
+      the realtime worker, a bulk job). 2026-09-05 10:38: a fully-paged sreality
+      komercni/prodej walk recorded collected=0 and skipped its sweep because
+      this LAST step lost the race. Three of 46 runs.
+    * QueryCanceled -- "canceling statement due to statement timeout ... while
+      locking tuple": the touch waited the whole 2-minute statement_timeout
+      behind a long transaction holding the same rows. 2026-09-05 21:26 and
+      21:27: idnes dum/prodej AND ceskereality komercni/prodej died within a
+      minute of each other, both behind the hourly MF-yield recompute, whose
+      single bulk UPDATE over listings held row locks for ~90 s twice. The touch
+      statements themselves are indexed lookups over <=250 ids and never take
+      two minutes on their own, so a cancel here is a lock wait, not slowness.
+
+    Retrying is safe: the walk connection is autocommit, so either error aborts
+    only this statement, and both statements in a chunk are idempotent (SET
+    last_seen_at = now(); INSERT ... ON CONFLICT). After a deadlock Postgres has
+    already rolled back the victim, so the other side completes and a short
+    pause is enough; after a lock-wait cancel the holder is usually done, so a
+    longer pause lets it finish releasing. Anything else raises unchanged.
     """
     for attempt in range(1, _TOUCH_DEADLOCK_ATTEMPTS + 1):
         try:
-            return _touch_chunk(cur, chunk)
-        except psycopg.errors.DeadlockDetected:
+            return touch(cur, chunk)
+        except (psycopg.errors.DeadlockDetected, psycopg.errors.QueryCanceled) as exc:
             if attempt == _TOUCH_DEADLOCK_ATTEMPTS:
                 raise
-            LOG.warning("touch_listings: deadlock on chunk of %d (attempt %d/%d); retrying",
-                        len(chunk), attempt, _TOUCH_DEADLOCK_ATTEMPTS)
-            time.sleep(_TOUCH_DEADLOCK_DELAY * attempt)
+            lock_wait = isinstance(exc, psycopg.errors.QueryCanceled)
+            LOG.warning(
+                "touch: %s on chunk of %d (attempt %d/%d); retrying",
+                "lock-wait timeout" if lock_wait else "deadlock",
+                len(chunk), attempt, _TOUCH_DEADLOCK_ATTEMPTS,
+            )
+            base = _TOUCH_LOCKWAIT_DELAY if lock_wait else _TOUCH_DEADLOCK_DELAY
+            time.sleep(base * attempt)
     raise AssertionError("unreachable")
 
 
@@ -1394,35 +1415,39 @@ def touch_listings_by_id(
     with conn.cursor() as cur:
         for start in range(0, len(ids), TOUCH_CHUNK_SIZE):
             chunk = ids[start : start + TOUCH_CHUNK_SIZE]
-            cur.execute(
-                """
-                WITH react AS (
-                    UPDATE listings
-                    SET is_active = true, inactive_at = NULL, last_seen_at = now()
-                    FROM unnest(%s::bigint[]) AS u(id)
-                    WHERE listings.id = u.id
-                      AND listings.is_active = false
-                    RETURNING listings.property_id
-                )
-                INSERT INTO dirty_properties (property_id)
-                SELECT DISTINCT property_id FROM react WHERE property_id IS NOT NULL
-                ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
-                """,
-                (chunk,),
-            )
-            cur.execute(
-                """
-                UPDATE listings
-                SET last_seen_at = now(),
-                    is_active = true,
-                    inactive_at = NULL
-                FROM unnest(%s::bigint[]) AS u(id)
-                WHERE listings.id = u.id
-                """,
-                (chunk,),
-            )
-            total += cur.rowcount or 0
+            total += _touch_chunk_with_retry(cur, chunk, _touch_chunk_by_id)
     return total
+
+
+def _touch_chunk_by_id(cur: Any, chunk: list[int]) -> int:
+    cur.execute(
+        """
+        WITH react AS (
+            UPDATE listings
+            SET is_active = true, inactive_at = NULL, last_seen_at = now()
+            FROM unnest(%s::bigint[]) AS u(id)
+            WHERE listings.id = u.id
+              AND listings.is_active = false
+            RETURNING listings.property_id
+        )
+        INSERT INTO dirty_properties (property_id)
+        SELECT DISTINCT property_id FROM react WHERE property_id IS NOT NULL
+        ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+        """,
+        (chunk,),
+    )
+    cur.execute(
+        """
+        UPDATE listings
+        SET last_seen_at = now(),
+            is_active = true,
+            inactive_at = NULL
+        FROM unnest(%s::bigint[]) AS u(id)
+        WHERE listings.id = u.id
+        """,
+        (chunk,),
+    )
+    return cur.rowcount or 0
 
 
 def _seen_without_nulls(seen: Collection[Any], label: str) -> list[Any] | None:

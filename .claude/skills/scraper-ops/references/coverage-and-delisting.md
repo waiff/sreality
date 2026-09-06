@@ -294,11 +294,25 @@ truncated run reports one category incomplete. Budget raised to 13000 s (3.0 s/p
 API ignores sort, so it re-touches the same ~10,000 rows every pass. The walks are
 the only coverage mechanism.
 
-**A lock race that discards a finished walk.** `touch_listings` lost a
-`DeadlockDetected` to a concurrent writer AFTER every page of komercni/prodej had
-been fetched; the category was recorded as collected=0 and its sweep skipped
-(3 of 46 runs). Now retried per chunk, up to three attempts — safe because the walk
-connection is autocommit and both statements are idempotent.
+**A lost lock fight that discards a finished walk.** The last step of a category
+walk bumps `last_seen_at` for every unchanged row (`touch_listings` for sreality,
+`touch_listings_by_id` for the other eight portals). Twice it has died AFTER every
+page was fetched, and each time the category was recorded as collected=0 and its
+sweep skipped: a `DeadlockDetected` against a concurrent writer (sreality
+komercni/prodej, 2026-09-05 10:38, 3 of 46 runs), and a `QueryCanceled` — "statement
+timeout … while locking tuple" — when idnes dum/prodej and ceskereality
+komercni/prodej both sat the full 2-minute `statement_timeout` behind the hourly
+MF-yield recompute (`recompute_mf_yields.yml`, cron `25 * * * *`; migration 257's
+`recompute_mf_gross_yields()` is one `update listings` in one transaction), which
+held row locks for 6½ minutes on its own deadlock retry (2026-09-05 21:22–21:30,
+from the Postgres lock-wait log). Both touch functions now retry a chunk up to three
+times on either error — safe because the walk connection is autocommit and both
+statements are idempotent; a lock-wait cancel pauses longer (5 s × attempt) than a
+deadlock (0.5 s × attempt) because the holder is usually committing by then. The
+touch statements are indexed lookups over ≤250 ids and never take two minutes on
+their own, so a cancel there is a lock wait, not slowness. The root cause — one
+multi-minute transaction over a hot table — is the recompute's to fix (commit in
+batches); the retry only stops it costing a category.
 
 **Not budget stops:** ceskereality's and bazos's "short" categories all sit at
 99.0-99.5% — the declared count drifting a few rows during the walk, on slices
