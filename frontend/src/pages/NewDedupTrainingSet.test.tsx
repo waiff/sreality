@@ -358,3 +358,37 @@ describe('<NewDedupTrainingSet> before the cutoff exists', () => {
     expect(last).not.toHaveProperty('membership');
   });
 });
+
+describe('<NewDedupTrainingSet> confirming the rest of the page', () => {
+  it('confirms every untouched machine positive on the page in one write, and patches them to yours', async () => {
+    vi.mocked(api.bulkSetNewDedupTagAnnotation).mockResolvedValue({
+      data: { updated: 1, tag_id: 3, state: 'positive', excluded_reason: null, image_ids: [11] },
+    } as never);
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    // Row 11 is the machine's; row 12 is already yours — only 11 is pending.
+    const btn = screen.getByTestId('confirm-page');
+    expect(btn).toHaveTextContent('Confirm the other 1 on this page');
+    const user = userEvent.setup();
+    await user.click(btn);
+    await waitFor(() => expect(api.bulkSetNewDedupTagAnnotation)
+      .toHaveBeenCalledWith(3, [11], 'positive', null));
+    // Patched in place, no refetch: the tile now reads "yours" and the button is gone.
+    expect(within(screen.getByTestId('training-tile-11')).getByText('yours')).toBeInTheDocument();
+    expect(screen.queryByTestId('confirm-page')).toBeNull();
+    expect(api.listTrainingSet).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves out a tile the operator changed this session', async () => {
+    vi.mocked(api.bulkSetNewDedupTagAnnotation).mockResolvedValue({
+      data: { updated: 0, tag_id: 3, state: 'positive', excluded_reason: null, image_ids: [] },
+    } as never);
+    const user = userEvent.setup();
+    renderPage(['/new-dedup/training-set?set=all']);
+    const tile = await screen.findByTestId('training-tile-11');
+    await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalled());
+    // 11 was changed (and is no longer a positive); nothing is left to confirm.
+    expect(screen.queryByTestId('confirm-page')).toBeNull();
+  });
+});

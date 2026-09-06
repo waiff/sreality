@@ -3,6 +3,7 @@ import { useId, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
+  bulkSetNewDedupTagAnnotation,
   listTrainingSet,
   listTrainingSetHeads,
   setNewDedupTagAnnotation,
@@ -186,6 +187,36 @@ export default function NewDedupTrainingSet() {
         return { ...old, data: { ...old.data, rows, counts: c } };
       });
       qc.invalidateQueries({ queryKey: ['training-set-heads'] });
+    },
+    onError: (e: Error) => pushToast('err', e.message),
+  });
+
+  /* CONFIRM THE REST OF THE PAGE. Reviewing by eye leaves no trace: an image
+   * the operator looked at and found correct stays "the machine's word alone"
+   * unless its tick is pressed, so "To review" never shrinks and the photos
+   * that stepped in from the reserve are indistinguishable from the ones
+   * already seen. Measured live on garáž: 300 reviewed, 30 confirmed one by
+   * one, 249 still counted as unreviewed. One click confirms every machine
+   * positive on the page the operator has NOT changed — those they changed
+   * already carry their own decision. Confirmed labels are theirs, so a later
+   * machine pass cannot overwrite them. */
+  const pending = rows.filter((r) =>
+    r.state === 'positive' && r.source === 'machine' && !changed.has(r.image_id));
+  const confirmPageMut = useMutation({
+    mutationFn: (imageIds: number[]) =>
+      bulkSetNewDedupTagAnnotation(activeId as number, imageIds, 'positive', null),
+    onSuccess: (res) => {
+      const done = new Set(res.data.image_ids);
+      qc.setQueryData(rowsKey, (old: typeof rowsQ.data) => old && ({
+        ...old,
+        data: {
+          ...old.data,
+          rows: old.data.rows.map((row) => done.has(row.image_id)
+            ? { ...row, source: 'human' as const } : row),
+        },
+      }));
+      qc.invalidateQueries({ queryKey: ['training-set-heads'] });
+      pushToast('ok', `${res.data.updated} confirmed as yours`);
     },
     onError: (e: Error) => pushToast('err', e.message),
   });
@@ -579,6 +610,14 @@ export default function NewDedupTrainingSet() {
               They stack. <b>To review</b> is a preset: it fixes 2 to “Applies” and 3 to “Machine”, and
               shows those groups locked so nothing is silently ignored.
             </p>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">The fastest way through “To review”</p>
+            <p className="mt-0.5">
+              Scan the page. Click <b>✕ no</b> or <b>– left out</b> on the wrong ones. Then press
+              <b> Confirm the other N on this page</b>: everything you left alone becomes your label
+              in one go. Looking without clicking leaves no trace, so the count only drops when you
+              confirm. When you remove one, the first reserve photo steps into the set by itself, and
+              because it is unreviewed it shows up on “To review” at the end.
+            </p>
             <p className="mt-2 font-medium text-[var(--color-ink)]">After you change a mark</p>
             <p className="mt-0.5">
               The photo stays where it is, showing its new mark and the filter it now belongs to, so
@@ -607,6 +646,23 @@ export default function NewDedupTrainingSet() {
           >
             {rows.map(tile)}
           </ul>
+          {pending.length > 0 && (
+            <div className="mt-4 flex flex-col items-center gap-1">
+              <button
+                type="button"
+                data-testid="confirm-page"
+                disabled={confirmPageMut.isPending}
+                onClick={() => confirmPageMut.mutate(pending.map((r) => r.image_id))}
+                className="px-3 py-1.5 text-xs rounded-[var(--radius-sm)] border border-[var(--color-sage)] text-[var(--color-ink)] hover:bg-[var(--color-sage)]/10 disabled:opacity-40"
+              >
+                ✓ Confirm the other {pending.length} on this page as correct
+              </button>
+              <p className="text-[0.7rem] text-[var(--color-ink-4)] text-center max-w-prose">
+                Fix the wrong ones first, then press this: every remaining machine positive on
+                this page becomes your label. That is what takes them off “To review”.
+              </p>
+            </div>
+          )}
           <div className="mt-4 flex items-center justify-center gap-3 text-xs">
             <button
               type="button"
