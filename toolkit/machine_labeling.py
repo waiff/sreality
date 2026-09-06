@@ -518,12 +518,21 @@ _TRAINING_PAGE_RANKED_SQL = f"""
     WITH {_RANKED_POSITIVES_CTE}
     SELECT l.image_id, i.storage_path, l.state, l.source, l.excluded_reason,
            l.updated_at, d.version, d.status,
-           r.set_rank, (r.set_rank IS NOT NULL AND r.set_rank <= tg.target) AS in_set
+           r.set_rank, (r.set_rank IS NOT NULL AND r.set_rank <= tg.target) AS in_set,
+           nt.id, nt.note
     FROM image_tag_labels l
     JOIN images i ON i.id = l.image_id AND i.storage_path IS NOT NULL
     JOIN targets tg ON tg.tag_id = l.tag_id
     LEFT JOIN tag_definitions d ON d.id = l.definition_id
     LEFT JOIN ranked r ON r.tag_id = l.tag_id AND r.image_id = l.image_id
+    LEFT JOIN LATERAL (
+      SELECT n.id, n.note
+      FROM tag_label_notes n
+      WHERE n.image_id = l.image_id AND n.tag_id = l.tag_id
+        AND n.absorbed_definition_id IS NULL
+      ORDER BY n.created_at DESC, n.id DESC
+      LIMIT 1
+    ) nt ON true
     WHERE l.tag_id = %(tag_id)s::bigint
       AND l.source = ANY(%(sources)s::text[])
       AND (%(state)s::text IS NULL OR l.state = %(state)s::text)
@@ -618,6 +627,8 @@ def training_set_page_ranked(
                     "definition_stale": (r[7] is not None and r[7] != "active"),
                     "set_rank": int(r[8]) if r[8] is not None else None,
                     "in_set": bool(r[9]),
+                    "note_id": int(r[10]) if r[10] is not None else None,
+                    "note": r[11],
                 }
                 for r in cur.fetchall()
             ]
@@ -629,6 +640,8 @@ def training_set_page_ranked(
         for row in rows:
             row["set_rank"] = None
             row["in_set"] = None
+            row.setdefault("note_id", None)
+            row.setdefault("note", None)
         return rows
 
     return _tolerating_474(_run, fallback=None) or _fallback()

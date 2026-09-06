@@ -4,6 +4,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
   bulkSetNewDedupTagAnnotation,
+  deleteTagLabelNote,
+  editTagLabelNote,
   listTrainingSet,
   listTrainingSetHeads,
   setNewDedupTagAnnotation,
@@ -94,6 +96,10 @@ export default function NewDedupTrainingSet() {
    * machine positive the operator has not touched, and on a 500-row page that
    * is otherwise an act of faith. */
   const [previewing, setPreviewing] = useState(false);
+  /* A note the operator is rewriting. Notes were write-only until now: the
+   * field lived only while a mark was being changed and vanished on save, so
+   * a note could never be reread or corrected. */
+  const [editingNote, setEditingNote] = useState<Set<number>>(new Set());
 
   const tagId = Number(params.get('tag') ?? 0) || null;
   const verdict = (params.get('verdict') ?? 'positive') as Verdict | 'all';
@@ -264,25 +270,60 @@ export default function NewDedupTrainingSet() {
 
   /* The reason, sent as a re-statement of the SAME mark with the note attached
    * — one write path for mark and reason, so they cannot drift apart. */
+  const patchRowNote = (imageId: number, note: { id: number; note: string } | null) =>
+    qc.setQueryData(rowsKey, (old: typeof rowsQ.data) => old && ({
+      ...old,
+      data: {
+        ...old.data,
+        rows: old.data.rows.map((row) => row.image_id === imageId
+          ? { ...row, note_id: note?.id ?? null, note: note?.note ?? null } : row),
+      },
+    }));
+
   const noteMut = useMutation({
-    mutationFn: ({ imageId, text }: { imageId: number; text: string }) => {
-      const ch = changed.get(imageId);
-      if (!ch) throw new Error('note without a change');
-      return setNewDedupTagAnnotation(
-        activeId as number, imageId, ch.to,
-        ch.to === 'excluded' ? 'pruned' : null,
-        { text, from_state: ch.from },
-      );
-    },
+    /* A note is written by re-stating the CURRENT mark with the reason
+     * attached — one write path for mark and reason. It no longer requires a
+     * change this session: `from` is simply null when nothing changed. */
+    mutationFn: ({ imageId, text, to, from }: {
+      imageId: number; text: string; to: TagState; from: TagState | null;
+    }) => setNewDedupTagAnnotation(
+      activeId as number, imageId, to,
+      to === 'excluded' ? 'pruned' : null, { text, from_state: from },
+    ),
     onSuccess: (res, vars) => {
-      const unavailable = (res.data as { note_unavailable?: string }).note_unavailable;
-      if (unavailable) {
-        pushToast('err', `Your mark is saved, but the note was not: ${unavailable}`);
+      const data = res.data as {
+        note_unavailable?: string; note?: { id: number; note: string } | null;
+      };
+      if (data.note_unavailable) {
+        pushToast('err', `Your mark is saved, but the note was not: ${data.note_unavailable}`);
         return;
       }
       setDrafts((prev) => { const n = new Map(prev); n.delete(vars.imageId); return n; });
       setChanged((prev) => { const n = new Map(prev); n.delete(vars.imageId); return n; });
+      if (data.note) patchRowNote(vars.imageId, data.note);
       pushToast('ok', 'Note saved');
+    },
+    onError: (e: Error) => pushToast('err', e.message),
+  });
+
+  const editNoteMut = useMutation({
+    mutationFn: ({ noteId, text }: { noteId: number; text: string; imageId: number }) =>
+      editTagLabelNote(noteId, text),
+    onSuccess: (res, vars) => {
+      patchRowNote(vars.imageId, { id: res.data.id, note: res.data.note });
+      setDrafts((prev) => { const n = new Map(prev); n.delete(vars.imageId); return n; });
+      setEditingNote((prev) => { const n = new Set(prev); n.delete(vars.imageId); return n; });
+      pushToast('ok', 'Note updated');
+    },
+    onError: (e: Error) => pushToast('err', e.message),
+  });
+
+  const deleteNoteMut = useMutation({
+    mutationFn: ({ noteId }: { noteId: number; imageId: number }) => deleteTagLabelNote(noteId),
+    onSuccess: (_res, vars) => {
+      patchRowNote(vars.imageId, null);
+      setEditingNote((prev) => { const n = new Set(prev); n.delete(vars.imageId); return n; });
+      pushToast('ok', 'Note removed');
     },
     onError: (e: Error) => pushToast('err', e.message),
   });
@@ -379,14 +420,61 @@ export default function NewDedupTrainingSet() {
             Stays here until you change the filter or leave the page.
           </p>
         )}
-        {changed.has(r.image_id) && (
+        {/* A saved note, readable and changeable. Until now it vanished on save
+          * and could never be corrected — the gap the operator hit. */}
+        {r.note && !editingNote.has(r.image_id) && (
+          <div data-testid={`note-saved-${r.image_id}`} className="text-[0.7rem] leading-snug">
+            <p className="text-[var(--color-ink-2)] text-pretty">“{r.note}”</p>
+            <span className="flex gap-2 mt-0.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setDrafts((prev) => new Map(prev).set(r.image_id, r.note ?? ''));
+                  setEditingNote((prev) => new Set(prev).add(r.image_id));
+                }}
+                className="text-[var(--color-copper)] hover:underline"
+              >
+                edit note
+              </button>
+              <button
+                type="button"
+                disabled={deleteNoteMut.isPending}
+                onClick={() => deleteNoteMut.mutate({
+                  noteId: r.note_id as number, imageId: r.image_id })}
+                className="text-[var(--color-ink-4)] hover:underline"
+              >
+                remove
+              </button>
+            </span>
+          </div>
+        )}
+        {!r.note && !changed.has(r.image_id) && !editingNote.has(r.image_id) && (
+          <button
+            type="button"
+            data-testid={`note-add-${r.image_id}`}
+            onClick={() => setEditingNote((prev) => new Set(prev).add(r.image_id))}
+            className="self-start text-[0.7rem] text-[var(--color-ink-4)] hover:text-[var(--color-copper)] hover:underline"
+          >
+            + note
+          </button>
+        )}
+        {(changed.has(r.image_id) || editingNote.has(r.image_id)) && (
           <form
             data-testid={`note-form-${r.image_id}`}
             className="flex gap-1"
             onSubmit={(e) => {
               e.preventDefault();
               const text = (drafts.get(r.image_id) ?? '').trim();
-              if (text) noteMut.mutate({ imageId: r.image_id, text });
+              if (!text) return;
+              if (r.note_id != null && editingNote.has(r.image_id)) {
+                editNoteMut.mutate({ noteId: r.note_id, text, imageId: r.image_id });
+              } else {
+                noteMut.mutate({
+                  imageId: r.image_id, text,
+                  to: changed.get(r.image_id)?.to ?? (r.state as TagState),
+                  from: changed.get(r.image_id)?.from ?? null,
+                });
+              }
             }}
           >
             <input
@@ -399,11 +487,24 @@ export default function NewDedupTrainingSet() {
             />
             <button
               type="submit"
-              disabled={noteMut.isPending || !(drafts.get(r.image_id) ?? '').trim()}
+              disabled={noteMut.isPending || editNoteMut.isPending
+                || !(drafts.get(r.image_id) ?? '').trim()}
               className="px-2 py-0.5 text-[0.7rem] rounded-[var(--radius-xs)] border border-[var(--color-copper)] text-[var(--color-ink)] disabled:opacity-40"
             >
               save
             </button>
+            {editingNote.has(r.image_id) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setDrafts((prev) => { const n = new Map(prev); n.delete(r.image_id); return n; });
+                  setEditingNote((prev) => { const n = new Set(prev); n.delete(r.image_id); return n; });
+                }}
+                className="px-2 py-0.5 text-[0.7rem] text-[var(--color-ink-4)] hover:underline"
+              >
+                cancel
+              </button>
+            )}
           </form>
         )}
       </li>
@@ -650,6 +751,8 @@ export default function NewDedupTrainingSet() {
               After you change a mark, a small field appears. A short reason (“entrance door, facade is
               just the backdrop”) is enough. Notes are gathered per head and distilled into one general
               rule in the definition, never one line per note, so keep them short.
+              A saved note stays on its photo: <b>edit note</b> or <b>remove</b> it any time before it
+              has been absorbed into a definition version. <b>+ note</b> adds one without changing a mark.
             </p>
             <p className="mt-2 font-medium text-[var(--color-ink)]">How the three filter groups combine</p>
             <p className="mt-0.5">

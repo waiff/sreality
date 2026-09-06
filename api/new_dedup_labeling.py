@@ -427,6 +427,44 @@ def get_tag_notes(
         conn, tag_id=tag_id, include_absorbed=include_absorbed, limit=limit)}
 
 
+class EditNoteIn(BaseModel):
+    note: str
+
+
+@router.patch("/notes/{note_id}")
+def patch_note(
+    note_id: int, body: EditNoteIn, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Change a note the operator has second thoughts about. Only an OPEN note:
+    an absorbed one already shaped a definition version, and the ledger's value
+    is answering "what did v10 change and why"."""
+    from toolkit import tag_label_notes
+
+    try:
+        return {"data": tag_label_notes.update_note(conn, note_id=note_id, note=body.note)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"note {note_id} not found, or already absorbed into a definition",
+        ) from exc
+
+
+@router.delete("/notes/{note_id}")
+def delete_note(note_id: int, conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
+    """Remove an OPEN note. Same rail as editing."""
+    from toolkit import tag_label_notes
+
+    try:
+        return {"data": tag_label_notes.delete_note(conn, note_id=note_id)}
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"note {note_id} not found, or already absorbed into a definition",
+        ) from exc
+
+
 @router.get("/notes/open-counts")
 def get_open_note_counts(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
     from toolkit import tag_label_notes
