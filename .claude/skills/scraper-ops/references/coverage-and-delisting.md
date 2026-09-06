@@ -198,6 +198,12 @@ cycle starts (idnes `15 */6`, ceskereality `25 */6`), so it never reads a
 half-written ledger. Reading mid-walk would score a hold: harmless, but it would
 reset a streak that had done nothing wrong.
 
+**Only `kind='scraper'` rows are evaluated.** The `portals` registry also holds the
+on-demand URL-parser rows (`idnes_reality`, kind='parser': no categories, no walk,
+no ledger). One sat `supports_complete_walk=false` and was scored every cycle,
+writing a "no slice ledger" hold four times a day for a portal that never walks.
+A parser row is not a parked portal.
+
 Two questions, both from data:
 
 **The denominator is CANONICAL categories, not config entries.** ceskereality

@@ -258,3 +258,42 @@ def test_an_unresolvable_mapping_falls_back_to_the_STRICT_count(monkeypatch) -> 
     monkeypatch.setattr(cg, "canonical_category_count", lambda *a, **k: None)
     cats = [{"sale_type": "prodej", "category": "byty"}] * 12
     assert cg._declared_categories("whatever", cats) == 12
+
+
+class _RecordingCur:
+    def __init__(self) -> None:
+        self.sql = ""
+
+    def __enter__(self) -> "_RecordingCur":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: object = None) -> None:
+        self.sql = sql
+
+    def fetchall(self) -> list[tuple[str, list[dict[str, str]]]]:
+        return []
+
+
+class _RecordingConn:
+    def __init__(self) -> None:
+        self.cur = _RecordingCur()
+
+    def cursor(self) -> _RecordingCur:
+        return self.cur
+
+
+def test_parked_sources_only_considers_scraper_rows() -> None:
+    """The portals registry also holds on-demand URL-parser rows (kind='parser',
+    e.g. idnes_reality) which never walk and never write a slice ledger. One sat
+    supports_complete_walk=false and was evaluated every cycle, recording a
+    "no slice ledger" hold four times a day. A parser row is not a parked
+    portal; the gate must not see it."""
+    from scripts.coverage_gate import _parked_sources
+
+    conn = _RecordingConn()
+    assert _parked_sources(conn, None) == []
+    assert "kind = 'scraper'" in conn.cur.sql
+    assert "supports_complete_walk = false" in conn.cur.sql

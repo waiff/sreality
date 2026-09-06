@@ -129,13 +129,20 @@ def _declared_categories(source: str, categories: list[dict[str, Any]]) -> int:
 
 
 def _parked_sources(conn: Any, only: str | None) -> list[tuple[str, list[dict[str, Any]]]]:
-    """Portals whose delisting is parked — the only ones this gate can open."""
+    """Portals whose delisting is parked — the only ones this gate can open.
+
+    `kind = 'scraper'` because the registry also holds the on-demand URL-parser
+    rows (`idnes_reality`, kind='parser', no categories, no walk). One of those
+    sat `supports_complete_walk=false` and was evaluated every cycle, writing a
+    "no slice ledger" hold row four times a day for a portal that never walks.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
             select source, categories
               from portals
              where is_enabled
+               and kind = 'scraper'
                and supports_complete_walk = false
                and (%s::text is null or source = %s)
              order by source
