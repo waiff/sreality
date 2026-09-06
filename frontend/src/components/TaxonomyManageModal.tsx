@@ -1,13 +1,18 @@
 /* "Modify labels" dialog for the NEW DEDUP Labeling page's Taxonomy v1 vocabulary —
  * add/rename/remove, alphabetically sorted (the bar chart on the page itself is sorted
  * by confirmed count instead, so this is the one place the operator manages the SET
- * rather than reads its progress). Modelled on PresetSaveModal for visual consistency
- * (backdrop, Escape-to-close, click-outside-to-close). */
+ * rather than reads its progress).
+ *
+ * Chrome, Escape layering, the focus trap, focus restore and the ref-counted body
+ * scroll lock all come from <Dialog> (components/Dialog.tsx, over lib/useDialog.ts).
+ * The window keydown listener, the backdrop-click handler and the panel's
+ * stopPropagation that only existed to undo it are gone with it. */
 
-import { useEffect, useState } from 'react';
+import { useRef, useState } from 'react';
 
 import type { NewDedupTag } from '@/lib/api';
 import { Field } from '@/components/controls';
+import Dialog, { DialogClose } from '@/components/Dialog';
 import { TrashIcon } from '@/components/icons';
 import Spinner from '@/components/Spinner';
 
@@ -45,13 +50,9 @@ export default function TaxonomyManageModal({
   onSetFlags,
   flagsPending,
 }: TaxonomyManageModalProps) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  /* Opened in order to TYPE: initial focus goes to the add field (the
+   * `autoFocus` it used to carry would lose to the primitive's own effect). */
+  const addFieldRef = useRef<HTMLInputElement>(null);
 
   // Priority tags pin to the top (operator's "needs attention now" flag);
   // alphabetical within each group, same as before.
@@ -61,87 +62,74 @@ export default function TaxonomyManageModal({
   });
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-[var(--color-ink)]/40 px-4 pt-[10vh]"
-      onClick={onClose}
-      role="presentation"
+    <Dialog
+      open
+      onClose={onClose}
+      label="Modify Taxonomy v1 labels"
+      initialFocus={addFieldRef}
+      className="flex max-h-[78vh] w-full max-w-lg flex-col p-5"
     >
-      <div
-        className="flex max-h-[78vh] w-full max-w-lg flex-col rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-5 shadow-lg"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Modify Taxonomy v1 labels"
-      >
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-              Taxonomy v1
-            </p>
-            <h2
-              className="mt-1 text-xl leading-tight"
-              style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
-            >
-              Modify labels
-            </h2>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="text-[var(--color-ink-3)] hover:text-[var(--color-ink)]"
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+            Taxonomy v1
+          </p>
+          <h2
+            className="mt-1 text-xl leading-tight"
+            style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
           >
-            ✕
-          </button>
+            Modify labels
+          </h2>
         </div>
-
-        <div className="mt-3 flex items-end gap-2">
-          <Field label="New label" as="control" className="min-w-0 flex-1">
-            <input
-              type="text"
-              autoFocus
-              value={newLabelText}
-              onChange={(e) => onNewLabelTextChange(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && newLabelText.trim()) onAdd();
-              }}
-              placeholder="new label, e.g. interier - kuchyne"
-              className="w-full px-2 py-1 text-sm font-mono rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus-visible:border-[var(--color-copper)]"
-            />
-          </Field>
-          <button
-            type="button"
-            onClick={onAdd}
-            disabled={addPending || !newLabelText.trim()}
-            className="shrink-0 px-3 py-1 text-xs rounded-[var(--radius-xs)] bg-[var(--color-copper)] text-[var(--color-paper)] disabled:opacity-50"
-          >
-            Add label
-          </button>
-        </div>
-
-        <p className="mt-3 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-          {sorted.length} label{sorted.length === 1 ? '' : 's'} — priority pinned to top, then A–Z
-        </p>
-
-        <div className="mt-1.5 flex-1 space-y-1.5 overflow-y-auto">
-          {sorted.length === 0 && (
-            <p className="text-sm text-[var(--color-ink-3)]">No labels yet — add the first one above.</p>
-          )}
-          {sorted.map((l) => (
-            <ManageRow
-              key={l.id}
-              label={l}
-              onRename={(next) => onRename(l.id, l.label, next)}
-              renamePending={renamePending}
-              onRemove={() => onRemove(l.id, l.label)}
-              removePending={removePending}
-              onSetFlags={(flags) => onSetFlags(l.id, flags)}
-              flagsPending={flagsPending}
-            />
-          ))}
-        </div>
+        <DialogClose onClick={onClose} />
       </div>
-    </div>
+
+      <div className="mt-3 flex items-end gap-2">
+        <Field label="New label" as="control" className="min-w-0 flex-1">
+          <input
+            type="text"
+            ref={addFieldRef}
+            value={newLabelText}
+            onChange={(e) => onNewLabelTextChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && newLabelText.trim()) onAdd();
+            }}
+            placeholder="new label, e.g. interier - kuchyne"
+            className="w-full px-2 py-1 text-sm font-mono rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus-visible:border-[var(--color-copper)]"
+          />
+        </Field>
+        <button
+          type="button"
+          onClick={onAdd}
+          disabled={addPending || !newLabelText.trim()}
+          className="shrink-0 px-3 py-1 text-xs rounded-[var(--radius-xs)] bg-[var(--color-copper)] text-[var(--color-paper)] disabled:opacity-50"
+        >
+          Add label
+        </button>
+      </div>
+
+      <p className="mt-3 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+        {sorted.length} label{sorted.length === 1 ? '' : 's'} — priority pinned to top, then A–Z
+      </p>
+
+      <div className="mt-1.5 flex-1 space-y-1.5 overflow-y-auto">
+        {sorted.length === 0 && (
+          <p className="text-sm text-[var(--color-ink-3)]">No labels yet — add the first one above.</p>
+        )}
+        {sorted.map((l) => (
+          <ManageRow
+            key={l.id}
+            label={l}
+            onRename={(next) => onRename(l.id, l.label, next)}
+            renamePending={renamePending}
+            onRemove={() => onRemove(l.id, l.label)}
+            removePending={removePending}
+            onSetFlags={(flags) => onSetFlags(l.id, flags)}
+            flagsPending={flagsPending}
+          />
+        ))}
+      </div>
+    </Dialog>
   );
 }
 
@@ -183,6 +171,10 @@ function ManageRow({
                   setRenaming(false);
                 }
                 if (e.key === 'Escape') {
+                  // Claims the key: reverting the draft IS the gesture, and the
+                  // dialog must not also close (lib/useDialog skips a key a
+                  // widget inside it has defaultPrevented).
+                  e.preventDefault();
                   setDraft(label.label);
                   setRenaming(false);
                 }

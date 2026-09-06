@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   bulkSetNewDedupImageTags,
@@ -9,6 +9,7 @@ import {
   type TagState,
 } from '@/lib/api';
 import { pushToast } from '@/lib/toast';
+import Dialog, { DialogClose } from '@/components/Dialog';
 import ErrorBanner from '@/components/ErrorBanner';
 import {
   NEW_DEDUP_CANDIDATES_KEY,
@@ -270,136 +271,123 @@ export default function ImageTagDetailPanel({
     onError: (err: Error) => pushToast('err', err.message),
   });
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
+  /* Escape layering, the focus trap, initial + restored focus and the
+   * ref-counted body scroll lock come from <Dialog> (lib/useDialog.ts). The
+   * window keydown listener, the backdrop-click handler and the panel's
+   * stopPropagation that only existed to undo it are gone with it. */
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-[var(--color-ink)]/40 px-4 pt-[10vh]"
-      onClick={onClose}
-      role="presentation"
+    <Dialog
+      open
+      onClose={onClose}
+      label="All tags on this image"
+      className="flex max-h-[78vh] w-full max-w-lg flex-col p-5"
     >
-      <div
-        className="flex max-h-[78vh] w-full max-w-lg flex-col rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-5 shadow-lg"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label="All tags on this image"
-      >
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg leading-tight" style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}>
-            Image {imageId} — all tags
-          </h2>
-          <button type="button" onClick={onClose} aria-label="Close" className="text-[var(--color-ink-3)] hover:text-[var(--color-ink)]">
-            ✕
-          </button>
-        </div>
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg leading-tight" style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}>
+          Image {imageId} — all tags
+        </h2>
+        <DialogClose onClick={onClose} />
+      </div>
 
-        {q.isLoading && <p className="mt-4 text-sm text-[var(--color-ink-3)]">Loading…</p>}
-        {q.error && <ErrorBanner message={(q.error as Error).message} />}
+      {q.isLoading && <p className="mt-4 text-sm text-[var(--color-ink-3)]">Loading…</p>}
+      {q.error && <ErrorBanner message={(q.error as Error).message} />}
 
-        {subjectTagId != null && rows.length > 0 && (
-          <SubjectTagBlock
-            row={subjectRow}
-            pending={setMut.isPending && setMut.variables?.tagId === subjectTagId}
-            onSet={(state, excludedReason) =>
-              subjectRow &&
-              setMut.mutate({
-                tagId: subjectRow.id,
-                label: subjectRow.label,
-                state,
-                excludedReason,
-              })
+      {subjectTagId != null && rows.length > 0 && (
+        <SubjectTagBlock
+          row={subjectRow}
+          pending={setMut.isPending && setMut.variables?.tagId === subjectTagId}
+          onSet={(state, excludedReason) =>
+            subjectRow &&
+            setMut.mutate({
+              tagId: subjectRow.id,
+              label: subjectRow.label,
+              state,
+              excludedReason,
+            })
+          }
+        />
+      )}
+
+      {rows.length > 0 && (
+        <div className="mt-3 flex items-center gap-3 flex-wrap">
+          <button
+            type="button"
+            onClick={() =>
+              setSelected(allUntouchedSelected ? new Set() : new Set(untouchedIds))
             }
-          />
-        )}
-
-        {rows.length > 0 && (
-          <div className="mt-3 flex items-center gap-3 flex-wrap">
+            disabled={untouchedIds.length === 0}
+            className="px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] disabled:opacity-40"
+          >
+            {allUntouchedSelected ? 'Deselect all' : 'Select all untouched'}
+          </button>
+          <span className="text-xs text-[var(--color-ink-3)]">{selected.size} selected</span>
+          {BATCH_ACTIONS.map((a) => (
             <button
+              key={a.key}
               type="button"
-              onClick={() =>
-                setSelected(allUntouchedSelected ? new Set() : new Set(untouchedIds))
-              }
-              disabled={untouchedIds.length === 0}
-              className="px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] disabled:opacity-40"
+              disabled={selected.size === 0 || bulkSetMut.isPending}
+              onClick={() => bulkSetMut.mutate({ state: a.state, excludedReason: a.reason })}
+              title={a.reason ? EXCLUDED_REASON_META[a.reason].title : undefined}
+              className={[
+                'px-2.5 py-1 text-xs rounded-[var(--radius-xs)] disabled:opacity-40',
+                STATE_META[a.state].activeClass,
+                a.reason === 'pruned' ? 'opacity-80' : '',
+              ].join(' ')}
             >
-              {allUntouchedSelected ? 'Deselect all' : 'Select all untouched'}
+              Set selected: {a.label}
             </button>
-            <span className="text-xs text-[var(--color-ink-3)]">{selected.size} selected</span>
-            {BATCH_ACTIONS.map((a) => (
-              <button
-                key={a.key}
-                type="button"
-                disabled={selected.size === 0 || bulkSetMut.isPending}
-                onClick={() => bulkSetMut.mutate({ state: a.state, excludedReason: a.reason })}
-                title={a.reason ? EXCLUDED_REASON_META[a.reason].title : undefined}
-                className={[
-                  'px-2.5 py-1 text-xs rounded-[var(--radius-xs)] disabled:opacity-40',
-                  STATE_META[a.state].activeClass,
-                  a.reason === 'pruned' ? 'opacity-80' : '',
-                ].join(' ')}
-              >
-                Set selected: {a.label}
-              </button>
-            ))}
-          </div>
-        )}
-
-        <div className="mt-3 flex-1 space-y-4 overflow-y-auto">
-          {grouped.map(([family, tags]) => (
-            <div key={family}>
-              <p className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)] mb-1.5">
-                {family}
-              </p>
-              <div className="space-y-1">
-                {tags.map((t) => (
-                  <div key={t.id} className="flex items-center gap-2 py-0.5">
-                    <input
-                      type="checkbox"
-                      checked={selected.has(t.id)}
-                      onChange={() => toggleSelect(t.id)}
-                      className="h-3.5 w-3.5 shrink-0"
-                      aria-label={`Select ${t.label} for batch action`}
-                    />
-                    <span className="min-w-0 flex-1 truncate font-mono text-sm text-[var(--color-ink-2)]">
-                      {t.label}
-                    </span>
-                    <TriStateControl
-                      state={t.state}
-                      onChange={(state, excludedReason) =>
-                        setMut.mutate({
-                          tagId: t.id,
-                          label: t.label,
-                          state,
-                          excludedReason: excludedReason ?? null,
-                        })
-                      }
-                      disabled={setMut.isPending && setMut.variables?.tagId === t.id}
-                      excludedReason={t.excluded_reason}
-                      onChangeReason={(reason) =>
-                        setMut.mutate({
-                          tagId: t.id,
-                          label: t.label,
-                          state: 'excluded',
-                          excludedReason: reason,
-                        })
-                      }
-                      source={t.source}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
           ))}
         </div>
+      )}
+
+      <div className="mt-3 flex-1 space-y-4 overflow-y-auto">
+        {grouped.map(([family, tags]) => (
+          <div key={family}>
+            <p className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)] mb-1.5">
+              {family}
+            </p>
+            <div className="space-y-1">
+              {tags.map((t) => (
+                <div key={t.id} className="flex items-center gap-2 py-0.5">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(t.id)}
+                    onChange={() => toggleSelect(t.id)}
+                    className="h-3.5 w-3.5 shrink-0"
+                    aria-label={`Select ${t.label} for batch action`}
+                  />
+                  <span className="min-w-0 flex-1 truncate font-mono text-sm text-[var(--color-ink-2)]">
+                    {t.label}
+                  </span>
+                  <TriStateControl
+                    state={t.state}
+                    onChange={(state, excludedReason) =>
+                      setMut.mutate({
+                        tagId: t.id,
+                        label: t.label,
+                        state,
+                        excludedReason: excludedReason ?? null,
+                      })
+                    }
+                    disabled={setMut.isPending && setMut.variables?.tagId === t.id}
+                    excludedReason={t.excluded_reason}
+                    onChangeReason={(reason) =>
+                      setMut.mutate({
+                        tagId: t.id,
+                        label: t.label,
+                        state: 'excluded',
+                        excludedReason: reason,
+                      })
+                    }
+                    source={t.source}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
-    </div>
+    </Dialog>
   );
 }
 

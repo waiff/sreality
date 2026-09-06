@@ -3,6 +3,7 @@ import { useId, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
+  bulkSetNewDedupTagAnnotation,
   listTrainingSet,
   listTrainingSetHeads,
   setNewDedupTagAnnotation,
@@ -48,7 +49,13 @@ const MEMBERSHIPS: ReadonlyArray<{ key: Membership; label: string; title: string
   { key: 'all', label: 'Everything', title: 'No cutoff' },
 ];
 
-const PAGE = 60;
+/* Page sizes the operator asked for. 2000 is a whole head's set at the
+ * default target; images lazy-load, so the cost is the DOM and it is theirs
+ * to choose. The one-click confirm chunks by the server's bulk cap. */
+const PAGE_SIZES = [50, 100, 500, 2000] as const;
+type PageSize = (typeof PAGE_SIZES)[number];
+const DEFAULT_PAGE: PageSize = 50;
+const BULK_CAP = 200;
 
 const VERDICTS: ReadonlyArray<{ key: Verdict | 'all'; label: string }> = [
   { key: 'positive', label: 'Applies' },
@@ -62,6 +69,10 @@ const SOURCES: ReadonlyArray<{ key: SourceFilter; label: string; title: string }
   { key: 'machine', label: 'Machine', title: 'Written by the model from your definitions' },
   { key: 'human', label: 'Yours', title: 'Your own labels — a machine pass can never overwrite these' },
 ];
+
+const VERDICT_LABEL: Record<Verdict, string> = {
+  positive: 'Applies', negative: 'Does not', excluded: 'Left out',
+};
 
 const VERDICT_STYLE: Record<Verdict, string> = {
   positive: 'border-[var(--color-sage)] bg-[var(--color-sage)]/10',
@@ -79,6 +90,10 @@ export default function NewDedupTrainingSet() {
    * so the reason is recorded against the change it explains. */
   const [changed, setChanged] = useState<Map<number, { from: TagState; to: TagState }>>(new Map());
   const [drafts, setDrafts] = useState<Map<number, string>>(new Map());
+  /* Hovering the bulk-confirm button previews its reach: a click claims every
+   * machine positive the operator has not touched, and on a 500-row page that
+   * is otherwise an act of faith. */
+  const [previewing, setPreviewing] = useState(false);
 
   const tagId = Number(params.get('tag') ?? 0) || null;
   const verdict = (params.get('verdict') ?? 'positive') as Verdict | 'all';
@@ -86,6 +101,9 @@ export default function NewDedupTrainingSet() {
   /* Opens on the bounded review by default: that is the work worth doing. */
   const membership = (params.get('set') ?? 'review') as Membership;
   const offset = Math.max(0, Number(params.get('offset') ?? 0) || 0);
+  const rawN = Number(params.get('n') ?? DEFAULT_PAGE);
+  const pageSize: PageSize = (PAGE_SIZES as readonly number[]).includes(rawN)
+    ? (rawN as PageSize) : DEFAULT_PAGE;
 
   const patch = (next: Record<string, string | null>) => {
     const merged = new URLSearchParams(params);
@@ -112,19 +130,26 @@ export default function NewDedupTrainingSet() {
 
   /* 'review' = set membership + machine source + positive verdict, composed
    * from the three server filters so it can never disagree with them. */
-  const effective = membership === 'review'
-    ? { verdict: 'positive' as const, source: 'machine' as const, member: 'set' as const }
-    : { verdict, source, member: membership === 'all' ? null : membership };
+  const cutoffReady = activeHead?.cutoff_available !== false;
+  /* No cutoff yet: behave as "Everything" and say why, instead of showing a
+   * confident 0/300 beside tiles that claim to be in the set. */
+  const locked = cutoffReady && membership === 'review';
+  const effective = !cutoffReady
+    ? { verdict, source, member: null }
+    : membership === 'review'
+      ? { verdict: 'positive' as const, source: 'machine' as const, member: 'set' as const }
+      : { verdict, source, member: membership === 'all' ? null : membership };
 
+  const rowsKey = ['training-set', activeId, effective.verdict, effective.source, effective.member, offset, pageSize];
   const rowsQ = useQuery({
-    queryKey: ['training-set', activeId, effective.verdict, effective.source, effective.member, offset],
+    queryKey: rowsKey,
     queryFn: () =>
       listTrainingSet({
         tag_id: activeId as number,
         ...(effective.verdict === 'all' ? {} : { state: effective.verdict }),
         ...(effective.source === 'all' ? {} : { source: effective.source }),
         ...(effective.member ? { membership: effective.member } : {}),
-        limit: PAGE,
+        limit: pageSize,
         offset,
       }),
     enabled: activeId != null,
@@ -156,10 +181,65 @@ export default function NewDedupTrainingSet() {
       setChanged((prev) => new Map(prev).set(vars.imageId, {
         from: prev.get(vars.imageId)?.from ?? vars.from, to: vars.state,
       }));
-      /* Refetch the page, not the whole surface: the head counts move too, and
-       * a reviewer who corrects a tile expects the totals to agree. */
-      qc.invalidateQueries({ queryKey: ['training-set'] });
+      /* PATCH THE LIST, NEVER REFETCH IT under a correcting hand. Measured live:
+       * a "no" on a positive under the Applies filter refetched, the row no
+       * longer matched, and the tile vanished with its note field before the
+       * operator could type. The tile now stays where it is, showing its new
+       * mark and where it will live next time; only the head totals refetch. */
+      qc.setQueryData(rowsKey, (old: typeof rowsQ.data) => {
+        if (!old) return old;
+        const rows = old.data.rows.map((row) => row.image_id === vars.imageId
+          ? { ...row, state: vars.state, source: 'human' as const,
+              excluded_reason: vars.state === 'excluded' ? ('pruned' as const) : null }
+          : row);
+        const c = { ...old.data.counts };
+        if (vars.from !== vars.state) {
+          c[vars.from] = Math.max(0, c[vars.from] - 1);
+          c[vars.state] = c[vars.state] + 1;
+        }
+        return { ...old, data: { ...old.data, rows, counts: c } };
+      });
       qc.invalidateQueries({ queryKey: ['training-set-heads'] });
+    },
+    onError: (e: Error) => pushToast('err', e.message),
+  });
+
+  /* CONFIRM THE REST OF THE PAGE. Reviewing by eye leaves no trace: an image
+   * the operator looked at and found correct stays "the machine's word alone"
+   * unless its tick is pressed, so "To review" never shrinks and the photos
+   * that stepped in from the reserve are indistinguishable from the ones
+   * already seen. Measured live on garáž: 300 reviewed, 30 confirmed one by
+   * one, 249 still counted as unreviewed. One click confirms every machine
+   * positive on the page the operator has NOT changed — those they changed
+   * already carry their own decision. Confirmed labels are theirs, so a later
+   * machine pass cannot overwrite them. */
+  const pending = rows.filter((r) =>
+    r.state === 'positive' && r.source === 'machine' && !changed.has(r.image_id));
+  const willConfirm = new Set(pending.map((r) => r.image_id));
+  const confirmPageMut = useMutation({
+    mutationFn: async (imageIds: number[]) => {
+      /* Sequential chunks, in order, stopping at the first failure so a
+       * partial page is reported as exactly what landed. */
+      const done: number[] = [];
+      for (let i = 0; i < imageIds.length; i += BULK_CAP) {
+        const res = await bulkSetNewDedupTagAnnotation(
+          activeId as number, imageIds.slice(i, i + BULK_CAP), 'positive', null);
+        done.push(...res.data.image_ids);
+      }
+      return { data: { updated: done.length, image_ids: done } };
+    },
+    onSuccess: (res) => {
+      const done = new Set(res.data.image_ids);
+      qc.setQueryData(rowsKey, (old: typeof rowsQ.data) => old && ({
+        ...old,
+        data: {
+          ...old.data,
+          rows: old.data.rows.map((row) => done.has(row.image_id)
+            ? { ...row, source: 'human' as const } : row),
+        },
+      }));
+      qc.invalidateQueries({ queryKey: ['training-set-heads'] });
+      pushToast('ok', `${res.data.updated} confirmed as yours`);
     },
     onError: (e: Error) => pushToast('err', e.message),
   });
@@ -176,7 +256,12 @@ export default function NewDedupTrainingSet() {
         { text, from_state: ch.from },
       );
     },
-    onSuccess: (_res, vars) => {
+    onSuccess: (res, vars) => {
+      const unavailable = (res.data as { note_unavailable?: string }).note_unavailable;
+      if (unavailable) {
+        pushToast('err', `Your mark is saved, but the note was not: ${unavailable}`);
+        return;
+      }
       setDrafts((prev) => { const n = new Map(prev); n.delete(vars.imageId); return n; });
       setChanged((prev) => { const n = new Map(prev); n.delete(vars.imageId); return n; });
       pushToast('ok', 'Note saved');
@@ -199,7 +284,14 @@ export default function NewDedupTrainingSet() {
         key={r.image_id}
         data-testid={`training-tile-${r.image_id}`}
         data-state={r.state}
-        className={`rounded-[var(--radius-sm)] border p-1.5 flex flex-col gap-1.5 ${VERDICT_STYLE[r.state as Verdict] ?? ''}`}
+        data-previewed={previewing && willConfirm.has(r.image_id) ? 'true' : undefined}
+        className={`rounded-[var(--radius-sm)] border p-1.5 flex flex-col gap-1.5 transition-opacity ${VERDICT_STYLE[r.state as Verdict] ?? ''} ${
+          previewing
+            ? willConfirm.has(r.image_id)
+              ? 'ring-2 ring-[var(--color-sage)] ring-offset-1 ring-offset-[var(--color-paper)]'
+              : 'opacity-40'
+            : ''
+        }`}
       >
         <a
           href={imageSrc(ref)}
@@ -221,7 +313,7 @@ export default function NewDedupTrainingSet() {
           <span title={mine ? 'Your label — no machine pass can overwrite it' : 'Written by the model'}>
             {mine ? 'yours' : 'machine'}
           </span>
-          {r.state === 'positive' && (
+          {r.state === 'positive' && r.in_set != null && (
             <span
               data-testid={`membership-${r.image_id}`}
               className={r.in_set ? 'text-[var(--color-sage)]' : ''}
@@ -263,6 +355,12 @@ export default function NewDedupTrainingSet() {
             </button>
           ))}
         </div>
+        {changed.has(r.image_id) && (
+          <p className="text-[0.65rem] text-[var(--color-ink-3)] leading-snug">
+            Now under <b>{VERDICT_LABEL[changed.get(r.image_id)!.to]}</b> · <b>Yours</b>.
+            Stays here until you change the filter or leave the page.
+          </p>
+        )}
         {changed.has(r.image_id) && (
           <form
             data-testid={`note-form-${r.image_id}`}
@@ -334,13 +432,22 @@ export default function NewDedupTrainingSet() {
             ))}
           </select>
 
-          <span className="flex gap-1" role="group" aria-label="cutoff">
+          <fieldset
+            className={`flex items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--color-rule)]/70 px-2 py-1 ${cutoffReady ? '' : 'opacity-50'}`}
+            role="group"
+            aria-label="cutoff"
+            disabled={!cutoffReady}
+          >
+            <legend className="px-1 text-[0.6rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)]">
+              1 · cutoff{!cutoffReady && ' — not active yet'}
+            </legend>
             {MEMBERSHIPS.map((m) => (
               <button
                 key={m.key}
                 type="button"
-                title={m.title}
-                aria-pressed={membership === m.key}
+                title={cutoffReady ? m.title : 'The cutoff needs migration 474; until then this page shows everything'}
+                disabled={!cutoffReady}
+                aria-pressed={cutoffReady ? membership === m.key : m.key === 'all'}
                 onClick={() => patch({ set: m.key, offset: null })}
                 className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
                   membership === m.key
@@ -349,28 +456,40 @@ export default function NewDedupTrainingSet() {
                 }`}
               >
                 {m.label}
-                {activeHead && m.key === 'review' && (
+                {activeHead && cutoffReady && m.key === 'review' && (
                   <span className="ml-1 text-[var(--color-ink-4)]">{activeHead.in_set_unreviewed}</span>
                 )}
-                {activeHead && m.key === 'set' && (
+                {activeHead && cutoffReady && m.key === 'set' && (
                   <span className="ml-1 text-[var(--color-ink-4)]">{activeHead.in_set}/{activeHead.target}</span>
                 )}
-                {activeHead && m.key === 'reserve' && (
+                {activeHead && cutoffReady && m.key === 'reserve' && (
                   <span className="ml-1 text-[var(--color-ink-4)]">{activeHead.reserve}</span>
                 )}
               </button>
             ))}
-          </span>
+          </fieldset>
 
-          <span className="flex gap-1" role="group" aria-label="verdict">
+          {/* Under "To review" the next two groups are FIXED (applies + machine),
+            * so they are shown locked rather than silently ignored — a filter
+            * that looks live but does nothing is worse than one that says so. */}
+          <fieldset
+            className={`flex items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--color-rule)]/70 px-2 py-1 ${locked ? 'opacity-50' : ''}`}
+            role="group"
+            aria-label="verdict"
+            disabled={locked}
+          >
+            <legend className="px-1 text-[0.6rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)]">
+              2 · verdict{locked && ' — set by “To review”'}
+            </legend>
             {VERDICTS.map((v) => (
               <button
                 key={v.key}
                 type="button"
-                aria-pressed={verdict === v.key}
+                disabled={locked}
+                aria-pressed={(locked ? 'positive' : verdict) === v.key}
                 onClick={() => patch({ verdict: v.key, offset: null })}
                 className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
-                  verdict === v.key
+                  (locked ? 'positive' : verdict) === v.key
                     ? 'border-[var(--color-ink-2)] text-[var(--color-ink)]'
                     : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]'
                 }`}
@@ -381,18 +500,27 @@ export default function NewDedupTrainingSet() {
                 )}
               </button>
             ))}
-          </span>
+          </fieldset>
 
-          <span className="flex gap-1" role="group" aria-label="decided by">
+          <fieldset
+            className={`flex items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--color-rule)]/70 px-2 py-1 ${locked ? 'opacity-50' : ''}`}
+            role="group"
+            aria-label="decided by"
+            disabled={locked}
+          >
+            <legend className="px-1 text-[0.6rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)]">
+              3 · decided by{locked && ' — set by “To review”'}
+            </legend>
             {SOURCES.map((s) => (
               <button
                 key={s.key}
                 type="button"
                 title={s.title}
-                aria-pressed={source === s.key}
+                disabled={locked}
+                aria-pressed={(locked ? 'machine' : source) === s.key}
                 onClick={() => patch({ source: s.key, offset: null })}
                 className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
-                  source === s.key
+                  (locked ? 'machine' : source) === s.key
                     ? 'border-[var(--color-copper)] text-[var(--color-ink)]'
                     : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]'
                 }`}
@@ -400,8 +528,22 @@ export default function NewDedupTrainingSet() {
                 {s.label}
               </button>
             ))}
-          </span>
+          </fieldset>
         </div>
+        {!cutoffReady && (
+          <p
+            data-testid="cutoff-unavailable"
+            className="mt-1.5 text-[0.75rem] text-[var(--color-copper)]"
+          >
+            The cutoff is not active yet: migration 474 has not been applied, so there is no
+            target, no set and no reserve. Everything is shown, and no tile can say which side of
+            the cutoff it is on. Apply the migration and this row comes alive.
+          </p>
+        )}
+        <p className="mt-1.5 text-[0.7rem] text-[var(--color-ink-4)]">
+          The three groups combine: pick a slice of the cutoff (1), then narrow it by the current
+          mark (2) and by who made it (3). “To review” is a preset that fixes 2 and 3 for you.
+        </p>
 
         {activeHead && (
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--color-ink-3)]">
@@ -409,6 +551,7 @@ export default function NewDedupTrainingSet() {
               {activeHead.positive} applies · {activeHead.machine_positive} by the machine,{' '}
               {activeHead.human_positive} yours
             </span>
+            {cutoffReady && (
             <form
               className="flex items-center gap-1"
               onSubmit={(e) => {
@@ -439,6 +582,7 @@ export default function NewDedupTrainingSet() {
                 set
               </button>
             </form>
+            )}
             <span className="text-[var(--color-ink-4)]">
               set = your positives, then the machine’s oldest-first, up to the target; the
               reserve refills it when you remove one
@@ -489,10 +633,26 @@ export default function NewDedupTrainingSet() {
               just the backdrop”) is enough. Notes are gathered per head and distilled into one general
               rule in the definition, never one line per note, so keep them short.
             </p>
-            <p className="mt-2 font-medium text-[var(--color-ink)]">Verdict and “decided by”</p>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">How the three filter groups combine</p>
             <p className="mt-0.5">
-              <b>Applies / Does not / Left out / All</b> filter by the current mark. <b>Anyone / Machine / Yours</b>
-              filter by who made it. Both are ignored under <b>To review</b>, which is always machine positives in the set.
+              <b>1 · cutoff</b> picks a slice (to review, in set, reserve, everything). <b>2 · verdict</b>
+              narrows it by the current mark. <b>3 · decided by</b> narrows it by who made that mark.
+              They stack. <b>To review</b> is a preset: it fixes 2 to “Applies” and 3 to “Machine”, and
+              shows those groups locked so nothing is silently ignored.
+            </p>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">The fastest way through “To review”</p>
+            <p className="mt-0.5">
+              Scan the page. Click <b>✕ no</b> or <b>– left out</b> on the wrong ones. Then press
+              <b> Confirm the other N on this page</b>: everything you left alone becomes your label
+              in one go. Looking without clicking leaves no trace, so the count only drops when you
+              confirm. When you remove one, the first reserve photo steps into the set by itself, and
+              because it is unreviewed it shows up on “To review” at the end.
+            </p>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">After you change a mark</p>
+            <p className="mt-0.5">
+              The photo stays where it is, showing its new mark and the filter it now belongs to, so
+              you can add your note. It moves on your next filter change or page load. To find it
+              later: <b>Everything</b> → its new verdict → <b>Yours</b>.
             </p>
           </div>
         </div>
@@ -516,11 +676,51 @@ export default function NewDedupTrainingSet() {
           >
             {rows.map(tile)}
           </ul>
-          <div className="mt-4 flex items-center justify-center gap-3 text-xs">
+          {pending.length > 0 && (
+            <div className="mt-4 flex flex-col items-center gap-1">
+              <button
+                type="button"
+                data-testid="confirm-page"
+                disabled={confirmPageMut.isPending}
+                onMouseEnter={() => setPreviewing(true)}
+                onMouseLeave={() => setPreviewing(false)}
+                onFocus={() => setPreviewing(true)}
+                onBlur={() => setPreviewing(false)}
+                onClick={() => { setPreviewing(false); confirmPageMut.mutate(pending.map((r) => r.image_id)); }}
+                className="px-3 py-1.5 text-xs rounded-[var(--radius-sm)] border border-[var(--color-sage)] text-[var(--color-ink)] hover:bg-[var(--color-sage)]/10 disabled:opacity-40"
+              >
+                ✓ Confirm the other {pending.length} on this page as correct
+              </button>
+              <p className="text-[0.7rem] text-[var(--color-ink-4)] text-center max-w-prose">
+                Fix the wrong ones first, then press this: every remaining machine positive on
+                this page becomes your label. That is what takes them off “To review”.
+                Hover it to see exactly which photos it will claim.
+              </p>
+            </div>
+          )}
+          <div className="mt-4 flex items-center justify-center gap-3 text-xs flex-wrap">
+            <span className="flex items-center gap-1" role="group" aria-label="per page">
+              <span className="text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)] mr-0.5">per page</span>
+              {PAGE_SIZES.map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  aria-pressed={pageSize === n}
+                  onClick={() => patch({ n: String(n), offset: null })}
+                  className={`px-2 py-1 rounded-[var(--radius-sm)] border ${
+                    pageSize === n
+                      ? 'border-[var(--color-ink-2)] text-[var(--color-ink)]'
+                      : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]'
+                  }`}
+                >
+                  {n}
+                </button>
+              ))}
+            </span>
             <button
               type="button"
               disabled={offset === 0}
-              onClick={() => patch({ offset: String(Math.max(0, offset - PAGE)) })}
+              onClick={() => patch({ offset: String(Math.max(0, offset - pageSize)) })}
               className="px-3 py-1 rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink-3)] disabled:opacity-40"
             >
               ← previous
@@ -530,8 +730,8 @@ export default function NewDedupTrainingSet() {
             </span>
             <button
               type="button"
-              disabled={rows.length < PAGE}
-              onClick={() => patch({ offset: String(offset + PAGE) })}
+              disabled={rows.length < pageSize}
+              onClick={() => patch({ offset: String(offset + pageSize) })}
               className="px-3 py-1 rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink-3)] disabled:opacity-40"
             >
               next →

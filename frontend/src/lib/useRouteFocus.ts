@@ -14,19 +14,36 @@
  * are in-page state changes, not navigations — hijacking focus on every filter
  * click would be worse than the defect. The first render is skipped so a deep
  * link is not stolen from whatever the browser focused on load. */
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 
 export const MAIN_ID = 'main';
 
+/* MODULE-level, not a ref: App.tsx wraps the whole route tree in
+ * <ErrorBoundary key={location.pathname}> so a crashed page recovers on the
+ * next navigation — which means the Shell, and this hook's host, REMOUNT on
+ * every pathname change. An instance-level "skip the first render" guard
+ * therefore skipped every navigation in production (measured: <main> was a
+ * new element 65 ms after each nav click, and focus ended on <body>). The
+ * last pathname this module focused survives the remount; a full page load
+ * resets it, which is exactly the "do not steal a deep link" case. */
+let lastPathname: string | null = null;
+
+/* Test seam: module state would otherwise leak between cases. */
+export function resetRouteFocus(): void {
+  lastPathname = null;
+}
+
 export function useRouteFocus(): void {
   const { pathname } = useLocation();
-  const first = useRef(true);
   useEffect(() => {
-    if (first.current) {
-      first.current = false;
+    if (lastPathname === null) {
+      // First render after a full page load — leave the browser's focus alone.
+      lastPathname = pathname;
       return;
     }
+    if (pathname === lastPathname) return; // same-path remount, nothing moved
+    lastPathname = pathname;
     const main = document.getElementById(MAIN_ID);
     if (!main) return;
     // preventScroll: the page has just rendered at the top; jumping the

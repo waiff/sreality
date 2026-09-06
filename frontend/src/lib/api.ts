@@ -1197,6 +1197,9 @@ export interface TrainingSetHead {
   in_set: number;
   reserve: number;
   in_set_unreviewed: number;
+  /* False while migration 474 is pending: no cutoff exists, so the counts
+   * above are placeholders and every tile's membership is unknown. */
+  cutoff_available: boolean;
 }
 
 export interface TrainingSetRow {
@@ -1214,7 +1217,8 @@ export interface TrainingSetRow {
   /* Position in the head's ranked positives (null for non-positives) and
    * whether that position is inside the cutoff. */
   set_rank: number | null;
-  in_set: boolean;
+  /* null = unknown (no cutoff exists yet), never a guess. */
+  in_set: boolean | null;
 }
 
 export const listTrainingSetHeads = (): Promise<{ data: TrainingSetHead[] }> =>

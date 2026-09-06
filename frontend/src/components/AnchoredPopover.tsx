@@ -2,12 +2,12 @@
  *
  * Why a portal rather than the `absolute` popovers this app already has
  * (TagEditPopover, the filter dropdowns): those live inside their own container
- * and only work because that container neither clips nor stacks. The pipeline
- * funnel does not have that luxury — on a Browse card it sits inside an
- * `overflow-hidden` wrapper AND inside the card's <Link>, and on the Table it
- * sits inside a horizontal scroller. An absolutely-positioned menu there is
- * clipped to the photo, and every click inside it navigates. Portalling to
- * <body> with `position: fixed` escapes both.
+ * and only work because that container neither clips nor stacks. The controls
+ * on a Browse card do not have that luxury — the pipeline funnel and the
+ * collection trigger sit inside the photo's `overflow-hidden` frame, and on the
+ * Table the funnel sits inside a horizontal scroller. An absolutely-positioned
+ * menu there is clipped to the photo. Portalling to <body> with
+ * `position: fixed` escapes both.
  *
  * Deliberately minimal, and deliberately not a dependency (rule 7): anchor rect
  * → fixed coordinates, flip up when the panel would fall off the bottom, clamp
@@ -36,8 +36,11 @@ export interface AnchoredPopoverProps {
   anchorRef: RefObject<HTMLElement | null>;
   onClose: () => void;
   children: ReactNode;
-  /* Accessible name for the floating container. */
+  /* Accessible name for the floating container. With it the panel is a named
+   * role="group" (a container of controls); without it, a plain container. */
   ariaLabel?: string;
+  /* DOM id, so the trigger's aria-controls can point at the panel itself. */
+  id?: string;
   /* Panel chrome. Callers set width here; positioning is owned by this file. */
   className?: string;
   /* Gap between anchor and panel, px. */
@@ -50,6 +53,7 @@ const MARGIN = 8;
 export default function AnchoredPopover({
   anchorRef,
   onClose,
+  id,
   children,
   ariaLabel,
   className = '',
@@ -107,6 +111,28 @@ export default function AnchoredPopover({
       onClose();
     };
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Tab') {
+        /* APG disclosure: Tab past the panel's last control (or Shift+Tab past
+         * its first) CLOSES it and continues from the trigger — the panel is
+         * transient, not a place to trap focus in. Without this, a one-control
+         * panel (a new account's collection list) tabbed straight out to
+         * wherever the portal's neighbour in <body> happened to be. Focus moves
+         * to the anchor here and the browser's default action then steps to
+         * the next element after it, which is exactly where Tab should land. */
+        const panel = panelRef.current;
+        const active = document.activeElement;
+        if (!panel || !(active instanceof Element) || !panel.contains(active)) return;
+        const items = Array.from(
+          panel.querySelectorAll<HTMLElement>(
+            'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),select,textarea,[tabindex]:not([tabindex="-1"])',
+          ),
+        );
+        const atEdge = e.shiftKey ? active === items[0] : active === items[items.length - 1];
+        if (!atEdge) return;
+        anchorRef.current?.focus({ preventScroll: true });
+        onClose();
+        return;
+      }
       if (e.key !== 'Escape') return;
       e.stopPropagation();
       // Escape is a deliberate dismissal, so focus goes back where it came
@@ -128,23 +154,69 @@ export default function AnchoredPopover({
     };
   }, [anchorRef, onClose, place]);
 
+  /* Keyboard entry and exit. The portal places the panel at the END of
+   * <body>, so from the trigger, Tab would walk the entire rest of the page
+   * before reaching it. Move focus INTO the panel on mount (first control, else
+   * the panel itself) and back to the anchor on unmount — the APG disclosure
+   * contract. Mount-only on purpose: re-running on prop change is the
+   * focus-theft bug. */
+  /* Restore on unmount: capture the anchor at mount, hand focus back on close. */
+  useEffect(() => {
+    const anchor = anchorRef.current;
+    return () => {
+      anchor?.focus({ preventScroll: true });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only by contract
+  }, []);
+
+  /* Focus IN, keyed on `pos`, not on mount. The panel renders
+   * `visibility: hidden` until place() has measured it, and place() runs in a
+   * LAYOUT effect: React flushes the first commit's passive effects BEFORE
+   * processing that layout-effect state update, so a mount-only focus ran
+   * while the panel was still hidden — a no-op in Chromium (which refuses to
+   * focus a hidden element) and invisible in jsdom (which does not enforce
+   * visibility; the unit test passed while production did not). Once-only via
+   * the ref: repositioning on scroll/resize must not re-steal focus. */
+  const focusedIn = useRef(false);
+  useEffect(() => {
+    if (!pos || focusedIn.current) return;
+    focusedIn.current = true;
+    const panel = panelRef.current;
+    const first = panel?.querySelector<HTMLElement>(
+      'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),select,textarea,[tabindex]:not([tabindex="-1"])',
+    );
+    (first ?? panel)?.focus({ preventScroll: true });
+  }, [pos]);
+
   return createPortal(
     <div
       ref={panelRef}
+      id={id}
+      // Read by lib/useDialog's focus trap: focus in here counts as inside the
+      // dialog that opened this panel, not as an escape to be yanked back.
+      data-transient-layer=""
+
+      role={ariaLabel ? 'group' : undefined}
+      tabIndex={-1}
       aria-label={ariaLabel}
-      /* The panel routinely opens over a <Link> (Browse card) or a clickable
-       * row (Table); without this, every click inside it also navigates. */
-      onClick={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-      }}
+      /* NO panel-wide click suppression. It used to preventDefault every click
+       * in here, because React routes a portal's synthetic events up the REACT
+       * tree — so a click in the panel reached the Browse card's wrapping
+       * <Link> and navigated. That wrapper is gone (ListingCards), the Table's
+       * <tr> has never had an onClick, and the listing header's pill is not
+       * inside anything clickable; the three callers are the whole population.
+       * Keeping it would break the one link the panels legitimately contain —
+       * the collection popover's "Create a collection →". */
       style={{
         top: pos?.top ?? 0,
         left: pos?.left ?? 0,
         visibility: pos ? undefined : 'hidden',
       }}
       className={[
-        'fixed z-40 rounded-[var(--radius-md)] border border-[var(--color-rule-strong)]',
+        // z-60: every modal in the app is z-50 and a popover opened FROM a modal
+        // (Explore modals render Browse cards) must sit above it. A transient
+        // panel is always on top of whatever opened it.
+        'fixed z-[60] rounded-[var(--radius-md)] border border-[var(--color-rule-strong)]',
         'bg-[var(--color-paper-3)] shadow-[0_4px_16px_rgba(0,0,0,0.10)]',
         className,
       ].join(' ')}

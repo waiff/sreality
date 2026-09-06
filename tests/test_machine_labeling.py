@@ -323,7 +323,7 @@ def test_the_page_caps_its_limit_and_floors_its_offset() -> None:
     conn = _Conn([])
     ml.training_set_page(conn, tag_id=22, limit=10_000, offset=-5)
     params = conn.log[0][2]
-    assert params["limit"] == 200 and params["offset"] == 0
+    assert params["limit"] == ml.PAGE_MAX == 2000 and params["offset"] == 0
 
 
 def test_counts_split_positives_by_who_decided_them() -> None:
@@ -371,9 +371,11 @@ def test_the_summary_counts_set_reserve_and_the_review_backlog() -> None:
 
     conn = _Conn([(3, 300, 300, 849, 282)])
     out = ml.set_summary(conn, tag_ids=[3, 2])
-    assert out[3] == {"target": 300, "in_set": 300, "reserve": 849, "in_set_unreviewed": 282}
+    assert out[3] == {"target": 300, "in_set": 300, "reserve": 849, "in_set_unreviewed": 282,
+                      "cutoff_available": True}
     # A head the query returned nothing for still carries the default target.
-    assert out[2] == {"target": 300, "in_set": 0, "reserve": 0, "in_set_unreviewed": 0}
+    assert out[2] == {"target": 300, "in_set": 0, "reserve": 0, "in_set_unreviewed": 0,
+                      "cutoff_available": True}
 
 
 def test_the_ranked_page_filters_membership_in_sql_and_orders_by_rank() -> None:
@@ -412,6 +414,9 @@ def test_the_reads_survive_474_not_being_applied() -> None:
 
     out = ml.set_summary(_NoColumn(), tag_ids=[3])
     assert out[3]["target"] == ml.DEFAULT_TRAINING_TARGET
+    # And it SAYS there is no cutoff, instead of a confident 0/300 — measured
+    # live as a chip reading 0 beside tiles reading "in set".
+    assert out[3]["cutoff_available"] is False
     assert ml.training_set_positive_ids(_NoColumn(), tag_id=3) == []
 
 

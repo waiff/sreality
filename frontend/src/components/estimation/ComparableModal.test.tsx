@@ -1,12 +1,20 @@
 /* The comparable's photo strip. The carousel's prev/next buttons have always
  * been named; the six thumbnails under them were not — their only child is an
  * <img alt="">, so each one reached the accessibility tree as an unnamed
- * button. */
+ * button.
+ *
+ * Since W6b this renders through <Dialog>, so the modal half of its contract —
+ * focus in, Tab containment, one layer per Escape, focus restored, scroll lock
+ * released — is asserted through the shared expectDialogContract
+ * (src/test/a11y.ts). Its behaviour as the INNER half of the app's one nested
+ * pair is proved where the pair actually lives: RunDetailModal.test.tsx. */
 
+import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
+import { expectDialogContract } from '@/test/a11y';
 import ComparableModal from './ComparableModal';
 import type { ImagePublic, ListingPublic } from '@/lib/types';
 
@@ -44,6 +52,44 @@ function renderModal(images: ImagePublic[]) {
     </MemoryRouter>,
   );
 }
+
+/* Mounting IS opening (lib/useDialog), which is how the comparables table
+ * opens it: `{activeId != null && <ComparableModal/>}`. */
+function ModalHost() {
+  const [open, setOpen] = useState(false);
+  return (
+    <MemoryRouter>
+      <button type="button" onClick={() => setOpen(true)}>
+        open-comparable
+      </button>
+      {open && (
+        <ComparableModal
+          listing={LISTING}
+          images={[photo(1), photo(2)]}
+          summary={null}
+          summaryError={null}
+          summaryLoading={false}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </MemoryRouter>
+  );
+}
+
+describe('<ComparableModal> as a dialog', () => {
+  it('honours the whole modal-dialog contract', () => {
+    render(<ModalHost />);
+    const trigger = screen.getByRole('button', { name: 'open-comparable' });
+    expectDialogContract({ open: () => fireEvent.click(trigger), trigger });
+  });
+
+  it('is named by the line the operator reads at the top of it', () => {
+    // aria-labelledby onto the visible eyebrow, not a literal that could drift
+    // away from the words on screen.
+    renderModal([photo(1)]);
+    expect(screen.getByRole('dialog')).toHaveAccessibleName('Comparable · id 900');
+  });
+});
 
 describe('<ComparableModal> photo thumbnails', () => {
   it('names every thumbnail by its position in the strip', () => {
