@@ -49,7 +49,13 @@ const MEMBERSHIPS: ReadonlyArray<{ key: Membership; label: string; title: string
   { key: 'all', label: 'Everything', title: 'No cutoff' },
 ];
 
-const PAGE = 60;
+/* Page sizes the operator asked for. 2000 is a whole head's set at the
+ * default target; images lazy-load, so the cost is the DOM and it is theirs
+ * to choose. The one-click confirm chunks by the server's bulk cap. */
+const PAGE_SIZES = [50, 100, 500, 2000] as const;
+type PageSize = (typeof PAGE_SIZES)[number];
+const DEFAULT_PAGE: PageSize = 50;
+const BULK_CAP = 200;
 
 const VERDICTS: ReadonlyArray<{ key: Verdict | 'all'; label: string }> = [
   { key: 'positive', label: 'Applies' },
@@ -91,6 +97,9 @@ export default function NewDedupTrainingSet() {
   /* Opens on the bounded review by default: that is the work worth doing. */
   const membership = (params.get('set') ?? 'review') as Membership;
   const offset = Math.max(0, Number(params.get('offset') ?? 0) || 0);
+  const rawN = Number(params.get('n') ?? DEFAULT_PAGE);
+  const pageSize: PageSize = (PAGE_SIZES as readonly number[]).includes(rawN)
+    ? (rawN as PageSize) : DEFAULT_PAGE;
 
   const patch = (next: Record<string, string | null>) => {
     const merged = new URLSearchParams(params);
@@ -127,7 +136,7 @@ export default function NewDedupTrainingSet() {
       ? { verdict: 'positive' as const, source: 'machine' as const, member: 'set' as const }
       : { verdict, source, member: membership === 'all' ? null : membership };
 
-  const rowsKey = ['training-set', activeId, effective.verdict, effective.source, effective.member, offset];
+  const rowsKey = ['training-set', activeId, effective.verdict, effective.source, effective.member, offset, pageSize];
   const rowsQ = useQuery({
     queryKey: rowsKey,
     queryFn: () =>
@@ -136,7 +145,7 @@ export default function NewDedupTrainingSet() {
         ...(effective.verdict === 'all' ? {} : { state: effective.verdict }),
         ...(effective.source === 'all' ? {} : { source: effective.source }),
         ...(effective.member ? { membership: effective.member } : {}),
-        limit: PAGE,
+        limit: pageSize,
         offset,
       }),
     enabled: activeId != null,
@@ -203,8 +212,17 @@ export default function NewDedupTrainingSet() {
   const pending = rows.filter((r) =>
     r.state === 'positive' && r.source === 'machine' && !changed.has(r.image_id));
   const confirmPageMut = useMutation({
-    mutationFn: (imageIds: number[]) =>
-      bulkSetNewDedupTagAnnotation(activeId as number, imageIds, 'positive', null),
+    mutationFn: async (imageIds: number[]) => {
+      /* Sequential chunks, in order, stopping at the first failure so a
+       * partial page is reported as exactly what landed. */
+      const done: number[] = [];
+      for (let i = 0; i < imageIds.length; i += BULK_CAP) {
+        const res = await bulkSetNewDedupTagAnnotation(
+          activeId as number, imageIds.slice(i, i + BULK_CAP), 'positive', null);
+        done.push(...res.data.image_ids);
+      }
+      return { data: { updated: done.length, image_ids: done } };
+    },
     onSuccess: (res) => {
       const done = new Set(res.data.image_ids);
       qc.setQueryData(rowsKey, (old: typeof rowsQ.data) => old && ({
@@ -663,11 +681,29 @@ export default function NewDedupTrainingSet() {
               </p>
             </div>
           )}
-          <div className="mt-4 flex items-center justify-center gap-3 text-xs">
+          <div className="mt-4 flex items-center justify-center gap-3 text-xs flex-wrap">
+            <span className="flex items-center gap-1" role="group" aria-label="per page">
+              <span className="text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)] mr-0.5">per page</span>
+              {PAGE_SIZES.map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  aria-pressed={pageSize === n}
+                  onClick={() => patch({ n: String(n), offset: null })}
+                  className={`px-2 py-1 rounded-[var(--radius-sm)] border ${
+                    pageSize === n
+                      ? 'border-[var(--color-ink-2)] text-[var(--color-ink)]'
+                      : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]'
+                  }`}
+                >
+                  {n}
+                </button>
+              ))}
+            </span>
             <button
               type="button"
               disabled={offset === 0}
-              onClick={() => patch({ offset: String(Math.max(0, offset - PAGE)) })}
+              onClick={() => patch({ offset: String(Math.max(0, offset - pageSize)) })}
               className="px-3 py-1 rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink-3)] disabled:opacity-40"
             >
               ← previous
@@ -677,8 +713,8 @@ export default function NewDedupTrainingSet() {
             </span>
             <button
               type="button"
-              disabled={rows.length < PAGE}
-              onClick={() => patch({ offset: String(offset + PAGE) })}
+              disabled={rows.length < pageSize}
+              onClick={() => patch({ offset: String(offset + pageSize) })}
               className="px-3 py-1 rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink-3)] disabled:opacity-40"
             >
               next →
