@@ -13,6 +13,7 @@ import html as ihtml
 import json
 from typing import Any
 
+from scraper.mmreality_parser import declared_total
 from scraper.mmreality_parser import (
     _building_type,
     _condition,
@@ -148,6 +149,26 @@ def test_parse_index_items_and_next_page():
     assert first.detail_path == "https://www.mmreality.cz/nemovitosti/944445/"
     assert first.price_text == "3 190 000 Kč"
     assert "Byt 2+1" in (first.title or "")
+
+
+SSR_HTML = (
+    '<html><body><vue-property-list-grid namespace="list" '
+    ':ssr="{&quot;offers&quot;:[{&quot;id&quot;:954007}],'
+    '&quot;metadata&quot;:{&quot;count&quot;:1643,&quot;groups&quot;:[]},&quot;page&quot;:1}">'
+    '</vue-property-list-grid><link rel="next" href="?page=2"/></body></html>'
+)
+
+
+def test_parse_index_declared_total_from_the_ssr_state():
+    """The per-type index declares its own result count in the page's Vue SSR
+    state (entity-encoded JSON). Absent state is None, never 0: an unmeasurable
+    page must read as unknown, not as an empty category (rule #3)."""
+    assert declared_total(SSR_HTML) == 1643
+    assert declared_total(SSR_HTML.replace("&quot;", '"')) == 1643
+    assert parse_index(SSR_HTML).total == 1643
+    assert parse_index(SSR_HTML).next_offset == 2
+    assert declared_total(INDEX_HTML) is None
+    assert parse_index(INDEX_HTML).total is None
 
 
 def test_index_price_parsing():

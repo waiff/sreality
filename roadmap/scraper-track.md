@@ -5,6 +5,19 @@
 Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
+### mmreality: ten per-type indexes, proved against the portal's own count (2026-09-06, done)
+- The bare `/nemovitosti/` feed the walk paged since 2026-05 was **prodej only** (its own
+  SSR `metadata.count` equals the prodej total) — the 1,518 rentals were never scraped —
+  and every per-type URL declares a count. So "single mixed index, no total", the reason
+  the portal was parked on `supports_complete_walk=false`, was wrong on both halves.
+- Walk is now one category per (sale type × property type), ten in all, each proved by
+  the shared `walk_is_complete` arithmetic, written to the slice ledger (one row per
+  category), swept by the category-scoped `mark_inactive_native` behind the 12 h rail.
+  Migration 481 set the ten descriptors; the coverage gate flips the flag from evidence.
+- **Next:** watch `portal_coverage_gate` for mmreality's three-cycle streak (~a day).
+  Its ~3,300 stale rows (27% of active) will then hit the flip cap — verify a sample by
+  fetch and release with a bounded override, exactly as idnes.
+
 ### Phase 1.5: Six-category coverage (done)
 Cross-listed under top-level Done above. Headline: all six byt / dum
 / komercni × pronajem / prodej pairs walked nightly with per-category

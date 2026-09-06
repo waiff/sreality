@@ -376,7 +376,7 @@ def parse_index(html: str) -> IndexPage:
                 ),
             )
         )
-    return IndexPage(total=None, items=items, next_offset=_next_page(tree))
+    return IndexPage(total=declared_total(html), items=items, next_offset=_next_page(tree))
 
 
 def _text(node: Node | None) -> str | None:
@@ -384,6 +384,23 @@ def _text(node: Node | None) -> str | None:
         return None
     txt = re.sub(r"\s+", " ", node.text(separator=" ", strip=False)).strip()
     return txt or None
+
+
+# The page's Vue SSR state (`<vue-property-list-grid :ssr="{...}">`, HTML-entity
+# encoded JSON) carries `metadata.count`: the portal's own result total for this
+# filter. Read it off the raw text in either encoding rather than decoding the
+# ~400 KB attribute — the number is the only thing the walk needs from it.
+_DECLARED_RE = re.compile(
+    r'metadata(?:&quot;|"):\{(?:&quot;|")count(?:&quot;|"):(\d+)'
+)
+
+
+def declared_total(html: str) -> int | None:
+    """The portal-declared result count for this index page, or None when the
+    SSR state is absent (a throttled or error page) — never 0 by default, so an
+    unmeasurable page reads as `unknown`, not `complete` (rule #3)."""
+    m = _DECLARED_RE.search(html)
+    return int(m.group(1)) if m else None
 
 
 def _next_page(tree: HTMLParser) -> int | None:
