@@ -116,10 +116,15 @@ export default function NewDedupTrainingSet() {
 
   /* 'review' = set membership + machine source + positive verdict, composed
    * from the three server filters so it can never disagree with them. */
-  const locked = membership === 'review';
-  const effective = membership === 'review'
-    ? { verdict: 'positive' as const, source: 'machine' as const, member: 'set' as const }
-    : { verdict, source, member: membership === 'all' ? null : membership };
+  const cutoffReady = activeHead?.cutoff_available !== false;
+  /* No cutoff yet: behave as "Everything" and say why, instead of showing a
+   * confident 0/300 beside tiles that claim to be in the set. */
+  const locked = cutoffReady && membership === 'review';
+  const effective = !cutoffReady
+    ? { verdict, source, member: null }
+    : membership === 'review'
+      ? { verdict: 'positive' as const, source: 'machine' as const, member: 'set' as const }
+      : { verdict, source, member: membership === 'all' ? null : membership };
 
   const rowsKey = ['training-set', activeId, effective.verdict, effective.source, effective.member, offset];
   const rowsQ = useQuery({
@@ -173,12 +178,12 @@ export default function NewDedupTrainingSet() {
           ? { ...row, state: vars.state, source: 'human' as const,
               excluded_reason: vars.state === 'excluded' ? ('pruned' as const) : null }
           : row);
-        const c = { ...old.data.counts } as Record<string, number>;
+        const c = { ...old.data.counts };
         if (vars.from !== vars.state) {
-          c[vars.from] = Math.max(0, (c[vars.from] ?? 0) - 1);
-          c[vars.state] = (c[vars.state] ?? 0) + 1;
+          c[vars.from] = Math.max(0, c[vars.from] - 1);
+          c[vars.state] = c[vars.state] + 1;
         }
-        return { ...old, data: { ...old.data, rows, counts: c as typeof old.data.counts } };
+        return { ...old, data: { ...old.data, rows, counts: c } };
       });
       qc.invalidateQueries({ queryKey: ['training-set-heads'] });
     },
@@ -197,7 +202,12 @@ export default function NewDedupTrainingSet() {
         { text, from_state: ch.from },
       );
     },
-    onSuccess: (_res, vars) => {
+    onSuccess: (res, vars) => {
+      const unavailable = (res.data as { note_unavailable?: string }).note_unavailable;
+      if (unavailable) {
+        pushToast('err', `Your mark is saved, but the note was not: ${unavailable}`);
+        return;
+      }
       setDrafts((prev) => { const n = new Map(prev); n.delete(vars.imageId); return n; });
       setChanged((prev) => { const n = new Map(prev); n.delete(vars.imageId); return n; });
       pushToast('ok', 'Note saved');
@@ -242,7 +252,7 @@ export default function NewDedupTrainingSet() {
           <span title={mine ? 'Your label — no machine pass can overwrite it' : 'Written by the model'}>
             {mine ? 'yours' : 'machine'}
           </span>
-          {r.state === 'positive' && (
+          {r.state === 'positive' && r.in_set != null && (
             <span
               data-testid={`membership-${r.image_id}`}
               className={r.in_set ? 'text-[var(--color-sage)]' : ''}
@@ -361,16 +371,22 @@ export default function NewDedupTrainingSet() {
             ))}
           </select>
 
-          <fieldset className="flex items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--color-rule)]/70 px-2 py-1" role="group" aria-label="cutoff">
+          <fieldset
+            className={`flex items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--color-rule)]/70 px-2 py-1 ${cutoffReady ? '' : 'opacity-50'}`}
+            role="group"
+            aria-label="cutoff"
+            disabled={!cutoffReady}
+          >
             <legend className="px-1 text-[0.6rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)]">
-              1 · cutoff
+              1 · cutoff{!cutoffReady && ' — not active yet'}
             </legend>
             {MEMBERSHIPS.map((m) => (
               <button
                 key={m.key}
                 type="button"
-                title={m.title}
-                aria-pressed={membership === m.key}
+                title={cutoffReady ? m.title : 'The cutoff needs migration 474; until then this page shows everything'}
+                disabled={!cutoffReady}
+                aria-pressed={cutoffReady ? membership === m.key : m.key === 'all'}
                 onClick={() => patch({ set: m.key, offset: null })}
                 className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
                   membership === m.key
@@ -379,13 +395,13 @@ export default function NewDedupTrainingSet() {
                 }`}
               >
                 {m.label}
-                {activeHead && m.key === 'review' && (
+                {activeHead && cutoffReady && m.key === 'review' && (
                   <span className="ml-1 text-[var(--color-ink-4)]">{activeHead.in_set_unreviewed}</span>
                 )}
-                {activeHead && m.key === 'set' && (
+                {activeHead && cutoffReady && m.key === 'set' && (
                   <span className="ml-1 text-[var(--color-ink-4)]">{activeHead.in_set}/{activeHead.target}</span>
                 )}
-                {activeHead && m.key === 'reserve' && (
+                {activeHead && cutoffReady && m.key === 'reserve' && (
                   <span className="ml-1 text-[var(--color-ink-4)]">{activeHead.reserve}</span>
                 )}
               </button>
@@ -453,6 +469,16 @@ export default function NewDedupTrainingSet() {
             ))}
           </fieldset>
         </div>
+        {!cutoffReady && (
+          <p
+            data-testid="cutoff-unavailable"
+            className="mt-1.5 text-[0.75rem] text-[var(--color-copper)]"
+          >
+            The cutoff is not active yet: migration 474 has not been applied, so there is no
+            target, no set and no reserve. Everything is shown, and no tile can say which side of
+            the cutoff it is on. Apply the migration and this row comes alive.
+          </p>
+        )}
         <p className="mt-1.5 text-[0.7rem] text-[var(--color-ink-4)]">
           The three groups combine: pick a slice of the cutoff (1), then narrow it by the current
           mark (2) and by who made it (3). “To review” is a preset that fixes 2 and 3 for you.
@@ -464,6 +490,7 @@ export default function NewDedupTrainingSet() {
               {activeHead.positive} applies · {activeHead.machine_positive} by the machine,{' '}
               {activeHead.human_positive} yours
             </span>
+            {cutoffReady && (
             <form
               className="flex items-center gap-1"
               onSubmit={(e) => {
@@ -494,6 +521,7 @@ export default function NewDedupTrainingSet() {
                 set
               </button>
             </form>
+            )}
             <span className="text-[var(--color-ink-4)]">
               set = your positives, then the machine’s oldest-first, up to the target; the
               reserve refills it when you remove one
