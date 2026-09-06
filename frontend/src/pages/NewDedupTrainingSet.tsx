@@ -171,6 +171,24 @@ export default function NewDedupTrainingSet() {
   const rows = rowsQ.data?.data.rows ?? [];
   const counts = rowsQ.data?.data.counts;
 
+  /* How many rows this exact filter combination has, or null when the counts
+   * we hold cannot answer it (negatives and left-outs are not counted per
+   * source, so "Does not + Yours" is unknowable). Null hides the total and
+   * the jump-to-end, because a wrong total is worse than none. */
+  const total: number | null = (() => {
+    if (!counts || !cutoffReady) return null;
+    if (membership === 'review') return counts.in_set_unreviewed;
+    const anySource = source === 'all';
+    const positivesOnly = verdict === 'positive' || verdict === 'all';
+    if (membership === 'set') return anySource && positivesOnly ? counts.in_set : null;
+    if (membership === 'reserve') return anySource && positivesOnly ? counts.reserve : null;
+    if (!anySource) return null;
+    if (verdict === 'all') return counts.positive + counts.negative + counts.excluded;
+    return counts[verdict];
+  })();
+  const lastOffset = total == null ? null
+    : Math.max(0, Math.floor(Math.max(0, total - 1) / pageSize) * pageSize);
+
   const correctMut = useMutation({
     mutationFn: ({ imageId, state }: { imageId: number; state: TagState; from: TagState }) =>
       setNewDedupTagAnnotation(
@@ -318,10 +336,10 @@ export default function NewDedupTrainingSet() {
               data-testid={`membership-${r.image_id}`}
               className={r.in_set ? 'text-[var(--color-sage)]' : ''}
               title={r.in_set
-                ? `In the set at position ${r.set_rank}`
-                : `Reserve, position ${r.set_rank} — steps in when a set positive is removed`}
+                ? `Position ${r.set_rank} in the set. The highest positions are the most recent arrivals from the reserve.`
+                : `Reserve, position ${r.set_rank} — steps into the set when a set positive is removed`}
             >
-              · {r.in_set ? 'in set' : 'reserve'}
+              · {r.in_set ? 'in set' : 'reserve'} #{r.set_rank}
             </span>
           )}
           {r.definition_stale && (
@@ -607,7 +625,7 @@ export default function NewDedupTrainingSet() {
             <ul className="mt-0.5 list-disc pl-4 space-y-0.5">
               <li><b>To review</b> — photos in the set that only the machine has judged. This is your job; the number is how many remain.</li>
               <li><b>In set</b> — everything a classifier will train on: your positives first, then the machine’s oldest-first, up to the target.</li>
-              <li><b>Reserve</b> — positives past the target. When you remove one from the set, the first reserve photo steps in automatically.</li>
+              <li><b>Reserve</b> — positives past the target. When you remove one from the set, the first reserve photo steps in automatically, so <b>in set</b> stays at the target; a full count is the proof it worked, not a sign nothing happened.</li>
               <li><b>Everything</b> — no cutoff; use the verdict and “decided by” filters freely.</li>
             </ul>
             <p className="mt-2 font-medium text-[var(--color-ink)]">Target</p>
@@ -647,6 +665,12 @@ export default function NewDedupTrainingSet() {
               in one go. Looking without clicking leaves no trace, so the count only drops when you
               confirm. When you remove one, the first reserve photo steps into the set by itself, and
               because it is unreviewed it shows up on “To review” at the end.
+            </p>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">Checking what the reserve pulled in</p>
+            <p className="mt-0.5">
+              Arrivals always take the <b>highest</b> positions in the set, because the reserve fills
+              from the bottom. Each tile shows its position (<i>in set #296</i>), and <b>last page ⇥</b>
+              in the pager jumps straight there. Verify the tail and you have seen every newcomer.
             </p>
             <p className="mt-2 font-medium text-[var(--color-ink)]">After you change a mark</p>
             <p className="mt-0.5">
@@ -725,8 +749,8 @@ export default function NewDedupTrainingSet() {
             >
               ← previous
             </button>
-            <span className="text-[var(--color-ink-4)]">
-              {offset + 1}–{offset + rows.length}
+            <span data-testid="page-range" className="text-[var(--color-ink-4)]">
+              {offset + 1}–{offset + rows.length}{total != null && ` of ${total}`}
             </span>
             <button
               type="button"
@@ -736,6 +760,19 @@ export default function NewDedupTrainingSet() {
             >
               next →
             </button>
+            {lastOffset != null && lastOffset > offset && (
+              /* The reserve refills the set from the bottom, so the newest
+               * arrivals are always on the LAST page — one click away. */
+              <button
+                type="button"
+                data-testid="jump-last"
+                title="The newest arrivals from the reserve are always at the end"
+                onClick={() => patch({ offset: String(lastOffset) })}
+                className="px-3 py-1 rounded-[var(--radius-sm)] border border-[var(--color-sage)] text-[var(--color-ink)]"
+              >
+                last page ⇥
+              </button>
+            )}
           </div>
         </>
       )}

@@ -464,3 +464,34 @@ describe('<NewDedupTrainingSet> the confirm button previews its reach', () => {
       .toHaveAttribute('data-previewed', 'true'));
   });
 });
+
+describe('<NewDedupTrainingSet> finding what the reserve pulled in', () => {
+  it('shows each positive its set position, so the newest arrivals are identifiable', async () => {
+    renderPage(['/new-dedup/training-set?set=all']);
+    expect(await screen.findByTestId('membership-11')).toHaveTextContent('in set #19');
+    expect(screen.getByTestId('membership-12')).toHaveTextContent('in set #1');
+  });
+
+  it('states the exact total and jumps to the last page, where arrivals land', async () => {
+    const user = userEvent.setup();
+    renderPage(); // To review: total is in_set_unreviewed = 282
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByTestId('page-range')).toHaveTextContent('1–2 of 282');
+    await user.click(screen.getByTestId('jump-last'));
+    // 282 rows at 50 per page: the last page starts at 250.
+    await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
+      expect.objectContaining({ offset: 250, limit: 50 }),
+    ));
+  });
+
+  it('hides the total when the filter combination cannot be counted exactly', async () => {
+    const user = userEvent.setup();
+    renderPage(['/new-dedup/training-set?set=all&verdict=negative']);
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByTestId('page-range')).toHaveTextContent('of 9166');
+    // Narrowing by who decided makes it unknowable from the counts we hold.
+    await user.click(screen.getByRole('button', { name: 'Yours' }));
+    await waitFor(() => expect(screen.getByTestId('page-range')).not.toHaveTextContent(/ of /));
+    expect(screen.queryByTestId('jump-last')).toBeNull();
+  });
+});
