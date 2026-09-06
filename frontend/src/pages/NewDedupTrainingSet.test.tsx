@@ -334,3 +334,27 @@ describe('<NewDedupTrainingSet> the filter groups', () => {
     expect(screen.getByRole('button', { name: 'Yours' })).toBeEnabled();
   });
 });
+
+describe('<NewDedupTrainingSet> before the cutoff exists', () => {
+  it('says the cutoff is not active instead of showing 0/300 beside "in set" tiles', async () => {
+    vi.mocked(api.listTrainingSetHeads).mockResolvedValue({
+      data: HEADS.map((h) => ({ ...h, in_set: 0, reserve: 0, in_set_unreviewed: 0,
+        cutoff_available: false })) as never,
+    });
+    vi.mocked(api.listTrainingSet).mockResolvedValue({
+      data: { rows: ROWS.map((r) => ({ ...r, set_rank: null, in_set: null })) as never,
+        counts: { ...HEADS[0], cutoff_available: false } as never, limit: 60, offset: 0 },
+    });
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByTestId('cutoff-unavailable')).toHaveTextContent(/migration 474/);
+    // Cutoff chips locked, no counts claimed, no membership badge on any tile,
+    // and the list is fetched with no membership filter at all.
+    expect(screen.getByRole('button', { name: /In set/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /In set/ })).not.toHaveTextContent('0/300');
+    expect(screen.queryByTestId('membership-11')).toBeNull();
+    expect(screen.queryByLabelText('target')).toBeNull();
+    const last = vi.mocked(api.listTrainingSet).mock.calls.at(-1)?.[0];
+    expect(last).not.toHaveProperty('membership');
+  });
+});

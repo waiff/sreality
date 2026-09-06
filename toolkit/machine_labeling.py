@@ -557,7 +557,8 @@ def set_summary(
 ) -> dict[int, dict[str, int]]:
     """Per head: target, how many positives are IN the set, how many wait in
     reserve, and how many in-set positives are still the machine's word alone."""
-    empty = {"target": default_target, "in_set": 0, "reserve": 0, "in_set_unreviewed": 0}
+    empty = {"target": default_target, "in_set": 0, "reserve": 0, "in_set_unreviewed": 0,
+             "cutoff_available": True}
 
     def _run() -> dict[int, dict[str, int]]:
         out = {int(t): dict(empty) for t in tag_ids}
@@ -568,10 +569,15 @@ def set_summary(
             for tag_id, target, in_set, reserve, unreviewed in cur.fetchall():
                 out[int(tag_id)] = {"target": int(target), "in_set": int(in_set),
                                     "reserve": int(reserve),
-                                    "in_set_unreviewed": int(unreviewed)}
+                                    "in_set_unreviewed": int(unreviewed),
+                                    "cutoff_available": True}
         return out
 
-    return _tolerating_474(_run, fallback={int(t): dict(empty) for t in tag_ids})
+    # Without the column there IS no cutoff — say so, rather than reporting a
+    # confident 0/300. Measured live: the summary said 0 in set while the tile
+    # said "in set", because two fallbacks each guessed differently.
+    return _tolerating_474(
+        _run, fallback={int(t): {**empty, "cutoff_available": False} for t in tag_ids})
 
 
 def training_set_page_ranked(
@@ -613,11 +619,12 @@ def training_set_page_ranked(
             ]
 
     def _fallback() -> list[dict[str, Any]]:
+        # No cutoff exists yet, so membership is UNKNOWN — None, never a guess.
         rows = training_set_page(conn, tag_id=tag_id, state=state,
                                  source_class=source_class, limit=limit, offset=offset)
         for row in rows:
             row["set_rank"] = None
-            row["in_set"] = row["state"] == "positive"
+            row["in_set"] = None
         return rows
 
     return _tolerating_474(_run, fallback=None) or _fallback()
