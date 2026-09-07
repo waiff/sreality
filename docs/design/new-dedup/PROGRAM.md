@@ -174,6 +174,23 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-07 (f) — **The review sample: a drawn thousand that does not move (migration 485).**
+  The operator: *"Right now I have to verify thousands of negative images per head. I would like to
+  draw a random sample of only 1000 images per head from the current negatives … I would prefer if
+  the random sample was sorted the same way it is now, because the current negatives were built in
+  an order, so images of certain types are grouped and that is easier for review."* So the draw is
+  `ORDER BY random() LIMIT n` and NOTHING ELSE — no ranking, no clustering, and explicitly no new
+  sort (*"I do not want you to create a sorting mechanism"*): the page renders the sample under its
+  own `updated_at DESC, image_id DESC`, so the sample is a FILTER over the order that was already
+  there and each photo sits further down the list than the last. **It is a TABLE, not a query**, for
+  the reason 484 exists: a computed "1000 random negatives" re-draws on every read, and re-marking
+  one of the thousand takes it out of `negative` and silently promotes number 1001. The lane
+  therefore selects by MEMBERSHIP and passes NO state, so a photo just re-marked keeps its place
+  wearing its new mark instead of vanishing mid-page; the drawn count is pinned while `sample_reviewed`
+  moves. Progress counts `source <> 'machine'`, because confirming a machine negative leaves it a
+  negative and state alone cannot see the work. Redraw is explicit (a confirm), since it discards a
+  half-reviewed list. Same rails as every training read: no holdout, no missing bytes.
+
 - 2026-09-07 (e) — **A link names a head and a photo, never a page number.** The duplicate audit
   produced 36 conflicting labels to look at, and the raw R2 links handed over were useless: they
   pointed at a stale API host from `.env` (`sreality-api`, unprovisioned — the live one is

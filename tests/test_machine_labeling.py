@@ -9,6 +9,7 @@ labeled, and a head labeled without being named.
 
 from __future__ import annotations
 
+import contextlib
 import pathlib
 import typing
 from typing import Any
@@ -19,6 +20,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class _Cur:
+    rowcount = 0
+
     def __init__(self, rows: list[tuple], log: list) -> None:
         self._rows, self._log = rows, log
 
@@ -48,6 +51,13 @@ class _Conn:
     def cursor(self) -> _Cur:
         rows = self._batches.pop(0) if self._batches else []
         return _Cur(rows, self.log)
+
+    @contextlib.contextmanager
+    def transaction(self) -> typing.Iterator[None]:
+        """psycopg's explicit block. connect() is autocommit, so a unit that must
+        not be split (a redraw: delete then insert) has to open one."""
+        self.log.append(("transaction", "", None))
+        yield
 
 
 # ------------------------------------------------------------------ the vocabulary
@@ -327,6 +337,71 @@ def test_the_page_caps_its_limit_and_floors_its_offset() -> None:
     conn = _Conn([])
     ml.training_set_page(conn, tag_id=22, limit=10_000)
     assert conn.log[0][2]["limit"] == 10_000
+
+
+def test_the_draw_is_random_and_takes_the_existing_order_from_nowhere() -> None:
+    # The operator asked for a RANDOM thousand shown in the order the negatives
+    # already had. So the draw randomises and the PAGE orders — if the draw ever
+    # acquired an ORDER BY of its own it would be a sorting mechanism, which is
+    # exactly what they said not to build.
+    from toolkit import machine_labeling as ml
+
+    sql = ml._DRAW_SAMPLE_SQL
+    assert "ORDER BY random()" in sql
+    assert "updated_at" not in sql and "row_number()" not in sql
+    # Same rails as every other training read: no holdout, no missing bytes.
+    assert "tag_exam_cohorts hc" in sql
+    assert "i.storage_path IS NOT NULL" in sql
+    # Re-drawing must not duplicate a row someone is already reviewing.
+    assert "ON CONFLICT (tag_id, image_id) DO NOTHING" in sql
+
+
+def test_the_draw_caps_its_size_and_refuses_a_bad_state() -> None:
+    from toolkit import machine_labeling as ml
+
+    conn = _Conn([], [])
+    ml.draw_review_sample(conn, tag_id=17, size=99_999)
+    assert conn.log[-1][2]["size"] == ml.SAMPLE_MAX == 5000
+    with pytest.raises(ValueError):
+        ml.draw_review_sample(_Conn([]), tag_id=17, state="maybe")
+
+
+def test_a_redraw_is_explicit_never_implicit() -> None:
+    # A redraw throws away a list the operator may be half way through, so it
+    # only happens when asked for.
+    from toolkit import machine_labeling as ml
+
+    plain = _Conn([], [])
+    ml.draw_review_sample(plain, tag_id=17)
+    assert not any("DELETE FROM tag_review_samples" in c[1] for c in plain.log)
+    replaced = _Conn([], [], [])
+    ml.draw_review_sample(replaced, tag_id=17, replace=True)
+    assert any("DELETE FROM tag_review_samples" in c[1] for c in replaced.log)
+
+
+def test_sample_progress_counts_the_operators_own_marks() -> None:
+    # A confirmed negative is still a negative, so state alone cannot see the
+    # work; what marks a photo reviewed is that the decision became theirs.
+    from toolkit import machine_labeling as ml
+
+    assert "l.source <> 'machine'" in ml._SAMPLE_COUNTS_SQL
+    out = ml.review_sample_counts(_Conn([(17, 1000, 247)]), tag_ids=[17, 25])
+    assert out[17] == {"sample": 1000, "sample_reviewed": 247}
+    assert out[25] == {"sample": 0, "sample_reviewed": 0}
+
+
+def test_the_sample_filter_never_narrows_by_state() -> None:
+    # The lane shows the drawn rows by MEMBERSHIP. Filtering it by state too
+    # would drop a photo out of the page the moment it was re-marked — the
+    # disappearing tile the operator has already objected to once.
+    from toolkit import machine_labeling as ml
+
+    conn = _Conn([])
+    ml.training_set_page(conn, tag_id=17, sampled=True)
+    params = conn.log[0][2]
+    assert params["sampled"] is True and params["state"] is None
+    assert "FROM tag_review_samples rs" in ml._TRAINING_PAGE_SQL
+    assert "ORDER BY l.updated_at DESC, l.image_id DESC" in ml._TRAINING_PAGE_SQL
 
 
 def test_locate_maps_state_and_membership_to_a_tray_and_a_row() -> None:
