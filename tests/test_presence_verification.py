@@ -40,6 +40,8 @@ class _Cur:
             self.rowcount = len(params["nids"])
         elif "INSERT INTO delist_flip_refusals" in s:
             self._conn.refusals.append(params)
+        elif "SET given_up = false" in s:
+            self._conn.rearmed.append(params)
         else:
             self._result = None
 
@@ -54,6 +56,7 @@ class _Conn:
     def __init__(self, *, rows=(), active_rows=0, cap=None) -> None:
         self.executed: list[tuple[str, Any]] = []
         self.refusals: list[Any] = []
+        self.rearmed: list[Any] = []
         self.rows = list(rows)
         self.active_rows = active_rows
         self.cap = cap
@@ -168,3 +171,14 @@ def test_nothing_to_nominate_touches_nothing():
     conn = _Conn(cap={"fraction": 0.1, "min_rows": 2000, "overrides": []})
     assert db.enqueue_presence_checks(conn, "remax", "byt", "prodej", [], active_rows=10) == (0, 0)
     assert conn.executed == []
+
+
+def test_nominated_rows_the_drain_had_given_up_on_are_re_armed():
+    """A queue row given up after five failed fetches is excluded from every
+    claim and never reset by enqueue_detail; a nominated listing in that state
+    would stay active forever with no path to a page check."""
+    conn = _Conn(cap={"fraction": 0.1, "min_rows": 2000, "overrides": []})
+    db.enqueue_presence_checks(conn, "remax", "byt", "prodej", _cands(3), active_rows=10)
+    assert conn.rearmed == [("remax", ["n0", "n1", "n2"])]
+    sql = next(s for s, _ in conn.executed if "SET given_up = false" in s)
+    assert "given_up = true AND claimed_at IS NULL" in sql

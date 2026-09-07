@@ -1604,6 +1604,22 @@ def enqueue_presence_checks(
         conn, source,
         [(nid, ref, price, QUEUE_PRIORITY_VERIFY) for nid, ref, price in batch],
     )
+    # A row the drain gave up on (5 failed fetches) is excluded from every claim
+    # and enqueue_detail never re-arms it, so without this a listing whose page
+    # once erred five times would stay active forever with no path to a check.
+    # Re-arm only what THIS walk nominated: the index just failed to see it, so
+    # another look is exactly what is owed (rule #5: tracked, not dropped).
+    if batch:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE listing_detail_queue
+                SET given_up = false, attempts = 0
+                WHERE source = %s AND given_up = true AND claimed_at IS NULL
+                  AND native_id = ANY(%s::text[])
+                """,
+                (source, [nid for nid, _, _ in batch]),
+            )
     return queued, total - limit
 
 

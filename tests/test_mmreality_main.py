@@ -291,7 +291,9 @@ def test_page_cap_is_a_partial_walk(monkeypatch):
     _s, _c, _t, pages, complete = _portal(max_pages=1).walk_category(
         BYTY, object(), False, _Limiter())
     assert (pages, complete) == (1, False)
-    assert cap["ledger"][0]["outcome"] == "ceiling"
+    # A capped walk is a probe, not coverage: it must not overwrite the ledger
+    # (latest-wins) with "ceiling" every few minutes and hold the gate shut.
+    assert cap["ledger"] == []
 
 
 def test_a_pager_that_does_not_advance_stops_the_walk(monkeypatch):

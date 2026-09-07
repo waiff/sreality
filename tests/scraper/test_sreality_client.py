@@ -215,3 +215,17 @@ def test_iter_index_on_page_receives_raw_payload(monkeypatch):
     assert ids == [1, 2, 3]
     assert [(o, p) for o, u, p in seen] == [(0, pages[0]), (2, pages[2])]
     assert all("offset=" in u and "category_main_cb=" in u for _, u, _p in seen)
+
+
+def test_get_detail_rejects_an_estate_less_envelope(monkeypatch):
+    """A 200 whose body is only the API envelope is not a listing. Since
+    2026-09-07 delisted listings are re-fetched on purpose (rule #3 presence
+    checks), which is exactly when such a body is likeliest; treating it as
+    'ok' would set the row alive and blank its category, price and title."""
+    client = SrealityClient()
+    monkeypatch.setattr(
+        client, "_get_json",
+        lambda url, params=None: {"result": {}, "status_code": 200, "status_message": "OK"},
+    )
+    with pytest.raises(RuntimeError, match="carries no estate"):
+        client.get_detail(4242)

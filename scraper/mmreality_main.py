@@ -208,7 +208,12 @@ class MmRealityPortal:
             "outcome=%s complete=%s",
             sale_type, cat, declared, len(seen), pages, outcome, complete,
         )
-        self._record_slice(conn, category, outcome, declared, len(seen), pages)
+        if not self._max_pages:
+            # A page-capped walk is a probe or a bounded test, not coverage: the
+            # ledger is latest-wins, so recording its "ceiling" every few minutes
+            # would overwrite the real walk's "exhausted" and hold the coverage
+            # gate shut for good (the always-on worker probes under a cap).
+            self._record_slice(conn, category, outcome, declared, len(seen), pages)
 
         existing = (
             db.index_summary_native(conn, SOURCE, native_ids)
