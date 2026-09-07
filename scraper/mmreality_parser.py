@@ -326,13 +326,27 @@ def _has_any(names: set[str], *needles: str) -> bool | None:
     return True if any(n in name for name in names for n in needles) else None
 
 
+class PropertyMismatch(ValueError):
+    """The page parsed, but none of its `:property` objects IS the requested
+    listing. mmreality keeps a removed listing's URL alive (HTTP 200, the old
+    title) and fills the page with "similar" preview cards -- so this is the
+    portal's gone signal in disguise, not a parse failure."""
+
+
 def extract_property(html: str, listing_id: str | None) -> dict[str, Any]:
     """Return the embedded `:property` estate object for `listing_id`.
 
     A detail page carries several `:property` Vue props (the main listing plus
-    related preview cards), so we pick the blob whose `id` matches the listing,
-    falling back to the largest blob. Raises ValueError when none parse."""
+    related preview cards), so we pick the blob whose `id` matches the listing.
+    When `listing_id` is known and NO blob matches, raise PropertyMismatch: the
+    2026-09-07 presence checks found that a removed listing's URL still serves
+    200 with the old title and a page of substitute cards, and the old
+    largest-blob fallback ingested those substitutes as if they were the
+    requested listing (their rows overwritten with preview-card data). The
+    fallback survives only for callers with no id to match. Raises ValueError
+    when nothing parses at all."""
     candidates: list[dict[str, Any]] = []
+    matches: list[dict[str, Any]] = []
     for raw in _PROPERTY_ATTR_RE.findall(html):
         if "&quot;id&quot;" not in raw and '"id"' not in raw:
             continue
@@ -343,10 +357,19 @@ def extract_property(html: str, listing_id: str | None) -> dict[str, Any]:
         if not isinstance(obj, dict):
             continue
         if listing_id is not None and str(obj.get("id")) == str(listing_id):
-            return obj
+            matches.append(obj)
         candidates.append(obj)
+    if matches:
+        # The page can carry the listing twice: the full estate object and a
+        # preview card of itself. The fullest one is the listing.
+        return max(matches, key=lambda o: len(json.dumps(o, default=str)))
     if not candidates:
         raise ValueError("no :property estate object found on page")
+    if listing_id is not None:
+        raise PropertyMismatch(
+            f"page carries no :property object for listing {listing_id} "
+            f"(found {[str(o.get('id')) for o in candidates][:5]})"
+        )
     return max(candidates, key=lambda o: len(json.dumps(o, default=str)))
 
 

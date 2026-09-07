@@ -9,11 +9,13 @@ tests exercise the same decode path the live page hits.
 
 from __future__ import annotations
 
+import pytest
+
 import html as ihtml
 import json
 from typing import Any
 
-from scraper.mmreality_parser import declared_total
+from scraper.mmreality_parser import PropertyMismatch, declared_total, extract_property
 from scraper.mmreality_parser import (
     _building_type,
     _condition,
@@ -334,3 +336,15 @@ def test_title_street_capped_and_anchored():
     got = _title_street(obj, "Kladno", None, None, None)
     assert got in ("Dlouhá", "Dlouhá 15", None)  # never the prose tail
     assert _title_street({"originalTitle": "Prodej, ul. dobrá lokalita"}, "Brno", None, None, None) is None
+
+
+def test_a_page_of_substitute_cards_is_a_mismatch_not_a_listing():
+    """2026-09-07: a removed mmreality listing's URL still answers 200 with the
+    old title and a page of "similar" preview cards. The old largest-blob
+    fallback ingested one of those as the requested listing and overwrote its
+    row with card data. With an id to match, no match is a PropertyMismatch."""
+    html = _detail_html(DECOY, {**DECOY, "id": "222222"})
+    with pytest.raises(PropertyMismatch, match="no :property object for listing 944445"):
+        extract_property(html, "944445")
+    # No id to match (a caller that only has the page) keeps the fallback.
+    assert extract_property(html, None)["id"] in ("111111", "222222")

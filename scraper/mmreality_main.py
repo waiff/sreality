@@ -35,7 +35,9 @@ from typing import Any
 from scraper import db, portal_runner
 from scraper.location import CoordResolver
 from scraper.mmreality_client import MmRealityClient, detail_url
-from scraper.mmreality_parser import GROUP_SLUGS, index_price, live_groups, parse_detail, parse_index
+from scraper.mmreality_parser import (
+    GROUP_SLUGS, PropertyMismatch, index_price, live_groups, parse_detail, parse_index,
+)
 from scraper.portal import (
     PortalConfig,
     default_config,
@@ -308,8 +310,21 @@ class MmRealityPortal:
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
         try:
             listing = parse_detail(html, source_url=url)
+        except PropertyMismatch as exc:
+            # A 200 with the old title and only "similar" cards: the portal no
+            # longer presents this listing. Positive gone signal (rule #3).
+            LOG.info("DETAIL id=%s gone: %s", native_id, exc)
+            return DrainItem(native_id=native_id, kind="gone")
         except Exception as exc:  # noqa: BLE001
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
+        parsed_id = getattr(listing, "source_id_native", None)
+        if parsed_id and str(parsed_id) != str(native_id):
+            # Belt on top of the parser: never write another listing's data
+            # under a fetch for this one.
+            return DrainItem(
+                native_id=native_id, kind="error",
+                error=f"parsed id {parsed_id} != fetched id {native_id}",
+            )
         # Page coords win -> carry a stored geom forward -> geocode the locality
         # (never fails the fetch; scraper.location).
         listing = self._coords.fill(native_id, listing)

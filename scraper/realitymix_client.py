@@ -29,6 +29,11 @@ _GONE_MARKERS: tuple[str, ...] = (
     "tato nabídka již není",
     "inzerát byl odstraněn",
     "tato stránka neexistuje",
+    # 2026-09-07: a removed listing's URL keeps answering 200 (no redirect) with
+    # "…již není v naší databázi. Našli jsme …" and a page of substitutes; the
+    # presence checks re-fetch removed listings on purpose, so without this
+    # every one of them read as alive.
+    "již není v naší databázi",
 )
 
 

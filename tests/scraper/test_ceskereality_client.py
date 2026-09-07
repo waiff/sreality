@@ -132,3 +132,16 @@ def test_retry_exhausted_raises(monkeypatch):
     with pytest.raises(requests.HTTPError):
         c.fetch_detail(_DETAIL)
     assert len(c._session.calls) == 2
+
+
+def test_fetch_detail_archived_page_is_gone():
+    """2026-09-07: a removed listing's URL keeps answering 200 with the old H1
+    and prices inside `<section class="s-estate-archive">` plus "Nemovitost již
+    byla smazána". Presence checks re-fetch removed listings on purpose, so this
+    must read as gone, never as a live page to refresh."""
+    body = ('<html><section class="base-section s-estate-archive"><h1>Prodej byty 2+1 52 m²</h1>'
+            '<div class="overlay">Smazaná nemovitost</div><h2>Nemovitost již byla smazána</h2>'
+            '</section></html>')
+    c = _client([FakeResponse(200, body, url=_DETAIL)])
+    with pytest.raises(ListingGoneError):
+        c.fetch_detail(_DETAIL)
