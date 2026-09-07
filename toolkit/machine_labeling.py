@@ -265,6 +265,11 @@ def near_tag_candidates(
     embedded positives to have a meaningful centroid — a draw seeded on three
     images would concentrate the budget on three images' worth of the corpus.
 
+    `seed_tag_id` need not be one of `tag_ids`: a NEW head has no positives to
+    seed from, and its nearest relative's do (property lists sit among floor
+    plans). The rails still key on `tag_ids` — eligibility is about the heads
+    being LABELED, and the seed only says where to look.
+
     The statement timeout is raised for this ONE query: it is a deliberate
     analytical scan over millions of vectors, and the connection's default
     exists to stop a runaway transactional query, which this is not. The

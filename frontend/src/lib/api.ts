@@ -759,6 +759,10 @@ export interface NewDedupTag {
    * yet built) per-tag trainer — independent of Gate 1, which only says a
    * tag is LABELED enough, not reviewed. */
   ready_for_training: boolean;
+  /* Property types this head serves (byt, dum, komercni, pozemek, ostatni).
+   * Null = NOT a head: the training-set page, the heads read and the labeler
+   * all key on this. Set from the Taxonomy page. */
+  routing_categories?: string[] | null;
   created_at: string;
   /* Positive annotations for this tag — the inventory number (what a tag
    * REMOVE deletes). It is `gate_count + border_case_count`. */
@@ -872,6 +876,16 @@ export const setNewDedupTagFlags = (
     method: 'PATCH',
     json: flags,
     jwt: true,
+  });
+
+export const ROUTING_CATEGORIES = ['byt', 'dum', 'komercni', 'pozemek', 'ostatni'] as const;
+
+/* Make a tag a head (non-empty) or stop it being one (empty). */
+export const setNewDedupTagRouting = (
+  tagId: number, categories: string[],
+): Promise<{ data: NewDedupTag }> =>
+  request<{ data: NewDedupTag }>(`/new-dedup/labeling/taxonomy/${tagId}/routing`, {
+    method: 'PATCH', json: { categories }, jwt: true,
   });
 
 export const growNewDedupSample = (

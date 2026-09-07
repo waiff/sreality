@@ -121,7 +121,9 @@ def main() -> int:
                          "(CLIP centroid over a sampled slice) instead of at random. "
                          "For rare heads that a random draw cannot reach — the draw "
                          "inherits CLIP's blind spots, so use it BESIDE the random "
-                         "one, never instead of it.")
+                         "one, never instead of it. May name a head that is NOT "
+                         "being labeled: the bootstrap for a new head, seeded from "
+                         "its nearest relative (property list from půdorys).")
     ap.add_argument("--max-usd", type=float, default=1.0)
     ap.add_argument("--max-seconds", type=int, default=1500)
     ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
@@ -175,9 +177,8 @@ def main() -> int:
                       args.from_drafts)
             return 1
         if args.near_tag and args.near_tag not in tag_ids:
-            LOG.error("LABEL --near-tag %d must be one of the heads being labeled",
-                      args.near_tag)
-            return 1
+            LOG.info("LABEL --near-tag %d is not among the labeled heads: seeding a NEW "
+                     "head from a relative's positives", args.near_tag)
 
         if args.from_drafts:
             rows = ml.draft_candidates(

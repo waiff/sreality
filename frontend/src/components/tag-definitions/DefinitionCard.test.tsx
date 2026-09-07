@@ -2,7 +2,7 @@
  * assertions here are about what it must NEVER show as much as what it shows. */
 
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import DefinitionCard from './DefinitionCard';
 import type { TagHandbookCard } from '@/lib/api';
 
@@ -67,5 +67,25 @@ describe('<DefinitionCard>', () => {
     expect(
       screen.getByRole('region', { name: 'How to label interier - koupelna' }),
     ).toBeInTheDocument();
+  });
+});
+
+describe('<HeadRouting>', () => {
+  it('shows whether the tag is a head and toggles a property type', async () => {
+    const { default: HeadRouting } = await import('./HeadRouting');
+    const userEvent = (await import('@testing-library/user-event')).default;
+    const onChange = vi.fn();
+    render(
+      <HeadRouting categories={['byt']} options={['byt', 'dum', 'komercni']} saving={false} onChange={onChange} />,
+    );
+    expect(screen.getByText(/serves byt/)).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole('button', { name: 'dům' }));
+    expect(onChange).toHaveBeenCalledWith(['byt', 'dum']);
+  });
+
+  it('says "not a head" when nothing is ticked', async () => {
+    const { default: HeadRouting } = await import('./HeadRouting');
+    render(<HeadRouting categories={[]} options={['byt']} saving={false} onChange={() => {}} />);
+    expect(screen.getByText(/not a head/)).toBeInTheDocument();
   });
 });

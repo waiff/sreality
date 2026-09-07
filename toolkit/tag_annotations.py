@@ -72,14 +72,47 @@ def clean_label(label: str) -> str:
 
 # --- taxonomy -------------------------------------------------------------
 
-_TAG_COLUMNS = "id, label, family, active, priority, ready_for_training, created_at"
+_TAG_COLUMNS = ("id, label, family, active, priority, ready_for_training, created_at, "
+                "routing_categories")
+
+# The property types a head can serve (listings.category_main). Mirrors
+# tag_candidates.CATEGORY_MIX's keys — asserted equal in tests, not imported,
+# because tag_candidates imports this module.
+ROUTING_CATEGORIES = ("byt", "dum", "komercni", "pozemek", "ostatni")
 
 
 def _tag_dict(r: tuple[Any, ...]) -> dict[str, Any]:
     return {
         "id": r[0], "label": r[1], "family": r[2], "active": r[3],
         "priority": r[4], "ready_for_training": r[5], "created_at": r[6],
+        # A tag with NO routing categories is not a head: the training-set
+        # page, the heads read and the labeler all key on this column.
+        "routing_categories": list(r[7]) if len(r) > 7 and r[7] else None,
     }
+
+
+def set_routing_categories(
+    conn: psycopg.Connection, *, tag_id: int, categories: list[str] | None,
+) -> dict[str, Any]:
+    """Make a tag a head (or stop it being one). Empty/None stores NULL, which
+    is the taxonomy's "not a head" — the same column migration 457 seeded by
+    hand; this is the operator-facing way, so adding a head is a click, not a
+    migration."""
+    cleaned = list(dict.fromkeys((c or "").strip().lower() for c in (categories or [])))
+    cleaned = [c for c in cleaned if c]
+    bad = [c for c in cleaned if c not in ROUTING_CATEGORIES]
+    if bad:
+        raise ValueError(f"unknown property types {bad}; allowed: {list(ROUTING_CATEGORIES)}")
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE tag_taxonomy SET routing_categories = %s WHERE id = %s "
+            f"RETURNING {_TAG_COLUMNS}",
+            (cleaned or None, tag_id),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise KeyError(tag_id)
+    return _tag_dict(row)
 
 
 def add_tag(
@@ -591,7 +624,8 @@ _OVERVIEW_SQL = f"""
       COALESCE(p.dismissed_count, 0) AS dismissed_count,
       COALESCE(cand.candidate_count, 0) AS candidate_count,
       COALESCE(cand.candidate_open_count, 0) AS candidate_open_count,
-      cand.last_drawn_at
+      cand.last_drawn_at,
+      t.routing_categories
     FROM tag_taxonomy t
     LEFT JOIN (
       SELECT itl.tag_id,
@@ -704,6 +738,8 @@ def tag_overview(conn: psycopg.Connection) -> dict[str, Any]:
             "pending_count": r[21], "dismissed_count": r[22],
             "candidate_count": r[23], "candidate_open_count": r[24],
             "last_drawn_at": r[25],
+            # Appended LAST so no existing position shifts. Null = not a head.
+            "routing_categories": list(r[26]) if len(r) > 26 and r[26] else None,
         }
         for r in rows
     ]

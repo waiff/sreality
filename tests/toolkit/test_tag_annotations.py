@@ -76,7 +76,7 @@ def test_rename_tag_leaves_every_dependent_row_untouched(conn: _FakeConn) -> Non
     assert [sql for sql, _ in conn.executed] == [
         " ".join(
             "UPDATE tag_taxonomy SET label = %s WHERE id = %s "
-            "RETURNING id, label, family, active, priority, ready_for_training, created_at".split()
+            "RETURNING id, label, family, active, priority, ready_for_training, created_at, routing_categories".split()
         )
     ]
     assert conn.states_for(tag["id"]) == {1: "positive"}
@@ -1223,3 +1223,37 @@ def test_a_human_write_always_lands_on_a_backfill_442_cell() -> None:
         assert "ON CONFLICT (image_id, tag_id) DO UPDATE SET" in sql
         assert "WHERE excluded.source <> 'machine'" in sql
         assert "OR image_tag_labels.source IN ('machine', 'backfill_442', 'human_draft')" in sql
+
+
+def test_routing_categories_make_a_head_and_are_validated() -> None:
+    # The operator-facing form of what migration 457 seeded by hand. Empty
+    # stores NULL — "not a head" — and unknown property types are refused.
+    from toolkit import tag_annotations as ta
+    from toolkit.tag_candidates import CATEGORY_MIX
+
+    # Same set of property types; CATEGORY_MIX's order is a draw weight order.
+    assert set(CATEGORY_MIX) == set(ta.ROUTING_CATEGORIES)
+
+    class _Cur:
+        def __init__(self, row): self.row, self.calls = row, []
+        def __enter__(self): return self
+        def __exit__(self, *a): ...
+        def execute(self, sql, params=None): self.calls.append((sql, params))
+        def fetchone(self): return self.row
+
+    class _Conn:
+        def __init__(self, row): self.cur = _Cur(row)
+        def cursor(self): return self.cur
+
+    row = (45, "podklad - property list", "podklad", True, False, False, "t", ["byt", "dum"])
+    conn = _Conn(row)
+    out = ta.set_routing_categories(conn, tag_id=45, categories=["Byt", "dum", "byt", ""])
+    assert out["routing_categories"] == ["byt", "dum"]
+    assert conn.cur.calls[0][1] == (["byt", "dum"], 45)   # deduped, lower-cased, cleaned
+    ta.set_routing_categories(conn, tag_id=45, categories=[])
+    assert conn.cur.calls[1][1] == (None, 45)              # empty -> NULL -> not a head
+    import pytest
+    with pytest.raises(ValueError):
+        ta.set_routing_categories(conn, tag_id=45, categories=["garaz"])
+    with pytest.raises(KeyError):
+        ta.set_routing_categories(_Conn(None), tag_id=999, categories=["byt"])

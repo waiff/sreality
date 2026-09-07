@@ -11,6 +11,8 @@ import {
   listTagNeighbours,
   listTagPositiveImages,
   previewTagDefinitionCard,
+  ROUTING_CATEGORIES,
+  setNewDedupTagRouting,
   listTagLabelNotes,
   absorbTagLabelNotes,
   removeNewDedupTag,
@@ -40,6 +42,7 @@ import DefinitionReadOnly from '@/components/tag-definitions/DefinitionReadOnly'
 import DefinitionCard from '@/components/tag-definitions/DefinitionCard';
 import OverlapEvidence from '@/components/tag-definitions/OverlapEvidence';
 import DefinitionNotes from '@/components/tag-definitions/DefinitionNotes';
+import HeadRouting from '@/components/tag-definitions/HeadRouting';
 import TagContentsGallery, {
   type BatchFileRequest,
   type BatchFileResult,
@@ -204,6 +207,21 @@ export default function NewDedupTaxonomy() {
     queryFn: () => listTagLabelNotes(selectedTagId as number),
     enabled: selectedTagId != null,
   });
+  /* Which property types this head serves — and, by being non-empty, that it
+   * IS a head. The operator-facing form of what migration 457 seeded by hand. */
+  const routingMut = useMutation({
+    mutationFn: (vars: { tagId: number; categories: string[] }) =>
+      setNewDedupTagRouting(vars.tagId, vars.categories),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: NEW_DEDUP_OVERVIEW_KEY });
+      qc.invalidateQueries({ queryKey: ['training-set-heads'] });
+      pushToast('ok', res.data.routing_categories?.length
+        ? `Head for ${res.data.routing_categories.join(', ')}`
+        : 'No longer a head');
+    },
+    onError: (err: Error) => pushToast('err', err.message),
+  });
+
   const absorbMut = useMutation({
     mutationFn: (vars: { tagId: number; definitionId: number; noteIds: number[] }) =>
       absorbTagLabelNotes(vars.tagId, { definition_id: vars.definitionId, note_ids: vars.noteIds }),
@@ -1186,6 +1204,14 @@ export default function NewDedupTaxonomy() {
                     loading={neighboursQ.isLoading}
                     minPositives={MIN_POSITIVES_FOR_CENTROID}
                   />
+                  {selectedTag && (
+                    <HeadRouting
+                      categories={selectedTag.routing_categories ?? []}
+                      options={ROUTING_CATEGORIES}
+                      saving={routingMut.isPending}
+                      onChange={(categories) => routingMut.mutate({ tagId: selectedTag.id, categories })}
+                    />
+                  )}
                   <DefinitionNotes
                     notes={notesQ.data?.data ?? []}
                     loading={notesQ.isLoading}

@@ -144,6 +144,34 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   about context cost, not correctness) — one aggregate row per question, `md5(string_agg(...))`
   to compare a list without printing it, never a wide result set.
 
+## Runbook — adding a head (verified on `podklad - property list`, 2026-09-07)
+
+The operator's requirement: adding a head ad hoc must be a repeatable process, because the
+full dedup engine will keep needing new ones. Every step below is an existing surface or lane;
+the two gaps found while adding property list are closed in the same PR that adds this section.
+
+1. **The tag exists in the taxonomy** (Labeling page → add tag), with the `family - name` form.
+2. **Make it a head**: set its routing categories on the Taxonomy page (which property types it
+   serves — byt / dům / komerční / pozemek / ostatní). A tag with NO routing categories is not
+   a head: the training-set page, the heads read and the labeler all key on that column. *Gap
+   closed: this used to be settable only by migration (457).*
+3. **Write the definition with real exclusions.** The model treats DOES NOT COUNT as law and
+   `confusable_with` as advice (measured on fasáda: 0.60→0.95 precision). A boundary written on
+   the *neighbour's* side is invisible when THIS head is labeled alone — mirror it. Rules:
+   what the image is OF; three tiers on a space head; exclusivity on a document head;
+   `means` ≤ 500 chars, `leave_out_when` ≤ 300.
+4. **Seed candidates.** In order of yield per dollar, measured: the operator's drafts (96%),
+   a CLIP near-tag draw (41%), random (≈1% for a rare head). A NEW head has no positives to
+   seed from — seed the near-tag draw from its nearest relative (`--near-tag <relative>`;
+   property list from půdorys). *Gap closed: the seed used to have to be a labeled head.*
+5. **Label** with `label_images.yml`: dry run, then a small count, then scale. `--tags` names
+   ONLY the new head so nothing else is re-judged.
+6. **The cutoff applies automatically** (default 300, editable per head); review the in-set
+   positives on the training-set page; "Confirm the other N" per page; notes on corrections.
+7. **Optional gate.** Without an exam sitting there is no measured precision/recall for the
+   head; the operator's review IS the quality control. Say so in the ledger.
+8. **Ledger entry** here, memory note, roadmap line.
+
 ## Progress ledger (update every session, newest first)
 
 - 2026-09-05 (f) — **DINOv3 readiness build: all four PRs up, draft, CI green, per entry
