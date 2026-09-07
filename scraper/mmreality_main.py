@@ -36,7 +36,8 @@ from scraper import db, portal_runner
 from scraper.location import CoordResolver
 from scraper.mmreality_client import MmRealityClient, detail_url
 from scraper.mmreality_parser import (
-    GROUP_SLUGS, PropertyMismatch, index_price, live_groups, parse_detail, parse_index,
+    GROUP_SLUGS, NoPropertyObject, PropertyMismatch, index_price, live_groups, parse_detail,
+    parse_index,
 )
 from scraper.portal import (
     PortalConfig,
@@ -74,6 +75,10 @@ SALE_TYPE: dict[str, str] = {"prodej": "prodej", "pronajem": "pronajem"}
 # to their tail (the largest, pozemky/prodej, is ~300 pages of 12), so there is
 # no second axis; one row per category is the ledger's whole shape.
 SLICE_KEY = "national"
+
+# The site's own <title> suffix, in both encodings a body can carry it.
+_SITE_TITLE = "| M&M Reality"
+_SITE_TITLE_ESCAPED = "| M&amp;M Reality"
 
 
 class MmRealityPortal:
@@ -315,6 +320,14 @@ class MmRealityPortal:
             # longer presents this listing. Positive gone signal (rule #3).
             LOG.info("DETAIL id=%s gone: %s", native_id, exc)
             return DrainItem(native_id=native_id, kind="gone")
+        except NoPropertyObject as exc:
+            # The same page with no cards at all (removed plots, 2026-09-07):
+            # gone when it is the site's own page, an error for any other 200
+            # body (a challenge page, a blank proxy answer).
+            if _SITE_TITLE in html or _SITE_TITLE_ESCAPED in html:
+                LOG.info("DETAIL id=%s gone: %s (site page, no object)", native_id, exc)
+                return DrainItem(native_id=native_id, kind="gone")
+            return DrainItem(native_id=native_id, kind="error", error=str(exc))
         except Exception as exc:  # noqa: BLE001
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
         parsed_id = getattr(listing, "source_id_native", None)
