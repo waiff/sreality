@@ -328,3 +328,35 @@ def test_price_for_looks_up_prices_dict():
     )
     assert p.price_for("m1") == ModelPrice(1.0, 2.0)
     assert p.price_for("unknown") is None
+
+
+# --- per-model reasoning_effort, sent only alongside function tools ------------------
+
+_TOOL = ToolSchema(name="record_x", description="records x",
+                   input_schema={"type": "object", "properties": {}})
+_USER = [Message(role="user", content=[TextBlock(text="go")])]
+
+
+def test_reasoning_effort_sent_with_tools_for_a_mapped_model():
+    """gpt-5.6-luna 400s on every tool call at its default effort — 127/127 in the W2-10
+    bake-off. The map is per-model and the key rides only when tools are present."""
+    session = FakeSession([_tool_call_response("record_x", {})])
+    p = _provider(session, reasoning_effort_with_tools={"test-model": "none"})
+    p.complete(system="", messages=_USER, tools=[_TOOL], model="test-model")
+    assert session.calls[0]["json"]["reasoning_effort"] == "none"
+
+
+def test_reasoning_effort_absent_for_an_unmapped_model():
+    session = FakeSession([_tool_call_response("record_x", {})])
+    p = _provider(session, reasoning_effort_with_tools={"other-model": "none"})
+    p.complete(system="", messages=_USER, tools=[_TOOL], model="test-model")
+    assert "reasoning_effort" not in session.calls[0]["json"]
+
+
+def test_reasoning_effort_absent_without_tools_even_for_a_mapped_model():
+    """Tool-less calls keep the model's default effort: the override exists to satisfy the
+    tools-on-chat-completions constraint, not to change how the model thinks in general."""
+    session = FakeSession([_text_response("ok")])
+    p = _provider(session, reasoning_effort_with_tools={"test-model": "none"})
+    p.complete(system="", messages=_USER, tools=[], model="test-model")
+    assert "reasoning_effort" not in session.calls[0]["json"]

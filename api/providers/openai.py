@@ -77,6 +77,10 @@ class OpenAIProvider(OpenAICompatibleProvider):
             max_tokens_param="max_completion_tokens",
             api_key=api_key,
             session=session,
+            # gpt-5.6-luna refuses function tools on /v1/chat/completions at its default
+            # reasoning effort (HTTP 400, "set reasoning_effort to 'none'") — 127/127 calls
+            # in the 2026-09-07 W2-10 bake-off. Sent only when tools are present.
+            reasoning_effort_with_tools={"gpt-5.6-luna": "none"},
         )
 
     # --- async Batch API (BatchCapableProvider) -------------------------------

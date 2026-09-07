@@ -65,6 +65,7 @@ class OpenAICompatibleProvider:
         max_tokens_param: str = "max_completion_tokens",
         api_key: str | None = None,
         session: Any = None,
+        reasoning_effort_with_tools: dict[str, str] | None = None,
     ) -> None:
         self.name = name
         self._base_url = base_url.rstrip("/")
@@ -73,6 +74,11 @@ class OpenAICompatibleProvider:
         self._prices = prices
         self._max_tokens_param = max_tokens_param
         self._session = session or requests
+        # Per-model `reasoning_effort` sent ONLY when the request carries function tools.
+        # gpt-5.6-luna 400s on every tool call at its default effort ("Function tools with
+        # reasoning_effort are not supported ... set reasoning_effort to 'none'") — measured
+        # 127/127 in the W2-10 bake-off. Tool-less calls keep the model's default.
+        self._reasoning_effort_with_tools = dict(reasoning_effort_with_tools or {})
 
     def complete(
         self,
@@ -141,6 +147,9 @@ class OpenAICompatibleProvider:
                     "type": "function",
                     "function": {"name": tool_choice},
                 }
+            effort = self._reasoning_effort_with_tools.get(model)
+            if effort:
+                body["reasoning_effort"] = effort
         return body
 
     def price_for(self, model: str) -> ModelPrice | None:
