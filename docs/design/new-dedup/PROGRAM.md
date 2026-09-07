@@ -174,6 +174,37 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-07 (e) — **A link names a head and a photo, never a page number.** The duplicate audit
+  produced 36 conflicting labels to look at, and the raw R2 links handed over were useless: they
+  pointed at a stale API host from `.env` (`sreality-api`, unprovisioned — the live one is
+  `sreality-production`), and even correct they would only have shown bytes, not the row's mark,
+  its note or its tray. So `?image=<id>` on the training-set page, resolved by
+  `GET /training-set/locate` → `machine_labeling.locate_in_training_set`: the SERVER computes the
+  tray and the 0-based rank under the page's own `ORDER BY updated_at DESC, image_id DESC` AND its
+  `storage_path IS NOT NULL` join, because a rank computed against any other row set pages to a
+  different photo. The page divides by its page size, lands there, rings the tile and scrolls to it;
+  a 404 (no label on that head, or a HOLDOUT image — refused on both the row and the rank's cohort)
+  says so and leaves the page where it was. `scrollIntoView` is called optionally: jsdom lacks it,
+  and a tile the operator scrolls to themselves beats a ref callback that throws mid-commit.
+
+- 2026-09-07 (d) — **A tray and its count must ask the same question.** Migration 484 landed and
+  the backfill verified to the row (katastrální mapa 301 in set / 535 reserve, garáž 329/120 — the
+  29 over 300 are labels the operator made themself, kept wherever they rank). Two defects surfaced
+  the moment the page was used at scale, both the SAME shape as the "300/300 that would not move":
+  a control whose bookkeeping the operator cannot see. (1) `in_training` is a fact about a
+  POSITIVE — every negative is admitted and a left-out trains nothing whatever the flag says
+  (`training_rows` filters on state) — but the page filtered EVERY non-reserve tray by
+  `in_training = true`. Harmless on negatives; on left-outs the backfill never admitted one, so the
+  tray rendered 4 rows under a count of 1,064. The tray query now asks about membership only where
+  membership is a question. (2) The move affordance was offered on the negative tray, where
+  "return to reserve" un-admitted a row that NO tray counts: the photo vanished from the page and
+  the optimistic patch moved `positive` and `reserve`, neither of which was involved. Membership
+  controls now exist on Training · positive and Reserve only (`MEMBERSHIP_TRAYS`); a negative comes
+  out by re-marking it, which is what the marks are for. Also: `PAGE_MAX` 2000 → 10000 so the
+  largest tray (~10.5k negatives) is one page, and the tile opens the SHARED `ImageLightbox` — the
+  listing gallery's viewer — instead of a new browser tab, widening the training row to
+  `ImagePublic` rather than re-fetching a full image row per tile.
+
 - 2026-09-07 (c) — **Membership is STORED and the operator's alone (migration 484).** Two models
   were wrong in opposite directions and the operator named both: 474's `training_target` COMPUTED
   membership from a rank, so the boundary moved on its own and a reviewed set was never stable;

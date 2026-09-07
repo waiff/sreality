@@ -75,14 +75,88 @@ describe('<NewDedupTrainingSet> four trays over stored membership', () => {
     ));
   });
 
-  it('negative and left-out trays read their own state', async () => {
+  /* Filtering these two trays by in_training was a real bug: the backfill never
+   * admitted a left-out, so "Left out" showed 4 rows under a count of 1,064.
+   * Membership is a question about a POSITIVE only. */
+  it('negative and left-out trays read their own state, unfiltered by membership', async () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByTestId('training-tile-11');
     await user.click(screen.getByRole('button', { name: /Training · negative/ }));
-    await waitFor(() => expect(lastQuery()).toEqual(expect.objectContaining({ state: 'negative', in_training: true })));
+    await waitFor(() => expect(lastQuery()).toEqual({ tag_id: 42, state: 'negative', limit: 50, offset: 0 }));
     await user.click(screen.getByRole('button', { name: /Left out/ }));
-    await waitFor(() => expect(lastQuery()).toEqual(expect.objectContaining({ state: 'excluded', in_training: true })));
+    await waitFor(() => expect(lastQuery()).toEqual({ tag_id: 42, state: 'excluded', limit: 50, offset: 0 }));
+  });
+
+  it('offers no membership move on the negative tray — a negative comes out by re-marking', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByTestId('move-11')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Training · negative/ }));
+    await waitFor(() => expect(screen.queryByTestId('move-11')).toBeNull());
+    expect(screen.queryByTestId('move-page')).toBeNull();
+  });
+
+  it('opens the shared full-size viewer on a tile, and closes it', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await user.click(screen.getByTestId('open-11'));
+    const viewer = await screen.findByRole('dialog');
+    expect(viewer).toHaveAttribute('aria-modal', 'true');
+    await user.click(screen.getByRole('button', { name: /close/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  /* A link from outside names a head and a photo, never a page number: the
+   * server resolves which tray and which row, so the offset cannot drift from
+   * what the grid renders. */
+  describe('deep link to one photo', () => {
+    it('lands on the tray and page the server says, and rings the tile', async () => {
+      vi.mocked(api.locateTrainingImage).mockResolvedValue({
+        data: { tag_id: 42, image_id: 12, tray: 'reserve', state: 'positive',
+                in_training: false, rank: 137 },
+      });
+      renderPage(['/new-dedup/training-set?tag=42&image=12']);
+      await waitFor(() => expect(lastQuery()).toEqual(
+        { tag_id: 42, state: 'positive', in_training: false, limit: 50, offset: 100 },
+      ));
+      expect(await screen.findByTestId('deep-link-note')).toHaveTextContent('Reserve');
+      expect(screen.getByTestId('training-tile-12')).toHaveAttribute('data-linked', 'true');
+      expect(screen.getByTestId('training-tile-11')).not.toHaveAttribute('data-linked');
+    });
+
+    it('says so and stays put when the head has no label for that photo', async () => {
+      vi.mocked(api.locateTrainingImage).mockRejectedValue(new Error('404'));
+      renderPage(['/new-dedup/training-set?tag=42&image=999']);
+      expect(await screen.findByTestId('deep-link-note')).toHaveTextContent('no label on this head');
+      expect(lastQuery()).toEqual(
+        { tag_id: 42, state: 'positive', in_training: true, limit: 50, offset: 0 },
+      );
+    });
+
+    it('clears the link without moving the page', async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.locateTrainingImage).mockResolvedValue({
+        data: { tag_id: 42, image_id: 11, tray: 'positive', state: 'positive',
+                in_training: true, rank: 0 },
+      });
+      renderPage(['/new-dedup/training-set?tag=42&image=11']);
+      await screen.findByTestId('deep-link-note');
+      await user.click(screen.getByTestId('deep-link-clear'));
+      await waitFor(() => expect(screen.queryByTestId('deep-link-note')).toBeNull());
+      expect(screen.getByTestId('training-tile-11')).not.toHaveAttribute('data-linked');
+    });
+  });
+
+  it('offers a 10000-per-page step', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    await user.click(screen.getByRole('button', { name: '10000' }));
+    await waitFor(() => expect(lastQuery()).toEqual(expect.objectContaining({ limit: 10000, offset: 0 })));
   });
 
   it('has no anyone / machine / yours breakdown', async () => {

@@ -772,6 +772,21 @@ def get_training_set_heads(conn: Any = Depends(deps.get_db_conn)) -> dict[str, A
     return {"data": [{**t, **counts.get(t["id"], {})} for t in tags]}
 
 
+@router.get("/training-set/locate")
+def locate_training_image(
+    tag_id: int, image_id: int, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Where one image sits in one head's trays, so a link can name a head and a
+    photo and land on it. 404 when the head has no label for it — including when
+    the image is holdout, which the query refuses like every other training read."""
+    from toolkit import machine_labeling as ml
+
+    found = ml.locate_in_training_set(conn, tag_id=tag_id, image_id=image_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="no label for that head and image")
+    return {"data": {"tag_id": tag_id, "image_id": image_id, **found}}
+
+
 @router.get("/training-set")
 def get_training_set(
     tag_id: int, state: str | None = None, in_training: bool | None = None,
