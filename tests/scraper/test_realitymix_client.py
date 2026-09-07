@@ -124,3 +124,13 @@ def test_retry_exhausted_raises(monkeypatch):
     with pytest.raises(requests.HTTPError):
         c.fetch_detail(_DETAIL)
     assert len(c._session.calls) == 2
+
+
+def test_fetch_detail_no_longer_in_database_is_gone():
+    """2026-09-07: a removed listing's URL keeps answering 200 (no redirect) with
+    "…již není v naší databázi. Našli jsme…" and a page of substitutes. It must
+    read as gone, never as a live page to refresh."""
+    body = "<html><p>Tato nabídka již není v naší databázi. Našli jsme ale podobné nabídky.</p></html>"
+    c = _client([FakeResponse(200, body, url=_DETAIL)])
+    with pytest.raises(ListingGoneError):
+        c.fetch_detail(_DETAIL)

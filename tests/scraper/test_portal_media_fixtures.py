@@ -431,8 +431,13 @@ def test_mmreality_real_house_page_does_not_call_its_plot_an_interior_area():
     from scraper.mmreality_parser import parse_detail
 
     html = (_FIXTURES / "mmreality_detail.html").read_text(encoding="utf-8")
+    # The captured page is listing 951845 (usableArea 200, a normal house); the
+    # `totalArea`-only shape this test is about lives in the page's preview card
+    # of house 950647. The old largest-blob fallback silently parsed that card
+    # as "the listing" (the very substitution that made removed mmreality pages
+    # read as alive, 2026-09-07); now the object must be asked for by id.
     listing = parse_detail(
-        html, source_url="https://www.mmreality.cz/nemovitosti/944446/"
+        html, source_url="https://www.mmreality.cz/nemovitosti/950647/"
     )
     assert listing.category_main == "dum"
     assert listing.usable_area is None

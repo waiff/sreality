@@ -384,3 +384,24 @@ def test_mark_gone_flips_listing_inactive_native(monkeypatch):
     )
     _portal().mark_gone(object(), "944445")
     assert captured == {"source": "mmreality", "native_id": "944445"}
+
+
+def test_fetch_detail_reads_a_substitute_page_as_gone(monkeypatch):
+    """A 200 whose :property objects are all other listings is the portal's
+    gone signal in disguise; it must flip the listing, never write a
+    substitute's data (rule #3, 2026-09-07)."""
+    from scraper.mmreality_parser import PropertyMismatch
+    monkeypatch.setattr(
+        mmreality_main, "parse_detail",
+        lambda html, *, source_url: (_ for _ in ()).throw(PropertyMismatch("no object for 1")))
+    client = SimpleNamespace(fetch_detail=lambda ref: ("<html>", 200))
+    item = _portal().fetch_detail(client, "1", "https://www.mmreality.cz/nemovitosti/1/")
+    assert item.kind == "gone"
+
+
+def test_fetch_detail_refuses_another_listings_data(monkeypatch):
+    listing = SimpleNamespace(source_id_native="999", raw={})
+    monkeypatch.setattr(mmreality_main, "parse_detail", lambda html, *, source_url: listing)
+    client = SimpleNamespace(fetch_detail=lambda ref: ("<html>", 200))
+    item = _portal().fetch_detail(client, "1", None)
+    assert item.kind == "error" and "999" in (item.error or "")

@@ -73,6 +73,14 @@ _GONE_MARKERS: tuple[str, ...] = (
     "inzerát byl odstraněn",
     "nabídka již není aktivní",
     "tato nabídka již není",
+    # The archived page (2026-09-07): a removed listing's URL keeps answering
+    # 200 with its old H1 and prices inside `<section class="s-estate-archive">`,
+    # an overlay "Smazaná nemovitost" and "Nemovitost již byla smazána". Presence
+    # checks re-fetch removed listings on purpose, so without these three every
+    # archived listing read as alive and would never close.
+    "nemovitost již byla smazána",
+    "smazaná nemovitost",
+    "s-estate-archive",
 )
 
 
