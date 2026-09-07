@@ -460,3 +460,22 @@ def test_only_the_missing_column_falls_back() -> None:
 
     rows = ml.training_set_page_ranked(_NoColumn(), tag_id=17, membership="set")
     assert rows == []  # the fallback ran and found nothing, which is honest
+
+
+def test_a_new_head_may_be_seeded_from_a_relatives_positives() -> None:
+    # A head with no positives cannot seed itself. The eligibility rails key on
+    # the heads being LABELED; the seed only says where to look.
+    src = (ROOT / "scripts" / "label_images.py").read_text()
+    # --from-drafts keeps its own-head check (a draft is a guess ABOUT that
+    # head); only the near-tag seed is free to name a relative.
+    assert "--near-tag %d must be one of the heads being labeled" not in src
+    assert "--from-drafts %d must be one of the heads being labeled" in src
+    assert "seeding a NEW" in src
+    from toolkit import machine_labeling as ml
+
+    # set_config, the draw and RESET share ONE cursor, so one batch feeds all.
+    conn = _Conn([(5, "img/a.jpg")])
+    rows = ml.near_tag_candidates(conn, seed_tag_id=46, tag_ids=[45], limit=10)
+    assert rows == [(5, "img/a.jpg")]
+    params = conn.log[1][2]
+    assert params["seed_tag_id"] == 46 and params["tag_ids"] == [45]

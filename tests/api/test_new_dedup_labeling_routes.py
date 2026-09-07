@@ -1446,3 +1446,27 @@ def test_the_answer_resolves_the_same_set_as_the_question(client, monkeypatch):
     })
     assert res.status_code == 200
     assert got["tag_ids"] == [28, 20]
+
+
+def test_routing_categories_are_set_through_the_api(client, monkeypatch):
+    # Adding a head is a click, not a migration: the route validates against the
+    # known property types and NULLs the column on an empty list.
+    from toolkit import tag_annotations as ta
+
+    got: dict = {}
+    monkeypatch.setattr(ta, "set_routing_categories", lambda conn, **kw: got.update(kw) or {
+        "id": 45, "label": "podklad - property list", "family": "podklad", "active": True,
+        "priority": False, "ready_for_training": False, "created_at": "t",
+        "routing_categories": kw["categories"] or None})
+    res = client.patch("/new-dedup/labeling/taxonomy/45/routing",
+                       json={"categories": ["byt", "dum", "komercni"]})
+    assert res.status_code == 200
+    assert res.json()["data"]["routing_categories"] == ["byt", "dum", "komercni"]
+    assert got == {"tag_id": 45, "categories": ["byt", "dum", "komercni"]}
+
+    def _bad(conn, **kw):
+        raise ValueError("unknown property types ['garaz']")
+
+    monkeypatch.setattr(ta, "set_routing_categories", _bad)
+    assert client.patch("/new-dedup/labeling/taxonomy/45/routing",
+                        json={"categories": ["garaz"]}).status_code == 422

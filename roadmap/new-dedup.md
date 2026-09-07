@@ -311,6 +311,10 @@ W1 (shared prerequisites + labeling program):
       random 0.9% (garáž). Review surface `/new-dedup/training-set` + `tag_label_notes` (mig
       473) so a changed mark carries its reason into the next definition revision — distilled
       as ONE rule per batch, never one line per note.
+- [x] **Adding a head is a repeatable process (2026-09-07)** — runbook in PROGRAM.md, verified
+      on `podklad - property list` (head 13, no exam). Two gaps closed: routing categories are
+      set from the Taxonomy page (was migration-only, 457), and the CLIP draw can seed a NEW
+      head from a relative's positives (`--near-tag <relative>`).
 - [ ] **NEXT — apply 473; train the CLIP linear probe on the 12 heads; evaluate on exam_v1;**
       spend the remaining ~$19 where the probe's per-head numbers show labels actually help.
  Then choose the sampling

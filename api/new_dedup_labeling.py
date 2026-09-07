@@ -204,6 +204,27 @@ def delete_tag(tag_id: int, conn: Any = Depends(deps.get_db_conn)) -> dict[str, 
         raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
 
 
+class TagRoutingIn(BaseModel):
+    # Empty = not a head.
+    categories: list[str] = []
+
+
+@router.patch("/taxonomy/{tag_id}/routing")
+def patch_tag_routing(
+    tag_id: int, body: TagRoutingIn, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Which property types this head serves — and, by being non-empty, that it
+    IS a head. The operator-facing form of what migration 457 seeded by hand,
+    so adding a head is a click rather than a migration."""
+    try:
+        return {"data": tag_annotations.set_routing_categories(
+            conn, tag_id=tag_id, categories=body.categories)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.patch("/taxonomy/{tag_id}/flags")
 def patch_tag_flags(
     tag_id: int, body: TagFlagsIn, conn: Any = Depends(deps.get_db_conn),
