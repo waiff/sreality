@@ -981,3 +981,58 @@ def test_every_jsonb_column_param_is_bound_as_jsonb():
     assert saw_nonempty_transform, (
         "no contract exercised a non-empty transform — the regression case "
         "(bazos/sreality psc_normalise) has gone missing")
+
+
+# ------------------------------------------------------- the run() preflight (2026-09-06)
+
+def _bare_entry(reader: str | None) -> claims_intake.Entry:
+    """A minimal Entry built field-by-field, bypassing `parse_entry`: this tests the
+    preflight PREDICATE, not the contract parser, and must not depend on what the parser
+    admits for a given reader/surface pair."""
+    import dataclasses
+    values: dict[str, object] = {}
+    for f in dataclasses.fields(claims_intake.Entry):
+        if f.name == "locator":
+            values[f.name] = {"reader": reader} if reader else {}
+        elif f.name in ("transform", "guards"):
+            values[f.name] = ()
+        elif f.type in ("dict[str, Any]",):
+            values[f.name] = {}
+        elif f.name in ("id", "contract_id", "contract_version"):
+            values[f.name] = 1
+        else:
+            values[f.name] = "x"
+    return claims_intake.Entry(**values)
+
+
+def test_the_preflight_knows_every_lanes_readers_not_just_its_own():
+    """W1's `run()` preflight refuses an ACTIVE contract naming a reader nothing
+    implements. The seven shadowed W2 activations put archive-only and llm-only readers
+    on every active contract; the runtime loop SKIPS those, but the preflight compared
+    against `READERS` alone and refused first — the hourly intake was dead for all nine
+    portals from 2026-09-06 until this pin. KNOWN must be the union of the three lanes."""
+    by_source = {
+        "a": [_bare_entry("point_pair")],          # this lane's own
+        "b": [_bare_entry("html_own_text")],       # the archive lane's
+        "c": [_bare_entry("llm_location_text")],   # the free-text lane's
+        "d": [_bare_entry(None)],                  # declared, no reader yet: inert
+    }
+    assert claims_intake.unknown_readers(by_source, ["a", "b", "c", "d"]) == []
+
+
+def test_the_preflight_still_refuses_a_reader_no_lane_implements():
+    by_source = {"a": [_bare_entry("point_pair"), _bare_entry("no_such_reader")]}
+    assert claims_intake.unknown_readers(by_source, ["a"]) == ["x:no_such_reader"]
+
+
+def test_every_shipped_contract_passes_the_intake_preflight():
+    """The test that would have caught the outage: the exact production predicate over
+    the exact production contracts, off disk. Any future contract naming a reader that no
+    lane registers reds here instead of taking the hourly intake down an hour after merge."""
+    from tests.location_data.claim_intake_fixtures import entries_for
+    by_source = {s: entries_for(s) for s in SOURCES}
+    assert claims_intake.unknown_readers(by_source, list(SOURCES)) == []
+    # and the census this guards is not vacuous: the W2 wave put other-lane readers live
+    other_lane = {e.reader for es in by_source.values() for e in es
+                  if e.reader and e.reader not in READERS}
+    assert other_lane & (claims_intake.ARCHIVE_ONLY_READERS | claims_intake.LLM_ONLY_READERS)
