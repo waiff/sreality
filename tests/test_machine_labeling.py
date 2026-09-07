@@ -308,13 +308,11 @@ def test_the_page_orders_by_a_unique_tiebreaker() -> None:
     assert "ORDER BY l.updated_at DESC, l.image_id DESC" in ml._TRAINING_PAGE_SQL
 
 
-def test_the_page_refuses_a_state_or_source_it_does_not_understand() -> None:
+def test_the_page_refuses_a_state_it_does_not_understand() -> None:
     from toolkit import machine_labeling as ml
 
     with pytest.raises(ValueError):
         ml.training_set_page(_Conn([]), tag_id=22, state="maybe")
-    with pytest.raises(ValueError):
-        ml.training_set_page(_Conn([]), tag_id=22, source_class="robot")
 
 
 def test_the_page_caps_its_limit_and_floors_its_offset() -> None:
@@ -326,21 +324,36 @@ def test_the_page_caps_its_limit_and_floors_its_offset() -> None:
     assert params["limit"] == ml.PAGE_MAX == 2000 and params["offset"] == 0
 
 
-def test_counts_split_positives_by_who_decided_them() -> None:
-    # A head carried entirely by machine work reads differently from one the
-    # operator has confirmed, and the picker has to show that.
+def test_counts_are_trays_over_stored_membership() -> None:
+    # Migration 484: membership is a fact about a row, so a count is a count of
+    # rows. A positive the operator has not admitted is the RESERVE and trains
+    # nothing — their correction, after a cutoff computed membership and after
+    # removing the cutoff dumped the whole reserve into the set.
     from toolkit import machine_labeling as ml
 
-    conn = _Conn([(22, "positive", True, 400), (22, "positive", False, 20),
-                  (22, "negative", True, 5000), (22, "negative", False, 37)])
-    out = ml.training_set_counts(conn, tag_ids=[22, 25])
-    assert out[22]["positive"] == 420
-    assert out[22]["machine_positive"] == 400 and out[22]["human_positive"] == 20
-    # Negatives split the same way: only the human ones are training material,
-    # so the page's "training · negative" count is human_negative, not negative.
-    assert out[22]["negative"] == 5037
-    assert out[22]["machine_negative"] == 5000 and out[22]["human_negative"] == 37
-    assert out[25]["positive"] == 0 and out[25]["human_negative"] == 0
+    conn = _Conn([(42, "positive", True, 300), (42, "positive", False, 536),
+                  (42, "negative", True, 10009), (42, "excluded", True, 2)])
+    out = ml.training_set_counts(conn, tag_ids=[42, 2])
+    assert out[42] == {"positive": 300, "reserve": 536, "negative": 10009, "excluded": 2}
+    assert out[2] == {"positive": 0, "negative": 0, "excluded": 0, "reserve": 0}
+
+
+def test_the_trainer_reads_admitted_rows_only() -> None:
+    from toolkit import machine_labeling as ml
+
+    assert "AND l.in_training" in ml._TRAINING_ROWS_SQL
+    assert "tag_exam_cohorts hc" in ml._TRAINING_ROWS_SQL
+
+
+def test_the_page_filters_by_tray_not_by_who_wrote_it() -> None:
+    from toolkit import machine_labeling as ml
+
+    sql = ml._TRAINING_PAGE_SQL
+    assert "l.in_training = %(in_training)s::boolean" in sql
+    assert "source_class" not in sql
+    conn = _Conn([])
+    ml.training_set_page(conn, tag_id=42, state="positive", in_training=False)
+    assert conn.log[0][2]["in_training"] is False
 
 
 def test_a_label_written_under_replaced_wording_is_flagged() -> None:
@@ -348,8 +361,8 @@ def test_a_label_written_under_replaced_wording_is_flagged() -> None:
 
     import datetime as dt
     now = dt.datetime(2026, 9, 5)
-    conn = _Conn([(5, "img/a.jpg", "positive", "machine", None, now, 3, "superseded", None, None),
-                  (6, "img/b.jpg", "positive", "machine", None, now, 4, "active", None, None)])
+    conn = _Conn([(5, "img/a.jpg", "positive", "machine", None, now, 3, "superseded", None, None, True),
+                  (6, "img/b.jpg", "positive", "machine", None, now, 4, "active", None, None, False)])
     rows = ml.training_set_page(conn, tag_id=22)
     assert rows[0]["definition_stale"] is True and rows[0]["definition_version"] == 3
     assert rows[1]["definition_stale"] is False
@@ -383,7 +396,7 @@ def test_the_page_read_carries_the_note_and_no_rank() -> None:
     # Every row's membership is simply its state; there is nothing to rank.
     import datetime as dt
     conn = _Conn([(5, "img/a.jpg", "positive", "machine", None, dt.datetime(2026, 9, 7), 9,
-                   "active", 36, "front shot")])
+                   "active", 36, "front shot", True)])
     rows = ml.training_set_page(conn, tag_id=3)
     assert rows[0]["note_id"] == 36 and rows[0]["note"] == "front shot"
     assert "in_set" not in rows[0]

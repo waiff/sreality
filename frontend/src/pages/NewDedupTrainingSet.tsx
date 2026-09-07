@@ -3,14 +3,13 @@ import { useId, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
-  bulkSetNewDedupTagAnnotation,
   deleteTagLabelNote,
+  setTrainingMembership,
   editTagLabelNote,
   listTrainingSet,
   listTrainingSetHeads,
   setNewDedupTagAnnotation,
   type TagState,
-  type TrainingSetHead,
   type TrainingSetRow,
 } from '@/lib/api';
 import { imageSrc, type ImageRef } from '@/lib/imageUrl';
@@ -19,51 +18,58 @@ import ErrorBanner from '@/components/ErrorBanner';
 import ImageSizeToggle from '@/components/ImageSizeToggle';
 import { pushToast } from '@/lib/toast';
 
-/* NEW DEDUP · Training set — a head's labels, sorted into three trays.
+/* NEW DEDUP · Training set — a head's labels, in four trays.
  *
- * NO LIMITS. The operator's ruling (2026-09-07), replacing the cutoff: a
- * head's training set is every label it has. So:
- *   Training · positive — every positive, the operator's and the machine's
- *   Training · negative — every negative, likewise
- *   Left out            — every exclusion; trains nothing, grades nothing
- * A tray is one server query on one state, and the trainer reads the same
- * rows (machine_labeling.training_rows), so page and trainer cannot disagree.
- * A count on a tray is a plain count of labels, and it moves the instant a
- * mark does — patched optimistically from the click, reconciled by a refetch.
+ * MEMBERSHIP IS THE OPERATOR'S, AND IT IS STORED (migration 484). The
+ * operator's correction, after two wrong models: "I asked you to keep whatever
+ * was in the training positive set and I would move images from reserve to the
+ * training positive set as I would deem necessary."
+ *   Training · positive — what the head trains on. It changes ONLY when the
+ *                         operator changes it, so a reviewed set stays the
+ *                         size it was reviewed at.
+ *   Training · negative — what it trains on as negative.
+ *   Reserve             — positives the model proposed and the operator has
+ *                         not admitted. Trains nothing. Nothing moves out of
+ *                         here by itself; there is no rank and no target.
+ *   Left out            — the subject is there but the photo is of something
+ *                         else. Trains nothing, grades nothing.
  *
- * Moving a photo between trays writes a HUMAN label, which the store's
- * human-wins rail protects from every later machine pass; that is why the tile
- * says who decided. The bounded review survives as a filter, not a cap: "the
- * machine's" inside a tray is what still deserves a look, and "confirm the
- * rest of this page" is how a page of it becomes yours in one write.
+ * A tray is one server query, and the trainer reads the admitted rows through
+ * machine_labeling.training_rows, so page and trainer cannot disagree. Counts
+ * are counts of rows and move optimistically on every click.
+ *
+ * "Move to training" / "Return to reserve" is the one deliberate way membership
+ * changes. A machine pass PROPOSES a label (landing in reserve) and can never
+ * admit one; re-labelling never demotes an admitted row.
  *
  * THE HOLDOUT IS NOT HERE: those images grade the model.
  */
 
-type Tray = TagState;
-const TRAYS: readonly Tray[] = ['positive', 'negative', 'excluded'];
+type Tray = 'positive' | 'negative' | 'excluded' | 'reserve';
+const TRAYS: readonly Tray[] = ['positive', 'negative', 'reserve', 'excluded'];
 const TRAY_LABEL: Record<Tray, string> = {
   positive: 'Training · positive',
   negative: 'Training · negative',
+  reserve: 'Reserve',
   excluded: 'Left out',
 };
 const TRAY_TITLE: Record<Tray, string> = {
-  positive: 'Every positive for this head, yours and the machine’s. This is what a probe trains on as positive.',
-  negative: 'Every negative for this head, yours and the machine’s. This is what a probe trains on as negative.',
+  positive: 'What this head trains on as positive. It only changes when you change it.',
+  negative: 'What this head trains on as negative.',
+  reserve: 'Positives the model proposed that you have not admitted. Nothing here trains anything until you move it in.',
   excluded: 'The subject is there but the photo is of something else. Trains nothing, grades nothing.',
 };
-const TRAY_STYLE: Record<Tray, string> = {
+const STATE_STYLE: Record<TagState, string> = {
   positive: 'border-[var(--color-sage)] bg-[var(--color-sage)]/10',
   negative: 'border-[var(--color-rule)]',
   excluded: 'border-dashed border-[var(--color-copper)]',
 };
 
-type Who = 'all' | 'machine' | 'human';
-const WHO: ReadonlyArray<{ key: Who; label: string; title: string }> = [
-  { key: 'all', label: 'Anyone', title: 'Every label in this tray' },
-  { key: 'machine', label: 'The machine’s', title: 'Still on the model’s word alone — what deserves a look' },
-  { key: 'human', label: 'Yours', title: 'Your own labels; no machine pass can overwrite these' },
-];
+/* The query behind each tray. Membership is stored (migration 484), so a tray
+ * is a state plus, for positives, whether the operator has admitted it. */
+const trayQuery = (t: Tray) => t === 'reserve'
+  ? { state: 'positive' as const, in_training: false }
+  : { state: t, in_training: true };
 
 const PAGE_SIZES = [50, 100, 500, 2000] as const;
 type PageSize = (typeof PAGE_SIZES)[number];
@@ -72,17 +78,6 @@ const BULK_CAP = 200;
 
 const readTray = (raw: string | null): Tray =>
   (TRAYS as readonly string[]).includes(raw ?? '') ? (raw as Tray) : 'positive';
-const readWho = (raw: string | null): Who =>
-  raw === 'machine' || raw === 'human' ? raw : 'all';
-
-/* The exact size of what is on screen, from the head's counts. Left-outs are
- * not split by who decided, so that combination has no exact total. */
-const trayTotal = (h: TrainingSetHead | null, tray: Tray, who: Who): number | null => {
-  if (!h) return null;
-  if (tray === 'excluded') return who === 'all' ? h.excluded : null;
-  if (who === 'all') return h[tray];
-  return who === 'machine' ? h[`machine_${tray}`] : h[`human_${tray}`];
-};
 
 export default function NewDedupTrainingSet() {
   const headSelectId = useId();
@@ -98,7 +93,6 @@ export default function NewDedupTrainingSet() {
 
   const tagId = Number(params.get('tag') ?? 0) || null;
   const tray = readTray(params.get('set'));
-  const who = readWho(params.get('who'));
   const offset = Math.max(0, Number(params.get('offset') ?? 0) || 0);
   const rawN = Number(params.get('n') ?? DEFAULT_PAGE);
   const pageSize: PageSize = (PAGE_SIZES as readonly number[]).includes(rawN)
@@ -122,45 +116,28 @@ export default function NewDedupTrainingSet() {
   const activeId = tagId ?? ordered[0]?.id ?? null;
   const activeHead = ordered.find((h) => h.id === activeId) ?? null;
 
-  const rowsKey = ['training-set', activeId, tray, who, offset, pageSize];
+  const rowsKey = ['training-set', activeId, tray, offset, pageSize];
   const rowsQ = useQuery({
     queryKey: rowsKey,
-    queryFn: () => listTrainingSet({
-      tag_id: activeId as number, state: tray,
-      ...(who === 'all' ? {} : { source: who }),
-      limit: pageSize, offset,
-    }),
+    queryFn: () => listTrainingSet({ tag_id: activeId as number, ...trayQuery(tray), limit: pageSize, offset }),
     enabled: activeId != null,
   });
   const rows = rowsQ.data?.data.rows ?? [];
-  const total = trayTotal(activeHead, tray, who);
+  const total = activeHead ? activeHead[tray] : null;
   const lastOffset = total == null ? null
     : Math.max(0, Math.floor(Math.max(0, total - 1) / pageSize) * pageSize);
 
-  /* COUNTS MOVE ON THE CLICK. The head's counts are patched in the cache from
-   * the change itself (from → to, and machine → yours), so the tray numbers
-   * are right before the server answers; the heads refetch then reconciles. */
-  const bumpCounts = (moves: Array<{ from: TagState; fromMine: boolean; to: TagState }>) => {
+  /* COUNTS MOVE ON THE CLICK, in tray terms. A mark change moves a row between
+   * trays; the reserve is only ever entered or left by an explicit move. */
+  const bumpTrays = (deltas: Partial<Record<Tray, number>>) =>
     qc.setQueryData(['training-set-heads'], (old: typeof headsQ.data) => old && ({
       ...old,
-      data: old.data.map((h) => {
-        if (h.id !== activeId) return h;
-        const c = { ...h };
-        for (const m of moves) {
-          if (m.from !== m.to) {
-            c[m.from] = Math.max(0, c[m.from] - 1);
-            c[m.to] += 1;
-          }
-          if (m.from !== 'excluded') {
-            const k = `${m.fromMine ? 'human' : 'machine'}_${m.from}` as const;
-            c[k] = Math.max(0, c[k] - 1);
-          }
-          if (m.to !== 'excluded') c[`human_${m.to}` as const] += 1;
-        }
-        return c;
-      }),
+      data: old.data.map((h) => h.id !== activeId ? h : Object.entries(deltas).reduce(
+        (acc, [k, d]) => ({ ...acc, [k]: Math.max(0, acc[k as Tray] + (d as number)) }),
+        { ...h },
+      )),
     }));
-  };
+
   const patchRow = (imageId: number, fn: (r: TrainingSetRow) => TrainingSetRow) =>
     qc.setQueryData(rowsKey, (old: typeof rowsQ.data) => old && ({
       ...old, data: { ...old.data, rows: old.data.rows.map((r) => r.image_id === imageId ? fn(r) : r) },
@@ -170,12 +147,14 @@ export default function NewDedupTrainingSet() {
     mutationFn: ({ imageId, state }: { imageId: number; state: TagState; from: TagState; fromMine: boolean }) =>
       setNewDedupTagAnnotation(activeId as number, imageId, state, state === 'excluded' ? 'pruned' : null),
     onMutate: (vars) => {
-      /* Optimistic: the tile and the counts move now. A failure reverts both. */
+      /* Optimistic: the tile and the counts move now. A failure reverts both.
+       * A mark written by the operator is admitted, so a reserve row that is
+       * re-marked leaves the reserve and enters its new tray. */
       patchRow(vars.imageId, (r) => ({
-        ...r, state: vars.state, source: 'human',
+        ...r, state: vars.state, source: 'human', in_training: true,
         excluded_reason: vars.state === 'excluded' ? 'pruned' : null,
       }));
-      bumpCounts([{ from: vars.from, fromMine: vars.fromMine, to: vars.state }]);
+      bumpTrays({ [tray]: -1, [vars.state]: +1 } as Partial<Record<Tray, number>>);
     },
     onSuccess: (_res, vars) => {
       setChanged((prev) => new Map(prev).set(vars.imageId, {
@@ -184,47 +163,43 @@ export default function NewDedupTrainingSet() {
       qc.invalidateQueries({ queryKey: ['training-set-heads'] });
     },
     onError: (e: Error, vars) => {
-      patchRow(vars.imageId, (r) => ({ ...r, state: vars.from, source: vars.fromMine ? 'human' : 'machine' }));
+      patchRow(vars.imageId, (r) => ({
+        ...r, state: vars.from, source: vars.fromMine ? 'human' : 'machine',
+        in_training: tray !== 'reserve',
+      }));
       qc.invalidateQueries({ queryKey: ['training-set-heads'] });
       pushToast('err', e.message);
     },
   });
 
-  /* Confirm every machine label on this page that the operator left alone:
-   * the page becomes theirs in one write (chunked by the server's bulk cap),
-   * which is what takes it off "the machine's". */
-  const pending = rows.filter((r) => r.source === 'machine' && !changed.has(r.image_id));
-  const willConfirm = new Set(pending.map((r) => r.image_id));
-  const confirmPageMut = useMutation({
-    mutationFn: async (imageIds: number[]) => {
-      const done: number[] = [];
+  /* THE MOVE. The one deliberate way membership changes: the operator admits
+   * reserve photos to the training set, or returns admitted ones to reserve.
+   * Chunked by the server's bulk cap so a 2,000-row page works in one press. */
+  const moveMut = useMutation({
+    mutationFn: async ({ imageIds, into }: { imageIds: number[]; into: boolean }) => {
+      const moved: number[] = [];
       for (let i = 0; i < imageIds.length; i += BULK_CAP) {
-        const res = await bulkSetNewDedupTagAnnotation(
-          activeId as number, imageIds.slice(i, i + BULK_CAP), tray, tray === 'excluded' ? 'pruned' : null);
-        done.push(...res.data.image_ids);
+        const res = await setTrainingMembership(activeId as number, imageIds.slice(i, i + BULK_CAP), into);
+        moved.push(...res.data.moved);
       }
-      return done;
+      return moved;
     },
-    onSuccess: (done) => {
-      const set = new Set(done);
+    onSuccess: (moved, vars) => {
+      const set = new Set(moved);
       qc.setQueryData(rowsKey, (old: typeof rowsQ.data) => old && ({
-        ...old, data: { ...old.data, rows: old.data.rows.map((r) => set.has(r.image_id) ? { ...r, source: 'human' as const } : r) },
+        ...old, data: { ...old.data, rows: old.data.rows.map((r) => set.has(r.image_id) ? { ...r, in_training: vars.into } : r) },
       }));
-      if (tray !== 'excluded') {
-        const mk = `machine_${tray}` as const;
-        const hk = `human_${tray}` as const;
-        qc.setQueryData(['training-set-heads'], (old: typeof headsQ.data) => old && ({
-          ...old,
-          data: old.data.map((h) => h.id !== activeId ? h : {
-            ...h, [mk]: Math.max(0, h[mk] - done.length), [hk]: h[hk] + done.length,
-          }),
-        }));
-      }
+      bumpTrays(vars.into ? { reserve: -moved.length, positive: +moved.length }
+                          : { positive: -moved.length, reserve: +moved.length });
       qc.invalidateQueries({ queryKey: ['training-set-heads'] });
-      pushToast('ok', `${done.length} confirmed as yours`);
+      pushToast('ok', vars.into ? `${moved.length} moved into the training set`
+                                : `${moved.length} returned to reserve`);
     },
     onError: (e: Error) => pushToast('err', e.message),
   });
+  /* Rows a page-wide move would touch: everything still on the tray's side. */
+  const movable = rows.filter((r) => r.in_training === (tray !== 'reserve') && !changed.has(r.image_id));
+  const willMove = new Set(movable.map((r) => r.image_id));
 
   const patchRowNote = (imageId: number, note: { id: number; note: string } | null) =>
     patchRow(imageId, (r) => ({ ...r, note_id: note?.id ?? null, note: note?.note ?? null }));
@@ -273,9 +248,9 @@ export default function NewDedupTrainingSet() {
         key={r.image_id}
         data-testid={`training-tile-${r.image_id}`}
         data-state={r.state}
-        data-previewed={previewing && willConfirm.has(r.image_id) ? 'true' : undefined}
-        className={`rounded-[var(--radius-sm)] border p-1.5 flex flex-col gap-1.5 transition-opacity ${TRAY_STYLE[r.state]} ${
-          previewing ? (willConfirm.has(r.image_id)
+        data-previewed={previewing && willMove.has(r.image_id) ? 'true' : undefined}
+        className={`rounded-[var(--radius-sm)] border p-1.5 flex flex-col gap-1.5 transition-opacity ${STATE_STYLE[r.state]} ${
+          previewing ? (willMove.has(r.image_id)
             ? 'ring-2 ring-[var(--color-sage)] ring-offset-1 ring-offset-[var(--color-paper)]' : 'opacity-40') : ''
         }`}
       >
@@ -291,15 +266,15 @@ export default function NewDedupTrainingSet() {
           )}
         </div>
         <div className="flex gap-1">
-          {TRAYS.map((v) => (
+          {(['positive', 'negative', 'excluded'] as const).map((v) => (
             <button
               key={v}
               type="button"
               aria-label={`${v} ${r.image_id}`}
               aria-pressed={r.state === v}
               title={v === r.state
-                ? (mine ? `Already ${TRAY_LABEL[v]}, yours` : 'Confirm — makes this your label')
-                : `Move to ${TRAY_LABEL[v]}`}
+                ? (mine ? `Already ${TRAY_LABEL[v]}, yours` : 'Confirm — makes this your label and admits it')
+                : `Change the mark to ${TRAY_LABEL[v]}`}
               disabled={correctMut.isPending}
               onClick={() => correctMut.mutate({ imageId: r.image_id, state: v, from: r.state, fromMine: mine })}
               className={`flex-1 py-0.5 text-[0.65rem] whitespace-nowrap rounded-[var(--radius-xs)] border transition-colors ${
@@ -310,6 +285,19 @@ export default function NewDedupTrainingSet() {
             </button>
           ))}
         </div>
+        {/* One photo at a time: admit it, or send it back. */}
+        <button
+          type="button"
+          data-testid={`move-${r.image_id}`}
+          disabled={moveMut.isPending}
+          onClick={() => moveMut.mutate({ imageIds: [r.image_id], into: !r.in_training })}
+          className={`py-0.5 text-[0.65rem] rounded-[var(--radius-xs)] border ${
+            r.in_training
+              ? 'border-[var(--color-rule)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]'
+              : 'border-[var(--color-sage)] text-[var(--color-ink)] hover:bg-[var(--color-sage)]/10'}`}
+        >
+          {r.in_training ? '↩ return to reserve' : '→ move to training'}
+        </button>
         {ch && ch.to !== tray && (
           <p className="text-[0.65rem] text-[var(--color-ink-3)] leading-snug">
             Now in <b>{TRAY_LABEL[ch.to]}</b> · <b>Yours</b>. Stays here until you change tray or leave the page.
@@ -379,10 +367,11 @@ export default function NewDedupTrainingSet() {
           <div>
             <h1 className="text-lg font-medium text-[var(--color-ink)]">Training set</h1>
             <p className="text-xs text-[var(--color-ink-3)] mt-0.5 max-w-prose">
-              One head at a time, in three trays: what it will train on as positive, as negative, and what is
-              left out. Every label counts, yours and the machine&rsquo;s. Move a wrong photo with its buttons;
-              the move is yours and final, and the counts change the moment you click. The sealed exam images
-              are excluded: they grade the model, so they never appear on a training surface.
+              One head at a time, in four trays: what it trains on as positive and as negative, what waits
+              in <b>reserve</b>, and what is left out. The training set changes only when you change it &mdash;
+              nothing moves in or out on its own, so a set you have reviewed stays reviewed. The model&rsquo;s
+              new proposals land in the reserve. The sealed exam images are excluded: they grade the model,
+              so they never appear on a training surface.
             </p>
           </div>
           <ImageSizeToggle large={large} onChange={setLarge} label="Training grid image size" />
@@ -409,31 +398,12 @@ export default function NewDedupTrainingSet() {
               </button>
             ))}
           </span>
-
-          {tray !== 'excluded' && (
-            <span className="flex gap-1" role="group" aria-label="decided by">
-              {WHO.map((w) => (
-                <button key={w.key} type="button" title={w.title} aria-pressed={who === w.key}
-                  onClick={() => patch({ who: w.key === 'all' ? null : w.key, offset: null })}
-                  className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
-                    who === w.key ? 'border-[var(--color-copper)] text-[var(--color-ink)]'
-                      : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]'}`}>
-                  {w.label}
-                  {activeHead && w.key !== 'all' && (
-                    <span data-testid={`who-count-${w.key}`} className="ml-1 text-[var(--color-ink-4)] tabular-nums">
-                      {w.key === 'machine' ? activeHead[`machine_${tray}`] : activeHead[`human_${tray}`]}
-                    </span>
-                  )}
-                </button>
-              ))}
-            </span>
-          )}
         </div>
+
         {activeHead && (
           <p className="mt-2 text-xs text-[var(--color-ink-3)]" data-testid="head-summary">
-            {activeHead.positive} positives ({activeHead.human_positive} yours, {activeHead.machine_positive} the machine&rsquo;s) ·{' '}
-            {activeHead.negative} negatives ({activeHead.human_negative} yours, {activeHead.machine_negative} the machine&rsquo;s) ·{' '}
-            {activeHead.excluded} left out
+            Trains on {activeHead.positive} positives and {activeHead.negative} negatives ·{' '}
+            {activeHead.reserve} waiting in reserve · {activeHead.excluded} left out
           </p>
         )}
       </header>
@@ -442,21 +412,23 @@ export default function NewDedupTrainingSet() {
         <summary className="cursor-pointer select-none text-[var(--color-ink)]">How to use this page</summary>
         <div className="mt-2 grid gap-3 md:grid-cols-2">
           <div>
-            <p className="font-medium text-[var(--color-ink)]">The three trays</p>
+            <p className="font-medium text-[var(--color-ink)]">The four trays</p>
             <ul className="mt-0.5 list-disc pl-4 space-y-0.5">
-              <li><b>Training · positive</b> — every photo labeled as this head, by you or by the machine. A probe trains on all of them.</li>
-              <li><b>Training · negative</b> — every photo labeled as not this head. A probe trains on all of them too.</li>
+              <li><b>Training · positive</b> — what this head trains on as positive. It changes only when you change it.</li>
+              <li><b>Training · negative</b> — what it trains on as negative.</li>
+              <li><b>Reserve</b> — positives the model proposed that you have not admitted. They train nothing, and nothing leaves here by itself.</li>
               <li><b>Left out</b> — the subject is there but the photo is of something else. Trains nothing.</li>
             </ul>
-            <p className="mt-2 font-medium text-[var(--color-ink)]">Decided by</p>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">Moving photos</p>
             <p className="mt-0.5">
-              <b>The machine&rsquo;s</b> is what still deserves a look. <b>Yours</b> is what you have decided.
-              The count on each is exact and moves as you click.
+              <b>→ move to training</b> admits one reserve photo; <b>↩ return to reserve</b> takes one out. The
+              button under the grid does the whole page at once. Changing a photo&rsquo;s mark also admits it,
+              because a mark you set is a decision you have made.
             </p>
-            <p className="mt-2 font-medium text-[var(--color-ink)]">The fastest way through a tray</p>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">Growing a set</p>
             <p className="mt-0.5">
-              Show <b>the machine&rsquo;s</b>, scan the page, move the wrong ones with their buttons, then press
-              <b> Confirm the other N on this page</b>: everything you left alone becomes your label in one go.
+              Open <b>Reserve</b>, scan, and move in what you want. You never have to look at the rest: a
+              thousand unreviewed proposals sitting in reserve cost you nothing.
             </p>
           </div>
           <div>
@@ -464,8 +436,9 @@ export default function NewDedupTrainingSet() {
             <ul className="mt-0.5 list-disc pl-4 space-y-0.5">
               <li>Click the photo to open it full-size in a new tab.</li>
               <li><b>machine</b> / <b>yours</b> says who decided the current mark.</li>
+              <li><b>→ move to training</b> / <b>↩ return to reserve</b> is membership, separate from the mark.</li>
               <li><b>old wording</b> means the label was written under a definition you have since changed.</li>
-              <li><b>✓ applies</b>, <b>✕ no</b>, <b>– left out</b> move the photo between trays. Pressing the already-pressed one on a machine tile <i>confirms</i> it as yours.</li>
+              <li><b>✓ applies</b>, <b>✕ no</b>, <b>– left out</b> change the mark. Pressing the already-pressed one on a machine tile <i>confirms</i> it as yours and admits it.</li>
               <li>A moved photo stays where it is until you change tray or reload, with a line saying where it went.</li>
             </ul>
             <p className="mt-2 font-medium text-[var(--color-ink)]">Why? field</p>
@@ -489,18 +462,21 @@ export default function NewDedupTrainingSet() {
           <ul className="mt-4 grid gap-2" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${large ? '16rem' : '8rem'}, 1fr))` }}>
             {rows.map(tile)}
           </ul>
-          {pending.length > 0 && (
+          {movable.length > 0 && (
             <div className="mt-4 flex flex-col items-center gap-1">
-              <button type="button" data-testid="confirm-page" disabled={confirmPageMut.isPending}
+              <button type="button" data-testid="move-page" disabled={moveMut.isPending}
                 onMouseEnter={() => setPreviewing(true)} onMouseLeave={() => setPreviewing(false)}
                 onFocus={() => setPreviewing(true)} onBlur={() => setPreviewing(false)}
-                onClick={() => { setPreviewing(false); confirmPageMut.mutate(pending.map((r) => r.image_id)); }}
+                onClick={() => { setPreviewing(false); moveMut.mutate({ imageIds: movable.map((r) => r.image_id), into: tray === 'reserve' }); }}
                 className="px-3 py-1.5 text-xs rounded-[var(--radius-sm)] border border-[var(--color-sage)] text-[var(--color-ink)] hover:bg-[var(--color-sage)]/10 disabled:opacity-40">
-                ✓ Confirm the other {pending.length} on this page as correct
+                {tray === 'reserve'
+                  ? `→ Move all ${movable.length} on this page into the training set`
+                  : `↩ Return all ${movable.length} on this page to reserve`}
               </button>
               <p className="text-[0.7rem] text-[var(--color-ink-4)] text-center max-w-prose">
-                Move the wrong ones first, then press this: every remaining machine label on this page becomes yours.
-                Hover it to see exactly which photos it will claim.
+                {tray === 'reserve'
+                  ? 'Nothing leaves the reserve on its own. Hover to see exactly which photos this admits.'
+                  : 'Takes them out of what the head trains on. Hover to see which.'}
               </p>
             </div>
           )}

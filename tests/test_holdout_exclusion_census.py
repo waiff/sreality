@@ -78,6 +78,12 @@ _EXEMPT: dict[str, str] = {
         "training set's size. Machine cells cannot exist on exam members (the draws "
         "above forbid it), and this grades nothing.",
 
+    "_SET_MEMBERSHIP_SQL":
+        "A WRITE, not a read: the operator moving named rows between the training set "
+        "and the reserve (migration 484). It selects nothing — the image_ids come from "
+        "a page that is already holdout-excluded — and an exam member has no label row "
+        "here to move.",
+
     # --- the write path -------------------------------------------------------
     "_UPSERT_STATE_RETURNING_SQL":
         "The write. The operator's exam answers go THROUGH it — excluding the exam "

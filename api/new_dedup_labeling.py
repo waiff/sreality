@@ -204,6 +204,26 @@ def delete_tag(tag_id: int, conn: Any = Depends(deps.get_db_conn)) -> dict[str, 
         raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
 
 
+class TrainingMembershipIn(BaseModel):
+    image_ids: list[int]
+    in_training: bool
+
+
+@router.post("/tags/{tag_id}/training-membership")
+def post_training_membership(
+    tag_id: int, body: TrainingMembershipIn, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Move labels into this head's training set, or back to the reserve. The
+    only deliberate way membership changes: a machine pass proposes a label but
+    never admits one, so a reviewed set stays the size it was reviewed at."""
+    try:
+        return {"data": tag_annotations.set_training_membership(
+            conn, tag_id=tag_id, image_ids=body.image_ids,
+            in_training=body.in_training)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 class TagRoutingIn(BaseModel):
     # Empty = not a head.
     categories: list[str] = []
@@ -754,17 +774,18 @@ def get_training_set_heads(conn: Any = Depends(deps.get_db_conn)) -> dict[str, A
 
 @router.get("/training-set")
 def get_training_set(
-    tag_id: int, state: str | None = None, source: str | None = None,
+    tag_id: int, state: str | None = None, in_training: bool | None = None,
     limit: int = 60, offset: int = 0, conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
-    """One page of a head's training material — a tray is one state, optionally
-    narrowed to who decided it. The holdout is excluded here as everywhere a
-    label is treated as training material."""
+    """One page of a head's material. A tray is a state plus, for positives,
+    whether the operator has admitted it (`in_training`, migration 484): true is
+    the training set, false is the reserve. The holdout is excluded here as
+    everywhere a label is treated as training material."""
     from toolkit import machine_labeling as ml
 
     try:
         rows = ml.training_set_page(
-            conn, tag_id=tag_id, state=state, source_class=source,
+            conn, tag_id=tag_id, state=state, in_training=in_training,
             limit=limit, offset=offset,
         )
     except ValueError as exc:
