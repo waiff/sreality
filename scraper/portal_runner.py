@@ -580,11 +580,13 @@ class _GoneRateBreaker:
     flips one listing, and nothing else does -- so the one systemic failure
     left is a portal that answers EVERY page with the gone signal (a consent
     interstitial that redirects off the listing, a WAF serving 404s). Ingest
-    rows (priority >= 0) were on the index minutes ago, so among them a gone
+    rows (every other priority) were on the index minutes ago, so among them a gone
     rate near zero is normal and a majority is not the market, it is the
     portal. Once tripped for the run, gone verdicts are recorded as failures
-    (retried later) instead of flips. Presence checks (priority < 0) are NOT
-    counted: a backlog of truly dead listings legitimately reads 100% gone.
+    (retried later) instead of flips. Presence checks (QUEUE_PRIORITY_VERIFY)
+    are NOT counted: a backlog of truly dead listings legitimately reads 100%
+    gone. Everything else, the location refetch lane included, is a listing
+    the index vouched for and counts.
     """
 
     MIN_SAMPLE = 20
@@ -598,7 +600,7 @@ class _GoneRateBreaker:
         self.reason = ""
 
     def observe(self, priority: int, kind: str) -> None:
-        if priority < 0 or self.tripped:
+        if priority == db.QUEUE_PRIORITY_VERIFY or self.tripped:
             return
         self.ingest_fetched += 1
         if kind == "gone":

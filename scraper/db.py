@@ -2856,8 +2856,10 @@ QUEUE_PRIORITY_FAILURE = 2
 # page to learn whether it is gone. Served AFTER everything else (the claim order
 # is priority DESC, and 0 is "new"), so a backlog of checks can never delay a
 # brand-new listing. Negative on purpose: smallint, no CHECK, and GREATEST() on
-# re-enqueue means a row already queued as new keeps its place.
-QUEUE_PRIORITY_VERIFY = -1
+# re-enqueue means a row already queued as new keeps its place. -2, not -1:
+# -1 is the location-data refetch lane (location_data.refetch_cohort, migration
+# 384), which must keep sorting above these.
+QUEUE_PRIORITY_VERIFY = -2
 # How many given-up queue rows a walk re-arms per source (see
 # enqueue_presence_checks): 50 x 5 attempts is a bounded retry budget per walk.
 PRESENCE_REARM_PER_WALK = 50
