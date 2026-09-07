@@ -157,12 +157,15 @@ describe('<NewDedupTrainingSet> four trays over stored membership', () => {
       });
       renderPage(['/new-dedup/training-set?tag=42&set=sample']);
       await screen.findByTestId('training-tile-11');
-      expect(screen.getByTestId('tray-count-sample')).toHaveTextContent('40/1000');
+      /* The chip counts what is IN the tray, exactly like every other chip —
+       * showing `decided/drawn` here made 35/1000 read as "35 drawn". */
+      expect(screen.getByTestId('tray-count-sample')).toHaveTextContent('1000');
+      expect(screen.getByTestId('draw-controls')).toHaveTextContent('40');
 
       await user.click(screen.getByRole('button', { name: 'positive 11' }));
-      await waitFor(() => expect(screen.getByTestId('tray-count-sample')).toHaveTextContent('41/1000'));
+      await waitFor(() => expect(screen.getByTestId('draw-controls')).toHaveTextContent('41'));
       // 1000 is a list, not a tray: deciding one does not remove it.
-      expect(screen.getByTestId('tray-count-sample')).not.toHaveTextContent('999');
+      expect(screen.getByTestId('tray-count-sample')).toHaveTextContent('1000');
       expect(screen.getByTestId('training-tile-11')).toBeInTheDocument();
     });
 

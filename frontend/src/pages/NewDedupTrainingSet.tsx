@@ -526,9 +526,13 @@ export default function NewDedupTrainingSet() {
                   tray === t ? 'border-[var(--color-sage)] text-[var(--color-ink)]'
                     : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]'}`}>
                 {TRAY_LABEL[t]}
+                {/* EVERY chip is a count of what is in that tray. The sample chip
+                  * showed `decided/drawn`, and 35/1000 read as "35 drawn" — the
+                  * operator reported exactly that. Progress belongs in the line
+                  * below, which has room to name which number is which. */}
                 {activeHead && (
                   <span data-testid={`tray-count-${t}`} className="ml-1 text-[var(--color-ink-4)] tabular-nums">
-                    {t === 'sample' ? `${activeHead.sample_reviewed}/${activeHead.sample}` : activeHead[t]}
+                    {activeHead[t]}
                   </span>
                 )}
               </button>
@@ -548,8 +552,10 @@ export default function NewDedupTrainingSet() {
             {activeHead.sample > 0 ? (
               <>
                 <span className="text-[var(--color-ink-3)]">
-                  Review sample: <b className="tabular-nums">{activeHead.sample_reviewed}</b> of{' '}
-                  <b className="tabular-nums">{activeHead.sample}</b> decided.
+                  Review sample: <b className="tabular-nums">{activeHead.sample.toLocaleString()}</b> drawn
+                  at random from the {activeHead.negative.toLocaleString()} negatives ·{' '}
+                  <b className="tabular-nums">{activeHead.sample_reviewed.toLocaleString()}</b> decided ·{' '}
+                  <b className="tabular-nums">{(activeHead.sample - activeHead.sample_reviewed).toLocaleString()}</b> to go.
                 </span>
                 <button type="button" data-testid="draw-again"
                   onClick={() => {
