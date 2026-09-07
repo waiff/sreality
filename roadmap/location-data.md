@@ -19,7 +19,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 **infrastructure shipped, lane deliberately inert** (2026-08-17) — W2-0/W2-1 (#1048/#1045), W2-3 the exclusion-zone scoper (#1053), W2-4 the contract shadow mechanism (#1050, mig 404), W2-5 the permanent fixture-diff gate (#1058) and W2-2 the evidence-bearing claims + archived-HTML re-mine lane (#1079) are all merged. The lane still mines **nothing**, but the reason moved: `ARCHIVE_READERS` now holds four generic DOM readers (#1081 `html_text`/`html_attr`/`html_point_dms`, #1090 `html_point_attrs`) and **no contract entry names one**, so a run finds no executable entry and returns *before* it opens a batch row — a batch stamped `'ok'` would move the incremental watermark over a corpus it never opened. **W2-6…W2-12 is READER work, not YAML work** (see the verification table below): six portals need a JSON-pointer reader, a regex reader with capture-group spans, and splitting transforms before their contracts become one-line activations, and no contract may activate before W2-13 anyway (#1082). **W2-13 SHIPPED** — the archived-HTML sweep now has a dispatch-only workflow (`location_claims_remine_archive.yml`, in `location-batch`) and the W2 gate is readable per portal (`scripts/location_w2_gate_report.py` + its own read-only workflow); the lane also gained its own batch bounds (50-5000, default 500) and a zero-claim tripwire. **W2-6…W2-12 SHIPPED 2026-09-05 — all seven portal contracts activated and SHADOWED in one wave** (bazos@2, ceskereality@5, idnes@2, maxima@2, mmreality@2, realitymix@4, remax@3): 43 entries moved inert→executable (fleet split 69/70 → 112/47), every one on an archive-only reader, and **migration 470 closes the policy gap that would have blocked the lot** — four of the ten extraction methods had no `location_field_policy` v1 row, so their claims would have been skipped at S7 forever. **The lane is no longer inert and no longer dark-free**: it can mine, and nothing it mines reaches `location_claims_live` until the operator un-shadows each portal off the W2-13 gate report. `shadow` is header-grain, so each of the seven also parks its own already-live W1 entries meanwhile — a freeze, not a blackout, and the reason the un-shadow decision is per portal and not a wave flip. See the W2-6…W2-12 section |
 | W3 history backfill | claims from `listing_snapshots.raw_json` | ✅ **shipped 2026-08-19 — scan complete (`reached_end=true`) and all four gate arms PASS** (verify run 32223331085). **1,634,096 snapshots mined over five windows → 92,312 historical location claims + ~10.85 M observations**, terminal batch 289 / cursor 1,634,096. Note the terminal denominator against the 1,574,313 the wave opened with: `listing_snapshots` grew ~60 k rows while the scan walked it, so **`reached_end` is the only completion signal** — the same lesson W2a's backfill recorded (#1088). Unblocking it needed BOTH `location-batch` crons paused (#1100 intake, #1101 resolve), because resolve oversubscribes the group by itself — measured over eleven ticks, a run occupies it 11–27 min on a 15-min cadence, so ~1 tick in 3 completed and the rest superseded each other; both restored (#1105) the moment the scan finished. Gate arm 4 (the corpus arm) needed a lane that did not exist: `claims_remine_verify` + its own read-only workflow (#1102), then two corrections — scoping by anchor/observation rather than `extractor_version` (#1104), and **partitioning the series by contract entry (#1106), without which the gate PASSED on an artifact** (165,706 of 165,708 listings "oscillating"; the real figure is 324). See the W3 section for the measured oscillation and what it says about the program's churn premise |
 | W4 targeted refetch cohorts | sreality legacy-shape + truncated refetch, bezrealitky remainder | 🟡 **build started (2026-08-18)** — the consumer for the cohort W1 has been filling since 2026-08-12 (#1083) + its dispatch lane. **Nothing dispatched**; substrate-disjoint from W2/W3 and outside `location-batch`. See the W4 section |
-| W2-10 bazos free-text LLM lane | one structured LLM call per archived bazos body → evidence-quoted `llm_text` claims | 🟡 **lane + 3-model bake-off shipped, lane INERT** (2026-09-05) — `location_data/claims_llm.py` (LANE `location_claims_llm`, `claims_llm@1`, group `location-llm`), a THIRD reader registry (`LLM_READERS` / `claims_intake.LLM_ONLY_READERS` / `contracts.READER_CONTRACTS['llm_location_text']`, with the three shipped equalities re-scoped in the same commit), migration 470 (`called_for` += `extract_location_claims`, `location_llm_bakeoff`), `QwenProvider` registered + `PRICES` rows for gpt-5-nano / gpt-5.6-luna / qwen3.7-flash, and `scripts/location_llm_bakeoff.py` + two dispatch-only workflows. **bazos@3 SHIPPED 2026-09-05 and the lane is live-able**: the contract now names `llm_location_text` on **sixteen** entries — eight output fields (`obec_name`, `cast_obce_name`, `psc`, `street_name`, `house_number_cp/co`, `landmark`, `address_line_verbatim`) read from the ad's DESCRIPTION and the same eight from its TITLE — and **migration 472** adds the `('portal:bazos','llm_text', rank 350, min_confidence='medium', may_overwrite_non_null=false, requires_independent_agreement=FALSE)` rungs for the six of those that are survivorship fields. Two rulings are baked in: the two entry families are the two RUNGS of ONE ladder (the lane emits exactly one claim per output field per listing, description-first, title as fallback — policy cannot see `surface`, so this is an EXTRACTOR decision), and rank 350 puts the free text above every structured read on this portal because they are okres-grade (the town anchor's text is the okres; `postal_town` disagrees with the geo obec on 57.0 % of rows; the pin-derived obec is itself wrong). `requires_independent_agreement=FALSE` is a deliberate D7 relaxation: bazos free text is the only carrier for these fields, so requiring a second source makes single-source claims permanently unusable. **Still shadowed** (`shadow: true` carries forward) and the workflow is still dispatch-only — nothing runs until an operator dispatches it, and nothing it writes reaches `location_claims_live` until `--unshadow bazos@3`. Next: the bake-off, then a capped campaign |
+| W2-10 bazos free-text LLM lane | one structured LLM call per archived bazos body → evidence-quoted `llm_text` claims | 🟡 **lane + 3-model bake-off shipped, lane INERT** (2026-09-05) — `location_data/claims_llm.py` (LANE `location_claims_llm`, `claims_llm@1`, group `location-llm`), a THIRD reader registry (`LLM_READERS` / `claims_intake.LLM_ONLY_READERS` / `contracts.READER_CONTRACTS['llm_location_text']`, with the three shipped equalities re-scoped in the same commit), migration 471 (`called_for` += `extract_location_claims`, `location_llm_bakeoff`; renumbered from 470 after the activation wave took it), `QwenProvider` registered + `PRICES` rows for gpt-5-nano / gpt-5.6-luna / qwen3.7-flash, and `scripts/location_llm_bakeoff.py` + two dispatch-only workflows. **bazos@3 SHIPPED 2026-09-05 and the lane is live-able**: the contract now names `llm_location_text` on **sixteen** entries — eight output fields (`obec_name`, `cast_obce_name`, `psc`, `street_name`, `house_number_cp/co`, `landmark`, `address_line_verbatim`) read from the ad's DESCRIPTION and the same eight from its TITLE — and **migration 472** adds the `('portal:bazos','llm_text', rank 350, min_confidence='medium', may_overwrite_non_null=false, requires_independent_agreement=FALSE)` rungs for the six of those that are survivorship fields. Two rulings are baked in: the two entry families are the two RUNGS of ONE ladder (the lane emits exactly one claim per output field per listing, description-first, title as fallback — policy cannot see `surface`, so this is an EXTRACTOR decision), and rank 350 puts the free text above every structured read on this portal because they are okres-grade (the town anchor's text is the okres; `postal_town` disagrees with the geo obec on 57.0 % of rows; the pin-derived obec is itself wrong). `requires_independent_agreement=FALSE` is a deliberate D7 relaxation: bazos free text is the only carrier for these fields, so requiring a second source makes single-source claims permanently unusable. **Still shadowed** (`shadow: true` carries forward) and the workflow is still dispatch-only — nothing runs until an operator dispatches it, and nothing it writes reaches `location_claims_live` until `--unshadow bazos@3`. Next: the bake-off, then a capped campaign |
 | W5–W6 | LLM lane, serving flip | ⚪ not started |
 
 ## W0 — done
@@ -1856,3 +1856,109 @@ pairwise agreement matrix. It writes no claims. Adjudication happens outside the
 6. **the fixture-diff golden will NOT cover this lane** — `score_archived` filters on
    `ARCHIVE_READERS` and this reader is in `LLM_READERS`. `tests/location_data/test_claims_llm.py`
    is the only coverage; do not read a green golden as coverage of the free-text lane.
+
+## W2 close-out — production evidence (2026-09-05)
+
+The wave is closed as a BUILD; the shadow window is open. What actually ran against
+production the same day, so the next reader knows what is verified vs merely merged:
+
+- **Migrations 470, 471, 472 are all APPLIED** (via the Supabase MCP at each merge; the
+  migration_drift check window is clean). Mig 470's dirty enqueue was applied in id-range
+  chunks after the whole-file apply timed out — **the MCP "timeout" had COMMITTED** (the
+  known behaviour): 127,253 listings carry `reason='policy_version'`; the 25–50M id chunk
+  added zero rows, proving the whole legacy population sits in the 1–25M claim-id range.
+- **The sweep chain works end to end**: a dry-run (300 remax payloads, 600 claims, zero
+  writes) then a real bounded run — **remax 2,000 archived payloads → 4,000 claims inserted
+  into `location_claims_shadow`**, 2,000 listings enqueued, batch 457 stamped `stopped`
+  (resumable, cursor 84547, `reached_end=false`). Bodies streamed from R2 at ~2.4/s.
+- **The gate report runs** and reports honestly: seven portals at their shadowed versions,
+  seven frozen samples drawn 2026-09-05 (120 members each, 0 labelled — the O8 hand-labelling
+  is unchanged operator work). Caveat: run it with `skip_denominator=true` for now — the
+  archive-denominator sub-scan hits its statement timeout from the report's bounded
+  transaction (follow-up: budget it separately or run off-peak).
+- **A contract merged minutes before a dispatch is not yet projected**: the bake-off's first
+  dispatch refused (correctly, with instructions) because bazos@3 hadn't been through
+  `contracts --load` yet — the hourly intake's projection step is the normal path.
+
+- **INCIDENT — the activation wave took the hourly W1 intake down for ~40 hours** (every
+  scheduled run from 2026-09-06 05:01Z to 2026-09-07 16:38Z failed in 22 s with
+  `REFUSED: active contract declares readers this extractor does not implement`). Root cause:
+  `run()`'s preflight compared the ACTIVE contracts' readers against W1's own `READERS` only;
+  the seven shadowed activations put archive-only and llm-only readers on every active
+  contract, and the runtime loop that SKIPS those (whose comment names this exact failure)
+  never ran because the preflight refused first. **Fixed in #1326** (KNOWN = the union of the
+  three lanes' registries; a name in NO registry still refuses), verified by a manual dispatch
+  at 20:30Z that ran past the point every prior run died. Lag, not loss — intake is incremental
+  and re-covers its ground. Why CI missed it: the preflight runs inside `run()` against the
+  DB's active contracts, which no unit test reached and the schema-replay DB never holds;
+  the new `test_every_shipped_contract_passes_the_intake_preflight` runs the exact production
+  predicate over every shipped contract off disk. Lesson recorded: **a runtime skip and a
+  preflight are two guards; teaching one is not teaching both.**
+
+- **The 3-model bake-off ran** (run 34159568363, 127 bazos listings, seed `w2-10`, prompt
+  `bzs.loc@1`, $0.21 total; artifact `location-llm-bakeoff`). **gpt-5-nano** 127/127 —
+  quote-valid 100 %, gazetteer 74.6 %, p50 17.6 s, $0.00146/call. **qwen3.7-flash** 127/127
+  — quote-valid 96.5 %, gazetteer 74.0 %, p50 4.7 s, $0.00018/call, and **~2× the yield**
+  (street 83 vs 39, cast_obce 63 vs 19, obec 181 vs 110 raw values). **gpt-5.6-luna 0/127 in that run** — every call HTTP 400: the model refuses function tools on
+  chat-completions unless `reasoning_effort` is `'none'`, a parameter the provider never sent;
+  fixed in #1327 (per-model `reasoning_effort_with_tools`, sent only alongside tools) and
+  **re-run on the same seed (run 34163879358): 150/150**, quote-valid 96.4 %, **gazetteer
+  86.7 %** (vs ~74 % for both others), p50 **3.0 s**, $0.00070/call, $0.10 for the whole sample;
+  yields per listing on par with qwen (street 61 % vs 65 %, cast_obce 50 % vs 50 %, house
+  number 14 % vs 12 %) and ~3× the landmarks (41 % vs 14 %). Pairwise
+  nano/qwen agreement 82.1 % over 123 shared values, **100 % on street**. The 22
+  disagreements adjudicated by hand: **12 of the 15 obec conflicts are Czech grammatical
+  case** — nano copies the town as declined in the prose (Chebu, Karviné, Mladé Boleslavi,
+  Přerově, Bílině, Prahy…), qwen returns the nominative the registry needs (10 for qwen,
+  2 for nano — Hukvaldy, Praha — one both wrong: "Nová Paka"); the other three are
+  obec-vs-část confusions (Karolinka/Raťkov, Jindřichov/Hranice: nano right; Brno-město is an
+  OKRES, Zábrdovice the část: qwen right). Landmarks (5) are ungated free text — nano quotes
+  named entities, qwen longer spans. **Head-to-head, qwen vs luna, same 150 listings (run 34164730337, $0.09):** qwen 474 values,
+  quote-valid 93.5 %, gazetteer 74.0 %, p50 4.4 s, $0.00017/call; luna 536 values, 96.3 %,
+  **86.6 %**, p50 3.0 s, $0.00046/call; yields level on street (60 % vs 61 %), cast_obce,
+  house number; luna 3× the landmarks. Agreement 73.1 % over 301 shared values, street 91 %,
+  obec 67 %. **All 40 disagreements are on obec, hand-adjudicated: 26 are qwen copying the
+  inflected prose form where luna gives the nominative** (Karlových Varů → Karlovy Vary,
+  Olomouce → Olomouc, Mladé Boleslavi → Mladá Boleslav…), **7 are qwen putting a district or
+  část in the obec field** (Praha 9 – Vysočany, Zábřeh nad Odrou, Brno-Lesná) where luna
+  keeps the obec, plus registry-exact names (Lomnice, not "Lomnice u Sokolova"); qwen is
+  right in 2–3 (Přerov; Soutice over its část Černýš; perhaps Vinary). So qwen lemmatises
+  INCONSISTENTLY (it out-lemmatised nano in run 1 and under-lemmatised luna here); luna does
+  it consistently and fields the grain correctly — which is what the +12.6 points of
+  registry resolution are: correctness, not plausible guessing (a name the gazetteer cannot
+  resolve writes NO claim, so this is the metric that decides usable yield).
+  **Recommendation: gpt-5.6-luna** — best registry resolution, fastest, best quote validity,
+  3× the landmarks, 2.6× qwen's per-call cost but ~$14 for the whole bazos corpus. The
+  verdict is the operator's; the three artifacts are re-runnable for cents (150 listings, one
+  seed — luna is a two-month-old model, so PRICES and availability deserve a periodic check).
+  **Prompt follow-up regardless of model:** ask for the dictionary (nominative) form as the
+  value while quoting the verbatim inflected span as evidence — value ≠ quote is already the
+  archive readers' contract, and it removes nano's dominant failure mode. The verdict is the
+  operator's; the numbers are in the artifact.
+
+- **The catch-up after the outage exposed a second, quieter limit — fixed in #1328.** The first
+  post-fix intake ran 55 minutes of real work (260k listings, 807k claims — the backlog plus the
+  W2 fingerprint re-insert) and was cancelled at 55:15 by the job's own `timeout-minutes`, not by
+  another lane: the `--max-seconds` budget is checked BETWEEN batches, and one 20k-listing batch
+  over a dense sreality slice took 18 minutes (+300k claims, +270k observations) — the pre-W2
+  default batch size meeting post-W2 density (executable entries 69 → 112). Without a `stopped`
+  stamp the run is not resumable, so every hourly tick would have restarted from the 09-06
+  watermark and died at the same region. Scheduled defaults are now 2400 s + 10k batches
+  (worst case ~9 min inside 15 min of headroom) — **verified**: the first run under those
+  inputs (batch 459, 2026-09-07 21:35→22:16Z) walked 210,000 listings and ended via
+  `stopped` with a resumable cursor; the hourly ticks now converge on the backlog instead
+  of restarting it (its 679k observations vs 0 inserts are the re-scan of ground the
+  cancelled run had already written — the price of that cancellation, paid once). Batch 458 is a stranded `running` row — inert by
+  construction (the watermark reads `ok`, resume reads `stopped`), one more in the documented
+  phantom family. The 20:45 scheduled run never started at all: it was the pending entry in
+  `location-batch` and the 20:57 resolve tick displaced it — the standing-decisions section's
+  failure #3, verbatim, still unfixed.
+
+**The remaining path to un-shadow, per portal** (all machinery live): label the frozen sample
+on the Location Quality page → dispatch budgeted sweeps (`location_claims_remine_archive.yml`,
+`mode=incremental` after the first full pass) until `reached_end=true` → read
+`location_w2_gate_report` → `python -m location_data.contracts --unshadow <portal>@<version>`
+(re-resolves that portal's listings in the same transaction). Follow-ups recorded, unstarted:
+the ceskereality `exact`-flag harvest lane (OQ1 is answered — the bbox `map-refresh` endpoint
+works corpus-wide), the gate-report denominator timeout, PRICES verification against provider
+billing after the first live bake-off pass.
