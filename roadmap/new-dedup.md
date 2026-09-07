@@ -315,7 +315,10 @@ W1 (shared prerequisites + labeling program):
       on `podklad - property list` (head 13, no exam). Two gaps closed: routing categories are
       set from the Taxonomy page (was migration-only, 457), and the CLIP draw can seed a NEW
       head from a relative's positives (`--near-tag <relative>`).
-- [ ] **NEXT — apply 473; train the CLIP linear probe on the 12 heads; evaluate on exam_v1;**
+- [x] **Head 13 built: `podklad - property list` (2026-09-07, ~$1.80, no exam)** — 412
+      positives / 2,198 negatives from a půdorys-seeded draw, its drafts, a self-seeded draw and
+      a random slice; 300 in set awaiting review. Spend ≈ $33 of $50.
+- [ ] **NEXT — train the CLIP linear probe on the 13 heads; evaluate the 12 gated ones on exam_v1;**
       spend the remaining ~$19 where the probe's per-head numbers show labels actually help.
  Then choose the sampling
       strategy WITH those numbers: ~$47 of the $50 buys ~4-8k labeled images once, and a random

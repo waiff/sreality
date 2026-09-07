@@ -190,6 +190,19 @@ the two gaps found while adding property list are closed in the same PR that add
   positive tray. Finalisation is now the operator saying the trays are right — that, not a
   confirm count, is the gate to the first head training run.
 
+- 2026-09-07 — **Head 13, `podklad - property list`, built ad hoc in one session (~$1.80);
+  the add-a-head runbook above is what it verified.** No exam (operator's call: the taxonomy
+  suffices for the model; the operator's review is the QC — so this head has NO measured
+  precision/recall and cannot be compared on the gate). Definition rewritten to v5 with six
+  DOES NOT COUNT cases — the boundary had lived only on půdorys's side, invisible when this
+  head is labeled alone; ruling: a no-plan marketing sheet still counts. Routing set from the
+  new Taxonomy-page control (byt, dům, komerční). Draws: seeded from půdorys 800 → 182 positives
+  (23%, $0.63); its 10 drafts; seeded from its own positives 800; random 1,000 for unbiased
+  negatives. Result: **412 positives, 2,198 negatives** across 2,610 images — 300 in the set,
+  112 in reserve, all 300 awaiting the operator's review. Cost fact: a single-head prompt is a
+  fifth of the twelve-head one ($0.0008 vs $0.0023 per image) — the definitions, not the photo,
+  dominate at twelve heads. Spend ≈ $33 of $50.
+
 - 2026-09-05 (f) — **DINOv3 readiness build: all four PRs up, draft, CI green, per entry
   (b)'s directive.** #1296 (migration 480, the vector store), #1300 (the bake-off harness),
   #1298 (the production embedding job + dispatch workflow), #1297 (the per-tag heads trainer +
