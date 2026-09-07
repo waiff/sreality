@@ -19,13 +19,31 @@
 -- A machine write can propose a label but never admits it: every machine cell
 -- lands false. The operator moves rows in and out, and nothing else does.
 --
--- BACKFILL. What was in the training set at this moment must stay in it. The
--- pre-#1321 set was, per head, the ranked positives up to the target: the
--- operator's own first, then the machine's oldest-first. That exact expression
--- is replayed here, so the set the operator had reviewed is preserved to the
--- row. Negatives are admitted wholesale: nobody reviews ten thousand negatives,
--- and a wrong negative among them is noise where a wrong positive among 300 is
--- a third of a percent of label error.
+-- BACKFILL. What was in the training set at this moment must stay in it.
+--
+-- The pre-#1321 rank was `(source = 'machine') ASC, created_at ASC, image_id
+-- ASC` — the operator's labels first, then the machine's oldest-first. Its own
+-- comment claimed the cutoff "never wobbles between two reads", and that was
+-- true; it wobbled across WRITES. Confirming one reserve image made it 'human',
+-- which moved it from rank ~400 to rank ~1 and evicted whatever sat at rank 300
+-- — a photo the operator had already reviewed and accepted, silently returned
+-- to the reserve. (That is why the in-set count did not move when a reserve
+-- image was marked "applies": one in, one out.) So replaying that rank today
+-- reproduces the drift rather than the reviewed set.
+--
+-- The reconstruction therefore drops the source split and admits, per head,
+-- the union of:
+--   1. the oldest `target` positives by created_at — stable, because a later
+--      re-label cannot change when a row was created; and
+--   2. every positive the operator labeled themself, wherever it ranks —
+--      under the old expression those floated to the front, so they were in
+--      the set, and the operator promoted them on purpose.
+-- Everything past that stays in the reserve, which is the point: a bounded
+-- review, not a thousand photos.
+--
+-- Negatives are admitted wholesale: nobody reviews ten thousand negatives, and
+-- a wrong negative among them is noise where a wrong positive among 300 is a
+-- third of a percent of label error.
 
 begin;
 
@@ -37,12 +55,12 @@ comment on column image_tag_labels.in_training is
   'write always lands false (reserve). Replaces migration 474''s computed '
   'training_target, so a reviewed set stays exactly as it was reviewed.';
 
--- Positives: replay the pre-#1321 cutoff so the reviewed set survives.
+-- 1. The oldest `target` positives per head — the stable half of the old set.
 with ranked as (
   select l.image_id, l.tag_id,
          row_number() over (
            partition by l.tag_id
-           order by (l.source = 'machine') asc, l.created_at asc, l.image_id asc
+           order by l.created_at asc, l.image_id asc
          ) as set_rank
   from image_tag_labels l
   where l.state = 'positive'
@@ -62,6 +80,19 @@ update image_tag_labels l
   join targets t on t.tag_id = r.tag_id
  where l.image_id = r.image_id and l.tag_id = r.tag_id
    and r.set_rank <= t.target;
+
+-- 2. Every positive the operator labeled themself, wherever it ranks: the old
+--    expression floated these to the front, so they were in the set.
+update image_tag_labels l
+   set in_training = true
+ where l.state = 'positive'
+   and l.source in ('human', 'human_confirmed')
+   and not l.in_training
+   and not exists (
+     select 1 from tag_exam_members hx
+     join tag_exam_cohorts hc on hc.id = hx.cohort_id and hc.purpose = 'holdout'
+     where hx.image_id = l.image_id
+   );
 
 -- Negatives and left-outs: negatives all train, left-outs never do.
 update image_tag_labels set in_training = true
