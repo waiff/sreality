@@ -135,8 +135,18 @@ jobs:
           # cleanly between batches. It then stamps `stopped` (never `ok`) and the next
           # hour resumes from the keyset cursor on that batch row — the watermark does not
           # move until a scan actually reaches the end of its range.
+          # Scheduled defaults must leave the 55-minute job ceiling room for one WORST-CASE
+          # batch: the budget is checked BETWEEN batches, and after the W2 activations
+          # (69 -> 112 executable entries fleet-wide) a 20k-listing batch over a dense
+          # sreality slice measured 18 minutes (run 34159613249, 2026-09-07). At 2700 s
+          # + 20k that batch overran the ceiling and the run was CANCELLED before it could
+          # stamp a resumable `stopped` — restarting from the watermark every hour.
+          # 2400 s + 10k batches: worst case ~9 min inside 15 min of headroom.
           if [ -z "$MAX_SECONDS" ] && [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
-            ARGS="$ARGS --max-seconds 2700"
+            ARGS="$ARGS --max-seconds 2400"
+          fi
+          if [ -z "$BATCH_SIZE" ] && [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            ARGS="$ARGS --batch-size 10000"
           fi
           echo "python -m location_data.claims_intake $ARGS"
           python -m location_data.claims_intake $ARGS
