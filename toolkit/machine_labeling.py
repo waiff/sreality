@@ -391,10 +391,18 @@ _TRAINING_COUNTS_SQL = f"""
 # mandatory tiebreaker, not decoration.
 _TRAINING_PAGE_SQL = f"""
     SELECT l.image_id, i.storage_path, l.state, l.source, l.excluded_reason,
-           l.updated_at, d.version, d.status
+           l.updated_at, d.version, d.status, nt.id, nt.note
     FROM image_tag_labels l
     JOIN images i ON i.id = l.image_id AND i.storage_path IS NOT NULL
     LEFT JOIN tag_definitions d ON d.id = l.definition_id
+    LEFT JOIN LATERAL (
+      SELECT n.id, n.note
+      FROM tag_label_notes n
+      WHERE n.image_id = l.image_id AND n.tag_id = l.tag_id
+        AND n.absorbed_definition_id IS NULL
+      ORDER BY n.created_at DESC, n.id DESC
+      LIMIT 1
+    ) nt ON true
     WHERE l.tag_id = %(tag_id)s::bigint
       AND l.source = ANY(%(sources)s::text[])
       AND (%(state)s::text IS NULL OR l.state = %(state)s::text)
@@ -456,256 +464,48 @@ def training_set_page(
                 # not wrong, but it describes a rule the operator has changed —
                 # the one fact a reviewer needs and cannot see in the photo.
                 "definition_stale": (r[7] is not None and r[7] != "active"),
+                "note_id": int(r[8]) if r[8] is not None else None,
+                "note": r[9],
             }
             for r in cur.fetchall()
         ]
 
 
-# --- the cutoff: what "the training set" means ------------------------------
+# --- what "the training set" means: every label, no limits ------------------
 #
-# fasáda has 1,149 positives; nobody reviews 1,149 photos, and a linear probe
-# on frozen CLIP features stops improving well before that. So each head has a
-# TARGET (tag_taxonomy.training_target, migration 474; NULL = the default
-# below), and its set is DEFINED AS A QUERY over the ranked positives:
-#
-#   the operator's own positives first (confirmed), then the machine's
-#   oldest-first, up to the target. Past the target is the RESERVE.
-#
-# Because it is a query, removing a wrong positive pulls the first reserve image
-# into the set with no bookkeeping, and the review stays a bounded job: the
-# machine positives inside the cutoff are exactly the ones worth a look.
-#
-# 300: a per-class count past which a logistic probe on 512/768-dim frozen
-# features shows little further gain in our own and the published CLIP
-# linear-probe results; heads with fewer simply have everything in the set.
-DEFAULT_TRAINING_TARGET = 300
-TRAINING_TARGET_MAX = 5000
-# The review page may ask for up to a whole head's set at once (the operator
-# chose 50 / 100 / 500 / 2000 steps); the query is indexed and bounded, and
-# the images lazy-load, so the cost is the DOM, which is the operator's call.
+# The operator's ruling (2026-09-07), replacing the cutoff/reserve model: a
+# head's training set is EVERY positive and EVERY negative labeled for it,
+# the operator's and the machine's alike, minus the holdout. No target, no
+# ranking, no reserve. What the page shows in a tray is exactly what a trainer
+# reads through `training_rows` — one door, so the two cannot disagree — and a
+# count on the page is a plain count of labels, which moves the moment a mark
+# does.
 PAGE_MAX = 2000
 
-# `(l.source = 'machine') ASC` puts the operator's labels (false) first.
-# created_at then image_id makes the order total, so the cutoff never wobbles
-# between two reads and "position 300" means the same image every time.
-_RANKED_POSITIVES_CTE = f"""
-    ranked AS (
-      SELECT l.tag_id, l.image_id, l.source,
-             row_number() OVER (
-               PARTITION BY l.tag_id
-               ORDER BY (l.source = 'machine') ASC, l.created_at ASC, l.image_id ASC
-             ) AS set_rank
-      FROM image_tag_labels l
-      WHERE l.tag_id = ANY(%(tag_ids)s::bigint[])
-        AND l.state = 'positive'
-        AND l.source = ANY(%(sources)s::text[])
-        {exclusion_for("l")}
-    ),
-    targets AS (
-      SELECT t.id AS tag_id,
-             coalesce(t.training_target, %(default_target)s::int) AS target
-      FROM tag_taxonomy t
-      WHERE t.id = ANY(%(tag_ids)s::bigint[])
-    )
-"""
-
-_SET_SUMMARY_SQL = f"""
-    WITH {_RANKED_POSITIVES_CTE}
-    SELECT tg.tag_id, tg.target,
-           count(r.image_id) FILTER (WHERE r.set_rank <= tg.target)::int AS in_set,
-           count(r.image_id) FILTER (WHERE r.set_rank >  tg.target)::int AS reserve,
-           count(r.image_id) FILTER (WHERE r.set_rank <= tg.target
-                                      AND r.source = 'machine')::int AS in_set_unreviewed
-    FROM targets tg
-    LEFT JOIN ranked r ON r.tag_id = tg.tag_id
-    GROUP BY tg.tag_id, tg.target
-"""
-
-# The page read with membership. Only positives have a rank; a non-positive
-# row's in_set is false and a membership filter leaves it out.
-_TRAINING_PAGE_RANKED_SQL = f"""
-    WITH {_RANKED_POSITIVES_CTE}
-    SELECT l.image_id, i.storage_path, l.state, l.source, l.excluded_reason,
-           l.updated_at, d.version, d.status,
-           r.set_rank, (r.set_rank IS NOT NULL AND r.set_rank <= tg.target) AS in_set,
-           nt.id, nt.note
+_TRAINING_ROWS_SQL = f"""
+    SELECT l.image_id, l.state
     FROM image_tag_labels l
-    JOIN images i ON i.id = l.image_id AND i.storage_path IS NOT NULL
-    JOIN targets tg ON tg.tag_id = l.tag_id
-    LEFT JOIN tag_definitions d ON d.id = l.definition_id
-    LEFT JOIN ranked r ON r.tag_id = l.tag_id AND r.image_id = l.image_id
-    LEFT JOIN LATERAL (
-      SELECT n.id, n.note
-      FROM tag_label_notes n
-      WHERE n.image_id = l.image_id AND n.tag_id = l.tag_id
-        AND n.absorbed_definition_id IS NULL
-      ORDER BY n.created_at DESC, n.id DESC
-      LIMIT 1
-    ) nt ON true
     WHERE l.tag_id = %(tag_id)s::bigint
+      AND l.state = ANY(%(states)s::text[])
       AND l.source = ANY(%(sources)s::text[])
-      AND (%(state)s::text IS NULL OR l.state = %(state)s::text)
-      AND (%(source_class)s::text IS NULL
-           OR (%(source_class)s::text = 'machine' AND l.source = 'machine')
-           OR (%(source_class)s::text = 'human' AND l.source <> 'machine'))
-      AND (%(membership)s::text IS NULL
-           OR (%(membership)s::text = 'set' AND r.set_rank <= tg.target)
-           OR (%(membership)s::text = 'reserve' AND r.set_rank > tg.target))
       {exclusion_for("l")}
-    ORDER BY r.set_rank ASC NULLS LAST, l.updated_at DESC, l.image_id DESC
-    LIMIT %(limit)s OFFSET %(offset)s
-"""
-
-_SET_TARGET_SQL = """
-    UPDATE tag_taxonomy SET training_target = %(target)s
-    WHERE id = %(tag_id)s
-    RETURNING id, coalesce(training_target, %(default_target)s::int)
+    ORDER BY l.image_id
 """
 
 
-def _tolerating_474(fn: Any, *, fallback: Any) -> Any:
-    """Merge is not apply: 474 adds the column these reads coalesce over. Until
-    it is applied, every head simply has the default target."""
-    try:
-        return fn()
-    except psycopg.errors.UndefinedColumn:
-        LOG.warning("tag_taxonomy.training_target is absent — migration 474 not applied yet")
-        return fallback
-
-
-def set_summary(
-    conn: psycopg.Connection, *, tag_ids: list[int],
-    default_target: int = DEFAULT_TRAINING_TARGET,
-) -> dict[int, dict[str, int]]:
-    """Per head: target, how many positives are IN the set, how many wait in
-    reserve, and how many in-set positives are still the machine's word alone."""
-    empty = {"target": default_target, "in_set": 0, "reserve": 0, "in_set_unreviewed": 0,
-             "cutoff_available": True}
-
-    def _run() -> dict[int, dict[str, int]]:
-        out = {int(t): dict(empty) for t in tag_ids}
-        with conn.cursor() as cur:
-            cur.execute(_SET_SUMMARY_SQL, {
-                "tag_ids": list(tag_ids), "sources": list(TRAINING_SOURCES),
-                "default_target": int(default_target)})
-            for tag_id, target, in_set, reserve, unreviewed in cur.fetchall():
-                out[int(tag_id)] = {"target": int(target), "in_set": int(in_set),
-                                    "reserve": int(reserve),
-                                    "in_set_unreviewed": int(unreviewed),
-                                    "cutoff_available": True}
-        return out
-
-    # Without the column there IS no cutoff — say so, rather than reporting a
-    # confident 0/300. Measured live: the summary said 0 in set while the tile
-    # said "in set", because two fallbacks each guessed differently.
-    return _tolerating_474(
-        _run, fallback={int(t): {**empty, "cutoff_available": False} for t in tag_ids})
-
-
-def training_set_page_ranked(
-    conn: psycopg.Connection, *, tag_id: int, state: str | None = None,
-    source_class: str | None = None, membership: str | None = None,
-    limit: int = 60, offset: int = 0,
-    default_target: int = DEFAULT_TRAINING_TARGET,
-) -> list[dict[str, Any]]:
-    """`training_set_page` plus the cutoff: each row says whether it is in the
-    set and at what rank, and `membership` narrows to 'set' or 'reserve'."""
-    if state is not None and state not in ("positive", "negative", "excluded"):
-        raise ValueError(f"state must be positive/negative/excluded, got {state!r}")
-    if source_class is not None and source_class not in ("machine", "human"):
-        raise ValueError(f"source must be machine/human, got {source_class!r}")
-    if membership is not None and membership not in ("set", "reserve"):
-        raise ValueError(f"membership must be set/reserve, got {membership!r}")
-    params = {
-        "tag_id": int(tag_id), "tag_ids": [int(tag_id)],
-        "sources": list(TRAINING_SOURCES), "state": state,
-        "source_class": source_class, "membership": membership,
-        "limit": max(1, min(int(limit), PAGE_MAX)), "offset": max(0, int(offset)),
-        "default_target": int(default_target),
-    }
-
-    def _run() -> list[dict[str, Any]]:
-        with conn.cursor() as cur:
-            cur.execute(_TRAINING_PAGE_RANKED_SQL, params)
-            return [
-                {
-                    "image_id": int(r[0]), "storage_path": r[1], "state": r[2],
-                    "source": r[3], "excluded_reason": r[4],
-                    "updated_at": r[5].isoformat() if r[5] else None,
-                    "definition_version": int(r[6]) if r[6] is not None else None,
-                    "definition_stale": (r[7] is not None and r[7] != "active"),
-                    "set_rank": int(r[8]) if r[8] is not None else None,
-                    "in_set": bool(r[9]),
-                    "note_id": int(r[10]) if r[10] is not None else None,
-                    "note": r[11],
-                }
-                for r in cur.fetchall()
-            ]
-
-    def _fallback() -> list[dict[str, Any]]:
-        # No cutoff exists yet, so membership is UNKNOWN — None, never a guess.
-        rows = training_set_page(conn, tag_id=tag_id, state=state,
-                                 source_class=source_class, limit=limit, offset=offset)
-        for row in rows:
-            row["set_rank"] = None
-            row["in_set"] = None
-            row.setdefault("note_id", None)
-            row.setdefault("note", None)
-        return rows
-
-    # `_run() or _fallback()` was wrong and quietly so: an EMPTY result is
-    # falsy, so any filter combination that legitimately matches nothing — "in
-    # the set" AND "does not apply", a head with no reserve, a page past the
-    # end — fell through to the pre-474 path, which ignores the membership
-    # filter entirely and returned unranked rows. Only the missing COLUMN may
-    # trigger the fallback, so the exception is the only signal.
-    try:
-        return _run()
-    except psycopg.errors.UndefinedColumn:
-        LOG.warning("tag_taxonomy.training_target is absent — migration 474 not applied yet")
-        return _fallback()
-
-
-def set_training_target(
-    conn: psycopg.Connection, *, tag_id: int, target: int | None,
-    default_target: int = DEFAULT_TRAINING_TARGET,
-) -> dict[str, Any]:
-    """The operator's per-head override; None restores the default."""
-    if target is not None and not (1 <= int(target) <= TRAINING_TARGET_MAX):
-        raise ValueError(f"target must be between 1 and {TRAINING_TARGET_MAX}")
-    with conn.cursor() as cur:
-        cur.execute(_SET_TARGET_SQL, {
-            "tag_id": int(tag_id), "target": None if target is None else int(target),
-            "default_target": int(default_target)})
-        row = cur.fetchone()
-    if row is None:
-        raise KeyError(tag_id)
-    return {"tag_id": int(row[0]), "target": int(row[1]), "is_default": target is None}
-
-
-# What a trainer reads: the SET's positives — human first, machine up to the
-# target — never the reserve. This is the second sanctioned door beside
-# tag_holdout.training_label_rows, which reads human labels only; a probe that
-# wants the machine's material comes through here and gets exactly the set the
-# review page shows, so what was reviewed and what is trained on are one list.
-_SET_POSITIVE_IDS_SQL = f"""
-    WITH {_RANKED_POSITIVES_CTE}
-    SELECT r.image_id
-    FROM ranked r JOIN targets tg ON tg.tag_id = r.tag_id
-    WHERE r.set_rank <= tg.target
-    ORDER BY r.set_rank
-"""
-
-
-def training_set_positive_ids(
+def training_rows(
     conn: psycopg.Connection, *, tag_id: int,
-    default_target: int = DEFAULT_TRAINING_TARGET,
-) -> list[int]:
-    def _run() -> list[int]:
-        with conn.cursor() as cur:
-            cur.execute(_SET_POSITIVE_IDS_SQL, {
-                "tag_ids": [int(tag_id)], "sources": list(TRAINING_SOURCES),
-                "default_target": int(default_target)})
-            return [int(r[0]) for r in cur.fetchall()]
-
-    return _tolerating_474(_run, fallback=[])
+    states: tuple[str, ...] = ("positive", "negative"),
+) -> list[tuple[int, str]]:
+    """Every (image_id, state) a probe for this head trains on: all positives
+    and all negatives, human and machine, holdout excluded. Left-outs are not
+    a training state. The second sanctioned door beside
+    tag_holdout.training_label_rows (which reads human labels only)."""
+    bad = [x for x in states if x not in ("positive", "negative")]
+    if bad:
+        raise ValueError(f"not trainable states: {bad}")
+    with conn.cursor() as cur:
+        cur.execute(_TRAINING_ROWS_SQL, {
+            "tag_id": int(tag_id), "states": list(states),
+            "sources": list(TRAINING_SOURCES)})
+        return [(int(r[0]), str(r[1])) for r in cur.fetchall()]

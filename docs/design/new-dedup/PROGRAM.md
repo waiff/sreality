@@ -174,6 +174,22 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-07 (b) — **No limits: a head's training set is every label it has (operator ruling,
+  replacing the cutoff).** The operator confirmed a reserve photo on katastrální mapa and saw
+  "300/300" unchanged — correct under a capped set (the confirmation swapped it in and pushed
+  the last machine positive out), and precisely the kind of invisible bookkeeping they did not
+  want: "I do not need the limits anymore, just make sure counts are up to date and react
+  instantly." So: no target, no ranking, no reserve. **Training · positive = every positive,
+  Training · negative = every negative — the operator's and the machine's — Left out = every
+  exclusion**; a count is a plain count of labels and moves optimistically on every click. ONE
+  trainer door, `machine_labeling.training_rows` (positives + negatives, human + machine,
+  holdout excluded) — the trays read the same rows, so page and trainer cannot disagree. This
+  also overrides the four-tray redesign's choice that only HUMAN negatives train: the machine's
+  ~10k negatives per head ARE training material now (the operator asked for the actual count).
+  The bounded review survives as a filter, not a cap: "the machine's" within a tray. Migration
+  474's `training_target` column is now unused — dead schema to prune in a forward migration
+  when the operator OKs a destructive change; it is harmless meanwhile.
+
 - 2026-09-07 — **`/new-dedup/training-set` reduced to four trays (operator ruling: "the
   filters are too difficult").** The three composable filter groups (cutoff × verdict ×
   decided-by), the "To review" preset and the per-page "Confirm the other N" bulk-confirm are
