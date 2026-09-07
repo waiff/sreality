@@ -319,9 +319,14 @@ def test_the_page_caps_its_limit_and_floors_its_offset() -> None:
     from toolkit import machine_labeling as ml
 
     conn = _Conn([])
-    ml.training_set_page(conn, tag_id=22, limit=10_000, offset=-5)
+    ml.training_set_page(conn, tag_id=22, limit=50_000, offset=-5)
     params = conn.log[0][2]
-    assert params["limit"] == ml.PAGE_MAX == 2000 and params["offset"] == 0
+    assert params["limit"] == ml.PAGE_MAX == 10_000 and params["offset"] == 0
+    # 10,000 is a page the operator can ask for, not a value the cap eats: the
+    # largest tray (a head's ~10.5k negatives) fits in one.
+    conn = _Conn([])
+    ml.training_set_page(conn, tag_id=22, limit=10_000)
+    assert conn.log[0][2]["limit"] == 10_000
 
 
 def test_counts_are_trays_over_stored_membership() -> None:

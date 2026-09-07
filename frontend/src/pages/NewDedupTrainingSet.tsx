@@ -13,6 +13,8 @@ import {
   type TrainingSetRow,
 } from '@/lib/api';
 import { imageSrc, type ImageRef } from '@/lib/imageUrl';
+import ImageLightbox from '@/components/ImageLightbox';
+import type { ImagePublic } from '@/lib/types';
 import Spinner from '@/components/Spinner';
 import ErrorBanner from '@/components/ErrorBanner';
 import ImageSizeToggle from '@/components/ImageSizeToggle';
@@ -65,13 +67,29 @@ const STATE_STYLE: Record<TagState, string> = {
   excluded: 'border-dashed border-[var(--color-copper)]',
 };
 
-/* The query behind each tray. Membership is stored (migration 484), so a tray
- * is a state plus, for positives, whether the operator has admitted it. */
-const trayQuery = (t: Tray) => t === 'reserve'
-  ? { state: 'positive' as const, in_training: false }
-  : { state: t, in_training: true };
+/* The query behind each tray. Membership is stored (migration 484) and it is a
+ * fact about a POSITIVE: admitted ones train, the rest wait in reserve.
+ *
+ * Negatives and left-outs are NOT filtered by the flag, and asking for
+ * `in_training: true` on them was a real bug — every negative is admitted so
+ * the filter was merely redundant there, but the backfill never admitted a
+ * left-out, so "Left out" rendered 4 rows under a count of 1,064. A count and
+ * its tray must be the same question; only the positive/reserve split asks
+ * about membership at all. */
+const trayQuery = (t: Tray) => {
+  if (t === 'reserve') return { state: 'positive' as const, in_training: false };
+  if (t === 'positive') return { state: 'positive' as const, in_training: true };
+  return { state: t };
+};
 
-const PAGE_SIZES = [50, 100, 500, 2000] as const;
+/* Membership is only a question for positives, so the move affordance exists
+ * only where it means something. On the negative tray it did not: returning a
+ * negative to "reserve" un-admitted a row that no tray counts, so it vanished
+ * from the page with the counts moving the wrong column. Take a negative out by
+ * re-marking it, which is what the marks are for. */
+const MEMBERSHIP_TRAYS: readonly Tray[] = ['positive', 'reserve'];
+
+const PAGE_SIZES = [50, 100, 500, 2000, 10000] as const;
 type PageSize = (typeof PAGE_SIZES)[number];
 const DEFAULT_PAGE: PageSize = 50;
 const BULK_CAP = 200;
@@ -90,6 +108,9 @@ export default function NewDedupTrainingSet() {
   const [drafts, setDrafts] = useState<Map<number, string>>(new Map());
   const [editingNote, setEditingNote] = useState<Set<number>>(new Set());
   const [previewing, setPreviewing] = useState(false);
+  /* Position in THIS page's rows, or null when the viewer is shut. The shared
+   * ImageLightbox walks the grid from there with the arrow keys. */
+  const [lightboxAt, setLightboxAt] = useState<number | null>(null);
 
   const tagId = Number(params.get('tag') ?? 0) || null;
   const tray = readTray(params.get('set'));
@@ -197,9 +218,38 @@ export default function NewDedupTrainingSet() {
     },
     onError: (e: Error) => pushToast('err', e.message),
   });
-  /* Rows a page-wide move would touch: everything still on the tray's side. */
-  const movable = rows.filter((r) => r.in_training === (tray !== 'reserve') && !changed.has(r.image_id));
+  /* Rows a page-wide move would touch: everything still on the tray's side.
+   * Empty outside the two trays where membership is a question at all. */
+  const canMove = (MEMBERSHIP_TRAYS as readonly string[]).includes(tray);
+  const movable = canMove
+    ? rows.filter((r) => r.in_training === (tray !== 'reserve') && !changed.has(r.image_id))
+    : [];
   const willMove = new Set(movable.map((r) => r.image_id));
+
+  /* The enlarged photo is the SHARED viewer (components/ImageLightbox) — the
+   * same one the listing gallery and the labeling grids open, so arrow-key
+   * walking, Escape layering, the focus trap and the scroll lock behave here
+   * exactly as they do there. It takes ImagePublic rows; a training row already
+   * carries the only two fields imageSrc reads, and the badges the viewer draws
+   * self-guard on null, so the row is widened rather than re-fetched — at
+   * 10,000 tiles a page, fetching a full image row per tile would be the
+   * expensive way to show the same photo. `sreality_id` and `sequence` are not
+   * on a training row and nothing here reads them. */
+  const galleryImages: ImagePublic[] = useMemo(
+    () => rows.map((r) => ({
+      id: r.image_id,
+      sreality_id: 0,
+      sequence: null,
+      sreality_url: '',
+      storage_path: r.storage_path,
+      clip_fine_tag: null,
+      clip_logical_tag: null,
+      clip_confidence: null,
+      clip_render_score: null,
+      phash: null,
+    })),
+    [rows],
+  );
 
   const patchRowNote = (imageId: number, note: { id: number; note: string } | null) =>
     patchRow(imageId, (r) => ({ ...r, note_id: note?.id ?? null, note: note?.note ?? null }));
@@ -239,7 +289,7 @@ export default function NewDedupTrainingSet() {
   if (headsQ.isLoading) return <div className="p-6"><Spinner /></div>;
   if (headsQ.error) return <div className="p-6"><ErrorBanner message={(headsQ.error as Error).message} /></div>;
 
-  const tile = (r: TrainingSetRow) => {
+  const tile = (r: TrainingSetRow, idx: number) => {
     const mine = r.source !== 'machine';
     const ref: ImageRef = { storage_path: r.storage_path, sreality_url: '' };
     const ch = changed.get(r.image_id);
@@ -254,11 +304,15 @@ export default function NewDedupTrainingSet() {
             ? 'ring-2 ring-[var(--color-sage)] ring-offset-1 ring-offset-[var(--color-paper)]' : 'opacity-40') : ''
         }`}
       >
-        <a href={imageSrc(ref)} target="_blank" rel="noreferrer" title="Open the full-size photo in a new tab"
-           className={`block bg-[var(--color-paper-2)] rounded-[var(--radius-xs)] ${large ? 'h-56' : 'h-28'}`}>
+        <button
+          type="button"
+          data-testid={`open-${r.image_id}`}
+          title="Open the photo large. Arrow keys walk the page; Escape closes."
+          onClick={() => setLightboxAt(idx)}
+          className={`block w-full bg-[var(--color-paper-2)] rounded-[var(--radius-xs)] ${large ? 'h-56' : 'h-28'}`}>
           <img src={imageSrc(ref)} alt={`Training image ${r.image_id}`} loading="lazy"
                className="w-full h-full object-contain rounded-[var(--radius-xs)]" />
-        </a>
+        </button>
         <div className="flex items-center gap-1 text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)]">
           <span title={mine ? 'Your label — no machine pass can overwrite it' : 'Written by the model'}>{mine ? 'yours' : 'machine'}</span>
           {r.definition_stale && (
@@ -285,7 +339,9 @@ export default function NewDedupTrainingSet() {
             </button>
           ))}
         </div>
-        {/* One photo at a time: admit it, or send it back. */}
+        {/* One photo at a time: admit it, or send it back. Only on the two
+          * trays where membership means anything — see MEMBERSHIP_TRAYS. */}
+        {canMove && (
         <button
           type="button"
           data-testid={`move-${r.image_id}`}
@@ -298,6 +354,7 @@ export default function NewDedupTrainingSet() {
         >
           {r.in_training ? '↩ return to reserve' : '→ move to training'}
         </button>
+        )}
         {ch && ch.to !== tray && (
           <p className="text-[0.65rem] text-[var(--color-ink-3)] leading-snug">
             Now in <b>{TRAY_LABEL[ch.to]}</b> · <b>Yours</b>. Stays here until you change tray or leave the page.
@@ -423,7 +480,9 @@ export default function NewDedupTrainingSet() {
             <p className="mt-0.5">
               <b>→ move to training</b> admits one reserve photo; <b>↩ return to reserve</b> takes one out. The
               button under the grid does the whole page at once. Changing a photo&rsquo;s mark also admits it,
-              because a mark you set is a decision you have made.
+              because a mark you set is a decision you have made. These appear only on <b>Training &middot; positive</b>
+              and <b>Reserve</b>: every negative trains, and a left-out trains nothing, so there is nothing to admit
+              on those two trays. Take a negative out by re-marking it.
             </p>
             <p className="mt-2 font-medium text-[var(--color-ink)]">Growing a set</p>
             <p className="mt-0.5">
@@ -434,9 +493,9 @@ export default function NewDedupTrainingSet() {
           <div>
             <p className="font-medium text-[var(--color-ink)]">Each photo</p>
             <ul className="mt-0.5 list-disc pl-4 space-y-0.5">
-              <li>Click the photo to open it full-size in a new tab.</li>
+              <li>Click the photo to open it large, in the same viewer the listing pages use. Arrow keys walk the page; Escape closes.</li>
               <li><b>machine</b> / <b>yours</b> says who decided the current mark.</li>
-              <li><b>→ move to training</b> / <b>↩ return to reserve</b> is membership, separate from the mark.</li>
+              <li><b>→ move to training</b> / <b>↩ return to reserve</b> is membership, separate from the mark — on the positive and reserve trays only.</li>
               <li><b>old wording</b> means the label was written under a definition you have since changed.</li>
               <li><b>✓ applies</b>, <b>✕ no</b>, <b>– left out</b> change the mark. Pressing the already-pressed one on a machine tile <i>confirms</i> it as yours and admits it.</li>
               <li>A moved photo stays where it is until you change tray or reload, with a line saying where it went.</li>
@@ -460,7 +519,7 @@ export default function NewDedupTrainingSet() {
       ) : (
         <>
           <ul className="mt-4 grid gap-2" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${large ? '16rem' : '8rem'}, 1fr))` }}>
-            {rows.map(tile)}
+            {rows.map((r, i) => tile(r, i))}
           </ul>
           {movable.length > 0 && (
             <div className="mt-4 flex flex-col items-center gap-1">
@@ -509,6 +568,14 @@ export default function NewDedupTrainingSet() {
             )}
           </div>
         </>
+      )}
+
+      {lightboxAt != null && galleryImages.length > 0 && (
+        <ImageLightbox
+          images={galleryImages}
+          startIndex={lightboxAt}
+          onClose={() => setLightboxAt(null)}
+        />
       )}
     </div>
   );

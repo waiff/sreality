@@ -75,14 +75,47 @@ describe('<NewDedupTrainingSet> four trays over stored membership', () => {
     ));
   });
 
-  it('negative and left-out trays read their own state', async () => {
+  /* Filtering these two trays by in_training was a real bug: the backfill never
+   * admitted a left-out, so "Left out" showed 4 rows under a count of 1,064.
+   * Membership is a question about a POSITIVE only. */
+  it('negative and left-out trays read their own state, unfiltered by membership', async () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByTestId('training-tile-11');
     await user.click(screen.getByRole('button', { name: /Training · negative/ }));
-    await waitFor(() => expect(lastQuery()).toEqual(expect.objectContaining({ state: 'negative', in_training: true })));
+    await waitFor(() => expect(lastQuery()).toEqual({ tag_id: 42, state: 'negative', limit: 50, offset: 0 }));
     await user.click(screen.getByRole('button', { name: /Left out/ }));
-    await waitFor(() => expect(lastQuery()).toEqual(expect.objectContaining({ state: 'excluded', in_training: true })));
+    await waitFor(() => expect(lastQuery()).toEqual({ tag_id: 42, state: 'excluded', limit: 50, offset: 0 }));
+  });
+
+  it('offers no membership move on the negative tray — a negative comes out by re-marking', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByTestId('move-11')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Training · negative/ }));
+    await waitFor(() => expect(screen.queryByTestId('move-11')).toBeNull());
+    expect(screen.queryByTestId('move-page')).toBeNull();
+  });
+
+  it('opens the shared full-size viewer on a tile, and closes it', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await user.click(screen.getByTestId('open-11'));
+    const viewer = await screen.findByRole('dialog');
+    expect(viewer).toHaveAttribute('aria-modal', 'true');
+    await user.click(screen.getByRole('button', { name: /close/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('offers a 10000-per-page step', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    await user.click(screen.getByRole('button', { name: '10000' }));
+    await waitFor(() => expect(lastQuery()).toEqual(expect.objectContaining({ limit: 10000, offset: 0 })));
   });
 
   it('has no anyone / machine / yours breakdown', async () => {

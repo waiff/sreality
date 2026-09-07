@@ -174,6 +174,24 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-07 (d) — **A tray and its count must ask the same question.** Migration 484 landed and
+  the backfill verified to the row (katastrální mapa 301 in set / 535 reserve, garáž 329/120 — the
+  29 over 300 are labels the operator made themself, kept wherever they rank). Two defects surfaced
+  the moment the page was used at scale, both the SAME shape as the "300/300 that would not move":
+  a control whose bookkeeping the operator cannot see. (1) `in_training` is a fact about a
+  POSITIVE — every negative is admitted and a left-out trains nothing whatever the flag says
+  (`training_rows` filters on state) — but the page filtered EVERY non-reserve tray by
+  `in_training = true`. Harmless on negatives; on left-outs the backfill never admitted one, so the
+  tray rendered 4 rows under a count of 1,064. The tray query now asks about membership only where
+  membership is a question. (2) The move affordance was offered on the negative tray, where
+  "return to reserve" un-admitted a row that NO tray counts: the photo vanished from the page and
+  the optimistic patch moved `positive` and `reserve`, neither of which was involved. Membership
+  controls now exist on Training · positive and Reserve only (`MEMBERSHIP_TRAYS`); a negative comes
+  out by re-marking it, which is what the marks are for. Also: `PAGE_MAX` 2000 → 10000 so the
+  largest tray (~10.5k negatives) is one page, and the tile opens the SHARED `ImageLightbox` — the
+  listing gallery's viewer — instead of a new browser tab, widening the training row to
+  `ImagePublic` rather than re-fetching a full image row per tile.
+
 - 2026-09-07 (c) — **Membership is STORED and the operator's alone (migration 484).** Two models
   were wrong in opposite directions and the operator named both: 474's `training_target` COMPUTED
   membership from a rank, so the boundary moved on its own and a reviewed set was never stable;

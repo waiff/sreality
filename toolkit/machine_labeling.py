@@ -468,16 +468,27 @@ def training_set_page(
         ]
 
 
-# --- what "the training set" means: every label, no limits ------------------
+# --- what "the training set" means: the ADMITTED labels ---------------------
 #
-# The operator's ruling (2026-09-07), replacing the cutoff/reserve model: a
-# head's training set is EVERY positive and EVERY negative labeled for it,
-# the operator's and the machine's alike, minus the holdout. No target, no
-# ranking, no reserve. What the page shows in a tray is exactly what a trainer
-# reads through `training_rows` — one door, so the two cannot disagree — and a
-# count on the page is a plain count of labels, which moves the moment a mark
-# does.
-PAGE_MAX = 2000
+# Membership is stored, not computed (migration 484): a head trains on the
+# positives the operator has admitted plus every negative, minus the holdout.
+# There is no rank and no target, so nothing enters or leaves on its own — the
+# text this comment replaced ("no reserve") described PR #1321's model, which
+# the operator reversed the same day. What the page shows in a tray is exactly
+# what a trainer reads through `training_rows` — one door, so the two cannot
+# disagree — and a count on the page is a plain count of rows.
+#
+# `in_training` is a fact about a POSITIVE. Negatives are admitted wholesale and
+# nothing un-admits one; "left out" trains nothing whatever the flag says
+# (`training_rows` filters on state). So a tray of negatives or left-outs must
+# not be filtered by the flag — doing so showed 4 rows against a count of 1,064.
+#
+# The review page may ask for a whole tray at once (the operator chose
+# 50 / 100 / 500 / 2000 / 10000 steps): the query is indexed and bounded and the
+# images lazy-load, so the cost is the DOM, which is the operator's call. 10,000
+# covers the largest tray we have — a head's negatives run to ~10.5k — so "show
+# me all of them" is one page rather than six.
+PAGE_MAX = 10000
 
 _TRAINING_ROWS_SQL = f"""
     SELECT l.image_id, l.state
