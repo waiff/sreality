@@ -305,15 +305,13 @@ from the slow "download each ad" write:
   `index_pages=0`. The queue persists across runs, so a bounded run never loses work; a
   SIGKILLed claim is recovered by the next run's `reclaim_stale_claims`.
 
-**Delisting is presence-verified (rule #3, 2026-09-07).** A complete category walk
-nominates every active row it did not see (`VERIFY cm=… candidates=… queued=… deferred=…`
-in the log) into the detail queue at the lowest priority; the drain fetches each page and a
-positive gone signal (HTTP 404/410, a redirect off the listing, the portal's "no longer
-active" text → `ListingGoneError`) flips that one listing, a live page refreshes it. There is
-no absence sweep and no staleness rail any more; `delist_flip_cap` throttles nominations per
-walk (`VERIFY DEFERRED`, recorded in `delist_flip_refusals`). The drain's failure-priority
-replaces the old per-walk priority retry: a failed fetch keeps its queue row at elevated
-priority.
+**Delisting is presence-verified (rule #3, 2026-09-07).** A complete category walk nominates
+every active row it did not see (`VERIFY cm=… candidates=… queued=… deferred=…`) into the detail
+queue at the lowest priority; the drain fetches each page and only a positive gone signal (404/410,
+a redirect off the listing, the portal's "no longer active" text → `ListingGoneError`) flips it; a
+live page refreshes it. No absence sweep, no staleness rail; `delist_flip_cap` throttles nominations
+per walk (`VERIFY DEFERRED`, recorded in `delist_flip_refusals`). A failed fetch keeps its queue row
+at elevated priority (the drain's failure-priority replaced the old per-walk retry).
 
 **Condition scoring is currently UNSCHEDULED — an intentional pause, not a bug** (PR #730,
 confirmed operator-intentional 2026-07-09; ~56k byt rows unscored is accepted). Don't
