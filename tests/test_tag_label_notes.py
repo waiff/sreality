@@ -156,7 +156,7 @@ def test_an_edited_note_is_validated_like_a_new_one() -> None:
 def test_the_page_read_carries_the_open_note_so_it_can_be_changed() -> None:
     from toolkit import machine_labeling as ml
 
-    sql = ml._TRAINING_PAGE_RANKED_SQL
+    sql = ml._TRAINING_PAGE_SQL
     assert "LEFT JOIN LATERAL" in sql
     assert "n.absorbed_definition_id IS NULL" in sql
     # Newest open note wins, deterministically.

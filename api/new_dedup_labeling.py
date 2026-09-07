@@ -743,63 +743,34 @@ def get_tag_neighbours(
 
 @router.get("/training-set/heads")
 def get_training_set_heads(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
-    """Every routing head with what the training set holds for it, split by who
-    decided, plus the cutoff view: target, in the set, in reserve, and how many
-    in-set positives are still the machine's word alone (the review backlog)."""
+    """Every routing head with what its training set holds, split by verdict
+    and by who decided. No cutoff: a head's set is every label it has."""
     from toolkit import machine_labeling as ml
 
     tags = _routing_tags(conn)
-    ids = [t["id"] for t in tags]
-    counts = ml.training_set_counts(conn, tag_ids=ids)
-    summary = ml.set_summary(conn, tag_ids=ids)
-    return {"data": [{**t, **counts.get(t["id"], {}), **summary.get(t["id"], {})}
-                     for t in tags]}
+    counts = ml.training_set_counts(conn, tag_ids=[t["id"] for t in tags])
+    return {"data": [{**t, **counts.get(t["id"], {})} for t in tags]}
 
 
 @router.get("/training-set")
 def get_training_set(
     tag_id: int, state: str | None = None, source: str | None = None,
-    membership: str | None = None, limit: int = 60, offset: int = 0,
-    conn: Any = Depends(deps.get_db_conn),
+    limit: int = 60, offset: int = 0, conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
-    """One page of a head's training material, each row saying whether it is
-    inside the cutoff. `membership=set` is the bounded review: the positives a
-    probe will actually train on. The holdout is excluded here as everywhere a
+    """One page of a head's training material — a tray is one state, optionally
+    narrowed to who decided it. The holdout is excluded here as everywhere a
     label is treated as training material."""
     from toolkit import machine_labeling as ml
 
     try:
-        rows = ml.training_set_page_ranked(
+        rows = ml.training_set_page(
             conn, tag_id=tag_id, state=state, source_class=source,
-            membership=membership, limit=limit, offset=offset,
+            limit=limit, offset=offset,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     counts = ml.training_set_counts(conn, tag_ids=[tag_id]).get(tag_id, {})
-    summary = ml.set_summary(conn, tag_ids=[tag_id]).get(tag_id, {})
-    return {"data": {"rows": rows, "counts": {**counts, **summary},
-                     "limit": limit, "offset": offset}}
-
-
-class TrainingTargetIn(BaseModel):
-    # None restores the programme default.
-    target: int | None = None
-
-
-@router.put("/tags/{tag_id}/training-target")
-def put_training_target(
-    tag_id: int, body: TrainingTargetIn, conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    """The operator's per-head cutoff. Changing it moves the boundary of a
-    QUERY, so the set and reserve re-divide instantly and nothing is copied."""
-    from toolkit import machine_labeling as ml
-
-    try:
-        return {"data": ml.set_training_target(conn, tag_id=tag_id, target=body.target)}
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"tag {tag_id} not found") from exc
+    return {"data": {"rows": rows, "counts": counts, "limit": limit, "offset": offset}}
 
 
 # --- the sealed exam (migrations 458 + 459) ---------------------------------

@@ -9,22 +9,15 @@ tri-state, so a per-tag head trains on real negatives instead of "not the labele
 class". The target tag is an ARGUMENT — there is no list of "the 12 tags" in this
 module, because Gate 1's list is the operator's and is not finalized.
 
-THE TWO DOORS. Training labels are read through `toolkit.machine_labeling` and
-`toolkit.tag_holdout` and nowhere else. This module contains no SQL naming
-image_tag_labels, deliberately:
-
-  * positives = machine_labeling.training_set_positive_ids — the SET as the
-    operator's own review page defines it (their confirmed positives first, then
-    the machine's oldest-first, up to tag_taxonomy.training_target). What a human
-    reviewed and what the head trains on therefore cannot diverge.
-  * negatives = tag_holdout.training_label_rows(states=("negative",)) — human-only,
-    sealed exam excluded. `include_holdout` is never passed: that door is the
-    operator's, and opening it would cost this head the ability to be graded on
-    the holdout it consumed.
-
-There is no sanctioned door for machine-labeled negatives, so there are none here.
-`tests/test_holdout_exclusion_census.py` is the rail; this module stays off its
-radar by never writing the statement in the first place.
+THE ONE DOOR. Training labels are read through `toolkit.machine_labeling.training_rows`
+and nowhere else. This module contains no SQL naming image_tag_labels, deliberately.
+The operator's ruling (2026-09-07), replacing the earlier cutoff: a head's training
+set is EVERY label it has — positives and negatives, the operator's and the
+machine's alike — minus the sealed exam. `training_rows` is exactly what the
+operator's review page shows in its trays, so what a human reviewed and what the
+head trains on cannot diverge. The exam door (`tag_holdout.training_label_rows`
+with `include_holdout`) is never opened here: it would cost this head the ability
+to be graded on the holdout it consumed.
 
 scikit-learn is a training-only extra (`pip install -e ".[training]"`) and is
 imported lazily inside the training functions. Assembling a dataset, loading an
@@ -43,7 +36,7 @@ from typing import Any, Iterable, Sequence
 
 import psycopg
 
-from toolkit import machine_labeling, tag_holdout
+from toolkit import machine_labeling
 
 ARTIFACT_VERSION = 1
 ARTIFACT_KIND = "tag_head_binary_logreg"
@@ -260,9 +253,8 @@ def _fetch_groups(
 def assemble_dataset(
     conn: psycopg.Connection, *, tag_id: int,
     encoder: EncoderIdentity | None = None,
-    default_target: int = machine_labeling.DEFAULT_TRAINING_TARGET,
 ) -> DatasetSnapshot:
-    """One tag's trainable population, through the two sanctioned doors only.
+    """One tag's trainable population, through the one sanctioned door only.
 
     `encoder` defaults to whichever of the seven identity facts have the most rows
     stored (`dominant_encoder`); pass it explicitly whenever the run means a
@@ -271,29 +263,16 @@ def assemble_dataset(
     trained on half its set because the embedding job had not caught up is exactly
     the failure a count in a log line hides.
     """
-    positives = machine_labeling.training_set_positive_ids(
-        conn, tag_id=tag_id, default_target=default_target)
-    negative_rows = tag_holdout.training_label_rows(
-        conn, tag_id=tag_id, states=("negative",))
-
-    positive_ids = sorted({int(i) for i in positives})
-    positive_set = set(positive_ids)
-    # A cell cannot be positive and negative at once; if the doors ever disagree
-    # (a machine positive later marked negative by hand, say), the operator's
-    # negative is not thrown away silently — it is named and the row is dropped
-    # from training entirely rather than guessed at.
-    negative_ids: list[int] = []
-    conflicting: list[int] = []
-    for image_id, _state in negative_rows:
-        image_id = int(image_id)
-        if image_id in positive_set:
-            conflicting.append(image_id)
-        else:
-            negative_ids.append(image_id)
-    conflicting = sorted(set(conflicting))
-    conflict_set = set(conflicting)
+    rows = machine_labeling.training_rows(conn, tag_id=tag_id)
+    positive_ids = sorted({int(i) for i, st in rows if st == "positive"})
+    negative_ids = sorted({int(i) for i, st in rows if st == "negative"})
+    # One cell holds one state, so a single read cannot contradict itself; the
+    # guard stays because it is cheap and the ledger names any row that would
+    # otherwise train as both.
+    conflict_set = set(positive_ids) & set(negative_ids)
+    conflicting = sorted(conflict_set)
     positive_ids = [i for i in positive_ids if i not in conflict_set]
-    negative_ids = sorted(set(negative_ids))
+    negative_ids = [i for i in negative_ids if i not in conflict_set]
 
     if encoder is None:
         encoder = dominant_encoder(conn)

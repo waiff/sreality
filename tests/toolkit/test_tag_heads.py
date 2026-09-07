@@ -48,12 +48,11 @@ class _Cur:
         s = " ".join(sql.split())
         c = self._conn
         c.executed.append((s, params))
-        if "FROM image_tag_labels l" in s and "row_number() OVER" in s:
-            c.doors_used.append("set_positives")
-            self._rows = [(i,) for i in c.positive_ids]
-        elif s.startswith("SELECT itl.image_id, itl.state"):
-            c.doors_used.append("training_label_rows")
-            self._rows = [(i, "negative") for i in c.negative_ids]
+        if s.startswith("SELECT l.image_id, l.state") and "l.state = ANY(%(states)s" in s:
+            # THE one door: every positive and negative, human and machine.
+            c.doors_used.append("training_rows")
+            self._rows = ([(i, "positive") for i in c.positive_ids]
+                          + [(i, "negative") for i in c.negative_ids])
         elif "FROM image_dinov3_embeddings" in s and "GROUP BY" in s:
             facts = c.encoder.as_dict()
             self._rows = [tuple(facts[f] for f in th.ENCODER_FIELDS) + (99,)]
@@ -136,18 +135,18 @@ def _conn(**kw) -> _FakeConn:
 
 # ------------------------------------------------------- the holdout survives
 
-def test_assembly_reads_labels_only_through_the_two_sanctioned_doors() -> None:
-    # With the REAL doors running against the fake, every statement that names
+def test_assembly_reads_labels_only_through_the_one_sanctioned_door() -> None:
+    # With the REAL door running against the fake, every statement that names
     # image_tag_labels is one of theirs — and carries the exclusion. If a future
     # edit adds a "let me just double-check the labels" query, this fails.
     conn = _conn()
     th.assemble_dataset(conn, tag_id=19)
 
     label_reads = [s for s, _ in conn.executed if "image_tag_labels" in s]
-    assert len(label_reads) == 2, label_reads
+    assert len(label_reads) == 1, label_reads   # one door, one statement
     for sql in label_reads:
         assert MARKER in sql, "a label read lost the sealed-exam exclusion"
-    assert sorted(conn.doors_used) == ["set_positives", "training_label_rows"]
+    assert conn.doors_used == ["training_rows"]
 
 
 def test_assembly_adds_no_back_door_when_the_doors_are_stubbed(monkeypatch) -> None:
@@ -157,18 +156,12 @@ def test_assembly_adds_no_back_door_when_the_doors_are_stubbed(monkeypatch) -> N
     holdout_image = 4242
     seen: dict[str, Any] = {}
 
-    def fake_positives(conn, *, tag_id, default_target=300):
-        seen["positives"] = {"tag_id": tag_id, "default_target": default_target}
-        return [1001, 1002, holdout_image]
+    def fake_rows(conn, *, tag_id, states=("positive", "negative")):
+        seen["rows"] = {"tag_id": tag_id, "states": states}
+        return [(1001, "positive"), (1002, "positive"), (holdout_image, "positive"),
+                (1003, "negative"), (1004, "negative")]
 
-    def fake_negatives(conn, *, tag_id, states=("positive", "negative"),
-                       include_holdout=False):
-        seen["negatives"] = {"tag_id": tag_id, "states": states,
-                             "include_holdout": include_holdout}
-        return [(1003, "negative"), (1004, "negative")]
-
-    monkeypatch.setattr(th.machine_labeling, "training_set_positive_ids", fake_positives)
-    monkeypatch.setattr(th.tag_holdout, "training_label_rows", fake_negatives)
+    monkeypatch.setattr(th.machine_labeling, "training_rows", fake_rows)
 
     ids = [1001, 1002, 1003, 1004, holdout_image]
     conn = _FakeConn(positive_ids=[], negative_ids=[],
@@ -178,10 +171,8 @@ def test_assembly_adds_no_back_door_when_the_doors_are_stubbed(monkeypatch) -> N
 
     assert not [s for s, _ in conn.executed if "image_tag_labels" in s], \
         "assemble_dataset queried the label table itself — that is the back door"
-    # And it never opens the operator's own exam door.
-    assert seen["negatives"]["include_holdout"] is False
-    assert seen["negatives"]["states"] == ("negative",)
-    assert seen["positives"]["tag_id"] == 19
+    # And it asks the one door for exactly the two trainable states.
+    assert seen["rows"] == {"tag_id": 19, "states": ("positive", "negative")}
     assert {r.image_id for r in snap.rows} == set(ids)
 
 
