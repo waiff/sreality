@@ -427,3 +427,36 @@ def test_a_trainer_reads_the_set_never_the_reserve() -> None:
     assert "WHERE r.set_rank <= tg.target" in ml._SET_POSITIVE_IDS_SQL
     conn = _Conn([(11,), (12,), (13,)])
     assert ml.training_set_positive_ids(conn, tag_id=3) == [11, 12, 13]
+
+
+def test_an_empty_page_is_not_mistaken_for_a_missing_column() -> None:
+    # `_run() or _fallback()` made every legitimately empty result — "in the
+    # set" AND "does not apply", a head with no reserve, a page past the end —
+    # fall through to the pre-474 path, which ignores the membership filter and
+    # returned unranked rows. Measured live: in-set + negative returned
+    # negatives with set_rank None instead of nothing.
+    from toolkit import machine_labeling as ml
+
+    rows = ml.training_set_page_ranked(_Conn([]), tag_id=17, membership="set",
+                                       state="negative")
+    assert rows == []
+
+
+def test_only_the_missing_column_falls_back() -> None:
+    import psycopg
+
+    from toolkit import machine_labeling as ml
+
+    class _NoColumn(_Conn):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def cursor(self) -> _Cur:
+            self.calls += 1
+            if self.calls == 1:
+                raise psycopg.errors.UndefinedColumn("column training_target does not exist")
+            return _Cur([], self.log)
+
+    rows = ml.training_set_page_ranked(_NoColumn(), tag_id=17, membership="set")
+    assert rows == []  # the fallback ran and found nothing, which is honest
