@@ -6,6 +6,7 @@ import {
   deleteTagLabelNote,
   setTrainingMembership,
   editTagLabelNote,
+  drawReviewSample,
   listTrainingSet,
   listTrainingSetHeads,
   locateTrainingImage,
@@ -48,19 +49,21 @@ import { pushToast } from '@/lib/toast';
  * THE HOLDOUT IS NOT HERE: those images grade the model.
  */
 
-type Tray = 'positive' | 'negative' | 'excluded' | 'reserve';
-const TRAYS: readonly Tray[] = ['positive', 'negative', 'reserve', 'excluded'];
+type Tray = 'positive' | 'negative' | 'excluded' | 'reserve' | 'sample';
+const TRAYS: readonly Tray[] = ['positive', 'negative', 'reserve', 'excluded', 'sample'];
 const TRAY_LABEL: Record<Tray, string> = {
   positive: 'Training · positive',
   negative: 'Training · negative',
   reserve: 'Reserve',
   excluded: 'Left out',
+  sample: 'Review sample',
 };
 const TRAY_TITLE: Record<Tray, string> = {
   positive: 'What this head trains on as positive. It only changes when you change it.',
   negative: 'What this head trains on as negative.',
   reserve: 'Positives the model proposed that you have not admitted. Nothing here trains anything until you move it in.',
   excluded: 'The subject is there but the photo is of something else. Trains nothing, grades nothing.',
+  sample: 'A thousand drawn at random from the negatives, in the order they already had. The list stays put while you work through it.',
 };
 const STATE_STYLE: Record<TagState, string> = {
   positive: 'border-[var(--color-sage)] bg-[var(--color-sage)]/10',
@@ -80,6 +83,10 @@ const STATE_STYLE: Record<TagState, string> = {
 const trayQuery = (t: Tray) => {
   if (t === 'reserve') return { state: 'positive' as const, in_training: false };
   if (t === 'positive') return { state: 'positive' as const, in_training: true };
+  /* The review lane asks for the drawn rows and NO state: a photo the operator
+   * has just re-marked must keep its place on the page instead of dropping out
+   * of the list mid-review. Progress is the marks, not a shrinking tray. */
+  if (t === 'sample') return { sampled: true };
   return { state: t };
 };
 
@@ -175,11 +182,11 @@ export default function NewDedupTrainingSet() {
 
   /* COUNTS MOVE ON THE CLICK, in tray terms. A mark change moves a row between
    * trays; the reserve is only ever entered or left by an explicit move. */
-  const bumpTrays = (deltas: Partial<Record<Tray, number>>) =>
+  const bumpTrays = (deltas: Partial<Record<Tray | 'sample_reviewed', number>>) =>
     qc.setQueryData(['training-set-heads'], (old: typeof headsQ.data) => old && ({
       ...old,
       data: old.data.map((h) => h.id !== activeId ? h : Object.entries(deltas).reduce(
-        (acc, [k, d]) => ({ ...acc, [k]: Math.max(0, acc[k as Tray] + (d as number)) }),
+        (acc, [k, d]) => ({ ...acc, [k]: Math.max(0, acc[k as keyof typeof acc] as number + (d as number)) }),
         { ...h },
       )),
     }));
@@ -195,12 +202,24 @@ export default function NewDedupTrainingSet() {
     onMutate: (vars) => {
       /* Optimistic: the tile and the counts move now. A failure reverts both.
        * A mark written by the operator is admitted, so a reserve row that is
-       * re-marked leaves the reserve and enters its new tray. */
+       * re-marked leaves the reserve and enters its new tray.
+       *
+       * On the review lane the DRAWN COUNT MUST NOT MOVE — the thousand is a
+       * list, not a tray, and shrinking it as the operator works would be the
+       * churn the stored draw exists to prevent. What moves there is progress
+       * and the two state trays the photo travels between. */
       patchRow(vars.imageId, (r) => ({
         ...r, state: vars.state, source: 'human', in_training: true,
         excluded_reason: vars.state === 'excluded' ? 'pruned' : null,
       }));
-      bumpTrays({ [tray]: -1, [vars.state]: +1 } as Partial<Record<Tray, number>>);
+      if (tray === 'sample') {
+        bumpTrays({
+          ...(vars.from === vars.state ? {} : { [vars.from]: -1, [vars.state]: +1 }),
+          ...(vars.fromMine ? {} : { sample_reviewed: +1 }),
+        } as Partial<Record<Tray | 'sample_reviewed', number>>);
+      } else {
+        bumpTrays({ [tray]: -1, [vars.state]: +1 } as Partial<Record<Tray, number>>);
+      }
     },
     onSuccess: (_res, vars) => {
       setChanged((prev) => new Map(prev).set(vars.imageId, {
@@ -287,6 +306,22 @@ export default function NewDedupTrainingSet() {
     })),
     [rows],
   );
+
+  /* THE DRAW. A thousand negatives picked at random and written down, so the
+   * review is a finite job and the list cannot shift under it. A redraw throws
+   * away a list that may be half-reviewed, so it asks first. */
+  const [drawSize, setDrawSize] = useState(1000);
+  const drawMut = useMutation({
+    mutationFn: ({ replace }: { replace: boolean }) =>
+      drawReviewSample(activeId as number, { state: 'negative', size: drawSize, replace }),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['training-set-heads'] });
+      qc.invalidateQueries({ queryKey: ['training-set'] });
+      patch({ set: 'sample', offset: null });
+      pushToast('ok', `${res.data.drawn} drawn at random from the negatives`);
+    },
+    onError: (e: Error) => pushToast('err', e.message),
+  });
 
   const patchRowNote = (imageId: number, note: { id: number; note: string } | null) =>
     patchRow(imageId, (r) => ({ ...r, note_id: note?.id ?? null, note: note?.note ?? null }));
@@ -484,7 +519,7 @@ export default function NewDedupTrainingSet() {
           </select>
 
           <span className="flex gap-1" role="group" aria-label="tray">
-            {TRAYS.map((t) => (
+            {TRAYS.filter((t) => t !== 'sample' || (activeHead?.sample ?? 0) > 0).map((t) => (
               <button key={t} type="button" title={TRAY_TITLE[t]} aria-pressed={tray === t}
                 onClick={() => patch({ set: t, offset: null })}
                 className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
@@ -492,7 +527,9 @@ export default function NewDedupTrainingSet() {
                     : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]'}`}>
                 {TRAY_LABEL[t]}
                 {activeHead && (
-                  <span data-testid={`tray-count-${t}`} className="ml-1 text-[var(--color-ink-4)] tabular-nums">{activeHead[t]}</span>
+                  <span data-testid={`tray-count-${t}`} className="ml-1 text-[var(--color-ink-4)] tabular-nums">
+                    {t === 'sample' ? `${activeHead.sample_reviewed}/${activeHead.sample}` : activeHead[t]}
+                  </span>
                 )}
               </button>
             ))}
@@ -504,6 +541,50 @@ export default function NewDedupTrainingSet() {
             Trains on {activeHead.positive} positives and {activeHead.negative} negatives ·{' '}
             {activeHead.reserve} waiting in reserve · {activeHead.excluded} left out
           </p>
+        )}
+
+        {activeHead && (
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs" data-testid="draw-controls">
+            {activeHead.sample > 0 ? (
+              <>
+                <span className="text-[var(--color-ink-3)]">
+                  Review sample: <b className="tabular-nums">{activeHead.sample_reviewed}</b> of{' '}
+                  <b className="tabular-nums">{activeHead.sample}</b> decided.
+                </span>
+                <button type="button" data-testid="draw-again"
+                  onClick={() => {
+                    if (!window.confirm(
+                      `Draw a new sample for this head? The current ${activeHead.sample} are discarded, `
+                      + `including the ${activeHead.sample_reviewed} you have already been through. `
+                      + 'Your marks are kept — only the list of what to review is replaced.')) return;
+                    drawMut.mutate({ replace: true });
+                  }}
+                  disabled={drawMut.isPending}
+                  className="text-[var(--color-ink-4)] hover:text-[var(--color-copper)] hover:underline">
+                  draw a new one
+                </button>
+              </>
+            ) : (
+              <>
+                <span className="text-[var(--color-ink-3)]">
+                  {activeHead.negative.toLocaleString()} negatives is not a reviewable number. Draw a random
+                  sample and work through that instead:
+                </span>
+                <label className="flex items-center gap-1">
+                  <span className="sr-only">sample size</span>
+                  <input type="number" min={1} max={5000} step={100} value={drawSize}
+                    onChange={(e) => setDrawSize(Math.max(1, Math.min(5000, Number(e.target.value) || 1)))}
+                    aria-label="sample size"
+                    className="w-20 px-1.5 py-0.5 rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-transparent text-[var(--color-ink)] tabular-nums" />
+                </label>
+                <button type="button" data-testid="draw-sample" disabled={drawMut.isPending}
+                  onClick={() => drawMut.mutate({ replace: false })}
+                  className="px-2.5 py-1 rounded-[var(--radius-sm)] border border-[var(--color-sage)] text-[var(--color-ink)] hover:bg-[var(--color-sage)]/10 disabled:opacity-40">
+                  {drawMut.isPending ? 'drawing…' : 'Draw a review sample'}
+                </button>
+              </>
+            )}
+          </div>
         )}
       </header>
 
@@ -537,6 +618,8 @@ export default function NewDedupTrainingSet() {
               <li><b>Training · negative</b> — what it trains on as negative.</li>
               <li><b>Reserve</b> — positives the model proposed that you have not admitted. They train nothing, and nothing leaves here by itself.</li>
               <li><b>Left out</b> — the subject is there but the photo is of something else. Trains nothing.</li>
+              <li><b>Review sample</b> — a random draw from the negatives, shown in the order they already
+                had, so photos of a kind still sit together. It appears once you draw one.</li>
             </ul>
             <p className="mt-2 font-medium text-[var(--color-ink)]">Moving photos</p>
             <p className="mt-0.5">
@@ -545,6 +628,15 @@ export default function NewDedupTrainingSet() {
               because a mark you set is a decision you have made. These appear only on <b>Training &middot; positive</b>
               and <b>Reserve</b>: every negative trains, and a left-out trains nothing, so there is nothing to admit
               on those two trays. Take a negative out by re-marking it.
+            </p>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">Reviewing the negatives</p>
+            <p className="mt-0.5">
+              Ten thousand negatives is not a job that finishes, so <b>Draw a review sample</b> picks a
+              thousand of them at random and writes that list down. It is written down on purpose: a sample
+              worked out fresh on every read would quietly swap in a new photo each time you re-marked one.
+              The draw is random, but the lane keeps the order the negatives already had. Nothing leaves the
+              lane as you decide — a photo you re-mark stays where it is wearing its new mark, and the
+              counter moves.
             </p>
             <p className="mt-2 font-medium text-[var(--color-ink)]">Growing a set</p>
             <p className="mt-0.5">

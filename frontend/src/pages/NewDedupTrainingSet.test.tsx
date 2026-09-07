@@ -14,9 +14,12 @@ vi.mock('@/lib/api');
 vi.mock('@/lib/imageUrl', () => ({ imageSrc: () => 'blob:photo' }));
 
 const HEADS = [
-  { id: 42, label: 'podklad - katastrální mapa', positive: 300, negative: 10009, excluded: 2, reserve: 536 },
-  { id: 2, label: 'exterier - domovní vchod', positive: 173, negative: 10153, excluded: 218, reserve: 0 },
+  { id: 42, label: 'podklad - katastrální mapa', positive: 300, negative: 10009, excluded: 2, reserve: 536,
+    sample: 0, sample_reviewed: 0 },
+  { id: 2, label: 'exterier - domovní vchod', positive: 173, negative: 10153, excluded: 218, reserve: 0,
+    sample: 0, sample_reviewed: 0 },
 ];
+const SAMPLED_HEADS = [{ ...HEADS[0], sample: 1000, sample_reviewed: 40 }, HEADS[1]];
 
 const ROWS = [
   { image_id: 11, storage_path: 'img/1/11.jpg', state: 'positive', source: 'machine',
@@ -108,6 +111,72 @@ describe('<NewDedupTrainingSet> four trays over stored membership', () => {
     expect(viewer).toHaveAttribute('aria-modal', 'true');
     await user.click(screen.getByRole('button', { name: /close/i }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  /* Ten thousand negatives is not a reviewable number. The draw is random, the
+   * lane keeps the order the negatives already had, and — the property the
+   * whole thing rests on — the drawn list does not move while it is reviewed. */
+  describe('the review sample', () => {
+    it('offers a draw when there is none, and no lane to open', async () => {
+      renderPage();
+      await screen.findByTestId('training-tile-11');
+      expect(screen.getByTestId('draw-sample')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Review sample/ })).toBeNull();
+    });
+
+    it('draws at random from the negatives and opens the lane', async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.drawReviewSample).mockResolvedValue({
+        data: { tag_id: 42, state: 'negative', drawn: 1000 },
+      });
+      renderPage();
+      await screen.findByTestId('training-tile-11');
+      await user.click(screen.getByTestId('draw-sample'));
+      await waitFor(() => expect(api.drawReviewSample).toHaveBeenCalledWith(
+        42, { state: 'negative', size: 1000, replace: false },
+      ));
+      // The lane asks for the drawn rows and NO state — a re-marked photo must
+      // keep its place instead of dropping out of the list mid-review.
+      await waitFor(() => expect(lastQuery()).toEqual(
+        { tag_id: 42, sampled: true, limit: 50, offset: 0 },
+      ));
+    });
+
+    it('shows progress on the lane and never shrinks the drawn list', async () => {
+      const user = userEvent.setup();
+      /* The server counts a decided photo as reviewed and leaves the draw
+       * alone; the mock does the same, so the refetch after the write cannot
+       * paper over a wrong optimistic patch. */
+      let reviewed = 40;
+      vi.mocked(api.listTrainingSetHeads).mockImplementation(async () => ({
+        data: [{ ...HEADS[0], sample: 1000, sample_reviewed: reviewed }, HEADS[1]] as never,
+      }));
+      vi.mocked(api.setNewDedupTagAnnotation).mockImplementation(async () => {
+        reviewed += 1;
+        return { data: {} } as never;
+      });
+      renderPage(['/new-dedup/training-set?tag=42&set=sample']);
+      await screen.findByTestId('training-tile-11');
+      expect(screen.getByTestId('tray-count-sample')).toHaveTextContent('40/1000');
+
+      await user.click(screen.getByRole('button', { name: 'positive 11' }));
+      await waitFor(() => expect(screen.getByTestId('tray-count-sample')).toHaveTextContent('41/1000'));
+      // 1000 is a list, not a tray: deciding one does not remove it.
+      expect(screen.getByTestId('tray-count-sample')).not.toHaveTextContent('999');
+      expect(screen.getByTestId('training-tile-11')).toBeInTheDocument();
+    });
+
+    it('asks before a redraw, because it discards a half-reviewed list', async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.listTrainingSetHeads).mockResolvedValue({ data: SAMPLED_HEADS as never });
+      const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+      renderPage(['/new-dedup/training-set?tag=42&set=sample']);
+      await screen.findByTestId('draw-again');
+      await user.click(screen.getByTestId('draw-again'));
+      expect(confirm).toHaveBeenCalled();
+      expect(api.drawReviewSample).not.toHaveBeenCalled();
+      confirm.mockRestore();
+    });
   });
 
   /* A link from outside names a head and a photo, never a page number: the
