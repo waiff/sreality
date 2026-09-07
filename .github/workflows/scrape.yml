@@ -23,7 +23,7 @@ name: "Scraping: Sreality combined walk (Phase-2 fallback, dispatch-only)"
 # decoupled hourly workflow (condition_scores.yml) so the LLM phase can never
 # slow the scrape.
 #
-# Because the walk is complete (no --limit), mark_inactive runs every tick.
+# Because the walk is complete (no --limit), nomination runs every tick.
 # scraper/main.py guards each per-category flip on walk completeness
 # (collected vs the API's result_size), so a silently truncated index page
 # never mass-flips live listings. A gone detail fetch (404/410 or sreality's
@@ -40,7 +40,7 @@ name: "Scraping: Sreality combined walk (Phase-2 fallback, dispatch-only)"
 #
 # CADENCE: none — dispatch-only (the Phase-2 split carries the schedule). When
 # used as the revert fallback, re-add `schedule: - cron: "0 * * * *"` below.
-# Each run is a complete walk; mark_inactive runs every tick (no --limit).
+# Each run is a complete walk; nomination runs every tick (no --limit).
 # Recorded as run_type='full' (auto, since no --limit).
 #
 # Concurrency: cancel-in-progress=false so a long tick is never killed
@@ -159,7 +159,7 @@ jobs:
           # ~1500 detail writes ON TOP of the all-category index+touch walk
           # (~20 min). A higher cap just overflows the timeout → SIGKILL before
           # scrape_run_finalize → orphaned run, stale drift. So cap LOW: each
-          # run finalizes (drift + mark_inactive update every run) and the
+          # run finalizes (drift + nomination update every run) and the
           # one-time new-listing backlog drains over several finalizing runs.
           MAX_REFETCH="${{ inputs.max_detail_refetches }}"
           if [ -z "$MAX_REFETCH" ]; then

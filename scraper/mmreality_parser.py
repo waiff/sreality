@@ -421,7 +421,11 @@ def live_groups(html: str) -> set[int] | None:
     m = _GROUPS_RE.search(html)
     if not m:
         return None
-    return {int(g) for g in _GROUP_ID_RE.findall(m.group(1))}
+    groups = {int(g) for g in _GROUP_ID_RE.findall(m.group(1))}
+    # An empty or differently-keyed array is unreadable, not "no categories":
+    # returning set() would make the drift alarm report every configured type
+    # as dead on every walk.
+    return groups or None
 
 
 def _next_page(tree: HTMLParser) -> int | None:

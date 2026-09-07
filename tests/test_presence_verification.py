@@ -77,8 +77,12 @@ def test_native_nomination_excludes_the_seen_set_and_returns_oldest_first():
     select_sql, select_params = conn.executed[1]
     assert "WHERE is_active = true AND source = %s AND category_main = %s AND category_type = %s" in count_sql
     assert count_params == ("remax", "byt", "prodej")
-    assert "source_id_native <> ALL(%s)" in select_sql
-    assert "ORDER BY last_seen_at ASC NULLS FIRST" in select_sql
+    assert "l.source_id_native <> ALL(%s)" in select_sql
+    assert "ORDER BY l.last_seen_at ASC NULLS FIRST" in select_sql
+    # Rows the drain already holds, or checked within a day, are not nominated
+    # again -- otherwise an erroring page sorts first forever and jams the slots.
+    assert "NOT EXISTS ( SELECT 1 FROM listing_detail_queue q" in select_sql
+    assert "detail_queue_completions c" in select_sql and "interval '24 hours'" in select_sql
     assert select_params[:3] == ("remax", "byt", "prodej")
     assert sorted(select_params[3]) == ["s1", "s2"]
 
@@ -91,7 +95,7 @@ def test_sreality_nomination_keys_on_sreality_id_and_carries_no_ref():
         conn, "sreality", "byt", "prodej", {123, 456}, seen_key="sreality_id")
     assert cands == [("123", None, 5_000_000)]
     select_sql, select_params = conn.executed[1]
-    assert "sreality_id <> ALL(%s)" in select_sql
+    assert "l.sreality_id <> ALL(%s)" in select_sql
     assert sorted(select_params[3]) == [123, 456]
 
 
@@ -173,12 +177,16 @@ def test_nothing_to_nominate_touches_nothing():
     assert conn.executed == []
 
 
-def test_nominated_rows_the_drain_had_given_up_on_are_re_armed():
+def test_a_bounded_batch_of_given_up_rows_is_re_armed_each_walk():
     """A queue row given up after five failed fetches is excluded from every
-    claim and never reset by enqueue_detail; a nominated listing in that state
-    would stay active forever with no path to a page check."""
+    claim and never reset by enqueue_detail; such a listing would stay active
+    forever with no path to a page check. Each walk re-arms a bounded batch,
+    oldest first, and moves them to the back of the line."""
     conn = _Conn(cap={"fraction": 0.1, "min_rows": 2000, "overrides": []})
     db.enqueue_presence_checks(conn, "remax", "byt", "prodej", _cands(3), active_rows=10)
-    assert conn.rearmed == [("remax", ["n0", "n1", "n2"])]
+    [params] = conn.rearmed
+    assert params == {"source": "remax", "verify": db.QUEUE_PRIORITY_VERIFY, "rearm": db.PRESENCE_REARM_PER_WALK}
     sql = next(s for s, _ in conn.executed if "SET given_up = false" in s)
-    assert "given_up = true AND claimed_at IS NULL" in sql
+    assert "given_up = true AND claimed_at IS NULL ORDER BY enqueued_at LIMIT %(rearm)s" in sql
+    assert "enqueued_at = now()" in sql
+    assert 0 < db.PRESENCE_REARM_PER_WALK <= 100

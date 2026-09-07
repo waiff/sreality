@@ -188,7 +188,7 @@ def test_nomination_is_agenda_grain(monkeypatch):
         ),
     )
     # First prodej descriptor (byt) triggers the agenda sweep.
-    assert portal.presence_candidates(object(), _CATEGORIES[0], {"b1", "b2"}) == ([], 7)
+    assert portal.presence_candidates(object(), _CATEGORIES[0], {"b1", "b2"}) == ([], 7, {"category_main": None})
     source, cm, ct, seen = captured[0]
     assert source == "maxima" and ct == "prodej" and cm is None   # agenda scope: category_type alone
     assert seen == {"b1", "b2", "d1", "o1"}        # the FULL agenda, not the byt slice

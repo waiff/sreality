@@ -267,7 +267,7 @@ class MaximaPortal:
 
     def presence_candidates(
         self, conn: Any, category: dict[str, Any], seen: set[str],
-    ) -> tuple[list[tuple[str, str | None, int | None]], int] | None:
+    ) -> tuple[list[tuple[str, str | None, int | None]], int, dict[str, Any]] | None:
         """Agenda-grain nomination (rule #3, 2026-09-07). The runner calls this
         once per (cm, ct) descriptor, but maxima's completeness is per AGENDA
         (af == category_type), so the whole agenda is nominated once --
@@ -290,7 +290,10 @@ class MaximaPortal:
             "VERIFY agenda af=%d ct=%s collected=%d total=%s",
             af, ct, len(walk.native_ids), walk.total,
         )
-        return db.presence_candidates(conn, SOURCE, None, ct, set(walk.native_ids))
+        candidates, active_rows = db.presence_candidates(
+            conn, SOURCE, None, ct, set(walk.native_ids),
+        )
+        return candidates, active_rows, {"category_main": None}
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
         cm, ct = self.category_labels(category)

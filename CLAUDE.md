@@ -148,7 +148,7 @@ incident history: `docs/architecture.md` § Architectural rules.
    absence NOMINATES, the page DECIDES** (`portal_runner._queue_presence_checks`): a category walk
    proven complete (`scraper.portal.walk_coverage` — the ONE verdict for all nine portals; ≥99.5%
    AND ≤1.02x of the declared total, UNMEASURABLE = `unknown`, never complete) queues every active
-   row it did not see into `listing_detail_queue` at `QUEUE_PRIORITY_VERIFY` (served last); the
+   row it did not see into `listing_detail_queue` at `QUEUE_PRIORITY_VERIFY` (served last, 20% reserve); the
    drain fetches the page and a POSITIVE gone signal (404/410, redirect off the listing, the
    portal's own "no longer active" text → `ListingGoneError`) flips that one listing, a live page
    refreshes it, an error waits. No staleness rail, no absence sweep, no `supports_complete_walk`

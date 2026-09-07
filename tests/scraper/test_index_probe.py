@@ -69,8 +69,6 @@ class _ProbePortal:
         # that CLAIMS completeness (belt on top of the max_pages gate).
         return ({"n1", "n2"}, {"found_new": 2, "enqueued": 2}, 10, 1, True)
 
-        return len(seen)
-
     def active_count(self, conn, c):
         self.calls["active_count"].append(c)
         return 5
@@ -90,10 +88,12 @@ def test_probe_never_nominates(monkeypatch):
         portal_runner.db, "enqueue_presence_checks",
         lambda *a, **k: pytest.fail("a probe must not queue page checks"),
     )
-    p = _ProbePortal()
+    p = _ProbePortal(categories=["A", "B"])
     rc, agg = portal_runner.run_index_probe(p, dry_run=False)
     assert rc == 0
-    assert p.calls["walk"]
+    assert p.calls["walk"] == ["A", "B"]
+    assert p.calls["active_count"] == []      # discovery only: no reconciliation either
+    assert p.conn.closed
 
 
 def test_probe_writes_no_scrape_run_bookkeeping(monkeypatch):

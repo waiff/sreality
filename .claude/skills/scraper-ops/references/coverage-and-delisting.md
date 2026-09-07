@@ -347,7 +347,12 @@ where one row is half a percent. A threshold artefact, not a coverage failure.
    signal flips it. A wrong nomination costs one fetch, never a live listing.
 4. **The throttle** — `delist_flip_cap` bounds how many checks one walk may
    queue (oldest-unseen first, the rest deferred and recorded), so a broken
-   walk cannot flood the drain and a real backlog drains in a few walks.
+   walk cannot flood the drain and a real backlog drains in a few walks. A
+   walk that saw nothing nominates nothing; rows already in the queue or
+   checked within a day are not re-nominated; given-up rows are re-armed 50
+   per walk. The drain reserves 20% of each claim for checks so they can never
+   starve behind refresh inflow, and Health reads the ingest queue through a
+   view that excludes them (migration 483).
 
 The gate still runs and re-earns `supports_complete_walk` from the ledger, but
 as a posture signal for Health: nothing reads it to decide a deletion any more.

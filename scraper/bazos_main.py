@@ -237,7 +237,7 @@ class BazosPortal:
 
     def presence_candidates(
         self, conn: Any, category: dict[str, str], seen: set[str],
-    ) -> tuple[list[tuple[str, str | None, int | None]], int] | None:
+    ) -> tuple[list[tuple[str, str | None, int | None]], int, dict[str, Any]] | None:
         cm, ct = self.category_labels(category)
         if cm is None or ct is None:
             return None
@@ -246,9 +246,10 @@ class BazosPortal:
         # an un-scoped per-section nomination would send every sibling section's
         # rows to the drain for a page check on every walk.
         sub = SUBTYPE.get(category.get("category"))
-        return db.presence_candidates(
+        candidates, active_rows = db.presence_candidates(
             conn, SOURCE, cm, ct, seen, subtype=sub, scope_subtype=True,
         )
+        return candidates, active_rows, {"subtype": sub}
 
     def active_count(self, conn: Any, category: dict[str, str]) -> int | None:
         cm, ct = self.category_labels(category)

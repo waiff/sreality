@@ -1515,15 +1515,28 @@ def presence_candidates(
             tuple(scope_params),
         )
         active_rows = int(cur.fetchone()[0])
+        # Two exclusions keep the oldest-unseen order from jamming. A row that
+        # already has a queue row (waiting, claimed, or given up after five
+        # failures) is in the drain's hands, and a row the drain finished in
+        # the last day was just checked; without these, a page that errors
+        # keeps its old last_seen_at, sorts first forever and eats every
+        # throttle slot while the rows behind it are never nominated.
         cur.execute(
             f"""
             SELECT {key_col}::text, source_url, price_czk
-            FROM listings
-            WHERE is_active = true
-              AND source = %s{cm_clause}
-              AND category_type = %s{sub_clause}
-              AND {key_col} <> ALL(%s)
-            ORDER BY last_seen_at ASC NULLS FIRST, id
+            FROM listings l
+            WHERE l.is_active = true
+              AND l.source = %s{cm_clause}
+              AND l.category_type = %s{sub_clause}
+              AND l.{key_col} <> ALL(%s)
+              AND NOT EXISTS (
+                    SELECT 1 FROM listing_detail_queue q
+                    WHERE q.source = l.source AND q.native_id = l.{key_col}::text)
+              AND NOT EXISTS (
+                    SELECT 1 FROM detail_queue_completions c
+                    WHERE c.source = l.source AND c.native_id = l.{key_col}::text
+                      AND c.completed_at > now() - interval '24 hours')
+            ORDER BY l.last_seen_at ASC NULLS FIRST, l.id
             """,
             tuple(scope_params) + (ids,),
         )
@@ -1538,7 +1551,7 @@ def presence_candidates(
 def enqueue_presence_checks(
     conn: psycopg.Connection,
     source: str,
-    category_main: str,
+    category_main: str | None,
     category_type: str,
     candidates: Sequence[tuple[str, str | None, int | None]],
     *,
@@ -1605,21 +1618,28 @@ def enqueue_presence_checks(
         [(nid, ref, price, QUEUE_PRIORITY_VERIFY) for nid, ref, price in batch],
     )
     # A row the drain gave up on (5 failed fetches) is excluded from every claim
-    # and enqueue_detail never re-arms it, so without this a listing whose page
-    # once erred five times would stay active forever with no path to a check.
-    # Re-arm only what THIS walk nominated: the index just failed to see it, so
-    # another look is exactly what is owed (rule #5: tracked, not dropped).
-    if batch:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE listing_detail_queue
-                SET given_up = false, attempts = 0
-                WHERE source = %s AND given_up = true AND claimed_at IS NULL
-                  AND native_id = ANY(%s::text[])
-                """,
-                (source, [nid for nid, _, _ in batch]),
+    # and never re-armed by anything else, so a listing whose page erred five
+    # times once would stay active forever with no path to a check. Give a
+    # bounded number of them another five tries per walk, oldest first, and
+    # move them to the back of the line (enqueued_at = now()) so the same few
+    # cannot monopolise the budget walk after walk. Rows in the queue are not
+    # nominated above, so this is the only way a given-up row comes back
+    # (rule #5: tracked, not dropped).
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE listing_detail_queue q
+            SET given_up = false, attempts = 0, enqueued_at = now(),
+                priority = LEAST(q.priority, %(verify)s)
+            WHERE (q.source, q.native_id) IN (
+                SELECT source, native_id FROM listing_detail_queue
+                WHERE source = %(source)s AND given_up = true AND claimed_at IS NULL
+                ORDER BY enqueued_at
+                LIMIT %(rearm)s
             )
+            """,
+            {"source": source, "verify": QUEUE_PRIORITY_VERIFY, "rearm": PRESENCE_REARM_PER_WALK},
+        )
     return queued, total - limit
 
 
@@ -2838,6 +2858,11 @@ QUEUE_PRIORITY_FAILURE = 2
 # brand-new listing. Negative on purpose: smallint, no CHECK, and GREATEST() on
 # re-enqueue means a row already queued as new keeps its place.
 QUEUE_PRIORITY_VERIFY = -1
+# How many given-up queue rows a walk re-arms per source (see
+# enqueue_presence_checks): 50 x 5 attempts is a bounded retry budget per walk.
+PRESENCE_REARM_PER_WALK = 50
+# Share of each claim batch reserved for presence checks (see claim_detail_batch).
+QUEUE_VERIFY_RESERVE = 0.2
 
 # Fraction of each claim reserved for acquisition. Unused reserve backfills to
 # refresh (the refresh limit is computed from the rows acquisition actually
@@ -3198,6 +3223,12 @@ def claim_detail_batch(
         QUEUE_ACQUISITION_RESERVE if acquisition_reserve is None else acquisition_reserve
     )
     acq_limit = 0 if reserve <= 0 else min(limit, max(1, math.ceil(limit * reserve)))
+    # Presence checks (rule #3, 2026-09-07) get a reserved share too, for the
+    # same reason acquisition does: they sit at the bottom of the refresh class
+    # by design, and refresh inflow is unbounded, so with no reserve a busy
+    # queue would never close a listing again. Unused reserve backfills into
+    # `rest` inside SQL, and `rest` still takes remaining checks at its tail.
+    ver_limit = min(limit, max(1, math.ceil(limit * QUEUE_VERIFY_RESERVE)))
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
@@ -3209,16 +3240,27 @@ def claim_detail_batch(
                 LIMIT %(acq_limit)s
                 FOR UPDATE SKIP LOCKED
             ),
+            ver AS (
+                SELECT source, native_id FROM listing_detail_queue
+                WHERE source = %(source)s AND claimed_at IS NULL AND given_up = false
+                  AND priority = %(verify_priority)s
+                ORDER BY enqueued_at
+                LIMIT LEAST(%(ver_limit)s, GREATEST(%(limit)s - (SELECT count(*) FROM acq), 0))
+                FOR UPDATE SKIP LOCKED
+            ),
             rest AS (
                 SELECT source, native_id FROM listing_detail_queue
                 WHERE source = %(source)s AND claimed_at IS NULL AND given_up = false
                   AND priority <> %(new_priority)s
+                  AND (source, native_id) NOT IN (SELECT source, native_id FROM ver)
                 ORDER BY priority DESC, enqueued_at
-                LIMIT GREATEST(%(limit)s - (SELECT count(*) FROM acq), 0)
+                LIMIT GREATEST(%(limit)s - (SELECT count(*) FROM acq) - (SELECT count(*) FROM ver), 0)
                 FOR UPDATE SKIP LOCKED
             ),
             c AS (
                 SELECT source, native_id FROM acq
+                UNION ALL
+                SELECT source, native_id FROM ver
                 UNION ALL
                 SELECT source, native_id FROM rest
             )
@@ -3230,7 +3272,9 @@ def claim_detail_batch(
             {
                 "source": source,
                 "new_priority": QUEUE_PRIORITY_NEW,
+                "verify_priority": QUEUE_PRIORITY_VERIFY,
                 "acq_limit": acq_limit,
+                "ver_limit": ver_limit,
                 "limit": limit,
             },
         )
@@ -3238,6 +3282,26 @@ def claim_detail_batch(
             (nid, ref, price, dseq, enq)
             for nid, ref, price, dseq, enq in cur.fetchall()
         ]
+
+
+def queue_priorities(conn: psycopg.Connection, source: str, native_ids: Sequence[str]) -> dict[str, int]:
+    """priority per queued native_id (rows still hold their queue row while
+    claimed). Best-effort: the drain's gone-rate breaker treats an unknown
+    priority as an ingest row, the conservative direction."""
+    ids = [str(n) for n in native_ids]
+    if not ids:
+        return {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT native_id, priority FROM listing_detail_queue "
+                "WHERE source = %s AND native_id = ANY(%s::text[])",
+                (source, ids),
+            )
+            return {str(n): int(p) for n, p in cur.fetchall()}
+    except Exception as exc:  # noqa: BLE001 - observability must not fail the drain
+        LOG.warning("queue_priorities: %s", exc)
+        return {}
 
 
 def complete_detail(

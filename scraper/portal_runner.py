@@ -113,11 +113,14 @@ class Portal(Protocol):
     # seen_key: "native" (default; walk_category returns source_id_native strings)
     #   or "sreality_id" (integer sreality ids). Picks the column the runner's
     #   default nomination query excludes the seen set from.
-    # presence_candidates(conn, category, seen) -> (candidates, active_rows) | None:
+    # presence_candidates(conn, category, seen)
+    #   -> (candidates, active_rows) | (candidates, active_rows, scope) | None:
     #   override the default nomination for portals whose index sections do not
     #   map 1:1 onto (category_main, category_type) -- bazos scopes by subtype,
-    #   ceskereality buffers sibling slices and nominates once on the last.
-    #   Returning None means "not yet" (nothing is queued for this call).
+    #   ceskereality buffers sibling slices and nominates once on the last,
+    #   remax/maxima nominate a whole agenda. `scope` names what was actually
+    #   nominated ({"subtype": ...} / {"category_main": None}) so the throttle
+    #   and the operator override match the same scope. None means "not yet".
     #   `candidates` are (native_id, detail_ref, price) triples, oldest-unseen
     #   first, as db.presence_candidates returns them.
     # live_categories(limiter) -> (live, configured) | None: the portal's own
@@ -160,6 +163,20 @@ def _queue_presence_checks(
     tolerance) nominates nothing, because its unseen set is not evidence, it is
     the part of the portal it never reached.
     """
+    if not seen:
+        # walk_coverage calls a measured zero complete (declared 0, collected 0),
+        # and it is right to -- but "I saw nothing" proves nothing about what is
+        # missing: with an empty seen set the nomination query's `<> ALL('{}')`
+        # is true for every row, so the WHOLE scope would be queued. An emptied
+        # category (a retired slug, a throttled shell page that confirmed empty
+        # twice) is exactly when the portal is least trustworthy; its rows wait
+        # for a walk that saw something, or for their own gone detail fetch.
+        LOG.warning(
+            "VERIFY skipped cm=%s ct=%s: the walk saw no listings, so it cannot "
+            "nominate any (an empty seen set would nominate the whole scope)",
+            cm, ct,
+        )
+        return 0, 0
     custom = getattr(portal, "presence_candidates", None)
     if custom is not None:
         scope = custom(conn, category, seen)
@@ -173,13 +190,25 @@ def _queue_presence_checks(
         )
     if scope is None:
         return 0, 0
-    candidates, active_rows = scope
+    # An override may append a scope dict: {"subtype": ...} when it narrowed the
+    # nomination (bazos), {"category_main": None} when it widened it to an
+    # agenda (remax, maxima). The throttle, the operator override match and the
+    # deferral record then describe the SAME scope the candidates came from --
+    # otherwise a subtype-named override could never match, and an agenda-wide
+    # deferral would be filed under one descriptor's category.
+    extra: dict[str, Any] = {}
+    if len(scope) == 3:
+        candidates, active_rows, extra = scope
+    else:
+        candidates, active_rows = scope
+    cm_scope = extra.get("category_main", cm)
     queued, deferred = db.enqueue_presence_checks(
-        conn, portal.source, cm or "", ct or "", candidates, active_rows=active_rows,
+        conn, portal.source, cm_scope, ct or "", candidates,
+        active_rows=active_rows, subtype=extra.get("subtype"),
     )
     LOG.info(
-        "VERIFY cm=%s ct=%s candidates=%d queued=%d deferred=%d active=%d",
-        cm, ct, len(candidates), queued, deferred, active_rows,
+        "VERIFY cm=%s ct=%s subtype=%s candidates=%d queued=%d deferred=%d active=%d",
+        cm_scope, ct, extra.get("subtype"), len(candidates), queued, deferred, active_rows,
     )
     return queued, deferred
 
@@ -546,6 +575,45 @@ def _flush_drain_batch(
     return conn
 
 
+class _GoneRateBreaker:
+    """Rule #3's last rail after presence verification: a positive gone signal
+    flips one listing, and nothing else does -- so the one systemic failure
+    left is a portal that answers EVERY page with the gone signal (a consent
+    interstitial that redirects off the listing, a WAF serving 404s). Ingest
+    rows (priority >= 0) were on the index minutes ago, so among them a gone
+    rate near zero is normal and a majority is not the market, it is the
+    portal. Once tripped for the run, gone verdicts are recorded as failures
+    (retried later) instead of flips. Presence checks (priority < 0) are NOT
+    counted: a backlog of truly dead listings legitimately reads 100% gone.
+    """
+
+    MIN_SAMPLE = 20
+    MAX_GONE_SHARE = 0.5
+
+    def __init__(self, source: str) -> None:
+        self.source = source
+        self.ingest_fetched = 0
+        self.ingest_gone = 0
+        self.tripped = False
+        self.reason = ""
+
+    def observe(self, priority: int, kind: str) -> None:
+        if priority < 0 or self.tripped:
+            return
+        self.ingest_fetched += 1
+        if kind == "gone":
+            self.ingest_gone += 1
+        if (self.ingest_fetched >= self.MIN_SAMPLE
+                and self.ingest_gone > self.MAX_GONE_SHARE * self.ingest_fetched):
+            self.tripped = True
+            self.reason = (
+                f"gone-rate breaker: {self.ingest_gone} of {self.ingest_fetched} ingest "
+                f"fetches read gone this run -- the portal, not the market"
+            )
+            LOG.error("DRAIN %s source=%s; further gone verdicts this run are "
+                      "recorded as failures, not flips", self.reason, self.source)
+
+
 def _drain_mark_gone(portal: Portal, conn: Any, native_id: str, reconnect: Any) -> Any:
     """Flip a gone listing inactive + dequeue it, transient-drop resilient.
     Returns the live connection. mark_gone's own bookkeeping errors stay tolerated
@@ -614,6 +682,7 @@ def run_detail_drain(
         "new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0,
         "images_discovered": 0,
     }
+    breaker = _GoneRateBreaker(portal.source)
     limiter = build_rate_limiter(
         portal.source, detail_rate, getattr(portal, "shared_rate_limiter", False))
     client = portal.make_client(limiter)
@@ -695,6 +764,8 @@ def run_detail_drain(
             # the queue's internals.
             dseq_by_nid = {nid: dseq for nid, _ref, _price, dseq, _enq in claimed}
             enq_by_nid = {nid: enq for nid, _ref, _price, _dseq, enq in claimed}
+            prio_by_nid = db.queue_priorities(
+                conn, portal.source, [nid for nid, *_ in claimed]) if conn is not None else {}
             with ThreadPoolExecutor(max_workers=max(1, detail_workers)) as pool:
                 futures = {
                     pool.submit(portal.fetch_detail, client, nid, ref): nid
@@ -704,12 +775,23 @@ def run_detail_drain(
                     item = future.result()  # never raises
                     item.discovery_seq = dseq_by_nid.get(item.native_id)
                     item.discovered_at = enq_by_nid.get(item.native_id)
+                    breaker.observe(
+                        prio_by_nid.get(item.native_id, db.QUEUE_PRIORITY_NEW), item.kind)
                     if item.kind == "ok":
                         buffer.append(item)
                         if len(buffer) >= DETAIL_BATCH_SIZE:
                             conn = _flush_drain_batch(
                                 portal, conn, buffer, counts, dry_run, portal.connect_drain)
                             buffer = []
+                    elif item.kind == "gone" and breaker.tripped:
+                        # A page that reads "gone" while the portal is answering
+                        # every fetch that way is not evidence about this listing.
+                        LOG.warning("DETAIL id=%s gone, but the gone-rate breaker is "
+                                    "tripped; recorded as a failure to retry later",
+                                    item.native_id)
+                        counts["errors"] += 1
+                        conn = _drain_record_failure(
+                            portal, conn, item.native_id, breaker.reason, portal.connect_drain)
                     elif item.kind == "gone":
                         LOG.info("DETAIL id=%s gone (is_active=false)", item.native_id)
                         conn = _drain_mark_gone(

@@ -31,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       max_pages:
-        description: cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.
+        description: cap index pages per category (ad-hoc partial; nominates nothing). Blank = full walk.
         required: false
         default: ""
         type: string

@@ -3,7 +3,7 @@ name: "Scraping: Bazos index walk"
 # portal: bazos
 # The fast half of the bazos cadence split (architectural rule #19, like
 # sreality/idnes). Walks the ENTIRE index of every configured scope (no
-# --max-pages), touch_listings bumps last_seen on still-listed ads, mark_inactive
+# --max-pages), touch_listings bumps last_seen on still-listed ads, presence nomination (rule #3)
 # flips delisted ones under the completeness guard (source-scoped, throttled to
 # once per 12h), and new/price-changed ids are enqueued into listing_detail_queue
 # (source='bazos'). No detail fetch — the drain (bazos_detail_drain.yml) consumes
@@ -49,7 +49,7 @@ on:
         default: ""
         type: string
       max_pages:
-        description: cap index pages per scope (ad-hoc partial; suppresses mark_inactive). Blank = full walk.
+        description: cap index pages per scope (ad-hoc partial; suppresses presence nomination (rule #3)). Blank = full walk.
         required: false
         default: ""
         type: string

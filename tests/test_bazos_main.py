@@ -115,7 +115,7 @@ def test_nomination_is_subtype_scoped(monkeypatch):
             nominated.update(src=src, cm=cm, ct=ct, seen=set(seen), subtype=subtype,
                              scope_subtype=scope_subtype) or ([], 3),
     )
-    assert _portal().presence_candidates(object(), _BYT_RENT, {"a", "b"}) == ([], 3)
+    assert _portal().presence_candidates(object(), _BYT_RENT, {"a", "b"}) == ([], 3, {"subtype": None})
     assert nominated == {"src": "bazos", "cm": "byt", "ct": "pronajem",
                          "seen": {"a", "b"}, "subtype": None, "scope_subtype": True}
     nominated.clear()
@@ -124,6 +124,9 @@ def test_nomination_is_subtype_scoped(monkeypatch):
     # it never nominates the generic-dum (subtype NULL) section's rows.
     assert nominated["cm"] == "dum" and nominated["subtype"] == "chata"
     assert nominated["scope_subtype"] is True
+    # The scope travels with the candidates so the throttle, the operator
+    # override and the deferral record all name the section, not just (dum, prodej).
+    assert _portal([_CHATA_SALE]).presence_candidates(object(), _CHATA_SALE, {"a"})[2] == {"subtype": "chata"}
 
 
 def test_nomination_happens_for_every_category_every_run(monkeypatch):
@@ -135,8 +138,8 @@ def test_nomination_happens_for_every_category_every_run(monkeypatch):
         lambda _c, src, cm, ct, seen, **kw: calls.append(ct) or ([], 1),
     )
     p = _portal([_BYT_SALE, _BYT_RENT])
-    assert p.presence_candidates(object(), _BYT_SALE, {"a"}) == ([], 1)
-    assert p.presence_candidates(object(), _BYT_RENT, {"b"}) == ([], 1)
+    assert p.presence_candidates(object(), _BYT_SALE, {"a"}) == ([], 1, {"subtype": None})
+    assert p.presence_candidates(object(), _BYT_RENT, {"b"}) == ([], 1, {"subtype": None})
     assert calls == ["prodej", "pronajem"]
     assert not hasattr(bazos_main.BazosPortal, "mark_inactive")
 

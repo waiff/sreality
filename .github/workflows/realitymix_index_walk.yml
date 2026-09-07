@@ -3,7 +3,7 @@ name: "Scraping: RealityMix index walk"
 # portal: realitymix
 # The fast half of the realitymix cadence split (architectural rule #19, like
 # sreality/idnes/ceskereality). Walks the ENTIRE index of every configured category
-# (no --max-pages), touch_listings bumps last_seen on still-listed ids, mark_inactive
+# (no --max-pages), touch_listings bumps last_seen on still-listed ids, presence nomination (rule #3)
 # flips delisted ones under the completeness guard (source-scoped), and
 # new/price-changed ids are enqueued into listing_detail_queue (source='realitymix').
 # No detail fetch — the drain (realitymix_detail_drain.yml) consumes the queue.
@@ -26,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       max_pages:
-        description: cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.
+        description: cap index pages per category (ad-hoc partial; suppresses presence nomination (rule #3)). Blank = full walk.
         required: false
         default: ""
         type: string

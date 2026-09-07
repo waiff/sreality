@@ -81,7 +81,7 @@ def test_nomination_is_agenda_grain(monkeypatch):
         ),
     )
     # First prodej descriptor (byt) sweeps the whole sale agenda.
-    assert portal.presence_candidates(object(), _CATEGORIES[0], {"r1", "r2"}) == ([], 4)
+    assert portal.presence_candidates(object(), _CATEGORIES[0], {"r1", "r2"}) == ([], 4, {"category_main": None})
     source, cm, ct, seen = captured[0]
     assert source == "remax" and ct == "prodej" and cm is None   # agenda scope: category_type alone
     assert seen == {"r1", "r2", "r3"}              # the FULL sale agenda, not the byt slice

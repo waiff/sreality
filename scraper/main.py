@@ -779,7 +779,12 @@ def _run_full(
             # a truncated walk nominates nothing.
             inactive = 0
             if conn is not None and limit is None:
-                if complete:
+                if complete and not seen_ids:
+                    LOG.warning(
+                        "VERIFY skipped cm=%s ct=%s: the walk saw no listings, so "
+                        "it cannot nominate any", cm_text, ct_text,
+                    )
+                elif complete:
                     candidates, active_rows = db.presence_candidates(
                         conn, "sreality", cm_text, ct_text, seen_ids,
                         seen_key="sreality_id",
