@@ -35,7 +35,7 @@ from typing import Any
 from scraper import db, portal_runner
 from scraper.location import CoordResolver
 from scraper.mmreality_client import MmRealityClient, detail_url
-from scraper.mmreality_parser import index_price, parse_detail, parse_index
+from scraper.mmreality_parser import GROUP_SLUGS, index_price, live_groups, parse_detail, parse_index
 from scraper.portal import (
     PortalConfig,
     default_config,
@@ -64,10 +64,9 @@ CATEGORY_MAIN: dict[str, str] = {
 }
 SALE_TYPE: dict[str, str] = {"prodej": "prodej", "pronajem": "pronajem"}
 
-# The staleness rail (rule #3): a row is flipped only if ALSO unseen this long,
-# so one walk's hiccup cannot delist what the previous walk just touched. 12 h on
-# the 6-hourly portals, same as ceskereality/bazos/bezrealitky.
-INACTIVE_MIN_UNSEEN_HOURS = 12
+# No staleness rail any more (rule #3, 2026-09-07): a complete walk nominates
+# the rows it did not see for a page check and the drain's fetch decides, so a
+# single walk-miss costs one fetch, never a live listing.
 
 # The ledger key for a category walked whole. mmreality's per-type indexes page
 # to their tail (the largest, pozemky/prodej, is ~300 pages of 12), so there is
@@ -110,6 +109,13 @@ class MmRealityPortal:
         self._coords = CoordResolver(SOURCE)
 
     # --- index-walk seams ---
+    def set_index_page_cap(self, pages: int | None) -> None:
+        """The always-on worker's newest-first probe re-caps the walk between
+        its peek and its deepening (portal_runner.run_index_probe). The per-type
+        indexes list newest first by default (`order: createdAt`), so the
+        generic page-capped walk is a valid delta probe here."""
+        self._max_pages = pages
+
     def categories(self) -> list[dict[str, Any]]:
         return list(self._categories)
 
@@ -202,7 +208,12 @@ class MmRealityPortal:
             "outcome=%s complete=%s",
             sale_type, cat, declared, len(seen), pages, outcome, complete,
         )
-        self._record_slice(conn, category, outcome, declared, len(seen), pages)
+        if not self._max_pages:
+            # A page-capped walk is a probe or a bounded test, not coverage: the
+            # ledger is latest-wins, so recording its "ceiling" every few minutes
+            # would overwrite the real walk's "exhausted" and hold the coverage
+            # gate shut for good (the always-on worker probes under a cap).
+            self._record_slice(conn, category, outcome, declared, len(seen), pages)
 
         existing = (
             db.index_summary_native(conn, SOURCE, native_ids)
@@ -258,18 +269,22 @@ class MmRealityPortal:
             collected=collected, pages=pages,
         )
 
-    def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
-        # Runner-gated: called only on a complete walk of THIS category while
-        # supports_complete_walk is true. Source- and category-scoped (rule #15),
-        # behind the staleness rail (rule #3). Each (sale type, property type)
-        # index maps to exactly one (category_main, category_type), so unlike
-        # ceskereality there is no sibling slice to buffer for.
-        cm, ct = self.category_labels(category)
-        if cm is None or ct is None:
-            return 0
-        return db.mark_inactive_native(
-            conn, SOURCE, cm, ct, seen, min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
-        )
+    def live_categories(self, limiter: RateLimiter) -> tuple[set[str], set[str]] | None:
+        """The coverage alarm's input (runner: _record_category_drift): the
+        property-type groups the portal lists right now, per sale type, vs the
+        ones this walk is configured to cover. Two requests, the sale-type root
+        pages. None if either page carries no SSR state -- an unreadable page
+        must not read as 'the portal dropped every category'."""
+        client = MmRealityClient(limiter=limiter)
+        live: set[str] = set()
+        for sale in sorted({c["sale_type"] for c in self._categories}):
+            html, _status = client.fetch_sale_root(sale)
+            groups = live_groups(html)
+            if groups is None:
+                return None
+            live.update(f"{sale}/{GROUP_SLUGS.get(g, f'group-{g}')}" for g in groups)
+        configured = {f"{c['sale_type']}/{c['category']}" for c in self._categories}
+        return live, configured
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
         cm, ct = self.category_labels(category)

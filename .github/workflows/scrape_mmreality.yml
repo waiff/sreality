@@ -18,7 +18,7 @@ name: "Scraping: M&M Reality scraper (pilot)"
 #
 # The index is a single MIXED-category feed (no per-category slice) AND exposes no
 # result-total, so it can't be gated per-category the way source-scoped
-# mark_inactive needs: the portal stays supports_complete_walk=false (registry
+# the old absence sweep needed: the portal stays supports_complete_walk=false (registry
 # row, migration 117), so the runner never flips its listings inactive from index
 # absence (architectural rule #3) — delistings still surface via a gone detail
 # fetch (immediate per-listing flip) + the "active = seen within 7 days" rule.

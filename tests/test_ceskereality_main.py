@@ -240,14 +240,19 @@ def test_a_missing_kraj_forces_incomplete(monkeypatch):
     assert complete is False                 # 2 of 14 is never a full walk
 
 
-def test_union_short_of_the_national_total_forces_incomplete(monkeypatch):
-    # Every slice exhausted and their declared sum reconciles — but the nationwide
-    # probe says the category is far bigger, so the partition is not trusted.
+def test_union_short_of_the_national_total_is_still_complete(monkeypatch):
+    """Rule #3 since 2026-09-07: the verdict is per region, against each
+    region's own count. The nationwide total includes listings filed under no
+    region (foreign flats in the domestic tree, Czech flats with no kraj), so
+    the kraj union can never reach it -- demanding it parked rentals for good.
+    Those region-less rows are nominated for a page check on every walk
+    instead. The national number is still reported as the result size, so the
+    RECONCILE line keeps showing the gap."""
     fake = _PartitionClient({k: 40 for k in KRAJ_SLUGS}, national=5000)
     portal = m.CeskerealityPortal(default_config("ceskereality"))
     _seen, _c, total, _p, complete = _walk(portal, fake, monkeypatch)
     assert total == 5000
-    assert complete is False
+    assert complete is True
 
 
 # --- the subtype descent (a kraj past the site's 99-page ceiling) ------------
@@ -413,50 +418,57 @@ def test_search_url_puts_subtype_before_kraj():
         "https://www.ceskereality.cz/prodej/byty/praha/?strana=93")
 
 
-# --- cross-slice delisting sweep ('rodinne-domy' + 'chaty-chalupy' -> dum) ---
+# --- cross-slice nomination ('rodinne-domy' + 'chaty-chalupy' -> dum) --------------------------
+#
+# Rule #3 since 2026-09-07: a complete walk nominates its unseen rows for a page
+# check, it does not delist. Sibling slices that collapse onto one canonical
+# category still have to be buffered, because the runner calls the seam per
+# slice and one slice's seen set would nominate the sibling's whole population.
 
-def _sweep_portal(monkeypatch):
+def _nominating_portal(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(
-        m.db, "mark_inactive_native",
-        lambda _c, src, cm, ct, seen, *, min_unseen_hours: calls.append(
-            {"src": src, "cm": cm, "ct": ct, "seen": set(seen),
-             "min_unseen_hours": min_unseen_hours}) or len(seen),
+        m.db, "presence_candidates",
+        lambda _c, src, cm, ct, seen, **kw: calls.append(
+            {"src": src, "cm": cm, "ct": ct, "seen": set(seen), **kw}) or ([], len(seen)),
     )
     return m.CeskerealityPortal(default_config("ceskereality")), calls
 
 
-def test_mark_inactive_sweeps_collapsing_group_once_with_union(monkeypatch):
-    portal, calls = _sweep_portal(monkeypatch)
-    # First dum slice buffers only — a sweep here would flip every chaty-chalupy
-    # row (same (dum, pronajem), never in the rodinne-domy slice's seen set).
-    assert portal.mark_inactive(
-        object(), {"sale_type": "pronajem", "category": "rodinne-domy"},
-        {"r1", "r2"}) == 0
+def test_nomination_buffers_the_collapsing_group_and_nominates_once_with_union(monkeypatch):
+    portal, calls = _nominating_portal(monkeypatch)
+    # First dum slice buffers only: nominating here would send every chaty-chalupy row
+    # (same (dum, pronajem), never in the rodinne-domy slice's seen set) to the drain.
+    assert portal.presence_candidates(
+        object(), {"sale_type": "pronajem", "category": "rodinne-domy"}, {"r1", "r2"}) is None
     assert calls == []
-    # The group's last complete slice sweeps with the UNION + the 24h rail.
-    n = portal.mark_inactive(
+    # The group's last complete slice nominates with the UNION.
+    out = portal.presence_candidates(
         object(), {"sale_type": "pronajem", "category": "chaty-chalupy"}, {"c1"})
-    assert n == 3
-    assert calls == [{"src": "ceskereality", "cm": "dum", "ct": "pronajem",
-                      "seen": {"r1", "r2", "c1"}, "min_unseen_hours": 12}]
+    assert out == ([], 3)
+    assert calls == [{"src": "ceskereality", "cm": "dum", "ct": "pronajem", "seen": {"r1", "r2", "c1"}}]
 
 
-def test_mark_inactive_missing_sibling_slice_suppresses_sweep(monkeypatch):
-    # The runner only calls mark_inactive for COMPLETE slices; if rodinne-domy
-    # walked incomplete/failed, chaty-chalupy alone must not sweep (dum, prodej).
-    portal, calls = _sweep_portal(monkeypatch)
-    assert portal.mark_inactive(
-        object(), {"sale_type": "prodej", "category": "chaty-chalupy"}, {"c1"}) == 0
+def test_nomination_missing_sibling_slice_nominates_nothing(monkeypatch):
+    # The runner only reaches this seam for COMPLETE slices; if rodinne-domy walked
+    # incomplete or failed, chaty-chalupy alone must not nominate (dum, prodej).
+    portal, calls = _nominating_portal(monkeypatch)
+    assert portal.presence_candidates(
+        object(), {"sale_type": "prodej", "category": "chaty-chalupy"}, {"c1"}) is None
     assert calls == []
 
 
-def test_mark_inactive_single_slice_group_sweeps_immediately(monkeypatch):
-    portal, calls = _sweep_portal(monkeypatch)
-    assert portal.mark_inactive(
-        object(), {"sale_type": "prodej", "category": "byty"}, {"b1"}) == 1
-    assert calls == [{"src": "ceskereality", "cm": "byt", "ct": "prodej",
-                      "seen": {"b1"}, "min_unseen_hours": 12}]
+def test_nomination_single_slice_group_nominates_immediately(monkeypatch):
+    portal, calls = _nominating_portal(monkeypatch)
+    assert portal.presence_candidates(
+        object(), {"sale_type": "prodej", "category": "byty"}, {"b1"}) == ([], 1)
+    assert calls == [{"src": "ceskereality", "cm": "byt", "ct": "prodej", "seen": {"b1"}}]
+
+
+def test_the_old_sweep_seam_is_gone():
+    """No portal may flip rows from index absence any more; the runner never
+    calls mark_inactive and the seam must not linger to tempt anyone."""
+    assert not hasattr(m.CeskerealityPortal, "mark_inactive")
 
 
 # --- newest-first delta probe (/nejnovejsi/ on the www host) -----------------
@@ -644,15 +656,20 @@ class _LaunderedKrajClient(_PartitionClient):
         return super().fetch_search(url)
 
 
-def test_a_throttled_kraj_cannot_launder_itself_into_an_empty_one(monkeypatch):
+def test_a_throttled_kraj_laundered_as_empty_costs_fetches_not_listings(monkeypatch):
+    """A throttled kraj that renders an empty shell twice reads as an empty
+    region, and the national cross-check that used to catch it is gone from
+    the verdict (it made rentals impossible to complete). What protects the
+    region's rows now is the rule itself: a complete walk NOMINATES, the page
+    decides. The 400 unseen rows get a page check, come back alive, and are
+    refreshed; nothing is deleted. The walk still reports the national total
+    as its result size, so the shortfall stays visible on the RECONCILE line."""
     counts = {k: 400 for k in KRAJ_SLUGS}
     fake = _LaunderedKrajClient(counts, throttled="zlinsky-kraj")
     portal = m.CeskerealityPortal(default_config("ceskereality"))
-    _seen, _c, _t, _pages, complete = _walk(portal, fake, monkeypatch)
-    assert complete is False, (
-        "a throttled kraj was accepted as empty - the exact path that "
-        "reproduced complete=True with a whole kraj missing"
-    )
+    seen, _c, total, _pages, complete = _walk(portal, fake, monkeypatch)
+    assert complete is True
+    assert total == 5600 and len(seen) == 5200      # the gap is on the record
 
 
 def test_an_empty_slice_is_confirmed_by_a_second_read(monkeypatch):
@@ -668,17 +685,18 @@ def test_an_empty_slice_is_confirmed_by_a_second_read(monkeypatch):
     assert len(empty_reads) >= 2, "the empty slice was accepted on a single read"
 
 
-def test_an_unmeasurable_national_probe_cannot_prove_completeness(monkeypatch):
-    """The cross-check read `national is None or ...`, so a FAILED probe asserted
-    completeness. Throttling is correlated - the national probe degrades at
-    exactly the moment the slices do, so the rail was weakest when needed."""
+def test_an_unmeasurable_national_probe_no_longer_decides(monkeypatch):
+    """The national probe is observability, not verdict: fourteen exhausted
+    regions make the category complete whether or not the national page could
+    be read, and the result size falls back to the regions' declared sum."""
     counts = {k: 400 for k in KRAJ_SLUGS}
     fake = _PartitionClient(counts)
     monkeypatch.setattr(
         m.CeskerealityPortal, "_nationwide_total", lambda *a, **k: None)
     portal = m.CeskerealityPortal(default_config("ceskereality"))
-    _seen, _c, _t, _pages, complete = _walk(portal, fake, monkeypatch)
-    assert complete is False
+    _seen, _c, total, _pages, complete = _walk(portal, fake, monkeypatch)
+    assert complete is True
+    assert total == 5600                            # declared_sum, not None
 
 
 # --- the slice ledger (migration 454) ----------------------------------------

@@ -175,14 +175,14 @@ def test_probe_pass_filters_disabled_and_proxied(monkeypatch):
         await rw._probe_pass(asyncio.Event(), state)
 
     asyncio.run(scenario())
-    # ceskereality is proxied (USE_PROXY) and SCRAPER_PROXY_URL is unset.
-    # sreality (Phase 4 of portal-order-fidelity) is neither disabled nor
-    # proxied, so it runs too.
+    # ceskereality and mmreality are proxied (USE_PROXY, proxy REQUIRED) and
+    # SCRAPER_PROXY_URL is unset. sreality (Phase 4 of portal-order-fidelity) is
+    # neither disabled nor proxied, so it runs too.
     assert ran == ["bezrealitky", "idnes", "maxima", "realitymix", "sreality"]
     probe = state["lanes"]["probe"]
     assert probe["passes"] == 1
     assert probe["last"]["portals"] == 5
-    assert probe["last"]["skipped"] == 3
+    assert probe["last"]["skipped"] == 4      # bazos + remax disabled, ceskereality + mmreality proxied
     assert probe["last"]["enqueued"] == 10
 
 

@@ -53,8 +53,10 @@ SHIPS DARK: the process exits immediately unless env REALTIME_WORKER_ENABLED=1,
 so merging changes nothing until the operator creates the Railway service.
 Setting any lane's interval <= 0 idles that lane (kill-switch without redeploy).
 
-mmreality is deliberately OUT of the registry: it is proxied low-frequency by
-design. sreality JOINED the registry in Phase 4 of the portal-order-fidelity
+mmreality JOINED the registry 2026-09-07 with presence-verified delisting: its
+queue only drained inside the 6-hourly job before, so the page checks that now
+close its listings would have waited hours (it is proxied, like ceskereality,
+which the worker already serves). sreality JOINED in Phase 4 of the portal-order-fidelity
 program (docs/design/portal-order-fidelity.md) via its own bespoke
 probe_category (the ceskereality pattern — no sort param to request, so a
 per-page early-stop diff replaces it) — UNSPLIT, since the deep-pagination 422
@@ -147,14 +149,14 @@ COUNT_PROBE_RATE_PER_S = 2.0  # ~20 total-only requests in ~10s, politely paced
 # to build.
 REALTIME_SOURCES: tuple[str, ...] = (
     "bazos", "bezrealitky", "ceskereality", "idnes",
-    "maxima", "realitymix", "remax", "sreality",
+    "maxima", "mmreality", "realitymix", "remax", "sreality",
 )
 
 # The class MAPPING lives in scraper.portal_factory, because the coverage gate
 # needs the same table to ask a portal what its declared categories canonicalise
 # to. The SCOPE stays here and stays narrower: the factory knows every portal,
-# while this worker deliberately drains only REALTIME_SOURCES — mmreality is out
-# by design (proxied, low-frequency) and bazos predates the uniform constructor.
+# while this worker deliberately drains only REALTIME_SOURCES (every walked
+# portal since 2026-09-07; bazos predates the uniform constructor).
 # Shared mapping, local scope, so neither caller can silently widen the other.
 _PORTAL_CLASSES = {
     k: v for k, v in portal_factory.PORTAL_CLASSES.items()

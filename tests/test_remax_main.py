@@ -68,25 +68,25 @@ def _items(*specs):
     ]
 
 
-def test_mark_inactive_is_agenda_grain(monkeypatch):
+def test_nomination_is_agenda_grain(monkeypatch):
     portal = _portal()
     _walk_sale_agenda(monkeypatch, portal, total=3, items=_items(
         ("r1", "Prodej bytu 2+kk"), ("r2", "Prodej bytu"), ("r3", "Prodej rodinného domu"),
     ))
     captured: list[Any] = []
     monkeypatch.setattr(
-        remax_main.db, "mark_inactive_agenda",
-        lambda _c, source, ct, seen, *, min_unseen_hours: (
-            captured.append((source, ct, set(seen), min_unseen_hours)) or 4
+        remax_main.db, "presence_candidates",
+        lambda _c, source, cm, ct, seen, **kw: (
+            captured.append((source, cm, ct, set(seen))) or ([], 4)
         ),
     )
     # First prodej descriptor (byt) sweeps the whole sale agenda.
-    assert portal.mark_inactive(object(), _CATEGORIES[0], {"r1", "r2"}) == 4
-    source, ct, seen, hrs = captured[0]
-    assert source == "remax" and ct == "prodej" and hrs == 12
+    assert portal.presence_candidates(object(), _CATEGORIES[0], {"r1", "r2"}) == ([], 4, {"category_main": None})
+    source, cm, ct, seen = captured[0]
+    assert source == "remax" and ct == "prodej" and cm is None   # agenda scope: category_type alone
     assert seen == {"r1", "r2", "r3"}              # the FULL sale agenda, not the byt slice
-    # A second prodej descriptor (dum) must NOT re-sweep.
-    assert portal.mark_inactive(object(), _CATEGORIES[1], {"r3"}) == 0
+    # A second prodej descriptor (dum) must NOT re-nominate.
+    assert portal.presence_candidates(object(), _CATEGORIES[1], {"r3"}) is None
     assert len(captured) == 1
 
 
@@ -137,7 +137,7 @@ def test_walk_priceless_card_is_unchanged_not_changed(monkeypatch):
     assert counts == {"found_new": 1, "enqueued": 2}
 
 
-def test_mark_inactive_skips_incomplete_agenda(monkeypatch):
+def test_nomination_skips_incomplete_agenda(monkeypatch):
     portal = _portal()
     # total=10 but only 2 collected -> walk.complete False -> no index-absence delist.
     _walk_sale_agenda(monkeypatch, portal, total=10, items=_items(
@@ -145,8 +145,8 @@ def test_mark_inactive_skips_incomplete_agenda(monkeypatch):
     ))
     called = {"n": 0}
     monkeypatch.setattr(
-        remax_main.db, "mark_inactive_agenda",
-        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or 0,
+        remax_main.db, "presence_candidates",
+        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or ([], 0),
     )
-    assert portal.mark_inactive(object(), _CATEGORIES[0], {"r1", "r2"}) == 0
+    assert portal.presence_candidates(object(), _CATEGORIES[0], {"r1", "r2"}) is None
     assert called["n"] == 0

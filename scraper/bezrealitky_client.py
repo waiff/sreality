@@ -145,10 +145,19 @@ class BezrealitkyClient(BasePortalClient):
         return list(result.get("list") or []), int(result.get("totalCount") or 0)
 
     def get_detail(self, advert_id: str) -> dict[str, Any]:
-        """Full advert object. Raises `ListingGoneError` when the API returns a
-        null advert (delisted / unknown id)."""
+        """Full advert object. Raises `ListingGoneError` only on the POSITIVE
+        signal -- the API answered the query and said the advert is null
+        (delisted / unknown id). A response with no `advert` key at all (an
+        empty `data`, an edge stub, a partial outage) is an ERROR, not gone:
+        since 2026-09-07 every unseen active row is checked this way (rule #3),
+        so reading "no answer" as "gone" would delist a whole nomination batch
+        during one bad minute."""
         data = self._graphql(_DETAIL_QUERY, {"id": str(advert_id)})
-        advert = data.get("advert")
+        if "advert" not in data:
+            raise RuntimeError(
+                f"bezrealitky detail {advert_id}: response carried no 'advert' field"
+            )
+        advert = data["advert"]
         if advert is None:
             raise ListingGoneError(detail_url(str(advert_id)), None)
         return advert

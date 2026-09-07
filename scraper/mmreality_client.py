@@ -66,6 +66,13 @@ class MmRealityClient(BasePortalClient):
         response = self._request(index_url(sale_type, category, page))
         return response.text, response.status_code
 
+    def fetch_sale_root(self, sale_type: str) -> tuple[str, int]:
+        """The sale-type root (`/nemovitosti/prodej/`, `/nemovitosti/pronajem/`):
+        its SSR state lists every property-type group the portal offers for
+        that sale type, with counts -- the live category vocabulary."""
+        response = self._request(f"{BASE_URL}/nemovitosti/{sale_type}/")
+        return response.text, response.status_code
+
     def fetch_detail(self, id_or_path: str) -> tuple[str, int]:
         url = detail_url(id_or_path)
         response = self._request(url)

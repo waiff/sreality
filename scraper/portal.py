@@ -456,7 +456,7 @@ _DEFAULTS: dict[str, PortalConfig] = {
         # (cached) and keeps the id-prefix slice for its category. Complete-walk
         # via AGENDA-GRAIN delisting: maxima reports a per-AGENDA total, so the
         # sweep flips the whole agenda (af ≡ category_type) once it's fully walked
-        # (db.mark_inactive_agenda), not the per-(cm,ct) slice. See maxima_main.
+        # (db.presence_candidates, category_main=None), not the per-(cm,ct) slice. See maxima_main.
         supports_complete_walk=True,
         categories=[
             {"category_main": "byt",      "category_type": "prodej",   "af": 1},
@@ -483,7 +483,7 @@ _DEFAULTS: dict[str, PortalConfig] = {
         # title-derived slice for its category. Complete-walk via AGENDA-GRAIN
         # delisting: remax reports a per-AGENDA total, so the sweep flips the whole
         # agenda (sale ≡ category_type) once it's fully walked
-        # (db.mark_inactive_agenda), not the title-derived per-(cm,ct) slice. See
+        # (db.presence_candidates, category_main=None), not the title-derived per-(cm,ct) slice. See
         # remax_main.
         supports_complete_walk=True,
         categories=[

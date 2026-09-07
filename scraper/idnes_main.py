@@ -62,13 +62,9 @@ from scraper.rate_limit import RateLimiter
 LOG = logging.getLogger(__name__)
 SOURCE = "idnes"
 
-# Only flip rows unseen for 12h+ — ~2 full walk cadences at the 6h schedule.
-# last_seen_at is bumped for unchanged rows each walk (touch_listings) and for
-# changed rows on a successful drain fetch — so a churn-missed live row is
-# protected unless its detail fetches have ALSO failed for 12h+; even then the
-# flip self-heals on the next index sighting (touch_listings reactivates).
-# Tightened 24->12h for the real-time delisting SLO.
-INACTIVE_MIN_UNSEEN_HOURS = 12
+# No staleness rail any more (rule #3, 2026-09-07): a complete walk nominates
+# the rows it did not see for a page check and the drain's fetch decides, so a
+# single walk-miss costs one fetch, never a live listing.
 
 # A loop guard, not a budget: idnes clamps an out-of-range ?page to the last page
 # and serves it again, so a pager bug could otherwise page forever against a live
@@ -618,20 +614,6 @@ class IdnesPortal:
             page = parsed.next_offset
         counts = self._reconcile(conn, collected)
         return set(collected), counts, total, pages, False
-
-    def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
-        cm, ct = self.category_labels(category)
-        if cm is None or ct is None:
-            return 0
-        # Sweep on the native id the index actually walked, not on a PK set
-        # resolved back out of the DB: under listing-identity Gate 2 a
-        # non-sreality row carries sreality_id = NULL, and one NULL inside
-        # `<> ALL(...)` makes the whole predicate NULL — the sweep would become
-        # a permanent no-op for the entire portal (rule #3).
-        return db.mark_inactive_native(
-            conn, SOURCE, cm, ct, seen,
-            min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
-        )
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
         cm, ct = self.category_labels(category)

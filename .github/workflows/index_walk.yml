@@ -8,18 +8,18 @@ name: "Scraping: Sreality index walk (Phase 2)"
 # — the full category cross product incl. pozemek/ostatni/drazba/podil;
 # district-split + national fallback above the deep-pagination cap), bumps
 # last_seen on still-listed ids (touch), flips delisted ones to is_active=false
-# (mark_inactive, under the 100% completeness guard), and enqueues new +
+# (nominates unseen ids for a page check, rule #3), and enqueues new +
 # price-changed ids into listing_detail_queue (source='sreality'). It does NO
 # detail fetching, so it finishes in minutes and delistings surface fast.
 #
-# This replaces the index+detail+mark_inactive of the legacy scrape.yml (now a
+# This replaces the index+detail+sweep of the legacy scrape.yml (now a
 # dispatch-only fallback running the unchanged `scraper.main` CLI — the
 # instant-revert path). The companion detail_drain.yml consumes the queue.
 # Records run_type='index' with index_pages>0, which is what the Health
 # liveness check keys off (freshness/delisting depend on the index walk, not
 # the drain).
 #
-# CADENCE: every 15 min. Each run is a complete walk; mark_inactive runs every
+# CADENCE: every 15 min. Each run is a complete walk; nomination runs every
 # tick under the same per-category walk-completeness rail (architectural rule
 # #3) so a truncated page never mass-flips live listings. GitHub throttles
 # scheduled workflows, so effective cadence is slower; Health liveness is tuned
@@ -39,7 +39,7 @@ name: "Scraping: Sreality index walk (Phase 2)"
 # detail-drain and the fallback scrape.
 #
 # Required GitHub secret: SUPABASE_DB_URL (transaction pooler — the walk does
-# bulk set-based touch/mark_inactive/enqueue, no per-listing prepared loop).
+# bulk set-based touch/nominate/enqueue, no per-listing prepared loop).
 
 on:
   schedule:
@@ -64,7 +64,7 @@ concurrency:
 jobs:
   index-walk:
     runs-on: ubuntu-latest
-    # A complete index walk + touch + mark_inactive + enqueue is cheap (no
+    # A complete index walk + touch + nominate + enqueue is cheap (no
     # detail fetches). The --max-seconds clean-stop is the real bound; this
     # timeout is the generous outer backstop (budget + finalize headroom),
     # kept under the API's sweep_stuck_scrape_runs cutoff (90 min).

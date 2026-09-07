@@ -66,7 +66,7 @@ class _FakePortal:
         self.conns = [self.conn]            # every connection handed out, in order
         self.connect_drain_calls = 0
         self.calls: dict[str, list] = {
-            "walk": [], "mark_inactive": [], "active_count": [],
+            "walk": [], "active_count": [],
             "write": [], "gone": [], "failure": [],
         }
 
@@ -93,10 +93,6 @@ class _FakePortal:
         if c in self._walk_fails:
             raise RuntimeError(f"blocked {c}")
         return ({1, 2}, {"found_new": 2, "enqueued": 2}, 2, 1, self._complete)
-
-    def mark_inactive(self, conn, c, seen):
-        self.calls["mark_inactive"].append((c, set(seen)))
-        return len(seen)
 
     def active_count(self, conn, c):
         self.calls["active_count"].append(c)
@@ -139,39 +135,115 @@ class _FakePortal:
 # --- run_index_walk ---------------------------------------------------------
 
 
-def test_index_walk_marks_inactive_when_complete_and_supported():
+def _nominations(monkeypatch):
+    """Capture what the runner nominates for a page check (rule #3, 2026-09-07:
+    a complete walk nominates unseen rows; the drain's page visit decides)."""
+    cap: dict[str, list] = {"candidates": [], "queued": []}
+
+    def fake_candidates(conn, source, cm, ct, seen, *, seen_key="native", **kw):
+        cap["candidates"].append((cm, set(seen), seen_key))
+        return ([("7", "https://x/7", None), ("8", "https://x/8", None)], 9)
+
+    def fake_enqueue(conn, source, cm, ct, candidates, *, active_rows, subtype=None):
+        cap["queued"].append((cm, [c[0] for c in candidates], active_rows))
+        cap.setdefault("scopes", []).append((cm, subtype))
+        return len(candidates), 0
+
+    monkeypatch.setattr(portal_runner.db, "presence_candidates", fake_candidates)
+    monkeypatch.setattr(portal_runner.db, "enqueue_presence_checks", fake_enqueue)
+    return cap
+
+
+def test_index_walk_nominates_unseen_rows_when_complete(monkeypatch):
+    cap = _nominations(monkeypatch)
     p = _FakePortal(supports_complete_walk=True, complete=True)
     rc, agg = portal_runner.run_index_walk(p, dry_run=False)
     assert rc == 0
     assert p.calls["walk"] == ["A", "B"]
-    assert [c for c, _ in p.calls["mark_inactive"]] == ["A", "B"]
-    assert agg["index_pages"] == 2          # 1 page per category
-    assert agg["listings_inactive"] == 4    # 2 seen ids flipped per category
+    assert [c for c, _, _ in cap["candidates"]] == ["A", "B"]
+    assert cap["candidates"][0][1] == {1, 2}            # the walk's seen set is what is excluded
+    assert [c for c, _, _ in cap["queued"]] == ["A", "B"]
+    assert agg["index_pages"] == 2
+    assert agg["listings_inactive"] == 0                # the walk itself flips nothing now
+    assert sum(c["listings_to_verify"] for c in agg["by_category"]) == 4
     assert agg["listings_scraped_new"] == 0
     assert p.conn.closed
 
 
-def test_index_walk_skips_inactive_when_incomplete():
+def test_index_walk_nominates_nothing_when_incomplete(monkeypatch):
+    """An unproven walk's unseen set is the part of the portal it never reached,
+    not evidence; nominating it would flood the drain with fetches."""
+    cap = _nominations(monkeypatch)
     p = _FakePortal(supports_complete_walk=True, complete=False)
     portal_runner.run_index_walk(p, dry_run=False)
-    assert p.calls["mark_inactive"] == []   # incomplete walk -> no flip
+    assert cap["candidates"] == [] and cap["queued"] == []
 
 
-def test_index_walk_skips_inactive_when_portal_cannot_complete():
+def test_index_walk_nominates_even_when_portal_flag_is_down(monkeypatch):
+    """supports_complete_walk gated a sweep that could be wrong. A nomination
+    cannot be -- the page decides -- so the flag no longer gates it."""
+    cap = _nominations(monkeypatch)
     p = _FakePortal(supports_complete_walk=False, complete=True)
     portal_runner.run_index_walk(p, dry_run=False)
-    assert p.calls["mark_inactive"] == []   # partial-walk portal never flips
+    assert [c for c, _, _ in cap["queued"]] == ["A", "B"]
 
 
-def test_index_walk_dry_run_uses_no_connection():
+def test_index_walk_uses_a_portal_override_for_nomination(monkeypatch):
+    """A portal whose index sections do not map 1:1 onto a category (bazos
+    subtypes, ceskereality sibling slices) supplies its own candidates; None
+    means 'not yet' and queues nothing."""
+    cap = _nominations(monkeypatch)
+    p = _FakePortal(complete=True)
+    seen_by: list = []
+
+    def presence_candidates(conn, category, seen):
+        seen_by.append(category)
+        return None if category == "A" else ([("42", "https://x/42", 100)], 3)
+
+    p.presence_candidates = presence_candidates
+    portal_runner.run_index_walk(p, dry_run=False)
+    assert seen_by == ["A", "B"]
+    assert cap["candidates"] == []                      # default nomination bypassed
+    assert cap["queued"] == [("B", ["42"], 3)]
+
+
+def test_index_walk_override_scope_reaches_the_throttle(monkeypatch):
+    """bazos narrows to a subtype, remax/maxima widen to an agenda; the throttle
+    and the operator override must see the scope the candidates came from."""
+    cap = _nominations(monkeypatch)
+    p = _FakePortal(complete=True, categories=["A"])
+    p.presence_candidates = lambda conn, category, seen: ([("1", "https://x/1", None)], 8, {"subtype": "chata"})
+    portal_runner.run_index_walk(p, dry_run=False)
+    assert cap["scopes"] == [("A", "chata")]
+    p2 = _FakePortal(complete=True, categories=["A"])
+    p2.presence_candidates = lambda conn, category, seen: ([("1", "https://x/1", None)], 8, {"category_main": None})
+    cap2 = _nominations(monkeypatch)
+    portal_runner.run_index_walk(p2, dry_run=False)
+    assert cap2["scopes"] == [(None, None)]
+
+
+def test_index_walk_that_saw_nothing_nominates_nothing(monkeypatch):
+    """A measured zero is a complete walk, but an empty seen set would nominate
+    the WHOLE scope (`<> ALL('{}')` is true for every row) -- exactly when the
+    portal is least trustworthy (a retired slug, a throttled shell page)."""
+    cap = _nominations(monkeypatch)
+    p = _FakePortal(complete=True, categories=["A"])
+    p.walk_category = lambda c, conn, dry_run, limiter, deadline=None: (set(), {"found_new": 0, "enqueued": 0}, 0, 1, True)
+    portal_runner.run_index_walk(p, dry_run=False)
+    assert cap["candidates"] == [] and cap["queued"] == []
+
+
+def test_index_walk_dry_run_uses_no_connection(monkeypatch):
+    cap = _nominations(monkeypatch)
     p = _FakePortal()
     portal_runner.run_index_walk(p, dry_run=True)
-    # walk still runs (conn=None passed through) but no mark_inactive
+    # walk still runs (conn=None passed through) but nothing is nominated
     assert p.calls["walk"] == ["A", "B"]
-    assert p.calls["mark_inactive"] == []
+    assert cap["queued"] == []
 
 
 def test_index_walk_bumps_index_pages_per_committed_category(monkeypatch):
+    _nominations(monkeypatch)
     # With a run_id, each category's pages are committed immediately so Health
     # liveness survives a SIGKILL before finalize.
     p = _FakePortal(supports_complete_walk=True, complete=True)
@@ -185,6 +257,7 @@ def test_index_walk_bumps_index_pages_per_committed_category(monkeypatch):
 
 
 def test_index_walk_does_not_bump_without_run_id(monkeypatch):
+    _nominations(monkeypatch)
     p = _FakePortal()
     bumps: list = []
     monkeypatch.setattr(
@@ -207,14 +280,16 @@ def test_index_walk_clean_stops_when_budget_already_blown(monkeypatch):
         return 0.0 if calls["n"] == 1 else 9999.0
 
     monkeypatch.setattr(portal_runner.time, "monotonic", fake_monotonic)
+    cap = _nominations(monkeypatch)
     rc, agg = portal_runner.run_index_walk(p, dry_run=False, max_seconds=10)
     assert rc == 0
     assert p.calls["walk"] == []            # budget blown -> no category walked
-    assert p.calls["mark_inactive"] == []   # nothing walked -> nothing flipped (rule #3)
+    assert cap["queued"] == []              # nothing walked -> nothing nominated (rule #3)
     assert agg["index_pages"] == 0
 
 
 def test_index_walk_runs_all_when_budget_not_reached(monkeypatch):
+    _nominations(monkeypatch)
     # A generous budget never trips the deadline -> full walk, same as no budget.
     p = _FakePortal(supports_complete_walk=True, complete=True)
     monkeypatch.setattr(portal_runner.time, "monotonic", lambda: 0.0)
@@ -222,28 +297,30 @@ def test_index_walk_runs_all_when_budget_not_reached(monkeypatch):
     assert p.calls["walk"] == ["A", "B"]
 
 
-def test_index_walk_one_failed_category_stays_green_with_error_recorded():
+def test_index_walk_one_failed_category_stays_green_with_error_recorded(monkeypatch):
     # One category's walk raises -> the run stays rc=0 (partial failure is
     # tolerated) but the failure is COUNTED in the aggregate, and the other
-    # category is still walked + swept.
+    # category is still walked + its unseen rows nominated.
+    cap = _nominations(monkeypatch)
     p = _FakePortal(supports_complete_walk=True, complete=True, walk_fails={"A"})
     rc, agg = portal_runner.run_index_walk(p, dry_run=False)
     assert rc == 0
     assert agg["errors"] == 1
     assert p.calls["walk"] == ["A", "B"]
-    assert [c for c, _ in p.calls["mark_inactive"]] == ["B"]  # failed cat skips sweep
+    assert [c for c, _, _ in cap["queued"]] == ["B"]   # failed cat nominates nothing
     assert agg["index_pages"] == 1          # only B contributed pages
-    assert agg["listings_inactive"] == 2    # B's sweep still happened
+    assert sum(c["listings_to_verify"] for c in agg["by_category"]) == 2
 
 
-def test_index_walk_all_categories_failed_returns_nonzero_rc():
+def test_index_walk_all_categories_failed_returns_nonzero_rc(monkeypatch):
     # EVERY category failed -> the portal is fully blocked (e.g. WAF 403s the
     # runner egress); the run must go red, not record a green zero-listing walk.
+    cap = _nominations(monkeypatch)
     p = _FakePortal(supports_complete_walk=True, complete=True, walk_fails={"A", "B"})
     rc, agg = portal_runner.run_index_walk(p, dry_run=False)
     assert rc != 0
     assert agg["errors"] == 2
-    assert p.calls["mark_inactive"] == []
+    assert cap["queued"] == []
     assert agg["index_pages"] == 0
 
 
@@ -811,3 +888,48 @@ def test_run_phase_passes_run_id_and_kwargs_through_to_the_runner(monkeypatch):
         _FakePortal(), "detail", _runner, False, max_claims=17, detail_workers=3)
     assert seen["run_id"] == 42
     assert seen["max_claims"] == 17 and seen["detail_workers"] == 3
+
+
+# --- the gone-rate breaker (rule #3's last rail) ---------------------------
+
+
+def test_drain_breaker_stops_flipping_when_ingest_fetches_mostly_read_gone(monkeypatch):
+    """A portal answering every page with its gone signal (consent redirect,
+    WAF 404s) is not the market. Ingest rows were on the index minutes ago, so
+    once a majority of them read gone the run stops flipping and records the
+    rest as failures to retry later."""
+    ids = [str(i) for i in range(1, 26)]
+    cap = _patch_queue(monkeypatch, [[(i, None, None, None, None) for i in ids]])
+    p = _FakePortal(fetch_kinds={i: "gone" for i in ids})
+    rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    assert rc == 0
+    # The 20th observation completes the sample and trips the breaker before
+    # that item is routed, so 19 flipped and the remaining 6 were recorded as
+    # failures to retry later.
+    flipped = portal_runner._GoneRateBreaker.MIN_SAMPLE - 1
+    assert len(p.calls["gone"]) == flipped
+    assert len(p.calls["failure"]) == 25 - flipped
+    assert agg["listings_inactive"] == flipped
+
+
+def test_drain_breaker_ignores_presence_checks(monkeypatch):
+    """A backlog of truly dead listings legitimately reads 100% gone; presence
+    checks (priority < 0) must not trip the breaker."""
+    ids = [str(i) for i in range(1, 26)]
+    _patch_queue(monkeypatch, [[(i, None, None, None, None) for i in ids]])
+    monkeypatch.setattr(
+        portal_runner.db, "queue_priorities",
+        lambda conn, source, nids: {n: portal_runner.db.QUEUE_PRIORITY_VERIFY for n in nids})
+    p = _FakePortal(fetch_kinds={i: "gone" for i in ids})
+    rc, agg = portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    assert rc == 0
+    assert len(p.calls["gone"]) == 25 and p.calls["failure"] == []
+
+
+def test_drain_breaker_needs_a_sample_before_it_trips(monkeypatch):
+    """Nineteen gone ingest fetches in a row is still within one run's noise."""
+    ids = [str(i) for i in range(1, 20)]
+    _patch_queue(monkeypatch, [[(i, None, None, None, None) for i in ids]])
+    p = _FakePortal(fetch_kinds={i: "gone" for i in ids})
+    portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    assert len(p.calls["gone"]) == 19 and p.calls["failure"] == []

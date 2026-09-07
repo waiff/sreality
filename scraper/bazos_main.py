@@ -9,10 +9,10 @@ pipeline — only the per-portal fetcher (BazosClient) + parser (bazos_parser) +
 config differ from sreality.
 
 The index reports a total ("z N inzerátů"), so a full walk of the configured
-scope is provable-complete: `supports_complete_walk=True` and the runner marks
-delisted ads inactive under the completeness guard (rule #3), restricted to rows
-unseen for 24h+ (INACTIVE_MIN_UNSEEN_HOURS) so a frequent walk surfaces new ads
-+ freshness every run while delisting inference stays conservative.
+scope is provable-complete: `supports_complete_walk=True`, and a complete walk
+nominates the rows it did not see for a page check (rule #3, 2026-09-07) — the
+drain's fetch decides, so a frequent walk surfaces new ads + freshness every run
+while a wrong nomination costs one fetch, never a live listing.
 
 Scope: every category in the portal registry (14 nationwide sale+rent sections —
 byt/dum/chata/restaurace/kancelar/prostory/sklad). The source-generic queue carries
@@ -61,12 +61,9 @@ from scraper.rate_limit import RateLimiter
 LOG = logging.getLogger(__name__)
 SOURCE = "bazos"
 
-# Only flip rows unseen for 12h+ — ~2x the 6-7h walk cadence. Combined with
-# touch_listings bumping last_seen_at for every index-seen row BEFORE the sweep,
-# a live row inside the 0.5% tolerance window cannot be flipped — only rows
-# missed by 2+ consecutive walks can. Tightened 24->12h for the real-time
-# delisting SLO (2 walk-misses is still robust against single-walk jitter).
-INACTIVE_MIN_UNSEEN_HOURS = 12
+# No staleness rail any more (rule #3, 2026-09-07): a complete walk nominates
+# the rows it did not see for a page check and the drain's fetch decides, so a
+# single walk-miss costs one fetch, never a live listing.
 
 
 class BazosPortal:
@@ -74,11 +71,10 @@ class BazosPortal:
     bazos client + parser. Single-category, one locality scope per run.
 
     Complete-walk capable: the index reports a total ("z N inzerátů"), so a
-    full walk of the configured scope is provable-complete and drives
-    mark_inactive under the completeness guard (rule #3). The sweep only flips
-    rows unseen for INACTIVE_MIN_UNSEEN_HOURS+ — the staleness rail that keeps
-    delisting inference conservative on every walk, with no sweep-window
-    throttle (small categories no longer burn the window for big ones)."""
+    full walk of the configured scope is provable-complete and nominates the
+    rows it did not see for a page check (rule #3); the nomination is scoped
+    to the section's subtype so fine sections that share a category_main
+    never nominate each other's rows."""
 
     source = SOURCE
     supports_complete_walk = True
@@ -239,18 +235,21 @@ class BazosPortal:
             total, pages, complete,
         )
 
-    def mark_inactive(self, conn: Any, category: dict[str, str], seen: set[str]) -> int:
+    def presence_candidates(
+        self, conn: Any, category: dict[str, str], seen: set[str],
+    ) -> tuple[list[tuple[str, str | None, int | None]], int, dict[str, Any]] | None:
         cm, ct = self.category_labels(category)
         if cm is None or ct is None:
-            return 0
-        # Scope the sweep to this scope's subtype: bazos walks fine sections that
-        # collapse onto one category_main (chata + dum -> dum), so an un-scoped
-        # per-section sweep would flip the sibling sections inactive.
+            return None
+        # Scope the nomination to this section's subtype: bazos walks fine
+        # sections that collapse onto one category_main (chata + dum -> dum), so
+        # an un-scoped per-section nomination would send every sibling section's
+        # rows to the drain for a page check on every walk.
         sub = SUBTYPE.get(category.get("category"))
-        return db.mark_inactive_native(
+        candidates, active_rows = db.presence_candidates(
             conn, SOURCE, cm, ct, seen, subtype=sub, scope_subtype=True,
-            min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
         )
+        return candidates, active_rows, {"subtype": sub}
 
     def active_count(self, conn: Any, category: dict[str, str]) -> int | None:
         cm, ct = self.category_labels(category)

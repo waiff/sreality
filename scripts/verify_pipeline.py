@@ -2301,12 +2301,17 @@ select source, category_main, category_type, candidates, active_rows, cap, refus
 
 
 def check_delist_flip_refused(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    """Did a sweep try to delist more of a category than the cap allows?
+    """Did a walk nominate far more of a category for a page check than the
+    per-walk throttle lets through?
 
-    Expected cause is a completeness gate re-opening after a long block — which
-    is exactly when the sweep is least trustworthy, because absence from the
-    FIRST run of a repaired walk is the weakest evidence there is. This warns
-    rather than fails: nothing broke, a guard held, and the operator decides.
+    Since 2026-09-07 (rule #3) a row in `delist_flip_refusals` means DEFERRED,
+    not refused: the walk nominated more unseen rows than `delist_flip_cap`
+    allows per walk, the oldest share was queued for a page check and the rest
+    waits for the next walk. That is routine while a backlog drains. What is
+    NOT routine is a walk that saw less than half of a category it called
+    complete -- that is the signature of a broken walk (a retired slug, a
+    throttled portal), so it warns. The operator's move is to check the walk,
+    not to raise anything: the drain is already fetching the pages.
     """
     with conn.cursor() as cur:
         cur.execute(_DELIST_REFUSAL_SQL)
@@ -2314,30 +2319,39 @@ def check_delist_flip_refused(conn: Any, thresholds: dict[str, Any]) -> dict[str
     if not rows:
         return {
             "check_key": "delist_flip_refused", "status": "ok", "value": 0,
-            "details": {"refusals": []},
-            "message": "No delisting sweep hit the per-category flip cap in 7 days.",
+            "details": {"deferrals": []},
+            "message": "No walk nominated more than the per-walk throttle allows in 7 days.",
         }
-    refusals = [
+    deferrals = [
         {"source": s, "category_main": cm, "category_type": ct,
          "candidates": int(cand), "active_rows": int(act), "cap": int(cap),
-         "refused_at": ra.isoformat() if hasattr(ra, "isoformat") else str(ra)}
+         "deferred_at": ra.isoformat() if hasattr(ra, "isoformat") else str(ra)}
         for s, cm, ct, cand, act, cap, ra in rows
     ]
-    worst = max(r["candidates"] for r in refusals)
+    suspicious = [d for d in deferrals if d["active_rows"] and d["candidates"] > d["active_rows"] / 2]
+    worst = max(d["candidates"] for d in deferrals)
     named = "; ".join(
-        f"{r['source']} {r['category_main']}/{r['category_type']} "
-        f"{r['candidates']} of {r['active_rows']} (cap {r['cap']})"
-        for r in refusals[:3]
+        f"{d['source']} {d['category_main'] or '*'}/{d['category_type']} "
+        f"{d['candidates']} of {d['active_rows']} (per-walk {d['cap']})"
+        for d in (suspicious or deferrals)[:3]
     )
+    if suspicious:
+        return {
+            "check_key": "delist_flip_refused", "status": "warn", "value": worst,
+            "details": {"deferrals": deferrals},
+            "message": (
+                f"{len(suspicious)} walk(s) called complete while more than half of "
+                f"the category was unseen: {named}. Check the walk (a retired slug, a "
+                "throttled portal) -- nothing is deleted without a page check, but a "
+                "walk this short is not one to trust."
+            ),
+        }
     return {
-        "check_key": "delist_flip_refused",
-        "status": "warn",
-        "value": worst,
-        "details": {"refusals": refusals},
+        "check_key": "delist_flip_refused", "status": "ok", "value": worst,
+        "details": {"deferrals": deferrals},
         "message": (
-            f"{len(refusals)} delisting sweep(s) refused by the flip cap: {named}. "
-            "Verify the listings by FETCHING them (a real 404/410) before raising "
-            "the cap -- absence from one walk is not proof a listing is gone."
+            f"{len(deferrals)} nomination(s) throttled to the per-walk share, the rest "
+            f"deferred to the next walk: {named}. Routine while a backlog drains."
         ),
     }
 

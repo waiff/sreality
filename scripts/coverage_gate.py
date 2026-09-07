@@ -1,6 +1,9 @@
 """The coverage gate: decide from evidence whether a parked portal may delist again.
 
-`supports_complete_walk` gates delisting (architectural rule #3). Two portals are
+`supports_complete_walk` used to gate delisting (architectural rule #3); since
+2026-09-07 it is a posture signal for Health -- a complete walk nominates its
+unseen rows for a page check and the drain's fetch decides, so nothing reads
+the flag to delete. It is still re-earned from evidence here. Two portals were
 parked on it: ceskereality (migration 449) and idnes (453). Both were parked for
 the same reason — the flag was a standing claim someone typed once, and the walks
 stopped matching it — so un-parking by hand would put us straight back there. A
@@ -12,7 +15,7 @@ So this runs on a schedule and answers two questions from data, every time:
   COVERED  Did every slice of every category finish (outcome='exhausted') inside
            the freshness window? One hole and the answer is no. Fourteen of
            fifteen slices is not 93% coverage for delisting purposes — the hole
-           is exactly what `mark_inactive` reads as "these listings are gone".
+           was exactly what the old absence sweep read as "these listings are gone".
 
   STABLE   Has that held for N consecutive evaluations, with the delist-candidate
            count steady between them? One lucky run proves nothing, and a
@@ -24,12 +27,10 @@ Either fails → the flag stays down and the row records why. Every evaluation i
 written either way (`portal_coverage_gate`, migration 455), because a verdict
 that only exists in an expiring Actions log is a verdict nobody receives.
 
-WHY THIS IS SAFE TO RUN UNATTENDED. Not because the gate is certain to be right —
-because a wrong verdict cannot execute. Un-parking only makes a sweep *eligible*;
-the flip cap (migrations 451/452) still refuses any sweep over 10% of a category,
-latches, and alarms. idnes's backlog is ~37% of its rows, so the very failure this
-gate could cause is the one the layer underneath is built to catch. The gate needs
-to be right-or-caught, not right.
+WHY THIS IS SAFE TO RUN UNATTENDED. Since 2026-09-07 a wrong verdict cannot
+execute: the flag no longer gates anything. Closures come from page checks that
+complete walks nominate (rule #3), throttled per walk by `delist_flip_cap`; this
+gate only records whether the portal's walks are proving coverage.
 
 Usage:
     python -m scripts.coverage_gate                # evaluate + act

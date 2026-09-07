@@ -144,17 +144,17 @@ incident history: `docs/architecture.md` § Architectural rules.
 2. **Snapshots on content change only.** Never write `listings` without computing the content hash and
    appending a `listing_snapshots` row when it differs from that listing's latest snapshot. Every write
    path into `listings`.
-3. **Never delete; delist via `is_active=false`.** History is sacred. Infer inactive ONLY after a
-   ~complete index walk (`scraper.portal.walk_coverage` — the ONE verdict for all nine portals;
-   ≥99.5% AND ≤1.02x of the portal's declared total, and an UNMEASURABLE total is `unknown`,
-   never complete — sreality included since W5a) AND only for
-   rows additionally unseen for a cadence-scaled staleness window (`min_unseen_hours`: 12h on the 6h
-   portals, 3h on sreality) — the two rails together, so a single truncated walk can't false-delist;
-   partial walks (`--limit` / `--detail-only` / `--max-pages`) must never flip rows; a false flip
-   self-heals on next sighting (`touch_listings`); a gone detail fetch (404/410 → `ListingGoneError`)
-   flips that one listing immediately (never slowed by the rail). Every flip stamps `inactive_at`.
-   **THIRD rail (451/452): no sweep flips >`delist_flip_cap` (10%, floor 2k rows; MEASURED, p99=3.4%)
-   of a category; it LATCHES** — release one scope via `.overrides` (bounded+expiring), not the ceiling.
+3. **Never delete; delist via `is_active=false`.** History is sacred. **Since 2026-09-07 index
+   absence NOMINATES, the page DECIDES** (`portal_runner._queue_presence_checks`): a category walk
+   proven complete (`scraper.portal.walk_coverage` — the ONE verdict for all nine portals; ≥99.5%
+   AND ≤1.02x of the declared total, UNMEASURABLE = `unknown`, never complete) queues every active
+   row it did not see into `listing_detail_queue` at `QUEUE_PRIORITY_VERIFY` (served last, 20% reserve); the
+   drain fetches the page and a POSITIVE gone signal (404/410, redirect off the listing, the
+   portal's own "no longer active" text → `ListingGoneError`) flips that one listing, a live page
+   refreshes it, an error waits. No staleness rail, no absence sweep, no `supports_complete_walk`
+   gate on nominations; partial walks (`--limit` / `--max-pages` / deadline) nominate nothing.
+   `delist_flip_cap` (10%, floor 2k) now THROTTLES nominations per walk (rest deferred, recorded);
+   `.overrides` lift it per scope. Every flip stamps `inactive_at`; a sighting reactivates.
 4. **`last_seen_at` is driven by index sightings + successful detail fetches only; failed fetches never
    touch it** (else repeated failures would falsely delist a live listing). The `unchanged` freshness
    path also doesn't bump it — its signal is `listing_freshness_checks.checked_at`.
@@ -215,7 +215,7 @@ incident history: `docs/architecture.md` § Architectural rules.
     property-anchored table = one registry line.
 19. **The scrape is cadence-split: a fast index-walk feeds an async batched detail-drain via
     `listing_detail_queue`** (migration 105). Index-walk (`--index-only`) walks the full index,
-    `touch_listings` + completeness-gated `mark_inactive`, and enqueues; detail-drain (`--drain-only`) claims
+    `touch_listings` + completeness-gated nomination (rule #3), and enqueues; detail-drain (`--drain-only`) claims
     a bounded slice (`FOR UPDATE SKIP LOCKED`) and writes batched via `write_detail_batch`. New rows land
     `property_id` NULL (grouping deferred, rule #15). Every portal runs this same split through the shared
     `portal_runner` on the source-generic queue.
@@ -225,8 +225,8 @@ incident history: `docs/architecture.md` § Architectural rules.
     the reconcile backstop. Both share the `sreality-property-maintenance` concurrency group.
 21. **Every portal runs through ONE shared framework (Phase 4); per-portal code is a fetcher + parser +
     config row — no per-portal branches in shared code.** `portal_base` / `portal` / `portal_runner`; one
-    source-generic `listing_detail_queue`. A portal that can't prove a near-complete walk sets
-    `supports_complete_walk=false` and is never marked inactive from index absence (rule #3). Sanctioned
+    source-generic `listing_detail_queue`. A walk that can't be proven complete nominates nothing; its
+    listings close only through gone detail fetches (rule #3). `supports_complete_walk` is posture. Sanctioned
     per-portal hooks: sreality's district-split; ceskereality's and sreality's bespoke `probe_category`
     (neither portal's index accepts a sort param, so each implements its own early-stop discovery probe).
 22. **The deal pipeline is single-valued, property-grain operator state** (migration 205): `property_pipeline`

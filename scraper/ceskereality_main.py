@@ -65,17 +65,10 @@ SOURCE = "ceskereality"
 
 # The completeness verdict — min ratio, over-collection ceiling, early-stop — is
 # scraper.portal.walk_is_complete, one definition for all nine portals (rule #3).
-# It replaced a local copy that returned True when the total was unmeasurable;
-# the INACTIVE_MIN_UNSEEN_HOURS staleness rail below is the second, stronger guard.
-
-# Only flip rows unseen for 12h+ — ~2 full walk cadences at the 6h schedule.
-# last_seen_at is bumped for unchanged rows each walk (touch_listings) and for
-# changed rows on a successful drain fetch — so a churn-missed live row is
-# protected unless its detail fetches have ALSO failed for 12h+; even then the
-# flip self-heals on the next index sighting (touch_listings reactivates). Passed
-# EXPLICITLY on every sweep: db.mark_inactive_native applies NO rail by default.
-# Tightened 24->12h for the real-time delisting SLO.
-INACTIVE_MIN_UNSEEN_HOURS = 12
+# It replaced a local copy that returned True when the total was unmeasurable.
+# No staleness rail any more (rule #3, 2026-09-07): a complete walk nominates
+# the rows it did not see for a page check and the drain's fetch decides, so a
+# single walk-miss costs one fetch, never a live listing.
 
 # The 12-page cap is NOT a site-wide law — it belongs to UNFILTERED category URLs
 # (/prodej/byty/?strana=13 = 404) and to nothing else. A FILTERED URL caps at 99
@@ -558,15 +551,20 @@ class CeskerealityPortal:
             "ENQUEUE source=ceskereality new=%d changed=%d unchanged=%d enqueued=%d",
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        # mark_inactive is safe only on a walk that PROVED it saw the whole
-        # category (rule #3): every one of the 14 kraje represented, every slice
-        # exhausted to its declared tail, and the union reconciling against BOTH
-        # the summed per-kraj declared counts and — when it is measurable — the
-        # nationwide total. declared_sum is the primary denominator because
-        # _nationwide_total swallows its own exception: a failed probe must never
-        # be the thing that suppresses every sweep forever, and equally must never
-        # authorise one on its own (it is skipped only after 14 positive slices
-        # already proved coverage).
+        # A complete walk NOMINATES (rule #3, 2026-09-07); it no longer delists,
+        # so "complete" answers one question only: did every one of the 14 kraje
+        # walk to its own declared tail? Each slice is checked against the
+        # region's own count, and a degraded, throttled or unreached slice fails
+        # the whole category (an unproven walk nominates nothing).
+        #
+        # The nationwide total is deliberately NOT part of the verdict any more.
+        # It includes listings filed under no kraj at all -- foreign flats in the
+        # domestic tree, Czech flats with no region set -- so the kraj union can
+        # never reach it (rentals: 4,732 of 4,771, twelve walks in a row), and a
+        # verdict that demanded it parked the category for good. Those listings
+        # are nominated on every walk instead, and their page decides. The
+        # national count is still fetched and logged (PARTITION / RECONCILE) as
+        # the coverage signal it always was.
         complete = (
             not self._max_pages
             and not self._kraje
@@ -574,17 +572,16 @@ class CeskerealityPortal:
             and kraje_seen == set(KRAJ_SLUGS)
             and all(r.positive for r in results)
             and walk_is_complete(len(seen), declared_sum, stopped_early=deadline_hit)
-            # FAIL CLOSED. This was written `national is None or ...`, which
-            # made an unmeasurable national probe *prove* completeness — and
-            # _nationwide_total swallows its own exception, so the rail was
-            # weakest exactly when it mattered. Throttling is correlated: if the
-            # kraj pages are degraded, the national probe is degraded too. An
-            # adversarial review reproduced complete=True with 5,200 of 5,600
-            # rows collected and a whole kraj missing. Rule #3: an unproven walk
-            # never authorises a sweep.
-            and national is not None
-            and walk_is_complete(len(seen), national)
         )
+        if complete and national is not None and declared_sum < 0.97 * national:
+            # Not a gate (rule #3 nominates, the page decides), a coverage
+            # alarm: the region-less tail is under 1%, so a kraj-sum this far
+            # below national means a region came back short or empty.
+            LOG.warning(
+                "COVERAGE cm=%s ct=%s kraj-sum=%d national=%d: a region may be "
+                "missing from this walk; its rows are nominated, not deleted",
+                cat, sale_type, declared_sum, national,
+            )
         result_size = national if national is not None else declared_sum
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, result_size, pages, complete
 
@@ -661,29 +658,36 @@ class CeskerealityPortal:
                 break
         return seen, {"found_new": found_new, "enqueued": enqueued}, total, pages, False
 
-    def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
+    def presence_candidates(
+        self, conn: Any, category: dict[str, Any], seen: set[str],
+    ) -> tuple[list[tuple[str, str | None, int | None]], int] | None:
+        """Nominate this category's unseen rows for a page check (rule #3,
+        2026-09-07) -- once per (category_main, category_type), with the UNION
+        of its slices' seen ids.
+
+        Several index slices collapse onto one canonical category ('rodinne-domy'
+        and 'chaty-chalupy' both -> dum), and the runner calls this per slice, so
+        nominating from ONE slice's seen set would nominate the sibling slice's
+        whole population every walk. Buffer each complete slice's ids and
+        nominate on the group's LAST complete slice. An incomplete or failed
+        sibling never reaches this call, so its group stays below the expected
+        slice count and nothing is nominated this walk (the next walk retries).
+
+        Region-less listings (foreign, or a Czech flat filed under no kraj) are
+        in no slice, so they are nominated every walk; the page check then keeps
+        the live ones and closes the dead ones -- the only way to know.
+        """
         cm, ct = self.category_labels(category)
         if cm is None or ct is None:
-            return 0
-        # Several index slices collapse onto one (cm, ct) — 'rodinne-domy' and
-        # 'chaty-chalupy' both -> dum — and this runner-gated call sees only ONE
-        # slice's ids, so a per-slice sweep flipped the sibling slice's listings
-        # inactive every walk. Buffer each complete slice's ids and sweep once,
-        # on the group's LAST complete slice, with the union. An incomplete/
-        # failed sibling never reaches this call, so its group stays below the
-        # expected slice count and the sweep is suppressed this walk
-        # (over-retention only; the next walk retries).
+            return None
         key = (cm, ct)
         group = self._sweep_seen.setdefault(key, set())
         group.update(seen)
         self._sweep_done[key] = self._sweep_done.get(key, 0) + 1
         expected = sum(1 for c in self._categories if self.category_labels(c) == key)
         if self._sweep_done[key] < expected:
-            return 0
-        return db.mark_inactive_native(
-            conn, SOURCE, cm, ct, group,
-            min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
-        )
+            return None
+        return db.presence_candidates(conn, SOURCE, cm, ct, group)
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
         cm, ct = self.category_labels(category)

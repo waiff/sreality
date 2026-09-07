@@ -1076,7 +1076,7 @@
     {
       "filename": "bazos_index_walk.yml",
       "name": "Scraping: Bazos index walk",
-      "description": "The fast half of the bazos cadence split (architectural rule #19, like sreality/idnes). Walks the ENTIRE index of every configured scope (no --max-pages), touch_listings bumps last_seen on still-listed ads, mark_inactive flips delisted ones under the completeness guard (source-scoped, throttled to once per 12h), and new/price-changed ids are enqueued into listing_detail_queue (source='bazos'). No detail fetch — the drain (bazos_detail_drain.yml) consumes the queue. Records run_type='index'.",
+      "description": "The fast half of the bazos cadence split (architectural rule #19, like sreality/idnes). Walks the ENTIRE index of every configured scope (no --max-pages), touch_listings bumps last_seen on still-listed ads, presence nomination (rule #3) flips delisted ones under the completeness guard (source-scoped, throttled to once per 12h), and new/price-changed ids are enqueued into listing_detail_queue (source='bazos'). No detail fetch — the drain (bazos_detail_drain.yml) consumes the queue. Records run_type='index'.",
       "portal": "bazos",
       "manual": true,
       "schedules": [
@@ -1136,7 +1136,7 @@
         },
         {
           "name": "max_pages",
-          "description": "cap index pages per scope (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
+          "description": "cap index pages per scope (ad-hoc partial; suppresses presence nomination (rule",
           "required": false,
           "type": "string",
           "default": "",
@@ -1280,7 +1280,7 @@
     {
       "filename": "ceskereality_index_walk.yml",
       "name": "Scraping: Českéreality index walk",
-      "description": "The fast half of the ceskereality cadence split (architectural rule #19, like sreality/idnes). Walks the ENTIRE index of every configured category (no --max-pages), touch_listings bumps last_seen on still-listed ids, mark_inactive flips delisted ones under the completeness guard (source-scoped), and new/price-changed ids are enqueued into listing_detail_queue (source='ceskereality'). No detail fetch — the drain (ceskereality_detail_drain.yml) consumes the queue. Records run_type='index'.",
+      "description": "The fast half of the ceskereality cadence split (architectural rule #19, like sreality/idnes). Walks the ENTIRE index of every configured category (no --max-pages), touch_listings bumps last_seen on still-listed ids, presence nomination (rule #3) flips delisted ones under the completeness guard (source-scoped), and new/price-changed ids are enqueued into listing_detail_queue (source='ceskereality'). No detail fetch — the drain (ceskereality_detail_drain.yml) consumes the queue. Records run_type='index'.",
       "portal": "ceskereality",
       "manual": true,
       "schedules": [
@@ -1295,7 +1295,7 @@
       "inputs": [
         {
           "name": "max_pages",
-          "description": "cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
+          "description": "cap index pages per category (ad-hoc partial; suppresses presence nomination (rule",
           "required": false,
           "type": "string",
           "default": "",
@@ -1311,7 +1311,7 @@
         },
         {
           "name": "kraj",
-          "description": "limit the walk to ONE kraj (e.g. stredocesky-kraj) for an ad-hoc partial run; suppresses mark_inactive. Blank = all 14.",
+          "description": "limit the walk to ONE kraj (e.g. stredocesky-kraj) for an ad-hoc partial run; suppresses presence nomination (rule",
           "required": false,
           "type": "string",
           "default": "",
@@ -2725,7 +2725,7 @@
     {
       "filename": "idnes_index_walk.yml",
       "name": "Scraping: iDNES Reality index walk",
-      "description": "The fast half of the iDNES cadence split (architectural rule #19, like sreality). Walks the ENTIRE index of every configured category (no --max-pages), touch_listings bumps last_seen on still-listed ids, mark_inactive flips delisted ones under the completeness guard (source-scoped), and new/price-changed ids are enqueued into listing_detail_queue (source='idnes'). No detail fetch — the drain (idnes_detail_drain.yml) consumes the queue. Records run_type='index'.",
+      "description": "The fast half of the iDNES cadence split (architectural rule #19, like sreality). Walks the ENTIRE index of every configured category (no --max-pages), touch_listings bumps last_seen on still-listed ids, unseen ids are nominated for a page check (rule #3), ones under the completeness guard (source-scoped), and new/price-changed ids are enqueued into listing_detail_queue (source='idnes'). No detail fetch — the drain (idnes_detail_drain.yml) consumes the queue. Records run_type='index'.",
       "portal": "idnes",
       "manual": true,
       "schedules": [
@@ -2740,7 +2740,7 @@
       "inputs": [
         {
           "name": "max_pages",
-          "description": "cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
+          "description": "cap index pages per category (ad-hoc partial; nominates nothing). Blank = full walk.",
           "required": false,
           "type": "string",
           "default": "",
@@ -2876,7 +2876,7 @@
     {
       "filename": "index_walk.yml",
       "name": "Scraping: Sreality index walk (Phase 2)",
-      "description": "The fast half of the Phase-2 cadence split, now on the shared portal framework: `scraper.sreality_main --index-only` drives SrealityPortal through the one generic portal_runner (the same loop every other portal uses). Walks the COMPLETE index of every configured category pair (scraper.main.CATEGORIES — the full category cross product incl. pozemek/ostatni/drazba/podil; district-split + national fallback above the deep-pagination cap), bumps last_seen on still-listed ids (touch), flips delisted ones to is_active=false (mark_inactive, under the 100% completeness guard), and enqueues new + price-changed ids into listing_detail_queue (source='sreality'). It does NO detail fetching, so it finishes in minutes and delistings surface fast.",
+      "description": "The fast half of the Phase-2 cadence split, now on the shared portal framework: `scraper.sreality_main --index-only` drives SrealityPortal through the one generic portal_runner (the same loop every other portal uses). Walks the COMPLETE index of every configured category pair (scraper.main.CATEGORIES — the full category cross product incl. pozemek/ostatni/drazba/podil; district-split + national fallback above the deep-pagination cap), bumps last_seen on still-listed ids (touch), flips delisted ones to is_active=false (nominates unseen ids for a page check, rule #3), and enqueues new + price-changed ids into listing_detail_queue (source='sreality'). It does NO detail fetching, so it finishes in minutes and delistings surface fast.",
       "portal": "sreality",
       "manual": true,
       "schedules": [
@@ -4705,7 +4705,7 @@
     {
       "filename": "realitymix_index_walk.yml",
       "name": "Scraping: RealityMix index walk",
-      "description": "The fast half of the realitymix cadence split (architectural rule #19, like sreality/idnes/ceskereality). Walks the ENTIRE index of every configured category (no --max-pages), touch_listings bumps last_seen on still-listed ids, mark_inactive flips delisted ones under the completeness guard (source-scoped), and new/price-changed ids are enqueued into listing_detail_queue (source='realitymix'). No detail fetch — the drain (realitymix_detail_drain.yml) consumes the queue. Records run_type='index'.",
+      "description": "The fast half of the realitymix cadence split (architectural rule #19, like sreality/idnes/ceskereality). Walks the ENTIRE index of every configured category (no --max-pages), touch_listings bumps last_seen on still-listed ids, presence nomination (rule #3) flips delisted ones under the completeness guard (source-scoped), and new/price-changed ids are enqueued into listing_detail_queue (source='realitymix'). No detail fetch — the drain (realitymix_detail_drain.yml) consumes the queue. Records run_type='index'.",
       "portal": "realitymix",
       "manual": true,
       "schedules": [
@@ -4720,7 +4720,7 @@
       "inputs": [
         {
           "name": "max_pages",
-          "description": "cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
+          "description": "cap index pages per category (ad-hoc partial; suppresses presence nomination (rule",
           "required": false,
           "type": "string",
           "default": "",
@@ -5434,7 +5434,7 @@
       "inputs": [
         {
           "name": "max_pages",
-          "description": "cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
+          "description": "cap index pages per category (ad-hoc partial; nominates nothing). Blank = full walk.",
           "required": false,
           "type": "string",
           "default": "",

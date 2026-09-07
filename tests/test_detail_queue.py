@@ -403,7 +403,11 @@ def test_claim_detail_batch_skip_locked_priority_order():
     sql, params = conn.executed[0]
     # Acquisition is claimed by age alone; the old ranking survives only INSIDE refresh.
     assert "AND priority = %(new_priority)s ORDER BY enqueued_at" in sql
-    assert "AND priority <> %(new_priority)s ORDER BY priority DESC, enqueued_at" in sql
+    assert ("AND priority <> %(new_priority)s AND (source, native_id) NOT IN "
+            "(SELECT source, native_id FROM ver) ORDER BY priority DESC, enqueued_at") in sql
+    # Presence checks (priority -1) get their own reserved slice, oldest first.
+    assert "AND priority = %(verify_priority)s ORDER BY enqueued_at" in sql
+    assert params["verify_priority"] == db.QUEUE_PRIORITY_VERIFY
     assert "claimed_at IS NULL AND given_up = false" in sql
     assert "SET claimed_at = now()" in sql
     assert "RETURNING q.native_id, q.detail_ref, q.index_price_czk, q.discovery_seq" in sql
@@ -422,7 +426,23 @@ def test_claim_detail_batch_reserves_half_the_batch_for_new_listings():
     # Refresh takes the rest, and only the rest — unused reserve backfills to it
     # inside SQL (GREATEST(limit - count(acq), 0)), never in Python.
     sql, _ = conn.executed[0]
-    assert "LIMIT GREATEST(%(limit)s - (SELECT count(*) FROM acq), 0)" in sql
+    assert ("LIMIT GREATEST(%(limit)s - (SELECT count(*) FROM acq) - "
+            "(SELECT count(*) FROM ver), 0)") in sql
+    # The presence share is bounded by what acquisition left over, so tiny
+    # batches still acquire first.
+    assert "LIMIT LEAST(%(ver_limit)s, GREATEST(%(limit)s - (SELECT count(*) FROM acq), 0))" in sql
+    assert params["ver_limit"] == 40                      # 20% of 200
+
+
+def test_claim_detail_batch_reserves_a_share_for_presence_checks():
+    """Rule #3 (2026-09-07): closures come only from page checks, which sit at
+    the bottom of the refresh class by design. Without a reserve of their own an
+    unbounded refresh inflow would mean no listing is ever delisted again."""
+    conn = _FakeConn([(lambda s: "FOR UPDATE SKIP LOCKED" in s, [])])
+    db.claim_detail_batch(conn, "ceskereality", 10)
+    _, params = conn.executed[0]
+    assert params["ver_limit"] == 2
+    assert 0 < db.QUEUE_VERIFY_RESERVE < db.QUEUE_ACQUISITION_RESERVE
 
 
 def test_claim_detail_batch_reserve_rounds_up_so_tiny_batches_still_acquire():

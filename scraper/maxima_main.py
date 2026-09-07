@@ -24,7 +24,7 @@ maxima is `supports_complete_walk=true` via AGENDA-GRAIN delisting: it reports a
 per-AGENDA total (not per-category), so the runner can't gate a per-(cm,ct) sweep —
 instead `mark_inactive` flips the whole agenda (af ≡ category_type) once the agenda
 walk reaches its reported total, scoped by category_type against the full walk's id
-set (`db.mark_inactive_agenda`), never the title-derived per-category slice (which
+set (`db.presence_candidates` with category_main=None), never the title-derived per-category slice (which
 could false-flip a listing whose index-time title category ≠ its detail-time one).
 A gone detail fetch (404/410) still flips that one listing inactive immediately.
 """
@@ -265,31 +265,35 @@ class MaximaPortal:
         # walk reached its reported total.
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, len(seen), pages, walk.complete
 
-    def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
-        # Agenda-grain: the runner calls this once per (cm, ct) descriptor, but
-        # maxima's completeness is per-AGENDA (af ≡ category_type), so we sweep the
-        # whole agenda once — scoped by category_type against the FULL agenda walk's
-        # id set, NOT the title-derived per-category slice (which could false-flip a
-        # listing whose index-time title category ≠ its detail-time category). The
-        # passed `seen` (this category's slice) is intentionally ignored.
+    def presence_candidates(
+        self, conn: Any, category: dict[str, Any], seen: set[str],
+    ) -> tuple[list[tuple[str, str | None, int | None]], int, dict[str, Any]] | None:
+        """Agenda-grain nomination (rule #3, 2026-09-07). The runner calls this
+        once per (cm, ct) descriptor, but maxima's completeness is per AGENDA
+        (af == category_type), so the whole agenda is nominated once --
+        scoped by category_type against the FULL agenda walk's id set, never the
+        title-derived per-category slice (a listing whose index-time title
+        category differs from its detail-time category would otherwise be
+        nominated by a walk that did see it). The passed `seen` (this
+        category's slice) is intentionally ignored. An incomplete, unmeasurable
+        or over-collected agenda nominates nothing: its unseen set is not
+        evidence."""
         cm, ct = self.category_labels(category)
         af = int(category.get("af") or 1)
         if ct is None or af in self._swept_agendas:
-            return 0
+            return None
         walk = self._agenda_cache.get(af)
         if walk is None or not walk.complete:
-            return 0
+            return None
         self._swept_agendas.add(af)
-        # 12h staleness rail (~2 walk cadences at 6h): tightened 24->12h for the
-        # real-time delisting SLO; 2 walk-misses is still robust to single-walk jitter.
-        flipped = db.mark_inactive_agenda(
-            conn, SOURCE, ct, set(walk.native_ids), min_unseen_hours=12,
-        )
         LOG.info(
-            "INACTIVE agenda af=%d ct=%s marked=%d collected=%d total=%s",
-            af, ct, flipped, len(walk.native_ids), walk.total,
+            "VERIFY agenda af=%d ct=%s collected=%d total=%s",
+            af, ct, len(walk.native_ids), walk.total,
         )
-        return flipped
+        candidates, active_rows = db.presence_candidates(
+            conn, SOURCE, None, ct, set(walk.native_ids),
+        )
+        return candidates, active_rows, {"category_main": None}
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
         cm, ct = self.category_labels(category)

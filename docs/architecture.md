@@ -194,10 +194,10 @@ every slice but enumerates a different population each time is sampling, not cov
 difference is invisible in a coverage percentage). Both pass → `supports_complete_walk` returns to
 true; either fails → it stays down. Every evaluation is appended to `portal_coverage_gate`
 (migration 455), holds included. **It is safe unattended not because the gate is certain to be
-right, but because a wrong verdict cannot execute**: un-parking only makes a sweep *eligible*, and
-the flip cap (rule #3's third rail) still refuses anything over 10% of a category, latches and
-alarms — idnes's backlog is ~37% of its rows, so the one failure this gate could cause is exactly
-the one the layer beneath it is built to catch.
+right, but because a wrong verdict cannot execute**. Since 2026-09-07 the flag no longer gates
+anything: a complete walk nominates its unseen rows for a page check and the drain's fetch
+decides (rule #3), so the gate is a posture signal for Health and the ledger is its evidence;
+`delist_flip_cap` throttles how many checks one walk may queue rather than refusing a sweep.
 The detail URL carries the category
 (`/detail/{sale}/{cat}/…`), so the drain derives each listing's category from its own URL —
 one config (the `portals` row, migrations 110/111) walks many categories (byty + domy ×
@@ -257,9 +257,9 @@ its category (giving the runner real (cm, ct) Health-reconciliation labels). The
 drain re-derives each listing's category from the detail page ("Typ nemovitosti" +
 title verb). A PILOT: `supports_complete_walk=false` (remax reports a per-AGENDA
 total and the per-category slice is title-derived — not a portal-reported per-(cm,ct)
-total — so a safe per-category completeness check isn't available; the runner never
-flips listings inactive from index absence, rule #3); a gone detail (404/410 or a
-redirect off the detail path) still flips that one listing inactive. Registered as a
+total — so the per-AGENDA walk nominates the whole agenda's unseen rows for a page
+check once, scoped by category_type, rule #3); a gone detail (404/410 or a
+redirect off the detail path) flips that one listing inactive. Registered as a
 scraper portal by CONVERTING the existing on-demand-parser row (migration 135). NOTE:
 remax ALSO has an on-demand URL parser (`scraper/source_parsers/remax.py`, LLM,
 `source_kind='remax'`) used by the estimation preview — a separate entry point
@@ -577,13 +577,28 @@ renumber.** Navigate by area:
    the content hash and inserting into `listing_snapshots` if it differs from the most
    recent snapshot for that listing.
 3. **Never delete listings.** Listings that disappear get `is_active=false`. History is
-   sacred. The `is_active=false` inference is only valid after a **~complete index walk** —
-   a partial walk (`--limit N`, `--detail-only`, `--max-pages`) cannot determine which
-   listings are gone. The scraper enforces this: `mark_inactive` is skipped when `--limit`
-   is set, and `--detail-only` never reaches the index phase. **The verdict is
+   sacred. **Since 2026-09-07 the flip is PRESENCE-VERIFIED, not inferred from absence.** A
+   complete category walk (`portal_runner.run_index_walk` → `_queue_presence_checks`) queues
+   every active row it did not see into `listing_detail_queue` at `QUEUE_PRIORITY_VERIFY`
+   (served after new and changed listings); the drain fetches the page and only a POSITIVE gone
+   signal — 404/410, a redirect off the listing, the portal's own "no longer active" text,
+   raised as `ListingGoneError` — flips it (`mark_gone` → `mark_listing_inactive_native`);
+   a live page refreshes it, an error leaves it for the next pass. Why: absence-based sweeps
+   needed a staleness rail, a national cross-check and a latching cap to be safe, and even so
+   parked two portals for weeks (ceskereality's rentals could never reach the national count
+   because listings filed under no region are in no regional list). A nomination cannot be
+   wrong — it costs one fetch — so the rail and the cross-check are gone, `supports_complete_walk`
+   no longer gates anything, and `delist_flip_cap` throttles how many checks one walk may
+   queue (oldest-unseen first, the rest deferred and recorded in `delist_flip_refusals`).
+   Nomination is the shared default (`db.presence_candidates`, keyed on `source_id_native` or,
+   via `seen_key`, on `sreality_id`); a portal whose index sections do not map 1:1 onto a
+   category overrides `presence_candidates` (bazos: subtype scope; ceskereality/realitymix:
+   sibling-slice union; remax/maxima: agenda grain). What a complete walk still means: a
+   partial walk (`--limit N`, `--max-pages`, a deadline) cannot know which rows it never
+   reached, so it nominates nothing. **The verdict is
    `scraper.portal.walk_coverage`, the ONE definition for all nine portals, and it has three
    outcomes, not two: `complete` / `incomplete` / `unknown`. Only `complete` authorises a
-   sweep.** It replaced eight byte-identical private copies that FAILED OPEN — `if not total:
+   nomination.** It replaced eight byte-identical private copies that FAILED OPEN — `if not total:
    return True`, i.e. "I could not measure, so assume complete". ceskereality's nationwide
    probe swallows its own exception and returns None, so a walk that reached a fraction of a
    category reported itself complete and became eligible to delist everything it never saw.
@@ -1007,7 +1022,7 @@ renumber.** Navigate by area:
 19. **The sreality scrape is split by cadence (Phase 2): a fast index-walk feeds an async
     batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`
     (`scraper.main --index-only`, `run_type='index'`) walks the full index, `touch_listings` +
-    `mark_inactive` (under the completeness guard, rule #3), and **enqueues** new/price-changed
+    nominates unseen rows for a page check (rule #3, 2026-09-07), and **enqueues** new/price-changed
     ids — classified by the ONE shared verdict rule, `portal.classify_index_sighting`, which
     every portal including sreality routes through (a rail in `tests/scraper/test_portal.py`
     fails any `*_main.py` that calls `price_changed` directly). Its load-bearing clause: **an
@@ -1170,11 +1185,10 @@ renumber.** Navigate by area:
     the district-split; full rationale `docs/design/portal-order-fidelity.md`).
     The needs-detail queue is **source-generic** (`listing_detail_queue` keyed on
     `(source, native_id)` + `detail_ref`, migration 108) so every portal shares the one queue and
-    the one drain. A portal that cannot prove a near-complete walk sets
-    `supports_complete_walk=false` and the runner never marks its listings inactive (rule #3) —
-    bazos (partial single-category walks) is such a portal; bezrealitky is NOT (its GraphQL
-    `totalCount` + uncapped paging make a per-category walk provable-complete, so it sets
-    `supports_complete_walk=true` and marks delistings inactive, source-scoped).
+    the one drain. Since 2026-09-07 every portal delists the same way (rule #3): a complete
+    category walk nominates its unseen rows, the drain's page fetch decides; a portal whose
+    walk cannot be proven complete (no declared total → `unknown`) simply nominates nothing and
+    relies on gone detail fetches. `supports_complete_walk` is a posture signal, not a gate.
 21b. **`category_type` is NULLABLE on Browse — NULL means "no deal-type constraint"** (the
     "Vše" pill). This is not new semantics: `toolkit/comparables.py`, the watchdog matcher in
     `api/notifications.py` and `browse_stats_properties` have always guarded the clause with an

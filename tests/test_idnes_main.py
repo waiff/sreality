@@ -408,28 +408,16 @@ def test_the_page_capped_probe_keeps_the_flat_national_walk(monkeypatch):
     assert complete is False
 
 
-def test_mark_inactive_source_scoped(monkeypatch):
-    # Listing-identity Gate 2: non-sreality rows carry sreality_id = NULL, and
-    # ONE NULL inside `<> ALL(...)` makes the predicate NULL for every row —
-    # idnes's 108k-listing delisting sweep would become a permanent no-op
-    # (rule #3). The sweep must key on the native id the index walked.
-    monkeypatch.setattr(
-        idnes_main.db, "mark_inactive",
-        lambda *a, **k: pytest.fail("legacy sreality_id-keyed sweep must not be used"),
-    )
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        idnes_main.db, "mark_inactive_native",
-        lambda _c, source, cm, ct, natives, min_unseen_hours: (captured.update(
-            cm=cm, ct=ct, natives=set(natives), source=source,
-            min_unseen_hours=min_unseen_hours) or 7),
-    )
-    n = _portal().mark_inactive(object(), {"sale_type": "prodej", "category": "byty"}, {"x", "y"})
-    assert n == 7
-    assert captured["cm"] == "byt" and captured["ct"] == "prodej"
-    assert captured["source"] == "idnes"
-    assert captured["natives"] == {"x", "y"}    # raw walked ids, no PK round-trip
-    assert captured["min_unseen_hours"] == 12   # staleness rail rides on every sweep
+def test_delisting_uses_the_runners_default_nomination():
+    """Rule #3 since 2026-09-07: the walk nominates unseen rows for a page
+    check and the runner does it generically, keyed on the native id the index
+    walked (a NULL sreality_id under listing-identity Gate 2 can never poison
+    it). idnes has no special scoping, so it carries neither the old sweep
+    seam nor an override."""
+    p = _portal()
+    assert not hasattr(p, "mark_inactive")
+    assert not hasattr(p, "presence_candidates")
+    assert getattr(p, "seen_key", "native") == "native"
 
 
 def test_active_count_source_scoped(monkeypatch):

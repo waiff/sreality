@@ -262,6 +262,20 @@ class SrealityClient(BasePortalClient):
             payload = self._get_json(url)
             if isinstance(payload, dict):
                 estate = _unwrap_estate(payload)
+                if "category_main_cb" not in estate:
+                    # A 200 whose body is only the {result, status_code,
+                    # status_message} envelope, or any dict without the estate
+                    # marker, is NOT a listing. Writing it would set the row
+                    # alive and blank its category, price and title (every
+                    # column is EXCLUDED.col in the batch upsert). Since
+                    # 2026-09-07 delisted listings are re-fetched on purpose
+                    # (rule #3 presence checks), which is exactly when such a
+                    # body is likeliest -- so it is an error, never "ok".
+                    raise RuntimeError(
+                        f"sreality detail {sreality_id}: payload carries no estate "
+                        f"(keys={sorted(payload)[:6]}, status_message="
+                        f"{payload.get('status_message')!r})"
+                    )
                 # The estate carries its id as `hash_id`; inject the known id
                 # if a payload ever omits it so the parser can rely on it.
                 estate.setdefault("hash_id", sreality_id)

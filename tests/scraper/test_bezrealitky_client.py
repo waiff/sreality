@@ -123,3 +123,13 @@ def test_graphql_errors_raise():
     c = _client([FakeResponse({"errors": [{"message": "boom"}]})])
     with pytest.raises(RuntimeError):
         c.search("PRODEJ", "BYT", limit=1, offset=0)
+
+
+def test_get_detail_missing_advert_field_is_an_error_not_gone():
+    """Only an explicit null advert is the positive gone signal. An empty or
+    advert-less `data` (edge stub, partial outage) must surface as an error,
+    or one bad minute would delist a whole batch of presence checks."""
+    for body in ({"data": {}}, {}):
+        c = _client([FakeResponse(body)])
+        with pytest.raises(RuntimeError, match="no 'advert' field"):
+            c.get_detail("999")

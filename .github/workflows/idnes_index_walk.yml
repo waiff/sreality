@@ -3,7 +3,7 @@ name: "Scraping: iDNES Reality index walk"
 # portal: idnes
 # The fast half of the iDNES cadence split (architectural rule #19, like sreality).
 # Walks the ENTIRE index of every configured category (no --max-pages),
-# touch_listings bumps last_seen on still-listed ids, mark_inactive flips delisted
+# touch_listings bumps last_seen on still-listed ids, unseen ids are nominated for a page check (rule #3),
 # ones under the completeness guard (source-scoped), and new/price-changed ids are
 # enqueued into listing_detail_queue (source='idnes'). No detail fetch — the drain
 # (idnes_detail_drain.yml) consumes the queue. Records run_type='index'.
@@ -24,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       max_pages:
-        description: cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.
+        description: cap index pages per category (ad-hoc partial; nominates nothing). Blank = full walk.
         required: false
         default: ""
         type: string

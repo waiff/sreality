@@ -277,11 +277,11 @@ not a bundled module — see `docs/architecture.md`); CI's `--check` guards drif
 **The split (architectural rule #19).** The cheap "which ads still exist" check is decoupled
 from the slow "download each ad" write:
 - **`index_walk.yml` (fast, frequent).** Walks the **entire** index of every category pair (no
-  `--limit`), `touch_listings` bumps `last_seen_at` on still-listed ids, `mark_inactive` flips
-  delisted ones (under the completeness guard), and new + price-changed ids. The walk carries a
+  `--limit`), `touch_listings` bumps `last_seen_at` on still-listed ids, unseen ids are nominated
+  for a page check (rule #3, 2026-09-07), and new + price-changed ids. The walk carries a
   **wall-clock deadline checked per PAGE** (`--max-seconds` → `run_index_walk` →
   `walk_category` → `portal.deadline_reached`); a walk that stops on it reports
-  `complete=False`, so it forfeits delisting authority but keeps everything it collected.
+  `complete=False`, so it nominates nothing but keeps everything it collected.
   Never hand-roll the comparison, and never add a portal without wiring the flag through —
   `tests/scraper/test_walk_deadline_wiring.py` fails the build if you do. Ids are classified by the
   one shared rule `portal.classify_index_sighting`, where **an index card with no price reads
@@ -305,13 +305,13 @@ from the slow "download each ad" write:
   `index_pages=0`. The queue persists across runs, so a bounded run never loses work; a
   SIGKILLed claim is recovered by the next run's `reclaim_stale_claims`.
 
-`mark_inactive` runs every index walk. Two safety rails make the flip safe (architectural rule
-#3): (1) each per-category flip is gated on **walk completeness** — `_walk_complete` compares the
-collected count against the API's `result_size` and skips the flip (logging `INACTIVE skipped`)
-when the walk looks truncated; (2) a gone detail fetch (HTTP 404/410 or sreality's "tato stránka
-neexistuje" body, `ListingGoneError`) flips that single listing immediately. The drain's
-failure-priority replaces the old per-walk priority retry: a failed fetch keeps its queue row at
-elevated priority.
+**Delisting is presence-verified (rule #3, 2026-09-07).** A complete category walk nominates
+every active row it did not see (`VERIFY cm=… candidates=… queued=… deferred=…`) into the detail
+queue at the lowest priority; the drain fetches each page and only a positive gone signal (404/410,
+a redirect off the listing, the portal's "no longer active" text → `ListingGoneError`) flips it; a
+live page refreshes it. No absence sweep, no staleness rail; `delist_flip_cap` throttles nominations
+per walk (`VERIFY DEFERRED`, recorded in `delist_flip_refusals`). A failed fetch keeps its queue row
+at elevated priority (the drain's failure-priority replaced the old per-walk retry).
 
 **Condition scoring is currently UNSCHEDULED — an intentional pause, not a bug** (PR #730,
 confirmed operator-intentional 2026-07-09; ~56k byt rows unscored is accepted). Don't
@@ -356,9 +356,9 @@ liveness warn at 1.5× / fail at 3× the portal's cadence, and freshness warn at
 sreality's cadence (60 min, ~hourly real cadence) reproduces the original 90/180 + 60/180; the 6h
 pilots (bazos/bezrealitky/idnes, cadence 360) get proportional thresholds so they aren't falsely
 red between runs. Concurrency: each workflow has its own group with `cancel-in-progress: false` — a long
-run is never killed mid-batch; the next tick queues behind it. Per-category mark_inactive commits
-immediately after each category's walk, so even a timed-out index walk leaves a consistent
-partial result.
+run is never killed mid-batch; the next tick queues behind it. Per-category nominations are
+queued immediately after each category's walk, so even a timed-out index walk leaves a
+consistent partial result.
 
 The detail-drain writes `scrape_runs` rows too (`run_type='detail'`), but only the **index walk** sets `index_pages>0` — so "last scrape", the liveness check, and reconciliation track the index walk specifically, while the 24h new/updated/error counters sum across the drain's `index_pages=0` rows too (see `scraper_health_checks()`, migration 105). The image backfill (`--images-only`) deliberately writes NO `scrape_runs` row — recording it once polluted liveness/reconciliation with `index_pages=0` noise.
 **The lifecycle around both phases lives in ONE place, `portal_runner.run_phase`** (rule #21; never re-add a per-portal copy): `ended_at` means the phase COMPLETED, so a phase that raises bumps `errors` and deliberately leaves `ended_at` NULL, lighting up both the `stuck` and `err_pct` health arms instead of neither. That same crash path is W3's failure-signature producer (`ops_incidents`, migration 462). **The crash contract, the signature grammar and the log-tail backstop: `references/pipeline-verification.md`.**
@@ -377,8 +377,8 @@ Lanes shipped so far:
   category_type)` count check that detects a market-wide count swing faster than a full index
   walk would, feeding the completeness/delisting rails.
 - **Tightened delisting rails for sreality** (PR #697) — sreality's completeness gate moved
-  1.0→0.995 and its unseen-staleness window to 3h (vs 12h on the 6h-cadence portals), matching
-  rule #3's two-rail design to sreality's faster real cadence.
+  1.0→0.995 (the unseen-staleness window it also introduced was retired 2026-09-07 when
+  delisting became presence-verified).
 - **Property-maintenance lane**, every 2 min (PR #716) — runs `run_incremental_pass` against
   `dirty_properties` (rule #20) far more often than the 5-min GH Actions cron. Its first cut
   serialized against the GH cron + daily sweep with a SESSION advisory lock, which is unsound
