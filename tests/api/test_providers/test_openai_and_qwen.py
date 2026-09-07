@@ -51,3 +51,8 @@ def test_qwen_provider_reads_env_when_no_explicit_key(monkeypatch):
     monkeypatch.setenv("QWEN_API_KEY", "env-key")
     p = QwenProvider(session=_FakeSession())
     assert p._api_key == "env-key"
+
+
+def test_openai_provider_sends_reasoning_effort_none_with_tools_for_luna():
+    p = OpenAIProvider(api_key="k", session=_FakeSession())
+    assert p._reasoning_effort_with_tools == {"gpt-5.6-luna": "none"}
