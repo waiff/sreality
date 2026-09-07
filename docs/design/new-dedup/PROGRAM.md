@@ -174,6 +174,22 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-07 — **`/new-dedup/training-set` reduced to four trays (operator ruling: "the
+  filters are too difficult").** The three composable filter groups (cutoff × verdict ×
+  decided-by), the "To review" preset and the per-page "Confirm the other N" bulk-confirm are
+  gone. What remains is one tray strip, each tray ONE server query that is exactly what the
+  trainer meets: **Training · positive** = `membership=set` (the ranked positives up to the
+  target, the operator's first, then the machine's oldest-first — `training_set_positive_ids`);
+  **Training · negative** = `state=negative&source=human` (the human/human_confirmed negatives,
+  the only door `tag_holdout.training_label_rows` reads negatives through — the machine's
+  negatives are in NO tray, and the page states their count rather than hiding it;
+  `training_set_counts` now splits negatives by who decided, `human_negative` being the size of
+  that set); **Reserve** = `membership=reserve`; **Left out** = `state=excluded`. The tile keeps
+  its three verbs, who-decided, set position, old-wording flag and the note; the target editor
+  stays because it IS the set/reserve boundary. Old links carrying `set=review|all` land on the
+  positive tray. Finalisation is now the operator saying the trays are right — that, not a
+  confirm count, is the gate to the first head training run.
+
 - 2026-09-05 (f) — **DINOv3 readiness build: all four PRs up, draft, CI green, per entry
   (b)'s directive.** #1296 (migration 480, the vector store), #1300 (the bake-off harness),
   #1298 (the production embedding job + dispatch workflow), #1297 (the per-tag heads trainer +

@@ -332,12 +332,15 @@ def test_counts_split_positives_by_who_decided_them() -> None:
     from toolkit import machine_labeling as ml
 
     conn = _Conn([(22, "positive", True, 400), (22, "positive", False, 20),
-                  (22, "negative", True, 5000)])
+                  (22, "negative", True, 5000), (22, "negative", False, 37)])
     out = ml.training_set_counts(conn, tag_ids=[22, 25])
     assert out[22]["positive"] == 420
     assert out[22]["machine_positive"] == 400 and out[22]["human_positive"] == 20
-    assert out[22]["negative"] == 5000
-    assert out[25]["positive"] == 0
+    # Negatives split the same way: only the human ones are training material,
+    # so the page's "training · negative" count is human_negative, not negative.
+    assert out[22]["negative"] == 5037
+    assert out[22]["machine_negative"] == 5000 and out[22]["human_negative"] == 37
+    assert out[25]["positive"] == 0 and out[25]["human_negative"] == 0
 
 
 def test_a_label_written_under_replaced_wording_is_flagged() -> None:
