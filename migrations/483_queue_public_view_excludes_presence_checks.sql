@@ -12,19 +12,20 @@
 -- behaving exactly as specified, and bury the signal those checks exist for
 -- (the 2026-08 ingest starvation).
 --
--- The view keeps its columns and its posture; it now shows the ingest queue
--- only. It stays ungated because the health matview's refresh (pg_cron) reads
--- it and it carries no listing content -- source, priority and timestamps, the
--- same exposure as since migration 109.
--- ci-allow-ungated: listing_detail_queue_public redefinition of the migration-109 view the health matview refresh reads; queue timestamps only, no listing content
-create or replace view listing_detail_queue_public as
+-- The view keeps its columns and its admin gate (migration 318; the gate opens
+-- for the claims-less pg_cron connection that refreshes the matview, migration
+-- 330); it now shows the ingest queue only.
+create or replace view public.listing_detail_queue_public as
+select * from (
   select source, priority, enqueued_at, claimed_at, given_up
   from listing_detail_queue
-  where priority >= 0;
+  where priority >= 0
+) __admin_gate
+where is_platform_admin();
 
 -- Presence checks are visible through this new view, admin-gated like every
 -- operational view since migration 318 (SPA route-gating is not a boundary).
-create or replace view listing_presence_checks_public as
+create or replace view public.listing_presence_checks_public as
 select * from (
   select source, enqueued_at, claimed_at, given_up, attempts
   from listing_detail_queue
