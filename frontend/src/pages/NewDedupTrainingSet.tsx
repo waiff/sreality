@@ -790,9 +790,26 @@ export default function NewDedupTrainingSet() {
       ) : rowsQ.error ? (
         <div className="mt-4"><ErrorBanner message={(rowsQ.error as Error).message} /></div>
       ) : rows.length === 0 ? (
-        <p className="mt-10 text-center text-sm text-[var(--color-ink-2)]">
-          Nothing labeled for this head and filter yet.
-        </p>
+        <div className="mt-10 text-center text-sm text-[var(--color-ink-2)]">
+          {/* The commonest empty result is not an absence of data but a
+            * contradiction: only positives are ranked into the set, so asking
+            * for a negative inside it can never match. Say which it is. */}
+          {(membership === 'set' || membership === 'reserve')
+            && verdict !== 'positive' && verdict !== 'all' ? (
+              <>
+                <p data-testid="empty-contradiction">
+                  Nothing can match: the cutoff ranks <b>positives</b> only, so “{VERDICT_LABEL[verdict as Verdict]}”
+                  has no place in the set or the reserve.
+                </p>
+                <p className="mt-1 text-[var(--color-ink-3)]">
+                  Negatives and left-outs are unbounded — every photo the model judged for this head.
+                  Switch group 1 to <b>Everything</b> to see them.
+                </p>
+              </>
+            ) : (
+              <p>Nothing labeled for this head and filter yet.</p>
+            )}
+        </div>
       ) : (
         <>
           <ul

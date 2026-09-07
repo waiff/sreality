@@ -644,7 +644,17 @@ def training_set_page_ranked(
             row.setdefault("note", None)
         return rows
 
-    return _tolerating_474(_run, fallback=None) or _fallback()
+    # `_run() or _fallback()` was wrong and quietly so: an EMPTY result is
+    # falsy, so any filter combination that legitimately matches nothing — "in
+    # the set" AND "does not apply", a head with no reserve, a page past the
+    # end — fell through to the pre-474 path, which ignores the membership
+    # filter entirely and returned unranked rows. Only the missing COLUMN may
+    # trigger the fallback, so the exception is the only signal.
+    try:
+        return _run()
+    except psycopg.errors.UndefinedColumn:
+        LOG.warning("tag_taxonomy.training_target is absent — migration 474 not applied yet")
+        return _fallback()
 
 
 def set_training_target(

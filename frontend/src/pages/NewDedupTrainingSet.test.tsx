@@ -554,3 +554,24 @@ describe('<NewDedupTrainingSet> a note can be reread and changed', () => {
     ));
   });
 });
+
+describe('<NewDedupTrainingSet> an impossible filter combination', () => {
+  it('explains that only positives are ranked, instead of an empty shrug', async () => {
+    vi.mocked(api.listTrainingSet).mockResolvedValue({
+      data: { rows: [], counts: HEADS[0] as never, limit: 50, offset: 0 },
+    });
+    renderPage(['/new-dedup/training-set?set=set&verdict=negative']);
+    expect(await screen.findByTestId('empty-contradiction'))
+      .toHaveTextContent(/ranks positives only/);
+    expect(screen.getByText(/Switch group 1 to/)).toBeInTheDocument();
+  });
+
+  it('keeps the plain message when the combination is merely empty', async () => {
+    vi.mocked(api.listTrainingSet).mockResolvedValue({
+      data: { rows: [], counts: HEADS[1] as never, limit: 50, offset: 0 },
+    });
+    renderPage(['/new-dedup/training-set?set=all&verdict=negative']);
+    expect(await screen.findByText(/Nothing labeled for this head/)).toBeInTheDocument();
+    expect(screen.queryByTestId('empty-contradiction')).toBeNull();
+  });
+});
