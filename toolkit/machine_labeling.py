@@ -436,6 +436,50 @@ def training_set_counts(
     return out
 
 
+# WHERE ONE IMAGE SITS. A link from outside — a conflict list, a report, a note
+# to the operator — names a head and an image, not a page number. Resolving that
+# to "tray X, row N" has to happen HERE, against the same ORDER BY and the same
+# `storage_path IS NOT NULL` join the page uses, or the offset it computes lands
+# on a different photo. Rank is 0-based: the count of rows that sort ahead of it.
+_LOCATE_SQL = f"""
+    SELECT l.state, l.in_training,
+      (SELECT count(*)
+         FROM image_tag_labels o
+         JOIN images oi ON oi.id = o.image_id AND oi.storage_path IS NOT NULL
+        WHERE o.tag_id = l.tag_id
+          AND o.source = ANY(%(sources)s::text[])
+          AND o.state = l.state
+          AND (l.state <> 'positive' OR o.in_training = l.in_training)
+          AND (o.updated_at, o.image_id) > (l.updated_at, l.image_id)
+          {exclusion_for("o")}
+      )::bigint AS rank
+    FROM image_tag_labels l
+    JOIN images i ON i.id = l.image_id AND i.storage_path IS NOT NULL
+    WHERE l.tag_id = %(tag_id)s::bigint
+      AND l.image_id = %(image_id)s::bigint
+      AND l.source = ANY(%(sources)s::text[])
+      {exclusion_for("l")}
+"""
+
+
+def locate_in_training_set(
+    conn: psycopg.Connection, *, tag_id: int, image_id: int,
+) -> dict[str, Any] | None:
+    """Which tray this head's label for this image is in, and its 0-based row
+    number there. None when the head has no label for it, or the image is
+    holdout — a caller must not be able to page to a photo the exam owns."""
+    with conn.cursor() as cur:
+        cur.execute(_LOCATE_SQL, {
+            "tag_id": int(tag_id), "image_id": int(image_id),
+            "sources": list(TRAINING_SOURCES)})
+        row = cur.fetchone()
+    if row is None:
+        return None
+    state, in_training, rank = str(row[0]), bool(row[1]), int(row[2])
+    tray = "reserve" if state == "positive" and not in_training else state
+    return {"tray": tray, "state": state, "in_training": in_training, "rank": rank}
+
+
 def training_set_page(
     conn: psycopg.Connection, *, tag_id: int, state: str | None = None,
     in_training: bool | None = None, limit: int = 60, offset: int = 0,

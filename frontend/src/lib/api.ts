@@ -1240,6 +1240,22 @@ export const listTrainingSetHeads = (): Promise<{ data: TrainingSetHead[] }> =>
     jwt: true,
   });
 
+/* Where one image sits in a head's trays — so a link can name a head and a photo
+ * and the page can land on it. The server resolves it against the SAME order and
+ * the same storage_path join the page uses, because a rank computed any other
+ * way pages to a different photo. */
+export const locateTrainingImage = (
+  tagId: number, imageId: number,
+): Promise<{ data: {
+  tag_id: number; image_id: number;
+  tray: 'positive' | 'negative' | 'excluded' | 'reserve';
+  state: 'positive' | 'negative' | 'excluded';
+  in_training: boolean; rank: number;
+} }> =>
+  request('/new-dedup/labeling/training-set/locate', {
+    query: { tag_id: tagId, image_id: imageId }, jwt: true,
+  });
+
 export const listTrainingSet = (params: {
   tag_id: number;
   state?: 'positive' | 'negative' | 'excluded';

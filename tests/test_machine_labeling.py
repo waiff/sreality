@@ -329,6 +329,37 @@ def test_the_page_caps_its_limit_and_floors_its_offset() -> None:
     assert conn.log[0][2]["limit"] == 10_000
 
 
+def test_locate_maps_state_and_membership_to_a_tray_and_a_row() -> None:
+    # A link names a head and a photo; the page needs a tray and a page number.
+    # An unadmitted positive is the RESERVE — the one mapping the page cannot
+    # get wrong without sending the operator to a tray the photo is not in.
+    from toolkit import machine_labeling as ml
+
+    assert ml.locate_in_training_set(_Conn([("positive", False, 137)]),
+                                     tag_id=42, image_id=12) == {
+        "tray": "reserve", "state": "positive", "in_training": False, "rank": 137}
+    assert ml.locate_in_training_set(_Conn([("positive", True, 0)]),
+                                     tag_id=42, image_id=11)["tray"] == "positive"
+    assert ml.locate_in_training_set(_Conn([("negative", True, 9)]),
+                                     tag_id=42, image_id=13)["tray"] == "negative"
+    # No label for that head, or a holdout image: nothing to page to.
+    assert ml.locate_in_training_set(_Conn([]), tag_id=42, image_id=99) is None
+
+
+def test_locate_ranks_under_the_pages_own_order_and_rails() -> None:
+    # A rank computed against a different order or a different row set pages to
+    # a DIFFERENT photo than the one the link named.
+    from toolkit import machine_labeling as ml
+
+    sql = ml._LOCATE_SQL
+    assert "(o.updated_at, o.image_id) > (l.updated_at, l.image_id)" in sql
+    assert "oi.storage_path IS NOT NULL" in sql and "i.storage_path IS NOT NULL" in sql
+    # Membership splits the positives into two trays and nothing else.
+    assert "l.state <> 'positive' OR o.in_training = l.in_training" in sql
+    # The holdout is refused on both sides — the row itself and the rank's cohort.
+    assert sql.count("tag_exam_cohorts hc") == 2
+
+
 def test_counts_are_trays_over_stored_membership() -> None:
     # Migration 484: membership is a fact about a row, so a count is a count of
     # rows. A positive the operator has not admitted is the RESERVE and trains

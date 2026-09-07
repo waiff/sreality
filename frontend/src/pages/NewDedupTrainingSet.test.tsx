@@ -110,6 +110,47 @@ describe('<NewDedupTrainingSet> four trays over stored membership', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
+  /* A link from outside names a head and a photo, never a page number: the
+   * server resolves which tray and which row, so the offset cannot drift from
+   * what the grid renders. */
+  describe('deep link to one photo', () => {
+    it('lands on the tray and page the server says, and rings the tile', async () => {
+      vi.mocked(api.locateTrainingImage).mockResolvedValue({
+        data: { tag_id: 42, image_id: 12, tray: 'reserve', state: 'positive',
+                in_training: false, rank: 137 },
+      });
+      renderPage(['/new-dedup/training-set?tag=42&image=12']);
+      await waitFor(() => expect(lastQuery()).toEqual(
+        { tag_id: 42, state: 'positive', in_training: false, limit: 50, offset: 100 },
+      ));
+      expect(await screen.findByTestId('deep-link-note')).toHaveTextContent('Reserve');
+      expect(screen.getByTestId('training-tile-12')).toHaveAttribute('data-linked', 'true');
+      expect(screen.getByTestId('training-tile-11')).not.toHaveAttribute('data-linked');
+    });
+
+    it('says so and stays put when the head has no label for that photo', async () => {
+      vi.mocked(api.locateTrainingImage).mockRejectedValue(new Error('404'));
+      renderPage(['/new-dedup/training-set?tag=42&image=999']);
+      expect(await screen.findByTestId('deep-link-note')).toHaveTextContent('no label on this head');
+      expect(lastQuery()).toEqual(
+        { tag_id: 42, state: 'positive', in_training: true, limit: 50, offset: 0 },
+      );
+    });
+
+    it('clears the link without moving the page', async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.locateTrainingImage).mockResolvedValue({
+        data: { tag_id: 42, image_id: 11, tray: 'positive', state: 'positive',
+                in_training: true, rank: 0 },
+      });
+      renderPage(['/new-dedup/training-set?tag=42&image=11']);
+      await screen.findByTestId('deep-link-note');
+      await user.click(screen.getByTestId('deep-link-clear'));
+      await waitFor(() => expect(screen.queryByTestId('deep-link-note')).toBeNull());
+      expect(screen.getByTestId('training-tile-11')).not.toHaveAttribute('data-linked');
+    });
+  });
+
   it('offers a 10000-per-page step', async () => {
     const user = userEvent.setup();
     renderPage();

@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
@@ -8,6 +8,7 @@ import {
   editTagLabelNote,
   listTrainingSet,
   listTrainingSetHeads,
+  locateTrainingImage,
   setNewDedupTagAnnotation,
   type TagState,
   type TrainingSetRow,
@@ -112,6 +113,10 @@ export default function NewDedupTrainingSet() {
    * ImageLightbox walks the grid from there with the arrow keys. */
   const [lightboxAt, setLightboxAt] = useState<number | null>(null);
 
+  /* ?image=<id> — a link from outside naming one photo (a conflict list, a
+   * report). The page has to answer "which tray, which page" before it can show
+   * it, so the server locates it; nothing is guessed from the URL. */
+  const deepLinkImage = Number(params.get('image') ?? 0) || null;
   const tagId = Number(params.get('tag') ?? 0) || null;
   const tray = readTray(params.get('set'));
   const offset = Math.max(0, Number(params.get('offset') ?? 0) || 0);
@@ -136,6 +141,26 @@ export default function NewDedupTrainingSet() {
   );
   const activeId = tagId ?? ordered[0]?.id ?? null;
   const activeHead = ordered.find((h) => h.id === activeId) ?? null;
+
+  /* Resolve the deep link, then send the page to it: the tray it lives in and
+   * the page its row falls on. Both come from the server's rank so they cannot
+   * drift from what the grid will actually render. A 404 (no label for this
+   * head, or a holdout image) leaves the page exactly where it was. */
+  const locateQ = useQuery({
+    queryKey: ['training-set-locate', activeId, deepLinkImage],
+    queryFn: () => locateTrainingImage(activeId as number, deepLinkImage as number),
+    enabled: activeId != null && deepLinkImage != null,
+    retry: false,
+  });
+  const located = locateQ.data?.data ?? null;
+  useEffect(() => {
+    if (!located) return;
+    const want = Math.floor(located.rank / pageSize) * pageSize;
+    if (located.tray === tray && want === offset) return;
+    patch({ set: located.tray, offset: want === 0 ? null : String(want) });
+    // patch is derived from params each render; the guard above makes this idempotent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [located, pageSize, tray, offset]);
 
   const rowsKey = ['training-set', activeId, tray, offset, pageSize];
   const rowsQ = useQuery({
@@ -235,6 +260,18 @@ export default function NewDedupTrainingSet() {
    * 10,000 tiles a page, fetching a full image row per tile would be the
    * expensive way to show the same photo. `sreality_id` and `sequence` are not
    * on a training row and nothing here reads them. */
+  /* Scroll the linked tile into view once, the first time it renders. Keyed on
+   * the id so paging away and back does not re-yank the viewport. */
+  const scrolledTo = useRef<number | null>(null);
+  const highlightRef = (el: HTMLLIElement | null) => {
+    if (!el || deepLinkImage == null || scrolledTo.current === deepLinkImage) return;
+    scrolledTo.current = deepLinkImage;
+    const still = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    // Optional call: jsdom has no scrollIntoView, and a ringed tile the operator
+    // has to scroll to themselves beats a ref callback that throws mid-commit.
+    el.scrollIntoView?.({ block: 'center', behavior: still ? 'auto' : 'smooth' });
+  };
+
   const galleryImages: ImagePublic[] = useMemo(
     () => rows.map((r) => ({
       id: r.image_id,
@@ -296,10 +333,15 @@ export default function NewDedupTrainingSet() {
     return (
       <li
         key={r.image_id}
+        ref={r.image_id === deepLinkImage ? highlightRef : undefined}
         data-testid={`training-tile-${r.image_id}`}
+        data-linked={r.image_id === deepLinkImage ? 'true' : undefined}
         data-state={r.state}
         data-previewed={previewing && willMove.has(r.image_id) ? 'true' : undefined}
         className={`rounded-[var(--radius-sm)] border p-1.5 flex flex-col gap-1.5 transition-opacity ${STATE_STYLE[r.state]} ${
+          r.image_id === deepLinkImage
+            ? 'ring-2 ring-[var(--color-copper)] ring-offset-2 ring-offset-[var(--color-paper)]' : ''
+        } ${
           previewing ? (willMove.has(r.image_id)
             ? 'ring-2 ring-[var(--color-sage)] ring-offset-1 ring-offset-[var(--color-paper)]' : 'opacity-40') : ''
         }`}
@@ -464,6 +506,26 @@ export default function NewDedupTrainingSet() {
           </p>
         )}
       </header>
+
+      {deepLinkImage != null && (
+        <p data-testid="deep-link-note"
+           className="mt-3 flex flex-wrap items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--color-copper)] px-3 py-2 text-xs text-[var(--color-ink-2)]">
+          {locateQ.isError ? (
+            <span>Photo {deepLinkImage} has no label on this head &mdash; nothing to show. Pick another head, or clear the link.</span>
+          ) : located ? (
+            <span>
+              Showing photo <b>{deepLinkImage}</b> in <b>{TRAY_LABEL[located.tray]}</b>, ringed below.
+            </span>
+          ) : (
+            <span>Finding photo {deepLinkImage}&hellip;</span>
+          )}
+          <button type="button" data-testid="deep-link-clear"
+            onClick={() => patch({ image: null })}
+            className="text-[var(--color-copper)] hover:underline">
+            clear
+          </button>
+        </p>
+      )}
 
       <details className="mt-3 rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-3 py-2 text-xs text-[var(--color-ink-2)]">
         <summary className="cursor-pointer select-none text-[var(--color-ink)]">How to use this page</summary>
