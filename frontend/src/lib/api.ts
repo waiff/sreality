@@ -1203,6 +1203,11 @@ export interface TrainingSetHead {
   excluded: number;
   machine_positive: number;
   human_positive: number;
+  /* Negatives split the same way. Only the human ones train (the trainer reads
+   * negatives through the human-only door), so `human_negative` IS the size of
+   * the negative training set; the machine's negatives are not in any set. */
+  machine_negative: number;
+  human_negative: number;
   /* The cutoff view. The set is a QUERY: your positives first, then the
    * machine's oldest-first, up to `target`; the rest is the reserve, which
    * steps in automatically when a positive is removed. `in_set_unreviewed` is

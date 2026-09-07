@@ -1,6 +1,6 @@
-/* The training-set review surface. What matters: the filters actually reach
- * the server (a filter that only reshapes what is already loaded would lie
- * about a 10,000-row set), and a correction writes a HUMAN label — which the
+/* The training-set page: four trays, each ONE server query that matches what
+ * the trainer reads (a tray that only reshaped the loaded page would lie about
+ * a 10,000-row set), and a correction that writes a HUMAN label — which the
  * store then protects from every later machine pass. */
 
 import { render, screen, waitFor, within } from '@testing-library/react';
@@ -16,11 +16,12 @@ vi.mock('@/lib/imageUrl', () => ({ imageSrc: () => 'blob:photo' }));
 
 const HEADS = [
   { id: 3, label: 'exterier - fasáda', positive: 1131, negative: 9166, excluded: 247,
-    machine_positive: 1113, human_positive: 18,
-    target: 300, in_set: 300, reserve: 831, in_set_unreviewed: 282 },
+    machine_positive: 1113, human_positive: 18, machine_negative: 9120, human_negative: 46,
+    target: 300, in_set: 300, reserve: 831, in_set_unreviewed: 282, cutoff_available: true },
   { id: 2, label: 'exterier - domovní vchod', positive: 173, negative: 10153,
     excluded: 218, machine_positive: 159, human_positive: 14,
-    target: 300, in_set: 173, reserve: 0, in_set_unreviewed: 159 },
+    machine_negative: 10150, human_negative: 3,
+    target: 300, in_set: 173, reserve: 0, in_set_unreviewed: 159, cutoff_available: true },
 ];
 
 const ROWS = [
@@ -41,6 +42,8 @@ function renderPage(entries = ['/new-dedup/training-set']) {
   );
 }
 
+const lastQuery = () => vi.mocked(api.listTrainingSet).mock.calls.at(-1)?.[0];
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(api.listTrainingSetHeads).mockResolvedValue({ data: HEADS as never });
@@ -50,47 +53,77 @@ beforeEach(() => {
   vi.mocked(api.setNewDedupTagAnnotation).mockResolvedValue({ data: {} } as never);
 });
 
-describe('<NewDedupTrainingSet>', () => {
-  it('opens on the head with the most positives, on the bounded review', async () => {
-    // 'To review' = in the set + machine + positive, composed from the three
-    // server filters so it cannot disagree with them.
+describe('<NewDedupTrainingSet> the four trays', () => {
+  it('opens on the head with the most positives, on the positive tray = the set', async () => {
     renderPage();
     await waitFor(() => expect(api.listTrainingSet).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tag_id: 3, state: 'positive', source: 'machine', membership: 'set', limit: 50, offset: 0,
-      }),
+      { tag_id: 3, state: 'positive', membership: 'set', limit: 50, offset: 0 },
     ));
     expect(await screen.findByTestId('training-tile-11')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Training · positive/ })).toHaveAttribute('aria-selected', 'true');
   });
 
-  it('says how much of a head is the machine and how much is yours', async () => {
+  it('the negative tray is the operator’s negatives ONLY — the door the trainer reads', async () => {
+    const user = userEvent.setup();
     renderPage();
-    expect(await screen.findByText(/1113 by the machine, 18 yours/)).toBeInTheDocument();
-  });
-
-  it('filters by verdict AT THE SERVER, not in the loaded page', async () => {
-    const user = userEvent.setup();
-    renderPage(['/new-dedup/training-set?set=all']);
     await screen.findByTestId('training-tile-11');
-    await user.click(screen.getByRole('button', { name: /Does not/ }));
-    await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
-      expect.objectContaining({ tag_id: 3, state: 'negative' }),
+    await user.click(screen.getByRole('tab', { name: /Training · negative/ }));
+    await waitFor(() => expect(lastQuery()).toEqual(
+      { tag_id: 3, state: 'negative', source: 'human', limit: 50, offset: 0 },
     ));
   });
 
-  it('filters by who decided, and drops the filter for "anyone"', async () => {
+  it('the reserve tray is the positives past the cutoff', async () => {
     const user = userEvent.setup();
-    renderPage(['/new-dedup/training-set?set=all']);
+    renderPage();
     await screen.findByTestId('training-tile-11');
-    await user.click(screen.getByRole('button', { name: 'Yours' }));
-    await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
-      expect.objectContaining({ source: 'human' }),
+    await user.click(screen.getByRole('tab', { name: /Reserve/ }));
+    await waitFor(() => expect(lastQuery()).toEqual(
+      { tag_id: 3, state: 'positive', membership: 'reserve', limit: 50, offset: 0 },
     ));
-    await user.click(screen.getByRole('button', { name: 'Anyone' }));
-    await waitFor(() => {
-      const last = vi.mocked(api.listTrainingSet).mock.calls.at(-1)?.[0];
-      expect(last).not.toHaveProperty('source');
-    });
+  });
+
+  it('the left-out tray is the excluded labels, whoever wrote them', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    await user.click(screen.getByRole('tab', { name: /Left out/ }));
+    await waitFor(() => expect(lastQuery()).toEqual(
+      { tag_id: 3, state: 'excluded', limit: 50, offset: 0 },
+    ));
+  });
+
+  it('each tray carries the size of what it holds, in its own terms', async () => {
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByRole('tab', { name: /Training · positive/ })).toHaveTextContent('300 / 300');
+    // 9166 negatives exist, 46 are the operator's: the tray says 46.
+    expect(screen.getByRole('tab', { name: /Training · negative/ })).toHaveTextContent('46');
+    expect(screen.getByRole('tab', { name: /Training · negative/ })).not.toHaveTextContent('9166');
+    expect(screen.getByRole('tab', { name: /Reserve/ })).toHaveTextContent('831');
+    expect(screen.getByRole('tab', { name: /Left out/ })).toHaveTextContent('247');
+  });
+
+  it('says how many machine negatives are in no tray, instead of hiding them', async () => {
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByTestId('machine-negatives')).toHaveTextContent('9120 machine negatives train nothing');
+  });
+
+  it('there are no composable filters and no bulk confirm', async () => {
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(screen.queryByRole('group', { name: 'verdict' })).toBeNull();
+    expect(screen.queryByRole('group', { name: 'decided by' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Confirm the other/ })).toBeNull();
+    expect(screen.queryByText(/To review/)).toBeNull();
+  });
+
+  it('old links with the review presets land on the positive tray', async () => {
+    renderPage(['/new-dedup/training-set?set=review&verdict=negative&source=machine']);
+    await waitFor(() => expect(lastQuery()).toEqual(
+      { tag_id: 3, state: 'positive', membership: 'set', limit: 50, offset: 0 },
+    ));
   });
 
   it('switches head and resets the page offset', async () => {
@@ -98,11 +131,23 @@ describe('<NewDedupTrainingSet>', () => {
     renderPage(['/new-dedup/training-set?offset=120']);
     await screen.findByTestId('training-tile-11');
     await user.selectOptions(screen.getByLabelText('head'), '2');
-    await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
+    await waitFor(() => expect(lastQuery()).toEqual(
       expect.objectContaining({ tag_id: 2, offset: 0 }),
     ));
   });
 
+  it('says how much of a head is the machine and how much is yours', async () => {
+    renderPage();
+    expect(await screen.findByText(/18 yours, 1113 the machine/)).toBeInTheDocument();
+  });
+
+  it('states that the holdout is deliberately absent', async () => {
+    renderPage();
+    expect(await screen.findByText(/sealed exam images are excluded/)).toBeInTheDocument();
+  });
+});
+
+describe('<NewDedupTrainingSet> moving a photo', () => {
   it('a correction writes a human label for THIS head and image', async () => {
     const user = userEvent.setup();
     renderPage();
@@ -121,112 +166,55 @@ describe('<NewDedupTrainingSet>', () => {
       .toHaveBeenCalledWith(3, 11, 'excluded', 'pruned'));
   });
 
-  it('marks a label written under wording that has since been replaced', async () => {
+  it('a corrected tile stays in its tray, patched, until the next load', async () => {
+    const user = userEvent.setup();
     renderPage();
-    const stale = await screen.findByTestId('training-tile-12');
-    expect(within(stale).getByText(/old wording/)).toBeInTheDocument();
-    const current = screen.getByTestId('training-tile-11');
-    expect(within(current).queryByText(/old wording/)).toBeNull();
+    const tile = await screen.findByTestId('training-tile-11');
+    expect(api.listTrainingSet).toHaveBeenCalledTimes(1);
+    await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledTimes(1));
+    const after = screen.getByTestId('training-tile-11');
+    expect(after).toHaveAttribute('data-state', 'negative');
+    expect(within(after).getByText('yours')).toBeInTheDocument();
+    expect(within(after).getByText(/Now under/)).toHaveTextContent('Training · negative');
+    expect(screen.getByTestId('note-form-11')).toBeInTheDocument();
+    expect(api.listTrainingSet).toHaveBeenCalledTimes(1);
   });
 
-  it('names who decided each tile', async () => {
+  it('the pressed applies button on a machine tile is a confirm', async () => {
+    renderPage();
+    const tile = await screen.findByTestId('training-tile-11');
+    expect(within(tile).getByRole('button', { name: /^positive 11$/ }))
+      .toHaveAttribute('title', expect.stringMatching(/Confirm/));
+    const yours = screen.getByTestId('training-tile-12');
+    expect(within(yours).getByRole('button', { name: /^positive 12$/ }))
+      .toHaveAttribute('title', 'Applies');
+  });
+
+  it('names who decided each tile, and flags since-replaced wording', async () => {
     renderPage();
     const machine = await screen.findByTestId('training-tile-11');
     expect(within(machine).getByText('machine')).toBeInTheDocument();
-    expect(within(screen.getByTestId('training-tile-12')).getByText('yours')).toBeInTheDocument();
+    expect(within(machine).queryByText(/old wording/)).toBeNull();
+    const stale = screen.getByTestId('training-tile-12');
+    expect(within(stale).getByText('yours')).toBeInTheDocument();
+    expect(within(stale).getByText(/old wording/)).toBeInTheDocument();
   });
 
-  it('states that the holdout is deliberately absent', async () => {
-    renderPage();
-    expect(await screen.findByText(/sealed exam images are excluded/)).toBeInTheDocument();
-  });
-
-  it('pages forward, and stops when the page is short', async () => {
-    renderPage();
-    await screen.findByTestId('training-tile-11');
-    // Two rows against a 50-row page means there is no next page.
-    expect(screen.getByRole('button', { name: /next/ })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /previous/ })).toBeDisabled();
-  });
-
-  it('says so when a head has nothing under the current filter', async () => {
-    vi.mocked(api.listTrainingSet).mockResolvedValue({
-      data: { rows: [], counts: HEADS[1] as never, limit: 60, offset: 0 },
-    });
-    renderPage();
-    expect(await screen.findByText(/Nothing labeled for this head/)).toBeInTheDocument();
-  });
-});
-
-describe('<NewDedupTrainingSet> the reason for a change', () => {
-  it('offers a note field only on a tile whose mark changed, and sends it with from/to', async () => {
-    const user = userEvent.setup();
-    renderPage();
-    const tile = await screen.findByTestId('training-tile-11');
-    // No field before any change.
-    expect(screen.queryByTestId('note-form-11')).toBeNull();
-    await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
-    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledTimes(1));
-    // The change came from a machine "positive"; the field appears on THIS tile only.
-    const form = await screen.findByTestId('note-form-11');
-    expect(screen.queryByTestId('note-form-12')).toBeNull();
-    await user.type(within(form).getByRole('textbox'), 'entrance door, facade is only the backdrop');
-    await user.click(within(form).getByRole('button', { name: 'save' }));
-    // The note re-states the SAME mark with the reason attached — one write
-    // path for mark and reason — and carries what the tile showed before.
-    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenLastCalledWith(
-      3, 11, 'negative', null,
-      { text: 'entrance door, facade is only the backdrop', from_state: 'positive' },
-    ));
-  });
-
-  it('will not save an empty note', async () => {
-    const user = userEvent.setup();
-    renderPage();
-    const tile = await screen.findByTestId('training-tile-11');
-    await user.click(within(tile).getByRole('button', { name: /^excluded 11$/ }));
-    const form = await screen.findByTestId('note-form-11');
-    expect(within(form).getByRole('button', { name: 'save' })).toBeDisabled();
-    await user.type(within(form).getByRole('textbox'), '   ');
-    expect(within(form).getByRole('button', { name: 'save' })).toBeDisabled();
-  });
-});
-
-
-describe('<NewDedupTrainingSet> the cutoff', () => {
-  it('shows the bounded review count, the set against its target, and the reserve', async () => {
-    renderPage();
-    await screen.findByTestId('training-tile-11');
-    expect(screen.getByRole('button', { name: /To review/ })).toHaveTextContent('282');
-    expect(screen.getByRole('button', { name: /In set/ })).toHaveTextContent('300/300');
-    expect(screen.getByRole('button', { name: /Reserve/ })).toHaveTextContent('831');
-  });
-
-  it('the reserve view asks the server for positives past the cutoff', async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await screen.findByTestId('training-tile-11');
-    await user.click(screen.getByRole('button', { name: /Reserve/ }));
-    await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
-      expect.objectContaining({ membership: 'reserve' }),
-    ));
-  });
-
-  it('each positive tile says whether it is in the set', async () => {
+  it('each positive tile says its position and which side of the cutoff it is on', async () => {
     vi.mocked(api.listTrainingSet).mockResolvedValue({
       data: {
-        rows: [
-          ROWS[0],
-          { ...ROWS[0], image_id: 13, set_rank: 512, in_set: false },
-        ] as never,
+        rows: [ROWS[0], { ...ROWS[0], image_id: 13, set_rank: 512, in_set: false }] as never,
         counts: HEADS[0] as never, limit: 60, offset: 0,
       },
     });
-    renderPage(['/new-dedup/training-set?set=all']);
-    expect(await screen.findByTestId('membership-11')).toHaveTextContent('in set');
-    expect(screen.getByTestId('membership-13')).toHaveTextContent('reserve');
+    renderPage();
+    expect(await screen.findByTestId('membership-11')).toHaveTextContent('in set #19');
+    expect(screen.getByTestId('membership-13')).toHaveTextContent('reserve #512');
   });
+});
 
+describe('<NewDedupTrainingSet> the target', () => {
   it('changing the target moves the boundary; an empty target restores the default', async () => {
     vi.mocked(api.setTrainingTarget).mockResolvedValue({
       data: { tag_id: 3, target: 200, is_default: false },
@@ -244,23 +232,24 @@ describe('<NewDedupTrainingSet> the cutoff', () => {
     await waitFor(() => expect(api.setTrainingTarget).toHaveBeenLastCalledWith(3, null));
   });
 
-  it('the pressed applies button on a machine tile is a confirm', async () => {
-    renderPage();
-    const tile = await screen.findByTestId('training-tile-11');
-    expect(within(tile).getByRole('button', { name: /^positive 11$/ }))
-      .toHaveAttribute('title', expect.stringMatching(/Confirm/));
-    const yours = screen.getByTestId('training-tile-12');
-    expect(within(yours).getByRole('button', { name: /^positive 12$/ }))
-      .toHaveAttribute('title', 'Applies');
-  });
-});
-
-describe('<NewDedupTrainingSet> the family is part of the tag', () => {
-  it('names heads in full in the picker', async () => {
+  it('without a cutoff, the positive tray is every positive and the reserve is closed', async () => {
+    vi.mocked(api.listTrainingSetHeads).mockResolvedValue({
+      data: HEADS.map((h) => ({ ...h, in_set: 0, reserve: 0, in_set_unreviewed: 0,
+        cutoff_available: false })) as never,
+    });
+    vi.mocked(api.listTrainingSet).mockResolvedValue({
+      data: { rows: ROWS.map((r) => ({ ...r, set_rank: null, in_set: null })) as never,
+        counts: { ...HEADS[0], cutoff_available: false } as never, limit: 60, offset: 0 },
+    });
     renderPage();
     await screen.findByTestId('training-tile-11');
-    expect(screen.getByRole('option', { name: /exterier - domovní vchod · 173/ })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /exterier - fasáda · 1131/ })).toBeInTheDocument();
+    expect(screen.getByTestId('cutoff-unavailable')).toHaveTextContent(/migration 474/);
+    expect(screen.getByRole('tab', { name: /Reserve/ })).toBeDisabled();
+    expect(screen.getByRole('tab', { name: /Training · positive/ })).toHaveTextContent('1131');
+    expect(screen.getByRole('tab', { name: /Training · positive/ })).not.toHaveTextContent('/');
+    expect(screen.queryByTestId('membership-11')).toBeNull();
+    expect(screen.queryByLabelText('target')).toBeNull();
+    expect(lastQuery()).toEqual({ tag_id: 3, state: 'positive', limit: 50, offset: 0 });
   });
 });
 
@@ -274,14 +263,19 @@ describe('<NewDedupTrainingSet> reading the page', () => {
     expect(img.closest('a')).toHaveAttribute('target', '_blank');
   });
 
-  it('labels the tile buttons in words, and explains the page on demand', async () => {
+  it('labels the tile buttons in words', async () => {
     renderPage();
     const tile = await screen.findByTestId('training-tile-11');
     expect(within(tile).getByRole('button', { name: /^positive 11$/ })).toHaveTextContent('applies');
     expect(within(tile).getByRole('button', { name: /^negative 11$/ })).toHaveTextContent('no');
     expect(within(tile).getByRole('button', { name: /^excluded 11$/ })).toHaveTextContent('left out');
-    expect(screen.getByText('How to use this page')).toBeInTheDocument();
-    expect(screen.getByText(/the first reserve photo steps in automatically/)).toBeInTheDocument();
+  });
+
+  it('names heads in full in the picker', async () => {
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByRole('option', { name: /exterier - domovní vchod · 173/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /exterier - fasáda · 1131/ })).toBeInTheDocument();
   });
 
   it('renders typographic characters, not their escape codes', async () => {
@@ -289,122 +283,35 @@ describe('<NewDedupTrainingSet> reading the page', () => {
     await screen.findByTestId('training-tile-11');
     expect(document.body.textContent).not.toMatch(/\\u20/);
   });
-});
 
-describe('<NewDedupTrainingSet> a corrected tile stays put', () => {
-  it('does not refetch the list after a correction, so the note field survives', async () => {
-    // The operator clicked "no" on a positive under the Applies filter; the
-    // list refetched, the row no longer matched, and the tile vanished with
-    // the note field on it. The list is patched in place instead.
-    const user = userEvent.setup();
-    renderPage(['/new-dedup/training-set?set=all']);
-    const tile = await screen.findByTestId('training-tile-11');
-    expect(api.listTrainingSet).toHaveBeenCalledTimes(1);
-    await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
-    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledTimes(1));
-    // Still here, now a human negative, note field present, list not refetched.
-    const after = screen.getByTestId('training-tile-11');
-    expect(after).toHaveAttribute('data-state', 'negative');
-    expect(within(after).getByText('yours')).toBeInTheDocument();
-    expect(screen.getByTestId('note-form-11')).toBeInTheDocument();
-    expect(api.listTrainingSet).toHaveBeenCalledTimes(1);
-    // And it says where the photo now lives.
-    expect(within(after).getByText(/now under/i)).toBeInTheDocument();
-  });
-});
-
-describe('<NewDedupTrainingSet> the filter groups', () => {
-  it('names the three groups and locks two of them under "To review"', async () => {
-    renderPage();
-    await screen.findByTestId('training-tile-11');
-    expect(screen.getByRole('group', { name: 'cutoff' })).toBeInTheDocument();
-    expect(screen.getByRole('group', { name: 'verdict' })).toBeInTheDocument();
-    expect(screen.getByRole('group', { name: 'decided by' })).toBeInTheDocument();
-    // "To review" fixes verdict=applies and decided-by=machine; the other two
-    // groups are visibly locked rather than silently ignored.
-    expect(screen.getByRole('button', { name: /Does not/ })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Yours' })).toBeDisabled();
-    expect(screen.getAllByText(/set by “To review”/i).length).toBeGreaterThan(0);
-  });
-
-  it('unlocks them under any other cutoff', async () => {
-    renderPage(['/new-dedup/training-set?set=all']);
-    await screen.findByTestId('training-tile-11');
-    expect(screen.getByRole('button', { name: /Does not/ })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Yours' })).toBeEnabled();
-  });
-});
-
-describe('<NewDedupTrainingSet> before the cutoff exists', () => {
-  it('says the cutoff is not active instead of showing 0/300 beside "in set" tiles', async () => {
-    vi.mocked(api.listTrainingSetHeads).mockResolvedValue({
-      data: HEADS.map((h) => ({ ...h, in_set: 0, reserve: 0, in_set_unreviewed: 0,
-        cutoff_available: false })) as never,
-    });
+  it('says so when a tray is empty, and why for the negative tray', async () => {
     vi.mocked(api.listTrainingSet).mockResolvedValue({
-      data: { rows: ROWS.map((r) => ({ ...r, set_rank: null, in_set: null })) as never,
-        counts: { ...HEADS[0], cutoff_available: false } as never, limit: 60, offset: 0 },
+      data: { rows: [], counts: HEADS[1] as never, limit: 60, offset: 0 },
     });
-    renderPage();
-    await screen.findByTestId('training-tile-11');
-    expect(screen.getByTestId('cutoff-unavailable')).toHaveTextContent(/migration 474/);
-    // Cutoff chips locked, no counts claimed, no membership badge on any tile,
-    // and the list is fetched with no membership filter at all.
-    expect(screen.getByRole('button', { name: /In set/ })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /In set/ })).not.toHaveTextContent('0/300');
-    expect(screen.queryByTestId('membership-11')).toBeNull();
-    expect(screen.queryByLabelText('target')).toBeNull();
-    const last = vi.mocked(api.listTrainingSet).mock.calls.at(-1)?.[0];
-    expect(last).not.toHaveProperty('membership');
+    renderPage(['/new-dedup/training-set?set=negative']);
+    expect(await screen.findByText(/Nothing in/)).toHaveTextContent('Training · negative');
+    expect(screen.getByText(/the machine’s do not train/)).toBeInTheDocument();
   });
 });
 
-describe('<NewDedupTrainingSet> confirming the rest of the page', () => {
-  it('confirms every untouched machine positive on the page in one write, and patches them to yours', async () => {
-    vi.mocked(api.bulkSetNewDedupTagAnnotation).mockResolvedValue({
-      data: { updated: 1, tag_id: 3, state: 'positive', excluded_reason: null, image_ids: [11] },
-    } as never);
+describe('<NewDedupTrainingSet> paging', () => {
+  it('pages forward, and stops when the page is short', async () => {
     renderPage();
     await screen.findByTestId('training-tile-11');
-    // Row 11 is the machine's; row 12 is already yours — only 11 is pending.
-    const btn = screen.getByTestId('confirm-page');
-    expect(btn).toHaveTextContent('Confirm the other 1 on this page');
-    const user = userEvent.setup();
-    await user.click(btn);
-    await waitFor(() => expect(api.bulkSetNewDedupTagAnnotation)
-      .toHaveBeenCalledWith(3, [11], 'positive', null));
-    // Patched in place, no refetch: the tile now reads "yours" and the button is gone.
-    expect(within(screen.getByTestId('training-tile-11')).getByText('yours')).toBeInTheDocument();
-    expect(screen.queryByTestId('confirm-page')).toBeNull();
-    expect(api.listTrainingSet).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: /next/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /previous/ })).toBeDisabled();
   });
 
-  it('leaves out a tile the operator changed this session', async () => {
-    vi.mocked(api.bulkSetNewDedupTagAnnotation).mockResolvedValue({
-      data: { updated: 0, tag_id: 3, state: 'positive', excluded_reason: null, image_ids: [] },
-    } as never);
-    const user = userEvent.setup();
-    renderPage(['/new-dedup/training-set?set=all']);
-    const tile = await screen.findByTestId('training-tile-11');
-    await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
-    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalled());
-    // 11 was changed (and is no longer a positive); nothing is left to confirm.
-    expect(screen.queryByTestId('confirm-page')).toBeNull();
-  });
-});
-
-
-describe('<NewDedupTrainingSet> page size', () => {
   it('offers 50 / 100 / 500 / 2000, sends the choice as the limit, and resets the offset', async () => {
     const user = userEvent.setup();
-    renderPage(['/new-dedup/training-set?set=all&offset=100']);
+    renderPage(['/new-dedup/training-set?offset=100']);
     await screen.findByTestId('training-tile-11');
     const group = screen.getByRole('group', { name: 'per page' });
     for (const n of ['50', '100', '500', '2000']) {
       expect(within(group).getByRole('button', { name: n })).toBeInTheDocument();
     }
     await user.click(within(group).getByRole('button', { name: '2000' }));
-    await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
+    await waitFor(() => expect(lastQuery()).toEqual(
       expect.objectContaining({ limit: 2000, offset: 0 }),
     ));
   });
@@ -417,93 +324,61 @@ describe('<NewDedupTrainingSet> page size', () => {
       },
     });
     const user = userEvent.setup();
-    renderPage(['/new-dedup/training-set?set=all&n=100']);
+    renderPage(['/new-dedup/training-set?n=100']);
     await screen.findByTestId('training-tile-1000');
     await user.click(screen.getByRole('button', { name: /next/ }));
-    await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
+    await waitFor(() => expect(lastQuery()).toEqual(
       expect.objectContaining({ limit: 100, offset: 100 }),
     ));
   });
 
-  it('confirming a big page writes in chunks of 200 and reports the total', async () => {
-    const rows = Array.from({ length: 450 }, (_, i) => ({ ...ROWS[0], image_id: 1000 + i }));
-    vi.mocked(api.listTrainingSet).mockResolvedValue({
-      data: { rows: rows as never, counts: HEADS[0] as never, limit: 500, offset: 0 },
-    });
-    vi.mocked(api.bulkSetNewDedupTagAnnotation).mockImplementation(async (_t, ids) => ({
-      data: { updated: ids.length, tag_id: 3, state: 'positive', excluded_reason: null, image_ids: ids },
-    }) as never);
+  it('states the tray total and jumps to the last page, where reserve arrivals land', async () => {
     const user = userEvent.setup();
-    renderPage(['/new-dedup/training-set?n=500']);
-    await screen.findByTestId('training-tile-1000');
-    await user.click(screen.getByTestId('confirm-page'));
-    await waitFor(() => expect(api.bulkSetNewDedupTagAnnotation).toHaveBeenCalledTimes(3));
-    const sizes = vi.mocked(api.bulkSetNewDedupTagAnnotation).mock.calls.map((c) => c[1].length);
-    expect(sizes).toEqual([200, 200, 50]);
-    await waitFor(() => expect(screen.queryByTestId('confirm-page')).toBeNull());
+    renderPage(['/new-dedup/training-set?set=reserve']);
+    await screen.findByTestId('training-tile-11');
+    expect(screen.getByTestId('page-range')).toHaveTextContent('1–2 of 831');
+    await user.click(screen.getByTestId('jump-last'));
+    // 831 rows at 50 per page: the last page starts at 800.
+    await waitFor(() => expect(lastQuery()).toEqual(
+      expect.objectContaining({ offset: 800, limit: 50 }),
+    ));
   });
 });
 
-describe('<NewDedupTrainingSet> the confirm button previews its reach', () => {
-  it('highlights exactly the tiles it will claim, on hover and on focus', async () => {
+describe('<NewDedupTrainingSet> the reason for a change', () => {
+  it('offers a note field only on a tile whose mark changed, and sends it with from/to', async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByTestId('training-tile-11');
-    // Nothing highlighted at rest.
-    expect(screen.getByTestId('training-tile-11')).not.toHaveAttribute('data-previewed');
-    await user.hover(screen.getByTestId('confirm-page'));
-    // 11 is the untouched machine positive; 12 is already yours.
-    expect(screen.getByTestId('training-tile-11')).toHaveAttribute('data-previewed', 'true');
-    expect(screen.getByTestId('training-tile-12')).not.toHaveAttribute('data-previewed');
-    expect(screen.getByTestId('training-tile-12').className).toContain('opacity-40');
-    await user.unhover(screen.getByTestId('confirm-page'));
-    expect(screen.getByTestId('training-tile-11')).not.toHaveAttribute('data-previewed');
-    // Keyboard users get the same preview.
-    screen.getByTestId('confirm-page').focus();
-    await waitFor(() => expect(screen.getByTestId('training-tile-11'))
-      .toHaveAttribute('data-previewed', 'true'));
-  });
-});
-
-describe('<NewDedupTrainingSet> finding what the reserve pulled in', () => {
-  it('shows each positive its set position, so the newest arrivals are identifiable', async () => {
-    renderPage(['/new-dedup/training-set?set=all']);
-    expect(await screen.findByTestId('membership-11')).toHaveTextContent('in set #19');
-    expect(screen.getByTestId('membership-12')).toHaveTextContent('in set #1');
-  });
-
-  it('states the exact total and jumps to the last page, where arrivals land', async () => {
-    const user = userEvent.setup();
-    renderPage(); // To review: total is in_set_unreviewed = 282
-    await screen.findByTestId('training-tile-11');
-    expect(screen.getByTestId('page-range')).toHaveTextContent('1–2 of 282');
-    await user.click(screen.getByTestId('jump-last'));
-    // 282 rows at 50 per page: the last page starts at 250.
-    await waitFor(() => expect(api.listTrainingSet).toHaveBeenLastCalledWith(
-      expect.objectContaining({ offset: 250, limit: 50 }),
+    const tile = await screen.findByTestId('training-tile-11');
+    expect(screen.queryByTestId('note-form-11')).toBeNull();
+    await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledTimes(1));
+    const form = await screen.findByTestId('note-form-11');
+    expect(screen.queryByTestId('note-form-12')).toBeNull();
+    await user.type(within(form).getByRole('textbox'), 'entrance door, facade is only the backdrop');
+    await user.click(within(form).getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenLastCalledWith(
+      3, 11, 'negative', null,
+      { text: 'entrance door, facade is only the backdrop', from_state: 'positive' },
     ));
   });
 
-  it('hides the total when the filter combination cannot be counted exactly', async () => {
+  it('will not save an empty note', async () => {
     const user = userEvent.setup();
-    renderPage(['/new-dedup/training-set?set=all&verdict=negative']);
-    await screen.findByTestId('training-tile-11');
-    expect(screen.getByTestId('page-range')).toHaveTextContent('of 9166');
-    // Narrowing by who decided makes it unknowable from the counts we hold.
-    await user.click(screen.getByRole('button', { name: 'Yours' }));
-    await waitFor(() => expect(screen.getByTestId('page-range')).not.toHaveTextContent(/ of /));
-    expect(screen.queryByTestId('jump-last')).toBeNull();
+    renderPage();
+    const tile = await screen.findByTestId('training-tile-11');
+    await user.click(within(tile).getByRole('button', { name: /^excluded 11$/ }));
+    const form = await screen.findByTestId('note-form-11');
+    expect(within(form).getByRole('button', { name: 'save' })).toBeDisabled();
+    await user.type(within(form).getByRole('textbox'), '   ');
+    expect(within(form).getByRole('button', { name: 'save' })).toBeDisabled();
   });
-});
 
-
-describe('<NewDedupTrainingSet> a note can be reread and changed', () => {
   it('shows a saved note on its photo, with edit and remove', async () => {
-    renderPage(['/new-dedup/training-set?set=all']);
+    renderPage();
     const tile = await screen.findByTestId('training-tile-12');
     expect(within(tile).getByTestId('note-saved-12'))
       .toHaveTextContent('front shot, building is the subject');
-    // A photo without a note offers to add one, without changing any mark.
     expect(screen.getByTestId('note-add-11')).toBeInTheDocument();
     expect(screen.queryByTestId('note-add-12')).toBeNull();
   });
@@ -513,7 +388,7 @@ describe('<NewDedupTrainingSet> a note can be reread and changed', () => {
       data: { id: 36, image_id: 12, note: 'must be a frontal shot' } as never,
     });
     const user = userEvent.setup();
-    renderPage(['/new-dedup/training-set?set=all']);
+    renderPage();
     await screen.findByTestId('training-tile-12');
     await user.click(screen.getByRole('button', { name: 'edit note' }));
     const input = screen.getByLabelText('why 12');
@@ -523,7 +398,6 @@ describe('<NewDedupTrainingSet> a note can be reread and changed', () => {
     await user.click(within(screen.getByTestId('note-form-12')).getByRole('button', { name: 'save' }));
     await waitFor(() => expect(api.editTagLabelNote)
       .toHaveBeenCalledWith(36, 'must be a frontal shot'));
-    // Patched in place — the mark is untouched and the list is not refetched.
     await waitFor(() => expect(screen.getByTestId('note-saved-12'))
       .toHaveTextContent('must be a frontal shot'));
     expect(api.setNewDedupTagAnnotation).not.toHaveBeenCalled();
@@ -534,7 +408,7 @@ describe('<NewDedupTrainingSet> a note can be reread and changed', () => {
       data: { id: 36, image_id: 12, tag_id: 3 },
     });
     const user = userEvent.setup();
-    renderPage(['/new-dedup/training-set?set=all']);
+    renderPage();
     await screen.findByTestId('training-tile-12');
     await user.click(screen.getByRole('button', { name: 'remove' }));
     await waitFor(() => expect(api.deleteTagLabelNote).toHaveBeenCalledWith(36));
@@ -544,7 +418,7 @@ describe('<NewDedupTrainingSet> a note can be reread and changed', () => {
 
   it('a note added without a mark change re-states the current mark, from null', async () => {
     const user = userEvent.setup();
-    renderPage(['/new-dedup/training-set?set=all']);
+    renderPage();
     await screen.findByTestId('training-tile-11');
     await user.click(screen.getByTestId('note-add-11'));
     await user.type(screen.getByLabelText('why 11'), 'clear frontal facade');
@@ -552,26 +426,5 @@ describe('<NewDedupTrainingSet> a note can be reread and changed', () => {
     await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(
       3, 11, 'positive', null, { text: 'clear frontal facade', from_state: null },
     ));
-  });
-});
-
-describe('<NewDedupTrainingSet> an impossible filter combination', () => {
-  it('explains that only positives are ranked, instead of an empty shrug', async () => {
-    vi.mocked(api.listTrainingSet).mockResolvedValue({
-      data: { rows: [], counts: HEADS[0] as never, limit: 50, offset: 0 },
-    });
-    renderPage(['/new-dedup/training-set?set=set&verdict=negative']);
-    expect(await screen.findByTestId('empty-contradiction'))
-      .toHaveTextContent(/ranks positives only/);
-    expect(screen.getByText(/Switch group 1 to/)).toBeInTheDocument();
-  });
-
-  it('keeps the plain message when the combination is merely empty', async () => {
-    vi.mocked(api.listTrainingSet).mockResolvedValue({
-      data: { rows: [], counts: HEADS[1] as never, limit: 50, offset: 0 },
-    });
-    renderPage(['/new-dedup/training-set?set=all&verdict=negative']);
-    expect(await screen.findByText(/Nothing labeled for this head/)).toBeInTheDocument();
-    expect(screen.queryByTestId('empty-contradiction')).toBeNull();
   });
 });

@@ -414,7 +414,8 @@ def training_set_counts(
     looks well covered by machine work alone is visibly different from one the
     operator has personally confirmed."""
     empty = {"positive": 0, "negative": 0, "excluded": 0,
-             "machine_positive": 0, "human_positive": 0}
+             "machine_positive": 0, "human_positive": 0,
+             "machine_negative": 0, "human_negative": 0}
     out = {int(t): dict(empty) for t in tag_ids}
     with conn.cursor() as cur:
         cur.execute(_TRAINING_COUNTS_SQL,
@@ -422,8 +423,11 @@ def training_set_counts(
         for tag_id, state, is_machine, count in cur.fetchall():
             row = out.setdefault(int(tag_id), dict(empty))
             row[str(state)] = row.get(str(state), 0) + int(count)
-            if state == "positive":
-                row["machine_positive" if is_machine else "human_positive"] += int(count)
+            # A head trains on its human negatives ONLY (tag_holdout.training_label_rows),
+            # so the split matters for negatives too: it is the size of the set.
+            if state in ("positive", "negative"):
+                who = "machine" if is_machine else "human"
+                row[f"{who}_{state}"] += int(count)
     return out
 
 

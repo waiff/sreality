@@ -174,6 +174,22 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-07 — **`/new-dedup/training-set` reduced to four trays (operator ruling: "the
+  filters are too difficult").** The three composable filter groups (cutoff × verdict ×
+  decided-by), the "To review" preset and the per-page "Confirm the other N" bulk-confirm are
+  gone. What remains is one tray strip, each tray ONE server query that is exactly what the
+  trainer meets: **Training · positive** = `membership=set` (the ranked positives up to the
+  target, the operator's first, then the machine's oldest-first — `training_set_positive_ids`);
+  **Training · negative** = `state=negative&source=human` (the human/human_confirmed negatives,
+  the only door `tag_holdout.training_label_rows` reads negatives through — the machine's
+  negatives are in NO tray, and the page states their count rather than hiding it;
+  `training_set_counts` now splits negatives by who decided, `human_negative` being the size of
+  that set); **Reserve** = `membership=reserve`; **Left out** = `state=excluded`. The tile keeps
+  its three verbs, who-decided, set position, old-wording flag and the note; the target editor
+  stays because it IS the set/reserve boundary. Old links carrying `set=review|all` land on the
+  positive tray. Finalisation is now the operator saying the trays are right — that, not a
+  confirm count, is the gate to the first head training run.
+
 - 2026-09-07 — **Head 13, `podklad - property list`, built ad hoc in one session (~$1.80);
   the add-a-head runbook above is what it verified.** No exam (operator's call: the taxonomy
   suffices for the model; the operator's review is the QC — so this head has NO measured
