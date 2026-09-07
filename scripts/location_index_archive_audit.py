@@ -146,11 +146,11 @@ INDEX_ARCHIVERS: dict[str, CallSite] = {
     "sreality": CallSite(
         module="main.py",
         state=STATE_GATED,
-        call_site="scraper/main.py:1380 (_index_page_archiver.archive)",
-        gate="main.py:1377 `if key in fresh:` returning on the next line — the set is "
+        call_site="scraper/main.py:1385 (_index_page_archiver.archive)",
+        gate="main.py:1382 `if key in fresh:` returning on the next line — the set is "
              "db.fresh_index_page_keys(hours=INDEX_ARCHIVE_REFRESH_HOURS), read before the upsert",
         intentional_skips=(
-            "main.py:930 `def probe_category(` fetches index pages via fetch_index_page and "
+            "main.py:935 `def probe_category(` fetches index pages via fetch_index_page and "
             "never attaches the on_page archiver — discovery only, by design",
         ),
     ),
