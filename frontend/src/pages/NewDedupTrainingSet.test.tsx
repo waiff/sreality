@@ -14,12 +14,11 @@ vi.mock('@/lib/api');
 vi.mock('@/lib/imageUrl', () => ({ imageSrc: () => 'blob:photo' }));
 
 const HEADS = [
-  { id: 42, label: 'podklad - katastrální mapa', positive: 300, negative: 10009, excluded: 2, reserve: 536,
-    sample: 0, sample_reviewed: 0 },
-  { id: 2, label: 'exterier - domovní vchod', positive: 173, negative: 10153, excluded: 218, reserve: 0,
-    sample: 0, sample_reviewed: 0 },
+  { id: 42, label: 'podklad - katastrální mapa', positive: 300, positive_reserve: 536,
+    negative: 1000, negative_reserve: 9009, excluded: 2 },
+  { id: 2, label: 'exterier - domovní vchod', positive: 173, positive_reserve: 0,
+    negative: 1000, negative_reserve: 9153, excluded: 218 },
 ];
-const SAMPLED_HEADS = [{ ...HEADS[0], sample: 1000, sample_reviewed: 40 }, HEADS[1]];
 
 const ROWS = [
   { image_id: 11, storage_path: 'img/1/11.jpg', state: 'positive', source: 'machine',
@@ -65,38 +64,41 @@ describe('<NewDedupTrainingSet> four trays over stored membership', () => {
       { tag_id: 42, state: 'positive', in_training: true, limit: 50, offset: 0 },
     ));
     expect(screen.getByTestId('tray-count-positive')).toHaveTextContent('300');
-    expect(screen.getByTestId('tray-count-reserve')).toHaveTextContent('536');
+    expect(screen.getByTestId('tray-count-positive_reserve')).toHaveTextContent('536');
   });
 
   it('the reserve tray is the positives the operator has NOT admitted', async () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByTestId('training-tile-11');
-    await user.click(screen.getByRole('button', { name: /Reserve/ }));
+    await user.click(screen.getByRole('button', { name: /Positive reserve/ }));
     await waitFor(() => expect(lastQuery()).toEqual(
       { tag_id: 42, state: 'positive', in_training: false, limit: 50, offset: 0 },
     ));
   });
 
-  /* Filtering these two trays by in_training was a real bug: the backfill never
-   * admitted a left-out, so "Left out" showed 4 rows under a count of 1,064.
-   * Membership is a question about a POSITIVE only. */
-  it('negative and left-out trays read their own state, unfiltered by membership', async () => {
+  /* 484 filtered every non-reserve tray by in_training, which hid 1,060
+   * left-outs the backfill never admitted. 486 keeps the fix for left-outs —
+   * they train nothing whichever way the flag points — and gives negatives a
+   * real membership, so they are filtered like positives are. */
+  it('reads left out by state alone, since membership means nothing there', async () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByTestId('training-tile-11');
-    await user.click(screen.getByRole('button', { name: /Training · negative/ }));
-    await waitFor(() => expect(lastQuery()).toEqual({ tag_id: 42, state: 'negative', limit: 50, offset: 0 }));
     await user.click(screen.getByRole('button', { name: /Left out/ }));
-    await waitFor(() => expect(lastQuery()).toEqual({ tag_id: 42, state: 'excluded', limit: 50, offset: 0 }));
+    await waitFor(() => expect(lastQuery()).toEqual(
+      { tag_id: 42, state: 'excluded', limit: 50, offset: 0 },
+    ));
   });
 
-  it('offers no membership move on the negative tray — a negative comes out by re-marking', async () => {
+  it('offers the membership move on both signs, and never on left out', async () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByTestId('training-tile-11');
     expect(screen.getByTestId('move-11')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: /Training · negative/ }));
+    await user.click(screen.getByRole('button', { name: /Training negative/ }));
+    await waitFor(() => expect(screen.getByTestId('move-11')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: /Left out/ }));
     await waitFor(() => expect(screen.queryByTestId('move-11')).toBeNull());
     expect(screen.queryByTestId('move-page')).toBeNull();
   });
@@ -113,72 +115,66 @@ describe('<NewDedupTrainingSet> four trays over stored membership', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
-  /* Ten thousand negatives is not a reviewable number. The draw is random, the
-   * lane keeps the order the negatives already had, and — the property the
-   * whole thing rests on — the drawn list does not move while it is reviewed. */
-  describe('the review sample', () => {
-    it('offers a draw when there is none, and no lane to open', async () => {
+  /* Migration 486: membership is a fact about a LABEL, not about a positive.
+   * Each sign has a training set and a reserve; the drawn thousand IS the
+   * training negative set, so there is no sample and no separate table. */
+  describe('the draw', () => {
+    it('names four trays by sign and membership, plus left out', async () => {
       renderPage();
       await screen.findByTestId('training-tile-11');
-      expect(screen.getByTestId('draw-sample')).toBeInTheDocument();
+      for (const name of ['Training positive', 'Positive reserve', 'Training negative',
+                          'Negative reserve', 'Left out']) {
+        expect(screen.getByRole('button', { name: new RegExp(name) })).toBeInTheDocument();
+      }
       expect(screen.queryByRole('button', { name: /Review sample/ })).toBeNull();
     });
 
-    it('draws at random from the negatives and opens the lane', async () => {
+    it('reads each tray as one state plus membership', async () => {
       const user = userEvent.setup();
-      vi.mocked(api.drawReviewSample).mockResolvedValue({
+      renderPage();
+      await screen.findByTestId('training-tile-11');
+      await user.click(screen.getByRole('button', { name: /Negative reserve/ }));
+      await waitFor(() => expect(lastQuery()).toEqual(
+        { tag_id: 42, state: 'negative', in_training: false, limit: 50, offset: 0 },
+      ));
+      await user.click(screen.getByRole('button', { name: /Training negative/ }));
+      await waitFor(() => expect(lastQuery()).toEqual(
+        { tag_id: 42, state: 'negative', in_training: true, limit: 50, offset: 0 },
+      ));
+    });
+
+    it('draws negatives into training and confirms first, since it replaces a set', async () => {
+      const user = userEvent.setup();
+      const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+      vi.mocked(api.drawTrainingSet).mockResolvedValue({
         data: { tag_id: 42, state: 'negative', drawn: 1000 },
       });
       renderPage();
       await screen.findByTestId('training-tile-11');
-      await user.click(screen.getByTestId('draw-sample'));
-      await waitFor(() => expect(api.drawReviewSample).toHaveBeenCalledWith(
-        42, { state: 'negative', size: 1000, replace: false },
-      ));
-      // The lane asks for the drawn rows and NO state — a re-marked photo must
-      // keep its place instead of dropping out of the list mid-review.
-      await waitFor(() => expect(lastQuery()).toEqual(
-        { tag_id: 42, sampled: true, limit: 50, offset: 0 },
-      ));
-    });
-
-    it('shows progress on the lane and never shrinks the drawn list', async () => {
-      const user = userEvent.setup();
-      /* The server counts a decided photo as reviewed and leaves the draw
-       * alone; the mock does the same, so the refetch after the write cannot
-       * paper over a wrong optimistic patch. */
-      let reviewed = 40;
-      vi.mocked(api.listTrainingSetHeads).mockImplementation(async () => ({
-        data: [{ ...HEADS[0], sample: 1000, sample_reviewed: reviewed }, HEADS[1]] as never,
-      }));
-      vi.mocked(api.setNewDedupTagAnnotation).mockImplementation(async () => {
-        reviewed += 1;
-        return { data: {} } as never;
-      });
-      renderPage(['/new-dedup/training-set?tag=42&set=sample']);
-      await screen.findByTestId('training-tile-11');
-      /* The chip counts what is IN the tray, exactly like every other chip —
-       * showing `decided/drawn` here made 35/1000 read as "35 drawn". */
-      expect(screen.getByTestId('tray-count-sample')).toHaveTextContent('1000');
-      expect(screen.getByTestId('draw-controls')).toHaveTextContent('40');
-
-      await user.click(screen.getByRole('button', { name: 'positive 11' }));
-      await waitFor(() => expect(screen.getByTestId('draw-controls')).toHaveTextContent('41'));
-      // 1000 is a list, not a tray: deciding one does not remove it.
-      expect(screen.getByTestId('tray-count-sample')).toHaveTextContent('1000');
-      expect(screen.getByTestId('training-tile-11')).toBeInTheDocument();
-    });
-
-    it('asks before a redraw, because it discards a half-reviewed list', async () => {
-      const user = userEvent.setup();
-      vi.mocked(api.listTrainingSetHeads).mockResolvedValue({ data: SAMPLED_HEADS as never });
-      const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-      renderPage(['/new-dedup/training-set?tag=42&set=sample']);
-      await screen.findByTestId('draw-again');
-      await user.click(screen.getByTestId('draw-again'));
+      await user.click(screen.getByTestId('draw-negatives'));
       expect(confirm).toHaveBeenCalled();
-      expect(api.drawReviewSample).not.toHaveBeenCalled();
+      await waitFor(() => expect(api.drawTrainingSet).toHaveBeenCalledWith(
+        42, { state: 'negative', size: 1000 },
+      ));
       confirm.mockRestore();
+    });
+
+    it('shows a tray count and nothing about who decided it', async () => {
+      renderPage();
+      await screen.findByTestId('training-tile-11');
+      expect(screen.getByTestId('tray-count-negative')).toHaveTextContent('1000');
+      expect(screen.getByTestId('tray-count-negative_reserve')).toHaveTextContent('9009');
+      const tile = screen.getByTestId('training-tile-11');
+      for (const word of ['machine', 'yours']) {
+        expect(within(tile).queryByText(word)).toBeNull();
+      }
+    });
+
+    it('still answers a link written before the rename', async () => {
+      renderPage(['/new-dedup/training-set?tag=42&set=reserve']);
+      await waitFor(() => expect(lastQuery()).toEqual(
+        { tag_id: 42, state: 'positive', in_training: false, limit: 50, offset: 0 },
+      ));
     });
   });
 
@@ -188,14 +184,14 @@ describe('<NewDedupTrainingSet> four trays over stored membership', () => {
   describe('deep link to one photo', () => {
     it('lands on the tray and page the server says, and rings the tile', async () => {
       vi.mocked(api.locateTrainingImage).mockResolvedValue({
-        data: { tag_id: 42, image_id: 12, tray: 'reserve', state: 'positive',
+        data: { tag_id: 42, image_id: 12, tray: 'positive_reserve', state: 'positive',
                 in_training: false, rank: 137 },
       });
       renderPage(['/new-dedup/training-set?tag=42&image=12']);
       await waitFor(() => expect(lastQuery()).toEqual(
         { tag_id: 42, state: 'positive', in_training: false, limit: 50, offset: 100 },
       ));
-      expect(await screen.findByTestId('deep-link-note')).toHaveTextContent('Reserve');
+      expect(await screen.findByTestId('deep-link-note')).toHaveTextContent('Positive reserve');
       expect(screen.getByTestId('training-tile-12')).toHaveAttribute('data-linked', 'true');
       expect(screen.getByTestId('training-tile-11')).not.toHaveAttribute('data-linked');
     });
@@ -239,7 +235,7 @@ describe('<NewDedupTrainingSet> four trays over stored membership', () => {
       expect(screen.queryByRole('button', { name })).toBeNull();
     }
     expect(screen.getByTestId('head-summary')).toHaveTextContent(
-      'Trains on 300 positives and 10009 negatives · 536 waiting in reserve · 2 left out');
+      'Trains on 300 positives and 1000 negatives · 536 + 9009 in reserve · 2 left out');
   });
 
   it('states that the set changes only when the operator changes it', async () => {
@@ -256,7 +252,7 @@ describe('<NewDedupTrainingSet> moving between reserve and the training set', ()
     });
     // The reconciling refetch returns the server's truth, which in production
     // agrees with the optimistic patch — so the mock moves too.
-    const after = { ...HEADS[0], positive: 301, reserve: 535 };
+    const after = { ...HEADS[0], positive: 301, positive_reserve: 535 };
     vi.mocked(api.listTrainingSetHeads)
       .mockResolvedValueOnce({ data: HEADS as never })
       .mockResolvedValue({ data: [after, HEADS[1]] as never });
@@ -267,11 +263,11 @@ describe('<NewDedupTrainingSet> moving between reserve and the training set', ()
     await user.click(within(tile).getByTestId('move-301'));
     await waitFor(() => expect(api.setTrainingMembership).toHaveBeenCalledWith(42, [301], true));
     await waitFor(() => expect(screen.getByTestId('tray-count-positive')).toHaveTextContent('301'));
-    expect(screen.getByTestId('tray-count-reserve')).toHaveTextContent('535');
+    expect(screen.getByTestId('tray-count-positive_reserve')).toHaveTextContent('535');
   });
 
   it('returns an admitted photo to the reserve', async () => {
-    const after = { ...HEADS[0], positive: 299, reserve: 537 };
+    const after = { ...HEADS[0], positive: 299, positive_reserve: 537 };
     vi.mocked(api.listTrainingSetHeads)
       .mockResolvedValueOnce({ data: HEADS as never })
       .mockResolvedValue({ data: [after, HEADS[1]] as never });
@@ -282,7 +278,7 @@ describe('<NewDedupTrainingSet> moving between reserve and the training set', ()
     await user.click(within(tile).getByTestId('move-11'));
     await waitFor(() => expect(api.setTrainingMembership).toHaveBeenCalledWith(42, [11], false));
     await waitFor(() => expect(screen.getByTestId('tray-count-positive')).toHaveTextContent('299'));
-    expect(screen.getByTestId('tray-count-reserve')).toHaveTextContent('537');
+    expect(screen.getByTestId('tray-count-positive_reserve')).toHaveTextContent('537');
   });
 
   it('moves a whole page, chunked, and previews exactly what it will take', async () => {
@@ -307,8 +303,8 @@ describe('<NewDedupTrainingSet> moving between reserve and the training set', ()
     const user = userEvent.setup();
     renderPage();
     await screen.findByTestId('training-tile-11');
-    await user.click(screen.getByRole('button', { name: /Reserve/ }));
-    await user.click(screen.getByRole('button', { name: /Training · negative/ }));
+    await user.click(screen.getByRole('button', { name: /Positive reserve/ }));
+    await user.click(screen.getByRole('button', { name: /Training negative/ }));
     expect(api.setTrainingMembership).not.toHaveBeenCalled();
   });
 });
@@ -323,9 +319,8 @@ describe('<NewDedupTrainingSet> changing a mark', () => {
     await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
     // Still pending — the numbers have already moved.
     expect(screen.getByTestId('tray-count-positive')).toHaveTextContent('299');
-    expect(screen.getByTestId('tray-count-negative')).toHaveTextContent('10010');
+    expect(screen.getByTestId('tray-count-negative')).toHaveTextContent('1001');
     expect(tile).toHaveAttribute('data-state', 'negative');
-    expect(within(tile).getByText('yours')).toBeInTheDocument();
     resolve({ data: {} });
     await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledWith(42, 11, 'negative', null));
   });
@@ -345,16 +340,19 @@ describe('<NewDedupTrainingSet> changing a mark', () => {
     const tile = await screen.findByTestId('training-tile-11');
     await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
     await waitFor(() => expect(tile).toHaveAttribute('data-state', 'positive'));
-    expect(within(tile).getByText('machine')).toBeInTheDocument();
   });
 });
 
 describe('<NewDedupTrainingSet> reading the page', () => {
-  it('shows the whole photo and names who decided', async () => {
+  /* No "machine / yours" on a tile: the operator's ruling is that a label in a
+   * tray is a label, and a set of a thousand is a thousand. The human-wins rail
+   * still holds in the database; it is not a thing to read on every photo. */
+  it('shows the whole photo and says nothing about who decided it', async () => {
     renderPage();
     const tile = await screen.findByTestId('training-tile-11');
     expect(within(tile).getByRole('img').className).toContain('object-contain');
-    expect(within(tile).getByText('machine')).toBeInTheDocument();
+    expect(within(tile).queryByText('machine')).toBeNull();
+    expect(within(tile).queryByText('yours')).toBeNull();
     expect(within(screen.getByTestId('training-tile-12')).getByText(/old wording/)).toBeInTheDocument();
   });
 

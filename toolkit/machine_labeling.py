@@ -406,9 +406,6 @@ _TRAINING_PAGE_SQL = f"""
       AND l.source = ANY(%(sources)s::text[])
       AND (%(state)s::text IS NULL OR l.state = %(state)s::text)
       AND (%(in_training)s::boolean IS NULL OR l.in_training = %(in_training)s::boolean)
-      AND (NOT %(sampled)s::boolean OR EXISTS (
-            SELECT 1 FROM tag_review_samples rs
-            WHERE rs.tag_id = l.tag_id AND rs.image_id = l.image_id))
       {exclusion_for("l")}
     ORDER BY l.updated_at DESC, l.image_id DESC
     LIMIT %(limit)s OFFSET %(offset)s
@@ -418,9 +415,12 @@ _TRAINING_PAGE_SQL = f"""
 def training_set_counts(
     conn: psycopg.Connection, *, tag_ids: list[int],
 ) -> dict[int, dict[str, int]]:
-    """Per head, the size of each tray. Membership is STORED (migration 484), so
-    a count is a count of rows and nothing is derived from a rank."""
-    empty = {"positive": 0, "negative": 0, "excluded": 0, "reserve": 0}
+    """Per head, the size of each tray. Membership is STORED (484) and means the
+    same for both signs (486): admitted labels train, the rest wait in that
+    sign's reserve. A count is a count of rows; nothing is derived from a rank,
+    and nothing is split by who decided it."""
+    empty = {"positive": 0, "positive_reserve": 0,
+             "negative": 0, "negative_reserve": 0, "excluded": 0}
     out = {int(t): dict(empty) for t in tag_ids}
     with conn.cursor() as cur:
         cur.execute(_TRAINING_COUNTS_SQL,
@@ -429,98 +429,65 @@ def training_set_counts(
             row = out.setdefault(int(tag_id), dict(empty))
             if state == "excluded":
                 row["excluded"] += int(count)
-            elif in_training:
-                row[str(state)] += int(count)
-            elif state == "positive":
-                # A positive the operator has not admitted: the reserve. A
-                # non-admitted NEGATIVE is not a tray — the backfill admits them
-                # all and nothing un-admits one — so it is deliberately uncounted.
-                row["reserve"] += int(count)
+            else:
+                # positive / positive_reserve / negative / negative_reserve —
+                # one rule, both signs.
+                row[f"{state}" if in_training else f"{state}_reserve"] += int(count)
     return out
 
 
-# THE REVIEW SAMPLE (migration 485). Verifying ten thousand negatives per head
-# is not a job anyone finishes, so the operator draws a thousand of them and
-# reviews that. Two rules the draw has to hold:
+# DRAWING THE TRAINING NEGATIVES (486). Ten thousand negatives per head is not
+# a reviewable number, so the operator trains on a random thousand of them and
+# the rest wait in the negative reserve — the same shape positives have always
+# had. There is no separate "sample": the drawn thousand IS the admitted set,
+# which is why migration 485's table stopped being needed the moment this
+# landed.
 #
-#   RANDOM — `ORDER BY random()` over the tray, so every negative has the same
-#   chance. Nothing is ranked, weighted or clustered.
-#
-#   THEN THE ORDER THAT WAS ALREADY THERE — the sample is stored and the page
-#   renders it under its own `updated_at DESC, image_id DESC`. The negatives
-#   arrived in batches, so like images sit together and reviewing them in that
-#   grouping is far easier than a reshuffled thousand. No new sort exists: this
-#   is a filter over the existing one.
-#
-# The draw is written down because a computed sample moves under the reviewer —
-# re-marking one of the thousand takes it out of `negative` and promotes number
-# 1001 in its place. Same lesson as the cutoff in 484.
-SAMPLE_MAX = 5000
+# RANDOM, AND NO SORT OF ITS OWN. `ORDER BY random()` picks; the page then
+# renders under its existing `updated_at DESC, image_id DESC`, so the reviewer
+# walks the grouping the negatives already had and each photo sits further down
+# that list than the last. The draw is a filter over an order, never a new one.
+DRAW_MAX = 5000
+
+_DRAW_CLEAR_SQL = """
+    UPDATE image_tag_labels SET in_training = false
+    WHERE tag_id = %(tag_id)s::bigint AND state = %(state)s::text AND in_training
+"""
 
 _DRAW_SAMPLE_SQL = f"""
-    INSERT INTO tag_review_samples (tag_id, image_id, drawn_from_state)
-    SELECT l.tag_id, l.image_id, %(state)s::text
-    FROM image_tag_labels l
-    JOIN images i ON i.id = l.image_id AND i.storage_path IS NOT NULL
-    WHERE l.tag_id = %(tag_id)s::bigint
-      AND l.state = %(state)s::text
-      AND l.source = ANY(%(sources)s::text[])
-      {exclusion_for("l")}
-    ORDER BY random()
-    LIMIT %(size)s
-    ON CONFLICT (tag_id, image_id) DO NOTHING
-"""
-
-# Progress is "how many of the drawn thousand carry the operator's own mark now"
-# — pressing the already-pressed button confirms a machine label as theirs, so
-# confirming and correcting both count as reviewed. Nothing else could: a
-# confirmed negative is still a negative, so state alone cannot see the work.
-_SAMPLE_COUNTS_SQL = f"""
-    SELECT rs.tag_id, count(*)::bigint,
-           count(*) FILTER (WHERE l.source <> 'machine')::bigint
-    FROM tag_review_samples rs
-    LEFT JOIN image_tag_labels l
-      ON l.tag_id = rs.tag_id AND l.image_id = rs.image_id
-    WHERE rs.tag_id = ANY(%(tag_ids)s::bigint[])
-      {exclusion_for("rs")}
-    GROUP BY rs.tag_id
+    UPDATE image_tag_labels l SET in_training = true
+    FROM (
+      SELECT c.image_id
+      FROM image_tag_labels c
+      JOIN images i ON i.id = c.image_id AND i.storage_path IS NOT NULL
+      WHERE c.tag_id = %(tag_id)s::bigint
+        AND c.state = %(state)s::text
+        AND c.source = ANY(%(sources)s::text[])
+        {exclusion_for("c")}
+      ORDER BY random()
+      LIMIT %(size)s
+    ) pick
+    WHERE l.tag_id = %(tag_id)s::bigint AND l.image_id = pick.image_id
 """
 
 
-def draw_review_sample(
+def draw_training_set(
     conn: psycopg.Connection, *, tag_id: int, state: str = "negative",
-    size: int = 1000, replace: bool = False,
+    size: int = 1000,
 ) -> dict[str, Any]:
-    """Draw `size` images at random from one head's tray and write them down.
-    `replace` clears the head's existing sample first — a redraw is deliberate,
-    because it throws away the list someone may be halfway through."""
+    """Admit `size` labels of one sign, chosen at random, and return the rest of
+    that sign to the reserve. One transaction, because a head with its old draw
+    cleared and no new one is a head that trains on nothing."""
     if state not in ("positive", "negative", "excluded"):
         raise ValueError(f"state must be positive/negative/excluded, got {state!r}")
-    size = max(1, min(int(size), SAMPLE_MAX))
+    size = max(1, min(int(size), DRAW_MAX))
     with conn.transaction(), conn.cursor() as cur:
-        if replace:
-            cur.execute("DELETE FROM tag_review_samples WHERE tag_id = %(tag_id)s::bigint",
-                        {"tag_id": int(tag_id)})
+        cur.execute(_DRAW_CLEAR_SQL, {"tag_id": int(tag_id), "state": state})
         cur.execute(_DRAW_SAMPLE_SQL, {
             "tag_id": int(tag_id), "state": state, "size": size,
             "sources": list(TRAINING_SOURCES)})
         drawn = int(cur.rowcount or 0)
     return {"tag_id": int(tag_id), "state": state, "drawn": drawn}
-
-
-def review_sample_counts(
-    conn: psycopg.Connection, *, tag_ids: list[int],
-) -> dict[int, dict[str, int]]:
-    """Per head: how many are in the drawn sample, and how many of those the
-    operator has now decided themself."""
-    out = {int(t): {"sample": 0, "sample_reviewed": 0} for t in tag_ids}
-    if not tag_ids:
-        return out
-    with conn.cursor() as cur:
-        cur.execute(_SAMPLE_COUNTS_SQL, {"tag_ids": list(tag_ids)})
-        for tag_id, total, reviewed in cur.fetchall():
-            out[int(tag_id)] = {"sample": int(total), "sample_reviewed": int(reviewed)}
-    return out
 
 
 # WHERE ONE IMAGE SITS. A link from outside — a conflict list, a report, a note
@@ -569,20 +536,17 @@ def locate_in_training_set(
 
 def training_set_page(
     conn: psycopg.Connection, *, tag_id: int, state: str | None = None,
-    in_training: bool | None = None, sampled: bool = False,
-    limit: int = 60, offset: int = 0,
+    in_training: bool | None = None, limit: int = 60, offset: int = 0,
 ) -> list[dict[str, Any]]:
     """One page of a head's material, newest decision first. `in_training`
-    picks the tray: True is what the head trains on, False is the reserve.
-    `sampled` narrows to the drawn review sample (migration 485) and is a FILTER
-    over this same order — the review lane passes it with no state, so a photo
-    just re-marked keeps its place instead of dropping out of the page."""
+    picks the tray: True is what the head trains on, False is that sign's
+    reserve — the same rule for positives and negatives since 486."""
     if state is not None and state not in ("positive", "negative", "excluded"):
         raise ValueError(f"state must be positive/negative/excluded, got {state!r}")
     with conn.cursor() as cur:
         cur.execute(_TRAINING_PAGE_SQL, {
             "tag_id": int(tag_id), "sources": list(TRAINING_SOURCES),
-            "state": state, "in_training": in_training, "sampled": bool(sampled),
+            "state": state, "in_training": in_training,
             "limit": max(1, min(int(limit), PAGE_MAX)), "offset": max(0, int(offset)),
         })
         return [

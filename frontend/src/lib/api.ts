@@ -1201,13 +1201,10 @@ export interface TrainingSetHead {
   /* The trays. `positive`/`negative` are what the head TRAINS on (admitted);
    * `reserve` is positives the operator has not admitted (migration 484). */
   positive: number;
+  positive_reserve: number;
   negative: number;
+  negative_reserve: number;
   excluded: number;
-  reserve: number;
-  /* The drawn review sample (migration 485): how many were drawn, and how many
-   * of those now carry the operator's own mark. 0/0 when none was drawn. */
-  sample: number;
-  sample_reviewed: number;
 }
 
 export interface TrainingSetRow {
@@ -1248,12 +1245,12 @@ export const listTrainingSetHeads = (): Promise<{ data: TrainingSetHead[] }> =>
  * and the page can land on it. The server resolves it against the SAME order and
  * the same storage_path join the page uses, because a rank computed any other
  * way pages to a different photo. */
-/* Draw a review sample: N images at random from one head's tray, written down
- * so the set stays put while it is being worked through. */
-export const drawReviewSample = (
-  tagId: number, opts: { state?: TagState; size?: number; replace?: boolean } = {},
+/* Admit N labels of one sign at random and return the rest of that sign to its
+ * reserve. The drawn set IS what the head trains on (migration 486). */
+export const drawTrainingSet = (
+  tagId: number, opts: { state?: TagState; size?: number } = {},
 ): Promise<{ data: { tag_id: number; state: string; drawn: number } }> =>
-  request(`/new-dedup/labeling/tags/${tagId}/review-sample`, {
+  request(`/new-dedup/labeling/tags/${tagId}/draw`, {
     method: 'POST', json: opts, jwt: true,
   });
 
@@ -1261,7 +1258,7 @@ export const locateTrainingImage = (
   tagId: number, imageId: number,
 ): Promise<{ data: {
   tag_id: number; image_id: number;
-  tray: 'positive' | 'negative' | 'excluded' | 'reserve';
+  tray: 'positive' | 'positive_reserve' | 'negative' | 'negative_reserve' | 'excluded';
   state: 'positive' | 'negative' | 'excluded';
   in_training: boolean; rank: number;
 } }> =>
@@ -1273,9 +1270,6 @@ export const listTrainingSet = (params: {
   tag_id: number;
   state?: 'positive' | 'negative' | 'excluded';
   in_training?: boolean;
-  /* Narrow to the drawn review sample. A FILTER over the same order — the lane
-   * passes it with no state, so a photo just re-marked keeps its place. */
-  sampled?: boolean;
   limit?: number;
   offset?: number;
 }): Promise<{

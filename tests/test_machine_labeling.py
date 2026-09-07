@@ -352,56 +352,39 @@ def test_the_draw_is_random_and_takes_the_existing_order_from_nowhere() -> None:
     # Same rails as every other training read: no holdout, no missing bytes.
     assert "tag_exam_cohorts hc" in sql
     assert "i.storage_path IS NOT NULL" in sql
-    # Re-drawing must not duplicate a row someone is already reviewing.
-    assert "ON CONFLICT (tag_id, image_id) DO NOTHING" in sql
 
 
-def test_the_draw_caps_its_size_and_refuses_a_bad_state() -> None:
+def test_the_draw_replaces_the_whole_set_in_one_transaction() -> None:
+    # Clearing the old draw and admitting the new one are one unit: a head with
+    # its negatives cleared and nothing drawn trains on no negatives at all.
     from toolkit import machine_labeling as ml
 
     conn = _Conn([], [])
-    ml.draw_review_sample(conn, tag_id=17, size=99_999)
-    assert conn.log[-1][2]["size"] == ml.SAMPLE_MAX == 5000
+    ml.draw_training_set(conn, tag_id=17, size=99_999)
+    kinds = [c[0] for c in conn.log]
+    assert kinds[0] == "transaction"
+    assert "SET in_training = false" in conn.log[1][1]
+    assert conn.log[-1][2]["size"] == ml.DRAW_MAX == 5000
     with pytest.raises(ValueError):
-        ml.draw_review_sample(_Conn([]), tag_id=17, state="maybe")
+        ml.draw_training_set(_Conn([]), tag_id=17, state="maybe")
 
 
-def test_a_redraw_is_explicit_never_implicit() -> None:
-    # A redraw throws away a list the operator may be half way through, so it
-    # only happens when asked for.
+def test_counts_are_five_trays_one_rule_for_both_signs() -> None:
+    # Migration 486, the operator's renaming: membership is a fact about a
+    # LABEL. Each sign has a training set and a reserve; "left out" trains
+    # nothing whichever way the flag points.
     from toolkit import machine_labeling as ml
 
-    plain = _Conn([], [])
-    ml.draw_review_sample(plain, tag_id=17)
-    assert not any("DELETE FROM tag_review_samples" in c[1] for c in plain.log)
-    replaced = _Conn([], [], [])
-    ml.draw_review_sample(replaced, tag_id=17, replace=True)
-    assert any("DELETE FROM tag_review_samples" in c[1] for c in replaced.log)
-
-
-def test_sample_progress_counts_the_operators_own_marks() -> None:
-    # A confirmed negative is still a negative, so state alone cannot see the
-    # work; what marks a photo reviewed is that the decision became theirs.
-    from toolkit import machine_labeling as ml
-
-    assert "l.source <> 'machine'" in ml._SAMPLE_COUNTS_SQL
-    out = ml.review_sample_counts(_Conn([(17, 1000, 247)]), tag_ids=[17, 25])
-    assert out[17] == {"sample": 1000, "sample_reviewed": 247}
-    assert out[25] == {"sample": 0, "sample_reviewed": 0}
-
-
-def test_the_sample_filter_never_narrows_by_state() -> None:
-    # The lane shows the drawn rows by MEMBERSHIP. Filtering it by state too
-    # would drop a photo out of the page the moment it was re-marked — the
-    # disappearing tile the operator has already objected to once.
-    from toolkit import machine_labeling as ml
-
-    conn = _Conn([])
-    ml.training_set_page(conn, tag_id=17, sampled=True)
-    params = conn.log[0][2]
-    assert params["sampled"] is True and params["state"] is None
-    assert "FROM tag_review_samples rs" in ml._TRAINING_PAGE_SQL
-    assert "ORDER BY l.updated_at DESC, l.image_id DESC" in ml._TRAINING_PAGE_SQL
+    rows = [(17, "positive", True, 300), (17, "positive", False, 120),
+            (17, "negative", True, 1000), (17, "negative", False, 9626),
+            (17, "excluded", False, 34)]
+    out = ml.training_set_counts(_Conn(rows), tag_ids=[17, 25])
+    assert out[17] == {"positive": 300, "positive_reserve": 120,
+                       "negative": 1000, "negative_reserve": 9626, "excluded": 34}
+    # A head with nothing still reports every tray, so the page never renders a
+    # blank where a zero belongs.
+    assert out[25] == {"positive": 0, "positive_reserve": 0,
+                       "negative": 0, "negative_reserve": 0, "excluded": 0}
 
 
 def test_locate_maps_state_and_membership_to_a_tray_and_a_row() -> None:
@@ -433,20 +416,6 @@ def test_locate_ranks_under_the_pages_own_order_and_rails() -> None:
     assert "l.state <> 'positive' OR o.in_training = l.in_training" in sql
     # The holdout is refused on both sides — the row itself and the rank's cohort.
     assert sql.count("tag_exam_cohorts hc") == 2
-
-
-def test_counts_are_trays_over_stored_membership() -> None:
-    # Migration 484: membership is a fact about a row, so a count is a count of
-    # rows. A positive the operator has not admitted is the RESERVE and trains
-    # nothing — their correction, after a cutoff computed membership and after
-    # removing the cutoff dumped the whole reserve into the set.
-    from toolkit import machine_labeling as ml
-
-    conn = _Conn([(42, "positive", True, 300), (42, "positive", False, 536),
-                  (42, "negative", True, 10009), (42, "excluded", True, 2)])
-    out = ml.training_set_counts(conn, tag_ids=[42, 2])
-    assert out[42] == {"positive": 300, "reserve": 536, "negative": 10009, "excluded": 2}
-    assert out[2] == {"positive": 0, "negative": 0, "excluded": 0, "reserve": 0}
 
 
 def test_the_trainer_reads_admitted_rows_only() -> None:
