@@ -303,18 +303,16 @@ def test_a_pager_that_does_not_advance_stops_the_walk(monkeypatch):
     assert cap["ledger"][0]["outcome"] == "degraded"
 
 
-def test_mark_inactive_is_category_scoped_behind_the_staleness_rail(monkeypatch):
-    calls: list[tuple] = []
-    monkeypatch.setattr(
-        mmreality_main.db, "mark_inactive_native",
-        lambda conn, source, cm, ct, seen, **kw: (calls.append((source, cm, ct, set(seen), kw)) or 7))
-    assert _portal().mark_inactive(object(), BYTY, {"x", "y"}) == 7
-    assert calls == [("mmreality", "byt", "prodej", {"x", "y"},
-                      {"min_unseen_hours": mmreality_main.INACTIVE_MIN_UNSEEN_HOURS})]
-    assert mmreality_main.INACTIVE_MIN_UNSEEN_HOURS == 12
-    # An unlabelled (old-shape) category can never sweep anything.
-    assert _portal().mark_inactive(object(), {"index": "nemovitosti"}, {"x"}) == 0
-    assert len(calls) == 1
+def test_delisting_uses_the_runners_default_nomination():
+    """Rule #3 since 2026-09-07: the walk nominates unseen rows for a page
+    check and the runner does it generically, keyed on the native id the index
+    walked (a NULL sreality_id under listing-identity Gate 2 can never poison
+    it). mmreality has no special scoping, so it carries neither the old sweep
+    seam nor an override."""
+    p = _portal()
+    assert not hasattr(p, "mark_inactive")
+    assert not hasattr(p, "presence_candidates")
+    assert getattr(p, "seen_key", "native") == "native"
 
 
 def test_active_count_is_category_scoped(monkeypatch):

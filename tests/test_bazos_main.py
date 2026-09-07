@@ -103,55 +103,42 @@ def test_portal_complete_walk_and_per_scope_labels():
     assert p.category_labels(_BYT_RENT) == ("byt", "pronajem")
 
 
-def test_mark_inactive_runs_native_sweep_with_staleness_rail(monkeypatch):
-    swept: dict[str, Any] = {}
+def test_nomination_is_subtype_scoped(monkeypatch):
+    """Rule #3 since 2026-09-07: a complete walk nominates unseen rows for a
+    page check. bazos walks fine sections that collapse onto one category_main,
+    so the nomination is scoped to the section's subtype (NULL for byt) or one
+    section would nominate its siblings' rows every walk."""
+    nominated: dict[str, Any] = {}
     monkeypatch.setattr(
-        bazos_main.db, "mark_inactive_native",
-        lambda _c, src, cm, ct, seen, *, subtype, scope_subtype, min_unseen_hours:
-            swept.update(src=src, cm=cm, ct=ct, seen=seen, subtype=subtype,
-                         scope_subtype=scope_subtype,
-                         min_unseen_hours=min_unseen_hours) or 3,
+        bazos_main.db, "presence_candidates",
+        lambda _c, src, cm, ct, seen, *, subtype, scope_subtype:
+            nominated.update(src=src, cm=cm, ct=ct, seen=set(seen), subtype=subtype,
+                             scope_subtype=scope_subtype) or ([], 3),
     )
-    n = _portal().mark_inactive(object(), _BYT_RENT, {"a", "b"})
-    assert n == 3
-    # byt carries no subtype, but the sweep is still subtype-scoped (to NULL) so
-    # the fine sections that share category_main can't sweep each other. The
-    # 24h staleness rail rides on every sweep — only rows missed by 4+
-    # consecutive walks can flip; there is no sweep-window throttle anymore.
-    assert swept == {"src": "bazos", "cm": "byt", "ct": "pronajem",
-                     "seen": {"a", "b"}, "subtype": None, "scope_subtype": True,
-                     "min_unseen_hours": 12}
+    assert _portal().presence_candidates(object(), _BYT_RENT, {"a", "b"}) == ([], 3)
+    assert nominated == {"src": "bazos", "cm": "byt", "ct": "pronajem",
+                         "seen": {"a", "b"}, "subtype": None, "scope_subtype": True}
+    nominated.clear()
+    _portal([_CHATA_SALE]).presence_candidates(object(), _CHATA_SALE, {"a"})
+    # chata collapses onto category_main=dum but is scoped to subtype=chata, so
+    # it never nominates the generic-dum (subtype NULL) section's rows.
+    assert nominated["cm"] == "dum" and nominated["subtype"] == "chata"
+    assert nominated["scope_subtype"] is True
 
 
-def test_mark_inactive_scopes_fine_section_to_its_subtype(monkeypatch):
-    swept: dict[str, Any] = {}
-    monkeypatch.setattr(
-        bazos_main.db, "mark_inactive_native",
-        lambda _c, src, cm, ct, seen, *, subtype, scope_subtype, min_unseen_hours:
-            swept.update(cm=cm, subtype=subtype, scope_subtype=scope_subtype,
-                         min_unseen_hours=min_unseen_hours) or 0,
-    )
-    _portal([_CHATA_SALE]).mark_inactive(object(), _CHATA_SALE, {"a"})
-    # chata collapses onto category_main=dum but is scoped to subtype=chata, so it
-    # never sweeps the generic-dum (subtype NULL) section's rows.
-    assert swept == {"cm": "dum", "subtype": "chata", "scope_subtype": True,
-                     "min_unseen_hours": 12}
-
-
-def test_mark_inactive_sweeps_every_category_every_run(monkeypatch):
-    # No sweep-window throttle: every complete-walk category sweeps every run,
-    # so small categories can't burn a window while the big ones starve. The
-    # staleness rail (min_unseen_hours) is the conservatism guard instead.
+def test_nomination_happens_for_every_category_every_run(monkeypatch):
+    # No sweep-window throttle and no staleness rail any more: every complete
+    # category nominates every run; the page check is the guard.
     calls: list[str] = []
     monkeypatch.setattr(
-        bazos_main.db, "mark_inactive_native",
-        lambda _c, src, cm, ct, seen, *, subtype, scope_subtype, min_unseen_hours:
-            calls.append(ct) or 1,
+        bazos_main.db, "presence_candidates",
+        lambda _c, src, cm, ct, seen, **kw: calls.append(ct) or ([], 1),
     )
     p = _portal([_BYT_SALE, _BYT_RENT])
-    assert p.mark_inactive(object(), _BYT_SALE, {"a"}) == 1
-    assert p.mark_inactive(object(), _BYT_RENT, {"b"}) == 1
+    assert p.presence_candidates(object(), _BYT_SALE, {"a"}) == ([], 1)
+    assert p.presence_candidates(object(), _BYT_RENT, {"b"}) == ([], 1)
     assert calls == ["prodej", "pronajem"]
+    assert not hasattr(bazos_main.BazosPortal, "mark_inactive")
 
 
 def test_active_count_source_scoped(monkeypatch):

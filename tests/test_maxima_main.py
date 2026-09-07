@@ -166,9 +166,9 @@ def _walk_one_agenda(monkeypatch, portal, *, total, items, max_pages=None):
     portal.walk_category(_CATEGORIES[0], object(), False, _Limiter())  # byt·prodej, af=1
 
 
-def test_mark_inactive_is_agenda_grain(monkeypatch):
-    # A complete sale agenda spanning byt + dum + ostatni. mark_inactive must
-    # sweep the WHOLE agenda (category_type=prodej) against EVERY agenda id —
+def test_nomination_is_agenda_grain(monkeypatch):
+    # A complete sale agenda spanning byt + dum + ostatni. presence_candidates must
+    # nominate the WHOLE agenda (category_type=prodej) against EVERY agenda id —
     # never the per-category byt slice — and only once per agenda per run.
     base = "https://nemovitosti.maxima.cz/nemovitosti/"
     items = [
@@ -182,22 +182,22 @@ def test_mark_inactive_is_agenda_grain(monkeypatch):
 
     captured: list[Any] = []
     monkeypatch.setattr(
-        maxima_main.db, "mark_inactive_agenda",
-        lambda _c, source, ct, seen, *, min_unseen_hours: (
-            captured.append((source, ct, set(seen), min_unseen_hours)) or 7
+        maxima_main.db, "presence_candidates",
+        lambda _c, source, cm, ct, seen, **kw: (
+            captured.append((source, cm, ct, set(seen))) or ([], 7)
         ),
     )
     # First prodej descriptor (byt) triggers the agenda sweep.
-    assert portal.mark_inactive(object(), _CATEGORIES[0], {"b1", "b2"}) == 7
-    source, ct, seen, hrs = captured[0]
-    assert source == "maxima" and ct == "prodej" and hrs == 12
+    assert portal.presence_candidates(object(), _CATEGORIES[0], {"b1", "b2"}) == ([], 7)
+    source, cm, ct, seen = captured[0]
+    assert source == "maxima" and ct == "prodej" and cm is None   # agenda scope: category_type alone
     assert seen == {"b1", "b2", "d1", "o1"}        # the FULL agenda, not the byt slice
-    # A second prodej descriptor (dum) must NOT re-sweep the same agenda.
-    assert portal.mark_inactive(object(), _CATEGORIES[1], {"d1"}) == 0
+    # A second prodej descriptor (dum) must NOT re-nominate the same agenda.
+    assert portal.presence_candidates(object(), _CATEGORIES[1], {"d1"}) is None
     assert len(captured) == 1
 
 
-def test_mark_inactive_skips_incomplete_agenda(monkeypatch):
+def test_nomination_skips_incomplete_agenda(monkeypatch):
     # Agenda reports total=10 but only 2 collected -> walk.complete is False, so
     # no index-absence delisting (avoids false-flipping the unseen 8).
     base = "https://nemovitosti.maxima.cz/nemovitosti/"
@@ -210,14 +210,14 @@ def test_mark_inactive_skips_incomplete_agenda(monkeypatch):
     _walk_one_agenda(monkeypatch, portal, total=10, items=items)
     called = {"n": 0}
     monkeypatch.setattr(
-        maxima_main.db, "mark_inactive_agenda",
-        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or 0,
+        maxima_main.db, "presence_candidates",
+        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or ([], 0),
     )
-    assert portal.mark_inactive(object(), _CATEGORIES[0], {"b1", "b2"}) == 0
+    assert portal.presence_candidates(object(), _CATEGORIES[0], {"b1", "b2"}) is None
     assert called["n"] == 0
 
 
-def test_mark_inactive_skips_unmeasurable_agenda(monkeypatch):
+def test_nomination_skips_unmeasurable_agenda(monkeypatch):
     # The index parsed but its total never did (total=None). The old shared
     # _walk_complete FAILED OPEN here — "no total, so assume complete" — which
     # authorised delisting every id the walk had not reached. That expectation
@@ -233,14 +233,14 @@ def test_mark_inactive_skips_unmeasurable_agenda(monkeypatch):
     _walk_one_agenda(monkeypatch, portal, total=None, items=items)
     called = {"n": 0}
     monkeypatch.setattr(
-        maxima_main.db, "mark_inactive_agenda",
-        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or 0,
+        maxima_main.db, "presence_candidates",
+        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or ([], 0),
     )
-    assert portal.mark_inactive(object(), _CATEGORIES[0], {"b1", "b2"}) == 0
+    assert portal.presence_candidates(object(), _CATEGORIES[0], {"b1", "b2"}) is None
     assert called["n"] == 0
 
 
-def test_mark_inactive_skips_overcollected_agenda(monkeypatch):
+def test_nomination_skips_overcollected_agenda(monkeypatch):
     # Collected 4 against a declared total of 2: the denominator is wrong
     # (overlapping slices or foreign stock), so contamination must not read as
     # completeness — no delisting from a walk we cannot trust.
@@ -254,10 +254,10 @@ def test_mark_inactive_skips_overcollected_agenda(monkeypatch):
     _walk_one_agenda(monkeypatch, portal, total=2, items=items)
     called = {"n": 0}
     monkeypatch.setattr(
-        maxima_main.db, "mark_inactive_agenda",
-        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or 0,
+        maxima_main.db, "presence_candidates",
+        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or ([], 0),
     )
-    assert portal.mark_inactive(object(), _CATEGORIES[0], {"b1", "b2", "b3", "b4"}) == 0
+    assert portal.presence_candidates(object(), _CATEGORIES[0], {"b1", "b2", "b3", "b4"}) is None
     assert called["n"] == 0
 
 

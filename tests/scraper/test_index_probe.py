@@ -45,7 +45,7 @@ class _ProbePortal:
         self._walk_fails = walk_fails or set()
         self.caps: list[int | None] = []
         self.conn = _Conn()
-        self.calls: dict[str, list] = {"walk": [], "mark_inactive": [], "active_count": []}
+        self.calls: dict[str, list] = {"walk": [], "active_count": []}
 
     def categories(self):
         return list(self._categories)
@@ -69,8 +69,6 @@ class _ProbePortal:
         # that CLAIMS completeness (belt on top of the max_pages gate).
         return ({"n1", "n2"}, {"found_new": 2, "enqueued": 2}, 10, 1, True)
 
-    def mark_inactive(self, conn, c, seen):
-        self.calls["mark_inactive"].append((c, set(seen)))
         return len(seen)
 
     def active_count(self, conn, c):
@@ -81,16 +79,21 @@ class _ProbePortal:
 # --- run_index_probe: discovery-only invariants -----------------------------
 
 
-def test_probe_never_calls_mark_inactive():
-    # Even a complete-walk-capable portal whose walk reports complete=True must
-    # never sweep from a probe: a first-page diff can't prove a delisting.
-    p = _ProbePortal(categories=["A", "B"])
+def test_probe_never_nominates(monkeypatch):
+    """Discovery only: a shallow probe cannot prove anything about the rows it
+    did not reach, so it must never nominate them for a page check."""
+    monkeypatch.setattr(
+        portal_runner.db, "presence_candidates",
+        lambda *a, **k: pytest.fail("a probe must not nominate"),
+    )
+    monkeypatch.setattr(
+        portal_runner.db, "enqueue_presence_checks",
+        lambda *a, **k: pytest.fail("a probe must not queue page checks"),
+    )
+    p = _ProbePortal()
     rc, agg = portal_runner.run_index_probe(p, dry_run=False)
     assert rc == 0
-    assert p.calls["walk"] == ["A", "B"]
-    assert p.calls["mark_inactive"] == []
-    assert p.calls["active_count"] == []
-    assert p.conn.closed
+    assert p.calls["walk"]
 
 
 def test_probe_writes_no_scrape_run_bookkeeping(monkeypatch):

@@ -58,14 +58,9 @@ LOG = logging.getLogger(__name__)
 SOURCE = "realitymix"
 PER_PAGE = 20  # realitymix renders 20 results per ?stranka page
 
-# Only flip rows unseen for 12h+ — ~2 full walk cadences at the 6h schedule.
-# last_seen_at is bumped for unchanged rows each walk (touch_listings) and for
-# changed rows on a successful drain fetch — so a churn-missed live row is
-# protected unless its detail fetches have ALSO failed for 12h+; even then the
-# flip self-heals on the next index sighting (touch_listings reactivates). Passed
-# EXPLICITLY on every sweep: db.mark_inactive_native applies NO rail by default.
-# Tightened 24->12h for the real-time delisting SLO.
-INACTIVE_MIN_UNSEEN_HOURS = 12
+# No staleness rail any more (rule #3, 2026-09-07): a complete walk nominates
+# the rows it did not see for a page check and the drain's fetch decides, so a
+# single walk-miss costs one fetch, never a live listing.
 
 
 class RealitymixPortal:
@@ -224,29 +219,28 @@ class RealitymixPortal:
         )
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
 
-    def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
+    def presence_candidates(
+        self, conn: Any, category: dict[str, Any], seen: set[str],
+    ) -> tuple[list[tuple[str, str | None, int | None]], int] | None:
+        """Nominate this category's unseen rows for a page check (rule #3,
+        2026-09-07) -- once per (category_main, category_type), with the UNION
+        of its slices' seen ids. Several index slices collapse onto one
+        canonical category ('domy' and 'chaty' both -> dum) and the runner calls
+        this per slice; nominating from one slice's seen set would nominate the
+        sibling's whole population every walk. Buffer, nominate on the group's
+        LAST complete slice; an incomplete sibling never reaches this call, so
+        nothing is nominated this walk and the next walk retries."""
         cm, ct = self.category_labels(category)
         if cm is None or ct is None:
-            return 0
-        # Several index slices collapse onto one (cm, ct) — 'domy' and 'chaty'
-        # both -> dum — and this runner-gated call sees only ONE slice's ids, so
-        # a per-slice sweep flipped the sibling slice's listings inactive every
-        # walk (each dum slice marked the other's ~9k rows). Buffer each complete
-        # slice's ids and sweep once, on the group's LAST complete slice, with
-        # the union. An incomplete/failed sibling never reaches this call, so its
-        # group stays below the expected slice count and the sweep is suppressed
-        # this walk (over-retention only; the next walk retries).
+            return None
         key = (cm, ct)
         group = self._sweep_seen.setdefault(key, set())
         group.update(seen)
         self._sweep_done[key] = self._sweep_done.get(key, 0) + 1
         expected = sum(1 for c in self._categories if self.category_labels(c) == key)
         if self._sweep_done[key] < expected:
-            return 0
-        return db.mark_inactive_native(
-            conn, SOURCE, cm, ct, group,
-            min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
-        )
+            return None
+        return db.presence_candidates(conn, SOURCE, cm, ct, group)
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
         cm, ct = self.category_labels(category)

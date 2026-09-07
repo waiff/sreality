@@ -6,8 +6,14 @@ instead of a boolean somebody typed once.
 
 ## The flag is a claim about US, not about the portal
 
-`portals.supports_complete_walk` gates `mark_inactive` (architectural rule #3):
-a portal that cannot prove it saw the whole catalogue never delists from index
+> **2026-09-07:** delisting is now presence-verified (rule #3): a complete walk
+> nominates its unseen rows for a page check and the drain's fetch decides. The
+> flag below no longer gates anything; the ledger and the gate remain the
+> coverage evidence and the posture signal. The history stays because it is
+> why the design changed.
+
+`portals.supports_complete_walk` used to gate `mark_inactive` (architectural rule #3):
+a portal that could not prove it saw the whole catalogue never delisted from index
 absence. It was set true for idnes when the walk *could* in principle be
 complete — and then stayed true for months while the walk was reaching 13% of
 the biggest category.
@@ -242,12 +248,10 @@ down. Every evaluation appends to `portal_coverage_gate`, holds included: while 
 portal is parked the holds are the interesting rows, and a verdict that lives
 only in an expiring Actions log is a verdict nobody receives.
 
-**Why this is safe unattended.** Not because the gate is certain to be right —
-because a wrong verdict cannot execute. Un-parking only makes a sweep *eligible*;
-the flip cap (migrations 451/452) still refuses any sweep over 10% of a category,
-latches, and records the refusal in `delist_flip_refusals`. idnes's backlog is
-~37% of its rows, so the single failure this gate could plausibly cause is the
-exact one the layer beneath it is built to catch. **Right-or-caught, not right.**
+**Why this is safe unattended.** Since 2026-09-07 the gate decides nothing that
+can delete: it re-earns a posture flag from ledger evidence, and the flag feeds
+Health. Closures come from page checks nominated by complete walks, one fetch
+each, throttled per walk by `delist_flip_cap`.
 
 **ceskereality now feeds the ledger too.** It was parked in migration 449 with no
 way back: the gate un-parks on ledger evidence and its walk wrote none, so it
@@ -333,12 +337,19 @@ batches); the retry only stops it costing a category.
 99.0-99.5% — the declared count drifting a few rows during the walk, on slices
 where one row is half a percent. A threshold artefact, not a coverage failure.
 
-## The four layers, in order
+## The four layers, in order (as rebuilt 2026-09-07)
 
 1. **Coverage** — the sliced walk reaches everything (or records that it didn't).
+   Only a walk proven complete against the portal's own counts nominates.
 2. **The ledger** — coverage accumulates across runs instead of restarting.
-3. **The gate** — the flag is re-earned from that evidence, on a schedule.
-4. **The flip cap** — and if all three are wrong, no sweep over 10% of a
-   category executes anyway; it latches and alarms.
+3. **Nomination, not deletion** — a complete walk queues the rows it did not
+   see for a page check; the drain fetches each page and only a positive gone
+   signal flips it. A wrong nomination costs one fetch, never a live listing.
+4. **The throttle** — `delist_flip_cap` bounds how many checks one walk may
+   queue (oldest-unseen first, the rest deferred and recorded), so a broken
+   walk cannot flood the drain and a real backlog drains in a few walks.
 
-Each layer assumes the one above it can fail. That is the whole design.
+The gate still runs and re-earns `supports_complete_walk` from the ledger, but
+as a posture signal for Health: nothing reads it to decide a deletion any more.
+The retired pieces — the staleness rail, the national cross-check, the latching
+refusal — all existed to make absence safe; presence does not need them.

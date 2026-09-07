@@ -5,6 +5,19 @@
 Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
+### Presence-verified delisting — rule #3 rewritten (2026-09-07, done)
+- Index absence NOMINATES, the page DECIDES: a complete category walk queues every active
+  row it did not see for a detail fetch at the lowest priority; a positive gone signal flips
+  it, a live page refreshes it. One mechanism for all nine portals (shared runner default +
+  overrides for bazos subtypes, ceskereality/realitymix sibling slices, remax/maxima agendas).
+- Retired: the staleness rail, ceskereality's national cross-check (region-less listings are
+  nominated instead), the latching refusal. `delist_flip_cap` now throttles nominations.
+- mmreality joined the always-on worker (its queue drains in minutes, not hours). Migration
+  482 adds `portal_category_drift`, the coverage alarm fed by the optional `live_categories`
+  seam (mmreality implements it; ceskereality exposes no machine-readable category list).
+- **Next:** watch the first walks' `VERIFY` lines and `delist_flip_refusals` deferrals; the
+  ceskereality backlog (~40k) drains at 10% of each category per walk.
+
 ### mmreality: ten per-type indexes, proved against the portal's own count (2026-09-06, done)
 - The bare `/nemovitosti/` feed the walk paged since 2026-05 was **prodej only** (its own
   SSR `metadata.count` equals the prodej total) — the 1,518 rentals were never scraped —

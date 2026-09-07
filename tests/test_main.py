@@ -1,4 +1,4 @@
-"""Tests for scraper.main._run_full — focused on the mark_inactive guard.
+"""Tests for scraper.main._run_full — focused on the nomination guard (rule #3).
 
 Hermetic: monkeypatches db.* functions and the SrealityClient builder so
 no network is touched. Asserts that mark_inactive is called only when
@@ -136,7 +136,7 @@ _FakeClient.total_entries = 5  # type: ignore[attr-defined]
 def patched_db(monkeypatch):
     """Patch every db.* helper used by _run_full + the per-category client."""
     calls: dict[str, list] = {
-        "mark_inactive": [],
+        "nominated": [],
         "touch_listings": [],
         "index_summary": [],
         "enqueue": [],
@@ -166,11 +166,18 @@ def patched_db(monkeypatch):
     monkeypatch.setattr(
         scraper_main.db, "active_failure_ids", lambda _conn, _ids: set(),
     )
+    # Rule #3 (2026-09-07): the combined run nominates unseen rows for a page
+    # check instead of sweeping; record the nominations the way the old sweep
+    # calls were recorded so every guard test keeps its meaning.
     monkeypatch.setattr(
-        scraper_main.db, "mark_inactive",
-        lambda _conn, cm, ct, ids, *, source="sreality", min_unseen_hours=None: (
-            calls["mark_inactive"].append((cm, ct, set(ids))) or 0
+        scraper_main.db, "presence_candidates",
+        lambda _conn, source, cm, ct, ids, *, seen_key="native", **kw: (
+            calls["nominated"].append((cm, ct, set(ids))) or ([], 0)
         ),
+    )
+    monkeypatch.setattr(
+        scraper_main.db, "enqueue_presence_checks",
+        lambda _conn, source, cm, ct, cands, *, active_rows, subtype=None: (0, 0),
     )
     monkeypatch.setattr(
         scraper_main.db, "active_count",
@@ -192,11 +199,11 @@ def patched_db(monkeypatch):
     return calls
 
 
-def test_run_full_calls_mark_inactive_per_category_when_no_limit(patched_db):
+def test_run_full_nominates_per_category_when_no_limit(patched_db):
     rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
     assert rc == 0
     # One mark_inactive call per category in CATEGORIES.
-    assert len(patched_db["mark_inactive"]) == len(scraper_main.CATEGORIES)
+    assert len(patched_db["nominated"]) == len(scraper_main.CATEGORIES)
 
     # Each call is scoped to its own (cm_text, ct_text) and carries the
     # ids that came from that category's index walk only. Expected labels
@@ -206,41 +213,36 @@ def test_run_full_calls_mark_inactive_per_category_when_no_limit(patched_db):
         (scraper_main.parser.CATEGORY_MAIN[cm], scraper_main.parser.CATEGORY_TYPE[ct])
         for cm, ct in scraper_main.CATEGORIES
     }
-    actual_pairs = {(cm, ct) for cm, ct, _ids in patched_db["mark_inactive"]}
+    actual_pairs = {(cm, ct) for cm, ct, _ids in patched_db["nominated"]}
     assert actual_pairs == expected_pairs
 
     # Spot-check that ids are category-scoped: byt/pronajem (1, 2) base = 12000.
-    by_pair = {(cm, ct): ids for cm, ct, ids in patched_db["mark_inactive"]}
+    by_pair = {(cm, ct): ids for cm, ct, ids in patched_db["nominated"]}
     assert by_pair[("byt", "pronajem")] == {12000, 12001, 12002, 12003, 12004}
     assert by_pair[("byt", "prodej")] == {11000, 11001, 11002, 11003, 11004}
 
 
-def test_run_full_skips_mark_inactive_when_limit_set(patched_db):
+def test_run_full_skips_nomination_when_limit_set(patched_db):
     rc, _agg = scraper_main._run_full(limit=3, dry_run=False)
     assert rc == 0
-    assert patched_db["mark_inactive"] == []
+    assert patched_db["nominated"] == []
 
 
-def test_run_full_skips_mark_inactive_when_limit_zero(patched_db):
+def test_run_full_skips_nomination_when_limit_zero(patched_db):
     """limit=0 still means partial view, even if no listings were seen."""
     rc, _agg = scraper_main._run_full(limit=0, dry_run=False)
     assert rc == 0
-    assert patched_db["mark_inactive"] == []
+    assert patched_db["nominated"] == []
 
 
-def test_sreality_mark_inactive_carries_unseen_rail(monkeypatch):
-    """SrealityPortal.mark_inactive (the framework index-walk path) rides the
-    INACTIVE_MIN_UNSEEN_HOURS staleness rail on every sweep — the second guard that
-    keeps the relaxed 0.995 completeness gate from false-delisting a live listing."""
-    captured: dict = {}
-    monkeypatch.setattr(
-        scraper_main.db, "mark_inactive",
-        lambda _conn, cm, ct, ids, *, source, min_unseen_hours=None: captured.update(
-            cm=cm, ct=ct, source=source, min_unseen_hours=min_unseen_hours) or 0,
-    )
-    scraper_main.SrealityPortal().mark_inactive(object(), (1, 2), {1, 2, 3})
-    assert captured["source"] == "sreality"
-    assert captured["min_unseen_hours"] == scraper_main.INACTIVE_MIN_UNSEEN_HOURS == 3
+def test_sreality_portal_nominates_on_its_integer_ids():
+    """Rule #3 since 2026-09-07: the framework index walk nominates unseen rows
+    for a page check and the runner does it generically; sreality's walk returns
+    its own integer ids, so it tells the runner to exclude them on
+    listings.sreality_id. The old sweep seam is gone."""
+    p = scraper_main.SrealityPortal()
+    assert p.seen_key == "sreality_id"
+    assert not hasattr(p, "mark_inactive")
 
 
 def test_walk_complete_tolerates_half_percent_short_walk():
@@ -255,12 +257,12 @@ def test_walk_complete_tolerates_half_percent_short_walk():
     assert walk_is_complete(10, None) is False
 
 
-def test_dry_run_never_calls_mark_inactive(patched_db, monkeypatch):
+def test_dry_run_never_nominates(patched_db, monkeypatch):
     """dry_run skips the connection altogether, so mark_inactive can't run."""
     monkeypatch.setattr(scraper_main.db, "connect", lambda: None)
     rc, _agg = scraper_main._run_full(limit=None, dry_run=True)
     assert rc == 0
-    assert patched_db["mark_inactive"] == []
+    assert patched_db["nominated"] == []
 
 
 def test_run_full_isolates_one_crashing_category_marks_the_rest(
@@ -287,7 +289,7 @@ def test_run_full_isolates_one_crashing_category_marks_the_rest(
     rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
     assert rc == 0  # the crash did NOT propagate
 
-    marked = {(cm, ct) for cm, ct, _ in patched_db["mark_inactive"]}
+    marked = {(cm, ct) for cm, ct, _ in patched_db["nominated"]}
     # Only the crashing category is skipped; all others (before AND after it)
     # still get swept.
     assert ("dum", "pronajem") not in marked
@@ -329,13 +331,13 @@ def test_walk_complete_thresholds():
     assert walk_is_complete(10, 100) is False
 
 
-def test_run_full_skips_mark_inactive_when_walk_incomplete(patched_db, monkeypatch):
+def test_run_full_skips_nomination_when_walk_incomplete(patched_db, monkeypatch):
     """result_size far above the collected count looks like a truncated
     walk, so mark_inactive must be skipped to avoid false delistings."""
     monkeypatch.setattr(_FakeClient, "result_size", 1000, raising=False)
     rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
     assert rc == 0
-    assert patched_db["mark_inactive"] == []
+    assert patched_db["nominated"] == []
 
 
 def test_run_full_marks_inactive_when_walk_complete(patched_db, monkeypatch):
@@ -343,7 +345,7 @@ def test_run_full_marks_inactive_when_walk_complete(patched_db, monkeypatch):
     monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
     rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
     assert rc == 0
-    assert len(patched_db["mark_inactive"]) == len(scraper_main.CATEGORIES)
+    assert len(patched_db["nominated"]) == len(scraper_main.CATEGORIES)
 
 
 # --- category coverage (delisting depends on a complete walk per pair) ------
@@ -763,7 +765,7 @@ def test_run_full_isolates_a_crashing_category(patched_db, monkeypatch):
     monkeypatch.setattr(scraper_main, "_walk_category_split", _boom)
     rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
     assert rc == 0                          # run completed, did not propagate
-    assert patched_db["mark_inactive"] == []  # no sweep on a failed walk
+    assert patched_db["nominated"] == []  # no sweep on a failed walk
 
 
 def test_run_full_records_reconciliation_fields(patched_db, monkeypatch):
@@ -915,7 +917,7 @@ def test_index_walk_enqueues_and_marks_inactive(patched_db, monkeypatch):
     monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
     rc, agg = scraper_main._run_index_walk(dry_run=False)
     assert rc == 0
-    assert len(patched_db["mark_inactive"]) == len(scraper_main.CATEGORIES)
+    assert len(patched_db["nominated"]) == len(scraper_main.CATEGORIES)
     assert len(patched_db["enqueue"]) == len(scraper_main.CATEGORIES)
     # index_summary returns {} (fixture) -> every id is new (priority 0).
     all_entries = [e for batch in patched_db["enqueue"] for e in batch]
@@ -935,7 +937,7 @@ def test_index_walk_dry_run_writes_nothing(patched_db):
     rc, _agg = scraper_main._run_index_walk(dry_run=True)
     assert rc == 0
     assert patched_db["enqueue"] == []
-    assert patched_db["mark_inactive"] == []
+    assert patched_db["nominated"] == []
 
 
 def test_index_walk_skips_inactive_when_incomplete(patched_db, monkeypatch):
@@ -944,7 +946,7 @@ def test_index_walk_skips_inactive_when_incomplete(patched_db, monkeypatch):
     monkeypatch.setattr(_FakeClient, "result_size", 1000, raising=False)
     rc, _agg = scraper_main._run_index_walk(dry_run=False)
     assert rc == 0
-    assert patched_db["mark_inactive"] == []
+    assert patched_db["nominated"] == []
     assert patched_db["enqueue"]  # enqueue is independent of completeness
 
 

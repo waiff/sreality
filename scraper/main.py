@@ -72,21 +72,14 @@ DEFAULT_DETAIL_RATE = 2.0  # requests/sec, global across all workers
 # reads it (walk_is_complete) now live in scraper.portal — ONE definition for all
 # nine portals (rule #21), imported above. 0.995 rather than 1.0 because
 # sreality's result_size jitters mid-walk, so a strict 100% gate suppressed the
-# sweep on nearly every walk and delistings accumulated until a perfect one. The
-# second rail (INACTIVE_MIN_UNSEEN_HOURS) is what makes relaxing it safe: even
-# under a 0.5%-short walk, a listing only flips if it has ALSO been unseen across
-# several consecutive walks, so a single walk-miss can never false-delist a live
-# listing. An UNMEASURABLE walk (no result_size) is "unknown", not "complete" —
-# the shared verdict never fails open, so a failed probe suppresses the sweep.
-
-# Staleness rail on the index-absence sweep (rule #3, the second rail): a listing
-# is flipped inactive only if it was ALSO unseen for at least this many hours, so
-# relaxing the completeness gate above can't false-delist on one truncated walk.
-# Short for sreality — its ~hourly cadence makes 3h ~3 consecutive walk-misses —
-# and it never slows the FAST delisting path (a gone detail fetch flips a listing
-# immediately via ListingGoneError; this rail only governs the index-absence
-# backstop for listings whose detail we don't re-fetch).
-INACTIVE_MIN_UNSEEN_HOURS = 3
+# sweep on nearly every walk and delistings accumulated until a perfect one.
+# An UNMEASURABLE walk (no result_size) is "unknown", not "complete" — the shared
+# verdict never fails open, so a failed probe nominates nothing.
+#
+# There is no staleness rail any more (rule #3, 2026-09-07): a complete walk
+# nominates the rows it did not see for a page check and the drain's fetch
+# decides — the same fast path a gone detail fetch always had (ListingGoneError
+# flips one listing immediately), now reached on purpose for every unseen row.
 
 # Safety ceiling on SrealityPortal.probe_category's own page loop, independent of
 # the caller-supplied probe_pages (docs/design/portal-order-fidelity.md, Phase 4).
@@ -778,26 +771,34 @@ def _run_full(
                 cat_counts.get("unchanged", 0), cat_counts.get("errors", 0),
             )
 
-            # Commit inactive-marking per category immediately after its
-            # walk. The `complete` flag already folds in walk-completeness
-            # (and, for region-split categories, every region being complete),
-            # so a truncated walk never flips live listings to inactive.
+            # Rule #3 (2026-09-07): a complete walk NOMINATES the rows it did
+            # not see for a page check; the drain's fetch decides. Same seam
+            # the framework runner uses, so this dispatch-only fallback cannot
+            # drift back to absence-based delisting. `complete` already folds
+            # in walk-completeness (and every region for split categories), so
+            # a truncated walk nominates nothing.
             inactive = 0
             if conn is not None and limit is None:
                 if complete:
-                    inactive = db.mark_inactive(
-                        conn, cm_text, ct_text, seen_ids, source="sreality",
-                        min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
+                    candidates, active_rows = db.presence_candidates(
+                        conn, "sreality", cm_text, ct_text, seen_ids,
+                        seen_key="sreality_id",
+                    )
+                    queued, deferred = db.enqueue_presence_checks(
+                        conn, "sreality", cm_text, ct_text, candidates,
+                        active_rows=active_rows,
                     )
                     LOG.info(
-                        "INACTIVE cm=%s ct=%s marked=%d collected=%d result_size=%s",
-                        cm_text, ct_text, inactive, len(seen_ids), cat_result_size,
+                        "VERIFY cm=%s ct=%s candidates=%d queued=%d deferred=%d "
+                        "collected=%d result_size=%s",
+                        cm_text, ct_text, len(candidates), queued, deferred,
+                        len(seen_ids), cat_result_size,
                     )
                 else:
                     LOG.warning(
-                        "INACTIVE skipped cm=%s ct=%s: walk looks incomplete "
-                        "(collected=%d result_size=%s); not flipping to avoid "
-                        "false delisting",
+                        "VERIFY skipped cm=%s ct=%s: walk looks incomplete "
+                        "(collected=%d result_size=%s); an unproven walk "
+                        "nominates nothing",
                         cm_text, ct_text, len(seen_ids), cat_result_size,
                     )
 
@@ -889,6 +890,9 @@ class SrealityPortal:
     behavior is unchanged. The district-split (the one sanctioned per-portal
     customization, forced by the deep-pagination cap) stays inside walk_category.
     """
+    # The walk's seen set is sreality's own integer ids, so the runner's default
+    # nomination (rule #3, 2026-09-07) excludes them on listings.sreality_id.
+    seen_key = "sreality_id"
 
     source = "sreality"
     supports_complete_walk = True
@@ -999,13 +1003,6 @@ class SrealityPortal:
                 break
             offset += client.per_page
         return seen, {"found_new": found_new, "enqueued": enqueued}, total, pages, False
-
-    def mark_inactive(self, conn: Any, category: tuple[int, int], seen: set[int]) -> int:
-        cm, ct = category
-        return db.mark_inactive(
-            conn, parser.CATEGORY_MAIN[cm], parser.CATEGORY_TYPE[ct], seen,
-            source=self.source, min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
-        )
 
     def active_count(self, conn: Any, category: tuple[int, int]) -> int | None:
         cm, ct = category

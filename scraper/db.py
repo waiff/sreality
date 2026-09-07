@@ -1450,6 +1450,163 @@ def _touch_chunk_by_id(cur: Any, chunk: list[int]) -> int:
     return cur.rowcount or 0
 
 
+def presence_candidates(
+    conn: psycopg.Connection,
+    source: str,
+    category_main: str | None,
+    category_type: str,
+    seen: set[Any],
+    *,
+    seen_key: str = "native",
+    subtype: str | None = None,
+    scope_subtype: bool = False,
+) -> tuple[list[tuple[str, str | None, int | None]], int]:
+    """The active rows of this (source, category) that a COMPLETE walk did not
+    see, oldest sighting first, plus the scope's active row count.
+
+    Rule #3 since 2026-09-07: index absence NOMINATES, it no longer delists. A
+    row the walk did not see is a candidate; the detail drain then visits its
+    page, and the page decides -- a positive gone signal (404/410, a redirect
+    off the listing, the portal's own "no longer active" text) flips it, a live
+    page refreshes it, an error leaves it for the next pass. That is why this
+    query carries none of the old sweep's rails (no min_unseen_hours, no refusal):
+    a wrong nomination costs one fetch, not a live listing.
+
+    `seen_key` names what the walk's seen set holds: portal-native string ids
+    (`source_id_native`, every crawler portal) or sreality's integer ids
+    (`sreality_id`). `scope_subtype` narrows to `subtype` for portals whose fine
+    index sections collapse onto one category_main (bazos: chata + dum -> dum),
+    so one section's walk cannot nominate its siblings' rows every run.
+
+    `category_main=None` scopes by category_type alone: the agenda portals
+    (remax, maxima) walk one mixed sale/rent index whose completeness is proved
+    per AGENDA, and a listing's title-derived category can differ from its
+    detail-derived one, so nominating per category would nominate rows the
+    agenda walk did see.
+
+    Returns (native_id, detail_ref, price) triples: detail_ref is the stored
+    source_url for crawler portals and None for sreality (its fetch derives the
+    URL from the id); price is carried so the re-enqueue does not blank the
+    queue's observed price.
+    """
+    key_col = "sreality_id" if seen_key == "sreality_id" else "source_id_native"
+    ids = [x for x in seen if x is not None]
+    if seen_key == "sreality_id":
+        ids = [int(x) for x in ids]
+    else:
+        ids = [str(x) for x in ids]
+    sub_clause = "\n              AND subtype IS NOT DISTINCT FROM %s" if scope_subtype else ""
+    cm_clause = "\n              AND category_main = %s" if category_main is not None else ""
+    scope_params: list[Any] = [source]
+    if category_main is not None:
+        scope_params.append(category_main)
+    scope_params.append(category_type)
+    if scope_subtype:
+        scope_params.append(subtype)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT count(*)
+            FROM listings
+            WHERE is_active = true
+              AND source = %s{cm_clause}
+              AND category_type = %s{sub_clause}
+            """,
+            tuple(scope_params),
+        )
+        active_rows = int(cur.fetchone()[0])
+        cur.execute(
+            f"""
+            SELECT {key_col}::text, source_url, price_czk
+            FROM listings
+            WHERE is_active = true
+              AND source = %s{cm_clause}
+              AND category_type = %s{sub_clause}
+              AND {key_col} <> ALL(%s)
+            ORDER BY last_seen_at ASC NULLS FIRST, id
+            """,
+            tuple(scope_params) + (ids,),
+        )
+        rows = cur.fetchall()
+    ref_none = seen_key == "sreality_id"
+    return (
+        [(str(r[0]), None if ref_none else r[1], r[2]) for r in rows],
+        active_rows,
+    )
+
+
+def enqueue_presence_checks(
+    conn: psycopg.Connection,
+    source: str,
+    category_main: str,
+    category_type: str,
+    candidates: Sequence[tuple[str, str | None, int | None]],
+    *,
+    active_rows: int,
+    subtype: str | None = None,
+) -> tuple[int, int]:
+    """Queue nominated rows for a page check, bounded per walk. Returns
+    (queued, deferred).
+
+    The bound is the old flip cap (`app_settings.delist_flip_cap`: fraction of
+    the scope's active rows, only above min_rows), repurposed. It no longer
+    refuses anything -- every closure is now page-verified -- it throttles: a
+    walk that nominates more than its share queues the oldest-unseen share now
+    and leaves the rest for the next walk, so a broken walk (240 of 4,771
+    collected) cannot flood the drain with thousands of fetches, and a real
+    backlog drains in a few walks without anyone typing an override. The
+    operator's bounded, expiring overrides still lift the bound for one scope.
+    A truncation is RECORDED in delist_flip_refusals (same columns, the row now
+    means "deferred", not "refused") so the signal outlives the Actions log.
+    """
+    total = len(candidates)
+    if total == 0:
+        return 0, 0
+    fraction, min_rows, overrides = _delist_cap(conn)
+    limit = total
+    if active_rows >= min_rows:
+        cap = max(1, int(active_rows * fraction))
+        if total > cap:
+            permit = _delist_override_permits(
+                overrides, source=source, category_main=category_main,
+                category_type=category_type, subtype=subtype, candidates=total,
+            )
+            if permit is not None:
+                LOG.warning(
+                    "VERIFY OVERRIDE source=%s cm=%s ct=%s candidates=%d cap=%d "
+                    "-- operator override in force until %s (%s)",
+                    source, category_main, category_type, total, cap,
+                    permit.get("until"), permit.get("reason", "no reason given"),
+                )
+            else:
+                limit = cap
+                LOG.warning(
+                    "VERIFY DEFERRED source=%s cm=%s ct=%s candidates=%d active=%d cap=%d "
+                    "-- queuing the %d oldest-unseen now, the rest next walk",
+                    source, category_main, category_type, total, active_rows, cap, cap,
+                )
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO delist_flip_refusals
+                                (source, category_main, category_type, subtype,
+                                 candidates, active_rows, cap)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (source, category_main, category_type, subtype,
+                             total, active_rows, cap),
+                        )
+                except Exception as exc:  # noqa: BLE001 - bookkeeping never blocks the queue
+                    LOG.warning("presence checks: could not record the deferral: %s", exc)
+    batch = list(candidates)[:limit]
+    queued = enqueue_detail(
+        conn, source,
+        [(nid, ref, price, QUEUE_PRIORITY_VERIFY) for nid, ref, price in batch],
+    )
+    return queued, total - limit
+
+
 def _seen_without_nulls(seen: Collection[Any], label: str) -> list[Any] | None:
     """Drop NULL ids from a delisting sweep's seen-set; None if that empties it.
 
@@ -2659,6 +2816,12 @@ def active_failure_ids(
 QUEUE_PRIORITY_NEW = 0
 QUEUE_PRIORITY_CHANGED = 1
 QUEUE_PRIORITY_FAILURE = 2
+# Presence checks: the walk did not see an active row, so the drain visits its
+# page to learn whether it is gone. Served AFTER everything else (the claim order
+# is priority DESC, and 0 is "new"), so a backlog of checks can never delay a
+# brand-new listing. Negative on purpose: smallint, no CHECK, and GREATEST() on
+# re-enqueue means a row already queued as new keeps its place.
+QUEUE_PRIORITY_VERIFY = -1
 
 # Fraction of each claim reserved for acquisition. Unused reserve backfills to
 # refresh (the refresh limit is computed from the rows acquisition actually

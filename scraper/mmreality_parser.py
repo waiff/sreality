@@ -403,6 +403,27 @@ def declared_total(html: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+# The portal's own property-type groups, as the filter UI and the SSR
+# `metadata.groups` list them. A group id the walk does not know shows up as
+# `group-<id>` in the drift check, which is the point: an unknown type is a
+# coverage gap until someone maps it.
+GROUP_SLUGS: dict[int, str] = {
+    11: "byty", 10: "domy", 4: "pozemky", 2: "komercni-objekty", 210: "ostatni",
+}
+_GROUPS_RE = re.compile(r'metadata(?:&quot;|"):\{.*?groups(?:&quot;|"):\[(.*?)\]', re.S)
+_GROUP_ID_RE = re.compile(r'group(?:&quot;|"):(\d+)')
+
+
+def live_groups(html: str) -> set[int] | None:
+    """Property-type group ids the page's SSR state declares for this listing
+    tree, or None when the state is absent (never an empty set for a broken
+    page -- absence must not read as 'the portal has no categories')."""
+    m = _GROUPS_RE.search(html)
+    if not m:
+        return None
+    return {int(g) for g in _GROUP_ID_RE.findall(m.group(1))}
+
+
 def _next_page(tree: HTMLParser) -> int | None:
     link = tree.css_first('link[rel="next"]')
     href = link.attributes.get("href") if link else None
