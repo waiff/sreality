@@ -405,3 +405,17 @@ def test_fetch_detail_refuses_another_listings_data(monkeypatch):
     client = SimpleNamespace(fetch_detail=lambda ref: ("<html>", 200))
     item = _portal().fetch_detail(client, "1", None)
     assert item.kind == "error" and "999" in (item.error or "")
+
+
+def test_fetch_detail_reads_an_objectless_site_page_as_gone_but_a_foreign_body_as_error(monkeypatch):
+    """A removed plot's URL answers 200 with the old title and no :property
+    object at all (2026-09-07). That is gone when it is the site's own page;
+    any other object-less 200 body (a challenge page) stays an error."""
+    from scraper.mmreality_parser import NoPropertyObject
+    monkeypatch.setattr(
+        mmreality_main, "parse_detail",
+        lambda html, *, source_url: (_ for _ in ()).throw(NoPropertyObject("no object")))
+    site = SimpleNamespace(fetch_detail=lambda ref: ("<title>Prodej pozemku | M&amp;M Reality</title>", 200))
+    assert _portal().fetch_detail(site, "1", None).kind == "gone"
+    other = SimpleNamespace(fetch_detail=lambda ref: ("<html>Just a moment...</html>", 200))
+    assert _portal().fetch_detail(other, "1", None).kind == "error"

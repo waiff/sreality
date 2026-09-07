@@ -326,6 +326,14 @@ def _has_any(names: set[str], *needles: str) -> bool | None:
     return True if any(n in name for name in names for n in needles) else None
 
 
+class NoPropertyObject(ValueError):
+    """The page parsed but carries no `:property` object at all. On mmreality
+    a removed listing's URL can answer 200 with the old title and NOTHING
+    else (no similar cards either) -- the removed-plot shape seen 2026-09-07.
+    The portal decides whether that is gone (the site's own page) or an error
+    (some other 200 body)."""
+
+
 class PropertyMismatch(ValueError):
     """The page parsed, but none of its `:property` objects IS the requested
     listing. mmreality keeps a removed listing's URL alive (HTTP 200, the old
@@ -364,7 +372,7 @@ def extract_property(html: str, listing_id: str | None) -> dict[str, Any]:
         # preview card of itself. The fullest one is the listing.
         return max(matches, key=lambda o: len(json.dumps(o, default=str)))
     if not candidates:
-        raise ValueError("no :property estate object found on page")
+        raise NoPropertyObject("no :property estate object found on page")
     if listing_id is not None:
         raise PropertyMismatch(
             f"page carries no :property object for listing {listing_id} "
