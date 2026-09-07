@@ -270,9 +270,10 @@ _UPSERT_STATE_RETURNING_SQL = """
       %(model)s, %(excluded_reason)s,
       CASE WHEN %(verified)s THEN now() END,
       -- A machine write PROPOSES a label; only a person admits it to the
-      -- training set (migration 484). A negative is admitted either way:
-      -- nobody reviews ten thousand negatives.
-      (%(source)s <> 'machine' OR %(state)s = 'negative')
+      -- training set (484, extended to negatives by 486). One rule for both
+      -- signs now: a machine positive waits in the positive reserve and a
+      -- machine negative waits in the negative reserve.
+      %(source)s <> 'machine'
     )
     ON CONFLICT (image_id, tag_id) DO UPDATE SET
       state = excluded.state,
@@ -303,9 +304,10 @@ _UPSERT_STATE_SQL = """
       %(model)s, %(excluded_reason)s,
       CASE WHEN %(verified)s THEN now() END,
       -- A machine write PROPOSES a label; only a person admits it to the
-      -- training set (migration 484). A negative is admitted either way:
-      -- nobody reviews ten thousand negatives.
-      (%(source)s <> 'machine' OR %(state)s = 'negative')
+      -- training set (484, extended to negatives by 486). One rule for both
+      -- signs now: a machine positive waits in the positive reserve and a
+      -- machine negative waits in the negative reserve.
+      %(source)s <> 'machine'
     )
     ON CONFLICT (image_id, tag_id) DO UPDATE SET
       state = excluded.state,

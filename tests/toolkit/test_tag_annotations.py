@@ -1260,14 +1260,18 @@ def test_routing_categories_make_a_head_and_are_validated() -> None:
 
 
 def test_a_machine_write_proposes_and_only_a_person_admits() -> None:
-    # Migration 484. A machine pass may propose a positive — it lands in the
-    # reserve — and can never grow the training set on its own. A negative is
-    # admitted either way: nobody reviews ten thousand negatives. And
-    # re-labelling never DEMOTES an admitted row.
+    # Migrations 484 + 486. A machine pass PROPOSES, whatever the sign: a
+    # positive waits in the positive reserve, a negative in the negative
+    # reserve. 484 admitted machine negatives outright ("nobody reviews ten
+    # thousand negatives"); 486 draws a thousand instead, which is the same
+    # observation with the right conclusion. Re-labelling never DEMOTES.
     from toolkit import tag_annotations as ta
 
     for sql in (ta._UPSERT_STATE_SQL, ta._UPSERT_STATE_RETURNING_SQL):
-        assert "(%(source)s <> 'machine' OR %(state)s = 'negative')" in sql
+        assert "%(source)s <> 'machine'" in sql
+        # No sign-shaped exemption survives: that asymmetry is what made
+        # "training negative" mean "everything the model ever rejected".
+        assert "%(state)s = 'negative'" not in sql
         assert "in_training = image_tag_labels.in_training OR excluded.in_training" in sql
 
 

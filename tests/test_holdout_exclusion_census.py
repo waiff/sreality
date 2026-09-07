@@ -66,6 +66,12 @@ _EXEMPT: dict[str, str] = {
     "_DRAFT_POOL_SQL":
         "Counts that same pool for the --status report. Reads only; no training "
         "material is selected by it.",
+    "_DRAW_CLEAR_SQL":
+        "REMOVES membership from a head's negatives before a fresh draw admits some "
+        "back (486). It selects no training material — it un-selects — and narrowing "
+        "it by the holdout would be actively wrong: a holdout row that somehow held "
+        "in_training would survive the clear. The exclusion belongs on the DRAW, "
+        "which carries it.",
     "_SAMPLE_SQL":
         "Bulk-label candidate draw. Excludes every exam member outright (all "
         "cohorts, not only holdout); the labels read are the machine's own resume "

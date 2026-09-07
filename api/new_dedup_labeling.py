@@ -768,31 +768,26 @@ def get_training_set_heads(conn: Any = Depends(deps.get_db_conn)) -> dict[str, A
     from toolkit import machine_labeling as ml
 
     tags = _routing_tags(conn)
-    ids = [t["id"] for t in tags]
-    counts = ml.training_set_counts(conn, tag_ids=ids)
-    samples = ml.review_sample_counts(conn, tag_ids=ids)
-    return {"data": [{**t, **counts.get(t["id"], {}),
-                      **samples.get(t["id"], {"sample": 0, "sample_reviewed": 0})}
-                     for t in tags]}
+    counts = ml.training_set_counts(conn, tag_ids=[t["id"] for t in tags])
+    return {"data": [{**t, **counts.get(t["id"], {})} for t in tags]}
 
 
-@router.post("/tags/{tag_id}/review-sample")
-def draw_review_sample(
+@router.post("/tags/{tag_id}/draw")
+def draw_training_set(
     tag_id: int, body: dict[str, Any],
     conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
-    """Draw N images at random from one head's tray and write the draw down, so
-    the operator can work through a thousand instead of ten thousand and the set
-    does not shift under them. `replace` throws away an existing draw — a redraw
-    discards a list someone may be halfway through, so it is never implicit."""
+    """Admit N labels of one sign at random and return the rest of that sign to
+    its reserve. Ten thousand negatives is not a reviewable number, so a head
+    trains on a drawn thousand; drawing again replaces the whole set, which
+    discards whatever review the old one had, so the caller confirms first."""
     from toolkit import machine_labeling as ml
 
     try:
-        out = ml.draw_review_sample(
+        out = ml.draw_training_set(
             conn, tag_id=tag_id,
             state=str(body.get("state", "negative")),
             size=int(body.get("size", 1000)),
-            replace=bool(body.get("replace", False)),
         )
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -817,8 +812,7 @@ def locate_training_image(
 @router.get("/training-set")
 def get_training_set(
     tag_id: int, state: str | None = None, in_training: bool | None = None,
-    sampled: bool = False, limit: int = 60, offset: int = 0,
-    conn: Any = Depends(deps.get_db_conn),
+    limit: int = 60, offset: int = 0, conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
     """One page of a head's material. A tray is a state plus, for positives,
     whether the operator has admitted it (`in_training`, migration 484): true is
@@ -829,7 +823,7 @@ def get_training_set(
     try:
         rows = ml.training_set_page(
             conn, tag_id=tag_id, state=state, in_training=in_training,
-            sampled=sampled, limit=limit, offset=offset,
+            limit=limit, offset=offset,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

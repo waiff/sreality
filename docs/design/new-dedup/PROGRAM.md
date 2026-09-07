@@ -174,6 +174,25 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-07 (g) — **One rule for both signs (migration 486).** The operator renamed the trays —
+  *training negative → **negative reserve**, reserve → **positive reserve**, review sample →
+  **training negative*** — and the renaming is a model change, not vocabulary. Read together those
+  lines say `in_training` is a fact about a LABEL, not about a positive. 484 admitted every negative
+  wholesale ("nobody reviews ten thousand negatives" — true observation, wrong conclusion); the
+  right one is to train on a drawn thousand and leave the rest in a reserve exactly as unadmitted
+  positives sit in theirs. **This collapsed a mechanism a few hours old**: 485's `tag_review_samples`
+  existed to remember which thousand were drawn, but "the drawn thousand" IS "the negatives admitted
+  to training", so the draw needs no table — 486 moves that fact into `in_training` and 485's table
+  becomes dead schema awaiting a destructive OK. The write path is symmetric too: a machine write
+  PROPOSES whatever its sign, where before a machine negative was admitted on insert — the asymmetry
+  that made "training negative" mean "everything the model ever rejected". Five trays now come from
+  one expression (`state` + `in_training`), the page derives `inReserve` once instead of comparing
+  against a literal in four places, and pre-rename links still resolve (`reserve` → positive reserve,
+  `sample` → training negative). **The machine/yours marker is gone from the tile and progress
+  counting with it** — the operator, for the second time: *"do not differentiate between what I or
+  machine chose, if review sample has 1000 images, then they are all equal"*. The human-wins upsert
+  rail still holds in the database; it is simply not a thing to read on every photo.
+
 - 2026-09-07 (f) — **The review sample: a drawn thousand that does not move (migration 485).**
   The operator: *"Right now I have to verify thousands of negative images per head. I would like to
   draw a random sample of only 1000 images per head from the current negatives … I would prefer if
