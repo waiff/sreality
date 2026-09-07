@@ -174,6 +174,29 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-07 (c) — **Membership is STORED and the operator's alone (migration 484).** Two models
+  were wrong in opposite directions and the operator named both: 474's `training_target` COMPUTED
+  membership from a rank, so the boundary moved on its own and a reviewed set was never stable;
+  removing the cutoff (#1321) then dumped every reserve positive into the training set, turning a
+  reviewed 300 into an unreviewed 836. Their words: *"I asked you to keep whatever was in the
+  training positive set and I would move images from reserve to the training positive set as I
+  would deem necessary."* So `image_tag_labels.in_training` is a fact about a row: a machine write
+  PROPOSES (lands in reserve, always false for a positive; negatives are admitted wholesale since
+  nobody reviews ten thousand), re-labelling never demotes, and the only deliberate change is the
+  operator's own move (`POST /tags/{id}/training-membership`, chunked). The 484 backfill does NOT
+  replay the old rank: `(source='machine') ASC, created_at ASC` was stable between READS but not
+  across WRITES — confirming one reserve photo made it 'human', moved it to rank ~1 and EVICTED
+  whatever sat at rank 300, a photo already reviewed and accepted (the operator: *"do not split
+  between machine and me, those that were in the training set before needs to be there, I have
+  already reviewed them and they were ok, the rest was in the reserve"*). So the reconstruction is
+  the union of the oldest `target` positives by `created_at` (stable — a re-label cannot change
+  when a row was created) with every positive the operator labeled themself, wherever it ranks
+  (those floated to the front under the old expression, so they were in the set). Four trays:
+  Training · positive / Training · negative / Reserve / Left out; the anyone-machine-yours
+  breakdown is gone at their request. `training_rows` reads admitted rows only, so the page and
+  the DINOv3 trainer cannot disagree. 474's `training_target` is now doubly dead — prune both it
+  and nothing else in a forward migration when a destructive change is OK'd.
+
 - 2026-09-07 (b) — **No limits: a head's training set is every label it has (operator ruling,
   replacing the cutoff).** The operator confirmed a reserve photo on katastrální mapa and saw
   "300/300" unchanged — correct under a capped set (the confirmation swapped it in and pushed

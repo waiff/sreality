@@ -1198,13 +1198,12 @@ export const absorbTagLabelNotes = (
 export interface TrainingSetHead {
   id: number;
   label: string;
+  /* The trays. `positive`/`negative` are what the head TRAINS on (admitted);
+   * `reserve` is positives the operator has not admitted (migration 484). */
   positive: number;
   negative: number;
   excluded: number;
-  machine_positive: number;
-  human_positive: number;
-  machine_negative: number;
-  human_negative: number;
+  reserve: number;
 }
 
 export interface TrainingSetRow {
@@ -1223,7 +1222,18 @@ export interface TrainingSetRow {
    * and changed later. Null when there is none. */
   note_id: number | null;
   note: string | null;
+  /* Does the head train on this label, or is it waiting in the reserve? */
+  in_training: boolean;
 }
+
+/* Move labels into a head's training set, or back to the reserve. */
+export const setTrainingMembership = (
+  tagId: number, imageIds: number[], inTraining: boolean,
+): Promise<{ data: { tag_id: number; in_training: boolean; moved: number[]; requested: number } }> =>
+  request<{ data: { tag_id: number; in_training: boolean; moved: number[]; requested: number } }>(
+    `/new-dedup/labeling/tags/${tagId}/training-membership`,
+    { method: 'POST', json: { image_ids: imageIds, in_training: inTraining }, jwt: true },
+  );
 
 export const listTrainingSetHeads = (): Promise<{ data: TrainingSetHead[] }> =>
   request<{ data: TrainingSetHead[] }>('/new-dedup/labeling/training-set/heads', {
@@ -1233,7 +1243,7 @@ export const listTrainingSetHeads = (): Promise<{ data: TrainingSetHead[] }> =>
 export const listTrainingSet = (params: {
   tag_id: number;
   state?: 'positive' | 'negative' | 'excluded';
-  source?: 'machine' | 'human';
+  in_training?: boolean;
   limit?: number;
   offset?: number;
 }): Promise<{

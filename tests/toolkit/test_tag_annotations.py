@@ -1257,3 +1257,41 @@ def test_routing_categories_make_a_head_and_are_validated() -> None:
         ta.set_routing_categories(conn, tag_id=45, categories=["garaz"])
     with pytest.raises(KeyError):
         ta.set_routing_categories(_Conn(None), tag_id=999, categories=["byt"])
+
+
+def test_a_machine_write_proposes_and_only_a_person_admits() -> None:
+    # Migration 484. A machine pass may propose a positive — it lands in the
+    # reserve — and can never grow the training set on its own. A negative is
+    # admitted either way: nobody reviews ten thousand negatives. And
+    # re-labelling never DEMOTES an admitted row.
+    from toolkit import tag_annotations as ta
+
+    for sql in (ta._UPSERT_STATE_SQL, ta._UPSERT_STATE_RETURNING_SQL):
+        assert "(%(source)s <> 'machine' OR %(state)s = 'negative')" in sql
+        assert "in_training = image_tag_labels.in_training OR excluded.in_training" in sql
+
+
+def test_membership_moves_only_through_the_explicit_call() -> None:
+    import pytest
+
+    from toolkit import tag_annotations as ta
+
+    class _Cur:
+        def __init__(self, rows): self.rows, self.calls = rows, []
+        def __enter__(self): return self
+        def __exit__(self, *a): ...
+        def execute(self, sql, params=None): self.calls.append((sql, params))
+        def fetchall(self): return self.rows
+
+    class _Conn:
+        def __init__(self, rows): self.cur = _Cur(rows)
+        def cursor(self): return self.cur
+
+    conn = _Conn([(11,), (12,)])
+    out = ta.set_training_membership(conn, tag_id=42, image_ids=[11, 12, 11], in_training=True)
+    assert out == {"tag_id": 42, "in_training": True, "moved": [11, 12], "requested": 2}
+    assert conn.cur.calls[0][1]["image_ids"] == [11, 12]      # deduped
+    with pytest.raises(ValueError):
+        ta.set_training_membership(conn, tag_id=42, image_ids=[], in_training=True)
+    with pytest.raises(ValueError):
+        ta.set_training_membership(conn, tag_id=42, image_ids=list(range(300)), in_training=True)

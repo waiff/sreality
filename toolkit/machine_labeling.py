@@ -377,13 +377,12 @@ def draft_pool_counts(
 TRAINING_SOURCES = ("machine", "human", "human_confirmed")
 
 _TRAINING_COUNTS_SQL = f"""
-    SELECT l.tag_id, l.state, (l.source = 'machine') AS is_machine,
-           count(*)::bigint
+    SELECT l.tag_id, l.state, l.in_training, count(*)::bigint
     FROM image_tag_labels l
     WHERE l.tag_id = ANY(%(tag_ids)s::bigint[])
       AND l.source = ANY(%(sources)s::text[])
       {exclusion_for("l")}
-    GROUP BY l.tag_id, l.state, (l.source = 'machine')
+    GROUP BY l.tag_id, l.state, l.in_training
 """
 
 # updated_at alone would reshuffle equal timestamps between pages — a bulk
@@ -391,7 +390,7 @@ _TRAINING_COUNTS_SQL = f"""
 # mandatory tiebreaker, not decoration.
 _TRAINING_PAGE_SQL = f"""
     SELECT l.image_id, i.storage_path, l.state, l.source, l.excluded_reason,
-           l.updated_at, d.version, d.status, nt.id, nt.note
+           l.updated_at, d.version, d.status, nt.id, nt.note, l.in_training
     FROM image_tag_labels l
     JOIN images i ON i.id = l.image_id AND i.storage_path IS NOT NULL
     LEFT JOIN tag_definitions d ON d.id = l.definition_id
@@ -406,9 +405,7 @@ _TRAINING_PAGE_SQL = f"""
     WHERE l.tag_id = %(tag_id)s::bigint
       AND l.source = ANY(%(sources)s::text[])
       AND (%(state)s::text IS NULL OR l.state = %(state)s::text)
-      AND (%(source_class)s::text IS NULL
-           OR (%(source_class)s::text = 'machine' AND l.source = 'machine')
-           OR (%(source_class)s::text = 'human' AND l.source <> 'machine'))
+      AND (%(in_training)s::boolean IS NULL OR l.in_training = %(in_training)s::boolean)
       {exclusion_for("l")}
     ORDER BY l.updated_at DESC, l.image_id DESC
     LIMIT %(limit)s OFFSET %(offset)s
@@ -418,40 +415,39 @@ _TRAINING_PAGE_SQL = f"""
 def training_set_counts(
     conn: psycopg.Connection, *, tag_ids: list[int],
 ) -> dict[int, dict[str, int]]:
-    """Per-head totals split by verdict AND by who decided it, so a head that
-    looks well covered by machine work alone is visibly different from one the
-    operator has personally confirmed."""
-    empty = {"positive": 0, "negative": 0, "excluded": 0,
-             "machine_positive": 0, "human_positive": 0,
-             "machine_negative": 0, "human_negative": 0}
+    """Per head, the size of each tray. Membership is STORED (migration 484), so
+    a count is a count of rows and nothing is derived from a rank."""
+    empty = {"positive": 0, "negative": 0, "excluded": 0, "reserve": 0}
     out = {int(t): dict(empty) for t in tag_ids}
     with conn.cursor() as cur:
         cur.execute(_TRAINING_COUNTS_SQL,
                     {"tag_ids": list(tag_ids), "sources": list(TRAINING_SOURCES)})
-        for tag_id, state, is_machine, count in cur.fetchall():
+        for tag_id, state, in_training, count in cur.fetchall():
             row = out.setdefault(int(tag_id), dict(empty))
-            row[str(state)] = row.get(str(state), 0) + int(count)
-            # A head trains on its human negatives ONLY (tag_holdout.training_label_rows),
-            # so the split matters for negatives too: it is the size of the set.
-            if state in ("positive", "negative"):
-                who = "machine" if is_machine else "human"
-                row[f"{who}_{state}"] += int(count)
+            if state == "excluded":
+                row["excluded"] += int(count)
+            elif in_training:
+                row[str(state)] += int(count)
+            elif state == "positive":
+                # A positive the operator has not admitted: the reserve. A
+                # non-admitted NEGATIVE is not a tray — the backfill admits them
+                # all and nothing un-admits one — so it is deliberately uncounted.
+                row["reserve"] += int(count)
     return out
 
 
 def training_set_page(
     conn: psycopg.Connection, *, tag_id: int, state: str | None = None,
-    source_class: str | None = None, limit: int = 60, offset: int = 0,
+    in_training: bool | None = None, limit: int = 60, offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """One page of a head's training material, newest decision first."""
+    """One page of a head's material, newest decision first. `in_training`
+    picks the tray: True is what the head trains on, False is the reserve."""
     if state is not None and state not in ("positive", "negative", "excluded"):
         raise ValueError(f"state must be positive/negative/excluded, got {state!r}")
-    if source_class is not None and source_class not in ("machine", "human"):
-        raise ValueError(f"source must be machine/human, got {source_class!r}")
     with conn.cursor() as cur:
         cur.execute(_TRAINING_PAGE_SQL, {
             "tag_id": int(tag_id), "sources": list(TRAINING_SOURCES),
-            "state": state, "source_class": source_class,
+            "state": state, "in_training": in_training,
             "limit": max(1, min(int(limit), PAGE_MAX)), "offset": max(0, int(offset)),
         })
         return [
@@ -466,6 +462,7 @@ def training_set_page(
                 "definition_stale": (r[7] is not None and r[7] != "active"),
                 "note_id": int(r[8]) if r[8] is not None else None,
                 "note": r[9],
+                "in_training": bool(r[10]),
             }
             for r in cur.fetchall()
         ]
@@ -488,6 +485,7 @@ _TRAINING_ROWS_SQL = f"""
     WHERE l.tag_id = %(tag_id)s::bigint
       AND l.state = ANY(%(states)s::text[])
       AND l.source = ANY(%(sources)s::text[])
+      AND l.in_training
       {exclusion_for("l")}
     ORDER BY l.image_id
 """
@@ -497,10 +495,11 @@ def training_rows(
     conn: psycopg.Connection, *, tag_id: int,
     states: tuple[str, ...] = ("positive", "negative"),
 ) -> list[tuple[int, str]]:
-    """Every (image_id, state) a probe for this head trains on: all positives
-    and all negatives, human and machine, holdout excluded. Left-outs are not
-    a training state. The second sanctioned door beside
-    tag_holdout.training_label_rows (which reads human labels only)."""
+    """Every (image_id, state) a probe for this head trains on: the ADMITTED
+    positives and negatives (`in_training`, migration 484), holdout excluded.
+    Left-outs are not a training state, and a positive in the reserve is not
+    training material until the operator moves it in — which is the whole point
+    of a reviewed set staying the size it was reviewed at."""
     bad = [x for x in states if x not in ("positive", "negative")]
     if bad:
         raise ValueError(f"not trainable states: {bad}")

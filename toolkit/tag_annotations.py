@@ -261,14 +261,18 @@ def _clean_provenance(
 _UPSERT_STATE_RETURNING_SQL = """
     INSERT INTO image_tag_labels (
       image_id, tag_id, state, created_by, source, definition_id, model,
-      excluded_reason, verified_at
+      excluded_reason, verified_at, in_training
     )
     VALUES (
       %(image_id)s, %(tag_id)s, %(state)s, %(created_by)s, %(source)s,
       (SELECT id FROM tag_definitions
         WHERE tag_id = %(tag_id)s AND status = 'active'),
       %(model)s, %(excluded_reason)s,
-      CASE WHEN %(verified)s THEN now() END
+      CASE WHEN %(verified)s THEN now() END,
+      -- A machine write PROPOSES a label; only a person admits it to the
+      -- training set (migration 484). A negative is admitted either way:
+      -- nobody reviews ten thousand negatives.
+      (%(source)s <> 'machine' OR %(state)s = 'negative')
     )
     ON CONFLICT (image_id, tag_id) DO UPDATE SET
       state = excluded.state,
@@ -277,6 +281,9 @@ _UPSERT_STATE_RETURNING_SQL = """
       model = excluded.model,
       excluded_reason = excluded.excluded_reason,
       verified_at = coalesce(excluded.verified_at, image_tag_labels.verified_at),
+      -- Re-labelling never demotes: a machine pass over an admitted row leaves
+      -- it admitted, and the operator's own write admits it.
+      in_training = image_tag_labels.in_training OR excluded.in_training,
       updated_at = now()
     WHERE excluded.source <> 'machine'
        OR image_tag_labels.source IN ('machine', 'backfill_442', 'human_draft')
@@ -287,14 +294,18 @@ _UPSERT_STATE_RETURNING_SQL = """
 _UPSERT_STATE_SQL = """
     INSERT INTO image_tag_labels (
       image_id, tag_id, state, created_by, source, definition_id, model,
-      excluded_reason, verified_at
+      excluded_reason, verified_at, in_training
     )
     VALUES (
       %(image_id)s, %(tag_id)s, %(state)s, %(created_by)s, %(source)s,
       (SELECT id FROM tag_definitions
         WHERE tag_id = %(tag_id)s AND status = 'active'),
       %(model)s, %(excluded_reason)s,
-      CASE WHEN %(verified)s THEN now() END
+      CASE WHEN %(verified)s THEN now() END,
+      -- A machine write PROPOSES a label; only a person admits it to the
+      -- training set (migration 484). A negative is admitted either way:
+      -- nobody reviews ten thousand negatives.
+      (%(source)s <> 'machine' OR %(state)s = 'negative')
     )
     ON CONFLICT (image_id, tag_id) DO UPDATE SET
       state = excluded.state,
@@ -303,6 +314,9 @@ _UPSERT_STATE_SQL = """
       model = excluded.model,
       excluded_reason = excluded.excluded_reason,
       verified_at = coalesce(excluded.verified_at, image_tag_labels.verified_at),
+      -- Re-labelling never demotes: a machine pass over an admitted row leaves
+      -- it admitted, and the operator's own write admits it.
+      in_training = image_tag_labels.in_training OR excluded.in_training,
       updated_at = now()
     WHERE excluded.source <> 'machine'
        OR image_tag_labels.source IN ('machine', 'backfill_442', 'human_draft')
@@ -426,6 +440,32 @@ def bulk_set_state_for_image(
         "updated": len(ids), "image_id": image_id, "state": state, "source": source,
         "excluded_reason": excluded_reason, "tag_ids": ids,
     }
+
+
+_SET_MEMBERSHIP_SQL = """
+    UPDATE image_tag_labels SET in_training = %(in_training)s, updated_at = now()
+    WHERE image_id = ANY(%(image_ids)s::bigint[]) AND tag_id = %(tag_id)s
+    RETURNING image_id
+"""
+
+
+def set_training_membership(
+    conn: psycopg.Connection, *, tag_id: int, image_ids: list[int], in_training: bool,
+) -> dict[str, Any]:
+    """Move labels into the training set, or back to the reserve. The ONLY way
+    membership changes on purpose: the operator's own hand. A machine pass can
+    propose a label but never admits one (see the upserts above)."""
+    ids = list(dict.fromkeys(int(i) for i in image_ids))
+    if not ids:
+        raise ValueError("no images selected")
+    if len(ids) > BULK_STATE_MAX:
+        raise ValueError(f"at most {BULK_STATE_MAX} images per batch")
+    with conn.cursor() as cur:
+        cur.execute(_SET_MEMBERSHIP_SQL, {
+            "tag_id": int(tag_id), "image_ids": ids, "in_training": bool(in_training)})
+        moved = [int(r[0]) for r in cur.fetchall()]
+    return {"tag_id": int(tag_id), "in_training": bool(in_training),
+            "moved": moved, "requested": len(ids)}
 
 
 def clear_state(conn: psycopg.Connection, *, image_id: int, tag_id: int) -> dict[str, Any]:
