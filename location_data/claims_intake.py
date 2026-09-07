@@ -2049,6 +2049,26 @@ def _resume_point(
 
 # ------------------------------------------------------------------ the run
 
+
+def unknown_readers(
+    entries_by_source: dict[str, list[Entry]], wanted: list[str],
+) -> list[str]:
+    """`entry_id:reader` for every entry naming a reader NO lane implements.
+
+    KNOWN is wider than what THIS lane implements, and the difference is the whole point:
+    an entry naming another lane's reader (`ARCHIVE_ONLY_READERS`, `LLM_ONLY_READERS`) is
+    SKIPPED by `extract_listing`, not refused, because `listings.raw_json` carries nothing
+    for it to read. Only a name in NO registry is a real deploy error. Leaving the two
+    other-lane sets out of the preflight is what took the hourly intake down for all nine
+    portals from 2026-09-06 (the W2-6..W2-12 activation): the runtime loop skipped them
+    correctly and never ran, because the preflight refused first.
+    """
+    known = READERS.keys() | ARCHIVE_ONLY_READERS | LLM_ONLY_READERS
+    return sorted(
+        f"{e.entry_id}:{e.reader}"
+        for s in wanted for e in entries_by_source.get(s, ()) if e.reader and e.reader not in known)
+
+
 def run(
     conn: psycopg.Connection,
     *,
@@ -2081,12 +2101,10 @@ def run(
 
     # Fail fast, before a batch row exists: an unknown reader on one entry would otherwise
     # abort mid-run and leave the batch `failed` for a config problem.
-    unknown = sorted(
-        f"{e.entry_id}:{e.reader}"
-        for s in wanted for e in entries_by_source[s] if e.reader and e.reader not in READERS)
+    unknown = unknown_readers(entries_by_source, wanted)
     if unknown:
         raise IntakeRefused(
-            f"active contract declares readers this extractor does not implement: "
+            f"active contract declares readers no lane implements: "
             f"{', '.join(unknown)}")
 
     # The preflight reads are bounded too. They are small by construction, which is exactly
