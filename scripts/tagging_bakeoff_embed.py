@@ -61,11 +61,14 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Sequence
 
 from scraper import dinov3_tagger, image_storage
+from scripts import pod_bootstrap
 from scripts import tagging_bakeoff_arms as arms_mod
 
 LOG = logging.getLogger("tagging_bakeoff_embed")
 
-DEFAULT_CACHE_DIR = "/workspace/tagging-bakeoff-cache"
+# On the CONTAINER disk, beside the bootstrap's own work dir — never `/workspace`, which
+# is the pod VOLUME's mount point and which these lanes no longer rent (2026-09-08 (h)).
+DEFAULT_CACHE_DIR = f"{pod_bootstrap.CONTAINER_ROOT}/tagging-bakeoff-cache"
 # Big enough that the per-statement overhead disappears, small enough that a killed pod
 # loses at most this much work on the arm it was running.
 WRITE_BATCH = 500

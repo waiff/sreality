@@ -57,17 +57,29 @@ the dispatcher derives it from the payload's own `--max-seconds` plus a startup 
 
 **5. The window is the ceiling; the WATCHDOG is what makes the usual case cheaper.**
 `scripts/pod_watchdog.py` polls the rows this job writes (count for the six-fact identity)
-every 60 s from the runner and terminates the pod in three cases: no vector at all within
+every 60 s from the runner and terminates the pod in four cases: no vector at all within
 `bootstrap_deadline_seconds` (default 1800 — fetch + interpreter + torch + weights + the
-first chunk), no new vector for `stall_deadline_seconds` (default 900), or — in the bake-off
-lane — every arm terminal. It logs which case fired plus a spend estimate, and a
-bootstrap/stall teardown **fails the workflow on purpose**: a green run that embedded nothing
-is exactly what 2026-09-08 looked like. Without `SUPABASE_DB_URL` on the runner there is no
-watchdog and the dispatcher says so loudly.
+first chunk), no new vector for `stall_deadline_seconds` (default 900), two or more `exit=`
+reports from the pod's bootstrap (`case=crash-loop`, which needs the step heartbeats this
+lane does not wire — see below), or — in the bake-off lane — every arm terminal. It logs
+which case fired plus a spend estimate, and a bootstrap/stall/crash-loop teardown **fails the
+workflow on purpose**: a green run that embedded nothing is exactly what 2026-09-08 looked
+like. Without `SUPABASE_DB_URL` on the runner there is no watchdog and the dispatcher says so
+loudly.
+
+**6. The pod works on the CONTAINER disk, and rents no volume.** `container_disk_gb`
+(default **60**, floor 40) has to hold the devel base image, ~5 GB of installed torch and
+the DINOv3 weights. `/workspace` is RunPod's mount point for the pod VOLUME, which used to
+default to 1 GB while the bootstrap installed torch under it — the likeliest cause of the
+sibling lane's third dead pod (2026-09-08 (h)). The bootstrap works in `/opt/podboot`, the
+launch asks for `volumeInGb: 0`, and a `step=disk <N>GB free` heartbeat lands right before
+the torch step. **The pod also never exits**: RunPod re-runs the start command when it does,
+so the bootstrap is idempotent and ends in a sleep; the watchdog ends the pod.
 
 **THE STEP HEARTBEATS ARE NOT WIRED IN THIS LANE (yet), and that is a decision.** Since
-2026-09-08 (g) the shared bootstrap reports every step (`deps`/`fetch`/`uv`/`venv`/`torch`/
-`repo`/`payload`) and ships `exit=<code> step=<name>` plus a log tail from an EXIT trap —
+2026-09-08 (g) the shared bootstrap reports every step (`deps`/`fetch`/`uv`/`venv`/`disk`/
+`torch`/`repo`/`payload`/`idle`) and ships `pass=<n> exit=<code> step=<name>` plus a log tail
+from an EXIT trap, as a bounded history a restart loop cannot overwrite (h) —
 but only into the row a lane names for it, through the `HEARTBEAT_SQL` + `HEARTBEAT_RUN_ID`
 pair the dispatcher puts in the pod's env. The bake-off has such a row
 (`dedup_sim.tag_head_bakeoff_runs.note`); **this lane has none** — its progress record is

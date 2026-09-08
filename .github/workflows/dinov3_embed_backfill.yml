@@ -31,6 +31,13 @@ name: "NEW DEDUP: DINOv3 corpus embedding (RunPod)"
 # sibling bake-off lane paid 8,115s of rent for zero vectors on 2026-09-08 for want of
 # it. A watchdog teardown FAILS this job on purpose.
 #
+# THE POD WORKS ON THE CONTAINER DISK, NOT ON /workspace. /workspace is RunPod's mount
+# point for the pod VOLUME, which used to default to 1 GB while a ~5 GB torch install
+# was pointed at it — the likeliest cause of the sibling lane's third failed pod. The
+# bootstrap now works in /opt/podboot, this lane rents no volume, and container_disk_gb
+# is the knob. The bootstrap is also idempotent and ends in a sleep rather than an exit,
+# because RunPod re-runs the start command whenever it exits.
+#
 # Requires migration 480 (PR #1296) to have been applied — the table does not exist
 # otherwise.
 #
@@ -77,6 +84,11 @@ on:
         description: "Kill the pod if a working pod stops writing vectors for this long."
         required: false
         default: "900"
+        type: string
+      container_disk_gb:
+        description: "The pod's CONTAINER disk in GB — where the bootstrap works (/opt/podboot). It must hold the base image, ~5GB of installed torch and the DINOv3 weights. No pod volume is rented: /workspace was a 1GB volume and a 5GB install aimed at it is what killed the sibling lane's 2026-09-08 pod. Minimum 40."
+        required: false
+        default: "60"
         type: string
       dry_run:
         description: "Print the resolved identity, the pending count and the pod plan. Launches nothing, writes nothing, spends nothing."
@@ -127,6 +139,7 @@ jobs:
           JOB_MAX_SECONDS: ${{ inputs.job_max_seconds }}
           BOOTSTRAP_DEADLINE_SECONDS: ${{ inputs.bootstrap_deadline_seconds }}
           STALL_DEADLINE_SECONDS: ${{ inputs.stall_deadline_seconds }}
+          CONTAINER_DISK_GB: ${{ inputs.container_disk_gb }}
           DRY_RUN: ${{ inputs.dry_run }}
         # Inputs travel via env and are case-validated before use, never interpolated
         # into the shell by ${{ }}.
@@ -156,11 +169,15 @@ jobs:
           case "${STALL_DEADLINE_SECONDS:-900}" in
             ''|*[!0-9]*) echo "::error::stall_deadline_seconds must be a number"; exit 1 ;;
           esac
+          case "${CONTAINER_DISK_GB:-60}" in
+            ''|*[!0-9]*) echo "::error::container_disk_gb must be a number"; exit 1 ;;
+          esac
           ARGS="--max-write-mb-per-hour ${MAX_WRITE_MB_PER_HOUR} --limit ${LIMIT:-20000}"
           ARGS="${ARGS} --shard ${SHARD:-0} --shards ${SHARDS:-1} --workers ${WORKERS:-16}"
           ARGS="${ARGS} --job-max-seconds ${JOB_MAX_SECONDS:-3600}"
           ARGS="${ARGS} --bootstrap-deadline-s ${BOOTSTRAP_DEADLINE_SECONDS:-1800}"
           ARGS="${ARGS} --stall-deadline-s ${STALL_DEADLINE_SECONDS:-900}"
+          ARGS="${ARGS} --container-disk-gb ${CONTAINER_DISK_GB:-60}"
           if [ "${DRY_RUN:-true}" = "true" ]; then ARGS="${ARGS} --dry-run"; fi
           echo "python -m scripts.dinov3_embed_dispatch ${ARGS}"
           python -m scripts.dinov3_embed_dispatch ${ARGS}

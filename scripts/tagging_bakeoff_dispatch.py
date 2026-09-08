@@ -49,6 +49,7 @@ Usage:  python -m scripts.tagging_bakeoff_dispatch --stage embed --run-id 7 --dr
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -85,6 +86,15 @@ MAX_PRICE_PER_HR = 1.00
 # Clone + `pip install -e .[clip]` + the first weight download, before image one is
 # embedded. The wait window must cover it on top of the payload's own budget.
 STARTUP_GRACE_S = 900
+
+# THE DISK THE JOB ACTUALLY RUNS ON (2026-09-08 (h)). The bootstrap works in
+# `/opt/podboot` on the CONTAINER disk, so this number has to cover the devel base image
+# (>20 GB on its own) plus ~5 GB of installed torch, the model weights each arm
+# downloads, and the ~1 GB local image cache. `/workspace` is the pod VOLUME and this
+# lane rents none: a 1 GB volume under a 5 GB install is what the last pod died of.
+DEFAULT_CONTAINER_DISK_GB = 60
+MIN_CONTAINER_DISK_GB = 40
+POD_VOLUME_GB = 0
 
 # Credentials the pod payload needs. Names only ever appear in logs; values go in the
 # REST body.
@@ -133,18 +143,23 @@ _RUN_NOTE_SQL = """
 # here, not in the pod script, because the reporter must stay lane-agnostic: it knows a
 # note and a run id, never a table.
 #
-# LATEST-WINS, ONE LINE: the regexp drops any previous `pod step` line, so the note holds
-# the newest step (or, from the EXIT trap, the failing step plus a tail of the bootstrap
-# log) and never grows. Everything else — the manifest's text, the payload's own
-# `pod booted` / `pod alive` lines — is preserved.
+# ONE LINE, A BOUNDED HISTORY (2026-09-08 (h)): the regexp drops the previous
+# `pod steps` line and the reporter re-sends the whole bounded array, so the note holds
+# the last few records — including the FIRST `exit=` report, which a latest-wins single
+# line let a restart loop overwrite before anyone read it. `left()` now bounds the REST
+# of the note (the manifest's text, the payload's `pod booted` / `pod alive` lines)
+# rather than the heartbeat itself, so the record we came for is never the part cut.
+# `steps?` matches the pre-(h) marker too, so a note written by an older pod is replaced
+# rather than accumulated beside the new one.
 POD_HEARTBEAT_SQL = r"""
     UPDATE dedup_sim.tag_head_bakeoff_runs
     SET note = left(
-        regexp_replace(coalesce(note, ''), '(^|\n)pod step [^\n]*', '', 'g')
-        || E'\n' || %(note)s, 8000)
+        regexp_replace(coalesce(note, ''), '(^|\n)pod steps? [^\n]*', '', 'g'),
+        6000) || E'\n' || %(note)s
     WHERE id = %(run_id)s
 """
 
+STEPS_PREFIX = "pod steps "
 STEP_PREFIX = "pod step "
 
 _ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)?")
@@ -196,14 +211,34 @@ def _latest_iso(texts: Sequence[str | None]) -> str:
     return max(stamps) if stamps else ""
 
 
-def _last_step(run_note: str | None) -> str:
-    """The bootstrap's newest step line, verbatim (JSON: timestamp, message, pod name,
-    python version — and from the EXIT trap the code plus a tail of the bootstrap log).
-    Empty before the first one."""
+def _steps(run_note: str | None) -> list[str]:
+    """The bootstrap's heartbeat records, oldest first, each verbatim JSON (timestamp,
+    message with its pass number, pod name, python version — and from the EXIT trap the
+    code plus a tail of the bootstrap log).
+
+    Since 2026-09-08 (h) the reporter writes a bounded ARRAY under one `pod steps` marker,
+    so a crash loop cannot overwrite the report that explains it. A `pod step` line is the
+    pre-(h) single-record form and is still read, so this dispatcher can watch a pod
+    launched from an older ref."""
     for line in reversed((run_note or "").splitlines()):
+        if line.startswith(STEPS_PREFIX):
+            try:
+                records = json.loads(line[len(STEPS_PREFIX):])
+            except ValueError:  # a truncated array is still worth showing verbatim
+                return [line[len(STEPS_PREFIX):]]
+            if isinstance(records, list):
+                return [json.dumps(r, ensure_ascii=False) for r in records
+                        if isinstance(r, dict)]
+            return [line[len(STEPS_PREFIX):]]
         if line.startswith(STEP_PREFIX):
-            return line[len(STEP_PREFIX):]
-    return ""
+            return [line[len(STEP_PREFIX):]]
+    return []
+
+
+def _last_step(run_note: str | None) -> str:
+    """The newest heartbeat record, or '' before the first one."""
+    steps = _steps(run_note)
+    return steps[-1] if steps else ""
 
 
 def _boot_at(run_note: str | None) -> datetime | None:
@@ -253,14 +288,15 @@ def read_bakeoff_progress(conn: Any, *, run_id: int, only: Sequence[str],
     # The bootstrap's step line carries its own ISO stamp, so `heartbeat` (and with it
     # the marker) advances through fetch/uv/venv/torch/repo — the phases that used to
     # look exactly like a dead pod from here.
-    step = _last_step(run_note)
+    steps = _steps(run_note)
     return Progress(
         booted=fresh_boot or vectors > baseline_vectors,
         marker=f"{vectors}|{heartbeat}",
         terminal=terminal,
         detail=(f"{vectors} vectors, arms {done}/{len(considered)} terminal, "
                 f"heartbeat {heartbeat or 'none'}"),
-        step=step[:1500],
+        step=(steps[-1] if steps else "")[:1500],
+        steps=tuple(record[:2000] for record in steps),
     )
 
 
@@ -362,6 +398,10 @@ def _run_pod(plan: Plan, args: argparse.Namespace) -> int:
                       if s.strip())
     LOG.info("image=%s ref=%s max_wait_s=%.0f gpu_allowlist=%s",
              args.image, args.ref, plan.max_wait_s, ",".join(allowlist) or "(none)")
+    LOG.info("container_disk_gb=%d volume_gb=%d (the bootstrap works in %s on the "
+             "CONTAINER disk; %s is the volume this lane does not rent)",
+             args.container_disk_gb, POD_VOLUME_GB, pod_bootstrap.CONTAINER_ROOT,
+             pod_bootstrap.VOLUME_MOUNT_PATH)
     LOG.info("pod env keys present: %s", ",".join(sorted(env)) or "(none)")
     if missing:
         LOG.warning("pod env keys MISSING (the pod will no-op or fail): %s",
@@ -408,7 +448,8 @@ def _run_pod(plan: Plan, args: argparse.Namespace) -> int:
             env=env,
             max_wait_s=plan.max_wait_s,
             poll_interval_s=30,
-            container_disk_gb=60,
+            container_disk_gb=args.container_disk_gb,
+            volume_gb=POD_VOLUME_GB,
             progress=watchdog,
         )
     except NoCapacityError as exc:
@@ -516,6 +557,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                    help="Git ref the pod fetches BY SHA. Defaults to GITHUB_SHA in "
                         "Actions.")
     p.add_argument("--image", default=DEFAULT_IMAGE)
+    p.add_argument("--container-disk-gb", type=int, default=DEFAULT_CONTAINER_DISK_GB,
+                   help="embed: the pod's CONTAINER disk, which is where the bootstrap "
+                        "works. It must hold the base image, ~5GB of torch, the arm "
+                        "weights and the local image cache. No pod volume is rented "
+                        f"(minimum {MIN_CONTAINER_DISK_GB}GB).")
     p.add_argument("--gpu-allowlist", default=",".join(DEFAULT_GPU_ALLOWLIST))
     p.add_argument("--dry-run", action="store_true",
                    help="Print the resolved plan. The manifest stage still runs (its "
@@ -524,6 +570,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    if args.container_disk_gb < MIN_CONTAINER_DISK_GB:
+        LOG.error("--container-disk-gb=%d is below the %dGB floor: torch alone installs "
+                  "~5GB and the base image is larger than that (2026-09-08 (h))",
+                  args.container_disk_gb, MIN_CONTAINER_DISK_GB)
+        return 2
 
     try:
         plan = plan_stage(args)

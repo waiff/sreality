@@ -14,6 +14,16 @@ and the watchdog's verdict could only ever be "the pod never reported Python run
 Now every step reports, and the EXIT trap ships the failing step plus the tail of the
 bootstrap log into the same row.
 
+A CRASH LOOP MUST NOT ERASE ITS OWN EVIDENCE (pod `lg5oy1ivlgoyh7`, 2026-09-08 (h)).
+This file used to write ONE line, latest-wins, so when RunPod restarted the start command
+the second pass's `step=deps ok` overwrote the first pass's `exit=… step=torch` report
+before the runner's 60 s poll ever saw it — the one line that would have named the cause.
+It now keeps a BOUNDED HISTORY: the last `HISTORY_LIMIT` records as a JSON array under a
+single `pod steps [...]` marker, in which the FIRST `exit=` record is never dropped and is
+the last tail sacrificed to the size cap. Staleness is answered by the per-record `ts` and
+`pass=N`, not by erasure. The history lives in a file on the pod's own disk
+(`PODBOOT_HISTORY`), which is what makes it survive the restart it exists to describe.
+
 GENERIC BY CONSTRUCTION. It knows no table: `HEARTBEAT_SQL` carries an UPDATE with
 `%(note)s` and `%(run_id)s` placeholders and `HEARTBEAT_RUN_ID` names the row, both
 delivered in the pod's REST-body env by whichever lane launched it. With either absent
@@ -32,12 +42,21 @@ import socket
 import sys
 from datetime import datetime, timezone
 
-# One line, one row, latest-wins: the lane's UPDATE replaces any previous line carrying
-# this prefix, so the note holds the newest step and never grows without bound.
-LINE_PREFIX = "pod step "
+# One line, one row: the lane's UPDATE replaces any previous line carrying this prefix,
+# so the note holds the current bounded history and never grows without bound.
+LINE_PREFIX = "pod steps "
+# The legacy single-record marker. Kept only so a lane's UPDATE and the watchdog can
+# still recognise a note written by a pod launched before 2026-09-08 (h).
+LEGACY_LINE_PREFIX = "pod step "
 # Enough of the log to carry a pip resolver error or a git failure, small enough to sit
 # in a note beside the lane's own text.
 TAIL_CHARS = 3000
+# How many records the note carries. Eight covers a whole bootstrap (start → deps →
+# fetch → uv → venv → disk → torch → repo) or two short crash-loop passes.
+HISTORY_LIMIT = 8
+# The whole line's ceiling. The lane's UPDATE keeps this line intact and truncates the
+# rest of the note, so this is what "bounded" actually means.
+MAX_LINE_CHARS = 7000
 
 
 def _tail(path: str, limit: int = TAIL_CHARS) -> str:
@@ -52,10 +71,9 @@ def _tail(path: str, limit: int = TAIL_CHARS) -> str:
         return f"<log unreadable: {exc!r}>"
 
 
-def build_line(message: str, *, tail: str = "") -> str:
-    """The single line written into the note. JSON so an error tail's newlines and
-    quotes cannot break the one-line-per-heartbeat contract the UPDATE relies on."""
-    record = {
+def build_record(message: str, *, tail: str = "") -> dict[str, object]:
+    """One heartbeat: what was said, when, by which pod, on which interpreter."""
+    record: dict[str, object] = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "msg": message,
         "pod": os.environ.get("RUNPOD_POD_ID") or socket.gethostname(),
@@ -63,7 +81,75 @@ def build_line(message: str, *, tail: str = "") -> str:
     }
     if tail:
         record["tail"] = tail
-    return LINE_PREFIX + json.dumps(record, ensure_ascii=False)
+    return record
+
+
+def _is_exit(record: dict[str, object]) -> bool:
+    return "exit=" in str(record.get("msg", ""))
+
+
+def trim(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    """The last `HISTORY_LIMIT` records, except that the FIRST `exit=` report is always
+    among them — it names the original cause, and everything after it is a symptom."""
+    if len(records) <= HISTORY_LIMIT:
+        return list(records)
+    first_exit = next((i for i, r in enumerate(records) if _is_exit(r)), None)
+    recent = records[-HISTORY_LIMIT:]
+    if first_exit is None or records[first_exit] in recent:
+        return recent
+    return [records[first_exit]] + recent[1:]
+
+
+def build_line(records: list[dict[str, object]]) -> str:
+    """The single line written into the note: `pod steps [<json array>]`, JSON so an
+    error tail's newlines and quotes cannot break the one-line-per-note contract.
+
+    Over the size cap the tails go first, OLDEST symptom first — so what survives is the
+    original cause and the most recent evidence — and the first `exit=` report's tail is
+    the last thing surrendered."""
+    kept = [dict(r) for r in trim(records)]
+    line = LINE_PREFIX + json.dumps(kept, ensure_ascii=False)
+    if len(line) <= MAX_LINE_CHARS:
+        return line
+    keep = next((i for i, r in enumerate(kept) if _is_exit(r)), None)
+    for i in range(len(kept)):
+        if len(line) <= MAX_LINE_CHARS:
+            return line
+        if i == keep:
+            continue
+        kept[i].pop("tail", None)
+        line = LINE_PREFIX + json.dumps(kept, ensure_ascii=False)
+    # Only the original cause's tail is left; keep its END, which is where the error is.
+    while len(line) > MAX_LINE_CHARS and keep is not None and kept[keep].get("tail"):
+        tail = str(kept[keep]["tail"])
+        kept[keep]["tail"] = tail[len(tail) // 2:] if len(tail) > 200 else ""
+        if not kept[keep]["tail"]:
+            kept[keep].pop("tail", None)
+        line = LINE_PREFIX + json.dumps(kept, ensure_ascii=False)
+    return line
+
+
+def load_history(path: str) -> list[dict[str, object]]:
+    """Previous records, or none. A history we cannot read is not a reason to stop
+    reporting — it only costs the record of what came before."""
+    if not path:
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:  # noqa: BLE001 - first call, or a half-written file
+        return []
+    return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+
+
+def save_history(path: str, records: list[dict[str, object]]) -> None:
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(records, fh, ensure_ascii=False)
+    except Exception:  # noqa: BLE001 - see the module docstring: never fatal
+        pass
 
 
 def report(line: str) -> str:
@@ -98,8 +184,12 @@ def main(argv: list[str] | None = None) -> int:
             tail_path = args.pop(0)
         else:
             words.append(arg)
-    line = build_line(" ".join(words), tail=_tail(tail_path) if tail_path else "")
-    print(f"heartbeat: {line[:4000]}")
+    history_path = os.environ.get("PODBOOT_HISTORY", "")
+    record = build_record(" ".join(words), tail=_tail(tail_path) if tail_path else "")
+    records = trim(load_history(history_path) + [record])
+    save_history(history_path, records)
+    line = build_line(records)
+    print(f"heartbeat: {json.dumps(record, ensure_ascii=False)[:4000]}")
     print(f"heartbeat: {report(line)}")
     return 0
 

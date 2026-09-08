@@ -137,7 +137,7 @@ class RunPodClient:
         gpu_type_id: str,
         start_cmd: list[str],
         container_disk_gb: int = 10,
-        volume_gb: int = 1,
+        volume_gb: int = 0,
         cloud_type: str = "COMMUNITY",
         env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
@@ -145,6 +145,16 @@ class RunPodClient:
         credentials inside the pod (SUPABASE_DB_URL, R2_*, HF_TOKEN) and there is no
         other channel: a start_cmd is argv, visible in the pod record, so secrets do
         not belong there.
+
+        TWO DISKS, AND THEY ARE NOT INTERCHANGEABLE. `containerDiskInGb` is the
+        container's own filesystem — the base image, anything installed into it, and
+        `/opt/podboot` where the bootstrap works. `volumeInGb` is a separate persistent
+        volume RunPod mounts at `/workspace`, and it DEFAULTED TO 1 GB here while
+        `scripts/pod_bootstrap.py` put a ~5 GB torch install under `/workspace`. That is
+        the likeliest cause of the 2026-09-08 (h) pod dying at `step=torch` in under
+        100 s. The default is now 0 — these jobs keep nothing between pods (their
+        durable state is Postgres and R2), so a volume buys nothing and can only be the
+        wrong size. Never raise it to give a job room: size `container_disk_gb`.
 
         Shape: the REST API (rest.runpod.io/v1, what this client uses for pod CRUD)
         takes `env` as a JSON OBJECT — `{"KEY": "value"}` — not the `[{key, value}]`
@@ -268,7 +278,7 @@ class RunPodClient:
         max_wait_s: float = 600.0,
         poll_interval_s: float = 10.0,
         container_disk_gb: int = 10,
-        volume_gb: int = 1,
+        volume_gb: int = 0,
         env: dict[str, str] | None = None,
         progress: Callable[[float, PodContext | None], str | None] | None = None,
     ) -> JobResult:
@@ -327,7 +337,7 @@ class RunPodClient:
         max_wait_s: float = 600.0,
         poll_interval_s: float = 10.0,
         container_disk_gb: int = 10,
-        volume_gb: int = 1,
+        volume_gb: int = 0,
         env: dict[str, str] | None = None,
         progress: Callable[[float, PodContext | None], str | None] | None = None,
     ) -> JobResult:

@@ -87,6 +87,15 @@ _REF_RE = pod_bootstrap._REF_RE
 # mid-job. (The watchdog is what handles a startup that never finishes.)
 STARTUP_GRACE_S = 900
 
+# THE DISK THE JOB ACTUALLY RUNS ON (2026-09-08 (h)). The bootstrap works in
+# `/opt/podboot` on the CONTAINER disk, so this must hold the devel base image (>20 GB),
+# ~5 GB of installed torch and the DINOv3 weights. `/workspace` is the pod VOLUME, which
+# defaulted to 1 GB and which this lane rents none of — the sibling lane's pod died at
+# `step=torch` in under 100 s with a 5 GB install pointed at a 1 GB volume.
+DEFAULT_CONTAINER_DISK_GB = 60
+MIN_CONTAINER_DISK_GB = 40
+POD_VOLUME_GB = 0
+
 # The watchdog's own read budget. Deliberately far below the payload's 300s: this
 # question is asked once a minute beside a live production database and its answer is
 # only worth having if it is prompt.
@@ -230,6 +239,11 @@ def main() -> int:
                    help="Git ref the pod fetches BY SHA. Defaults to GITHUB_SHA in "
                         "Actions.")
     p.add_argument("--image", default=DEFAULT_IMAGE)
+    p.add_argument("--container-disk-gb", type=int, default=DEFAULT_CONTAINER_DISK_GB,
+                   help="The pod's CONTAINER disk, which is where the bootstrap works. "
+                        "It must hold the base image, ~5GB of torch and the model "
+                        "weights. No pod volume is rented (minimum "
+                        f"{MIN_CONTAINER_DISK_GB}GB).")
     p.add_argument("--gpu-allowlist", default=",".join(DEFAULT_GPU_ALLOWLIST),
                    help="Comma-separated substrings of preferred GPU ids/names. "
                         "Empty = price-ranked catalog only (not recommended).")
@@ -239,6 +253,12 @@ def main() -> int:
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    if args.container_disk_gb < MIN_CONTAINER_DISK_GB:
+        LOG.error("--container-disk-gb=%d is below the %dGB floor: torch alone installs "
+                  "~5GB and the base image is larger than that (2026-09-08 (h))",
+                  args.container_disk_gb, MIN_CONTAINER_DISK_GB)
+        return 2
 
     # Refuse before spending a cent if the encoder is still under-specified: a pod that
     # launches only to raise on the config is $0.22/hr of nothing.
@@ -266,6 +286,10 @@ def main() -> int:
 
     LOG.info("image=%s ref=%s max_wait_s=%.0f gpu_allowlist=%s",
              args.image, args.ref, max_wait_s, ",".join(allowlist) or "(none)")
+    LOG.info("container_disk_gb=%d volume_gb=%d (the bootstrap works in %s on the "
+             "CONTAINER disk; %s is the volume this lane does not rent)",
+             args.container_disk_gb, POD_VOLUME_GB, pod_bootstrap.CONTAINER_ROOT,
+             pod_bootstrap.VOLUME_MOUNT_PATH)
     LOG.info("pod env keys present: %s", ",".join(sorted(env)) or "(none)")
     if missing:
         LOG.warning("pod env keys MISSING (the pod will no-op or fail): %s", ",".join(missing))
@@ -309,7 +333,8 @@ def main() -> int:
             env=env,
             max_wait_s=max_wait_s,
             poll_interval_s=30,
-            container_disk_gb=40,
+            container_disk_gb=args.container_disk_gb,
+            volume_gb=POD_VOLUME_GB,
             progress=watchdog,
         )
     except NoCapacityError as exc:

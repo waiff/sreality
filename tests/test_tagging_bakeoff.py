@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from scripts.pod_watchdog import PodWatchdog
 from scripts import tagging_bakeoff_arms as arms_mod
 from scripts import tagging_bakeoff_dispatch as dispatch
 from scripts import tagging_bakeoff_embed as embed
@@ -681,6 +682,60 @@ def test_the_exit_trap_s_error_tail_is_what_the_dispatcher_reads_back():
                                              launched_at=LAUNCHED, baseline_vectors=0)
     assert "exit=1 step=repo" in reading.step
     assert "No matching distribution" in reading.step
+
+
+def test_the_whole_bounded_history_reaches_the_watchdog_not_only_the_newest(monkeypatch):
+    # Since 2026-09-08 (h) the pod writes an ARRAY under one `pod steps` marker, because
+    # a latest-wins single line let a restart loop overwrite the report naming the cause.
+    records = [{"ts": "2026-09-08T18:30:34+00:00", "msg": "pass=1 step=venv ok"},
+               {"ts": "2026-09-08T18:30:40+00:00", "msg": "pass=1 exit=1 step=torch",
+                "tail": "No space left on device"},
+               {"ts": "2026-09-08T18:32:16+00:00", "msg": "pass=2 exit=3 step=fetch",
+                "tail": "error: remote origin already exists"}]
+    note = "manifest: 15 heads\npod steps " + json.dumps(records)
+    conn = _progress_conn(arms=[("a", "pending", None, 0)], run_note=note)
+    reading = dispatch.read_bakeoff_progress(conn, run_id=1, only=[],
+                                             launched_at=LAUNCHED, baseline_vectors=0)
+    assert len(reading.steps) == 3
+    assert "No space left on device" in reading.steps[1]
+    assert "pass=2 exit=3 step=fetch" in reading.steps[2]
+    assert reading.step == reading.steps[-1]
+    # And the watchdog reads a crash loop out of it, on the first poll.
+    watchdog = PodWatchdog(lambda: reading, bootstrap_deadline_s=1800,
+                           stall_deadline_s=900, poll_interval_s=60)
+    stop = watchdog(60.0)
+    assert watchdog.verdict == "crash-loop"
+    assert "No space left on device" in stop
+
+
+def test_the_heartbeat_update_keeps_the_history_and_truncates_the_rest(monkeypatch):
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgres://secret")
+    sql = dispatch.pod_env(run_id=7)["HEARTBEAT_SQL"]
+    # `steps?` so a pre-(h) `pod step` line is replaced rather than left beside the array.
+    assert "pod steps? " in sql
+    # The 8000-char cap used to be able to cut the heartbeat itself; now `left()` bounds
+    # the note's OTHER lines and the record we came for is always appended whole.
+    assert "left(" in sql and sql.index("left(") < sql.index("regexp_replace")
+    assert sql.rstrip().endswith("WHERE id = %(run_id)s")
+    assert "6000) || E'\\n' || %(note)s" in sql
+
+
+def test_the_image_cache_lands_on_the_container_disk_too():
+    # The ~1GB cache followed the bootstrap onto /workspace, which is the pod VOLUME's
+    # mount point and which neither lane rents any more.
+    from scripts import pod_bootstrap
+
+    assert embed.DEFAULT_CACHE_DIR.startswith(pod_bootstrap.CONTAINER_ROOT)
+    assert not embed.DEFAULT_CACHE_DIR.startswith(pod_bootstrap.VOLUME_MOUNT_PATH)
+
+
+def test_the_container_disk_has_a_floor_and_the_pod_rents_no_volume(caplog):
+    assert dispatch.POD_VOLUME_GB == 0
+    assert dispatch.DEFAULT_CONTAINER_DISK_GB >= dispatch.MIN_CONTAINER_DISK_GB >= 40
+    with caplog.at_level("ERROR"):
+        rc = dispatch.main(["--stage", "embed", "--run-id", "7", "--dry-run",
+                            "--container-disk-gb", "10"])
+    assert rc == 2 and "below the 40GB floor" in caplog.text
 
 
 def test_a_dry_run_proves_the_generated_bootstrap_before_a_pod_is_rented(monkeypatch,
