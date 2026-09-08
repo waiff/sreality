@@ -32,8 +32,17 @@ counter, `note`/`rus`/`rusReply`).
 
 **Data source (bazos.cz).** A separate HTML crawler (`scraper/bazos_client.py`,
 `bazos_parser.py`, `bazos_main.py`) lands bazos listings into the same
-`listings`/`listing_snapshots` contract, tagged `source='bazos'`. It walks 14 nationwide
-scopes (byt/dum/chata/restaurace/kancelar/prostory/sklad × prodam/pronajmu), so — like
+`listings`/`listing_snapshots` contract, tagged `source='bazos'`. It walks 22 nationwide
+scopes (byt/dum/chata/restaurace/kancelar/prostory/sklad/pozemek/zahrada/garaz/ostatni ×
+prodam/pronajmu). The last four closed a **silent** four-year coverage gap: migration 160
+deferred pozemek/garaz/ostatni ("left out for now") and never named zahrada at all, so ads
+filed in those sections were never enqueued — no error, no failed fetch, nothing in
+`scrape_runs`, because a section the walk never requests cannot fail. Migration 488 added
+them; `tests/scraper/test_portal_category_coverage.py` now fails CI whenever a parser's
+`CATEGORY_MAIN` knows a slug the walk doesn't ask for. Still excluded on purpose: `projekty`
+("Nové projekty" — developer marketing that also appears under byt/dum, and no other portal
+in the fleet carries such a category) and the rent-only `podnajem`/`ubytovani` (roommate
+search and short-term lodging classifieds, not the sale or rental of a property). So — like
 sreality/idnes (rule #19) — it is **cadence-split**: `bazos_index_walk.yml` (every 6h, full
 walk + mark_inactive + enqueue) feeds the bounded `bazos_detail_drain.yml` (hourly,
 `--max-seconds` budget). A combined run can't do both inside one job (~1500 index pages ≈

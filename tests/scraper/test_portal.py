@@ -69,13 +69,17 @@ def test_default_config_bazos():
     assert cfg.supports_complete_walk is True
     assert cfg.split_threshold is None
     assert cfg.splits is False
-    # byt + houses (dum/chata) + commercial (restaurace/kancelar/prostory/sklad)
-    # × sale + rent. The fine sections carry the subtype; the sweep is
-    # subtype-scoped so same-category_main sections don't flip each other.
-    assert len(cfg.categories) == 14
+    # Every bazos property section × sale + rent. The fine sections carry the
+    # subtype; the nomination is subtype-scoped so same-category_main sections
+    # don't nominate each other.
+    assert len(cfg.categories) == 22
     assert {"sale_type": "prodam", "category": "byt"} in cfg.categories
     assert {"sale_type": "prodam", "category": "chata"} in cfg.categories
     assert {"sale_type": "pronajmu", "category": "kancelar"} in cfg.categories
+    # migration 488: the four sections migration 160 deferred and never revisited
+    for cat in ("pozemek", "zahrada", "garaz", "ostatni"):
+        assert {"sale_type": "prodam", "category": cat} in cfg.categories
+        assert {"sale_type": "pronajmu", "category": cat} in cfg.categories
 
 
 def test_default_config_idnes():

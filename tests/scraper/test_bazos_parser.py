@@ -354,7 +354,11 @@ def test_parse_detail_subtype_from_fine_section_breadcrumb():
         "sklad": ("komercni", "sklad"),
         "prostory": ("komercni", "obchodni_prostor"),
         "restaurace": ("komercni", "restaurace"),
+        "zahrada": ("pozemek", "zahrada"),
+        "garaz": ("ostatni", "garaz"),
         "dum": ("dum", None),          # generic house section — no subtype
+        "pozemek": ("pozemek", None),  # generic land section — no subtype
+        "ostatni": ("ostatni", None),  # generic "other" section — no subtype
         "byt": ("byt", None),
     }
     for section, (cm, sub) in cases.items():

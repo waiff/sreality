@@ -374,15 +374,22 @@ _DEFAULTS: dict[str, PortalConfig] = {
         # provable-complete; the per-walk completeness guard + the 12h sweep
         # throttle (migration 113) keep delisting inference safe.
         supports_complete_walk=True,
-        # byt + houses (dum/chata) + commercial (restaurace/kancelar/prostory/
-        # sklad) × sale + rent. The fine sections collapse onto one category_main,
-        # so the sweep is subtype-scoped (BazosPortal.mark_inactive). Mirrors the
-        # DB registry (migration 158). pozemek / garaz / ostatni are one-line adds.
+        # Every bazos property section × sale + rent (migration 488 closed the gap
+        # migration 160 deferred: pozemek/zahrada/garaz/ostatni were never walked,
+        # so ads filed there were never enqueued — silently, for months). The fine
+        # sections collapse onto one category_main (chata+dum, the four commercial,
+        # pozemek+zahrada, garaz+ostatni), so the presence nomination is
+        # subtype-scoped (BazosPortal.presence_candidates). Mirrors the DB registry.
+        # Still out by choice: "projekty" (Nové projekty — developer marketing that
+        # also appears under byt/dum; no other portal has such a category) and the
+        # rent-only "podnajem"/"ubytovani" (roommate + short-term lodging ads, not
+        # a property sale or rental).
         categories=[
             {"sale_type": st, "category": cat}
             for st in ("prodam", "pronajmu")
             for cat in ("byt", "dum", "chata", "restaurace",
-                        "kancelar", "prostory", "sklad")
+                        "kancelar", "prostory", "sklad",
+                        "pozemek", "zahrada", "garaz", "ostatni")
         ],
         split_threshold=None,
         # detail_rate 0.6 is the politeness ceiling (req/s); 4 workers share that
