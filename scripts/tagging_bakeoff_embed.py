@@ -168,6 +168,27 @@ class SimpleEncoder:
                 f"model output has no usable tensor for pooling={self.pooling!r}")
         return pooled
 
+    def _process(self, batch: list):
+        """Normalize + tensorize, with the processor's OWN geometry switched off.
+
+        The geometry is already ours (`apply_preprocessing` produced a
+        resolution-square), so the processor must only normalize. Not every family's
+        processor accepts both switches — SigLIP's has no centre crop to disable — so an
+        unknown-kwarg rejection falls back rather than failing the arm. That fallback is
+        safe ONLY because these two arms run at their checkpoint's NATIVE resolution, so
+        the processor's default resize is an identity on an already-square image of that
+        size. It would not be safe on a resolution arm, which is why the DINO family
+        (where the resolutions vary) goes through the strict path in dinov3_tagger.
+        """
+        for kwargs in ({"do_resize": False, "do_center_crop": False},
+                       {"do_resize": False},
+                       {}):
+            try:
+                return self._processor(images=batch, return_tensors="pt", **kwargs)
+            except (TypeError, ValueError):
+                continue
+        raise RuntimeError("image processor rejected every call form")
+
     def embed(self, images: list, batch_size: int = 32):
         import torch
 
@@ -178,8 +199,7 @@ class SimpleEncoder:
                                                   self.resolution)
                 for img in images[i:i + batch_size]
             ]
-            inp = self._processor(images=batch, return_tensors="pt", do_resize=False,
-                                  do_center_crop=False)
+            inp = self._process(batch)
             pixel_values = inp["pixel_values"]
             if self._torch_dtype is not None:
                 pixel_values = pixel_values.to(self._torch_dtype)
