@@ -1205,11 +1205,11 @@ export interface TrainingSetHead {
   negative: number;
   negative_reserve: number;
   excluded: number;
-  /* The operator's own marker of whether they have been through this head
-   * (tag_taxonomy.review_state, migration 487). Nothing reads it but them — it
-   * is bookkeeping across a review spanning days, not a gate. Three-valued
-   * because "set aside on purpose" is a decision and must not look like
-   * "nobody has said". */
+  /* The operator's marker of whether they have been through this head
+   * (tag_taxonomy.review_state, migration 487). Three-valued because "set aside
+   * on purpose" is a decision and must not look like "nobody has said". Since
+   * the ruling of 2026-09-08 'ready' also SELECTS the heads a tagging bake-off
+   * run trains, so this toggle decides scope — it is no longer only bookkeeping. */
   review_state: ReviewState;
 }
 

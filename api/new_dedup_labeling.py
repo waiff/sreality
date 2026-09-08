@@ -871,8 +871,9 @@ def _routing_tags(conn: Any) -> list[dict[str, Any]]:
             "SELECT id, label, review_state FROM tag_taxonomy "
             "WHERE routing_categories IS NOT NULL AND active ORDER BY id"
         )
-        # ready_for_training (migration 443) is the operator's own bookkeeping:
-        # "I have been through this head's set". Nothing reads it but them.
+        # review_state (migration 487) is the operator's review marker: "I have
+        # been through this head's set". Since 2026-09-08 'ready' also selects the
+        # heads a tagging bake-off run trains (tag_head_bakeoff.ready_heads).
         return [{"id": int(r[0]), "label": r[1], "review_state": str(r[2])}
                 for r in cur.fetchall()]
 

@@ -281,6 +281,16 @@ the two gaps found while adding property list are closed in the same PR that add
     whole rule; every rejected tag is still reported with the count that rejected it. Measured
     2026-09-08: 15 heads carry 159-316 admitted positives against ~1,000 drawn negatives; a long
     tail has under 20 or none.
+    - **Addendum, same day — the flag is the OPERATOR'S, not a count.** Ruling: *"Select heads by
+      the ready flag I have on the training set page."* A positives count decided the experiment's
+      scope on the operator's behalf; the ready marker on `/new-dedup/training-set`
+      (`tag_taxonomy.review_state = 'ready'`, migration 487 — 443's `ready_for_training` was carried
+      forward into it and is dead schema, so reading THAT column would freeze selection at the 487
+      backfill) is a review decision and now selects, through one shared
+      `tag_head_bakeoff.ready_heads` that both the manifest stage and the CPU runner call.
+      `--heads` remains the explicit override; the admitted counts are still reported (log + the
+      run's `note`) but never filter, so a ready head with too few rows trains, fails, and records
+      why. `runs.min_train_positives` is retired in place — written 0, still echoed by the API.
   - **Migration 489** (`dedup_sim`, pgvector-guarded `DO`/`EXECUTE` like 480, RLS + revoke at
     creation, registered in both admin registries, `-- ci-allow-dynamic:` annotated, shape-tested
     offline by `tests/test_tag_head_bakeoff_migration.py`). In `dedup_sim` deliberately: this is

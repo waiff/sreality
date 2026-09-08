@@ -6153,16 +6153,8 @@
           "options": null
         },
         {
-          "name": "min_train_positives",
-          "description": "manifest only: a head needs at least this many admitted positives to enter the run. Below it a per-tag classifier's numbers are noise.",
-          "required": false,
-          "type": "string",
-          "default": "100",
-          "options": null
-        },
-        {
           "name": "heads",
-          "description": "manifest only: comma-separated tag ids. Overrides the positives floor entirely.",
+          "description": "manifest only: comma-separated tag ids. Overrides the operator's ready flag entirely.",
           "required": false,
           "type": "string",
           "default": "",

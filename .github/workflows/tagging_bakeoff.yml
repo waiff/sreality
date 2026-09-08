@@ -17,9 +17,9 @@ name: "NEW DEDUP: tagging bake-off (manifest / embed / train)"
 #   3. train — back on a runner with the `training` extra, running the results half of
 #      the experiment.
 #
-# START WITH dry_run (the default). The manifest stage's dry run reports which heads clear
-# the positives floor and how many distinct images the run would embed, and writes nothing;
-# the embed stage's prints the pod plan and launches nothing.
+# START WITH dry_run (the default). The manifest stage's dry run reports which heads the
+# operator has marked ready on /new-dedup/training-set and how many distinct images the run
+# would embed, and writes nothing; the embed stage's prints the pod plan and launches nothing.
 #
 # THE SEALED EXAM IS EMBEDDED BUT NEVER READ. Its images have to carry vectors — grading
 # the heads is the point — but no exam ANSWER is read anywhere in this lane. Training
@@ -60,13 +60,8 @@ on:
         required: false
         default: ""
         type: string
-      min_train_positives:
-        description: "manifest only: a head needs at least this many admitted positives to enter the run. Below it a per-tag classifier's numbers are noise."
-        required: false
-        default: "100"
-        type: string
       heads:
-        description: "manifest only: comma-separated tag ids. Overrides the positives floor entirely."
+        description: "manifest only: comma-separated tag ids. Overrides the operator's ready flag entirely."
         required: false
         default: ""
         type: string
@@ -123,7 +118,6 @@ jobs:
         env:
           STAGE: ${{ inputs.stage }}
           RUN_ID: ${{ inputs.run_id }}
-          MIN_TRAIN_POSITIVES: ${{ inputs.min_train_positives }}
           HEADS: ${{ inputs.heads }}
           ARMS: ${{ inputs.arms }}
           BATCH_SIZE: ${{ inputs.batch_size }}
@@ -133,9 +127,6 @@ jobs:
           set -euo pipefail
           case "${RUN_ID:-}" in
             *[!0-9]*) echo "::error::run_id must be a number (or empty for stage=manifest)"; exit 1 ;;
-          esac
-          case "${MIN_TRAIN_POSITIVES:-100}" in
-            ''|*[!0-9]*) echo "::error::min_train_positives must be a number"; exit 1 ;;
           esac
           case "${BATCH_SIZE:-32}" in
             ''|*[!0-9]*) echo "::error::batch_size must be a number"; exit 1 ;;
@@ -181,13 +172,12 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           LABEL: ${{ inputs.label }}
           NOTE: ${{ inputs.note }}
-          MIN_TRAIN_POSITIVES: ${{ inputs.min_train_positives }}
           HEADS: ${{ inputs.heads }}
           ARMS: ${{ inputs.arms }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          ARGS=(--stage manifest --min-train-positives "${MIN_TRAIN_POSITIVES:-100}")
+          ARGS=(--stage manifest)
           # `if`, not `[ ... ] && ...`: under `set -e` a false test in the last position
           # of a step's script is itself a non-zero exit and would fail the step.
           if [ -n "${LABEL:-}" ]; then ARGS+=(--label "${LABEL}"); fi

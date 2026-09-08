@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import random
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Sequence
 
 import pytest
 
@@ -69,9 +69,12 @@ class _FakeConn:
     def __init__(self, *, tags: dict[int, str], labels: dict[int, dict[int, str]],
                  groups: dict[int, int], vectors: dict[int, list[float]],
                  excluded: dict[int, list[int]] | None = None,
+                 ready: Sequence[int] | None = None,
                  run: dict[str, Any] | None = None,
                  arms: list[bo.Arm] | None = None) -> None:
         self.tags = tags
+        # The operator's ready flag; every fixture tag is ready unless one says otherwise.
+        self.ready = set(tags) if ready is None else {int(t) for t in ready}
         self.labels = labels                 # {tag_id: {image_id: state}}
         self.groups = groups
         self.vectors = vectors
@@ -97,6 +100,12 @@ class _FakeConn:
                 return []
             return [(i, "p", "excluded", "human", "pruned", None, None, None,
                      None, None, False) for i in self.excluded.get(tag, [])]
+        if "WHERE active AND review_state = 'ready'" in s:
+            return sorted((t, label) for t, label in self.tags.items()
+                          if t in self.ready)
+        if "FROM tag_taxonomy WHERE id = ANY" in s:
+            want = set(params["ids"])
+            return sorted((t, label) for t, label in self.tags.items() if t in want)
         if "FROM tag_taxonomy WHERE active" in s:
             return sorted(self.tags.items())
         if "FROM tag_exam_cohorts" in s or "FROM tag_exam_sets" in s:
@@ -173,22 +182,45 @@ def _conn(**kw: Any) -> _FakeConn:
 
 # ------------------------------------------------------------ head selection
 
-def test_select_heads_is_a_floor_not_a_list() -> None:
-    conn = _conn()
-    plans = bo.select_heads(conn, min_train_positives=3)
-    assert {p.tag_id for p in plans} == {11, 12}
-    assert all(p.selected for p in plans)
+def test_ready_heads_reads_the_flag_and_no_label_table() -> None:
+    conn = _conn(ready=[12])
+    assert bo.ready_heads(conn) == [(12, "koupelna")]
+    statements = [s for s, _ in conn.executed]
+    assert any("review_state = 'ready'" in s for s in statements)
+    assert all("image_tag_labels" not in s for s in statements)
 
-    strict = bo.select_heads(conn, min_train_positives=10_000)
-    assert not any(p.selected for p in strict)
-    # A rejected head is still REPORTED with the count that rejected it.
-    assert all("admitted positives" in p.reason for p in strict)
-    assert all(p.n_pos > 0 for p in strict)
+
+def test_the_flag_selects_and_the_counts_only_report() -> None:
+    conn = _conn(ready=[12])
+    plans = bo.select_heads(conn)
+    # Every active tag is still REPORTED, with its counts and why it is out.
+    assert {p.tag_id for p in plans} == {11, 12}
+    by_id = {p.tag_id: p for p in plans}
+    assert by_id[12].selected and by_id[12].reason == ""
+    assert not by_id[11].selected
+    assert by_id[11].reason == bo.NOT_READY_REASON
+    # Tag 11 has plenty of positives — a count is not what kept it out.
+    assert by_id[11].n_pos > 0
+
+
+def test_an_explicit_list_beats_the_flag() -> None:
+    conn = _conn(ready=[12])
+    assert bo.ready_heads(conn, tag_ids=[11]) == [(11, "kuchyně")]
+    plans = bo.select_heads(conn, tag_ids=[11])
+    by_id = {p.tag_id: p for p in plans}
+    assert by_id[11].selected and not by_id[12].selected
+    assert by_id[12].reason == bo.NOT_NAMED_REASON
+
+
+def test_a_ready_head_with_no_training_rows_is_still_selected() -> None:
+    conn = _FakeConn(tags={11: "kuchyně"}, labels={11: {}}, groups={}, vectors={})
+    plans = bo.select_heads(conn)
+    assert [(p.tag_id, p.selected, p.n_pos) for p in plans] == [(11, True, 0)]
 
 
 def test_selection_reads_labels_only_through_the_one_door() -> None:
     conn = _conn()
-    bo.select_heads(conn, min_train_positives=1)
+    bo.select_heads(conn)
     label_reads = [s for s, _ in conn.executed if "image_tag_labels" in s]
     assert label_reads, "sanity: it did read labels"
     for sql in label_reads:
@@ -330,7 +362,7 @@ def test_a_head_that_cannot_be_graded_is_recorded_not_skipped() -> None:
 def test_run_bakeoff_covers_the_whole_cross_product_and_resumes() -> None:
     pytest.importorskip("sklearn")
     conn = _conn()
-    outcomes = bo.run_bakeoff(conn, run_id=3, min_train_positives=3,
+    outcomes = bo.run_bakeoff(conn, run_id=3,
                               n_splits=3, trained_at=TRAINED_AT)
     # 1 arm x 3 modes x 2 heads
     assert len(outcomes) == 6
@@ -340,12 +372,12 @@ def test_run_bakeoff_covers_the_whole_cross_product_and_resumes() -> None:
     assert len(conn.written_metrics) == 6
 
     # A second pass with the metrics already there writes nothing new.
-    again = bo.run_bakeoff(conn, run_id=3, min_train_positives=3, n_splits=3,
+    again = bo.run_bakeoff(conn, run_id=3, n_splits=3,
                            trained_at=TRAINED_AT)
     assert again == []
 
     # ...unless asked to redo it.
-    forced = bo.run_bakeoff(conn, run_id=3, min_train_positives=3, n_splits=3,
+    forced = bo.run_bakeoff(conn, run_id=3, n_splits=3,
                             force=True, trained_at=TRAINED_AT)
     assert len(forced) == 6
 
@@ -353,7 +385,7 @@ def test_run_bakeoff_covers_the_whole_cross_product_and_resumes() -> None:
 def test_run_bakeoff_without_an_exam_still_produces_cv_numbers() -> None:
     pytest.importorskip("sklearn")
     conn = _conn()
-    outcomes = bo.run_bakeoff(conn, run_id=3, min_train_positives=3, n_splits=3,
+    outcomes = bo.run_bakeoff(conn, run_id=3, n_splits=3,
                               modes=[th.MODE_POS_NEG], trained_at=TRAINED_AT)
     assert all(o.metrics["cv_graded_n"] > 0 for o in outcomes)
     assert all(o.metrics["exam_graded_n"] == 0 for o in outcomes)
@@ -363,7 +395,7 @@ def test_run_bakeoff_without_an_exam_still_produces_cv_numbers() -> None:
 def test_an_arm_with_no_vectors_is_marked_failed_not_sixty_broken_heads() -> None:
     conn = _conn()
     conn.vectors = {}
-    outcomes = bo.run_bakeoff(conn, run_id=3, min_train_positives=3, n_splits=3,
+    outcomes = bo.run_bakeoff(conn, run_id=3, n_splits=3,
                               trained_at=TRAINED_AT)
     assert outcomes == []
     updates = [p for s, p in conn.executed
@@ -378,10 +410,10 @@ def test_run_bakeoff_refuses_an_unknown_mode() -> None:
         bo.run_bakeoff(conn, run_id=3, modes=["pos_only_vibes"])
 
 
-def test_run_bakeoff_refuses_when_no_head_clears_the_floor() -> None:
-    conn = _conn()
-    with pytest.raises(bo.BakeoffError, match="admitted training positives"):
-        bo.run_bakeoff(conn, run_id=3, min_train_positives=10_000)
+def test_run_bakeoff_refuses_when_no_head_is_marked_ready() -> None:
+    conn = _conn(ready=[])
+    with pytest.raises(bo.BakeoffError, match="marked ready for training"):
+        bo.run_bakeoff(conn, run_id=3)
 
 
 # ------------------------------------------------------ the two page readers
@@ -506,7 +538,7 @@ def test_run_metrics_types_every_column_and_isoformats_the_timestamp() -> None:
 def test_run_bakeoff_opens_no_label_door_of_its_own() -> None:
     pytest.importorskip("sklearn")
     conn = _conn()
-    bo.run_bakeoff(conn, run_id=3, min_train_positives=3, n_splits=3,
+    bo.run_bakeoff(conn, run_id=3, n_splits=3,
                    modes=[th.MODE_POS_NEG], trained_at=TRAINED_AT)
     for sql, _ in conn.executed:
         if "image_tag_labels" in sql:
