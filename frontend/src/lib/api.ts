@@ -1729,6 +1729,196 @@ export const listTagNeighbours = (
     jwt: true,
   });
 
+/* ----- the tagging bake-off (api/new_dedup_bakeoff.py) --------------------
+ *
+ * READ-ONLY. One yes/no classifier (a HEAD) per photo tag, trained on the
+ * embeddings of one encoder configuration (an ARM) under one training MODE,
+ * then scored over every labelled photo. The page these four calls back is the
+ * comparison surface: which arm should NEW DEDUP buy into, and what does the
+ * number look like as photographs.
+ *
+ * TWO CONVENTIONS TRAVEL WITH EVERY SHAPE HERE, and both are load-bearing:
+ *  - a `null` precision / recall / f1 means NOTHING WAS PROPOSED. It is not
+ *    zero, and it must never render as one. `*_graded_n` sits beside every rate
+ *    for exactly that reason and belongs beside it on screen too.
+ *  - `label: null` (exam split only) is a human ABSTENTION. Those rows carry a
+ *    real score and a real prediction, and are in no bucket and no rate.
+ *
+ * Raw scores compare only WITHIN one mode: the two logistic modes score in
+ * [0, 1], `pos_only_centroid` is a cosine. Compare outcomes and metrics across
+ * modes, never the numbers themselves. */
+
+export type BakeoffMode = 'pos_neg' | 'pos_only_free_neg' | 'pos_only_centroid';
+export type BakeoffSplit = 'cv' | 'exam';
+export type BakeoffOutcome = 'tp' | 'fp' | 'fn' | 'tn';
+
+export interface BakeoffArm {
+  id: number;
+  run_id: number;
+  /* The short human name, e.g. "dinov3-b16@768/bf16". */
+  arm: string;
+  dim: number | null;
+  status: string;
+  note: string | null;
+  model: string;
+  revision: string | null;
+  library: string | null;
+  pooling: string | null;
+  resolution: number | null;
+  preprocessing: string | null;
+  dtype: string | null;
+}
+
+export interface BakeoffRun {
+  id: number;
+  created_at: string;
+  label: string | null;
+  note: string | null;
+  status: string;
+  manifest_key: string | null;
+  /* Tag ids only — the human labels arrive with the metrics rows. */
+  heads: number[];
+  min_train_positives: number | null;
+  arms: BakeoffArm[];
+}
+
+export interface BakeoffMetric {
+  arm_id: number;
+  arm: string;
+  mode: BakeoffMode;
+  tag_id: number;
+  tag_label: string;
+  n_pos: number;
+  n_neg: number;
+  n_groups: number;
+  cv_precision: number | null;
+  cv_recall: number | null;
+  cv_f1: number | null;
+  cv_graded_n: number;
+  cv_tp: number;
+  cv_fp: number;
+  cv_tn: number;
+  cv_fn: number;
+  exam_precision: number | null;
+  exam_recall: number | null;
+  exam_f1: number | null;
+  exam_graded_n: number;
+  exam_abstained_n: number;
+  exam_tp: number;
+  exam_fp: number;
+  exam_tn: number;
+  exam_fn: number;
+  threshold: number | null;
+  dataset_hash: string | null;
+  /* 'failed' is a DECIDED cell, not a missing one — its note says why. */
+  status: string;
+  note: string | null;
+  trained_at: string | null;
+}
+
+export interface BakeoffImageScore {
+  arm_id: number;
+  arm: string;
+  mode: BakeoffMode;
+  tag_id: number;
+  tag_label: string;
+  split: BakeoffSplit;
+  fold: number | null;
+  label: 1 | 0 | null;
+  score: number;
+  predicted: boolean;
+  outcome: BakeoffOutcome | 'abstained';
+}
+
+export interface BakeoffImage {
+  image_id: number;
+  listing_id: number | null;
+  storage_path: string | null;
+  scores: BakeoffImageScore[];
+}
+
+export interface BakeoffTile {
+  image_id: number;
+  listing_id: number | null;
+  storage_path: string | null;
+  score: number;
+  label: 1 | 0 | null;
+  predicted: boolean;
+  fold: number | null;
+}
+
+export interface BakeoffBuckets {
+  arm_id: number;
+  mode: BakeoffMode;
+  tag_id: number;
+  split: BakeoffSplit;
+  abstained_count: number;
+  buckets: Record<BakeoffOutcome, { count: number; tiles: BakeoffTile[] }>;
+  histogram: {
+    bins: number;
+    /* The MEASURED range of this cell, not an assumed axis — the logistic modes
+     * live in [0, 1] and the centroid mode in cosine space. */
+    lo: number;
+    hi: number;
+    positive: number[];
+    negative: number[];
+    abstained: number[];
+  };
+}
+
+export const listBakeoffRuns = (
+  limit = 25,
+): Promise<{ data: BakeoffRun[] }> =>
+  request<{ data: BakeoffRun[] }>('/new-dedup/tagging-bakeoff/runs', {
+    query: { limit }, jwt: true,
+  });
+
+/* The whole arm x mode x head table in one payload — small by construction, so
+ * the page pivots it client-side rather than asking the API to. */
+export const getBakeoffMetrics = (
+  runId: number,
+): Promise<{ data: BakeoffMetric[] }> =>
+  request<{ data: BakeoffMetric[] }>(
+    `/new-dedup/tagging-bakeoff/runs/${runId}/metrics`, { jwt: true },
+  );
+
+/* VIEW A. `arms` is a COMMA-JOINED string here, not a repeated param — the
+ * route parses it itself (`arms: str`), so the request helper's array
+ * serialization would arrive as an unparseable value. `outcome` requires
+ * `tag_id`: an outcome is one head's verdict. */
+export const getBakeoffImages = (
+  runId: number,
+  params: {
+    split?: BakeoffSplit;
+    arms?: string;
+    mode?: BakeoffMode;
+    tag_id?: number;
+    outcome?: BakeoffOutcome;
+    after_image_id?: number;
+    limit?: number;
+  } = {},
+): Promise<{ data: { images: BakeoffImage[]; next_after_image_id: number | null } }> =>
+  request<{ data: { images: BakeoffImage[]; next_after_image_id: number | null } }>(
+    `/new-dedup/tagging-bakeoff/runs/${runId}/images`, { query: params, jwt: true },
+  );
+
+/* VIEW B. One head under one arm and mode. Each bucket pages INDEPENDENTLY on
+ * the same limit/offset, so "next page" advances all four together. */
+export const getBakeoffBuckets = (
+  runId: number,
+  params: {
+    arm_id: number;
+    mode: BakeoffMode;
+    tag_id: number;
+    split?: BakeoffSplit;
+    limit?: number;
+    offset?: number;
+  },
+): Promise<{ data: BakeoffBuckets }> =>
+  request<{ data: BakeoffBuckets }>(
+    `/new-dedup/tagging-bakeoff/runs/${runId}/buckets`, { query: params, jwt: true },
+  );
+
 // "Border case" flag (migration 310): even a human isn't confident about this
 // image's classification. Independent of image_training_examples — no label
 // required, may coexist with one (a best-guess flagged as uncertain).
