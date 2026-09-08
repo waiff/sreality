@@ -200,13 +200,15 @@ re-scan bloat — a same-day observation dedup guard is queued follow-up work).
 
 ### Open, carried forward
 
-- **The per-portal frozen labelled samples (n ≥ 100/portal) are the gate on each CONTRACT** —
-  they decide whether it resolves or stays in shadow. The machinery shipped in W1v (migration
-  399 + `scripts/location_draw_labelled_sample` + `location_labelled_sample.yml` + the
-  labelling surface and live floor scoring on the Location quality page). **bezrealitky's
-  sample is drawn and frozen: 120 rows, 0 labelled.** Each remaining portal needs its sample
-  drawn BEFORE its W2 sweep (one dispatch, seconds); the 2–4 h of hand-labelling per portal
-  stays operator work and can trail the sweep — an unlabelled contract sweeps in shadow.
+- **The un-shadow gate is the operator's portal-by-portal review, NOT the frozen labelled
+  samples (operator ruling 2026-09-08, restated after an earlier one).** The samples are drawn
+  (nine portals × 120 rows, migration 399 + `scripts/location_draw_labelled_sample` +
+  `location_labelled_sample.yml`) and stay drawn as inert machinery; they will NOT be
+  hand-labelled, so the Location quality page's floor scoring has no denominator and must not be
+  read as a gate. What replaced them: the joint link review of 2026-08-26 → 2026-09-05 (remax 20,
+  ceskereality ~10, realitymix 10, bazos 10 listings; every verdict recorded as a contract ruling
+  in the W2-6…W2-12 section) — the same activity on ad-hoc listings, producing rulings rather
+  than a score. A contract un-shadows on that ruling. Do not propose labelling again.
 
 ## W1v — shipped (bezrealitky vertical slice)
 
@@ -1543,14 +1545,16 @@ one of the four whose claims already exist, so the migration enqueues those list
 `tests/location_data/test_resolver_seed_policy.py::test_every_producer_a_shipped_contract_can_emit_has_a_v1_policy_row`
 is the standing gate that makes the next activation red instead of silent.
 
-**The un-shadow path, and it is per portal.** Nothing here promotes anything. The order is:
-dispatch `location_claims_remine_archive.yml` for one portal → read
-`scripts/location_w2_gate_report.py` for that portal (which needs its O8 frozen sample drawn
-FIRST — that draw is a one-way door) → the operator runs
-`python -m location_data.contracts --unshadow <portal>@<version>`, which writes the DB column, not
-the YAML, and enqueues that contract's listings so the promotion actually re-resolves. Until then
-the seven contracts' claims are stored and scored (`location_claims_shadow`) and excluded from
-`location_claims_live`.
+**The un-shadow path, and it is per portal.** Nothing here promotes anything. The gate is the
+operator's ruling (the joint review — ruling 2026-09-08: no labelled-sample scoring), so the order
+is: the operator says un-shadow → `python -m location_data.contracts --unshadow
+<portal>@<version>`, which writes the DB column, not the YAML, and enqueues that contract's
+listings so the promotion actually re-resolves → dispatch `location_claims_remine_archive.yml`
+for that portal until `reached_end=true`. The sweep can run before or after the flip; flipping
+FIRST ends the header-grain freeze, which is the costlier of the two (every new listing on a
+shadowed portal gets no live claim). `scripts/location_w2_gate_report.py` stays a READOUT — claim
+counts, coverage, register misses — not a decision. Until the flip, the seven contracts' claims
+are stored (`location_claims_shadow`) and excluded from `location_claims_live`.
 
 Two things to carry into the gate report rather than discover later: idnes' shipped exclusion
 register already names markup the portal no longer emits (`zones_unmatched == ('.b-similar',
@@ -1872,8 +1876,8 @@ production the same day, so the next reader knows what is verified vs merely mer
   into `location_claims_shadow`**, 2,000 listings enqueued, batch 457 stamped `stopped`
   (resumable, cursor 84547, `reached_end=false`). Bodies streamed from R2 at ~2.4/s.
 - **The gate report runs** and reports honestly: seven portals at their shadowed versions,
-  seven frozen samples drawn 2026-09-05 (120 members each, 0 labelled — the O8 hand-labelling
-  is unchanged operator work). Caveat: run it with `skip_denominator=true` for now — the
+  seven frozen samples drawn 2026-09-05 (120 members each, 0 labelled — and staying so: operator
+  ruling 2026-09-08, the joint review is the gate). Caveat: run it with `skip_denominator=true` for now — the
   archive-denominator sub-scan hits its statement timeout from the report's bounded
   transaction (follow-up: budget it separately or run off-peak).
 - **A contract merged minutes before a dispatch is not yet projected**: the bake-off's first
@@ -1954,11 +1958,19 @@ production the same day, so the next reader knows what is verified vs merely mer
   `location-batch` and the 20:57 resolve tick displaced it — the standing-decisions section's
   failure #3, verbatim, still unfixed.
 
-**The remaining path to un-shadow, per portal** (all machinery live): label the frozen sample
-on the Location Quality page → dispatch budgeted sweeps (`location_claims_remine_archive.yml`,
-`mode=incremental` after the first full pass) until `reached_end=true` → read
-`location_w2_gate_report` → `python -m location_data.contracts --unshadow <portal>@<version>`
-(re-resolves that portal's listings in the same transaction). Follow-ups recorded, unstarted:
-the ceskereality `exact`-flag harvest lane (OQ1 is answered — the bbox `map-refresh` endpoint
-works corpus-wide), the gate-report denominator timeout, PRICES verification against provider
-billing after the first live bake-off pass.
+**The remaining path to un-shadow, per portal** (all machinery live; operator ruling 2026-09-08 —
+NO labelling, the joint review is the gate): the operator says the word →
+`python -m location_data.contracts --unshadow <portal>@<version>` (re-resolves that portal's
+listings in the same transaction, and ends the header-grain freeze that parks every new listing
+on that portal — measured 2026-09-08: 9,864 of the 10,023 listings first seen on the seven portals
+since 2026-09-05 had no live claim) → dispatch budgeted sweeps (`location_claims_remine_archive.yml`,
+`mode=incremental` after the first full pass) until `reached_end=true`, reading
+`location_w2_gate_report` as a readout. **Measured sweep pace (batch 457): 2,000 bodies in 844 s ≈
+2.4 pages/s, fetch-bound** — one sequential R2 GET per body; the intake lane writes the same tables
+at ~85 listings/s, so the database is not the limit and a bigger Supabase plan would not move it.
+The seven portals hold ~602k archived detail bodies (an upper bound — the sweep reads the latest
+body per listing), ≈ 70 h of scan at that pace; concurrent R2 fetching in the lane is the lever.
+Follow-ups recorded, unstarted: the gate-report denominator timeout, PRICES verification against
+provider billing after the first live bake-off pass. The ceskereality `exact`-flag map harvest is
+NOT scheduled: the contract ruling stands (headline = declared granularity, the flag a backup)
+and the operator declined a further lane.
