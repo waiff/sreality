@@ -85,10 +85,15 @@ other arm is measured against, so a run without it measures nothing useful.
 
 Always start with `dry_run: true` (the default).
 
-1. **manifest** — `stage: manifest`, optionally `label`, `min_train_positives` (default
-   100), `heads` (explicit tag ids, overriding the floor), `arms` (narrow the preset).
-   The dry run prints which heads clear the floor, the distinct-image census, and how
-   many of those images we actually hold bytes for. Then re-run with `dry_run: false`
+1. **manifest** — `stage: manifest`, optionally `label`, `heads` (explicit tag ids), `arms`
+   (narrow the preset). **Head selection is the operator's ready flag** — the Ready / Not
+   ready / Skip toggle on `/new-dedup/training-set` (`tag_taxonomy.review_state = 'ready'`),
+   read through the one shared selector `toolkit.tag_head_bakeoff.ready_heads`, which the
+   CPU runner uses too; `heads` is the only override, and the admitted positive/negative
+   counts are reported but never filter (ruling 2026-09-08, replacing the old
+   `min_train_positives` floor). The dry run prints the selected heads with their counts,
+   the distinct-image census, and how many of those images we actually hold bytes for.
+   Then re-run with `dry_run: false`
    and **note the `run_id` it prints** — the other two stages need it.
 2. **embed** — `stage: embed`, `run_id: N`. The dry run prints the pod plan (image, ref,
    wait window, GPU allowlist, which credential names are present) and launches nothing.

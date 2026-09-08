@@ -27,10 +27,12 @@ Note what that means for the exam: its images ARE embedded (they have to be — 
 whole point is to grade the heads on them) but no exam ANSWER is read here. Embedding a
 picture leaks nothing; reading its label would.
 
-HEAD SELECTION IS A FLOOR, NOT A LIST. `--min-train-positives` (default 100) keeps a
-head out of the run when its training set is too thin for a per-tag classifier to say
-anything, so the readout is not padded with heads whose numbers are noise. `--heads`
-overrides the floor with an explicit list when the operator wants a specific comparison.
+HEAD SELECTION IS THE OPERATOR'S READY FLAG (ruling 2026-09-08), read through the ONE
+shared selector `toolkit.tag_head_bakeoff.ready_heads` — the same door the CPU runner
+uses, so the two halves of the lane cannot pick different heads. `--heads` overrides it
+with an explicit list. Admitted positive/negative counts are reported on every selected
+head, in the log and on the run row, but they never filter: a ready head with too few
+rows enters the run and its failure is recorded per cell.
 
 Usage:  python -m scripts.tagging_bakeoff_manifest --label "res+precision grid" --dry-run
 Required: SUPABASE_DB_URL (+ R2_* to mint URLs and upload the manifest).
@@ -49,6 +51,7 @@ from typing import Any, Sequence
 
 from scripts import tagging_bakeoff_arms as arms_mod
 from toolkit import machine_labeling
+from toolkit import tag_head_bakeoff as bo
 
 LOG = logging.getLogger("tagging_bakeoff_manifest")
 
@@ -56,16 +59,6 @@ MANIFEST_PREFIX = "bakeoff/tagging"
 DEFAULT_EXPIRES_S = 7 * 24 * 3600
 # One bounded array parameter per statement, however many images the run holds.
 _ID_CHUNK = 2000
-
-# The candidate head pool. tag_taxonomy is the operator-curated vocabulary; this reads
-# the vocabulary only — which tags EXIST — never a label.
-_ACTIVE_TAGS_SQL = """
-    SELECT id, label FROM tag_taxonomy WHERE active ORDER BY id
-"""
-
-_NAMED_TAGS_SQL = """
-    SELECT id, label FROM tag_taxonomy WHERE id = ANY(%(ids)s::bigint[]) ORDER BY id
-"""
 
 # The sealed exam's membership, purpose-narrowed the same way tag_holdout's exclusion
 # is: 'holdout' cohorts are the ones that GRADE, so they are the ones whose images must
@@ -140,37 +133,33 @@ _FINISH_ARM_SQL = """
 """
 
 
-def select_heads(conn: Any, *, min_train_positives: int,
+def select_heads(conn: Any, *,
                  head_ids: Sequence[int] | None = None) -> list[dict[str, Any]]:
-    """Heads with enough admitted positives to train on, plus their set sizes.
+    """The heads the operator marked ready (or the explicit list), plus their sizes.
 
-    Counting is done in Python over `training_rows` rather than in SQL on purpose: that
-    function IS the training population (in_training only, sealed exam excluded), so a
-    head admitted here and a head trained later cannot disagree about its own size.
+    Selection is `tag_head_bakeoff.ready_heads` — the shared selector, so this stage
+    and the CPU runner cannot disagree about scope. The counts come from
+    `training_rows`, which IS the training population (in_training only, sealed exam
+    excluded), so a head planned here and a head trained later cannot disagree about
+    its own size either. They are reported, never applied as a threshold.
     """
-    with conn.cursor() as cur:
-        if head_ids:
-            cur.execute(_NAMED_TAGS_SQL, {"ids": [int(h) for h in head_ids]})
-        else:
-            cur.execute(_ACTIVE_TAGS_SQL)
-        candidates = [(int(r[0]), str(r[1])) for r in cur.fetchall()]
-
     heads: list[dict[str, Any]] = []
-    for tag_id, label in candidates:
+    for tag_id, label in bo.ready_heads(conn, tag_ids=head_ids):
         rows = machine_labeling.training_rows(conn, tag_id=tag_id)
         positives = sum(1 for _, state in rows if state == "positive")
         negatives = len(rows) - positives
-        record = {
+        heads.append({
             "tag_id": tag_id, "label": label,
             "positives": positives, "negatives": negatives,
             "image_ids": sorted({image_id for image_id, _ in rows}),
-        }
-        if head_ids or positives >= min_train_positives:
-            heads.append(record)
-        else:
-            LOG.info("head %d (%s) skipped: %d positives < %d",
-                     tag_id, label, positives, min_train_positives)
+        })
     return heads
+
+
+def head_census(heads: Sequence[dict[str, Any]]) -> str:
+    """The selected heads and their set sizes, as one line for the run's note."""
+    return "; ".join(f"{h['label']}({h['tag_id']}) {h['positives']}+/{h['negatives']}-"
+                     for h in heads)
 
 
 def holdout_image_ids(conn: Any) -> list[int]:
@@ -205,13 +194,15 @@ def build_arms(*, only: Sequence[str] | None, hf_token: str | None,
     return arms_mod.select_arms(preset, only)
 
 
-def _create_run(conn: Any, *, label: str, note: str, heads: Sequence[int],
-                min_train_positives: int) -> int:
+def _create_run(conn: Any, *, label: str, note: str, heads: Sequence[int]) -> int:
     with conn.cursor() as cur:
         cur.execute(_INSERT_RUN_SQL, {
             "label": label, "note": note,
             "heads": [int(h) for h in heads],
-            "min_train_positives": int(min_train_positives),
+            # RETIRED 2026-09-08: selection is the operator's ready flag, not a
+            # count. The column stays (the read API and the page echo it) and is
+            # written 0 so no run can be read as having had a floor.
+            "min_train_positives": 0,
         })
         row = cur.fetchone()
     if not row:
@@ -282,12 +273,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--label", default="", help="Short operator-facing name for the run.")
     p.add_argument("--note", default="", help="Free text recorded on the run row.")
-    p.add_argument("--min-train-positives", type=int, default=100,
-                   help="A head needs at least this many ADMITTED positives to enter "
-                        "the run. Below it a per-tag classifier's numbers are noise.")
     p.add_argument("--heads", default="",
-                   help="Comma-separated tag ids. Overrides --min-train-positives "
-                        "entirely — an explicit list is the operator's call.")
+                   help="Comma-separated tag ids. Overrides the operator's ready "
+                        "flag entirely — an explicit list is the operator's call.")
     p.add_argument("--arms", default="",
                    help="Comma-separated arm names to narrow the preset to. Empty = "
                         "every arm. An unknown name is an error, not a silent no-op.")
@@ -321,11 +309,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     from scraper import image_storage
 
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
-        heads = select_heads(conn, min_train_positives=args.min_train_positives,
-                             head_ids=head_ids or None)
+        heads = select_heads(conn, head_ids=head_ids or None)
+        LOG.info("BAKEOFF head selection = %s",
+                 f"explicit --heads {head_ids}" if head_ids
+                 else "tag_taxonomy ready flag (the training-set page toggle)")
         if not heads:
-            LOG.error("no head clears --min-train-positives=%d (and --heads is empty) "
-                      "— nothing to measure", args.min_train_positives)
+            LOG.error("no head is marked ready for training (and --heads is empty) "
+                      "— flip the Ready toggle on /new-dedup/training-set first")
             return 1
         training_ids = {i for head in heads for i in head["image_ids"]}
         exam_ids = holdout_image_ids(conn)
@@ -351,9 +341,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                       "URLs, so this cannot proceed without them")
             return 1
 
-        run_id = _create_run(conn, label=args.label, note=args.note,
-                             heads=[h["tag_id"] for h in heads],
-                             min_train_positives=args.min_train_positives)
+        note = "; ".join(p for p in (args.note, f"heads: {head_census(heads)}") if p)
+        run_id = _create_run(conn, label=args.label, note=note,
+                             heads=[h["tag_id"] for h in heads])
         LOG.info("BAKEOFF run_id=%d created", run_id)
         try:
             arm_ids = _create_arms(conn, run_id=run_id, arms=arms)

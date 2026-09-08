@@ -169,8 +169,10 @@ def set_tag_flags(
     """Update the operator flags on a tag — only the fields actually passed, so
     setting one from the Modify labels popup never clobbers another. `priority`
     pins a tag to the top of that popup and marks it red; `review_state` is the
-    operator's own three-valued marker of whether they have been through this
-    head. Both are bookkeeping: nothing reads them and nothing is gated on them."""
+    operator's three-valued marker of whether they have been through this head.
+    `priority` is bookkeeping; `review_state = 'ready'` is NOT — since the ruling
+    of 2026-09-08 it selects the heads that enter a tagging bake-off run
+    (`tag_head_bakeoff.ready_heads`), so flipping it changes what gets trained."""
     if priority is None and ready_for_training is None and review_state is None:
         raise ValueError("nothing to update")
     if review_state is not None and review_state not in REVIEW_STATES:

@@ -124,8 +124,7 @@ def pod_env() -> dict[str, str]:
 def plan_stage(args: argparse.Namespace) -> Plan:
     """Pure stage routing: what runs, where, and whether a dry run should execute it."""
     if args.stage == "manifest":
-        argv = [sys.executable, "-m", "scripts.tagging_bakeoff_manifest",
-                f"--min-train-positives={args.min_train_positives}"]
+        argv = [sys.executable, "-m", "scripts.tagging_bakeoff_manifest"]
         if args.label:
             argv.append(f"--label={args.label}")
         if args.note:
@@ -260,9 +259,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "stage MINTS one.")
     p.add_argument("--label", default="", help="manifest: run label.")
     p.add_argument("--note", default="", help="manifest: free-text note on the run.")
-    p.add_argument("--min-train-positives", type=int, default=100,
-                   help="manifest: a head's floor for entering the run.")
-    p.add_argument("--heads", default="", help="manifest: explicit tag ids.")
+    p.add_argument("--heads", default="",
+                   help="manifest: explicit tag ids, overriding the ready flag.")
     p.add_argument("--arms", default="",
                    help="Comma-separated arm names, to narrow any stage to a subset.")
     p.add_argument("--batch-size", type=int, default=32, help="embed: forward batch.")

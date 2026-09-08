@@ -15,9 +15,11 @@ already has a metrics row is skipped unless `--force`; a cell that could not be
 trained is RECORDED as failed rather than skipped, so a resume does not retry it
 forever and the page can say why it is missing.
 
-HEADS ARE CHOSEN BY A FLAG, NOT A LIST. `--min-train-positives` (default 100) is
-the whole rule; the dry run prints every tag with its admitted counts and whether
-it made the cut, so the scope of a run is inspectable before it costs an hour.
+HEADS ARE CHOSEN BY THE OPERATOR'S READY FLAG (ruling 2026-09-08) — the Ready /
+Not ready / Skip toggle on `/new-dedup/training-set`, read through
+`tag_head_bakeoff.ready_heads`. `--heads` overrides it with a named list. The
+admitted positive/negative counts are still printed for every tag, but they are
+INFORMATION: a ready head with too few rows trains, fails, and records why.
 """
 
 from __future__ import annotations
@@ -38,16 +40,16 @@ def _report_plan(conn, args: argparse.Namespace) -> int:
     if run is None:
         LOG.error("BAKEOFF run %d does not exist", args.run_id)
         return 1
-    floor = (args.min_train_positives if args.min_train_positives is not None
-             else run["min_train_positives"])
     arms = bo.list_arms(conn, run_id=args.run_id, names=args.arms)
-    plans = bo.select_heads(conn, min_train_positives=floor)
+    plans = bo.select_heads(conn, tag_ids=args.heads or None)
     selected = [p for p in plans if p.selected]
     sitting = bo.load_exam(conn, cohort=args.exam_cohort, set_name=args.exam_set)
     done = bo.done_keys(conn, run_id=args.run_id)
 
-    LOG.info("BAKEOFF run=%d %r status=%s min_train_positives=%d",
-             run["id"], run["label"], run["status"], floor)
+    LOG.info("BAKEOFF run=%d %r status=%s selection=%s",
+             run["id"], run["label"], run["status"],
+             f"explicit --heads {args.heads}" if args.heads
+             else "tag_taxonomy ready flag")
     for arm in arms:
         LOG.info("BAKEOFF arm=%s id=%d dim=%s vectors=%d %s",
                  arm.arm, arm.id, arm.dim, bo.arm_vector_count(conn, arm_id=arm.id),
@@ -72,8 +74,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-id", type=int, required=True,
                     help="dedup_sim.tag_head_bakeoff_runs.id to execute.")
-    ap.add_argument("--min-train-positives", type=int, default=None,
-                    help="Head selection floor; defaults to the run's own value.")
+    ap.add_argument("--heads", type=int, nargs="+", default=None,
+                    help="Tag ids to run, overriding the operator's ready flag. "
+                         "A named list is itself an operator decision.")
     ap.add_argument("--modes", nargs="+", default=list(th.MODES), choices=list(th.MODES),
                     help="Training modes to run (default: all three).")
     ap.add_argument("--arms", nargs="+", default=None,
@@ -101,7 +104,7 @@ def main() -> int:
         try:
             outcomes = bo.run_bakeoff(
                 conn, run_id=args.run_id, modes=args.modes, arm_names=args.arms,
-                min_train_positives=args.min_train_positives,
+                tag_ids=args.heads or None,
                 n_splits=args.n_splits, C=args.C, threshold=args.threshold,
                 seed=args.seed, exam_cohort=args.exam_cohort,
                 exam_set=args.exam_set, force=args.force)

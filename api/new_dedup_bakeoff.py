@@ -55,7 +55,10 @@ def list_runs(
       "label": "set-1 v1", "note": null, "status": "ok"|"running"|"failed",
       "manifest_key": "bakeoff/3/manifest.json" | null,
       "heads": [12, 13, 19],            # tag ids selected when the run executed
-      "min_train_positives": 100,
+      "min_train_positives": 0,         # RETIRED 2026-09-08: heads are selected by
+                                        # tag_taxonomy's ready flag, not a count. The
+                                        # field is echoed so the contract does not move;
+                                        # runs before the ruling carry their old floor.
       "arms": [{
         "id": 7, "run_id": 3, "arm": "dinov3-b16@768/bf16",
         "dim": 768 | null, "status": "ok"|"pending"|"running", "note": null,

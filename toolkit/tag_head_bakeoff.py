@@ -45,7 +45,6 @@ from toolkit import tag_heads as th
 
 LOG = logging.getLogger(__name__)
 
-DEFAULT_MIN_TRAIN_POSITIVES = 100
 DEFAULT_EXAM_COHORT = "exam_v1"
 DEFAULT_EXAM_SET = "all"
 
@@ -183,6 +182,21 @@ _ACTIVE_TAGS_SQL = """
     SELECT id, label FROM tag_taxonomy WHERE active ORDER BY id
 """
 
+# The operator's ready flag, and the ONE statement that reads it. `review_state`
+# (migration 487) is the live three-valued marker behind the Ready / Not ready /
+# Skip toggle on /new-dedup/training-set; migration 443's `ready_for_training`
+# boolean was carried forward into it and is dead schema, so reading THAT column
+# would freeze the selection at the 487 backfill and ignore every later toggle.
+_READY_TAGS_SQL = """
+    SELECT id, label FROM tag_taxonomy
+    WHERE active AND review_state = 'ready'
+    ORDER BY id
+"""
+
+_NAMED_TAGS_SQL = """
+    SELECT id, label FROM tag_taxonomy WHERE id = ANY(%(ids)s::bigint[]) ORDER BY id
+"""
+
 
 @dataclass(frozen=True)
 class Arm:
@@ -298,36 +312,61 @@ class HeadPlan:
     reason: str = ""
 
 
-def select_heads(
-    conn: psycopg.Connection, *,
-    min_train_positives: int = DEFAULT_MIN_TRAIN_POSITIVES,
-    tag_ids: Sequence[int] | None = None,
-) -> list[HeadPlan]:
-    """Every active tag, with its admitted counts and whether it makes the cut.
+NOT_READY_REASON = "not marked ready on the training-set page"
+NOT_NAMED_REASON = "not in the explicit head list"
 
-    A FLAG, NEVER A LIST. The set of trainable heads changes every time the
-    operator admits labels; a hard-coded list would be wrong within a day and
-    would quietly decide the experiment's scope. `min_train_positives` is the
-    whole rule, and every tag it rejects is still returned with the count that
-    rejected it, so "which heads were left out and by how much" is answerable
-    without re-running anything.
+
+def ready_heads(
+    conn: psycopg.Connection, *, tag_ids: Sequence[int] | None = None,
+) -> list[tuple[int, str]]:
+    """The heads that take part: `(tag_id, label)`, ordered by id.
+
+    THE OPERATOR'S FLAG IS THE DECISION (ruling 2026-09-08). A count of admitted
+    positives used to be the rule; it decided the experiment's scope on the
+    operator's behalf, and a well-labelled head they had not yet reviewed could
+    enter while a reviewed thin one could not. `tag_ids` is the one override — a
+    named list beats the flag, because naming heads IS an operator decision.
+
+    Reads the vocabulary only. No label table is touched here, which is why
+    tests/test_holdout_exclusion_census.py has nothing to exempt.
     """
+    with conn.cursor() as cur:
+        if tag_ids:
+            cur.execute(_NAMED_TAGS_SQL, {"ids": [int(t) for t in tag_ids]})
+        else:
+            cur.execute(_READY_TAGS_SQL)
+        return [(int(r[0]), str(r[1])) for r in cur.fetchall()]
+
+
+def select_heads(
+    conn: psycopg.Connection, *, tag_ids: Sequence[int] | None = None,
+) -> list[HeadPlan]:
+    """Every candidate tag, with its admitted counts and whether it was selected.
+
+    The counts are INFORMATION, never a filter: a flagged head with too few rows
+    is still selected and simply fails at training time with a recorded reason,
+    which is a decided cell rather than a silent omission.
+    """
+    picked = ready_heads(conn, tag_ids=tag_ids)
+    chosen = {tag_id for tag_id, _ in picked}
     with conn.cursor() as cur:
         cur.execute(_ACTIVE_TAGS_SQL)
         tags = [(int(r[0]), str(r[1])) for r in cur.fetchall()]
-    wanted = {int(t) for t in tag_ids} if tag_ids else None
+    # A named head that is inactive must still be reported, or an explicit list
+    # could name a tag the report never mentions.
+    seen = {tag_id for tag_id, _ in tags}
+    tags += [(t, label) for t, label in picked if t not in seen]
+
     out: list[HeadPlan] = []
-    for tag_id, label in tags:
-        if wanted is not None and tag_id not in wanted:
-            continue
+    for tag_id, label in sorted(tags):
         rows = machine_labeling.training_rows(conn, tag_id=tag_id)
         n_pos = sum(1 for _, state in rows if state == "positive")
         n_neg = sum(1 for _, state in rows if state == "negative")
-        ok = n_pos >= int(min_train_positives)
+        ok = tag_id in chosen
         out.append(HeadPlan(
             tag_id=tag_id, label=label, n_pos=n_pos, n_neg=n_neg, selected=ok,
             reason="" if ok else
-            f"{n_pos} admitted positives < {int(min_train_positives)}"))
+            (NOT_NAMED_REASON if tag_ids else NOT_READY_REASON)))
     return out
 
 
@@ -632,7 +671,7 @@ def run_bakeoff(
     conn: psycopg.Connection, *, run_id: int,
     modes: Sequence[str] = th.MODES,
     arm_names: Sequence[str] | None = None,
-    min_train_positives: int | None = None,
+    tag_ids: Sequence[int] | None = None,
     n_splits: int = th.DEFAULT_N_SPLITS,
     C: float = th.DEFAULT_C,
     threshold: float = th.DEFAULT_THRESHOLD,
@@ -653,15 +692,16 @@ def run_bakeoff(
     run = get_run(conn, run_id=run_id)
     if run is None:
         raise BakeoffError(f"bake-off run {run_id} does not exist")
-    floor = int(min_train_positives if min_train_positives is not None
-                else run["min_train_positives"])
     stamp = trained_at or datetime.now(timezone.utc)
 
-    plans = [p for p in select_heads(conn, min_train_positives=floor) if p.selected]
+    plans = [p for p in select_heads(conn, tag_ids=tag_ids) if p.selected]
     if not plans:
         raise BakeoffError(
-            f"no head has {floor} admitted training positives — lower "
-            "--min-train-positives, or admit more labels first")
+            "no head is marked ready for training — flip the Ready toggle on "
+            "/new-dedup/training-set, or name heads explicitly")
+    for plan in plans:
+        LOG.info("BAKEOFF head %d %s positives=%d negatives=%d",
+                 plan.tag_id, plan.label, plan.n_pos, plan.n_neg)
     set_run_status(conn, run_id=run_id, status="running",
                    heads=[p.tag_id for p in plans])
 

@@ -181,11 +181,13 @@ def test_siglip_checkpoint_prefers_the_largest_that_exists():
 # Manifest selection
 # --------------------------------------------------------------------------------
 
-def test_head_selection_uses_training_rows_and_applies_the_floor(monkeypatch):
-    conn = _FakeConn({"FROM tag_taxonomy WHERE active": [(1, "kuchyne"), (2, "garaz")]})
+def test_head_selection_is_the_operator_ready_flag(monkeypatch):
+    # Only tag 1 is ready. Tag 2 is active and far better labelled, and stays out
+    # anyway: the operator's flag is the decision, the counts are not.
+    conn = _FakeConn({"WHERE active AND review_state = 'ready'": [(1, "kuchyne")]})
     rows = {
         1: [(10, "positive")] * 3 + [(20, "negative")],
-        2: [(30, "positive")],
+        2: [(30, "positive")] * 500,
     }
     seen: list[int] = []
 
@@ -194,20 +196,41 @@ def test_head_selection_uses_training_rows_and_applies_the_floor(monkeypatch):
         return rows[tag_id]
 
     monkeypatch.setattr(manifest.machine_labeling, "training_rows", _training_rows)
-    heads = manifest.select_heads(conn, min_train_positives=2)
+    heads = manifest.select_heads(conn)
 
-    assert seen == [1, 2]                      # the ONE door, asked per head
-    assert [h["tag_id"] for h in heads] == [1]  # tag 2's single positive is below the floor
+    assert seen == [1]                          # the ONE door, asked per selected head
+    assert [h["tag_id"] for h in heads] == [1]
     assert heads[0]["positives"] == 3 and heads[0]["negatives"] == 1
-    assert heads[0]["image_ids"] == [10, 20]   # distinct, both states
+    assert heads[0]["image_ids"] == [10, 20]    # distinct, both states
+    # The selector reads the vocabulary and its flag; no label table.
+    assert all("image_tag_labels" not in sql for sql, _ in conn.executed)
 
 
-def test_explicit_heads_override_the_floor(monkeypatch):
+def test_a_ready_head_with_no_training_rows_is_still_selected(monkeypatch):
+    conn = _FakeConn({"WHERE active AND review_state = 'ready'": [(7, "sklep")]})
+    monkeypatch.setattr(manifest.machine_labeling, "training_rows", lambda *a, **k: [])
+    heads = manifest.select_heads(conn)
+    # It enters the run and fails at training time with a recorded reason; a count
+    # must never quietly drop a head the operator marked ready.
+    assert [h["tag_id"] for h in heads] == [7]
+    assert heads[0]["positives"] == 0 and heads[0]["negatives"] == 0
+
+
+def test_explicit_heads_override_the_ready_flag(monkeypatch):
     conn = _FakeConn({"WHERE id = ANY": [(2, "garaz")]})
     monkeypatch.setattr(manifest.machine_labeling, "training_rows",
                         lambda *a, **k: [(30, "positive")])
-    heads = manifest.select_heads(conn, min_train_positives=999, head_ids=[2])
+    heads = manifest.select_heads(conn, head_ids=[2])
     assert [h["tag_id"] for h in heads] == [2]
+    assert all("review_state" not in sql for sql, _ in conn.executed)
+
+
+def test_the_run_note_carries_the_counts_as_information():
+    census = manifest.head_census([
+        {"tag_id": 1, "label": "kuchyne", "positives": 231, "negatives": 1004},
+        {"tag_id": 2, "label": "garaz", "positives": 12, "negatives": 900},
+    ])
+    assert census == "kuchyne(1) 231+/1004-; garaz(2) 12+/900-"
 
 
 def test_the_manifest_module_writes_no_sql_naming_image_tag_labels():
@@ -383,7 +406,7 @@ def test_the_image_cache_is_filled_once_and_reused(tmp_path):
 # --------------------------------------------------------------------------------
 
 def _args(**overrides) -> argparse.Namespace:
-    base = dict(stage="manifest", run_id=0, label="", note="", min_train_positives=100,
+    base = dict(stage="manifest", run_id=0, label="", note="",
                 heads="", arms="", batch_size=32, workers=16, job_max_seconds=7200,
                 ref="main", image="img", gpu_allowlist="3090", dry_run=False)
     base.update(overrides)
