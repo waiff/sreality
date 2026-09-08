@@ -382,7 +382,12 @@ W1 (shared prerequisites + labeling program):
       abstention is counted beside the split and folded into no rate. Every selector is in the URL.
 - [ ] **NEXT — tagging bake-off, phase 2b**: the GPU job that fills
       `dedup_sim.tag_head_bakeoff_vectors` per arm, and its workflow. Nothing has been embedded,
-      trained or scored yet, so the page has no run to show until that lane runs.
+      trained or scored yet, so the page has no run to show until that lane runs. Two paid
+      attempts have failed (2026-09-08 ledger (f) ~$0.50, (g) ~$0.08 — the watchdog stopped the
+      second at 1,245 s). The cause of the second is unknown for lack of any pod log; the
+      bootstrap now reports every step and ships its own error tail into
+      `dedup_sim.tag_head_bakeoff_runs.note`, so the third attempt will say what happened.
+      Run 1 needs no cleanup: arms `pending`, zero vectors.
 
 Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
 

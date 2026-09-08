@@ -30,6 +30,15 @@ worth restating, because each was learned the expensive way:
     answers 400. A watchdog (`scripts/pod_watchdog.py`) now polls the payload's OWN rows
     every minute and tears the pod down on a missing boot heartbeat, a stalled one, or
     every arm reaching a terminal status.
+  * THE BOOTSTRAP REPORTS ITSELF. The second failure (pod bsg9k5ee9y6jcm, 1,245 s,
+    ~$0.08) was killed correctly and still could not be diagnosed: the first heartbeat
+    was the payload's, written only after fetch + uv + venv + torch + install had all
+    succeeded. This dispatch now hands the pod a `HEARTBEAT_SQL` naming THIS run's row
+    (`POD_HEARTBEAT_SQL`), which `scripts/pod_report.py` executes after every bootstrap
+    step and once more from an EXIT trap carrying `exit=<code> step=<the failing step>`
+    and the tail of the pod's own bootstrap log. `select note from
+    dedup_sim.tag_head_bakeoff_runs where id = N` is now the pod log RunPod will not
+    give us, and the dispatcher prints it after teardown.
 
 Completion is NOT read from the pod. Progress is a SQL question:
 `select arm, status, dim, note from dedup_sim.tag_head_bakeoff_arms where run_id = N`.
@@ -118,6 +127,26 @@ _RUN_NOTE_SQL = """
     SELECT note FROM dedup_sim.tag_head_bakeoff_runs WHERE id = %(run_id)s
 """
 
+# THE BOOTSTRAP'S OWN HEARTBEAT (2026-09-08 (g)). Handed to the pod in the REST body's
+# `env` as HEARTBEAT_SQL and executed by `scripts/pod_report.py` on the image's Python
+# after every bootstrap step — before this repo, the 3.12 venv or torch exist. It lives
+# here, not in the pod script, because the reporter must stay lane-agnostic: it knows a
+# note and a run id, never a table.
+#
+# LATEST-WINS, ONE LINE: the regexp drops any previous `pod step` line, so the note holds
+# the newest step (or, from the EXIT trap, the failing step plus a tail of the bootstrap
+# log) and never grows. Everything else — the manifest's text, the payload's own
+# `pod booted` / `pod alive` lines — is preserved.
+POD_HEARTBEAT_SQL = r"""
+    UPDATE dedup_sim.tag_head_bakeoff_runs
+    SET note = left(
+        regexp_replace(coalesce(note, ''), '(^|\n)pod step [^\n]*', '', 'g')
+        || E'\n' || %(note)s, 8000)
+    WHERE id = %(run_id)s
+"""
+
+STEP_PREFIX = "pod step "
+
 _ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)?")
 
 
@@ -149,15 +178,32 @@ def build_start_cmd(*, ref: str, module: str, payload_args: Sequence[str]) -> li
                                          payload_args=payload_args, extra="clip")
 
 
-def pod_env() -> dict[str, str]:
-    """The credentials present in this process's environment, forwarded to the pod."""
-    return {k: os.environ[k] for k in POD_ENV_KEYS if os.environ.get(k)}
+def pod_env(run_id: int = 0) -> dict[str, str]:
+    """The credentials present in this process's environment, forwarded to the pod —
+    plus the heartbeat wiring the bootstrap reporter needs. That wiring is not a
+    credential: an UPDATE and a row id, executed with the SUPABASE_DB_URL the pod
+    already has."""
+    env = {k: os.environ[k] for k in POD_ENV_KEYS if os.environ.get(k)}
+    if run_id:
+        env["HEARTBEAT_SQL"] = POD_HEARTBEAT_SQL
+        env["HEARTBEAT_RUN_ID"] = str(run_id)
+    return env
 
 
 def _latest_iso(texts: Sequence[str | None]) -> str:
     """The newest ISO timestamp appearing anywhere in these notes, '' if none."""
     stamps = [m for text in texts if text for m in _ISO_RE.findall(text)]
     return max(stamps) if stamps else ""
+
+
+def _last_step(run_note: str | None) -> str:
+    """The bootstrap's newest step line, verbatim (JSON: timestamp, message, pod name,
+    python version — and from the EXIT trap the code plus a tail of the bootstrap log).
+    Empty before the first one."""
+    for line in reversed((run_note or "").splitlines()):
+        if line.startswith(STEP_PREFIX):
+            return line[len(STEP_PREFIX):]
+    return ""
 
 
 def _boot_at(run_note: str | None) -> datetime | None:
@@ -204,12 +250,17 @@ def read_bakeoff_progress(conn: Any, *, run_id: int, only: Sequence[str],
     fresh_boot = (boot_at is not None
                   and boot_at >= launched_at - timedelta(seconds=CLOCK_SKEW_GRACE_S))
     done = sum(1 for r in considered if r[1] in TERMINAL_ARM_STATUSES)
+    # The bootstrap's step line carries its own ISO stamp, so `heartbeat` (and with it
+    # the marker) advances through fetch/uv/venv/torch/repo — the phases that used to
+    # look exactly like a dead pod from here.
+    step = _last_step(run_note)
     return Progress(
         booted=fresh_boot or vectors > baseline_vectors,
         marker=f"{vectors}|{heartbeat}",
         terminal=terminal,
         detail=(f"{vectors} vectors, arms {done}/{len(considered)} terminal, "
                 f"heartbeat {heartbeat or 'none'}"),
+        step=step[:1500],
     )
 
 
@@ -305,7 +356,7 @@ def plan_stage(args: argparse.Namespace) -> Plan:
 
 
 def _run_pod(plan: Plan, args: argparse.Namespace) -> int:
-    env = pod_env()
+    env = pod_env(args.run_id)
     missing = [k for k in POD_ENV_KEYS if k not in env]
     allowlist = tuple(s.strip().lower() for s in args.gpu_allowlist.split(",")
                       if s.strip())
@@ -315,9 +366,20 @@ def _run_pod(plan: Plan, args: argparse.Namespace) -> int:
     if missing:
         LOG.warning("pod env keys MISSING (the pod will no-op or fail): %s",
                     ",".join(missing))
-    LOG.info("start_cmd: %s", plan.start_cmd[-1])
+    LOG.info("start_cmd:\n%s", plan.start_cmd[-1])
 
     if not plan.execute:
+        # The cheap pre-flight: execute that exact script offline with every real step
+        # stubbed — once clean, once with a forced failure — and confirm the EXIT trap
+        # reports the failing step. A syntax error here would otherwise be discovered by
+        # renting a GPU and waiting out a deadline (2026-09-08, twice).
+        ok, lines = pod_bootstrap.preflight(plan.start_cmd[-1])
+        for line in lines:
+            LOG.info("%s", line)
+        if not ok:
+            LOG.error("the generated bootstrap script FAILED its offline self-check — "
+                      "do not launch a pod with it")
+            return 1
         LOG.info("DRY RUN — no pod launched, nothing written, nothing spent.")
         return 0
 
@@ -362,6 +424,9 @@ def _run_pod(plan: Plan, args: argparse.Namespace) -> int:
              result.cost_per_hr, _spend(result))
     if result.stop_reason:
         LOG.warning("the WATCHDOG ended this run: %s", result.stop_reason)
+    if watchdog is not None and watchdog.last_step:
+        LOG.info("last bootstrap step heartbeat seen: %s", watchdog.last_step)
+    _log_final_note(args.run_id)
     LOG.info("A timed_out=True here is EXPECTED (on-demand Pods do not flip "
              "desiredStatus) — read progress from Postgres: select arm, status, dim, "
              "note from dedup_sim.tag_head_bakeoff_arms where run_id = %s.", args.run_id)
@@ -371,6 +436,25 @@ def _run_pod(plan: Plan, args: argparse.Namespace) -> int:
     if result.stop_reason and not result.stop_reason.startswith("all-terminal"):
         return 1
     return 0
+
+
+def _log_final_note(run_id: int) -> None:
+    """Print the run row's note after teardown — the last step heartbeat and, when the
+    pod's EXIT trap got there first, its exit code plus the tail of its bootstrap log.
+    RunPod's Pod logs endpoint answers 400, so in a GitHub run this IS the pod's log.
+    Best effort: a dispatch is never failed by an unreadable note."""
+    db_url = os.environ.get("SUPABASE_DB_URL")
+    if not db_url:
+        return
+    try:
+        with _connect(db_url) as conn, conn.cursor() as cur:
+            cur.execute(_RUN_NOTE_SQL, {"run_id": run_id})
+            row = cur.fetchone()
+    except Exception as exc:  # noqa: BLE001 - the teardown already happened
+        LOG.warning("could not read the run note after teardown: %s", exc)
+        return
+    note = (row[0] if row else None) or "(empty)"
+    LOG.info("run %s note after teardown:\n%s", run_id, note[:6000])
 
 
 def _spend(result: Any) -> str:
@@ -421,9 +505,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "clean stop rather than mid-batch.")
     p.add_argument("--bootstrap-deadline-s", type=float,
                    default=DEFAULT_BOOTSTRAP_DEADLINE_S,
-                   help="embed: tear the pod down if no boot heartbeat reaches the "
-                        "database within this long (clone + installs + first weight "
-                        "download). This is the 2026-09-08 case.")
+                   help="embed: tear the pod down if no NEW heartbeat reaches the "
+                        "database within this long while the payload has yet to start. "
+                        "Measured from the last bootstrap STEP heartbeat, so a slow "
+                        "torch download keeps buying time and a dead pod does not.")
     p.add_argument("--stall-deadline-s", type=float, default=DEFAULT_STALL_DEADLINE_S,
                    help="embed: tear the pod down if a booted pod stops making "
                         "progress for this long.")

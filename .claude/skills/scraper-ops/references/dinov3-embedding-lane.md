@@ -58,12 +58,25 @@ the dispatcher derives it from the payload's own `--max-seconds` plus a startup 
 **5. The window is the ceiling; the WATCHDOG is what makes the usual case cheaper.**
 `scripts/pod_watchdog.py` polls the rows this job writes (count for the six-fact identity)
 every 60 s from the runner and terminates the pod in three cases: no vector at all within
-`bootstrap_deadline_seconds` (default 1200 — fetch + interpreter + torch + weights + the
+`bootstrap_deadline_seconds` (default 1800 — fetch + interpreter + torch + weights + the
 first chunk), no new vector for `stall_deadline_seconds` (default 900), or — in the bake-off
 lane — every arm terminal. It logs which case fired plus a spend estimate, and a
 bootstrap/stall teardown **fails the workflow on purpose**: a green run that embedded nothing
 is exactly what 2026-09-08 looked like. Without `SUPABASE_DB_URL` on the runner there is no
 watchdog and the dispatcher says so loudly.
+
+**THE STEP HEARTBEATS ARE NOT WIRED IN THIS LANE (yet), and that is a decision.** Since
+2026-09-08 (g) the shared bootstrap reports every step (`deps`/`fetch`/`uv`/`venv`/`torch`/
+`repo`/`payload`) and ships `exit=<code> step=<name>` plus a log tail from an EXIT trap —
+but only into the row a lane names for it, through the `HEARTBEAT_SQL` + `HEARTBEAT_RUN_ID`
+pair the dispatcher puts in the pod's env. The bake-off has such a row
+(`dedup_sim.tag_head_bakeoff_runs.note`); **this lane has none** — its progress record is
+the vector table itself, which the payload only reaches after the bootstrap has succeeded.
+So here `scripts/pod_report.py` prints its steps into the (unreadable) pod console and exits
+0, and the watchdog's only proof of life is still the first vector. Giving this lane step
+heartbeats means minting a durable run row first (a `dinov3_embed_runs`-shaped table): a
+schema decision, not part of the fix. Until then keep `bootstrap_deadline_seconds` generous,
+and if a pod dies silently, reproduce it on the bake-off lane, which can see.
 
 ## Gotchas
 

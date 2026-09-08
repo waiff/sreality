@@ -1999,10 +1999,10 @@
         },
         {
           "name": "bootstrap_deadline_seconds",
-          "description": "Kill the pod if no vector reaches the database within this long (fetch + 3.12 venv + torch + weights + the first chunk). The 2026-09-08 failure mode: a broken bootstrap billed for the whole window.",
+          "description": "Kill the pod if no vector reaches the database within this long (fetch + 3.12 venv + torch + weights + the first chunk). The 2026-09-08 failure mode: a broken bootstrap billed for the whole window. This lane has no run row for the bootstrap's step heartbeats to land in, so its only proof of life is still the first vector — keep it generous.",
           "required": false,
           "type": "string",
-          "default": "1200",
+          "default": "1800",
           "options": null
         },
         {
@@ -6210,10 +6210,10 @@
         },
         {
           "name": "bootstrap_deadline_seconds",
-          "description": "embed only: kill the pod if no boot heartbeat reaches the database within this long (fetch + 3.12 venv + torch + first weights). The 2026-09-08 failure: 8115s billed for zero vectors.",
+          "description": "embed only: kill the pod if no NEW heartbeat reaches the database within this long while the payload has yet to start. Measured from the last bootstrap step (fetch/uv/venv/torch/repo), so a slow torch download keeps buying time and a dead pod does not.",
           "required": false,
           "type": "string",
-          "default": "1200",
+          "default": "1800",
           "options": null
         },
         {

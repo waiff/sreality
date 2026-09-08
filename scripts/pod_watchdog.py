@@ -9,14 +9,17 @@ full 8,115 s window — ~$0.50 for zero vectors, and RunPod's Pod logs endpoint 
 The runner has `SUPABASE_DB_URL`; the pod's own writes are therefore readable from the
 outside. This module turns that into three terminations, all cheaper than the window:
 
-  (a) BOOTSTRAP DEADLINE — no heartbeat at all within `bootstrap_deadline_s` (default
-      20 min: clone + installs + the first weight download). This is the case that just
-      cost $0.50: "the clone or the install failed".
-  (b) STALL DEADLINE — the pod booted and then stopped making progress for
-      `stall_deadline_s` (default 15 min). Distinguishing (a) from (b) is the whole
-      reason the payload writes a heartbeat the moment Python is up, BEFORE any model
-      download: otherwise "clone failed" and "weights are downloading slowly" look
-      identical from here.
+  (a) BOOTSTRAP DEADLINE — no NEW heartbeat within `bootstrap_deadline_s` (default
+      30 min) while the payload has yet to prove Python is up. Measured from the last
+      heartbeat, not from launch: since 2026-09-08 (g) the bootstrap itself reports
+      every step (`scripts/pod_report.py`), so a slow 2 GB torch download keeps buying
+      time while a dead clone does not.
+  (b) STALL DEADLINE — progress stopped for `stall_deadline_s` (default 15 min). It
+      applies to a booted pod AND to a bootstrap that has already reported at least one
+      step: a pod that could write and then went quiet is stalled, whatever phase it is
+      in (the bootstrap repeats its current step every 300 s for exactly this reason).
+      Before the first heartbeat of any kind there is nothing to compare, so (a) is the
+      only rail that can fire.
   (c) ALL-TERMINAL — every unit of work reached a terminal state. The job is done; the
       remaining window is pure waste.
 
@@ -42,7 +45,10 @@ from typing import Any, Callable
 
 LOG = logging.getLogger("pod_watchdog")
 
-DEFAULT_BOOTSTRAP_DEADLINE_S = 20 * 60.0
+# 30 min, raised from 20 on 2026-09-08 (g): the deadline now runs from the last STEP
+# heartbeat rather than from launch, so it can afford to be generous with one slow step
+# without letting a dead pod idle — the stall deadline catches that within 15 min.
+DEFAULT_BOOTSTRAP_DEADLINE_S = 30 * 60.0
 DEFAULT_STALL_DEADLINE_S = 15 * 60.0
 DEFAULT_POLL_INTERVAL_S = 60.0
 
@@ -55,12 +61,16 @@ class Progress:
     `marker` — changes iff the job advanced; compared, never interpreted.
     `terminal` — every unit of work this dispatch cares about is finished.
     `detail` — free text for the log line.
+    `step` — the bootstrap's newest step report, verbatim, when the lane wires one up.
+      Logged as it changes and printed after teardown, so the GitHub run shows WHICH
+      step failed and the error tail it shipped.
     """
 
     booted: bool
     marker: str
     terminal: bool = False
     detail: str = ""
+    step: str = ""
 
 
 class PodWatchdog:
@@ -85,7 +95,10 @@ class PodWatchdog:
         self._marker: str | None = None
         self._progress_at: float | None = None
         self._booted = False
+        self._step: str = ""
         self.verdict: str | None = None
+        self.last_step: str = ""
+        self.last_detail: str = ""
 
     def __call__(self, elapsed_s: float, context: Any = None) -> str | None:
         if (self._last_poll_at is not None
@@ -102,36 +115,50 @@ class PodWatchdog:
             reading = None
 
         if reading is not None:
+            self.last_detail = reading.detail
+            if reading.step:
+                self.last_step = reading.step
+            if reading.step and reading.step != self._step:
+                # The bootstrap naming its own progress — the thing 2026-09-08 could not
+                # see at all.
+                self._log.info("WATCHDOG step=%s at %.0fs", reading.step, elapsed_s)
+                self._step = reading.step
             if reading.booted and not self._booted:
                 self._booted = True
                 self._progress_at = elapsed_s
                 self._log.info("WATCHDOG pod booted after %.0fs — %s",
                                elapsed_s, reading.detail)
             if reading.marker != self._marker:
-                if self._marker is not None and self._booted:
+                # The FIRST marker is a baseline, not progress: it may be a previous
+                # dispatch's rows. Every later change is progress, booted or not.
+                if self._marker is not None:
                     self._log.info("WATCHDOG progress at %.0fs — %s",
                                    elapsed_s, reading.detail)
-                self._marker = reading.marker
-                if self._booted:
                     self._progress_at = elapsed_s
+                self._marker = reading.marker
             if reading.terminal:
                 return self._terminate("all-terminal", elapsed_s, context,
                                        reading.detail or "every arm reached a terminal "
                                        "status; the rest of the window is waste")
 
-        if not self._booted and elapsed_s >= self._bootstrap_deadline_s:
+        since = self._progress_at if self._progress_at is not None else 0.0
+        if not self._booted and elapsed_s - since >= self._bootstrap_deadline_s:
+            last = self.last_step or "none — the bootstrap reported nothing at all"
             return self._terminate(
                 "bootstrap-deadline", elapsed_s, context,
-                f"no heartbeat within {self._bootstrap_deadline_s:.0f}s — the pod never "
-                "reported Python running, so the clone or the install failed (RunPod's "
-                "Pod logs endpoint answers 400; there is nothing else to read)")
+                f"no new heartbeat for {elapsed_s - since:.0f}s "
+                f"(limit {self._bootstrap_deadline_s:.0f}s) and the payload never "
+                "reported Python running, so the clone or the install failed; last "
+                f"step: {last}")
 
-        if (self._booted and self._progress_at is not None
+        if (self._progress_at is not None
                 and elapsed_s - self._progress_at >= self._stall_deadline_s):
             return self._terminate(
                 "stall-deadline", elapsed_s, context,
-                f"booted, then no progress for {elapsed_s - self._progress_at:.0f}s "
-                f"(limit {self._stall_deadline_s:.0f}s); last seen: {self._marker}")
+                f"{'booted' if self._booted else 'bootstrapping'}, then no progress "
+                f"for {elapsed_s - self._progress_at:.0f}s "
+                f"(limit {self._stall_deadline_s:.0f}s); last seen: {self._marker}"
+                + (f"; last step: {self.last_step}" if self.last_step else ""))
 
         return None
 
