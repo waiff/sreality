@@ -194,6 +194,41 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-08 (c) — **DINOv3 readiness closed out: licence accepted, migration 480 applied,
+  revision pinned, manifest lane proven live.** Corrects entry (b)'s parallel-state line, which
+  was already stale when written.
+  - **Licence: ACCEPTED.** The operator's Hugging Face account (`waiff`) shows "DINOv3 — Gating
+    Group Collection — Sep 5 — ACCEPTED" (screenshot shared 2026-09-08). Route = the HF gated
+    click-through, not Meta's download form, so no `.pth` mirror is needed: the lanes read the
+    gated repo with `HF_TOKEN`, which is set as an Actions secret alongside `RUNPOD_API_KEY`,
+    `SUPABASE_DB_URL` and the four `R2_*`. For ENCODER-DECISION.md §3.4 item 4 (archive the
+    text + hash + date): the public repo copy of the licence
+    (`facebookresearch/dinov3` `LICENSE.md`, *Last Updated: August 19, 2025*, "Sections 3, 4 and
+    7 shall survive") hashes to sha256 `25d122eb8f5b880fd23c736fb6ea8018ee45c12237e00b8a86d14c653904999e`.
+    Which of the two circulating texts the HF gate itself presented can only be confirmed by a
+    token-authenticated fetch of the gated repo's own licence file — small, still open.
+  - **Migration 480 applied 2026-09-08 ~12:57 UTC** via the Supabase MCP, verbatim from main
+    (sha256 47f5faa2…), and verified live in one row: RLS on with zero policies, `anon` and
+    `authenticated` hold no privilege at all, `embedding halfvec(768)`, the eight-column primary
+    key, `image_dinov3_embeddings_encoder_idx` present, 0 rows. It had been skipped over:
+    481–488 were applied around it — the merged ≠ applied trap, caught by checking
+    `to_regclass` rather than trusting the merge.
+  - **Revision pinned** to `5931719e67bbdb9737e363e781fb0c67687896bc` in `data/dinov3_config.json`
+    — the gated repo's HEAD as reported by the public model-metadata endpoint (lastModified
+    2025-08-19T09:00:44Z), i.e. the commit the acceptance covers. Resolution, preprocessing and
+    dtype stay null, so the loader still refuses and the embedding lane stays inert — the
+    bake-off decides those three.
+  - **Manifest lane dry-run (run 34228869976) succeeded against live data**: planner estimate
+    11,540,593 images; P1a[sample] pool 1,000,000 → 3,000 pairs; P1b 3,000 images × 6
+    transforms; P2 119 pairs (thin — same-listing same-tag hard negatives are rare by nature,
+    inspect before trusting); P3 3,784; P4 961 (inspection only); 13,554 distinct images,
+    0.61 MB manifest, no URL minted, nothing uploaded.
+  - **Trainer already on the final door**: `toolkit/tag_heads.py` reads
+    `machine_labeling.training_rows` (the migration-486 `in_training` model); the
+    `training_set_positive_ids` door it was built on is gone with 474. Nothing to change.
+  - #804 (the DINOv2-era bake-off draft) closed as superseded by #1300.
+  - **Still not run, on purpose**: the bake-off pod pass (~$2 — the operator's call), any
+    embedding pass, any training. Training waits on the set (one category still open).
 - 2026-09-08 (b) — **Roadmap-vs-progress review; same-town candidate rung requested (docs
   only).** The operator asked whether "for the location candidates we will also select
   candidates based on same town only (much lower location accuracy, input data quality we
