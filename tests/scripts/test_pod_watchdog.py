@@ -8,6 +8,8 @@ or its indispensable twin, "do NOT tear down a pod that is working".
 
 from __future__ import annotations
 
+import json
+
 from scripts.pod_watchdog import PodWatchdog, Progress
 
 
@@ -182,6 +184,91 @@ def test_each_new_step_is_logged_and_the_last_one_is_kept_for_the_dispatcher(cap
     assert "step=step=fetch ok" in caplog.text and "step=torch ok" in caplog.text
     # What the dispatcher prints after teardown: the shipped error, not a guess.
     assert "no matching distribution" in watchdog.last_step
+
+
+# --- the crash loop (2026-09-08 (h)) ------------------------------------------------
+
+
+def _rec(msg: str, tail: str = "") -> str:
+    record = {"ts": "2026-09-08T18:30:00+00:00", "msg": msg}
+    if tail:
+        record["tail"] = tail
+    return json.dumps(record)
+
+
+def test_two_exit_reports_are_a_crash_loop_and_the_first_one_is_the_verdict(caplog):
+    # RunPod re-runs the docker start command whenever it exits, so a bootstrap that
+    # dies keeps dying. On 2026-09-08 that burned 33 minutes at the stall deadline, and
+    # the report naming the cause was the one the loop overwrote.
+    first = _rec("pass=1 exit=1 step=torch", tail="OSError: No space left on device")
+    poller = _Poller([
+        Progress(booted=False, marker="0|t1", step=_rec("pass=1 step=venv ok"),
+                 steps=(_rec("pass=1 step=venv ok"),)),
+        Progress(booted=False, marker="0|t2", step=first,
+                 steps=(_rec("pass=1 step=venv ok"), first)),
+        Progress(booted=False, marker="0|t3", step=_rec("pass=2 exit=3 step=fetch"),
+                 steps=(_rec("pass=1 step=venv ok"), first,
+                        _rec("pass=2 step=deps ok"),
+                        _rec("pass=2 exit=3 step=fetch",
+                             tail="error: remote origin already exists"))),
+    ])
+    watchdog = PodWatchdog(poller, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60)
+    with caplog.at_level("INFO"):
+        stop, at = _run(watchdog, [60 * i for i in range(1, 40)])
+    assert watchdog.verdict == "crash-loop"
+    assert at == 180                                   # the poll that saw the second exit
+    assert "exited 2 times" in stop
+    # The FIRST failure is the cause; every later one is a symptom of the restart.
+    assert "No space left on device" in stop
+    assert "already exists" not in stop
+    assert watchdog.first_exit == first
+
+
+def test_every_new_record_is_logged_not_only_the_latest(caplog):
+    # A 60s poll against a bootstrap that reports every few seconds sees several new
+    # records at once; logging only the newest throws the rest away.
+    records = tuple(_rec(f"pass=1 step=s{i} ok") for i in range(4))
+    poller = _Poller([Progress(booted=False, marker="0|t1", step=records[-1],
+                              steps=records)])
+    watchdog = PodWatchdog(poller, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60)
+    with caplog.at_level("INFO"):
+        _run(watchdog, [60, 120])
+    for i in range(4):
+        assert f"step=s{i} ok" in caplog.text
+    # And not again on the next poll: a record is logged once.
+    assert caplog.text.count("step=s0 ok") == 1
+
+
+def test_one_exit_report_alone_is_not_a_crash_loop():
+    # A single failing pass is the ordinary case the other rails already cover; only the
+    # repetition proves the container is restarting.
+    died = _rec("pass=1 exit=1 step=torch")
+    poller = _Poller([
+        Progress(booted=False, marker="0|t1", step=_rec("pass=1 step=venv ok"),
+                 steps=(_rec("pass=1 step=venv ok"),)),
+        Progress(booted=False, marker="0|t2", step=died,
+                 steps=(_rec("pass=1 step=venv ok"), died)),
+    ])
+    watchdog = PodWatchdog(poller, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60)
+    stop, at = _run(watchdog, [60 * i for i in range(1, 40)])
+    assert watchdog.verdict == "stall-deadline"      # not crash-loop
+    assert at == 120 + 900
+
+
+def test_a_lane_that_reports_only_the_newest_record_keeps_the_old_rails():
+    # The pre-(h) note shape, and any lane that never wires a history: `steps` is empty
+    # and nothing about the three original terminations changes.
+    poller = _Poller([Progress(booted=False, marker="0|t1", step="step=uv ok"),
+                      Progress(booted=False, marker="0|t2", step="step=venv ok"),
+                      Progress(booted=False, marker="0|t2", step="step=venv ok")])
+    watchdog = PodWatchdog(poller, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60)
+    stop, at = _run(watchdog, [60 * i for i in range(1, 40)])
+    assert watchdog.verdict == "stall-deadline" and at == 120 + 900
+    assert "step=venv ok" in stop
 
 
 def test_the_default_bootstrap_deadline_is_generous_enough_for_a_slow_install():

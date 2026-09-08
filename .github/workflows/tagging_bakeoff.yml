@@ -19,9 +19,15 @@ name: "NEW DEDUP: tagging bake-off (manifest / embed / train)"
 #      when no NEW heartbeat arrives (bootstrap_deadline_seconds), when progress stops
 #      (stall_deadline_seconds), or when every arm is terminal. On 2026-09-08, before it
 #      existed, a broken bootstrap billed 8,115s for zero vectors. Since that day's
-#      retry the BOOTSTRAP reports every step (fetch/uv/venv/torch/repo) into the run
-#      row's note, and its EXIT trap ships the failing step plus the tail of its own log
-#      there — read it with: select note from dedup_sim.tag_head_bakeoff_runs where id=N.
+#      retry the BOOTSTRAP reports every step (fetch/uv/venv/disk/torch/repo) into the
+#      run row's note, and its EXIT trap ships the failing step plus the tail of its own
+#      log there — read it with: select note from dedup_sim.tag_head_bakeoff_runs
+#      where id=N. The note holds the LAST FEW records as a JSON array, not one
+#      latest-wins line, because RunPod re-runs the pod's start command whenever it
+#      exits: the third attempt restarted every ~60s and each restart overwrote the
+#      report that named the cause. The bootstrap now sleeps instead of exiting, every
+#      step is idempotent, every heartbeat carries pass=N, and two `exit=` reports tear
+#      the pod down immediately as case=crash-loop.
 #   3. train — back on a runner with the `training` extra, running the results half of
 #      the experiment.
 #
@@ -103,6 +109,11 @@ on:
         required: false
         default: "900"
         type: string
+      container_disk_gb:
+        description: "embed only: the pod's CONTAINER disk in GB — where the bootstrap works (/opt/podboot). It must hold the base image, ~5GB of installed torch, every arm's weights and the ~1GB image cache. No pod volume is rented: /workspace was a 1GB volume and a 5GB install aimed at it is what killed the 2026-09-08 pod. Minimum 40."
+        required: false
+        default: "60"
+        type: string
       dry_run:
         description: "Report the plan and exit. The manifest stage still reports head/image counts (writing nothing); embed launches no pod; train executes nothing."
         required: false
@@ -143,8 +154,12 @@ jobs:
           JOB_MAX_SECONDS: ${{ inputs.job_max_seconds }}
           BOOTSTRAP_DEADLINE_SECONDS: ${{ inputs.bootstrap_deadline_seconds }}
           STALL_DEADLINE_SECONDS: ${{ inputs.stall_deadline_seconds }}
+          CONTAINER_DISK_GB: ${{ inputs.container_disk_gb }}
         run: |
           set -euo pipefail
+          case "${CONTAINER_DISK_GB:-60}" in
+            ''|*[!0-9]*) echo "::error::container_disk_gb must be a number"; exit 1 ;;
+          esac
           case "${BOOTSTRAP_DEADLINE_SECONDS:-1800}" in
             ''|*[!0-9]*) echo "::error::bootstrap_deadline_seconds must be a number"; exit 1 ;;
           esac
@@ -233,6 +248,7 @@ jobs:
           JOB_MAX_SECONDS: ${{ inputs.job_max_seconds }}
           BOOTSTRAP_DEADLINE_SECONDS: ${{ inputs.bootstrap_deadline_seconds }}
           STALL_DEADLINE_SECONDS: ${{ inputs.stall_deadline_seconds }}
+          CONTAINER_DISK_GB: ${{ inputs.container_disk_gb }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
@@ -240,6 +256,7 @@ jobs:
           ARGS+=(--workers "${WORKERS:-16}" --job-max-seconds "${JOB_MAX_SECONDS:-7200}")
           ARGS+=(--bootstrap-deadline-s "${BOOTSTRAP_DEADLINE_SECONDS:-1800}")
           ARGS+=(--stall-deadline-s "${STALL_DEADLINE_SECONDS:-900}")
+          ARGS+=(--container-disk-gb "${CONTAINER_DISK_GB:-60}")
           if [ -n "${ARMS:-}" ]; then ARGS+=(--arms "${ARMS}"); fi
           if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi
           python -m scripts.tagging_bakeoff_dispatch "${ARGS[@]}"

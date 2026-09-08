@@ -538,3 +538,57 @@ def test_eligible_gpus_returns_cheapest_first():
     )
     gpus = _client(session).eligible_gpus()
     assert [g.id for g in gpus] == ["rtxa2000", "rtx4090"]
+
+
+# --- the two disks (2026-09-08 (h)) -----------------------------------------
+#
+# The invoice was one field. `volumeInGb` defaulted to 1, RunPod mounts that volume at
+# /workspace, and the bootstrap installed a ~5 GB torch under /workspace. Nothing here
+# had ever looked at the body, so the shape that could not work shipped three times.
+
+
+def test_no_pod_volume_is_rented_by_default():
+    # These jobs keep nothing between pods — their durable state is Postgres and R2 —
+    # so the right volume size is none at all, and the disk to grow is the container's.
+    session = _FakeSession()
+    session.launch_responses = [_FakeResponse(201, {"id": "pod123"})]
+    _client(session).launch_pod(
+        name="job", image="x", gpu_type_id="rtxa2000", start_cmd=["true"],
+    )
+    assert session.calls[0][2]["volumeInGb"] == 0
+
+
+def test_the_container_disk_is_what_the_caller_asked_for():
+    session = _FakeSession()
+    session.launch_responses = [_FakeResponse(201, {"id": "pod123"})]
+    _client(session).launch_pod(
+        name="job", image="x", gpu_type_id="rtxa2000", start_cmd=["true"],
+        container_disk_gb=60,
+    )
+    body = session.calls[0][2]
+    assert body["containerDiskInGb"] == 60 and body["volumeInGb"] == 0
+
+
+def test_run_job_passes_both_disk_sizes_through_to_the_launch():
+    session = _FakeSession()
+    session.launch_responses = [_FakeResponse(201, {"id": "pod123"})]
+    session.get_responses = [_FakeResponse(200, {"desiredStatus": "EXITED"})]
+    session.get_logs_response = _FakeResponse(200, lines=[])
+    _client(session).run_job(
+        name="job", image="x", gpu_type_id="rtxa2000", start_cmd=["true"],
+        max_wait_s=1, container_disk_gb=60, volume_gb=0,
+    )
+    body = session.calls[0][2]
+    assert body["containerDiskInGb"] == 60 and body["volumeInGb"] == 0
+
+
+def test_both_lanes_size_the_container_disk_for_torch_and_rent_no_volume():
+    from scripts import dinov3_embed_dispatch, pod_bootstrap, tagging_bakeoff_dispatch
+
+    for lane in (dinov3_embed_dispatch, tagging_bakeoff_dispatch):
+        assert lane.POD_VOLUME_GB == 0
+        assert lane.MIN_CONTAINER_DISK_GB >= 40
+        assert lane.DEFAULT_CONTAINER_DISK_GB >= lane.MIN_CONTAINER_DISK_GB
+    # The one connection between this module's body and the bootstrap's paths.
+    assert pod_bootstrap.VOLUME_MOUNT_PATH == "/workspace"
+    assert not pod_bootstrap.CONTAINER_ROOT.startswith(pod_bootstrap.VOLUME_MOUNT_PATH)

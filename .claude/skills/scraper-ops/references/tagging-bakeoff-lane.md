@@ -82,12 +82,20 @@ ceiling: the pod is torn down when it expires, whatever the job is doing.
 **The ceiling is not the plan — the watchdog is** (`scripts/pod_watchdog.py`, since
 2026-09-08). It polls this run's own rows every 60 s from the runner and terminates the pod
 when: no NEW heartbeat arrives within `bootstrap_deadline_seconds` (default **1800**) while
-the payload has yet to start, progress stops for `stall_deadline_seconds` (default 900), or
-**every arm is terminal** (`ok`/`failed`/`skipped`) — the last one being the ordinary happy
-path, which now stops paying the moment the work is done rather than at the end of the
-window. It logs the case and a spend estimate; a bootstrap or stall teardown **fails the
-workflow**, because a green run that embedded nothing is precisely what the incident looked
-like in Actions.
+the payload has yet to start, progress stops for `stall_deadline_seconds` (default 900),
+**two or more `exit=` reports arrive** (`case=crash-loop` — the container is restarting, see
+below), or **every arm is terminal** (`ok`/`failed`/`skipped`) — the last one being the
+ordinary happy path, which now stops paying the moment the work is done rather than at the
+end of the window. It logs the case and a spend estimate; a bootstrap, stall or crash-loop
+teardown **fails the workflow**, because a green run that embedded nothing is precisely what
+the incident looked like in Actions.
+
+**The pod works on the CONTAINER disk** (`/opt/podboot`), sized by the `container_disk_gb`
+input (default **60**, floor 40: the devel base image, ~5 GB of installed torch, every arm's
+weights, the ~1 GB image cache). `/workspace` is RunPod's mount point for the pod VOLUME,
+which this lane rents none of — a 1 GB volume under a 5 GB install is the likeliest cause of
+attempt 3's death at `step=torch`. The `step=disk <N>GB free` heartbeat right before the
+torch step is there so the next disk problem is read, not guessed.
 
 **The bootstrap reports every step** (since 2026-09-08 (g), after the retry cost ~$0.08 and
 still could not be diagnosed). `scripts/pod_report.py` is written onto the pod by the start
@@ -137,27 +145,56 @@ number that decides whether a future full-corpus pass is affordable) and **the r
 is the only record of what actually ran. A `skipped` arm names why in `note` — usually a
 gated checkpoint the token could not read.
 
-**The bootstrap's own steps land in the SAME run note**, one line at a time, latest-wins:
+**The bootstrap's own steps land in the SAME run note**, as ONE line holding the last ~8
+records as a JSON array (since 2026-09-08 (h) — a single latest-wins line let a restart
+loop overwrite the record that named the cause):
 
 ```sql
 select note from dedup_sim.tag_head_bakeoff_runs where id = N;
 ```
 
 ```
-pod step {"ts": "2026-09-08T18:04:11+00:00", "msg": "step=torch ok",
-          "pod": "bsg9k5ee9y6jcm", "python": "3.10.12"}
+pod steps [{"ts": "2026-09-08T18:30:38+00:00", "msg": "pass=1 step=venv ok",
+            "pod": "lg5oy1ivlgoyh7", "python": "3.10.12"},
+           {"ts": "2026-09-08T18:30:41+00:00", "msg": "pass=1 exit=1 step=torch",
+            "tail": "…No space left on device"}]
 ```
 
-The steps, in order: `deps` (psycopg for the reporter) → `fetch` (the repo at the sha) →
-`uv` → `venv` (the 3.12) → `torch` (cu118, the slow one) → `repo` (`pip install -e .[clip]`)
-→ `payload starting`. **A failure ships itself**: the start command's EXIT trap writes
-`{"msg": "exit=1 step=torch", "tail": "<the last ~3000 chars of the pod's bootstrap log>"}`
-into that same line, so the actual pip/git error text is readable from SQL and is printed in
-the dispatcher's own log after teardown. RunPod's Pod logs endpoint answers 400 — this note
-IS the pod log. `step=<name> running` lines are the 300 s beat during a long step.
+To read it as rows rather than as a wall of JSON:
 
-Only when the note carries no `pod step` line **at all** is the pod dead before the reporter
-existed (the image had no `python3`, or the container never started).
+```sql
+select r.ts, r.msg, left(coalesce(r.tail, ''), 300) as tail
+from dedup_sim.tag_head_bakeoff_runs b
+cross join lateral (
+  select (regexp_match(l, '^pod steps (.*)$'))[1] as arr
+  from regexp_split_to_table(coalesce(b.note, ''), E'\n') as l
+  where l like 'pod steps %'
+) s
+cross join lateral jsonb_to_recordset(s.arr::jsonb) as r(ts text, msg text, tail text)
+where b.id = N
+order by r.ts;
+```
+
+The steps, in order: `start` → `deps` (psycopg for the reporter) → `fetch` (the repo at the
+sha) → `uv` → `venv` (the 3.12) → `disk` (**free GB on the work dir, before the ~5 GB torch
+install**) → `torch` (cu118, the slow one) → `repo` (`pip install -e .[clip]`) →
+`payload starting` → `payload ok` → `idle`. **A failure ships itself**: the start command's
+EXIT trap writes `{"msg": "pass=1 exit=1 step=torch", "tail": "<the last ~3000 chars of the
+pod's bootstrap log>"}` into the array, so the actual pip/git error text is readable from SQL
+and is printed in the dispatcher's own log after teardown. RunPod's Pod logs endpoint answers
+400 — this note IS the pod log. `step=<name> running` lines are the 300 s beat during a long
+step.
+
+**`pass=N` is the thing to read first.** RunPod re-runs the pod's start command whenever it
+exits, so a bootstrap that dies keeps dying: attempt 3 (pod `lg5oy1ivlgoyh7`) restarted every
+~60 s for 33 minutes. The bootstrap is now idempotent and, after a clean payload, sleeps
+instead of exiting — so `pass=2` in a live note means the container restarted and something
+is wrong. Two `exit=` records tear the pod down at once (`case=crash-loop`), and the
+dispatcher prints the FIRST one, which is the cause; the rest are its restarts.
+
+Only when the note carries no `pod steps` line **at all** is the pod dead before the reporter
+existed (the image had no `python3`, or the container never started). A `pod step` (singular)
+line is the pre-(h) shape and is still read.
 
 While a pod is up, the same two columns are the payload's heartbeat: the arm note is rewritten at
 every batch (`<iso> running 3000/10800 vectors dim=768 …`) and the RUN row's note carries
@@ -181,10 +218,17 @@ with no fresh `pod booted` line means the bootstrap never reached the payload �
   and the image is CUDA 11.8-era). One module, `scripts/pod_bootstrap.py`, shared with the
   production lane; tests assert `--branch` never returns.
 - **A `dry_run: true` embed now PROVES the generated bash before any pod is rented.** The
-  dispatcher prints the whole start command and then executes it locally twice with every
-  real step stubbed — once clean, once with `torch` forced to fail — and requires the EXIT
-  trap to report `exit=1 step=torch`. A failed self-check returns 1 and says so. Free, and
-  it is the rail against a third paid-for syntax error.
+  dispatcher prints the whole start command and then executes it locally three times with
+  every real step stubbed — clean, again over the SAME work dir (the restart RunPod
+  performs), and once with `torch` forced to fail — and requires the EXIT trap to report
+  `pass=1 exit=0 step=idle`, `pass=2 exit=0 step=idle` and `exit=1 step=torch`. A failed
+  self-check returns 1 and says so. Free, and it is the rail against a fourth paid-for
+  bootstrap bug.
+- **Never let the pod's start command exit.** RunPod re-runs it, so an exit is a restart
+  loop on the clock (2026-09-08 (h): ~33 min, ~$0.12, `error: remote origin already
+  exists` every ~60 s). The bootstrap ends in `sleep infinity` and the watchdog is what
+  ends the pod; every step is also idempotent (`rm -rf` before the checkout and the venv),
+  so a restart is at worst wasted minutes rather than a hard failure.
 - **Re-dispatching a half-finished run needs no cleanup.** An arm a killed pod left
   `running` is picked up again — `pending_arms` treats `pending`/`running`/`failed` alike,
   and the per-image skip means the work already committed is not repeated. A `running`
@@ -193,8 +237,9 @@ with no fresh `pod booted` line means the bootstrap never reached the payload �
   every download erroring; re-run the manifest stage (it mints a new run) rather than
   hunting the pod.
 - **Download once, embed N times.** The pod caches every image to local disk before the
-  first arm runs (~1 GB), because ten arms re-downloading the corpus would spend the
-  pod's life on R2 egress. The *production* corpus job does the opposite and must —
+  first arm runs (~1 GB, in `/opt/podboot/tagging-bakeoff-cache` on the CONTAINER disk —
+  it used to sit on the 1 GB volume alongside the venv), because ten arms re-downloading
+  the corpus would spend the pod's life on R2 egress. The *production* corpus job does the opposite and must —
   10.4M images do not fit on a pod's disk. Different problem, different answer.
 - **Resume is free and needs no marker column**, the same way the production lane works:
   an arm's already-written `image_id`s are read into a set and skipped. A pod dying at

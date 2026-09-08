@@ -194,6 +194,58 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-08 (h) — **Attempt 3 finally produced readable heartbeats, and they showed a
+  RESTART LOOP over a disk that was never big enough. Three fixes, one PR.** Run 1's embed
+  stage went to pod `lg5oy1ivlgoyh7`; the watchdog's stall rail ended it at **~33 min**
+  (~$0.12). What the note said, for the first time:
+  - `18:30:34 step=uv ok`, `18:30:38 step=venv ok` — **63 s after launch**. Fetch-by-sha, uv
+    and the 3.12 venv all work on the pod; (f) and (g) hold.
+  - `18:32:16` — a **SECOND pass of the whole start command**, failing at `step=fetch` with
+    `error: remote origin already exists` (exit 3), then repeating every ~60 s.
+  - **RunPod re-runs the docker start command whenever it exits.** That is the loop: the
+    first pass died, the container restarted, `git remote add origin` met a directory that
+    already had a remote, and every restart wrote a fresh heartbeat over the previous one.
+    Fix: **every step is idempotent** (`rm -rf` before the checkout and before the venv;
+    `$PODBOOT_ROOT` itself — reporter, log, step file, history, pass counter — is kept), and
+    after a clean payload the script **`sleep infinity`** instead of exiting. The dispatcher's
+    watchdog is what ends the pod. A pass counter on disk survives the restart and every
+    heartbeat now carries `pass=N`, so a loop reads as a loop instead of as progress.
+  - **The first pass died fast, and the most likely reason is disk.** `launch_pod` defaulted
+    `volume_gb=1`; RunPod mounts the pod volume at `/workspace`; `pod_bootstrap` put
+    everything — including a `uv pip install torch …cu118` (~2.5 GB downloaded, ~5 GB
+    installed) — under `/workspace`. **This is a reading, not a confirmed diagnosis**: the
+    report that would have named it was overwritten by pass 2 before the 60 s poll saw it.
+    Fix regardless: the work dir moves to the **container disk** (`/opt/podboot`, never
+    `/workspace`), both lanes rent **no volume** (`volumeInGb: 0`) and size
+    `container_disk_gb` (a new dispatcher flag + workflow input, default **60**, floor 40:
+    devel base image + torch + weights + the ~1 GB image cache), and the bootstrap logs
+    `df -h` at the top plus a `step=disk <N>GB free` heartbeat immediately before the torch
+    step. The next disk problem is read, not guessed. The bake-off payload's own image cache
+    moved off `/workspace` with it (`tagging_bakeoff_embed.DEFAULT_CACHE_DIR`).
+  - **A crash loop must not erase its own evidence.** `pod_report.py` used to rewrite ONE
+    `pod step {…}` line, so pass 2's `deps ok` destroyed pass 1's `exit=… step=torch`. It now
+    keeps a **bounded history**: the last 8 records as a JSON array under one `pod steps [...]`
+    marker, ≤7,000 chars, in which the FIRST `exit=` record is never trimmed away and is the
+    last tail surrendered to the size cap (staleness is answered by `ts` + `pass=N`, not by
+    erasure). The history file lives on the pod's own disk, which is what makes it survive the
+    restart it describes. The lane's UPDATE now bounds the note's OTHER lines (`left(…, 6000)`)
+    and appends the heartbeat whole, so the record we came for can never be the part cut.
+  - **The watchdog recognises the loop.** It reads the array, logs EVERY new record (not just
+    the latest), and terminates immediately with `case=crash-loop` on **two or more `exit=`
+    reports within the stall window**, printing the FIRST one's tail — the original cause;
+    the rest are its restarts. The three existing rails are untouched, and a lane that reports
+    only a single record (the pre-(h) shape) keeps exactly the old behaviour.
+  - **No migration, no new dependency.** All three fixes are in the shared bootstrap, the
+    reporter, the watchdog and the two dispatchers.
+  - Tests, all offline and free: the generated bash runs TWICE over one work dir without error
+    and reports `pass=2`; it ends in the sleep after a clean payload (proved with a short
+    `PODBOOT_SLEEP_S`); the work dir is not under `/workspace`; the REST body carries
+    `containerDiskInGb` and `volumeInGb: 0`; the reporter's history is bounded and never drops
+    the first `exit=`; the watchdog fires `crash-loop` on two exits and prints the first one's
+    tail. `--dry-run` preflight now runs the script three times — clean, **restart over the
+    same root**, and `torch` forced to fail — and refuses to launch if any fails.
+  - **Run 1 is still re-dispatchable as it stands** — arms `pending`, zero vectors.
+
 - 2026-09-08 (g) — **The retry died too (~$0.08 — the watchdog worked), and we still could
   not say why. The bootstrap now reports itself.** Run 1's embed stage was re-dispatched onto
   pod `bsg9k5ee9y6jcm` (RTX 3090) with (f)'s fixes in place. The watchdog terminated it at

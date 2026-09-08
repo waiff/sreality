@@ -1,10 +1,10 @@
 """The shell a rented GPU pod runs before the payload: report, fetch this repo at a sha,
 stand up a Python 3.12 interpreter, install torch, install us — reporting after every
 step. One module because both RunPod lanes (`dinov3_embed_dispatch`,
-`tagging_bakeoff_dispatch`) need the identical thing and both 2026-09-08 failures were
+`tagging_bakeoff_dispatch`) need the identical thing and every 2026-09-08 failure was
 in this script, not in either lane's logic.
 
-THREE BUGS THIS EXISTS TO NOT REPEAT, all paid for on 2026-09-08:
+FIVE BUGS THIS EXISTS TO NOT REPEAT, all paid for on 2026-09-08:
 
   * `git clone --depth 1 --branch <sha>` CANNOT WORK (pod u1yvcktjn6dbrt, 8,115 s,
     ~$0.50). `--branch` takes a branch or a tag, never a commit sha, and the dispatchers
@@ -28,6 +28,26 @@ THREE BUGS THIS EXISTS TO NOT REPEAT, all paid for on 2026-09-08:
     `PODBOOT_BEAT_S` so a long silent install still proves life; and an EXIT trap ships
     `exit=<code> step=<the step that failed>` plus the tail of the bootstrap log into
     the same row. The next failure names itself.
+  * RUNPOD RE-RUNS THE DOCKER START COMMAND WHENEVER IT EXITS (pod lg5oy1ivlgoyh7,
+    ~33 min, ~$0.12). Attempt 3's heartbeats showed `step=venv ok` at 63 s and then, 98 s
+    later, a SECOND pass of this whole script failing at `step=fetch` with
+    `error: remote origin already exists` — repeating every ~60 s until the watchdog's
+    stall rail ended the run. So: EVERY STEP IS IDEMPOTENT (the checkout and the venv are
+    removed before they are rebuilt, and `$PODBOOT_ROOT` itself — which holds the
+    reporter, the log, the step file, the heartbeat history and the pass counter — is
+    not), and after a clean payload the script SLEEPS instead of exiting, because the
+    container restarts if it does not. The dispatcher's watchdog is what ends the pod.
+    Every report carries `pass=N` (a counter on disk, so it survives a restart), so a
+    restart loop is legible in the note instead of looking like ordinary progress.
+  * `/workspace` IS THE POD VOLUME AND THE VOLUME IS 1 GB. `RunPodClient.launch_pod`
+    defaulted `volume_gb=1` and RunPod mounts the volume at `/workspace`, while this
+    script put the venv (torch: ~2.5 GB downloaded, ~5 GB installed) under it. That is
+    the likeliest reason attempt 3's first pass died at `step=torch` in under 100 s — the
+    report we needed was overwritten by the restart before anyone read it. The work dir
+    is therefore on the CONTAINER disk (`/opt/podboot`), the lanes size
+    `container_disk_gb` for the job and ask for no volume at all, and a `df -h` plus a
+    `step=disk <free>GB` heartbeat before the torch step make the next disk problem
+    visible instead of inferred.
 
 TORCH COMES FROM THE cu118 INDEX. The image is CUDA 11.8-era and cu118 is the flavour
 with the widest cp312 coverage on the PyTorch index (cp312 wheels through torch 2.6.0;
@@ -37,8 +57,9 @@ more honest record than a pin nobody re-reads.
 
 THE GENERATED SCRIPT IS EXECUTABLE OFFLINE. With `PODBOOT_DRY=1` every real step becomes
 a no-op stub and `PODBOOT_DRY_FAIL=<step>` forces one to fail, so `preflight()` proves —
-for free, before a pod is rented — that the script parses and that the trap reports the
-failing step. That is the one behaviour we cannot afford to get wrong twice.
+for free, before a pod is rented — that the script parses, that the trap reports the
+failing step, and that a second pass over the same root is harmless. That is the one
+behaviour we cannot afford to get wrong twice.
 
 Carries no secrets: this is argv, visible in the pod record. Credentials (and the
 lane's `HEARTBEAT_SQL`) travel in the REST body's `env` (see `RunPodClient.launch_pod`).
@@ -53,12 +74,14 @@ from pathlib import Path
 from typing import Sequence
 
 REPO_URL = "https://github.com/waiff/sreality"
-# The pod's default workspace. Every path below is derived from `$PODBOOT_ROOT`, which
-# defaults to this and is overridden only by the offline self-check (a test runner
-# cannot mkdir /workspace).
-WORKSPACE_ROOT = "/workspace"
-CHECKOUT_DIR = f"{WORKSPACE_ROOT}/sreality"
-VENV_DIR = f"{WORKSPACE_ROOT}/venv"
+# THE CONTAINER DISK, NOT `/workspace`. `/workspace` is RunPod's default mount point for
+# the pod VOLUME, which the lanes no longer rent (and which defaulted to 1 GB — far less
+# than torch needs). Every path below is derived from `$PODBOOT_ROOT`, which defaults to
+# this and is overridden only by the offline self-check (a test runner cannot mkdir
+# /opt/podboot).
+CONTAINER_ROOT = "/opt/podboot"
+# What a lane must NOT set `PODBOOT_ROOT` to, and what the tests assert against.
+VOLUME_MOUNT_PATH = "/workspace"
 PYTHON_VERSION = "3.12"
 TORCH_INDEX_URL = "https://download.pytorch.org/whl/cu118"
 # Long enough not to spam the note through a 10-minute install, short enough that three
@@ -66,7 +89,7 @@ TORCH_INDEX_URL = "https://download.pytorch.org/whl/cu118"
 BEAT_INTERVAL_S = 300
 # The steps, in order. The names are the vocabulary of every heartbeat and of the exit
 # report, so they are short and stable.
-STEPS = ("deps", "fetch", "uv", "venv", "torch", "repo", "payload")
+STEPS = ("deps", "fetch", "uv", "venv", "disk", "torch", "repo", "payload", "idle")
 
 _REPORTER_SOURCE = (Path(__file__).with_name("pod_report.py")).read_text(encoding="utf-8")
 _HEREDOC = "PODBOOT_REPORT_EOF"
@@ -97,21 +120,36 @@ def build_bootstrap_script(*, ref: str, module: str, payload_args: Sequence[str]
     payload = " ".join(payload_args)
     return "\n".join([
         "set -euo pipefail",
-        f'PODBOOT_ROOT="${{PODBOOT_ROOT:-{WORKSPACE_ROOT}}}"',
+        f'PODBOOT_ROOT="${{PODBOOT_ROOT:-{CONTAINER_ROOT}}}"',
         f'PODBOOT_BEAT_S="${{PODBOOT_BEAT_S:-{BEAT_INTERVAL_S}}}"',
+        # 0 = sleep forever after a clean payload (the production setting). Any other
+        # value is a bounded sleep, which is how the offline self-check finishes.
+        'PODBOOT_SLEEP_S="${PODBOOT_SLEEP_S:-0}"',
         'mkdir -p "$PODBOOT_ROOT"',
         'PODBOOT_LOG="$PODBOOT_ROOT/bootstrap.log"',
         ': > "$PODBOOT_LOG"',
         # Everything the bootstrap says goes to the log, so the EXIT trap can ship the
         # actual error text — the Pod logs endpoint answers 400 and never will.
         'exec > >(tee -a "$PODBOOT_LOG") 2>&1',
+        # RunPod restarts the container when this command exits, so this script may be
+        # running for the second (or twentieth) time over the same disk. The counter is
+        # a file for exactly that reason, and every report carries it.
+        'PODBOOT_PASS="$(( $(cat "$PODBOOT_ROOT/pass" 2>/dev/null || echo 0) + 1 ))"',
+        'echo "$PODBOOT_PASS" > "$PODBOOT_ROOT/pass"',
+        'echo "PODBOOT pass=$PODBOOT_PASS root=$PODBOOT_ROOT"',
+        # The disk this whole bootstrap lives on, named before anything can fill it.
+        'df -h || true',
         # The reporter runs on the IMAGE's python. The 3.12 venv built below is a
         # different interpreter without psycopg, and may not exist when this is needed.
         'PODBOOT_PY="$(command -v python3)"',
+        # Heartbeat history: the reporter keeps the last few records here so a crash
+        # loop cannot overwrite the report that explains it (2026-09-08 (h)).
+        'export PODBOOT_HISTORY="$PODBOOT_ROOT/steps.json"',
         f'cat > "$PODBOOT_ROOT/report.py" <<\'{_HEREDOC}\'',
         _REPORTER_SOURCE.rstrip("\n"),
         _HEREDOC,
-        'report() { "$PODBOOT_PY" "$PODBOOT_ROOT/report.py" "$@" || true; }',
+        'report() { "$PODBOOT_PY" "$PODBOOT_ROOT/report.py" "pass=$PODBOOT_PASS" "$@" '
+        "|| true; }",
         # The current step lives in a FILE, not just a variable: the background beat is
         # a forked subshell and would otherwise report the step it was forked at.
         'step() { PODBOOT_STEP="$1"; echo "$1" > "$PODBOOT_ROOT/step"; }',
@@ -139,6 +177,7 @@ def build_bootstrap_script(*, ref: str, module: str, payload_args: Sequence[str]
         '  report "exit=$PODBOOT_CODE step=$PODBOOT_STEP" --tail-file "$PODBOOT_LOG"',
         "}",
         "trap on_exit EXIT",
+        'report "step=start"',
         "step deps",
         # psycopg into the image's python, for the reporter only. A few seconds, and a
         # failure here costs the heartbeats, never the run.
@@ -151,6 +190,10 @@ def build_bootstrap_script(*, ref: str, module: str, payload_args: Sequence[str]
         'done ) >> "$PODBOOT_LOG" 2>&1 &',
         "PODBOOT_BEAT=$!",
         "step fetch",
+        # IDEMPOTENT BY DEMOLITION. `git remote add origin` on a second pass fails with
+        # "remote origin already exists" (exit 3) — the whole of attempt 3's restart
+        # loop. A fresh directory cannot be in a half-built state either.
+        'rm -rf "$PODBOOT_ROOT/sreality"',
         'mkdir -p "$PODBOOT_ROOT/sreality"',
         'cd "$PODBOOT_ROOT/sreality"',
         # Fetch BY SHA. `--branch` resolves a branch or tag only and would fail here.
@@ -165,12 +208,21 @@ def build_bootstrap_script(*, ref: str, module: str, payload_args: Sequence[str]
         "x pip install --quiet uv",
         'report "step=uv ok"',
         "step venv",
+        # Same reason as the checkout: a venv left half-built by a killed pass is worse
+        # than no venv, and `uv venv` is not a repair tool.
+        'rm -rf "$PODBOOT_ROOT/venv"',
         f'x uv venv --python {PYTHON_VERSION} "$PODBOOT_ROOT/venv"',
         # Not `source .../activate`: that script is not written for `set -u`, and these
         # two exports are all of it that matters (uv honours VIRTUAL_ENV).
         'export VIRTUAL_ENV="$PODBOOT_ROOT/venv"',
         'export PATH="$PODBOOT_ROOT/venv/bin:$PATH"',
         'report "step=venv ok"',
+        "step disk",
+        # The step before the 5 GB one says how much room it has. A disk failure was
+        # invisible on 2026-09-08 (h) and cost a whole run to guess at.
+        'PODBOOT_FREE_GB="$(df -BG --output=avail "$PODBOOT_ROOT" 2>/dev/null '
+        "| tail -1 | tr -dc '0-9' || true)\"",
+        'report "step=disk ${PODBOOT_FREE_GB:-unknown}GB free on $PODBOOT_ROOT"',
         "step torch",
         f"x uv pip install torch --index-url {TORCH_INDEX_URL}",
         'report "step=torch ok"',
@@ -183,6 +235,14 @@ def build_bootstrap_script(*, ref: str, module: str, payload_args: Sequence[str]
         # per-arm progress), so the beat stops rather than racing its read-modify-write.
         'kill "$PODBOOT_BEAT" 2>/dev/null || true',
         f"x python -m {module} {payload}".rstrip(),
+        'report "step=payload ok"',
+        "step idle",
+        # DO NOT EXIT. RunPod re-runs this start command whenever it ends, so returning
+        # here means running the whole bootstrap again, forever, on the pod's dime. The
+        # dispatcher's watchdog terminates the pod once every arm is terminal.
+        'report "step=idle"',
+        'if [ "$PODBOOT_SLEEP_S" = "0" ]; then sleep infinity; '
+        'else sleep "$PODBOOT_SLEEP_S"; fi',
     ])
 
 
@@ -194,13 +254,14 @@ def build_start_cmd(*, ref: str, module: str, payload_args: Sequence[str],
 
 
 def run_dry(script: str, *, fail_step: str | None = None, beat_s: float = 0,
-            sleep_s: float = 0, root: str | None = None,
+            sleep_s: float = 0, root: str | None = None, idle_s: float = 0.2,
             timeout_s: float = 120) -> subprocess.CompletedProcess[str]:
     """Execute the generated script locally with every real step stubbed out.
 
     Real bash, real trap, real reporter — only the commands that would cost money or
     need a network are stubs. This is the only way to prove the trap fires, and it is
-    free."""
+    free. `idle_s` stands in for the production `sleep infinity`; it must never be 0
+    here, or the offline run would hang exactly the way the pod is supposed to."""
     with tempfile.TemporaryDirectory(prefix="podboot-") as tmp:
         root = root or tmp
         env = {
@@ -208,6 +269,7 @@ def run_dry(script: str, *, fail_step: str | None = None, beat_s: float = 0,
             "PODBOOT_DRY": "1",
             "PODBOOT_ROOT": root,
             "PODBOOT_BEAT_S": str(beat_s or BEAT_INTERVAL_S),
+            "PODBOOT_SLEEP_S": str(idle_s or 0.2),
         }
         if fail_step:
             env["PODBOOT_DRY_FAIL"] = fail_step
@@ -218,32 +280,39 @@ def run_dry(script: str, *, fail_step: str | None = None, beat_s: float = 0,
 
 
 def preflight(script: str, *, timeout_s: float = 120) -> tuple[bool, list[str]]:
-    """Run the generated script twice offline — clean, then with `torch` forced to fail
-    — and confirm the EXIT trap reported each outcome.
+    """Run the generated script offline — clean, again over the SAME root (a restart),
+    then with `torch` forced to fail — and confirm the EXIT trap reported each outcome.
 
-    A syntax error in this script, or a trap that does not fire, is otherwise only
-    discovered by renting a GPU and waiting out a deadline. Returns (ok, log lines)."""
+    A syntax error in this script, a trap that does not fire, or a step that cannot
+    survive RunPod re-running the start command is otherwise only discovered by renting
+    a GPU and waiting out a deadline. Returns (ok, log lines)."""
     lines: list[str] = []
     ok = True
-    for fail_step, want_code, want in ((None, 0, "exit=0 step=payload"),
-                                       ("torch", 1, "exit=1 step=torch")):
-        label = fail_step or "clean"
-        try:
-            proc = run_dry(script, fail_step=fail_step, timeout_s=timeout_s)
-        except OSError as exc:  # no bash on this runner: report, do not fail the dry run
-            lines.append(f"preflight[{label}]: SKIPPED — cannot execute bash ({exc})")
-            continue
-        except subprocess.TimeoutExpired:
-            lines.append(f"preflight[{label}]: FAILED — the script did not finish in "
-                         f"{timeout_s:.0f}s")
-            ok = False
-            continue
-        out = proc.stdout + proc.stderr
-        good = proc.returncode == want_code and want in out
-        ok = ok and good
-        lines.append(f"preflight[{label}]: rc={proc.returncode} "
-                     f"{'OK' if good else 'FAILED'} — expected rc={want_code} and "
-                     f"{want!r} in the trap's report")
-        if not good:
-            lines.extend(out.splitlines()[-25:])
+    with tempfile.TemporaryDirectory(prefix="podboot-preflight-") as shared:
+        cases = (
+            ("clean", None, 0, "pass=1 exit=0 step=idle", shared),
+            # The 2026-09-08 (h) restart loop: the SAME root, a second time.
+            ("restart", None, 0, "pass=2 exit=0 step=idle", shared),
+            ("torch", "torch", 1, "exit=1 step=torch", None),
+        )
+        for label, fail_step, want_code, want, root in cases:
+            try:
+                proc = run_dry(script, fail_step=fail_step, root=root,
+                               timeout_s=timeout_s)
+            except OSError as exc:  # no bash here: report, do not fail the dry run
+                lines.append(f"preflight[{label}]: SKIPPED — cannot execute bash ({exc})")
+                continue
+            except subprocess.TimeoutExpired:
+                lines.append(f"preflight[{label}]: FAILED — the script did not finish "
+                             f"in {timeout_s:.0f}s")
+                ok = False
+                continue
+            out = proc.stdout + proc.stderr
+            good = proc.returncode == want_code and want in out
+            ok = ok and good
+            lines.append(f"preflight[{label}]: rc={proc.returncode} "
+                         f"{'OK' if good else 'FAILED'} — expected rc={want_code} and "
+                         f"{want!r} in the trap's report")
+            if not good:
+                lines.extend(out.splitlines()[-25:])
     return ok, lines

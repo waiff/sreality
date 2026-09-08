@@ -2014,6 +2014,14 @@
           "options": null
         },
         {
+          "name": "container_disk_gb",
+          "description": "The pod's CONTAINER disk in GB — where the bootstrap works (/opt/podboot). It must hold the base image, ~5GB of installed torch and the DINOv3 weights. No pod volume is rented: /workspace was a 1GB volume and a 5GB install aimed at it is what killed the sibling lane's 2026-09-08 pod. Minimum 40.",
+          "required": false,
+          "type": "string",
+          "default": "60",
+          "options": null
+        },
+        {
           "name": "dry_run",
           "description": "Print the resolved identity, the pending count and the pod plan. Launches nothing, writes nothing, spends nothing.",
           "required": false,
@@ -6222,6 +6230,14 @@
           "required": false,
           "type": "string",
           "default": "900",
+          "options": null
+        },
+        {
+          "name": "container_disk_gb",
+          "description": "embed only: the pod's CONTAINER disk in GB — where the bootstrap works (/opt/podboot). It must hold the base image, ~5GB of installed torch, every arm's weights and the ~1GB image cache. No pod volume is rented: /workspace was a 1GB volume and a 5GB install aimed at it is what killed the 2026-09-08 pod. Minimum 40.",
+          "required": false,
+          "type": "string",
+          "default": "60",
           "options": null
         },
         {

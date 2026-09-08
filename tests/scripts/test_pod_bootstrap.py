@@ -17,7 +17,8 @@ import json
 
 import pytest
 
-from scripts import dinov3_embed_dispatch, pod_bootstrap, tagging_bakeoff_dispatch
+from scripts import (dinov3_embed_dispatch, pod_bootstrap, pod_report,
+                     tagging_bakeoff_dispatch)
 
 
 def _script(ref: str = "2d00061db1089dad5d42cf51124494c2cdbd1032") -> str:
@@ -75,6 +76,9 @@ def test_every_step_reports_before_the_next_one_starts():
                  for name in ("deps", "fetch", "uv", "venv", "torch", "repo")]
     assert positions == sorted(positions)
     assert script.index('report "step=payload starting"') > positions[-1]
+    # Free space is reported BEFORE the ~5GB install, not after it fails.
+    assert script.index('report "step=disk') > script.index('report "step=venv ok"')
+    assert script.index('report "step=disk') < script.index("uv pip install torch")
     # The reporter is installed and callable BEFORE the first real step, or the first
     # step's failure is again invisible.
     assert script.index("report.py") < script.index("git init")
@@ -87,14 +91,18 @@ def test_the_reporter_runs_on_the_images_python_not_the_venv():
     assert 'PODBOOT_PY="$(command -v python3)"' in script
     assert (script.index('PODBOOT_PY="$(command -v python3)"')
             < script.index('export PATH="$PODBOOT_ROOT/venv/bin:$PATH"'))
-    assert 'report() { "$PODBOOT_PY" "$PODBOOT_ROOT/report.py" "$@" || true; }' in script
+    # Every report carries the pass number, so a restart loop reads as one in the note.
+    assert ('report() { "$PODBOOT_PY" "$PODBOOT_ROOT/report.py" "pass=$PODBOOT_PASS" '
+            '"$@" || true; }') in script
 
 
 def test_a_reporter_failure_can_never_fail_the_bootstrap():
     # A heartbeat that kills the job it reports on would be worse than blindness.
     script = _script()
     assert script.count("|| true") >= 1
-    assert 'report() { "$PODBOOT_PY" "$PODBOOT_ROOT/report.py" "$@" || true; }' in script
+    # Every report carries the pass number, so a restart loop reads as one in the note.
+    assert ('report() { "$PODBOOT_PY" "$PODBOOT_ROOT/report.py" "pass=$PODBOOT_PASS" '
+            '"$@" || true; }') in script
     assert "x pip install --quiet 'psycopg[binary]' ||" in script
 
 
@@ -160,7 +168,16 @@ def test_the_generated_script_runs_clean_end_to_end_offline():
     assert proc.returncode == 0, out[-2000:]
     for name in ("deps", "fetch", "uv", "venv", "torch", "repo"):
         assert f"step={name} ok" in out
-    assert "exit=0 step=payload" in out
+    # It ends idling, not exiting: RunPod re-runs the start command when it exits.
+    assert "pass=1 step=payload ok" in out
+    assert "pass=1 exit=0 step=idle" in out
+
+
+def _records(out: str) -> list[dict]:
+    """Every heartbeat the run printed, parsed."""
+    return [json.loads(ln.split("heartbeat: ", 1)[1])
+            for ln in out.splitlines()
+            if ln.startswith("heartbeat: {")]
 
 
 def test_a_failing_step_is_named_by_the_trap_with_the_log_tail():
@@ -170,14 +187,78 @@ def test_a_failing_step_is_named_by_the_trap_with_the_log_tail():
     out = proc.stdout + proc.stderr
     assert proc.returncode == 1
     assert "step=venv ok" in out and "step=torch ok" not in out
-    line = [ln for ln in out.splitlines() if '"exit=1 step=torch"' in ln
-            or '"msg": "exit=1 step=torch"' in ln]
-    assert line, out[-2000:]
-    record = json.loads(line[-1].split("pod step ", 1)[1])
-    assert record["msg"] == "exit=1 step=torch"
+    record = _records(out)[-1]
+    assert record["msg"] == "pass=1 exit=1 step=torch"
     # The tail is what turns "torch failed" into "torch failed BECAUSE …".
     assert "failing step=torch" in record["tail"]
     assert record["ts"] and record["pod"] and record["python"]
+
+
+# --- the restart loop (2026-09-08 (h)) ----------------------------------------------
+
+
+def test_the_work_dir_is_on_the_container_disk_not_the_pod_volume():
+    # `/workspace` is the VOLUME mount point, and the volume defaulted to 1 GB while a
+    # ~5 GB torch install was aimed at it. Nothing this script writes may land there.
+    script = _script()
+    assert pod_bootstrap.CONTAINER_ROOT == "/opt/podboot"
+    assert pod_bootstrap.VOLUME_MOUNT_PATH not in script
+    assert 'PODBOOT_ROOT="${PODBOOT_ROOT:-/opt/podboot}"' in script
+
+
+def test_a_second_pass_over_the_same_disk_is_harmless_and_says_which_pass_it_is(tmp_path):
+    # RunPod re-runs the docker start command whenever it exits, so pass 2 met
+    # `git remote add origin` -> "remote origin already exists" (exit 3) and looped.
+    root = tmp_path / "podboot"
+    root.mkdir()
+    script = _script()
+    first = pod_bootstrap.run_dry(script, root=str(root))
+    second = pod_bootstrap.run_dry(script, root=str(root))
+    assert first.returncode == 0 and second.returncode == 0, second.stderr[-2000:]
+    assert "already exists" not in (second.stdout + second.stderr)
+    assert "pass=1 step=fetch ok" in first.stdout + first.stderr
+    assert "pass=2 step=fetch ok" in second.stdout + second.stderr
+    # The counter is a file, which is the only reason it survives the restart.
+    assert (root / "pass").read_text().strip() == "2"
+
+
+def test_a_clean_payload_ends_in_a_sleep_rather_than_an_exit():
+    # Exiting IS the restart loop. In production the sleep is unbounded; the offline run
+    # only finishes because PODBOOT_SLEEP_S bounds it.
+    script = _script()
+    assert 'if [ "$PODBOOT_SLEEP_S" = "0" ]; then sleep infinity;' in script
+    assert script.index("python -m scripts.tagging_bakeoff_embed") < script.index(
+        "sleep infinity")
+    proc = pod_bootstrap.run_dry(script, idle_s=1.5, timeout_s=60)
+    assert proc.returncode == 0
+    steps = [r["msg"] for r in _records(proc.stdout + proc.stderr)]
+    assert steps[-2] == "pass=1 step=idle"          # said before the sleep
+    assert steps[-1] == "pass=1 exit=0 step=idle"   # the trap, after it
+
+
+def test_the_free_space_before_the_torch_install_is_reported(tmp_path):
+    root = tmp_path / "podboot"
+    root.mkdir()
+    proc = pod_bootstrap.run_dry(_script(), root=str(root))
+    disk = [r["msg"] for r in _records(proc.stdout + proc.stderr)
+            if "step=disk" in r["msg"]]
+    assert len(disk) == 1 and "GB free on" in disk[0]
+    assert "unknown" not in disk[0]
+
+
+def test_the_heartbeat_history_survives_the_restart_that_it_describes(tmp_path):
+    # The record that named the cause was overwritten by the next pass's first
+    # heartbeat, 98 s later, before the runner's 60 s poll could read it.
+    root = tmp_path / "podboot"
+    root.mkdir()
+    script = _script()
+    pod_bootstrap.run_dry(script, fail_step="torch", root=str(root))
+    pod_bootstrap.run_dry(script, fail_step="fetch", root=str(root))
+    history = json.loads((root / "steps.json").read_text())
+    messages = [r["msg"] for r in history]
+    assert "pass=1 exit=1 step=torch" in messages    # the cause, still there
+    assert "pass=2 exit=1 step=fetch" in messages    # and the restart that buried it
+    assert len(history) <= pod_report.HISTORY_LIMIT
 
 
 def test_the_beat_keeps_reporting_through_a_step_that_says_nothing(tmp_path):
@@ -199,6 +280,9 @@ def test_preflight_passes_for_the_script_we_ship_and_fails_for_a_broken_one():
     ok, lines = pod_bootstrap.preflight(_script())
     assert ok, lines
     assert any("preflight[clean]" in ln and "OK" in ln for ln in lines)
+    # The restart case runs the script a SECOND time over the same root — the shape of
+    # the 2026-09-08 (h) failure, proven offline before a pod is rented.
+    assert any("preflight[restart]" in ln and "OK" in ln for ln in lines)
     assert any("preflight[torch]" in ln and "OK" in ln for ln in lines)
 
     broken_ok, broken_lines = pod_bootstrap.preflight("set -euo pipefail\nif then fi\n")
