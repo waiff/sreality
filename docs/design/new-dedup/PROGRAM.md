@@ -157,13 +157,24 @@ the two gaps found while adding property list are closed in the same PR that add
    closed: this used to be settable only by migration (457).*
 3. **Write the definition with real exclusions.** The model treats DOES NOT COUNT as law and
    `confusable_with` as advice (measured on fasáda: 0.60→0.95 precision). A boundary written on
-   the *neighbour's* side is invisible when THIS head is labeled alone — mirror it. Rules:
+   the *neighbour's* side is invisible when THIS head is labeled alone — mirror it. **Mirroring
+   means editing the neighbours too**: adding a head between two existing ones changes THEIR
+   boundaries, and a neighbour left on its old wording will keep claiming what now belongs to
+   the newcomer. Bump their definitions in the same change; their existing labels then read
+   "old wording" on the training-set page, which is the honest signal, not a regression. Rules:
    what the image is OF; three tiers on a space head; exclusivity on a document head;
    `means` ≤ 500 chars, `leave_out_when` ≤ 300.
 4. **Seed candidates.** In order of yield per dollar, measured: the operator's drafts (96%),
    a CLIP near-tag draw (41%), random (≈1% for a rare head). A NEW head has no positives to
    seed from — seed the near-tag draw from its nearest relative (`--near-tag <relative>`;
    property list from půdorys). *Gap closed: the seed used to have to be a labeled head.*
+   **`--like-tag <sibling>` draws the images that sibling has ALREADY been judged on**, which
+   is the right draw whenever the new head's boundary runs against an existing one: both heads
+   are then judged over the same photos, so every image that made one say yes has been asked
+   about the other and the boundary is reviewable instead of inferred. It takes the sibling's
+   POOL, never its verdicts — filtering by them would bake an unreviewed boundary in as ground
+   truth. (Operator, adding 3D plán beside půdorys: *"use the pictures we have already used for
+   other heads"*.)
 5. **Label** with `label_images.yml`: dry run, then a small count, then scale. `--tags` names
    ONLY the new head so nothing else is re-judged.
 6. **The cutoff applies automatically** (default 300, editable per head); review the in-set

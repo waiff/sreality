@@ -76,6 +76,11 @@ _EXEMPT: dict[str, str] = {
         "Bulk-label candidate draw. Excludes every exam member outright (all "
         "cohorts, not only holdout); the labels read are the machine's own resume "
         "marker, not training material.",
+    "_LIKE_TAG_SQL":
+        "Draws the pool an EXISTING head was already judged on, so a new head gets the "
+        "same coverage. Reads image_tag_labels only to name that pool; eligibility comes "
+        "from _ELIGIBLE, which excludes every exam member outright (all cohorts, not "
+        "only holdout) — stricter than the marker, so adding it would WEAKEN this.",
     "_BY_IDS_SQL":
         "Same draw from an explicit id list, same outright member exclusion — so a "
         "hand-supplied id naming an exam member still cannot be labeled.",

@@ -3080,6 +3080,14 @@
           "options": null
         },
         {
+          "name": "like_tag",
+          "description": "Draw from the images an EXISTING head (a tag id) has already been judged on, so a new head gets the same coverage as its neighbour and the boundary between them is reviewable on the same photos.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
           "name": "sample_pct",
           "description": "Block-sample percentage for the random or near-tag draw (raise it when few rows come back).",
           "required": false,
