@@ -148,7 +148,28 @@ def test_the_town_is_picked_from_the_list_and_the_address_within_it():
     assert answer["from_title"]["street"] == NULL
     for field in ("psc", "landmark", "lokalita_line"):
         assert field not in answer["from_description"] and field not in answer["from_title"]
+    # The picked obec's code rides along for the gazetteer gates.
+    assert answer["obec_kod"] == CHEB.code
     assert c.stats == {"town_from_list": 1, "address_called": 1}
+
+
+def test_a_pick_far_from_the_pin_is_refused_and_not_retried():
+    """The first smoke run's defect: "ve Václavicích u Hrádku nad Nisou" — the obec
+    Václavice near Benešov, 150 km from the pin, was on the list through the text and the
+    model took it. The list no longer carries it; and were the national retry to name a far
+    town, that is refused too rather than claimed."""
+    # The list at Cheb no longer holds Praha even though the text names it.
+    client = ScriptedClient(pick_obec=[town(None, None, "low"), town("Praha", "do Prahy")])
+    c = caller(client)
+    answer, _cost = c.answer(BLOCKS, CallHints(lat=CHEB.lat, lon=CHEB.lon))
+    assert "Praha" not in _offered(client.calls[0]["user"], "SEZNAM OBCÍ")
+    assert [x["tool"] for x in client.calls] == ["pick_obec", "pick_obec"]
+    assert answer == {"from_description": {}, "from_title": {}}
+    assert c.stats == {"town_list_abstained": 1, "town_rejected_far": 1}
+    # Without a pin there is no distance to judge: a far name from the text stands.
+    client = ScriptedClient(pick_obec=[town("Praha", "do Prahy")], record_address=[address()])
+    answer, _cost = caller(client).answer(BLOCKS, CallHints())
+    assert answer["from_description"]["obec"]["value"] == "Praha"
 
 
 def test_an_out_of_list_pick_is_an_abstention_and_an_anchored_ad_gets_the_national_retry():

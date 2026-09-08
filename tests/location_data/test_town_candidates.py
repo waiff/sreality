@@ -6,6 +6,7 @@ import pytest
 
 from location_data.town_candidates import (
     DEFAULT_RADIUS_KM,
+    DEFAULT_TEXT_REACH_KM,
     MAX_CANDIDATES,
     ObecIndex,
     ObecPoint,
@@ -69,6 +70,7 @@ def test_text_matching_folds_accents_and_case_and_dedupes():
 def test_haversine_is_sane():
     assert abs(haversine_km(PRAHA.lat, PRAHA.lon, BRNO.lat, BRNO.lon) - 184) < 3
     assert haversine_km(CHEB.lat, CHEB.lon, CHEB.lat, CHEB.lon) == 0.0
+    assert DEFAULT_TEXT_REACH_KM > DEFAULT_RADIUS_KM
 
 
 def test_within_km_uses_centroids_and_skips_unplaced_obce(index):
@@ -79,14 +81,32 @@ def test_within_km_uses_centroids_and_skips_unplaced_obce(index):
 
 
 def test_candidate_towns_is_text_union_pin_radius_sorted_and_capped(index):
-    towns = candidate_towns(index, text="byt v Praze", lat=CHEB.lat, lon=CHEB.lon)
-    assert towns == ["Cheb", "Františkovy Lázně", "Lhota", "Praha"]
-    # No pin: the text is the only source.
+    # Aš is named in the text and 20 km from the pin: outside the 15 km radius, inside
+    # the 40 km text reach, so the text keeps it on the list.
+    towns = candidate_towns(index, text="byt v Aši", lat=CHEB.lat, lon=CHEB.lon)
+    assert towns == ["Aš", "Cheb", "Františkovy Lázně", "Lhota"]
+    # No pin: the text is the only source, at any distance.
     assert candidate_towns(index, text="byt v Praze", lat=None, lon=None) == ["Praha"]
     # Nothing at all: an empty list, never an exception.
     assert candidate_towns(index, text="krásný byt", lat=None, lon=None) == []
-    capped = candidate_towns(index, text="byt v Praze", lat=CHEB.lat, lon=CHEB.lon, cap=2)
-    assert capped == ["Cheb", "Františkovy Lázně"] and MAX_CANDIDATES >= 300
+    capped = candidate_towns(index, text="byt v Aši", lat=CHEB.lat, lon=CHEB.lon, cap=2)
+    assert capped == ["Aš", "Cheb"] and MAX_CANDIDATES >= 300
+
+
+def test_a_text_match_far_from_the_pin_is_a_homonym_trap_and_stays_off_the_list(index):
+    """The first smoke run claimed the obec Václavice (near Benešov) for an ad in
+    Václavice, a PART of Hrádek nad Nisou 150 km away: the text matcher found the name,
+    the model took it. With a pin, the named town was never more than 5.3 km away."""
+    towns = candidate_towns(index, text="dojezd do Prahy", lat=CHEB.lat, lon=CHEB.lon)
+    assert "Praha" not in towns and towns == ["Cheb", "Františkovy Lázně", "Lhota"]
+    # Widen the reach and it comes back; drop the pin and it is there anyway.
+    assert "Praha" in candidate_towns(index, text="dojezd do Prahy", lat=CHEB.lat,
+                                      lon=CHEB.lon, text_reach_km=200)
+    assert candidate_towns(index, text="dojezd do Prahy", lat=None, lon=None) == ["Praha"]
+    assert index.nearest_distance_km("Lhota", CHEB.lat, CHEB.lon) < 5
+    assert index.nearest_distance_km("Praha", CHEB.lat, CHEB.lon) > 140
+    assert index.nearest_distance_km("Atlantis", CHEB.lat, CHEB.lon) is None
+    assert index.nearest_distance_km("Nikde", CHEB.lat, CHEB.lon) is None
 
 
 def test_codes_and_the_nearest_homonym(index):

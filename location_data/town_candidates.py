@@ -25,6 +25,12 @@ from typing import Any
 from location_data.name_index import normalize_name
 
 DEFAULT_RADIUS_KM = 15.0
+# With a pin, a text-matched name stays on the list only if some obec of that name lies
+# within this reach, and a pick farther than this is rejected. The probe put the named town
+# within 5.3 km of the pin on 90/90 ads; a text match 150 km away is a homonym trap — a část
+# obce whose name is also an obec elsewhere ("ve Václavicích u Hrádku nad Nisou": Václavice
+# is Hrádek's part, and the obec Václavice near Benešov is what the first smoke run claimed).
+DEFAULT_TEXT_REACH_KM = 40.0
 MAX_CANDIDATES = 400
 _EARTH_RADIUS_KM = 6371.0088
 
@@ -134,6 +140,15 @@ class ObecIndex:
     def codes_for_name(self, name: str) -> list[int]:
         return sorted(p.code for p in self._by_norm.get(normalize_name(name), ()))
 
+    def nearest_distance_km(self, name: str, lat: float, lon: float) -> float | None:
+        """Distance from the point to the nearest obec of that name; None when the name is
+        unknown or no obec of that name has a centroid."""
+        placed = [p for p in self._by_norm.get(normalize_name(name), [])
+                  if p.lat is not None and p.lon is not None]
+        if not placed:
+            return None
+        return min(haversine_km(lat, lon, p.lat, p.lon) for p in placed)
+
     def nearest_code(self, name: str, lat: float | None, lon: float | None) -> int | None:
         """The one obec of that name — or, among homonyms, the one nearest the pin. None
         when the name is unknown, or ambiguous with no pin to break the tie."""
@@ -152,12 +167,23 @@ class ObecIndex:
 
 def candidate_towns(
     index: ObecIndex, *, text: str, lat: float | None, lon: float | None,
-    radius_km: float = DEFAULT_RADIUS_KM, cap: int = MAX_CANDIDATES,
+    radius_km: float = DEFAULT_RADIUS_KM, text_reach_km: float = DEFAULT_TEXT_REACH_KM,
+    cap: int = MAX_CANDIDATES,
 ) -> list[str]:
-    """text-matched obce ∪ obce within `radius_km` of the pin, sorted, capped."""
-    names = set(index.text_matches(text))
-    if lat is not None and lon is not None:
-        names.update(index.within_km(lat, lon, radius_km))
+    """text-matched obce ∪ obce within `radius_km` of the pin, sorted, capped.
+
+    With a pin, a text-matched name is kept only if some obec of that name lies within
+    `text_reach_km` (see the constant); without a pin the text is all there is.
+    """
+    matched = index.text_matches(text)
+    if lat is None or lon is None:
+        return sorted(matched)[:cap]
+    names = {
+        name for name in matched
+        if (distance := index.nearest_distance_km(name, lat, lon)) is not None
+        and distance <= text_reach_km
+    }
+    names.update(index.within_km(lat, lon, radius_km))
     return sorted(names)[:cap]
 
 

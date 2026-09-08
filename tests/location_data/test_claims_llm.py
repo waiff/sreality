@@ -627,6 +627,13 @@ def test_the_candidate_obec_ladder_is_description_then_title_then_psc():
         554782, "obec_from_psc")
     assert _candidate_obec(answer(), gazetteer=gazetteer, psc=None) == (
         None, "obec_unknown")
+    # claims_llm@2: the caller's own resolution (the nearest homonym to the pin) outranks
+    # every name rung — a shared name like "Lhota" is then a candidate, not `obec_unknown`.
+    hinted = {**answer(title={"obec": stated("Praha 8")}), "obec_kod": 1001}
+    assert _candidate_obec(hinted, gazetteer=gazetteer, psc=None) == (
+        1001, "obec_from_caller")
+    assert _candidate_obec({**answer(), "obec_kod": True}, gazetteer=gazetteer,
+                           psc=None) == (None, "obec_unknown")
 
 
 def test_an_ambiguous_obec_name_is_not_a_candidate():

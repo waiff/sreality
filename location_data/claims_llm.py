@@ -114,6 +114,7 @@ from location_data.name_index import normalize_name, normalize_street_name
 from location_data.resolver import lease
 from location_data.town_candidates import (
     DEFAULT_RADIUS_KM,
+    DEFAULT_TEXT_REACH_KM,
     ObecIndex,
     candidate_towns,
     load_obec_index,
@@ -705,10 +706,15 @@ def _candidate_obec(
 ) -> tuple[int | None, str]:
     """The one cross-field dependency, resolved ONCE per listing and deterministically.
 
-    Description obec, then title obec, then the stored PSČ — and each rung only counts when
-    it resolves to EXACTLY ONE obec code, because an ambiguous name is not a candidate. The
-    PSČ never reaches the prompt; it is a registry key here and nothing else.
+    The caller's own resolution first — claims_llm@2 hands the picked obec's code with the
+    answer, the nearest homonym to the pin when the name is shared (`assemble_answer`) —
+    then description obec, then title obec, then the stored PSČ; each of those rungs only
+    counts when it resolves to EXACTLY ONE obec code, because an ambiguous name is not a
+    candidate. The PSČ never reaches the prompt; it is a registry key here and nothing else.
     """
+    hinted = answer.get("obec_kod") if isinstance(answer, dict) else None
+    if isinstance(hinted, int) and not isinstance(hinted, bool):
+        return hinted, "obec_from_caller"
     for block in BLOCK_ORDER:
         parsed = parse_field_answer(answer, block, "obec")
         if isinstance(parsed, Refusal) or parsed.value is None:
@@ -971,7 +977,9 @@ def _valid_pick(raw: Any, candidates: list[str]) -> FieldAnswer | None:
     return None
 
 
-def assemble_answer(blocks: dict[str, str], picks: dict[str, FieldAnswer]) -> dict[str, Any]:
+def assemble_answer(
+    blocks: dict[str, str], picks: dict[str, FieldAnswer], *, obec_kod: int | None = None,
+) -> dict[str, Any]:
     """The free-form answer shape, from candidate picks. Pure.
 
     Each field lands in the FIRST block (description-first) whose text carries its quote,
@@ -979,8 +987,12 @@ def assemble_answer(blocks: dict[str, str], picks: dict[str, FieldAnswer]) -> di
     reads a free-form answer. A quote found in neither block is placed in the description:
     the extraction then records it as unlocatable, which is a finding — never dropped here.
     A field with no pick is OMITTED, which the extraction records as `not_attempted`.
+    `obec_kod` — the picked obec resolved against the pin — rides along for the gazetteer
+    gates (`_candidate_obec`'s first rung); the blocks never carry it.
     """
     out: dict[str, Any] = {f"from_{block}": {} for block in BLOCK_ORDER}
+    if obec_kod is not None:
+        out["obec_kod"] = int(obec_kod)
     for field, pick in picks.items():
         home = next((block for block in BLOCK_ORDER
                      if pick.quote and pick.quote in (blocks.get(block) or "")),
@@ -1032,6 +1044,14 @@ class CandidateCaller:
     def _bump(self, key: str) -> None:
         self.stats[key] = self.stats.get(key, 0) + 1
 
+    def _too_far(self, obec: FieldAnswer, hints: CallHints) -> bool:
+        """A pick whose every obec of that name is beyond the text reach of the pin is a
+        homonym of what the ad meant, not the town — refused, never claimed."""
+        if hints.lat is None or hints.lon is None:
+            return False
+        distance = self._index.nearest_distance_km(obec.value or "", hints.lat, hints.lon)
+        return distance is not None and distance > DEFAULT_TEXT_REACH_KM
+
     def _call(self, *, system: str, user: str, tool: dict[str, Any]) -> tuple[dict[str, Any], float]:
         from api.llm_client import parse_tool_input_json
 
@@ -1059,19 +1079,29 @@ class CandidateCaller:
             self._bump("skipped_no_anchor")
             return assemble_answer(blocks, {}), cost
         obec: FieldAnswer | None = None
+        rejected_far = False
         if towns:
             raw, spent = self._call(
                 system=TOWN_PROMPT, user=build_town_message(blocks, towns), tool=TOWN_TOOL)
             cost += spent
             obec = _valid_pick(_town_envelope(raw), towns)
-            self._bump("town_from_list" if obec else "town_list_abstained")
-        if obec is None and hints.anchored:
+            if obec is not None and self._too_far(obec, hints):
+                # The national list would hand the same far name straight back: no retry.
+                self._bump("town_rejected_far")
+                obec, rejected_far = None, True
+            else:
+                self._bump("town_from_list" if obec else "town_list_abstained")
+        if obec is None and hints.anchored and not rejected_far:
             raw, spent = self._call(
                 system=TOWN_PROMPT, user=build_town_message(blocks, self._index.names),
                 tool=TOWN_TOOL)
             cost += spent
             obec = _valid_pick(_town_envelope(raw), self._index.names)
-            self._bump("town_from_national" if obec else "town_national_abstained")
+            if obec is not None and self._too_far(obec, hints):
+                self._bump("town_rejected_far")
+                obec = None
+            else:
+                self._bump("town_from_national" if obec else "town_national_abstained")
         if obec is None:
             return assemble_answer(blocks, {}), cost
 
@@ -1103,7 +1133,7 @@ class CandidateCaller:
             picks["street"] = street
         if number is not None:
             picks["house_number"] = number
-        return assemble_answer(blocks, picks), cost
+        return assemble_answer(blocks, picks, obec_kod=code), cost
 
 
 class FileCaller:
