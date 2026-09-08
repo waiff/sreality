@@ -94,6 +94,7 @@ def test_an_injected_source_reports_gaps_rather_than_shrinking_silently() -> Non
 # --------------------------------------------------------- what each mode fits
 
 def test_pos_neg_fits_on_every_training_row() -> None:
+    pytest.importorskip("sklearn")   # grouped_folds is StratifiedGroupKFold
     snap = _snapshot()
     folds = th.grouped_folds(snap, n_splits=3, seed=0)
     train_idx, eval_idx = folds[0]
@@ -104,6 +105,7 @@ def test_pos_neg_fits_on_every_training_row() -> None:
 
 
 def test_pos_only_centroid_fits_on_positives_alone() -> None:
+    pytest.importorskip("sklearn")   # grouped_folds is StratifiedGroupKFold
     snap = _snapshot()
     train_idx, eval_idx = th.grouped_folds(snap, n_splits=3, seed=0)[0]
     fitting = th._fold_training_rows(snap, train_idx, eval_idx,
@@ -115,6 +117,7 @@ def test_pos_only_centroid_fits_on_positives_alone() -> None:
 
 
 def test_pos_only_free_neg_uses_no_operator_negative() -> None:
+    pytest.importorskip("sklearn")   # grouped_folds is StratifiedGroupKFold
     snap = _snapshot()
     free = _free_negatives(snap)
     train_idx, eval_idx = th.grouped_folds(snap, n_splits=3, seed=0)[0]
@@ -128,6 +131,7 @@ def test_pos_only_free_neg_uses_no_operator_negative() -> None:
 
 
 def test_free_negatives_never_straddle_the_evaluated_fold() -> None:
+    pytest.importorskip("sklearn")   # grouped_folds is StratifiedGroupKFold
     # Give a free negative a listing_id that IS in the head's own population, and
     # it must be dropped from any fold that grades that listing — otherwise the
     # grouped split's whole guarantee is gone.
