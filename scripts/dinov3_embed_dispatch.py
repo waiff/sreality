@@ -22,6 +22,11 @@ docs/design/new-dedup/ENCODER-DECISION.md §5.3/§5.5 or a live RunPod run:
     nothing about vCPU or system RAM, and JPEG decode is CPU-side — §5.3 names the
     RTX 3090 (16 vCPU) and RTX A5000 (9 vCPU) and warns off the 4090 (6 vCPU). The
     allowlist below is that judgement, applied cheapest-first within it.
+  * THE WINDOW IS A CEILING, NOT A PLAN. The sibling bake-off lane rented a 3090 for its
+    full 8,115 s window on 2026-09-08 and wrote nothing — the pod had died in its first
+    seconds and the blind wait could not tell. The watchdog
+    (`scripts/pod_watchdog.py`) polls the rows this job writes and tears the pod down
+    when they never start, or stop.
 
 Completion is NOT read from the pod: it self-reports into Postgres, because the rows it
 writes ARE the progress record (count for this config / count of stored images).
@@ -35,17 +40,27 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import re
 import sys
+from typing import Any
 
 from scraper.dinov3_config import IDENTITY_FIELDS, encoder_identity
+from scripts import pod_bootstrap
+from scripts.pod_watchdog import (
+    DEFAULT_BOOTSTRAP_DEADLINE_S,
+    DEFAULT_POLL_INTERVAL_S,
+    DEFAULT_STALL_DEADLINE_S,
+    PodWatchdog,
+    Progress,
+)
 from scripts.runpod_client import NoCapacityError, RunPodClient, RunPodError
 
 LOG = logging.getLogger("dinov3_embed_dispatch")
 
-REPO_URL = "https://github.com/waiff/sreality"
-# A CUDA image with torch + git + pip already present, so the pod's only setup is a
-# shallow clone and `pip install -e .[clip]`.
+REPO_URL = pod_bootstrap.REPO_URL
+# The image supplies git, pip and a CUDA driver. It does NOT supply a usable Python:
+# its 3.10 is below this project's >=3.12 floor, so the pod bootstraps its own
+# interpreter and torch (scripts/pod_bootstrap.py). Chasing a newer image tag is not
+# the fix — RunPod's newer tags do not state a Python version at all.
 DEFAULT_IMAGE = "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04"
 # §5.3's boxes, in the order it prefers them. Matched case-insensitively against the
 # catalog's id and display name; an empty match falls back to the price-ranked list
@@ -65,28 +80,28 @@ POD_ENV_KEYS = (
 
 # The ref is interpolated into a shell command, so it is constrained to what a git ref
 # can legally contain — no spaces, quotes, semicolons or backticks.
-_REF_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]{0,199}$")
+_REF_RE = pod_bootstrap._REF_RE
 
-# Pod startup: clone + pip install before the first image is embedded. The wait window
-# must cover it on top of the payload's own budget or the teardown lands mid-job.
+# Pod startup: fetch + interpreter + torch install before the first image is embedded.
+# The wait window must cover it on top of the payload's own budget or the teardown lands
+# mid-job. (The watchdog is what handles a startup that never finishes.)
 STARTUP_GRACE_S = 900
+
+# The watchdog's own read budget. Deliberately far below the payload's 300s: this
+# question is asked once a minute beside a live production database and its answer is
+# only worth having if it is prompt.
+WATCHDOG_QUERY_TIMEOUT_MS = 30_000
 
 
 def build_start_cmd(*, ref: str, backfill_args: list[str]) -> list[str]:
-    """The pod's argv. Carries no secrets — those travel in the REST body's `env`."""
-    if not _REF_RE.match(ref):
-        raise ValueError(f"refusing to interpolate an unsafe git ref into a shell command: {ref!r}")
-    for arg in backfill_args:
-        if not re.fullmatch(r"[A-Za-z0-9._=/-]+", arg):
-            raise ValueError(f"refusing to interpolate an unsafe backfill arg: {arg!r}")
-    script = (
-        "set -euo pipefail; "
-        f"git clone --depth 1 --branch {ref} {REPO_URL} /workspace/sreality; "
-        "cd /workspace/sreality; "
-        "pip install -e '.[clip]'; "
-        "python -m scripts.dinov3_embed_backfill " + " ".join(backfill_args)
-    )
-    return ["bash", "-c", script]
+    """The pod's argv. Carries no secrets — those travel in the REST body's `env`.
+
+    The script (fetch by sha, bootstrap a 3.12, cu118 torch) is shared with the bake-off
+    lane in `scripts/pod_bootstrap.py`: both lanes were broken the same way on
+    2026-09-08 and must stay fixed the same way."""
+    return pod_bootstrap.build_start_cmd(ref=ref,
+                                         module="scripts.dinov3_embed_backfill",
+                                         payload_args=backfill_args, extra="clip")
 
 
 def pod_env() -> dict[str, str]:
@@ -94,6 +109,67 @@ def pod_env() -> dict[str, str]:
     A missing one is reported by NAME so the operator can fix the secret binding —
     values are never logged, and never put in the start command."""
     return {k: os.environ[k] for k in POD_ENV_KEYS if os.environ.get(k)}
+
+
+def _connect(db_url: str) -> Any:
+    import psycopg
+
+    # A bounded read: this runs beside a live production database once a minute, and a
+    # progress question that queues behind the bulk write is not worth asking.
+    return psycopg.connect(db_url, autocommit=True, prepare_threshold=None,
+                           connect_timeout=15,
+                           options="-c statement_timeout=30000")
+
+
+def read_backfill_progress(conn: Any, *, identity: dict[str, Any],
+                           baseline: int) -> Progress:
+    """One watchdog reading: how many vectors exist under this exact identity.
+
+    BOOTED means the pod wrote at least one vector this run — this lane has no separate
+    heartbeat row and gets none, because adding one would be a migration for a job that
+    already publishes its progress. The consequence is honest and worth stating: the
+    bootstrap deadline here must cover clone + install + weights + the FIRST chunk, not
+    just the boot.
+
+    NEVER TERMINAL. Completion would be `pending == 0`, and that anti-join over ~10.4M
+    images is far too expensive to ask every minute; the stall deadline is what ends a
+    finished pod, one stall window later.
+    """
+    from scripts.dinov3_embed_backfill import embedded_count
+
+    count = embedded_count(conn, identity, timeout_ms=WATCHDOG_QUERY_TIMEOUT_MS)
+    return Progress(booted=count > baseline, marker=str(count), terminal=False,
+                    detail=f"{count} vectors under this identity (baseline {baseline})")
+
+
+def make_watchdog(args: argparse.Namespace, identity: dict[str, Any]) -> PodWatchdog | None:
+    """The watchdog for this dispatch, or None when the runner cannot read the database
+    (in which case the wait window is the only protection there is, loudly)."""
+    db_url = os.environ.get("SUPABASE_DB_URL")
+    if not db_url:
+        LOG.warning("SUPABASE_DB_URL is not set on the RUNNER — no watchdog, so a pod "
+                    "that dies on boot bills the whole window (2026-09-08)")
+        return None
+    baseline = 0
+    try:
+        with _connect(db_url) as conn:
+            baseline = read_backfill_progress(conn, identity=identity,
+                                              baseline=-1).marker
+        baseline = int(baseline)
+    except Exception as exc:  # noqa: BLE001 - a baseline we cannot read is 0
+        LOG.warning("could not read the vector baseline (assuming 0): %s", exc)
+        baseline = 0
+
+    def poll() -> Progress:
+        with _connect(db_url) as conn:
+            return read_backfill_progress(conn, identity=identity, baseline=baseline)
+
+    LOG.info("watchdog: bootstrap_deadline=%.0fs stall_deadline=%.0fs poll=%.0fs "
+             "baseline_vectors=%d", args.bootstrap_deadline_s, args.stall_deadline_s,
+             DEFAULT_POLL_INTERVAL_S, baseline)
+    return PodWatchdog(poll, bootstrap_deadline_s=args.bootstrap_deadline_s,
+                       stall_deadline_s=args.stall_deadline_s,
+                       poll_interval_s=DEFAULT_POLL_INTERVAL_S)
 
 
 def select_gpus(client: RunPodClient, allowlist: tuple[str, ...]):
@@ -135,8 +211,17 @@ def main() -> int:
     p.add_argument("--job-max-seconds", type=float, default=3600,
                    help="The payload's own time budget. The pod's wait window is this "
                         "plus a startup grace, so teardown lands after a clean stop.")
+    p.add_argument("--bootstrap-deadline-s", type=float,
+                   default=DEFAULT_BOOTSTRAP_DEADLINE_S,
+                   help="Tear the pod down if no vector reaches the database within "
+                        "this long (fetch + interpreter + torch + weights + the first "
+                        "chunk). The 2026-09-08 failure mode.")
+    p.add_argument("--stall-deadline-s", type=float, default=DEFAULT_STALL_DEADLINE_S,
+                   help="Tear the pod down if a working pod stops writing for this "
+                        "long.")
     p.add_argument("--ref", default=os.environ.get("GITHUB_SHA") or "main",
-                   help="Git ref the pod clones. Defaults to GITHUB_SHA in Actions.")
+                   help="Git ref the pod fetches BY SHA. Defaults to GITHUB_SHA in "
+                        "Actions.")
     p.add_argument("--image", default=DEFAULT_IMAGE)
     p.add_argument("--gpu-allowlist", default=",".join(DEFAULT_GPU_ALLOWLIST),
                    help="Comma-separated substrings of preferred GPU ids/names. "
@@ -197,6 +282,7 @@ def main() -> int:
     LOG.info("%d candidate GPU(s), cheapest first: %s", len(gpus),
              ", ".join(f"{g.id} (${g.community_price_per_hr:.3f}/hr)" for g in gpus[:5]))
 
+    watchdog = make_watchdog(args, identity)
     try:
         result = client.run_job_with_fallback(
             name="dinov3-embed-backfill",
@@ -207,6 +293,7 @@ def main() -> int:
             max_wait_s=max_wait_s,
             poll_interval_s=30,
             container_disk_gb=40,
+            progress=watchdog,
         )
     except NoCapacityError as exc:
         LOG.error("no candidate GPU type had capacity: %s", exc)
@@ -215,12 +302,20 @@ def main() -> int:
         LOG.error("dispatch failed (not a capacity issue): %s", exc)
         return 1
 
-    LOG.info("pod %s torn down: gpu=%s status=%s timed_out=%s elapsed=%.0fs cost_per_hr=$%s",
+    spent = ("" if result.cost_per_hr is None
+             else f" spent≈${float(result.cost_per_hr) * result.elapsed_s / 3600.0:.2f}")
+    LOG.info("pod %s torn down: gpu=%s status=%s timed_out=%s elapsed=%.0fs cost_per_hr=$%s%s",
              result.pod_id, result.gpu_type_id, result.final_status, result.timed_out,
-             result.elapsed_s, result.cost_per_hr)
+             result.elapsed_s, result.cost_per_hr, spent)
+    if result.stop_reason:
+        LOG.warning("the WATCHDOG ended this run: %s", result.stop_reason)
     LOG.info("A timed_out=True here is EXPECTED (on-demand Pods do not flip desiredStatus) "
              "— read progress from Postgres instead: count(image_dinov3_embeddings for this "
              "config) / count(images where storage_path is not null).")
+    # A watchdog teardown means the pod was not working: fail the lane rather than leave
+    # a green run that embedded nothing (which is what 2026-09-08 looked like).
+    if result.stop_reason and not result.stop_reason.startswith("all-terminal"):
+        return 1
     return 0
 
 

@@ -194,6 +194,55 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-08 (f) — **The bake-off's first real GPU run FAILED and cost ~$0.50 for zero
+  vectors. Three causes, all fixed; the third is the one that turned a 10-second bug into an
+  8,115-second bill.** Run 1's embed stage rented an RTX 3090 (pod `u1yvcktjn6dbrt`,
+  $0.22/hr), held it for the whole 8,115 s wait window, and produced **no vectors for any of
+  the ten GPU arms** — all ten still `pending`. RunPod's Pod logs endpoint answers **400**, so
+  the run left no readable trace at all; the post-mortem was done offline, against the code.
+  - **Cause 1 — the clone could never have succeeded.** The start command was
+    `git clone --depth 1 --branch {ref} …` with `ref = GITHUB_SHA`. `--branch` resolves a
+    branch or a tag, never a commit sha: `fatal: Remote branch 2d00061d… not found in upstream
+    origin`, exit 128. Under `set -euo pipefail` that is the entire pod, dead in seconds and
+    idling on the meter for two hours. Now `git init` + `git remote add` +
+    `git fetch --depth 1 origin <sha>` + `git checkout FETCH_HEAD`, verified against GitHub.
+  - **Cause 2 — the wrong Python, waiting behind it.** The image
+    (`runpod/pytorch:2.1.0-py3.10-…`) ships **3.10**; `pyproject.toml` requires **>=3.12**, so
+    `pip install -e '.[clip]'` would have refused even with a healthy checkout. RunPod's newer
+    tags do not state a Python version, so the fix does not chase an image: the pod installs
+    `uv`, builds a **3.12** venv (uv downloads a managed CPython) and takes torch from the
+    **cu118** index — the flavour with cp312 wheels furthest up the series (through 2.6.0;
+    cu121 stops at 2.5.1) and the one matching this CUDA-11.8-era image. Proven locally in CPU
+    mode end-to-end: `python=3.12.14 torch=2.14.0+cpu transformers=4.57.6`, with
+    `from scraper import dinov3_tagger` importing in that venv. The RESOLVED versions are
+    recorded at run time into the arm rows' `note`, because a bootstrapped interpreter is not
+    knowable from the repo.
+  - **Cause 3 — nothing was watching (the expensive one).** The dispatcher waited
+    `job_max_seconds + 900` no matter what the pod did; a pod that dies at second 10 bills
+    identically to one that works. **`scripts/pod_watchdog.py`** now polls the payload's OWN
+    rows from the runner (which has `SUPABASE_DB_URL`) every 60 s and terminates on: no boot
+    heartbeat within `bootstrap_deadline_seconds` (default 1200), no progress for
+    `stall_deadline_seconds` (default 900), or **every arm terminal** — the happy path, which
+    now stops paying when the work stops rather than when the window does. It logs the case and
+    a spend estimate; a bootstrap/stall teardown FAILS the workflow, because a green Actions
+    run that embedded nothing is exactly what this incident looked like. Both lanes
+    (bake-off + the production `dinov3_embed_backfill`) share it, and `RunPodClient.run_job`
+    grew one `progress` hook — the `finally`-terminate guarantee is untouched.
+  - **No migration.** The heartbeat rides on columns that already exist: the run row's `note`
+    carries `pod booted <iso> <versions>` (the payload's very FIRST DB write, before the
+    manifest and any weight download) and a rewritten `pod alive <iso> <phase>` through the
+    phases that write no vector; each arm's `note` is rewritten at every batch with the vectors
+    already committed. The boot stamp is what separates "the clone or install failed" from "the
+    weights are downloading slowly" — the distinction this incident had no way to make.
+  - **Run 1 is re-dispatchable as it stands**: arms `pending`, zero vectors, nothing to clean
+    up. An arm a killed pod leaves `running` is picked up again (`pending_arms` treats
+    pending/running/failed alike; the vectors, not the status, are the record of work).
+  - Tests, all offline: `tests/scripts/test_pod_bootstrap.py` (fetch-by-sha, never `--branch`;
+    the 3.12 venv; the cu118 index; both lanes share one script),
+    `tests/scripts/test_pod_watchdog.py` (each case fires, and does NOT fire while progress
+    advances — fake clock, fake poller), plus the payload's boot-heartbeat-first,
+    heartbeat-with-its-vectors and stale-`running`-resumes cases.
+
 - 2026-09-08 (e) — **The tagging bake-off, phase 2a: the comparison page** (`NEW DEDUP ·
   Tagging bake-off`, `/new-dedup/tagging-bakeoff`). The read surface of (d) given an operator
   face. No backend change: the page is a pure consumer of the four documented routes.

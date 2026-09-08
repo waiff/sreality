@@ -8,9 +8,10 @@ data.** Design + rationale: `docs/design/new-dedup/ENCODER-DECISION.md`. Table:
 ## Shape
 
 Runner → `scripts/dinov3_embed_dispatch.py` → rents a GPU pod through
-`scripts/runpod_client.py` → the pod clones the repo at `GITHUB_SHA`, installs the `clip`
-extra, and runs `scripts/dinov3_embed_backfill.py`, which streams images out of R2, embeds
-them with `scraper/dinov3_tagger.py`, and writes one L2-normalized 768-d `halfvec` per image.
+`scripts/runpod_client.py` → the pod runs `scripts/pod_bootstrap.py`'s script (fetch the
+repo BY SHA, stand up a Python 3.12, install cu118 torch, install the `clip` extra) and
+then `scripts/dinov3_embed_backfill.py`, which streams images out of R2, embeds them with
+`scraper/dinov3_tagger.py`, and writes one L2-normalized 768-d `halfvec` per image.
 
 The runner never installs torch — the model lives in the pod. The dispatcher passes
 `--device cuda` explicitly (a pod always has a card); run by hand, `--device` defaults to
@@ -54,8 +55,31 @@ that teardown is the cost guarantee. It also means the wait window *is* the pod'
 the dispatcher derives it from the payload's own `--max-seconds` plus a startup grace. A
 `timed_out=True` in the log is the expected path, not a failure.
 
+**5. The window is the ceiling; the WATCHDOG is what makes the usual case cheaper.**
+`scripts/pod_watchdog.py` polls the rows this job writes (count for the six-fact identity)
+every 60 s from the runner and terminates the pod in three cases: no vector at all within
+`bootstrap_deadline_seconds` (default 1200 — fetch + interpreter + torch + weights + the
+first chunk), no new vector for `stall_deadline_seconds` (default 900), or — in the bake-off
+lane — every arm terminal. It logs which case fired plus a spend estimate, and a
+bootstrap/stall teardown **fails the workflow on purpose**: a green run that embedded nothing
+is exactly what 2026-09-08 looked like. Without `SUPABASE_DB_URL` on the runner there is no
+watchdog and the dispatcher says so loudly.
+
 ## Gotchas
 
+- **The pod bootstraps its own interpreter — do not "fix" the image tag.** The RunPod image
+  (`runpod/pytorch:2.1.0-py3.10-…`) ships **Python 3.10** and `pyproject.toml` requires
+  `>=3.12`, so `pip install -e '.[clip]'` under the image's python refuses. RunPod's newer
+  tags do not name a Python version at all, so `scripts/pod_bootstrap.py` installs `uv` and
+  builds a 3.12 venv (uv downloads a managed CPython), then takes torch from the **cu118**
+  index — the image is CUDA 11.8-era and cu118 is the flavour with cp312 wheels furthest up
+  the torch series (through 2.6.0; cu121 stops at 2.5.1). Versions are recorded at run time in
+  the progress rows, not pinned.
+- **Never `git clone --branch <sha>`.** `--branch` resolves a branch or a tag only; the ref
+  here is `GITHUB_SHA`, so the clone fails (`fatal: Remote branch … not found in upstream
+  origin`, exit 128) and, under `set -euo pipefail`, so does the whole pod — which then idles
+  on the meter. The bootstrap uses `git init` + `git fetch --depth 1 origin <sha>` +
+  `git checkout FETCH_HEAD`. A test asserts `--branch` never comes back.
 - **GPU selection is not price-only here.** `RunPodClient.eligible_gpus` ranks on price and
   knows nothing about vCPU or system RAM, and JPEG decode is CPU-side. The dispatcher's
   `--gpu-allowlist` (default: RTX 3090 / A5000, per ENCODER-DECISION §5.3) filters first and

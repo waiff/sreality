@@ -25,6 +25,12 @@ name: "NEW DEDUP: DINOv3 corpus embedding (RunPod)"
 # desiredStatus, so run_job always times out and tears the pod down in its `finally`.
 # Progress is a SQL question: count(rows for this config) / count(stored images).
 #
+# The wait window is the CEILING, not the plan: a watchdog asks that same SQL question
+# once a minute and tears the pod down if nothing ever appears
+# (bootstrap_deadline_seconds) or if it stops appearing (stall_deadline_seconds). The
+# sibling bake-off lane paid 8,115s of rent for zero vectors on 2026-09-08 for want of
+# it. A watchdog teardown FAILS this job on purpose.
+#
 # Requires migration 480 (PR #1296) to have been applied — the table does not exist
 # otherwise.
 #
@@ -61,6 +67,16 @@ on:
         description: "The payload's own time budget. The pod's wait window is this plus a 900s startup grace, so teardown lands after a clean stop, never mid-batch."
         required: false
         default: "3600"
+        type: string
+      bootstrap_deadline_seconds:
+        description: "Kill the pod if no vector reaches the database within this long (fetch + 3.12 venv + torch + weights + the first chunk). The 2026-09-08 failure mode: a broken bootstrap billed for the whole window."
+        required: false
+        default: "1200"
+        type: string
+      stall_deadline_seconds:
+        description: "Kill the pod if a working pod stops writing vectors for this long."
+        required: false
+        default: "900"
         type: string
       dry_run:
         description: "Print the resolved identity, the pending count and the pod plan. Launches nothing, writes nothing, spends nothing."
@@ -109,6 +125,8 @@ jobs:
           SHARDS: ${{ inputs.shards }}
           WORKERS: ${{ inputs.workers }}
           JOB_MAX_SECONDS: ${{ inputs.job_max_seconds }}
+          BOOTSTRAP_DEADLINE_SECONDS: ${{ inputs.bootstrap_deadline_seconds }}
+          STALL_DEADLINE_SECONDS: ${{ inputs.stall_deadline_seconds }}
           DRY_RUN: ${{ inputs.dry_run }}
         # Inputs travel via env and are case-validated before use, never interpolated
         # into the shell by ${{ }}.
@@ -132,9 +150,17 @@ jobs:
           case "${JOB_MAX_SECONDS:-3600}" in
             ''|*[!0-9]*) echo "::error::job_max_seconds must be a number"; exit 1 ;;
           esac
+          case "${BOOTSTRAP_DEADLINE_SECONDS:-1200}" in
+            ''|*[!0-9]*) echo "::error::bootstrap_deadline_seconds must be a number"; exit 1 ;;
+          esac
+          case "${STALL_DEADLINE_SECONDS:-900}" in
+            ''|*[!0-9]*) echo "::error::stall_deadline_seconds must be a number"; exit 1 ;;
+          esac
           ARGS="--max-write-mb-per-hour ${MAX_WRITE_MB_PER_HOUR} --limit ${LIMIT:-20000}"
           ARGS="${ARGS} --shard ${SHARD:-0} --shards ${SHARDS:-1} --workers ${WORKERS:-16}"
           ARGS="${ARGS} --job-max-seconds ${JOB_MAX_SECONDS:-3600}"
+          ARGS="${ARGS} --bootstrap-deadline-s ${BOOTSTRAP_DEADLINE_SECONDS:-1200}"
+          ARGS="${ARGS} --stall-deadline-s ${STALL_DEADLINE_SECONDS:-900}"
           if [ "${DRY_RUN:-true}" = "true" ]; then ARGS="${ARGS} --dry-run"; fi
           echo "python -m scripts.dinov3_embed_dispatch ${ARGS}"
           python -m scripts.dinov3_embed_dispatch ${ARGS}
