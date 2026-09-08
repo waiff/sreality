@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { ImagePublic } from '@/lib/types';
 import { imageSrc } from '@/lib/imageUrl';
@@ -46,6 +46,12 @@ interface Props {
    * page's proposed tag) so the enlarged photo can never contradict the tile it
    * was opened from. */
   tagAt?: (index: number) => { tag: string | null; confidence: number | null };
+  /* An optional control bar under the photo, for the position on show. The
+   * training-set review opens this viewer to DECIDE, not only to look, and
+   * making the operator close it to reach the marks turns one judgement into
+   * three clicks. Callers that only display photos pass nothing and the
+   * viewer is unchanged. */
+  actionsAt?: (index: number) => React.ReactNode;
 }
 
 export default function ImageLightbox({
@@ -54,6 +60,7 @@ export default function ImageLightbox({
   onClose,
   dim = '',
   tagAt,
+  actionsAt,
 }: Props) {
   const [index, setIndex] = useState(startIndex);
   const [errored, setErrored] = useState(false);
@@ -183,7 +190,8 @@ export default function ImageLightbox({
           </>
         )}
 
-        <div className="relative max-w-[92vw] max-h-[88vh] flex items-center justify-center">
+        <div className="relative max-w-[92vw] max-h-[88vh] flex flex-col items-center justify-center gap-3">
+        <div className="relative min-h-0 flex items-center justify-center">
           {errored ? (
             <div
               className="px-12 py-10 border border-[var(--color-rule-strong)] text-[var(--color-ink-4)] tracking-[0.14em] uppercase text-sm"
@@ -198,7 +206,11 @@ export default function ImageLightbox({
                 alt=""
                 onError={() => setErrored(true)}
                 className={[
-                  'max-w-[92vw] max-h-[88vh] object-contain',
+                  // The bar is a SIBLING, not an overlay: it takes its height
+                  // out of the photo's rather than sitting on top of it, so a
+                  // control never covers the part being judged.
+                  'max-w-[92vw] object-contain',
+                  actionsAt ? 'max-h-[74vh]' : 'max-h-[88vh]',
                   'border border-[var(--color-copper)]/40',
                   dim,
                 ].join(' ')}
@@ -214,6 +226,12 @@ export default function ImageLightbox({
               />
             </>
           )}
+        </div>
+        {actionsAt && (
+          <div data-testid="lightbox-actions" className="w-full max-w-[46rem] shrink-0">
+            {actionsAt(i)}
+          </div>
+        )}
         </div>
       </div>
     </div>,

@@ -103,6 +103,38 @@ describe('<NewDedupTrainingSet> four trays over stored membership', () => {
     expect(screen.queryByTestId('move-page')).toBeNull();
   });
 
+  it('carries the marks into the focus view, and stays open after one', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    await user.click(screen.getByTestId('open-11'));
+    await screen.findByRole('dialog');
+    // Deciding is why the photo is open; closing it to reach the marks would
+    // make one judgement three clicks.
+    expect(screen.getByTestId('zoom-positive')).toHaveAttribute('aria-pressed', 'true');
+    await user.click(screen.getByTestId('zoom-negative'));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation)
+      .toHaveBeenCalledWith(42, 11, 'negative', null));
+    // The viewer stays open so the arrow keys walk straight to the next one.
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId('zoom-negative')).toHaveAttribute('aria-pressed', 'true'));
+  });
+
+  it('offers no move control in the focus view where membership means nothing', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    await user.click(screen.getByTestId('open-11'));
+    expect(await screen.findByTestId('zoom-move')).toHaveTextContent('return to reserve');
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: /Left out/ }));
+    await screen.findByTestId('training-tile-11');
+    await user.click(screen.getByTestId('open-11'));
+    await screen.findByRole('dialog');
+    expect(screen.queryByTestId('zoom-move')).toBeNull();
+  });
+
   it('opens the shared full-size viewer on a tile, and closes it', async () => {
     const user = userEvent.setup();
     renderPage();

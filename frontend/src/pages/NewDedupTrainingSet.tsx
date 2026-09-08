@@ -394,6 +394,60 @@ export default function NewDedupTrainingSet() {
   if (headsQ.isLoading) return <div className="p-6"><Spinner /></div>;
   if (headsQ.error) return <div className="p-6"><ErrorBanner message={(headsQ.error as Error).message} /></div>;
 
+  /* The marks, named once. The tile and the focus view render the SAME three
+   * decisions; two lists would drift the moment one gained a state. */
+  const MARKS = [
+    { v: 'positive' as const, label: '✓ applies' },
+    { v: 'negative' as const, label: '✕ no' },
+    { v: 'excluded' as const, label: '– left out' },
+  ];
+
+  /* The control bar inside the focus view. Deciding is why the photo is open —
+   * closing it to reach the marks would make one judgement three clicks — and
+   * the viewer STAYS open afterwards so the arrow keys walk straight to the
+   * next one. The row is patched in place, so the page behind updates and the
+   * position never shifts under the viewer. */
+  const zoomActions = (idx: number) => {
+    const r = rows[idx];
+    if (!r) return null;
+    return (
+      <div className="flex flex-col gap-1.5">
+        <div className="flex gap-1.5">
+          {MARKS.map(({ v, label }) => (
+            <button
+              key={v}
+              type="button"
+              data-testid={`zoom-${v}`}
+              aria-pressed={r.state === v}
+              disabled={correctMut.isPending}
+              onClick={() => correctMut.mutate({
+                imageId: r.image_id, state: v, from: r.state,
+                fromMine: r.source !== 'machine',
+              })}
+              className={`flex-1 py-1.5 text-sm rounded-[var(--radius-sm)] border transition-colors ${
+                r.state === v
+                  ? 'border-[var(--color-copper)] bg-[var(--color-paper)]/10 text-[var(--color-paper)]'
+                  : 'border-[var(--color-paper)]/25 text-[var(--color-ink-4)] hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10'}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {canMove && (
+          <button
+            type="button"
+            data-testid="zoom-move"
+            disabled={moveMut.isPending}
+            onClick={() => moveMut.mutate({ imageIds: [r.image_id], into: !r.in_training })}
+            className="py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-paper)]/25 text-[var(--color-ink-4)] hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10"
+          >
+            {r.in_training ? '↩ return to reserve' : '→ move to training'}
+          </button>
+        )}
+      </div>
+    );
+  };
+
   const tile = (r: TrainingSetRow, idx: number) => {
     const mine = r.source !== 'machine';
     const ref: ImageRef = { storage_path: r.storage_path, sreality_url: '' };
@@ -433,7 +487,7 @@ export default function NewDedupTrainingSet() {
           )}
         </div>
         <div className="flex gap-1">
-          {(['positive', 'negative', 'excluded'] as const).map((v) => (
+          {MARKS.map(({ v, label }) => (
             <button
               key={v}
               type="button"
@@ -448,7 +502,7 @@ export default function NewDedupTrainingSet() {
                 r.state === v ? 'border-[var(--color-ink-2)] text-[var(--color-ink)]'
                   : 'border-[var(--color-rule)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]'}`}
             >
-              {v === 'positive' ? '✓ applies' : v === 'negative' ? '✕ no' : '– left out'}
+              {label}
             </button>
           ))}
         </div>
@@ -703,7 +757,9 @@ export default function NewDedupTrainingSet() {
           <div>
             <p className="font-medium text-[var(--color-ink)]">Each photo</p>
             <ul className="mt-0.5 list-disc pl-4 space-y-0.5">
-              <li>Click the photo to open it large, in the same viewer the listing pages use. Arrow keys walk the page; Escape closes.</li>
+              <li>Click the photo to open it large, in the same viewer the listing pages use. The
+                same marks are under it there, and it stays open after one &mdash; so arrow keys
+                walk the page and you can decide without closing. Escape closes.</li>
               <li><b>machine</b> / <b>yours</b> says who decided the current mark.</li>
               <li><b>→ move to training</b> / <b>↩ return to reserve</b> is membership, separate from the mark — on the positive and reserve trays only.</li>
               <li><b>old wording</b> means the label was written under a definition you have since changed.</li>
@@ -785,6 +841,7 @@ export default function NewDedupTrainingSet() {
           images={galleryImages}
           startIndex={lightboxAt}
           onClose={() => setLightboxAt(null)}
+          actionsAt={zoomActions}
         />
       )}
     </div>
