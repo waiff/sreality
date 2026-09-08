@@ -442,6 +442,14 @@ def pending_arms(arms: Sequence[dict[str, Any]], *,
     retried once the operator fixes the token or accepts the licence. (Work already done
     is still skipped image-by-image, so a forced re-run of a finished arm is a no-op
     rather than a duplicate.)
+
+    `failed` IS RETRYABLE HERE AND TERMINAL THERE. `scripts/pod_watchdog.py`'s
+    all-terminal case counts `ok`/`failed`/`skipped` as terminal and tears the pod down,
+    which is right — for THIS launch. The two rules only agree because
+    `tagging_bakeoff_dispatch.reset_failed_arms` clears the previous attempt's `failed`
+    arms back to `pending` before the pod starts, so a retry is a new attempt rather than
+    a run the watchdog considers already over (2026-09-08 (j)). Do not "fix" either end
+    by making them match.
     """
     wanted = {a.strip() for a in (only or []) if a.strip()}
     out = []

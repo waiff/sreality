@@ -665,6 +665,86 @@ def test_terminal_means_every_arm_this_dispatch_asked_for():
                                           baseline_vectors=0).terminal is True
 
 
+# --- the retry reset: what makes attempt N+1 a NEW attempt ----------------------
+
+def _arms_conn(rows):
+    """A run whose arm rows answer the resettable-arms SELECT."""
+    return _FakeConn({"SELECT arm, status FROM dedup_sim.tag_head_bakeoff_arms": rows})
+
+
+def _updates(conn):
+    return [(sql, params) for sql, params in conn.executed if sql.startswith("UPDATE")]
+
+
+def test_a_retry_resets_the_previous_attempts_failed_arms():
+    # The bug: attempt 5 of run 1 was torn down at 2s as all-terminal, because the seven
+    # DINOv3 arms still carried attempt 4's `failed`. The watchdog is right; the
+    # dispatcher clearing the verdict is what makes the retry a new attempt.
+    conn = _arms_conn([("dinov3-b16@512/bf16", "failed"),
+                       ("dinov3-l16@512/bf16", "failed")])
+    reset = dispatch.reset_failed_arms(conn, run_id=1)
+    assert reset == [("dinov3-b16@512/bf16", "failed"),
+                     ("dinov3-l16@512/bf16", "failed")]
+    (sql, params), = _updates(conn)
+    assert "SET status = 'pending'" in sql
+    assert params["run_id"] == 1
+    assert params["arms"] == ["dinov3-b16@512/bf16", "dinov3-l16@512/bf16"]
+
+
+def test_only_failed_arms_are_offered_for_reset():
+    # `ok` and `skipped` never move on their own: an explicit --arms list is also how a
+    # finished arm is named for a resumed pass, and a re-embed must be asked for.
+    conn = _arms_conn([("a", "failed")])
+    dispatch.reset_failed_arms(conn, run_id=1)
+    selects = [params for sql, params in conn.executed if sql.startswith("SELECT")]
+    assert selects[0]["statuses"] == ["failed"]
+    # ...and the zero-GPU arm is excluded by the statement itself, not by luck.
+    assert selects[0]["stored"] == arms_mod.STORED_CLIP_ARM
+
+
+def test_force_arms_widens_the_reset_only_for_the_arms_named():
+    conn = _arms_conn([("a", "ok"), ("b", "skipped")])
+    reset = dispatch.reset_failed_arms(conn, run_id=1, only=["a"], force=True)
+    assert reset == [("a", "ok")]
+    selects = [params for sql, params in conn.executed if sql.startswith("SELECT")]
+    assert selects[0]["statuses"] == list(dispatch.FORCE_RESET_STATUSES)
+    # Without --arms there is nothing to force, so the widening does not apply and the
+    # statement still asks only for `failed` (main() refuses that combination anyway).
+    bare = _arms_conn([])
+    dispatch.reset_failed_arms(bare, run_id=1, force=True)
+    assert bare.executed[0][1]["statuses"] == list(dispatch.RESET_STATUSES)
+
+
+def test_force_arms_without_arms_is_refused():
+    assert dispatch.main(["--stage", "embed", "--run-id", "1", "--force-arms"]) == 2
+
+
+def test_arms_narrows_which_failed_arms_are_reset():
+    conn = _arms_conn([("a", "failed"), ("b", "failed")])
+    assert dispatch.reset_failed_arms(conn, run_id=1, only=["b"]) == [("b", "failed")]
+    (_, params), = _updates(conn)
+    assert params["arms"] == ["b"]
+
+
+def test_a_dry_run_reports_the_reset_and_writes_nothing():
+    conn = _arms_conn([("a", "failed")])
+    assert dispatch.reset_failed_arms(conn, run_id=1, dry_run=True) == [("a", "failed")]
+    assert _updates(conn) == []
+
+
+def test_the_reset_stamps_the_attempt_in_front_of_the_failure_it_cleared(monkeypatch):
+    monkeypatch.setenv("GITHUB_RUN_ID", "34274077032")
+    conn = _arms_conn([("a", "failed")])
+    dispatch.reset_failed_arms(conn, run_id=1)
+    (sql, params), = _updates(conn)
+    assert params["prefix"].startswith("retry ")
+    assert "(attempt from GitHub run 34274077032):" in params["prefix"]
+    # Prefixed, never overwritten: the torchvision error is still readable underneath.
+    assert "coalesce(note, '')" in sql
+    monkeypatch.delenv("GITHUB_RUN_ID")
+    assert "GitHub run local" in dispatch.retry_note_prefix()
+
+
 def test_a_bootstrap_step_is_progress_and_reaches_the_watchdog(monkeypatch):
     # The pod is still installing torch: no vectors, no payload boot stamp — and yet the
     # run is advancing. The step line's own timestamp is what says so.

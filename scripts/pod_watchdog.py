@@ -21,7 +21,15 @@ outside. This module turns that into three terminations, all cheaper than the wi
       Before the first heartbeat of any kind there is nothing to compare, so (a) is the
       only rail that can fire.
   (c) ALL-TERMINAL — every unit of work reached a terminal state. The job is done; the
-      remaining window is pure waste.
+      remaining window is pure waste. TERMINAL IS PER LAUNCH, and the other end of that
+      invariant is `scripts/tagging_bakeoff_embed.py::pending_arms`, which treats a
+      `failed` arm as work to do: right for a payload deciding what to claim, wrong as a
+      reason to keep a pod alive. Both stay as they are. What makes a retry a NEW attempt
+      is the DISPATCHER resetting the previous attempt's `failed` arms to `pending`
+      before launch (`tagging_bakeoff_dispatch.reset_failed_arms`); an arm that fails
+      AGAIN during this run is genuinely terminal and this case fires on it correctly.
+      Without that reset, attempt 5 of run 1 read 10/10 terminal two seconds in
+      (2026-09-08 (j)).
   (d) CRASH LOOP — two or more `exit=` reports from the pod's own bootstrap. RunPod
       re-runs the docker start command whenever it exits, so a bootstrap that dies keeps
       dying, on the clock, and the stall rail only catches it a quarter of an hour later

@@ -27,7 +27,11 @@ name: "NEW DEDUP: tagging bake-off (manifest / embed / train)"
 #      exits: the third attempt restarted every ~60s and each restart overwrote the
 #      report that named the cause. The bootstrap now sleeps instead of exiting, every
 #      step is idempotent, every heartbeat carries pass=N, and two `exit=` reports tear
-#      the pod down immediately as case=crash-loop.
+#      the pod down immediately as case=crash-loop. RE-DISPATCHING IS A NEW ATTEMPT: the
+#      dispatcher resets this run's `failed` arms to `pending` before launching, because
+#      `failed` is terminal to the watchdog and retryable to the payload — without it,
+#      attempt 5 of run 1 was torn down as all-terminal 2s in, $0.00 and no retry
+#      possible. `force_arms` (with `arms`) additionally re-opens finished arms.
 #   3. train — back on a runner with the `training` extra, running the results half of
 #      the experiment.
 #
@@ -84,6 +88,12 @@ on:
         required: false
         default: ""
         type: string
+      force_arms:
+        description: "embed only: also re-open the arms named in `arms` when they are already ok/skipped (a deliberate re-embed). Requires `arms`. A retry always clears `failed` arms without this."
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
       batch_size:
         description: "embed only: model forward batch. Lower it if a 1024px arm runs out of GPU memory."
         required: false
@@ -243,6 +253,7 @@ jobs:
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
           RUN_ID: ${{ inputs.run_id }}
           ARMS: ${{ inputs.arms }}
+          FORCE_ARMS: ${{ inputs.force_arms }}
           BATCH_SIZE: ${{ inputs.batch_size }}
           WORKERS: ${{ inputs.workers }}
           JOB_MAX_SECONDS: ${{ inputs.job_max_seconds }}
@@ -258,6 +269,7 @@ jobs:
           ARGS+=(--stall-deadline-s "${STALL_DEADLINE_SECONDS:-900}")
           ARGS+=(--container-disk-gb "${CONTAINER_DISK_GB:-60}")
           if [ -n "${ARMS:-}" ]; then ARGS+=(--arms "${ARMS}"); fi
+          if [ "${FORCE_ARMS:-false}" = "true" ]; then ARGS+=(--force-arms); fi
           if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi
           python -m scripts.tagging_bakeoff_dispatch "${ARGS[@]}"
 
