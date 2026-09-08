@@ -24,10 +24,12 @@ PRAHA = ObecPoint(code=554782, name="Praha", lat=50.0755, lon=14.4378)
 BRNO = ObecPoint(code=582786, name="Brno", lat=49.1951, lon=16.6068)
 KOLIN = ObecPoint(code=533165, name="Kolín", lat=50.0281, lon=15.2005)
 NOVA_PAKA = ObecPoint(code=573248, name="Nová Paka", lat=50.4946, lon=15.5150)
+MAR_LAZNE = ObecPoint(code=554642, name="Mariánské Lázně", lat=49.9647, lon=12.7010)  # ~27 km
 LHOTA_A = ObecPoint(code=1001, name="Lhota", lat=50.10, lon=12.40)          # near Cheb
 LHOTA_B = ObecPoint(code=1002, name="Lhota", lat=49.20, lon=16.60)          # near Brno
 UNPLACED = ObecPoint(code=1003, name="Nikde", lat=None, lon=None)
-POINTS = (CHEB, AS, FRANTISKOVY, PRAHA, BRNO, KOLIN, NOVA_PAKA, LHOTA_A, LHOTA_B, UNPLACED)
+POINTS = (CHEB, AS, FRANTISKOVY, PRAHA, BRNO, KOLIN, NOVA_PAKA, MAR_LAZNE, LHOTA_A, LHOTA_B,
+          UNPLACED)
 
 
 @pytest.fixture
@@ -81,16 +83,17 @@ def test_within_km_uses_centroids_and_skips_unplaced_obce(index):
 
 
 def test_candidate_towns_is_text_union_pin_radius_sorted_and_capped(index):
-    # Aš is named in the text and 20 km from the pin: outside the 15 km radius, inside
-    # the 40 km text reach, so the text keeps it on the list.
-    towns = candidate_towns(index, text="byt v Aši", lat=CHEB.lat, lon=CHEB.lon)
-    assert towns == ["Aš", "Cheb", "Františkovy Lázně", "Lhota"]
+    # Mariánské Lázně is named in the text and ~27 km from the pin: outside the 15 km
+    # radius, inside the 40 km text reach, so the text keeps it on the list.
+    text = "byt v Mariánských Lázních"
+    towns = candidate_towns(index, text=text, lat=CHEB.lat, lon=CHEB.lon)
+    assert towns == ["Cheb", "Františkovy Lázně", "Lhota", "Mariánské Lázně"]
     # No pin: the text is the only source, at any distance.
     assert candidate_towns(index, text="byt v Praze", lat=None, lon=None) == ["Praha"]
     # Nothing at all: an empty list, never an exception.
     assert candidate_towns(index, text="krásný byt", lat=None, lon=None) == []
-    capped = candidate_towns(index, text="byt v Aši", lat=CHEB.lat, lon=CHEB.lon, cap=2)
-    assert capped == ["Aš", "Cheb"] and MAX_CANDIDATES >= 300
+    capped = candidate_towns(index, text=text, lat=CHEB.lat, lon=CHEB.lon, cap=2)
+    assert capped == ["Cheb", "Františkovy Lázně"] and MAX_CANDIDATES >= 300
 
 
 def test_a_text_match_far_from_the_pin_is_a_homonym_trap_and_stays_off_the_list(index):

@@ -122,11 +122,12 @@ def test_the_town_is_picked_from_the_list_and_the_address_within_it():
     assert first["system"] == TOWN_PROMPT and first["tool_choice"] == TOWN_TOOL["name"]
     assert first["called_for"] == "extract_location_claims"
     assert first["model"] == "gpt-5.6-luna"
-    # The list: text-matched (Cheb, "do Prahy" → Praha) ∪ within 15 km of the pin (Cheb,
-    # the near Lhota) — and never the postcode.
+    # The list: text-matched names within reach of the pin (Cheb) ∪ obce within 15 km (Cheb,
+    # the near Lhota). "do Prahy" names a town 150 km away — off the list — and Aš, 20 km
+    # out and not in the text, is not on it either. Never the postcode.
     listed = _offered(first["user"], "SEZNAM OBCÍ")
-    assert "Cheb" in listed and "Praha" in listed and "Lhota" in listed
-    assert "Aš" not in listed
+    assert "Cheb" in listed and "Lhota" in listed
+    assert "Praha" not in listed and "Aš" not in listed
     assert "350 02" not in first["user"] and "35002" not in first["user"]
     second = client.calls[1]
     assert second["system"] == ADDRESS_PROMPT and second["tool_choice"] == ADDRESS_TOOL["name"]
