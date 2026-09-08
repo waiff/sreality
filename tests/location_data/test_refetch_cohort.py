@@ -18,16 +18,21 @@ from location_data.refetch_cohort import (
     _MARK_DISPATCHED_SQL,
     _MARK_PLACED_SQL,
     _MARK_RETIRED_SQL,
+    BEZREALITKY_LANE,
     COHORT_LANE,
     CONCURRENCY_GROUP,
     JOB_NAME,
     MAX_ATTEMPTS,
     REFETCH_PRIORITY,
+    LANES,
     CohortRow,
     DueRow,
     classify,
     dispatch,
+    enroll,
+    lane_spec,
     reconcile,
+    run,
 )
 
 _POST_CUTOVER = {"gps_lat": 50.08, "gps_lon": 14.42, "entity_type": "address",
@@ -35,9 +40,9 @@ _POST_CUTOVER = {"gps_lat": 50.08, "gps_lon": 14.42, "entity_type": "address",
 _LEGACY = {"name": "Praha 2 - Vinohrady", "value": 12345, "accuracy": "street"}
 
 
-def _row(locality, *, is_active=True, attempts=0, listing_id=1) -> CohortRow:
+def _row(probe, *, is_active=True, attempts=0, listing_id=1) -> CohortRow:
     return CohortRow(listing_id=listing_id, is_active=is_active, attempts=attempts,
-                     locality=locality)
+                     probe=probe)
 
 
 class _Cursor:
@@ -283,3 +288,80 @@ def test_the_lane_holds_both_halves_of_its_lease():
     source = Path(refetch_cohort.__file__).read_text(encoding="utf-8")
     assert "lease.held(" in source
     assert "pg_advisory" not in source.lower()
+
+
+# ---------------------------------------------------------------- lanes (W4b)
+
+def _inputs() -> dict:
+    wf = _workflow()
+    return (wf[True] if True in wf else wf["on"])["workflow_dispatch"]["inputs"]
+
+
+def test_the_two_lanes_are_registered_with_distinct_sources():
+    assert set(LANES) == {COHORT_LANE, BEZREALITKY_LANE}
+    assert {s.source for s in LANES.values()} == {"sreality", "bezrealitky"}
+    with pytest.raises(ValueError, match="unknown refetch lane"):
+        lane_spec("nope")
+
+
+def test_bezrealitky_is_placed_on_key_presence_not_value():
+    """A refetch cannot mint a kód ADM the portal publishes as `null` — the ~48 % ceiling
+    W1v measured. The key's presence is the whole of what a refetch can achieve, so a
+    present-but-null key is `placed`, and only a missing key stays pending."""
+    spec = LANES[BEZREALITKY_LANE]
+    assert classify(_row(True), spec) == "placed"
+    assert classify(_row(False), spec) == "pending"
+    assert classify(_row(None), spec) == "pending"
+    assert classify(_row(True, is_active=False), spec) == "not_applicable"
+
+
+def test_bezrealitky_enroll_is_idempotent_and_selects_only_key_absent_active_rows():
+    sql = " ".join(LANES[BEZREALITKY_LANE].enroll_sql.split())
+    assert "ON CONFLICT (listing_id, method, lane) DO NOTHING" in sql
+    assert "NOT (l.raw_json ? 'ruianId')" in sql
+    assert "l.is_active" in sql and "l.source = 'bezrealitky'" in sql
+    assert "%(lane)s" in sql and "%(extractor_version)s" in sql
+    assert "'skipped'" in sql, "enrolled rows start pending, like the producer's"
+
+
+def test_the_sreality_lane_has_no_enroll_step_because_w1_intake_is_its_producer():
+    assert LANES[COHORT_LANE].enroll_sql is None
+    assert enroll(_Conn(), LANES[COHORT_LANE]) == 0
+
+
+def test_run_enrolls_only_the_producerless_lane(monkeypatch):
+    monkeypatch.setattr("location_data.refetch_cohort.db.enqueue_detail",
+                        lambda conn, source, entries: 0)
+    conn = _Conn()
+    run(conn, lane=BEZREALITKY_LANE, reconcile_only=True)
+    enrolls = _sql_of(conn, "INSERT INTO location_enrichment_state")
+    assert len(enrolls) == 1 and enrolls[0][1]["lane"] == BEZREALITKY_LANE
+    conn = _Conn()
+    run(conn, lane=COHORT_LANE, reconcile_only=True)
+    assert not _sql_of(conn, "INSERT INTO location_enrichment_state")
+
+
+def test_dry_run_never_enrolls():
+    conn = _Conn()
+    run(conn, lane=BEZREALITKY_LANE, reconcile_only=True, dry_run=True)
+    assert not _sql_of(conn, "INSERT INTO")
+
+
+def test_reconcile_projects_the_lanes_own_probe():
+    conn = _Conn(cohort=[(11, True, 0, True)])
+    stats = reconcile(conn, lane=BEZREALITKY_LANE)
+    assert stats["placed"] == 1
+    scans = [s for s, _ in conn.executed
+             if "FROM location_enrichment_state es" in s and "JOIN listings l" in s]
+    assert scans and "(l.raw_json ? 'ruianId')" in scans[0]
+    assert "__PROBE__" not in scans[0]
+    conn = _Conn(cohort=[(11, True, 0, _POST_CUTOVER)])
+    reconcile(conn, lane=COHORT_LANE)
+    scans = [s for s, _ in conn.executed if "JOIN listings l" in s]
+    assert "l.raw_json->'locality'" in scans[0]
+
+
+def test_the_workflow_offers_exactly_the_registered_lanes():
+    inputs = _inputs()
+    assert set(inputs["lane"]["options"]) == set(LANES)
+    assert inputs["lane"]["default"] == COHORT_LANE

@@ -44,6 +44,14 @@ on:
           - reconcile
           - dispatch
           - gate
+      lane:
+        description: "sreality_detail_refetch (W1-fed legacy/truncated cohort) | bezrealitky_ruian_refetch (W4b: pre-0m rows lacking the ruianId key; enrolled from listings on each run)"
+        required: false
+        default: "sreality_detail_refetch"
+        type: choice
+        options:
+          - sreality_detail_refetch
+          - bezrealitky_ruian_refetch
       limit:
         description: "max rows to enqueue in dispatch mode"
         required: false
@@ -98,7 +106,7 @@ jobs:
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
-          ARGS="--limit ${{ inputs.limit }} --batch-size ${{ inputs.batch_size }}"
+          ARGS="--lane ${{ inputs.lane }} --limit ${{ inputs.limit }} --batch-size ${{ inputs.batch_size }}"
           if [ "${{ inputs.mode }}" = "reconcile" ]; then ARGS="$ARGS --reconcile-only"; fi
           if [ -n "${{ inputs.max_seconds }}" ]; then ARGS="$ARGS --max-seconds ${{ inputs.max_seconds }}"; fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi

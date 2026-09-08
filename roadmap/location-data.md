@@ -1647,18 +1647,62 @@ itself (`mode=dispatch`) was NOT dispatched by the session** — the auto-mode c
 it as a production egress commitment, correctly: 5,945 portal fetches are the operator's call.
 That command is one line and is recorded in the wave-status row.
 
-**Open, in order (unchanged in substance, now with numbers):**
+**The refetch was dispatched by the operator at 12:54 UTC the same day** (run 34227…, `mode=dispatch
+--limit 6000`): **due 5,943 · enqueued 5,943 · dispatched 5,943**, all at `priority = -1`. Queue
+baseline six minutes later: 5,942 pending at −1, 0 claimed; 37 pending at 0, 190 at −2.
 
-- **Operator: `mode=dispatch`, limit 6000.** Then re-run `mode=reconcile` after a drain day and
-  re-measure the 5.76 % — a refetch returns the CURRENT API shape, so the share should fall to
-  whatever the portal itself still serves legacy-shaped.
-- **The sign-off number** is the full-corpus `CASE` scan over active sreality rows, not the sample
-  and never the cohort table (the table is a scheduling ledger; after reconcile it is current-state,
-  but the gate wording is "share of active rows", which only `listings` can answer).
-- W4(b): refetch the 133 pre-0m bezrealitky rows (same lane pattern, `source='bezrealitky'`), then
-  record the 48.08 % as the portal ceiling — the gate as written cannot be met by any pipeline.
-- The P6 standing `payload_schema_detector` check, scoped to sreality + bezrealitky —
-  `ceskereality.yaml` carries one too and belongs to W2's per-portal work.
+### How −1 actually drains (adversarially reviewed before the dispatch, two refuters)
+
+`db.claim_detail_batch` is not one `ORDER BY`: it composes each 100-row chunk from an
+**acquisition reserve** (priority = 0 exactly, 50 %), a **verify reserve** (priority = −2
+exactly, 20 %) and `rest` (everything else, `priority DESC, enqueued_at`). **−1 is the only class
+with no reserve**, competing in `rest` slack below every priority-1 (changed) and priority-2
+(failure) row — the exact starvation shape that once left sreality nine days at zero and earned
+priority 0 its reserve. Nothing skips negative priorities; the drain fetches everything it
+claims. What this means operationally: with sreality's queue as shallow as it is today (≈ 40 rows
+above −1) the cohort takes ~80–100 slots per chunk and the always-on worker (200/pass, sreality
+LAST in a serial ~20-minute pass) needs ~30 passes; the `*/15` `detail_drain.yml` (12,000
+claims/run) would clear it in one run **but is cron-throttled — three runs in the ten hours before
+the dispatch**. So the honest expectation is hours, not minutes, and it is **measured, not
+assumed**: the pending-at-−1 count is re-read after each worker cycle, and if it stops falling the
+fallback the operator authorised is promotion (`enqueue_detail` uses `GREATEST`, so re-enqueueing
+at 0 raises a row; nothing can lower one). Three side effects to know while the rows sit queued: a
+queued row **blocks presence-check nomination** for that listing (rule #3) until it drains; a −1 row
+that fails five fetches is `given_up` and the only re-arm path demotes it to −2; and the rows count
+in the Health ingest-backlog metric (`listing_detail_queue_public` filters only −2), so a lag amber
+during the drain is this cohort, not a regression.
+
+### W4-3b — the second cohort, W4-3c — the standing shape check (same day)
+
+- **W4-3b bezrealitky remainder.** W1v's 5,233-row enqueue was a one-off SQL that lives only in a
+  session transcript — the lesson is to put the second cohort IN the lane. `refetch_cohort.py` now
+  carries a lane registry: `sreality_detail_refetch` (W1-fed, probe `raw_json->'locality'`, placed =
+  post-cutover shape) and **`bezrealitky_ruian_refetch`** (producer-less — `enroll()` selects active
+  rows lacking the `ruianId` KEY from `listings` on every run, `ON CONFLICT DO NOTHING`; probe
+  `raw_json ? 'ruianId'`; **placed = key present, whatever its value**, because a present-but-null
+  key is the portal's ~48 % ceiling and a refetch returns the same null). The workflow gained a
+  `lane` input; the fetcher ignores `detail_ref` and fetches by id, so `(source_id_native, None, None,
+  −1)` is the whole entry. 133 rows at last count; dispatch is `--lane bezrealitky_ruian_refetch
+  mode=dispatch` — the operator's, like every refetch.
+- **W4-3c `location_payload_shape_drift`** — the gate's fourth arm ("a standing payload-schema-version
+  check exists"). Today an unknown sreality shape classifies `absent`, is routed to the refetch cohort
+  and burns five fetches before retiring as `error` — nobody is told. The check, in `verify_pipeline`'s
+  6-hourly lane: per source, the share of rows **first seen in the trailing 7 days** whose payload the
+  contracts cannot read (sreality `locality` not post-cutover; bezrealitky `ruianId` key absent), warn
+  5 % / fail 20 % / min 50 rows, `warn` with no value when nothing scored, the remedy named per source in
+  the message. It shares ONE SQL `CASE` with the gate report (`SREALITY_SHAPE_CASE_SQL`, parity-tested
+  against the Python classifier). In-app bell only for now — the hourly emailing lane's `--only` list is
+  a deliberate promotion after a soak, the same ladder the ppm2 checks climbed. The contracts' declarative
+  `payload_schema_detector` blocks stay as they are: nothing consumes them today and a bezrealitky block
+  would sit inside `contract_sha256` and force a version bump for zero claim value.
+
+**Open, in order:**
+
+- **Watch the −1 drain; promote only if it stalls.** Then `mode=reconcile`, then `mode=gate` for the
+  sign-off numbers (the full-corpus legacy share, D3 coverage on the refetched cohort).
+- **Operator: `--lane bezrealitky_ruian_refetch`, `mode=dispatch`** (133 rows), then the same reconcile
+  → gate. The ≥ 95 % arm reads `PORTAL-CAPPED` by construction; the remainder arm is the one that flips.
+- Soak, then promote `location_payload_shape_drift` into `llm_health.yml`'s `--only` list.
 - **R4 (Mapy purge) stays carved out and operator-gated.** It is the program's only destructive
   surface and the only part touching live serving; 06 §6.4's coexistence promise ("nothing in the
   ingest write path changes") covers W1–W3 and pointedly excludes W4.

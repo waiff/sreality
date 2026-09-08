@@ -36,6 +36,7 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,6 +54,30 @@ LOG = logging.getLogger("location_data.refetch_cohort")
 # resume cursor; its lane is `location_enrichment_state.lane`, a different column and a
 # different namespace, shared on purpose with the producer that fills it.
 COHORT_LANE = "sreality_detail_refetch"
+
+# W4(b). bezrealitky's live GraphQL query has requested `ruianId` since W0 item 0m
+# (2026-08-10); a row whose payload lacks the KEY outright predates that and is a
+# re-FETCH order. A row carrying the key with a `null` value is the portal withholding
+# it — the ~48 % ceiling W1v measured — and a refetch returns the same null, so the key's
+# presence, not its value, is what "placed" means on this lane. No producer fills it:
+# `enroll()` selects the remainder from `listings` directly, idempotently.
+BEZREALITKY_LANE = "bezrealitky_ruian_refetch"
+ENROLL_VERSION = "refetch_cohort@1"
+
+# `claims_intake.sreality_payload_shape` restated as ONE exhaustive SQL CASE, for the two
+# readers that must classify in SQL (the W4 gate report's full-corpus scan and the
+# payload-shape drift check). Post-cutover tested first; `IS DISTINCT FROM 'object'`
+# because `jsonb_typeof(NULL)` is NULL and a plain `<>` silently drops the truncated rows;
+# `ELSE 'absent'` for the classifier's second absent arm. `test_refetch_cohort` feeds every
+# key named here through the Python function so the two cannot drift.
+SREALITY_SHAPE_CASE_SQL = """
+    CASE
+      WHEN jsonb_typeof(raw_json->'locality') IS DISTINCT FROM 'object' THEN 'absent'
+      WHEN raw_json->'locality' ?| array['gps_lat','gps_lon','entity_type','inaccuracy_type','city','citypart'] THEN 'post_cutover'
+      WHEN raw_json->'locality' ?| array['name','value','accuracy'] THEN 'legacy'
+      ELSE 'absent'
+    END
+"""
 
 # The lease-row CAS, never an advisory lock — the transaction-mode pooler strands one. It
 # is a second, orthogonal guard to the workflow's concurrency group: it also catches a
@@ -89,14 +114,61 @@ class DueRow:
 
 @dataclass(frozen=True)
 class CohortRow:
-    """A cohort member as reconcile sees it. `locality` is the projected
-    `raw_json->'locality'` ONLY — never the whole payload, which on sreality carries the
-    geometry blob that made these rows truncated in the first place."""
+    """A cohort member as reconcile sees it. `probe` is the lane's projected probe
+    expression ONLY (`raw_json->'locality'` on sreality, `raw_json ? 'ruianId'` on
+    bezrealitky) — never the whole payload, which on sreality carries the geometry blob
+    that made these rows truncated in the first place."""
 
     listing_id: int
     is_active: bool
     attempts: int
-    locality: Any
+    probe: Any
+
+
+@dataclass(frozen=True)
+class LaneSpec:
+    """What makes a cohort lane: which portal, what to project per row, when a row is
+    placed, and — for a lane with no producer — how to enroll its cohort."""
+
+    lane: str
+    source: str
+    probe_sql: str
+    placed: Callable[[Any], bool]
+    enroll_sql: str | None = None
+
+
+def _sreality_placed(probe: Any) -> bool:
+    return sreality_payload_shape({"locality": probe}) == "post_cutover"
+
+
+def _bezrealitky_placed(probe: Any) -> bool:
+    return probe is True
+
+
+_ENROLL_BEZREALITKY_SQL = """
+    INSERT INTO location_enrichment_state
+        (listing_id, method, lane, attempts, last_outcome, last_error,
+         extractor_version, next_eligible_at)
+    SELECT l.id, 'portal_structured_field'::location_extraction_method, %(lane)s, 0,
+           'skipped', 'ruianId key absent: pre-0m payload shape, a re-fetch order (W4b)',
+           %(extractor_version)s, now()
+    FROM listings l
+    WHERE l.source = 'bezrealitky' AND l.is_active AND NOT (l.raw_json ? 'ruianId')
+    ON CONFLICT (listing_id, method, lane) DO NOTHING
+"""
+
+LANES: dict[str, LaneSpec] = {
+    COHORT_LANE: LaneSpec(COHORT_LANE, "sreality", "l.raw_json->'locality'", _sreality_placed),
+    BEZREALITKY_LANE: LaneSpec(BEZREALITKY_LANE, "bezrealitky", "(l.raw_json ? 'ruianId')",
+                               _bezrealitky_placed, _ENROLL_BEZREALITKY_SQL),
+}
+
+
+def lane_spec(lane: str) -> LaneSpec:
+    try:
+        return LANES[lane]
+    except KeyError:
+        raise ValueError(f"unknown refetch lane {lane!r}; known: {sorted(LANES)}") from None
 
 
 def statement_timeout_s() -> int:
@@ -126,7 +198,7 @@ _DUE_SQL = """
 # retired here is one the driver never has to claim again, and `is_active` / payload shape
 # both change out from under this table without touching it.
 _COHORT_SCAN_SQL = """
-    SELECT es.listing_id, l.is_active, es.attempts, l.raw_json->'locality'
+    SELECT es.listing_id, l.is_active, es.attempts, __PROBE__
     FROM location_enrichment_state es
     JOIN listings l ON l.id = es.listing_id
     WHERE es.lane = %(lane)s
@@ -162,21 +234,31 @@ _MARK_DISPATCHED_SQL = """
 """
 
 
-def classify(row: CohortRow) -> str:
+def classify(row: CohortRow, spec: LaneSpec = LANES[COHORT_LANE]) -> str:
     """`placed` | `not_applicable` | `exhausted` | `pending`.
 
-    The shape test calls W1's own `sreality_payload_shape` rather than restating it in
-    SQL. The classifier returns `absent` from TWO arms (not-a-dict, and an object carrying
-    neither key set) and tests post-cutover BEFORE legacy, so a hand-written SQL mirror
-    drifts on exactly the truncation cohort this lane exists to drain.
+    The sreality lane's placed test calls W1's own `sreality_payload_shape` rather than
+    restating it in SQL. The classifier returns `absent` from TWO arms (not-a-dict, and an
+    object carrying neither key set) and tests post-cutover BEFORE legacy, so a hand-written
+    SQL mirror drifts on exactly the truncation cohort this lane exists to drain.
     """
     if not row.is_active:
         return "not_applicable"
-    if sreality_payload_shape({"locality": row.locality}) == "post_cutover":
+    if spec.placed(row.probe):
         return "placed"
     if row.attempts >= MAX_ATTEMPTS:
         return "exhausted"
     return "pending"
+
+
+def enroll(conn: psycopg.Connection, spec: LaneSpec, dry_run: bool = False) -> int:
+    """Fill a producer-less lane's cohort from `listings`, idempotently (ON CONFLICT DO
+    NOTHING keeps every existing row's attempts and schedule)."""
+    if spec.enroll_sql is None or dry_run:
+        return 0
+    with guarded(conn, statement_timeout_s()) as cur:
+        cur.execute(spec.enroll_sql, {"lane": spec.lane, "extractor_version": ENROLL_VERSION})
+        return cur.rowcount or 0
 
 
 def claim_due(
@@ -237,14 +319,16 @@ def reconcile(
 
     Without this the table only grows and the gate reads a number that can never fall."""
     started = time.monotonic()
+    spec = lane_spec(lane)
+    scan_sql = _COHORT_SCAN_SQL.replace("__PROBE__", spec.probe_sql)
     stats = {"scanned": 0, "placed": 0, "not_applicable": 0, "exhausted": 0, "pending": 0}
     after_id = 0
 
     while True:
         with conn.cursor() as cur:
-            cur.execute(_COHORT_SCAN_SQL, {
+            cur.execute(scan_sql, {
                 "lane": lane, "after_id": after_id, "batch_size": batch_size})
-            batch = [CohortRow(listing_id=r[0], is_active=r[1], attempts=r[2], locality=r[3])
+            batch = [CohortRow(listing_id=r[0], is_active=r[1], attempts=r[2], probe=r[3])
                      for r in cur.fetchall()]
         if not batch:
             break
@@ -253,7 +337,7 @@ def reconcile(
 
         verdicts: dict[str, list[int]] = {}
         for row in batch:
-            verdicts.setdefault(classify(row), []).append(row.listing_id)
+            verdicts.setdefault(classify(row, spec), []).append(row.listing_id)
         for verdict, ids in verdicts.items():
             stats[verdict] += len(ids)
 
@@ -282,9 +366,10 @@ def run(
     reconcile_only: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Reconcile FIRST, then dispatch — so a row the last pass already fixed is retired
-    before this pass can spend a fetch on it."""
+    """Enroll (producer-less lanes only), reconcile, THEN dispatch — so a row the last
+    pass already fixed is retired before this pass can spend a fetch on it."""
     stats: dict[str, Any] = {"lane": lane, "dry_run": dry_run}
+    stats["enrolled"] = enroll(conn, lane_spec(lane), dry_run=dry_run)
     stats["reconcile"] = reconcile(
         conn, lane=lane, batch_size=batch_size, max_seconds=max_seconds, dry_run=dry_run)
     stats["dispatch"] = (
@@ -295,7 +380,7 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--lane", default=COHORT_LANE)
+    parser.add_argument("--lane", default=COHORT_LANE, choices=sorted(LANES))
     parser.add_argument("--limit", type=int, default=DEFAULT_DISPATCH_LIMIT)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--max-seconds", type=float, default=None)

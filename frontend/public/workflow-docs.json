@@ -4204,6 +4204,17 @@
           ]
         },
         {
+          "name": "lane",
+          "description": "sreality_detail_refetch (W1-fed legacy/truncated cohort) | bezrealitky_ruian_refetch (W4b: pre-0m rows lacking the ruianId key; enrolled from listings on each run)",
+          "required": false,
+          "type": "choice",
+          "default": "sreality_detail_refetch",
+          "options": [
+            "sreality_detail_refetch",
+            "bezrealitky_ruian_refetch"
+          ]
+        },
+        {
           "name": "limit",
           "description": "max rows to enqueue in dispatch mode",
           "required": false,

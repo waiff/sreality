@@ -46,6 +46,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
+from location_data.refetch_cohort import SREALITY_SHAPE_CASE_SQL
 from scraper.db import QUEUE_PRIORITY_NEW, connect
 from toolkit.listing_identity import R2_CARRIERS as _PARITY_CARRIERS
 from toolkit.system_alerts import (
@@ -215,6 +216,16 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "ppm2_basis_floor_share_warn": 0.05,
     "ppm2_basis_floor_share_fail": 0.10,
     "ppm2_basis_floor_min_rows": 100,
+    # Location payload-shape drift (W4's standing P6 check): share of rows FIRST SEEN in
+    # the trailing 7 days whose payload has the shape the location contracts cannot
+    # read — sreality's `locality` object not post-cutover, bezrealitky's `ruianId` key
+    # absent. A fresh row always gets a detail fetch within the hour, so a source-side
+    # shape change shows up here as ~100% within a day; the standing noise is the odd
+    # truncated payload (0 of 8,280 sampled on 2026-09-08). warn 5% / fail 20% leave
+    # room for a bad hour without missing a cutover.
+    "location_payload_shape_drift_warn": 0.05,
+    "location_payload_shape_drift_fail": 0.20,
+    "location_payload_shape_drift_min_rows": 50,
     # Area divergence: share of rows carrying BOTH areas whose values differ by more
     # than the view's 10% material band. Live, mmreality dum/prodej is 99.7% (100.0%
     # over the trailing week) while every other portal's dum/prodej is 0.0%. The one
@@ -2356,6 +2367,77 @@ def check_delist_flip_refused(conn: Any, thresholds: dict[str, Any]) -> dict[str
     }
 
 
+_LOCATION_PAYLOAD_SHAPE_DRIFT_SQL = f"""
+    SELECT source, count(*) AS n, count(*) FILTER (WHERE unexpected) AS unexpected
+    FROM (
+      SELECT source,
+             CASE WHEN source = 'sreality'
+                  THEN ({SREALITY_SHAPE_CASE_SQL}) <> 'post_cutover'
+                  ELSE NOT (raw_json ? 'ruianId')
+             END AS unexpected
+      FROM listings
+      WHERE source IN ('sreality', 'bezrealitky') AND is_active
+        AND first_seen_at > now() - interval '7 days'
+    ) fresh
+    GROUP BY source
+"""
+
+_LOCATION_SHAPE_REMEDY = {
+    "sreality": ("the v1 API changed the shape of `locality`; W1 intake is enrolling every "
+                 "new row into the refetch cohort, where a refetch cannot fix a NEW shape — "
+                 "update claims_intake.sreality_payload_shape + contracts/portals/sreality.yaml's "
+                 "payload_schema_detector and re-extract"),
+    "bezrealitky": ("new rows arrive without the `ruianId` key; the GraphQL detail query lost "
+                    "the field W0 item 0m added — restore it in "
+                    "scraper/bezrealitky_client._DETAIL_QUERY (adding it back has no "
+                    "retroactive effect: the rows fetched meanwhile need a refetch)"),
+}
+
+
+def check_location_payload_shape_drift(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """W4's standing payload-schema-version check (06 §6.4 W4 gate, P6): the next
+    source-side shape change must force re-extraction instead of silently degrading.
+    Today a sreality payload of unknown shape classifies `absent`, is routed to the
+    refetch cohort and burns five fetches before retiring as `error` — nobody is told.
+    This check tells someone. Measured on rows first seen in 7 days, per source, so a
+    change is ~100% of the arm within a day rather than churn-fraction of the stock."""
+    warn = float(thresholds["location_payload_shape_drift_warn"])
+    fail = float(thresholds["location_payload_shape_drift_fail"])
+    min_rows = int(thresholds["location_payload_shape_drift_min_rows"])
+    rows = _fetchall(conn, _LOCATION_PAYLOAD_SHAPE_DRIFT_SQL)
+    cells = [{"source": s, "n": int(n), "unexpected": int(u),
+              "share": (int(u) / int(n)) if int(n) else None}
+             for s, n, u in rows]
+    scored = [c for c in cells if c["n"] >= min_rows]
+    if not scored:
+        detail = (f"{len(cells)} source(s) read, none with {min_rows}+ rows first seen in "
+                  f"7 days — nothing was verified")
+        return {"check_key": "location_payload_shape_drift", "status": "warn", "value": None,
+                "details": {"skipped": detail, "cells": cells, "arms_scored": 0},
+                "message": f"Location payload-shape drift verified NOTHING — {detail}."}
+    worst = max(c["share"] for c in scored)
+    status = "fail" if worst >= fail else "warn" if worst >= warn else "ok"
+    offenders = [f"{c['source']}: {c['share']:.1%} of {c['n']} rows first seen in 7d — "
+                 f"{_LOCATION_SHAPE_REMEDY[c['source']]}"
+                 for c in scored if c["share"] >= warn]
+    message = (
+        f"{len(offenders)} source(s) are landing payloads the location contracts cannot "
+        f"read (worst {worst:.1%}): " + "; ".join(offenders)
+        if offenders
+        else f"Location payload shapes stable (worst {worst:.1%} unexpected across "
+             f"{len(scored)} scored source(s))."
+    )
+    return {
+        "check_key": "location_payload_shape_drift",
+        "status": status,
+        "value": round(worst * 100, 2),
+        "details": {"worst_share": round(worst, 4), "warn": warn, "fail": fail,
+                    "min_rows": min_rows, "cells": cells, "arms_scored": len(scored),
+                    "offenders": offenders},
+        "message": message,
+    }
+
+
 _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("llm_errors", check_llm_errors),
     ("llm_liveness", check_llm_liveness),
@@ -2380,7 +2462,12 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("migration_drift", check_migration_drift),
     ("worker_lane_stall", check_worker_lane_stall),
     ("delist_flip_refused", check_delist_flip_refused),
+    # W4's standing P6 check. 6h lane + in-app bell; NOT in llm_health.yml's hourly
+    # --only list yet — ship, soak, then promote (the same ladder as the ppm2 checks).
+    ("location_payload_shape_drift", check_location_payload_shape_drift),
 ]
+# (the check body sits above this registry; the SQL it runs is
+# `_LOCATION_PAYLOAD_SHAPE_DRIFT_SQL`, built on the shape CASE the W4 gate shares)
 
 # No weekly-only CHECKS today (the merge-precision sample went with the legacy decision
 # engine), but the lane is no longer inert: main() emits the once-per-ISO-week health

@@ -48,7 +48,7 @@ import psycopg
 
 from location_data import loader_db
 from location_data.claims_intake import guarded
-from location_data.refetch_cohort import COHORT_LANE
+from location_data.refetch_cohort import COHORT_LANE, SREALITY_SHAPE_CASE_SQL
 from scraper import db
 
 LOG = logging.getLogger("location_w4_gate_report")
@@ -65,19 +65,9 @@ VERDICT_FAIL = "FAIL"
 VERDICT_NO_DATA = "NO DATA"
 VERDICT_PORTAL_CAPPED = "PORTAL-CAPPED"
 
-_POST_CUTOVER_KEYS = "array['gps_lat','gps_lon','entity_type','inaccuracy_type','city','citypart']"
-_LEGACY_KEYS = "array['name','value','accuracy']"
-
-# Mirrors `claims_intake.sreality_payload_shape` arm for arm; `test_location_w4_gate_report`
-# runs both over the same fixtures so the SQL cannot drift from the Python.
-SHAPE_CASE_SQL = f"""
-    CASE
-      WHEN jsonb_typeof(raw_json->'locality') IS DISTINCT FROM 'object' THEN 'absent'
-      WHEN raw_json->'locality' ?| {_POST_CUTOVER_KEYS} THEN 'post_cutover'
-      WHEN raw_json->'locality' ?| {_LEGACY_KEYS} THEN 'legacy'
-      ELSE 'absent'
-    END
-"""
+# One definition, shared with the payload-shape drift check; parity-tested against the
+# Python classifier in `test_location_w4_gate_report`.
+SHAPE_CASE_SQL = SREALITY_SHAPE_CASE_SQL
 
 _LEGACY_SHARE_SQL = f"""
     WITH shaped AS (
