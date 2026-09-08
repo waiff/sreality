@@ -185,6 +185,51 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-08 — **Head 14, `podklad - 3d plán`, and the first head whose arrival CHANGED ITS
+  NEIGHBOURS.** The tag already existed (id 39) and both neighbours already pointed at it; it had
+  no definition and no routing, so it was never a head. Operator's precedence, now written on all
+  three sides: **property list > 3D plán > půdorys** — *"if the document has both a půdorys on it
+  and a 3d plan, include it on the 3d plan! A 3d plan can have the same basic description features
+  as a půdorys — a list of rooms with areas, a simple summary of information or a broker logo, but
+  not in the extent of a property list"*. So půdorys went v9→v10 (a mixed sheet now loses to the
+  3D view; its old wording said only "rendered in 3D", which left mixed sheets ambiguous) and
+  property list v5→v6, **narrowed**: it used to claim any 3D drawing composed with tables and
+  branding, which under the ruling is wrong — a room list, a summary or a logo no longer promote a
+  3D plan to a property list. Both neighbours' existing labels now read "old wording"; neither was
+  re-judged (operator's standing instruction on půdorys).
+
+  **`--like-tag` (#1335) is the new draw**: judge the newcomer over the images a sibling has
+  ALREADY been judged on, so the boundary between them is reviewable on the same photos instead of
+  inferred across two different random samples. Pool, never verdicts.
+
+  **v1 was measurably wrong and a 200-image probe ($0.10) caught it.** The word "shading" read as
+  flat colour fill, so a tinted 2D vector plan came back positive — 1 of the 3 positives was a
+  půdorys. v2 makes the test RENDERED LIGHT (materials, cast shadows, visible wall thickness) and
+  says outright that colour fill is not depth. **Ruling recorded, since the operator did not
+  overrule it: a top-down plan rendered photorealistically IS a 3D plán** — the industry's "3D
+  floor plan" — so the head is "rendered plans", not "plans in perspective".
+
+  **Result: 251 positives / 10,293 negatives over 10,544 images, $5.57**, target met from the
+  shared pool with no near-tag top-up. v2 verified on the three images that forced it: the flat
+  tinted plan flipped to negative, both genuine renders held. Trays: 0 training positive / 251
+  positive reserve / 1,000 training negative (drawn) / 9,293 negative reserve. The positives sit
+  in RESERVE on purpose — a machine write proposes and only the operator admits (484/486); nothing
+  about a new head suspends that rule.
+
+  **135 of the 251 are still positive on půdorys too** — an exclusivity breach, and the predicted
+  cost of adding a head between two others: those labels were written under v9, when a rendered
+  plan was půdorys. Property list clashes: 0, so the narrowing held. The breach resolves by
+  re-judging půdorys under v10 (~10.5k images, ≈$5.5) or by hand; NOT done here, per the
+  operator's standing "do not re-judge půdorys".
+
+  Measured: **$0.00052/image** single-head (vs a $0.00174 pre-flight, which blends the old
+  twelve-head runs). That gap is a trap, not a curiosity: **`max_usd` is priced against the
+  pre-flight estimate, not the real cost**, so a ceiling set from the measured rate refuses the
+  batch outright — five 3,000-image batches did exactly that and spent nothing, reporting only
+  their draw line until the database was checked. Set the ceiling against the pessimistic
+  estimate and read `LABEL done`, never `LABEL drew`.
+
+
 - 2026-09-07 (g) — **One rule for both signs (migration 486).** The operator renamed the trays —
   *training negative → **negative reserve**, reserve → **positive reserve**, review sample →
   **training negative*** — and the renaming is a model change, not vocabulary. Read together those

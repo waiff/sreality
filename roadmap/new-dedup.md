@@ -318,8 +318,15 @@ W1 (shared prerequisites + labeling program):
 - [x] **Head 13 built: `podklad - property list` (2026-09-07, ~$1.80, no exam)** — 412
       positives / 2,198 negatives from a půdorys-seeded draw, its drafts, a self-seeded draw and
       a random slice; 300 in set awaiting review. Spend ≈ $33 of $50.
-- [ ] **NEXT — train the CLIP linear probe on the 13 heads; evaluate the 12 gated ones on exam_v1;**
-      spend the remaining ~$19 where the probe's per-head numbers show labels actually help.
+- [x] **Head 14 built: `podklad - 3d plán` (2026-09-08, $5.57, no exam)** — 251 positives /
+      10,293 negatives over the SAME 10,544 images půdorys was judged on (the new `--like-tag`
+      draw, #1335), so the boundary between the two is reviewable on the same photos. Operator's
+      precedence written on all three sides: property list > 3D plán > půdorys. Neighbours bumped
+      with it (půdorys v10, property list v6 — narrowed), so both now read "old wording"; neither
+      re-judged. **135 images are still positive on both 3D plán and půdorys** — the old wording's
+      residue, resolvable by a ~$5.5 re-judge of půdorys or by hand. Spend ≈ $32 of $50.
+- [ ] **NEXT — train the CLIP linear probe on the 14 heads; evaluate the 12 gated ones on exam_v1;**
+      spend the remaining ~$18 where the probe's per-head numbers show labels actually help.
  Then choose the sampling
       strategy WITH those numbers: ~$47 of the $50 buys ~4-8k labeled images once, and a random
       draw spends most of it on heads that are already strong.
