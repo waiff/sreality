@@ -194,6 +194,72 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-08 (d) — **The tagging bake-off, phase 1: the results store, three training modes, the
+  CPU runner and its read surface.** ENCODER-DECISION.md §5.2 "Set 1" and §5.4 readout 4 turned
+  into something that can actually be run and looked at. Nothing has been embedded, trained or
+  scored — this is the durable half; the GPU job and the comparison page are phase 2.
+  - **Arms.** An arm is one encoder configuration, identified by the SAME seven facts migration
+    480 keys the production vector table on (`model, revision, library, pooling, resolution,
+    preprocessing, dtype`) plus a short human name (`dinov3-b16@768/bf16`). Vector width VARIES
+    by arm — 512, 768, 1024 — so `dedup_sim.tag_head_bakeoff_vectors.embedding` is an
+    **unmodified `halfvec`**, not `halfvec(768)`; a fixed width would silently exclude every arm
+    that is not DINOv3 ViT-B. The arms' vectors live in `dedup_sim` rather than in
+    `image_dinov3_embeddings` for the same reason a losing arm must not be able to pollute the
+    production population.
+  - **Three modes, because the instruction admits three readings.** The operator asked for
+    "positive training only, no negative training", and that sentence has more than one honest
+    meaning; guessing one would have decided the experiment by assumption. So all three run side
+    by side: `pos_neg` (the existing trainer — this head's admitted positives against its
+    admitted negatives), `pos_only_free_neg` (logistic regression whose negatives are the OTHER
+    selected heads' positives, standing in as material that cost no label-day; an image positive
+    for THIS head, or one the operator LEFT OUT for it, is never among them), and
+    `pos_only_centroid` (no classifier at all — cosine to the L2-normalised mean of this head's
+    positives; negatives reach the threshold and nothing else). Read together they answer the
+    question the instruction was really about: **what did labelling negatives buy over the free
+    alternative, and over no negatives at all?**
+  - **Every mode is graded on the same rows.** The modes differ in what reaches the FIT and never
+    in what is graded — otherwise "positive-only did better" could just mean "positive-only was
+    asked an easier question". Grouped `StratifiedGroupKFold` on `listing_id` as before, and a
+    free negative whose listing is being graded is dropped from that fold's training set, so the
+    extra rows cannot re-open the leak the grouped split closes.
+  - **Two scored populations, stored per image.** `split='cv'` is every training row scored
+    out-of-fold; `split='exam'` is the sealed 250-image `exam_v1` holdout scored by the head refit
+    on all training rows. Exam cells are graded by the ratified rule — a cell grades only when
+    both sides said yes or no, an abstention on either side grades nothing, a declared default is
+    not a judgment. That rule was **extracted** out of `exam_machine_review.agreement` into
+    `exam_machine_review.human_verdict` and imported, never re-typed, so the machine review and
+    the bake-off cannot drift apart. An abstained cell keeps its photo, its score and a NULL
+    label; it is in no bucket and in no rate. Precision/recall/F1 are **NULL, not 0**, when
+    nothing was proposed.
+  - **The centroid mode's threshold is chosen, and says so.** A cosine has no natural 0.5, so the
+    threshold maximising F1 on the pooled out-of-fold scores is picked and REPORTED — on the same
+    scores it is then measured against, which makes that mode's F1 optimistic by exactly what the
+    choice buys. Stated in the code rather than hidden; the alternative (a fixed cut on a cosine)
+    would have handicapped the mode instead.
+  - **Heads are chosen by a FLAG, never a list.** `--min-train-positives` (default 100) is the
+    whole rule; every rejected tag is still reported with the count that rejected it. Measured
+    2026-09-08: 15 heads carry 159-316 admitted positives against ~1,000 drawn negatives; a long
+    tail has under 20 or none.
+  - **Migration 489** (`dedup_sim`, pgvector-guarded `DO`/`EXECUTE` like 480, RLS + revoke at
+    creation, registered in both admin registries, `-- ci-allow-dynamic:` annotated, shape-tested
+    offline by `tests/test_tag_head_bakeoff_migration.py`). In `dedup_sim` deliberately: this is
+    experiment evidence, droppable wholesale at Wave 8, and nothing in a live read path joins it.
+  - **The lane.** `scripts/tag_head_bakeoff.py --run-id N` runs the arm x mode x head cross
+    product on CPU (the `training` extra only), resumable per cell and `--dry-run`-able; a cell
+    that cannot be graded is RECORDED as failed with its reason rather than skipped silently.
+    Read surface, admin-gated and read-only: `GET /new-dedup/tagging-bakeoff/runs`,
+    `/runs/{id}/metrics` (the whole table in one payload), `/runs/{id}/images` (view A — a page of
+    photos, each carrying what every arm and head said about it) and `/runs/{id}/buckets` (view B
+    — one head under one arm and mode as its four outcome buckets plus a 20-bin score histogram
+    split by label, its range measured rather than assumed, since the logistic modes score in
+    [0,1] and the centroid mode in cosine space).
+  - **No new label door.** Neither new module contains SQL naming `image_tag_labels`: training
+    labels come through `machine_labeling.training_rows`, left-outs through
+    `machine_labeling.training_set_page`, exam answers through `tag_exam.answers`. The holdout
+    census therefore has nothing to exempt, and gained no entry.
+  - **Phase 2, not built here**: the GPU job that fills `tag_head_bakeoff_vectors` per arm, its
+    workflow, and the comparison page.
+
 - 2026-09-08 (c) — **DINOv3 readiness closed out: licence accepted, migration 480 applied,
   revision pinned, manifest lane proven live.** Corrects entry (b)'s parallel-state line, which
   was already stale when written.

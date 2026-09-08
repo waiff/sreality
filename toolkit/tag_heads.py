@@ -32,7 +32,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 import psycopg
 
@@ -40,12 +40,33 @@ from toolkit import machine_labeling
 
 ARTIFACT_VERSION = 1
 ARTIFACT_KIND = "tag_head_binary_logreg"
+# The centroid mode has no weights and no bias — its whole model is one unit
+# vector — so it gets its own kind rather than a logreg artifact with the fields
+# quietly meaning something else.
+ARTIFACT_KIND_CENTROID = "tag_head_centroid_cosine"
+ARTIFACT_KINDS = (ARTIFACT_KIND, ARTIFACT_KIND_CENTROID)
 
 DEFAULT_N_SPLITS = 5
 DEFAULT_C = 1.0
 DEFAULT_THRESHOLD = 0.5
 DEFAULT_MAX_ITER = 1000
 DEFAULT_SEED = 0
+
+# The three training modes the tagging bake-off compares. `pos_neg` is what this
+# module has always done. The other two exist because the operator's instruction
+# ("positive training only, no negative training") admits two honest readings,
+# and guessing which one they meant would decide the experiment by assumption:
+#   * pos_only_free_neg — a classifier is still fitted, but its negatives are the
+#     OTHER selected heads' positives, which cost no labelling. It answers "what
+#     did labelling negatives actually buy over the free alternative?"
+#   * pos_only_centroid — no classifier at all: cosine to the mean of this head's
+#     positives. The strict reading, where negatives touch nothing but the
+#     evaluation.
+# Both are scored the same way as `pos_neg` and shown side by side.
+MODE_POS_NEG = "pos_neg"
+MODE_POS_ONLY_FREE_NEG = "pos_only_free_neg"
+MODE_POS_ONLY_CENTROID = "pos_only_centroid"
+MODES = (MODE_POS_NEG, MODE_POS_ONLY_FREE_NEG, MODE_POS_ONLY_CENTROID)
 
 # The composite primary key of image_dinov3_embeddings minus image_id: what
 # "which encoder produced this vector" means. Deliberately a local, minimal
@@ -225,6 +246,12 @@ def _parse_vector(raw: Any) -> tuple[float, ...]:
     return tuple(float(x) for x in raw)
 
 
+# Public alias: any other reader of a pgvector column (the bake-off's own store,
+# for one) needs the same both-shapes tolerance and should not reach for the
+# underscore.
+parse_vector = _parse_vector
+
+
 def _fetch_embeddings(
     conn: psycopg.Connection, image_ids: Sequence[int], encoder: EncoderIdentity,
 ) -> dict[int, tuple[float, ...]]:
@@ -236,6 +263,42 @@ def _fetch_embeddings(
             for image_id, vec in cur.fetchall():
                 out[int(image_id)] = _parse_vector(vec)
     return out
+
+
+# --- where the vectors come from -------------------------------------------
+
+class VectorSource(Protocol):
+    """"Give me the vectors for these image ids", and nothing else.
+
+    WHY AN INJECTION POINT. `_fetch_embeddings` reads image_dinov3_embeddings by
+    the seven-field production identity, which is right for production and wrong
+    for an experiment: a bake-off arm may be a different model family entirely,
+    at a width the production column cannot hold. Rather than teach this module
+    about `dedup_sim.tag_head_bakeoff_vectors` — evidence schema, droppable
+    wholesale — the caller supplies the reader. The label door is NOT injectable
+    and never will be: `training_rows` stays the one door, so an injected source
+    can change which vectors a head sees and never which labels it trains on.
+    """
+
+    def __call__(self, image_ids: Sequence[int]) -> Mapping[int, Sequence[float]]:
+        ...
+
+
+def encoder_vector_source(
+    conn: psycopg.Connection, encoder: EncoderIdentity,
+) -> VectorSource:
+    """The default source: the production store, read by encoder identity."""
+    def _source(image_ids: Sequence[int]) -> Mapping[int, Sequence[float]]:
+        return _fetch_embeddings(conn, image_ids, encoder)
+    return _source
+
+
+def mapping_vector_source(vectors: Mapping[int, Sequence[float]]) -> VectorSource:
+    """An already-materialized {image_id: vector} as a source — what the bake-off
+    runner uses once it has read one arm's vectors in a single pass."""
+    def _source(image_ids: Sequence[int]) -> Mapping[int, Sequence[float]]:
+        return {i: vectors[i] for i in image_ids if i in vectors}
+    return _source
 
 
 def _fetch_groups(
@@ -253,6 +316,7 @@ def _fetch_groups(
 def assemble_dataset(
     conn: psycopg.Connection, *, tag_id: int,
     encoder: EncoderIdentity | None = None,
+    vectors: VectorSource | Mapping[int, Sequence[float]] | None = None,
 ) -> DatasetSnapshot:
     """One tag's trainable population, through the one sanctioned door only.
 
@@ -262,6 +326,13 @@ def assemble_dataset(
     that encoder is REPORTED (`missing_embedding`), never silently dropped: a head
     trained on half its set because the embedding job had not caught up is exactly
     the failure a count in a log line hides.
+
+    `vectors` overrides WHERE the vectors come from (a `VectorSource` callable or a
+    plain {image_id: vector} mapping) — the bake-off feeds an arm's vectors from
+    `dedup_sim.tag_head_bakeoff_vectors` this way. `encoder` is then still
+    REQUIRED and still stamped into the snapshot and the artifact: an injected
+    source that carried no identity would produce a head nobody could later tell
+    apart from another arm's.
     """
     rows = machine_labeling.training_rows(conn, tag_id=tag_id)
     positive_ids = sorted({int(i) for i, st in rows if st == "positive"})
@@ -275,6 +346,10 @@ def assemble_dataset(
     negative_ids = [i for i in negative_ids if i not in conflict_set]
 
     if encoder is None:
+        if vectors is not None:
+            raise TagHeadError(
+                "an injected vector source must name its encoder identity — "
+                "otherwise the artifact cannot say which arm produced it")
         encoder = dominant_encoder(conn)
         if encoder is None:
             raise TagHeadError(
@@ -287,17 +362,22 @@ def assemble_dataset(
     if not all_ids:
         raise TagHeadError(f"tag {tag_id} has no trainable labels")
 
-    vectors = _fetch_embeddings(conn, all_ids, encoder)
+    source: VectorSource = (
+        encoder_vector_source(conn, encoder) if vectors is None
+        else vectors if callable(vectors)
+        else mapping_vector_source(vectors))
+    found = source(all_ids)
     groups = _fetch_groups(conn, all_ids)
 
     rows: list[DatasetRow] = []
     missing_embedding: list[int] = []
     missing_group: list[int] = []
     for image_id in all_ids:
-        vec = vectors.get(image_id)
-        if vec is None:
+        raw = found.get(image_id)
+        if raw is None:
             missing_embedding.append(image_id)
             continue
+        vec = tuple(float(x) for x in raw)
         listing_id = groups.get(image_id)
         if listing_id is None:
             # A singleton group keyed off the image itself: an unattributed image
@@ -375,6 +455,10 @@ class OofPrediction:
     label: int
     score: float
     predicted: int
+    # Which fold graded this row. Stored per image so the bake-off page can show
+    # a fold's rows together — a mistake that is one fold's alone is a different
+    # story from one every fold makes.
+    fold: int = -1
 
 
 @dataclass(frozen=True)
@@ -384,6 +468,12 @@ class TrainedHead:
     snapshot: DatasetSnapshot
     oof: tuple[OofPrediction, ...]
     estimator: Any = field(repr=False, default=None)   # fitted sklearn model; never serialized
+    mode: str = MODE_POS_NEG
+    threshold: float = DEFAULT_THRESHOLD               # the centroid mode CHOOSES this
+
+    def score(self, embedding: Sequence[float]) -> float:
+        """This head's score for one vector, whichever mode fitted it."""
+        return score_embedding(self.artifact, embedding)
 
 
 def _fit(X, y, *, C: float, max_iter: int, seed: int):
@@ -410,6 +500,60 @@ def _sigmoid(z: float) -> float:
         return 1.0 / (1.0 + math.exp(-z))
     e = math.exp(z)
     return e / (1.0 + e)
+
+
+def _unit(vec: Sequence[float]) -> list[float]:
+    norm = math.sqrt(sum(float(x) * float(x) for x in vec))
+    if norm == 0.0:
+        return [0.0] * len(vec)
+    return [float(x) / norm for x in vec]
+
+
+def _centroid(rows: Sequence[DatasetRow]) -> list[float]:
+    """The L2-normalized mean of L2-normalized positives.
+
+    Normalizing BEFORE averaging as well as after is what makes this a direction
+    rather than a magnitude: an image whose raw vector happens to be long would
+    otherwise pull the mean toward itself for no reason but its norm.
+    """
+    if not rows:
+        raise TagHeadError("a centroid needs at least one positive")
+    dim = len(rows[0].embedding)
+    acc = [0.0] * dim
+    for r in rows:
+        for k, x in enumerate(_unit(r.embedding)):
+            acc[k] += x
+    return _unit([x / len(rows) for x in acc])
+
+
+def _cosine(unit_a: Sequence[float], vec: Sequence[float]) -> float:
+    return sum(a * b for a, b in zip(unit_a, _unit(vec)))
+
+
+def _best_f1_threshold(oof: Sequence[OofPrediction]) -> float:
+    """The threshold maximising F1 over already-computed out-of-fold scores.
+
+    STATED, NOT HIDDEN: this threshold is chosen on the same scores it is then
+    reported against, so the centroid mode's F1 is optimistic by exactly the
+    amount that choice buys. The alternative — a fixed cut on a cosine, whose
+    scale is nothing like a probability's — would compare the centroid mode
+    against the logistic modes on a handicap instead. Evaluation may use the
+    negatives (they are excluded from the FIT, which is the mode's whole claim);
+    what it may not do is pretend the choice was free.
+    """
+    if not oof:
+        return DEFAULT_THRESHOLD
+    best = (-1.0, float(min(p.score for p in oof)))
+    for candidate in sorted({round(p.score, 6) for p in oof}):
+        tp = sum(1 for p in oof if p.label == 1 and p.score >= candidate)
+        fp = sum(1 for p in oof if p.label == 0 and p.score >= candidate)
+        fn = sum(1 for p in oof if p.label == 1 and p.score < candidate)
+        precision = tp / (tp + fp) if (tp + fp) else 0.0
+        recall = tp / (tp + fn) if (tp + fn) else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+        if f1 > best[0]:
+            best = (f1, float(candidate))
+    return best[1]
 
 
 def _metrics(
@@ -469,8 +613,34 @@ def grouped_folds(
     return [(list(tr), list(ev)) for tr, ev in splitter.split(X, y, groups)]
 
 
+def _fold_training_rows(
+    snapshot: DatasetSnapshot, train_idx: Sequence[int], eval_idx: Sequence[int],
+    *, mode: str, free_negatives: Sequence[DatasetRow],
+) -> list[DatasetRow]:
+    """What one fold FITS on, which is not what it is graded on.
+
+    Every mode is graded on the same rows — this head's own labelled population —
+    so the three are comparable; they differ only in what reaches the fit. The
+    free negatives are filtered by GROUP against the evaluation fold: a photo of a
+    listing being graded must not sit in the training set under any label, or the
+    grouped split's whole guarantee is gone.
+    """
+    rows = snapshot.rows
+    if mode == MODE_POS_NEG:
+        return [rows[i] for i in train_idx]
+    positives = [rows[i] for i in train_idx if rows[i].label == 1]
+    if mode == MODE_POS_ONLY_CENTROID:
+        return positives
+    if mode == MODE_POS_ONLY_FREE_NEG:
+        held_out = {rows[i].listing_id for i in eval_idx}
+        return positives + [n for n in free_negatives if n.listing_id not in held_out]
+    raise TagHeadError(f"unknown training mode {mode!r}; expected one of {MODES}")
+
+
 def train_head(
     snapshot: DatasetSnapshot, *, trained_at: datetime,
+    mode: str = MODE_POS_NEG,
+    free_negatives: Sequence[DatasetRow] = (),
     n_splits: int = DEFAULT_N_SPLITS, C: float = DEFAULT_C,
     threshold: float = DEFAULT_THRESHOLD, max_iter: int = DEFAULT_MAX_ITER,
     seed: int = DEFAULT_SEED,
@@ -486,37 +656,57 @@ def train_head(
     rows — the standard split of duties between "how good is this recipe" (CV) and
     "the model you deploy" (refit).
 
+    `mode` selects among MODES. `pos_neg` is the original behaviour. The two
+    positive-only modes change only what the FIT sees (`_fold_training_rows`); the
+    graded population, the folds and the pooled confusion matrix are identical, so
+    the three sit in one table and mean the same thing. `free_negatives` are the
+    other selected heads' positives, used by `pos_only_free_neg` alone and ignored
+    otherwise; a row that is positive or excluded for THIS head must never appear
+    among them, which is the caller's job (`tag_head_bakeoff.free_negatives_for`).
+
     `trained_at` is a parameter, not a clock read: the same snapshot and the same
     timestamp must produce the same artifact bytes.
     """
-    import sklearn
-
+    if mode not in MODES:
+        raise TagHeadError(f"unknown training mode {mode!r}; expected one of {MODES}")
     rows = snapshot.rows
     if not rows:
         raise TagHeadError(f"tag {snapshot.tag_id}: nothing to train on")
-    X = [list(r.embedding) for r in rows]
-    y = [r.label for r in rows]
+    centroid_mode = mode == MODE_POS_ONLY_CENTROID
 
     folds = grouped_folds(snapshot, n_splits=n_splits, seed=seed)
     oof: list[OofPrediction] = []
-    for train_idx, eval_idx in folds:
-        fold = _fit([X[i] for i in train_idx], [y[i] for i in train_idx],
-                    C=C, max_iter=max_iter, seed=seed)
-        scores = fold.decision_function([X[i] for i in eval_idx])
-        for i, raw in zip(eval_idx, scores):
-            p = _sigmoid(float(raw))
+    for fold_no, (train_idx, eval_idx) in enumerate(folds):
+        fitting = _fold_training_rows(snapshot, train_idx, eval_idx,
+                                      mode=mode, free_negatives=free_negatives)
+        if centroid_mode:
+            direction = _centroid(fitting)
+            scored = [(i, _cosine(direction, rows[i].embedding)) for i in eval_idx]
+        else:
+            model = _fit([list(r.embedding) for r in fitting],
+                         [r.label for r in fitting], C=C, max_iter=max_iter, seed=seed)
+            raw = model.decision_function([list(rows[i].embedding) for i in eval_idx])
+            scored = [(i, _sigmoid(float(z))) for i, z in zip(eval_idx, raw)]
+        for i, value in scored:
             oof.append(OofPrediction(
                 image_id=rows[i].image_id, listing_id=rows[i].listing_id,
-                label=rows[i].label, score=p, predicted=1 if p >= threshold else 0))
+                label=rows[i].label, score=float(value), predicted=0, fold=fold_no))
     oof.sort(key=lambda p: p.image_id)
 
-    metrics = _metrics(oof, n_splits=len(folds), strategy="StratifiedGroupKFold")
-    final = _fit(X, y, C=C, max_iter=max_iter, seed=seed)
+    # Two passes because the centroid mode's threshold is a property of the WHOLE
+    # pooled out-of-fold score set, not of any one fold.
+    cut = _best_f1_threshold(oof) if centroid_mode else float(threshold)
+    oof = [OofPrediction(image_id=p.image_id, listing_id=p.listing_id, label=p.label,
+                         score=p.score, predicted=1 if p.score >= cut else 0,
+                         fold=p.fold)
+           for p in oof]
 
-    artifact = {
+    metrics = _metrics(oof, n_splits=len(folds), strategy="StratifiedGroupKFold")
+
+    artifact: dict[str, Any] = {
         "artifact_version": ARTIFACT_VERSION,
-        "kind": ARTIFACT_KIND,
         "tag_id": int(snapshot.tag_id),
+        "mode": mode,
         "encoder": snapshot.encoder.as_dict(),
         "dataset_hash": snapshot.dataset_hash,
         "trained_at": trained_at.isoformat(),
@@ -524,26 +714,47 @@ def train_head(
         "n_positive": snapshot.n_positive,
         "n_negative": snapshot.n_negative,
         "n_groups": snapshot.n_groups,
-        "threshold": float(threshold),
-        "hyperparameters": {
+        "threshold": float(cut),
+        "metrics": metrics.as_dict(),
+    }
+    final: Any = None
+    if centroid_mode:
+        # No estimator: the "model" is one direction, and scoring is a cosine.
+        # Negatives touched the threshold and nothing else.
+        artifact["kind"] = ARTIFACT_KIND_CENTROID
+        artifact["centroid"] = _centroid([r for r in rows if r.label == 1])
+        artifact["hyperparameters"] = {"normalize": "l2", "threshold_rule": "max_f1_oof"}
+    else:
+        import sklearn
+
+        fitting = (list(rows) if mode == MODE_POS_NEG
+                   else [r for r in rows if r.label == 1] + list(free_negatives))
+        final = _fit([list(r.embedding) for r in fitting],
+                     [r.label for r in fitting], C=C, max_iter=max_iter, seed=seed)
+        artifact["kind"] = ARTIFACT_KIND
+        artifact["hyperparameters"] = {
             "penalty": "l2", "C": float(C), "solver": "lbfgs",
             "class_weight": "balanced", "max_iter": int(max_iter), "seed": int(seed),
-        },
-        "metrics": metrics.as_dict(),
-        "weights": [float(w) for w in final.coef_[0]],
-        "bias": float(final.intercept_[0]),
-        "sklearn_version": sklearn.__version__,
-    }
+        }
+        artifact["weights"] = [float(w) for w in final.coef_[0]]
+        artifact["bias"] = float(final.intercept_[0])
+        artifact["sklearn_version"] = sklearn.__version__
+        if mode == MODE_POS_ONLY_FREE_NEG:
+            artifact["n_free_negative"] = len(free_negatives)
     return TrainedHead(artifact=artifact, metrics=metrics, snapshot=snapshot,
-                       oof=tuple(oof), estimator=final)
+                       oof=tuple(oof), estimator=final, mode=mode, threshold=cut)
 
 
 # --- the artifact, and inference from it without sklearn --------------------
 
 _REQUIRED_ARTIFACT_KEYS = (
     "artifact_version", "kind", "tag_id", "encoder", "dataset_hash", "trained_at",
-    "threshold", "metrics", "weights", "bias",
+    "threshold", "metrics",
 )
+_REQUIRED_BY_KIND = {
+    ARTIFACT_KIND: ("weights", "bias"),
+    ARTIFACT_KIND_CENTROID: ("centroid",),
+}
 
 
 def save_artifact(artifact: dict[str, Any], path: str | Path) -> Path:
@@ -558,8 +769,11 @@ def load_artifact(path: str | Path) -> dict[str, Any]:
     missing = [k for k in _REQUIRED_ARTIFACT_KEYS if k not in raw]
     if missing:
         raise TagHeadError(f"artifact is missing {', '.join(missing)}")
-    if raw["kind"] != ARTIFACT_KIND:
+    if raw["kind"] not in ARTIFACT_KINDS:
         raise TagHeadError(f"not a tag head artifact: kind={raw['kind']!r}")
+    missing = [k for k in _REQUIRED_BY_KIND[raw["kind"]] if k not in raw]
+    if missing:
+        raise TagHeadError(f"artifact is missing {', '.join(missing)}")
     if int(raw["artifact_version"]) != ARTIFACT_VERSION:
         raise TagHeadError(
             f"artifact version {raw['artifact_version']} != {ARTIFACT_VERSION}")
@@ -578,7 +792,17 @@ def score_embedding(artifact: dict[str, Any], embedding: Sequence[float]) -> flo
     No numpy, no sklearn: a dot product and a logistic. `clip-linear-probe.md` D5
     keeps scikit-learn to a training-only extra; this is what makes that true — an
     inference-side caller needs the JSON and nothing else.
+
+    A centroid head returns a COSINE in [-1, 1], not a probability — its threshold
+    is on the same scale, so `predict` still works, but the two kinds' scores must
+    never be averaged or compared as if they were the same quantity.
     """
+    if artifact.get("kind") == ARTIFACT_KIND_CENTROID:
+        centroid = artifact["centroid"]
+        if len(embedding) != len(centroid):
+            raise TagHeadError(
+                f"embedding has {len(embedding)} dims, head expects {len(centroid)}")
+        return _cosine(centroid, embedding)
     weights = artifact["weights"]
     if len(embedding) != len(weights):
         raise TagHeadError(
