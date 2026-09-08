@@ -80,10 +80,37 @@ def test_search_returns_list_and_total():
 
 
 def test_get_detail_returns_advert():
-    payload = {"data": {"advert": {"id": "7", "uri": "7-x", "price": 9}}}
+    payload = {"data": {"advert": {"id": "7", "uri": "7-x", "price": 9, "active": True}}}
     c = _client([FakeResponse(payload)])
     advert = c.get_detail("7")
     assert advert["id"] == "7"
+
+
+def test_get_detail_active_false_raises_gone():
+    """The portal's REAL gone signal (live API, 2026-09-08): a withdrawn advert
+    is a full record with active=false, with or without timeDeactivated, and an
+    unknown id is a stub with active=false and an empty title. None of them is
+    a null advert, so a rule that waited for null never closed anything."""
+    withdrawn = {"id": "678523", "uri": "678523-x", "title": "Pronájem garáže 12 m²",
+                 "active": False, "timeActivated": None, "timeDeactivated": 1788780753}
+    withdrawn_no_stamp = {"id": "310616", "uri": "310616-x", "title": "Pronájem chaty",
+                          "active": False, "timeActivated": None, "timeDeactivated": None}
+    unknown_stub = {"id": "1", "active": False, "timeDeactivated": None, "title": ""}
+    for advert in (withdrawn, withdrawn_no_stamp, unknown_stub):
+        c = _client([FakeResponse({"data": {"advert": advert}})])
+        with pytest.raises(ListingGoneError):
+            c.get_detail(advert["id"])
+
+
+def test_get_detail_active_missing_or_null_is_an_error_not_gone():
+    """Only an explicit False is the positive signal. A record with no `active`
+    at all, or active=null (the shape of an access-denied field), is not
+    evidence either way and must surface as an error, never as alive or gone."""
+    for advert in ({"id": "7", "uri": "7-x", "price": 9},
+                   {"id": "7", "uri": "7-x", "active": None}):
+        c = _client([FakeResponse({"data": {"advert": advert}})])
+        with pytest.raises(RuntimeError, match="'active' flag"):
+            c.get_detail("7")
 
 
 def test_get_detail_null_raises_gone():
