@@ -870,7 +870,7 @@ export const removeNewDedupTag = (
  * toggling one from the Modify labels popup never clobbers the other. */
 export const setNewDedupTagFlags = (
   tagId: number,
-  flags: { priority?: boolean; ready_for_training?: boolean },
+  flags: { priority?: boolean; ready_for_training?: boolean; review_state?: ReviewState },
 ): Promise<{ data: NewDedupTag }> =>
   request<{ data: NewDedupTag }>(`/new-dedup/labeling/taxonomy/${tagId}/flags`, {
     method: 'PATCH',
@@ -1205,11 +1205,15 @@ export interface TrainingSetHead {
   negative: number;
   negative_reserve: number;
   excluded: number;
-  /* The operator's own "I have been through this one" marker
-   * (tag_taxonomy.ready_for_training, migration 443). Nothing reads it but
-   * them — it is bookkeeping across a review that spans days, not a gate. */
-  ready_for_training: boolean;
+  /* The operator's own marker of whether they have been through this head
+   * (tag_taxonomy.review_state, migration 487). Nothing reads it but them — it
+   * is bookkeeping across a review spanning days, not a gate. Three-valued
+   * because "set aside on purpose" is a decision and must not look like
+   * "nobody has said". */
+  review_state: ReviewState;
 }
+
+export type ReviewState = 'not_ready' | 'ready' | 'skipped';
 
 export interface TrainingSetRow {
   image_id: number;

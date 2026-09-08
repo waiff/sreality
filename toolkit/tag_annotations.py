@@ -73,7 +73,7 @@ def clean_label(label: str) -> str:
 # --- taxonomy -------------------------------------------------------------
 
 _TAG_COLUMNS = ("id, label, family, active, priority, ready_for_training, created_at, "
-                "routing_categories")
+                "routing_categories, review_state")
 
 # The property types a head can serve (listings.category_main). Mirrors
 # tag_candidates.CATEGORY_MIX's keys — asserted equal in tests, not imported,
@@ -88,6 +88,9 @@ def _tag_dict(r: tuple[Any, ...]) -> dict[str, Any]:
         # A tag with NO routing categories is not a head: the training-set
         # page, the heads read and the labeler all key on this column.
         "routing_categories": list(r[7]) if len(r) > 7 and r[7] else None,
+        # The operator's own review marker (487). Older SELECTs that predate the
+        # column simply do not carry it, hence the length guard.
+        "review_state": r[8] if len(r) > 8 else "not_ready",
     }
 
 
@@ -152,18 +155,26 @@ def rename_tag(conn: psycopg.Connection, *, tag_id: int, new_label: str) -> dict
     return _tag_dict(row)
 
 
+# The operator's review marker (487). 'skipped' is deliberately NOT expressible
+# as a boolean's third state — see the migration: a value indistinguishable from
+# "nobody has said" would not be a decision.
+REVIEW_STATES = ("not_ready", "ready", "skipped")
+
+
 def set_tag_flags(
     conn: psycopg.Connection, *, tag_id: int,
     priority: bool | None = None, ready_for_training: bool | None = None,
+    review_state: str | None = None,
 ) -> dict[str, Any]:
-    """Update one or both operator flags on a tag — only the fields actually
-    passed, so toggling one from the Modify labels popup never clobbers the
-    other. `priority` pins a tag to the top of that popup and marks it red;
-    `ready_for_training` is the operator's own call that a tag's set is solid
-    enough for the (not yet built) per-tag trainer to consume — independent
-    of Gate 1, which only says a tag is LABELED enough, not reviewed."""
-    if priority is None and ready_for_training is None:
+    """Update the operator flags on a tag — only the fields actually passed, so
+    setting one from the Modify labels popup never clobbers another. `priority`
+    pins a tag to the top of that popup and marks it red; `review_state` is the
+    operator's own three-valued marker of whether they have been through this
+    head. Both are bookkeeping: nothing reads them and nothing is gated on them."""
+    if priority is None and ready_for_training is None and review_state is None:
         raise ValueError("nothing to update")
+    if review_state is not None and review_state not in REVIEW_STATES:
+        raise ValueError(f"review_state must be one of {list(REVIEW_STATES)}")
     sets = []
     params: list[Any] = []
     if priority is not None:
@@ -172,6 +183,9 @@ def set_tag_flags(
     if ready_for_training is not None:
         sets.append("ready_for_training = %s")
         params.append(ready_for_training)
+    if review_state is not None:
+        sets.append("review_state = %s")
+        params.append(review_state)
     params.append(tag_id)
     with conn.cursor() as cur:
         cur.execute(

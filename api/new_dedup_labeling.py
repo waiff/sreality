@@ -43,6 +43,7 @@ class RenameTagIn(BaseModel):
 class TagFlagsIn(BaseModel):
     priority: bool | None = None
     ready_for_training: bool | None = None
+    review_state: str | None = None
 
 
 class GrowSampleIn(BaseModel):
@@ -249,13 +250,14 @@ def patch_tag_routing(
 def patch_tag_flags(
     tag_id: int, body: TagFlagsIn, conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
-    """Set one or both operator flags (priority, ready_for_training) on a
-    tag — only the fields actually sent."""
+    """Set the operator's flags on a tag (priority, review_state) — only the
+    fields actually sent, so setting one never clobbers another."""
     try:
         return {
             "data": tag_annotations.set_tag_flags(
                 conn, tag_id=tag_id, priority=body.priority,
                 ready_for_training=body.ready_for_training,
+                review_state=body.review_state,
             )
         }
     except KeyError as exc:
@@ -866,12 +868,12 @@ class ExamAnswerIn(BaseModel):
 def _routing_tags(conn: Any) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, label, ready_for_training FROM tag_taxonomy "
+            "SELECT id, label, review_state FROM tag_taxonomy "
             "WHERE routing_categories IS NOT NULL AND active ORDER BY id"
         )
         # ready_for_training (migration 443) is the operator's own bookkeeping:
         # "I have been through this head's set". Nothing reads it but them.
-        return [{"id": int(r[0]), "label": r[1], "ready_for_training": bool(r[2])}
+        return [{"id": int(r[0]), "label": r[1], "review_state": str(r[2])}
                 for r in cur.fetchall()]
 
 
