@@ -3080,6 +3080,22 @@
           "options": null
         },
         {
+          "name": "rejudge",
+          "description": "Re-ask this head (a tag id) about images it has ALREADY answered under an older definition. The companion to a definition revision, which otherwise leaves old answers standing.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "rejudge_state",
+          "description": "Scope rejudge to the verdict those images carry (positive / negative / excluded). A narrowing revision can only lose positives, so re-asking those alone is the cheap half of a redo.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
           "name": "like_tag",
           "description": "Draw from the images an EXISTING head (a tag id) has already been judged on, so a new head gets the same coverage as its neighbour and the boundary between them is reviewable on the same photos.",
           "required": false,

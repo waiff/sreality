@@ -116,6 +116,15 @@ def main() -> int:
                          "head. Their own earlier guesses, so the hit-rate is far "
                          "above random; the model still judges each one against the "
                          "definition, and its verdict is what gets written.")
+    ap.add_argument("--rejudge", type=int, dest="rejudge",
+                    help="Re-ask this head about images it has ALREADY answered, whose "
+                         "answers predate its active definition. The companion to a "
+                         "definition revision, which otherwise leaves old answers standing.")
+    ap.add_argument("--rejudge-state", dest="rejudge_state",
+                    choices=("positive", "negative", "excluded"),
+                    help="Scope --rejudge to the verdict the images currently carry. A "
+                         "narrowing revision can only lose positives, so re-asking those "
+                         "alone is the cheap half of a redo.")
     ap.add_argument("--like-tag", type=int, dest="like_tag",
                     help="Draw from the images an EXISTING head has already been judged "
                          "on, so a new head gets the same coverage as its neighbour and "
@@ -175,7 +184,8 @@ def main() -> int:
 
         chosen = [n for n, v in (("--from-drafts", args.from_drafts),
                                  ("--near-tag", args.near_tag),
-                                 ("--like-tag", args.like_tag)) if v]
+                                 ("--like-tag", args.like_tag),
+                                 ("--rejudge", args.rejudge)) if v]
         if len(chosen) > 1:
             LOG.error("LABEL %s are different draws; pick one", " and ".join(chosen))
             return 1
@@ -202,6 +212,16 @@ def main() -> int:
             if not rows:
                 LOG.warning("LABEL no candidates — the head may have too few embedded "
                             "positives for a centroid, or the sampled slice held none")
+        elif args.rejudge:
+            rows = ml.rejudge_candidates(
+                conn, tag_ids=tag_ids, rejudge_tag=args.rejudge,
+                state=args.rejudge_state, limit=max(1, args.count))
+            LOG.info("LABEL rejudge=%d (%s) state=%s drew=%d",
+                     args.rejudge, labels.get(args.rejudge, "?"),
+                     args.rejudge_state or "any", len(rows))
+            if not rows:
+                LOG.warning("LABEL nothing to re-judge — every labeled image already "
+                            "carries this head's ACTIVE definition")
         elif args.like_tag:
             rows = ml.like_tag_candidates(
                 conn, tag_ids=tag_ids, like_tag=args.like_tag, limit=max(1, args.count))

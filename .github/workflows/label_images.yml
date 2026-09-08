@@ -47,6 +47,16 @@ on:
         required: false
         default: ""
         type: string
+      rejudge:
+        description: "Re-ask this head (a tag id) about images it has ALREADY answered under an older definition. The companion to a definition revision, which otherwise leaves old answers standing."
+        required: false
+        default: ""
+        type: string
+      rejudge_state:
+        description: "Scope rejudge to the verdict those images carry (positive / negative / excluded). A narrowing revision can only lose positives, so re-asking those alone is the cheap half of a redo."
+        required: false
+        default: ""
+        type: string
       like_tag:
         description: "Draw from the images an EXISTING head (a tag id) has already been judged on, so a new head gets the same coverage as its neighbour and the boundary between them is reviewable on the same photos."
         required: false
@@ -109,6 +119,8 @@ jobs:
           SAMPLE_PCT: ${{ inputs.sample_pct }}
           NEAR_TAG: ${{ inputs.near_tag }}
           LIKE_TAG: ${{ inputs.like_tag }}
+          REJUDGE: ${{ inputs.rejudge }}
+          REJUDGE_STATE: ${{ inputs.rejudge_state }}
           FROM_DRAFTS: ${{ inputs.from_drafts }}
           WORKERS: ${{ inputs.workers }}
           STATUS_ONLY: ${{ inputs.status_only }}
@@ -145,10 +157,20 @@ jobs:
             '') : ;;
             *[!0-9]*) echo "::error::like_tag must be a tag id"; exit 1 ;;
           esac
+          case "${REJUDGE:-}" in
+            '') : ;;
+            *[!0-9]*) echo "::error::rejudge must be a tag id"; exit 1 ;;
+          esac
+          case "${REJUDGE_STATE:-}" in
+            ''|positive|negative|excluded) : ;;
+            *) echo "::error::rejudge_state must be positive, negative or excluded"; exit 1 ;;
+          esac
           ARGS="--tags ${TAGS} --count ${COUNT} --max-usd ${MAX_USD} --sample-pct ${SAMPLE_PCT:-1} --max-seconds 1500 --workers ${WORKERS:-8}"
           if [ -n "${NEAR_TAG:-}" ]; then ARGS="${ARGS} --near-tag ${NEAR_TAG}"; fi
           if [ -n "${FROM_DRAFTS:-}" ]; then ARGS="${ARGS} --from-drafts ${FROM_DRAFTS}"; fi
           if [ -n "${LIKE_TAG:-}" ]; then ARGS="${ARGS} --like-tag ${LIKE_TAG}"; fi
+          if [ -n "${REJUDGE:-}" ]; then ARGS="${ARGS} --rejudge ${REJUDGE}"; fi
+          if [ -n "${REJUDGE_STATE:-}" ]; then ARGS="${ARGS} --rejudge-state ${REJUDGE_STATE}"; fi
           if [ "${STATUS_ONLY:-false}" = "true" ]; then ARGS="--tags ${TAGS} --status"; fi
           if [ "${DRY_RUN:-true}" = "true" ] && [ "${STATUS_ONLY:-false}" != "true" ]; then ARGS="${ARGS} --dry-run"; fi
           echo "python -m scripts.label_images ${ARGS}"

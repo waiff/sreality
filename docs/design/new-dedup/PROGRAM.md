@@ -177,6 +177,12 @@ the two gaps found while adding property list are closed in the same PR that add
    other heads"*.)
 5. **Label** with `label_images.yml`: dry run, then a small count, then scale. `--tags` names
    ONLY the new head so nothing else is re-judged.
+5b. **After ANY definition revision, `--rejudge <tag> --rejudge-state positive`.** A revision
+   makes stale labels eligible but nothing draws them preferentially, so old answers under old
+   wording survive indefinitely — which is how a head keeps positives its current definition
+   would refuse. Scoping to positives is the cheap half: a NARROWING revision can only lose
+   positives, so the negatives need no second opinion and ~10k images of budget stays unspent.
+   (A widening revision is the other case and does need the negatives re-asked.)
 6. **The cutoff applies automatically** (default 300, editable per head); review the in-set
    positives on the training-set page; "Confirm the other N" per page; notes on corrections.
 7. **Optional gate.** Without an exam sitting there is no measured precision/recall for the
