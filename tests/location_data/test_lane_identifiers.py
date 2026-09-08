@@ -92,7 +92,7 @@ _KNOWN_JOB_NAMES = frozenset({
     "payload_archive_prune", "location_payload_backfill",
 })
 _KNOWN_VERSIONS = frozenset({
-    "claims_intake@3", "claims_remine_archive@1", "claims_llm@1",
+    "claims_intake@3", "claims_remine_archive@1", "claims_llm@2",
     "payload_prune@1", "payload_backfill@1",
 })
 

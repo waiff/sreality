@@ -10,14 +10,29 @@ and house number an ad states in prose is invisible to W1; the regex path is jun
 away); and the maps-link pin cannot stand in for the text (the pin-derived obec is itself
 wrong on measured rows). 29,546 active bazos rows share only 90 distinct `locality` values.
 
-WHAT THE MODEL IS ASKED, and what the lane does with it (the operator's ruling, option (b)):
-ONE call per listing asks for `from_description` and `from_title` SEPARATELY, each field
-carrying a VERBATIM quote. The lane then emits exactly ONE claim per field per listing,
-DESCRIPTION-FIRST — the title is a fallback rung consulted only when the description says
-nothing about that field. The ranking is therefore an EXTRACTOR decision, taken here where
-it is expressible, and not a resolution one: `location_field_policy` matches on
-`(source, extraction_method)` only, so two `llm_text` claims from one portal cannot be
-ranked as data at all (`survivorship.matches`).
+WHAT THE MODEL IS ASKED (claims_llm@2, 2026-09-08 — lists everywhere the registry can supply
+one). The free-form extraction (`SYSTEM_PROMPT` / `LOCATION_TOOL`, kept for the bake-off)
+lost 26 of 40 obec disagreements to Czech declension, and streets decline the same way. The
+lane now asks CLOSED questions: `CandidateCaller` builds the town list from what every
+portal has — registry names found in the ad's text ∪ obce within `DEFAULT_RADIUS_KM` of
+the pin (`town_candidates`) — and the model may only PICK a member with a verbatim quote,
+or abstain; an abstention gets one retry against the national list when the ad has an
+anchor at all; then, inside the picked obec, the same for the část obce and the street
+(registry names matched in the text) and the house number as literal digits. Measured on
+the candidates probe (#1338): the named town sat in text ∪ pin-15 km 90/90, and picks from
+that list agreed with an unanchored national pick 90/90.
+
+The picks are assembled into the ONE answer shape `extract_payload` reads — `from_title`
+/ `from_description`, one `{value, quote, confidence}` envelope per field, each landing in
+the block whose text carries its quote — so the pure extraction, its gazetteer gates, the
+contract entries and the policy rows are unchanged. The lane emits exactly ONE claim per
+field per listing, DESCRIPTION-FIRST — the title is a fallback rung consulted only when the
+description says nothing about that field. The ranking is therefore an EXTRACTOR decision,
+taken here where it is expressible, and not a resolution one: `location_field_policy`
+matches on `(source, extraction_method)` only, so two `llm_text` claims from one portal
+cannot be ranked as data at all (`survivorship.matches`). `psc`, `landmark` and
+`lokalita_line` have no list to pick from and are not asked in this version: they are
+recorded as `not_attempted` absences, and the contract entries stay for a later prompt.
 
 THE LANE IS INERT TODAY. `LLM_READERS` is populated, but no shipped portal contract names
 `llm_location_text`, so `run()` returns `outcome='inert'` BEFORE opening a batch row — a
@@ -97,6 +112,14 @@ from location_data.claims_remine_archive import (
 from location_data.html_scope import ScopeRegister, ScopedDocument, scope_html
 from location_data.name_index import normalize_name, normalize_street_name
 from location_data.resolver import lease
+from location_data.town_candidates import (
+    DEFAULT_RADIUS_KM,
+    DEFAULT_TEXT_REACH_KM,
+    ObecIndex,
+    candidate_towns,
+    load_obec_index,
+    text_match_candidates,
+)
 from scraper import db
 
 LOG = logging.getLogger("location_data.claims_llm")
@@ -106,7 +129,7 @@ LOG = logging.getLogger("location_data.claims_llm")
 # Bumped whenever this lane's extraction SEMANTICS change. It rides in
 # `location_claim_batches.extractor_version` and on every absence row; the PER-CLAIM
 # `extractor_version` stays the contract's own `contract:{source}@{version}`.
-LLM_VERSION = "claims_llm@1"
+LLM_VERSION = "claims_llm@2"
 LANE = "location_claims_llm"
 WAVE = "W2"
 
@@ -132,9 +155,13 @@ PAGE_KIND = "detail"
 DEFAULT_SOURCE = "bazos"
 
 CALLED_FOR = "extract_location_claims"
-PROMPT_VERSION = "bzs.loc@1"
+# Stamped on every claim; the fingerprint hashes neither it nor the model, so a prompt edit
+# without a bump is silent forever (module docstring). @2 = the candidate-driven calls.
+PROMPT_VERSION = "bzs.loc@2"
 MODEL_SETTING_KEY = "location_llm_model"
-DEFAULT_MODEL = "gpt-5-nano"
+# The bake-off verdict (2026-09-07/08, three runs + the constrained arm): best registry
+# resolution, fastest, 0 out-of-list picks. `app_settings.location_llm_model` overrides.
+DEFAULT_MODEL = "gpt-5.6-luna"
 # The house convention, learned twice the hard way: a GPT-5-series model spends its budget
 # on REASONING before it emits anything, so 512 killed 99.6% of the enrichment lane's calls
 # (PR #791) and ~300 killed half the exam lane's calibration calls. The answer here is ~200
@@ -277,6 +304,107 @@ def build_user_message(blocks: dict[str, str]) -> str:
             f"POPIS:\n{blocks.get('description', '')}\n")
 
 
+# ------------------------------------------------------------------ the closed questions
+
+# THE TOWN. Same shape the constrained bake-off arm measured (`bzs.loc.pick@1`, luna 90/99
+# picked, 0 out-of-list), plus the two rules the probe showed were missing: "u X" is NEAR
+# X, and a longer name that contains a list name is not that name (Rajecké Teplice ≠
+# Teplice — the one false positive in 100 ads).
+TOWN_PROMPT = """\
+Jsi extraktor obce (města) z českých realitních inzerátů.
+
+Dostaneš TITULEK a POPIS jednoho inzerátu a SEZNAM OBCÍ. Vyber ze seznamu tu obec, ve které
+se nemovitost nachází — ale JEN pokud to z textu jednoznačně plyne.
+
+Pravidla:
+- `obec` vracej POUZE jako přesný název ze SEZNAMU, opsaný beze změny. Nikdy nevymýšlej
+  název, který v seznamu není.
+- Text obec často skloňuje ("v Kolíně", "u Chebu", "do Karlových Varů"); ty vrať tvar ze
+  seznamu ("Kolín", "Cheb", "Karlovy Vary").
+- "u X", "poblíž X", "nedaleko X", "směr X", "dojezd do X" znamená BLÍZKO X, ne V X. Obec, u
+  které nemovitost jen leží, nevybírej — pokud text vlastní obec nejmenuje, vrať null.
+- Delší název, který obsahuje název ze seznamu, NENÍ shoda ("Rajecké Teplice" nejsou
+  "Teplice", "Nové Město na Moravě" není "Nové Město"). V takovém případě vrať null.
+- Pokud text žádnou obec neuvádí, nebo uvádí obec, která v seznamu NENÍ, nebo si nejsi
+  jistý, vrať obec=null.
+- `quote` = DOSLOVNÝ, nezkrácený úsek textu (z titulku nebo popisu), ze kterého volba plyne;
+  přesný podřetězec včetně diakritiky. Při obec=null vrať quote=null.
+- `confidence` = "high" jen když text obec jmenuje výslovně; "medium" když plyne z části
+  obce, ulice nebo orientačního bodu; jinak "low" (a obec=null).
+"""
+
+TOWN_TOOL: dict[str, Any] = {
+    "name": "pick_obec",
+    "description": "Vyber obec ze SEZNAMU OBCÍ, pokud z inzerátu jednoznačně plyne.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["obec", "quote", "confidence"],
+        "properties": {
+            "obec": {"type": ["string", "null"]},
+            "quote": {"type": ["string", "null"]},
+            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        },
+    },
+}
+
+# THE ADDRESS WITHIN THE TOWN. Two more closed lists — the obec's části and its streets,
+# each pre-filtered to the names that occur in the text — and one literal: the house
+# number, which the registry validates afterwards (`gazetteer_refusal`).
+ADDRESS_PROMPT = """\
+Jsi extraktor adresy z českých realitních inzerátů. Obec je už určená (řádek OBEC).
+
+Dostaneš TITULEK a POPIS inzerátu, SEZNAM ČÁSTÍ OBCE a SEZNAM ULIC (obojí jen z této obce;
+seznam může být prázdný). Vyplň tři údaje:
+- `cast_obce` = část obce / čtvrť ze SEZNAMU ČÁSTÍ OBCE, opsaná beze změny — jen pokud ji
+  text uvádí (i skloněnou: "v Karlíně" → "Karlín"). Jinak null.
+- `street` = ulice ze SEZNAMU ULIC, opsaná beze změny — jen pokud ji text uvádí (i skloněnou
+  nebo se slovem "ulice"/"ul.": "v ulici Sokolovské" → "Sokolovská"). Jinak null.
+- `house_number` = číslo domu DOSLOVA z textu, ve tvaru "234" nebo "1216/46", jen pokud
+  stojí u ulice nebo u obce (č.p. / č.o.). Nikdy s ulicí, nikdy nevymýšlej.
+
+Pravidla:
+- Nikdy nevracej název, který v příslušném seznamu není.
+- "u", "poblíž", "nedaleko", "směr" značí blízkost, ne polohu — takový údaj nevybírej.
+- Ke každé vyplněné hodnotě uveď `quote`: DOSLOVNÝ, nezkrácený úsek textu (z titulku nebo
+  popisu), ve kterém hodnota stojí; přesný podřetězec včetně diakritiky.
+- Pokud údaj v textu není, vrať value=null, quote=null, confidence="low".
+- confidence="high" jen když hodnota stojí v textu jednoznačně a bez výkladu.
+"""
+
+ADDRESS_TOOL: dict[str, Any] = {
+    "name": "record_address",
+    "description": "Zapiš část obce, ulici a číslo domu nalezené v inzerátu.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["cast_obce", "street", "house_number"],
+        "properties": {
+            "cast_obce": _FIELD_SCHEMA, "street": _FIELD_SCHEMA, "house_number": _FIELD_SCHEMA,
+        },
+    },
+}
+
+
+def build_town_message(blocks: dict[str, str], candidates: list[str]) -> str:
+    """The scoped blocks plus the closed list. The list is built OUTSIDE the prompt from
+    the pin and the text; no stored column reaches here (`build_user_message`)."""
+    return (build_user_message(blocks)
+            + "\nSEZNAM OBCÍ (vrať přesně jeden název z tohoto seznamu, nebo null):\n"
+            + "\n".join(candidates) + "\n")
+
+
+def build_address_message(
+    blocks: dict[str, str], *, obec: str, parts: list[str], streets: list[str],
+) -> str:
+    """The scoped blocks, the picked obec (the model's own answer, not a stored column)
+    and the two closed lists, each already filtered to names that occur in the text."""
+    return (build_user_message(blocks)
+            + f"\nOBEC: {obec}\n"
+            + "\nSEZNAM ČÁSTÍ OBCE:\n" + ("\n".join(parts) if parts else "(prázdný)") + "\n"
+            + "\nSEZNAM ULIC:\n" + ("\n".join(streets) if streets else "(prázdný)") + "\n")
+
+
 # ------------------------------------------------------------------ value objects
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +445,9 @@ class Gazetteer(Protocol):
     def address_point_exists(self, *, obec_kod: int, street_norm: str | None,
                              cp: int | None, co: int | None) -> bool: ...
     def obec_codes_for_psc(self, psc: str) -> list[int]: ...
+    # The closed lists the address call offers (claims_llm@2). Names, registry spelling.
+    def streets_of_obec(self, obec_kod: int) -> list[str]: ...
+    def parts_of_obec(self, obec_kod: int) -> list[str]: ...
 
 
 class RegistryGazetteer:
@@ -339,8 +470,28 @@ class RegistryGazetteer:
     writes `location_claims.value_norm` and is applied by the database, not by us).
     """
 
-    def __init__(self, view: Any) -> None:
+    def __init__(self, view: Any, conn: psycopg.Connection | None = None) -> None:
         self._view = view
+        self._conn = conn
+        self._parts: dict[int, list[str]] = {}
+
+    def streets_of_obec(self, obec_kod: int) -> list[str]:
+        return sorted({str(s.name) for s in self._view.streets_in_obec(obec_kod)})
+
+    def parts_of_obec(self, obec_kod: int) -> list[str]:
+        """The části obce under one obec, by path prefix, cached per run. Empty without a
+        connection (the registry view has no such question): a list that cannot be built
+        is an empty list, and the address call then simply offers no part names."""
+        if obec_kod in self._parts:
+            return self._parts[obec_kod]
+        names: list[str] = []
+        unit = self._view.admin_unit_by_code("obec", obec_kod)
+        if unit is not None and self._conn is not None and unit.path:
+            with self._conn.cursor() as cur:
+                cur.execute(_PARTS_OF_OBEC_SQL, {"prefix": f"{unit.path}.c%"})
+                names = [str(r[0]) for r in cur.fetchall()]
+        self._parts[obec_kod] = names
+        return names
 
     def name_exists(self, name_norm: str) -> bool:
         return bool(name_norm) and bool(self._view.admin_units_by_name(name_norm))
@@ -377,7 +528,7 @@ def open_gazetteer(conn: psycopg.Connection) -> tuple[RegistryGazetteer, int, st
     view = resolve_db.CachedRegistryView(
         resolve_db.SqlRegistryView(conn, version_id),
         resolve_db.RunCache(max_entries=250_000))
-    return RegistryGazetteer(view), version_id, version_label
+    return RegistryGazetteer(view, conn=conn), version_id, version_label
 
 
 # ------------------------------------------------------------------ the third registry
@@ -555,10 +706,15 @@ def _candidate_obec(
 ) -> tuple[int | None, str]:
     """The one cross-field dependency, resolved ONCE per listing and deterministically.
 
-    Description obec, then title obec, then the stored PSČ — and each rung only counts when
-    it resolves to EXACTLY ONE obec code, because an ambiguous name is not a candidate. The
-    PSČ never reaches the prompt; it is a registry key here and nothing else.
+    The caller's own resolution first — claims_llm@2 hands the picked obec's code with the
+    answer, the nearest homonym to the pin when the name is shared (`assemble_answer`) —
+    then description obec, then title obec, then the stored PSČ; each of those rungs only
+    counts when it resolves to EXACTLY ONE obec code, because an ambiguous name is not a
+    candidate. The PSČ never reaches the prompt; it is a registry key here and nothing else.
     """
+    hinted = answer.get("obec_kod") if isinstance(answer, dict) else None
+    if isinstance(hinted, int) and not isinstance(hinted, bool):
+        return hinted, "obec_from_caller"
     for block in BLOCK_ORDER:
         parsed = parse_field_answer(answer, block, "obec")
         if isinstance(parsed, Refusal) or parsed.value is None:
@@ -760,14 +916,103 @@ def extract_payload(
 
 # ------------------------------------------------------------------ the model call
 
+@dataclass(frozen=True, slots=True)
+class CallHints:
+    """What the caller may know about a listing BESIDES its text: the pin (any quality — a
+    postcode centroid included) and the postcode. Both BUILD the candidate list; neither
+    ever reaches a prompt (the stored-echo rule on `build_user_message` stands)."""
+    lat: float | None = None
+    lon: float | None = None
+    psc: str | None = None
+
+    @property
+    def anchored(self) -> bool:
+        """Is there anything to retry the national list on? A foreign ad with no Czech pin
+        and no Czech postcode is not, and gets no second call."""
+        digits = "".join(ch for ch in str(self.psc or "") if ch.isdigit())
+        return (self.lat is not None and self.lon is not None) or len(digits) == 5
+
+
 class LlmCaller(Protocol):
-    """One structured call. Returns (parsed tool input, cost_usd)."""
+    """The calls for one listing. Returns (an answer in `extract_payload`'s shape, cost)."""
 
-    def answer(self, blocks: dict[str, str]) -> tuple[dict[str, Any], float]: ...
+    def answer(
+        self, blocks: dict[str, str], hints: CallHints,
+    ) -> tuple[dict[str, Any], float]: ...
 
 
-class ProviderCaller:
-    """The production caller: one forced-tool call per listing through `LLMClient`.
+_NULL_ENVELOPE: dict[str, Any] = {"value": None, "quote": None, "confidence": "low"}
+
+
+def _envelope(raw: Any) -> FieldAnswer | None:
+    """A stated, quoted answer with a confidence this lane would claim; else None."""
+    if not isinstance(raw, dict):
+        return None
+    value = _text(raw.get("value"))
+    quote = _text(raw.get("quote"))
+    confidence = str(raw.get("confidence") or "").lower()
+    if value is None or quote is None or confidence not in _MODEL_CONFIDENCE:
+        return None
+    return FieldAnswer(value=value, quote=quote, confidence=confidence)
+
+
+def _town_envelope(raw: Any) -> dict[str, Any]:
+    """`pick_obec` answers `{obec, quote, confidence}`; the validators read `value`."""
+    if not isinstance(raw, dict):
+        return {}
+    return {"value": raw.get("obec"), "quote": raw.get("quote"),
+            "confidence": raw.get("confidence")}
+
+
+def _valid_pick(raw: Any, candidates: list[str]) -> FieldAnswer | None:
+    """A list member, in the REGISTRY's spelling, quoted; an out-of-list name is an
+    abstention, never a value — the whole point of the closed list."""
+    stated = _envelope(raw)
+    if stated is None:
+        return None
+    wanted = normalize_name(stated.value or "")
+    for candidate in candidates:
+        if normalize_name(candidate) == wanted:
+            return FieldAnswer(value=candidate, quote=stated.quote, confidence=stated.confidence)
+    return None
+
+
+def assemble_answer(
+    blocks: dict[str, str], picks: dict[str, FieldAnswer], *, obec_kod: int | None = None,
+) -> dict[str, Any]:
+    """The free-form answer shape, from candidate picks. Pure.
+
+    Each field lands in the FIRST block (description-first) whose text carries its quote,
+    with a null envelope in the other, so `extract_payload`'s ladder reads it exactly as it
+    reads a free-form answer. A quote found in neither block is placed in the description:
+    the extraction then records it as unlocatable, which is a finding — never dropped here.
+    A field with no pick is OMITTED, which the extraction records as `not_attempted`.
+    `obec_kod` — the picked obec resolved against the pin — rides along for the gazetteer
+    gates (`_candidate_obec`'s first rung); the blocks never carry it.
+    """
+    out: dict[str, Any] = {f"from_{block}": {} for block in BLOCK_ORDER}
+    if obec_kod is not None:
+        out["obec_kod"] = int(obec_kod)
+    for field, pick in picks.items():
+        home = next((block for block in BLOCK_ORDER
+                     if pick.quote and pick.quote in (blocks.get(block) or "")),
+                    BLOCK_ORDER[0])
+        for block in BLOCK_ORDER:
+            out[f"from_{block}"][field] = (
+                {"value": pick.value, "quote": pick.quote, "confidence": pick.confidence}
+                if block == home else dict(_NULL_ENVELOPE))
+    return out
+
+
+class CandidateCaller:
+    """The production caller: the town from a closed list, then the address within it.
+
+    Two forced-tool calls per listing — three when the town pick abstains and the ad has an
+    anchor — assembled into the ONE answer shape `extract_payload` reads, so the pure
+    extraction, its gazetteer gates, the contract entries and the policy rows are exactly
+    the free-form lane's; only how the answer is obtained changed (operator ruling
+    2026-09-08 after the constrained bake-off and the candidates probe: lists everywhere
+    the registry can supply one). `stats` counts which rung answered.
 
     The providers are listed EXPLICITLY rather than taken from
     `api.dependencies.get_providers()`, because no cron script in this repo uses that
@@ -776,36 +1021,119 @@ class ProviderCaller:
     and going invisible to llm_errors, llm_burn_rate and llm_liveness alike.
     """
 
-    def __init__(self, conn: psycopg.Connection, *, model: str) -> None:
-        from api.llm_client import LLMClient
-        from api.providers.openai import OpenAIProvider
-        from api.providers.qwen import QwenProvider
+    def __init__(
+        self, conn: psycopg.Connection | None, *, model: str, index: ObecIndex,
+        gazetteer: Gazetteer, client: Any | None = None,
+        radius_km: float = DEFAULT_RADIUS_KM,
+    ) -> None:
+        if client is None:
+            from api.llm_client import LLMClient
+            from api.providers.openai import OpenAIProvider
+            from api.providers.qwen import QwenProvider
 
+            client = LLMClient(conn, providers={
+                "openai": OpenAIProvider(), "qwen": QwenProvider(),
+            })
+        self._client = client
         self._model = model
-        self._client = LLMClient(conn, providers={
-            "openai": OpenAIProvider(), "qwen": QwenProvider(),
-        })
+        self._index = index
+        self._gazetteer = gazetteer
+        self._radius_km = radius_km
+        self.stats: dict[str, int] = {}
 
-    def answer(self, blocks: dict[str, str]) -> tuple[dict[str, Any], float]:
+    def _bump(self, key: str) -> None:
+        self.stats[key] = self.stats.get(key, 0) + 1
+
+    def _too_far(self, obec: FieldAnswer, hints: CallHints) -> bool:
+        """A pick whose every obec of that name is beyond the text reach of the pin is a
+        homonym of what the ad meant, not the town — refused, never claimed."""
+        if hints.lat is None or hints.lon is None:
+            return False
+        distance = self._index.nearest_distance_km(obec.value or "", hints.lat, hints.lon)
+        return distance is not None and distance > DEFAULT_TEXT_REACH_KM
+
+    def _call(self, *, system: str, user: str, tool: dict[str, Any]) -> tuple[dict[str, Any], float]:
         from api.llm_client import parse_tool_input_json
 
         response = self._client.call(
-            called_for=CALLED_FOR,
-            messages=[{"role": "user", "content": build_user_message(blocks)}],
-            system=SYSTEM_PROMPT,
-            tools=[LOCATION_TOOL],
-            tool_choice=LOCATION_TOOL["name"],
-            model=self._model,
-            max_tokens=MAX_TOKENS,
-        )
+            called_for=CALLED_FOR, messages=[{"role": "user", "content": user}],
+            system=system, tools=[tool], tool_choice=tool["name"], model=self._model,
+            max_tokens=MAX_TOKENS)
+        cost = float(response.cost_usd or 0.0)
         for call in response.tool_calls:
-            if call.get("name") == LOCATION_TOOL["name"]:
-                return parse_tool_input_json(call.get("input")), float(
-                    response.cost_usd or 0.0)
-        # A model that answered without calling the forced tool has said nothing this lane
-        # can use. An empty dict is the honest record: every field becomes a missing key,
-        # which becomes one `not_attempted` absence per field.
-        return {}, float(response.cost_usd or 0.0)
+            if call.get("name") == tool["name"]:
+                parsed = parse_tool_input_json(call.get("input"))
+                return (parsed if isinstance(parsed, dict) else {}), cost
+        # A model that answered without calling the forced tool has said nothing this
+        # lane can use; an empty dict is the honest record.
+        return {}, cost
+
+    def answer(
+        self, blocks: dict[str, str], hints: CallHints,
+    ) -> tuple[dict[str, Any], float]:
+        text = f"{blocks.get('title', '')}\n{blocks.get('description', '')}"
+        towns = candidate_towns(
+            self._index, text=text, lat=hints.lat, lon=hints.lon, radius_km=self._radius_km)
+        cost = 0.0
+        if not towns and not hints.anchored:
+            self._bump("skipped_no_anchor")
+            return assemble_answer(blocks, {}), cost
+        obec: FieldAnswer | None = None
+        rejected_far = False
+        if towns:
+            raw, spent = self._call(
+                system=TOWN_PROMPT, user=build_town_message(blocks, towns), tool=TOWN_TOOL)
+            cost += spent
+            obec = _valid_pick(_town_envelope(raw), towns)
+            if obec is not None and self._too_far(obec, hints):
+                # The national list would hand the same far name straight back: no retry.
+                self._bump("town_rejected_far")
+                obec, rejected_far = None, True
+            else:
+                self._bump("town_from_list" if obec else "town_list_abstained")
+        if obec is None and hints.anchored and not rejected_far:
+            raw, spent = self._call(
+                system=TOWN_PROMPT, user=build_town_message(blocks, self._index.names),
+                tool=TOWN_TOOL)
+            cost += spent
+            obec = _valid_pick(_town_envelope(raw), self._index.names)
+            if obec is not None and self._too_far(obec, hints):
+                self._bump("town_rejected_far")
+                obec = None
+            else:
+                self._bump("town_from_national" if obec else "town_national_abstained")
+        if obec is None:
+            return assemble_answer(blocks, {}), cost
+
+        picks: dict[str, FieldAnswer] = {"obec": obec}
+        code = self._index.nearest_code(obec.value or "", hints.lat, hints.lon)
+        parts: list[str] = []
+        streets: list[str] = []
+        if code is None:
+            # A homonym with no pin to break the tie: the town stands (it is validated by
+            # name), the within-town lists cannot be built, so the address call runs with
+            # empty lists and can still return a house number.
+            self._bump("obec_ambiguous")
+        else:
+            parts = text_match_candidates(text, self._gazetteer.parts_of_obec(code))
+            streets = text_match_candidates(text, self._gazetteer.streets_of_obec(code))
+        raw, spent = self._call(
+            system=ADDRESS_PROMPT,
+            user=build_address_message(blocks, obec=obec.value or "", parts=parts,
+                                       streets=streets),
+            tool=ADDRESS_TOOL)
+        cost += spent
+        self._bump("address_called")
+        part = _valid_pick(raw.get("cast_obce"), parts) if parts else None
+        street = _valid_pick(raw.get("street"), streets) if streets else None
+        number = _envelope(raw.get("house_number"))
+        if part is not None:
+            picks["cast_obce"] = part
+        if street is not None:
+            picks["street"] = street
+        if number is not None:
+            picks["house_number"] = number
+        return assemble_answer(blocks, picks, obec_kod=code), cost
 
 
 class FileCaller:
@@ -816,7 +1144,9 @@ class FileCaller:
         with open(path, encoding="utf-8") as handle:
             self._answer = json.load(handle)
 
-    def answer(self, blocks: dict[str, str]) -> tuple[dict[str, Any], float]:
+    def answer(
+        self, blocks: dict[str, str], hints: CallHints,
+    ) -> tuple[dict[str, Any], float]:
         return dict(self._answer), 0.0
 
 
@@ -858,7 +1188,8 @@ _LLM_SCAN_SQL = """
     SELECT p.id, p.source, p.source_id_native, p.page_kind::text,
            encode(p.payload_sha256, 'hex'), p.first_observed_at,
            l.id, (a.listing_id IS NOT NULL) AS in_mapy_inventory,
-           l.raw_json ->> 'psc'
+           l.raw_json ->> 'psc',
+           ST_Y(l.geom::geometry), ST_X(l.geom::geometry)
     FROM portal_raw_payloads p
     JOIN listings l ON l.source = p.source AND l.source_id_native = p.source_id_native
     LEFT JOIN mapy_affected a ON a.listing_id = l.id
@@ -894,6 +1225,14 @@ _LLM_EXCLUSION_ZONES_SQL = """
 
 _MODEL_SETTING_SQL = "SELECT value FROM app_settings WHERE key = %(key)s"
 
+# The části obce under one obec: the ltree path is `k{kraj}.o{okres}.b{obec}.c{cast}`
+# (01 §3.2.1), so the obec's own path plus `.c` is the prefix. Read by `RegistryGazetteer`.
+_PARTS_OF_OBEC_SQL = """
+    SELECT DISTINCT name FROM ruian_admin_units
+     WHERE level::text = 'cast_obce' AND valid_to IS NULL AND path::text LIKE %(prefix)s
+     ORDER BY name
+"""
+
 # The `--mode full` floor. Timezone-AWARE, because `first_observed_at` is `timestamptz`
 # and a naive comparison would be read in the server's own zone.
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -901,14 +1240,17 @@ EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 def _row_from_record(record: tuple[Any, ...]) -> tuple[ArchivedPayload, ListingRow, str | None]:
     (payload_id, source, native, page_kind, sha_hex, first_observed_at, listing_id,
-     in_inventory, psc) = record
+     in_inventory, psc, lat, lon) = record
     payload = ArchivedPayload(
         id=int(payload_id), source=source, source_id_native=str(native),
         page_kind=page_kind, payload_sha256=str(sha_hex),
         first_observed_at=first_observed_at)
     row = ListingRow(
         listing_id=int(listing_id), source=source, source_id_native=str(native),
-        raw_json={}, lat=None, lon=None,
+        raw_json={},
+        # The pin, any quality: it BUILDS the candidate list (`CallHints`) and is never
+        # claimed by this lane, which emits no coordinate.
+        lat=None if lat is None else float(lat), lon=None if lon is None else float(lon),
         # The BODY's own first observation, never now() and never `last_observed_at`
         # (which an unchanged refetch moves without new evidence).
         observed_at=first_observed_at, in_mapy_inventory=bool(in_inventory),
@@ -1007,6 +1349,7 @@ def run(
     store: BodyStore | None = None,
     llm: LlmCaller | None = None,
     gazetteer: Gazetteer | None = None,
+    obec_index: ObecIndex | None = None,
 ) -> dict[str, Any]:
     """Preflight, then batches of `batch_size` listings against one source.
 
@@ -1062,9 +1405,10 @@ def run(
     register = load_register(conn, source)
     if register is None:
         raise IntakeRefused(f"no active portal_contracts row for {source}")
+    registry_version_id: int | None = None
     if gazetteer is None:
         try:
-            gazetteer, _version_id, version_label = open_gazetteer(conn)
+            gazetteer, registry_version_id, version_label = open_gazetteer(conn)
         except LookupError as exc:
             raise IntakeRefused(
                 f"the RÚIAN mirror has no current registry version ({exc}); this lane "
@@ -1074,7 +1418,18 @@ def run(
     if store is None:
         store = payloads.open_store()
     if llm is None and not dry_run:
-        llm = ProviderCaller(conn, model=resolved_model)
+        if obec_index is None:
+            if registry_version_id is None:
+                from location_data.resolver import resolve_db
+
+                registry_version_id, _label = resolve_db.current_registry_version(conn)
+            # ONE read per run: 6,258 obce with centroids make the per-ad radius test an
+            # in-memory loop instead of a geometry query (the probe paid 2.8 s/ad for SQL).
+            with guarded(conn, statement_timeout) as cur:
+                obec_index = load_obec_index(cur, registry_version_id)
+            LOG.info("CLAIMS-LLM obec index loaded: %d obce", len(obec_index))
+        llm = CandidateCaller(conn, model=resolved_model, index=obec_index,
+                              gazetteer=gazetteer)
 
     # Validated ONCE, not per listing: the entry set is constant for the whole run, and a
     # contradictory contract must refuse before a single call is billed.
@@ -1192,7 +1547,8 @@ def run(
                     continue
                 assert llm is not None
                 try:
-                    answer, cost = llm.answer(blocks)
+                    answer, cost = llm.answer(
+                        blocks, CallHints(lat=row.lat, lon=row.lon, psc=psc))
                 except Exception as exc:  # noqa: BLE001 - one listing must not kill the run
                     stats.errors += 1
                     consecutive_errors += 1
@@ -1273,6 +1629,9 @@ def run(
         "prompt_version": PROMPT_VERSION, "batch_id": batch_id,
         "reached_end": reached_end, "stopped_early": stopped_early,
         "cursor_after_id": after_id, **stats.as_dict(),
+        # Which rung answered the town, per listing: list / national retry / abstained /
+        # skipped for want of any anchor. The caller's own count, not the DB's.
+        "caller": dict(getattr(llm, "stats", None) or {}),
     }
 
 
