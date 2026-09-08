@@ -79,7 +79,18 @@ jobs:
           # Install server + PostGIS + pgvector in ONE apt transaction so the
           # binary and every contrib .so land at the same (newest) 17.x minor —
           # a partial upgrade is what triggers "undefined symbol" on load.
-          RUN apt-get update \
+          # Check-Valid-Until=false: the base image is Debian BULLSEYE, and
+          # bullseye-security's Release file has now expired — apt refuses the
+          # whole repo and `apt-get update` exits 100, which took every
+          # migration-touching PR red on 2026-09-08 with nothing wrong in the
+          # diff. An expired Release file does not self-heal: the suite has
+          # simply stopped being republished. Ignoring the date is safe HERE
+          # specifically — this container lives for the minutes it takes to
+          # replay migrations against an empty database, serves no traffic and
+          # holds no data — and it is the narrow fix. The real one is a
+          # bookworm-based postgis tag, which also moves the PostGIS minor and
+          # so belongs in its own change, not in a CI unblock.
+          RUN apt-get -o Acquire::Check-Valid-Until=false update \
             && apt-get install -y --no-install-recommends \
                  postgresql-17 postgresql-17-postgis-3 postgresql-17-pgvector \
             && rm -rf /var/lib/apt/lists/*
