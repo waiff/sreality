@@ -1205,6 +1205,10 @@ export interface TrainingSetHead {
   negative: number;
   negative_reserve: number;
   excluded: number;
+  /* The operator's own "I have been through this one" marker
+   * (tag_taxonomy.ready_for_training, migration 443). Nothing reads it but
+   * them — it is bookkeeping across a review that spans days, not a gate. */
+  ready_for_training: boolean;
 }
 
 export interface TrainingSetRow {

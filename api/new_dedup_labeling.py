@@ -866,10 +866,13 @@ class ExamAnswerIn(BaseModel):
 def _routing_tags(conn: Any) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, label FROM tag_taxonomy "
+            "SELECT id, label, ready_for_training FROM tag_taxonomy "
             "WHERE routing_categories IS NOT NULL AND active ORDER BY id"
         )
-        return [{"id": int(r[0]), "label": r[1]} for r in cur.fetchall()]
+        # ready_for_training (migration 443) is the operator's own bookkeeping:
+        # "I have been through this head's set". Nothing reads it but them.
+        return [{"id": int(r[0]), "label": r[1], "ready_for_training": bool(r[2])}
+                for r in cur.fetchall()]
 
 
 def _exam_tag_set(

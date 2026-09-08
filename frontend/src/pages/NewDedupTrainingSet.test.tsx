@@ -15,9 +15,9 @@ vi.mock('@/lib/imageUrl', () => ({ imageSrc: () => 'blob:photo' }));
 
 const HEADS = [
   { id: 42, label: 'podklad - katastrální mapa', positive: 300, positive_reserve: 536,
-    negative: 1000, negative_reserve: 9009, excluded: 2 },
+    negative: 1000, negative_reserve: 9009, excluded: 2, ready_for_training: false },
   { id: 2, label: 'exterier - domovní vchod', positive: 173, positive_reserve: 0,
-    negative: 1000, negative_reserve: 9153, excluded: 218 },
+    negative: 1000, negative_reserve: 9153, excluded: 218, ready_for_training: true },
 ];
 
 const ROWS = [
@@ -113,6 +113,51 @@ describe('<NewDedupTrainingSet> four trays over stored membership', () => {
     expect(viewer).toHaveAttribute('aria-modal', 'true');
     await user.click(screen.getByRole('button', { name: /close/i }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  /* A marker for the operator alone: "I have been through this head". It
+   * writes one boolean and nothing reads it — no gate, no training effect. */
+  describe('ready / not ready', () => {
+    it('toggles the head, and writes only that one flag', async () => {
+      const user = userEvent.setup();
+      /* The write sticks server-side, so the reconciling refetch agrees with
+       * the optimistic patch rather than papering over a wrong one. */
+      let ready = false;
+      vi.mocked(api.listTrainingSetHeads).mockImplementation(async () => ({
+        data: [{ ...HEADS[0], ready_for_training: ready }, HEADS[1]] as never,
+      }));
+      vi.mocked(api.setNewDedupTagFlags).mockImplementation(async (_id, flags) => {
+        ready = flags.ready_for_training ?? ready;
+        return { data: {} } as never;
+      });
+      renderPage();
+      const toggle = await screen.findByTestId('ready-toggle');
+      expect(toggle).toHaveTextContent('Not ready');
+      expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+      await user.click(toggle);
+      expect(api.setNewDedupTagFlags).toHaveBeenCalledWith(42, { ready_for_training: true });
+      // Only that field is sent: priority is the other flag on the same
+      // endpoint and toggling one must never clobber the other.
+      expect(vi.mocked(api.setNewDedupTagFlags).mock.calls[0][1]).toEqual({ ready_for_training: true });
+      await waitFor(() => expect(screen.getByTestId('ready-toggle')).toHaveTextContent('Ready'));
+    });
+
+    it('puts the toggle back when the write fails', async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.setNewDedupTagFlags).mockRejectedValue(new Error('nope'));
+      renderPage();
+      const toggle = await screen.findByTestId('ready-toggle');
+      await user.click(toggle);
+      await waitFor(() => expect(screen.getByTestId('ready-toggle')).toHaveTextContent('Not ready'));
+    });
+
+    it('marks a ready head in the picker so the list itself shows progress', async () => {
+      renderPage();
+      await screen.findByTestId('ready-toggle');
+      expect(screen.getByRole('option', { name: /exterier - domovní vchod/ })).toHaveTextContent('✓');
+      expect(screen.getByRole('option', { name: /katastrální mapa/ })).not.toHaveTextContent('✓');
+    });
   });
 
   /* Migration 486: membership is a fact about a LABEL, not about a positive.
