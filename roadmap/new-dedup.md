@@ -346,11 +346,18 @@ W1 (shared prerequisites + labeling program):
       note left for Wave 5, which should have its job write results to Postgres/R2 instead of
       relying on either) — not a blocker for W1's actual goal, which was proving the launch→
       bill→terminate pipeline itself works.
-- [ ] **DINOv3 readiness build (2026-09-05, PROGRAM.md ledger (f)):** vector table
-      (migration 480, #1296), bake-off harness (#1300), production embedding job (#1298), and
-      the per-tag heads trainer (#1297) — four independent draft PRs, all CI green, built and
-      tested but not run against real data (training set still unfinalized; no money spent, no
-      gated weights downloaded). See PROGRAM.md for the full breakdown.
+- [x] **DINOv3 readiness build (2026-09-05, PROGRAM.md ledger (f); closed out 2026-09-08 (c)):**
+      vector table (migration 480, #1296 — **applied live 2026-09-08**), bake-off harness (#1300),
+      production embedding job (#1298), and the per-tag heads trainer (#1297) — all merged
+      2026-09-06. Licence accepted by the operator on Hugging Face (2026-09-05), the checkpoint
+      revision pinned, the manifest lane dry-run proven against live data. Nothing has embedded
+      or trained yet: the bake-off pod run (~$2, the operator's call) still has to choose
+      resolution/preprocessing/dtype, and training waits on the training set (one category
+      still open).
+- [ ] **NEXT — run the bake-off** (manifest lane with `dry_run=false`, then the pod-side
+      harness by hand with `HF_TOKEN`), read ENCODER-DECISION.md §5.4's seven readouts with the
+      operator, fill the three remaining nulls in `data/dinov3_config.json`, then a small-limit
+      embedding pass before any corpus pass.
 
 Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
 

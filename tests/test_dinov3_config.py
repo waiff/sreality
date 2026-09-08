@@ -13,6 +13,7 @@ Offline: no DB, no HF hub, no torch.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -44,14 +45,19 @@ def _write(tmp_path, config: dict):
 
 
 def test_shipped_config_locks_the_model_and_leaves_the_measured_facts_null():
-    # The operator's 2026-09-05 ruling locked the model; revision, resolution,
-    # preprocessing and dtype are gated on the bake-off (§3.2) and must NOT be
-    # filled in with plausible-looking guesses.
+    # The operator's 2026-09-05 ruling locked the model. The revision was pinned on
+    # 2026-09-08, after the operator's Hugging Face licence acceptance, to the sha the
+    # public model-metadata endpoint reports — a real commit, not a guess. Resolution,
+    # preprocessing and dtype are gated on the bake-off (§3.2) and must NOT be filled
+    # in with plausible-looking guesses.
     config = load_dinov3_config()
     assert config["model"] == "facebook/dinov3-vitb16-pretrain-lvd1689m"
     assert config["library"] == "transformers"
     assert config["pooling"] == "cls"
-    for gated in ("revision", "resolution", "preprocessing", "dtype"):
+    assert re.fullmatch(r"[0-9a-f]{40}", config["revision"]), (
+        "revision must be a full HF commit sha, never a branch name like 'main'"
+    )
+    for gated in ("resolution", "preprocessing", "dtype"):
         assert config[gated] is None, f"{gated} was filled in without the bake-off"
 
 
