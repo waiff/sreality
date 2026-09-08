@@ -15,9 +15,9 @@ vi.mock('@/lib/imageUrl', () => ({ imageSrc: () => 'blob:photo' }));
 
 const HEADS = [
   { id: 42, label: 'podklad - katastrální mapa', positive: 300, positive_reserve: 536,
-    negative: 1000, negative_reserve: 9009, excluded: 2, ready_for_training: false },
+    negative: 1000, negative_reserve: 9009, excluded: 2, review_state: 'not_ready' },
   { id: 2, label: 'exterier - domovní vchod', positive: 173, positive_reserve: 0,
-    negative: 1000, negative_reserve: 9153, excluded: 218, ready_for_training: true },
+    negative: 1000, negative_reserve: 9153, excluded: 218, review_state: 'ready' },
 ];
 
 const ROWS = [
@@ -115,48 +115,55 @@ describe('<NewDedupTrainingSet> four trays over stored membership', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
-  /* A marker for the operator alone: "I have been through this head". It
-   * writes one boolean and nothing reads it — no gate, no training effect. */
-  describe('ready / not ready', () => {
-    it('toggles the head, and writes only that one flag', async () => {
+  /* Where the operator got to. Three-valued on purpose: "skipped" is a decision
+   * and must not read as "nobody has said" (migration 487). */
+  describe('review state', () => {
+    it('offers all three, marks the current one, and writes only that field', async () => {
       const user = userEvent.setup();
-      /* The write sticks server-side, so the reconciling refetch agrees with
-       * the optimistic patch rather than papering over a wrong one. */
-      let ready = false;
+      let state = 'not_ready';
       vi.mocked(api.listTrainingSetHeads).mockImplementation(async () => ({
-        data: [{ ...HEADS[0], ready_for_training: ready }, HEADS[1]] as never,
+        data: [{ ...HEADS[0], review_state: state }, HEADS[1]] as never,
       }));
       vi.mocked(api.setNewDedupTagFlags).mockImplementation(async (_id, flags) => {
-        ready = flags.ready_for_training ?? ready;
+        state = flags.review_state ?? state;
         return { data: {} } as never;
       });
       renderPage();
-      const toggle = await screen.findByTestId('ready-toggle');
-      expect(toggle).toHaveTextContent('Not ready');
-      expect(toggle).toHaveAttribute('aria-pressed', 'false');
+      const group = await screen.findByRole('radiogroup', { name: 'review state' });
+      expect(within(group).getAllByRole('radio')).toHaveLength(3);
+      expect(screen.getByTestId('review-not_ready')).toHaveAttribute('aria-checked', 'true');
 
-      await user.click(toggle);
-      expect(api.setNewDedupTagFlags).toHaveBeenCalledWith(42, { ready_for_training: true });
-      // Only that field is sent: priority is the other flag on the same
-      // endpoint and toggling one must never clobber the other.
-      expect(vi.mocked(api.setNewDedupTagFlags).mock.calls[0][1]).toEqual({ ready_for_training: true });
-      await waitFor(() => expect(screen.getByTestId('ready-toggle')).toHaveTextContent('Ready'));
+      await user.click(screen.getByTestId('review-skipped'));
+      // Only review_state travels: priority is another flag on the same
+      // endpoint and setting one must never clobber the other.
+      expect(vi.mocked(api.setNewDedupTagFlags).mock.calls[0][1]).toEqual({ review_state: 'skipped' });
+      await waitFor(() =>
+        expect(screen.getByTestId('review-skipped')).toHaveAttribute('aria-checked', 'true'));
     });
 
-    it('puts the toggle back when the write fails', async () => {
+    it('puts the previous state back when the write fails — not a default', async () => {
       const user = userEvent.setup();
+      vi.mocked(api.listTrainingSetHeads).mockResolvedValue({
+        data: [{ ...HEADS[0], review_state: 'skipped' }, HEADS[1]] as never,
+      });
       vi.mocked(api.setNewDedupTagFlags).mockRejectedValue(new Error('nope'));
       renderPage();
-      const toggle = await screen.findByTestId('ready-toggle');
-      await user.click(toggle);
-      await waitFor(() => expect(screen.getByTestId('ready-toggle')).toHaveTextContent('Not ready'));
+      await screen.findByTestId('review-ready');
+      await user.click(screen.getByTestId('review-ready'));
+      // Rolls back to SKIPPED, the value it had — an error must not quietly
+      // reset a deliberate decision to the default.
+      await waitFor(() =>
+        expect(screen.getByTestId('review-skipped')).toHaveAttribute('aria-checked', 'true'));
     });
 
-    it('marks a ready head in the picker so the list itself shows progress', async () => {
+    it('marks ready and skipped heads differently in the picker', async () => {
+      vi.mocked(api.listTrainingSetHeads).mockResolvedValue({
+        data: [{ ...HEADS[0], review_state: 'skipped' }, HEADS[1]] as never,
+      });
       renderPage();
-      await screen.findByTestId('ready-toggle');
-      expect(screen.getByRole('option', { name: /exterier - domovní vchod/ })).toHaveTextContent('✓');
-      expect(screen.getByRole('option', { name: /katastrální mapa/ })).not.toHaveTextContent('✓');
+      await screen.findByTestId('review-skipped');
+      expect(screen.getByRole('option', { name: /katastrální mapa/ })).toHaveTextContent('–');
+      expect(screen.getByRole('option', { name: /domovní vchod/ })).toHaveTextContent('✓');
     });
   });
 

@@ -11,6 +11,7 @@ import {
   listTrainingSetHeads,
   locateTrainingImage,
   setNewDedupTagFlags,
+  type ReviewState,
   setNewDedupTagAnnotation,
   type TagState,
   type TrainingSetRow,
@@ -100,6 +101,30 @@ const trayQuery = (t: Tray) => {
 /* Membership is a question everywhere except "left out", which trains nothing
  * whichever way the flag points. */
 const MEMBERSHIP_TRAYS: readonly Tray[] = ['positive', 'positive_reserve', 'negative', 'negative_reserve'];
+
+/* Three states, and "skipped" is the reason this is not a toggle: setting a head
+ * aside on purpose is a decision, and must not read as "nobody has said".
+ *
+ * The ORDER lives here because it is presentational, and the two Records below
+ * are typed on the union — so adding a state fails the build here rather than
+ * rendering a nameless button. It also must NOT come from lib/api: this page's
+ * tests automock that module, which turns any runtime constant it exports into
+ * undefined and renders the group empty. */
+const REVIEW_ORDER: readonly ReviewState[] = ['not_ready', 'ready', 'skipped'];
+const REVIEW_LABEL: Record<ReviewState, string> = {
+  not_ready: 'Not ready',
+  ready: '✓ Ready',
+  skipped: 'Skip for now',
+};
+const REVIEW_ON: Record<ReviewState, string> = {
+  not_ready: 'border-[var(--color-ink-2)]',
+  ready: 'border-[var(--color-sage)] bg-[var(--color-sage)]/10',
+  skipped: 'border-[var(--color-copper)] bg-[var(--color-copper)]/10',
+};
+/* The picker carries the same state, so the list itself is the progress view. */
+const REVIEW_MARK: Record<ReviewState, string> = {
+  not_ready: '', ready: '✓ ', skipped: '– ',
+};
 
 const PAGE_SIZES = [50, 100, 500, 2000, 10000] as const;
 type PageSize = (typeof PAGE_SIZES)[number];
@@ -333,24 +358,24 @@ export default function NewDedupTrainingSet() {
     onError: (e: Error) => pushToast('err', e.message),
   });
 
-  /* READY / NOT READY. The operator's own marker that they have been through
-   * this head, so a review spread over days does not lose its place. It writes
-   * one boolean (tag_taxonomy.ready_for_training, migration 443) and nothing
-   * reads it — no gate, no training effect, no other column touched. */
-  const readyMut = useMutation({
-    mutationFn: (ready: boolean) =>
-      setNewDedupTagFlags(activeId as number, { ready_for_training: ready }),
-    onMutate: (ready) => {
-      qc.setQueryData(['training-set-heads'], (old: typeof headsQ.data) => old && ({
-        ...old,
-        data: old.data.map((h) => h.id === activeId ? { ...h, ready_for_training: ready } : h),
-      }));
+  /* WHERE THE OPERATOR GOT TO. Three-valued, because "set aside on purpose" is
+   * a decision and must not read as "nobody has said" (migration 487). It
+   * writes one column and nothing reads it — no gate, no training effect. */
+  const patchHeadState = (next: ReviewState) =>
+    qc.setQueryData(['training-set-heads'], (old: typeof headsQ.data) => old && ({
+      ...old,
+      data: old.data.map((h) => h.id === activeId ? { ...h, review_state: next } : h),
+    }));
+  const reviewMut = useMutation({
+    mutationFn: (state: ReviewState) =>
+      setNewDedupTagFlags(activeId as number, { review_state: state }),
+    onMutate: (state) => {
+      const was = activeHead?.review_state ?? 'not_ready';
+      patchHeadState(state);
+      return { was };
     },
-    onError: (e: Error, ready) => {
-      qc.setQueryData(['training-set-heads'], (old: typeof headsQ.data) => old && ({
-        ...old,
-        data: old.data.map((h) => h.id === activeId ? { ...h, ready_for_training: !ready } : h),
-      }));
+    onError: (e: Error, _state, ctx) => {
+      patchHeadState(ctx?.was ?? 'not_ready');
       pushToast('err', e.message);
     },
     onSettled: () => qc.invalidateQueries({ queryKey: ['training-set-heads'] }),
@@ -553,28 +578,32 @@ export default function NewDedupTrainingSet() {
             className="px-2 py-1 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-transparent text-[var(--color-ink)]">
             {ordered.map((h) => (
               <option key={h.id} value={h.id}>
-                {h.ready_for_training ? '✓ ' : ''}{h.label} · {h.positive}
+                {REVIEW_MARK[h.review_state]}{h.label} · {h.positive}
               </option>
             ))}
           </select>
 
           {activeHead && (
-            <button
-              type="button"
-              data-testid="ready-toggle"
-              aria-pressed={activeHead.ready_for_training}
-              disabled={readyMut.isPending}
-              title={activeHead.ready_for_training
-                ? 'You have marked this head reviewed. Click to put it back to not ready.'
-                : 'Mark this head as one you have been through. Nothing else changes — it is only so you can see where you got to.'}
-              onClick={() => readyMut.mutate(!activeHead.ready_for_training)}
-              className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
-                activeHead.ready_for_training
-                  ? 'border-[var(--color-sage)] bg-[var(--color-sage)]/10 text-[var(--color-ink)]'
-                  : 'border-[var(--color-rule)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]'}`}
-            >
-              {activeHead.ready_for_training ? '✓ Ready' : 'Not ready'}
-            </button>
+            <span className="flex gap-1" role="radiogroup" aria-label="review state"
+                  title="Where you got to on this head. It stores nothing but this — no gate, no training effect.">
+              {REVIEW_ORDER.map((st) => (
+                <button
+                  key={st}
+                  type="button"
+                  role="radio"
+                  data-testid={`review-${st}`}
+                  aria-checked={activeHead.review_state === st}
+                  disabled={reviewMut.isPending}
+                  onClick={() => reviewMut.mutate(st)}
+                  className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
+                    activeHead.review_state === st
+                      ? `text-[var(--color-ink)] ${REVIEW_ON[st]}`
+                      : 'border-[var(--color-rule)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]'}`}
+                >
+                  {REVIEW_LABEL[st]}
+                </button>
+              ))}
+            </span>
           )}
 
           <span className="flex gap-1" role="group" aria-label="tray">
@@ -678,12 +707,13 @@ export default function NewDedupTrainingSet() {
               and <b>Reserve</b>: every negative trains, and a left-out trains nothing, so there is nothing to admit
               on those two trays. Take a negative out by re-marking it.
             </p>
-            <p className="mt-2 font-medium text-[var(--color-ink)]">Ready / not ready</p>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">Where you got to</p>
             <p className="mt-0.5">
-              A marker for you alone, next to the head picker. It stores one true/false and nothing
-              reads it — it does not gate training, change a count or touch a photo. Its only job is
-              that a review spread over several days does not lose its place; a head you have marked
-              ready shows a ✓ in the dropdown.
+              A marker for you alone, next to the head picker: <b>Not ready</b>, <b>✓ Ready</b>, or
+              <b> Skip for now</b> for a head you are deliberately setting aside. It stores nothing
+              but that — it does not gate training, change a count or touch a photo. The dropdown
+              carries the same mark (✓ ready, – skipped), so the list of heads is itself the
+              progress view.
             </p>
             <p className="mt-2 font-medium text-[var(--color-ink)]">Reviewing the negatives</p>
             <p className="mt-0.5">

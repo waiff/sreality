@@ -73,10 +73,13 @@ def test_rename_tag_leaves_every_dependent_row_untouched(conn: _FakeConn) -> Non
     renamed = ta.rename_tag(conn, tag_id=tag["id"], new_label="new-name")
 
     assert renamed["label"] == "new-name"
+    # ONE statement, against tag_taxonomy only — that is the property here. The
+    # RETURNING list comes from _TAG_COLUMNS rather than being restated, so
+    # adding a column (review_state, 487) does not fail a test about renaming.
     assert [sql for sql, _ in conn.executed] == [
         " ".join(
-            "UPDATE tag_taxonomy SET label = %s WHERE id = %s "
-            "RETURNING id, label, family, active, priority, ready_for_training, created_at, routing_categories".split()
+            f"UPDATE tag_taxonomy SET label = %s WHERE id = %s "
+            f"RETURNING {ta._TAG_COLUMNS}".split()
         )
     ]
     assert conn.states_for(tag["id"]) == {1: "positive"}

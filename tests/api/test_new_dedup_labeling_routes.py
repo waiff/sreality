@@ -270,7 +270,7 @@ def test_patch_tag_flags_priority_only(client, calls):
     res = client.patch("/new-dedup/labeling/taxonomy/1/flags", json={"priority": True})
     assert res.status_code == 200
     assert res.json()["data"]["priority"] is True
-    assert calls["set_tag_flags"] == {"tag_id": 1, "priority": True, "ready_for_training": None}
+    assert calls["set_tag_flags"] == {"tag_id": 1, "priority": True, "ready_for_training": None, "review_state": None}
 
 
 def test_patch_tag_flags_both(client, calls):
@@ -279,7 +279,7 @@ def test_patch_tag_flags_both(client, calls):
         json={"priority": True, "ready_for_training": True},
     )
     assert res.status_code == 200
-    assert calls["set_tag_flags"] == {"tag_id": 1, "priority": True, "ready_for_training": True}
+    assert calls["set_tag_flags"] == {"tag_id": 1, "priority": True, "ready_for_training": True, "review_state": None}
 
 
 def test_patch_tag_flags_unknown_404s(client, monkeypatch):
