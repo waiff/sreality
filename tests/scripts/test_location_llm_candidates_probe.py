@@ -32,9 +32,16 @@ NAMES = ["Aš", "Cheb", "Kolín", "Karlovy Vary", "Mladá Boleslav", "Praha", "P
     ("as", "as", True), ("asi", "as", False),   # short words match exactly
     ("nad", "nad", True), ("nade", "nad", False),
     ("ko", "kolin", False),         # a token shorter than the required prefix
+    ("pace", "paka", True),         # v Nové Pace — k/c alternation inside the stem
+    ("nove", "nova", True),
+    ("pate", "paka", False),        # t is not an alternation of k
 ])
 def test_word_matching_is_declension_tolerant_but_bounded(token, word, expected):
     assert _word_matches(token, word) is expected
+
+
+def test_text_matching_survives_stem_alternation():
+    assert text_match_candidates("prodej bytu v Nové Pace", NAMES + ["Nová Paka"]) == ["Nová Paka"]
 
 
 def test_text_matching_finds_declined_and_multi_word_names_in_order():

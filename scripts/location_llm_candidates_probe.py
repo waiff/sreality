@@ -84,7 +84,9 @@ ARMS = ("national", "psc", "union")
 # second half) is built at `--radius-km`. The query reaches to MAX_DISTANCE_KM — a reference
 # farther than that from the pin reads as "beyond reach", which is the finding.
 DISTANCE_TIERS_KM = (15.0, 25.0, 40.0)
-MAX_DISTANCE_KM = 60.0
+# Equal to the widest tier: every extra kilometre of reach widens the `&&` box that bounds
+# the per-ad geometry scan, and the first run paid 24 s per ad for a 60 km reach.
+MAX_DISTANCE_KM = 40.0
 
 # The bake-off's cohort, plus the pin. Derived from `_SAMPLE_SQL` rather than copied so the
 # two harnesses cannot drift apart on who is in the sample. `listings.geom` is a GEOGRAPHY
@@ -95,48 +97,59 @@ _PROBE_SAMPLE_SQL = _SAMPLE_SQL.replace(
 if _PROBE_SAMPLE_SQL == _SAMPLE_SQL:
     raise RuntimeError("the bake-off sample SQL moved; re-anchor the probe's pin columns")
 
-_NATIONAL_SQL = """
-    SELECT DISTINCT name FROM ruian_admin_units
+_OBEC_UNITS_SQL = """
+    SELECT id, name FROM ruian_admin_units
      WHERE level::text = 'obec' AND valid_to IS NULL
-     ORDER BY name
 """
 
-# `resolve_db._NEAREST_OBEC_BRANCH`'s shape: the `&&` box is the Index Cond (a geography
-# `ST_DWithin` alone reads every boundary row — 6.7 s/point measured there), 60,000 is the
-# deliberate under-estimate of metres per degree so the box contains the circle, and the
-# MIN over the subdivided `pip` pieces (plus the raw polygon as the partially-loaded
-# fallback) is the distance to the polygon — zero when the pin is inside the obec.
+# `resolve_db._NEAREST_OBEC_BRANCH`'s shape: the `&&` box is the Index Cond on the partial
+# `pip` GiST index (a geography `ST_DWithin` alone reads every boundary row — 6.7 s/point
+# measured there), 60,000 is the deliberate under-estimate of metres per degree so the box
+# contains the circle, and the MIN over the subdivided `pip` pieces is the distance to the
+# polygon — zero when the pin is inside the obec. NO JOIN on purpose: with `ruian_admin_units`
+# in the query the planner mis-estimated the geometry side at one row, materialised it, and
+# looped every admin unit over it — 32 million join-filter comparisons, 23.7 s per ad
+# (EXPLAIN ANALYZE, 2026-09-08). The unit → obec name map is fetched once per run instead.
 _PIN_DISTANCES_SQL = """
-    SELECT u.name,
+    SELECT g.unit_id,
            MIN(ST_Distance(g.geom::geography,
                            ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)::geography)) AS d
       FROM ruian_admin_unit_geometries g
-      JOIN ruian_admin_units u ON u.id = g.unit_id
      WHERE g.registry_version_id = %(version)s
-       AND g.purpose IN ('pip', 'authoritative')
-       AND u.level::text = 'obec' AND u.valid_to IS NULL
+       AND g.purpose = 'pip'
        AND g.geom && ST_Expand(ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326),
                                %(reach_m)s / 60000.0)
        AND ST_DWithin(g.geom::geography,
                       ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)::geography,
                       %(reach_m)s)
-     GROUP BY u.name
+     GROUP BY g.unit_id
 """
 
 
 # ------------------------------------------------------------------ candidate sources
 
+# Czech consonant alternations that reach INTO the stem when a name declines — "Nová Paka"
+# → "v Nové Pace", "Praha" → "v Praze" — so the last letter of the compared prefix may swap
+# within a pair. Measured need: the probe's only text-match miss on a named town was Paka/Pace.
+_ALTERNATIONS = frozenset({("k", "c"), ("c", "k"), ("h", "z"), ("z", "h"), ("g", "z"), ("z", "g")})
+
+
 def _word_matches(token: str, word: str) -> bool:
     """Declension-tolerant: a text token matches a name word when they share a prefix at
-    least max(3, len(word) - 2) long and the token is at most two characters longer — so
-    "koline" finds "kolin" and "praze" finds "praha", while "boleslavskou" does not find
-    "boleslav". Words of three characters or fewer must match exactly ("as", "nad", "u")."""
+    least max(3, len(word) - 2) long (its last letter may alternate, see above) and the
+    token is at most two characters longer — so "koline" finds "kolin", "praze" finds
+    "praha" and "pace" finds "paka", while "boleslavskou" does not find "boleslav". Words of
+    three characters or fewer must match exactly ("as", "nad", "u")."""
     if len(word) <= 3:
         return token == word
     if len(token) > len(word) + 2:
         return False
     need = max(3, len(word) - 2)
-    return len(token) >= need and token[:need] == word[:need]
+    if len(token) < need:
+        return False
+    last = need - 1
+    return token[:last] == word[:last] and (
+        token[last] == word[last] or (token[last], word[last]) in _ALTERNATIONS)
 
 
 def text_match_candidates(text: str, names: Iterable[str]) -> list[str]:
@@ -164,20 +177,34 @@ def text_match_candidates(text: str, names: Iterable[str]) -> list[str]:
     return sorted(found)
 
 
-def national_names(conn: Any) -> list[str]:
+def obec_names_by_unit(conn: Any) -> dict[int, str]:
+    """{admin-unit id -> obec name} for every current obec; the national list is its values."""
     with guarded(conn, STATEMENT_TIMEOUT_S) as cur:
-        cur.execute(_NATIONAL_SQL)
-        return [str(r[0]) for r in cur.fetchall()]
+        cur.execute(_OBEC_UNITS_SQL)
+        return {int(r[0]): str(r[1]) for r in cur.fetchall()}
 
 
 def pin_distances(
-    conn: Any, version_id: int, lat: float, lon: float, reach_m: float,
+    conn: Any, version_id: int, lat: float, lon: float, reach_m: float, *,
+    obec_names: dict[int, str],
 ) -> dict[str, float]:
-    """{normalised obec name -> metres from the pin to the obec polygon}, within reach."""
+    """{normalised obec name -> metres from the pin to the obec polygon}, within reach.
+
+    Pieces of a non-obec unit (a kraj or okres also carries pip rows) are dropped by the
+    map lookup; homonymous obce collapse to the nearer one under the shared name.
+    """
     with guarded(conn, STATEMENT_TIMEOUT_S) as cur:
         cur.execute(_PIN_DISTANCES_SQL, {
             "version": version_id, "lat": lat, "lon": lon, "reach_m": reach_m})
-        return {normalize_name(str(r[0])): float(r[1]) for r in cur.fetchall()}
+        rows = cur.fetchall()
+    out: dict[str, float] = {}
+    for unit_id, metres in rows:
+        name = obec_names.get(int(unit_id))
+        if name is None:
+            continue
+        key = normalize_name(name)
+        out[key] = min(out.get(key, float("inf")), float(metres))
+    return out
 
 
 # ------------------------------------------------------------------ per-ad rows
@@ -429,7 +456,8 @@ def run(
         raise IntakeRefused(f"no active portal_contracts row for {SOURCE}")
     blocks_css = block_css(conn)
     version_id, version_label = resolve_db.current_registry_version(conn)
-    names = national_names(conn)
+    obec_names = obec_names_by_unit(conn)
+    names = sorted(set(obec_names.values()))
     if not names:
         raise IntakeRefused("the RÚIAN mirror has no current obec rows")
     store = payloads.open_store()
@@ -471,7 +499,8 @@ def run(
             f"{blocks.get('title', '')}\n{blocks.get('description', '')}", names)
         distances = None
         if lat is not None and lon is not None:
-            distances = pin_distances(conn, version_id, float(lat), float(lon), reach_m)
+            distances = pin_distances(conn, version_id, float(lat), float(lon), reach_m,
+                                      obec_names=obec_names)
         pin_list = sorted(
             name for name in names
             if distances is not None and distances.get(normalize_name(name), 1e12) <= radius_m)
