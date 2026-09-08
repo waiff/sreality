@@ -60,7 +60,7 @@ on:
         default: false
         type: boolean
       mode:
-        description: "free = the W2-10 extractor; constrained = pick ONE obec from the PSČ-okres list; both = the two arms on the same listings"
+        description: "free = the W2-10 extractor; constrained = pick ONE obec from the PSČ-okres list; both = the two arms on the same listings; candidates = the candidate-list probe (national / PSČ / text ∪ pin-radius lists, per-ad rows)"
         required: false
         default: "free"
         type: choice
@@ -68,6 +68,7 @@ on:
           - free
           - constrained
           - both
+          - candidates
 
 concurrency:
   group: location-llm-bakeoff
@@ -116,8 +117,13 @@ jobs:
           if [ -n "$MAX_USD" ]; then ARGS="$ARGS --max-usd $MAX_USD"; fi
           if [ -n "$MAX_SECONDS" ]; then ARGS="$ARGS --max-seconds $MAX_SECONDS"; fi
           if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
-          echo "python -m scripts.location_llm_bakeoff $ARGS"
-          python -m scripts.location_llm_bakeoff $ARGS
+          # `candidates` is the probe (scripts/location_llm_candidates_probe.py): same cohort,
+          # same prompt, per-ad rows — it measures which candidate-list SOURCE holds the town,
+          # not which model. Same arguments, same artifact names, so the steps below apply.
+          SCRIPT=scripts.location_llm_bakeoff
+          if [ "$MODE" = "candidates" ]; then SCRIPT=scripts.location_llm_candidates_probe; fi
+          echo "python -m $SCRIPT $ARGS"
+          python -m $SCRIPT $ARGS
 
       - name: Publish the summary
         if: always()
