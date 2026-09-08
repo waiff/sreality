@@ -7,7 +7,7 @@ not raw HTML. The shared retry/backoff + adaptive throttle (`RateLimiter` +
 `penalize()` on 429/403) live in `scraper.portal_base.BasePortalClient`; this
 client adds only the JSON `Accept`, the Origin/Referer the API requires, the two
 GraphQL queries (search index + single-advert detail), and the
-`advert == null -> ListingGoneError` delisting signal.
+`advert.active == false` (or a null advert) -> `ListingGoneError` delisting signal.
 
 `includeImports=false` scopes the walk to bezrealitky's OWN (private-seller)
 inventory — the unique value-add — and leaves any overlap with imported/other-
@@ -145,13 +145,22 @@ class BezrealitkyClient(BasePortalClient):
         return list(result.get("list") or []), int(result.get("totalCount") or 0)
 
     def get_detail(self, advert_id: str) -> dict[str, Any]:
-        """Full advert object. Raises `ListingGoneError` only on the POSITIVE
-        signal -- the API answered the query and said the advert is null
-        (delisted / unknown id). A response with no `advert` key at all (an
-        empty `data`, an edge stub, a partial outage) is an ERROR, not gone:
-        since 2026-09-07 every unseen active row is checked this way (rule #3),
-        so reading "no answer" as "gone" would delist a whole nomination batch
-        during one bad minute."""
+        """Full advert object. Raises `ListingGoneError` only on a POSITIVE
+        signal: the API answered and said the advert is null, or returned it
+        with `active: false`. The second is the one the portal actually sends
+        (verified against the live API 2026-09-08): a withdrawn advert comes
+        back as a full record with active=false -- timeDeactivated set or not
+        -- and an UNKNOWN id as a stub with active=false and an empty title.
+        The null advert this used to wait for never arrives, which is why the
+        portal closed 115-159 listings a day until the presence-check cutover
+        and zero after it: 323 checks in a row read active=false as alive.
+
+        Everything else is an ERROR, not gone: no `advert` key at all (an empty
+        `data`, an edge stub, a partial outage) and an advert whose `active` is
+        missing or null (the shape a field takes when the API denies access to
+        it). Since 2026-09-07 every unseen active row is checked this way
+        (rule #3), so reading "no answer" as "gone" would delist a whole
+        nomination batch during one bad minute."""
         data = self._graphql(_DETAIL_QUERY, {"id": str(advert_id)})
         if "advert" not in data:
             raise RuntimeError(
@@ -160,4 +169,12 @@ class BezrealitkyClient(BasePortalClient):
         advert = data["advert"]
         if advert is None:
             raise ListingGoneError(detail_url(str(advert_id)), None)
+        active = advert.get("active")
+        if active is False:
+            raise ListingGoneError(detail_url(str(advert.get("uri") or advert_id)), None)
+        if active is not True:
+            raise RuntimeError(
+                f"bezrealitky detail {advert_id}: advert carried no usable "
+                f"'active' flag ({active!r})"
+            )
         return advert
