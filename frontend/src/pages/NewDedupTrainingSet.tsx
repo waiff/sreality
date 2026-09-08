@@ -10,6 +10,7 @@ import {
   listTrainingSet,
   listTrainingSetHeads,
   locateTrainingImage,
+  setNewDedupTagFlags,
   setNewDedupTagAnnotation,
   type TagState,
   type TrainingSetRow,
@@ -332,6 +333,29 @@ export default function NewDedupTrainingSet() {
     onError: (e: Error) => pushToast('err', e.message),
   });
 
+  /* READY / NOT READY. The operator's own marker that they have been through
+   * this head, so a review spread over days does not lose its place. It writes
+   * one boolean (tag_taxonomy.ready_for_training, migration 443) and nothing
+   * reads it — no gate, no training effect, no other column touched. */
+  const readyMut = useMutation({
+    mutationFn: (ready: boolean) =>
+      setNewDedupTagFlags(activeId as number, { ready_for_training: ready }),
+    onMutate: (ready) => {
+      qc.setQueryData(['training-set-heads'], (old: typeof headsQ.data) => old && ({
+        ...old,
+        data: old.data.map((h) => h.id === activeId ? { ...h, ready_for_training: ready } : h),
+      }));
+    },
+    onError: (e: Error, ready) => {
+      qc.setQueryData(['training-set-heads'], (old: typeof headsQ.data) => old && ({
+        ...old,
+        data: old.data.map((h) => h.id === activeId ? { ...h, ready_for_training: !ready } : h),
+      }));
+      pushToast('err', e.message);
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['training-set-heads'] }),
+  });
+
   const patchRowNote = (imageId: number, note: { id: number; note: string } | null) =>
     patchRow(imageId, (r) => ({ ...r, note_id: note?.id ?? null, note: note?.note ?? null }));
   const noteMut = useMutation({
@@ -527,8 +551,31 @@ export default function NewDedupTrainingSet() {
           <label htmlFor={headSelectId} className="text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)]">head</label>
           <select id={headSelectId} value={activeId ?? ''} onChange={(e) => patch({ tag: e.target.value, offset: null })}
             className="px-2 py-1 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-transparent text-[var(--color-ink)]">
-            {ordered.map((h) => <option key={h.id} value={h.id}>{h.label} · {h.positive}</option>)}
+            {ordered.map((h) => (
+              <option key={h.id} value={h.id}>
+                {h.ready_for_training ? '✓ ' : ''}{h.label} · {h.positive}
+              </option>
+            ))}
           </select>
+
+          {activeHead && (
+            <button
+              type="button"
+              data-testid="ready-toggle"
+              aria-pressed={activeHead.ready_for_training}
+              disabled={readyMut.isPending}
+              title={activeHead.ready_for_training
+                ? 'You have marked this head reviewed. Click to put it back to not ready.'
+                : 'Mark this head as one you have been through. Nothing else changes — it is only so you can see where you got to.'}
+              onClick={() => readyMut.mutate(!activeHead.ready_for_training)}
+              className={`px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border ${
+                activeHead.ready_for_training
+                  ? 'border-[var(--color-sage)] bg-[var(--color-sage)]/10 text-[var(--color-ink)]'
+                  : 'border-[var(--color-rule)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]'}`}
+            >
+              {activeHead.ready_for_training ? '✓ Ready' : 'Not ready'}
+            </button>
+          )}
 
           <span className="flex gap-1" role="group" aria-label="tray">
             {TRAYS.map((t) => (
@@ -630,6 +677,13 @@ export default function NewDedupTrainingSet() {
               because a mark you set is a decision you have made. These appear only on <b>Training &middot; positive</b>
               and <b>Reserve</b>: every negative trains, and a left-out trains nothing, so there is nothing to admit
               on those two trays. Take a negative out by re-marking it.
+            </p>
+            <p className="mt-2 font-medium text-[var(--color-ink)]">Ready / not ready</p>
+            <p className="mt-0.5">
+              A marker for you alone, next to the head picker. It stores one true/false and nothing
+              reads it — it does not gate training, change a count or touch a photo. Its only job is
+              that a review spread over several days does not lose its place; a head you have marked
+              ready shows a ✓ in the dropdown.
             </p>
             <p className="mt-2 font-medium text-[var(--color-ink)]">Reviewing the negatives</p>
             <p className="mt-0.5">
