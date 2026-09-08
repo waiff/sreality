@@ -441,11 +441,11 @@ export default function NewDedupTrainingSet() {
     if (!r || !canMove || moveMut.isPending) return;
     moveMut.mutate({ imageIds: [r.image_id], into: !r.in_training });
   };
-  /* a / s / d / backspace — the operator's own mapping. Left hand on the marks,
-   * right hand on the arrows. */
+  /* a / s / d / space — the operator's own mapping. Left hand on the marks,
+   * thumb on the move, right hand on the arrows. */
   const zoomShortcuts = {
     ...Object.fromEntries(MARKS.map(({ v, key }) => [key, (i: number) => markAt(i, v)])),
-    backspace: moveAt,
+    space: moveAt,
   };
 
   /* The control bar inside the focus view. Deciding is why the photo is open —
@@ -485,7 +485,7 @@ export default function NewDedupTrainingSet() {
             className="py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-paper)]/25 text-[var(--color-ink-4)] hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10"
           >
             {r.in_training ? '↩ return to reserve' : '→ move to training'}
-            <kbd className="ml-1 opacity-60">⌫</kbd>
+            <kbd className="ml-1 opacity-60">space</kbd>
           </button>
         )}
       </div>
@@ -809,7 +809,7 @@ export default function NewDedupTrainingSet() {
               <li>Click the photo to open it large, in the same viewer the listing pages use. The
                 same marks are under it there, and it stays open after one &mdash; so arrow keys
                 walk the page and you can decide without closing. <b>A</b> applies, <b>S</b> no,
-                <b> D</b> left out, <b>backspace</b> moves it in or out of training. Escape closes.</li>
+                <b> D</b> left out, <b>space</b> moves it in or out of training. Escape closes.</li>
               <li><b>machine</b> / <b>yours</b> says who decided the current mark.</li>
               <li><b>→ move to training</b> / <b>↩ return to reserve</b> is membership, separate from the mark — on the positive and reserve trays only.</li>
               <li><b>old wording</b> means the label was written under a definition you have since changed.</li>

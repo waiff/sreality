@@ -155,18 +155,37 @@ describe('<NewDedupTrainingSet> four trays over stored membership', () => {
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 
-  it('backspace moves membership, and arrow keys still walk the page', async () => {
+  it('space moves membership, and arrow keys still walk the page', async () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByTestId('training-tile-11');
     await user.click(screen.getByTestId('open-11'));
     await screen.findByRole('dialog');
-    await user.keyboard('{Backspace}');
+    await user.keyboard(' ');
     await waitFor(() => expect(api.setTrainingMembership).toHaveBeenCalledWith(42, [11], false));
     // The arrows keep working, and the keystroke follows the photo on show.
     await user.keyboard('{ArrowRight}s');
     await waitFor(() => expect(api.setNewDedupTagAnnotation)
       .toHaveBeenCalledWith(42, 12, 'negative', null));
+  });
+
+  /* The hazard space brings and backspace did not: a focused button activates
+   * on it. After one click on a mark, the next space must move membership and
+   * NOT re-fire that mark. */
+  it('space means one thing even with a mark button focused', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    await user.click(screen.getByTestId('open-11'));
+    await screen.findByRole('dialog');
+    await user.click(screen.getByTestId('zoom-negative'));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId('zoom-negative')).toHaveFocus();
+
+    await user.keyboard(' ');
+    await waitFor(() => expect(api.setTrainingMembership).toHaveBeenCalledTimes(1));
+    // The focused button did NOT also activate.
+    expect(api.setNewDedupTagAnnotation).toHaveBeenCalledTimes(1);
   });
 
   it('a keystroke in a text field is typing, not a decision', async () => {

@@ -52,8 +52,9 @@ interface Props {
    * three clicks. Callers that only display photos pass nothing and the
    * viewer is unchanged. */
   actionsAt?: (index: number) => React.ReactNode;
-  /* Single-key shortcuts for the photo on show, keyed by `e.key` lowercased
-   * ('a', 'backspace'). They live HERE rather than in the calling page so they
+  /* Single-key shortcuts for the photo on show, keyed by `e.key` lowercased —
+   * with the space bar spelled 'space', because ' ' as an object key is too
+   * easy to misread. They live HERE rather than in the calling page so they
    * inherit the one rule the arrow keys already follow: only the frontmost
    * layer answers. A page-level listener would fire under a dialog opened over
    * this one. */
@@ -128,9 +129,14 @@ export default function ImageLightbox({
       const el = e.target as HTMLElement | null;
       if (el && (el.isContentEditable
                  || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName))) return;
-      const run = shortcutsRef.current?.[e.key.toLowerCase()];
+      const run = shortcutsRef.current?.[e.key === ' ' ? 'space' : e.key.toLowerCase()];
       if (run) {
-        // Backspace would otherwise navigate back in some browsers.
+        /* preventDefault is load-bearing for SPACE, not a nicety. A focused
+         * button activates on space, so after one click on a mark the next
+         * space would fire that mark AND this shortcut. Preventing the keydown
+         * suppresses the activation, so the space bar means one thing wherever
+         * focus happens to sit. (It also stops the page scrolling behind, and
+         * backspace navigating back, for any caller still mapping those.) */
         e.preventDefault();
         run(indexRef.current);
       }
