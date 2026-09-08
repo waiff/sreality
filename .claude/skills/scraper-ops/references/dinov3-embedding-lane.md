@@ -12,7 +12,12 @@ Runner → `scripts/dinov3_embed_dispatch.py` → rents a GPU pod through
 extra, and runs `scripts/dinov3_embed_backfill.py`, which streams images out of R2, embeds
 them with `scraper/dinov3_tagger.py`, and writes one L2-normalized 768-d `halfvec` per image.
 
-The runner never installs torch — the model lives in the pod. Credentials
+The runner never installs torch — the model lives in the pod. The dispatcher passes
+`--device cuda` explicitly (a pod always has a card); run by hand, `--device` defaults to
+`cuda` when torch reports a GPU and `cpu` otherwise, and the resolved value is logged as
+`DINOV3 device=…`. Check that line first on a slow pod run: before 2026-09-08 the payload
+moved nothing to CUDA at all, so it would have rented a GPU and computed on the CPU.
+Credentials
 (`SUPABASE_DB_URL`, `R2_*`, `HF_TOKEN`) reach the pod through the RunPod REST body's `env`
 object, never through the start command (argv is visible in the pod record).
 
