@@ -358,6 +358,23 @@ W1 (shared prerequisites + labeling program):
       harness by hand with `HF_TOKEN`), read ENCODER-DECISION.md §5.4's seven readouts with the
       operator, fill the three remaining nulls in `data/dinov3_config.json`, then a small-limit
       embedding pass before any corpus pass.
+- [x] **Tagging bake-off, phase 1 — the durable half (2026-09-08, PROGRAM.md ledger (d)):**
+      ENCODER-DECISION.md §5.2 "Set 1" made runnable. Migration 489 adds the results store in
+      `dedup_sim` (`tag_head_bakeoff_runs` / `_arms` / `_vectors` / `_scores` / `_metrics`; the
+      vector column is an UNMODIFIED `halfvec`, because arms differ in width). `toolkit/tag_heads.py`
+      gained an injectable vector source (the production `image_dinov3_embeddings` reader stays the
+      default) and two positive-only training modes beside the existing `pos_neg` —
+      `pos_only_free_neg` (other heads' positives stand in as free negatives) and
+      `pos_only_centroid` (cosine to the positives' mean, negatives touch only the threshold) —
+      because the operator's "positive training only" admits both readings and the point is to show
+      them side by side. `toolkit/tag_head_bakeoff.py` + `scripts/tag_head_bakeoff.py` run the
+      arm x mode x head cross product on CPU, resumable per cell, grading the sealed exam by the
+      ratified rule (`exam_machine_review.human_verdict`, now extracted so the two graders cannot
+      drift). Read surface: `/new-dedup/tagging-bakeoff/{runs,runs/{id}/metrics,runs/{id}/images,
+      runs/{id}/buckets}`, admin-gated and read-only.
+- [ ] **NEXT — tagging bake-off, phase 2**: the GPU job that fills
+      `dedup_sim.tag_head_bakeoff_vectors` per arm, its workflow, and the comparison page over the
+      four routes above. Nothing has been embedded, trained or scored yet.
 
 Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
 

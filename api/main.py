@@ -65,6 +65,7 @@ from api.routes.broker_review import router as broker_review_router
 from api.routes.outreach import router as outreach_router
 from api.routes.filter_presets import router as filter_presets_router
 from api.routes.images import router as images_router
+from api.new_dedup_bakeoff import router as new_dedup_bakeoff_router
 from api.new_dedup_labeling import router as new_dedup_labeling_router
 from api.routes.location_quality import router as location_quality_router
 from api.routes.new_dedup import router as new_dedup_router
@@ -274,6 +275,11 @@ app.include_router(new_dedup_router)
 # review) — the Labeling page's backend, admin-gated. See
 # toolkit/dedup_sim_labeling.py and docs/design/new-dedup/PROGRAM.md (Wave 1).
 app.include_router(new_dedup_labeling_router)
+# /new-dedup/tagging-bakeoff/* (ENCODER-DECISION.md 5.2 "Set 1") — read-only,
+# admin-gated: which encoder arm and which training mode makes each per-tag head
+# best, with the photos behind every number. Writes come from the CPU runner
+# (scripts/tag_head_bakeoff.py), never from a browser.
+app.include_router(new_dedup_bakeoff_router)
 # /location/* (location-quality dashboard, frozen labelled samples, operator
 # corrections) — the FIRST consumer of the location serving projection
 # (location program W1v), admin-gated (require_admin). Reads via

@@ -314,6 +314,26 @@ def measured_cost(conn: psycopg.Connection, *, model: str) -> tuple[int, float]:
 GRADED = ("yes", "no")
 
 
+def human_verdict(row: dict[str, Any], tag_id: int) -> str:
+    """One exam answer row's verdict for one head: "yes", "no" or "skip".
+
+    THE RATIFIED RULE, in one place. A can't-tell row abstains on every cell
+    (the exam records it as excluded/'ambiguous' across the board); a deliberate
+    leave-out abstains; an untouched migration-466 backfill cell abstains too,
+    because a declared default is not a judgment. Everything else is a real yes
+    or no. `agreement` below is its first caller and the tagging bake-off
+    (toolkit/tag_head_bakeoff.py) is its second — the rule is imported, never
+    re-typed, so the two graders cannot drift apart.
+    """
+    if row.get("cant_tell"):
+        return "skip"
+    if tag_id in set(row.get("skipped_tag_ids") or []):
+        return "skip"
+    if tag_id in set(row.get("auto_tag_ids") or []):
+        return "skip"
+    return "yes" if tag_id in set(row.get("picked_tag_ids") or []) else "no"
+
+
 def agreement(
     *, rows: list[dict[str, Any]], reviews: dict[int, dict[str, Any]],
     tag_ids: list[int],
@@ -327,12 +347,9 @@ def agreement(
                     "human_skip": 0, "machine_skip": 0, "unreviewed": 0,
                     "auto_default": 0}
            for tag_id in tag_ids}
-    picked_key, skipped_key = "picked_tag_ids", "skipped_tag_ids"
     for row in rows:
         review = reviews.get(int(row["image_id"]))
         verdicts = (review or {}).get("verdicts") or {}
-        picked = set(row.get(picked_key) or [])
-        skipped = set(row.get(skipped_key) or [])
         # A migration-466 backfill cell the operator has not touched is a
         # DECLARED DEFAULT, not a judgment. Grading the machine against it
         # measures the backfill — and it reads as a false positive every time
@@ -352,8 +369,7 @@ def agreement(
                 continue
             # A can't-tell row is an abstention on every cell, exactly as the
             # exam records it (excluded/'ambiguous' across the board).
-            human = "skip" if (cant_tell or tag_id in skipped or tag_id in auto) else (
-                "yes" if tag_id in picked else "no")
+            human = human_verdict(row, tag_id)
             if human not in GRADED:
                 # An untouched default and a deliberate leave-out are both
                 # abstentions, counted apart: one is the operator's judgment,

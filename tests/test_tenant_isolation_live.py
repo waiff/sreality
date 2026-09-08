@@ -130,6 +130,15 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
     "category_trends_mv", "image_storage_overview_mv", "snapshot_churn_24h_mv",
     "dedup_funnel_resolutions_archive",
     "images_failure_overview_mv",
+    # The tagging bake-off store (migration 489, schema dedup_sim): experiment
+    # evidence — runs, encoder arms, their vectors, per-image scores and the
+    # per-head metrics. Backend-only, NO `_public` view; the bake-off page reads
+    # them through the admin-gated API (/new-dedup/tagging-bakeoff/*).
+    "dedup_sim.tag_head_bakeoff_runs",
+    "dedup_sim.tag_head_bakeoff_arms",
+    "dedup_sim.tag_head_bakeoff_vectors",
+    "dedup_sim.tag_head_bakeoff_scores",
+    "dedup_sim.tag_head_bakeoff_metrics",
 ]
 
 # Relations that read the above but are legitimately reachable without the gate.
