@@ -102,6 +102,43 @@ _BY_IDS_SQL = f"""
     LIMIT %(limit)s
 """
 
+# THE SAME POOL AS AN EXISTING HEAD. A new head labeled on its own random draw
+# is judged over different photos than its neighbours, so the two can never be
+# compared and its negatives come from a different population. Drawing over the
+# images a sibling head has ALREADY been judged on gives the new head identical
+# coverage — which is what makes a boundary between two heads reviewable, since
+# every image that made one of them say yes has now also been asked about the
+# other. The operator asked for exactly this when adding 3D plán beside
+# půdorys: "use the pictures we have already used for other heads".
+#
+# Ordered at random, not by id: `LIMIT` on an id-ordered pool would label the
+# oldest slice and call it coverage.
+_LIKE_TAG_SQL = f"""
+    SELECT i.id, i.storage_path
+    FROM images i
+    WHERE EXISTS (
+            SELECT 1 FROM image_tag_labels l
+            WHERE l.image_id = i.id AND l.tag_id = %(like_tag)s::bigint
+              AND l.source = ANY(%(pool_sources)s::text[])
+          )
+      AND {_ELIGIBLE}
+    ORDER BY random()
+    LIMIT %(limit)s
+"""
+
+
+def like_tag_candidates(
+    conn: psycopg.Connection, *, tag_ids: list[int], like_tag: int, limit: int,
+) -> list[tuple[int, str]]:
+    """Eligible images that an existing head has already been judged on, so a new
+    head is labeled over the SAME photos as its neighbour rather than its own
+    random draw."""
+    with conn.cursor() as cur:
+        cur.execute(_LIKE_TAG_SQL, {
+            "tag_ids": list(tag_ids), "like_tag": int(like_tag),
+            "pool_sources": list(TRAINING_SOURCES), "limit": int(limit)})
+        return [(int(r[0]), str(r[1])) for r in cur.fetchall()]
+
 
 def sample_candidates(
     conn: psycopg.Connection, *, tag_ids: list[int], limit: int, pct: float = 1.0,

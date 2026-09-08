@@ -116,6 +116,10 @@ def main() -> int:
                          "head. Their own earlier guesses, so the hit-rate is far "
                          "above random; the model still judges each one against the "
                          "definition, and its verdict is what gets written.")
+    ap.add_argument("--like-tag", type=int, dest="like_tag",
+                    help="Draw from the images an EXISTING head has already been judged "
+                         "on, so a new head gets the same coverage as its neighbour and "
+                         "the boundary between them is reviewable on the same photos.")
     ap.add_argument("--near-tag", type=int,
                     help="Draw images that look like this head's known positives "
                          "(CLIP centroid over a sampled slice) instead of at random. "
@@ -169,8 +173,11 @@ def main() -> int:
                      "head and that are still eligible — the pool --from-drafts draws from")
             return 0
 
-        if args.from_drafts and args.near_tag:
-            LOG.error("LABEL --from-drafts and --near-tag are different draws; pick one")
+        chosen = [n for n, v in (("--from-drafts", args.from_drafts),
+                                 ("--near-tag", args.near_tag),
+                                 ("--like-tag", args.like_tag)) if v]
+        if len(chosen) > 1:
+            LOG.error("LABEL %s are different draws; pick one", " and ".join(chosen))
             return 1
         if args.from_drafts and args.from_drafts not in tag_ids:
             LOG.error("LABEL --from-drafts %d must be one of the heads being labeled",
@@ -195,6 +202,14 @@ def main() -> int:
             if not rows:
                 LOG.warning("LABEL no candidates — the head may have too few embedded "
                             "positives for a centroid, or the sampled slice held none")
+        elif args.like_tag:
+            rows = ml.like_tag_candidates(
+                conn, tag_ids=tag_ids, like_tag=args.like_tag, limit=max(1, args.count))
+            LOG.info("LABEL like-tag=%d (%s) drew=%d",
+                     args.like_tag, labels.get(args.like_tag, "?"), len(rows))
+            if not rows:
+                LOG.warning("LABEL no candidates — every image that head was judged on "
+                            "already carries this head's active definition")
         elif args.ids_file:
             with open(args.ids_file, encoding="utf-8") as fh:
                 image_ids = [int(line) for line in fh.read().split() if line.strip()]

@@ -248,11 +248,30 @@ def test_the_draft_pool_is_reportable_before_anything_is_spent() -> None:
     assert out == {17: 61, 2: 8, 48: 0}
 
 
-def test_the_two_targeted_draws_are_mutually_exclusive() -> None:
+def test_the_targeted_draws_are_mutually_exclusive() -> None:
     # They answer different questions; silently letting one win would make the
-    # run's provenance unreadable afterwards.
+    # run's provenance unreadable afterwards. Three of them now, so the check is
+    # a count rather than a hard-coded pair — a fourth must not slip past it.
     src = (ROOT / "scripts" / "label_images.py").read_text()
-    assert "--from-drafts and --near-tag are different draws; pick one" in src
+    assert "are different draws; pick one" in src
+    assert 'chosen = [n for n, v in (("--from-drafts"' in src
+    for flag in ("--near-tag", "--like-tag"):
+        assert flag in src.split("chosen = [")[1][:300]
+
+
+def test_the_like_tag_draw_takes_a_siblings_pool_not_its_verdicts() -> None:
+    # "Same coverage as the neighbour" means the same IMAGES. Filtering by the
+    # sibling's verdict would seed a new head on its neighbour's positives and
+    # bake that boundary in as ground truth before anyone reviewed it.
+    from toolkit import machine_labeling as ml
+
+    sql = ml._LIKE_TAG_SQL
+    assert "l.tag_id = %(like_tag)s::bigint" in sql
+    assert "l.state" not in sql
+    assert "ORDER BY random()" in sql and "ORDER BY i.id" not in sql
+    # The shared rails still apply to what it returns.
+    assert "FROM tag_exam_members m WHERE m.image_id = i.id" in sql
+    assert "l.definition_id = d.id" in sql
 
 
 def test_the_lane_validates_from_drafts_as_digits_only() -> None:
