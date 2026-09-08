@@ -259,6 +259,34 @@ def test_the_targeted_draws_are_mutually_exclusive() -> None:
         assert flag in src.split("chosen = [")[1][:300]
 
 
+def test_the_rejudge_draw_reopens_what_a_revision_left_standing() -> None:
+    # A definition revision makes stale labels ELIGIBLE but nothing draws them
+    # preferentially, so old answers under old wording survive indefinitely.
+    # This draw is the companion: re-ask what the head already answered.
+    from toolkit import machine_labeling as ml
+
+    sql = ml._REJUDGE_SQL
+    assert "l.tag_id = %(rejudge_tag)s::bigint" in sql
+    # Scoped to the verdict they CURRENTLY carry — a narrowing revision can only
+    # lose positives, so re-asking those alone is the cheap half of a redo.
+    assert "%(rejudge_state)s::text IS NULL OR l.state = %(rejudge_state)s::text" in sql
+    # _ELIGIBLE is what makes it a RE-judge: an image already answered under the
+    # ACTIVE definition is not eligible, so this never re-asks the same wording.
+    assert "l.definition_id = d.id" in sql
+    assert "FROM tag_exam_members m WHERE m.image_id = i.id" in sql
+    assert "ORDER BY random()" in sql and "ORDER BY i.id" not in sql
+
+
+def test_the_rejudge_draw_refuses_a_state_that_is_not_a_verdict() -> None:
+    from toolkit import machine_labeling as ml
+
+    conn = _Conn([])
+    ml.rejudge_candidates(conn, tag_ids=[48], rejudge_tag=48, state="positive", limit=5)
+    assert conn.log[0][2]["rejudge_state"] == "positive"
+    with pytest.raises(ValueError):
+        ml.rejudge_candidates(_Conn([]), tag_ids=[48], rejudge_tag=48, state="lift")
+
+
 def test_the_like_tag_draw_takes_a_siblings_pool_not_its_verdicts() -> None:
     # "Same coverage as the neighbour" means the same IMAGES. Filtering by the
     # sibling's verdict would seed a new head on its neighbour's positives and

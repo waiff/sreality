@@ -127,6 +127,47 @@ _LIKE_TAG_SQL = f"""
 """
 
 
+# RE-ASKING WHAT THIS HEAD ALREADY ANSWERED. A definition revision does not
+# re-open anything by itself: `_ELIGIBLE` makes stale-labeled images eligible
+# again, but a random or near-tag draw is overwhelmingly likely to pick
+# never-judged ones, so old answers under old wording survive indefinitely. That
+# is how půdorys sat on v9 answers after v10, and how a head keeps positives the
+# current definition would refuse.
+#
+# So: draw from the images this head HAS a label for, optionally scoped to the
+# verdict they carry. `--rejudge 48 --rejudge-state positive` re-asks only the
+# positives, which is the cheap half of a redo — a wording change that narrows a
+# head can only lose positives, never gain them, so the negatives need no
+# second opinion and 10k images of budget stays unspent.
+_REJUDGE_SQL = f"""
+    SELECT i.id, i.storage_path
+    FROM images i
+    WHERE EXISTS (
+            SELECT 1 FROM image_tag_labels l
+            WHERE l.image_id = i.id AND l.tag_id = %(rejudge_tag)s::bigint
+              AND (%(rejudge_state)s::text IS NULL OR l.state = %(rejudge_state)s::text)
+          )
+      AND {_ELIGIBLE}
+    ORDER BY random()
+    LIMIT %(limit)s
+"""
+
+
+def rejudge_candidates(
+    conn: psycopg.Connection, *, tag_ids: list[int], rejudge_tag: int,
+    state: str | None = None, limit: int = 100,
+) -> list[tuple[int, str]]:
+    """Images this head already answered, whose answers predate its active
+    definition. `state` scopes to the verdict they currently carry."""
+    if state is not None and state not in ("positive", "negative", "excluded"):
+        raise ValueError(f"state must be positive/negative/excluded, got {state!r}")
+    with conn.cursor() as cur:
+        cur.execute(_REJUDGE_SQL, {
+            "tag_ids": list(tag_ids), "rejudge_tag": int(rejudge_tag),
+            "rejudge_state": state, "limit": int(limit)})
+        return [(int(r[0]), str(r[1])) for r in cur.fetchall()]
+
+
 def like_tag_candidates(
     conn: psycopg.Connection, *, tag_ids: list[int], like_tag: int, limit: int,
 ) -> list[tuple[int, str]]:
