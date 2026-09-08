@@ -6106,6 +6106,129 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/street_key_parity.yml"
     },
     {
+      "filename": "tagging_bakeoff.yml",
+      "name": "NEW DEDUP: tagging bake-off (manifest / embed / train)",
+      "description": "Runs the tagging bake-off: embed every labelled training photo (plus the 250 sealed-exam photos) under several encoder configurations — \"arms\" — then train and compare a per-tag yes/no classifier on each, so the choice of encoder is decided by measurement instead of by argument. Manual dispatch only; one stage per run.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "stage",
+          "description": "manifest (build the run) -> embed (rent a GPU, the only stage that spends) -> train (score the arms).",
+          "required": true,
+          "type": "choice",
+          "default": "manifest",
+          "options": [
+            "manifest",
+            "embed",
+            "train"
+          ]
+        },
+        {
+          "name": "run_id",
+          "description": "Bake-off run id. Required for embed and train; the manifest stage mints one and prints it.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "label",
+          "description": "manifest only: a short name for the run.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "note",
+          "description": "manifest only: free-text note recorded on the run row.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "min_train_positives",
+          "description": "manifest only: a head needs at least this many admitted positives to enter the run. Below it a per-tag classifier's numbers are noise.",
+          "required": false,
+          "type": "string",
+          "default": "100",
+          "options": null
+        },
+        {
+          "name": "heads",
+          "description": "manifest only: comma-separated tag ids. Overrides the positives floor entirely.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "arms",
+          "description": "Comma-separated arm names to narrow a stage to (e.g. dinov3-b16@512/bf16). Empty = every arm.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "batch_size",
+          "description": "embed only: model forward batch. Lower it if a 1024px arm runs out of GPU memory.",
+          "required": false,
+          "type": "string",
+          "default": "32",
+          "options": null
+        },
+        {
+          "name": "workers",
+          "description": "embed only: parallel image downloads while the pod fills its local cache.",
+          "required": false,
+          "type": "string",
+          "default": "16",
+          "options": null
+        },
+        {
+          "name": "job_max_seconds",
+          "description": "embed only: the payload's own time budget. The pod's wait window is this plus a 900s startup grace, so teardown lands after a clean stop, never mid-batch.",
+          "required": false,
+          "type": "string",
+          "default": "7200",
+          "options": null
+        },
+        {
+          "name": "dry_run",
+          "description": "Report the plan and exit. The manifest stage still reports head/image counts (writing nothing); embed launches no pod; train executes nothing.",
+          "required": false,
+          "type": "choice",
+          "default": "true",
+          "options": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "secrets": [
+        "HF_TOKEN",
+        "R2_ACCESS_KEY_ID",
+        "R2_ACCOUNT_ID",
+        "R2_BUCKET_NAME",
+        "R2_SECRET_ACCESS_KEY",
+        "RUNPOD_API_KEY",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "tagging-bakeoff",
+      "cancelInProgress": false,
+      "timeoutMinutes": 180,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/tagging_bakeoff.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/tagging_bakeoff.yml"
+    },
+    {
       "filename": "test.yml",
       "name": "CI: tests",
       "description": "CI test suite, runs on every push and pull request. Two parallel jobs: a Python job (verifies the filter-registry and workflow-docs codegen are fresh, then runs pytest) and a frontend job (TypeScript type-check + vitest pure-function tests). This is the build gate for every branch.",

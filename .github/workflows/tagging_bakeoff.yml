@@ -1,0 +1,239 @@
+name: "NEW DEDUP: tagging bake-off (manifest / embed / train)"
+
+# Runs the tagging bake-off: embed every labelled training photo (plus the 250 sealed-exam
+# photos) under several encoder configurations — "arms" — then train and compare a per-tag
+# yes/no classifier on each, so the choice of encoder is decided by measurement instead of
+# by argument. Manual dispatch only; one stage per run.
+#
+# THREE STAGES, THREE MACHINES, and the order matters:
+#   1. manifest — a plain runner. Creates the run + arm rows, picks the heads, mints a
+#      7-day presigned R2 URL per image, uploads the manifest, and fills in the free
+#      `clip-b32-stored` arm by copying the incumbent's live CLIP vectors. Spends nothing.
+#   2. embed — rents a GPU pod (RunPod) that clones this repo, installs the `clip` extra
+#      and embeds the manifest's images under every pending arm. THE ONLY STAGE THAT
+#      COSTS MONEY: ~10.8k images x ~9 GPU arms, on the order of an hour on an RTX 3090
+#      at roughly $0.20-0.30/hr — call it well under a dollar, with the wait window as
+#      the hard ceiling.
+#   3. train — back on a runner with the `training` extra, running the results half of
+#      the experiment.
+#
+# START WITH dry_run (the default). The manifest stage's dry run reports which heads clear
+# the positives floor and how many distinct images the run would embed, and writes nothing;
+# the embed stage's prints the pod plan and launches nothing.
+#
+# THE SEALED EXAM IS EMBEDDED BUT NEVER READ. Its images have to carry vectors — grading
+# the heads is the point — but no exam ANSWER is read anywhere in this lane. Training
+# images arrive only through toolkit.machine_labeling.training_rows, the one holdout-
+# excluded door, and tests/test_holdout_exclusion_census.py is the rail that keeps it that
+# way.
+#
+# Progress and results are SQL questions, never read off the pod (on-demand Pods never
+# flip desiredStatus, so the dispatcher's job always "times out" and tears the pod down in
+# its finally — that teardown IS the cost guarantee):
+#   select arm, status, dim, note from dedup_sim.tag_head_bakeoff_arms where run_id = N;
+#
+# Requires the sibling PR's dedup_sim.tag_head_bakeoff_* tables to have been applied.
+# Secrets: SUPABASE_DB_URL + R2_* (manifest, embed), RUNPOD_API_KEY + HF_TOKEN (embed
+# only — nothing else in this lane talks to RunPod or downloads model weights).
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "manifest (build the run) -> embed (rent a GPU, the only stage that spends) -> train (score the arms)."
+        required: true
+        default: "manifest"
+        type: choice
+        options: ["manifest", "embed", "train"]
+      run_id:
+        description: "Bake-off run id. Required for embed and train; the manifest stage mints one and prints it."
+        required: false
+        default: ""
+        type: string
+      label:
+        description: "manifest only: a short name for the run."
+        required: false
+        default: ""
+        type: string
+      note:
+        description: "manifest only: free-text note recorded on the run row."
+        required: false
+        default: ""
+        type: string
+      min_train_positives:
+        description: "manifest only: a head needs at least this many admitted positives to enter the run. Below it a per-tag classifier's numbers are noise."
+        required: false
+        default: "100"
+        type: string
+      heads:
+        description: "manifest only: comma-separated tag ids. Overrides the positives floor entirely."
+        required: false
+        default: ""
+        type: string
+      arms:
+        description: "Comma-separated arm names to narrow a stage to (e.g. dinov3-b16@512/bf16). Empty = every arm."
+        required: false
+        default: ""
+        type: string
+      batch_size:
+        description: "embed only: model forward batch. Lower it if a 1024px arm runs out of GPU memory."
+        required: false
+        default: "32"
+        type: string
+      workers:
+        description: "embed only: parallel image downloads while the pod fills its local cache."
+        required: false
+        default: "16"
+        type: string
+      job_max_seconds:
+        description: "embed only: the payload's own time budget. The pod's wait window is this plus a 900s startup grace, so teardown lands after a clean stop, never mid-batch."
+        required: false
+        default: "7200"
+        type: string
+      dry_run:
+        description: "Report the plan and exit. The manifest stage still reports head/image counts (writing nothing); embed launches no pod; train executes nothing."
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+concurrency:
+  group: tagging-bakeoff
+  cancel-in-progress: false
+
+jobs:
+  bakeoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Inputs are validated ONCE, here, before any stage sees them: every one travels
+      # via env (never `${{ }}` interpolated into a shell), and the ones that end up in
+      # argv are charset-checked. `label`/`note` are free text and are quoted rather
+      # than pattern-matched, since they only ever reach a Python argv list.
+      - name: Validate inputs
+        env:
+          STAGE: ${{ inputs.stage }}
+          RUN_ID: ${{ inputs.run_id }}
+          MIN_TRAIN_POSITIVES: ${{ inputs.min_train_positives }}
+          HEADS: ${{ inputs.heads }}
+          ARMS: ${{ inputs.arms }}
+          BATCH_SIZE: ${{ inputs.batch_size }}
+          WORKERS: ${{ inputs.workers }}
+          JOB_MAX_SECONDS: ${{ inputs.job_max_seconds }}
+        run: |
+          set -euo pipefail
+          case "${RUN_ID:-}" in
+            *[!0-9]*) echo "::error::run_id must be a number (or empty for stage=manifest)"; exit 1 ;;
+          esac
+          case "${MIN_TRAIN_POSITIVES:-100}" in
+            ''|*[!0-9]*) echo "::error::min_train_positives must be a number"; exit 1 ;;
+          esac
+          case "${BATCH_SIZE:-32}" in
+            ''|*[!0-9]*) echo "::error::batch_size must be a number"; exit 1 ;;
+          esac
+          case "${WORKERS:-16}" in
+            ''|*[!0-9]*) echo "::error::workers must be a number"; exit 1 ;;
+          esac
+          case "${JOB_MAX_SECONDS:-7200}" in
+            ''|*[!0-9]*) echo "::error::job_max_seconds must be a number"; exit 1 ;;
+          esac
+          case "${HEADS:-}" in
+            *[!0-9,\ ]*) echo "::error::heads must be a comma-separated list of tag ids"; exit 1 ;;
+          esac
+          # Arm names carry @ / . - and commas (dinov3-b16@768/bf16); nothing else.
+          case "${ARMS:-}" in
+            *[!A-Za-z0-9@/.,_-]*) echo "::error::arms must be comma-separated arm names"; exit 1 ;;
+          esac
+          if [ "${STAGE}" != "manifest" ] && [ -z "${RUN_ID:-}" ]; then
+            echo "::error::stage=${STAGE} needs run_id (the manifest stage prints it)"; exit 1
+          fi
+
+      # The manifest stage reads the database and presigns R2 — no torch, no GPU, no
+      # RunPod key, no HF token. Base install only.
+      - name: Install (manifest / embed)
+        if: inputs.stage != 'train'
+        run: pip install -e .
+
+      # The trainer needs scikit-learn; the runner never installs torch in any stage,
+      # because the model only ever runs inside the pod.
+      - name: Install (train)
+        if: inputs.stage == 'train'
+        run: pip install -e '.[training]'
+
+      - name: Build the manifest
+        if: inputs.stage == 'manifest'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          # Read-only Hub metadata: which SigLIP2 checkpoint exists. No weights.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          LABEL: ${{ inputs.label }}
+          NOTE: ${{ inputs.note }}
+          MIN_TRAIN_POSITIVES: ${{ inputs.min_train_positives }}
+          HEADS: ${{ inputs.heads }}
+          ARMS: ${{ inputs.arms }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          ARGS=(--stage manifest --min-train-positives "${MIN_TRAIN_POSITIVES:-100}")
+          # `if`, not `[ ... ] && ...`: under `set -e` a false test in the last position
+          # of a step's script is itself a non-zero exit and would fail the step.
+          if [ -n "${LABEL:-}" ]; then ARGS+=(--label "${LABEL}"); fi
+          if [ -n "${NOTE:-}" ]; then ARGS+=(--note "${NOTE}"); fi
+          if [ -n "${HEADS:-}" ]; then ARGS+=(--heads "${HEADS}"); fi
+          if [ -n "${ARMS:-}" ]; then ARGS+=(--arms "${ARMS}"); fi
+          if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi
+          python -m scripts.tagging_bakeoff_dispatch "${ARGS[@]}"
+
+      # The only stage with RUNPOD_API_KEY, and the only one that can spend. The DB and
+      # R2 secrets are here because the dispatcher FORWARDS them into the pod's REST
+      # body `env` — the runner itself neither queries nor downloads anything.
+      - name: Dispatch the embedding pass to a GPU pod
+        if: inputs.stage == 'embed'
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          RUN_ID: ${{ inputs.run_id }}
+          ARMS: ${{ inputs.arms }}
+          BATCH_SIZE: ${{ inputs.batch_size }}
+          WORKERS: ${{ inputs.workers }}
+          JOB_MAX_SECONDS: ${{ inputs.job_max_seconds }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          ARGS=(--stage embed --run-id "${RUN_ID}" --batch-size "${BATCH_SIZE:-32}")
+          ARGS+=(--workers "${WORKERS:-16}" --job-max-seconds "${JOB_MAX_SECONDS:-7200}")
+          if [ -n "${ARMS:-}" ]; then ARGS+=(--arms "${ARMS}"); fi
+          if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi
+          python -m scripts.tagging_bakeoff_dispatch "${ARGS[@]}"
+
+      - name: Train and score the arms
+        if: inputs.stage == 'train'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          RUN_ID: ${{ inputs.run_id }}
+          ARMS: ${{ inputs.arms }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          ARGS=(--stage train --run-id "${RUN_ID}")
+          if [ -n "${ARMS:-}" ]; then ARGS+=(--arms "${ARMS}"); fi
+          if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi
+          python -m scripts.tagging_bakeoff_dispatch "${ARGS[@]}"

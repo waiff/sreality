@@ -233,10 +233,17 @@ def _loaded_revision(model, pinned: str) -> str:
 class Dinov3Tagger:
     """A loaded, eval-mode DINOv3 encoder plus the six facts that identify its output."""
 
-    def __init__(self, model, processor, identity: dict[str, Any], torch_dtype=None) -> None:
+    def __init__(self, model, processor, identity: dict[str, Any], torch_dtype=None,
+                 device: str = "cpu") -> None:
         self._model = model
         self._processor = processor
         self._torch_dtype = torch_dtype
+        # WHERE the forward pass runs, and deliberately NOT one of the six identity
+        # facts: the same weights at the same dtype produce the same numbers on either
+        # side of the PCIe bus, so a device is not a new population. Default "cpu"
+        # because that is what every caller did before this parameter existed; a caller
+        # holding a GPU has to say so, and `scripts/tagging_bakeoff_embed.py` does.
+        self._device = device
         self.identity: dict[str, Any] = dict(identity)
         self.model_id: str = identity["model"]
         self.revision: str = identity["revision"]
@@ -247,7 +254,8 @@ class Dinov3Tagger:
         self.dtype: str = identity["dtype"]
 
     @classmethod
-    def load(cls, *, config: dict[str, Any] | None = None, threads: int = 0) -> "Dinov3Tagger":
+    def load(cls, *, config: dict[str, Any] | None = None, threads: int = 0,
+             device: str = "cpu") -> "Dinov3Tagger":
         identity = validate_config(config if config is not None else load_dinov3_config())
         check_supported(identity)
         torch_dtype = resolve_torch_dtype(identity["dtype"])
@@ -258,11 +266,14 @@ class Dinov3Tagger:
         # so a module left in train mode returns a different vector each forward pass
         # for the same image (ENCODER-DECISION §6).
         model.eval()
+        if device != "cpu":
+            model.to(device)
         return cls(
             model,
             processor,
             {**identity, "revision": _loaded_revision(model, identity["revision"])},
             torch_dtype=torch_dtype,
+            device=device,
         )
 
     def _pool(self, outputs):
@@ -298,11 +309,13 @@ class Dinov3Tagger:
             pixel_values = inp["pixel_values"]
             if self._torch_dtype is not None:
                 pixel_values = pixel_values.to(self._torch_dtype)
+            if self._device != "cpu":
+                pixel_values = pixel_values.to(self._device)
             with torch.no_grad():
                 out = self._model(pixel_values=pixel_values)
             # Cast BEFORE normalizing: under bf16 the norm itself would be computed at
             # ~3 decimal digits, so the stored unit vector would not be unit.
             feats = self._pool(out).float()
             feats = feats / feats.norm(dim=-1, keepdim=True)
-            chunks.append(feats)
+            chunks.append(feats.cpu())
         return torch.cat(chunks) if chunks else None
