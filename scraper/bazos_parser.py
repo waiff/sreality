@@ -60,15 +60,19 @@ CATEGORY_MAIN: dict[str, str] = {
 }
 
 # Portal-agnostic subtype (migration 152), keyed on the bazoš section slug that
-# appears in the detail breadcrumb / index URL. Only the sections that map onto
-# a single canonical dum/komercni subtype are listed; "dum" (generic houses,
-# bazoš doesn't split rodinný/vila) and land/garage sections carry no subtype.
+# appears in the detail breadcrumb / index URL. Every section that shares a
+# category_main with a sibling section is listed, because the presence nomination
+# is subtype-scoped — an unlisted sibling would nominate the other's rows on every
+# walk. Each collapsed group's GENERIC member stays absent (subtype NULL): "dum"
+# (bazoš doesn't split rodinný/vila), "pozemek" (plain land) and "ostatni".
 SUBTYPE: dict[str, str] = {
     "chata": "chata",              # bazoš lumps chaty+chalupy; chata is the slug
     "restaurace": "restaurace",
     "kancelar": "kancelar",
     "prostory": "obchodni_prostor",
     "sklad": "sklad",
+    "zahrada": "zahrada",          # collapses onto pozemek
+    "garaz": "garaz",              # collapses onto ostatni
 }
 
 _ID_RE = re.compile(r"/inzerat/(\d+)/")

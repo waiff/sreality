@@ -28,6 +28,10 @@ class _Conn:
 _BYT_SALE = {"sale_type": "prodam", "category": "byt"}
 _BYT_RENT = {"sale_type": "pronajmu", "category": "byt"}
 _CHATA_SALE = {"sale_type": "prodam", "category": "chata"}
+_POZEMEK_SALE = {"sale_type": "prodam", "category": "pozemek"}
+_ZAHRADA_SALE = {"sale_type": "prodam", "category": "zahrada"}
+_OSTATNI_SALE = {"sale_type": "prodam", "category": "ostatni"}
+_GARAZ_SALE = {"sale_type": "prodam", "category": "garaz"}
 
 
 def _portal(categories=None) -> BazosPortal:
@@ -127,6 +131,46 @@ def test_nomination_is_subtype_scoped(monkeypatch):
     # The scope travels with the candidates so the throttle, the operator
     # override and the deferral record all name the section, not just (dum, prodej).
     assert _portal([_CHATA_SALE]).presence_candidates(object(), _CHATA_SALE, {"a"})[2] == {"subtype": "chata"}
+
+
+def test_nomination_scopes_the_categories_migration_488_added(monkeypatch):
+    """The two collapsed groups migration 488 opened up: pozemek+zahrada share
+    category_main=pozemek and garaz+ostatni share category_main=ostatni. The
+    generic member of each is subtype NULL, the other carries its own slug — so
+    neither section nominates the other's rows."""
+    nominated: dict[str, Any] = {}
+    monkeypatch.setattr(
+        bazos_main.db, "presence_candidates",
+        lambda _c, src, cm, ct, seen, *, subtype, scope_subtype:
+            nominated.update(cm=cm, subtype=subtype, scope_subtype=scope_subtype)
+            or ([], 0),
+    )
+    expected = {
+        _POZEMEK_SALE["category"]: ("pozemek", None),
+        _ZAHRADA_SALE["category"]: ("pozemek", "zahrada"),
+        _OSTATNI_SALE["category"]: ("ostatni", None),
+        _GARAZ_SALE["category"]: ("ostatni", "garaz"),
+    }
+    for scope in (_POZEMEK_SALE, _ZAHRADA_SALE, _OSTATNI_SALE, _GARAZ_SALE):
+        section = scope["category"]
+        cm, sub = expected[section]
+        out = _portal([scope]).presence_candidates(object(), scope, {"a"})
+        assert out == ([], 0, {"subtype": sub}), section
+        assert (nominated["cm"], nominated["subtype"]) == (cm, sub), section
+        assert nominated["scope_subtype"] is True, section
+
+
+def test_active_count_scopes_the_categories_migration_488_added(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        bazos_main.db, "active_count",
+        lambda _c, cm, ct, *, source, subtype, scope_subtype: captured.update(
+            cm=cm, subtype=subtype) or 7,
+    )
+    assert _portal().active_count(object(), _ZAHRADA_SALE) == 7
+    assert (captured["cm"], captured["subtype"]) == ("pozemek", "zahrada")
+    assert _portal().active_count(object(), _GARAZ_SALE) == 7
+    assert (captured["cm"], captured["subtype"]) == ("ostatni", "garaz")
 
 
 def test_nomination_happens_for_every_category_every_run(monkeypatch):
