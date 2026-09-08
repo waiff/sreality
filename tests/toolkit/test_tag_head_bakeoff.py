@@ -360,6 +360,18 @@ def test_run_bakeoff_without_an_exam_still_produces_cv_numbers() -> None:
     assert all("no sealed exam" in o.note for o in outcomes)
 
 
+def test_an_arm_with_no_vectors_is_marked_failed_not_sixty_broken_heads() -> None:
+    conn = _conn()
+    conn.vectors = {}
+    outcomes = bo.run_bakeoff(conn, run_id=3, min_train_positives=3, n_splits=3,
+                              trained_at=TRAINED_AT)
+    assert outcomes == []
+    updates = [p for s, p in conn.executed
+               if s.startswith("UPDATE dedup_sim.tag_head_bakeoff_arms")]
+    assert updates[-1]["status"] == "failed"
+    assert "no vectors" in updates[-1]["note"]
+
+
 def test_run_bakeoff_refuses_an_unknown_mode() -> None:
     conn = _conn()
     with pytest.raises(bo.BakeoffError, match="unknown mode"):

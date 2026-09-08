@@ -689,7 +689,15 @@ def run_bakeoff(
         vectors = _arm_vector_cache(conn, arm=arm, plans=plans, sitting=sitting,
                                     positives_by_tag=positives_by_tag,
                                     excluded_by_tag=excluded_by_tag)
-        dim = len(next(iter(vectors.values()))) if vectors else None
+        if not vectors:
+            # The GPU job has not reached this arm. Say so on the ARM rather than
+            # writing one identical "nothing to train on" failure per head — the
+            # cause is one missing embedding pass, not sixty broken heads.
+            LOG.warning("BAKEOFF arm=%s has no vectors — skipped", arm.arm)
+            set_arm_status(conn, arm_id=arm.id, status="failed", dim=None,
+                           note="no vectors stored for this arm yet")
+            continue
+        dim = len(next(iter(vectors.values())))
         set_arm_status(conn, arm_id=arm.id, status="running", dim=dim, note=None)
         for mode in modes:
             for plan in plans:
