@@ -202,6 +202,15 @@ def _load_model_and_processor(model_id: str, revision: str, torch_dtype, threads
             model = AutoModel.from_pretrained(
                 model_id, revision=revision, token=token, **dtype_kwargs
             )
+            # The FAST processor, deliberately: `use_fast=False` would change the
+            # resize/normalize path and therefore the vectors, so every embedding ever
+            # written would stop comparing against every new one. The DINOv3 configs
+            # resolve to `DINOv3ViTImageProcessorFast`, which imports torchvision — so
+            # a box without torchvision fails HERE, in the retry loop, and surfaces as
+            # "DINOv3 model load failed after retries: ... requires `torchvision`"
+            # (2026-09-08 (i): seven arms, one pod, that exact message). The pod
+            # bootstrap installs torchvision beside torch for this reason; fix the box,
+            # never the processor.
             processor = AutoImageProcessor.from_pretrained(
                 model_id, revision=revision, token=token
             )

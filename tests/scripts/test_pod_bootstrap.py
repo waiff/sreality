@@ -55,10 +55,25 @@ def test_the_interpreter_is_bootstrapped_not_inherited():
 
 def test_torch_comes_from_the_cuda_flavour_the_image_can_run():
     # cu118: the image is CUDA 11.8-era, and cu118 is the flavour with cp312 wheels
-    # furthest up the torch series (through 2.6.0; cu121 stops at 2.5.1).
+    # furthest up the torch series (through 2.7.1; cu121 stops at 2.5.1).
     script = _script()
-    assert "uv pip install torch --index-url https://download.pytorch.org/whl/cu118" in script
+    assert ("uv pip install torch torchvision "
+            "--index-url https://download.pytorch.org/whl/cu118") in script
     assert script.index("uv pip install torch") < script.index("uv pip install -e")
+
+
+def test_torchvision_is_installed_beside_torch_from_the_same_index():
+    # 2026-09-08 (i), pod 4rgi66lggbty11: three arms embedded and all seven DINOv3 arms
+    # died at load with "`DINOv3ViTImageProcessorFast` requires `torchvision`". The fast
+    # image processor transformers picks for DINOv3 imports torchvision, so the pod that
+    # has torch and not torchvision fails only on those arms — and only after paying for
+    # the boot. One command, one index: a torchvision built against another CUDA than
+    # the torch beside it fails at import instead.
+    script = _script()
+    torch_step = script[script.index("step torch"):script.index('report "step=torch ok"')]
+    assert "torchvision" in torch_step
+    assert torch_step.count("--index-url") == 1
+    assert pod_bootstrap.TORCH_INDEX_URL in torch_step
 
 
 def test_the_venv_is_entered_without_sourcing_activate():

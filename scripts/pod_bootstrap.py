@@ -4,7 +4,7 @@ step. One module because both RunPod lanes (`dinov3_embed_dispatch`,
 `tagging_bakeoff_dispatch`) need the identical thing and every 2026-09-08 failure was
 in this script, not in either lane's logic.
 
-FIVE BUGS THIS EXISTS TO NOT REPEAT, all paid for on 2026-09-08:
+SIX BUGS THIS EXISTS TO NOT REPEAT, all paid for on 2026-09-08:
 
   * `git clone --depth 1 --branch <sha>` CANNOT WORK (pod u1yvcktjn6dbrt, 8,115 s,
     ~$0.50). `--branch` takes a branch or a tag, never a commit sha, and the dispatchers
@@ -48,12 +48,25 @@ FIVE BUGS THIS EXISTS TO NOT REPEAT, all paid for on 2026-09-08:
     `container_disk_gb` for the job and ask for no volume at all, and a `df -h` plus a
     `step=disk <free>GB` heartbeat before the torch step make the next disk problem
     visible instead of inferred.
+  * `torch` ALONE IS NOT ENOUGH: `transformers` NEEDS `torchvision` (pod 4rgi66lggbty11,
+    1,547 s, ~$0.09). Attempt 4 booted, installed and embedded — the DINOv2, SigLIP2 and
+    LAION-CLIP arms each wrote their 9,514 vectors — and then all SEVEN DINOv3 arms died
+    identically at model load: "`DINOv3ViTImageProcessorFast` requires `torchvision` to
+    be installed". The fast image processors transformers now selects by default do their
+    resize/crop in torchvision, and only the DINOv3 checkpoints resolve to one, so a torch
+    install that had been fine for three arms was fatal for seven. `torchvision` is
+    therefore installed in the SAME step from the SAME index as torch, because a
+    torchvision built against a different CUDA than the torch beside it fails at import
+    rather than at install.
 
-TORCH COMES FROM THE cu118 INDEX. The image is CUDA 11.8-era and cu118 is the flavour
-with the widest cp312 coverage on the PyTorch index (cp312 wheels through torch 2.6.0;
-cu121 stops at 2.5.1). The version is deliberately NOT pinned here — the payload records
-the RESOLVED python/torch/transformers versions into its own progress rows, which is a
-more honest record than a pin nobody re-reads.
+TORCH AND TORCHVISION COME FROM THE cu118 INDEX, in one command. The image is CUDA
+11.8-era and cu118 is the flavour with the widest cp312 coverage on the PyTorch index
+(cp312 through torch 2.7.1 / torchvision 0.22.1; cu121 stops at 2.5.1). One command
+because the resolver then picks the pair the index publishes together — attempt 4
+resolved torch 2.7.1+cu118, whose partner is torchvision 0.22.1+cu118. The versions are
+deliberately NOT pinned here — the payload records the RESOLVED python/torch/transformers
+versions into its own progress rows, which is a more honest record than a pin nobody
+re-reads.
 
 THE GENERATED SCRIPT IS EXECUTABLE OFFLINE. With `PODBOOT_DRY=1` every real step becomes
 a no-op stub and `PODBOOT_DRY_FAIL=<step>` forces one to fail, so `preflight()` proves —
@@ -224,7 +237,9 @@ def build_bootstrap_script(*, ref: str, module: str, payload_args: Sequence[str]
         "| tail -1 | tr -dc '0-9' || true)\"",
         'report "step=disk ${PODBOOT_FREE_GB:-unknown}GB free on $PODBOOT_ROOT"',
         "step torch",
-        f"x uv pip install torch --index-url {TORCH_INDEX_URL}",
+        # TORCHVISION IS NOT OPTIONAL, see the header. Same command and same index as
+        # torch so the two CUDA builds are the matched pair the index publishes.
+        f"x uv pip install torch torchvision --index-url {TORCH_INDEX_URL}",
         'report "step=torch ok"',
         "step repo",
         f"x uv pip install -e '.[{extra}]'",

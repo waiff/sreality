@@ -96,10 +96,14 @@ and if a pod dies silently, reproduce it on the bake-off lane, which can see.
   (`runpod/pytorch:2.1.0-py3.10-…`) ships **Python 3.10** and `pyproject.toml` requires
   `>=3.12`, so `pip install -e '.[clip]'` under the image's python refuses. RunPod's newer
   tags do not name a Python version at all, so `scripts/pod_bootstrap.py` installs `uv` and
-  builds a 3.12 venv (uv downloads a managed CPython), then takes torch from the **cu118**
-  index — the image is CUDA 11.8-era and cu118 is the flavour with cp312 wheels furthest up
-  the torch series (through 2.6.0; cu121 stops at 2.5.1). Versions are recorded at run time in
-  the progress rows, not pinned.
+  builds a 3.12 venv (uv downloads a managed CPython), then takes **`torch` AND `torchvision`
+  in one command** from the **cu118** index — the image is CUDA 11.8-era and cu118 is the
+  flavour with cp312 wheels furthest up the series (torch 2.7.1 / torchvision 0.22.1; cu121
+  stops at 2.5.1). **torchvision is not optional**: transformers' fast image processor for the
+  DINOv3 checkpoints (`DINOv3ViTImageProcessorFast`) imports it, and without it every DINOv3
+  arm dies at model load while non-DINOv3 arms embed happily (2026-09-08 (i), seven arms, one
+  pod). One command and one index so the two CUDA builds are the pair the index publishes
+  together. Versions are recorded at run time in the progress rows, not pinned.
 - **Never `git clone --branch <sha>`.** `--branch` resolves a branch or a tag only; the ref
   here is `GITHUB_SHA`, so the clone fails (`fatal: Remote branch … not found in upstream
   origin`, exit 128) and, under `set -euo pipefail`, so does the whole pod — which then idles

@@ -26,6 +26,8 @@ from scripts import tagging_bakeoff_arms as arms_mod
 from scripts import tagging_bakeoff_dispatch as dispatch
 from scripts import tagging_bakeoff_embed as embed
 from scripts import tagging_bakeoff_manifest as manifest
+from scripts import tag_head_bakeoff as trainer
+from toolkit import tag_heads as th
 
 
 # --------------------------------------------------------------------------------
@@ -303,6 +305,10 @@ def test_pending_arms_skips_the_zero_gpu_arm_and_finished_work():
         _arm_row(id=4, arm="d", status="failed"),
         _arm_row(id=5, arm="e", status="skipped"),
     ]
+    # `failed` is IN the default pass, and that is the whole re-dispatch story of
+    # 2026-09-08 (i): three arms `ok`, seven `failed` at model load with zero vectors.
+    # Re-dispatching stage=embed with no --arms picks up exactly the seven, and the
+    # per-image skip makes the three a no-op even if one were named.
     assert [a["arm"] for a in embed.pending_arms(rows)] == ["a", "d"]
     assert [a["arm"] for a in embed.pending_arms(rows, only=["d"])] == ["d"]
     # Naming an arm overrides its status — the retry affordance for a skipped arm once
@@ -766,3 +772,52 @@ def test_the_train_stage_shells_out_rather_than_importing_the_sibling():
     source = Path(dispatch.__file__).read_text()
     assert "import scripts.tag_head_bakeoff" not in source
     assert "from scripts.tag_head_bakeoff" not in source
+
+
+def test_the_train_stage_passes_the_comma_joined_arms_through():
+    plan = dispatch.plan_stage(_args(stage="train", run_id=1, arms="a@1/bf16,b@2/fp32"))
+    assert "--arms=a@1/bf16,b@2/fp32" in plan.argv
+    # One token, like every other stage — never a pre-split list, which is what the
+    # workflow's single string is not.
+    assert sum(1 for a in plan.argv if a.startswith("--arms")) == 1
+    assert dispatch.plan_stage(_args(stage="train", run_id=1)).argv[-2:] == \
+        ["--run-id", "1"]
+
+
+# --------------------------------------------------------------------------------
+# The trainer's list-shaped flags
+# --------------------------------------------------------------------------------
+
+def test_the_trainer_reads_a_comma_joined_arms_token_as_a_list():
+    # 2026-09-08 (i), GitHub run 34272736891: the dispatcher handed the trainer ONE
+    # comma-joined token and `nargs="+"` read it as one arm name — "run 1 has no arms
+    # named ['dinov2-...,siglip2-...,clip-...']", nothing written.
+    joined = ("dinov2-l14-reg@504/bf16,siglip2-b16@512/bf16,"
+              "clip-b32-laion@224/fp32,clip-b32-stored")
+    args = trainer.parse_args(["--run-id", "1", f"--arms={joined}"])
+    assert args.arms == ["dinov2-l14-reg@504/bf16", "siglip2-b16@512/bf16",
+                         "clip-b32-laion@224/fp32", "clip-b32-stored"]
+    # The space-separated spelling in the module docstring still works, and so does a
+    # mixture of the two.
+    assert trainer.parse_args(["--run-id", "1", "--arms", "a", "b,c"]).arms == \
+        ["a", "b", "c"]
+    assert trainer.parse_args(["--run-id", "1"]).arms is None
+
+
+def test_the_trainer_reads_modes_and_heads_the_same_way():
+    args = trainer.parse_args(["--run-id", "1", "--heads=4, 7,9",
+                               "--modes=pos_neg,pos_only_centroid"])
+    assert args.heads == [4, 7, 9]
+    assert args.modes == ["pos_neg", "pos_only_centroid"]
+    # Defaults survive the normalisation: every mode, no head/arm narrowing.
+    plain = trainer.parse_args(["--run-id", "1"])
+    assert plain.modes == list(th.MODES) and plain.heads is None
+
+
+def test_the_trainer_still_rejects_a_mode_that_does_not_exist():
+    # `choices=` had to go so a comma-joined token could be split; the check moved, it
+    # did not disappear.
+    for argv in (["--run-id", "1", "--modes=pos_neg,nonsense"],
+                 ["--run-id", "1", "--heads=4,not-a-number"]):
+        with pytest.raises(SystemExit):
+            trainer.parse_args(argv)

@@ -177,7 +177,10 @@ order by r.ts;
 
 The steps, in order: `start` → `deps` (psycopg for the reporter) → `fetch` (the repo at the
 sha) → `uv` → `venv` (the 3.12) → `disk` (**free GB on the work dir, before the ~5 GB torch
-install**) → `torch` (cu118, the slow one) → `repo` (`pip install -e .[clip]`) →
+install**) → `torch` (**cu118 `torch` AND `torchvision`, one command, the slow one** —
+the fast DINOv3 image processor imports torchvision, and a pod without it embeds the
+DINOv2/SigLIP2/CLIP arms fine and fails every DINOv3 arm at model load, 2026-09-08 (i)) →
+`repo` (`pip install -e .[clip]`) →
 `payload starting` → `payload ok` → `idle`. **A failure ships itself**: the start command's
 EXIT trap writes `{"msg": "pass=1 exit=1 step=torch", "tail": "<the last ~3000 chars of the
 pod's bootstrap log>"}` into the array, so the actual pip/git error text is readable from SQL

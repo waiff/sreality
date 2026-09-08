@@ -384,7 +384,10 @@ def plan_stage(args: argparse.Namespace) -> Plan:
         raise ValueError("--run-id is required for stage=train")
     argv = [sys.executable, "-m", TRAIN_MODULE, "--run-id", str(args.run_id)]
     if args.arms:
-        argv.extend(["--arms", args.arms])
+        # The comma-joined workflow input, passed through unsplit — exactly as the
+        # manifest and embed stages pass it. The trainer splits on commas too since
+        # 2026-09-08 (i), when it read the whole token as one arm name and wrote nothing.
+        argv.append(f"--arms={args.arms}")
     # NOT executed under --dry-run, unlike the manifest stage: the trainer is the
     # sibling's CLI and this module refuses to assume what its flags mean. A dry run
     # prints the exact command instead, which is the honest thing it can offer.
