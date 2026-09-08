@@ -59,6 +59,15 @@ on:
         required: false
         default: false
         type: boolean
+      mode:
+        description: "free = the W2-10 extractor; constrained = pick ONE obec from the PSČ-okres list; both = the two arms on the same listings"
+        required: false
+        default: "free"
+        type: choice
+        options:
+          - free
+          - constrained
+          - both
 
 concurrency:
   group: location-llm-bakeoff
@@ -97,8 +106,10 @@ jobs:
           MAX_USD: ${{ inputs.max_usd }}
           MAX_SECONDS: ${{ inputs.max_seconds }}
           DRY_RUN: ${{ inputs.dry_run }}
+          MODE: ${{ inputs.mode }}
         run: |
           ARGS="--summary-md bakeoff-summary.md"
+          if [ -n "$MODE" ]; then ARGS="$ARGS --mode $MODE"; fi
           if [ -n "$SAMPLE" ]; then ARGS="$ARGS --sample $SAMPLE"; fi
           if [ -n "$SEED" ]; then ARGS="$ARGS --seed $SEED"; fi
           if [ -n "$MODELS" ]; then ARGS="$ARGS --models $MODELS"; fi

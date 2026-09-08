@@ -3733,6 +3733,18 @@
           "type": "boolean",
           "default": "false",
           "options": null
+        },
+        {
+          "name": "mode",
+          "description": "free = the W2-10 extractor; constrained = pick ONE obec from the PSČ-okres list; both = the two arms on the same listings",
+          "required": false,
+          "type": "choice",
+          "default": "free",
+          "options": [
+            "free",
+            "constrained",
+            "both"
+          ]
         }
       ],
       "secrets": [

@@ -13,11 +13,18 @@ from pathlib import Path
 import pytest
 
 from scripts.location_llm_bakeoff import (
+    RELATIONS,
     CallRecord,
+    ChoiceObservation,
     FieldObservation,
+    build_constrained_message,
     compare_values,
     evaluate_answer,
+    evaluate_choice,
+    psc_digits,
+    relation_of,
     score,
+    score_constrained,
     summary_markdown,
 )
 from location_data.claims_llm import (
@@ -260,3 +267,151 @@ def test_the_markdown_summary_renders_every_model_and_flags_an_unpriced_one():
     for field in FIELD_ORDER:
         assert field in text
     assert "a|b" in text
+
+
+# ------------------------------------------------------------------ the constrained arm
+
+def test_psc_digits_accepts_the_spaced_form_and_rejects_anything_else():
+    assert psc_digits("186 00") == "18600"
+    assert psc_digits("18600") == "18600"
+    assert psc_digits("1860") is None
+    assert psc_digits(None) is None
+    assert psc_digits("PSČ") is None
+
+
+def test_the_constrained_message_carries_both_blocks_and_then_the_closed_list():
+    text = build_constrained_message({"title": "T", "description": "D"}, ["Aš", "Cheb"])
+    assert "TITULEK:\nT" in text and "POPIS:\nD" in text
+    assert text.index("SEZNAM OBCÍ") > text.index("POPIS")
+    assert text.endswith("\nAš\nCheb\n")
+
+
+def _choice(**answer):
+    document = scope_html(FIXTURE, register=REGISTER)
+    nodes = {b: document.css_first(css) for b, css in BLOCK_CSS.items()}
+    return evaluate_choice(
+        model="a", listing_id=1, answer=answer, candidates=["Praha", "Říčany"],
+        document=document, nodes=nodes)
+
+
+def test_a_pick_is_valid_only_when_it_is_a_list_member():
+    """The list is compared through the name normaliser: a case slip is not an invention,
+    a town outside the list is — and it stays recorded, never silently dropped."""
+    assert _choice(obec="Praha", quote="Sokolovská 234", confidence="high").valid is True
+    assert _choice(obec="praha", quote="Sokolovská 234", confidence="high").valid is True
+    outside = _choice(obec="Brno", quote="Sokolovská 234", confidence="high")
+    assert outside.valid is False and outside.obec == "Brno"
+    assert outside.candidates == 2
+
+
+def test_an_abstention_is_neither_valid_nor_invalid():
+    choice = _choice(obec=None, quote=None, confidence="low")
+    assert choice.obec is None and choice.valid is None and choice.quote_valid is False
+    blank = _choice(obec="   ", quote=None, confidence="low")
+    assert blank.obec is None and blank.valid is None
+
+
+def test_a_fabricated_quote_is_a_quote_validity_miss_in_the_constrained_arm_too():
+    assert _choice(obec="Praha", quote="Sokolovská 234", confidence="high").quote_valid
+    assert not _choice(obec="Praha", quote="nikde v textu", confidence="high").quote_valid
+    assert not _choice(obec="Praha", quote=None, confidence="high").quote_valid
+
+
+def test_an_unknown_confidence_reads_as_low_never_as_high():
+    assert _choice(obec="Praha", quote="Sokolovská 234", confidence="sure").confidence == "low"
+    assert _choice(obec="Praha", quote="Sokolovská 234", confidence=None).confidence == "low"
+
+
+@pytest.mark.parametrize("pick, valid, free, resolved, expected", [
+    (None, None, None, None, "neither"),
+    (None, None, "Chebu", False, "free_only"),
+    ("Cheb", True, None, None, "pick_only"),
+    ("Cheb", True, "Cheb", True, "same"),
+    ("Cheb", True, "cheb", True, "same"),
+    ("Cheb", True, "Chebu", False, "free_unresolved_pick_valid"),
+    ("Aš", True, "Cheb", True, "different"),
+    # An invalid pick never counts as "the list fixed it", whatever the free arm did.
+    ("Brno", False, "Chebu", False, "different"),
+])
+def test_relation_of(pick, valid, free, resolved, expected):
+    assert relation_of(pick, valid, free, resolved) == expected
+    assert expected in RELATIONS
+
+
+def _pick(model, listing_id, obec, *, valid=True, confidence="high", relation=None,
+          candidates=50) -> ChoiceObservation:
+    return ChoiceObservation(
+        model=model, listing_id=listing_id, candidates=candidates, obec=obec,
+        valid=None if obec is None else valid, quote=obec,
+        quote_valid=obec is not None, confidence=confidence, relation=relation)
+
+
+def test_constrained_scoring_counts_picks_validity_and_pairwise_agreement():
+    choices = [
+        _pick("a", 1, "Cheb"), _pick("b", 1, "Cheb"),
+        _pick("a", 2, "Aš"), _pick("b", 2, "Cheb"),
+        _pick("a", 3, None), _pick("b", 3, "Cheb"),
+        _pick("a", 4, None), _pick("b", 4, None),
+        _pick("a", 5, "Brno", valid=False), _pick("b", 5, "Brno", valid=False),
+    ]
+    calls = ([call("a", i, cost=0.001) for i in range(1, 6)]
+             + [call("b", i, cost=0.0) for i in range(1, 6)])
+    section = score_constrained(
+        choices, calls, ["a", "b"], listing_count=5, listings_without_candidates=1,
+        titles={2: "Prodej domu v Aši"}, urls={2: "https://reality.bazos.cz/inzerat/2/x.php"})
+    a = section["per_model"]["a"]
+    assert a["scored"] == 5 and a["picked"] == 3 and a["abstained"] == 2
+    assert a["valid_picks"] == 2 and a["invalid_picks"] == 1
+    assert a["valid_rate"] == round(2 / 3, 4) and a["pick_rate"] == 0.6
+    assert a["relations"] is None
+    assert section["per_model"]["b"]["unpriced"] is True
+    assert section["agreement"]["a|b"] == {
+        "both_picked": 3, "agreed": 2, "rate": round(2 / 3, 4),
+        "one_sided": 1, "both_abstained": 1,
+    }
+    listed = {d["listing_id"]: d for d in section["disagreements"]}
+    assert set(listed) == {2, 3}
+    assert listed[2]["url"].startswith("https://reality.bazos.cz/")
+    assert listed[2]["title"] == "Prodej domu v Aši"
+    assert listed[2]["a"] == "Aš" and listed[2]["b"] == "Cheb"
+    assert listed[3]["a"] is None and listed[3]["b"] == "Cheb"
+    assert section["listings_without_candidates"] == 1
+
+
+def test_constrained_scoring_reports_the_relation_histogram_when_the_free_arm_ran():
+    section = score_constrained(
+        [_pick("a", 1, "Cheb", relation="same"),
+         _pick("a", 2, "Cheb", relation="free_unresolved_pick_valid"),
+         _pick("a", 3, None, relation="free_only")],
+        [call("a", i) for i in (1, 2, 3)], ["a"], listing_count=3,
+        listings_without_candidates=0, titles={}, urls={})
+    relations = section["per_model"]["a"]["relations"]
+    assert relations["same"] == 1 and relations["free_unresolved_pick_valid"] == 1
+    assert relations["free_only"] == 1 and relations["different"] == 0
+
+
+def test_the_summary_renders_the_constrained_section_next_to_the_free_arm():
+    report = score([obs("a", 1, "obec", "Cheb", resolved=True)],
+                   [call("a", 1, cost=0.001)], ["a"], listing_count=1)
+    report.update({"seed": "w2-10", "prompt_version": "bzs.loc@1", "mode": "both",
+                   "cost_all_arms_usd": 0.002})
+    report["constrained"] = score_constrained(
+        [_pick("a", 1, "Cheb", relation="same")], [call("a", 1, cost=0.001)], ["a"],
+        listing_count=1, listings_without_candidates=0, titles={}, urls={})
+    text = summary_markdown(report)
+    assert "Per-field yield" in text
+    assert "Constrained arm" in text and "bzs.loc.pick@1" in text
+    assert "free_unresolved_pick_valid" in text
+    assert "total $0.0020" in text
+
+
+def test_a_constrained_only_run_does_not_render_an_empty_free_arm_table():
+    report = score([], [], ["a"], listing_count=0)
+    report.update({"seed": "s", "prompt_version": "bzs.loc@1", "mode": "constrained"})
+    report["constrained"] = score_constrained(
+        [_pick("a", 1, "Cheb")], [call("a", 1)], ["a"], listing_count=1,
+        listings_without_candidates=0, titles={}, urls={})
+    text = summary_markdown(report)
+    assert "Per-field yield" not in text and "Pairwise agreement" not in text
+    assert "Constrained arm" in text
+    assert "— 1 bazos listings" in text
