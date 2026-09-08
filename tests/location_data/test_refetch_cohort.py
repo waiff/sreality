@@ -264,7 +264,7 @@ def test_the_lane_defaults_to_the_phase_that_writes_no_queue_rows():
     inputs = _workflow()[True]["workflow_dispatch"]["inputs"] if True in _workflow() \
         else _workflow()["on"]["workflow_dispatch"]["inputs"]
     assert inputs["mode"]["default"] == "reconcile"
-    assert set(inputs["mode"]["options"]) == {"reconcile", "dispatch"}
+    assert set(inputs["mode"]["options"]) == {"reconcile", "dispatch", "gate"}
 
 
 def test_the_lane_stays_out_of_the_oversubscribed_batch_group():

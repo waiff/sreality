@@ -11,6 +11,12 @@ name: "Jobs: location refetch cohort (W4)"
 #                so its size says nothing about how much work is actually left.
 #   dispatch   — reconcile, then enqueue the still-pending rows onto the ordinary detail
 #                queue at priority -1 and advance their schedule.
+#   gate       — READ-ONLY. Prints the W4 acceptance gate measured on the production corpus
+#                (scripts/location_w4_gate_report.py): the legacy-shape share of ACTIVE
+#                sreality rows (on `listings`, never on the cohort table), D3 coverage on
+#                the refetched cohort, bezrealitky's ruianId share against its portal
+#                ceiling, and the cohort's state. Runs here because this is where the DB
+#                URL lives and a full-corpus jsonb scan outlives the MCP's statement budget.
 #
 # NOT in the `location-batch` concurrency group, deliberately. That group is oversubscribed
 # (measured: 57.5% of intake runs cancelled, #1084/#1086) and it exists to keep heavy
@@ -30,13 +36,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "reconcile (retire finished rows only) | dispatch (also enqueue refetches)"
+        description: "reconcile (retire finished rows only) | dispatch (also enqueue refetches) | gate (read-only W4 gate report)"
         required: false
         default: "reconcile"
         type: choice
         options:
           - reconcile
           - dispatch
+          - gate
       limit:
         description: "max rows to enqueue in dispatch mode"
         required: false
@@ -80,7 +87,14 @@ jobs:
       - name: Install
         run: pip install -e .
 
+      - name: W4 gate report (read-only)
+        if: inputs.mode == 'gate'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python -m scripts.location_w4_gate_report
+
       - name: Drive the cohort
+        if: inputs.mode != 'gate'
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |

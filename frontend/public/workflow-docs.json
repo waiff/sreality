@@ -4193,13 +4193,14 @@
       "inputs": [
         {
           "name": "mode",
-          "description": "reconcile (retire finished rows only) | dispatch (also enqueue refetches)",
+          "description": "reconcile (retire finished rows only) | dispatch (also enqueue refetches) | gate (read-only W4 gate report)",
           "required": false,
           "type": "choice",
           "default": "reconcile",
           "options": [
             "reconcile",
-            "dispatch"
+            "dispatch",
+            "gate"
           ]
         },
         {
