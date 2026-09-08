@@ -18,6 +18,7 @@ the plumbing itself. Two families carry real weight:
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1552,3 +1553,119 @@ def test_zero_claim_sources_ignores_a_page_kind_with_no_entry():
     assert claims_remine_archive.zero_claim_sources(
         {"per_source": {"remax": {"applicable_payloads": 0, "payloads": 50_000,
                                   "claims": 0}}}) == []
+
+
+# ------------------------------------------------------------------ the fetch runs wide
+
+class _BarrierStore:
+    """Every download blocks until `parties` of them are in flight at once. Serial fetching
+    cannot satisfy that, so a regression to one-at-a-time TIMES OUT rather than passing
+    slowly — which is the only way to assert concurrency without asserting on a clock."""
+
+    def __init__(self, objects: dict[str, bytes], parties: int) -> None:
+        self.objects = objects
+        self.barrier = threading.Barrier(parties, timeout=10)
+        self.peak = 0
+        self._live = 0
+        self._lock = threading.Lock()
+
+    def download_bytes(self, key: str) -> bytes:
+        with self._lock:
+            self._live += 1
+            self.peak = max(self.peak, self._live)
+        try:
+            self.barrier.wait()
+        finally:
+            with self._lock:
+                self._live -= 1
+        return self.objects[key]
+
+
+def _spilled_rows(count: int) -> tuple[list[tuple[Any, ...]], dict[str, bytes]]:
+    rows: list[tuple[Any, ...]] = []
+    objects: dict[str, bytes] = {}
+    for i in range(count):
+        key = f"payloads/remax/{i:02d}/body.html"
+        objects[key] = BODY + str(i).encode()
+        rows.append((i, None, key, "identity"))
+    return rows, objects
+
+
+def test_a_batch_of_bodies_is_fetched_concurrently_not_one_at_a_time():
+    rows, objects = _spilled_rows(4)
+    store = _BarrierStore(objects, parties=4)
+    bodies, from_r2 = claims_remine_archive.load_bodies(
+        _BodyCursor(rows), list(range(4)), store=store, workers=4)
+    assert from_r2 == 4
+    assert bodies == {i: objects[f"payloads/remax/{i:02d}/body.html"] for i in range(4)}
+    assert store.peak == 4
+
+
+def test_every_body_lands_on_its_own_payload_id_whatever_order_they_arrive_in():
+    """`pool.map` yields in submission order but the DOWNLOADS finish in any order; the id
+    travels WITH the bytes so a slow object cannot be filed under a fast one's row."""
+    rows, objects = _spilled_rows(6)
+
+    class _ReverseStore:
+        def __init__(self) -> None:
+            self.gate = threading.Event()
+            self.seen: list[str] = []
+
+        def download_bytes(self, key: str) -> bytes:
+            # The first key submitted returns LAST: it waits for the others to arrive.
+            if key.endswith("00/body.html"):
+                assert self.gate.wait(timeout=10)
+            else:
+                self.seen.append(key)
+                if len(self.seen) == 5:
+                    self.gate.set()
+            return objects[key]
+
+    store = _ReverseStore()
+    bodies, from_r2 = claims_remine_archive.load_bodies(
+        _BodyCursor(rows), list(range(6)), store=store, workers=6)
+    assert from_r2 == 6
+    for i in range(6):
+        assert bodies[i] == objects[f"payloads/remax/{i:02d}/body.html"]
+
+
+def test_one_failed_download_aborts_the_batch_rather_than_writing_a_partial_page_set():
+    """Serially this raised out of the batch's transaction and rolled it back; concurrently
+    it must still raise, or a page set with holes would be written as though complete."""
+    rows, objects = _spilled_rows(5)
+
+    class _FlakyStore:
+        def download_bytes(self, key: str) -> bytes:
+            if key.endswith("03/body.html"):
+                raise OSError("R2 timed out")
+            return objects[key]
+
+    with pytest.raises(OSError, match="R2 timed out"):
+        claims_remine_archive.load_bodies(
+            _BodyCursor(rows), list(range(5)), store=_FlakyStore(), workers=5)
+
+
+def test_the_width_is_bounded_by_the_batch_and_one_worker_stays_serial():
+    rows, objects = _spilled_rows(3)
+    store = _FakeStore(objects)
+    bodies, from_r2 = claims_remine_archive.load_bodies(
+        _BodyCursor(rows), [0, 1, 2], store=store, workers=1)
+    assert from_r2 == 3 and len(bodies) == 3
+    # Serial: the gets keep the row order, which is what the single-worker path promises.
+    assert store.gets == [f"payloads/remax/{i:02d}/body.html" for i in range(3)]
+    # A width wider than the batch never spawns idle threads: one row, one worker, and the
+    # barrier below would deadlock if a second thread were started.
+    single_rows, single_objects = _spilled_rows(1)
+    solo = _BarrierStore(single_objects, parties=1)
+    bodies, from_r2 = claims_remine_archive.load_bodies(
+        _BodyCursor(single_rows), [0], store=solo, workers=16)
+    assert from_r2 == 1 and solo.peak == 1
+
+
+def test_an_inline_body_needs_no_store_even_when_the_batch_is_wide(monkeypatch):
+    """The database-resident rows are decoded on the spot; only spilled rows reach the pool,
+    so a fully inline batch still runs with no credentials at all."""
+    monkeypatch.setenv(payloads.BODY_FETCH_WORKERS_ENV, "16")
+    cursor = _BodyCursor([(1, BODY, None, "identity"), (2, BODY, None, "identity")])
+    bodies, from_r2 = claims_remine_archive.load_bodies(cursor, [1, 2], store=None)
+    assert bodies == {1: BODY, 2: BODY} and from_r2 == 0

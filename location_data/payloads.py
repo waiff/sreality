@@ -795,6 +795,28 @@ def orphaned_r2_keys(cur: psycopg.Cursor, keys: Sequence[str]) -> tuple[str, ...
     return tuple(str(row[0]) for row in cur.fetchall())
 
 
+# ------------------------------------------------------------------ body fetch width
+
+# A sweep over the archived corpus is ~99 % fetching: measured 2026-09-08, one 2,000-page
+# remax run spent 844 s wall-clock of which the DATABASE accounted for 1.4 s per 500-row
+# batch — 0.7 % — and the rest was one R2 GET per page, in series. The readers therefore
+# fetch a batch's bodies CONCURRENTLY, and the client's connection pool must be at least as
+# wide or urllib3 discards connections and the pool becomes the new serialiser (the "pool is
+# full" warnings the W2a backfill logged on all eleven of its runs). One knob sizes both, so
+# they cannot drift apart.
+BODY_FETCH_WORKERS_ENV = "LOCATION_BODY_FETCH_WORKERS"
+DEFAULT_BODY_FETCH_WORKERS = 16
+MAX_BODY_FETCH_WORKERS = 32
+
+
+def body_fetch_workers() -> int:
+    """How many archived bodies a lane fetches at once. Clamped to 1..32: 0 would mean a
+    lane that fetches nothing, and the ceiling keeps one runner from opening a socket per
+    row of a 5,000-body batch."""
+    value = env_non_negative_int(BODY_FETCH_WORKERS_ENV, DEFAULT_BODY_FETCH_WORKERS)
+    return max(1, min(MAX_BODY_FETCH_WORKERS, value))
+
+
 _STORE: ObjectStore | None = None
 
 
@@ -813,7 +835,9 @@ def open_store() -> ObjectStore | None:
 
         if not image_storage.is_configured():
             return None
-        _STORE = image_storage.R2Client.from_env(max_pool_connections=4)
+        # Sized to the fetch width, never below it — see `body_fetch_workers`.
+        _STORE = image_storage.R2Client.from_env(
+            max_pool_connections=body_fetch_workers())
     return _STORE
 
 

@@ -1311,3 +1311,51 @@ def test_the_floor_reports_the_stored_body_from_the_append_statement_itself(
     assert (refused.id, refused.payload_sha256) == (first.id, first.payload_sha256)
     assert payloads.archive_stats().suppressed == 1
     assert len(_rows(conn, native)) == 1
+
+
+def test_the_fetch_width_is_clamped_and_read_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sweep is ~99 % fetching, so this knob is the sweep's speed. Zero would mean a lane
+    that fetches nothing and the ceiling keeps one runner from opening a socket per row of a
+    5,000-body batch."""
+    monkeypatch.delenv(payloads.BODY_FETCH_WORKERS_ENV, raising=False)
+    assert payloads.body_fetch_workers() == payloads.DEFAULT_BODY_FETCH_WORKERS
+
+    monkeypatch.setenv(payloads.BODY_FETCH_WORKERS_ENV, "8")
+    assert payloads.body_fetch_workers() == 8
+    monkeypatch.setenv(payloads.BODY_FETCH_WORKERS_ENV, "0")
+    assert payloads.body_fetch_workers() == 1
+    monkeypatch.setenv(payloads.BODY_FETCH_WORKERS_ENV, "9999")
+    assert payloads.body_fetch_workers() == payloads.MAX_BODY_FETCH_WORKERS
+    monkeypatch.setenv(payloads.BODY_FETCH_WORKERS_ENV, "-4")
+    assert payloads.body_fetch_workers() == payloads.DEFAULT_BODY_FETCH_WORKERS
+    monkeypatch.setenv(payloads.BODY_FETCH_WORKERS_ENV, "wide")
+    assert payloads.body_fetch_workers() == payloads.DEFAULT_BODY_FETCH_WORKERS
+
+
+def test_the_connection_pool_is_never_narrower_than_the_fetch_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """urllib3 discards connections once the pool is full — the "pool is full" warnings the
+    W2a backfill logged on all eleven runs — so a pool narrower than the fetch width would
+    quietly become the new serialiser and the concurrency would buy nothing."""
+    from scraper import image_storage
+
+    captured: dict[str, int] = {}
+
+    class _Client:
+        @classmethod
+        def from_env(cls, max_pool_connections: int = 32):
+            captured["pool"] = max_pool_connections
+            return object()
+
+    monkeypatch.setattr(image_storage, "is_configured", lambda: True)
+    monkeypatch.setattr(image_storage, "R2Client", _Client)
+    monkeypatch.setenv(payloads.BODY_FETCH_WORKERS_ENV, "16")
+    payloads.reset_store_cache()
+    try:
+        assert payloads.open_store() is not None
+        assert captured["pool"] >= payloads.body_fetch_workers() == 16
+    finally:
+        payloads.reset_store_cache()
