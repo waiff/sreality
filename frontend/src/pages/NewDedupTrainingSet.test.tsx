@@ -135,6 +135,51 @@ describe('<NewDedupTrainingSet> four trays over stored membership', () => {
     expect(screen.queryByTestId('zoom-move')).toBeNull();
   });
 
+  /* The operator's mapping: left hand on the marks, right hand on the arrows. */
+  it('marks by keystroke — a / s / d — through the same path as a click', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    await user.click(screen.getByTestId('open-11'));
+    await screen.findByRole('dialog');
+
+    await user.keyboard('s');
+    await waitFor(() => expect(api.setNewDedupTagAnnotation)
+      .toHaveBeenCalledWith(42, 11, 'negative', null));
+    await user.keyboard('d');
+    await waitFor(() => expect(api.setNewDedupTagAnnotation)
+      .toHaveBeenCalledWith(42, 11, 'excluded', 'pruned'));
+    await user.keyboard('a');
+    await waitFor(() => expect(api.setNewDedupTagAnnotation)
+      .toHaveBeenCalledWith(42, 11, 'positive', null));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('backspace moves membership, and arrow keys still walk the page', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('training-tile-11');
+    await user.click(screen.getByTestId('open-11'));
+    await screen.findByRole('dialog');
+    await user.keyboard('{Backspace}');
+    await waitFor(() => expect(api.setTrainingMembership).toHaveBeenCalledWith(42, [11], false));
+    // The arrows keep working, and the keystroke follows the photo on show.
+    await user.keyboard('{ArrowRight}s');
+    await waitFor(() => expect(api.setNewDedupTagAnnotation)
+      .toHaveBeenCalledWith(42, 12, 'negative', null));
+  });
+
+  it('a keystroke in a text field is typing, not a decision', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const tile = await screen.findByTestId('training-tile-11');
+    // A note field on the page, with no viewer open: the listener must ignore it.
+    await user.click(within(tile).getByRole('button', { name: /^negative 11$/ }));
+    await waitFor(() => expect(api.setNewDedupTagAnnotation).toHaveBeenCalledTimes(1));
+    await user.type(within(tile).getByRole('textbox', { name: /why 11/ }), 'sad');
+    expect(api.setNewDedupTagAnnotation).toHaveBeenCalledTimes(1);
+  });
+
   it('opens the shared full-size viewer on a tile, and closes it', async () => {
     const user = userEvent.setup();
     renderPage();

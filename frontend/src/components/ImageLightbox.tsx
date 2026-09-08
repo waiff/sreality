@@ -52,6 +52,12 @@ interface Props {
    * three clicks. Callers that only display photos pass nothing and the
    * viewer is unchanged. */
   actionsAt?: (index: number) => React.ReactNode;
+  /* Single-key shortcuts for the photo on show, keyed by `e.key` lowercased
+   * ('a', 'backspace'). They live HERE rather than in the calling page so they
+   * inherit the one rule the arrow keys already follow: only the frontmost
+   * layer answers. A page-level listener would fire under a dialog opened over
+   * this one. */
+  shortcuts?: Record<string, (index: number) => void>;
 }
 
 export default function ImageLightbox({
@@ -61,6 +67,7 @@ export default function ImageLightbox({
   dim = '',
   tagAt,
   actionsAt,
+  shortcuts,
 }: Props) {
   const [index, setIndex] = useState(startIndex);
   const [errored, setErrored] = useState(false);
@@ -89,6 +96,11 @@ export default function ImageLightbox({
    * handle — which is a fresh object every render — among its dependencies. */
   const isTopRef = useRef(isTopLayer);
   isTopRef.current = isTopLayer;
+  /* Same reason as isTopRef: read through refs so the listener never has to
+   * list a fresh-every-render object among its dependencies. */
+  const shortcutsRef = useRef(shortcuts);
+  shortcutsRef.current = shortcuts;
+  const indexRef = useRef(0);
 
   /* THE ARROW KEYS, AND NOTHING ELSE. This effect used to also call
    * `closeBtnRef.current?.focus()` while depending on [onClose, prev, next] —
@@ -107,13 +119,27 @@ export default function ImageLightbox({
     const handler = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
       if (!isTopRef.current()) return;
-      if (e.key === 'ArrowLeft') prev();
-      else if (e.key === 'ArrowRight') next();
+      if (e.key === 'ArrowLeft') { prev(); return; }
+      if (e.key === 'ArrowRight') { next(); return; }
+      /* A shortcut is a bare keypress: a modifier means the browser's own
+       * command (⌘A, ctrl-D), and a field with focus means the operator is
+       * typing a note, not deciding. */
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.isContentEditable
+                 || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName))) return;
+      const run = shortcutsRef.current?.[e.key.toLowerCase()];
+      if (run) {
+        // Backspace would otherwise navigate back in some browsers.
+        e.preventDefault();
+        run(indexRef.current);
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [prev, next]);
 
+  indexRef.current = i;
   const current = images[i];
   if (!current) return null;
   const badge = tagAt?.(i) ?? {

@@ -422,10 +422,31 @@ export default function NewDedupTrainingSet() {
   /* The marks, named once. The tile and the focus view render the SAME three
    * decisions; two lists would drift the moment one gained a state. */
   const MARKS = [
-    { v: 'positive' as const, label: '✓ applies' },
-    { v: 'negative' as const, label: '✕ no' },
-    { v: 'excluded' as const, label: '– left out' },
+    { v: 'positive' as const, label: '✓ applies', key: 'a' },
+    { v: 'negative' as const, label: '✕ no', key: 's' },
+    { v: 'excluded' as const, label: '– left out', key: 'd' },
   ];
+
+  /* One place that knows how a decision is made, so a keystroke and a click
+   * cannot diverge. Both go through correctMut, so the optimistic patch, the
+   * tray counts and the rollback are identical either way. */
+  const markAt = (idx: number, state: TagState) => {
+    const r = rows[idx];
+    if (!r || correctMut.isPending) return;
+    correctMut.mutate({ imageId: r.image_id, state, from: r.state,
+                        fromMine: r.source !== 'machine' });
+  };
+  const moveAt = (idx: number) => {
+    const r = rows[idx];
+    if (!r || !canMove || moveMut.isPending) return;
+    moveMut.mutate({ imageIds: [r.image_id], into: !r.in_training });
+  };
+  /* a / s / d / backspace — the operator's own mapping. Left hand on the marks,
+   * right hand on the arrows. */
+  const zoomShortcuts = {
+    ...Object.fromEntries(MARKS.map(({ v, key }) => [key, (i: number) => markAt(i, v)])),
+    backspace: moveAt,
+  };
 
   /* The control bar inside the focus view. Deciding is why the photo is open —
    * closing it to reach the marks would make one judgement three clicks — and
@@ -438,23 +459,20 @@ export default function NewDedupTrainingSet() {
     return (
       <div className="flex flex-col gap-1.5">
         <div className="flex gap-1.5">
-          {MARKS.map(({ v, label }) => (
+          {MARKS.map(({ v, label, key }) => (
             <button
               key={v}
               type="button"
               data-testid={`zoom-${v}`}
               aria-pressed={r.state === v}
               disabled={correctMut.isPending}
-              onClick={() => correctMut.mutate({
-                imageId: r.image_id, state: v, from: r.state,
-                fromMine: r.source !== 'machine',
-              })}
+              onClick={() => markAt(idx, v)}
               className={`flex-1 py-1.5 text-sm rounded-[var(--radius-sm)] border transition-colors ${
                 r.state === v
                   ? 'border-[var(--color-copper)] bg-[var(--color-paper)]/10 text-[var(--color-paper)]'
                   : 'border-[var(--color-paper)]/25 text-[var(--color-ink-4)] hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10'}`}
             >
-              {label}
+              {label} <kbd className="ml-1 opacity-60">{key.toUpperCase()}</kbd>
             </button>
           ))}
         </div>
@@ -463,10 +481,11 @@ export default function NewDedupTrainingSet() {
             type="button"
             data-testid="zoom-move"
             disabled={moveMut.isPending}
-            onClick={() => moveMut.mutate({ imageIds: [r.image_id], into: !r.in_training })}
+            onClick={() => moveAt(idx)}
             className="py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-paper)]/25 text-[var(--color-ink-4)] hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10"
           >
             {r.in_training ? '↩ return to reserve' : '→ move to training'}
+            <kbd className="ml-1 opacity-60">⌫</kbd>
           </button>
         )}
       </div>
@@ -789,7 +808,8 @@ export default function NewDedupTrainingSet() {
             <ul className="mt-0.5 list-disc pl-4 space-y-0.5">
               <li>Click the photo to open it large, in the same viewer the listing pages use. The
                 same marks are under it there, and it stays open after one &mdash; so arrow keys
-                walk the page and you can decide without closing. Escape closes.</li>
+                walk the page and you can decide without closing. <b>A</b> applies, <b>S</b> no,
+                <b> D</b> left out, <b>backspace</b> moves it in or out of training. Escape closes.</li>
               <li><b>machine</b> / <b>yours</b> says who decided the current mark.</li>
               <li><b>→ move to training</b> / <b>↩ return to reserve</b> is membership, separate from the mark — on the positive and reserve trays only.</li>
               <li><b>old wording</b> means the label was written under a definition you have since changed.</li>
@@ -872,6 +892,7 @@ export default function NewDedupTrainingSet() {
           startIndex={lightboxAt}
           onClose={() => setLightboxAt(null)}
           actionsAt={zoomActions}
+          shortcuts={zoomShortcuts}
         />
       )}
     </div>
