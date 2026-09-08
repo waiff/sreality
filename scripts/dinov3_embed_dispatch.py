@@ -162,6 +162,9 @@ def main() -> int:
         f"--shard={args.shard}",
         f"--shards={args.shards}",
         f"--max-seconds={args.job_max_seconds}",
+        # Explicit, not left to the payload's probe: this command only ever runs on a
+        # rented GPU pod, so anything but cuda there is a fault worth a loud fallback.
+        "--device=cuda",
     ]
     start_cmd = build_start_cmd(ref=args.ref, backfill_args=backfill_args)
     env = pod_env()

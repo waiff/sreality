@@ -351,3 +351,48 @@ def test_an_under_specified_encoder_is_refused_before_any_db_work(monkeypatch):
     with pytest.raises(RuntimeError) as exc:
         bf.main()
     assert "ENCODER-DECISION" in str(exc.value)
+
+
+# --- the device ----------------------------------------------------------------
+
+
+class _FakeCuda:
+    def __init__(self, available: bool) -> None:
+        self._available = available
+
+    def is_available(self) -> bool:
+        return self._available
+
+
+class _FakeTorch:
+    def __init__(self, gpu: bool) -> None:
+        self.cuda = _FakeCuda(gpu)
+
+
+def _torch(monkeypatch, *, gpu: bool) -> None:
+    monkeypatch.setitem(sys.modules, "torch", _FakeTorch(gpu))
+
+
+def test_the_default_device_is_the_gpu_when_there_is_one(monkeypatch):
+    # This payload runs INSIDE a rented GPU pod. Until 2026-09-08 it moved nothing to
+    # CUDA, so a real run would have paid for a card and computed on the CPU — same
+    # vectors, hours slower, nothing in the log saying so.
+    _torch(monkeypatch, gpu=True)
+    assert bf.resolve_device() == "cuda"
+
+
+def test_the_default_device_falls_back_to_cpu_with_no_gpu(monkeypatch):
+    _torch(monkeypatch, gpu=False)
+    assert bf.resolve_device() == "cpu"
+
+
+def test_an_explicit_cpu_never_probes_torch(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", None)  # importing it would fail
+    assert bf.resolve_device("cpu") == "cpu"
+
+
+def test_an_explicit_cuda_without_a_gpu_falls_back_loudly(monkeypatch, caplog):
+    _torch(monkeypatch, gpu=False)
+    with caplog.at_level("WARNING"):
+        assert bf.resolve_device("cuda") == "cpu"
+    assert "no GPU" in caplog.text

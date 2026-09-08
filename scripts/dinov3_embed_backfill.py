@@ -23,6 +23,11 @@ pipeline, not just this job. Disk also cannot shrink. The safe rate therefore de
 on the dashboard's live disk-utilisation reading at run time and cannot be baked into a
 default, so the flag is required and the operator must look before dispatching.
 
+RUNS ON THE GPU IT IS PAYING FOR. `--device` defaults to `cuda` when torch reports a
+card and `cpu` otherwise, resolved at run time and logged. Until 2026-09-08 this script
+moved nothing to CUDA at all, so a pod run would have rented a GPU and computed on its
+CPU — same vectors, hours slower, and nothing in the log would have said so.
+
 Usage:  python -m scripts.dinov3_embed_backfill --max-write-mb-per-hour 500 --limit 200000
 Required: SUPABASE_DB_URL (+ R2_*, HF_TOKEN and the `clip` extra to do the work).
 Requires migration 480 (PR #1296) to have been applied — the table does not exist otherwise.
@@ -214,6 +219,26 @@ def select_pending(conn, *, identity: dict[str, Any], batch: int, shard: int,
         return [(r[0], r[1]) for r in cur.fetchall()]
 
 
+def resolve_device(requested: str = "") -> str:
+    """The torch device to run the forward pass on, measured rather than assumed.
+
+    An empty request means "use the GPU if there is one". A GPU pass and a CPU pass
+    produce the same vectors, so nothing here fails loudly on its own — the run just
+    takes hours and bills for a card it never touched. Hence a live
+    `torch.cuda.is_available()` probe and a logged answer.
+    """
+    if requested and requested != "cuda":
+        return requested
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda"
+    if requested == "cuda":
+        LOG.warning("--device=cuda but torch reports no GPU — falling back to cpu. "
+                    "This will be very slow.")
+    return "cpu"
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -233,6 +258,12 @@ def main() -> int:
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--shards", type=int, default=1, help="image_id %% shards == shard.")
     p.add_argument("--threads", type=int, default=0, help="torch threads (0=cpus).")
+    p.add_argument("--device", default="",
+                   help="Torch device for the forward pass. Empty (the default) "
+                        "resolves to 'cuda' when torch reports a GPU and 'cpu' "
+                        "otherwise, and the resolved value is logged — this job runs "
+                        "inside a rented GPU pod, so a silent CPU pass would pay for "
+                        "a GPU and never touch it.")
     p.add_argument("--max-seconds", type=float, default=0,
                    help="Time budget; stop cleanly at a chunk boundary. 0 = unbounded. "
                         "Set it under the runner/pod timeout so the pass reports what it "
@@ -280,7 +311,9 @@ def main() -> int:
 
         from scraper.dinov3_tagger import Dinov3Tagger
 
-        tagger = Dinov3Tagger.load(threads=args.threads)
+        device = resolve_device(args.device)
+        LOG.info("DINOV3 device=%s (requested=%s)", device, args.device or "auto")
+        tagger = Dinov3Tagger.load(threads=args.threads, device=device)
         # Stamp what the LOADED weights actually were, never the file we read — a tagger
         # loaded some other way can then never write a row claiming a revision it did
         # not use (the rail clip_tag_backfill.py already applies to CLIP).

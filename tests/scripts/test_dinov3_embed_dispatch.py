@@ -169,6 +169,15 @@ def test_dispatch_hands_the_pod_its_credentials_and_a_wait_window_that_outlives_
     assert "--limit=5000" in job["start_cmd"][2]
 
 
+def test_the_pod_is_told_to_use_the_gpu_it_is_renting(monkeypatch, caplog):
+    # A pod always has a card, and a payload that quietly ran on CPU would look like
+    # a slow run while billing for a GPU it never touched.
+    _argv(monkeypatch, "--max-write-mb-per-hour", "500", "--dry-run")
+    with caplog.at_level("INFO"):
+        assert dispatch.main() == 0
+    assert "--device=cuda" in caplog.text
+
+
 def test_dispatch_refuses_without_an_api_key(monkeypatch):
     _argv(monkeypatch, "--max-write-mb-per-hour", "500")
     monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
