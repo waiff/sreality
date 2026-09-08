@@ -44,9 +44,11 @@ them; `tests/scraper/test_portal_category_coverage.py` now fails CI whenever a p
 in the fleet carries such a category) and the rent-only `podnajem`/`ubytovani` (roommate
 search and short-term lodging classifieds, not the sale or rental of a property). So — like
 sreality/idnes (rule #19) — it is **cadence-split**: `bazos_index_walk.yml` (every 6h, full
-walk + mark_inactive + enqueue) feeds the bounded `bazos_detail_drain.yml` (hourly,
-`--max-seconds` budget). A combined run can't do both inside one job (~1500 index pages ≈
-50 min eats the window, starving the drain); narrow ad-hoc runs go through the split
+walk + presence nomination + enqueue) feeds the bounded `bazos_detail_drain.yml` (hourly,
+`--max-seconds` budget). A combined run can't do both inside one job (the full 22-scope walk is
+~2400 index pages ≈ 85-90 min at the portal's 0.5 req/s index rate since migration 488 added
+pozemek/zahrada/garaz/ostatni — a 130-minute job timeout with a 110-minute budget — which eats
+the window, starving the drain); narrow ad-hoc runs go through the split
 workflows' dispatch inputs (`-f sale_type=… -f category=…`, or locality + radius) or
 `scraper.bazos_main` locally. **Detail-page** raw HTML is staged in `portal_raw_pages`
 (migration 099) before parsing (the parsed-state ledger + reparse-without-refetch capability); INDEX/search-page
@@ -128,9 +130,9 @@ cross-source filtering/dedup/condition-scoring see one vocabulary. Coordinates c
 the API's `gps` field (precise, per-listing — no geocoding step). Because the detail JSON
 carries `offerType`/`estateType`, the drain derives each listing's category from the
 response, so one config walks many categories (no per-category queue encoding).
-`listAdverts` has a `totalCount` and no deep-pagination cap, so a per-category walk is
-provable-complete: unlike bazos, bezrealitky is complete-walk capable and the runner marks
-delisted listings inactive under the completeness guard (source-scoped). NOTE: bezrealitky
+`listAdverts` has a `totalCount` and no deep-pagination cap, so a per-category walk can page
+to the API's own last page; the runner nominates the rows such a finished walk did not see for
+a page check (rule #3, source-scoped) and the page decides. NOTE: bezrealitky
 also has an on-demand URL parser (`scraper/source_parsers/bezrealitky.py`, LLM) used by the
 estimation preview — a separate entry point that is unchanged by the scheduled scraper.
 
@@ -168,23 +170,27 @@ on all 10 categories. Slicing here is **not** a workaround for a pagination cap 
 category order and the slice order are **least-recently-walked first**, with a never-walked slice
 sorting ahead of everything. That is the fix for the real defect, which was amnesia rather than
 speed — a walk that runs out of budget used to restart at the first category's first page, so the
-same head was re-walked while 8 of 10 categories were never touched at all. A category reads
-complete only when **every** slice was walked *and* returned `exhausted` *and* the union satisfies
-the national declared total; one `deadline`, `error`, `degraded` or `ceiling` holds the whole
-category open. An empty slice publishes no count, so `total` is `None` — identical to a degraded
+same head was re-walked while 8 of 10 categories were never touched at all. A category NOMINATES only when **every**
+slice was walked *and* each one ended on idnes's own last page; one `deadline`, `error` or
+`ceiling` — a stop of ours — holds the whole category open. Since 2026-09-08 the union no longer
+has to satisfy the national declared total (rule #3): that arithmetic is the ledger's `outcome`
+and the runner's `COVERAGE` alarm, not the gate. A slice one row short of its declared count has
+still reached the end of the index. An empty slice publishes no count, so `total` is `None` — identical to a degraded
 page — and is only accepted when idnes *says* it is empty ("momentálně tu není žádný inzerát",
 `IndexPage.empty_confirmed`); ceskereality, which publishes no such string, has to confirm a zero
 by reading the page twice instead.
 **A slice that paging cannot finish DESCENDS, and the parent walk is kept.** idnes's result
 ordering is not stable between requests, so pages of one query overlap and the loss compounds with
 page count: `stredocesky-kraj` (67 pages) returned its declared 1,675 exactly, `praha` (154 pages)
-returned 2,948 of 3,839 — 27% of slots were repeats. Two axes, tried in order: **place** (the
-site's own hierarchy — a kraj links its okresy, Prague its ten obvody, abroad one `s-l` per
-country, and those 38 countries sum *exactly* to the abroad total), then **price bands** for a
-place with no sub-places at all (Spain: 8,613 flats, 345 pages, no regions advertised). Neither
-axis is a partition — 60 Prague listings are too vaguely addressed for any obvod, and 6 Spanish
-ones have no price — which is precisely why the parent's own rows are merged with its children's
-rather than replaced: the unfiltered walk is what holds each axis's remainder. Measured:
+returned 2,948 of 3,839 — 27% of slots were repeats. **Place** — the site's own
+hierarchy — is the ONE axis: a kraj links its okresy, Prague its ten obvody, abroad one `s-l` per
+country, and those 38 countries sum *exactly* to the abroad total. (A price-band fallback for a
+place with no sub-places at all, e.g. Spain's 8,613 flats over 345 pages, was tried and REMOVED —
+idnes's price filter cannot paginate, so it burned hundreds of requests for nothing;
+`tests/test_idnes_main.py::test_place_is_the_only_descent_axis` pins its absence.) Place is not a
+partition — 60 Prague listings are too vaguely addressed for any obvod — which is precisely why
+the parent's own rows are merged with its children's rather than replaced: the unfiltered walk is
+what holds the remainder. Measured:
 parent alone 76.8%, children alone 98.4%, **union 99.74%**; verified through the real code path at
 99.61%. The child list is scraped rather than declared, which is safe only because the arithmetic
 checks it — a missing child leaves the union short, and a spurious one can only add rows of the
@@ -236,10 +242,11 @@ state (`metadata.count`); the five prodej counts sum to the prodej total, so the
 partition the portal exactly. Until 2026-09 the walk paged the bare `/nemovitosti/` feed
 as "a single mixed index with no total" — live-verified false on both counts: that feed's
 own count IS the prodej total (rentals never appeared in it, so 1,518 were never scraped)
-and every per-type page declares one. Each category is now proved by the shared
-`walk_is_complete` arithmetic against its declared count, written to the slice ledger
-(one row per category, `slice_key='national'`), and swept by the source- and
-category-scoped `mark_inactive_native` behind the 12 h staleness rail (rule #3); the
+and every per-type page declares one. Each category's ledger row (one per category,
+`slice_key='national'`) still records the `walk_is_complete` arithmetic against its declared
+count, but since 2026-09-08 what authorises NOMINATION is the structural verdict — the feed
+paged to its own last page with no stop of ours — and the source- and category-scoped page check
+decides each row (rule #3; the 12 h staleness rail went with absence-based delisting). The
 coverage gate (migration 455) flips `supports_complete_walk` from that evidence
 (migration 481 set the ten descriptors). A gone detail fetch still flips a single
 listing immediately (`mark_listing_inactive_native`).
@@ -264,10 +271,12 @@ descriptor pairs a category with its offer-type flag and `walk_category` walks (
 reuses, via the agenda cache) that agenda once and keeps the title-derived slice for
 its category (giving the runner real (cm, ct) Health-reconciliation labels). The
 drain re-derives each listing's category from the detail page ("Typ nemovitosti" +
-title verb). A PILOT: `supports_complete_walk=false` (remax reports a per-AGENDA
-total and the per-category slice is title-derived — not a portal-reported per-(cm,ct)
-total — so the per-AGENDA walk nominates the whole agenda's unseen rows for a page
-check once, scoped by category_type, rule #3); a gone detail (404/410 or a
+title verb). `supports_complete_walk=true` (`scraper/portal.py`) at AGENDA grain: remax reports a
+per-AGENDA total and the per-category slice is title-derived — not a portal-reported per-(cm,ct)
+total — so the per-AGENDA walk nominates the whole agenda's unseen rows for a page check once,
+scoped by category_type (rule #3). Because that per-category `declared_total` is `len(seen)` by
+construction, the runner's `COVERAGE` warning is blind here and `remax_main.presence_candidates`
+logs its own agenda-grain `COVERAGE agenda …` line instead; a gone detail (404/410 or a
 redirect off the detail path) flips that one listing inactive. Registered as a
 scraper portal by CONVERTING the existing on-demand-parser row (migration 135). NOTE:
 remax ALSO has an on-demand URL parser (`scraper/source_parsers/remax.py`, LLM,
@@ -278,7 +287,7 @@ independent of the `portals` row's `kind`.
 **Data source (ceskereality.cz).** A scheduled scraper (`scraper/ceskereality_client.py`,
 `ceskereality_parser.py`, `ceskereality_main.py`) tagged `source='ceskereality'`. It is large
 (~49k listings), so — like sreality/idnes — it is **cadence-split**: `ceskereality_index_walk.yml`
-(every 6h, full complete-walk + mark_inactive + enqueue) feeds the hourly bounded
+(every 6h, full walk + presence nomination + enqueue) feeds the hourly bounded
 `ceskereality_detail_drain.yml` (`--max-seconds` budget). The index walk partitions each
 category on the **14 declared kraj slugs** (`KRAJ_SLUGS`, a proven row-level partition —
 never the rendered facet block, which is a top-10-by-popularity list), pages each slice to
@@ -298,9 +307,11 @@ is deliberately never used; both route through the shared `scraper/street.py` gu
 a stable identity — the `/realitni-makleri/{slug}-{id}/` profile id — stored idnes-shaped in
 `raw["broker"]`, so ceskereality is in `BROKER_ATTRIBUTED_SOURCES` and has a `toolkit/broker_sources.py`
 registry row (phone-only; no email → no firm). Per-category search pages carry a result
-total ("Máme tady N…") with no deep-pagination cap, so a per-category walk is provable-complete
-(`supports_complete_walk=true`; the runner marks delistings inactive under the completeness guard,
-source-scoped). The detail URL carries the category, so the drain derives each listing's category from
+total ("Máme tady N…") with no deep-pagination cap, so every kraj slice can be paged to its own
+declared tail; a category all of whose slices reached that end nominates its unseen rows for a
+page check (rule #3, source-scoped) even when the declared counts add up short — which is the
+whole point of the 2026-09-08 structural gate, since one 87-row Karlovarský slice collecting 86
+had been vetoing a 20,964-row category. The detail URL carries the category, so the drain derives each listing's category from
 its own URL — one config (the `portals` row, migration 249) walks all 12 (cm × offer-type) descriptors.
 The client uses an honest identifying `User-Agent` at a polite rate (the site disallows generic bots in
 robots.txt — an operator-owned posture). NOTE: ceskereality ALSO has an on-demand URL parser
@@ -602,12 +613,76 @@ renumber.** Navigate by area:
    Nomination is the shared default (`db.presence_candidates`, keyed on `source_id_native` or,
    via `seen_key`, on `sreality_id`); a portal whose index sections do not map 1:1 onto a
    category overrides `presence_candidates` (bazos: subtype scope; ceskereality/realitymix:
-   sibling-slice union; remax/maxima: agenda grain). What a complete walk still means: a
+   sibling-slice union; remax/maxima: agenda grain). What a finished walk still means: a
    partial walk (`--limit N`, `--max-pages`, a deadline) cannot know which rows it never
-   reached, so it nominates nothing. **The verdict is
-   `scraper.portal.walk_coverage`, the ONE definition for all nine portals, and it has three
-   outcomes, not two: `complete` / `incomplete` / `unknown`. Only `complete` authorises a
-   nomination.** It replaced eight byte-identical private copies that FAILED OPEN — `if not total:
+   reached, so it nominates nothing.
+
+   **2026-09-08 — the nomination gate became STRUCTURAL; the count stopped voting.** Until this
+   date the 5th element of `walk_category` was arithmetic: `walk_is_complete(collected,
+   declared_total)`, ANDed across every slice a category is split into. On a category split into
+   many units that AND can never pass, because it asks every unit to reconcile simultaneously
+   against a live, jittering index. ceskereality's houses-for-sale is 20,964 rows across 14
+   regions; the Karlovarský region declares 87 and the walk consistently collected 86, so
+   `0.9885 < 0.995` failed that one slice and the whole 20,964-row category nominated NOTHING —
+   for as long as one small region stayed one row short. (The category-level arithmetic would
+   have passed: 20,963/20,964 = 0.99995. It was the per-slice AND that bit.) The fix is to stop
+   asking "how much did we collect?" and to ask **"did the walk reach the portal's end?"**:
+   `reached_end` := every unit the category is defined over was walked, AND each unit's page loop
+   exited on a PORTAL terminator, AND no stop of OURS fired anywhere in the category. The
+   vocabulary is shared (`scraper.portal.StopReason` + `PORTAL_ENDS` / `OUR_STOPS` /
+   `stop_is_portal_end`) and the conjunction is spelled once (`walk_reached_end(portal_end=,
+   our_stop=)`), so the flag means one thing on all nine portals. PORTAL terminators: `pager_end`
+   (a page with items and no next page), `declared_total_reached` (the portal's OWN count, never
+   our ratio), `short_page`, `empty_confirmed`, `clamp_repeat` (a past-the-end request the portal
+   clamps back onto its last page — the weakest signal, and one no live probe has yet observed:
+   the 2026-09-08 probe found remax / mmreality / maxima / bezrealitky / sreality answer past the
+   end with 200 + an empty list and realitymix 404s, while idnes — the one portal that DOES clamp
+   — does not use it. So it survives only on **maxima** and **realitymix**, corroborated by
+   position (at or past the page the declared count implies) and a strict-subset id check at
+   page >= 2; where the premise was unproven the same shape is now `pager_stalled`, a stop of
+   ours: remax and mmreality break their loops on it but nominate nothing).
+   OUR stops, any one of which vetoes the whole category: `deadline`, `page_cap`,
+   `limit`, `slice_subset`, `slice_unreached`, `error`, `pager_stalled`, `cap_wall` (sreality's
+   HTTP 422 deep-pagination refusal, previously swallowed by the client and now exposed as
+   `cap_hit`), `barren`. Two disciplines make the flag honest, and both are mandatory on every
+   portal. **ITEMS-FIRST**: a loop that breaks on `not items or next is None` must test `not
+   items` FIRST, because a blocked or throttled HTTP 200 also carries no pager and would
+   otherwise exit through the same branch as the genuine last page — that conflation is exactly
+   what the numeric gate was silently defending against, so a structural flag that skips the
+   split is a safety regression. **THE BARREN RULE**: a page with zero items is `barren` (OURS)
+   until proven otherwise — re-fetch the same URL once through the limiter, and only if it is
+   still empty AND at or past the position the declared total implies (or no total was ever
+   readable and an earlier page of this unit carried items) does it become `empty_confirmed`. A
+   confirmation that cannot be obtained is not a confirmation, and a unit whose FIRST page is
+   barren with no declared total is never confirmed. What this trades away, deliberately: the
+   count no longer vetoes, so a walk that ends on a forged or misrendered terminator will
+   nominate its whole unseen remainder. That costs FETCHES, never rows — every nominated listing
+   is decided by its own page, and `delist_flip_cap` throttles per walk (but mind its FLOOR: the
+   cap only engages once a scope holds `min_rows` = 2,000 active rows, so a small scope — maxima's
+   ~220-row agendas, sreality `pozemek/drazba`, a bazos subtype scope — is unthrottled and one
+   walk can nominate all of it; the "~10% per walk" bound describes the big scopes only).
+   So a terminator has to be genuinely HARD TO FORGE, and that is a per-portal obligation, settled
+   against the live per-portal probe of the last page and the page past it (2026-09-08) — the
+   suspect page never supplies its own corroboration (a count is latched only from a page that
+   carried items, and only upward within a walk); `next is None` is never read as an end where it
+   also means "no pager rendered" (ceskereality reads its own `--disabled --next` arrow, maxima its
+   rendered pager, bazos corroborates a full page with one fetch of the next offset, mmreality —
+   whose last page still over-advertises `<link rel="next">` — walks past it to the items-less page
+   that IS its terminator); an offset API needs a new-id progress guard (bezrealitky); a clamped
+   page SIZE is not a `short_page` (sreality adopts the `pagination.limit` it was served); and
+   `clamp_repeat` survives only where clamping is plausible (maxima, realitymix), everywhere else
+   a repeated page is `pager_stalled`, ours. Per-portal detail: the `scraper-ops` skill's
+   `references/coverage-and-delisting.md`. The detectors that
+   replace the veto are the runner's `COVERAGE` warning (logged whenever a walk nominates with
+   `walk_coverage != "complete"`), the two facts now recorded per category in
+   `scrape_runs.by_category` (`walk_reached_end` + `walk_coverage` — JSONB, no migration), and
+   `scripts/verify_pipeline.py`'s coverage check. Those must not be silenced.
+
+   The numeric verdict is unchanged and still runs every walk — it just no longer gates. It
+   drives ceskereality's descent trigger, idnes's resample trigger, sreality's national-fallback
+   trigger and verify_pipeline's health check: **`scraper.portal.walk_coverage`, the ONE
+   definition for all nine portals, and it has three outcomes, not two: `complete` / `incomplete`
+   / `unknown`.** It replaced eight byte-identical private copies that FAILED OPEN — `if not total:
    return True`, i.e. "I could not measure, so assume complete". ceskereality's nationwide
    probe swallows its own exception and returns None, so a walk that reached a fraction of a
    category reported itself complete and became eligible to delist everything it never saw.
@@ -622,10 +697,11 @@ renumber.** Navigate by area:
    suppresses nothing that works today. "Complete" is ≥99.5%
    (`INDEX_MIN_COMPLETENESS = 0.995`) for the framework portals, NOT 100% — portal counts
    jitter mid-walk, and a strict 1.0 gate proved statistically unreachable for large bazos
-   categories (delistings then accumulated for 11 days). The second rail: framework sweeps
-   only flip rows additionally unseen for 24h+ (`min_unseen_hours` on `db.mark_inactive` /
-   `mark_inactive_native`), so a tolerated walk-miss can never flip a freshly-seen listing,
-   and a false flip self-heals on the next index sighting (`touch_listings` reactivates).
+   categories (delistings then accumulated for 11 days). The old second rail — flipping only
+   rows additionally unseen for 24h+ (`min_unseen_hours` on `db.mark_inactive` /
+   `mark_inactive_native`) — was retired on 2026-09-07 together with absence-based delisting: a
+   page check needs no staleness window, because it does not infer. A false flip still self-heals
+   on the next index sighting (`touch_listings` reactivates).
    Every flip stamps `listings.inactive_at` (cleared on reactivation) — the delisting-latency
    health check reads it. **A non-sreality portal sweeps on its own native id**
    (`db.mark_inactive_native` / `mark_inactive_agenda`, keyed `source_id_native`), never on a
@@ -1183,7 +1259,7 @@ renumber.** Navigate by area:
     per-portal code is the fetcher (a `BasePortalClient` subclass — its `_request` does GET for
     sreality/bazos and POST for bezrealitky's GraphQL), the parser strategy, and the
     config — everything else (queue claim/complete/fail, the fetch pool, batched writes,
-    completeness-gated `mark_inactive`, `scrape_runs`) is shared. A genuine per-portal need is an
+    end-gated presence nomination (`_queue_presence_checks`), `scrape_runs`) is shared. A genuine per-portal need is an
     explicit method on the `Portal` protocol, justified in review. Sanctioned hooks so far:
     **sreality's district-split** (the deep-pagination-cap workaround) inside its `walk_category`;
     **ceskereality's and sreality's bespoke `probe_category`** (both lack a sort param their

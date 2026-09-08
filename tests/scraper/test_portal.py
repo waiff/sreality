@@ -443,3 +443,57 @@ def test_no_portal_module_classifies_index_sightings_itself():
     assert offenders == [], (
         f"{offenders} call price_changed directly; use classify_index_sighting"
     )
+
+
+# --- the structural walk verdict (rule #3) ----------------------------------
+
+
+def test_every_stop_reason_is_classified_exactly_once():
+    """The two frozensets partition the vocabulary. A reason in neither would
+    read as OUR stop forever (a portal that never nominates); a reason in both
+    is a contradiction the nine implementations would resolve differently."""
+    from typing import get_args
+
+    reasons = set(get_args(portal.StopReason))
+    assert portal.PORTAL_ENDS | portal.OUR_STOPS == reasons
+    assert not (portal.PORTAL_ENDS & portal.OUR_STOPS)
+
+
+def test_stop_is_portal_end_splits_the_two_families():
+    assert portal.stop_is_portal_end("pager_end")
+    assert portal.stop_is_portal_end("declared_total_reached")
+    assert portal.stop_is_portal_end("short_page")
+    assert portal.stop_is_portal_end("empty_confirmed")
+    assert portal.stop_is_portal_end("clamp_repeat")
+    for ours in ("deadline", "page_cap", "limit", "slice_subset", "slice_unreached",
+                 "error", "pager_stalled", "cap_wall"):
+        assert not portal.stop_is_portal_end(ours), ours
+
+
+def test_barren_is_ours_until_it_is_corroborated():
+    """An items-less HTTP 200 is what a soft block looks like AND what the page
+    after the last one looks like. Only a portal that re-fetched and corroborated
+    the emptiness may report `empty_confirmed`; the raw class stays ours."""
+    assert not portal.stop_is_portal_end("barren")
+    assert portal.stop_is_portal_end("empty_confirmed")
+
+
+def test_unknown_stop_reason_reads_as_our_stop(caplog):
+    with caplog.at_level("WARNING"):
+        assert not portal.stop_is_portal_end("who_knows")  # type: ignore[arg-type]
+    assert any("unknown walk stop reason" in m for m in caplog.messages)
+
+
+def test_walk_reached_end_is_portal_end_and_no_stop_of_ours():
+    assert portal.walk_reached_end(portal_end=True, our_stop=False)
+    assert not portal.walk_reached_end(portal_end=True, our_stop=True)
+    assert not portal.walk_reached_end(portal_end=False, our_stop=False)
+    assert not portal.walk_reached_end(portal_end=False, our_stop=True)
+
+
+def test_walk_reached_end_ignores_the_count():
+    """The whole point: a category whose every unit paged to its own last page
+    is finished even when the declared totals say it is one row short. That is
+    the ceskereality houses-for-sale case (20,964 rows, silent for two days)."""
+    assert portal.walk_coverage(86, 87) == "incomplete"
+    assert portal.walk_reached_end(portal_end=True, our_stop=False)

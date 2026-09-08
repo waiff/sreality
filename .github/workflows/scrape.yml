@@ -13,8 +13,9 @@ name: "Scraping: Sreality combined walk (Phase-2 fallback, dispatch-only)"
 # configured category pair (scraper.main.CATEGORIES — the full category_main
 # × category_type cross product), so:
 #   - newly-listed properties surface, and
-#   - delisted properties flip to is_active=false — a complete walk is what
-#     makes that inference valid (architectural rule #3).
+#   - listings the walk did not see are nominated for a page check once the walk
+#     reached sreality's own end — the drain's fetch, not the walk, flips
+#     is_active=false (architectural rule #3, structural since 2026-09-08).
 #
 # This replaces the former two-tier split (scrape_delta.yml hourly +
 # scrape.yml nightly). Both tiers already did a complete walk; the only real

@@ -1728,8 +1728,10 @@ def test_acquisition_lag_queries_the_new_class_only() -> None:
     assert params == (0,)  # db.QUEUE_PRIORITY_NEW
 
 
-def _cov(source, walked, best, age, collected, total):
-    return (source, walked, best, age, collected, total)
+def _cov(source, walked, best, age, collected, total, nominating=None):
+    # nominating defaults to "every walked category reached the portal's end"
+    return (source, walked, best, age, collected, total,
+            walked if nominating is None else nominating)
 
 
 def test_walk_coverage_ok_at_the_observed_noise_floor() -> None:
@@ -1763,6 +1765,16 @@ def test_walk_coverage_flags_a_truncated_walk_even_at_zero_gap() -> None:
     out = check_walk_coverage(conn, T)
     assert out["status"] == "warn"
     assert out["details"]["per_source"]["idnes"]["truncated"] is True
+
+
+def test_walk_coverage_reports_how_many_categories_nominated() -> None:
+    """Since 2026-09-08 the count does not gate nomination, so the run row carries
+    both facts. A category that reached the portal's end while short is the NORMAL
+    case now — it must be visible, and it must not move the status."""
+    conn = _RowsConn([_cov("ceskereality", 12, 12, 2.0, 48200, 48235, nominating=11)])
+    out = check_walk_coverage(conn, T)
+    assert out["details"]["per_source"]["ceskereality"]["categories_nominating"] == 11
+    assert out["status"] == "ok"
 
 
 def test_walk_coverage_never_certifies_a_self_reported_total() -> None:

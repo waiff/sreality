@@ -2557,7 +2557,14 @@ def sweep_stuck_scrape_runs(
     (bump_index_pages) and the detail-drain (bump_scrape_run_counts) persist their
     counts incrementally as they go, so a swept row already carries the real
     totals of whatever committed before the kill. The cutoff must stay above the
-    scrape job timeout so a still-running walk is never finalized.
+    LONGEST scrape job timeout so a still-running walk is never finalized — the
+    binding one is idnes's index walk at 240 minutes, and bazos's is now 130 (its
+    22-scope walk is ~85-90 min), so this 90-minute default is only safe for the
+    lanes that finish inside it. The API's boot sweep passes an explicit cutoff
+    above them all (api/main.py): falsely stamping ended_at on an in-flight walk
+    makes verify_pipeline read it as a truncated run (by_category is NOT NULL
+    DEFAULT '[]', so it cannot be filtered out) and leaves a later crash invisible,
+    since _record_run_crash never clears an ended_at the sweep already wrote.
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(

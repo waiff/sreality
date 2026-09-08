@@ -20,12 +20,17 @@ joins listings on those — while fetching each agenda's pages only once per run
 The drain still derives each listing's category from the detail page itself
 (`maxima_parser.parse_detail`), so the queue stays category-agnostic.
 
-maxima is `supports_complete_walk=true` via AGENDA-GRAIN delisting: it reports a
+maxima is `supports_complete_walk=true` via AGENDA-GRAIN nomination: it reports a
 per-AGENDA total (not per-category), so the runner can't gate a per-(cm,ct) sweep —
-instead `mark_inactive` flips the whole agenda (af ≡ category_type) once the agenda
-walk reaches its reported total, scoped by category_type against the full walk's id
+instead the whole agenda (af ≡ category_type) is nominated once its walk reaches
+MAXIMA's end, scoped by category_type against the full walk's id
 set (`db.presence_candidates` with category_main=None), never the title-derived per-category slice (which
 could false-flip a listing whose index-time title category ≠ its detail-time one).
+"Reached the end" is STRUCTURAL (rule #3, 2026-09-08): the page loop exited on a
+terminator of maxima's own — its pager, its declared count, a corroborated empty
+page, a clamped repeat — and no stop of ours (page cap, deadline, an
+uncorroborated empty page) fired. The count is still computed and logged, and it
+never vetoes: an agenda a row short of its declared total has still finished.
 A gone detail fetch (404/410) still flips that one listing inactive immediately.
 """
 
@@ -41,11 +46,15 @@ from scraper.maxima_client import MaximaClient, detail_url
 from scraper.maxima_parser import category_of, index_price, parse_detail, parse_index
 from scraper.portal import (
     PortalConfig,
+    StopReason,
+    WalkVerdict,
     default_config,
     deadline_reached,
     load_portal_config,
     classify_index_sighting,
-    walk_is_complete,
+    stop_is_portal_end,
+    walk_coverage,
+    walk_reached_end,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -62,7 +71,8 @@ class _AgendaWalk:
     def __init__(
         self, native_ids: list[str], ref_map: dict[str, str],
         price_map: dict[str, int | None], cat_map: dict[str, str | None],
-        total: int | None, pages: int, complete: bool,
+        total: int | None, pages: int, reached_end: bool,
+        stop: StopReason, coverage: WalkVerdict,
     ) -> None:
         self.native_ids = native_ids
         self.ref_map = ref_map
@@ -70,9 +80,12 @@ class _AgendaWalk:
         self.cat_map = cat_map  # id -> category_main (title-first, prefix fallback)
         self.total = total
         self.pages = pages
-        # Did this walk reach the agenda's reported total? Gates agenda-grain
-        # delisting (mark_inactive). False on a capped/short walk → no flip.
-        self.complete = complete
+        # Did the walk reach MAXIMA's end (rule #3, structural since 2026-09-08)?
+        # Gates agenda-grain nomination. False whenever the loop stopped for a
+        # reason of OURS — a page cap, the deadline, an uncorroborated empty page.
+        self.reached_end = reached_end
+        self.stop = stop            # the one StopReason the page loop exited on
+        self.coverage = coverage    # the numeric verdict: an alarm, never a gate
 
 
 class MaximaPortal:
@@ -131,6 +144,38 @@ class MaximaPortal:
         self._coords.preload(conn)
         return conn
 
+    @staticmethod
+    def _confirm_empty_page(
+        total: int | None, collected: int, *,
+        pager_advanced: bool, pager_end_prev: bool,
+    ) -> StopReason:
+        """Classify an items-less page a re-fetch found still items-less: maxima's
+        end, or ours? (the BARREN rule — a confirmation that cannot be obtained is
+        not a confirmation).
+
+        Never a ratio: a walk that came up a row short still ends here, on the
+        portal's own pager, which is the whole point of the structural gate."""
+        if total is not None and collected >= total:
+            # We hold MAXIMA's own count (a declared zero with nothing collected
+            # included) — this is the page past the last one.
+            return "empty_confirmed"
+        if pager_advanced and pager_end_prev:
+            # Short of the declared count (live churn, a row the index moved under
+            # us) or unmeasurable, but the pager — which has demonstrably rendered
+            # forward links on this agenda — said the previous page was the last.
+            # The portal ended the walk; the gap gets nominated and the page
+            # decides (rule #3).
+            return "empty_confirmed"
+        if total is None and collected and not pager_advanced:
+            # No total was ever readable AND no pager ever rendered: nothing can
+            # contradict an empty page that follows pages which carried items.
+            # (An agenda barren from page 1 proves nothing at all.)
+            return "empty_confirmed"
+        # Either the pager is actively saying there is more, or we are short of
+        # maxima's count with nothing to corroborate the emptiness: a soft block,
+        # a consent shell, a throttled render. Ours.
+        return "barren"
+
     def _walk_agenda(
         self, af: int, conn: Any, limiter: RateLimiter, deadline: float | None = None,
     ) -> tuple[_AgendaWalk, int]:
@@ -138,9 +183,10 @@ class MaximaPortal:
         other category descriptors. Returns (walk, pages_fetched_this_call) so the
         runner counts each agenda's pages exactly once (0 on a cache hit).
 
-        A walk stopped by `deadline` is cached with complete=False, so every one of
-        that agenda's category descriptors inherits the incomplete verdict and
-        mark_inactive stays off (rule #3)."""
+        A walk stopped for a reason of OURS — the page cap, the deadline, an
+        uncorroborated empty page — is cached with reached_end=False, so every one
+        of that agenda's category descriptors inherits the verdict and nominates
+        nothing (rule #3)."""
         cached = self._agenda_cache.get(af)
         if cached is not None:
             return cached, 0
@@ -153,13 +199,52 @@ class MaximaPortal:
         total: int | None = None
         pages = 0
         page = 1
-        stopped_early = False
+        stop: StopReason = "barren"  # fail closed; every exit below re-stamps it
+        barren_retried = False
+        # The pager is EVIDENCE here, not the driver: the loop still pages until
+        # the index runs out, so a pager that fails to render (unverified on the
+        # rent agenda) can never truncate the walk — it only decides, afterwards,
+        # whether the page the walk ran out on was maxima's end or ours.
+        pager_advanced = False  # a forward pager link rendered at least once
+        pager_end_prev = False  # the last item-carrying page exposed no next page
         while True:
             html, status = client.fetch_index(page, af=af)
             parsed = parse_index(html)
             pages += 1
-            total = parsed.total if parsed.total is not None else total
+            # ONLY a page that carried items may move the denominator. `total` is
+            # what _confirm_empty_page measures POSITION against, so letting an
+            # items-less page write it let a shell/mis-filtered page rendering a
+            # small (or zero) counter corroborate itself as maxima's end.
+            if parsed.items and parsed.total is not None:
+                total = parsed.total
             LOG.info("INDEX af=%d page=%d items=%d total=%s", af, page, len(parsed.items), total)
+            capped = bool(self._max_pages and pages >= self._max_pages)
+            if not parsed.items:
+                if capped:
+                    # Ours either way: a capped walk (--max-pages, the probe's
+                    # set_index_page_cap) has no budget left to corroborate
+                    # anything, so don't spend a re-fetch on it.
+                    stop = "page_cap"
+                    break
+                # ITEMS-FIRST. A blocked/consent/degraded 200 parses to zero items
+                # exactly like the page past the last one, and the old compound
+                # `not parsed.items or new_on_page == 0` break could not tell them
+                # apart — the numeric gate was the only thing that separated them.
+                # Re-fetch the same page once before believing it (the #637 lesson,
+                # realitymix_main's one-shot retry), then classify.
+                if not barren_retried:
+                    barren_retried = True
+                    continue
+                stop = self._confirm_empty_page(
+                    total, len(native_ids),
+                    pager_advanced=pager_advanced, pager_end_prev=pager_end_prev,
+                )
+                LOG.info(
+                    "INDEX empty page af=%d page=%d collected=%d total=%s -> %s",
+                    af, page, len(native_ids), total, stop,
+                )
+                break
+            barren_retried = False
             new_on_page = 0
             for item in parsed.items:
                 nid = item.source_id_native
@@ -174,32 +259,71 @@ class MaximaPortal:
                 # taxonomy doesn't cover) is categorised the same way parse_detail
                 # will categorise it — no Health-reconciliation fragmentation.
                 cat_map[nid] = category_of(nid, item.title)
-            if self._max_pages and pages >= self._max_pages:
+            if new_on_page == 0:
+                # A page of ids we already hold — page >= 2 by construction, since
+                # page 1 has nothing to repeat. That is the clamped out-of-range
+                # page a WordPress index serves past its last one, but ONLY the
+                # pager makes it maxima's end: the same shape is a cached/repeated
+                # page off a degraded edge, and that stop is ours.
+                stop = (
+                    "clamp_repeat" if pager_advanced and pager_end_prev
+                    else "pager_stalled"
+                )
                 break
-            # Stop on an empty page (catalogue exhausted) or one adding nothing new.
-            if not parsed.items or new_on_page == 0:
+            if (
+                total is not None and len(native_ids) >= total
+                and parsed.next_offset is None
+            ):
+                # MAXIMA's own count, never our ratio: a walk that comes up a row
+                # short simply never trips this and ends on the pager instead. And
+                # only where the PAGER agrees there is nothing after this page: the
+                # counter is loose (the live tail reads "Zobrazuji 29-42 z celkem
+                # 29"), and breaking on the number alone stopped fetching rows that
+                # exist past it — rows that were then never enqueued at all, while
+                # the walk still claimed to have reached the end.
+                stop = "declared_total_reached"
                 break
+            if capped:
+                # Ours — and tested after the natural stops (the deadline's order,
+                # for the same reason): a walk that finished the whole agenda on
+                # its last permitted page did reach the end.
+                stop = "page_cap"
+                break
+            # ABSENCE of pager markup is not maxima saying "last page": a page whose
+            # cards render but whose pager fragment does not returns next_offset None
+            # too, and it would then corroborate the barren page after it. Only a
+            # pager that RENDERED can testify.
+            pager_end_prev = parsed.pager_present and parsed.next_offset is None
+            pager_advanced = pager_advanced or parsed.next_offset is not None
             # Checked after the natural stops so a walk that finished on this very
-            # page isn't falsely called incomplete; before fetching the next one so
+            # page isn't falsely called truncated; before fetching the next one so
             # the budget is still honoured.
             if deadline_reached(deadline):
-                stopped_early = True
+                stop = "deadline"
                 LOG.info(
                     "INDEX time budget reached af=%d page=%d collected=%d total=%s; "
-                    "stopping this agenda walk (incomplete -> no delisting)",
+                    "stopping this agenda walk (our stop -> no nomination)",
                     af, page, len(native_ids), total,
                 )
                 break
             page += 1
 
-        # Complete only if we walked the whole agenda (not page-capped) AND the
-        # shared verdict says so — one definition of coverage for all portals,
-        # and an agenda whose total never parsed is "unknown", not complete.
-        capped = bool(self._max_pages and pages >= self._max_pages)
-        complete = not capped and walk_is_complete(
-            len(native_ids), total, stopped_early=stopped_early
+        # One unit per agenda (a single mixed index), so the page loop's stop
+        # reason IS the agenda's verdict — no AND across slices to compute.
+        portal_end = stop_is_portal_end(stop)
+        reached_end = walk_reached_end(portal_end=portal_end, our_stop=not portal_end)
+        # The numeric verdict stays, at AGENDA grain (the runner's per-category one
+        # is 100% by construction — see walk_category), and it is an alarm only.
+        coverage = walk_coverage(len(native_ids), total)
+        LOG.info(
+            "INDEX af=%d done pages=%d collected=%d total=%s stop=%s reached_end=%s "
+            "coverage=%s",
+            af, pages, len(native_ids), total, stop, reached_end, coverage,
         )
-        walk = _AgendaWalk(native_ids, ref_map, price_map, cat_map, total, pages, complete)
+        walk = _AgendaWalk(
+            native_ids, ref_map, price_map, cat_map, total, pages,
+            reached_end, stop, coverage,
+        )
         self._agenda_cache[af] = walk
         return walk, pages
 
@@ -259,36 +383,50 @@ class MaximaPortal:
         )
         # maxima reports a per-AGENDA total (220/34), not per-category, so the
         # per-category "portal expected" is what this category collected — index%
-        # is then 100% by construction. The COMPLETE flag is the agenda's (not the
-        # slice's): delisting is agenda-grain (mark_inactive), so the slice never
-        # needs its own completeness proof. The runner only delists when the agenda
-        # walk reached its reported total.
-        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, len(seen), pages, walk.complete
+        # is then 100% by construction. The 5th element is the agenda's structural
+        # verdict (not the slice's): nomination is agenda-grain, so the slice never
+        # needs a proof of its own. The runner nominates only when the agenda walk
+        # reached maxima's end.
+        return (
+            seen, {"found_new": len(new_ids), "enqueued": enqueued}, len(seen), pages,
+            walk.reached_end,
+        )
 
     def presence_candidates(
         self, conn: Any, category: dict[str, Any], seen: set[str],
     ) -> tuple[list[tuple[str, str | None, int | None]], int, dict[str, Any]] | None:
         """Agenda-grain nomination (rule #3, 2026-09-07). The runner calls this
-        once per (cm, ct) descriptor, but maxima's completeness is per AGENDA
+        once per (cm, ct) descriptor, but maxima's end is reached per AGENDA
         (af == category_type), so the whole agenda is nominated once --
         scoped by category_type against the FULL agenda walk's id set, never the
         title-derived per-category slice (a listing whose index-time title
         category differs from its detail-time category would otherwise be
         nominated by a walk that did see it). The passed `seen` (this
-        category's slice) is intentionally ignored. An incomplete, unmeasurable
-        or over-collected agenda nominates nothing: its unseen set is not
-        evidence."""
+        category's slice) is intentionally ignored. An agenda whose walk stopped
+        for a reason of OURS nominates nothing: its unseen set is not evidence,
+        it is the part of the index the walk never reached. A count that came up
+        short is not such a reason (rule #3, structural since 2026-09-08)."""
         cm, ct = self.category_labels(category)
         af = int(category.get("af") or 1)
         if ct is None or af in self._swept_agendas:
             return None
         walk = self._agenda_cache.get(af)
-        if walk is None or not walk.complete:
+        if walk is None or not walk.reached_end:
             return None
         self._swept_agendas.add(af)
+        if walk.coverage != "complete":
+            # The gap is nominated anyway and the page decides — but a walk that
+            # reached maxima's end while short of maxima's own count is worth
+            # saying out loud (the runner's per-category COVERAGE warning cannot
+            # see this: maxima's per-category "expected" is the slice itself).
+            LOG.warning(
+                "COVERAGE af=%d ct=%s: reached maxima's end (%s) with %d of %s "
+                "collected (coverage=%s) -- nominating the gap anyway (rule #3)",
+                af, ct, walk.stop, len(walk.native_ids), walk.total, walk.coverage,
+            )
         LOG.info(
-            "VERIFY agenda af=%d ct=%s collected=%d total=%s",
-            af, ct, len(walk.native_ids), walk.total,
+            "VERIFY agenda af=%d ct=%s collected=%d total=%s stop=%s",
+            af, ct, len(walk.native_ids), walk.total, walk.stop,
         )
         candidates, active_rows = db.presence_candidates(
             conn, SOURCE, None, ct, set(walk.native_ids),
@@ -443,8 +581,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument(
         "--max-seconds", type=float, default=None,
-        help="wall-clock budget for the detail drain; it stops claiming + "
-             "finalizes cleanly before the job timeout (no 'stuck' run)",
+        help="wall-clock budget for EITHER phase (the index walk consumes it as "
+             "its per-category deadline); the phase stops claiming + finalizes "
+             "cleanly before the job timeout (no 'stuck' run)",
     )
     p.add_argument(
         "--index-only", action="store_true",
@@ -458,7 +597,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--probe", action="store_true",
         help="newest-first delta probe: diff + enqueue off the first "
              "--probe-pages catalogue page(s) per agenda, then exit — never "
-             "mark_inactive, no detail drain, no scrape_runs row",
+             "nominates unseen rows for a page check, no detail drain, no "
+             "scrape_runs row",
     )
     p.add_argument(
         "--probe-pages", type=int, default=1,

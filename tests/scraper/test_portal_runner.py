@@ -50,12 +50,16 @@ class _FakePortal:
     source = "fake"
     index_rate = 1.0
 
-    def __init__(self, *, supports_complete_walk=True, categories=None, complete=True,
-                 fetch_kinds=None, walk_fails=None, conn_close_error=None,
+    def __init__(self, *, supports_complete_walk=True, categories=None, reached_end=True,
+                 result_size=2, fetch_kinds=None, walk_fails=None, conn_close_error=None,
                  write_errors=None, reconnect_conns=False) -> None:
         self.supports_complete_walk = supports_complete_walk
         self._categories = categories if categories is not None else ["A", "B"]
-        self._complete = complete
+        # `reached_end` is STRUCTURAL: "the walk reached the portal's end", not
+        # "the counts reconciled". `result_size` is the portal's declared total,
+        # which drives the numeric verdict the runner now only logs.
+        self._reached_end = reached_end
+        self._result_size = result_size
         self._fetch_kinds = fetch_kinds or {}
         self._walk_fails = walk_fails or set()
         # Successive exceptions raised by write_details (None = let it succeed),
@@ -92,7 +96,7 @@ class _FakePortal:
         self.calls.setdefault("deadline", []).append(deadline)
         if c in self._walk_fails:
             raise RuntimeError(f"blocked {c}")
-        return ({1, 2}, {"found_new": 2, "enqueued": 2}, 2, 1, self._complete)
+        return ({1, 2}, {"found_new": 2, "enqueued": 2}, self._result_size, 1, self._reached_end)
 
     def active_count(self, conn, c):
         self.calls["active_count"].append(c)
@@ -112,7 +116,7 @@ class _FakePortal:
         # Sorted: intra-batch order is NOT a contract. The drain collects fetch
         # results via as_completed(), which yields already-finished futures in
         # set order — memory-address dependent, so even detail_workers=1 can
-        # buffer ["2","1"]. (Same posture as the `complete` capture below.)
+        # buffer ["2","1"]. (Same posture as the `reached_end` capture below.)
         self.calls["write"].append(sorted(it.native_id for it in items))
         if self._write_errors:
             exc = self._write_errors.pop(0)
@@ -137,7 +141,8 @@ class _FakePortal:
 
 def _nominations(monkeypatch):
     """Capture what the runner nominates for a page check (rule #3, 2026-09-07:
-    a complete walk nominates unseen rows; the drain's page visit decides)."""
+    a walk that reached the portal's end nominates the rows it did not see; the
+    drain's page visit decides)."""
     cap: dict[str, list] = {"candidates": [], "queued": []}
 
     def fake_candidates(conn, source, cm, ct, seen, *, seen_key="native", **kw):
@@ -154,9 +159,9 @@ def _nominations(monkeypatch):
     return cap
 
 
-def test_index_walk_nominates_unseen_rows_when_complete(monkeypatch):
+def test_index_walk_nominates_unseen_rows_when_the_walk_reached_the_portals_end(monkeypatch):
     cap = _nominations(monkeypatch)
-    p = _FakePortal(supports_complete_walk=True, complete=True)
+    p = _FakePortal(supports_complete_walk=True, reached_end=True)
     rc, agg = portal_runner.run_index_walk(p, dry_run=False)
     assert rc == 0
     assert p.calls["walk"] == ["A", "B"]
@@ -168,22 +173,61 @@ def test_index_walk_nominates_unseen_rows_when_complete(monkeypatch):
     assert sum(c["listings_to_verify"] for c in agg["by_category"]) == 4
     assert agg["listings_scraped_new"] == 0
     assert p.conn.closed
+    # both verdicts land in scrape_runs.by_category (JSONB, no migration)
+    assert [(c["walk_reached_end"], c["walk_coverage"]) for c in agg["by_category"]] == [
+        (True, "complete"), (True, "complete"),
+    ]
 
 
-def test_index_walk_nominates_nothing_when_incomplete(monkeypatch):
-    """An unproven walk's unseen set is the part of the portal it never reached,
-    not evidence; nominating it would flood the drain with fetches."""
+def test_index_walk_nominates_nothing_when_our_own_stop_fired(monkeypatch):
+    """A walk WE cut short (deadline, page cap, --limit, a slice never reached,
+    an exception, an uncorroborated empty page) has an unseen set that is the
+    part of the portal it never reached, not evidence -- even when the counts
+    reconcile perfectly."""
     cap = _nominations(monkeypatch)
-    p = _FakePortal(supports_complete_walk=True, complete=False)
-    portal_runner.run_index_walk(p, dry_run=False)
+    p = _FakePortal(supports_complete_walk=True, reached_end=False)
+    _rc, agg = portal_runner.run_index_walk(p, dry_run=False)
     assert cap["candidates"] == [] and cap["queued"] == []
+    assert [(c["walk_reached_end"], c["walk_coverage"]) for c in agg["by_category"]] == [
+        (False, "complete"), (False, "complete"),
+    ]
+
+
+def test_index_walk_nominates_a_short_count_and_alarms_on_it(monkeypatch, caplog):
+    """The motivating case (ceskereality houses-for-sale, 20,964 rows): every
+    unit paged to its own last page while the declared totals add up short. The
+    numeric verdict is `incomplete` and must NOT veto -- it is logged, recorded,
+    and the gap is nominated so the page decides."""
+    cap = _nominations(monkeypatch)
+    p = _FakePortal(categories=["A"], reached_end=True, result_size=87)
+    with caplog.at_level("WARNING"):
+        _rc, agg = portal_runner.run_index_walk(p, dry_run=False)
+    assert [c for c, _, _ in cap["queued"]] == ["A"]
+    assert agg["by_category"][0]["walk_reached_end"] is True
+    assert agg["by_category"][0]["walk_coverage"] == "incomplete"
+    line = [m for m in caplog.messages if m.startswith("COVERAGE cm=A")]
+    assert len(line) == 1
+    assert "the gap is nominated" in line[0]
+
+
+def test_index_walk_skip_line_names_our_stop_not_the_count(monkeypatch, caplog):
+    """The skip is about WHO stopped the walk. A reader of this line must not go
+    looking for a count mismatch that is not there."""
+    _nominations(monkeypatch)
+    p = _FakePortal(categories=["A"], reached_end=False)
+    with caplog.at_level("WARNING"):
+        portal_runner.run_index_walk(p, dry_run=False)
+    line = [m for m in caplog.messages if m.startswith("VERIFY skipped cm=A")]
+    assert len(line) == 1
+    assert "did not reach the portal's end" in line[0]
+    assert "an unfinished walk nominates nothing" in line[0]
 
 
 def test_index_walk_nominates_even_when_portal_flag_is_down(monkeypatch):
     """supports_complete_walk gated a sweep that could be wrong. A nomination
     cannot be -- the page decides -- so the flag no longer gates it."""
     cap = _nominations(monkeypatch)
-    p = _FakePortal(supports_complete_walk=False, complete=True)
+    p = _FakePortal(supports_complete_walk=False, reached_end=True)
     portal_runner.run_index_walk(p, dry_run=False)
     assert [c for c, _, _ in cap["queued"]] == ["A", "B"]
 
@@ -193,7 +237,7 @@ def test_index_walk_uses_a_portal_override_for_nomination(monkeypatch):
     subtypes, ceskereality sibling slices) supplies its own candidates; None
     means 'not yet' and queues nothing."""
     cap = _nominations(monkeypatch)
-    p = _FakePortal(complete=True)
+    p = _FakePortal(reached_end=True)
     seen_by: list = []
 
     def presence_candidates(conn, category, seen):
@@ -211,11 +255,11 @@ def test_index_walk_override_scope_reaches_the_throttle(monkeypatch):
     """bazos narrows to a subtype, remax/maxima widen to an agenda; the throttle
     and the operator override must see the scope the candidates came from."""
     cap = _nominations(monkeypatch)
-    p = _FakePortal(complete=True, categories=["A"])
+    p = _FakePortal(reached_end=True, categories=["A"])
     p.presence_candidates = lambda conn, category, seen: ([("1", "https://x/1", None)], 8, {"subtype": "chata"})
     portal_runner.run_index_walk(p, dry_run=False)
     assert cap["scopes"] == [("A", "chata")]
-    p2 = _FakePortal(complete=True, categories=["A"])
+    p2 = _FakePortal(reached_end=True, categories=["A"])
     p2.presence_candidates = lambda conn, category, seen: ([("1", "https://x/1", None)], 8, {"category_main": None})
     cap2 = _nominations(monkeypatch)
     portal_runner.run_index_walk(p2, dry_run=False)
@@ -227,9 +271,24 @@ def test_index_walk_that_saw_nothing_nominates_nothing(monkeypatch):
     the WHOLE scope (`<> ALL('{}')` is true for every row) -- exactly when the
     portal is least trustworthy (a retired slug, a throttled shell page)."""
     cap = _nominations(monkeypatch)
-    p = _FakePortal(complete=True, categories=["A"])
+    p = _FakePortal(reached_end=True, categories=["A"])
     p.walk_category = lambda c, conn, dry_run, limiter, deadline=None: (set(), {"found_new": 0, "enqueued": 0}, 0, 1, True)
     portal_runner.run_index_walk(p, dry_run=False)
+    assert cap["candidates"] == [] and cap["queued"] == []
+
+
+def test_a_walk_that_saw_nothing_still_tells_a_buffering_portal(monkeypatch):
+    """Portals whose index slices collapse onto one canonical category (ceskereality,
+    realitymix) count the slices they are handed and nominate on the last one. A slice
+    the runner refuses to nominate from must still be counted, or the group's counter
+    stays one short for ever and it never nominates again."""
+    cap = _nominations(monkeypatch)
+    p = _FakePortal(reached_end=True, categories=["A"])
+    p.walk_category = lambda c, conn, dry_run, limiter, deadline=None: (set(), {"found_new": 0, "enqueued": 0}, 0, 1, True)
+    noted: list[Any] = []
+    p.note_empty_slice = noted.append
+    portal_runner.run_index_walk(p, dry_run=False)
+    assert noted == ["A"]
     assert cap["candidates"] == [] and cap["queued"] == []
 
 
@@ -246,7 +305,7 @@ def test_index_walk_bumps_index_pages_per_committed_category(monkeypatch):
     _nominations(monkeypatch)
     # With a run_id, each category's pages are committed immediately so Health
     # liveness survives a SIGKILL before finalize.
-    p = _FakePortal(supports_complete_walk=True, complete=True)
+    p = _FakePortal(supports_complete_walk=True, reached_end=True)
     bumps: list[tuple[int, int]] = []
     monkeypatch.setattr(
         portal_runner.db, "bump_index_pages",
@@ -272,7 +331,7 @@ def test_index_walk_clean_stops_when_budget_already_blown(monkeypatch):
     # max_seconds with a deadline in the past -> stop before any category, finalize
     # cleanly (no SIGKILL). monotonic: first call sets the deadline, later calls
     # are past it.
-    p = _FakePortal(supports_complete_walk=True, complete=True)
+    p = _FakePortal(supports_complete_walk=True, reached_end=True)
     calls = {"n": 0}
 
     def fake_monotonic():
@@ -291,7 +350,7 @@ def test_index_walk_clean_stops_when_budget_already_blown(monkeypatch):
 def test_index_walk_runs_all_when_budget_not_reached(monkeypatch):
     _nominations(monkeypatch)
     # A generous budget never trips the deadline -> full walk, same as no budget.
-    p = _FakePortal(supports_complete_walk=True, complete=True)
+    p = _FakePortal(supports_complete_walk=True, reached_end=True)
     monkeypatch.setattr(portal_runner.time, "monotonic", lambda: 0.0)
     portal_runner.run_index_walk(p, dry_run=False, max_seconds=10_000)
     assert p.calls["walk"] == ["A", "B"]
@@ -302,7 +361,7 @@ def test_index_walk_one_failed_category_stays_green_with_error_recorded(monkeypa
     # tolerated) but the failure is COUNTED in the aggregate, and the other
     # category is still walked + its unseen rows nominated.
     cap = _nominations(monkeypatch)
-    p = _FakePortal(supports_complete_walk=True, complete=True, walk_fails={"A"})
+    p = _FakePortal(supports_complete_walk=True, reached_end=True, walk_fails={"A"})
     rc, agg = portal_runner.run_index_walk(p, dry_run=False)
     assert rc == 0
     assert agg["errors"] == 1
@@ -316,7 +375,7 @@ def test_index_walk_all_categories_failed_returns_nonzero_rc(monkeypatch):
     # EVERY category failed -> the portal is fully blocked (e.g. WAF 403s the
     # runner egress); the run must go red, not record a green zero-listing walk.
     cap = _nominations(monkeypatch)
-    p = _FakePortal(supports_complete_walk=True, complete=True, walk_fails={"A", "B"})
+    p = _FakePortal(supports_complete_walk=True, reached_end=True, walk_fails={"A", "B"})
     rc, agg = portal_runner.run_index_walk(p, dry_run=False)
     assert rc != 0
     assert agg["errors"] == 2

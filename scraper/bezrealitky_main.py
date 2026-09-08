@@ -9,11 +9,11 @@ ScrapedListing, and ingests via `db.ingest_scraped_listing` (Tier-0 idempotency 
 Tier-1 matching). No bespoke pipeline — only the per-portal fetcher
 (BezrealitkyClient) + parser (bezrealitky_parser) + config differ from sreality.
 
-Unlike bazos (a partial-walk HTML crawler), bezrealitky's GraphQL exposes a
-`totalCount` and has no deep-pagination cap, so a full per-category walk is
-provable-complete: `supports_complete_walk` (config-driven) lets the runner
-mark delisted listings inactive under the completeness guard (architectural rule
-#3), source-scoped so it only ever touches bezrealitky rows (rule #15). Because
+Unlike bazos (a partial-walk HTML crawler), bezrealitky's GraphQL has no
+deep-pagination cap, so a per-category walk can reach the portal's own end of
+list: `supports_complete_walk` (config-driven) lets the runner nominate the rows
+such a walk did not see for a page check, and the fetch decides (architectural
+rule #3), source-scoped so it only ever touches bezrealitky rows (rule #15). Because
 the detail JSON carries offerType/estateType, the drain derives each listing's
 category from the response — so bezrealitky walks MANY categories from one config
 without the queue-encodes-category limitation that constrains bazos.
@@ -24,6 +24,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from collections.abc import Callable
+from math import ceil
 from typing import Any
 
 from scraper import db, portal_runner
@@ -36,11 +38,13 @@ from scraper.bezrealitky_parser import (
 )
 from scraper.portal import (
     PortalConfig,
+    StopReason,
     default_config,
     deadline_reached,
     load_portal_config,
     classify_index_sighting,
-    walk_is_complete,
+    stop_is_portal_end,
+    walk_reached_end,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -50,9 +54,59 @@ LOG = logging.getLogger(__name__)
 
 INDEX_PAGE_SIZE = 100
 
+# An unconditional page ceiling for the offset loop. Its exits are all
+# conditional on something the API says (an empty page, a positive declared
+# count) or on a knob the scheduled lane may not pass (--max-seconds,
+# --max-pages), so a degraded resolver that serves rows while declaring
+# `totalCount: 0` would page forever until the job timeout SIGKILLs the run
+# (no scrape_runs row, no drain). 4,000 pages is ~400,000 adverts, two orders
+# of magnitude above bezrealitky's largest category, and it stops as `page_cap`
+# — a stop of OURS, so hitting it can never nominate.
+INDEX_PAGE_CEILING = 4_000
+
 # No staleness rail any more (rule #3, 2026-09-07): a complete walk nominates
 # the rows it did not see for a page check and the drain's fetch decides, so a
 # single walk-miss costs one fetch, never a live listing.
+
+
+def _end_of_list_confirmed(
+    fetch: Callable[[int], tuple[list[dict[str, Any]], int]], *,
+    offset: int, page_index: int, declared_total: int | None, page_total: int,
+) -> bool:
+    """Re-read the SAME page that came back empty; True only if the portal's
+    list is really exhausted there (barren rule, rule #3).
+
+    An items-less HTTP 200 is exactly what a soft-blocked GraphQL answer looks
+    like here — `bezrealitky_client.search` turns a null `listAdverts` into
+    ([], 0) with no error — so an empty page can never be the end on its own.
+    It takes the same offset the loop was reading, so the confirmation cannot
+    drift onto another page, and any failure to re-read returns False: a
+    confirmation that cannot be obtained is not a confirmation.
+    """
+    try:
+        adverts, total = fetch(offset)
+    except Exception as exc:  # noqa: BLE001 - an unreadable re-read proves nothing
+        LOG.warning("INDEX empty-page re-read failed offset=%d: %s", offset, exc)
+        return False
+    if adverts:
+        return False
+    if declared_total is None:
+        # No page of this walk ever carried an item, so the count is the only
+        # evidence there is — and both reads have to declare the scope empty.
+        # (An empty category is a measured zero and a fact; a shell answer that
+        # zeroes an over-declared total cannot pass, its first read carried the
+        # real count.)
+        return page_total == 0 and total == 0
+    # At or past the position the declared total implies: the offset caught the
+    # count, or this request is past the last page it implies AND the count
+    # falls inside the window we just asked for — an over-declared total whose
+    # list ran dry, which is a FINISHED walk, not a truncated one. A barren page
+    # with a whole page of declared rows still unread is never the end: that is
+    # what a mid-walk throttle looks like, including a throttled true last page.
+    return offset >= declared_total or (
+        page_index > ceil(declared_total / INDEX_PAGE_SIZE)
+        and offset + INDEX_PAGE_SIZE > declared_total
+    )
 
 
 class BezrealitkyPortal:
@@ -113,39 +167,102 @@ class BezrealitkyPortal:
         inc_short_term = bool(category.get("include_short_term", True))
         client = BezrealitkyClient(limiter=limiter)
 
+        def fetch(off: int) -> tuple[list[dict[str, Any]], int]:
+            return client.search(
+                offer, estate, limit=INDEX_PAGE_SIZE, offset=off,
+                include_imports=inc_imports, include_short_term=inc_short_term,
+            )
+
         native_ids: list[str] = []
         price_map: dict[str, int | None] = {}
         offset = 0
-        total = 0
+        # Latched ONLY from a page that returned items AND declared a positive
+        # count: a barren page reports totalCount 0, and letting it overwrite the
+        # denominator would erase the only number the end-of-list rule has to
+        # reason with (a page that hands us rows while declaring zero is
+        # self-contradictory and is no denominator either).
+        declared_total: int | None = None
         pages = 0
-        truncated = False
+        stop: StopReason = "error"
         while True:
-            adverts, total = client.search(
-                offer, estate, limit=INDEX_PAGE_SIZE, offset=offset,
-                include_imports=inc_imports, include_short_term=inc_short_term,
-            )
+            adverts, total = fetch(offset)
             pages += 1
             LOG.info("INDEX offset=%d items=%d total=%d", offset, len(adverts), total)
+            if adverts and total > 0 and (
+                declared_total is None or total > declared_total
+            ):
+                # HIGH-WATER only: `offset >= declared_total` is a PORTAL end, so a
+                # count that steps DOWN below the offset the walk already reached
+                # would end it on a full page of items with the rest unwalked. A
+                # number the walk has already passed is not evidence of an end.
+                declared_total = total
+            new_on_page = 0
             for adv in adverts:
                 nid = str(adv["id"])
                 if nid not in price_map:
                     native_ids.append(nid)
+                    new_on_page += 1
                 # Same clamps as the stored price so the unchanged-compare can't
                 # see a value the write boundary would have nulled.
                 price_map[nid] = db.sane_price_czk(adv.get("price"))
             offset += len(adverts)
+            # Items-first: an items-less 200 shares its shape with a soft block,
+            # so it gets its own arm and has to be corroborated before it may
+            # count as the portal's end (rule #3).
+            if not adverts:
+                confirmed = _end_of_list_confirmed(
+                    fetch, offset=offset, page_index=pages,
+                    declared_total=declared_total, page_total=total,
+                )
+                stop = "empty_confirmed" if confirmed else "barren"
+                if confirmed and declared_total is None and not native_ids:
+                    declared_total = 0  # an empty scope, measured twice
+                break
+            # `offset` counts ROWS RETURNED, so an API that ignores or clamps the
+            # offset parameter (a deep-offset clamp, a cache serving the head page)
+            # would march it to the declared total while re-serving page 1 — and
+            # exit `declared_total_reached` having seen one page. A page of items
+            # that adds no new id means the list did not advance. On an offset API
+            # that is OURS, not a terminator: unlike an HTML pager clamping an
+            # out-of-range request onto its last page, nothing here says we are at
+            # the end.
+            if new_on_page == 0:
+                stop = "pager_stalled"
+                LOG.warning(
+                    "INDEX offset did not advance offer=%s estate=%s offset=%d "
+                    "items=%d collected=%d: the page carried no new advert",
+                    offer, estate, offset, len(adverts), len(price_map),
+                )
+                break
+            if declared_total is not None and offset >= declared_total:
+                stop = "declared_total_reached"
+                break
+            # The natural end is tested FIRST: a walk that finished the portal's
+            # last page exactly on the budget reached the end, it was not cut short.
             if deadline_reached(deadline):
-                truncated = True
+                stop = "deadline"
                 LOG.info(
                     "INDEX deadline reached offer=%s estate=%s page=%d offset=%d "
-                    "collected=%d total=%d: stopping walk (incomplete)",
-                    offer, estate, pages, offset, len(price_map), total,
+                    "collected=%d total=%s: stopping walk (incomplete)",
+                    offer, estate, pages, offset, len(price_map), declared_total,
                 )
                 break
             if self._max_pages and pages >= self._max_pages:
+                stop = "page_cap"
                 break
-            if not adverts or offset >= total:
+            if pages >= INDEX_PAGE_CEILING:
+                stop = "page_cap"
+                LOG.warning(
+                    "INDEX page ceiling reached offer=%s estate=%s pages=%d "
+                    "collected=%d declared=%s; stopping (the walk nominates nothing)",
+                    offer, estate, pages, len(price_map), declared_total,
+                )
                 break
+
+        LOG.info(
+            "INDEX walk end offer=%s estate=%s pages=%d collected=%d declared=%s stop=%s",
+            offer, estate, pages, len(price_map), declared_total, stop,
+        )
 
         seen = set(native_ids)
         existing = (
@@ -181,15 +298,21 @@ class BezrealitkyPortal:
             "ENQUEUE source=bezrealitky new=%d changed=%d unchanged=%d enqueued=%d",
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        # One function owns the whole completeness verdict (scraper.portal):
-        # a deadline-stopped walk is `incomplete` and an unmeasurable total is
-        # `unknown` — never "complete", which is what authorises mark_inactive
-        # (rule #3). `_max_pages` stays a separate conjunct: it is an operator
-        # cap on this run, not a statement about coverage.
-        complete = (not self._max_pages) and walk_is_complete(
-            len(seen), total, stopped_early=truncated,
+        # STRUCTURAL, not numeric (rule #3, 2026-09-08): the walk may nominate
+        # its unseen rows only if the PORTAL ended it. One flat offset walk per
+        # descriptor means one stop reason for the whole category. A page cap is
+        # our stop even when the loop ended naturally underneath it — it is an
+        # operator restriction on this run, not a statement about coverage.
+        # `declared_total` no longer gates anything; the runner records the
+        # coverage verdict it implies into scrape_runs.by_category.
+        portal_end = stop_is_portal_end(stop)
+        reached_end = walk_reached_end(
+            portal_end=portal_end, our_stop=bool(self._max_pages) or not portal_end,
         )
-        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
+        return (
+            seen, {"found_new": len(new_ids), "enqueued": enqueued},
+            declared_total, pages, reached_end,
+        )
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
         cm, ct = self.category_labels(category)
@@ -344,8 +467,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="bezrealitky.cz scraper (portal framework)")
     p.add_argument(
         "--max-pages", type=int, default=None,
-        help="cap index pages per category (ad-hoc partial run; suppresses "
-             "mark_inactive). Omit for a full, complete walk.",
+        help="cap index pages per category (ad-hoc partial run; nominates "
+             "nothing). Omit for a full walk to the portal's own end.",
     )
     p.add_argument(
         "--max-detail", type=int, default=None,
@@ -365,7 +488,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--probe", action="store_true",
         help="newest-first delta probe: diff + enqueue off the first "
              "--probe-pages index page(s) per category, then exit — never "
-             "mark_inactive, no detail drain, no scrape_runs row",
+             "nominates unseen rows for a page check, no detail drain, no "
+             "scrape_runs row",
     )
     p.add_argument(
         "--probe-pages", type=int, default=1,
@@ -378,7 +502,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help=(
             "Wall-clock budget for the run. The index walk stops cleanly on "
-            "expiry and reports the category INCOMPLETE, so mark_inactive is "
+            "expiry and reports a stop of OURS, so nomination is "
             "suppressed (rule #3) rather than the job being killed by the CI "
             "timeout with nothing recorded; the drain uses it the same way."
         ),

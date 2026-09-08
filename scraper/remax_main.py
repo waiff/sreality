@@ -19,15 +19,15 @@ reconciliation joins listings on those — while fetching each agenda's pages on
 once per run. The drain re-derives each listing's category from the detail page
 ("Typ nemovitosti" + title), so the queue stays category-agnostic.
 
-remax is `supports_complete_walk=true` via AGENDA-GRAIN delisting: it reports a
+remax is `supports_complete_walk=true` via AGENDA-GRAIN nomination: it reports a
 per-AGENDA total (the per-category slice is title-derived, not a portal-reported
-per-(cm,ct) total), so the runner can't gate a per-category sweep — instead
-`mark_inactive` flips the whole agenda (sale ≡ category_type) once the agenda walk
-reaches its reported total, scoped by category_type against the full walk's id set
-(`db.presence_candidates` with category_main=None), never the title-derived per-category slice (which could
-false-flip a listing whose index-time title category ≠ its detail-time one). A gone
-detail fetch (404/410 or a redirect off the detail path) still flips that one
-listing inactive immediately.
+per-(cm,ct) total), so the runner can't gate a per-category sweep — instead the
+whole agenda (sale ≡ category_type) nominates every active row it did not see for
+a page check once the walk REACHED THE PORTAL'S END (rule #3, structural: remax
+said there is nothing after this page and no stop of OURS fired; the collected /
+declared ratio is logged, never a gate), scoped by category_type against the full
+walk's id set (`db.presence_candidates` with category_main=None), never the
+title-derived slice. A gone detail fetch still flips that one listing at once.
 """
 
 from __future__ import annotations
@@ -40,11 +40,11 @@ from scraper import db, portal_runner
 from scraper.location import CoordResolver
 from scraper.portal import (
     PortalConfig,
+    StopReason,
     default_config,
     load_portal_config,
     classify_index_sighting,
-    deadline_reached,
-    walk_is_complete,
+    deadline_reached, stop_is_portal_end, walk_coverage, walk_reached_end,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -64,7 +64,7 @@ class _AgendaWalk:
     def __init__(
         self, native_ids: list[str], ref_map: dict[str, str],
         price_map: dict[str, int | None], cat_map: dict[str, str | None],
-        total: int | None, pages: int, complete: bool,
+        total: int | None, pages: int, stop_reason: StopReason, reached_end: bool,
     ) -> None:
         self.native_ids = native_ids
         self.ref_map = ref_map
@@ -72,10 +72,10 @@ class _AgendaWalk:
         self.cat_map = cat_map  # id -> category_main (from the card title)
         self.total = total
         self.pages = pages
-        # Did this walk reach the agenda's reported total? Gates agenda-grain
-        # delisting (mark_inactive). False on a capped/short walk, or one cut
-        # short by the wall-clock deadline → no flip.
-        self.complete = complete
+        # Why the page loop stopped (StopReason) and the structural verdict read
+        # off it (rule #3): the gate for agenda-grain nomination, never a count.
+        self.stop_reason = stop_reason
+        self.reached_end = reached_end
 
 
 class RemaxPortal:
@@ -161,10 +161,10 @@ class RemaxPortal:
         total: int | None = None
         pages = 0
         page = 1
-        stopped_early = False
+        stop_reason: StopReason | None = None
         while True:
             if deadline_reached(deadline):
-                stopped_early = True
+                stop_reason = "deadline"
                 LOG.info(
                     "INDEX deadline sale=%d stopping before page=%d pages=%d collected=%d total=%s",
                     sale, page, pages, len(native_ids), total,
@@ -209,7 +209,13 @@ class RemaxPortal:
                     )
             parsed = parse_index(html)
             pages += 1
-            total = parsed.total if parsed.total is not None else total
+            # ONLY a page that carried cards may move the denominator. remax's
+            # "zobrazeno N z celkem M" line renders on a lost-filter / backend-error
+            # page too (and `_TOTAL_RE` happily reads "z celkem 0"), so letting an
+            # items-less page update `total` let the suspect page manufacture its own
+            # position corroboration in _classify_empty_page.
+            if parsed.items and parsed.total is not None:
+                total = parsed.total
             LOG.info("INDEX sale=%d page=%d items=%d total=%s", sale, page, len(parsed.items), total)
             new_on_page = 0
             for item in parsed.items:
@@ -223,32 +229,98 @@ class RemaxPortal:
                 price_map[nid] = db.sane_price_czk(index_price(item.price_text))
                 cat_map[nid] = category_of(None, item.title)
             if self._max_pages and pages >= self._max_pages:
+                stop_reason = "page_cap"
                 break
-            # Stop on an empty page, a page adding nothing new, or once the
-            # collected count reaches the reported total (a clamped out-of-range
-            # page would otherwise loop forever).
-            if not parsed.items or new_on_page == 0:
+            # Items-first: a page with zero cards is a soft block / blank-shell
+            # 200 until it is corroborated, and it looks exactly like the page
+            # after the last one — so it can no longer share one break with the
+            # portal's real end signals (that conflation is what the numeric gate
+            # was silently defending against).
+            if not parsed.items:
+                stop_reason = self._classify_empty_page(
+                    client, sale, page, total=total, saw_items=bool(native_ids),
+                )
+                break
+            if new_on_page == 0:
+                # It was read as remax clamping an out-of-range ?stranka=N back onto
+                # a valid page. The live probe (2026-09-08) refutes that: page 81 of
+                # an 80-page agenda answers HTTP 200 with zero cards and no redirect
+                # — remax does not clamp. So a page of cards that adds no id is an
+                # edge-cached body, a session reset or an index that reshuffled by a
+                # full page, none of which says we are at the tail. The loop still
+                # has to break; it must not nominate.
+                LOG.warning(
+                    "INDEX sale=%d page=%d added no new card; the list did not "
+                    "advance (collected=%d total=%s)",
+                    sale, page, len(native_ids), total,
+                )
+                stop_reason = "pager_stalled" if pages >= 2 else "barren"
                 break
             if total is not None and len(native_ids) >= total:
+                stop_reason = "declared_total_reached"
                 break
             page += 1
 
-        # Complete only if we walked the whole agenda (not page-capped) AND the
-        # shared verdict says so — the gate for agenda-grain delisting.
-        # `walk_is_complete` owns the whole coverage judgement: a deadline stop
-        # (which can still leave the collected count above the threshold) is
-        # passed as `stopped_early`, an unreported total is `unknown` — never
-        # complete — and over-collection past the declared total means the
-        # denominator is wrong, so it cannot read as coverage either. The walk is
-        # cached, so the whole agenda (every one of its category descriptors)
-        # inherits the incomplete verdict.
-        capped = bool(self._max_pages and pages >= self._max_pages)
-        complete = not capped and walk_is_complete(
-            len(native_ids), total, stopped_early=stopped_early,
+        # The gate is STRUCTURAL (rule #3): did remax end this page loop, and did
+        # no stop of ours fire? remax's index is ONE national list per agenda, so
+        # the agenda has a single unit and its stop reason IS the category's — a
+        # walk that ends one row short of the reported total has still reached the
+        # portal's last page and may nominate. A reasonless exit (unreachable
+        # today: every break classifies itself) reads as a unit we never walked.
+        # The walk is cached, so the whole agenda — every one of its category
+        # descriptors — inherits this verdict.
+        reason: StopReason = stop_reason or "slice_unreached"
+        portal_end = stop_is_portal_end(reason)
+        reached_end = walk_reached_end(portal_end=portal_end, our_stop=not portal_end)
+        LOG.info(
+            "INDEX done sale=%d pages=%d collected=%d total=%s stop=%s reached_end=%s",
+            sale, pages, len(native_ids), total, reason, reached_end,
         )
-        walk = _AgendaWalk(native_ids, ref_map, price_map, cat_map, total, pages, complete)
+        walk = _AgendaWalk(
+            native_ids, ref_map, price_map, cat_map, total, pages, reason, reached_end)
         self._agenda_cache[sale] = walk
         return walk, pages
+
+    def _classify_empty_page(
+        self, client: RemaxClient, sale: int, page: int, *,
+        total: int | None, saw_items: bool,
+    ) -> StopReason:
+        """Is this items-less page remax's end, or a soft block? (the barren rule)
+
+        Re-read the SAME url once, through the limiter: only a page that is still
+        empty AND sits past the last page the reported total implies — or, with no
+        total ever readable, past a page of this agenda that DID carry cards — is
+        the portal's end. Everything else is `barren`, a stop of OURS: a
+        confirmation that cannot be obtained is not a confirmation, and a
+        WAF/consent/blank-shell 200 parses to exactly zero cards.
+        """
+        try:
+            html, _status = client.fetch_index(sale=sale, stranka=page)
+            reread = parse_index(html)
+        except Exception as exc:  # noqa: BLE001 - an unreadable re-read proves nothing
+            LOG.warning(
+                "INDEX barren re-read failed sale=%d page=%d: %s", sale, page, exc)
+            return "barren"
+        if reread.items:
+            LOG.warning(
+                "INDEX barren page carried %d cards on re-read sale=%d page=%d — "
+                "a transient blank, not the end of the index",
+                len(reread.items), sale, page,
+            )
+            return "barren"
+        # Where _PAGE_SIZE finally earns its keep: the declared total is what says
+        # whether this empty page sits past the end or short of it.
+        last_page = None if total is None else (total + _PAGE_SIZE - 1) // _PAGE_SIZE
+        # `>=`, not `>`: the count says which page the tail is ON, so an empty page
+        # AT that page is the tail a churned-down agenda leaves behind (a strict `>`
+        # filed those finished walks as barren and nominated nothing).
+        confirmed = (page >= last_page) if last_page is not None else saw_items
+        if not confirmed:
+            LOG.warning(
+                "INDEX barren page unconfirmed sale=%d page=%d total=%s last_page=%s "
+                "— treating it as our own stop", sale, page, total, last_page,
+            )
+        return "empty_confirmed" if confirmed else "barren"
 
     @staticmethod
     def _belongs(mapped: str | None, cm: str | None) -> bool:
@@ -312,11 +384,10 @@ class RemaxPortal:
         )
         # remax reports a per-AGENDA total, not per-category, so the per-category
         # "portal expected" is what this category collected — index% is then 100%
-        # by construction. The COMPLETE flag is the agenda's (not the slice's):
-        # delisting is agenda-grain (mark_inactive), so the slice never needs its
-        # own completeness proof. The runner only delists when the agenda walk
-        # reached its reported total.
-        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, len(seen), pages, walk.complete
+        # by construction. The 5th element is the AGENDA's structural verdict, not
+        # the slice's: nomination is agenda-grain, so the title-derived slice never
+        # needs an end of its own.
+        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, len(seen), pages, walk.reached_end
 
     def presence_candidates(
         self, conn: Any, category: dict[str, Any], seen: set[str],
@@ -328,21 +399,32 @@ class RemaxPortal:
         title-derived per-category slice (a listing whose index-time title
         category differs from its detail-time category would otherwise be
         nominated by a walk that did see it). The passed `seen` (this
-        category's slice) is intentionally ignored. An incomplete, unmeasurable
-        or over-collected agenda nominates nothing: its unseen set is not
-        evidence."""
+        category's slice) is intentionally ignored. An agenda that did not reach
+        remax's end nominates nothing: its unseen set is then the part of the
+        index we never visited, not evidence of absence."""
         cm, ct = self.category_labels(category)
         sale = int(category.get("sale") or 1)
         if ct is None or sale in self._swept_agendas:
             return None
         walk = self._agenda_cache.get(sale)
-        if walk is None or not walk.complete:
+        if walk is None or not walk.reached_end:
             return None
         self._swept_agendas.add(sale)
+        coverage = walk_coverage(len(walk.native_ids), walk.total)
         LOG.info(
-            "VERIFY agenda sale=%d ct=%s collected=%d total=%s",
-            sale, ct, len(walk.native_ids), walk.total,
+            "VERIFY agenda sale=%d ct=%s collected=%d total=%s stop=%s coverage=%s",
+            sale, ct, len(walk.native_ids), walk.total, walk.stop_reason, coverage,
         )
+        if coverage != "complete":
+            # An alarm, never a veto (rule #3): the walk reached remax's end, so it
+            # nominates — but ending short of remax's own count means the portal's
+            # pagination dropped rows, and nothing else can see it here (the
+            # runner's coverage check compares len(seen) with len(seen) for this
+            # portal, since the per-category "declared" total IS what we collected).
+            LOG.warning(
+                "COVERAGE agenda sale=%d ct=%s collected=%d declared=%s verdict=%s stop=%s",
+                sale, ct, len(walk.native_ids), walk.total, coverage, walk.stop_reason,
+            )
         candidates, active_rows = db.presence_candidates(
             conn, SOURCE, None, ct, set(walk.native_ids),
         )
@@ -495,8 +577,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument(
         "--max-seconds", type=float, default=None,
-        help="wall-clock budget for the detail drain; it stops claiming + "
-             "finalizes cleanly before the job timeout (no 'stuck' run)",
+        help="wall-clock budget for EITHER phase (the index walk consumes it as "
+             "its per-category deadline); the phase stops claiming + finalizes "
+             "cleanly before the job timeout (no 'stuck' run)",
     )
     p.add_argument(
         "--index-only", action="store_true",
@@ -510,7 +593,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--probe", action="store_true",
         help="newest-first delta probe: diff + enqueue off the first "
              "--probe-pages index page(s) per agenda, then exit — never "
-             "mark_inactive, no detail drain, no scrape_runs row",
+             "nominates unseen rows for a page check, no detail drain, no "
+             "scrape_runs row",
     )
     p.add_argument(
         "--probe-pages", type=int, default=1,

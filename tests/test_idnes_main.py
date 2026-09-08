@@ -192,24 +192,26 @@ def test_walk_category_classifies_new_changed_unchanged(monkeypatch):
     assert c not in refs                          # unchanged is not enqueued
 
 
-def test_walk_complete_requires_near_full_walk():
-    # mark_inactive only after a ~complete walk (architectural rule #3); the bar
-    # is hardcoded (portal.INDEX_MIN_COMPLETENESS=0.995, tolerating mid-walk
-    # churn), not operator-tunable — a genuinely truncated walk reads incomplete.
-    assert idnes_main.walk_is_complete(100, 100) is True
-    assert idnes_main.walk_is_complete(996, 1000) is True   # 0.4% deficit = churn
-    assert idnes_main.walk_is_complete(994, 1000) is False  # 0.6% deficit = truncated
-    assert idnes_main.walk_is_complete(99, 100) is False
-    assert idnes_main.walk_is_complete(90, 100) is False
+def test_the_numeric_verdict_still_pins_the_coverage_triggers():
+    # Since 2026-09-08 this arithmetic no longer gates the nomination (that is
+    # the structural `stop`) — but it is still what decides whether a slice
+    # descends, whether it is resampled, and what the ledger records, so its bar
+    # (portal.INDEX_MIN_COMPLETENESS=0.995, tolerating mid-walk churn) has to
+    # keep meaning exactly what it means today.
+    assert portal_mod.walk_is_complete(100, 100) is True
+    assert portal_mod.walk_is_complete(996, 1000) is True   # 0.4% deficit = churn
+    assert portal_mod.walk_is_complete(994, 1000) is False  # 0.6% deficit = truncated
+    assert portal_mod.walk_is_complete(99, 100) is False
+    assert portal_mod.walk_is_complete(90, 100) is False
     # An unmeasurable total is "unknown", never "complete". The old local
     # _walk_complete returned True here and this test asserted it — that
     # expectation was the DEFECT, not the spec: it let a walk that measured
     # nothing authorise mark_inactive to delist everything it never reached.
-    assert idnes_main.walk_is_complete(0, None) is False
-    assert idnes_main.walk_is_complete(500, 1000, stopped_early=True) is False
+    assert portal_mod.walk_is_complete(0, None) is False
+    assert portal_mod.walk_is_complete(500, 1000, stopped_early=True) is False
     # Over-collection means the denominator is wrong (overlapping slices or
     # foreign stock), so contamination must not read as completeness either.
-    assert idnes_main.walk_is_complete(1030, 1000) is False
+    assert portal_mod.walk_is_complete(1030, 1000) is False
 
 
 def test_walk_category_max_pages_suppresses_complete(monkeypatch):
@@ -574,6 +576,226 @@ def test_the_empty_marker_cannot_override_a_page_that_has_results(monkeypatch):
     assert set(outcomes.values()) == {"exhausted"}
 
 
+# --- an items-less page is not the end of the pager --------------------------
+#
+# The `not items` arm and the `no next link` arm used to leave through the SAME
+# break, so a page with nothing on it read exactly like the last page — and on
+# idnes an items-less HTTP 200 is what the soft throttle answers with (one
+# request in twenty stalls ~390s and returns 200, never a 429). Items are tested
+# FIRST now, and an empty page is OURS (`barren`) until idnes corroborates it:
+# re-read the same URL once, and believe it only if it is still empty AND either
+# idnes says so out loud or the position is at/past its own declared count.
+
+
+def _seq_parse(pages):
+    """Serve `pages` in order, one per parse_index call (the barren re-read is a
+    call of its own, so it consumes the next entry)."""
+    it = iter(pages)
+    return lambda _h: next(it)
+
+
+def _page(*, items=(), total=None, next_offset=None, empty_confirmed=False):
+    return SimpleNamespace(
+        total=total, next_offset=next_offset, empty_confirmed=empty_confirmed,
+        items=[SimpleNamespace(
+            source_id_native=f"6a18deadbeefdeadbeef{i:04d}",
+            detail_path="https://reality.idnes.cz/detail/prodej/byt/x/y/",
+            price_text="5 000 000 Kč") for i in items])
+
+
+def _place_walk(monkeypatch, pages):
+    monkeypatch.setattr(idnes_main, "parse_index", _seq_parse(pages))
+    client = _IdxClient()
+    result = _portal()._walk_place(
+        client, "prodej", "byty", locality="praha", sl=None,
+        deadline=None, label="praha")
+    return result, client
+
+
+def test_a_barren_page_is_not_a_pager_end(monkeypatch):
+    """The regression the structural gate could otherwise introduce: a blocked
+    page has no items and no pager either, so without the items-first split it
+    would report the portal's own end and the walk would nominate everything it
+    never reached."""
+    (rows, _d, pages, outcome, stop, _h), client = _place_walk(monkeypatch, [
+        _page(items=[1], total=999, next_offset=1),
+        _page(total=999),                 # nothing on it, no next link
+        _page(total=999),                 # …and the re-read says the same
+    ])
+    assert len(rows) == 1
+    assert pages == 2                     # the re-read is not a page of the walk
+    assert client.calls == 3              # …but it IS a second fetch of page 2
+    assert stop == "barren"
+    assert idnes_main.stop_is_portal_end(stop) is False
+    assert outcome == "incomplete"
+
+
+def test_a_barren_page_at_the_declared_tail_is_confirmed(monkeypatch):
+    """Corroborated the other way: the same empty page, but the walk already
+    holds everything idnes said it had, so the emptiness is the tail."""
+    (rows, _d, _p, outcome, stop, _h), client = _place_walk(monkeypatch, [
+        _page(items=[1], total=1, next_offset=1),
+        _page(total=1),
+        _page(total=1),                   # still empty, and we hold 1 of 1
+    ])
+    assert len(rows) == 1
+    assert client.calls == 3
+    assert stop == "empty_confirmed"
+    assert idnes_main.stop_is_portal_end(stop) is True
+    assert outcome == "exhausted"
+
+
+def test_a_barren_page_idnes_confirms_out_loud_is_the_end(monkeypatch):
+    """idnes states emptiness in words, and it may do so on the re-read. A
+    site-authored 'no results' is a positive measurement at any page."""
+    (_rows, _d, _p, _o, stop, _h), _client = _place_walk(monkeypatch, [
+        _page(items=[1], total=None, next_offset=1),
+        _page(),
+        _page(empty_confirmed=True),
+    ])
+    assert stop == "empty_confirmed"
+
+
+def test_a_barren_page_that_reads_back_full_was_a_bad_read(monkeypatch):
+    """The one-shot re-read exists for exactly this: the page had rows all along.
+    A read that contradicts itself is not evidence of an end."""
+    (_rows, _d, _p, _o, stop, _h), _client = _place_walk(monkeypatch, [
+        _page(items=[1], total=999, next_offset=1),
+        _page(total=999),
+        _page(items=[2], total=999, next_offset=2),   # the re-read has rows
+    ])
+    assert stop == "barren"
+
+
+def test_a_first_page_that_is_barren_is_never_confirmed(monkeypatch):
+    """No count was ever readable and no page of this place ever carried a row —
+    there is nothing to corroborate an emptiness against. A place that starts
+    blank stays unproven (the same rule ceskereality's double read encodes: a
+    confirmation that cannot be obtained is not a confirmation)."""
+    (rows, _d, _p, outcome, stop, _h), _client = _place_walk(monkeypatch, [
+        _page(),
+        _page(),
+    ])
+    assert rows == []
+    assert stop == "barren"
+    assert outcome == "degraded"
+
+
+def test_a_re_read_that_fails_confirms_nothing(monkeypatch):
+    """A transport failure on the confirming fetch is missing evidence, not a
+    confirmation."""
+    class _OneShot(_IdxClient):
+        def fetch_index(self, *a, **k):
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("connection reset")
+            return ("<html>", 200)
+
+    monkeypatch.setattr(idnes_main, "parse_index", _seq_parse([_page(total=999)]))
+    _r, _d, _p, _o, stop, _h = _portal()._walk_place(
+        _OneShot(), "prodej", "byty", locality="praha", sl=None,
+        deadline=None, label="praha")
+    assert stop == "barren"
+
+
+def test_a_declared_zero_needs_no_re_read(monkeypatch):
+    """idnes publishing a count of zero IS the portal saying the place is empty;
+    spending a second fetch to hear it again would be a request for nothing."""
+    (rows, declared, _p, outcome, stop, _h), client = _place_walk(
+        monkeypatch, [_page(total=0)])
+    assert rows == [] and declared == 0
+    assert client.calls == 1
+    assert stop == "empty_confirmed"
+    assert outcome == "exhausted"
+
+
+# --- the category gate is structural -----------------------------------------
+
+
+def test_a_category_whose_slices_never_started_is_not_an_end(monkeypatch):
+    """`all()` over an empty list is True, so the stop list has to be seeded from
+    the CONFIGURED slices: a walk that ran out of budget before its first slice
+    must not read as having reached idnes's end."""
+    monkeypatch.setattr(idnes_main, "parse_index",
+                        lambda _h: _page(items=[1], total=1))
+    monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
+    monkeypatch.setattr(idnes_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(idnes_main.db, "enqueue_detail", lambda *a, **k: 0)
+    monkeypatch.setattr(idnes_main.db, "record_index_slice", lambda *a, **k: None)
+    monkeypatch.setattr(portal_mod, "time", SimpleNamespace(monotonic=lambda: 999.0))
+
+    _seen, _c, _n, _p, complete = _portal().walk_category(
+        {"sale_type": "prodej", "category": "byty"}, _Conn(), False, _Limiter(),
+        50.0)
+    assert complete is False
+
+
+def test_a_deadline_mid_page_suppresses_the_category(monkeypatch):
+    """The deadline that now carries the False is the one INSIDE the page loop:
+    a slice cut off between its own pages never reached idnes's end, however its
+    counts happen to look."""
+    clock = {"n": 0}
+
+    def _tick() -> float:
+        clock["n"] += 1
+        return 10.0 if clock["n"] < 3 else 999.0
+
+    monkeypatch.setattr(portal_mod, "time", SimpleNamespace(monotonic=_tick))
+    monkeypatch.setattr(idnes_main, "parse_index",
+                        lambda _h: _page(items=[1], total=1, next_offset=1))
+    monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
+    monkeypatch.setattr(idnes_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(idnes_main.db, "enqueue_detail", lambda *a, **k: 0)
+    stops: list[str] = []
+    monkeypatch.setattr(idnes_main.db, "record_index_slice",
+                        lambda *a, **k: stops.append(k["outcome"]))
+
+    _seen, _c, _n, _p, complete = _portal().walk_category(
+        {"sale_type": "prodej", "category": "byty"}, _Conn(), False, _Limiter(),
+        50.0)
+    assert complete is False
+    assert stops[:1] == ["deadline"]
+
+
+def test_a_deadline_inside_the_last_slice_suppresses_the_category(monkeypatch):
+    """The padding only covers a break with slices LEFT. A budget consumed
+    progressively almost always dies in a LATE slice, where the list of results is
+    full and every recorded stop is a portal end — so walk_category needs a
+    deadline term of its own."""
+    # The budget expires the moment the LAST slice finishes (its ledger write is
+    # the last thing that happens inside the loop), so the loop never breaks and
+    # every recorded stop is a portal end.
+    expired: list[int] = []
+    monkeypatch.setattr(idnes_main, "deadline_reached", lambda _d: bool(expired))
+    monkeypatch.setattr(idnes_main, "parse_index",
+                        lambda _h: _page(items=[1], total=1))
+    monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
+    monkeypatch.setattr(idnes_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(idnes_main.db, "enqueue_detail", lambda *a, **k: 0)
+    monkeypatch.setattr(idnes_main.db, "record_index_slice",
+                        lambda *a, **k: expired.append(1))
+    portal = _portal()
+    portal.SLICES = ("praha",)
+    _seen, _c, _n, _p, complete = portal.walk_category(
+        {"sale_type": "prodej", "category": "byty"}, _Conn(), False, _Limiter(),
+        50.0)
+    assert complete is False
+
+
+def test_a_countless_place_that_goes_empty_is_never_confirmed(monkeypatch):
+    """idnes states emptiness out loud (`empty_confirmed`), so a genuine tail never
+    needs the "no count, but an earlier page had items" fallback the other portals
+    use — while `declared is None` is the documented signature of a DEGRADED page.
+    Confirming on it would confirm the one shape the barren rule exists to catch."""
+    (rows, declared, pages, outcome, stop, _h), _client = _place_walk(
+        monkeypatch,
+        [_page(items=[1], total=None, next_offset=1), _page(total=None),
+         _page(total=None)])
+    assert len(rows) == 1 and declared is None and pages == 2
+    assert stop == "barren"
+    assert outcome == "degraded"
+
+
 # --- descending into a slice that paging cannot enumerate --------------------
 #
 # idnes's result ordering is not stable between requests, so successive pages of
@@ -674,10 +896,46 @@ def test_the_parent_rows_are_kept_not_replaced(monkeypatch):
     assert parent_only <= seen                # …and the walk kept them
 
 
-def test_a_slice_with_no_children_stays_incomplete(monkeypatch):
-    """Fail closed. Nothing to descend into is not evidence of completeness."""
+def test_a_slice_short_of_its_count_still_reached_the_end(monkeypatch):
+    """The premise that was reversed on 2026-09-08 (rule #3).
+
+    This slice pages to idnes's own last page and comes up short of the declared
+    total, with nothing to descend into. It stays honestly `incomplete` — that
+    is what drives the descent and what the ledger records — but it DID reach the
+    end of what idnes offered, so the category may nominate the rows it did not
+    see for a page check. Under the old numeric gate one such slice held a whole
+    category open forever, and the drain never got to decide anything.
+    """
     outcomes, (_s, _c, _n, _p, complete), _cl = _descend_walk(monkeypatch, children=())
-    assert outcomes["praha"] == "incomplete"
+    assert outcomes["praha"] == "incomplete"   # the count is unchanged…
+    assert complete is True                    # …and it no longer vetoes
+
+
+def test_a_descent_child_that_fails_vetoes_the_slice(monkeypatch):
+    """The descent runs ONLY where the parent came up short — i.e. exactly where
+    the parent's own `pager_end` is known not to mean "there is no more". So a
+    rescue walk that dies on a throttle must not leave the parent's terminator
+    standing as the slice's verdict."""
+    class _ChildBlocked(_Hierarchy):
+        def fetch_index(self, sale_type, category, page=None, *, locality=None,
+                        sl=None, price_min=None, price_max=None):
+            if locality in ("praha-1", "praha-2"):
+                raise ConnectionResetError("connection reset by peer")
+            return super().fetch_index(
+                sale_type, category, page, locality=locality, sl=sl,
+                price_min=price_min, price_max=price_max)
+
+    monkeypatch.setattr(idnes_main, "IdnesClient", lambda *a, **k: _ChildBlocked())
+    monkeypatch.setattr(idnes_main, "parse_index", _hier_parse)
+    monkeypatch.setattr(idnes_main, "sub_places",
+                        lambda html, s, c, exclude=(): (["praha-1", "praha-2"], []))
+    monkeypatch.setattr(idnes_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(idnes_main.db, "enqueue_detail", lambda *a, **k: 0)
+    monkeypatch.setattr(idnes_main.db, "record_index_slice", lambda *a, **k: None)
+    portal = _portal()
+    portal.SLICES = ("praha",)
+    _seen, _c, _n, _p, complete = portal.walk_category(
+        {"sale_type": "prodej", "category": "byty"}, _Conn(), False, _Limiter(), None)
     assert complete is False
 
 
@@ -726,12 +984,13 @@ def test_an_all_duplicates_page_no_longer_ends_the_walk(monkeypatch):
     monkeypatch.setattr(idnes_main, "parse_index", _parse)
     monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
     portal = _portal()
-    rows, declared, npages, outcome, _html = portal._walk_place(
+    rows, declared, npages, outcome, stop, _html = portal._walk_place(
         _IdxClient(), "prodej", "byty", locality="praha", sl=None,
         deadline=None, label="praha")
     assert npages == 3                        # it did not stop on the repeat page
     assert {r[0] for r in rows} == {nid, other}
     assert outcome == "exhausted"
+    assert stop == "pager_end"                # the pager ran out: idnes's own end
 
 
 def test_a_url_that_does_not_paginate_stops_instead_of_looping(monkeypatch):
@@ -755,13 +1014,17 @@ def test_a_url_that_does_not_paginate_stops_instead_of_looping(monkeypatch):
 
     monkeypatch.setattr(idnes_main, "parse_index", _stuck)
     portal = _portal()
-    _rows, _d, pages, outcome, _html = portal._walk_place(
+    _rows, _d, pages, outcome, stop, _html = portal._walk_place(
         _IdxClient(), "prodej", "byty", locality="praha-4", sl=None,
         deadline=None, label="praha-4")
     # page=None -> next=1 (advances), page=1 -> next=1 (does not). Two fetches,
     # not six hundred.
     assert pages == 2
     assert outcome != "exhausted"
+    # A pager that stands still is OUR stop, not idnes's: the walk gave up on a
+    # URL it could not page, which is not evidence that there is nothing more.
+    assert stop == "pager_stalled"
+    assert idnes_main.stop_is_portal_end(stop) is False
 
 
 def test_fresh_rows_do_not_excuse_a_stalled_pager(monkeypatch):
@@ -776,11 +1039,12 @@ def test_fresh_rows_do_not_excuse_a_stalled_pager(monkeypatch):
             detail_path="https://reality.idnes.cz/detail/prodej/byt/x/y/",
             price_text="5 000 000 Kč")]))
     portal = _portal()
-    _rows, _d, pages, _o, _html = portal._walk_place(
+    _rows, _d, pages, _o, stop, _html = portal._walk_place(
         _IdxClient(), "prodej", "byty", locality="praha-4", sl=None,
         deadline=None, label="praha-4")
     # None -> 3 advances; 3 -> 3 does not.
     assert pages == 2
+    assert stop == "pager_stalled"
 
 
 def test_overlapping_pages_still_walk_on(monkeypatch):
@@ -804,12 +1068,13 @@ def test_overlapping_pages_still_walk_on(monkeypatch):
 
     monkeypatch.setattr(idnes_main, "parse_index", _parse)
     portal = _portal()
-    rows, _d, pages, outcome, _html = portal._walk_place(
+    rows, _d, pages, outcome, stop, _html = portal._walk_place(
         _IdxClient(), "prodej", "byty", locality="praha", sl=None,
         deadline=None, label="praha")
     assert pages == 3
     assert len(rows) == 2
     assert outcome == "exhausted"
+    assert stop == "pager_end"
 
 
 def test_place_is_the_only_descent_axis(monkeypatch):
@@ -845,11 +1110,12 @@ def test_a_slice_too_big_to_page_descends_rather_than_giving_up(monkeypatch):
             detail_path="https://reality.idnes.cz/detail/prodej/byt/x/y/",
             price_text="5 000 000 Kč")]))
     portal = _portal()
-    _rows, _d, _p, outcome = portal._walk_tree(
+    _rows, _d, _p, outcome, stop = portal._walk_tree(
         _IdxClient(), "prodej", "byty", locality=None, sl="STAT-XX",
         label="abroad", deadline=None, depth=1, visited=set())
     assert descended, "a ceiling must try to split the place, not give up on it"
     assert outcome != "exhausted"      # …and still fail closed when it cannot
+    assert idnes_main.stop_is_portal_end(stop) is False
 
 
 def test_the_loop_guard_clears_the_largest_real_place() -> None:
@@ -896,7 +1162,7 @@ def _resample_walk(monkeypatch, samples, children=()):
 def test_a_short_slice_is_read_again(monkeypatch):
     """The first pass sees 6 of 10, the second the other 4. Neither alone
     clears the bar; the union does."""
-    rows, _d, _p, outcome = _resample_walk(
+    rows, _d, _p, outcome, _stop = _resample_walk(
         monkeypatch, [range(1, 7), range(5, 11)])
     assert len(rows) == 10
     assert outcome == "exhausted"
@@ -907,7 +1173,7 @@ def test_resampling_stops_once_it_stops_paying(monkeypatch):
     shortfall is not sampling loss — more reads will not find it. Without this
     the walk would spend its whole budget re-reading a slice it cannot finish."""
     # Pass 1 gets 5; every later pass returns the SAME 5, gaining nothing.
-    rows, _d, _p, outcome = _resample_walk(
+    rows, _d, _p, outcome, _stop = _resample_walk(
         monkeypatch, [range(1, 6), range(1, 6), range(1, 6)])
     assert len(rows) == 5
     assert outcome == "incomplete"      # honestly short, not silently passed
@@ -929,7 +1195,7 @@ def test_an_exhausted_slice_is_never_resampled(monkeypatch):
 
     monkeypatch.setattr(idnes_main, "parse_index", _parse)
     monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
-    _rows, _d, _p, outcome = _portal()._walk_tree(
+    _rows, _d, _p, outcome, _stop = _portal()._walk_tree(
         _IdxClient(), "prodej", "byty", locality="praha", sl=None, label="praha",
         deadline=None, depth=0, visited=set())
     assert outcome == "exhausted"

@@ -7,9 +7,9 @@ need is an explicit method on the `Portal` protocol — e.g. sreality's
 district-split lives inside its `walk_category`, not here — justified in review.
 
 - run_index_walk: per category, walk the index + enqueue new/changed ids into the
-  shared listing_detail_queue (source-generic, migration 108); run mark_inactive
-  under the completeness guard ONLY for portals that can prove a near-complete
-  walk (`supports_complete_walk`, architectural rule #3). Records run_type='index'.
+  shared listing_detail_queue (source-generic, migration 108); nominate the rows
+  the walk did not see for a page check, but only from a walk that reached the
+  portal's end (`reached_end`, architectural rule #3). Records run_type='index'.
 - run_detail_drain: claim a bounded slice of the queue for this source, fetch on a
   rate-limited pool, write in batches via the portal's writer, route gone→inactive
   and error→failure. Records run_type='detail'.
@@ -34,7 +34,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from scraper import db
-from scraper.portal import deadline_reached
+from scraper.portal import deadline_reached, walk_coverage
 from scraper.rate_ledger import build_rate_limiter
 from scraper.rate_limit import RateLimiter
 
@@ -103,8 +103,21 @@ class Portal(Protocol):
         self, category: Any, conn: Any, dry_run: bool, limiter: RateLimiter,
         deadline: float | None = None,
     ) -> tuple[set[Any], dict[str, int], int | None, int, bool]: ...
+    #   Returns (seen_ids, counts, declared_total, pages, reached_end).
+    #   `reached_end` is STRUCTURAL, not arithmetic (rule #3): every unit the
+    #   category is defined over was walked, each unit's page loop exited on a
+    #   PORTAL terminator (pager_end / declared_total_reached / short_page /
+    #   empty_confirmed / clamp_repeat), and no stop of OURS fired anywhere in it
+    #   (deadline / page cap / --limit / slice subset / exception / a unit never
+    #   reached / pager_stalled / cap_wall / barren). Portals spell that
+    #   conjunction through scraper.portal.walk_reached_end + stop_is_portal_end
+    #   so it means one thing on all nine. It is NOT "the counts reconciled": a
+    #   category one row short of its declared total has still reached the
+    #   portal's end, and the count gap is an alarm the runner logs, not a veto —
+    #   the numeric verdict vetoing nomination is what kept a 20,964-row
+    #   ceskereality category from ever nominating.
     #   `deadline` is a time.monotonic() instant. A walk that reaches it MUST
-    #   stop and return complete=False. Checking it only between categories is
+    #   stop and return reached_end=False. Checking it only between categories is
     #   not enough and was the idnes failure: one idnes category is ~1,050 pages,
     #   so the runner's between-category check never got a turn and GitHub
     #   SIGKILLed the job at page 599 of 1,050, 9 runs out of 12.
@@ -152,16 +165,19 @@ class Portal(Protocol):
 def _queue_presence_checks(
     portal: Portal, conn: Any, category: Any, seen: set[Any], cm: str | None, ct: str | None,
 ) -> tuple[int, int]:
-    """Rule #3 (2026-09-07): a complete walk does not delist, it NOMINATES.
+    """Rule #3 (2026-09-07): a finished walk does not delist, it NOMINATES.
 
     Every active row of the category the walk did not see is queued for a page
     check at the lowest priority; the detail drain visits the page and the page
     decides (gone -> flip, alive -> refresh, error -> next pass). Nothing here
     consults supports_complete_walk any more: that flag gated a sweep that could
     be wrong, and a nomination cannot be -- it costs one fetch. What still gates
-    is `complete`: an unproven walk (deadline, page cap, count mismatch beyond
-    tolerance) nominates nothing, because its unseen set is not evidence, it is
-    the part of the portal it never reached.
+    is `reached_end`: a walk that stopped for a reason of OURS (deadline, page
+    cap, --limit, a slice never reached, an exception, an uncorroborated empty
+    page) nominates nothing, because its unseen set is not evidence, it is the
+    part of the portal it never reached. A count that came up short is NOT such a
+    reason -- the walk that reached the portal's last page nominates its gap and
+    lets the page decide.
     """
     if not seen:
         # walk_coverage calls a measured zero complete (declared 0, collected 0),
@@ -176,6 +192,18 @@ def _queue_presence_checks(
             "nominate any (an empty seen set would nominate the whole scope)",
             cm, ct,
         )
+        # A portal whose index slices COLLAPSE onto one canonical category
+        # (ceskereality, realitymix) buffers each slice's ids and nominates on the
+        # group's last slice, counting the slices it has been handed. Returning here
+        # without telling it would leave that counter permanently one short, so the
+        # group would never nominate again — the same silent stall rule #3 was
+        # rewritten to remove. Record the slice; nominate nothing from it.
+        note = getattr(portal, "note_empty_slice", None)
+        if note is not None:
+            try:
+                note(category)
+            except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail a walk
+                LOG.warning("note_empty_slice failed cm=%s ct=%s: %s", cm, ct, exc)
         return 0, 0
     custom = getattr(portal, "presence_candidates", None)
     if custom is not None:
@@ -270,9 +298,9 @@ def run_index_walk(
     mid-flight too. The between-category check alone was not enough: one idnes
     category is ~1,050 pages, so the loop never came back round and the job was
     SIGKILLed at the 180-minute ceiling in 9 of 12 runs, recording zero
-    categories each time. A category cut short returns complete=False, so
-    mark_inactive stays safe (rule #3) — the un-walked remainder just isn't
-    refreshed this run and the next walk picks it up."""
+    categories each time. A category cut short returns reached_end=False, so it
+    nominates nothing (rule #3) — the un-walked remainder just isn't refreshed
+    this run and the next walk picks it up."""
     deadline = (time.monotonic() + max_seconds) if max_seconds else None
     total_pages = 0
     total_index = 0
@@ -296,7 +324,7 @@ def run_index_walk(
             cm_text, ct_text = portal.category_labels(category)
             LOG.info("CATEGORY start cm=%s ct=%s", cm_text, ct_text)
             try:
-                seen_ids, cat_counts, cat_result_size, cat_pages, complete = (
+                seen_ids, cat_counts, cat_result_size, cat_pages, reached_end = (
                     portal.walk_category(category, conn, dry_run, limiter, deadline)
                 )
             except Exception as exc:
@@ -305,7 +333,7 @@ def run_index_walk(
                     cm_text, ct_text, exc,
                 )
                 failed_categories += 1
-                seen_ids, cat_counts, cat_result_size, cat_pages, complete = (
+                seen_ids, cat_counts, cat_result_size, cat_pages, reached_end = (
                     set(), {}, None, 0, False,
                 )
             total_pages += cat_pages
@@ -314,8 +342,31 @@ def run_index_walk(
             total_index += len(seen_ids)
             total_enqueued += cat_counts.get("enqueued", 0)
 
+            # The numeric verdict is still computed every walk -- it just does
+            # not gate any more. It is logged as an alarm below and recorded in
+            # scrape_runs.by_category so the coverage rail keeps its input.
+            coverage = walk_coverage(len(seen_ids), cat_result_size)
+
             to_verify = deferred = 0
-            if conn is not None and complete:
+            if conn is not None and reached_end:
+                if coverage != "complete":
+                    # A portal whose declared denominator is an UPPER BOUND its slices
+                    # cannot reach by construction (ceskereality reports the national
+                    # total, which includes listings filed under no kraj at all) would
+                    # trip this on every category of every walk, and an alarm that is
+                    # on by construction is not an alarm. Those portals emit their own
+                    # scoped one; the number is recorded in by_category either way.
+                    emit = (
+                        LOG.info
+                        if getattr(portal, "coverage_denominator_is_upper_bound", False)
+                        else LOG.warning
+                    )
+                    emit(
+                        "COVERAGE cm=%s ct=%s: the walk reached the portal's end but "
+                        "collected %d of %s (coverage=%s) -- the gap is nominated, "
+                        "the page decides (rule #3)",
+                        cm_text, ct_text, len(seen_ids), cat_result_size, coverage,
+                    )
                 try:
                     to_verify, deferred = _queue_presence_checks(
                         portal, conn, category, seen_ids, cm_text, ct_text,
@@ -331,10 +382,11 @@ def run_index_walk(
                     )
             elif conn is not None:
                 LOG.warning(
-                    "VERIFY skipped cm=%s ct=%s: walk looks incomplete "
-                    "(collected=%d result_size=%s); an unproven walk nominates "
-                    "nothing (rule #3)",
-                    cm_text, ct_text, len(seen_ids), cat_result_size,
+                    "VERIFY skipped cm=%s ct=%s: the walk did not reach the portal's "
+                    "end (our stop: deadline / page cap / limit / slice never reached "
+                    "/ error / barren page); collected=%d result_size=%s coverage=%s "
+                    "-- an unfinished walk nominates nothing (rule #3)",
+                    cm_text, ct_text, len(seen_ids), cat_result_size, coverage,
                 )
 
             active_db: int | None = None
@@ -364,6 +416,8 @@ def run_index_walk(
                 "sreality_result_size": cat_result_size,
                 "collected":            len(seen_ids),
                 "active_db":            active_db,
+                "walk_reached_end":     bool(reached_end),
+                "walk_coverage":        coverage,
             })
 
         LOG.info(
@@ -423,7 +477,7 @@ def run_index_probe(
     whose default order is NOT newest-first overrides probe_category instead.
 
     NEVER calls mark_inactive: a page-capped walk cannot prove a delisting
-    (rule #3) — and the cap also makes every walk report complete=False, the
+    (rule #3) — and the cap also makes every walk report reached_end=False, the
     same second rail the --max-pages gate uses.
 
     Writes NO scrape_runs row (the images-only precedent): Health liveness AND
@@ -466,11 +520,11 @@ def run_index_probe(
             walked += 1
             try:
                 if prober is not None:
-                    seen, counts, total, pages, _complete = prober(
+                    seen, counts, total, pages, _reached_end = prober(
                         category, conn, dry_run, limiter, probe_pages)
                 else:
                     capper(1)
-                    seen, counts, total, pages, _complete = portal.walk_category(
+                    seen, counts, total, pages, _reached_end = portal.walk_category(
                         category, conn, dry_run, limiter)
                     if counts.get("found_new", 0) > 0 and probe_pages > 1:
                         # Page 1 had unknown ids -> deepen. The re-walk's diff
@@ -478,7 +532,7 @@ def run_index_probe(
                         # absent from listings), so its counts REPLACE the
                         # peek's; only `pages` sums (honest fetch accounting).
                         capper(probe_pages)
-                        seen, counts, total, deep_pages, _complete = (
+                        seen, counts, total, deep_pages, _reached_end = (
                             portal.walk_category(category, conn, dry_run, limiter))
                         pages += deep_pages
             except Exception as exc:

@@ -9,11 +9,13 @@ fetches each listing page, parses it to a `ScrapedListing`, and ingests via
 pipeline — only the per-portal fetcher (IdnesClient) + parser (idnes_parser) +
 config differ from sreality/bezrealitky (the modularity rule in CLAUDE.md).
 
-Unlike bazos (a partial-walk classifieds crawler), idnes's search pages carry a
-result total and have no deep-pagination cap, so a per-category walk is
-provable-complete: `supports_complete_walk` (config-driven) lets the runner mark
-delisted listings inactive under the completeness guard (architectural rule #3),
-source-scoped so it only ever touches idnes rows (rule #15). The detail URL
+Unlike bazos (a partial-walk classifieds crawler), idnes's search pages have no
+deep-pagination cap, so every slice can be paged to the portal's own last page:
+`supports_complete_walk` (config-driven) lets the runner nominate the rows such a
+walk did not see for a page check (architectural rule #3), source-scoped so it
+only ever touches idnes rows (rule #15). Since 2026-09-08 that gate is
+STRUCTURAL — every slice walked, every page loop ended by idnes — and the result
+count is evidence beside it, not a veto. The detail URL
 carries the category (`/detail/{sale}/{cat}/…`), so the drain derives each
 listing's category from its own URL — one config walks many categories without
 the queue-encodes-category limitation that constrains bazos. Coordinates come
@@ -47,12 +49,14 @@ from scraper.portal import (
     ABROAD_SLICE,
     CZ_KRAJ_SLUGS,
     PortalConfig,
+    StopReason,
     default_config,
     load_portal_config,
     classify_index_sighting,
     deadline_reached,
+    stop_is_portal_end,
     walk_coverage,
-    walk_is_complete,
+    walk_reached_end,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -91,16 +95,23 @@ _RESAMPLE_MIN_GAIN = 5
 
 @dataclass(frozen=True)
 class SliceWalk:
-    """One slice's outcome. Only `exhausted` — walked to the slice's OWN declared
-    tail — is positive; `deadline`, `error`, `degraded`, `ceiling` and
-    `incomplete` all mean missing evidence, and any of them forces the whole
-    category incomplete (rule #3)."""
+    """One slice's two verdicts, which answer different questions.
+
+    `outcome` is the NUMERIC one — `exhausted` means the slice collected its own
+    declared total — and it stays the trigger for the descent, the resample and
+    the `portal_index_slices` ledger the coverage gate reads.
+
+    `stop` is WHY the page loop ended, and it is what the nomination gate reads
+    (rule #3): a slice that paged to idnes's last page reached the end even if
+    its count came up a row short, and a slice we stopped ourselves never did.
+    """
 
     slice_key: str
     rows: list[tuple[str, str, int | None]]   # (native_id, detail_ref, index_price)
     declared_total: int | None
     pages: int
     outcome: str
+    stop: StopReason
 
 
 class IdnesPortal:
@@ -221,12 +232,14 @@ class IdnesPortal:
         self, client: IdnesClient, sale_type: str, cat: str, *,
         locality: str | None, sl: str | None, deadline: float | None,
         label: str,
-    ) -> tuple[list[tuple[str, str, int | None]], int | None, int, str, str | None]:
+    ) -> tuple[list[tuple[str, str, int | None]], int | None, int, str,
+               StopReason, str | None]:
         """Page one place to its own tail.
 
-        Returns (rows, declared_total, pages, outcome, first_page_html). The HTML
-        is kept because it advertises the places one level down, which is the
-        descent path when this one cannot be enumerated.
+        Returns (rows, declared_total, pages, outcome, stop, first_page_html) —
+        the numeric verdict and the structural one side by side (see SliceWalk).
+        The HTML is kept because it advertises the places one level down, which
+        is the descent path when this one cannot be enumerated.
         """
         rows: list[tuple[str, str, int | None]] = []
         ref: set[str] = set()
@@ -234,18 +247,19 @@ class IdnesPortal:
         first_html: str | None = None
         pages = 0
         page: int | None = None
+        stop: StopReason
         while True:
             if deadline_reached(deadline):
                 LOG.info("SLICE deadline cm=%s ct=%s place=%s pages=%d collected=%d",
                          cat, sale_type, label, pages, len(rows))
-                return rows, declared, pages, "deadline", first_html
+                return rows, declared, pages, "deadline", "deadline", first_html
             try:
                 html, _ = client.fetch_index(
                     sale_type, cat, page, locality=locality, sl=sl)
             except Exception as exc:  # noqa: BLE001 - one place must not kill the walk
                 LOG.warning("SLICE error cm=%s ct=%s place=%s page=%s: %s",
                             cat, sale_type, label, page, exc)
-                return rows, declared, pages, "error", first_html
+                return rows, declared, pages, "error", "error", first_html
             parsed = parse_index(html)
             pages += 1
             if first_html is None:
@@ -255,7 +269,7 @@ class IdnesPortal:
                 if declared is None and parsed.empty_confirmed:
                     # An empty place publishes no count — identical to a degraded
                     # page — so it only counts as finished when idnes says so.
-                    return rows, 0, pages, "exhausted", first_html
+                    return rows, 0, pages, "exhausted", "empty_confirmed", first_html
             for item in parsed.items:
                 nid = item.source_id_native
                 if nid not in ref:
@@ -265,7 +279,22 @@ class IdnesPortal:
             if pages >= _MAX_SLICE_PAGES:
                 LOG.warning("SLICE ceiling cm=%s ct=%s place=%s at %d pages",
                             cat, sale_type, label, pages)
-                return rows, declared, pages, "ceiling", first_html
+                return rows, declared, pages, "ceiling", "page_cap", first_html
+            # ITEMS FIRST. A page with no items is not the end of the pager, it
+            # is a page with no items — which is also what a soft block, a WAF
+            # interstitial and idnes's 390-second throttle stall all return, and
+            # they used to leave through the very same `break` as the true last
+            # page. Only a corroborated empty page may be read as idnes saying
+            # there is no more.
+            if not parsed.items:
+                stop = self._confirm_barren(
+                    client, sale_type, cat, page, locality=locality, sl=sl,
+                    label=label, declared=declared, collected=len(rows), pages=pages)
+                break
+            # THE REAL LAST PAGE: rows on it, and no next anchor to follow.
+            if parsed.next_offset is None:
+                stop = "pager_end"
+                break
             # STOP WHEN THE PAGER STOPS ADVANCING — progress in the CURSOR, not
             # novelty in the CONTENT.
             #
@@ -282,48 +311,100 @@ class IdnesPortal:
             # to move FORWARD separates the two cleanly: repeats are fine,
             # standing still is not.
             current = page or 0
-            if not parsed.items or parsed.next_offset is None:
-                break
             if parsed.next_offset <= current:
                 LOG.warning(
                     "SLICE cm=%s ct=%s place=%s pager did not advance at page=%s "
                     "(next=%s) — this URL does not paginate; stopping",
                     cat, sale_type, label, page, parsed.next_offset,
                 )
+                stop = "pager_stalled"
                 break
             page = parsed.next_offset
         verdict = walk_coverage(len(rows), declared, stopped_early=False)
         outcome = "exhausted" if verdict == "complete" else (
             "degraded" if verdict == "unknown" else "incomplete")
-        return rows, declared, pages, outcome, first_html
+        return rows, declared, pages, outcome, stop, first_html
+
+    def _confirm_barren(
+        self, client: IdnesClient, sale_type: str, cat: str, page: int | None, *,
+        locality: str | None, sl: str | None, label: str,
+        declared: int | None, collected: int, pages: int,
+    ) -> StopReason:
+        """Is this items-less page idnes's tail, or a bad read? Read it once more.
+
+        An items-less HTTP 200 is byte-for-byte what a degraded page returns, and
+        idnes soft-throttles by stalling one request ~390s and answering 200 — so
+        an empty page is OURS (`barren`) until the portal corroborates it, either
+        by saying it is empty out loud or by sitting at or past where its own
+        declared count puts the end. A confirmation that cannot be obtained is
+        not a confirmation.
+        """
+        if declared == 0 and collected == 0:
+            return "empty_confirmed"      # the portal declared this place empty
+        try:
+            html, _ = client.fetch_index(
+                sale_type, cat, page, locality=locality, sl=sl)
+        except Exception as exc:  # noqa: BLE001 - an unreadable re-read confirms nothing
+            LOG.warning("SLICE barren cm=%s ct=%s place=%s page=%s re-read failed: %s",
+                        cat, sale_type, label, page, exc)
+            return "barren"
+        again = parse_index(html)
+        if again.items:
+            return "barren"               # the first read was a bad read, not a tail
+        if again.empty_confirmed:
+            return "empty_confirmed"
+        # POSITION, never a ratio: an empty page is the tail only where the
+        # portal's own count already puts the end, or — when no count was ever
+        # readable — after earlier pages of this same place did carry rows. A
+        # place whose FIRST page is barren and countless is never confirmed.
+        if declared is not None and declared > 0 and collected >= declared:
+            return "empty_confirmed"
+        # NO countless fallback on idnes. Elsewhere "an earlier page of this unit
+        # carried items" stands in for a missing count, but idnes states emptiness
+        # out loud (`again.empty_confirmed` above), so a genuine tail never needs
+        # it — while `declared is None` is the documented signature of a DEGRADED
+        # page (idnes_parser: a throttled body renders no count phrase either).
+        # Confirming on it would confirm exactly the shape the barren rule exists
+        # to catch, and `outcome='degraded'` suppresses both the descent and the
+        # resample, so nothing else would re-read the place.
+        LOG.warning(
+            "SLICE barren cm=%s ct=%s place=%s page=%s collected=%d declared=%s "
+            "— an empty page nobody could corroborate; not an end",
+            cat, sale_type, label, page, collected, declared,
+        )
+        return "barren"
 
     def _walk_tree(
         self, client: IdnesClient, sale_type: str, cat: str, *,
         locality: str | None, sl: str | None, label: str,
         deadline: float | None, depth: int,
         visited: set[tuple[str | None, str | None]],
-    ) -> tuple[list[tuple[str, str, int | None]], int | None, int, str]:
+    ) -> tuple[list[tuple[str, str, int | None]], int | None, int, str, StopReason]:
         """Walk a place, descending if paging alone cannot reach its tail.
 
-        Two descent axes, tried in that order. PLACE first, because it is the
-        site's own hierarchy and (on the Czech side) very nearly a partition:
-        a kraj links its okresy, Prague links its ten obvody, the abroad bucket
-        links one `s-l` value per country — and those 38 countries sum EXACTLY to
-        the abroad total. PRICE second, as the fallback for a place that has no
-        sub-places at all: Spain is 8,613 flats over 345 pages and advertises no
-        regions, so without it that slice could never finish, and one unfinished
-        slice holds its whole category open forever.
+        PLACE is the only axis (the price ladder was removed, see below): it is
+        the site's own hierarchy and, on the Czech side, very nearly a partition
+        — a kraj links its okresy, Prague links its ten obvody, the abroad bucket
+        links one `s-l` value per country, and those 38 countries sum EXACTLY to
+        the abroad total.
 
         The parent's own rows are always kept. That is not an optimisation, it is
-        what makes either axis work: neither axis is a true partition, and the
-        unfiltered walk is what holds the remainder each one drops — the 60
-        Prague listings too vaguely addressed for any obvod, the 6 Spanish ones
-        with no price at all.
+        what makes the axis work: it is not a true partition, and the unfiltered
+        walk is what holds the remainder it drops — the 60 Prague listings too
+        vaguely addressed for any obvod.
 
-        Returns (rows, declared, pages, outcome).
+        Returns (rows, declared, pages, outcome, stop), where the stop is the
+        AND of every page loop that actually ran inside this place — the parent's,
+        each descent child's, each resample pass's. A child or a pass that never
+        ran contributes nothing (an exhausted place attempts neither), so this
+        cannot make a finished place harder to prove; what it stops is a FAILED
+        rescue reading as a finished walk. The descent runs only where the parent
+        came up short, i.e. exactly where the parent's own `pager_end` is known
+        NOT to mean "there is no more" (praha ends at 2,948 of 3,839), so a
+        child that dies on a throttle must veto the slice.
         """
         visited.add((locality, sl))
-        rows, declared, pages, outcome, html = self._walk_place(
+        rows, declared, pages, outcome, stop, html = self._walk_place(
             client, sale_type, cat, locality=locality, sl=sl,
             deadline=deadline, label=label)
         # Descend on a COVERAGE shortfall, not on a fetch problem.
@@ -336,6 +417,10 @@ class IdnesPortal:
         # would multiply failed requests and relabel a fetch problem as a
         # coverage one.
         merged = {r[0]: r for r in rows}
+        # Every page loop that runs inside this place votes on the stop: the
+        # parent's, each descent child's, each resample pass's. One stop of OURS
+        # anywhere poisons the slice (see the docstring).
+        stops: list[StopReason] = [stop]
         may_descend = outcome in ("incomplete", "ceiling") and depth > 0
 
         # PLACE is the only descent axis. A price-band axis was tried and removed:
@@ -358,12 +443,13 @@ class IdnesPortal:
                      cat, sale_type, label, len(rows), declared, len(children), depth)
             for c_loc, c_sl, c_label in children:
                 if deadline_reached(deadline):
-                    return list(merged.values()), declared, pages, "deadline"
-                c_rows, _cd, c_pages, _co = self._walk_tree(
+                    return list(merged.values()), declared, pages, "deadline", "deadline"
+                c_rows, _cd, c_pages, _co, c_stop = self._walk_tree(
                     client, sale_type, cat, locality=c_loc, sl=c_sl,
                     label=f"{label}/{c_label}", deadline=deadline,
                     depth=depth - 1, visited=visited)
                 pages += c_pages
+                stops.append(c_stop)
                 for r in c_rows:
                     merged.setdefault(r[0], r)
             rows = list(merged.values())
@@ -394,10 +480,11 @@ class IdnesPortal:
             if outcome != "incomplete" or deadline_reached(deadline):
                 break
             before = len(merged)
-            r_rows, _rd, r_pages, _ro, _rh = self._walk_place(
+            r_rows, _rd, r_pages, _ro, r_stop, _rh = self._walk_place(
                 client, sale_type, cat, locality=locality, sl=sl,
                 deadline=deadline, label=f"{label}~{attempt + 2}")
             pages += r_pages
+            stops.append(r_stop)
             for r in r_rows:
                 merged.setdefault(r[0], r)
             gained = len(merged) - before
@@ -411,7 +498,8 @@ class IdnesPortal:
             # the shortfall is not sampling loss — more reads will not find it.
             if gained <= _RESAMPLE_MIN_GAIN:
                 break
-        return rows, declared, pages, outcome
+        our = next((s for s in stops if not stop_is_portal_end(s)), None)
+        return rows, declared, pages, outcome, (our or stop)
 
     def _walk_slice(
         self, client: IdnesClient, sale_type: str, cat: str, slice_key: str,
@@ -451,12 +539,13 @@ class IdnesPortal:
         past the declared total. The link list never has to be trusted.
         """
         locality, sl = self._place(slice_key)
-        rows, declared, pages, outcome = self._walk_tree(
+        rows, declared, pages, outcome, stop = self._walk_tree(
             client, sale_type, cat, locality=locality, sl=sl, label=slice_key,
             deadline=deadline, depth=_DESCENT_DEPTH, visited=set())
-        LOG.info("SLICE cm=%s ct=%s slice=%s declared=%s collected=%d pages=%d outcome=%s",
-                 cat, sale_type, slice_key, declared, len(rows), pages, outcome)
-        return SliceWalk(slice_key, rows, declared, pages, outcome)
+        LOG.info("SLICE cm=%s ct=%s slice=%s declared=%s collected=%d pages=%d "
+                 "outcome=%s stop=%s",
+                 cat, sale_type, slice_key, declared, len(rows), pages, outcome, stop)
+        return SliceWalk(slice_key, rows, declared, pages, outcome, stop)
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
@@ -469,13 +558,15 @@ class IdnesPortal:
         # The realtime probe caps pages to read the newest-first head of the
         # NATIONAL list; slicing would scatter that head across 15 requests and
         # defeat the probe's whole purpose. Page-capped runs keep the flat walk
-        # (and, being partial, never drive mark_inactive — rule #3).
+        # (and, being partial, never nominate — rule #3).
         if self._max_pages:
             return self._walk_flat(client, sale_type, cat, conn, deadline)
 
-        # The portal's own claim about the whole category, fetched once. It is
-        # the denominator the slice union has to satisfy, and it is what catches
-        # a slice vocabulary that has silently stopped covering the category.
+        # The portal's own claim about the whole category, fetched once. It no
+        # longer gates anything (the gate is structural): it is the denominator
+        # the runner reports the walk's coverage against, and reading that gap is
+        # what catches a slice vocabulary that has silently stopped covering the
+        # category — a failed probe now costs the warning, not the nomination.
         national: int | None = None
         try:
             html, _ = client.fetch_index(sale_type, cat, None)
@@ -487,8 +578,15 @@ class IdnesPortal:
         order = self._slice_order(cm, ct)
         collected: dict[str, tuple[str, int | None]] = {}
         results: list[SliceWalk] = []
+        # A budget that expires anywhere in the category poisons the WHOLE
+        # verdict, not just the slice it hit. The `slice_unreached` padding below
+        # only covers a break with slices LEFT — when the clock dies inside the
+        # LAST slice (which is where a progressively-consumed budget almost always
+        # dies) the list is full and every recorded stop is a portal end.
+        deadline_hit = False
         for slice_key in order:
             if deadline_reached(deadline):
+                deadline_hit = True
                 LOG.info("CATEGORY cm=%s ct=%s stopped at the budget with %d/%d "
                          "slices walked; the rest keep their staleness and go "
                          "first next run", cat, sale_type, len(results), len(order))
@@ -508,20 +606,35 @@ class IdnesPortal:
                 )
 
         seen = set(collected)
-        # EVERY slice must have been walked AND finished. Anything less is a
-        # walk with a hole in it, and a hole is exactly what mark_inactive would
-        # read as "these listings are gone".
-        all_walked = len(results) == len(order)
-        all_positive = all(r.outcome == db.SLICE_OUTCOME_POSITIVE for r in results)
-        complete = bool(
-            all_walked and all_positive
-            and walk_is_complete(len(seen), national, stopped_early=False)
+        # THE GATE (rule #3): every slice was walked AND every one of them ended
+        # because idnes ran out of pages. STRUCTURAL, not numeric — a slice that
+        # paged to its pager's last page walked the whole of what idnes offered
+        # even if the counts come up a row short, and holding a 20,000-row
+        # category open over that gap is how a category comes to nominate
+        # nothing for days. The count is EVIDENCE beside it, never a veto: the
+        # numeric `outcome` still drives the descent, the resample and the
+        # ledger, and the runner logs the coverage gap on every nomination.
+        #
+        # Seeded from the CONFIGURED slices, not the walked ones: `all()` over an
+        # empty list is True, so a category whose slices never started would
+        # otherwise read as ended.
+        stops: list[StopReason] = (
+            [r.stop for r in results]
+            + ["slice_unreached"] * (len(order) - len(results))
         )
+        if deadline_reached(deadline):
+            deadline_hit = True
+        ends = [stop_is_portal_end(s) for s in stops]
+        complete = walk_reached_end(
+            portal_end=all(ends),
+            our_stop=deadline_hit or any(not e for e in ends),
+        )
+        all_positive = all(r.outcome == db.SLICE_OUTCOME_POSITIVE for r in results)
         LOG.info(
-            "CATEGORY cm=%s ct=%s slices=%d/%d positive=%s national=%s collected=%d "
-            "pages=%d complete=%s",
-            cat, sale_type, len(results), len(order), all_positive, national,
-            len(seen), pages, complete,
+            "CATEGORY cm=%s ct=%s slices=%d/%d stops=%s deadline=%s positive=%s "
+            "national=%s collected=%d pages=%d complete=%s",
+            cat, sale_type, len(results), len(order), sorted(set(stops)),
+            deadline_hit, all_positive, national, len(seen), pages, complete,
         )
         counts = self._reconcile(conn, collected)
         return seen, counts, national, pages, complete
@@ -587,7 +700,7 @@ class IdnesPortal:
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         """The page-capped probe path: the newest-first head of the national
         list. Always incomplete by construction — it is a delta probe, not a
-        walk — so it can never drive mark_inactive."""
+        walk — so it can never nominate."""
         collected: dict[str, tuple[str, int | None]] = {}
         total: int | None = None
         pages = 0
@@ -757,8 +870,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="reality.idnes.cz scraper (portal framework)")
     p.add_argument(
         "--max-pages", type=int, default=None,
-        help="cap index pages per category (ad-hoc partial run; suppresses "
-             "mark_inactive). Omit for a full, complete walk.",
+        help="cap index pages per category (ad-hoc partial run; nominates "
+             "nothing). Omit for a full walk to the portal's own end.",
     )
     p.add_argument(
         "--max-detail", type=int, default=None,
@@ -780,12 +893,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument(
         "--max-seconds", type=float, default=None,
-        help="wall-clock budget for the detail drain; it stops claiming + "
-             "finalizes cleanly before the job timeout (no 'stuck' run)",
+        help="wall-clock budget for EITHER phase (the index walk consumes it as "
+             "its per-category deadline); the phase stops claiming + finalizes "
+             "cleanly before the job timeout (no 'stuck' run)",
     )
     p.add_argument(
         "--index-only", action="store_true",
-        help="walk the index + enqueue + mark_inactive only (no detail drain)",
+        help="walk the index + enqueue + nominate unseen rows for a page check "
+             "only (no detail drain)",
     )
     p.add_argument(
         "--drain-only", action="store_true",
@@ -795,7 +910,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--probe", action="store_true",
         help="newest-first delta probe: diff + enqueue off the first "
              "--probe-pages index page(s) per category, then exit — never "
-             "mark_inactive, no detail drain, no scrape_runs row",
+             "nominates unseen rows for a page check, no detail drain, no "
+             "scrape_runs row",
     )
     p.add_argument(
         "--probe-pages", type=int, default=1,

@@ -9,10 +9,13 @@ other portal (--index-only / --drain-only / --max-detail / --max-seconds /
 default).
 
 What stays sreality-specific lives behind the Portal seams, unchanged:
-- the complete-walk semantics (all 12 category pairs incl. drazba/podil,
-  per-district splitting above SPLIT_THRESHOLD with union-of-seen-sets + the
-  national fallback pass, the INDEX_MIN_COMPLETENESS=1.0 gate, per-(cm,ct)
-  mark_inactive) inside SrealityPortal.walk_category;
+- the walk semantics (all 12 category pairs incl. drazba/podil, per-district
+  splitting above SPLIT_THRESHOLD with union-of-seen-sets + the national
+  fallback pass, the STRUCTURAL walk verdict — every district ended on
+  sreality's own signal and no stop of ours fired, `walk_reached_end` — and
+  per-(cm,ct) presence nomination) inside SrealityPortal.walk_category. The
+  count (INDEX_MIN_COMPLETENESS, 0.995) still triggers the national fallback
+  and reports coverage; since 2026-09-08 it gates nothing;
 - the batched prepared writes (db.write_detail_batch on the session pooler)
   behind SrealityPortal.write_details — at sreality volume (~15k details/day)
   per-row ingest would forfeit the Phase-1 prepared-statement win;
@@ -119,7 +122,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument(
         "--index-only", action="store_true",
-        help="walk the index + enqueue + mark_inactive only (no detail drain)",
+        help="walk the index + enqueue + nominate unseen rows for a page check "
+             "only (no detail drain)",
     )
     p.add_argument(
         "--drain-only", action="store_true",

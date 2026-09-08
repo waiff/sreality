@@ -9,6 +9,7 @@ category pair so a rental walk doesn't clobber sale listings.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,12 @@ class _FakeClient:
     # district_id -> reported total and -> collected count.
     district_result_size: dict[int, int] = {}
     district_collected: dict[int, int] = {}
+    # Rule #3 is STRUCTURAL since 2026-09-08: the gate reads WHY a page loop
+    # stopped, not how much it collected, so the fake has to stamp a stop reason
+    # exactly like SrealityClient.iter_index does. Default = sreality said there
+    # is no more; district_stop_reason overrides one district (a 422 wall, a
+    # barren page, a deadline) without touching any count.
+    district_stop_reason: dict[int, str] = {}
 
     def __init__(
         self,
@@ -91,9 +98,13 @@ class _FakeClient:
             )
         else:
             self.result_size = _FakeClient.result_size
+        self.stop_reason: str | None = None
 
     def probe_result_size(self):
         return self.result_size
+
+    def _natural_stop(self) -> str:
+        return "empty_confirmed" if self.result_size == 0 else "declared_total_reached"
 
     def iter_index(self, on_page=None):
         if self.locality_district_id is not None:
@@ -108,6 +119,9 @@ class _FakeClient:
             )
             for i in range(n):
                 yield {"hash_id": base + i, "price_czk": 1}
+            self.stop_reason = _FakeClient.district_stop_reason.get(
+                d, self._natural_stop()
+            )
             return
         if self.locality_region_id is not None:
             n = _FakeClient.region_collected.get(
@@ -121,12 +135,14 @@ class _FakeClient:
             )
             for i in range(n):
                 yield {"hash_id": base + i, "price_czk": 1}
+            self.stop_reason = self._natural_stop()
             return
         # Distinct id range per (cm, ct) so the per-category seen_ids
         # set is observable in mark_inactive call args.
         base = self.category_main * 10000 + self.category_type * 1000
         for i in range(_FakeClient.total_entries):
             yield {"hash_id": base + i, "price_czk": 10000 + i}
+        self.stop_reason = "declared_total_reached"
 
 
 _FakeClient.total_entries = 5  # type: ignore[attr-defined]
@@ -283,6 +299,7 @@ def test_run_full_isolates_one_crashing_category_marks_the_rest(
         base = self.category_main * 10000 + self.category_type * 1000
         for i in range(_FakeClient.total_entries):
             yield {"hash_id": base + i, "price_czk": 10000 + i}
+        self.stop_reason = "declared_total_reached"
 
     monkeypatch.setattr(_FakeClient, "iter_index", crashing_iter_index)
 
@@ -331,17 +348,45 @@ def test_walk_complete_thresholds():
     assert walk_is_complete(10, 100) is False
 
 
-def test_run_full_skips_nomination_when_walk_incomplete(patched_db, monkeypatch):
-    """result_size far above the collected count looks like a truncated
-    walk, so mark_inactive must be skipped to avoid false delistings."""
+def test_run_full_nominates_when_the_count_falls_short_of_the_total(
+    patched_db, monkeypatch
+):
+    """Rule #3 is STRUCTURAL since 2026-09-08. A walk whose page loop ended on
+    sreality's own signal nominates even though it collected 5 of a declared
+    1000 — the count is a coverage warning, never a veto. This test asserted the
+    opposite while the gate was numeric, and that gate is what left a whole
+    category (ceskereality's 20,964 houses) nominating nothing for two days
+    because one region was one row short."""
     monkeypatch.setattr(_FakeClient, "result_size", 1000, raising=False)
+    rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
+    assert rc == 0
+    assert len(patched_db["nominated"]) == len(scraper_main.CATEGORIES)
+
+
+def test_run_full_skips_nomination_when_our_own_stop_ended_the_walk(
+    patched_db, monkeypatch
+):
+    """...and the count matching proves nothing on its own: a walk that ended on
+    a stop of OURS nominates nothing even when it collected exactly the declared
+    total. Here the loop ends on an uncorroborated blank page (`barren`) — the
+    soft-block shape the numeric gate used to catch by accident."""
+    monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
+
+    def barren_iter_index(self, on_page=None):
+        base = self.category_main * 10000 + self.category_type * 1000
+        for i in range(_FakeClient.total_entries):
+            yield {"hash_id": base + i, "price_czk": 10000 + i}
+        self.stop_reason = "barren"
+
+    monkeypatch.setattr(_FakeClient, "iter_index", barren_iter_index)
     rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
     assert rc == 0
     assert patched_db["nominated"] == []
 
 
 def test_run_full_marks_inactive_when_walk_complete(patched_db, monkeypatch):
-    """When the collected count matches the reported total the flip runs."""
+    """The happy path: sreality's declared total was consumed, so the walk
+    reached the end and every category nominates."""
     monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
     rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
     assert rc == 0
@@ -635,25 +680,29 @@ def test_walk_category_split_reports_probe_not_summed_districts(
         1, 2, **_split_args()
     )
     assert rs == 12000             # probe total, not summed_drs (16000)
-    # ...and the walk is NOT complete: the union (16000 distinct ids) overshoots
-    # the national probe by 1.33x, past INDEX_MAX_OVERCOLLECTION. This asserted
-    # True before the shared verdict landed. Over-collection means the
-    # denominator can't be trusted — either the slices overlap or foreign stock
-    # leaked in — so it must not authorise a sweep. The denominator this test
-    # exists to pin (rs) is unaffected.
-    assert complete is False
+    # ...and since 2026-09-08 the walk DID reach the end: every district paged to
+    # sreality's own last page, so the union over-collecting the national probe
+    # 1.33x is a coverage signal (logged, and recorded in scrape_runs.by_category
+    # by the runner), not a veto. The denominator this test exists to pin (rs) is
+    # unaffected either way.
+    assert complete is True
+    assert walk_is_complete(len(_seen), rs) is False   # the coverage number still says so
 
 
 def test_walk_category_split_truncated_district_suppresses_inactivation(
     patched_db, monkeypatch
 ):
-    """If any district's own walk is incomplete, the whole category is treated
-    as incomplete so mark_inactive is skipped (no false delisting)."""
+    """A district the 422 wall cut short is a stop of OURS, so the whole category
+    nominates nothing — one truncated slice still vetoes, it just has to be
+    truncated for a REASON now instead of merely being short."""
     monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
     monkeypatch.setattr(
         _FakeClient, "district_result_size", {1: 6000, 2: 6000}, raising=False,
     )
     monkeypatch.setattr(_FakeClient, "district_collected", {1: 3000}, raising=False)
+    monkeypatch.setattr(
+        _FakeClient, "district_stop_reason", {1: "cap_wall"}, raising=False,
+    )
 
     _seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
         1, 2, **_split_args()
@@ -661,24 +710,66 @@ def test_walk_category_split_truncated_district_suppresses_inactivation(
     assert complete is False
 
 
-def test_walk_category_split_missing_district_suppresses_inactivation(
+def test_walk_category_split_district_one_row_short_still_reached_the_end(
     patched_db, monkeypatch
 ):
-    """If the walked districts don't cover the national total (a district
-    missing from DISTRICT_IDS), the union falls short of the national probe so
-    the category is incomplete — guards against false mass-delisting even when
-    every district we DID walk was itself complete."""
+    """THE case this change exists for: a district that paged to sreality's own
+    last page but collected one row less than its jittering declared total. The
+    numeric gate called that a truncated walk and suppressed the whole category;
+    structurally it is a finished walk."""
+    # The real shape of the incident: a small district, one row short — 86 of 87
+    # is 98.85%, under INDEX_MIN_COMPLETENESS, so the numeric gate failed it.
     monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
-    # Only one district populated; union (6000) << national (12000).
+    monkeypatch.setattr(
+        _FakeClient, "district_result_size", {1: 87, 2: 87}, raising=False,
+    )
+    monkeypatch.setattr(_FakeClient, "district_collected", {1: 86}, raising=False)
+
+    _seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
+        1, 2, **_split_args()
+    )
+    assert complete is True
+    assert walk_is_complete(86, 87) is False   # ...and the count still knows
+
+
+def test_walk_category_split_deadline_between_districts_suppresses_nomination(
+    patched_db, monkeypatch
+):
+    """The wall-clock budget expiring between districts leaves 77 - walked
+    districts never reached (`slice_unreached`) plus our own `deadline` stop, so
+    the category nominates nothing however much the walked part collected."""
+    monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
+    monkeypatch.setattr(
+        _FakeClient, "district_result_size", {1: 6000, 2: 6000}, raising=False,
+    )
+
+    _seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
+        1, 2, deadline=time.monotonic() - 1, **_split_args()
+    )
+    assert complete is False
+
+
+def test_walk_category_split_union_shortfall_no_longer_vetoes(
+    patched_db, monkeypatch
+):
+    """The rail this change deliberately trades away, pinned so the trade stays
+    visible: the union falling short of the national probe (rows reachable under
+    no locality_district_id) USED to suppress the category. It no longer does —
+    every district reached sreality's end, so the category nominates and the
+    shortfall survives as the national-fallback trigger and a coverage warning."""
+    monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
+    # Only one district populated; union (6000 + the 5 the fallback adds) is far
+    # below the national 12000.
     monkeypatch.setattr(
         _FakeClient, "district_result_size", {1: 6000}, raising=False,
     )
     monkeypatch.setattr(_FakeClient, "district_collected", {}, raising=False)
 
-    _seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
+    seen, _counts, rs, _pages, complete = scraper_main._walk_category_split(
         1, 2, **_split_args()
     )
-    assert complete is False
+    assert complete is True
+    assert walk_is_complete(len(seen), rs) is False
 
 
 def test_walk_category_split_national_fallback_closes_gap(patched_db, monkeypatch):
@@ -754,6 +845,33 @@ def test_walk_category_no_split_under_threshold(patched_db, monkeypatch):
     assert len(seen) == 5          # total_entries, NOT district 1's 999
     assert rs == 5
     assert complete is True
+
+
+def test_walk_category_with_a_limit_never_reaches_the_end(patched_db, monkeypatch):
+    """--limit is a partial view by definition. It stays OUR stop even when the
+    capped walk happens to run out before the cap bites, so a --limit run can
+    never nominate."""
+    monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
+    args = _split_args()
+    args["cat_limit"] = 3
+
+    seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
+        1, 2, **args
+    )
+    assert len(seen) == 3
+    assert complete is False
+
+
+def test_slice_stop_reason_fails_closed_when_nothing_stamped_one():
+    """An abandoned generator leaves no stop reason. "I cannot classify this
+    stop" is not evidence that sreality ended the walk, so it reads as ours."""
+    class _NoReason:
+        pass
+
+    assert scraper_main._slice_stop_reason(_NoReason()) == "error"
+    assert scraper_main.stop_is_portal_end(
+        scraper_main._slice_stop_reason(_NoReason())
+    ) is False
 
 
 def test_run_full_isolates_a_crashing_category(patched_db, monkeypatch):
@@ -941,13 +1059,22 @@ def test_index_walk_dry_run_writes_nothing(patched_db):
 
 
 def test_index_walk_skips_inactive_when_incomplete(patched_db, monkeypatch):
-    """A truncated walk (collected << result_size) still enqueues but must NOT
-    mark_inactive — same completeness guard as the legacy full run."""
+    """A walk stopped by one of OUR stops (here the 422 deep-pagination wall)
+    still enqueues but must NOT nominate — same structural guard as the legacy
+    full run. Note what no longer suppresses it: collected << result_size."""
     monkeypatch.setattr(_FakeClient, "result_size", 1000, raising=False)
+
+    def capped_iter_index(self, on_page=None):
+        base = self.category_main * 10000 + self.category_type * 1000
+        for i in range(_FakeClient.total_entries):
+            yield {"hash_id": base + i, "price_czk": 10000 + i}
+        self.stop_reason = "cap_wall"
+
+    monkeypatch.setattr(_FakeClient, "iter_index", capped_iter_index)
     rc, _agg = scraper_main._run_index_walk(dry_run=False)
     assert rc == 0
     assert patched_db["nominated"] == []
-    assert patched_db["enqueue"]  # enqueue is independent of completeness
+    assert patched_db["enqueue"]  # enqueue is independent of the walk's end
 
 
 def test_walk_category_enqueue_assigns_priorities(monkeypatch):

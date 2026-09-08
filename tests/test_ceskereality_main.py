@@ -8,6 +8,13 @@ turned out to belong to UNFILTERED category URLs only. The walk now partitions o
 the 14 DECLARED kraje, pages each slice to its own declared tail (up to the site's
 real 99-page ceiling on a filtered URL), and descends onto the subtype axis when a
 kraj needs more than that.
+
+The 5th element of walk_category is STRUCTURAL since 2026-09-08 (rule #3): it says
+the walk reached ceskereality's OWN end — every kraj stopped on the pager, on the
+region's declared tail, or on a confirmed-empty region — not that the counts
+reconciled. A region one row short of its declared count still reaches the end;
+a barren page, an error, a cap or the deadline still does not. The arithmetic is
+unchanged and still decides the slice ledger's `outcome` and the subtype descent.
 """
 
 from __future__ import annotations
@@ -40,9 +47,13 @@ def _page_html(
     )
     facet_links = "".join(f'<a href="/prodej/byty/{s}/">x</a>' for s in facets)
     meta = f'<meta name="description" content="Máme tady {total} bytů">' if total else ""
+    # The site's real last page still renders the arrow, carrying `--disabled` —
+    # that marker is what says "there is no more". A page with NO pagination block
+    # is a truncated body, and the walk must not read the two alike.
     pager = (
         f'<a class="pagination-arrow --next" href="/x/?strana={next_page}"></a>'
-        if next_page else ""
+        if next_page
+        else '<a class="pagination-arrow --disabled --next" href="/x/?strana=1"></a>'
     )
     h1 = f"<h1>{heading}</h1>" if heading else ""
     return (
@@ -166,6 +177,7 @@ def test_a_kraj_with_no_listings_is_a_valid_slice(monkeypatch):
     assert complete is True                  # empty is an ANSWER, not a failure
     empty = portal._walk_slice(fake, "prodej", "byty", "karlovarsky-kraj")
     assert (empty.outcome, empty.declared_total, empty.rows) == ("exhausted", 0, [])
+    assert (empty.stop, empty.reached_end) == ("empty_confirmed", True)
 
 
 class _DegradedClient(_PartitionClient):
@@ -187,6 +199,8 @@ def test_degraded_zero_card_page_is_not_a_finished_slice(monkeypatch):
     bad = portal._walk_slice(fake, "prodej", "byty", "ustecky-kraj")
     assert bad.outcome == "degraded"
     assert bad.positive is False
+    # An items-less 200 nobody could corroborate is OURS, never the portal's end.
+    assert (bad.stop, bad.reached_end) == ("barren", False)
     assert len(seen) == 13 * 40              # the other 13 kraje still collected
     assert complete is False                 # ...but the category is unproven
 
@@ -209,6 +223,9 @@ def test_blank_page_mid_slice_is_degraded_not_the_end(monkeypatch):
     portal = m.CeskerealityPortal(default_config("ceskereality"))
     r = portal._walk_slice(fake, "prodej", "byty", "praha")
     assert r.outcome == "degraded"
+    # Items-first: the blank page has no next arrow either, and reading it as the
+    # last page is exactly how a soft block would become a nomination.
+    assert (r.stop, r.reached_end) == ("barren", False)
     assert len(r.rows) == 40                 # pages 1-2 kept, the slice unproven
     _seen, _c, _t, _p, complete = _walk(portal, fake, monkeypatch)
     assert complete is False
@@ -226,6 +243,7 @@ def test_a_fetch_exception_is_an_error_not_a_clean_finish(monkeypatch):
     portal = m.CeskerealityPortal(default_config("ceskereality"))
     r = portal._walk_slice(fake, "prodej", "byty", "zlinsky-kraj")
     assert r.outcome == "error" and r.positive is False
+    assert (r.stop, r.reached_end) == ("error", False)
     _seen, _c, _t, _p, complete = _walk(portal, fake, monkeypatch)
     assert complete is False
 
@@ -253,6 +271,173 @@ def test_union_short_of_the_national_total_is_still_complete(monkeypatch):
     _seen, _c, total, _p, complete = _walk(portal, fake, monkeypatch)
     assert total == 5000
     assert complete is True
+
+
+# --- the structural verdict: the walk reached ceskereality's end -------------
+#
+# Rule #3, 2026-09-08. What the 5th element answers is "did every kraj stop
+# because the portal said there was no more?", not "did the counts reconcile".
+# The two came apart in production: prodej/rodinne-domy is 20,964 rows over 14
+# regions, one of which (karlovarsky, 87 rows) came back one row short on every
+# walk — and that single row held the whole category's nomination shut for two
+# days while 20,963 rows sat unchecked.
+
+
+class _ShortByOneClient(_PartitionClient):
+    """One kraj declares 87 and serves 86: the tail moved under the walk. Every
+    page is real, the pager runs out on the declared last page."""
+
+    def __init__(self, counts, short_kraj: str) -> None:  # noqa: ANN001
+        super().__init__(counts)
+        self._short = short_kraj
+
+    def fetch_search(self, url):  # noqa: ANN001
+        kraj = _kraj_of(url)
+        if kraj != self._short:
+            return super().fetch_search(url)
+        self.urls.append(url)
+        total = self._counts[kraj]
+        pg, last = _page_num(url), max(1, -(-self._counts[kraj] // 20))
+        first = (pg - 1) * 20
+        n = max(0, min(20, total - first)) - (1 if pg == last else 0)
+        ids = [str(2_000_000 + first + k) for k in range(n)]
+        return _page_html(total, ids, next_page=pg + 1 if pg < last else None,
+                          heading=f"Prodej bytu {kraj}"), 200
+
+
+def test_a_slice_one_row_short_of_its_declared_total_still_reaches_end(monkeypatch):
+    """86 of 87 = 0.9885, under the 0.995 the arithmetic gate demanded. The slice
+    walked every page it has and the pager ran out: that is a FINISHED walk over a
+    live index, so it reaches the portal's end and the category nominates. The
+    ledger still records the shortfall as `degraded` — the number did not change,
+    only what it is allowed to veto."""
+    counts = {k: 40 for k in KRAJ_SLUGS}
+    counts["karlovarsky-kraj"] = 87
+    fake = _ShortByOneClient(counts, "karlovarsky-kraj")
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+
+    short = portal._walk_slice(fake, "prodej", "byty", "karlovarsky-kraj")
+    assert len({r[0] for r in short.rows}) == 86
+    assert short.outcome == "degraded"       # the numeric verdict is unchanged...
+    assert short.positive is False           # ...and still numeric in the ledger
+    assert m_portal.walk_is_complete(86, 87) is False
+    assert short.stop == "pager_end"         # ...but the PORTAL ended the loop
+    assert short.reached_end is True
+
+    _seen, _c, _t, _p, complete = _walk(portal, fake, monkeypatch)
+    assert complete is True                  # 20,963 rows are no longer hostage
+
+
+class _EarlyPagerClient(_PartitionClient):
+    """A kraj whose next arrow goes disabled at page 2 of a declared 5 pages."""
+
+    def fetch_search(self, url):  # noqa: ANN001
+        html, status = super().fetch_search(url)
+        if _kraj_of(url) == "praha" and _page_num(url) == 2:
+            html = re.sub(
+                r'<a class="pagination-arrow --next".*?</a>',
+                '<a class="pagination-arrow --disabled --next" href="/x/?strana=2"></a>',
+                html,
+            )
+        return html, status
+
+
+class _PagerlessPageClient(_PartitionClient):
+    """A kraj whose page 2 comes back with its cards but NO pagination block at all
+    — the truncated body / edge shell an over-eager CDN serves."""
+
+    def fetch_search(self, url):  # noqa: ANN001
+        html, status = super().fetch_search(url)
+        if _kraj_of(url) == "praha" and _page_num(url) == 2:
+            html = re.sub(r'<a class="pagination-arrow[^>]*>.*?</a>', "", html)
+        return html, status
+
+
+def test_a_page_with_no_pagination_block_is_not_an_end(monkeypatch):
+    """`_next_page` returns None for the site's own disabled arrow AND for a page
+    that renders no pagination at all. Only the first is ceskereality saying "there
+    is no more"; treating absence alike let a shortened Cloudflare body carrying one
+    card end a slice at page 2 of 5 and nominate the rest of the category."""
+    counts = {k: 40 for k in KRAJ_SLUGS}
+    counts["praha"] = 100
+    fake = _PagerlessPageClient(counts)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+
+    r = portal._walk_slice(fake, "prodej", "byty", "praha")
+    assert (r.stop, r.reached_end) == ("barren", False)
+    _seen, _c, _t, _p, complete = _walk(portal, fake, monkeypatch)
+    assert complete is False
+
+
+def test_a_pager_that_ends_before_the_declared_tail_is_the_portals_end(monkeypatch):
+    """The disabled next arrow is the site's own last-page signal, and it means
+    the same thing wherever it appears. Reading an early one as a truncation was
+    the second numeric veto, and it fired on exactly the live-tail churn the
+    declared count cannot keep up with."""
+    counts = {k: 40 for k in KRAJ_SLUGS}
+    counts["praha"] = 100
+    fake = _EarlyPagerClient(counts)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+
+    r = portal._walk_slice(fake, "prodej", "byty", "praha")
+    assert r.pages == 2 and len(r.rows) == 40
+    assert (r.stop, r.reached_end) == ("pager_end", True)
+    assert r.outcome == "degraded"           # 40 of 100 is on the record
+    _seen, _c, _t, _p, complete = _walk(portal, fake, monkeypatch)
+    assert complete is True
+
+
+def test_a_full_slice_stops_on_the_portals_own_count(monkeypatch):
+    fake = _PartitionClient({k: 40 for k in KRAJ_SLUGS})
+    r = m.CeskerealityPortal(default_config("ceskereality"))._walk_slice(
+        fake, "prodej", "byty", "praha")
+    # page 2 of 2: the count says the tail and the arrow is gone; either way the
+    # portal ended it, and both are in PORTAL_ENDS.
+    assert r.stop in m_portal.PORTAL_ENDS
+    assert (r.outcome, r.reached_end) == ("exhausted", True)
+
+
+def test_a_barren_first_page_that_does_not_confirm_is_our_stop(monkeypatch):
+    """The transient throttle: the shell comes back once, the re-read returns the
+    real page. An items-less 200 nobody could corroborate is `barren` — OURS — so
+    the category cannot nominate this walk. It costs one walk, not a region."""
+    counts = {k: 400 for k in KRAJ_SLUGS}
+    fake = _LaunderedKrajClient(counts, throttled="zlinsky-kraj", stay_empty=False)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+
+    r = portal._walk_slice(fake, "prodej", "byty", "zlinsky-kraj")
+    assert (r.stop, r.reached_end, r.outcome) == ("barren", False, "degraded")
+    assert fake.rereads == 1                 # exactly one re-read, not a loop
+
+    fresh = _LaunderedKrajClient(counts, throttled="zlinsky-kraj", stay_empty=False)
+    _seen, _c, _t, _p, complete = _walk(portal, fresh, monkeypatch)
+    assert complete is False
+
+
+def test_max_pages_is_our_stop_even_when_every_slice_finishes(monkeypatch):
+    """--max-pages is ours by definition: the slices under it stop where WE said,
+    not where the portal did, so a capped walk may never nominate."""
+    fake = _PartitionClient({k: 40 for k in KRAJ_SLUGS})
+    portal = m.CeskerealityPortal(default_config("ceskereality"), max_pages=1)
+    _seen, _c, _t, _p, complete = _walk(portal, fake, monkeypatch)
+    assert complete is False
+    r = portal._walk_slice(fake, "prodej", "byty", "praha")
+    assert (r.stop, r.reached_end, r.outcome) == ("page_cap", False, "ceiling")
+
+
+def test_a_category_whose_slices_all_failed_to_start_never_reaches_the_end(monkeypatch):
+    """all([]) is True: seeding the stop list from the slices that RAN rather than
+    from the declared 14 would make a walk that collected nothing report the
+    portal's end."""
+    class _AllBoomClient(_PartitionClient):
+        def fetch_search(self, url):  # noqa: ANN001
+            raise RuntimeError("blocked")
+
+    fake = _AllBoomClient({k: 40 for k in KRAJ_SLUGS})
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    seen, _c, _t, _p, complete = _walk(portal, fake, monkeypatch)
+    assert seen == set()
+    assert complete is False
 
 
 # --- the subtype descent (a kraj past the site's 99-page ceiling) ------------
@@ -322,7 +507,8 @@ def test_a_descent_that_loses_the_residue_reports_incomplete(monkeypatch):
     the parent's, the category reads incomplete rather than silently dropping the
     difference."""
     portal = m.CeskerealityPortal(default_config("ceskereality"))
-    parent = m.SliceResult("stredocesky-kraj", None, [], 2312, 1, "ceiling")
+    parent = m.SliceResult(
+        "stredocesky-kraj", None, [], 2312, 1, "ceiling", "page_cap")
 
     class _ThinClient:
         def fetch_search(self, url):  # noqa: ANN001
@@ -335,6 +521,9 @@ def test_a_descent_that_loses_the_residue_reports_incomplete(monkeypatch):
     kids = portal._descend_slice(_ThinClient(), "prodej", "rodinne-domy", parent)
     assert any(k.outcome == "ceiling" for k in kids)   # residue surfaced
     assert not all(k.positive for k in kids)
+    # The residue child carries the parent's stop, so the category cannot nominate
+    # while a slice of it is unreachable.
+    assert not all(k.reached_end for k in kids)
 
 
 # --- the deadline + the unmeasurable total ----------------------------------
@@ -388,15 +577,19 @@ class _NoTotalClient:
 
 
 def test_unmeasurable_total_is_unknown_not_complete(monkeypatch):
-    """A full, un-deadlined walk whose totals are unreadable must still not
-    authorise a sweep: an unmeasurable walk is 'unknown', never 'complete'
-    (rule #3). The old fail-open said complete=True and delisted on a guess."""
+    """A page with cards but no count is a BROKEN page, not a tail: the count
+    renders from the same query as the cards, so one without the other is the
+    throttle signature. Unmeasurable is never the portal's end (rule #3); the old
+    fail-open said complete=True and delisted on a guess."""
     fake = _NoTotalClient()
     portal = m.CeskerealityPortal(default_config("ceskereality"))
     _seen, _counts, total, _pages, complete = _walk(portal, fake, monkeypatch)
 
     assert total == 0                       # nothing measurable to reconcile against
-    assert complete is False                # ...so coverage is unprovable
+    assert complete is False                # ...so the walk cannot nominate
+    r = m.CeskerealityPortal(default_config("ceskereality"))._walk_slice(
+        fake, "prodej", "byty", "praha")
+    assert (r.stop, r.reached_end) == ("error", False)
 
 
 def test_walk_slice_reports_deadline_when_budget_already_spent(monkeypatch):
@@ -408,6 +601,7 @@ def test_walk_slice_reports_deadline_when_budget_already_spent(monkeypatch):
         fake, "prodej", "byty", "praha", deadline=1.0)
     assert fake.urls == []                  # not one request past the budget
     assert (r.rows, r.pages, r.outcome, r.positive) == ([], 0, "deadline", False)
+    assert (r.stop, r.reached_end) == ("deadline", False)
 
 
 def test_search_url_puts_subtype_before_kraj():
@@ -486,9 +680,13 @@ def _priced_page_html(
         for i, p in id_price_pairs
     )
     meta = f'<meta name="description" content="Máme tady {total} bytů">' if total else ""
+    # The site's real last page still renders the arrow, carrying `--disabled` —
+    # that marker is what says "there is no more". A page with NO pagination block
+    # is a truncated body, and the walk must not read the two alike.
     pager = (
         f'<a class="pagination-arrow --next" href="/x/?strana={next_page}"></a>'
-        if next_page else ""
+        if next_page
+        else '<a class="pagination-arrow --disabled --next" href="/x/?strana=1"></a>'
     )
     return f"<html><head>{meta}</head><body>{cards}{pager}</body></html>"
 
@@ -683,6 +881,8 @@ def test_an_empty_slice_is_confirmed_by_a_second_read(monkeypatch):
     assert complete is True
     empty_reads = [u for u in fake.urls if "zlinsky-kraj" in u]
     assert len(empty_reads) >= 2, "the empty slice was accepted on a single read"
+    empty = portal._walk_slice(fake, "prodej", "byty", "zlinsky-kraj")
+    assert (empty.stop, empty.reached_end) == ("empty_confirmed", True)
 
 
 def test_an_unmeasurable_national_probe_no_longer_decides(monkeypatch):
@@ -722,11 +922,12 @@ def _record(monkeypatch, results, *, kraje=("praha", "stredocesky-kraj")):
     return written
 
 
-def _sr(kraj, outcome, *, subtype=None, declared=100, ids=("a",), pages=4):
+def _sr(kraj, outcome, *, subtype=None, declared=100, ids=("a",), pages=4,
+        stop="declared_total_reached"):
     return m.SliceResult(
         kraj=kraj, subtype=subtype,
         rows=[(i, f"https://x/{i}", None) for i in ids],
-        declared_total=declared, pages=pages, outcome=outcome)
+        declared_total=declared, pages=pages, outcome=outcome, stop=stop)
 
 
 def test_one_row_per_kraj_not_per_subtype(monkeypatch):

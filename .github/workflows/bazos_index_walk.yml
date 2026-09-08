@@ -4,17 +4,19 @@ name: "Scraping: Bazos index walk"
 # The fast half of the bazos cadence split (architectural rule #19, like
 # sreality/idnes). Walks the ENTIRE index of every configured scope (no
 # --max-pages), touch_listings bumps last_seen on still-listed ads, presence nomination (rule #3)
-# flips delisted ones under the completeness guard (source-scoped, throttled to
-# once per 12h), and new/price-changed ids are enqueued into listing_detail_queue
+# nominates unseen ones for a page check once the walk reached the portal's end
+# (source-scoped and throttled; the page, not the count, decides), and
+# new/price-changed ids are enqueued into listing_detail_queue
 # (source='bazos'). No detail fetch — the drain (bazos_detail_drain.yml) consumes
 # the queue. Records run_type='index'.
 #
-# WHY split: bazos now walks 14 nationwide scopes (byt/dum/chata/restaurace/
-# kancelar/prostory/sklad × prodam/pronajmu ≈ 1500 index pages, ~50 min). A
-# combined index+detail run can't do both inside one job — the full index eats
-# the whole window, so the detail drain never runs and the queue grows unbounded.
-# Splitting lets the index complete every cycle (active counts + delistings stay
-# accurate) while the drain chips the backlog on its own bounded cadence.
+# WHY split: bazos now walks 22 nationwide scopes (byt/dum/chata/restaurace/
+# kancelar/prostory/sklad/pozemek/zahrada/garaz/ostatni × prodam/pronajmu ≈ 2400
+# index pages, ~85 min since migration 488). A combined index+detail run can't do
+# both inside one job — the full index eats the whole window, so the detail drain
+# never runs and the queue grows unbounded. Splitting lets the index complete
+# every cycle (active counts + delistings stay accurate) while the drain chips the
+# backlog on its own bounded cadence.
 #
 # Scopes live in the `portals` registry row; coverage is tuned with a SQL update,
 # no workflow edit. The index walk needs no geocoding (that happens in the drain),
@@ -37,7 +39,7 @@ on:
         required: false
         default: ""
         type: choice
-        options: ["", byt, dum, chata, restaurace, kancelar, prostory, sklad]
+        options: ["", byt, dum, chata, restaurace, kancelar, prostory, sklad, pozemek, zahrada, garaz, ostatni]
       locality:
         description: locality filter (e.g. Praha); blank = nationwide
         required: false
@@ -53,6 +55,11 @@ on:
         required: false
         default: ""
         type: string
+      max_seconds:
+        description: wall-clock budget; the walk finalizes cleanly before this (blank = 6600 = 110 min).
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: bazos-index-walk
@@ -61,9 +68,13 @@ concurrency:
 jobs:
   index-walk:
     runs-on: ubuntu-latest
-    # The full 14-scope walk is ~1500 pages at the portal's index rate (~50 min
-    # observed); the headroom keeps it under the 90-min stuck-run cutoff.
-    timeout-minutes: 75
+    # The full 22-scope walk is ~2400 pages at the portal's 0.5 req/s index rate
+    # (~85-90 min since migration 488 added pozemek/zahrada/garaz/ostatni). The
+    # --max-seconds 6600 (110 min) budget is what actually ends the run: it stops
+    # cleanly and FINALIZES the scrape_run, where a GitHub kill leaves ended_at
+    # NULL and the tail scopes unwalked (which is what the 75-min timeout did).
+    # This timeout is the outer backstop only — re-tune the budget, not it.
+    timeout-minutes: 130
     steps:
       - uses: actions/checkout@v6
 
@@ -93,8 +104,9 @@ jobs:
           LOCALITY: ${{ inputs.locality }}
           RADIUS_KM: ${{ inputs.radius_km }}
           MAX_PAGES: ${{ inputs.max_pages }}
+          MAX_SECONDS: ${{ inputs.max_seconds || '6600' }}
         run: |
-          ARGS="--index-only"
+          ARGS="--index-only --max-seconds $MAX_SECONDS"
           if [ -n "$SALE_TYPE" ]; then ARGS="$ARGS --sale-type $SALE_TYPE"; fi
           if [ -n "$CATEGORY" ]; then ARGS="$ARGS --category $CATEGORY"; fi
           if [ -n "$LOCALITY" ]; then ARGS="$ARGS --locality '$LOCALITY'"; fi

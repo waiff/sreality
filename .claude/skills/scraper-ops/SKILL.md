@@ -280,12 +280,12 @@ from the slow "download each ad" write:
   `--limit`), `touch_listings` bumps `last_seen_at` on still-listed ids, unseen ids are nominated
   for a page check (rule #3, 2026-09-07), and new + price-changed ids. The walk carries a
   **wall-clock deadline checked per PAGE** (`--max-seconds` → `run_index_walk` →
-  `walk_category` → `portal.deadline_reached`); a walk that stops on it reports
-  `complete=False`, so it nominates nothing but keeps everything it collected.
-  Never hand-roll the comparison, and never add a portal without wiring the flag through —
+  `walk_category` → `portal.deadline_reached`); a deadline is a stop of OURS, so such a
+  walk reports `reached_end=False`, nominates nothing, and keeps everything it collected.
+  Never hand-roll it, and never add a portal without wiring the flag through —
   `tests/scraper/test_walk_deadline_wiring.py` fails the build if you do. Ids are classified by the
-  one shared rule `portal.classify_index_sighting`, where **an index card with no price reads
-  `unchanged`, never `changed`** — are **enqueued** into
+  one shared `portal.classify_index_sighting` (**an index card with no price reads `unchanged`,
+  never `changed`**) — and are **enqueued** into
   `listing_detail_queue` in one of two service classes — ACQUISITION (never fetched) or REFRESH
   (failure-retry > price-changed > the location refetch lane). The drain reserves half of every
   claim for acquisition, so an unbounded refresh backlog can no longer starve new listings; unused
@@ -300,18 +300,19 @@ from the slow "download each ad" write:
   prepared statements. New listings land with `property_id` NULL and become **singletons** via
   `recompute_property_stats`'s straggler-attach (the hot write path carries no matching at all;
   grouping is out-of-band and operator-ordered, rule #15). A gone fetch flips that listing inactive +
-  dequeues it; a transient error bumps
-  the queue row's `attempts` (given up after 5) and stays queued. Records `run_type='detail'`,
-  `index_pages=0`. The queue persists across runs, so a bounded run never loses work; a
-  SIGKILLed claim is recovered by the next run's `reclaim_stale_claims`.
+  dequeues it; a transient error bumps the queue row's `attempts` (given up after 5) and stays queued. Records `run_type='detail'`,
+  `index_pages=0`. The queue persists across runs, so a bounded run never loses work; a SIGKILLed
+  claim is recovered by the next run's `reclaim_stale_claims`.
 
-**Delisting is presence-verified (rule #3, 2026-09-07).** A complete category walk nominates
-every active row it did not see (`VERIFY cm=… candidates=… queued=… deferred=…`) into the detail
-queue at the lowest priority; the drain fetches each page and only a positive gone signal (404/410,
-a redirect off the listing, the portal's "no longer active" text → `ListingGoneError`) flips it; a
-live page refreshes it. No absence sweep, no staleness rail; `delist_flip_cap` throttles nominations
-per walk (`VERIFY DEFERRED`, in `delist_flip_refusals`); a failed fetch keeps its queue row at
-elevated priority. The page must be the row's OWN — a `detail_ref` naming another id is dropped.
+**Delisting is presence-verified (rule #3, 2026-09-07); the gate is STRUCTURAL (2026-09-08).** A
+walk that REACHED THE PORTAL'S END (`portal.walk_reached_end`: every unit walked, each page loop out
+on a portal terminator, no stop of ours) nominates every active row it did not see (`VERIFY cm=…
+candidates=… queued=… deferred=…`); the drain fetches each page and only a positive gone signal
+(404/410, a redirect off the listing, the portal's "no longer active" text → `ListingGoneError`)
+flips it; a live page refreshes it. The COUNT never vetoes — a short walk that reached the end
+nominates and logs `COVERAGE`. No absence sweep, no staleness rail; `delist_flip_cap` throttles per
+walk ONLY above its 2,000-active-row floor (`VERIFY DEFERRED`, in `delist_flip_refusals`); the page must be the row's OWN (a `detail_ref`
+naming another id is dropped). Stop-reason vocabulary: `references/coverage-and-delisting.md`.
 
 **Condition scoring is currently UNSCHEDULED — an intentional pause, not a bug** (PR #730,
 confirmed operator-intentional 2026-07-09; ~56k byt rows unscored is accepted). Don't
@@ -376,9 +377,8 @@ Lanes shipped so far:
 - **sreality count-probe lane** (migration 270, PR #696) — a lightweight per-`(category_main,
   category_type)` count check that detects a market-wide count swing faster than a full index
   walk would, feeding the completeness/delisting rails.
-- **Tightened delisting rails for sreality** (PR #697) — sreality's completeness gate moved
-  1.0→0.995 (the unseen-staleness window it also introduced was retired 2026-09-07 when
-  delisting became presence-verified).
+- **Tightened delisting rails for sreality** (PR #697) — the completeness gate moved 1.0→0.995;
+  its unseen-staleness window was retired 2026-09-07 with absence-based delisting.
 - **Property-maintenance lane**, every 2 min (PR #716) — runs `run_incremental_pass` against
   `dirty_properties` (rule #20) far more often than the 5-min GH Actions cron. Its first cut
   serialized against the GH cron + daily sweep with a SESSION advisory lock, which is unsound
@@ -459,9 +459,9 @@ shapes for every portal (with its own `source=`), so this reads the same for baz
   (sreality — the other portals go straight to ENQUEUE)
 - `ENQUEUE enqueued=N new=... changed=... priority=...` per category — the ids handed to the
   drain via `listing_detail_queue`
-- `INACTIVE cm=... ct=... marked=N collected=M result_size=K` per category after a
-  completeness-checked mark_inactive
-- `INACTIVE skipped cm=... ct=...` per category whose walk looked truncated (flip suppressed)
+- `VERIFY cm=... ct=... subtype=... candidates=N queued=M deferred=K active=A` — rows nominated for
+  a page check (rule #3); `VERIFY skipped ...: the walk did not reach the portal's end (our stop:
+  ...)` when it may not, and `COVERAGE cm=... ct=...` WARNS when it nominates while short
 - `RECONCILE cm=... ct=... sreality=... collected=... active=...` — portal-reported total vs
   collected vs our active DB count (drift feeds the Health page)
 - `INDEX total=N pages=M enqueued=K` once at end of the walk

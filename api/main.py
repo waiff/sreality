@@ -126,7 +126,13 @@ async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
             with deps.open_background_conn() as conn:
                 est = sweep_stuck_runs(conn)
                 bld = sweep_stuck_buildings(conn)
-                scr = sweep_stuck_scrape_runs(conn)
+                # Above every scrape job's timeout-minutes (idnes's index walk, at
+                # 240, is the binding one): the API boots on every deploy, and
+                # stamping ended_at on a RUNNING walk would make verify_pipeline
+                # report it as truncated and would hide a later crash. Healing a
+                # genuinely dead row late costs nothing — finalize re-stamps
+                # ended_at anyway.
+                scr = sweep_stuck_scrape_runs(conn, older_than_minutes=300)
             if est or bld or scr:
                 logging.info(
                     "stuck-row sweep on startup: %s estimation_runs, "

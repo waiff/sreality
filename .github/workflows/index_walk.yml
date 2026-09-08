@@ -7,8 +7,9 @@ name: "Scraping: Sreality index walk (Phase 2)"
 # the COMPLETE index of every configured category pair (scraper.main.CATEGORIES
 # — the full category cross product incl. pozemek/ostatni/drazba/podil;
 # district-split + national fallback above the deep-pagination cap), bumps
-# last_seen on still-listed ids (touch), flips delisted ones to is_active=false
-# (nominates unseen ids for a page check, rule #3), and enqueues new +
+# last_seen on still-listed ids (touch), nominates unseen ids for a page check
+# once the walk reached the portal's own end (rule #3 — the walk flips nothing;
+# the drain fetches each nominated page and the PAGE decides), and enqueues new +
 # price-changed ids into listing_detail_queue (source='sreality'). It does NO
 # detail fetching, so it finishes in minutes and delistings surface fast.
 #
@@ -19,9 +20,11 @@ name: "Scraping: Sreality index walk (Phase 2)"
 # liveness check keys off (freshness/delisting depend on the index walk, not
 # the drain).
 #
-# CADENCE: every 15 min. Each run is a complete walk; nomination runs every
-# tick under the same per-category walk-completeness rail (architectural rule
-# #3) so a truncated page never mass-flips live listings. GitHub throttles
+# CADENCE: every 15 min. Each run is a full walk; nomination runs every tick,
+# gated STRUCTURALLY per category (architectural rule #3, 2026-09-08): every
+# district ended on sreality's own signal and no stop of OURS fired (deadline,
+# page cap, --limit, the 422 wall, an uncorroborated blank), so a truncated walk
+# nominates nothing. The count no longer vetoes. GitHub throttles
 # scheduled workflows, so effective cadence is slower; Health liveness is tuned
 # to this (warn >90 min, fail >180 min). The --max-seconds budget (default
 # 1800 = 30 min) makes a slow/grown walk finalize CLEANLY between categories
