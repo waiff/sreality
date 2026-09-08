@@ -28,11 +28,27 @@ import argparse
 import json
 import logging
 import sys
+from typing import Sequence
 
 from toolkit import tag_head_bakeoff as bo
 from toolkit import tag_heads as th
 
 LOG = logging.getLogger("tag_head_bakeoff")
+
+
+def split_list(values: Sequence[str] | None) -> list[str]:
+    """Flatten `--arms a b`, `--arms a,b` and `--arms "a, b"` into the same list.
+
+    A workflow_dispatch input is ONE string, so the dispatcher hands these flags a single
+    comma-joined token — and `nargs="+"` alone read that token as one arm name. The train
+    stage of run 1 then died with `has no arms named ['a,b,c']` and wrote nothing
+    (2026-09-08 (i)). The embed payload has always split on commas; this is that same
+    reading, applied to every list-shaped flag here.
+    """
+    out: list[str] = []
+    for value in values or ():
+        out.extend(part.strip() for part in value.split(",") if part.strip())
+    return out
 
 
 def _report_plan(conn, args: argparse.Namespace) -> int:
@@ -70,15 +86,19 @@ def _report_plan(conn, args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-id", type=int, required=True,
                     help="dedup_sim.tag_head_bakeoff_runs.id to execute.")
-    ap.add_argument("--heads", type=int, nargs="+", default=None,
+    # The three list flags take space- OR comma-separated values and are normalised in
+    # parse_args(), never by argparse: `type=int` and `choices=` both run per TOKEN, so
+    # either would reject a comma-joined workflow input before it could be split.
+    ap.add_argument("--heads", nargs="+", default=None,
                     help="Tag ids to run, overriding the operator's ready flag. "
                          "A named list is itself an operator decision.")
-    ap.add_argument("--modes", nargs="+", default=list(th.MODES), choices=list(th.MODES),
-                    help="Training modes to run (default: all three).")
+    ap.add_argument("--modes", nargs="+", default=list(th.MODES),
+                    help=f"Training modes to run, from {', '.join(th.MODES)} "
+                         "(default: all three).")
     ap.add_argument("--arms", nargs="+", default=None,
                     help="Arm names to run (default: every arm of the run).")
     ap.add_argument("--n-splits", type=int, default=th.DEFAULT_N_SPLITS)
@@ -93,7 +113,29 @@ def main() -> int:
                     help="Retrain cells that already have metrics.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Report the plan; train nothing, write nothing.")
-    args = ap.parse_args()
+    return ap
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse and normalise: after this the three list flags are lists, whatever shape
+    the caller spelled them in, and an empty selection is None ("everything")."""
+    ap = build_parser()
+    args = ap.parse_args(argv)
+    args.arms = split_list(args.arms) or None
+    args.modes = split_list(args.modes) or list(th.MODES)
+    unknown = [m for m in args.modes if m not in th.MODES]
+    if unknown:
+        ap.error(f"--modes: unknown mode(s) {', '.join(unknown)}; "
+                 f"choose from {', '.join(th.MODES)}")
+    heads = split_list(args.heads)
+    if any(not h.lstrip("-").isdigit() for h in heads):
+        ap.error(f"--heads: tag ids must be integers, got {' '.join(heads)}")
+    args.heads = [int(h) for h in heads] or None
+    return args
+
+
+def main() -> int:
+    args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     from scraper import db

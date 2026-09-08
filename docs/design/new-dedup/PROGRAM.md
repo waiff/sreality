@@ -194,6 +194,51 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-08 (i) — **Attempt 4 BOOTED, EMBEDDED, and told us the next bug in one line: the
+  pod has torch but not torchvision, so every DINOv3 arm dies at model load.** Run 1's embed
+  stage on pod `4rgi66lggbty11` (RTX 3090) ran the whole bootstrap clean, cached the corpus,
+  embedded three arms and was torn down by the watchdog on **all-terminal at 1,547 s, ≈$0.09**
+  — the first run of this lane that produced vectors at all.
+  - **Three arms ok, 9,514 vectors each**: `dinov2-l14-reg@504/bf16` at **26.2 img/s**,
+    `siglip2-b16@512/bf16` at **37.0 img/s**, `clip-b32-laion@224/fp32` at **55.9 img/s**.
+    Those are the first real throughput numbers for the corpus and they price the production
+    backfill honestly.
+  - **All SEVEN DINOv3 arms failed identically**: ``DINOv3 model load failed after retries:
+    `DINOv3ViTImageProcessorFast` requires `torchvision` to be installed``. Cause:
+    `scripts/pod_bootstrap.py`'s torch step installed `torch` alone from the cu118 index, and
+    the fast image processor transformers selects for the DINOv3 configs does its resize/crop
+    in **torchvision**. Only DINOv3 resolves to a fast processor here, which is exactly why
+    three arms were fine and seven were not — a partial success is the hardest failure shape
+    to predict, and it cost a boot to find.
+  - **Fix: one command, one index.** `uv pip install torch torchvision --index-url
+    …/whl/cu118`, so the two CUDA builds are the pair the index publishes together (cp312
+    wheels confirmed on the public listing: torch 2.7.1+cu118 ↔ torchvision 0.22.1+cu118).
+    Both lanes share the bootstrap, so the production `dinov3_embed_backfill` dispatch — which
+    would have hit this on its first GPU — is fixed by the same line. **No pyproject change**:
+    torchvision is a pod-side install like torch, not a project dependency.
+  - **The processor stays FAST.** `use_fast=False` would change preprocessing and therefore
+    the vector identity, orphaning every embedding already written; the failure mode is
+    documented at the call site in `scraper/dinov3_tagger.py` instead. Fix the box, not the
+    processor.
+  - **The re-dispatch is free of charge to reason about**: `pending_arms` already treats
+    `failed` as work to do, and the vectors table is the per-image checkpoint, so re-running
+    `stage=embed` for run 1 with no `--arms` picks up exactly the seven DINOv3 arms and leaves
+    the three `ok` ones alone.
+  - **Second bug from the same run, fixed here too: the train stage could not narrow to
+    arms.** GitHub run 34272736891 (`stage=train`, `arms=dinov2-…,siglip2-…,clip-…`) failed
+    with `BAKEOFF run 1 has no arms named ['dinov2-…,siglip2-…,clip-b32-stored']` and wrote
+    nothing. A workflow_dispatch input is ONE string, and `scripts/tag_head_bakeoff.py`
+    declared `--arms` as `nargs="+"`, so the comma-joined token read as a single arm name.
+    `--arms`, `--modes` and `--heads` now split on commas the way the embed payload always
+    has (space-separated still works); `choices=`/`type=int` moved out of argparse into a
+    post-split check, because both run per token and would reject the joined form first.
+  - Tests: the generated bootstrap's torch step contains `torchvision` and exactly one
+    `--index-url`; the dry-mode preflight still passes all three cases; a comma-joined
+    `--arms` selects those arms in the trainer; an unknown mode and a non-numeric head still
+    exit non-zero. Verified locally against the real CPU index (`uv pip install torch
+    torchvision --index-url …/whl/cpu` into a scratch 3.12 venv): torch 2.14.0+cpu with
+    torchvision 0.29.0+cpu, one resolve, `torchvision.transforms.v2` imports.
+
 - 2026-09-08 (h) — **Attempt 3 finally produced readable heartbeats, and they showed a
   RESTART LOOP over a disk that was never big enough. Three fixes, one PR.** Run 1's embed
   stage went to pod `lg5oy1ivlgoyh7`; the watchdog's stall rail ended it at **~33 min**
