@@ -31,6 +31,8 @@ import pytest
 from location_data import claims_intake, contracts
 from location_data.claims_intake import Entry, IntakeRefused, ListingRow
 from location_data.claims_llm import (
+    ADDRESS_PROMPT,
+    ADDRESS_TOOL,
     BLOCK_ORDER,
     FIELD_CLAIM_TYPES,
     FIELD_ORDER,
@@ -39,11 +41,16 @@ from location_data.claims_llm import (
     MAX_TOKENS,
     PROMPT_VERSION,
     SYSTEM_PROMPT,
+    TOWN_PROMPT,
+    TOWN_TOOL,
     ArchivedPayload,
+    CallHints,
     Refusal,
     _candidate_obec,
     _validated_groups,
     block_texts,
+    build_address_message,
+    build_town_message,
     build_user_message,
     estimated_cost_usd,
     extract_payload,
@@ -193,6 +200,13 @@ class FakeGazetteer:
     def obec_codes_for_psc(self, psc: str) -> list[int]:
         return list(self.psc.get(psc, []))
 
+    # The closed lists of claims_llm@2's address call. Not consulted by `extract_payload`.
+    def streets_of_obec(self, obec_kod: int) -> list[str]:
+        return sorted(s.title() for s in self.streets.get(obec_kod, set()))
+
+    def parts_of_obec(self, obec_kod: int) -> list[str]:
+        return ["Karlín"] if obec_kod == 554782 else []
+
 
 def block_answer(**fields: Any) -> dict[str, Any]:
     """A whole block, with every field the tool schema requires; unnamed ones are null."""
@@ -228,7 +242,7 @@ def test_the_lane_identifiers_are_the_declared_strings_and_collide_with_nobody()
     assert claims_llm.LANE == "location_claims_llm"
     assert claims_llm.JOB_NAME == "location_claims_llm"
     assert claims_llm.CONCURRENCY_GROUP == "location-llm"
-    assert claims_llm.LLM_VERSION == "claims_llm@1"
+    assert claims_llm.LLM_VERSION == "claims_llm@2"
     assert claims_llm.WAVE == "W2"
     for value in (claims_llm.LANE, claims_llm.JOB_NAME, claims_llm.LLM_VERSION):
         assert value not in (
@@ -307,14 +321,18 @@ def test_the_prompt_is_pinned_so_an_unbumped_edit_reds():
 
     If this fails because you deliberately changed the prompt or the tool schema: bump
     `PROMPT_VERSION` and this digest TOGETHER, in the same commit."""
+    # The two closed questions the lane sends (claims_llm@2). The free-form pair
+    # (SYSTEM_PROMPT / LOCATION_TOOL) is the bake-off's and no longer stamps a claim.
     digest = hashlib.sha256(
-        (SYSTEM_PROMPT + json.dumps(LOCATION_TOOL, sort_keys=True, ensure_ascii=False))
+        (TOWN_PROMPT + json.dumps(TOWN_TOOL, sort_keys=True, ensure_ascii=False)
+         + ADDRESS_PROMPT + json.dumps(ADDRESS_TOOL, sort_keys=True, ensure_ascii=False))
         .encode("utf-8")).hexdigest()
     assert digest == PINNED_PROMPT_DIGEST, (
-        f"the prompt or the tool schema changed (digest {digest}); bump PROMPT_VERSION "
+        f"a prompt or a tool schema changed (digest {digest}); bump PROMPT_VERSION "
         f"and this literal together — the claim fingerprint hashes neither, so an "
         f"unbumped prompt edit is invisible forever")
-    assert PROMPT_VERSION == "bzs.loc@1"
+    assert PROMPT_VERSION == "bzs.loc@2"
+    assert SYSTEM_PROMPT and LOCATION_TOOL["name"] == "record_location"
 
 
 def test_the_prompt_never_carries_a_stored_column():
@@ -331,6 +349,20 @@ def test_the_prompt_never_carries_a_stored_column():
     source = "\n".join(ast.unparse(node) for node in body)
     for forbidden in ("listings.", "raw_json", "locality", "street", "psc"):
         assert forbidden not in source, forbidden
+    # The closed-question builders take the same vow: the lists are built OUTSIDE the
+    # prompt from the pin and the text, and the obec in the address message is the model's
+    # own pick. ("street" is legitimately a LIST there; the forbidden set is the stored
+    # columns.)
+    assert "SEZNAM OBCÍ" in build_town_message({"title": "T", "description": "D"}, ["Aš"])
+    assert "OBEC: Aš" in build_address_message(
+        {"title": "T", "description": "D"}, obec="Aš", parts=[], streets=[])
+    for name in ("build_town_message", "build_address_message"):
+        body = _function(name).body
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+            body = body[1:]
+        source = "\n".join(ast.unparse(node) for node in body)
+        for forbidden in ("listings.", "raw_json", "locality", "psc"):
+            assert forbidden not in source, (name, forbidden)
 
 
 def test_the_reasoning_budget_is_the_house_convention():
@@ -969,8 +1001,9 @@ def test_resolve_model_prefers_the_cli_override_then_app_settings_then_the_defau
     assert resolve_model(FakeConn(None), None) == claims_llm.DEFAULT_MODEL
 
 
-# The digest of SYSTEM_PROMPT + LOCATION_TOOL. Bump it and PROMPT_VERSION TOGETHER.
-PINNED_PROMPT_DIGEST = "8a51544867ea09122ea956170d6c788abadddc32f609f65191393c57587eeba9"
+# The digest of TOWN_PROMPT + TOWN_TOOL + ADDRESS_PROMPT + ADDRESS_TOOL (claims_llm@2).
+# Bump it and PROMPT_VERSION TOGETHER.
+PINNED_PROMPT_DIGEST = "9f2133867a3d1932f0eeffd66db3e09470f66c6d32456a695be115414e9ee046"
 
 
 # ------------------------------------------------------------------ the run, hermetically
@@ -1049,9 +1082,11 @@ class _FakeConn:
         self.scans: list[dict[str, Any]] = []
         self.written_claims: list[dict[str, Any]] = []
         self.written_absences: list[dict[str, Any]] = []
+        # The scan's column order, `_LLM_SCAN_SQL`: … psc, lat, lon (the pin BUILDS the
+        # candidate list through `CallHints`; the lane never claims it).
         self.payload_rows = [
             (9100 + i, "bazos", f"22002{i}", "detail", "cd" * 32, FETCHED_AT,
-             5150 + i, False, "186 00")
+             5150 + i, False, "186 00", 50.0933, 14.4535)
             for i in range(count)
         ]
         self.bodies = {9100 + i: FIXTURE for i in range(count)}
@@ -1071,10 +1106,14 @@ class FakeCaller:
         self.cost = cost
         self.calls = 0
         self.blocks_seen: list[dict[str, str]] = []
+        self.hints_seen: list[CallHints] = []
 
-    def answer(self, blocks: dict[str, str]) -> tuple[dict[str, Any], float]:
+    def answer(
+        self, blocks: dict[str, str], hints: CallHints,
+    ) -> tuple[dict[str, Any], float]:
         self.calls += 1
         self.blocks_seen.append(dict(blocks))
+        self.hints_seen.append(hints)
         return dict(self._answer), self.cost
 
 
@@ -1119,6 +1158,9 @@ def test_a_full_pass_calls_once_per_listing_and_writes_one_claim_per_field(wired
     assert stats["outcome"] == "ok"
     assert stats["payloads"] == 2
     assert caller.calls == 2
+    # The scan's pin and postcode reach the caller as hints — they BUILD the candidate
+    # list there and never appear in a prompt.
+    assert caller.hints_seen[0] == CallHints(lat=50.0933, lon=14.4535, psc="186 00")
     assert stats["calls"] == 2
     assert stats["claims"] == 4  # obec + street, per listing
     assert stats["claims_inserted"] == 4

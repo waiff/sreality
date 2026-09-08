@@ -128,53 +128,10 @@ _PIN_DISTANCES_SQL = """
 
 # ------------------------------------------------------------------ candidate sources
 
-# Czech consonant alternations that reach INTO the stem when a name declines — "Nová Paka"
-# → "v Nové Pace", "Praha" → "v Praze" — so the last letter of the compared prefix may swap
-# within a pair. Measured need: the probe's only text-match miss on a named town was Paka/Pace.
-_ALTERNATIONS = frozenset({("k", "c"), ("c", "k"), ("h", "z"), ("z", "h"), ("g", "z"), ("z", "g")})
-
-
-def _word_matches(token: str, word: str) -> bool:
-    """Declension-tolerant: a text token matches a name word when they share a prefix at
-    least max(3, len(word) - 2) long (its last letter may alternate, see above) and the
-    token is at most two characters longer — so "koline" finds "kolin", "praze" finds
-    "praha" and "pace" finds "paka", while "boleslavskou" does not find "boleslav". Words of
-    three characters or fewer must match exactly ("as", "nad", "u")."""
-    if len(word) <= 3:
-        return token == word
-    if len(token) > len(word) + 2:
-        return False
-    need = max(3, len(word) - 2)
-    if len(token) < need:
-        return False
-    last = need - 1
-    return token[:last] == word[:last] and (
-        token[last] == word[last] or (token[last], word[last]) in _ALTERNATIONS)
-
-
-def text_match_candidates(text: str, names: Iterable[str]) -> list[str]:
-    """Registry names whose words occur, in order, as consecutive tokens of the text.
-
-    Over-generates on purpose (a bike — "kolo" — puts Kolín on the list): the model's job is
-    to choose among a few, and a name that is on the list but not in the text costs nothing.
-    Needs no postcode, no pin and no knowledge of the portal.
-    """
-    tokens = normalize_name(text).split()
-    if not tokens:
-        return []
-    by_key: dict[str, list[tuple[str, list[str]]]] = {}
-    for name in names:
-        words = normalize_name(name).split()
-        if words:
-            by_key.setdefault(words[0][:3], []).append((name, words))
-    found: set[str] = set()
-    for i, token in enumerate(tokens):
-        for name, words in by_key.get(token[:3], ()):
-            if name in found or i + len(words) > len(tokens):
-                continue
-            if all(_word_matches(tokens[i + j], w) for j, w in enumerate(words)):
-                found.add(name)
-    return sorted(found)
+# The text matcher moved into the lane's own module once the probe settled the design
+# (`location_data.town_candidates`); re-exported here so the probe's tests keep their
+# names. ONE implementation: the probe must measure exactly what the lane runs.
+from location_data.town_candidates import _word_matches, text_match_candidates  # noqa: E402,F401
 
 
 def obec_names_by_unit(conn: Any) -> dict[int, str]:
