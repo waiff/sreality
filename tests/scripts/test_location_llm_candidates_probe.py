@@ -63,7 +63,7 @@ def test_text_matching_folds_accents_and_case_and_returns_sorted_unique_names():
 
 def test_the_probe_sample_is_the_bake_off_cohort_plus_the_pin():
     assert _PROBE_SAMPLE_SQL != _SAMPLE_SQL
-    assert "ST_Y(l.geom), ST_X(l.geom)" in _PROBE_SAMPLE_SQL
+    assert "ST_Y(l.geom::geometry), ST_X(l.geom::geometry)" in _PROBE_SAMPLE_SQL
     assert "Zahraničí" in _PROBE_SAMPLE_SQL
 
 

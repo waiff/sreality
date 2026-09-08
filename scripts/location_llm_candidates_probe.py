@@ -87,10 +87,11 @@ DISTANCE_TIERS_KM = (15.0, 25.0, 40.0)
 MAX_DISTANCE_KM = 60.0
 
 # The bake-off's cohort, plus the pin. Derived from `_SAMPLE_SQL` rather than copied so the
-# two harnesses cannot drift apart on who is in the sample.
+# two harnesses cannot drift apart on who is in the sample. `listings.geom` is a GEOGRAPHY
+# column; ST_X/ST_Y exist only for geometry, hence the cast.
 _PROBE_SAMPLE_SQL = _SAMPLE_SQL.replace(
     "l.raw_json ->> 'psc', l.source_url",
-    "l.raw_json ->> 'psc', l.source_url, ST_Y(l.geom), ST_X(l.geom)")
+    "l.raw_json ->> 'psc', l.source_url, ST_Y(l.geom::geometry), ST_X(l.geom::geometry)")
 if _PROBE_SAMPLE_SQL == _SAMPLE_SQL:
     raise RuntimeError("the bake-off sample SQL moved; re-anchor the probe's pin columns")
 
