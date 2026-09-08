@@ -417,14 +417,15 @@ function's alone, and a test pins that (an accidental collision would let `ON CO
 the dead-man switch's insert and silence it).
 
 `location_payload_shape_drift` — W4's standing payload-schema-version check (06 §6.4 W4 gate,
-P6). Per source, the share of ACTIVE rows **first seen in the trailing 7 days** whose payload the
+P6). Per source, the share of ACTIVE rows **first seen in the trailing 48 h** (`…_window_hours`) whose payload the
 location contracts cannot read: sreality's `locality` object not post-cutover shape (the same
 exhaustive SQL `CASE` the W4 gate report uses, `location_data.refetch_cohort.SREALITY_SHAPE_CASE_SQL`,
 parity-tested against `claims_intake.sreality_payload_shape`), bezrealitky's `ruianId` KEY absent.
-Why the fresh arm only: a new row always gets a detail fetch within the hour, so a source-side shape
-change is ~100% of this arm within a day, while it is churn-fraction of the stock. Why it exists: today
-an unknown sreality shape classifies `absent`, is routed to the refetch cohort and burns five fetches
-before retiring as `error` — nobody is told. warn 5% / fail 20% / min 50 rows
+Why the fresh arm only, and why 48 h: a new row always gets a detail fetch within the hour, so after a
+source-side cutover the share climbs as elapsed/window — one 6-hourly tick into 48 h reads 12.5% and
+crosses fail; the same tick into a 7-day window reads 3.6% and the bell would wait ~1.4 days. Why it
+exists: today an unknown sreality shape classifies `absent`, is routed to the refetch cohort and burns
+five fetches before retiring as `error` — nobody is told. warn 3% / fail 10% / min 30 rows
 (`location_payload_shape_drift_*` thresholds); `warn` with null value when no source reached min rows;
 the message names the remedy per source (sreality: update `sreality_payload_shape` + the contract's
 `payload_schema_detector`, re-extract; bezrealitky: restore `ruianId` in `_DETAIL_QUERY`, then refetch

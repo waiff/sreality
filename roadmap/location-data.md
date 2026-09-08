@@ -1680,17 +1680,22 @@ during the drain is this cohort, not a regression.
   post-cutover shape) and **`bezrealitky_ruian_refetch`** (producer-less — `enroll()` selects active
   rows lacking the `ruianId` KEY from `listings` on every run, `ON CONFLICT DO NOTHING`; probe
   `raw_json ? 'ruianId'`; **placed = key present, whatever its value**, because a present-but-null
-  key is the portal's ~48 % ceiling and a refetch returns the same null). The workflow gained a
-  `lane` input; the fetcher ignores `detail_ref` and fetches by id, so `(source_id_native, None, None,
+  key is the portal's ~48 % ceiling and a refetch returns the same null). Each lane owns a complete
+  scan statement (the schema-replay CI gate PREPAREs every `*_SQL` constant — a template token is a
+  42703 there), every lane query is source-scoped, a dry run COUNTS what enroll would insert, and
+  reconcile re-arms a `not_applicable` row whose listing came back (nothing else clears `given_up`
+  on a producer-less lane). The workflow gained a `lane` input; the fetcher ignores `detail_ref` and fetches by id, so `(source_id_native, None, None,
   −1)` is the whole entry. 133 rows at last count; dispatch is `--lane bezrealitky_ruian_refetch
   mode=dispatch` — the operator's, like every refetch.
 - **W4-3c `location_payload_shape_drift`** — the gate's fourth arm ("a standing payload-schema-version
   check exists"). Today an unknown sreality shape classifies `absent`, is routed to the refetch cohort
   and burns five fetches before retiring as `error` — nobody is told. The check, in `verify_pipeline`'s
-  6-hourly lane: per source, the share of rows **first seen in the trailing 7 days** whose payload the
+  6-hourly lane: per source, the share of rows **first seen in the trailing 48 h** whose payload the
   contracts cannot read (sreality `locality` not post-cutover; bezrealitky `ruianId` key absent), warn
-  5 % / fail 20 % / min 50 rows, `warn` with no value when nothing scored, the remedy named per source in
-  the message. It shares ONE SQL `CASE` with the gate report (`SREALITY_SHAPE_CASE_SQL`, parity-tested
+  3 % / fail 10 % / min 30 rows, `warn` with no value when nothing scored, the remedy named per source in
+  the message. The window IS the detection latency — after a cutover the share is elapsed/window, so
+  the first 6-hourly tick reads 12.5 % and rings; the 7-day window first drafted would have sat under
+  fail for ~1.4 days (adversarial review, #1351). It shares ONE SQL `CASE` with the gate report (`SREALITY_SHAPE_CASE_SQL`, parity-tested
   against the Python classifier). In-app bell only for now — the hourly emailing lane's `--only` list is
   a deliberate promotion after a soak, the same ladder the ppm2 checks climbed. The contracts' declarative
   `payload_schema_detector` blocks stay as they are: nothing consumes them today and a bezrealitky block

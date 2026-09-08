@@ -99,7 +99,7 @@ jobs:
         if: inputs.mode == 'gate'
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: python -m scripts.location_w4_gate_report
+        run: python -m scripts.location_w4_gate_report --lane ${{ inputs.lane }}
 
       - name: Drive the cohort
         if: inputs.mode != 'gate'

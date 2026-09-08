@@ -217,15 +217,18 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "ppm2_basis_floor_share_fail": 0.10,
     "ppm2_basis_floor_min_rows": 100,
     # Location payload-shape drift (W4's standing P6 check): share of rows FIRST SEEN in
-    # the trailing 7 days whose payload has the shape the location contracts cannot
+    # the trailing window whose payload has the shape the location contracts cannot
     # read — sreality's `locality` object not post-cutover, bezrealitky's `ruianId` key
-    # absent. A fresh row always gets a detail fetch within the hour, so a source-side
-    # shape change shows up here as ~100% within a day; the standing noise is the odd
-    # truncated payload (0 of 8,280 sampled on 2026-09-08). warn 5% / fail 20% leave
-    # room for a bad hour without missing a cutover.
-    "location_payload_shape_drift_warn": 0.05,
-    "location_payload_shape_drift_fail": 0.20,
-    "location_payload_shape_drift_min_rows": 50,
+    # absent. A fresh row always gets a detail fetch within the hour, so after a
+    # source-side cutover the share climbs as elapsed/window: with 48 h, one 6-hourly
+    # lane tick later it reads 12.5%, above fail — the bell rings on the first tick. A
+    # 7-day window would need ~1.4 days to cross the same line. The standing noise is
+    # the odd truncated payload (0 of 8,280 sampled on 2026-09-08), so warn sits at 3%.
+    # min_rows 30 lets bezrealitky's ~5.9k-row inventory score most windows.
+    "location_payload_shape_drift_warn": 0.03,
+    "location_payload_shape_drift_fail": 0.10,
+    "location_payload_shape_drift_min_rows": 30,
+    "location_payload_shape_drift_window_hours": 48,
     # Area divergence: share of rows carrying BOTH areas whose values differ by more
     # than the view's 10% material band. Live, mmreality dum/prodej is 99.7% (100.0%
     # over the trailing week) while every other portal's dum/prodej is 0.0%. The one
@@ -2377,7 +2380,7 @@ _LOCATION_PAYLOAD_SHAPE_DRIFT_SQL = f"""
              END AS unexpected
       FROM listings
       WHERE source IN ('sreality', 'bezrealitky') AND is_active
-        AND first_seen_at > now() - interval '7 days'
+        AND first_seen_at > now() - make_interval(hours => %(window_hours)s)
     ) fresh
     GROUP BY source
 """
@@ -2399,26 +2402,29 @@ def check_location_payload_shape_drift(conn: Any, thresholds: dict[str, Any]) ->
     source-side shape change must force re-extraction instead of silently degrading.
     Today a sreality payload of unknown shape classifies `absent`, is routed to the
     refetch cohort and burns five fetches before retiring as `error` — nobody is told.
-    This check tells someone. Measured on rows first seen in 7 days, per source, so a
-    change is ~100% of the arm within a day rather than churn-fraction of the stock."""
+    This check tells someone. Measured on rows first seen in the trailing window (48 h
+    by default), per source: after a cutover the share climbs as elapsed/window, so the
+    first 6-hourly tick already reads 12.5% and crosses fail — a 7-day window would sit
+    under it for ~1.4 days."""
     warn = float(thresholds["location_payload_shape_drift_warn"])
     fail = float(thresholds["location_payload_shape_drift_fail"])
     min_rows = int(thresholds["location_payload_shape_drift_min_rows"])
-    rows = _fetchall(conn, _LOCATION_PAYLOAD_SHAPE_DRIFT_SQL)
+    window_hours = int(thresholds["location_payload_shape_drift_window_hours"])
+    rows = _fetchall(conn, _LOCATION_PAYLOAD_SHAPE_DRIFT_SQL, {"window_hours": window_hours})
     cells = [{"source": s, "n": int(n), "unexpected": int(u),
               "share": (int(u) / int(n)) if int(n) else None}
              for s, n, u in rows]
     scored = [c for c in cells if c["n"] >= min_rows]
     if not scored:
         detail = (f"{len(cells)} source(s) read, none with {min_rows}+ rows first seen in "
-                  f"7 days — nothing was verified")
+                  f"{window_hours} h — nothing was verified")
         return {"check_key": "location_payload_shape_drift", "status": "warn", "value": None,
                 "details": {"skipped": detail, "cells": cells, "arms_scored": 0},
                 "message": f"Location payload-shape drift verified NOTHING — {detail}."}
     worst = max(c["share"] for c in scored)
     status = "fail" if worst >= fail else "warn" if worst >= warn else "ok"
-    offenders = [f"{c['source']}: {c['share']:.1%} of {c['n']} rows first seen in 7d — "
-                 f"{_LOCATION_SHAPE_REMEDY[c['source']]}"
+    offenders = [f"{c['source']}: {c['share']:.1%} of {c['n']} rows first seen in "
+                 f"{window_hours}h — {_LOCATION_SHAPE_REMEDY[c['source']]}"
                  for c in scored if c["share"] >= warn]
     message = (
         f"{len(offenders)} source(s) are landing payloads the location contracts cannot "
@@ -2432,8 +2438,8 @@ def check_location_payload_shape_drift(conn: Any, thresholds: dict[str, Any]) ->
         "status": status,
         "value": round(worst * 100, 2),
         "details": {"worst_share": round(worst, 4), "warn": warn, "fail": fail,
-                    "min_rows": min_rows, "cells": cells, "arms_scored": len(scored),
-                    "offenders": offenders},
+                    "min_rows": min_rows, "window_hours": window_hours, "cells": cells,
+                    "arms_scored": len(scored), "offenders": offenders},
         "message": message,
     }
 

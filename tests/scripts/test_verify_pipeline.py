@@ -1982,7 +1982,21 @@ def test_location_payload_shape_drift_reds_on_a_source_side_shape_change() -> No
     assert out["value"] == 95.83
     assert "sreality" in out["message"] and "sreality_payload_shape" in out["message"]
     assert "bezrealitky" not in out["details"]["offenders"][0]
+    assert out["details"]["window_hours"] == 48
     assert any("statement_timeout" in s for s in conn.executed)
+
+
+def test_location_payload_shape_drift_rings_on_the_first_tick_after_a_cutover() -> None:
+    """The window is the detection latency: after a total cutover the share is
+    elapsed/window, so one 6-hourly tick into a 48 h window reads 12.5% — above fail.
+    A 7-day window would sit below the same line for ~1.4 days."""
+    from scripts.verify_pipeline import DEFAULT_THRESHOLDS, check_location_payload_shape_drift
+
+    window = DEFAULT_THRESHOLDS["location_payload_shape_drift_window_hours"]
+    fail = DEFAULT_THRESHOLDS["location_payload_shape_drift_fail"]
+    assert 6 / window >= fail, "one lane tick after a cutover must already read fail"
+    out = check_location_payload_shape_drift(_ShapeDriftConn([("sreality", 800, 100)]), T)
+    assert out["status"] == "fail"
 
 
 def test_location_payload_shape_drift_names_bezrealitkys_own_remedy() -> None:
@@ -2019,6 +2033,6 @@ def test_location_payload_shape_drift_sql_shares_the_gate_classifier_and_reads_t
     from scripts.verify_pipeline import _LOCATION_PAYLOAD_SHAPE_DRIFT_SQL as sql
 
     assert SREALITY_SHAPE_CASE_SQL.strip() in sql
-    assert "first_seen_at > now() - interval '7 days'" in sql
+    assert "first_seen_at > now() - make_interval(hours => %(window_hours)s)" in sql
     assert "NOT (raw_json ? 'ruianId')" in sql
     assert "IS DISTINCT FROM 'object'" in sql

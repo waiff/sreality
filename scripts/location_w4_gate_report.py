@@ -48,7 +48,7 @@ import psycopg
 
 from location_data import loader_db
 from location_data.claims_intake import guarded
-from location_data.refetch_cohort import COHORT_LANE, SREALITY_SHAPE_CASE_SQL
+from location_data.refetch_cohort import COHORT_LANE, LANES, SREALITY_SHAPE_CASE_SQL
 from scraper import db
 
 LOG = logging.getLogger("location_w4_gate_report")
@@ -121,6 +121,7 @@ class Report:
     arms: tuple[Arm, ...]
     cohort: tuple[dict[str, Any], ...]
     verdict: str
+    lane: str = COHORT_LANE
 
 
 def _pct(num: int, den: int) -> float | None:
@@ -188,11 +189,14 @@ def overall(arms: tuple[Arm, ...]) -> str:
 
 
 def gather(conn: psycopg.Connection, *, statement_timeout_s: int, lane: str = COHORT_LANE) -> Report:
+    """`lane` scopes the cohort-state table only. The D3 arm is a fact about sreality's
+    legacy cohort (`entity_type` / `inaccuracy_type` are sreality fields) and always reads
+    `COHORT_LANE`, whichever lane the report was asked to tabulate."""
     with guarded(conn, statement_timeout_s) as cur:
         cur.execute(_LEGACY_SHARE_SQL)
         legacy_counts = {shape: n for shape, n in cur.fetchall()}
     with guarded(conn, statement_timeout_s) as cur:
-        cur.execute(_D3_COVERAGE_SQL, {"lane": lane})
+        cur.execute(_D3_COVERAGE_SQL, {"lane": COHORT_LANE})
         d3_rows = [(o, n, d3) for o, n, d3 in cur.fetchall()]
     with guarded(conn, statement_timeout_s) as cur:
         cur.execute(_BEZREALITKY_SQL)
@@ -204,7 +208,7 @@ def gather(conn: psycopg.Connection, *, statement_timeout_s: int, lane: str = CO
 
     share, remainder = decide_bezrealitky(active, key_present, key_absent, with_id)
     arms = (decide_legacy_share(legacy_counts), decide_d3_coverage(d3_rows), share, remainder)
-    return Report(arms=arms, cohort=cohort, verdict=overall(arms))
+    return Report(arms=arms, cohort=cohort, verdict=overall(arms), lane=lane)
 
 
 def render(report: Report, *, generated_at: str) -> list[str]:
@@ -213,7 +217,7 @@ def render(report: Report, *, generated_at: str) -> list[str]:
         lines.append(f"  [{arm.verdict:>13}] {arm.name}: {arm.measured} (gate {arm.threshold})")
         if arm.detail:
             lines.append(f"                  {arm.detail}")
-    lines += ["", f"  cohort `{COHORT_LANE}`:"]
+    lines += ["", f"  cohort `{report.lane}`:"]
     for row in report.cohort:
         lines.append(f"    {row['last_outcome']:>15} given_up={row['given_up']!s:<5} "
                      f"retired={row['retired']!s:<5} {row['n']}")
@@ -231,13 +235,16 @@ def to_json(report: Report, *, generated_at: str) -> dict[str, Any]:
             "tool": "location_w4_gate_report",
             "reads": ["listings", "location_enrichment_state"],
             "writes": [],
-            "lane": COHORT_LANE,
+            "lane": report.lane,
+            "d3_lane": COHORT_LANE,
         },
     }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="The W4 acceptance gate, measured.")
+    parser.add_argument("--lane", default=COHORT_LANE, choices=sorted(LANES),
+                        help="which cohort's state table to print (the arms are lane-independent)")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--fail-on-gate", action="store_true",
                         help="Exit 1 unless the overall verdict is PASS.")
@@ -256,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
 
     generated_at = datetime.now(timezone.utc).isoformat()
     with db.connect() as conn:
-        report = gather(conn, statement_timeout_s=args.statement_timeout)
+        report = gather(conn, statement_timeout_s=args.statement_timeout, lane=args.lane)
     if args.json:
         print(json.dumps(to_json(report, generated_at=generated_at), default=str, indent=2))
     else:

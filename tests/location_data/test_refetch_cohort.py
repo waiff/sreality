@@ -59,6 +59,9 @@ class _Cursor:
         self._sql = " ".join(sql.split())
         self._conn.executed.append((self._sql, params))
 
+    def fetchone(self):
+        return (133,) if "count(*)" in self._sql else None
+
     def fetchall(self):
         if "FROM location_enrichment_state es" in self._sql and "l.raw_json" in self._sql:
             batch, self._conn.cohort = self._conn.cohort, []
@@ -209,9 +212,25 @@ def test_reconcile_scans_the_whole_cohort_not_only_the_due_rows():
     """A row is retired by facts that change OUTSIDE this table — the payload shape and
     `is_active` — so gating the scan on `next_eligible_at <= now()` would leave finished
     rows in the cohort until their backoff happened to expire."""
-    from location_data.refetch_cohort import _COHORT_SCAN_SQL
-    assert "next_eligible_at" not in _COHORT_SCAN_SQL
-    assert "NOT es.given_up" in _COHORT_SCAN_SQL
+    from location_data.refetch_cohort import (
+        _COHORT_SCAN_BEZREALITKY_SQL, _COHORT_SCAN_SREALITY_SQL)
+    for sql in (_COHORT_SCAN_SREALITY_SQL, _COHORT_SCAN_BEZREALITKY_SQL):
+        assert "next_eligible_at" not in sql
+        assert "NOT es.given_up" in sql
+        assert "l.source = %(source)s" in sql
+
+
+def test_every_scan_is_a_complete_statement_not_a_template():
+    """The schema-replay CI gate PREPAREs every module-level `*_SQL` constant against the
+    live catalog. A placeholder token in one is a 42703 there, and the concrete forms built
+    inside a function are outside the only check that compiles SQL — so each lane owns a
+    whole statement and `LaneSpec.scan_sql` IS that constant."""
+    from location_data import refetch_cohort as rc
+    for name in dir(rc):
+        if name.endswith("_SQL"):
+            assert "__PROBE__" not in getattr(rc, name), name
+    assert LANES[COHORT_LANE].scan_sql is rc._COHORT_SCAN_SREALITY_SQL
+    assert LANES[BEZREALITKY_LANE].scan_sql is rc._COHORT_SCAN_BEZREALITKY_SQL
 
 
 def test_dry_run_writes_nothing():
@@ -365,3 +384,66 @@ def test_the_workflow_offers_exactly_the_registered_lanes():
     inputs = _inputs()
     assert set(inputs["lane"]["options"]) == set(LANES)
     assert inputs["lane"]["default"] == COHORT_LANE
+
+
+def test_dry_run_on_the_producerless_lane_counts_what_it_would_enroll():
+    """Before its first real run the lane's table is empty, so a dry run that skipped enroll
+    silently would report "0 scanned" — indistinguishable from "no work". It counts instead."""
+    conn = _Conn()
+    stats = run(conn, lane=BEZREALITKY_LANE, reconcile_only=True, dry_run=True)
+    assert stats["would_enroll"] == 133
+    assert "enrolled" not in stats
+    assert not _sql_of(conn, "INSERT INTO")
+    counts = _sql_of(conn, "SELECT count(*)")
+    assert counts and "NOT EXISTS" in counts[0][0] and counts[0][1]["lane"] == BEZREALITKY_LANE
+
+
+def test_reconcile_rearms_a_delisted_row_whose_listing_came_back():
+    """`not_applicable` retirement sets `given_up`; a sighting reactivates the listing and
+    NOTHING else clears the flag — the producer's DO UPDATE never touches it and enroll's DO
+    NOTHING cannot reach an existing row. Reconcile re-arms exactly that case, per lane and
+    source, and never an `error` retirement (a portal fact)."""
+    conn = _Conn()
+    stats = reconcile(conn, lane=BEZREALITKY_LANE)
+    rearm = _sql_of(conn, "SET given_up = false")
+    assert len(rearm) == 1
+    sql, params = rearm[0]
+    assert "es.last_outcome = 'not_applicable'" in sql and "l.is_active" in sql
+    assert "'error'" not in sql
+    assert params == {"lane": BEZREALITKY_LANE, "source": "bezrealitky"}
+    assert "rearmed" in stats
+
+
+def test_dry_run_never_rearms():
+    conn = _Conn()
+    reconcile(conn, lane=COHORT_LANE, dry_run=True)
+    assert not _sql_of(conn, "SET given_up = false")
+
+
+def test_the_due_query_and_every_scan_are_source_scoped():
+    """`LaneSpec.source` is enforced, not decorative: a row of the wrong portal in a lane must
+    never be read with the other portal's probe (a bezrealitky row under the sreality probe
+    projects NULL, classifies pending forever and burns MAX_ATTEMPTS fetches)."""
+    from location_data.refetch_cohort import _DUE_SQL
+    assert "l.source = %(source)s" in _DUE_SQL
+    conn = _Conn(due=[])
+    dispatch(conn, lane=BEZREALITKY_LANE)
+    due = _sql_of(conn, "es.next_eligible_at <= now()")
+    assert due and due[0][1]["source"] == "bezrealitky"
+
+
+def test_the_shared_shape_case_matches_the_python_classifier_key_by_key():
+    """The one SQL definition two readers share (the gate report and the drift check) —
+    parity asserted HERE, at the constant's home, not only through an alias elsewhere."""
+    import re
+    from location_data.refetch_cohort import SREALITY_SHAPE_CASE_SQL
+    post, legacy = [re.findall(r"'([a-z_]+)'", body)
+                    for body in re.findall(r"array\[(.*?)\]", SREALITY_SHAPE_CASE_SQL)]
+    for key in post:
+        assert sreality_payload_shape({"locality": {key: 1}}) == "post_cutover", key
+    for key in legacy:
+        assert sreality_payload_shape({"locality": {key: 1}}) == "legacy", key
+    assert sreality_payload_shape({"locality": {post[0]: 1, legacy[0]: 1}}) == "post_cutover"
+    assert SREALITY_SHAPE_CASE_SQL.index("'post_cutover'") < SREALITY_SHAPE_CASE_SQL.index("'legacy'")
+    assert SREALITY_SHAPE_CASE_SQL.count("'absent'") == 2
+    assert "IS DISTINCT FROM 'object'" in SREALITY_SHAPE_CASE_SQL
