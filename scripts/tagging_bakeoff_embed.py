@@ -177,13 +177,18 @@ def stamp_run(conn: Any, *, run_id: int, boot: str | None = None,
         if not line.startswith(ALIVE_PREFIX)
         and not (boot is not None and line.startswith(BOOT_PREFIX))
     ]
+    # The manifest's note is trimmed if anything has to give: the heartbeat is what the
+    # watchdog reads, and a truncated one would read as a pod that never booted.
+    kept = "\n".join(lines)[:3000]
+    managed = []
     if boot is not None:
-        lines.append(f"{BOOT_PREFIX}{iso_now()} {boot}")
+        managed.append(f"{BOOT_PREFIX}{iso_now()} {boot}")
     if alive is not None:
-        lines.append(f"{ALIVE_PREFIX}{iso_now()} {alive}")
+        managed.append(f"{ALIVE_PREFIX}{iso_now()} {alive}")
     with conn.cursor() as cur:
         cur.execute(_WRITE_RUN_NOTE_SQL,
-                    {"run_id": run_id, "note": "\n".join(lines)[:4000]})
+                    {"run_id": run_id,
+                     "note": "\n".join([kept, *managed] if kept else managed)})
 
 
 class SimpleEncoder:
