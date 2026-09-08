@@ -128,6 +128,9 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 ## Parked / open items
 
 - Clique guard (operator location-DQ sessions running in parallel; revisit before W2 gate).
+- **Same-town candidate rung (operator request 2026-09-08; definition pending — see the
+  2026-09-08 (b) ledger entry).** Not in the L0 spec today (which uses coordinates + 75 m and
+  explicitly no obec field). Nothing is designed until the operator states the rule.
 - **Path B risk, noted only — no mechanism designed (no-invented-rules instruction):** B has no
   location anchor, so identical marketing photos (developer catalogs, staged/stock interiors,
   reused renders across a project's units) can become candidate pairs and would merge at L2
@@ -191,6 +194,27 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-08 (b) — **Roadmap-vs-progress review; same-town candidate rung requested (docs
+  only).** The operator asked whether "for the location candidates we will also select
+  candidates based on same town only (much lower location accuracy, input data quality we
+  cannot fix)" is in the roadmap. **It is not**: L0 as specified is street+geo+dispo →
+  geo+dispo → geo+area with coordinates + 75 m and "no other fields such as obec"; the only
+  town-related item is the parked centroid data-quality prerequisite. Recorded as an OPEN
+  operator ruling, not designed. Facts the rule has to reckon with (measured today):
+  Praha = 128,266 listings (47,801 active), Brno 32,174 (12,020), Ostrava 20,269 (8,752),
+  Plzeň 13,442 (5,747) — "same town" alone in Praha pairs every listing with every other
+  (~8 billion pairs all-time, ~1.1 billion active-only), so the rule must say at least: which
+  listings it applies to (all, or only those whose location is town-grade per the location
+  program's precision class), whether it combines with the disposition/area rungs like the
+  other paths, what "town" is (obec; část obce for statutory cities?), and whether it is a
+  4th fallback rung or a parallel path like B. Sequencing note: the location program's
+  consumer flip is its own W6 — dedup still reads `listings.geom` + geo-derived admin columns;
+  W2 should read location through ONE query it can later point at the location projection.
+  Parallel state today: W0 closed (mig 475); W1 = operator reviewing the training set (heads
+  13/14 added, membership model final mig 486, review sample mig 485, ready/not-ready marker
+  mig 487); DINOv3 readiness code merged 09-06 (#1296-#1298, #1300) but nothing run — mig 480
+  not applied, weights not mirrored, licence acceptance pending (HF request awaiting Meta;
+  Meta's own download form is the no-queue route), bake-off not run. W2-W8 unstarted.
 - 2026-09-08 — **Head 14, `podklad - 3d plán`, and the first head whose arrival CHANGED ITS
   NEIGHBOURS.** The tag already existed (id 39) and both neighbours already pointed at it; it had
   no definition and no routing, so it was never a head. Operator's precedence, now written on all
