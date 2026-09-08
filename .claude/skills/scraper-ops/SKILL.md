@@ -310,8 +310,8 @@ every active row it did not see (`VERIFY cm=… candidates=… queued=… deferr
 queue at the lowest priority; the drain fetches each page and only a positive gone signal (404/410,
 a redirect off the listing, the portal's "no longer active" text → `ListingGoneError`) flips it; a
 live page refreshes it. No absence sweep, no staleness rail; `delist_flip_cap` throttles nominations
-per walk (`VERIFY DEFERRED`, recorded in `delist_flip_refusals`). A failed fetch keeps its queue row
-at elevated priority (the drain's failure-priority replaced the old per-walk retry).
+per walk (`VERIFY DEFERRED`, in `delist_flip_refusals`); a failed fetch keeps its queue row at
+elevated priority. The page must be the row's OWN — a `detail_ref` naming another id is dropped.
 
 **Condition scoring is currently UNSCHEDULED — an intentional pause, not a bug** (PR #730,
 confirmed operator-intentional 2026-07-09; ~56k byt rows unscored is accepted). Don't

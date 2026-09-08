@@ -419,3 +419,45 @@ def test_fetch_detail_reads_an_objectless_site_page_as_gone_but_a_foreign_body_a
     assert _portal().fetch_detail(site, "1", None).kind == "gone"
     other = SimpleNamespace(fetch_detail=lambda ref: ("<html>Just a moment...</html>", 200))
     assert _portal().fetch_detail(other, "1", None).kind == "error"
+
+
+def test_fetch_detail_ignores_a_detail_ref_pointing_at_another_listing(monkeypatch):
+    """A queue row whose detail_ref carries a DIFFERENT id would fetch that
+    listing's page — and if that one is removed, its gone signal fires before the
+    parsed-id belt and delists THIS listing (2026-09-08: 36 live rows flipped that
+    way). The row's own id-derived URL wins."""
+    seen: dict[str, Any] = {}
+
+    def fetch(ref):
+        seen["ref"] = ref
+        return ("<html>detail</html>", 200)
+
+    monkeypatch.setattr(
+        mmreality_main, "parse_detail",
+        lambda html, *, source_url: SimpleNamespace(raw={}, lat=50.0, lon=14.0))
+    item = _portal().fetch_detail(
+        SimpleNamespace(fetch_detail=fetch), "952409",
+        "https://www.mmreality.cz/nemovitosti/930052/")
+    assert item.kind == "ok"
+    assert seen["ref"] == "952409"
+
+
+def test_fetch_detail_keeps_an_agreeing_or_idless_detail_ref(monkeypatch):
+    """The guard drops only a CONTRADICTING ref: a matching URL and a ref with no
+    id in it (other portals' shapes, a bare path) are still used as given."""
+    seen: dict[str, Any] = {}
+
+    def fetch(ref):
+        seen["ref"] = ref
+        return ("<html>detail</html>", 200)
+
+    monkeypatch.setattr(
+        mmreality_main, "parse_detail",
+        lambda html, *, source_url: SimpleNamespace(raw={}, lat=50.0, lon=14.0))
+    agreeing = "https://www.mmreality.cz/nemovitosti/944445/"
+    assert _portal().fetch_detail(
+        SimpleNamespace(fetch_detail=fetch), "944445", agreeing).kind == "ok"
+    assert seen["ref"] == agreeing
+    assert _portal().fetch_detail(
+        SimpleNamespace(fetch_detail=fetch), "944445", "/detail/nejaky-byt").kind == "ok"
+    assert seen["ref"] == "/detail/nejaky-byt"

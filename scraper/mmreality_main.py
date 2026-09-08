@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 from typing import Any
 
 from scraper import db, portal_runner
@@ -77,6 +78,34 @@ SALE_TYPE: dict[str, str] = {"prodej": "prodej", "pronajem": "pronajem"}
 SLICE_KEY = "national"
 
 # The site's own <title> suffix, in both encodings a body can carry it.
+_REF_ID_RE = re.compile(r"/nemovitosti/(\d+)")
+
+
+def _trusted_detail_ref(native_id: str, detail_ref: str | None) -> str | None:
+    """Drop a detail_ref whose own id contradicts the row's.
+
+    An mmreality detail URL carries the listing id, so a disagreement means the
+    QUEUE row is wrong, not the portal. Fetching it anyway reads a DIFFERENT
+    listing's page, and that is not a harmless miss: if the other listing is
+    removed, its page is a positive gone signal (PropertyMismatch /
+    NoPropertyObject, both raised before the parsed-id belt below) and this
+    listing gets delisted on the strength of it. That happened on 2026-09-08 --
+    36 live listings flipped from refs left behind by the substitute-card bug
+    (#1316/#1317), whose stored source_url pointed at the dead page that had been
+    fetched. The id-derived URL is always canonical, so fall back to it.
+    """
+    if not detail_ref:
+        return None
+    match = _REF_ID_RE.search(detail_ref)
+    if match and match.group(1) != str(native_id):
+        LOG.warning(
+            "DETAIL id=%s ignoring detail_ref that points at %s",
+            native_id, match.group(1),
+        )
+        return None
+    return detail_ref
+
+
 _SITE_TITLE = "| M&M Reality"
 _SITE_TITLE_ESCAPED = "| M&amp;M Reality"
 
@@ -306,9 +335,10 @@ class MmRealityPortal:
     def fetch_detail(
         self, client: MmRealityClient, native_id: str, detail_ref: str | None,
     ) -> DrainItem:
-        url = detail_url(detail_ref or native_id)
+        ref = _trusted_detail_ref(native_id, detail_ref)
+        url = detail_url(ref or native_id)
         try:
-            html, status = client.fetch_detail(detail_ref or native_id)
+            html, status = client.fetch_detail(ref or native_id)
         except ListingGoneError:
             return DrainItem(native_id=native_id, kind="gone")
         except Exception as exc:  # noqa: BLE001 - one listing must not kill the run
