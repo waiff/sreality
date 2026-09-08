@@ -32,7 +32,7 @@ IDENTITY = {
 def test_start_cmd_runs_the_payload_at_the_pinned_ref():
     cmd = dispatch.build_start_cmd(ref="abc123", backfill_args=["--limit=10"])
     assert cmd[0] == "bash" and cmd[1] == "-c"
-    assert "--branch abc123" in cmd[2]
+    assert "git fetch --depth 1 origin abc123" in cmd[2]
     assert "python -m scripts.dinov3_embed_backfill --limit=10" in cmd[2]
 
 
@@ -79,9 +79,10 @@ def test_pod_env_includes_the_gated_weights_token_and_the_r2_credentials(monkeyp
 
 
 class _FakeClient:
-    def __init__(self, gpus: list[GpuOption]) -> None:
+    def __init__(self, gpus: list[GpuOption], stop_reason: str | None = None) -> None:
         self._gpus = gpus
         self.jobs: list[dict] = []
+        self.stop_reason = stop_reason
 
     def eligible_gpus(self, *, max_price_per_hr=None):
         return list(self._gpus)
@@ -89,7 +90,8 @@ class _FakeClient:
     def run_job_with_fallback(self, **kwargs):
         self.jobs.append(kwargs)
         return type("R", (), {"pod_id": "pod1", "gpu_type_id": "g", "final_status": "RUNNING",
-                              "timed_out": True, "elapsed_s": 1.0, "cost_per_hr": 0.22})()
+                              "timed_out": True, "elapsed_s": 1.0, "cost_per_hr": 0.22,
+                              "stop_reason": self.stop_reason})()
 
 
 CATALOG = [
@@ -189,6 +191,90 @@ def test_the_write_ceiling_is_required_here_too(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         dispatch.main()
     assert exc.value.code == 2
+
+
+# --- the watchdog: the wait window is a ceiling, not a plan ---------------------
+# 2026-09-08 (the sibling bake-off lane): a pod died in its first seconds and was
+# billed for the full 8,115s window because nothing here asked whether it was working.
+
+
+class _CountingConn:
+    """Answers the identity count and nothing else."""
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        self.timeouts: list[str] = []
+
+    def transaction(self):
+        return self
+
+    def cursor(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        if sql.startswith("SET LOCAL"):
+            self.timeouts.append(sql)
+
+    def fetchone(self):
+        return (self.count,)
+
+
+def test_progress_is_the_count_of_rows_this_identity_owns():
+    conn = _CountingConn(1200)
+    reading = dispatch.read_backfill_progress(conn, identity=IDENTITY, baseline=0)
+    assert reading.booted is True and reading.marker == "1200"
+    # Never terminal: `pending == 0` is an anti-join over ~10.4M images and far too
+    # expensive to ask every minute. The stall deadline ends a finished pod instead.
+    assert reading.terminal is False
+    # And it asks with a short leash — this runs beside a live production database.
+    assert "statement_timeout = 30000" in conn.timeouts[0]
+
+
+def test_a_pod_that_has_written_nothing_yet_has_not_booted():
+    conn = _CountingConn(500)
+    assert dispatch.read_backfill_progress(conn, identity=IDENTITY,
+                                           baseline=500).booted is False
+
+
+def test_no_database_on_the_runner_means_no_watchdog_and_a_loud_warning(monkeypatch, caplog):
+    import argparse
+
+    monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
+    args = argparse.Namespace(bootstrap_deadline_s=1200, stall_deadline_s=900)
+    with caplog.at_level("WARNING"):
+        assert dispatch.make_watchdog(args, dict(IDENTITY)) is None
+    assert "no watchdog" in caplog.text
+
+
+def test_the_dispatch_hands_the_pod_a_watchdog(monkeypatch):
+    client = _FakeClient(CATALOG)
+    _argv(monkeypatch, "--max-write-mb-per-hour", "500")
+    monkeypatch.setenv("RUNPOD_API_KEY", "rp_key")
+    monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
+    monkeypatch.setattr(dispatch, "RunPodClient", lambda *a, **k: client)
+    monkeypatch.setattr(dispatch, "make_watchdog", lambda *a, **k: "the-watchdog")
+    assert dispatch.main() == 0
+    assert client.jobs[0]["progress"] == "the-watchdog"
+
+
+def test_a_watchdog_teardown_fails_the_lane(monkeypatch):
+    # A green run that embedded nothing is what 2026-09-08 looked like in Actions.
+    client = _FakeClient(CATALOG, stop_reason="bootstrap-deadline: nothing ever booted")
+    _argv(monkeypatch, "--max-write-mb-per-hour", "500")
+    monkeypatch.setenv("RUNPOD_API_KEY", "rp_key")
+    monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
+    monkeypatch.setattr(dispatch, "RunPodClient", lambda *a, **k: client)
+    assert dispatch.main() == 1
+
+    done = _FakeClient(CATALOG, stop_reason="all-terminal: the job finished")
+    monkeypatch.setattr(dispatch, "RunPodClient", lambda *a, **k: done)
+    assert dispatch.main() == 0
 
 
 def test_an_under_specified_encoder_is_refused_before_a_pod_is_rented(monkeypatch):

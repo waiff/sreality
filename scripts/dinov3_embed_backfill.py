@@ -199,13 +199,28 @@ def _download_decode(r2, rows: list, workers: int):
     return decoded, failed
 
 
-def _scalar(conn, sql: str, params: dict[str, Any] | None = None) -> int:
+def _scalar(conn, sql: str, params: dict[str, Any] | None = None,
+            timeout_ms: int = SELECT_TIMEOUT_MS) -> int:
     with conn.transaction(), conn.cursor() as cur:
         # SET is a utility statement — it cannot take a bound parameter.
-        cur.execute(f"SET LOCAL statement_timeout = {int(SELECT_TIMEOUT_MS)}")
+        cur.execute(f"SET LOCAL statement_timeout = {int(timeout_ms)}")
         cur.execute(sql, params or {})
         row = cur.fetchone()
     return int(row[0]) if row else 0
+
+
+def embedded_count(conn, identity: dict[str, Any],
+                   timeout_ms: int = SELECT_TIMEOUT_MS) -> int:
+    """Rows written under this exact six-fact identity.
+
+    Public because it is also read from OUTSIDE the pod: this lane keeps no marker
+    column, so the count of its own rows is the only progress signal the dispatcher's
+    watchdog (scripts/pod_watchdog.py) has to decide whether the pod is earning its rent.
+    That caller passes a SHORT `timeout_ms`: it asks once a minute beside a live
+    production database, and a progress question worth queueing behind the bulk write is
+    not a progress question worth asking.
+    """
+    return _scalar(conn, _EMBEDDED_COUNT_SQL, identity, timeout_ms=timeout_ms)
 
 
 def select_pending(conn, *, identity: dict[str, Any], batch: int, shard: int,

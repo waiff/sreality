@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -375,6 +376,111 @@ def test_vectors_are_written_in_pgvector_text_form_with_do_nothing(monkeypatch, 
     assert insert[1] == [(1, 1, "[0.500000,-0.500000]"), (1, 2, "[0.250000,0.750000]")]
 
 
+def test_the_arm_heartbeat_is_written_with_the_vectors_it_reports(monkeypatch, tmp_path):
+    """A note that says "2 vectors" is a note whose 2 vectors are already committed —
+    same connection, same batch boundary. It is what the dispatcher's watchdog reads to
+    decide the pod is still earning its rent."""
+    from PIL import Image
+
+    for image_id in (1, 2):
+        Image.new("RGB", (8, 6)).save(tmp_path / f"{image_id}.png")
+    conn = _FakeConn({})
+    monkeypatch.setattr(embed.arms_mod, "hub_sha", lambda *a, **k: "sha1234567890")
+
+    class _Encoder:
+        def embed(self, images, batch_size):
+            return _FakeVectors([[0.5, -0.5], [0.25, 0.75]][:len(images)])
+
+    monkeypatch.setattr(embed, "load_encoder", lambda *a, **k: _Encoder())
+    beats: list[str] = []
+    _status, _written, note, _dim = embed.embed_arm(
+        conn, _arm_row(),
+        paths={1: str(tmp_path / "1.png"), 2: str(tmp_path / "2.png")},
+        device="cpu", batch_size=8, deadline=None,
+        versions="py3.12.14 torch2.6.0+cu118 transformers4.57.6",
+        on_heartbeat=beats.append)
+
+    statements = [e for e in conn.executed if "tag_head_bakeoff_arms" in e[0]]
+    heartbeat = [e for e in statements if "SET status = 'running', note" in e[0]][-1]
+    assert "2/2 vectors" in heartbeat[1]["note"] and "dim=2" in heartbeat[1]["note"]
+    # The insert is committed before the note that claims it.
+    assert conn.executed.index(heartbeat) > [i for i, e in enumerate(conn.executed)
+                                             if "INSERT INTO" in e[0]][-1]
+    # The resolved runtime is recorded on the row the run is judged by — the pod
+    # bootstraps its own interpreter and torch, so nothing else knows what ran.
+    assert "torch2.6.0+cu118" in heartbeat[1]["note"] and "torch2.6.0+cu118" in note
+    assert beats and "2/2 vectors" in beats[-1]
+
+
+def test_a_running_arm_left_by_a_killed_pod_is_picked_up_again():
+    """The 2026-09-08 pod was killed mid-run; a status of `running` must never be read
+    as "someone else is on it". The vectors, not the status, are the record of work."""
+    rows = [
+        _arm_row(id=1, arm="stale-running", status="running"),
+        _arm_row(id=2, arm="finished", status="ok"),
+    ]
+    assert [a["arm"] for a in embed.pending_arms(rows)] == ["stale-running"]
+
+
+class _CtxConn(_FakeConn):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_the_payloads_first_write_is_the_boot_heartbeat(monkeypatch):
+    """Before the manifest, before the image cache, before a byte of weights. Without
+    it the dispatcher cannot tell "the clone or the install failed" from "the weights
+    are still downloading" — which is exactly what 2026-09-08 could not tell."""
+    import psycopg
+
+    conn = _CtxConn({
+        "SELECT id, label, status, manifest_key": [(1, "run one", "running", "key")],
+        "SELECT note FROM dedup_sim.tag_head_bakeoff_runs": [("manifest: 10800 images",)],
+        "SELECT id, arm, model": [],
+    })
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: conn)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgres://x")
+    assert embed.main(["--run-id=1", "--device=cpu"]) == 0
+
+    writes = [e for e in conn.executed if e[0].startswith("UPDATE")]
+    assert writes, "the payload must announce itself before it does anything expensive"
+    first = writes[0]
+    assert "tag_head_bakeoff_runs SET note" in first[0]
+    assert embed.BOOT_PREFIX in first[1]["note"]
+    assert "py" in first[1]["note"]                    # the resolved interpreter
+    assert "manifest: 10800 images" in first[1]["note"]  # the manifest's note survives
+
+
+def test_a_second_boot_replaces_the_first_rather_than_stacking():
+    """The dispatcher dates the boot stamp against its own launch: two stamps, or an
+    old one left in place, would let a previous run vouch for this pod."""
+    conn = _FakeConn({"SELECT note FROM dedup_sim.tag_head_bakeoff_runs":
+                      [("kept line\npod booted 2026-09-01T00:00:00+00:00 old\n"
+                        "pod alive 2026-09-01T00:05:00+00:00 arm x",)]})
+    embed.stamp_run(conn, run_id=1, boot="py3.12.14", alive="starting")
+    note = [e for e in conn.executed if e[0].startswith("UPDATE")][0][1]["note"]
+    assert note.count(embed.BOOT_PREFIX) == 1 and note.count(embed.ALIVE_PREFIX) == 1
+    assert "2026-09-01" not in note and "kept line" in note
+
+
+def test_the_cache_phase_heartbeats_because_it_writes_no_vector(tmp_path):
+    class _R:
+        content = b"bytes"
+
+        def raise_for_status(self):
+            return None
+
+    doc = {"images": {str(i): {"url": f"u{i}"} for i in range(1, 601)}}
+    beats: list[tuple[int, int]] = []
+    embed.cache_images(doc, cache_dir=str(tmp_path), workers=4,
+                       get=lambda url, **kw: _R(),
+                       on_progress=lambda done, total: beats.append((done, total)))
+    assert beats == [(250, 600), (500, 600)]
+
+
 def test_the_loader_is_chosen_by_family_not_by_a_stored_class_name():
     assert embed._model_class_for("image_embeds") == "CLIPVisionModelWithProjection"
     assert embed._model_class_for("attention_pool") == "SiglipVisionModel"
@@ -461,6 +567,83 @@ def test_pod_env_forwards_by_name_only(monkeypatch):
     monkeypatch.setenv("SUPABASE_DB_URL", "postgres://secret")
     env = dispatch.pod_env()
     assert env == {"SUPABASE_DB_URL": "postgres://secret"}
+
+
+# --- what the watchdog reads ---------------------------------------------------
+
+LAUNCHED = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)
+
+
+def _progress_conn(*, arms, run_note):
+    return _FakeConn({
+        "FROM dedup_sim.tag_head_bakeoff_arms a": arms,
+        "SELECT note FROM dedup_sim.tag_head_bakeoff_runs": [(run_note,)],
+    })
+
+
+def test_a_stale_boot_stamp_does_not_vouch_for_this_pod():
+    # The failure this guards: a re-dispatch reading the PREVIOUS run's boot line, never
+    # firing the bootstrap deadline, and paying out the whole window again.
+    conn = _progress_conn(arms=[("a", "pending", None, 0)],
+                          run_note="pod booted 2026-09-07T09:00:00+00:00 py3.12.14")
+    reading = dispatch.read_bakeoff_progress(conn, run_id=1, only=[],
+                                             launched_at=LAUNCHED, baseline_vectors=0)
+    assert reading.booted is False
+
+
+def test_a_boot_stamp_from_this_dispatch_counts_as_alive():
+    conn = _progress_conn(arms=[("a", "running", None, 0)],
+                          run_note="pod booted 2026-09-08T12:00:30+00:00 py3.12.14")
+    assert dispatch.read_bakeoff_progress(conn, run_id=1, only=[], launched_at=LAUNCHED,
+                                          baseline_vectors=0).booted is True
+
+
+def test_vectors_above_the_baseline_are_proof_of_life_on_their_own():
+    conn = _progress_conn(arms=[("a", "running", None, 900)], run_note=None)
+    assert dispatch.read_bakeoff_progress(conn, run_id=1, only=[], launched_at=LAUNCHED,
+                                          baseline_vectors=0).booted is True
+
+
+def test_the_marker_moves_with_a_heartbeat_even_when_no_vector_is_written():
+    # Fetching the manifest and filling the ~10.8k image cache writes no vector; without
+    # this the stall deadline would tear down a pod that is working.
+    early = _progress_conn(arms=[("a", "running", None, 0)],
+                           run_note="pod alive 2026-09-08T12:01:00+00:00 caching 250/10800")
+    later = _progress_conn(arms=[("a", "running", None, 0)],
+                           run_note="pod alive 2026-09-08T12:06:00+00:00 caching 5000/10800")
+    assert (dispatch.read_bakeoff_progress(early, run_id=1, only=[], launched_at=LAUNCHED,
+                                           baseline_vectors=0).marker
+            != dispatch.read_bakeoff_progress(later, run_id=1, only=[],
+                                              launched_at=LAUNCHED,
+                                              baseline_vectors=0).marker)
+
+
+def test_terminal_means_every_arm_this_dispatch_asked_for():
+    arms = [("a", "ok", None, 5400), ("b", "failed", None, 0),
+            (arms_mod.STORED_CLIP_ARM, "pending", None, 0)]
+    conn = _progress_conn(arms=arms, run_note=None)
+    # The zero-GPU arm is the manifest stage's business and never blocks the teardown.
+    assert dispatch.read_bakeoff_progress(conn, run_id=1, only=[], launched_at=LAUNCHED,
+                                          baseline_vectors=0).terminal is True
+
+    pending = _progress_conn(arms=[("a", "ok", None, 5400), ("b", "running", None, 10)],
+                             run_note=None)
+    assert dispatch.read_bakeoff_progress(pending, run_id=1, only=[],
+                                          launched_at=LAUNCHED,
+                                          baseline_vectors=0).terminal is False
+    # Narrowed to one arm, the arms nobody asked for cannot keep the pod alive.
+    narrowed = _progress_conn(arms=[("a", "ok", None, 5400), ("b", "pending", None, 0)],
+                              run_note=None)
+    assert dispatch.read_bakeoff_progress(narrowed, run_id=1, only=["a"],
+                                          launched_at=LAUNCHED,
+                                          baseline_vectors=0).terminal is True
+
+
+def test_no_database_on_the_runner_means_no_watchdog_and_a_loud_warning(monkeypatch, caplog):
+    monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
+    with caplog.at_level("WARNING"):
+        assert dispatch.make_watchdog(_args(stage="embed", run_id=1), only=[]) is None
+    assert "no watchdog" in caplog.text
 
 
 def test_the_train_stage_shells_out_rather_than_importing_the_sibling():

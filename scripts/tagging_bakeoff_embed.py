@@ -20,7 +20,16 @@ A 10.8k bake-off is a different problem and gets a different answer.)
 RESUMABLE WITHOUT A MARKER COLUMN, the same way the production lane is: the vectors
 table IS the checkpoint. An arm's already-written image_ids are read once into a set and
 skipped, so a pod dying at arm 6 of 10 costs the arms it had not started. Re-running is
-a no-op.
+a no-op — including an arm a killed pod left `running`, which `pending_arms` picks up
+again precisely because the VECTORS, not the status, are the record of work done.
+
+IT HEARTBEATS INTO ITS OWN ROWS, AND THE FIRST DB WRITE IS THE BOOT STAMP — before the
+manifest, before a single weight byte. The dispatcher's watchdog
+(`scripts/pod_watchdog.py`) reads these rows to decide whether to tear the pod down
+early, and without a boot stamp it cannot tell "the clone or the install failed" (the
+2026-09-08 failure: $0.50 for zero vectors) from "the weights are still downloading". No
+migration: the boot/alive lines live in the run row's `note`, per-arm progress in the arm
+row's `note`, both carrying the resolved python/torch/transformers versions.
 
 A GATED ARM WITH NO RESOLVABLE REVISION IS SKIPPED, NEVER LOADED. `status='skipped'`
 with the reason in `note`. Loading `main` unpinned would write vectors nothing can ever
@@ -48,7 +57,8 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Sequence
+from datetime import datetime, timezone
+from typing import Any, Callable, Sequence
 
 from scraper import dinov3_tagger, image_storage
 from scripts import tagging_bakeoff_arms as arms_mod
@@ -59,6 +69,16 @@ DEFAULT_CACHE_DIR = "/workspace/tagging-bakeoff-cache"
 # Big enough that the per-statement overhead disappears, small enough that a killed pod
 # loses at most this much work on the arm it was running.
 WRITE_BATCH = 500
+# How often the cache phase stamps the run note. The dispatcher's stall deadline is
+# minutes and downloading ~10.8k images takes longer than that gap between vector
+# writes, so the phase that writes no vectors still has to say it is alive.
+CACHE_HEARTBEAT_EVERY = 250
+
+# The two lines this payload OWNS inside `tag_head_bakeoff_runs.note`. Rewritten, never
+# appended to, so a re-dispatch cannot be mistaken for the previous one's boot — the
+# dispatcher compares the stamp against its own launch time.
+BOOT_PREFIX = "pod booted "
+ALIVE_PREFIX = "pod alive "
 
 _RUN_SQL = """
     SELECT id, label, status, manifest_key
@@ -104,6 +124,71 @@ _SKIP_ARM_SQL = """
     SET status = 'skipped', note = %(note)s
     WHERE id = %(arm_id)s
 """
+
+# The per-arm heartbeat. `status='running'` is restated on purpose: an arm a killed pod
+# left `running` is resumable, so the status alone never means "someone is working on
+# it" — the timestamp in the note is what says that.
+_HEARTBEAT_ARM_SQL = """
+    UPDATE dedup_sim.tag_head_bakeoff_arms
+    SET status = 'running', note = %(note)s
+    WHERE id = %(arm_id)s
+"""
+
+_READ_RUN_NOTE_SQL = """
+    SELECT note FROM dedup_sim.tag_head_bakeoff_runs WHERE id = %(run_id)s
+"""
+
+_WRITE_RUN_NOTE_SQL = """
+    UPDATE dedup_sim.tag_head_bakeoff_runs SET note = %(note)s WHERE id = %(run_id)s
+"""
+
+
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def runtime_versions() -> str:
+    """The interpreter and libraries this pod actually resolved.
+
+    Recorded, not pinned: the pod bootstraps its own 3.12 and installs whatever the
+    cu118 index currently offers (`scripts/pod_bootstrap.py`), so the only honest record
+    of what ran is the one written at run time into the rows the run is judged by.
+    """
+    parts = [f"py{sys.version.split()[0]}"]
+    for name in ("torch", "transformers"):
+        try:
+            module = __import__(name)
+            parts.append(f"{name}{getattr(module, '__version__', '?')}")
+        except Exception:  # noqa: BLE001 - a missing library IS the record here
+            parts.append(f"{name}=absent")
+    return " ".join(parts)
+
+
+def stamp_run(conn: Any, *, run_id: int, boot: str | None = None,
+              alive: str | None = None) -> None:
+    """Rewrite this payload's heartbeat lines in the run note, leaving the manifest
+    stage's own note intact. Read-modify-write is safe here: one pod writes this row."""
+    with conn.cursor() as cur:
+        cur.execute(_READ_RUN_NOTE_SQL, {"run_id": run_id})
+        row = cur.fetchone()
+    note = (row[0] if row else None) or ""
+    lines = [
+        line for line in note.splitlines()
+        if not line.startswith(ALIVE_PREFIX)
+        and not (boot is not None and line.startswith(BOOT_PREFIX))
+    ]
+    # The manifest's note is trimmed if anything has to give: the heartbeat is what the
+    # watchdog reads, and a truncated one would read as a pod that never booted.
+    kept = "\n".join(lines)[:3000]
+    managed = []
+    if boot is not None:
+        managed.append(f"{BOOT_PREFIX}{iso_now()} {boot}")
+    if alive is not None:
+        managed.append(f"{ALIVE_PREFIX}{iso_now()} {alive}")
+    with conn.cursor() as cur:
+        cur.execute(_WRITE_RUN_NOTE_SQL,
+                    {"run_id": run_id,
+                     "note": "\n".join([kept, *managed] if kept else managed)})
 
 
 class SimpleEncoder:
@@ -257,8 +342,9 @@ def fetch_manifest(*, manifest_key: str) -> dict[str, Any]:
     return json.loads(r2.download_bytes(manifest_key).decode("utf-8"))
 
 
-def cache_images(manifest: dict[str, Any], *, cache_dir: str,
-                 workers: int, get: Any = None) -> dict[int, str]:
+def cache_images(manifest: dict[str, Any], *, cache_dir: str, workers: int,
+                 get: Any = None,
+                 on_progress: Callable[[int, int], None] | None = None) -> dict[int, str]:
     """{image_id: local path}, downloaded once and reused by every arm. Resumable — a
     file already on disk is not re-fetched, so a restarted pod pays only for what it
     had not finished."""
@@ -284,14 +370,21 @@ def cache_images(manifest: dict[str, Any], *, cache_dir: str,
                 time.sleep(1.0 * (attempt + 1))
         return image_id, None
 
+    items = manifest.get("images", {})
     out: dict[int, str] = {}
     failed = 0
+    seen = 0
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        for image_id, path in pool.map(_one, manifest.get("images", {}).items()):
+        for image_id, path in pool.map(_one, items.items()):
+            seen += 1
             if path is None:
                 failed += 1
             else:
                 out[image_id] = path
+            # The pod writes no vector during this phase; without a heartbeat the
+            # dispatcher's stall deadline would tear down a pod that is working.
+            if on_progress is not None and seen % CACHE_HEARTBEAT_EVERY == 0:
+                on_progress(seen, len(items))
     LOG.info("CACHE ready images=%d failed=%d dir=%s", len(out), failed, cache_dir)
     return out
 
@@ -363,8 +456,9 @@ def pending_arms(arms: Sequence[dict[str, Any]], *,
 
 
 def embed_arm(conn: Any, arm: dict[str, Any], *, paths: dict[int, str], device: str,
-              batch_size: int,
-              deadline: float | None) -> tuple[str, int, str, int | None]:
+              batch_size: int, deadline: float | None, versions: str = "",
+              on_heartbeat: Callable[[str], None] | None = None,
+              ) -> tuple[str, int, str, int | None]:
     """Embed everything this arm still owes. Returns (status, written, note, dim).
 
     `dim` is the width of a vector this pass actually produced, or None when it produced
@@ -398,7 +492,7 @@ def embed_arm(conn: Any, arm: dict[str, Any], *, paths: dict[int, str], device: 
         if deadline and time.monotonic() >= deadline:
             elapsed = time.monotonic() - t0
             note = (f"time budget reached at {written}/{len(todo)} "
-                    f"({written / elapsed if elapsed else 0:.1f} img/s)")
+                    f"({written / elapsed if elapsed else 0:.1f} img/s); {versions}")
             LOG.warning("ARM %s %s", arm["arm"], note)
             return "failed", written, note, dim
         chunk = todo[start:start + WRITE_BATCH]
@@ -418,11 +512,20 @@ def embed_arm(conn: Any, arm: dict[str, Any], *, paths: dict[int, str], device: 
         LOG.info("ARM %s progress=%d/%d dim=%d %.1f img/s",
                  arm["arm"], written, len(todo), dim,
                  written / elapsed if elapsed else 0.0)
+        # THE HEARTBEAT, written with the vectors it reports: same connection, same
+        # batch boundary, so a note that says "3000 vectors" is a note whose 3000
+        # vectors are already committed.
+        beat = (f"{iso_now()} running {written}/{len(todo)} vectors dim={dim} "
+                f"on {device}; {versions}")
+        with conn.cursor() as cur:
+            cur.execute(_HEARTBEAT_ARM_SQL, {"arm_id": arm["id"], "note": beat[:2000]})
+        if on_heartbeat is not None:
+            on_heartbeat(f"arm {arm['arm']} {written}/{len(todo)} vectors")
 
     elapsed = time.monotonic() - t0
     rate = written / elapsed if elapsed else 0.0
     note = (f"{written} vectors at revision {revision}; {rate:.1f} img/s end-to-end "
-            f"(decode + forward), {elapsed:.0f}s on {device}")
+            f"(decode + forward), {elapsed:.0f}s on {device}; {versions}")
     return "ok", written, note, dim
 
 
@@ -472,11 +575,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     import psycopg
 
+    versions = runtime_versions()
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
         run = read_run(conn, run_id=args.run_id)
         if run is None:
             LOG.error("no bake-off run with id=%d", args.run_id)
             return 1
+        # THE FIRST DB WRITE, deliberately before the manifest, the cache and any weight
+        # download: it is the only thing that tells the dispatcher's watchdog the clone
+        # and the install actually worked (scripts/pod_watchdog.py).
+        if not args.dry_run:
+            stamp_run(conn, run_id=args.run_id, boot=versions, alive="starting")
+            LOG.info("BOOT %s", versions)
         arms = read_arms(conn, run_id=args.run_id)
         todo_arms = pending_arms(arms, only=only)
         LOG.info("BAKEOFF run_id=%d label=%r arms=%d pending=%d manifest=%s",
@@ -496,8 +606,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                       args.run_id)
             return 1
 
+        def alive(message: str) -> None:
+            try:
+                stamp_run(conn, run_id=args.run_id, alive=message)
+            except Exception as exc:  # noqa: BLE001 - a heartbeat must never kill a run
+                LOG.warning("heartbeat write failed (continuing): %s", exc)
+
+        alive("fetching manifest")
         manifest = fetch_manifest(manifest_key=run["manifest_key"])
-        paths = cache_images(manifest, cache_dir=args.cache_dir, workers=args.workers)
+        paths = cache_images(
+            manifest, cache_dir=args.cache_dir, workers=args.workers,
+            on_progress=lambda done, total: alive(f"caching images {done}/{total}"))
         if not paths:
             LOG.error("no image could be downloaded — presigned URLs expire after "
                       "%ss; re-run the manifest stage if this run is old",
@@ -508,9 +627,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         results: list[tuple[str, str, int]] = []
         for arm in todo_arms:
             try:
+                alive(f"arm {arm['arm']} loading")
                 status, written, note, dim = embed_arm(
                     conn, arm, paths=paths, device=device,
-                    batch_size=args.batch_size, deadline=deadline)
+                    batch_size=args.batch_size, deadline=deadline,
+                    versions=versions, on_heartbeat=alive)
             except Exception as exc:  # noqa: BLE001 - one bad arm must not lose the rest
                 status, written, note, dim = "failed", 0, f"{type(exc).__name__}: {exc}", None
                 LOG.exception("ARM %s failed", arm["arm"])

@@ -1998,6 +1998,22 @@
           "options": null
         },
         {
+          "name": "bootstrap_deadline_seconds",
+          "description": "Kill the pod if no vector reaches the database within this long (fetch + 3.12 venv + torch + weights + the first chunk). The 2026-09-08 failure mode: a broken bootstrap billed for the whole window.",
+          "required": false,
+          "type": "string",
+          "default": "1200",
+          "options": null
+        },
+        {
+          "name": "stall_deadline_seconds",
+          "description": "Kill the pod if a working pod stops writing vectors for this long.",
+          "required": false,
+          "type": "string",
+          "default": "900",
+          "options": null
+        },
+        {
           "name": "dry_run",
           "description": "Print the resolved identity, the pending count and the pod plan. Launches nothing, writes nothing, spends nothing.",
           "required": false,
@@ -6190,6 +6206,22 @@
           "required": false,
           "type": "string",
           "default": "7200",
+          "options": null
+        },
+        {
+          "name": "bootstrap_deadline_seconds",
+          "description": "embed only: kill the pod if no boot heartbeat reaches the database within this long (fetch + 3.12 venv + torch + first weights). The 2026-09-08 failure: 8115s billed for zero vectors.",
+          "required": false,
+          "type": "string",
+          "default": "1200",
+          "options": null
+        },
+        {
+          "name": "stall_deadline_seconds",
+          "description": "embed only: kill the pod if a booted pod stops making progress for this long.",
+          "required": false,
+          "type": "string",
+          "default": "900",
           "options": null
         },
         {

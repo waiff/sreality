@@ -263,17 +263,100 @@ def test_wait_for_exit_returns_on_terminal_status(monkeypatch):
         _FakeResponse(200, {"desiredStatus": "RUNNING"}),
         _FakeResponse(200, {"desiredStatus": "EXITED"}),
     ]
-    status, timed_out = _client(session).wait_for_exit("pod123", max_wait_s=5, poll_interval_s=0)
+    status, timed_out, stop_reason = _client(session).wait_for_exit(
+        "pod123", max_wait_s=5, poll_interval_s=0)
     assert status == "EXITED"
     assert timed_out is False
+    assert stop_reason is None
 
 
 def test_wait_for_exit_times_out():
     session = _FakeSession()
     session.get_responses = [_FakeResponse(200, {"desiredStatus": "RUNNING"})] * 10
-    status, timed_out = _client(session).wait_for_exit("pod123", max_wait_s=0, poll_interval_s=0)
+    status, timed_out, stop_reason = _client(session).wait_for_exit(
+        "pod123", max_wait_s=0, poll_interval_s=0)
     assert timed_out is True
     assert status == "UNKNOWN"
+    assert stop_reason is None
+
+
+# --- the progress hook: the only way a blind wait can end early ----------------
+# 2026-09-08: a pod died in its first seconds and was billed for the full 8,115s
+# window, because nothing in this client could ask whether it was doing anything.
+
+
+def test_a_progress_hook_can_end_the_wait_early_and_says_why():
+    session = _FakeSession()
+    session.get_responses = [_FakeResponse(200, {"desiredStatus": "RUNNING"})] * 10
+    calls: list[float] = []
+
+    def _progress(elapsed_s, context):
+        calls.append(elapsed_s)
+        return "bootstrap-deadline: nothing ever booted" if len(calls) == 2 else None
+
+    status, timed_out, stop_reason = _client(session).wait_for_exit(
+        "pod123", max_wait_s=60, poll_interval_s=0, progress=_progress)
+    assert stop_reason == "bootstrap-deadline: nothing ever booted"
+    assert timed_out is False and status == "RUNNING"
+    assert len(calls) == 2
+
+
+def test_run_job_hands_the_progress_hook_the_pod_it_is_pricing_and_still_terminates():
+    session = _FakeSession()
+    session.launch_responses = [_FakeResponse(201, {"id": "pod123", "costPerHr": 0.22})]
+    session.get_responses = [_FakeResponse(200, {"desiredStatus": "RUNNING"})] * 5
+    session.get_logs_response = _FakeResponse(200, lines=[])
+    seen: list[Any] = []
+
+    def _progress(elapsed_s, context):
+        seen.append(context)
+        return "stall-deadline: booted, then nothing"
+
+    result = _client(session).run_job(
+        name="smoke", image="x", gpu_type_id="rtx3090", start_cmd=["true"],
+        max_wait_s=9999, poll_interval_s=0, progress=_progress,
+    )
+    assert result.stop_reason == "stall-deadline: booted, then nothing"
+    # The hook is told what it needs to price the decision it just made.
+    assert seen[0].pod_id == "pod123" and seen[0].cost_per_hr == 0.22
+    assert seen[0].gpu_type_id == "rtx3090"
+    # The point of the whole module: the pod is gone either way.
+    assert session.calls[-1][0] == "DELETE"
+
+
+def test_run_job_still_terminates_when_the_progress_hook_itself_raises():
+    session = _FakeSession()
+    session.launch_responses = [_FakeResponse(201, {"id": "pod123", "costPerHr": 0.22})]
+    session.get_responses = [_FakeResponse(200, {"desiredStatus": "RUNNING"})] * 5
+
+    def _boom(elapsed_s, context):
+        raise RuntimeError("watchdog blew up")
+
+    with pytest.raises(RuntimeError):
+        _client(session).run_job(
+            name="smoke", image="x", gpu_type_id="rtx3090", start_cmd=["true"],
+            max_wait_s=9999, poll_interval_s=0, progress=_boom,
+        )
+    assert session.calls[-1][0] == "DELETE"
+
+
+def test_run_job_with_fallback_passes_the_progress_hook_to_every_attempt():
+    session = _FakeSession()
+    session.launch_responses = [
+        _FakeResponse(500, text="There are no instances currently available"),
+        _FakeResponse(201, {"id": "pod2", "costPerHr": 0.16}),
+    ]
+    session.get_responses = [_FakeResponse(200, {"desiredStatus": "RUNNING"})] * 5
+    session.get_logs_response = _FakeResponse(200, lines=[])
+
+    result = _client(session).run_job_with_fallback(
+        name="smoke", image="x",
+        gpu_options=[GpuOption("a", "A", 24, 0.1), GpuOption("b", "B", 24, 0.2)],
+        start_cmd=["true"], max_wait_s=9999, poll_interval_s=0,
+        progress=lambda elapsed_s, context: "all-terminal: done",
+    )
+    assert result.pod_id == "pod2"
+    assert result.stop_reason == "all-terminal: done"
 
 
 # --- fetch_logs ----------------------------------------------------------------

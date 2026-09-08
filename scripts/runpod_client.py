@@ -16,6 +16,11 @@ documented "run once and stop" flag, so a job that errors after start would
 otherwise keep billing indefinitely — the bounded `wait_for_exit` timeout plus the
 unconditional `finally` terminate is the actual guarantee, not the container's own
 exit behavior.
+
+That guarantee bounds the bill; it does not make it small. A pod that dies in its
+first seconds still bills for the whole window (2026-09-08: 8,115 s for zero vectors),
+so `run_job` also accepts a `progress` hook that can end the wait early —
+`scripts/pod_watchdog.py` is the one this program uses.
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -58,6 +63,16 @@ class GpuOption:
 
 
 @dataclass(frozen=True)
+class PodContext:
+    """What a `progress` hook is told about the pod it is watching — enough to price
+    the decision it is about to make, and nothing this module has to interpret."""
+
+    pod_id: str
+    gpu_type_id: str
+    cost_per_hr: float | None
+
+
+@dataclass(frozen=True)
 class JobResult:
     pod_id: str
     gpu_type_id: str
@@ -66,6 +81,9 @@ class JobResult:
     logs: str
     elapsed_s: float
     cost_per_hr: float | None
+    # Set when a `progress` hook asked for the teardown (see `run_job`): which watchdog
+    # case fired and why. None means the wait ran its natural course.
+    stop_reason: str | None = None
 
 
 class RunPodClient:
@@ -166,11 +184,23 @@ class RunPodClient:
             raise RunPodError(f"pod terminate failed ({resp.status_code}): {resp.text}")
 
     def wait_for_exit(
-        self, pod_id: str, *, max_wait_s: float, poll_interval_s: float = 10.0
-    ) -> tuple[str, bool]:
-        """(final desiredStatus, timed_out). Polls until the pod reports EXITED/
-        TERMINATED or max_wait_s elapses — never raises on timeout, the caller
-        decides whether a timeout is a failure.
+        self,
+        pod_id: str,
+        *,
+        max_wait_s: float,
+        poll_interval_s: float = 10.0,
+        progress: Callable[[float, PodContext | None], str | None] | None = None,
+        context: "PodContext | None" = None,
+    ) -> tuple[str, bool, str | None]:
+        """(final desiredStatus, timed_out, stop_reason). Polls until the pod reports
+        EXITED/TERMINATED, a `progress` hook asks to stop, or max_wait_s elapses — never
+        raises on timeout, the caller decides whether a timeout is a failure.
+
+        `progress` is called once per poll with (elapsed_s, context) and returns None to
+        keep waiting or a reason string to stop NOW. It is the only way this bounded
+        wait can end early, because the pod itself never says anything (below), and a
+        pod that died in its first seconds is otherwise billed for the whole window —
+        which is exactly what happened on 2026-09-08. See `scripts/pod_watchdog.py`.
 
         A real live run (2026-08-06) rented a pod for the full wait window and
         `desiredStatus` never left RUNNING, even though the startup command
@@ -181,15 +211,20 @@ class RunPodClient:
         bounded job, not a failure signal on its own; a real batch job (Wave 5)
         should detect its own completion externally (e.g. a row it writes to
         Postgres/R2) rather than waiting on this to flip."""
-        deadline = time.monotonic() + max_wait_s
+        t0 = time.monotonic()
+        deadline = t0 + max_wait_s
         status = "UNKNOWN"
         while time.monotonic() < deadline:
             pod = self.get_pod(pod_id)
             status = pod.get("desiredStatus", "UNKNOWN")
             if status in _TERMINAL_STATUSES:
-                return status, False
+                return status, False, None
+            if progress is not None:
+                stop = progress(time.monotonic() - t0, context)
+                if stop:
+                    return status, False, stop
             time.sleep(poll_interval_s)
-        return status, True
+        return status, True, None
 
     def fetch_logs(self, pod_id: str, *, max_lines: int = 500, read_timeout_s: float = 10.0) -> str:
         """Best-effort log fetch over the documented SSE logs endpoint. Logs are
@@ -235,12 +270,16 @@ class RunPodClient:
         container_disk_gb: int = 10,
         volume_gb: int = 1,
         env: dict[str, str] | None = None,
+        progress: Callable[[float, PodContext | None], str | None] | None = None,
     ) -> JobResult:
         """Launch → wait → collect logs → ALWAYS terminate, even if a step above
         raises. This is the one entry point every wave's RunPod usage should go
         through, so the teardown guarantee is enforced once, not re-implemented
         per caller. `env` is passed to the pod's process environment (see
-        `launch_pod`) and is never logged."""
+        `launch_pod`) and is never logged.
+
+        `progress` (see `scripts/pod_watchdog.py`) can end the wait early; the
+        `finally` teardown is unchanged and still the actual cost guarantee."""
         t0 = time.monotonic()
         pod = self.launch_pod(
             name=name,
@@ -255,8 +294,13 @@ class RunPodClient:
         cost_per_hr = pod.get("costPerHr")
         LOG.info("launched pod %s (%s, $%s/hr)", pod_id, gpu_type_id, cost_per_hr)
         try:
-            status, timed_out = self.wait_for_exit(
-                pod_id, max_wait_s=max_wait_s, poll_interval_s=poll_interval_s
+            status, timed_out, stop_reason = self.wait_for_exit(
+                pod_id,
+                max_wait_s=max_wait_s,
+                poll_interval_s=poll_interval_s,
+                progress=progress,
+                context=PodContext(pod_id=pod_id, gpu_type_id=gpu_type_id,
+                                   cost_per_hr=cost_per_hr),
             )
             logs = self.fetch_logs(pod_id)
             return JobResult(
@@ -267,6 +311,7 @@ class RunPodClient:
                 logs=logs,
                 elapsed_s=time.monotonic() - t0,
                 cost_per_hr=cost_per_hr,
+                stop_reason=stop_reason,
             )
         finally:
             LOG.info("terminating pod %s", pod_id)
@@ -284,6 +329,7 @@ class RunPodClient:
         container_disk_gb: int = 10,
         volume_gb: int = 1,
         env: dict[str, str] | None = None,
+        progress: Callable[[float, PodContext | None], str | None] | None = None,
     ) -> JobResult:
         """Try each GPU type in order (cheapest first, per `eligible_gpus`) until
         one actually has capacity. Only `NoCapacityError` moves on to the next
@@ -305,6 +351,7 @@ class RunPodClient:
                     container_disk_gb=container_disk_gb,
                     volume_gb=volume_gb,
                     env=env,
+                    progress=progress,
                 )
             except NoCapacityError as exc:
                 LOG.warning("no capacity for %s, trying next option: %s", gpu.id, exc)
