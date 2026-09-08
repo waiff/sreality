@@ -552,7 +552,9 @@ def test_the_pod_command_carries_no_secret_and_refuses_unsafe_interpolation():
     script = plan.start_cmd[-1]
     assert "scripts.tagging_bakeoff_embed" in script and "--run-id=7" in script
     assert "dinov3-b16@768/bf16" in script          # arm names carry @ and / legitimately
-    for leaked in ("SUPABASE_DB_URL", "HF_TOKEN", "R2_SECRET"):
+    # A VALUE is the leak; the embedded reporter reads SUPABASE_DB_URL by NAME, which is
+    # exactly how it avoids carrying one (the value arrives in the REST body's env).
+    for leaked in ("SUPABASE_DB_URL=", "HF_TOKEN", "R2_SECRET"):
         assert leaked not in script
     with pytest.raises(ValueError, match="unsafe git ref"):
         dispatch.build_start_cmd(ref="main; rm -rf /", module="m", payload_args=[])
@@ -567,6 +569,23 @@ def test_pod_env_forwards_by_name_only(monkeypatch):
     monkeypatch.setenv("SUPABASE_DB_URL", "postgres://secret")
     env = dispatch.pod_env()
     assert env == {"SUPABASE_DB_URL": "postgres://secret"}
+
+
+def test_the_pod_is_told_which_row_to_report_its_bootstrap_steps_into(monkeypatch):
+    # Without this the bootstrap is mute until the payload's first write, which is what
+    # made the 2026-09-08 retry undiagnosable (~$0.08 and no cause).
+    for key in dispatch.POD_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgres://secret")
+    env = dispatch.pod_env(run_id=7)
+    assert env["HEARTBEAT_RUN_ID"] == "7"
+    assert "%(note)s" in env["HEARTBEAT_SQL"] and "%(run_id)s" in env["HEARTBEAT_SQL"]
+    # It must UPDATE this lane's run row and nothing else, and it must not append
+    # without bound: one `pod step` line at a time.
+    assert "dedup_sim.tag_head_bakeoff_runs" in env["HEARTBEAT_SQL"]
+    assert "regexp_replace" in env["HEARTBEAT_SQL"] and "left(" in env["HEARTBEAT_SQL"]
+    # No run id (the manifest/train stages) means no heartbeat wiring at all.
+    assert "HEARTBEAT_SQL" not in dispatch.pod_env()
 
 
 # --- what the watchdog reads ---------------------------------------------------
@@ -637,6 +656,44 @@ def test_terminal_means_every_arm_this_dispatch_asked_for():
     assert dispatch.read_bakeoff_progress(narrowed, run_id=1, only=["a"],
                                           launched_at=LAUNCHED,
                                           baseline_vectors=0).terminal is True
+
+
+def test_a_bootstrap_step_is_progress_and_reaches_the_watchdog(monkeypatch):
+    # The pod is still installing torch: no vectors, no payload boot stamp — and yet the
+    # run is advancing. The step line's own timestamp is what says so.
+    step = ('pod step {"ts": "2026-09-08T12:04:00+00:00", "msg": "step=torch ok", '
+            '"pod": "bsg9k5ee9y6jcm", "python": "3.10.12"}')
+    conn = _progress_conn(arms=[("a", "pending", None, 0)],
+                          run_note=f"manifest: 15 heads\n{step}")
+    reading = dispatch.read_bakeoff_progress(conn, run_id=1, only=[],
+                                             launched_at=LAUNCHED, baseline_vectors=0)
+    assert reading.booted is False           # the payload genuinely has not started
+    assert "step=torch ok" in reading.step   # but the bootstrap is talking
+    assert "2026-09-08T12:04:00" in reading.marker
+
+
+def test_the_exit_trap_s_error_tail_is_what_the_dispatcher_reads_back():
+    # The whole point: the next failure names its own step and ships its own error text.
+    step = ('pod step {"ts": "2026-09-08T12:09:00+00:00", "msg": "exit=1 step=repo", '
+            '"tail": "ERROR: No matching distribution found for torch"}')
+    conn = _progress_conn(arms=[("a", "pending", None, 0)], run_note=step)
+    reading = dispatch.read_bakeoff_progress(conn, run_id=1, only=[],
+                                             launched_at=LAUNCHED, baseline_vectors=0)
+    assert "exit=1 step=repo" in reading.step
+    assert "No matching distribution" in reading.step
+
+
+def test_a_dry_run_proves_the_generated_bootstrap_before_a_pod_is_rented(monkeypatch,
+                                                                        caplog):
+    # The self-check EXECUTES the script offline (every real step stubbed) and asserts
+    # the EXIT trap names a forced failure. A syntax error must not cost a GPU-hour.
+    monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
+    with caplog.at_level("INFO"):
+        rc = dispatch.main(["--stage", "embed", "--run-id", "7", "--dry-run"])
+    assert rc == 0
+    assert "preflight[clean]: rc=0 OK" in caplog.text
+    assert "preflight[torch]: rc=1 OK" in caplog.text
+    assert "DRY RUN" in caplog.text
 
 
 def test_no_database_on_the_runner_means_no_watchdog_and_a_loud_warning(monkeypatch, caplog):

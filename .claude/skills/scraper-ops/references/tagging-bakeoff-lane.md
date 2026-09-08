@@ -81,12 +81,21 @@ ceiling: the pod is torn down when it expires, whatever the job is doing.
 
 **The ceiling is not the plan — the watchdog is** (`scripts/pod_watchdog.py`, since
 2026-09-08). It polls this run's own rows every 60 s from the runner and terminates the pod
-when: no boot heartbeat arrives within `bootstrap_deadline_seconds` (default 1200), a booted
-pod stops progressing for `stall_deadline_seconds` (default 900), or **every arm is
-terminal** (`ok`/`failed`/`skipped`) — the last one being the ordinary happy path, which
-now stops paying the moment the work is done rather than at the end of the window. It logs
-the case and a spend estimate; a bootstrap or stall teardown **fails the workflow**, because
-a green run that embedded nothing is precisely what the incident looked like in Actions.
+when: no NEW heartbeat arrives within `bootstrap_deadline_seconds` (default **1800**) while
+the payload has yet to start, progress stops for `stall_deadline_seconds` (default 900), or
+**every arm is terminal** (`ok`/`failed`/`skipped`) — the last one being the ordinary happy
+path, which now stops paying the moment the work is done rather than at the end of the
+window. It logs the case and a spend estimate; a bootstrap or stall teardown **fails the
+workflow**, because a green run that embedded nothing is precisely what the incident looked
+like in Actions.
+
+**The bootstrap reports every step** (since 2026-09-08 (g), after the retry cost ~$0.08 and
+still could not be diagnosed). `scripts/pod_report.py` is written onto the pod by the start
+command itself, runs on the **image's Python 3.10** (no repo, no venv — the things that may
+have failed), and after each step UPDATEs this run's note through the `HEARTBEAT_SQL` the
+dispatcher hands the pod in its env. So the bootstrap deadline now runs from the last STEP,
+not from launch: a slow 2 GB torch download keeps buying time, a dead clone does not. A
+background beat repeats the current step every 300 s, so silence really is silence.
 
 The tenth arm, `clip-b32-stored`, costs nothing at all — it is a `SELECT … INSERT` out of
 the live `image_clip_embeddings`, done in the manifest stage. It is the baseline every
@@ -128,17 +137,35 @@ number that decides whether a future full-corpus pass is affordable) and **the r
 is the only record of what actually ran. A `skipped` arm names why in `note` — usually a
 gated checkpoint the token could not read.
 
-While a pod is up, the same two columns are the heartbeat: the arm note is rewritten at
-every batch (`<iso> running 3000/10800 vectors dim=768 …`) and the RUN row's note carries
-two payload-owned lines, `pod booted <iso> <versions>` (its very first DB write, before the
-manifest and any weight download) and `pod alive <iso> <phase>` (rewritten through the
-phases that write no vector — fetching the manifest, filling the image cache). A run note
-with no fresh `pod booted` line means the clone or the install failed; that distinction is
-the whole reason the boot stamp is written before anything expensive:
+**The bootstrap's own steps land in the SAME run note**, one line at a time, latest-wins:
 
 ```sql
 select note from dedup_sim.tag_head_bakeoff_runs where id = N;
 ```
+
+```
+pod step {"ts": "2026-09-08T18:04:11+00:00", "msg": "step=torch ok",
+          "pod": "bsg9k5ee9y6jcm", "python": "3.10.12"}
+```
+
+The steps, in order: `deps` (psycopg for the reporter) → `fetch` (the repo at the sha) →
+`uv` → `venv` (the 3.12) → `torch` (cu118, the slow one) → `repo` (`pip install -e .[clip]`)
+→ `payload starting`. **A failure ships itself**: the start command's EXIT trap writes
+`{"msg": "exit=1 step=torch", "tail": "<the last ~3000 chars of the pod's bootstrap log>"}`
+into that same line, so the actual pip/git error text is readable from SQL and is printed in
+the dispatcher's own log after teardown. RunPod's Pod logs endpoint answers 400 — this note
+IS the pod log. `step=<name> running` lines are the 300 s beat during a long step.
+
+Only when the note carries no `pod step` line **at all** is the pod dead before the reporter
+existed (the image had no `python3`, or the container never started).
+
+While a pod is up, the same two columns are the payload's heartbeat: the arm note is rewritten at
+every batch (`<iso> running 3000/10800 vectors dim=768 …`) and the RUN row's note carries
+two payload-owned lines, `pod booted <iso> <versions>` (its very first DB write, before the
+manifest and any weight download) and `pod alive <iso> <phase>` (rewritten through the
+phases that write no vector — fetching the manifest, filling the image cache). A run note
+with no fresh `pod booted` line means the bootstrap never reached the payload — and the
+`pod step` line above says which step it died on.
 
 ## Gotchas
 
@@ -153,6 +180,11 @@ select note from dedup_sim.tag_head_bakeoff_runs where id = N;
   `uv`, builds a 3.12 venv and takes torch from the **cu118** index (widest cp312 coverage,
   and the image is CUDA 11.8-era). One module, `scripts/pod_bootstrap.py`, shared with the
   production lane; tests assert `--branch` never returns.
+- **A `dry_run: true` embed now PROVES the generated bash before any pod is rented.** The
+  dispatcher prints the whole start command and then executes it locally twice with every
+  real step stubbed — once clean, once with `torch` forced to fail — and requires the EXIT
+  trap to report `exit=1 step=torch`. A failed self-check returns 1 and says so. Free, and
+  it is the rail against a third paid-for syntax error.
 - **Re-dispatching a half-finished run needs no cleanup.** An arm a killed pod left
   `running` is picked up again — `pending_arms` treats `pending`/`running`/`failed` alike,
   and the per-image skip means the work already committed is not repeated. A `running`

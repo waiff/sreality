@@ -194,6 +194,70 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-08 (g) — **The retry died too (~$0.08 — the watchdog worked), and we still could
+  not say why. The bootstrap now reports itself.** Run 1's embed stage was re-dispatched onto
+  pod `bsg9k5ee9y6jcm` (RTX 3090) with (f)'s fixes in place. The watchdog terminated it at
+  **1,245 s** with `case=bootstrap-deadline: no heartbeat within 1200s — the pod never
+  reported Python running`. That is the watchdog doing exactly its job: the whole failure
+  cost about eight cents instead of fifty. **The cause is unknown and stays unknown** — this
+  entry records the fix for the blindness, not a diagnosis.
+  - **Why nothing could be said.** RunPod's Pod logs endpoint answers **400**, and the first
+    heartbeat was the PAYLOAD's — written only after fetch + `pip install uv` + `uv venv
+    --python 3.12` + `uv pip install torch` (2 GB, cu118) + `uv pip install -e '.[clip]'` had
+    ALL succeeded. From the runner, "the torch download is slow" and "the clone is dead" are
+    the same observation: silence. A deadline can only ever be a guess about which one it is.
+  - **The fix: step-level heartbeats from inside the bootstrap, on the IMAGE's own Python.**
+    `scripts/pod_report.py` is embedded verbatim in the start command's heredoc — it is on
+    the box before the checkout exists, and it runs on the image's 3.10, never the 3.12 venv
+    the bootstrap builds (which is one of the things that can fail). The start command
+    installs `psycopg[binary]` into that interpreter first and then calls the reporter after
+    every step: `step=deps ok`, `step=fetch ok`, `step=uv ok`, `step=venv ok`,
+    `step=torch ok`, `step=repo ok`, `step=payload starting`. A background beat repeats the
+    current step every 300 s so a long silent install still proves life, and stops before the
+    payload takes over the note.
+  - **The error ships itself.** All output is tee'd to `/workspace/bootstrap.log` and an
+    `EXIT` trap reports `exit=<code> step=<the step that failed>` with the last ~3,000
+    characters of that log — into the same row. The failing step is tracked in a shell
+    variable set before each step, which is what the trap reads; the tail is read from the
+    file by Python rather than interpolated by the shell, because a pip error contains
+    quotes and backticks. **The next failure names itself**, in
+    `select note from dedup_sim.tag_head_bakeoff_runs where id = N` and in the dispatcher's
+    own log after teardown.
+  - **The reporter is lane-agnostic and never fatal.** It knows no table: `HEARTBEAT_SQL`
+    (an UPDATE with `%(note)s` / `%(run_id)s`) and `HEARTBEAT_RUN_ID` arrive in the pod's
+    REST-body env; the bake-off supplies an UPDATE that replaces any previous `pod step` line
+    (`regexp_replace` + `left(…, 8000)`), so the note holds the newest step, keeps the
+    manifest's and the payload's own lines, and never grows. With the env absent it prints
+    and exits 0, and every call site is `|| true`. **The production DINOv3 lane is
+    deliberately NOT wired**: it has no run row to report into (its progress record is the
+    vector table), and minting one is a schema decision, not a bug fix — written down in
+    `dinov3-embedding-lane.md` so the gap is a choice rather than an oversight.
+  - **The watchdog now counts a step as progress.** `bootstrap_deadline_s` runs from the last
+    heartbeat rather than from launch (default raised **1200 → 1800 s**, both workflow inputs
+    with it), so a slow torch download keeps buying time; a bootstrap that reported and then
+    went quiet is caught by the stall deadline (900 s = three missed beats); a pod that never
+    reported at all still trips the bootstrap deadline, and now says so ("reported nothing at
+    all"). Each new step is logged as it arrives and the last one — error tail included — is
+    printed after teardown.
+  - **The generated bash is now EXECUTED before a pod is rented.** `PODBOOT_DRY=1` swaps
+    every real step for a stub and `PODBOOT_DRY_FAIL=<step>` forces one to fail, so
+    `pod_bootstrap.preflight()` runs the exact script twice offline — clean (expects
+    `exit=0 step=payload`) and broken (expects `exit=1 step=torch`) — and the dispatchers run
+    it on every `--dry-run`, refusing to launch if it fails. A syntax error in this script
+    was previously discoverable only by renting a GPU and waiting out a deadline.
+  - **No migration, no new dependency.** The heartbeat rides on the existing `note` column;
+    `psycopg` is installed inside the pod at run time and is not in `pyproject.toml`.
+  - Tests, all offline: `tests/scripts/test_pod_bootstrap.py` (structure AND three real
+    subprocess runs of the generated bash — clean, forced failure with the trap naming
+    `step=torch` and carrying the tail, and the beat firing through a slow step),
+    `tests/scripts/test_pod_report.py` (one line whatever the tail contains; the SQL the lane
+    supplied; a refused write is not fatal), `tests/scripts/test_pod_watchdog.py` (a slow
+    reporting bootstrap is not a dead pod; a bootstrap that went quiet still is),
+    `tests/test_tagging_bakeoff.py` (the pod is told which row to report into; a step is
+    progress; the dry run proves the script).
+  - **Run 1 is still re-dispatchable as it stands** — arms `pending`, zero vectors, nothing
+    to clean up.
+
 - 2026-09-08 (f) — **The bake-off's first real GPU run FAILED and cost ~$0.50 for zero
   vectors. Three causes, all fixed; the third is the one that turned a 10-second bug into an
   8,115-second bill.** Run 1's embed stage rented an RTX 3090 (pod `u1yvcktjn6dbrt`,

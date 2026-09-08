@@ -37,10 +37,12 @@ def test_start_cmd_runs_the_payload_at_the_pinned_ref():
 
 
 def test_start_cmd_carries_no_secrets():
-    # argv is visible in the pod record; credentials go through `env` instead.
+    # argv is visible in the pod record; credentials go through `env` instead. The
+    # embedded step reporter READS SUPABASE_DB_URL by name — a name is not a secret, an
+    # assignment would be.
     cmd = dispatch.build_start_cmd(ref="main", backfill_args=["--limit=10"])
     for key in dispatch.POD_ENV_KEYS:
-        assert key not in cmd[2]
+        assert f"{key}=" not in cmd[2]
 
 
 @pytest.mark.parametrize(

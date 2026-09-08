@@ -16,9 +16,12 @@ name: "NEW DEDUP: tagging bake-off (manifest / embed / train)"
 #      of an hour on an RTX 3090 at roughly $0.20-0.30/hr — call it well under a dollar.
 #      The wait window is the hard ceiling; the WATCHDOG is what makes the usual case
 #      cheaper than the ceiling. It polls the arm rows every 60s and tears the pod down
-#      when no boot heartbeat arrives (bootstrap_deadline_seconds), when a booted pod
-#      stops progressing (stall_deadline_seconds), or when every arm is terminal. On
-#      2026-09-08, before it existed, a broken bootstrap billed 8,115s for zero vectors.
+#      when no NEW heartbeat arrives (bootstrap_deadline_seconds), when progress stops
+#      (stall_deadline_seconds), or when every arm is terminal. On 2026-09-08, before it
+#      existed, a broken bootstrap billed 8,115s for zero vectors. Since that day's
+#      retry the BOOTSTRAP reports every step (fetch/uv/venv/torch/repo) into the run
+#      row's note, and its EXIT trap ships the failing step plus the tail of its own log
+#      there — read it with: select note from dedup_sim.tag_head_bakeoff_runs where id=N.
 #   3. train — back on a runner with the `training` extra, running the results half of
 #      the experiment.
 #
@@ -91,9 +94,9 @@ on:
         default: "7200"
         type: string
       bootstrap_deadline_seconds:
-        description: "embed only: kill the pod if no boot heartbeat reaches the database within this long (fetch + 3.12 venv + torch + first weights). The 2026-09-08 failure: 8115s billed for zero vectors."
+        description: "embed only: kill the pod if no NEW heartbeat reaches the database within this long while the payload has yet to start. Measured from the last bootstrap step (fetch/uv/venv/torch/repo), so a slow torch download keeps buying time and a dead pod does not."
         required: false
-        default: "1200"
+        default: "1800"
         type: string
       stall_deadline_seconds:
         description: "embed only: kill the pod if a booted pod stops making progress for this long."
@@ -142,7 +145,7 @@ jobs:
           STALL_DEADLINE_SECONDS: ${{ inputs.stall_deadline_seconds }}
         run: |
           set -euo pipefail
-          case "${BOOTSTRAP_DEADLINE_SECONDS:-1200}" in
+          case "${BOOTSTRAP_DEADLINE_SECONDS:-1800}" in
             ''|*[!0-9]*) echo "::error::bootstrap_deadline_seconds must be a number"; exit 1 ;;
           esac
           case "${STALL_DEADLINE_SECONDS:-900}" in
@@ -235,7 +238,7 @@ jobs:
           set -euo pipefail
           ARGS=(--stage embed --run-id "${RUN_ID}" --batch-size "${BATCH_SIZE:-32}")
           ARGS+=(--workers "${WORKERS:-16}" --job-max-seconds "${JOB_MAX_SECONDS:-7200}")
-          ARGS+=(--bootstrap-deadline-s "${BOOTSTRAP_DEADLINE_SECONDS:-1200}")
+          ARGS+=(--bootstrap-deadline-s "${BOOTSTRAP_DEADLINE_SECONDS:-1800}")
           ARGS+=(--stall-deadline-s "${STALL_DEADLINE_SECONDS:-900}")
           if [ -n "${ARMS:-}" ]; then ARGS+=(--arms "${ARMS}"); fi
           if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi

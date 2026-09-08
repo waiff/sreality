@@ -130,6 +130,68 @@ def test_an_unreadable_database_is_not_progress():
     assert watchdog.verdict == "bootstrap-deadline" and at == 1200
 
 
+def test_a_slow_bootstrap_that_keeps_reporting_steps_is_not_a_dead_pod():
+    # The 2026-09-08 (g) case: fetch/uv/venv/torch/repo take longer than the bootstrap
+    # deadline between them, but each one reports. A 2 GB torch download must not be
+    # confused with a dead clone — that confusion is what this whole fix is about.
+    readings = [Progress(booted=False, marker=f"0|t{minute // 10}",
+                         step=f"step={minute // 10}")
+                for minute in range(0, 200)]
+    watchdog = PodWatchdog(_Poller(readings), bootstrap_deadline_s=1200,
+                           stall_deadline_s=900, poll_interval_s=60)
+    stop, _at = _run(watchdog, [60 * i for i in range(1, 60)])
+    assert stop is None and watchdog.verdict is None
+
+
+def test_a_bootstrap_that_reported_and_then_went_silent_is_still_torn_down():
+    # Two step heartbeats, then nothing: the pod proved it can write and stopped. The
+    # beat inside the bootstrap repeats every 300s, so silence here is death, not work.
+    poller = _Poller([
+        Progress(booted=False, marker="0|t1", step="step=fetch ok"),
+        Progress(booted=False, marker="0|t2", step="step=uv ok"),
+        Progress(booted=False, marker="0|t2", step="step=uv ok"),
+    ])
+    watchdog = PodWatchdog(poller, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60)
+    stop, at = _run(watchdog, [60 * i for i in range(1, 60)])
+    assert watchdog.verdict == "stall-deadline"
+    assert at == 120 + 900
+    assert "step=uv ok" in stop
+
+
+def test_the_bootstrap_deadline_still_fires_when_nothing_ever_reports():
+    # A pod whose first command dies before the reporter exists has no heartbeat at all.
+    watchdog = PodWatchdog(_Poller([DEAD]), bootstrap_deadline_s=1200,
+                           stall_deadline_s=900, poll_interval_s=60)
+    stop, at = _run(watchdog, [60 * i for i in range(1, 40)])
+    assert watchdog.verdict == "bootstrap-deadline" and at == 1200
+    assert "reported nothing at all" in stop
+
+
+def test_each_new_step_is_logged_and_the_last_one_is_kept_for_the_dispatcher(caplog):
+    poller = _Poller([
+        Progress(booted=False, marker="0|t1", step="step=fetch ok"),
+        Progress(booted=False, marker="0|t2", step="step=torch ok"),
+        Progress(booted=False, marker="0|t3",
+                 step='{"msg": "exit=1 step=repo", "tail": "no matching distribution"}'),
+    ])
+    watchdog = PodWatchdog(poller, bootstrap_deadline_s=1800, stall_deadline_s=900,
+                           poll_interval_s=60)
+    with caplog.at_level("INFO"):
+        _run(watchdog, [60, 120, 180])
+    assert "step=step=fetch ok" in caplog.text and "step=torch ok" in caplog.text
+    # What the dispatcher prints after teardown: the shipped error, not a guess.
+    assert "no matching distribution" in watchdog.last_step
+
+
+def test_the_default_bootstrap_deadline_is_generous_enough_for_a_slow_install():
+    # It runs from the last step heartbeat now, so the cost of a large value is bounded
+    # by the stall deadline, not by it.
+    from scripts.pod_watchdog import DEFAULT_BOOTSTRAP_DEADLINE_S
+
+    assert DEFAULT_BOOTSTRAP_DEADLINE_S == 1800
+
+
 def test_the_termination_log_prices_the_decision(caplog):
     class _Ctx:
         pod_id = "u1yvcktjn6dbrt"

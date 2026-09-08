@@ -69,9 +69,9 @@ on:
         default: "3600"
         type: string
       bootstrap_deadline_seconds:
-        description: "Kill the pod if no vector reaches the database within this long (fetch + 3.12 venv + torch + weights + the first chunk). The 2026-09-08 failure mode: a broken bootstrap billed for the whole window."
+        description: "Kill the pod if no vector reaches the database within this long (fetch + 3.12 venv + torch + weights + the first chunk). The 2026-09-08 failure mode: a broken bootstrap billed for the whole window. This lane has no run row for the bootstrap's step heartbeats to land in, so its only proof of life is still the first vector — keep it generous."
         required: false
-        default: "1200"
+        default: "1800"
         type: string
       stall_deadline_seconds:
         description: "Kill the pod if a working pod stops writing vectors for this long."
@@ -150,7 +150,7 @@ jobs:
           case "${JOB_MAX_SECONDS:-3600}" in
             ''|*[!0-9]*) echo "::error::job_max_seconds must be a number"; exit 1 ;;
           esac
-          case "${BOOTSTRAP_DEADLINE_SECONDS:-1200}" in
+          case "${BOOTSTRAP_DEADLINE_SECONDS:-1800}" in
             ''|*[!0-9]*) echo "::error::bootstrap_deadline_seconds must be a number"; exit 1 ;;
           esac
           case "${STALL_DEADLINE_SECONDS:-900}" in
@@ -159,7 +159,7 @@ jobs:
           ARGS="--max-write-mb-per-hour ${MAX_WRITE_MB_PER_HOUR} --limit ${LIMIT:-20000}"
           ARGS="${ARGS} --shard ${SHARD:-0} --shards ${SHARDS:-1} --workers ${WORKERS:-16}"
           ARGS="${ARGS} --job-max-seconds ${JOB_MAX_SECONDS:-3600}"
-          ARGS="${ARGS} --bootstrap-deadline-s ${BOOTSTRAP_DEADLINE_SECONDS:-1200}"
+          ARGS="${ARGS} --bootstrap-deadline-s ${BOOTSTRAP_DEADLINE_SECONDS:-1800}"
           ARGS="${ARGS} --stall-deadline-s ${STALL_DEADLINE_SECONDS:-900}"
           if [ "${DRY_RUN:-true}" = "true" ]; then ARGS="${ARGS} --dry-run"; fi
           echo "python -m scripts.dinov3_embed_dispatch ${ARGS}"

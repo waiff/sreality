@@ -106,6 +106,13 @@ def build_start_cmd(*, ref: str, backfill_args: list[str]) -> list[str]:
 
 def pod_env() -> dict[str, str]:
     """The credentials present in this process's environment, forwarded to the pod.
+
+    NOT WIRED HERE (deliberate, 2026-09-08 (g)): the bootstrap's step reporter needs a
+    `HEARTBEAT_SQL` + `HEARTBEAT_RUN_ID` pair naming a row it may UPDATE. This lane has
+    no run row — its progress record IS the vector table — so the reporter prints its
+    steps and exits 0, and this lane's watchdog still reads the vectors it always did.
+    Giving it one means choosing a durable row first (a `dinov3_embed_runs`-shaped
+    thing), which is a schema decision, not a bug fix.
     A missing one is reported by NAME so the operator can fix the secret binding —
     values are never logged, and never put in the start command."""
     return {k: os.environ[k] for k in POD_ENV_KEYS if os.environ.get(k)}
@@ -262,9 +269,19 @@ def main() -> int:
     LOG.info("pod env keys present: %s", ",".join(sorted(env)) or "(none)")
     if missing:
         LOG.warning("pod env keys MISSING (the pod will no-op or fail): %s", ",".join(missing))
-    LOG.info("start_cmd: %s", start_cmd[-1])
+    LOG.info("start_cmd:\n%s", start_cmd[-1])
 
     if args.dry_run:
+        # Execute that exact script offline with every real step stubbed — once clean,
+        # once with a forced failure — so a syntax error or a dead EXIT trap is found
+        # here rather than by renting a GPU and waiting out a deadline.
+        ok, lines = pod_bootstrap.preflight(start_cmd[-1])
+        for line in lines:
+            LOG.info("%s", line)
+        if not ok:
+            LOG.error("the generated bootstrap script FAILED its offline self-check — "
+                      "do not launch a pod with it")
+            return 1
         LOG.info("DRY RUN — no pod launched, nothing written, nothing spent.")
         return 0
 
