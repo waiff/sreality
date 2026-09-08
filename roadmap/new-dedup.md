@@ -372,9 +372,17 @@ W1 (shared prerequisites + labeling program):
       ratified rule (`exam_machine_review.human_verdict`, now extracted so the two graders cannot
       drift). Read surface: `/new-dedup/tagging-bakeoff/{runs,runs/{id}/metrics,runs/{id}/images,
       runs/{id}/buckets}`, admin-gated and read-only.
-- [ ] **NEXT — tagging bake-off, phase 2**: the GPU job that fills
-      `dedup_sim.tag_head_bakeoff_vectors` per arm, its workflow, and the comparison page over the
-      four routes above. Nothing has been embedded, trained or scored yet.
+- [x] **Tagging bake-off, phase 2a — the comparison page (2026-09-08, PROGRAM.md ledger (e)):**
+      `NEW DEDUP · Tagging bake-off` at `/new-dedup/tagging-bakeoff`, a pure consumer of the four
+      routes above. A matrix of head x (arm x mode) with F1 leading and the graded n always beside
+      it; view A, photographs each carrying what every selected arm said about them; view B, one
+      head's four outcome buckets in plain words (caught / wrongly caught / missed / correctly
+      rejected) under a 20-bin histogram with the threshold marked. Both contract conventions are
+      rendered rather than assumed — a null rate reads "nothing proposed", never zero, and an exam
+      abstention is counted beside the split and folded into no rate. Every selector is in the URL.
+- [ ] **NEXT — tagging bake-off, phase 2b**: the GPU job that fills
+      `dedup_sim.tag_head_bakeoff_vectors` per arm, and its workflow. Nothing has been embedded,
+      trained or scored yet, so the page has no run to show until that lane runs.
 
 Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
 

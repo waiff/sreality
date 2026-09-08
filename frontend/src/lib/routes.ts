@@ -122,6 +122,7 @@ export const ROUTES = {
   newDedupTrainingSet: def('/new-dedup/training-set'),
   newDedupExam: def('/new-dedup/exam'),
   newDedupExamReview: def('/new-dedup/exam/review'),
+  newDedupTaggingBakeoff: def('/new-dedup/tagging-bakeoff'),
   scrapers: def('/scrapers'),
   devConfidenceIndicator: def('/dev/confidence-indicator'),
 } as const;

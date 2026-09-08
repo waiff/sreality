@@ -194,6 +194,47 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-08 (e) — **The tagging bake-off, phase 2a: the comparison page** (`NEW DEDUP ·
+  Tagging bake-off`, `/new-dedup/tagging-bakeoff`). The read surface of (d) given an operator
+  face. No backend change: the page is a pure consumer of the four documented routes.
+  - **Three reads, in the order the decision is made.** A MATRIX of one row per head and one
+    column per selected (arm x mode), F1 leading with precision, recall and the graded n under
+    it, tinted in one accent so the best arm per head is visible without reading — then VIEW A,
+    a grid of photographs each carrying what every selected arm said about it, so the arms can
+    be compared on the SAME picture — then VIEW B, one head under one arm and mode split into
+    its four outcome buckets, most-confident first, under a 20-bin histogram with the threshold
+    marked. Number, photograph, mistake.
+  - **The two contract conventions are RENDERED, not assumed.** A null rate reads "nothing
+    proposed" beside its graded n and says on hover that it is not a zero; a `status: 'failed'`
+    cell is drawn struck, carrying its own note, as a decided outcome rather than a gap; an
+    exam abstention is counted beside the split and folded into no rate or bucket. Score bars
+    are normalised by their own mode's scale and the centroid mode is named "cosine" wherever
+    it appears, so no bar invites a comparison across modes that the numbers cannot support.
+  - **Plain words lead, codes follow.** Caught / wrongly caught / missed / correctly rejected,
+    with tp/fp/fn/tn secondary; "Yes + no", "Yes only, borrowed no", "Closeness only" for the
+    three modes, each carrying the full explanation on hover and again in a glossary the page
+    ships with itself. The repeated glyph is a 2x2 CONFUSION SQUARE — top row = the model said
+    yes, left column = you said yes — in every matrix cell, on every bucket header, and as the
+    colour of every outcome mark.
+  - **Deep-linkable.** `run`, `view`, `arms`, `mode` (both multi), `tag`, `split`, `outcome`
+    and the two paging cursors live in the query string; a default derived from the data is
+    never written into it, so a shared link says only what was actually chosen. Arms, modes,
+    head and split survive the view switch; View B's single arm/mode (`barm`/`bmode`) are
+    separate keys so narrowing there never discards the matrix's selection.
+  - **Three places the contract fell short, worked around rather than changed.** `/buckets`
+    carries no threshold, so it is read off the metric row for the same (arm, mode, head) — and
+    left UNMARKED, never guessed, when there is no such row. A head's human label arrives only
+    on a metric row, so a run whose metrics have not landed names its heads by tag id.
+    `/images` pages forward only, so "previous" is a cursor stack the page keeps. Also: when
+    more than one mode is selected the page asks `/images` for ALL modes and narrows client-side,
+    because the route takes exactly one.
+  - Tests: `frontend/src/pages/NewDedupTaggingBakeoff.test.tsx` (22) pin the run picker, the
+    matrix including the null-rate and failed-cell readings, the outcome-requires-a-head rule,
+    both paging shapes, the threshold join, and the URL round-trip.
+  - **Still phase 2**: the GPU job that fills `tag_head_bakeoff_vectors` per arm, and its
+    workflow. Nothing has been embedded, trained or scored yet, so the page has no run to show
+    until that lane runs.
+
 - 2026-09-08 (d) — **The tagging bake-off, phase 1: the results store, three training modes, the
   CPU runner and its read surface.** ENCODER-DECISION.md §5.2 "Set 1" and §5.4 readout 4 turned
   into something that can actually be run and looked at. Nothing has been embedded, trained or
