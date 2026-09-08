@@ -6193,6 +6193,17 @@
           "options": null
         },
         {
+          "name": "force_arms",
+          "description": "embed only: also re-open the arms named in `arms` when they are already ok/skipped (a deliberate re-embed). Requires `arms`. A retry always clears `failed` arms without this.",
+          "required": false,
+          "type": "choice",
+          "default": "false",
+          "options": [
+            "false",
+            "true"
+          ]
+        },
+        {
           "name": "batch_size",
           "description": "embed only: model forward batch. Lower it if a 1024px arm runs out of GPU memory.",
           "required": false,

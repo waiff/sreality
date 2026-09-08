@@ -39,6 +39,10 @@ worth restating, because each was learned the expensive way:
     and the tail of the pod's own bootstrap log. `select note from
     dedup_sim.tag_head_bakeoff_runs where id = N` is now the pod log RunPod will not
     give us, and the dispatcher prints it after teardown.
+  * A RETRY IS A NEW ATTEMPT, AND THIS IS WHERE IT BECOMES ONE. `failed` is terminal to
+    the watchdog and retryable to the payload; before launching, this dispatch resets
+    this run's `failed` arms to `pending` (see RESET_STATUSES) so attempt N+1 is not torn
+    down as all-terminal before the pod claims anything, as attempt 5 was.
 
 Completion is NOT read from the pod. Progress is a SQL question:
 `select arm, status, dim, note from dedup_sim.tag_head_bakeoff_arms where run_id = N`.
@@ -120,6 +124,34 @@ _ARG_RE = pod_bootstrap._ARG_RE
 # An arm nothing will move again. Every arm being one of these is the dispatcher's cue
 # that the rest of the wait window is pure rent.
 TERMINAL_ARM_STATUSES = frozenset({"ok", "failed", "skipped"})
+
+# A NEW ATTEMPT IS NOT A RESUME OF THE OLD VERDICT (2026-09-08 (j)). `failed` means two
+# incompatible things across this lane, and both are right in their own scope:
+# `scripts/pod_watchdog.py`'s all-terminal case counts it as TERMINAL (nothing will move
+# again, stop paying), while `tagging_bakeoff_embed.pending_arms` counts it as WORK TO DO
+# (the vectors, not the status, are the record of what is done). Attempt 5 of run 1 is
+# where they collided: the seven DINOv3 arms had failed in attempt 4 on the torchvision
+# gap, so the watchdog read 10/10 terminal two seconds after launch and tore the pod down
+# before the payload could claim anything. Zero cost, and a retry impossible as designed.
+# The dispatcher is the one place that knows a NEW attempt is starting, so this is where
+# the previous attempt's verdict is cleared. The watchdog's rule stays exactly as it was:
+# an arm that fails AGAIN during this run is genuinely terminal.
+RESET_STATUSES = ("failed",)
+# `--force-arms` widens that to the arms `--arms` NAMES — a deliberate re-embed of work
+# already recorded as finished (and a no-op image-by-image unless the vectors are gone).
+FORCE_RESET_STATUSES = ("ok", "failed", "skipped")
+
+_RESETTABLE_ARMS_SQL = """
+    SELECT arm, status FROM dedup_sim.tag_head_bakeoff_arms
+    WHERE run_id = %(run_id)s AND arm <> %(stored)s AND status = ANY(%(statuses)s::text[])
+    ORDER BY arm
+"""
+
+_RESET_ARMS_SQL = """
+    UPDATE dedup_sim.tag_head_bakeoff_arms
+    SET status = 'pending', note = %(prefix)s::text || coalesce(note, '')
+    WHERE run_id = %(run_id)s AND arm = ANY(%(arms)s::text[])
+"""
 
 # The pod's clock is not the runner's. A boot stamp this much older than the launch is
 # still accepted as this pod's, and anything older is a previous dispatch's.
@@ -307,6 +339,70 @@ def _connect(db_url: str) -> Any:
                            connect_timeout=15)
 
 
+def retry_note_prefix(now: datetime | None = None) -> str:
+    """`retry <iso> (attempt from GitHub run <id or 'local'>): ` — prefixed onto the arm
+    note so the attempt that cleared the verdict is named IN FRONT of the failure text it
+    cleared, which stays readable underneath it."""
+    stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    return (f"retry {stamp} (attempt from GitHub run "
+            f"{os.environ.get('GITHUB_RUN_ID') or 'local'}): ")
+
+
+def reset_failed_arms(conn: Any, *, run_id: int, only: Sequence[str] = (),
+                      force: bool = False, dry_run: bool = False,
+                      prefix: str = "") -> list[tuple[str, str]]:
+    """Clear the PREVIOUS attempt's terminal verdict off THIS run's arms, so the watchdog
+    does not read them as all-terminal before the pod has done anything (see
+    RESET_STATUSES). Returns the (arm, status it was reset FROM) pairs, and under
+    `dry_run` returns them having written nothing.
+
+    Scoped three ways on purpose: this run only, never the zero-GPU stored arm, and —
+    when `--arms` narrowed the dispatch — only the arms it named. `ok` and `skipped` are
+    never touched without `force`, because an explicit `--arms` list is also how a
+    finished arm gets named for a resumed pass.
+    """
+    wanted = {a.strip() for a in only if a.strip()}
+    statuses = list(FORCE_RESET_STATUSES if (force and wanted) else RESET_STATUSES)
+    with conn.cursor() as cur:
+        cur.execute(_RESETTABLE_ARMS_SQL, {"run_id": run_id, "stored": STORED_CLIP_ARM,
+                                           "statuses": statuses})
+        rows = [(str(r[0]), str(r[1])) for r in cur.fetchall()]
+    if wanted:
+        rows = [r for r in rows if r[0] in wanted]
+    if not rows or dry_run:
+        return rows
+    with conn.cursor() as cur:
+        cur.execute(_RESET_ARMS_SQL, {"run_id": run_id, "arms": [r[0] for r in rows],
+                                      "prefix": prefix or retry_note_prefix()})
+    return rows
+
+
+def _log_arm_reset(args: argparse.Namespace, only: Sequence[str]) -> None:
+    """Do the reset and say exactly which arms it moved. Best effort: an unreadable arms
+    table must not fail a dispatch — it only costs this attempt the retry, loudly."""
+    db_url = os.environ.get("SUPABASE_DB_URL")
+    if not db_url:
+        LOG.warning("SUPABASE_DB_URL is not set on the RUNNER — a previous attempt's "
+                    "failed arms cannot be reset, so a re-dispatch of a run whose arms "
+                    "all failed will be torn down as all-terminal (2026-09-08 (j))")
+        return
+    try:
+        with _connect(db_url) as conn:
+            reset = reset_failed_arms(conn, run_id=args.run_id, only=only,
+                                      force=args.force_arms, dry_run=args.dry_run)
+    except Exception as exc:  # noqa: BLE001 - the retry is the only thing at stake
+        LOG.warning("could not reset this run's failed arms: %s", exc)
+        return
+    verb = "WOULD reset" if args.dry_run else "reset"
+    if not reset:
+        LOG.info("no arm of run %s needed resetting (nothing %s)", args.run_id,
+                 ",".join(FORCE_RESET_STATUSES if args.force_arms
+                          else RESET_STATUSES))
+        return
+    LOG.info("%s %d arm(s) of run %s to pending: %s", verb, len(reset), args.run_id,
+             ", ".join(f"{arm} (was {status})" for arm, status in reset))
+
+
 def make_watchdog(args: argparse.Namespace, *, only: Sequence[str]) -> PodWatchdog | None:
     """The watchdog for this dispatch, or None when the runner cannot read the database
     (in which case the wait window is the only protection there is, loudly)."""
@@ -411,6 +507,12 @@ def _run_pod(plan: Plan, args: argparse.Namespace) -> int:
                     ",".join(missing))
     LOG.info("start_cmd:\n%s", plan.start_cmd[-1])
 
+    # The last thing before the launch: nothing between here and the pod touches an arm
+    # row, so this is where a retry becomes a new attempt rather than a run the watchdog
+    # already considers finished (2026-09-08 (j)).
+    only = [a.strip() for a in args.arms.split(",") if a.strip()]
+    _log_arm_reset(args, only)
+
     if not plan.execute:
         # The cheap pre-flight: execute that exact script offline with every real step
         # stubbed — once clean, once with a forced failure — and confirm the EXIT trap
@@ -440,7 +542,6 @@ def _run_pod(plan: Plan, args: argparse.Namespace) -> int:
     LOG.info("%d candidate GPU(s), cheapest first: %s", len(gpus),
              ", ".join(f"{g.id} (${g.community_price_per_hr:.3f}/hr)" for g in gpus[:5]))
 
-    only = [a.strip() for a in args.arms.split(",") if a.strip()]
     watchdog = make_watchdog(args, only=only)
     try:
         result = client.run_job_with_fallback(
@@ -540,6 +641,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                    help="manifest: explicit tag ids, overriding the ready flag.")
     p.add_argument("--arms", default="",
                    help="Comma-separated arm names, to narrow any stage to a subset.")
+    p.add_argument("--force-arms", action="store_true",
+                   help="embed: also reset the --arms named ones when they are already "
+                        "'ok' or 'skipped'. Without it a re-dispatch only clears "
+                        "'failed' arms, which is what makes a retry a new attempt "
+                        "rather than an all-terminal teardown. Requires --arms.")
     p.add_argument("--batch-size", type=int, default=32, help="embed: forward batch.")
     p.add_argument("--workers", type=int, default=16,
                    help="embed: parallel image downloads inside the pod.")
@@ -578,6 +684,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         LOG.error("--container-disk-gb=%d is below the %dGB floor: torch alone installs "
                   "~5GB and the base image is larger than that (2026-09-08 (h))",
                   args.container_disk_gb, MIN_CONTAINER_DISK_GB)
+        return 2
+
+    if args.force_arms and not args.arms:
+        # Bare, it would re-open every finished arm of the run — a forced re-embed is a
+        # per-arm decision, so it has to name them.
+        LOG.error("--force-arms names which finished arms to re-open, so it requires "
+                  "--arms")
         return 2
 
     try:

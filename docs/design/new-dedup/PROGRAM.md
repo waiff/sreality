@@ -194,6 +194,41 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-08 (j) — **Attempt 5 was killed by our own two definitions of `failed`, 2 s in,
+  $0.00 — and a retry was impossible as designed.** GitHub run 34274077032 rented pod
+  `w8rh1rekxwo57z` for run 1's embed stage and the watchdog tore it down immediately with
+  `case=all-terminal … arms 10/10 terminal`, before the payload could claim a thing.
+  - **The rule interaction.** `scripts/pod_watchdog.py`'s all-terminal case counts an arm
+    as terminal when its status is `ok`/`failed`/`skipped` (nothing will move again, stop
+    paying); `tagging_bakeoff_embed.pending_arms` counts `failed` as work to do (the
+    vectors, not the status, are the record of what is done). Both are right in their own
+    scope. The seven DINOv3 arms carried attempt 4's `failed` (the torchvision gap, fixed
+    in #1361), so the launch read 10/10 terminal on its first poll. Ledger entry (i)'s
+    claim that "the re-dispatch is free of charge to reason about" was true of the payload
+    and false of the watchdog watching it.
+  - **The fix is in the DISPATCHER, not in either rule.** It is the one place that knows a
+    NEW attempt is starting: `tagging_bakeoff_dispatch.reset_failed_arms` now clears this
+    run's `failed` arms back to `pending` immediately before the pod launches — scoped to
+    the run, and to `--arms` when given — prefixing each arm's note with `retry <ISO ts>
+    (attempt from GitHub run <id or 'local'>): ` so the attempt that cleared the verdict is
+    named in front of the failure text it cleared, and logging exactly which arms moved.
+    `ok`/`skipped` never move without the new `--force-arms` (which requires `--arms` and
+    only re-opens the arms it names). A dry run prints what it WOULD reset and writes
+    nothing. The watchdog's terminal rule is untouched: an arm that fails AGAIN during
+    this run is genuinely terminal, and the happy-path teardown still fires.
+  - **The invariant is now stated at both ends** — a comment in `pod_watchdog`'s
+    all-terminal case pointing at `pending_arms`, and one on `pending_arms` pointing back
+    — so neither gets "fixed" into agreeing with the other. `scripts/dinov3_embed_dispatch.py`
+    needs no reset and says so: that lane has no per-arm status at all, its progress record
+    IS the vector count, and `terminal` is hard-wired False.
+  - **The operator's session reset run 1's seven arms by hand** to unblock the next
+    attempt; this change is what makes the next one unnecessary.
+  - Tests (offline, fake conn): failed arms are reset and logged; the statement asks only
+    for `failed` and excludes the zero-GPU stored arm; `--arms` narrows the reset;
+    `--force-arms` widens it only for the named arms and is refused bare; a dry run resets
+    nothing; the note prefix carries the ISO stamp and the GitHub run id (`local` off
+    Actions).
+
 - 2026-09-08 (i) — **Attempt 4 BOOTED, EMBEDDED, and told us the next bug in one line: the
   pod has torch but not torchvision, so every DINOv3 arm dies at model load.** Run 1's embed
   stage on pod `4rgi66lggbty11` (RTX 3090) ran the whole bootstrap clean, cached the corpus,

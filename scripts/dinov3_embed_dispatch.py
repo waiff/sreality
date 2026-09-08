@@ -150,6 +150,12 @@ def read_backfill_progress(conn: Any, *, identity: dict[str, Any],
     NEVER TERMINAL. Completion would be `pending == 0`, and that anti-join over ~10.4M
     images is far too expensive to ask every minute; the stall deadline is what ends a
     finished pod, one stall window later.
+
+    NO ARM RESET APPLIES HERE (2026-09-08 (j)). The sibling lane's dispatcher clears a
+    previous attempt's `failed` arms before launching, because its per-arm status is what
+    the watchdog's all-terminal case reads. This lane has no per-arm status at all — its
+    progress record IS the vector count, `terminal` is hard-wired False, and a retry is
+    already a plain resume of the anti-join. Nothing to reset, nothing to clear.
     """
     from scripts.dinov3_embed_backfill import embedded_count
 

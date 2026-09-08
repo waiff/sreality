@@ -247,6 +247,13 @@ with no fresh `pod booted` line means the bootstrap never reached the payload â€
 - **Resume is free and needs no marker column**, the same way the production lane works:
   an arm's already-written `image_id`s are read into a set and skipped. A pod dying at
   arm 6 of 10 costs the arms it had not started.
+- **A re-dispatch IS a new attempt: the dispatcher resets this run's `failed` arms to
+  `pending` before launching** (prefixing the arm note with `retry <ts> (attempt from
+  GitHub run N):` and logging which arms moved), because `failed` is terminal to the
+  watchdog and retryable to the payload â€” attempt 5 of run 1 was torn down as
+  `all-terminal` two seconds in for exactly that reason (2026-09-08 (j)). `ok`/`skipped`
+  never move without `force_arms`, which needs `arms` and only re-opens the arms it names;
+  a dry run prints what it would reset and writes nothing.
 - **Naming an arm in `arms` overrides its status.** That is how a `skipped` arm is
   retried once the token is fixed or the licence accepted; an already-finished arm named
   this way is a no-op, because the per-image skip still applies. Leaving `arms` empty
