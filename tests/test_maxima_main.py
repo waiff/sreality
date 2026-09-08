@@ -7,6 +7,7 @@ source='maxima'.
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -152,31 +153,100 @@ def test_active_count_source_scoped(monkeypatch):
     assert captured["active"] == ("byt", "prodej", "maxima")
 
 
-def _walk_one_agenda(monkeypatch, portal, *, total, items, max_pages=None):
-    """Drive one agenda walk (af=1) so the portal's agenda cache is populated."""
-    page1 = SimpleNamespace(total=total, next_offset=None, items=items)
-    empty = SimpleNamespace(total=total, next_offset=None, items=[])
-    seq = iter([page1, empty, empty, empty])
+_BASE = "https://nemovitosti.maxima.cz/nemovitosti/"
+
+
+def _item(nid: str, title: str = "Prodej bytu") -> SimpleNamespace:
+    return SimpleNamespace(
+        source_id_native=nid, detail_path=f"{_BASE}{nid}/",
+        price_text="5 000 000 Kč", title=title,
+    )
+
+
+def _page(
+    total: int | None, items: list[Any], next_offset: int | None = None,
+    pager_present: bool = True,
+):
+    # pager_present defaults True: these pages stand for maxima RENDERING its pager
+    # (with or without a forward link). Pass False for the degraded shape — cards
+    # render, the pager fragment does not — which must testify to nothing.
+    return SimpleNamespace(
+        total=total, next_offset=next_offset, items=items,
+        pager_present=pager_present,
+    )
+
+
+def _drive(monkeypatch, portal, pages, *, category=None, **kw):
+    """Feed `pages` (parse_index results, in FETCH order — a re-fetched barren
+    page consumes one) to one agenda walk. Returns (walk_category result, fetches)."""
+    seq = iter(pages)
+    fetched: list[tuple[Any, Any]] = []
+
+    class _Client:
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def fetch_index(self, page=None, *, af=None):
+            fetched.append((page, af))
+            return ("<html>", 200)
+
     monkeypatch.setattr(maxima_main, "parse_index", lambda _h: next(seq))
-    monkeypatch.setattr(maxima_main, "MaximaClient", _IdxClient)
-    _IdxClient.fetches = {}
+    monkeypatch.setattr(maxima_main, "MaximaClient", _Client)
     monkeypatch.setattr(maxima_main.db, "index_summary_native", lambda *a, **k: {})
     monkeypatch.setattr(maxima_main.db, "enqueue_detail", lambda *a, **k: 0)
-    monkeypatch.setattr(maxima_main.db, "touch_listings", lambda *a, **k: None)
-    portal.walk_category(_CATEGORIES[0], object(), False, _Limiter())  # byt·prodej, af=1
+    monkeypatch.setattr(maxima_main.db, "touch_listings_by_id", lambda *a, **k: None)
+    result = portal.walk_category(
+        category or _CATEGORIES[0], object(), False, _Limiter(), **kw)
+    return result, fetched
+
+
+def _walk_one_agenda(monkeypatch, portal, *, total, items, max_pages=None):
+    """Drive one agenda walk (af=1) so the portal's agenda cache is populated:
+    one page of items whose pager says there is no next page, then the empty page
+    after it (re-fetched once by the barren rule)."""
+    empty = _page(total, [])
+    _drive(monkeypatch, portal, [_page(total, items), empty, empty])
+
+
+def test_a_blank_page_cannot_supply_its_own_count(monkeypatch):
+    """The page the code has just declared untrustworthy must not supply the evidence
+    that it is trustworthy. A shell / mis-filtered 200 that renders no cards and a
+    counter of its own (0, or anything <= what we hold) would otherwise satisfy
+    `collected >= total` and pass as maxima's end — and maxima's agendas are ~220
+    rows, below the flip cap's floor, so the whole agenda is nominable in one walk."""
+    portal = _portal()
+    shell = _page(0, [])
+    (_seen, _c, _t, _p, complete), _fetched = _drive(
+        monkeypatch, portal,
+        [_page(220, [_item("b1"), _item("b2")], next_offset=2), shell, shell],
+    )
+    walk = portal._agenda_cache[1]
+    assert (walk.total, walk.stop) == (220, "barren")
+    assert complete is False
+
+
+def test_a_page_with_no_pager_markup_corroborates_nothing(monkeypatch):
+    """`next_offset is None` means "the pager said this is the last page" OR "no
+    pager rendered at all" (a CDN/template hiccup that keeps the cards). Only the
+    first is evidence, so the barren page after a pager-less page stays ours."""
+    portal = _portal()
+    empty = _page(220, [])
+    (_seen, _c, _t, _p, complete), _fetched = _drive(
+        monkeypatch, portal,
+        [_page(220, [_item("b1")], next_offset=2),
+         _page(220, [_item("b2")], next_offset=None, pager_present=False),
+         empty, empty],
+    )
+    walk = portal._agenda_cache[1]
+    assert walk.stop == "barren"
+    assert complete is False
 
 
 def test_nomination_is_agenda_grain(monkeypatch):
     # A complete sale agenda spanning byt + dum + ostatni. presence_candidates must
     # nominate the WHOLE agenda (category_type=prodej) against EVERY agenda id —
     # never the per-category byt slice — and only once per agenda per run.
-    base = "https://nemovitosti.maxima.cz/nemovitosti/"
-    items = [
-        SimpleNamespace(source_id_native=n, detail_path=f"{base}{n}/",
-                        price_text="5 000 000 Kč", title=t)
-        for n, t in [("b1", "Prodej bytu"), ("b2", "Prodej bytu"),
-                     ("d1", "Prodej domu"), ("o1", "Prodej")]
-    ]
+    items = [_item("b1"), _item("b2"), _item("d1", "Prodej domu"), _item("o1", "Prodej")]
     portal = _portal()
     _walk_one_agenda(monkeypatch, portal, total=4, items=items)
 
@@ -197,17 +267,13 @@ def test_nomination_is_agenda_grain(monkeypatch):
     assert len(captured) == 1
 
 
-def test_nomination_skips_incomplete_agenda(monkeypatch):
-    # Agenda reports total=10 but only 2 collected -> walk.complete is False, so
-    # no index-absence delisting (avoids false-flipping the unseen 8).
-    base = "https://nemovitosti.maxima.cz/nemovitosti/"
-    items = [
-        SimpleNamespace(source_id_native=n, detail_path=f"{base}{n}/",
-                        price_text="5 000 000 Kč", title="Prodej bytu")
-        for n in ("b1", "b2")
-    ]
+def test_nomination_skips_uncorroborated_empty_page(monkeypatch):
+    # The agenda declares 10, the walk collected 2 and then hit an items-less page
+    # nothing could corroborate (no pager evidence, short of maxima's own count):
+    # `barren` is OURS, so the unseen 8 are not nominated.
     portal = _portal()
-    _walk_one_agenda(monkeypatch, portal, total=10, items=items)
+    _walk_one_agenda(monkeypatch, portal, total=10, items=[_item("b1"), _item("b2")])
+    assert portal._agenda_cache[1].stop == "barren"
     called = {"n": 0}
     monkeypatch.setattr(
         maxima_main.db, "presence_candidates",
@@ -217,48 +283,44 @@ def test_nomination_skips_incomplete_agenda(monkeypatch):
     assert called["n"] == 0
 
 
-def test_nomination_skips_unmeasurable_agenda(monkeypatch):
-    # The index parsed but its total never did (total=None). The old shared
-    # _walk_complete FAILED OPEN here — "no total, so assume complete" — which
-    # authorised delisting every id the walk had not reached. That expectation
-    # was the bug, not the spec: an unmeasurable walk is "unknown", and rule #3
-    # delists only from a PROVEN-complete one.
-    base = "https://nemovitosti.maxima.cz/nemovitosti/"
-    items = [
-        SimpleNamespace(source_id_native=n, detail_path=f"{base}{n}/",
-                        price_text="5 000 000 Kč", title="Prodej bytu")
-        for n in ("b1", "b2")
-    ]
+def test_nomination_ignores_unmeasurable_count(monkeypatch):
+    # The index parsed but its total never did (total=None) and no pager rendered.
+    # The walk still ended on an empty page that follows pages which carried items
+    # -- nothing can contradict it -- so it reached maxima's end and nominates.
+    # The count is an alarm (coverage="unknown", logged), never a veto (rule #3).
     portal = _portal()
-    _walk_one_agenda(monkeypatch, portal, total=None, items=items)
-    called = {"n": 0}
+    _walk_one_agenda(monkeypatch, portal, total=None, items=[_item("b1"), _item("b2")])
+    assert portal._agenda_cache[1].stop == "empty_confirmed"
+    assert portal._agenda_cache[1].coverage == "unknown"
+
+    captured: list[Any] = []
     monkeypatch.setattr(
         maxima_main.db, "presence_candidates",
-        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or ([], 0),
+        lambda _c, source, cm, ct, seen, **kw: captured.append(set(seen)) or ([], 3),
     )
-    assert portal.presence_candidates(object(), _CATEGORIES[0], {"b1", "b2"}) is None
-    assert called["n"] == 0
+    assert portal.presence_candidates(object(), _CATEGORIES[0], {"b1", "b2"}) == (
+        [], 3, {"category_main": None})
+    assert captured == [{"b1", "b2"}]
 
 
-def test_nomination_skips_overcollected_agenda(monkeypatch):
-    # Collected 4 against a declared total of 2: the denominator is wrong
-    # (overlapping slices or foreign stock), so contamination must not read as
-    # completeness — no delisting from a walk we cannot trust.
-    base = "https://nemovitosti.maxima.cz/nemovitosti/"
-    items = [
-        SimpleNamespace(source_id_native=n, detail_path=f"{base}{n}/",
-                        price_text="5 000 000 Kč", title="Prodej bytu")
-        for n in ("b1", "b2", "b3", "b4")
-    ]
+def test_nomination_ignores_overcollected_count(monkeypatch):
+    # Collected 4 against a declared total of 2: the numeric verdict is
+    # "incomplete" (over-collection), but the walk reached maxima's own count, so
+    # it nominates and the page decides. Over-collection can only SHRINK the
+    # nominated set -- it is an alarm, not a gate.
     portal = _portal()
+    items = [_item(n) for n in ("b1", "b2", "b3", "b4")]
     _walk_one_agenda(monkeypatch, portal, total=2, items=items)
+    assert portal._agenda_cache[1].stop == "declared_total_reached"
+    assert portal._agenda_cache[1].coverage == "incomplete"
+
     called = {"n": 0}
     monkeypatch.setattr(
         maxima_main.db, "presence_candidates",
         lambda *a, **k: called.__setitem__("n", called["n"] + 1) or ([], 0),
     )
-    assert portal.presence_candidates(object(), _CATEGORIES[0], {"b1", "b2", "b3", "b4"}) is None
-    assert called["n"] == 0
+    assert portal.presence_candidates(object(), _CATEGORIES[0], {"b1"}) is not None
+    assert called["n"] == 1
 
 
 class _IdxClient:
@@ -278,16 +340,20 @@ class _IdxClient:
 
 
 def test_walk_category_filters_by_category_and_caches_agenda(monkeypatch):
-    # One sale-agenda page with mixed categories: 2 byty, 1 dum, then an empty page.
+    # One sale-agenda page carrying the agenda's whole declared count (3): mixed
+    # categories, 2 byty + 1 dum. Its pager still advertises a page 2, so the walk
+    # asks for it — the counter alone must not stop the fetching (maxima's is loose:
+    # the live tail reads "Zobrazuji 29-42 z celkem 29", and a lagging count would
+    # otherwise leave real rows unread and unenqueued for ever).
     base = "https://nemovitosti.maxima.cz/nemovitosti/"
     b1, b2, d1 = "b50000001", "b50000002", "d40000003"  # b1 new, b2 changed, d1 dum
-    page1 = SimpleNamespace(total=3, next_offset=2, items=[
+    page1 = _page(3, next_offset=2, items=[
         SimpleNamespace(source_id_native=b1, detail_path=f"{base}{b1}/", price_text="5 000 000 Kč", title="Prodej bytu 2+kk"),
         SimpleNamespace(source_id_native=b2, detail_path=f"{base}{b2}/", price_text="6 000 000 Kč", title="Prodej bytu 3+kk"),
         SimpleNamespace(source_id_native=d1, detail_path=f"{base}{d1}/", price_text="9 000 000 Kč", title="Prodej rodinného domu"),
     ])
-    empty = SimpleNamespace(total=3, next_offset=None, items=[])
-    seq = iter([page1, empty])
+    empty = _page(3, next_offset=None, items=[])
+    seq = iter([page1, empty, empty])   # the empty page is read twice (barren rule)
     monkeypatch.setattr(maxima_main, "parse_index", lambda _h: next(seq))
     _IdxClient.fetches = {}
     monkeypatch.setattr(maxima_main, "MaximaClient", _IdxClient)
@@ -309,10 +375,11 @@ def test_walk_category_filters_by_category_and_caches_agenda(monkeypatch):
         _CATEGORIES[0], object(), False, _Limiter(),
     )
     assert seen_b == {b1, b2}
-    # complete reflects the AGENDA (3 of 3 collected), not the byt slice (2).
+    # reached_end reflects the AGENDA (3 of maxima's declared 3), not the byt
+    # slice (2) — the slice has no completeness proof of its own.
     assert total_b == 2 and complete_b is True
-    assert pages_b == 2                       # page 1 + the empty terminator
-    assert _IdxClient.fetches[1] == 2
+    assert pages_b == 3                       # page 2 asked for, ran dry, re-read once
+    assert _IdxClient.fetches[1] == 3
 
     # dum·prodej: reuses the cached agenda (no new fetch), yields just the dum.
     seen_d, _c, total_d, pages_d, _comp = portal.walk_category(
@@ -321,7 +388,7 @@ def test_walk_category_filters_by_category_and_caches_agenda(monkeypatch):
     assert seen_d == {d1}
     assert total_d == 1
     assert pages_d == 0                       # cache hit -> no pages counted again
-    assert _IdxClient.fetches[1] == 2         # still only the original 2 fetches
+    assert _IdxClient.fetches[1] == 3         # still only the original walk
 
     enq_ids = {e[0]: e for e in enq}
     assert enq_ids[b1][3] == maxima_main.db.QUEUE_PRIORITY_NEW       # new
@@ -335,10 +402,10 @@ def test_walk_category_walks_rent_agenda(monkeypatch):
     # so category MUST come from the title ("Pronájem bytu") -> byt, not the prefix.
     base = "https://nemovitosti.maxima.cz/nemovitosti/"
     rent = "a10009999"
-    page1 = SimpleNamespace(total=1, next_offset=None, items=[
+    page1 = _page(1, next_offset=None, items=[
         SimpleNamespace(source_id_native=rent, detail_path=f"{base}{rent}/", price_text="19 000 Kč", title="Pronájem bytu 1 + kk"),
     ])
-    empty = SimpleNamespace(total=1, next_offset=None, items=[])
+    empty = _page(1, next_offset=None, items=[])
     seq = iter([page1, empty])
     afs: list[int] = []
 
@@ -358,6 +425,141 @@ def test_walk_category_walks_rent_agenda(monkeypatch):
     )
     assert seen == {rent}
     assert afs and all(af == 2 for af in afs)   # the rent agenda was walked with af=2
+
+
+# --- the structural walk verdict (rule #3) ----------------------------------
+# The 5th tuple element answers "did the walk reach MAXIMA's end?", never "did
+# the count reconcile?". A walk a row short of the declared total has still
+# finished; a walk we cut short, or one that ended on an items-less page nobody
+# could corroborate, has not.
+
+
+def _reached_end(monkeypatch, portal, pages, **kw) -> bool:
+    (result, fetched) = _drive(monkeypatch, portal, pages, **kw)
+    return result[4]
+
+
+def test_reached_end_when_a_row_short_of_the_declared_total(monkeypatch):
+    # THE case this change unblocks: maxima declares 5, the walk collected 4
+    # (live churn), and the pager said page 2 was the last. Structurally finished
+    # -> the gap is nominated and the page decides.
+    portal = _portal()
+    pages = [
+        _page(5, [_item("b1"), _item("b2"), _item("b3")], next_offset=2),
+        _page(5, [_item("b4")], next_offset=None),
+        _page(5, []),
+        _page(5, []),                       # the barren rule's one re-fetch
+    ]
+    (seen, _c, _t, walked, reached_end), fetched = _drive(monkeypatch, portal, pages)
+    assert reached_end is True
+    assert portal._agenda_cache[1].stop == "empty_confirmed"
+    assert portal._agenda_cache[1].coverage == "incomplete"   # 4 of 5: an alarm only
+    assert len(fetched) == 4 and walked == 4
+
+
+def test_items_first_barren_page_is_not_the_end(monkeypatch):
+    # A blocked/consent/degraded 200 parses to zero items AND exposes no pager --
+    # exactly like the page past the last one, which is why the old compound
+    # `not items or new_on_page == 0` break could not tell them apart. Here the
+    # walk is 3 of a declared 10 and the previous page's pager pointed forward,
+    # so nothing corroborates the emptiness: OUR stop.
+    portal = _portal()
+    pages = [
+        _page(10, [_item("b1"), _item("b2"), _item("b3")], next_offset=2),
+        _page(10, []),
+        _page(10, []),
+    ]
+    (_s, _c, _t, _p, reached_end), fetched = _drive(monkeypatch, portal, pages)
+    assert reached_end is False
+    assert portal._agenda_cache[1].stop == "barren"
+    assert [pg for pg, _af in fetched] == [1, 2, 2]   # the same page, re-fetched once
+
+
+def test_barren_page_that_heals_on_the_re_fetch_keeps_walking(monkeypatch):
+    # The re-fetch is what makes an empty page evidence: when it comes back with
+    # items the walk goes on and keeps them (no truncation from one bad render).
+    portal = _portal()
+    pages = [
+        _page(None, [_item("b1"), _item("b2")], next_offset=2),
+        _page(None, []),                                        # transient blank
+        _page(None, [_item("b3"), _item("b4")], next_offset=None),
+        _page(None, []),
+        _page(None, []),
+    ]
+    (seen, _c, _t, walked, reached_end), fetched = _drive(monkeypatch, portal, pages)
+    assert seen == {"b1", "b2", "b3", "b4"}
+    assert reached_end is True
+    assert portal._agenda_cache[1].stop == "empty_confirmed"
+    assert [pg for pg, _af in fetched] == [1, 2, 2, 3, 3]
+    assert walked == 5                       # the re-fetches are counted honestly
+
+
+def test_page_cap_is_our_stop_but_still_collects_its_page(monkeypatch):
+    # The cap is tested AFTER the page is collected -- the probe walks under a
+    # 1-page cap and must still see (and enqueue) that page's listings.
+    portal = _portal(max_pages=1)
+    pages = [_page(10, [_item("b1")], next_offset=2)]
+    (seen, _c, _t, _p, reached_end), fetched = _drive(monkeypatch, portal, pages)
+    assert seen == {"b1"} and len(fetched) == 1
+    assert reached_end is False
+    assert portal._agenda_cache[1].stop == "page_cap"
+
+
+def test_page_cap_on_a_barren_page_spends_no_re_fetch(monkeypatch):
+    portal = _portal(max_pages=2)
+    pages = [_page(10, [_item("b1")], next_offset=2), _page(10, [])]
+    (_s, _c, _t, _p, reached_end), fetched = _drive(monkeypatch, portal, pages)
+    assert reached_end is False and len(fetched) == 2
+    assert portal._agenda_cache[1].stop == "page_cap"
+
+
+def test_deadline_is_our_stop(monkeypatch):
+    portal = _portal()
+    pages = [_page(10, [_item("b1")], next_offset=2)]
+    reached_end = _reached_end(
+        monkeypatch, portal, pages, deadline=time.monotonic() - 1)
+    assert reached_end is False
+    assert portal._agenda_cache[1].stop == "deadline"
+
+
+def test_repeated_page_is_the_end_only_when_the_pager_agrees(monkeypatch):
+    # A page that adds no new id is the clamped out-of-range page maxima serves
+    # past its last one -- but only its pager makes that maxima's word.
+    portal = _portal()
+    b1, b2 = _item("b1"), _item("b2")
+    clamped = [
+        _page(10, [b1], next_offset=2),
+        _page(10, [b2], next_offset=None),
+        _page(10, [b2]),                    # the last page served again
+    ]
+    assert _reached_end(monkeypatch, portal, clamped) is True
+    assert portal._agenda_cache[1].stop == "clamp_repeat"
+
+    stalled = _portal()
+    pages = [
+        _page(10, [b1], next_offset=2),
+        _page(10, [b1], next_offset=3),     # the pager says there is more
+    ]
+    assert _reached_end(monkeypatch, stalled, pages) is False
+    assert stalled._agenda_cache[1].stop == "pager_stalled"
+
+
+def test_confirm_empty_page_matrix():
+    confirm = MaximaPortal._confirm_empty_page
+    # maxima's own count reached -> the page past the last one.
+    assert confirm(5, 5, pager_advanced=False, pager_end_prev=False) == "empty_confirmed"
+    assert confirm(0, 0, pager_advanced=False, pager_end_prev=False) == "empty_confirmed"
+    # Short of it, but a working pager said the previous page was the last.
+    assert confirm(5, 4, pager_advanced=True, pager_end_prev=True) == "empty_confirmed"
+    # Short of it with nothing to corroborate the emptiness -> ours.
+    assert confirm(5, 4, pager_advanced=True, pager_end_prev=False) == "barren"
+    assert confirm(5, 4, pager_advanced=False, pager_end_prev=True) == "barren"
+    # No total and no pager: an empty page after real pages is the end...
+    assert confirm(None, 4, pager_advanced=False, pager_end_prev=False) == "empty_confirmed"
+    # ...but a pager that is still pointing forward contradicts it, and an
+    # agenda barren from page 1 proves nothing at all.
+    assert confirm(None, 4, pager_advanced=True, pager_end_prev=False) == "barren"
+    assert confirm(None, 0, pager_advanced=False, pager_end_prev=False) == "barren"
 
 
 # --- detail-drain seams -----------------------------------------------------

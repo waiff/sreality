@@ -10,10 +10,9 @@ name: "Scraping: Bezrealitky scraper (pilot)"
 #
 # Categories live in the `portals` registry row (migration 110), not here, so
 # coverage is tuned with a SQL update, no workflow edit. A scheduled run takes
-# no inputs and does a FULL per-category walk (no --max-pages), which is
-# provable-complete (totalCount, no deep-pagination cap), so the runner marks
-# delisted listings inactive under the completeness guard — source-scoped to
-# bezrealitky rows only.
+# no inputs and does a FULL per-category walk (no --max-pages) that ends on the
+# API's own last page, so the runner nominates unseen listings for a page check
+# (rule #3) — source-scoped to bezrealitky rows only, and the page decides.
 #
 # Writes 'index' + 'detail' scrape_runs rows under source='bezrealitky' (its own
 # Health-page lane; does not touch sreality liveness / reconciliation).
@@ -32,6 +31,11 @@ on:
     inputs:
       max_pages:
         description: cap index pages per category (ad-hoc partial; nominates nothing). Blank = full walk.
+        required: false
+        default: ""
+        type: string
+      max_seconds:
+        description: wall-clock budget for the run (default 1500s, under the 30-min job timeout)
         required: false
         default: ""
         type: string
@@ -85,8 +89,14 @@ jobs:
           MAX_DETAIL: ${{ inputs.max_detail || '2000' }}
           RATE: ${{ inputs.rate || '2.0' }}
           WORKERS: ${{ inputs.workers || '8' }}
+          # Kept under the job's timeout-minutes above: the phases stop claiming
+          # and finalize cleanly on expiry (a recorded, incomplete run) instead of
+          # being SIGKILLed with no scrape_runs row. It is also the only
+          # unconditional wall-clock rail the offset loop has.
+          MAX_SECONDS: ${{ inputs.max_seconds || '1500' }}
         run: |
           ARGS="--max-detail $MAX_DETAIL --rate $RATE --workers $WORKERS"
+          ARGS="$ARGS --max-seconds $MAX_SECONDS"
           if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
           echo "python -m scraper.bezrealitky_main $ARGS"
           eval "python -m scraper.bezrealitky_main $ARGS"

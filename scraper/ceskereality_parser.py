@@ -129,6 +129,12 @@ class IndexPage:
     total: int | None
     items: list[IndexItem] = field(default_factory=list)
     next_offset: int | None = None
+    # Did the site AUTHOR its end here? Its last page renders
+    # `<a class="pagination-arrow --disabled --next">`, so a disabled next arrow is
+    # a positive "there is no more". `next_offset is None` alone is not: it is also
+    # what a page with no pagination block at all (a truncated body, an edge shell)
+    # parses to, and the two must never read alike.
+    pager_end_marker: bool = False
 
 
 def _strip_diacritics(text: str) -> str:
@@ -534,7 +540,23 @@ def parse_index(html: str) -> IndexPage:
             )
         )
 
-    return IndexPage(total=total, items=items, next_offset=_next_page(tree))
+    return IndexPage(
+        total=total, items=items, next_offset=_next_page(tree),
+        pager_end_marker=_pager_end_marker(tree),
+    )
+
+
+def _pager_end_marker(tree: HTMLParser) -> bool:
+    """Did the site render a DISABLED next arrow — its own "this is the last page"?
+
+    Distinguishes that from a page carrying no pagination block at all, which
+    `_next_page` cannot: both give None.
+    """
+    for arrow in tree.css("a.pagination-arrow"):
+        cls = arrow.attributes.get("class") or ""
+        if "--next" in cls and "--disabled" in cls:
+            return True
+    return False
 
 
 def _next_page(tree: HTMLParser) -> int | None:

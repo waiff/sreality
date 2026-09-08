@@ -27,6 +27,7 @@ from scraper.portal_base import (
 )
 
 if TYPE_CHECKING:
+    from scraper.portal import StopReason
     from scraper.rate_limit import RateLimiter
 
 # Re-exported for backwards-compatible imports (`from scraper.sreality_client
@@ -136,6 +137,13 @@ class SrealityClient(BasePortalClient):
         self.locality_region_id = locality_region_id
         self.locality_district_id = locality_district_id
         self.per_page = per_page
+        # The page size sreality ACTUALLY served, read back from pagination.limit.
+        # It matters because `short_page` is a portal end: if the API ever clamps
+        # the limit we ask for (500), every page would come back "short" and the
+        # first one would end the walk with the rest of the district unseen. A
+        # clamp is a structural fact the payload states, so adopt it instead of
+        # reading it as a tail.
+        self.page_size_served: int | None = None
         self.detail_delay_s = detail_delay_s
         self._last_detail_at = 0.0
         self.pages_fetched = 0
@@ -144,11 +152,23 @@ class SrealityClient(BasePortalClient):
         # locality.geometry) that the estate dicts alone don't surface to
         # archiving callers (location-data W0 item 0n).
         self.last_index_page: tuple[int, str, dict[str, Any]] | None = None
-        # Total matching estates as the API reports it (pagination.total).
-        # Used by the caller to decide whether a walk was complete enough to
-        # drive mark_inactive (a silently-truncated walk must not flip live
-        # listings to inactive).
+        # Total matching estates as the API reports it (pagination.total), kept
+        # as the HIGH-WATER MARK of everything it reported during this walk: the
+        # number jitters, and a downward step below the offset already reached
+        # would otherwise stamp `declared_total_reached` on a FULL page with rows
+        # left unwalked. Since 2026-09-08 it is a COVERAGE number, not the
+        # nomination gate: rule #3 asks whether the walk reached sreality's last
+        # page, and that is stop_reason below.
         self.result_size: int | None = None
+        # Why the last iter_index page loop stopped, in scraper.portal's
+        # StopReason vocabulary. None until a walk finishes; an abandoned
+        # generator leaves it unset, which callers must read as OUR stop.
+        self.stop_reason: StopReason | None = None
+        # Set by fetch_index_page when sreality answers with the HTTP 422
+        # deep-pagination refusal, and sticky for the rest of the walk: that is a
+        # wall, not the end of the list -- rows past it exist and were not seen --
+        # and the empty list fetch_index_page returns cannot say so on its own.
+        self.cap_hit = False
 
     def _index_params(self, offset: int, limit: int | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {
@@ -186,8 +206,8 @@ class SrealityClient(BasePortalClient):
         probe, which must stop early rather than walk to exhaustion) instead of
         iter_index's generator. Also updates self.pages_fetched / self.result_size,
         same as a step of iter_index's loop. Returns [] at/past the deep-pagination
-        cap (HTTP 422) or once results genuinely run out — the same stop signal
-        iter_index uses, just surfaced per call instead of ending a generator.
+        cap (HTTP 422, which also latches self.cap_hit) and for a page that carried
+        no results — two different stops that only iter_index tells apart.
         """
         if self._limiter is not None:
             self._limiter.acquire()
@@ -201,6 +221,7 @@ class SrealityClient(BasePortalClient):
                 else None
             )
             if status in CAP_STATUSES:
+                self.cap_hit = True
                 LOG.info(
                     "INDEX cap reached offset=%d status=%s; stopping page fetch",
                     offset, status,
@@ -208,9 +229,21 @@ class SrealityClient(BasePortalClient):
                 return []
             raise
         self.pages_fetched += 1
-        total = (payload.get("pagination") or {}).get("total")
-        if isinstance(total, int):
+        pagination = payload.get("pagination") or {}
+        total = pagination.get("total")
+        if isinstance(total, int) and (
+            self.result_size is None or total > self.result_size
+        ):
             self.result_size = total
+        served = pagination.get("limit")
+        if isinstance(served, int) and 0 < served < self.per_page:
+            if self.page_size_served != served:
+                LOG.warning(
+                    "INDEX sreality served limit=%d for a requested %d; adopting it "
+                    "as the page size so a clamped page is not read as the tail",
+                    served, self.per_page,
+                )
+            self.page_size_served = served
         results = payload.get("results") or []
         self.last_index_page = (offset, f"{INDEX_URL}?{urlencode(params)}", payload)
         LOG.info(
@@ -219,30 +252,69 @@ class SrealityClient(BasePortalClient):
         )
         return results
 
+    def _classify_empty_page(self, offset: int, saw_items: bool) -> StopReason:
+        """An empty page that survived a re-fetch: sreality's end, or ours?
+
+        Corroboration only. An items-less HTTP 200 is also what a soft block, a
+        shell body and an edge-cached blank look like, so it stays `barren`
+        (ours) unless the walk's own position proves the list is exhausted: at
+        or past the declared total, or -- when no total was ever readable --
+        after a page of this same slice carried items. A first page that is
+        barren with nothing to compare against is never confirmed.
+        """
+        if self.result_size is not None and offset >= self.result_size:
+            return "empty_confirmed"
+        if self.result_size is None and saw_items:
+            return "empty_confirmed"
+        return "barren"
+
     def iter_index(
         self,
         on_page: Callable[[int, str, dict[str, Any]], None] | None = None,
     ) -> Iterator[dict[str, Any]]:
-        """Yield every estate dict from every search page until exhausted.
+        """Yield every estate dict from every search page until the walk stops.
 
-        Paged by offset/limit via fetch_index_page. Stops cleanly at the
-        deep-pagination cap (HTTP 422), when a page is empty, or when a short
-        page / the reported total signals the walk is done. `on_page` is
-        invoked once per non-empty page with (offset, url, raw payload) —
-        the index-archiving hook.
+        Paged by offset/limit via fetch_index_page, and stamps `self.stop_reason`
+        with WHY it stopped: sreality's own end (`declared_total_reached`,
+        `short_page`, a corroborated `empty_confirmed`) or ours (`cap_wall` at
+        the 422, `barren` for an items-less 200 nothing could corroborate).
+        Rule #3 lets only the former nominate. `on_page` is invoked once per
+        non-empty page with (offset, url, raw payload) — the index-archiving hook.
         """
+        self.stop_reason = None
+        self.cap_hit = False
         offset = 0
+        saw_items = False
         while True:
             results = self.fetch_index_page(offset)
             if not results:
-                return
+                # ITEMS-FIRST: classify the empty page BEFORE reading anything
+                # as an end. The 422 wall, a soft block and the page after the
+                # last one all arrive here as the same empty list.
+                if self.cap_hit:
+                    self.stop_reason = "cap_wall"
+                    return
+                LOG.info("INDEX empty offset=%d; re-fetching once to corroborate", offset)
+                results = self.fetch_index_page(offset)
+                if not results:
+                    self.stop_reason = (
+                        "cap_wall" if self.cap_hit
+                        else self._classify_empty_page(offset, saw_items)
+                    )
+                    return
+            saw_items = True
             if on_page is not None and self.last_index_page is not None:
                 on_page(*self.last_index_page)
             yield from results
-            offset += self.per_page
+            # Advance by what the page ACTUALLY carried, not by what we asked
+            # for: stepping by per_page over a clamped page skips every row
+            # between the two.
+            offset += len(results)
             if self.result_size is not None and offset >= self.result_size:
+                self.stop_reason = "declared_total_reached"
                 return
-            if len(results) < self.per_page:
+            if len(results) < (self.page_size_served or self.per_page):
+                self.stop_reason = "short_page"
                 return
 
     def get_detail(self, sreality_id: int) -> dict[str, Any]:

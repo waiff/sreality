@@ -13,10 +13,13 @@ sreality/idnes (the modularity rule in CLAUDE.md).
 ceskereality's search pages carry a result total (the meta "Máme tady N…"), and a
 FILTERED search URL pages deep and row-faithfully (verified: /prodej/byty/praha/
 ?strana=93 returns exactly 3 items = the declared 1843, and ?strana=94 404s), so a
-walk partitioned on the 14 declared kraje is provable-complete:
-`supports_complete_walk` (config-driven) lets the runner mark delisted listings
-inactive under the completeness guard (architectural rule #3), source-scoped so it
-only ever touches ceskereality rows (rule #15). The detail URL carries the
+walk partitioned on the 14 declared kraje can page each slice to its own tail.
+Nomination is STRUCTURAL since 2026-09-08 (architectural rule #3): a category all
+of whose slices ended because ceskereality said there was no more — a disabled next
+arrow, the region's own declared tail, a confirmed-empty region — nominates its
+unseen rows for a page check, and the PAGE decides; no portal flips a row from index
+absence any more. The count is a logged COVERAGE alarm, never a gate. Nomination is
+source-scoped, so it only ever touches ceskereality rows (rule #15). The detail URL carries the
 category (`/{sale}/{cat}/…`), so the drain derives each listing's category from
 its own URL — one config walks many categories. Coordinates come straight from the
 page's `data-coord-lat`/`data-coord-lng`, so there is no geocoding step.
@@ -50,11 +53,14 @@ from scraper.ceskereality_parser import (
 )
 from scraper.portal import (
     PortalConfig,
+    StopReason,
     default_config,
     deadline_reached,
     load_portal_config,
     classify_index_sighting,
+    stop_is_portal_end,
     walk_is_complete,
+    walk_reached_end,
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -63,12 +69,20 @@ from scraper.rate_limit import RateLimiter
 LOG = logging.getLogger(__name__)
 SOURCE = "ceskereality"
 
-# The completeness verdict — min ratio, over-collection ceiling, early-stop — is
-# scraper.portal.walk_is_complete, one definition for all nine portals (rule #3).
-# It replaced a local copy that returned True when the total was unmeasurable.
-# No staleness rail any more (rule #3, 2026-09-07): a complete walk nominates
-# the rows it did not see for a page check and the drain's fetch decides, so a
-# single walk-miss costs one fetch, never a live listing.
+# The nomination verdict is STRUCTURAL (rule #3, 2026-09-08): a category
+# nominates when every one of the 14 kraje stopped because ceskereality said
+# there was no more — the pager's disabled next arrow, the region's own declared
+# tail, or a confirmed-empty region — and no stop of OURS (deadline, page cap,
+# --kraje, a fetch error, a barren page) fired anywhere in it.
+# scraper.portal.walk_reached_end spells that conjunction for all nine portals.
+# The arithmetic — scraper.portal.walk_is_complete, min ratio + over-collection
+# ceiling — stays exactly where it was but no longer gates: it is the slice
+# ledger's `outcome`, the descent trigger, and a coverage alarm. A region one row
+# short of its own declared count is a finished walk over a live index, not a
+# truncated one; that one row kept a 20,964-row category from nominating anything.
+# No staleness rail any more (rule #3, 2026-09-07): a walk that reached the end
+# nominates the rows it did not see for a page check and the drain's fetch
+# decides, so a single walk-miss costs one fetch, never a live listing.
 
 # The 12-page cap is NOT a site-wide law — it belongs to UNFILTERED category URLs
 # (/prodej/byty/?strana=13 = 404) and to nothing else. A FILTERED URL caps at 99
@@ -95,9 +109,15 @@ SliceOutcome = Literal["exhausted", "deadline", "ceiling", "error", "degraded"]
 
 @dataclass(frozen=True)
 class SliceResult:
-    """One (kraj[, subtype]) slice's outcome. `exhausted` — walked to the slice's
-    own declared tail — is the ONLY positive one; every other outcome is missing
-    evidence and forces the category incomplete (rule #3)."""
+    """One (kraj[, subtype]) slice, carrying BOTH verdicts.
+
+    `outcome` is the arithmetic one and is unchanged — it is what the slice
+    ledger stores and what scripts/coverage_gate.py counts as `exhausted`.
+    `stop` is the structural one: why the page loop ended. Only `stop` decides
+    whether the category may nominate (rule #3), so a slice that paged to the
+    portal's end one row short of its own declared count reads `degraded` in the
+    ledger and `reached_end` at the gate.
+    """
 
     kraj: str
     subtype: str | None
@@ -105,10 +125,15 @@ class SliceResult:
     declared_total: int | None
     pages: int
     outcome: SliceOutcome
+    stop: StopReason
 
     @property
     def positive(self) -> bool:
         return self.outcome == "exhausted"
+
+    @property
+    def reached_end(self) -> bool:
+        return stop_is_portal_end(self.stop)
 
 
 class CeskerealityPortal:
@@ -118,6 +143,14 @@ class CeskerealityPortal:
 
     source = SOURCE
     index_rate = 0.7
+    # The denominator this portal reports to the runner is the NATIONAL total, and
+    # the kraj union cannot reach it by construction: listings filed under no kraj
+    # at all sit in no slice (rentals: 4,732 of 4,771, twelve walks in a row). So
+    # the runner's generic COVERAGE warning would fire on every category of every
+    # walk — an alarm that is on by construction is noise that hides the real one.
+    # The gap is still recorded in scrape_runs.by_category, and this portal emits
+    # its own scoped kraj-sum-vs-national warning below.
+    coverage_denominator_is_upper_bound = True
 
     def __init__(
         self,
@@ -130,13 +163,13 @@ class CeskerealityPortal:
         self._categories = config.categories
         self._max_pages = max_pages
         # A kraj subset to walk (for an ad-hoc one-kraj test); None = all 14.
-        # When set, the walk is partial so mark_inactive is suppressed.
+        # When set, the walk is partial so it nominates nothing (rule #3).
         self._kraje = kraje
         self.index_rate = config.limits.index_rate
         self.shared_rate_limiter = config.limits.shared_rate_limiter
         self._price_change_min_pct = config.limits.price_change_min_pct
         # per-(cm, ct) union of complete slices' seen ids + completed-slice
-        # counts — the cross-slice delisting sweep buffer (see mark_inactive).
+        # counts — the cross-slice nomination buffer (see presence_candidates).
         self._sweep_seen: dict[tuple[str, str], set[str]] = {}
         self._sweep_done: dict[tuple[str, str], int] = {}
         # page > carry-forward > geocode. Replaces the parser's never-wired
@@ -204,8 +237,9 @@ class CeskerealityPortal:
 
         Takes the url rather than rebuilding it, so the confirmation cannot drift
         onto a different page than the one it is confirming. Any failure to
-        re-read returns False (degraded), never True — a confirmation that cannot
-        be obtained is not a confirmation.
+        re-read returns False (barren), never True — a confirmation that cannot
+        be obtained is not a confirmation. This is the barren rule's second read,
+        for the empty page 1 and for a blank page mid-slice alike.
         """
         try:
             html, _status = client.fetch_search(url)
@@ -221,14 +255,15 @@ class CeskerealityPortal:
         archive_week: str | None = None, fresh_keys: set[str] | None = None,
         deadline: float | None = None,
     ) -> SliceResult:
-        """Walk ONE (kraj[, subtype]) slice to its declared tail.
+        """Walk ONE (kraj[, subtype]) slice until ceskereality says there is no more.
 
-        `exhausted` is the only positive outcome — everything else forces the
-        category incomplete (rule #3). The load-bearing case is a 200 carrying
-        ZERO cards: that is the site's real degraded response (the 404 is not —
-        `Retry-After: 3` accompanies every 404 here, nonexistent paths included),
-        so it is only ever read as a finished slice when the page also proves it
-        is the empty slice we asked for (`heading_names_kraj`).
+        Two verdicts come back (see SliceResult): `stop`, the structural one that
+        gates nomination, and `outcome`, the arithmetic one the ledger keeps. The
+        load-bearing case is a 200 carrying ZERO cards: that is the site's real
+        degraded response (the 404 is not — `Retry-After: 3` accompanies every 404
+        here, nonexistent paths included), so it is `barren` — a stop of OURS —
+        until the page proves it is the empty slice we asked for
+        (`heading_names_kraj` plus a second read, or a declared zero).
         """
         rows: list[tuple[str, str, int | None]] = []
         declared_total: int | None = None
@@ -237,12 +272,25 @@ class CeskerealityPortal:
         page = 1
         page_cap = self._max_pages or _MAX_SLICE_PAGES
 
-        def out(outcome: SliceOutcome, pages: int) -> SliceResult:
-            return SliceResult(kraj, subtype, rows, declared_total, max(pages, 0), outcome)
+        def out(
+            stop: StopReason, pages: int, *, outcome: SliceOutcome | None = None,
+        ) -> SliceResult:
+            # The ledger's outcome stays the shared two-sided arithmetic verdict,
+            # on DISTINCT ids (pages shift under a live walk, so len(rows)
+            # double-counts). It no longer decides anything here — `stop` does.
+            if outcome is None:
+                outcome = (
+                    "exhausted"
+                    if walk_is_complete(len({r[0] for r in rows}), declared_total)
+                    else "degraded"
+                )
+            return SliceResult(
+                kraj, subtype, rows, declared_total, max(pages, 0), outcome, stop)
 
+        stop: StopReason
         while True:
             if page > page_cap:
-                return out("ceiling", page - 1)
+                return out("page_cap", page - 1, outcome="ceiling")
             # Budget spent: stop BEFORE issuing another request and report the
             # slice as a deadline stop — the rows already collected still count.
             if deadline_reached(deadline):
@@ -251,7 +299,7 @@ class CeskerealityPortal:
                     "after page=%d collected=%d",
                     cat, sale_type, kraj, subtype or "all", page - 1, len(rows),
                 )
-                return out("deadline", page - 1)
+                return out("deadline", page - 1, outcome="deadline")
             url = search_url(
                 sale_type, cat, kraj=kraj, subtype=subtype,
                 page=page if page > 1 else None,
@@ -263,7 +311,7 @@ class CeskerealityPortal:
                 # ListingGoneError here is a 404 we did not expect to exist.
                 LOG.warning("SLICE error kraj=%s subtype=%s page=%d: %s",
                             kraj, subtype or "all", page, exc)
-                return out("error", page - 1)
+                return out("error", page - 1, outcome="error")
             if conn is not None and archive_week is not None:
                 # v2/ prefix: portal_raw_pages is UNIQUE(source, source_id_native,
                 # page_kind), and without it the dead v1 subdomain/facet keys and
@@ -279,7 +327,7 @@ class CeskerealityPortal:
                 if declared_total is None:
                     # No "Máme tady N" at all. A genuinely empty slice looks EXACTLY
                     # like this and there is no count to fail closed on, so the H1
-                    # has to carry the proof; anything else is degraded.
+                    # has to carry the proof; anything else is a stop of ours.
                     if not parsed.items and heading_names_kraj(html, kraj):
                         # CONFIRM THE ZERO BY READING IT TWICE.
                         #
@@ -295,35 +343,59 @@ class CeskerealityPortal:
                         # A throttle is transient; a genuinely empty kraj is
                         # stable. Reading it twice separates them, and costs one
                         # extra request only for slices that are already one page
-                        # long. It is not the only rail — the category's national
-                        # cross-check now fails closed too — but it is the one
-                        # that stops a bad zero entering the arithmetic at all.
+                        # long. It is the barren rule (scraper.portal.StopReason):
+                        # an items-less 200 is ours until it is corroborated, and
+                        # this is the only corroboration this site offers.
                         if not self._confirm_slice_is_empty(client, url, kraj):
                             LOG.warning(
                                 "SLICE cm=%s ct=%s kraj=%s subtype=%s looked empty "
-                                "but did not confirm on re-read; treating as degraded",
+                                "but did not confirm on re-read; treating as barren",
                                 cat, sale_type, kraj, subtype or "all",
                             )
-                            return out("degraded", 1)
+                            return out("barren", 1, outcome="degraded")
                         declared_total = 0
                         LOG.info(
                             "SLICE cm=%s ct=%s kraj=%s subtype=%s declared=0 "
                             "collected=0 pages=1 outcome=exhausted (empty-confirmed x2)",
                             cat, sale_type, kraj, subtype or "all",
                         )
-                        return out("exhausted", 1)
-                    return out("degraded", 1)
+                        return out("empty_confirmed", 1, outcome="exhausted")
+                    if not parsed.items:
+                        # Zero cards, no count, and an H1 that does not name the
+                        # kraj we asked for: an items-less 200 nobody corroborated.
+                        return out("barren", 1, outcome="degraded")
+                    # Cards but no count. The count renders from the same query as
+                    # the cards, so a page that kept one and lost the other is a
+                    # broken page, not a tail — unmeasurable is never an end.
+                    return out("error", 1, outcome="degraded")
                 last_page = max(1, -(-declared_total // _PER_PAGE))
                 if last_page > _MAX_SLICE_PAGES:
                     # Past the site's own 99-page ceiling on a filtered URL: the
                     # tail is unreachable on this axis, so descend instead.
-                    return out("ceiling", 1)
+                    return out("page_cap", 1, outcome="ceiling")
             if parsed.total is not None:
                 live_last = max(1, -(-parsed.total // _PER_PAGE))
+            # ITEMS FIRST, ahead of the pager: a blocked page carries no next
+            # arrow either, and reading one as the last page is how a soft block
+            # becomes a nomination.
             if not parsed.items:
                 if page == 1 and declared_total == 0:
-                    return out("exhausted", 1)
-                return out("degraded", page)
+                    # A measured zero with zero collected: the portal's own answer.
+                    return out("empty_confirmed", 1, outcome="exhausted")
+                # BARREN. It is the portal's end only if the page is past what
+                # the declared total implies AND a re-read of the SAME url is
+                # empty again. Position first: it is the necessary half, and a
+                # page we already suspect is a soft block is not worth a second
+                # request we could not use anyway. On this site the position half
+                # effectively never holds — the loop bounds itself at the declared
+                # tail and deliberately never fetches the 404 beyond it — so a
+                # blank page mid-slice stays a stop of ours.
+                if (
+                    last_page is not None and page > last_page
+                    and self._confirm_slice_is_empty(client, url, kraj)
+                ):
+                    return out("empty_confirmed", page - 1)
+                return out("barren", page, outcome="degraded")
             for item in parsed.items:
                 rows.append((
                     item.source_id_native,
@@ -334,17 +406,43 @@ class CeskerealityPortal:
             # whichever declared count says we are done first.
             stop_at = min(x for x in (last_page, live_last) if x is not None)
             if page >= stop_at:
+                # The portal's own count says this is the tail; a disabled next
+                # arrow on the same page is the stronger way to say it.
+                stop = (
+                    "pager_end" if parsed.next_offset is None
+                    else "declared_total_reached"
+                )
                 break
             if parsed.next_offset is None:
-                # The pager ended before the declared tail: a truncated page.
-                return out("degraded", page)
+                if not parsed.pager_end_marker:
+                    # No next arrow AND no disabled one either: this page carries no
+                    # pagination block at all, which is a truncated body / edge shell,
+                    # not the site saying "there is no more". Reading absence as an
+                    # end would turn any partially rendered page that still carries a
+                    # card into a category-wide nomination.
+                    LOG.warning(
+                        "SLICE cm=%s ct=%s kraj=%s subtype=%s page=%d of %d rendered "
+                        "no pagination block; that is not an end-of-results",
+                        cat, sale_type, kraj, subtype or "all", page, stop_at,
+                    )
+                    return out("barren", page, outcome="degraded")
+                # The pager ended BEFORE the declared tail. That is still the
+                # PORTAL's end — the arrow is disabled on the last page — not a
+                # truncation of ours. The shortfall lands in `outcome` and in this
+                # line; the rows we did not see are nominated, and their pages
+                # decide. Reading it as a failure is what kept a 20,964-row
+                # category silent.
+                LOG.warning(
+                    "SLICE cm=%s ct=%s kraj=%s subtype=%s pager ended at page=%d "
+                    "of %d: collected=%d declared=%s",
+                    cat, sale_type, kraj, subtype or "all", page, stop_at,
+                    len({r[0] for r in rows}), declared_total,
+                )
+                stop = "pager_end"
+                break
             page += 1
 
-        # Arithmetic gate: the shared two-sided verdict, on DISTINCT ids (pages
-        # shift under a live walk, so len(rows) double-counts).
-        if not walk_is_complete(len({r[0] for r in rows}), declared_total):
-            return out("degraded", page)
-        return out("exhausted", page)
+        return out(stop, page)
 
     def _nationwide_total(self, client: CeskerealityClient, sale_type: str, cat: str) -> int | None:
         """The www result total — the portal-reported count for the RECONCILE +
@@ -387,7 +485,7 @@ class CeskerealityPortal:
         children: list[SliceResult] = []
         for slug in subtypes:
             if deadline_reached(deadline):
-                children.append(replace(parent, outcome="deadline"))
+                children.append(replace(parent, outcome="deadline", stop="deadline"))
                 return children
             children.append(self._walk_slice(
                 client, sale_type, cat, kraj, subtype=slug, conn=conn,
@@ -468,9 +566,10 @@ class CeskerealityPortal:
         ref_map: dict[str, str] = {}
         seen_ids: set[str] = set()
         # A deadline stop poisons the WHOLE category verdict, not just its slice:
-        # the un-walked kraje never report at all, so per-slice outcomes alone
-        # would let a truncated walk claim complete=True. Passed to
-        # walk_is_complete as stopped_early=, so one function owns it.
+        # the un-walked kraje never report at all, so per-slice stops alone would
+        # let a truncated walk claim it reached the portal's end. It is folded
+        # into `our_stop` below, and the kraje it never reached are seeded as
+        # `slice_unreached`.
         deadline_hit = False
         results: list[SliceResult] = []
         for kraj in kraje:
@@ -492,9 +591,9 @@ class CeskerealityPortal:
         for r in results:
             LOG.info(
                 "SLICE cm=%s ct=%s kraj=%s subtype=%s declared=%s collected=%d "
-                "pages=%d outcome=%s",
+                "pages=%d outcome=%s stop=%s",
                 cat, sale_type, r.kraj, r.subtype or "all", r.declared_total,
-                len({x[0] for x in r.rows}), r.pages, r.outcome,
+                len({x[0] for x in r.rows}), r.pages, r.outcome, r.stop,
             )
             for nid, ref, price in r.rows:
                 if nid not in seen_ids:
@@ -506,13 +605,17 @@ class CeskerealityPortal:
         self._record_slices(conn, category, kraje, results, deadline_hit)
 
         pages = sum(r.pages for r in results)
-        declared_sum = sum(r.declared_total or 0 for r in results if r.positive)
+        # Summed over the slices that REACHED THE PORTAL'S END, not the ones that
+        # cleared 99.5% of their own count: a region walked to its last page is a
+        # region whose declared count we believe, however live the tail was.
+        declared_sum = sum(r.declared_total or 0 for r in results if r.reached_end)
         national = self._nationwide_total(client, sale_type, cat)
         kraje_seen = {r.kraj for r in results}
         LOG.info(
-            "PARTITION cm=%s ct=%s kraje=%d slices=%d positive=%d collected=%d "
-            "declared_sum=%d national=%s pages=%d",
+            "PARTITION cm=%s ct=%s kraje=%d slices=%d reached_end=%d positive=%d "
+            "collected=%d declared_sum=%d national=%s pages=%d",
             cat, sale_type, len(kraje_seen), len(results),
+            sum(1 for r in results if r.reached_end),
             sum(1 for r in results if r.positive), len(seen_ids), declared_sum,
             national, pages,
         )
@@ -551,13 +654,17 @@ class CeskerealityPortal:
             "ENQUEUE source=ceskereality new=%d changed=%d unchanged=%d enqueued=%d",
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        # A complete walk NOMINATES (rule #3, 2026-09-07); it no longer delists,
-        # so "complete" answers one question only: did every one of the 14 kraje
-        # walk to its own declared tail? Each slice is checked against the
-        # region's own count, and a degraded, throttled or unreached slice fails
-        # the whole category (an unproven walk nominates nothing).
+        # A walk that reached the portal's end NOMINATES (rule #3); it no longer
+        # delists, and since 2026-09-08 the verdict is STRUCTURAL: did every one
+        # of the 14 kraje stop because ceskereality said there was no more? A
+        # region one row short of its own declared count paged to its last page
+        # and IS finished — the count is a live number, not a contract, and
+        # demanding it kept a 20,964-row category from nominating anything.
+        # What still fails the category is a stop of OURS anywhere in it: a
+        # barren page, a fetch error, the page ceiling, --max-pages, --kraje, the
+        # deadline, or a kraj the loop never reached.
         #
-        # The nationwide total is deliberately NOT part of the verdict any more.
+        # The nationwide total is deliberately NOT part of the verdict either.
         # It includes listings filed under no kraj at all -- foreign flats in the
         # domestic tree, Czech flats with no region set -- so the kraj union can
         # never reach it (rentals: 4,732 of 4,771, twelve walks in a row), and a
@@ -565,15 +672,26 @@ class CeskerealityPortal:
         # are nominated on every walk instead, and their page decides. The
         # national count is still fetched and logged (PARTITION / RECONCILE) as
         # the coverage signal it always was.
-        complete = (
-            not self._max_pages
-            and not self._kraje
-            and not deadline_hit
-            and kraje_seen == set(KRAJ_SLUGS)
-            and all(r.positive for r in results)
-            and walk_is_complete(len(seen), declared_sum, stopped_early=deadline_hit)
+        stops_by_kraj: dict[str, list[StopReason]] = {}
+        for r in results:
+            stops_by_kraj.setdefault(r.kraj, []).append(r.stop)
+        # Seeded from the DECLARED 14, never from the slices that ran: an empty
+        # list makes all() vacuously true, so a category whose slices all failed
+        # to start would otherwise report the portal's end.
+        slice_stops = [
+            s for kraj in KRAJ_SLUGS
+            for s in (stops_by_kraj.get(kraj) or ["slice_unreached"])
+        ]
+        ends = {s: stop_is_portal_end(s) for s in set(slice_stops)}
+        reached_end = walk_reached_end(
+            portal_end=all(ends[s] for s in slice_stops),
+            our_stop=(
+                bool(self._max_pages) or bool(self._kraje) or deadline_hit
+                or kraje_seen != set(KRAJ_SLUGS)
+                or any(not ends[s] for s in slice_stops)
+            ),
         )
-        if complete and national is not None and declared_sum < 0.97 * national:
+        if reached_end and national is not None and declared_sum < 0.97 * national:
             # Not a gate (rule #3 nominates, the page decides), a coverage
             # alarm: the region-less tail is under 1%, so a kraj-sum this far
             # below national means a region came back short or empty.
@@ -583,7 +701,10 @@ class CeskerealityPortal:
                 cat, sale_type, declared_sum, national,
             )
         result_size = national if national is not None else declared_sum
-        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, result_size, pages, complete
+        return (
+            seen, {"found_new": len(new_ids), "enqueued": enqueued}, result_size,
+            pages, reached_end,
+        )
 
     def probe_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool,
@@ -594,8 +715,8 @@ class CeskerealityPortal:
         region×facet slices even under --max-pages AND the default order is not
         newest — so the probe reads the /nejnovejsi/ sort slug on the www host
         (through the same proxied client), page by page with an early stop on
-        the first all-known page. Diff + enqueue only; always complete=False so
-        the caller can never be tempted into a delisting sweep (rule #3)."""
+        the first all-known page. Diff + enqueue only; always reached_end=False,
+        so a probe can never nominate anything for a page check (rule #3)."""
         sale_type, cat = category["sale_type"], category["category"]
         client = CeskerealityClient(limiter=limiter)
         seen: set[str] = set()
@@ -657,6 +778,18 @@ class CeskerealityPortal:
             if not new_entries or parsed.next_offset is None:
                 break
         return seen, {"found_new": found_new, "enqueued": enqueued}, total, pages, False
+
+    def note_empty_slice(self, category: dict[str, Any]) -> None:
+        """A slice the runner refused to nominate from (it saw nothing) still counts
+        as one of the group's slices — otherwise a nationwide-empty sibling slug
+        would hold its whole (category_main, category_type) group below `expected`
+        for ever and the group would never nominate again. It contributes no ids."""
+        cm, ct = self.category_labels(category)
+        if cm is None or ct is None:
+            return
+        key = (cm, ct)
+        self._sweep_seen.setdefault(key, set())
+        self._sweep_done[key] = self._sweep_done.get(key, 0) + 1
 
     def presence_candidates(
         self, conn: Any, category: dict[str, Any], seen: set[str],
@@ -825,8 +958,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="ceskereality.cz scraper (portal framework)")
     p.add_argument(
         "--max-pages", type=int, default=None,
-        help="cap index pages per category (ad-hoc partial run; suppresses "
-             "mark_inactive). Omit for a full, complete walk.",
+        help="cap index pages per category (ad-hoc partial run; nominates "
+             "nothing). Omit for a full walk to the portal's own end.",
     )
     p.add_argument(
         "--max-detail", type=int, default=None,
@@ -842,12 +975,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument(
         "--max-seconds", type=float, default=None,
-        help="wall-clock budget for the detail drain; it stops claiming + "
-             "finalizes cleanly before the job timeout (no 'stuck' run)",
+        help="wall-clock budget for EITHER phase (the index walk consumes it as "
+             "its per-category deadline); the phase stops claiming + finalizes "
+             "cleanly before the job timeout (no 'stuck' run)",
     )
     p.add_argument(
         "--index-only", action="store_true",
-        help="walk the index + enqueue + mark_inactive only (no detail drain)",
+        help="walk the index + enqueue + nominate unseen rows for a page check "
+             "only (no detail drain)",
     )
     p.add_argument(
         "--drain-only", action="store_true",
@@ -857,8 +992,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--kraj", action="append", default=None, choices=list(KRAJ_SLUGS),
         metavar="SLUG",
         help="limit the index walk to this kraj (repeatable; e.g. "
-             "stredocesky-kraj) for an ad-hoc partial run. Suppresses "
-             "mark_inactive. Omit = all 14 kraje. An unknown slug is an "
+             "stredocesky-kraj) for an ad-hoc partial run. Nominates "
+             "nothing. Omit = all 14 kraje. An unknown slug is an "
              "argparse error, never a silently-404ing walk.",
     )
     p.add_argument(

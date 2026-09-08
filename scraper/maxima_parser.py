@@ -127,6 +127,11 @@ class IndexPage:
     total: int | None
     items: list[IndexItem] = field(default_factory=list)
     next_offset: int | None = None
+    # Did a pager actually RENDER here? `next_offset is None` conflates "the pager
+    # said this is the last page" with "no pager markup at all" (a truncated body,
+    # a CDN/template variant), and only the first is maxima saying there is no
+    # more. Callers that treat the pager as EVIDENCE must check this first.
+    pager_present: bool = False
 
 
 def _strip_diacritics(text: str) -> str:
@@ -343,7 +348,10 @@ def parse_index(html: str) -> IndexPage:
             )
         )
 
-    return IndexPage(total=total, items=items, next_offset=_next_page(tree))
+    return IndexPage(
+        total=total, items=items, next_offset=_next_page(tree),
+        pager_present=tree.css_first("a.btn-pager") is not None,
+    )
 
 
 def _next_page(tree: HTMLParser) -> int | None:

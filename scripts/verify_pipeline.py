@@ -2013,7 +2013,8 @@ select l.source,
        sum((c->>'collected')::bigint) filter (
          where (c->>'sreality_result_size') is not null) as collected,
        sum((c->>'sreality_result_size')::bigint) filter (
-         where (c->>'sreality_result_size') is not null) as portal_total
+         where (c->>'sreality_result_size') is not null) as portal_total,
+       count(*) filter (where (c->>'walk_reached_end')::boolean) as nominating
   from latest l
   join best b on b.source = l.source
   left join lateral jsonb_array_elements(l.by_category) c on true
@@ -2022,13 +2023,21 @@ select l.source,
 
 # These portals derive their "advertised total" as len(seen) -- the number they
 # just collected -- so their gap is 0% BY CONSTRUCTION and proves nothing.
-# mmreality reports no total at all. Reporting them as 100% covered would be the
-# worst kind of green: a number that cannot be wrong is not a measurement.
+# Reporting them as 100% covered would be the worst kind of green: a number that
+# cannot be wrong is not a measurement. (mmreality used to sit here too; since the
+# 2026-09 per-type split every mmreality category declares its own count, so it is
+# measured like the rest and only falls to `verifiable: false` if a walk records
+# no total at all.)
 _SELF_CERTIFYING_TOTALS = frozenset({"remax", "maxima"})
 
 
 def check_walk_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    """Collected vs portal-advertised inventory on the most recent index walk."""
+    """Collected vs portal-advertised inventory on the most recent index walk.
+
+    Since 2026-09-08 the count no longer gates nomination (rule #3), so this is the
+    standing rail on it. `categories_nominating` is reported beside the gap — the
+    count of categories whose walk reached the portal's end — but never changes the
+    status: a walk can legitimately reach the end and still be short."""
     with conn.cursor() as cur:
         cur.execute(_WALK_COVERAGE_SQL)
         rows = cur.fetchall()
@@ -2040,9 +2049,10 @@ def check_walk_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]
     unverified: list[str] = []
     status = "ok"
     worst = 0.0
-    for source, walked, max_cats, age_hours, collected, portal_total in rows:
+    for source, walked, max_cats, age_hours, collected, portal_total, nominating in rows:
         entry: dict[str, Any] = {
             "categories_walked": int(walked),
+            "categories_nominating": int(nominating or 0),
             "categories_best_7d": int(max_cats or 0),
             "age_hours": round(float(age_hours or 0.0), 2),
             "collected": int(collected or 0),

@@ -6,11 +6,17 @@ instead of a boolean somebody typed once.
 
 ## The flag is a claim about US, not about the portal
 
-> **2026-09-07:** delisting is now presence-verified (rule #3): a complete walk
+> **2026-09-07:** delisting is now presence-verified (rule #3): a finished walk
 > nominates its unseen rows for a page check and the drain's fetch decides. The
 > flag below no longer gates anything; the ledger and the gate remain the
 > coverage evidence and the posture signal. The history stays because it is
 > why the design changed.
+>
+> **2026-09-08:** what "finished" means changed too. The nomination gate is
+> **structural** — `walk_reached_end`, "the walk reached the portal's end" — and
+> the count comparison (`walk_coverage`) is a LOGGED ALARM, never a gate. See
+> "The structural gate" below; the arithmetic in this file still governs the
+> descent/resample triggers and the ledger's `outcome`, which did not change.
 
 `portals.supports_complete_walk` used to gate `mark_inactive` (architectural rule #3):
 a portal that could not prove it saw the whole catalogue never delisted from index
@@ -179,8 +185,18 @@ One latest-wins row per `(source, category_main, category_type, slice_key)`:
 `walked_at`, `outcome`, `declared_total`, `collected`, `pages`.
 
 - Only `exhausted` is positive. `deadline`, `error`, `degraded` and `ceiling`
-  are **missing evidence**, and any one of them holds its whole category open —
-  14 good slices and one hole is not 93% coverage for delisting purposes.
+  are **missing evidence**, and any one of them holds its whole category open
+  FOR THE GATE — 14 good slices and one hole is not 93% coverage for
+  `supports_complete_walk` purposes.
+- **`outcome` stayed NUMERIC on 2026-09-08 and must stay that way**:
+  `scripts/coverage_gate.py` counts `outcome='exhausted'` streaks, so re-pointing
+  it at the structural verdict would silently re-baseline the gate. The
+  structural verdict travels beside it, in code (a field on the slice result) and
+  in the `SLICE`/`CATEGORY` log lines, not in the ledger. Consequence to expect:
+  a slice can read `outcome='degraded'` (one row short) and `stop=pager_end`
+  (reached idnes's last page) at the same time. Both are true. The first decides
+  the posture flag; the second decides nomination. **Never read `exhausted` as
+  "this nominated".**
 - **Both the category order and the slice order are least-recently-walked
   first**, and an absent row sorts to *infinity*, not zero. Treating unknown as
   fresh would sort exactly the never-walked slices last, which is the starvation
@@ -335,19 +351,121 @@ batches); the retry only stops it costing a category.
 
 **Not budget stops:** ceskereality's and bazos's "short" categories all sit at
 99.0-99.5% — the declared count drifting a few rows during the walk, on slices
-where one row is half a percent. A threshold artefact, not a coverage failure.
+where one row is half a percent. A threshold artefact, not a coverage failure —
+and since 2026-09-08 not a nomination failure either: those walks reached the
+portal's end, so they nominate and log a `COVERAGE` warning.
 
-## The four layers, in order (as rebuilt 2026-09-07)
+## The structural gate (2026-09-08)
+
+The 5th element of every portal's `walk_category` used to be arithmetic and is
+now structural. **`reached_end` := every unit the category is defined over was
+walked, AND each unit's page loop exited on a PORTAL terminator, AND no stop of
+OURS fired anywhere in the category.** The vocabulary is shared so it means one
+thing on all nine portals (`scraper/portal.py`): `StopReason`, the `PORTAL_ENDS`
+/ `OUR_STOPS` frozensets, `stop_is_portal_end(reason)`, and the one conjunction
+`walk_reached_end(portal_end=..., our_stop=...)`.
+
+| verdict | reasons |
+| --- | --- |
+| PORTAL end (may nominate) | `pager_end`, `declared_total_reached`, `short_page`, `empty_confirmed`, `clamp_repeat` |
+| OUR stop (nominates nothing) | `deadline`, `page_cap`, `limit`, `slice_subset`, `slice_unreached`, `error`, `pager_stalled`, `cap_wall`, `barren` |
+
+**Why.** A numeric per-slice AND cannot pass on a live index: ceskereality's
+20,964-row houses-for-sale category nominated nothing for days because one
+87-row Karlovarský slice collected 86 (`0.9885 < 0.995`) — while the
+category-level arithmetic would have passed at 0.99995.
+
+**Two disciplines that keep it honest, mandatory on every portal.**
+*Items-first*: a loop that breaks on `not items or next is None` must test
+`not items` FIRST — a blocked or throttled HTTP 200 also has no pager, and
+sharing one break with the real last page is exactly what the numeric gate was
+quietly covering for. *The barren rule*: a zero-item page is `barren` (OURS)
+until re-fetched once through the limiter and still empty AND at or past the
+position the declared total implies (or no total was ever readable and an
+earlier page of this unit carried items) — then `empty_confirmed`. A
+confirmation that cannot be obtained is not a confirmation.
+
+**A terminator has to be HARD TO FORGE, per portal.** The shared vocabulary says
+what a stop means; each portal still has to prove its own terminator, and the
+2026-09-08 live probe (per-portal last page + the page past it) is what settles
+what is provable. Rules that came out of it, all count-free or position-only —
+the count must never veto:
+
+- **The suspect page may not supply its own corroboration.** `total` /
+  `declared` is latched ONLY from a page that carried items (remax, maxima,
+  realitymix, sreality's high-water `result_size`). A blank "no results" or
+  shell page renders its own smaller (or zero) counter, and reading it put the
+  page past the end and confirmed itself.
+- **A count may only be latched upward within a walk.** `offset >= declared` is
+  a portal end, so a total that steps DOWN below the offset already reached
+  would end a walk on a full page of items (bezrealitky, sreality).
+- **`next is None` is not one fact.** It means "the pager said last page" AND
+  "no pager rendered at all". Portals that use it as evidence must read the
+  site's own end marker instead: ceskereality's `<a class="pagination-arrow
+  --disabled --next">` (`IndexPage.pager_end_marker`), maxima's rendered pager
+  (`IndexPage.pager_present`). bazos publishes neither, so a FULL page claiming
+  no next page is corroborated by one fetch of the offset it would have pointed
+  at (gone or empty = its tail; ads we never saw = the pager broke).
+  mmreality's real last page still emits `<link rel="next">` (it over-advertises
+  by one page), so a missing link is WALKED PAST, not trusted — the items-less
+  page past the end is its only terminator, and it also honours the portal's own
+  "nejsou k dispozici žádné nemovitosti" copy.
+- **An offset API needs a progress guard.** bezrealitky counts rows returned, so
+  a resolver that ignores `offset` marched it to the declared total on one page:
+  a page that adds no new id is `pager_stalled` (OURS).
+- **`clamp_repeat` only where clamping is proven.** No probe has yet observed a
+  portal clamping a past-the-end request; remax and mmreality now break on a
+  repeated page as `pager_stalled` (OURS), and only maxima / realitymix keep it,
+  corroborated by position.
+- **A clamped PAGE SIZE is not a short page.** sreality's `short_page` is a
+  portal end, so the client adopts the `pagination.limit` the API actually
+  served and advances by what arrived.
+
+**What to read in a log.** Nomination itself is unchanged:
+`VERIFY cm=… ct=… subtype=… candidates=… queued=… deferred=… active=…`. Two
+lines changed shape:
+
+- `COVERAGE cm=… ct=…: the walk reached the portal's end but collected N of M
+  (coverage=…) -- the gap is nominated, the page decides (rule #3)` — a WARNING
+  emitted when a walk nominates while `walk_coverage != "complete"`. This is the
+  alarm that replaced the veto. **Do not silence it**: on a portal that could
+  serve a forged terminator (a missing pager, an edge-cached repeat) it is the
+  first thing that shows the walk ended early.
+- `VERIFY skipped cm=… ct=…: the walk did not reach the portal's end (our stop:
+  deadline / page cap / limit / slice never reached / error / barren page);
+  collected=… result_size=… coverage=…` — the old wording said "walk looks
+  incomplete", which now misdescribes a structural skip.
+
+Portals also log their own stop per unit (`SLICE … stop=…`,
+`WALK … stop=… reached_end=…`, `SPLIT summary … our_stops=…`); the stop reason
+is **not** in `scrape_runs.by_category` yet.
+
+**What lands in `scrape_runs.by_category`** (JSONB, no migration): each category
+entry now carries `walk_reached_end` (bool — did it nominate?) and
+`walk_coverage` (`complete` / `incomplete` / `unknown`) beside the existing
+`sreality_result_size`, `collected` and `active_db`. A category with
+`walk_reached_end: true, walk_coverage: "incomplete"` is the new normal case the
+old gate refused. `scripts/verify_pipeline.py`'s `walk_coverage` check reads the
+same rows and is now the standing rail on the count.
+
+## The four layers, in order (as rebuilt 2026-09-07, regated 2026-09-08)
 
 1. **Coverage** — the sliced walk reaches everything (or records that it didn't).
-   Only a walk proven complete against the portal's own counts nominates.
+   A walk that reached the portal's end nominates; the count comparison is a
+   logged alarm, never a gate.
 2. **The ledger** — coverage accumulates across runs instead of restarting.
-3. **Nomination, not deletion** — a complete walk queues the rows it did not
+3. **Nomination, not deletion** — a finished walk queues the rows it did not
    see for a page check; the drain fetches each page and only a positive gone
    signal flips it. A wrong nomination costs one fetch, never a live listing.
 4. **The throttle** — `delist_flip_cap` bounds how many checks one walk may
    queue (oldest-unseen first, the rest deferred and recorded), so a broken
-   walk cannot flood the drain and a real backlog drains in a few walks. A
+   walk cannot flood the drain and a real backlog drains in a few walks. Mind
+   its FLOOR: the cap only applies once a scope holds `min_rows` (2,000) active
+   rows, so a small scope (maxima's ~220-row agendas, sreality
+   `pozemek/drazba`, bazos subtype scopes) is unthrottled — one walk can
+   nominate 100% of it, and presence checks are also exempt from the drain's
+   gone-rate breaker. The "~10% per walk" bound is a bound on the BIG scopes
+   only; a small scope's protection is the page check itself. A
    walk that saw nothing nominates nothing; rows already in the queue or
    checked within a day are not re-nominated; given-up rows are re-armed 50
    per walk. The drain reserves 20% of each claim for checks so they can never

@@ -4,8 +4,9 @@ name: "Scraping: Českéreality index walk"
 # The fast half of the ceskereality cadence split (architectural rule #19, like
 # sreality/idnes). Walks the ENTIRE index of every configured category (no
 # --max-pages), touch_listings bumps last_seen on still-listed ids, presence nomination (rule #3)
-# flips delisted ones under the completeness guard (source-scoped), and
-# new/price-changed ids are enqueued into listing_detail_queue (source='ceskereality').
+# nominates unseen ones for a page check once the walk reached the portal's end
+# (source-scoped; the page, not the count, decides), and new/price-changed ids are
+# enqueued into listing_detail_queue (source='ceskereality').
 # No detail fetch — the drain (ceskereality_detail_drain.yml) consumes the queue.
 # Records run_type='index'.
 #

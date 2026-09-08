@@ -17,13 +17,14 @@ PRODEJ total (the 1,518 rentals never appeared in it — they were never scraped
 and every per-type URL (`/nemovitosti/{prodej|pronajem}/{byty|domy|pozemky|
 komercni-objekty|ostatni}/`) declares its own count. So the walk is now one
 category per (sale type, property type) — ten in all, partitioning the portal
-exactly (the per-type prodej counts sum to the prodej total) — each proved by
-the shared `walk_is_complete` arithmetic against that declared count, recorded
-in the slice ledger (`portal_index_slices`, one row per category), and swept by
-the source- and category-scoped `mark_inactive_native` behind the 12 h staleness
-rail. The flag itself is flipped by the coverage gate from ledger evidence, not
-here. Coordinates come from the estate JSON; a coords-less row falls back to
-carry-forward + locality geocoding via the shared scraper.location resolver.
+exactly (the per-type prodej counts sum to the prodej total) — each walked to
+the portal's OWN last page (the structural `reached_end` verdict rule #3
+nominates on since 2026-09-08), with the declared count kept as the numeric
+coverage signal that writes the slice ledger's outcome (`portal_index_slices`,
+one row per category) and never as the nomination gate. The flag itself is
+flipped by the coverage gate from ledger evidence, not here. Coordinates come
+from the estate JSON; a coords-less row falls back to carry-forward + locality
+geocoding via the shared scraper.location resolver.
 """
 
 from __future__ import annotations
@@ -42,10 +43,13 @@ from scraper.mmreality_parser import (
 )
 from scraper.portal import (
     PortalConfig,
+    StopReason,
     default_config,
     deadline_reached,
     load_portal_config,
-    walk_is_complete,
+    stop_is_portal_end,
+    walk_coverage,
+    walk_reached_end,
     classify_index_sighting,
 )
 from scraper.portal_base import ListingGoneError
@@ -104,6 +108,60 @@ def _trusted_detail_ref(native_id: str, detail_ref: str | None) -> str | None:
         )
         return None
     return detail_ref
+
+
+# What mmreality writes on a page past the end of a result set (live probe,
+# 2026-09-08). It is the portal AUTHORING its own emptiness, which is the one
+# thing an items-less HTTP 200 can be corroborated by when no count is readable:
+# a Cloudflare interstitial, a consent shell and a blank proxy answer all carry
+# cards=0 too, and none of them says this.
+_EMPTY_MARKERS = (
+    "nejsou k dispozici žádné nemovitosti",
+    "nebyly nalezeny žádné nemovitosti",
+)
+
+
+def empty_marker_present(html: str | None) -> bool:
+    """Did mmreality itself write 'there is nothing here' on this page?"""
+    if not html:
+        return False
+    return any(marker in html for marker in _EMPTY_MARKERS)
+
+
+def _empty_page_is_confirmed(
+    *, page: int | None, declared: int | None, collected: int,
+    page_size: int | None, saw_items: bool, empty_marker: bool = False,
+    pager_said_end: bool = False,
+) -> bool:
+    """Is an items-less index page the portal's tail, or our own blind spot?
+
+    The barren rule (rule #3). A page that stayed empty on a second read of the
+    same url is the end when a SECOND, independent signal agrees: its position (at
+    or past the page the page-1 count implies), the portal's own no-results copy,
+    or the page before it having carried cards and advertised no next page
+    (`pager_said_end` — mmreality over-advertises its head link, so a missing one
+    is walked past rather than trusted, and this is that walk landing on the
+    items-less page the probe shows past-the-end requests return). With no count
+    ever readable those two markers are the ONLY confirmations: "an earlier page of
+    this category had cards" (`saw_items`) is true of every mid-walk soft block
+    too, and mmreality's edge has produced 101 blocked runs. A confirmation that
+    cannot be obtained is not a confirmation.
+    """
+    if declared is None:
+        return empty_marker or pager_said_end
+    if declared == 0:
+        # A measured zero with nothing collected is a fact, not a gap.
+        return collected == 0
+    if collected >= declared or empty_marker or pager_said_end:
+        return True
+    if page_size is None or page_size <= 0:
+        return False
+    # Position. The declared count says which page the tail is ON, and `>=` (not
+    # `>`) is what makes an exact multiple work: a category that churned down to
+    # 8,688 of a declared 8,700 at 12 a page ends with an empty page 725, exactly
+    # ceil(8700/12) — a strict `>` filed that finished walk as barren and nominated
+    # nothing, silently, whenever the tail landed on a boundary.
+    return (page or 1) >= -(-declared // page_size)
 
 
 _SITE_TITLE = "| M&M Reality"
@@ -184,8 +242,20 @@ class MmRealityPortal:
         pages = 0
         page: int | None = None  # None = the bare first page
         declared: int | None = None
+        page_size: int | None = None
+        saw_items = False
+        # Did the page before this one carry cards while advertising no next page?
+        # On mmreality that is not a tail signal by itself (see the pager branch
+        # below), but it IS the second signal the barren rule needs once the walk
+        # has stepped past it onto an items-less page.
+        pager_said_end = False
         stopped_early = False
         outcome = "exhausted"
+        # mmreality is one unit per category (SLICE_KEY is a constant, there is no
+        # second axis), so the category's structural verdict IS this loop's stop
+        # reason. `error` is the fail-closed seed: a stop nobody classified must
+        # read as ours and never nominate.
+        stop: StopReason = "error"
 
         while True:
             if deadline_reached(deadline):
@@ -194,13 +264,28 @@ class MmRealityPortal:
                     "(pages=%d walked); stopping early, walk incomplete",
                     sale_type, cat, page or 1, pages,
                 )
-                stopped_early, outcome = True, "deadline"
+                stopped_early, outcome, stop = True, "deadline", "deadline"
                 break
             html, status = client.fetch_index(sale_type, cat, page)
             parsed = parse_index(html)
+            if not parsed.items:
+                # An items-less HTTP 200 is what a Cloudflare interstitial, a
+                # consent page and a blank proxy answer all look like — and also
+                # what the page past the tail looks like. Ask the SAME url once
+                # more (through the limiter) before believing either.
+                LOG.info(
+                    "INDEX sale=%s cat=%s page=%s carried no cards; re-fetching once",
+                    sale_type, cat, page or 1,
+                )
+                html, status = client.fetch_index(sale_type, cat, page)
+                parsed = parse_index(html)
             pages += 1
             if pages == 1:
                 declared = parsed.total
+            if parsed.items:
+                saw_items = True
+                if page_size is None:
+                    page_size = len(parsed.items)
             LOG.info(
                 "INDEX sale=%s cat=%s page=%s items=%d declared=%s",
                 sale_type, cat, page or 1, len(parsed.items), declared,
@@ -217,32 +302,83 @@ class MmRealityPortal:
                 price_map[nid] = db.sane_price_czk(index_price(item.price_text))
             if self._max_pages and pages >= self._max_pages:
                 # A page cap is a partial walk by definition (rule #3).
-                stopped_early, outcome = True, "ceiling"
+                stopped_early, outcome, stop = True, "ceiling", "page_cap"
                 break
-            # Stop on an empty page, no "next" link, or a page that added nothing
-            # new (a clamped out-of-range page would otherwise loop forever).
-            if not parsed.items or parsed.next_offset is None or new_on_page == 0:
+            # Items-first: the no-cards case is tested BEFORE the pager, because a
+            # blocked page exposes no `<link rel="next">` either and would
+            # otherwise exit through the true-last-page branch.
+            if not parsed.items:
+                confirmed = _empty_page_is_confirmed(
+                    page=page, declared=declared, collected=len(ref_map),
+                    page_size=page_size, saw_items=saw_items,
+                    empty_marker=empty_marker_present(html),
+                    pager_said_end=pager_said_end,
+                )
+                stop = "empty_confirmed" if confirmed else "barren"
+                if not confirmed:
+                    LOG.warning(
+                        "INDEX sale=%s cat=%s page=%s stayed empty and nothing "
+                        "corroborates it as the tail (declared=%s collected=%d); "
+                        "treating it as our own stop",
+                        sale_type, cat, page or 1, declared, len(ref_map),
+                    )
+                    outcome = "degraded"
                 break
+            if new_on_page == 0:
+                # A page of cards that adds no new id. It is NOT a terminator on
+                # this portal: the live probe (2026-09-08) shows mmreality answers
+                # a past-the-end request with HTTP 200 and zero cards — no redirect,
+                # no clamp — so nothing here says we are at the tail, while an edge
+                # cache re-serving a page and a newest-first index that shifted by a
+                # full page both land exactly here. Break the loop (it would
+                # otherwise spin) as a stop of OURS.
+                LOG.warning(
+                    "INDEX sale=%s cat=%s page=%s added no new card; the list did "
+                    "not advance", sale_type, cat, page or 1,
+                )
+                outcome, stop = "degraded", "pager_stalled"
+                break
+            if parsed.next_offset is None:
+                # NOT a last-page signal on mmreality: the live probe shows its real
+                # last page STILL emits <link rel="next"> (the head link
+                # over-advertises by one page at exact multiples), so a missing link
+                # is a template/CDN variant or a rewritten head — page 3 of 726
+                # wearing the tail's clothes. The portal's actual terminator is the
+                # items-less page past the end, so walk on to it and let the barren
+                # rule decide.
+                pager_said_end = True
+                page = (page or 1) + 1
+                continue
             if parsed.next_offset <= (page or 1):
                 LOG.warning(
                     "INDEX sale=%s cat=%s pager did not advance at page=%s (next=%s); "
                     "stopping", sale_type, cat, page or 1, parsed.next_offset,
                 )
-                outcome = "degraded"
+                outcome, stop = "degraded", "pager_stalled"
                 break
+            pager_said_end = False
             page = parsed.next_offset
 
         seen = set(native_ids)
+        # The nomination gate (rule #3) is STRUCTURAL: did this loop stop because
+        # the portal said there is no more, or because we stopped asking? The
+        # conjunction goes through the shared helper so the 5th element means the
+        # same thing on all nine portals.
+        portal_end = stop_is_portal_end(stop)
+        reached_end = walk_reached_end(portal_end=portal_end, our_stop=not portal_end)
         # The shared two-sided verdict against the portal's OWN count for this
         # index. An unmeasurable count (no SSR state on page 1) is `unknown`,
-        # never complete; a deadline or page cap short-circuits it.
-        complete = walk_is_complete(len(seen), declared, stopped_early=stopped_early)
-        if not complete and outcome == "exhausted":
+        # never complete; a deadline or page cap short-circuits it. It gates
+        # nothing since 2026-09-08 — it is the coverage alarm and the ledger's
+        # outcome string, which the coverage gate still reads numerically.
+        coverage = walk_coverage(len(seen), declared, stopped_early=stopped_early)
+        if coverage != "complete" and outcome == "exhausted":
             outcome = "degraded"
         LOG.info(
             "RECONCILE-INDEX sale=%s cat=%s declared=%s collected=%d pages=%d "
-            "outcome=%s complete=%s",
-            sale_type, cat, declared, len(seen), pages, outcome, complete,
+            "stop=%s outcome=%s reached_end=%s coverage=%s",
+            sale_type, cat, declared, len(seen), pages, stop, outcome, reached_end,
+            coverage,
         )
         if not self._max_pages:
             # A page-capped walk is a probe or a bounded test, not coverage: the
@@ -285,7 +421,10 @@ class MmRealityPortal:
             "enqueued=%d",
             sale_type, cat, len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, declared, pages, complete
+        return (
+            seen, {"found_new": len(new_ids), "enqueued": enqueued}, declared, pages,
+            reached_end,
+        )
 
     def _record_slice(
         self, conn: Any, category: dict[str, Any], outcome: str,
@@ -293,7 +432,9 @@ class MmRealityPortal:
     ) -> None:
         """One ledger row per category: the coverage gate (migration 455) reads
         "every slice of every declared category exhausted inside the window",
-        and `exhausted` is the only positive outcome it accepts."""
+        and `exhausted` is the only positive outcome it accepts. The string stays
+        NUMERIC (walk_coverage downgrades it) even though nomination is now
+        structural, so `exhausted` means to the gate exactly what it always did."""
         if conn is None:
             return
         cm, ct = self.category_labels(category)
@@ -486,8 +627,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument(
         "--max-seconds", type=float, default=None,
-        help="wall-clock budget for the detail drain; it stops claiming + "
-             "finalizes cleanly before the job timeout (no 'stuck' run)",
+        help="wall-clock budget for EITHER phase (the index walk consumes it as "
+             "its per-category deadline); the phase stops claiming + finalizes "
+             "cleanly before the job timeout (no 'stuck' run)",
     )
     p.add_argument(
         "--index-only", action="store_true",

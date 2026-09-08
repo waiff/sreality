@@ -1,9 +1,14 @@
 """The coverage gate: decide from evidence whether a parked portal may delist again.
 
 `supports_complete_walk` used to gate delisting (architectural rule #3); since
-2026-09-07 it is a posture signal for Health -- a complete walk nominates its
+2026-09-07 it is a posture signal for Health -- a finished walk nominates its
 unseen rows for a page check and the drain's fetch decides, so nothing reads
-the flag to delete. It is still re-earned from evidence here. Two portals were
+the flag to delete. It is still re-earned from evidence here. NOTE the gate's
+numeric reading of the ledger is DELIBERATELY unchanged by the 2026-09-08
+structural nomination gate: this script counts outcome='exhausted' streaks, and
+`portal_index_slices.outcome` stays the arithmetic verdict so the streak keeps
+its meaning. A slice can be 'degraded' here and still have reached the portal's
+end (and so have nominated) -- the two verdicts answer different questions. Two portals were
 parked on it: ceskereality (migration 449) and idnes (453). Both were parked for
 the same reason — the flag was a standing claim someone typed once, and the walks
 stopped matching it — so un-parking by hand would put us straight back there. A
@@ -29,8 +34,8 @@ that only exists in an expiring Actions log is a verdict nobody receives.
 
 WHY THIS IS SAFE TO RUN UNATTENDED. Since 2026-09-07 a wrong verdict cannot
 execute: the flag no longer gates anything. Closures come from page checks that
-complete walks nominate (rule #3), throttled per walk by `delist_flip_cap`; this
-gate only records whether the portal's walks are proving coverage.
+walks reaching the portal's end nominate (rule #3), throttled per walk by
+`delist_flip_cap`; this gate only records whether the walks prove coverage.
 
 Usage:
     python -m scripts.coverage_gate                # evaluate + act

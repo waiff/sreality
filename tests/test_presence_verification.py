@@ -1,7 +1,8 @@
 """Rule #3 since 2026-09-07: index absence NOMINATES, the page DECIDES.
 
-A complete category walk no longer flips the rows it did not see. It queues
-them for a detail fetch at the lowest priority; the drain visits each page, and
+A category walk that reached the portal's end no longer flips the rows it did
+not see. It queues them for a detail fetch at the lowest priority; the drain
+visits each page, and
 a positive gone signal flips the listing, a live page refreshes it, an error
 leaves it for the next pass. These tests pin the two db pieces of that: the
 nomination query (what is excluded, what is returned, in what order) and the

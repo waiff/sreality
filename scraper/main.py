@@ -45,11 +45,14 @@ import requests
 from scraper import db, hashing, image_storage, media, parser, portal_runner
 from scraper.portal import (
     PortalLimits,
+    StopReason,
     classify_index_sighting,
     deadline_reached,
     default_config,
     load_portal_config,
+    stop_is_portal_end,
     walk_is_complete,
+    walk_reached_end,
 )
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
@@ -68,13 +71,21 @@ DEFAULT_IMAGE_WORKERS = 32
 DEFAULT_DETAIL_WORKERS = 4
 DEFAULT_DETAIL_RATE = 2.0  # requests/sec, global across all workers
 
-# The completeness gate (INDEX_MIN_COMPLETENESS = 0.995) and the verdict that
-# reads it (walk_is_complete) now live in scraper.portal — ONE definition for all
-# nine portals (rule #21), imported above. 0.995 rather than 1.0 because
-# sreality's result_size jitters mid-walk, so a strict 100% gate suppressed the
-# sweep on nearly every walk and delistings accumulated until a perfect one.
-# An UNMEASURABLE walk (no result_size) is "unknown", not "complete" — the shared
-# verdict never fails open, so a failed probe nominates nothing.
+# Nomination (rule #3) is gated STRUCTURALLY since 2026-09-08: a category
+# nominates when every slice it is defined over walked to sreality's own end
+# (`declared_total_reached`, `short_page`, a corroborated `empty_confirmed`) and
+# no stop of OURS fired anywhere (`--limit`, the deadline, the 422 `cap_wall`, an
+# exception, a district never reached, an uncorroborated `barren` page). The
+# vocabulary and the conjunction are shared: scraper.portal's StopReason /
+# stop_is_portal_end / walk_reached_end, ONE definition for all nine portals
+# (rule #21).
+#
+# The count keeps its jobs but no longer vetoes: walk_is_complete
+# (INDEX_MIN_COMPLETENESS = 0.995, also in scraper.portal) still decides whether
+# the national fallback pass runs, still warns per district, and still feeds
+# verify_pipeline's coverage check. 0.995 rather than 1.0 because sreality's
+# result_size jitters mid-walk — which is precisely why a walk that finished the
+# list one row short of the declared total must not be called truncated.
 #
 # There is no staleness rail any more (rule #3, 2026-09-07): a complete walk
 # nominates the rows it did not see for a page check and the drain's fetch
@@ -771,12 +782,13 @@ def _run_full(
                 cat_counts.get("unchanged", 0), cat_counts.get("errors", 0),
             )
 
-            # Rule #3 (2026-09-07): a complete walk NOMINATES the rows it did
-            # not see for a page check; the drain's fetch decides. Same seam
-            # the framework runner uses, so this dispatch-only fallback cannot
-            # drift back to absence-based delisting. `complete` already folds
-            # in walk-completeness (and every region for split categories), so
-            # a truncated walk nominates nothing.
+            # Rule #3 (2026-09-07): a walk that reached the portal's end
+            # NOMINATES the rows it did not see for a page check; the drain's
+            # fetch decides. Same seam the framework runner uses, so this
+            # dispatch-only fallback cannot drift back to absence-based
+            # delisting. `complete` is the structural verdict (every district
+            # ended on sreality's own signal, no stop of ours anywhere), so a
+            # truncated walk nominates nothing.
             inactive = 0
             if conn is not None and limit is None:
                 if complete and not seen_ids:
@@ -801,7 +813,8 @@ def _run_full(
                     )
                 else:
                     LOG.warning(
-                        "VERIFY skipped cm=%s ct=%s: walk looks incomplete "
+                        "VERIFY skipped cm=%s ct=%s: the walk did not reach "
+                        "sreality's end — one of our own stops fired "
                         "(collected=%d result_size=%s); an unproven walk "
                         "nominates nothing",
                         cm_text, ct_text, len(seen_ids), cat_result_size,
@@ -1088,6 +1101,17 @@ _REFETCH_OUTCOMES = ("new", "updated", "unchanged", "gone", "errors")
 _DETAIL_FETCH_OUTCOMES = ("new", "updated", "gone", "errors")
 
 
+def _slice_stop_reason(client: Any) -> StopReason:
+    """Why the page loop that just ran on `client` stopped.
+
+    An unset reason — a generator abandoned by something other than --limit, or
+    a walk that never started — is OURS, never sreality's: "I cannot classify
+    this stop" is not evidence that the portal ended the walk.
+    """
+    reason = getattr(client, "stop_reason", None)
+    return reason if reason is not None else "error"
+
+
 def _walk_category_split(
     category_main: int,
     category_type: int,
@@ -1111,12 +1135,14 @@ def _walk_category_split(
     and union — every district is well under the cap, so the union is complete
     and mark_inactive can run.
 
-    Returns (seen_ids, counts, result_size, pages_fetched, complete). For a
-    split walk `complete` requires EVERY district's own walk to be complete
-    AND the union to cover the national probe (so a district missing from
-    DISTRICT_IDS can't masquerade as complete — architectural rule #3). A
-    single district that errors out is isolated: it marks the category
-    incomplete (sweep skipped) but never crashes the run.
+    Returns (seen_ids, counts, result_size, pages_fetched, reached_end). For a
+    split walk `reached_end` requires EVERY one of the 77 districts to have been
+    walked to sreality's own end — a district never reached (deadline), one that
+    crashed, one the 422 wall truncated or one whose last page was an
+    uncorroborated blank all veto it (rule #3). The count does not: a category
+    whose districts each finished their own list is a finished walk even when
+    the declared totals add up short. A single district that errors out is
+    isolated: it suppresses nomination but never crashes the run.
     """
     cm_text = parser.CATEGORY_MAIN[category_main]
     ct_text = parser.CATEGORY_TYPE[category_type]
@@ -1138,8 +1164,18 @@ def _walk_category_split(
             cat_refetch_cap, detail_workers, enqueue_only=enqueue_only,
         )
         rs = client.result_size if client.result_size is not None else result_size
-        complete = cat_limit is None and walk_is_complete(len(seen), rs)
-        return seen, counts, rs, client.pages_fetched, complete
+        # A --limit run is a partial view by definition, even when the slice
+        # happened to run out before the cap bit.
+        reason: StopReason = (
+            "limit" if cat_limit is not None else _slice_stop_reason(client)
+        )
+        portal_end = stop_is_portal_end(reason)
+        reached_end = walk_reached_end(portal_end=portal_end, our_stop=not portal_end)
+        LOG.info(
+            "WALK cm=%s ct=%s collected=%d result_size=%s stop=%s reached_end=%s",
+            cm_text, ct_text, len(seen), rs, reason, reached_end,
+        )
+        return seen, counts, rs, client.pages_fetched, reached_end
 
     LOG.info(
         "SPLIT cm=%s ct=%s result_size=%d > %d: walking %d districts",
@@ -1149,14 +1185,20 @@ def _walk_category_split(
     counts: dict[str, int] = {}
     summed_drs = 0
     pages = 0
-    all_districts_complete = True
+    # Seeded from the CONFIGURED districts, not the walked ones: a category
+    # whose loop stopped early must carry `slice_unreached` for every district
+    # it never got to, or an empty list of reasons would read as "all ended".
+    district_reasons: dict[int, StopReason] = {
+        d: "slice_unreached" for d in DISTRICT_IDS
+    }
+    category_stops: list[StopReason] = []
     cat_refetched = 0
     for walked, district in enumerate(DISTRICT_IDS):
         if deadline_reached(deadline):
-            all_districts_complete = False
+            category_stops.append("deadline")
             LOG.info(
                 "SPLIT cm=%s ct=%s stopping on the walk deadline after %d/%d "
-                "districts; category reported incomplete so no sweep runs",
+                "districts; the category nominates nothing",
                 cm_text, ct_text, walked, len(DISTRICT_IDS),
             )
             break
@@ -1174,12 +1216,13 @@ def _walk_category_split(
                 district_cap, detail_workers, enqueue_only=enqueue_only,
             )
         except Exception as exc:
-            all_districts_complete = False
+            district_reasons[district] = "error"
             LOG.warning(
                 "SPLIT district failed cm=%s ct=%s district=%d: %s",
                 cm_text, ct_text, district, exc,
             )
             continue
+        district_reasons[district] = _slice_stop_reason(dclient)
         union |= dseen
         for k, v in dcounts.items():
             counts[k] = counts.get(k, 0) + v
@@ -1196,23 +1239,26 @@ def _walk_category_split(
         # That silently starved the detail backlog of the big split categories
         # (komercni/pronajem, dum/prodej) so it never drained.
         cat_refetched += sum(dcounts.get(o, 0) for o in _DETAIL_FETCH_OUTCOMES)
-        # One definition for every completeness judgement in the tree, so a
-        # district inherits the same fail-closed and over-collection rules as
-        # the category verdict: an unmeasured district (drs None) is `unknown`,
-        # never trivially complete, and a district that somehow out-collects its
-        # own probe is a contaminated slice, not a thorough one.
+        # The district's COVERAGE, kept visible and kept out of the gate: a
+        # district that paged to its own last page one row short of a jittering
+        # total is a finished walk, and vetoing on that is what left a whole
+        # category nominating nothing for days. What it still buys is a signal —
+        # a gap this size next to a portal end is how slice contamination and
+        # total drift announce themselves.
         if not walk_is_complete(len(dseen), drs):
-            all_districts_complete = False
             LOG.warning(
-                "SPLIT district incomplete cm=%s ct=%s district=%d collected=%d result_size=%s",
+                "SPLIT district coverage gap cm=%s ct=%s district=%d collected=%d "
+                "result_size=%s stop=%s",
                 cm_text, ct_text, district, len(dseen), drs,
+                district_reasons[district],
             )
     # If the per-district union still falls short of the national total, some
     # listings aren't reachable via any single locality_district_id filter
     # (e.g. a null/uncovered district). One un-split national pass catches that
-    # remainder. The deep-pagination cap truncates it, but the union only grows
-    # — it can never cause a false delisting, and the completeness guard still
-    # compares the final union against the national probe below.
+    # remainder — this is the numeric verdict's remaining JOB, not a gate. The
+    # pass contributes ids only: its own 422 truncation can neither confer nor
+    # veto reached_end (the union only grows), which is why nclient's stop
+    # reason is deliberately not recorded below.
     if not walk_is_complete(len(union), result_size) and not deadline_reached(deadline):
         LOG.info(
             "SPLIT national-fallback cm=%s ct=%s union=%d result_size=%d",
@@ -1235,25 +1281,33 @@ def _walk_category_split(
             pages += nclient.pages_fetched
             LOG.info("SPLIT national-fallback added=%d union=%d", added, len(union))
         except Exception as exc:
-            all_districts_complete = False
+            # An exception is ours wherever it fires, the top-up pass included:
+            # we cannot tell how much of the category it had left to add.
+            category_stops.append("error")
             LOG.warning(
                 "SPLIT national-fallback failed cm=%s ct=%s: %s",
                 cm_text, ct_text, exc,
             )
 
-    # Complete only if every district fully walked AND the union covers the
-    # national total — the latter catches a district missing from DISTRICT_IDS
-    # (both union and summed sizes would otherwise drop together). Any negative
-    # district exit (deadline, crash, short walk) goes in as stopped_early so the
-    # ONE shared verdict owns the whole answer instead of being ANDed after it.
-    complete = walk_is_complete(
-        len(union), result_size, stopped_early=not all_districts_complete,
+    # The gate: every district ended on a signal from sreality, and nothing of
+    # ours stopped us anywhere in the category. The union-vs-probe arithmetic is
+    # NOT part of it any more — it survives as the fallback trigger above and as
+    # the coverage number logged here (and by the runner, into
+    # scrape_runs.by_category), where a persistent gap is visible without
+    # silencing a whole category's delisting.
+    reasons = list(district_reasons.values()) + category_stops
+    ended = {r: stop_is_portal_end(r) for r in set(reasons)}
+    reached_end = walk_reached_end(
+        portal_end=all(ended[r] for r in reasons),
+        our_stop=any(not ended[r] for r in reasons),
     )
+    our_stops = sorted(r for r, is_end in ended.items() if not is_end)
     LOG.info(
         "SPLIT summary cm=%s ct=%s districts=%d union=%d national_probe=%s "
-        "summed_districts=%d complete=%s",
+        "summed_districts=%d reached_end=%s coverage_complete=%s our_stops=%s",
         cm_text, ct_text, len(DISTRICT_IDS), len(union), result_size,
-        summed_drs, complete,
+        summed_drs, reached_end, walk_is_complete(len(union), result_size),
+        ",".join(our_stops) or "-",
     )
     # Report sreality's own national total (the single-filter probe) as the
     # reconciliation denominator, not the sum of per-district totals: summing
@@ -1261,7 +1315,7 @@ def _walk_category_split(
     # drift. The probe is the authoritative count; summed_drs is only a
     # fallback for when the probe itself failed.
     reported_size = result_size if result_size is not None else (summed_drs or None)
-    return union, counts, reported_size, pages, complete
+    return union, counts, reported_size, pages, reached_end
 
 
 def _record_detail_fetch(conn: Any, result: FetchResult, observation: str) -> None:
@@ -1427,6 +1481,9 @@ def _walk_category(
     index_entries: list[tuple[int, int | None]] = []
     for estate in client.iter_index(on_page=_index_page_archiver(client, conn, dry_run)):
         if cat_limit is not None and len(index_entries) >= cat_limit:
+            # Abandoning the generator leaves iter_index's stop reason unset, so
+            # stamp ours: --limit is a partial walk and must never nominate.
+            client.stop_reason = "limit"
             break
         sid = _extract_id(estate)
         if sid is None:

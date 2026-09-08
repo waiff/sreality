@@ -1,7 +1,7 @@
 """mmreality_main on the portal framework: MmRealityPortal (ten per-type indexes,
-each proved against its own declared count) seams + the main() that drives index-walk then detail-drain through
-the shared runner, recording an 'index' + a 'detail' scrape_runs row tagged
-source='mmreality'.
+each walked to the portal's own last page) seams + the main() that drives
+index-walk then detail-drain through the shared runner, recording an 'index' + a
+'detail' scrape_runs row tagged source='mmreality'.
 """
 
 from __future__ import annotations
@@ -195,7 +195,16 @@ def _stub_walk(monkeypatch, script: dict[str, SimpleNamespace], existing=None) -
     cap: dict[str, Any] = {"ledger": [], "touched": [], "entries": []}
     _ScriptedClient.calls = []
     monkeypatch.setattr(mmreality_main, "MmRealityClient", _ScriptedClient)
-    monkeypatch.setattr(mmreality_main, "parse_index", lambda h: script[h])
+
+    def _parse(html: str) -> SimpleNamespace:
+        entry = script[html]
+        # A list scripts successive reads of the SAME url (the barren re-fetch);
+        # the last element sticks.
+        if isinstance(entry, list):
+            return entry.pop(0) if len(entry) > 1 else entry[0]
+        return entry
+
+    monkeypatch.setattr(mmreality_main, "parse_index", _parse)
     monkeypatch.setattr(
         mmreality_main.db, "index_summary_native", lambda _c, _s, ids: dict(existing or {}))
     monkeypatch.setattr(
@@ -208,21 +217,27 @@ def _stub_walk(monkeypatch, script: dict[str, SimpleNamespace], existing=None) -
     return cap
 
 
-def test_walk_category_classifies_and_proves_complete_against_the_declared_count(monkeypatch):
+def test_walk_category_classifies_and_reaches_the_portals_last_page(monkeypatch):
     a, b, c = "944001", "944002", "944003"  # new, changed, unchanged
     cap = _stub_walk(
         monkeypatch,
-        {"1": _page([_item(a), _item(b, "6 000 000 Kč"), _item(c, "7 000 000 Kč")], total=3)},
+        {"1": _page([_item(a), _item(b, "6 000 000 Kč"), _item(c, "7 000 000 Kč")], total=3),
+         # mmreality's real last page STILL emits <link rel="next">, so a page with
+         # cards and no next link is walked PAST, not trusted: the items-less page
+         # the probe shows past-the-end requests return is the terminator.
+         "2": _page([], total=3)},
         existing={
             b: {"id": 8102, "sreality_id": -2, "price_czk": 5_500_000, "last_seen_at": None},
             c: {"id": 8103, "sreality_id": -3, "price_czk": 7_000_000, "last_seen_at": None},
         },
     )
-    seen, counts, total, pages, complete = _portal().walk_category(
+    seen, counts, total, pages, reached_end = _portal().walk_category(
         BYTY, object(), False, _Limiter())
     assert seen == {a, b, c}
-    assert (total, pages, complete) == (3, 1, True)
-    assert _ScriptedClient.calls == [("prodej", "byty", None)]
+    # The empty page past the tail, read twice, is the portal's own last-page signal.
+    assert (total, pages, reached_end) == (3, 2, True)
+    assert _ScriptedClient.calls == [
+        ("prodej", "byty", None), ("prodej", "byty", 2), ("prodej", "byty", 2)]
     assert cap["touched"] == [8103]
     refs = {e[0]: e for e in cap["entries"]}
     assert refs[a][3] == mmreality_main.db.QUEUE_PRIORITY_NEW
@@ -233,7 +248,7 @@ def test_walk_category_classifies_and_proves_complete_against_the_declared_count
     assert row == {
         "source": "mmreality", "category_main": "byt", "category_type": "prodej",
         "slice_key": "national", "outcome": "exhausted", "declared_total": 3,
-        "collected": 3, "pages": 1,
+        "collected": 3, "pages": 2,
     }
 
 
@@ -241,44 +256,169 @@ def test_walk_pages_to_the_tail_and_reports_every_page(monkeypatch):
     cap = _stub_walk(monkeypatch, {
         "1": _page([_item("1"), _item("2")], total=3, next_offset=2),
         "2": _page([_item("3")], total=3),
+        "3": _page([], total=3),
     })
-    seen, _c, total, pages, complete = _portal().walk_category(BYTY, object(), False, _Limiter())
-    assert (len(seen), total, pages, complete) == (3, 3, 2, True)
-    assert _ScriptedClient.calls == [("prodej", "byty", None), ("prodej", "byty", 2)]
+    seen, _c, total, pages, reached_end = _portal().walk_category(
+        BYTY, object(), False, _Limiter())
+    assert (len(seen), total, pages, reached_end) == (3, 3, 3, True)
+    assert _ScriptedClient.calls == [
+        ("prodej", "byty", None), ("prodej", "byty", 2),
+        ("prodej", "byty", 3), ("prodej", "byty", 3)]
     assert cap["ledger"][0]["outcome"] == "exhausted"
 
 
-def test_walk_short_of_the_declared_count_is_incomplete_and_degraded(monkeypatch):
-    """Rule #3: 3 of 10 is not a walk that saw everything, so no sweep and the
-    ledger says so."""
-    cap = _stub_walk(monkeypatch, {"1": _page([_item("1"), _item("2"), _item("3")], total=10)})
-    _s, _c, total, _p, complete = _portal().walk_category(BYTY, object(), False, _Limiter())
-    assert (total, complete) == (10, False)
+def test_a_walk_short_of_the_declared_count_still_reached_the_end(monkeypatch):
+    """Rule #3 since 2026-09-08: the gate is STRUCTURAL. A page that carried
+    cards and no next link is the portal's tail even if the declared count says
+    ten and we hold three — a live index churns, and the numeric veto is what
+    kept whole categories from ever nominating. The count stays visible in the
+    ledger, which the coverage gate still reads numerically."""
+    cap = _stub_walk(monkeypatch, {
+        "1": _page([_item("1"), _item("2"), _item("3")], total=10),
+        "2": _page([], total=10),
+    })
+    _s, _c, total, _p, reached_end = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (total, reached_end) == (10, True)
     assert cap["ledger"][0]["outcome"] == "degraded"
 
 
-def test_walk_with_no_declared_count_is_never_complete(monkeypatch):
-    """An SSR-less page (throttle, error) measures nothing. 'unknown' must not
-    read as complete — that fail-open was the 2026-08-27 audit hole."""
-    cap = _stub_walk(monkeypatch, {"1": _page([_item("1")], total=None)})
-    _s, _c, total, _p, complete = _portal().walk_category(BYTY, object(), False, _Limiter())
-    assert (total, complete) == (None, False)
+def test_walk_with_no_declared_count_reaches_the_end_but_stays_numerically_unknown(monkeypatch):
+    """An SSR-less page measures nothing, so the arithmetic is 'unknown' and the
+    ledger says degraded — but the page carried a card and the portal offered no
+    next page, which is a finished walk. The 2026-08-27 fail-open lesson lives on
+    in the ledger + the runner's COVERAGE warning, not in the gate."""
+    cap = _stub_walk(monkeypatch, {
+        "1": _page([_item("1")], total=None),
+        "2": _page([], total=None),
+    })
+    _s, _c, total, _p, reached_end = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (total, reached_end) == (None, True)
     assert cap["ledger"][0]["outcome"] == "degraded"
 
 
 def test_walk_of_an_empty_category_with_declared_zero_is_complete(monkeypatch):
+    """A declared zero with nothing collected is a measured fact — but it is
+    still read twice, because an items-less 200 is also what a block looks
+    like."""
     cap = _stub_walk(monkeypatch, {"1": _page([], total=0)})
-    seen, _c, total, _p, complete = _portal().walk_category(BYTY, object(), False, _Limiter())
-    assert (seen, total, complete) == (set(), 0, True)
+    seen, _c, total, _p, reached_end = _portal().walk_category(
+        BYTY, object(), False, _Limiter())
+    assert (seen, total, reached_end) == (set(), 0, True)
+    assert _ScriptedClient.calls == [("prodej", "byty", None), ("prodej", "byty", None)]
     assert cap["ledger"][0]["outcome"] == "exhausted"
+
+
+def test_a_barren_page_mid_walk_is_our_stop_not_the_portals(monkeypatch):
+    """The load-bearing case: a soft block / blank proxy answer at page 2 of 100
+    has no cards AND no pager, exactly like the true tail. It is re-fetched once,
+    and with the declared count still far ahead of what we hold nothing
+    corroborates it — so the walk must not nominate."""
+    cap = _stub_walk(monkeypatch, {
+        "1": _page([_item("1"), _item("2")], total=100, next_offset=2),
+        "2": _page([], total=None),
+    })
+    _s, _c, _t, pages, reached_end = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (pages, reached_end) == (2, False)
+    # The same url, read twice: a confirmation that cannot be obtained is not one.
+    assert _ScriptedClient.calls == [
+        ("prodej", "byty", None), ("prodej", "byty", 2), ("prodej", "byty", 2)]
+    assert cap["ledger"][0]["outcome"] == "degraded"
+
+
+def test_a_barren_first_page_with_nothing_declared_is_never_confirmed(monkeypatch):
+    """No cards, no count, no earlier page that carried cards: there is nothing
+    to corroborate the emptiness with, so it stays ours."""
+    cap = _stub_walk(monkeypatch, {"1": _page([], total=None)})
+    seen, _c, _t, _p, reached_end = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (seen, reached_end) == (set(), False)
+    assert cap["ledger"][0]["outcome"] == "degraded"
+
+
+def test_a_barren_page_the_refetch_fills_does_not_stop_the_walk(monkeypatch):
+    """The re-fetch is a second read of the same url, not a stop: if the cards
+    are there the second time, the walk carries on from them."""
+    _stub_walk(monkeypatch, {
+        "1": _page([_item("1")], total=2, next_offset=2),
+        "2": [_page([], total=2), _page([_item("2")], total=2)],
+        "3": _page([], total=2),
+    })
+    seen, _c, _t, pages, reached_end = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (seen, pages, reached_end) == ({"1", "2"}, 3, True)
+
+
+def test_a_barren_page_past_the_declared_total_is_the_portals_end(monkeypatch):
+    """Corroborated: we already hold everything the portal declared, so the empty
+    page after it is the tail and not a block."""
+    cap = _stub_walk(monkeypatch, {
+        "1": _page([_item("1"), _item("2")], total=2, next_offset=2),
+        "2": _page([], total=2),
+    })
+    _s, _c, _t, pages, reached_end = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (pages, reached_end) == (2, True)
+    assert cap["ledger"][0]["outcome"] == "exhausted"
+
+
+def test_a_barren_page_past_the_last_page_the_count_implies_is_the_portals_end(monkeypatch):
+    """Position, not volume: page 3 is past ceil(4/2), so an empty page there is
+    the tail even though the declared count outruns what churn left us."""
+    cap = _stub_walk(monkeypatch, {
+        "1": _page([_item("1"), _item("2")], total=4, next_offset=2),
+        "2": _page([_item("3")], total=4, next_offset=3),
+        "3": _page([], total=4),
+    })
+    _s, _c, _t, pages, reached_end = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (pages, reached_end) == (3, True)
+    assert cap["ledger"][0]["outcome"] == "degraded"
+
+
+def test_a_tail_landing_exactly_on_the_page_the_count_implies_is_confirmed(monkeypatch):
+    """The boundary a strict `>` lost. Churn leaves an exact multiple of the page
+    size, so the empty terminator arrives ON ceil(declared/page_size) — page 2 of a
+    declared 4 at 2 a page. Filing that finished walk as barren nominated nothing,
+    silently, every time the tail landed on a boundary."""
+    cap = _stub_walk(monkeypatch, {
+        "1": _page([_item("1"), _item("2")], total=4, next_offset=2),
+        "2": _page([], total=4),
+    })
+    _s, _c, _t, pages, reached_end = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (pages, reached_end) == (2, True)
+    assert cap["ledger"][0]["outcome"] == "degraded"   # the count still says short
+
+
+def test_the_portals_own_no_results_copy_confirms_a_countless_blank():
+    """With no readable count `saw_items` ("some earlier page had cards") is true of
+    every mid-walk soft block, so it is not a confirmation. mmreality's past-the-end
+    page authors its own emptiness, and that is."""
+    assert mmreality_main.empty_marker_present(
+        "<p>Je nám líto, ale v této lokalitě nejsou k dispozici žádné nemovitosti.</p>"
+    ) is True
+    assert mmreality_main.empty_marker_present("<div>Cloudflare</div>") is False
+    kw = dict(page=2, declared=None, collected=12, page_size=12, saw_items=True)
+    assert mmreality_main._empty_page_is_confirmed(**kw) is False
+    assert mmreality_main._empty_page_is_confirmed(**kw, empty_marker=True) is True
+
+
+def test_a_page_of_cards_we_already_hold_is_our_stop(monkeypatch):
+    """It was read as mmreality clamping an out-of-range page back onto its last
+    one. The live probe (2026-09-08) refutes the premise: a past-the-end request
+    answers HTTP 200 with zero cards, no redirect and no clamp. So a page that adds
+    no new id is an edge cache re-serving a body or a newest-first index that
+    shifted — the loop still has to break, but it must never nominate."""
+    cap = _stub_walk(monkeypatch, {
+        "1": _page([_item("1"), _item("2")], total=2, next_offset=2),
+        "2": _page([_item("1"), _item("2")], total=2, next_offset=3),
+    })
+    _s, _c, _t, pages, reached_end = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (pages, reached_end) == (2, False)
+    assert cap["ledger"][0]["outcome"] == "degraded"
 
 
 def test_deadline_stops_before_fetching_and_is_incomplete(monkeypatch):
     cap = _stub_walk(monkeypatch, {"1": _page([_item("1")], total=1)})
     monkeypatch.setattr(mmreality_main, "deadline_reached", lambda _d: True)
-    _s, _c, total, pages, complete = _portal().walk_category(
+    _s, _c, total, pages, reached_end = _portal().walk_category(
         BYTY, object(), False, _Limiter(), deadline=1.0)
-    assert (total, pages, complete) == (None, 0, False)
+    assert (total, pages, reached_end) == (None, 0, False)
     assert _ScriptedClient.calls == []
     assert cap["ledger"][0]["outcome"] == "deadline"
 
@@ -288,20 +428,20 @@ def test_page_cap_is_a_partial_walk(monkeypatch):
         "1": _page([_item("1")], total=2, next_offset=2),
         "2": _page([_item("2")], total=2),
     })
-    _s, _c, _t, pages, complete = _portal(max_pages=1).walk_category(
+    _s, _c, _t, pages, reached_end = _portal(max_pages=1).walk_category(
         BYTY, object(), False, _Limiter())
-    assert (pages, complete) == (1, False)
+    assert (pages, reached_end) == (1, False)
     # A capped walk is a probe, not coverage: it must not overwrite the ledger
     # (latest-wins) with "ceiling" every few minutes and hold the gate shut.
     assert cap["ledger"] == []
 
 
 def test_a_pager_that_does_not_advance_stops_the_walk(monkeypatch):
-    """A next link pointing at the current page would loop forever; stop, and
-    let the arithmetic call the result short."""
-    cap = _stub_walk(monkeypatch, {"1": _page([_item("1"), _item("2")], total=6, next_offset=1)})
-    _s, _c, _t, pages, complete = _portal().walk_category(BYTY, object(), False, _Limiter())
-    assert (pages, complete) == (1, False)
+    """A next link pointing at the current page would loop forever. Stopping is
+    OURS, so it vetoes nomination even when the count reconciles exactly."""
+    cap = _stub_walk(monkeypatch, {"1": _page([_item("1"), _item("2")], total=2, next_offset=1)})
+    _s, _c, _t, pages, reached_end = _portal().walk_category(BYTY, object(), False, _Limiter())
+    assert (pages, reached_end) == (1, False)
     assert cap["ledger"][0]["outcome"] == "degraded"
 
 

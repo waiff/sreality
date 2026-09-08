@@ -65,8 +65,9 @@ class _ProbePortal:
             raise RuntimeError(f"blocked {c}")
         if self._walk_results:
             return self._walk_results.pop(0)
-        # complete=True on purpose: the probe must not sweep even on a walk
-        # that CLAIMS completeness (belt on top of the max_pages gate).
+        # reached_end=True on purpose: the probe must not nominate even on a
+        # walk that CLAIMS it reached the portal's end (belt on top of the
+        # max_pages gate).
         return ({"n1", "n2"}, {"found_new": 2, "enqueued": 2}, 10, 1, True)
 
     def active_count(self, conn, c):

@@ -108,8 +108,8 @@ def test_portal_complete_walk_and_per_scope_labels():
 
 
 def test_nomination_is_subtype_scoped(monkeypatch):
-    """Rule #3 since 2026-09-07: a complete walk nominates unseen rows for a
-    page check. bazos walks fine sections that collapse onto one category_main,
+    """Rule #3: a walk that reached the portal's end nominates its unseen rows
+    for a page check. bazos walks fine sections that collapse onto one category_main,
     so the nomination is scoped to the section's subtype (NULL for byt) or one
     section would nominate its siblings' rows every walk."""
     nominated: dict[str, Any] = {}
@@ -174,8 +174,8 @@ def test_active_count_scopes_the_categories_migration_488_added(monkeypatch):
 
 
 def test_nomination_happens_for_every_category_every_run(monkeypatch):
-    # No sweep-window throttle and no staleness rail any more: every complete
-    # category nominates every run; the page check is the guard.
+    # No sweep-window throttle and no staleness rail any more: every category
+    # that reached the end nominates every run; the page check is the guard.
     calls: list[str] = []
     monkeypatch.setattr(
         bazos_main.db, "presence_candidates",
@@ -254,11 +254,11 @@ def test_walk_category_complete_walk_enqueues_new_and_changed(monkeypatch):
                                       or len(captured["entries"])),
     )
     p = _portal()
-    seen, counts, result_size, pages, complete = p.walk_category(
+    seen, counts, result_size, pages, reached_end = p.walk_category(
         {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
     )
     assert seen == {"a", "b", "c"}
-    assert result_size == 3 and complete is True          # full walk, collected == total
+    assert result_size == 3 and reached_end is True       # items, and no next page
     assert touched["ids"] == [41, 42]                     # both existing rows touched by surrogate id
     assert counts["found_new"] == 1                       # only "a" is genuinely new
     assert captured["source"] == "bazos"
@@ -269,7 +269,7 @@ def test_walk_category_complete_walk_enqueues_new_and_changed(monkeypatch):
     assert by_native["c"][3] == bazos_main.db.QUEUE_PRIORITY_CHANGED
 
 
-def test_walk_category_page_capped_is_incomplete(monkeypatch):
+def test_walk_category_page_capped_is_not_an_end(monkeypatch):
     page1 = SimpleNamespace(
         items=[SimpleNamespace(source_id_native="a", detail_path="/a", price_text=None)],
         total=500, next_offset=20,
@@ -281,11 +281,11 @@ def test_walk_category_page_capped_is_incomplete(monkeypatch):
     monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
     monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 1)
     p = BazosPortal(categories=[_BYT_SALE], max_pages=1)
-    _seen, _counts, result_size, _pages, complete = p.walk_category(
+    _seen, _counts, result_size, _pages, reached_end = p.walk_category(
         {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
     )
     assert result_size == 500
-    assert complete is False     # max_pages cap → never claims completeness
+    assert reached_end is False   # a page cap is a stop of OURS, never an end
 
 
 def _walk_with(monkeypatch, n_items: int, total: int | None):
@@ -294,7 +294,12 @@ def _walk_with(monkeypatch, n_items: int, total: int | None):
                for i in range(n_items)],
         total=total, next_offset=None,
     )
-    monkeypatch.setattr(bazos_main, "parse_index", lambda _h: page)
+    # A FULL page that advertises no next page is corroborated by one fetch of the
+    # offset it would have pointed at (bazos runs dry there); the blank second
+    # page below is that answer. See _confirm_pager_end.
+    blank = SimpleNamespace(items=[], total=total, next_offset=None)
+    seq = _SeqPages([page, blank])
+    monkeypatch.setattr(bazos_main, "parse_index", lambda _h: seq(_h))
     monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: _IdxClient([page]))
     monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
     monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
@@ -305,100 +310,214 @@ def _walk_with(monkeypatch, n_items: int, total: int | None):
     )
 
 
-def test_walk_category_below_tolerance_is_incomplete(monkeypatch):
-    # A full (un-capped) walk well short of the reported total must read
-    # incomplete: the sweep runs only after a ~complete walk (architectural
-    # rule #3). The 0.995 bar is scraper.portal.INDEX_MIN_COMPLETENESS — one
-    # shared constant for all nine portals now, not a per-portal copy.
-    _seen, _counts, result_size, _pages, complete = _walk_with(monkeypatch, 19, 20)
-    assert result_size == 20 and complete is False   # 19/20 = 95% < 99.5% → suppress sweep
+# --- the gate is STRUCTURAL (rule #3, 2026-09-08) ---------------------------
+# The 5th tuple element answers "did the walk reach bazos's last page?", not
+# "did the count reconcile?". The declared total jitters while a ~50 min walk
+# runs, so a deficit is normal on a finished walk; the numeric verdict stays
+# (walk_coverage, logged + recorded in scrape_runs.by_category) as an alarm.
 
 
-def test_walk_category_completeness_boundary(monkeypatch):
-    # 99.5% tolerance: a 0.4% deficit (mid-walk churn on a healthy walk) reads
-    # complete; a 0.6% deficit reads truncated and suppresses the sweep.
-    *_rest, complete = _walk_with(monkeypatch, 996, 1000)
-    assert complete is True                          # 996/1000 = 99.6% ≥ 99.5%
-    *_rest, complete = _walk_with(monkeypatch, 994, 1000)
-    assert complete is False                         # 994/1000 = 99.4% < 99.5%
+def test_walk_category_one_row_short_still_reaches_end(monkeypatch):
+    # 19 of a declared 20, and the pager said there is no next page: that is a
+    # finished walk over a live index. Under the old 99.5% gate this scope
+    # nominated nothing, forever (the ceskereality pathology).
+    _seen, _counts, result_size, _pages, reached_end = _walk_with(monkeypatch, 19, 20)
+    assert result_size == 20 and reached_end is True
 
 
-def test_walk_category_unknown_total_is_incomplete(monkeypatch):
-    # An unmeasurable walk is "unknown", never complete: a total that failed to
-    # parse is not proof of coverage, and rule #3 delists only on proof. bazos
-    # already got this right; the shared walk_coverage now makes it the contract
-    # for every portal (several of which used to fail OPEN here).
-    _seen, _counts, result_size, _pages, complete = _walk_with(monkeypatch, 20, None)
-    assert result_size is None and complete is False
+def test_walk_category_coverage_gaps_do_not_veto(monkeypatch):
+    # Three walks the numeric gate used to suppress, all ending on a page with
+    # items and no next page — bazos's own "there is no more".
+    *_rest, reached_end = _walk_with(monkeypatch, 994, 1000)   # 99.4% deficit
+    assert reached_end is True
+    *_rest, reached_end = _walk_with(monkeypatch, 20, None)    # total unreadable
+    assert reached_end is True
+    *_rest, reached_end = _walk_with(monkeypatch, 25, 20)      # over-collected
+    assert reached_end is True
 
 
-def test_walk_category_overcollection_is_incomplete(monkeypatch):
-    # Collecting materially MORE than the portal declared means the slices
-    # overlap or foreign stock leaked in, so `total` is not the denominator we
-    # think it is. Contamination must not read as completeness.
-    _seen, _counts, _result_size, _pages, complete = _walk_with(monkeypatch, 25, 20)
-    assert complete is False                         # 25/20 = 125% > 102% → suppress sweep
-    *_rest, complete = _walk_with(monkeypatch, 1010, 1000)
-    assert complete is True                          # 101% is within churn tolerance
+def test_walk_category_deadline_is_not_an_end(monkeypatch):
+    monkeypatch.setattr(bazos_main, "deadline_reached", lambda _d: True)
+    _seen, _counts, _result_size, pages, reached_end = _walk_with(monkeypatch, 5, 5)
+    assert pages == 0 and reached_end is False
 
 
-class _SeqIdxClient:
-    """fetch_index returns 200 for the first `ok_pages` calls, then raises
-    ListingGoneError — bazos 404s an offset past the last result page."""
+class _RecIdxClient:
+    """Records the offset of every index fetch (so the barren re-read's offset is
+    visible), and raises ListingGoneError once `ok_pages` fetches have succeeded —
+    bazos 404s an offset past the last result page."""
 
-    def __init__(self, ok_pages: int):
+    def __init__(self, ok_pages: int | None = None):
         self._ok = ok_pages
-        self.calls = 0
+        self.offsets: list[int] = []
 
-    def fetch_index(self, *a, **k):
-        self.calls += 1
-        if self.calls > self._ok:
+    def fetch_index(self, _sale_type, _category, offset=0, **_k):
+        self.offsets.append(offset)
+        if self._ok is not None and len(self.offsets) > self._ok:
             raise ListingGoneError("/past-end", 404)
         return ("<html>", 200)
+
+
+class _SeqPages:
+    """parse_index over a staged sequence of pages (the last one repeats), so a
+    walk can be driven page by page: items, then a blank, then its re-read."""
+
+    def __init__(self, pages):
+        self._pages = list(pages)
+        self.reads = 0
+
+    def __call__(self, _html):
+        page = self._pages[min(self.reads, len(self._pages) - 1)]
+        self.reads += 1
+        return page
+
+
+def _page(natives, *, total, next_offset):
+    return SimpleNamespace(
+        items=[SimpleNamespace(source_id_native=n, detail_path=f"/{n}", price_text=None)
+               for n in natives],
+        total=total, next_offset=next_offset,
+    )
+
+
+def _walk(monkeypatch, pages, *, client=None):
+    client = client or _RecIdxClient()
+    monkeypatch.setattr(bazos_main, "parse_index", _SeqPages(pages))
+    monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: client)
+    monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
+    monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
+    monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 1)
+    result = _portal().walk_category(
+        {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
+    )
+    return result, client
 
 
 def test_walk_category_stops_when_total_reached(monkeypatch):
     # The pager advertises a next page, but we've already collected `total`, so
     # the walk must stop (and never request the offset bazos would 404 on).
-    page = SimpleNamespace(
-        items=[SimpleNamespace(source_id_native="a", detail_path="/a", price_text=None),
-               SimpleNamespace(source_id_native="b", detail_path="/b", price_text=None)],
-        total=2, next_offset=20,
+    (seen, _c, result_size, _pages, reached_end), client = _walk(
+        monkeypatch, [_page(["a", "b"], total=2, next_offset=20)],
+        client=_RecIdxClient(ok_pages=10),
     )
-    client = _SeqIdxClient(ok_pages=10)
-    monkeypatch.setattr(bazos_main, "parse_index", lambda _h: page)
-    monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: client)
-    monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
-    monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
-    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
-    monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 2)
-    seen, _c, result_size, _pages, complete = _portal().walk_category(
-        {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
-    )
-    assert seen == {"a", "b"} and result_size == 2 and complete is True
-    assert client.calls == 1     # stopped after page 1; never requested offset 20
+    assert seen == {"a", "b"} and result_size == 2 and reached_end is True
+    assert client.offsets == [0]   # stopped after page 1; never requested offset 20
 
 
-def test_walk_category_tolerates_gone_index_page(monkeypatch):
-    # If a page past the end 404s before the total is reached, keep what we
-    # collected and report incomplete (so the sweep is skipped, not a crash).
-    page = SimpleNamespace(
-        items=[SimpleNamespace(source_id_native=str(i), detail_path=f"/{i}", price_text=None)
-               for i in range(20)],
-        total=400, next_offset=20,
-    )
-    client = _SeqIdxClient(ok_pages=1)   # page 1 ok, page 2 → gone
-    monkeypatch.setattr(bazos_main, "parse_index", lambda _h: page)
-    monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: client)
-    monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
-    monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
-    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
-    monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 20)
-    seen, _c, result_size, _pages, complete = _portal().walk_category(
-        {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
+def test_walk_category_gone_page_short_of_total_is_not_an_end(monkeypatch):
+    # A 404 while the declared total is still far away is indistinguishable from
+    # a soft block wearing a 404: keep the 20 rows we collected, but the scope
+    # must not nominate the other 380.
+    (seen, _c, result_size, _pages, reached_end), _client = _walk(
+        monkeypatch, [_page([str(i) for i in range(20)], total=400, next_offset=20)],
+        client=_RecIdxClient(ok_pages=1),
     )
     assert len(seen) == 20            # page-1 items kept despite the 404 on page 2
-    assert result_size == 400 and complete is False   # partial → no false delisting
+    assert result_size == 400 and reached_end is False
+
+
+def test_walk_category_gone_page_with_unknown_total_cannot_be_placed(monkeypatch):
+    # A 404 the walk cannot PLACE proves nothing: with no readable counter there is
+    # nothing to say this offset is past bazos's end rather than a soft block two
+    # pages in. Keep the rows, nominate nothing. (The probe shows bazos's genuine
+    # last page carries no "Další" at all, so a healthy walk ends on pager_end and
+    # never needs the 404 as a terminator.)
+    (seen, _c, _result_size, _pages, reached_end), _client = _walk(
+        monkeypatch, [_page(["a", "b"], total=None, next_offset=20)],
+        client=_RecIdxClient(ok_pages=1),
+    )
+    assert seen == {"a", "b"} and reached_end is False
+
+
+def test_walk_category_gone_page_past_the_declared_end_is_an_end(monkeypatch):
+    # ...but a 404 at an offset the portal's own counter puts past the end is
+    # bazos's past-the-end marker.
+    (seen, _c, result_size, _pages, reached_end), client = _walk(
+        monkeypatch, [_page([str(i) for i in range(20)], total=25, next_offset=30)],
+        client=_RecIdxClient(ok_pages=1),
+    )
+    assert len(seen) == 20 and result_size == 25 and reached_end is True
+    assert client.offsets == [0, 30]
+
+
+def test_walk_category_a_full_page_with_no_pager_is_corroborated(monkeypatch):
+    """`_next_offset` returns None both for bazos's last page and for a pager we
+    failed to parse. A FULL page claiming no next page must be proven: one fetch
+    of the offset it would have pointed at. Ads still there → the pager broke, so
+    the walk nominates nothing."""
+    (seen, _c, _result_size, _pages, reached_end), client = _walk(
+        monkeypatch,
+        [_page([str(i) for i in range(20)], total=6990, next_offset=None),
+         _page([f"p2-{i}" for i in range(20)], total=6990, next_offset=None)],
+    )
+    assert len(seen) == 20 and reached_end is False
+    assert client.offsets == [0, 20]
+
+
+def test_walk_category_gone_first_page_is_not_an_end(monkeypatch):
+    # Nothing corroborates a 404 on the very first page of a scope.
+    (seen, _c, _result_size, pages, reached_end), _client = _walk(
+        monkeypatch, [_page(["a"], total=100, next_offset=20)],
+        client=_RecIdxClient(ok_pages=0),
+    )
+    assert seen == set() and pages == 0 and reached_end is False
+
+
+def test_walk_category_barren_page_is_re_read_and_is_not_an_end(monkeypatch):
+    # An items-less HTTP 200 mid-walk (soft block, consent shell, renamed
+    # selector) is NOT how bazos ends a section. It is re-read once at the SAME
+    # offset, and an uncorroborated blank stays a stop of ours.
+    blank = _page([], total=None, next_offset=None)
+    (seen, _c, _result_size, pages, reached_end), client = _walk(
+        monkeypatch, [_page(["a"], total=400, next_offset=20), blank, blank],
+    )
+    assert client.offsets == [0, 20, 20]   # the blank page re-read, same offset
+    assert seen == {"a"} and pages == 2 and reached_end is False
+
+
+def test_walk_category_barren_page_past_declared_total_is_an_end(monkeypatch):
+    # Still blank on the re-read AND at/past what the declared total implies:
+    # that is the page after the last one, i.e. bazos's end — even though the
+    # walk is one row short of the total.
+    blank = _page([], total=None, next_offset=None)
+    (seen, _c, _result_size, _pages, reached_end), client = _walk(
+        monkeypatch,
+        [_page([str(i) for i in range(19)], total=20, next_offset=20), blank, blank],
+    )
+    assert client.offsets == [0, 20, 20]
+    assert len(seen) == 19 and reached_end is True
+
+
+def test_walk_category_barren_first_page_is_not_an_end(monkeypatch):
+    # A scope whose FIRST page is blank with no total is never confirmed: a
+    # confirmation that cannot be obtained is not a confirmation.
+    blank = _page([], total=None, next_offset=None)
+    (seen, _c, _result_size, _pages, reached_end), _client = _walk(
+        monkeypatch, [blank],
+    )
+    assert seen == set() and reached_end is False
+
+
+def test_walk_category_barren_re_read_with_items_is_not_an_end(monkeypatch):
+    # The blank was a fluke — so that page's ads were missed and the walk is
+    # truncated, however it ends.
+    (seen, _c, _result_size, _pages, reached_end), _client = _walk(
+        monkeypatch,
+        [_page(["a"], total=2, next_offset=20),
+         _page([], total=None, next_offset=None),
+         _page(["b"], total=2, next_offset=None)],
+    )
+    assert seen == {"a"} and reached_end is False
+
+
+def test_walk_category_pager_stalled_is_not_an_end(monkeypatch):
+    # A pager pointing at the offset we just walked would loop forever; it is a
+    # stop of ours, not an end.
+    (_seen, _c, _result_size, pages, reached_end), _client = _walk(
+        monkeypatch, [_page(["a"], total=400, next_offset=0)],
+    )
+    assert pages == 1 and reached_end is False
 
 
 class _Limiter:

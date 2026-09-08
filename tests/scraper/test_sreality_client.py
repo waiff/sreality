@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 import requests
 
+from scraper.portal import stop_is_portal_end
 from scraper.sreality_client import (
     ListingGoneError,
     SrealityClient,
@@ -130,6 +131,10 @@ def test_iter_index_pages_by_offset(monkeypatch):
     monkeypatch.setattr(client, "_get_json", lambda url, params=None: pages[params["offset"]])
     assert [e["id"] for e in client.iter_index()] == [1, 2, 3]
     assert client.result_size == 3
+    # Rule #3's structural gate reads WHY the loop stopped: here sreality's own
+    # count was consumed, which is a portal end and may nominate.
+    assert client.stop_reason == "declared_total_reached"
+    assert stop_is_portal_end(client.stop_reason) is True
 
 
 def test_iter_index_stops_cleanly_at_cap(monkeypatch):
@@ -144,6 +149,164 @@ def test_iter_index_stops_cleanly_at_cap(monkeypatch):
 
     monkeypatch.setattr(client, "_get_json", fake)
     assert [e["id"] for e in client.iter_index()] == [1, 2]
+    # The 422 is sreality REFUSING to paginate deeper — rows past it exist and
+    # were not seen — so it is our wall, not the end of the list. It used to be
+    # indistinguishable from a genuine end (both returned []).
+    assert client.cap_hit is True
+    assert client.stop_reason == "cap_wall"
+    assert stop_is_portal_end(client.stop_reason) is False
+
+
+def test_iter_index_short_page_is_a_portal_end(monkeypatch):
+    client = SrealityClient(per_page=2)
+    # A total that overstates what the list actually holds (sreality's total
+    # jitters): the walk ends on the tail page, not on the arithmetic.
+    pages = {
+        0: {"pagination": {"total": 9}, "results": [{"id": 1}, {"id": 2}]},
+        2: {"pagination": {"total": 9}, "results": [{"id": 3}]},
+    }
+    monkeypatch.setattr(client, "_get_json", lambda url, params=None: pages[params["offset"]])
+    assert [e["id"] for e in client.iter_index()] == [1, 2, 3]
+    assert client.stop_reason == "short_page"
+    assert stop_is_portal_end(client.stop_reason) is True
+
+
+def test_iter_index_barren_page_is_refetched_once_and_stays_ours(monkeypatch):
+    """ITEMS-FIRST + the barren rule. An items-less HTTP 200 below the declared
+    total is what a soft block, a shell body and an edge-cached blank look like;
+    it is only the end of the list if something corroborates it. Nothing does
+    here, so the walk reports OUR stop and the category nominates nothing."""
+    client = SrealityClient(per_page=2)
+    calls: list[int] = []
+
+    def fake(url, params=None):
+        calls.append(params["offset"])
+        if params["offset"] == 0:
+            return {"pagination": {"total": 100}, "results": [{"id": 1}, {"id": 2}]}
+        return {"pagination": {"total": 100}, "results": []}
+
+    monkeypatch.setattr(client, "_get_json", fake)
+    assert [e["id"] for e in client.iter_index()] == [1, 2]
+    assert calls == [0, 2, 2]      # the same URL, re-fetched exactly once
+    assert client.stop_reason == "barren"
+    assert stop_is_portal_end(client.stop_reason) is False
+
+
+def test_iter_index_barren_page_the_refetch_answers_keeps_walking(monkeypatch):
+    """The re-fetch is not just a vote — when it comes back with items the walk
+    continues from that page, so one blank response no longer truncates a slice."""
+    client = SrealityClient(per_page=2)
+    attempts: dict[int, int] = {}
+
+    def fake(url, params=None):
+        offset = params["offset"]
+        attempts[offset] = attempts.get(offset, 0) + 1
+        if offset == 0:
+            return {"pagination": {"total": 3}, "results": [{"id": 1}, {"id": 2}]}
+        if attempts[offset] == 1:
+            return {"results": []}
+        return {"pagination": {"total": 3}, "results": [{"id": 3}]}
+
+    monkeypatch.setattr(client, "_get_json", fake)
+    assert [e["id"] for e in client.iter_index()] == [1, 2, 3]
+    assert attempts[2] == 2
+    assert client.stop_reason == "declared_total_reached"
+
+
+def test_iter_index_a_total_that_shrinks_on_the_barren_page_cannot_confirm_it(monkeypatch):
+    """The suspect page must not supply its own corroboration. sreality's total
+    jitters, so a blank page that also reports a SMALLER total than the walk has
+    already passed would otherwise position-confirm itself. result_size is the
+    high-water mark of everything sreality declared, so the blank stays ours."""
+    client = SrealityClient(per_page=2)
+
+    def fake(url, params=None):
+        if params["offset"] == 0:
+            return {"pagination": {"total": 4}, "results": [{"id": 1}, {"id": 2}]}
+        return {"pagination": {"total": 2}, "results": []}
+
+    monkeypatch.setattr(client, "_get_json", fake)
+    assert [e["id"] for e in client.iter_index()] == [1, 2]
+    assert client.result_size == 4
+    assert client.stop_reason == "barren"
+    assert stop_is_portal_end(client.stop_reason) is False
+
+
+def test_iter_index_empty_page_past_the_declared_total_is_confirmed(monkeypatch):
+    """Corroboration by position: the count was unreadable while the walk paged,
+    so the loop asked for a page it did not need. Still empty on the re-fetch AND
+    at or past what the total implies → sreality's end, which may nominate."""
+    client = SrealityClient(per_page=2)
+
+    def fake(url, params=None):
+        if params["offset"] == 0:
+            return {"results": [{"id": 1}, {"id": 2}]}
+        return {"pagination": {"total": 2}, "results": []}
+
+    monkeypatch.setattr(client, "_get_json", fake)
+    assert [e["id"] for e in client.iter_index()] == [1, 2]
+    assert client.stop_reason == "empty_confirmed"
+    assert stop_is_portal_end(client.stop_reason) is True
+
+
+def test_iter_index_a_clamped_page_size_is_not_a_short_page(monkeypatch):
+    """`short_page` is a PORTAL end, so a clamped `limit` must never wear it: if
+    sreality answered a requested 500 with 100 rows the first page would end the
+    walk with the rest of the district unseen. The payload states the size it
+    served, so adopt it and keep paging by what arrived."""
+    client = SrealityClient(per_page=4)
+    offsets: list[int] = []
+
+    def fake(url, params=None):
+        offsets.append(params["offset"])
+        start = params["offset"]
+        ids = [{"id": i} for i in range(start, min(start + 2, 5))]
+        return {"pagination": {"total": 5, "limit": 2}, "results": ids}
+
+    monkeypatch.setattr(client, "_get_json", fake)
+    assert [e["id"] for e in client.iter_index()] == [0, 1, 2, 3, 4]
+    assert offsets == [0, 2, 4]
+    assert client.page_size_served == 2
+    assert client.stop_reason == "declared_total_reached"
+
+
+def test_iter_index_declared_zero_is_a_confirmed_empty_slice(monkeypatch):
+    """An empty okres is a MEASUREMENT, not a gap — sreality's split leans on it
+    (77 districts, most of them empty for a small category), so a declared zero
+    with zero collected is a portal end."""
+    client = SrealityClient(per_page=2)
+    monkeypatch.setattr(
+        client, "_get_json",
+        lambda url, params=None: {"pagination": {"total": 0}, "results": []},
+    )
+    assert list(client.iter_index()) == []
+    assert client.stop_reason == "empty_confirmed"
+
+
+def test_iter_index_first_page_barren_with_no_total_is_never_confirmed(monkeypatch):
+    """A confirmation that cannot be obtained is not a confirmation: no readable
+    total and no earlier page of this slice with items leaves nothing to
+    corroborate a blank first page against."""
+    client = SrealityClient(per_page=2)
+    monkeypatch.setattr(client, "_get_json", lambda url, params=None: {"results": []})
+    assert list(client.iter_index()) == []
+    assert client.stop_reason == "barren"
+    assert stop_is_portal_end(client.stop_reason) is False
+
+
+def test_iter_index_empty_after_items_with_no_total_is_confirmed(monkeypatch):
+    """...but a slice that DID serve items and then runs dry with no total ever
+    readable has corroborated its own end."""
+    client = SrealityClient(per_page=2)
+
+    def fake(url, params=None):
+        if params["offset"] == 0:
+            return {"results": [{"id": 1}, {"id": 2}]}
+        return {"results": []}
+
+    monkeypatch.setattr(client, "_get_json", fake)
+    assert [e["id"] for e in client.iter_index()] == [1, 2]
+    assert client.stop_reason == "empty_confirmed"
 
 
 def test_fetch_index_page_returns_one_pages_results(monkeypatch):

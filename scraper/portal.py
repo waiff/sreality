@@ -251,9 +251,100 @@ def walk_is_complete(
     *,
     stopped_early: bool = False,
 ) -> bool:
-    """`walk_coverage` as the boolean the runner gates mark_inactive on. Only a
-    positive `complete` verdict is True — `unknown` is not."""
+    """`walk_coverage` as a boolean. Only a positive `complete` verdict is True —
+    `unknown` is not. Since 2026-09-08 it no longer gates the runner's nomination
+    (that is `walk_reached_end`); it still drives the portals' own arithmetic
+    triggers — ceskereality's descent, idnes's resample, sreality's national
+    fallback — and verify_pipeline's coverage check."""
     return walk_coverage(collected, declared_total, stopped_early=stopped_early) == "complete"
+
+
+# --- the STRUCTURAL walk verdict (rule #3) ---------------------------------
+# The arithmetic above answers "how much did this walk collect?". The gate that
+# decides whether a walk may NOMINATE its unseen rows for a page check asks a
+# different question — "did the walk reach the portal's end?" — and the two are
+# not the same. A category whose every region paged to its own last page but
+# whose declared counts add up one row short is a FINISHED walk over a live
+# index, not a truncated one: ceskereality's 20,964-row houses-for-sale category
+# nominated nothing for two days because one 87-row region was one row short.
+# So classify the STOP instead of the count. Every page loop ends for exactly one
+# reason, and that reason is either the PORTAL's ("there is no more") or OURS
+# ("we stopped asking"). Only ours vetoes.
+
+StopReason = Literal[
+    # --- the portal said there is no more ---
+    "pager_end",               # a page that carried >=1 item and exposed no next page
+    "declared_total_reached",  # offset/collected reached the PORTAL's own count
+    "short_page",              # fewer items than the page size we asked for
+    "empty_confirmed",         # an empty page positively proven empty (barren rule)
+    "clamp_repeat",            # items, no new id, ids a subset of ours, at page >= 2
+    # --- we stopped asking ---
+    "deadline",                # the wall-clock budget expired
+    "page_cap",                # --max-pages, a probe cap, a baked-in page ceiling
+    "limit",                   # --limit
+    "slice_subset",            # only some of the category's units were requested (--kraje)
+    "slice_unreached",         # a unit the loop never got to
+    "error",                   # an exception, a blocked page, a gone page mid-walk
+    "pager_stalled",           # the next offset did not advance (next <= current)
+    "cap_wall",                # the portal refused to paginate deeper (sreality's 422)
+    "barren",                  # an items-less HTTP 200 nobody could corroborate
+]
+
+PORTAL_ENDS: frozenset[str] = frozenset({
+    "pager_end", "declared_total_reached", "short_page", "empty_confirmed",
+    "clamp_repeat",
+})
+OUR_STOPS: frozenset[str] = frozenset({
+    "deadline", "page_cap", "limit", "slice_subset", "slice_unreached", "error",
+    "pager_stalled", "cap_wall", "barren",
+})
+
+
+def stop_is_portal_end(reason: StopReason) -> bool:
+    """Did the PORTAL end this page loop, or did we?
+
+    `barren` is the one that has to be classified by hand and is deliberately
+    OURS: an items-less HTTP 200 is what a soft block, a throttle and a shell
+    page all look like, and it is also what the page after the last one looks
+    like. A portal that can receive one must re-fetch the same URL once and only
+    then, if it is still empty AND at or past the position the declared total
+    implies (or no total was ever readable and an earlier page of this unit
+    carried items), report `empty_confirmed`. A confirmation that cannot be
+    obtained is not a confirmation.
+
+    An unknown reason reads as OURS, because "I cannot classify this stop" is
+    not evidence that the portal ended the walk (same posture as walk_coverage's
+    `unknown`).
+    """
+    if reason in PORTAL_ENDS:
+        return True
+    if reason not in OUR_STOPS:
+        LOG.warning("unknown walk stop reason %r — treating it as our own stop", reason)
+    return False
+
+
+def walk_reached_end(*, portal_end: bool, our_stop: bool) -> bool:
+    """The nomination gate (rule #3): did this category's walk reach the portal's end?
+
+    ONE conjunction for all nine portals, so the 5th element of `walk_category`
+    means one thing everywhere:
+
+        reached_end := every unit the category is defined over was walked, AND
+        each unit's page loop exited on a PORTAL terminator, AND no stop of ours
+        fired anywhere in the category.
+
+    `portal_end` is the second conjunct (per unit via `stop_is_portal_end`, ANDed
+    across the units); `our_stop` is the first and third — a deadline, a page cap,
+    a --limit, a slice subset, an exception, a unit the loop never reached, a
+    barren page. Ours veto: a walk we cut short has not seen the portal's end, and
+    its unseen set is the part of the portal it never visited, not evidence of
+    absence.
+
+    Counts do not appear here. They are still computed (`walk_coverage`), still
+    logged, and still recorded in scrape_runs.by_category — as an alarm, never as
+    a veto.
+    """
+    return portal_end and not our_stop
 
 
 def deadline_reached(deadline: float | None) -> bool:
@@ -264,8 +355,9 @@ def deadline_reached(deadline: float | None) -> bool:
     is a time.monotonic() instant (never a duration, never wall-clock time —
     monotonic is immune to NTP steps mid-walk); None means unbounded.
 
-    A page loop that returns True here MUST report complete=False. Stopping early
-    is not a complete walk, and rule #3 forbids delisting from an incomplete one.
+    A page loop that returns True here MUST report reached_end=False — a deadline
+    is a stop of OURS (`OUR_STOPS`), and rule #3 lets only a walk that reached the
+    portal's end nominate the rows it did not see.
     """
     return deadline is not None and time.monotonic() >= deadline
 

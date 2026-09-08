@@ -5,6 +5,26 @@
 Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
+### The nomination gate went STRUCTURAL — counts stopped vetoing (2026-09-08, done)
+- The 5th element of `walk_category` now means **"the walk reached the portal's end"**
+  (`portal.walk_reached_end` over a shared `StopReason` / `PORTAL_ENDS` / `OUR_STOPS`
+  vocabulary), not "the counts reconciled". The numeric per-slice AND could never pass on a
+  live index: one 87-row Karlovarský slice collecting 86 vetoed all 20,964 rows of
+  ceskereality's houses-for-sale, which nominated nothing for days.
+- All nine portals reclassified their exits, with two mandatory disciplines: **items-first**
+  (a blocked HTTP 200 must not exit through the real last page's branch) and the **barren
+  rule** (an empty page is ours until a re-fetch corroborates it). sreality's swallowed HTTP
+  422 deep-pagination refusal is now exposed as `cap_hit` and counts as our stop.
+- `walk_coverage` is unchanged and still drives ceskereality's descent, idnes's resample and
+  sreality's national fallback — as a logged `COVERAGE` alarm, never a gate. Both facts land
+  in `scrape_runs.by_category` (`walk_reached_end` + `walk_coverage`, no migration) and
+  `verify_pipeline`'s coverage check reports `categories_nominating` beside the gap.
+- bazos CI budget: `timeout-minutes` 75 → 130 with `--max-seconds 6600`. Since migration 488
+  (22 scopes, ~2,400 pages) GitHub was cancelling the walk at 75 min, so the tail scopes never
+  walked and the `scrape_run` was never finalized.
+- **Next:** watch the first `COVERAGE` warnings per portal (a forged terminator shows up there
+  first) and the drain volume from ceskereality's newly-unblocked categories.
+
 ### Presence-verified delisting — rule #3 rewritten (2026-09-07, done)
 - Index absence NOMINATES, the page DECIDES: a complete category walk queues every active
   row it did not see for a detail fetch at the lowest priority; a positive gone signal flips
