@@ -77,6 +77,26 @@ _ALLOWLIST: list[tuple[str, str, str]] = [
         "verified against production instead (the alter_job signature is "
         "job_id bigint, ..., active boolean)",
     ),
+    # --- TEMPORARY, remove when the sibling bake-off PR merges ------------------
+    # The tagging bake-off's results store (dedup_sim.tag_head_bakeoff_runs / _arms /
+    # _vectors) is created by a migration in the SIBLING PR that owns the trainer, the
+    # CPU runner and the admin API; this PR owns only the manifest/embed/dispatch half.
+    # Until that migration lands, the schema replay cannot see the tables, so every
+    # statement naming them fails to PREPARE for the one reason this sweep does not
+    # care about. Same shape as the temporary entries PRs #1297/#1298 carried for
+    # migration 480. DELETE THESE THREE ENTRIES once both PRs are on main — leaving
+    # them in place would blind the sweep to a real typo in these statements.
+    (
+        "tagging_bakeoff_manifest.py",
+        "dedup_sim.tag_head_bakeoff",
+        "TEMPORARY: the dedup_sim.tag_head_bakeoff_* tables ship in the sibling "
+        "bake-off PR's migration and are not yet in the replayed schema",
+    ),
+    (
+        "tagging_bakeoff_embed.py",
+        "dedup_sim.tag_head_bakeoff",
+        "TEMPORARY: same tables, same sibling PR — remove with the entry above",
+    ),
     (
         "verify_pipeline.py",
         "cron.job_run_details",
