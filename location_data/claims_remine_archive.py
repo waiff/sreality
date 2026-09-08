@@ -111,6 +111,7 @@ import re
 import sys
 import time
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from math import cos, hypot, isfinite, radians
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -2066,6 +2067,7 @@ def load_registers(conn: psycopg.Connection) -> dict[str, ScopeRegister]:
 
 def load_bodies(
     cur: psycopg.Cursor, payload_ids: list[int], *, store: BodyStore | None,
+    workers: int | None = None,
 ) -> tuple[dict[int, bytes], int]:
     """The bodies for one batch's applicable rows, decoded. Returns (bodies, from_r2).
 
@@ -2083,7 +2085,10 @@ def load_bodies(
     if not payload_ids:
         return {}, 0
     bodies: dict[int, bytes] = {}
-    from_r2 = 0
+    spilled: list[tuple[int, str, str]] = []
+    # The cursor is DRAINED before a single object is fetched. The batch holds one
+    # transaction, so leaving the cursor open across a network fan-out would hold it there
+    # too, and psycopg's cursor is not thread-safe in any case.
     cur.execute(_PAYLOAD_BODIES_SQL, {"ids": payload_ids})
     for payload_id, body, body_r2_key, content_encoding in cur.fetchall():
         encoding = content_encoding or "identity"
@@ -2099,10 +2104,36 @@ def load_bodies(
                 f"no object store is configured; set the R2_* env vars — mining the "
                 f"database-resident rows alone would report coverage over a corpus that is "
                 f"almost entirely in the bucket")
-        bodies[int(payload_id)] = payloads.decode_body(
-            store.download_bytes(body_r2_key), encoding)
-        from_r2 += 1
-    return bodies, from_r2
+        spilled.append((int(payload_id), str(body_r2_key), encoding))
+    if not spilled:
+        return bodies, 0
+
+    # Unreachable with store=None: a spilled row with no store raised above, per row.
+    assert store is not None
+
+    def fetch(item: tuple[int, str, str]) -> tuple[int, bytes]:
+        payload_id, key, encoding = item
+        return payload_id, payloads.decode_body(store.download_bytes(key), encoding)
+
+    width = payloads.body_fetch_workers() if workers is None else workers
+    width = max(1, min(len(spilled), width))
+    if width == 1:
+        for item in spilled:
+            payload_id, decoded = fetch(item)
+            bodies[payload_id] = decoded
+        return bodies, len(spilled)
+    # ONE GET PER PAGE IS THE WHOLE COST OF A SWEEP (0.7 % of an 844 s run was the
+    # database), so the fetch runs wide. Threads, not async: `download_bytes` is a blocking
+    # botocore call — botocore clients are documented thread-safe — and both the socket
+    # wait and zlib's decompression release the GIL. An exception propagates as it did
+    # serially: `pool.map` re-raises the first failure as its results are consumed and the
+    # context manager's shutdown waits for the rest, so the batch aborts and its
+    # transaction rolls back rather than writing a partial page set.
+    with ThreadPoolExecutor(max_workers=width,
+                            thread_name_prefix="archive-body") as pool:
+        for payload_id, decoded in pool.map(fetch, spilled):
+            bodies[payload_id] = decoded
+    return bodies, len(spilled)
 
 
 def _resume_point(
