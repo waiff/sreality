@@ -3744,14 +3744,15 @@
         },
         {
           "name": "mode",
-          "description": "free = the W2-10 extractor; constrained = pick ONE obec from the PSČ-okres list; both = the two arms on the same listings",
+          "description": "free = the W2-10 extractor; constrained = pick ONE obec from the PSČ-okres list; both = the two arms on the same listings; candidates = the candidate-list probe (national / PSČ / text ∪ pin-radius lists, per-ad rows)",
           "required": false,
           "type": "choice",
           "default": "free",
           "options": [
             "free",
             "constrained",
-            "both"
+            "both",
+            "candidates"
           ]
         }
       ],
