@@ -357,7 +357,10 @@ W1 (shared prerequisites + labeling program):
 - [ ] **NEXT — run the bake-off** (manifest lane with `dry_run=false`, then the pod-side
       harness by hand with `HF_TOKEN`), read ENCODER-DECISION.md §5.4's seven readouts with the
       operator, fill the three remaining nulls in `data/dinov3_config.json`, then a small-limit
-      embedding pass before any corpus pass.
+      embedding pass before any corpus pass. **Partly answered by the tagging bake-off's run 1
+      (2026-09-09, ledger (a)): `dtype` and the measured end-to-end throughput §5.3 asked for are
+      now in hand; near-duplicate accuracy (Set 2) is not, and it is the readout the encoder
+      choice actually rests on.**
 - [x] **Tagging bake-off, phase 1 — the durable half (2026-09-08, PROGRAM.md ledger (d)):**
       ENCODER-DECISION.md §5.2 "Set 1" made runnable. Migration 489 adds the results store in
       `dedup_sim` (`tag_head_bakeoff_runs` / `_arms` / `_vectors` / `_scores` / `_metrics`; the
@@ -380,14 +383,41 @@ W1 (shared prerequisites + labeling program):
       rejected) under a 20-bin histogram with the threshold marked. Both contract conventions are
       rendered rather than assumed — a null rate reads "nothing proposed", never zero, and an exam
       abstention is counted beside the split and folded into no rate. Every selector is in the URL.
-- [ ] **NEXT — tagging bake-off, phase 2b**: the GPU job that fills
-      `dedup_sim.tag_head_bakeoff_vectors` per arm, and its workflow. Nothing has been embedded,
-      trained or scored yet, so the page has no run to show until that lane runs. Two paid
-      attempts have failed (2026-09-08 ledger (f) ~$0.50, (g) ~$0.08 — the watchdog stopped the
-      second at 1,245 s). The cause of the second is unknown for lack of any pod log; the
-      bootstrap now reports every step and ships its own error tail into
-      `dedup_sim.tag_head_bakeoff_runs.note`, so the third attempt will say what happened.
-      Run 1 needs no cleanup: arms `pending`, zero vectors.
+- [x] **Tagging bake-off, phase 2b — the GPU lane, and RUN 1 IS DONE (2026-09-09, PROGRAM.md
+      ledger (a)):** the embed job that fills `dedup_sim.tag_head_bakeoff_vectors` per arm plus
+      its workflow shipped over seven pod attempts on 2026-09-08 (post-mortems in ledger (f)–(j):
+      a clone that could never work, a bootstrap that could not report itself, a crash loop over
+      an undersized disk, a missing `torchvision`, and two correct-but-deadlocked definitions of
+      `failed`). **Run 1 completed: 11 heads (`review_state='ready'`) x 11 arms x 3 training
+      modes = 363 cells, 9,264 training photos + the sealed 250-photo exam (0 exam photos in any
+      training tray, verified), 529,188 per-photo scores, 0 ungradable, ≈$1.55 of GPU all in.**
+      Headline measured results — F1 is the balance of precision (of what it flagged, how much
+      was right) and recall (of what was there, how much it found): **bf16 = fp32 to three
+      decimals on every arm** at 1.6-2.7× the speed (the `dtype` null is answered);
+      **resolution on DINOv3-B is flat in cross-validation and worth +0.036 exam F1 from 512 to
+      1024 at 4.8× the compute**; **DINOv2-L (Apache-2.0) posts the best exam F1 (0.758) and is
+      the fastest DINO arm** — on the TAG job only, the near-duplicate job the encoder was
+      actually chosen on is still unmeasured; **leaving the incumbent CLIP buys +0.06 mean CV
+      F1**, concentrated on 3d plán, obývací pokoj, letecký snímek and technické zařízení; the
+      operator's negative labels buy **+0.055 CV / +0.074 exam** over free borrowed negatives,
+      ≈0 on documents but +0.22 on property list. And the corpus arithmetic, now measured
+      end-to-end rather than GPU-only: **11.5M images ≈ $27 (DINOv2-L) / $34 (@512) / $59 (@768)
+      / $163 (@1024)** on a $0.22/hr 3090 — far above ENCODER-DECISION.md's $1-12 band, which
+      was synthetic-tensor throughput. Results are browsable at `/new-dedup/tagging-bakeoff`.
+- [ ] **NEXT — read run 1 with the operator, then turn the cheap knobs.** In order: (1) look at
+      the **false-positive buckets in view B** before tuning anything — the exam column is a
+      *prevalence* story (250 random photos hold few positives of a rare tag: garáž 2 true
+      against 7 false, katastrální mapa 10 against 9; technické zařízení has 0 exam positives so
+      its metrics are correctly NULL; 3d plán and property list are post-exam and have no
+      gradable cells), and some "errors" will be label mistakes worth re-judging first;
+      (2) **per-head thresholds** off each head's own precision/recall curve — heads trained at
+      ~1:3 pos:neg and judged at 0.5 over-fire at natural prevalence, and this costs no
+      re-embedding and no re-training; (3) **property list's definition** — the one weak head at
+      0.69 CV F1 (precision 0.57 / recall 0.87), a shape that reads as a definition admitting too
+      much rather than a training failure; (4) **fill `resolution` in `data/dinov3_config.json`**
+      (`preprocessing` was already ruled `letterbox_pad`, `dtype` is answered by the data) — now
+      a $34-vs-$163 decision; (5) **run the near-duplicate bake-off (#1300's "Set 2")** before
+      concluding anything about the encoder choice from the tagging numbers.
 
 Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
 
