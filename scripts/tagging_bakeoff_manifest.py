@@ -184,14 +184,28 @@ def stored_images(conn: Any, image_ids: Sequence[int]) -> dict[int, str]:
 
 def build_arms(*, only: Sequence[str] | None, hf_token: str | None,
                siglip_probe: Any = None) -> list[arms_mod.Arm]:
-    """The preset, narrowed by `--arms`, with SigLIP2's checkpoint resolved live."""
+    """The preset, narrowed by `--arms`, with SigLIP2's checkpoint resolved live.
+
+    With no `--arms`, the RETIRED arms are dropped (operator ruling 2026-09-09 b: nothing
+    below 512 px competes any more), so a default run mints no row for work already
+    decided. Naming an arm is the operator saying it anyway, and it is honoured whatever
+    its resolution — the ruling narrowed the default, it did not delete an arm.
+    """
     if siglip_probe is None:
         siglip_probe = arms_mod.resolve_siglip_checkpoint
     siglip_model, siglip_resolution = siglip_probe(token=hf_token)
     preset = arms_mod.default_arms(siglip_model=siglip_model,
                                    siglip_resolution=siglip_resolution)
     preset = [arms_mod.renamed_to_effective(a) for a in preset]
-    return arms_mod.select_arms(preset, only)
+    if only:
+        return arms_mod.select_arms(preset, only)
+    live = arms_mod.live_arms(preset)
+    retired = [a.name for a in preset if arms_mod.is_retired(a)]
+    if retired:
+        LOG.info("BAKEOFF retired arms not minted (below %d px, ruling 2026-09-09): %s "
+                 "— name one in --arms to run it anyway",
+                 arms_mod.MIN_LIVE_RESOLUTION, ", ".join(retired))
+    return live
 
 
 def _create_run(conn: Any, *, label: str, note: str, heads: Sequence[int]) -> int:

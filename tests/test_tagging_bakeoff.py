@@ -140,6 +140,42 @@ def test_a_snapped_arm_is_renamed_to_what_it_actually_runs():
     assert arms_mod.renamed_to_effective(arm).effective_resolution == 504
 
 
+def test_the_512_floor_retires_the_224_arms_and_keeps_dinov2s_504():
+    # The ruling of 2026-09-09: nothing below 512 px competes any more, and dinov2's 504
+    # IS that 512 snapped to its 14 px patch grid. A rule that retired the arm it was
+    # written to keep would be the one failure mode worth a test of its own.
+    preset = arms_mod.default_arms(siglip_model="google/siglip2-base-patch16-512",
+                                   siglip_resolution=512)
+    retired = {a.name for a in preset if arms_mod.is_retired(a)}
+    assert retired == {"clip-b32-laion@224/fp32", arms_mod.STORED_CLIP_ARM}
+    live = {a.name for a in arms_mod.live_arms(preset)}
+    assert "dinov2-l14-reg@504/bf16" in live
+    assert "siglip2-b16@512/bf16" in live
+    assert not (live & retired)
+    # The floor is a resolution rule, not a name list: if the Hub only ever served
+    # SigLIP2's 256 fallback, that arm would be below 512 too and would be retired with
+    # the rest — which is the ruling applied, not an exception to it.
+    fallback = arms_mod.default_arms(siglip_model="google/siglip2-base-patch16-256",
+                                     siglip_resolution=256)
+    assert "siglip2-b16@256/bf16" not in {a.name for a in arms_mod.live_arms(fallback)}
+
+
+def test_a_default_run_mints_no_retired_arm_but_naming_one_still_runs_it():
+    def _probe(*, token=None):
+        return "google/siglip2-base-patch16-512", 512
+
+    default = manifest.build_arms(only=None, hf_token=None, siglip_probe=_probe)
+    assert [a.name for a in default] == \
+        [a.name for a in arms_mod.live_arms(arms_mod.default_arms(
+            siglip_model="google/siglip2-base-patch16-512", siglip_resolution=512))]
+    assert arms_mod.STORED_CLIP_ARM not in {a.name for a in default}
+    # Naming it is the operator asking for it anyway — the ruling narrowed the DEFAULT,
+    # it did not delete an arm, and the incumbent baseline has to stay re-runnable.
+    named = manifest.build_arms(only=[arms_mod.STORED_CLIP_ARM], hf_token=None,
+                                siglip_probe=_probe)
+    assert [a.name for a in named] == [arms_mod.STORED_CLIP_ARM]
+
+
 def test_select_arms_narrows_and_rejects_typos():
     arms = arms_mod.default_arms()
     picked = arms_mod.select_arms(arms, ["clip-b32-stored", "dinov3-b16@512/bf16"])
@@ -520,7 +556,8 @@ def test_the_image_cache_is_filled_once_and_reused(tmp_path):
 
 def _args(**overrides) -> argparse.Namespace:
     base = dict(stage="manifest", run_id=0, label="", note="",
-                heads="", arms="", batch_size=32, workers=16, job_max_seconds=7200,
+                heads="", arms="", modes="", batch_size=32, workers=16,
+                job_max_seconds=7200,
                 ref="main", image="img", gpu_allowlist="3090", dry_run=False)
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -864,6 +901,16 @@ def test_the_train_stage_passes_the_comma_joined_arms_through():
         ["--run-id", "1"]
 
 
+def test_the_train_stage_forwards_modes_only_when_the_operator_names_them():
+    # Empty means "the trainer's own default", which since 2026-09-09 is the live mode
+    # set. Restating that default here would freeze a second copy of the ruling.
+    assert not [a for a in dispatch.plan_stage(_args(stage="train", run_id=1)).argv
+                if a.startswith("--modes")]
+    plan = dispatch.plan_stage(_args(stage="train", run_id=1,
+                                     modes="pos_neg,pos_only_centroid"))
+    assert "--modes=pos_neg,pos_only_centroid" in plan.argv
+
+
 # --------------------------------------------------------------------------------
 # The trainer's list-shaped flags
 # --------------------------------------------------------------------------------
@@ -884,14 +931,26 @@ def test_the_trainer_reads_a_comma_joined_arms_token_as_a_list():
     assert trainer.parse_args(["--run-id", "1"]).arms is None
 
 
+def test_a_default_train_run_trains_the_live_modes_only():
+    # Ruling 2026-09-09 b. Before it, a bare run trained all three modes on every head —
+    # so the lane kept paying to re-measure two readings the operator had already
+    # rejected. The retired modes are still MODES, just not defaults.
+    assert trainer.parse_args(["--run-id", "1"]).modes == ["pos_neg"]
+    assert set(trainer.RETIRED_MODES) == {"pos_only_free_neg", "pos_only_centroid"}
+    assert set(trainer.LIVE_MODES) | set(trainer.RETIRED_MODES) == set(th.MODES)
+    # Named, a retired mode still runs: nothing was deleted.
+    assert trainer.parse_args(["--run-id", "1", "--modes=pos_only_centroid"]).modes == \
+        ["pos_only_centroid"]
+
+
 def test_the_trainer_reads_modes_and_heads_the_same_way():
     args = trainer.parse_args(["--run-id", "1", "--heads=4, 7,9",
                                "--modes=pos_neg,pos_only_centroid"])
     assert args.heads == [4, 7, 9]
     assert args.modes == ["pos_neg", "pos_only_centroid"]
-    # Defaults survive the normalisation: every mode, no head/arm narrowing.
+    # Defaults survive the normalisation: the live modes, no head/arm narrowing.
     plain = trainer.parse_args(["--run-id", "1"])
-    assert plain.modes == list(th.MODES) and plain.heads is None
+    assert plain.modes == list(trainer.LIVE_MODES) and plain.heads is None
 
 
 def test_the_trainer_still_rejects_a_mode_that_does_not_exist():

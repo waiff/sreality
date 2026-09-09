@@ -6213,6 +6213,14 @@
           "options": null
         },
         {
+          "name": "modes",
+          "description": "train only: comma-separated training modes. Empty = the live set (pos_neg). The two positive-only modes were retired on 2026-09-09 and run only when named here.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
           "name": "force_arms",
           "description": "embed only: also re-open the arms named in `arms` when they are already ok/skipped (a deliberate re-embed). Requires `arms`. A retry always clears `failed` arms without this.",
           "required": false,

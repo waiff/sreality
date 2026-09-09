@@ -27,6 +27,16 @@ WHAT THE DEFAULT RUN ASKS. The operator's questions, one arm each:
     zero-GPU `clip-b32-stored` arm, which copies the INCUMBENT's live vectors. That one
     is the baseline every other arm is measured against and it costs nothing.
 
+WHAT A DEFAULT RUN MEASURES NOW (operator ruling 2026-09-09 b). Both 224 px CLIP arms are
+RETIRED: run 1 measured them, they lost, and an arm below the 512 px floor no longer
+competes. They stay in this catalogue — `--arms clip-b32-stored` re-runs the incumbent
+baseline whenever the comparison is wanted again — but `live_arms` is what a run with no
+`--arms` gets, so nothing pays GPU minutes to re-measure a decided question. The floor is
+504 because DINOv2's patch 14 makes ITS 512 land there. The rule is the RESOLUTION, not a
+list of names: if the Hub ever served only SigLIP2's 256 fallback, that arm would sit
+below the floor too and be dropped with the rest — which is why the manifest stage LOGS
+what it dropped instead of quietly minting fewer rows than the operator expected.
+
 RESOLUTION SNAPS TO THE PATCH GRID and the snapped value is what gets recorded. DINOv2
 is patch 14, so a requested 512 is really 504; recording the request and calling the
 result 512 would be a lie the trainer could never detect.
@@ -204,6 +214,29 @@ def default_arms(*, siglip_model: str = SIGLIP2_CANDIDATES[-1][0],
              "measured against this one, and it is free",
     ))
     return arms
+
+
+# --------------------------------------------------------------------------------
+# The narrowing (operator ruling 2026-09-09 b)
+# --------------------------------------------------------------------------------
+
+# "Every arm below 512 px is out." The floor is written as 504 because DINOv2 tokenises
+# in 14 px patches, so ITS 512 lands on 504 — the same arm snapped to its own grid, not a
+# smaller one (the operator's ruling says so in as many words). This narrows what a
+# DEFAULT run measures; it deletes nothing, and `--arms <name>` still runs a retired arm
+# deliberately. Same number, same reason as MIN_LIVE_RESOLUTION on the bake-off page.
+MIN_LIVE_RESOLUTION = 504
+
+
+def is_retired(arm: Arm) -> bool:
+    """Below the operator's 512 px floor, judged on the resolution that actually RUNS
+    (a requested 512 on a patch-14 model is 504, and 504 is the floor, not below it)."""
+    return arm.effective_resolution < MIN_LIVE_RESOLUTION
+
+
+def live_arms(arms: Sequence[Arm]) -> list[Arm]:
+    """The preset minus the retired arms, in preset order."""
+    return [a for a in arms if not is_retired(a)]
 
 
 def select_arms(arms: Sequence[Arm], names: Iterable[str] | None) -> list[Arm]:

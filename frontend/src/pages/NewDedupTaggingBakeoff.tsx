@@ -46,7 +46,11 @@ import type { ImagePublic } from '@/lib/types';
  * below 512 px are RETIRED: hidden from the selectors and therefore from the
  * matrix, never deleted. One toggle brings them back, and anything the URL names
  * stays visible regardless — a shared link must reproduce its screen, and a
- * selection you cannot see is a selection you cannot unpick.
+ * selection you cannot see is a selection you cannot unpick. THE EXPERIMENT LANE
+ * WAS NARROWED TO MATCH, in the same PR and by the same numbers: the trainer's
+ * default modes (scripts/tag_head_bakeoff.LIVE_MODES) and the manifest's default
+ * arms (scripts/tagging_bakeoff_arms.live_arms, same 504 floor). Hiding a set-up
+ * here while the lane kept re-running it would cost GPU money invisibly.
  *
  * THE MODAL (operator ruling 2026-09-09 a). Tags will be assigned WINNER-TAKES-
  * ALL: every head scores the photo and the strongest wins. So opening a photo in
@@ -123,7 +127,7 @@ const armIsRetired = (a: BakeoffArm): boolean =>
   a.resolution != null && a.resolution < MIN_LIVE_RESOLUTION;
 
 const RETIRED_HELP =
-  'Set-ups the operator retired on 2026-09-09: the two positive-only training modes, and every arm below 512 px (dinov2’s 504 is that same 512 snapped to its 14 px patch grid, so it stays). Nothing was deleted — this only decides what competes on screen.';
+  'Set-ups the operator retired on 2026-09-09: the two positive-only training modes, and every arm below 512 px (dinov2’s 504 is that same 512 snapped to its 14 px patch grid, so it stays). Among them is clip-b32-stored, the free copy of the incumbent’s live vectors that every other arm was measured against — reveal it when you want the old baseline back in the comparison. Nothing was deleted, here or in the database, and the bake-off lane now defaults to the same live set, so no new run pays to re-measure these.';
 
 const SPLITS: readonly BakeoffSplit[] = ['cv', 'exam'];
 const SPLIT_LABEL: Record<BakeoffSplit, string> = {
@@ -1725,7 +1729,10 @@ function ImageProbabilityPanel({
         The raw number each head gave this photograph, strongest first &mdash; not an F1. The
         strongest head is the tag a winner-takes-all reading would assign, so it is marked{' '}
         <b>winner</b>. Heads are only ever ranked <b>within</b> one arm, mode and split: two arms
-        are two different models, and the modes do not share a scale.
+        are two different models, and the modes do not share a scale. The colour on each row is
+        that head&rsquo;s own yes/no verdict at the run&rsquo;s threshold &mdash; a
+        measurement, kept here because it says which rows the experiment scored right, and read by
+        nothing that assigns a tag.
       </p>
       {detail?.listing_id != null && (
         <p className="mt-1 font-mono text-[0.6rem] tabular-nums text-[var(--color-ink-4)]">

@@ -484,6 +484,11 @@ def plan_stage(args: argparse.Namespace) -> Plan:
         # manifest and embed stages pass it. The trainer splits on commas too since
         # 2026-09-08 (i), when it read the whole token as one arm name and wrote nothing.
         argv.append(f"--arms={args.arms}")
+    if args.modes:
+        # Passed through only when NAMED. The trainer's own default is the live mode
+        # set (ruling 2026-09-09 b); restating it here would freeze a copy of that
+        # decision in a second file.
+        argv.append(f"--modes={args.modes}")
     # NOT executed under --dry-run, unlike the manifest stage: the trainer is the
     # sibling's CLI and this module refuses to assume what its flags mean. A dry run
     # prints the exact command instead, which is the honest thing it can offer.
@@ -641,6 +646,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                    help="manifest: explicit tag ids, overriding the ready flag.")
     p.add_argument("--arms", default="",
                    help="Comma-separated arm names, to narrow any stage to a subset.")
+    p.add_argument("--modes", default="",
+                   help="train: comma-separated training modes. Empty = the trainer's "
+                        "default, which since the 2026-09-09 ruling is the live mode "
+                        "set; name a retired mode to run it deliberately.")
     p.add_argument("--force-arms", action="store_true",
                    help="embed: also reset the --arms named ones when they are already "
                         "'ok' or 'skipped'. Without it a re-dispatch only clears "
