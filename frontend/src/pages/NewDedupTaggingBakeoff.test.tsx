@@ -606,6 +606,27 @@ describe('<NewDedupTaggingBakeoff> — view C, all photos by score', () => {
     expect(screen.getByTestId('scores-range')).not.toHaveTextContent('showing 1');
   });
 
+  it('an empty last page ends the ranking without becoming a dead end', async () => {
+    // A cell whose size is an exact multiple of the page size hands back a
+    // cursor for a page that turns out to be empty.
+    vi.mocked(api.getBakeoffScores).mockResolvedValue({
+      data: { ...SCORES, rows: [], next_after_score: null, next_after_image_id: null },
+    });
+    renderPage('/new-dedup/tagging-bakeoff?view=scores&arms=7&tag=19&sc=0.88,556');
+    expect(await screen.findByTestId('scores-end')).toBeInTheDocument();
+    // Not "this head scored nothing" — the cell has 9,264 photos.
+    expect(screen.queryByTestId('no-scores')).not.toBeInTheDocument();
+    // And there is a way out: no stack to step back through, but the top of the
+    // ranking is a position we can always name.
+    const back = screen.getByTestId('score-prev');
+    expect(back).toBeEnabled();
+    expect(back).toHaveTextContent('back to the top');
+    await userEvent.click(back);
+    await waitFor(() => expect(
+      vi.mocked(api.getBakeoffScores).mock.lastCall?.[1]?.after_image_id,
+    ).toBeUndefined());
+  });
+
   it('ignores a malformed cursor rather than paging from a made-up position', async () => {
     renderPage('/new-dedup/tagging-bakeoff?view=scores&arms=7&tag=19&sc=nonsense');
     await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(

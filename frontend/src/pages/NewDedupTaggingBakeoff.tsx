@@ -1353,7 +1353,7 @@ export default function NewDedupTaggingBakeoff() {
             <div className="py-10 flex justify-center"><Spinner /></div>
           ) : scoresQ.error ? (
             <div className="mt-3"><ErrorBanner message={(scoresQ.error as Error).message} /></div>
-          ) : scoreRows.length === 0 ? (
+          ) : scoreRows.length === 0 && scoreCursor == null ? (
             <p className="mt-8 text-center text-sm text-[var(--color-ink-2)]" data-testid="no-scores">
               This head scored no photographs on the {SPLIT_LABEL[split].toLowerCase()} split.
             </p>
@@ -1373,6 +1373,15 @@ export default function NewDedupTaggingBakeoff() {
                 </span>
               </div>
 
+              {scoreRows.length === 0 ? (
+                /* A cell whose size is an exact multiple of the page size hands
+                 * back a cursor for a page that turns out to be empty. That is
+                 * the end of the ranking, not an empty cell — and the pager
+                 * below still renders, so this is never a dead end. */
+                <p className="mt-6 text-center text-sm text-[var(--color-ink-2)]" data-testid="scores-end">
+                  The ranking ends here. Step back for the previous page.
+                </p>
+              ) : (
               <ul
                 className="mt-2 grid gap-2"
                 style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(11rem, 1fr))' }}
@@ -1446,13 +1455,19 @@ export default function NewDedupTaggingBakeoff() {
                   );
                 })}
               </ul>
+              )}
 
               <div className="mt-4 flex items-center justify-center gap-3 text-xs">
+                {/* Stepping back needs a stack. A shared link that lands
+                  * mid-ranking has none — but the top of the ranking is a
+                  * position we can always name, so the button rewinds there
+                  * rather than going dead and stranding the operator. */}
                 <button
                   type="button"
                   data-testid="score-prev"
-                  disabled={scoreCursors.length === 0}
+                  disabled={scoreCursors.length === 0 && scoreCursor == null}
                   onClick={() => {
+                    if (scoreCursors.length === 0) { patch({ sc: null }); return; }
                     const stack = [...scoreCursors];
                     stack.pop();
                     setScoreCursors(stack);
@@ -1460,7 +1475,9 @@ export default function NewDedupTaggingBakeoff() {
                   }}
                   className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-3 py-1 text-[var(--color-ink-3)] disabled:opacity-40"
                 >
-                  &larr; previous
+                  {scoreCursors.length === 0 && scoreCursor != null
+                    ? <>&uarr; back to the top</>
+                    : <>&larr; previous</>}
                 </button>
                 <span className="tabular-nums text-[var(--color-ink-4)]">
                   {scoreRows.length} photos
