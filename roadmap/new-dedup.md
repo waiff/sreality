@@ -523,7 +523,8 @@ W1 (shared prerequisites + labeling program):
       listed in full in PROGRAM.md's `2026-09-09 (b)` entry; cite them by NUMBER, because the
       letters in a ledger heading are that day's entries, not the ruling's parts). So the
       training set, the head set, the model and the parameters go on changing together. Two
-      things follow. (1) **Narrow the experiment** (**ask 2**, shipped as **PR #1365**, merged 2026-09-09): drop
+      things follow. (1) **Narrow the experiment** (**ask 2**, shipped as **PR #1365**,
+      merged 2026-09-09): drop
       the two weak training modes — `pos_only_free_neg` (the "borrowed no") and
       `pos_only_centroid` (the "closeness only") — and every arm below 512 px, keeping dinov2's
       504 because that IS 512 snapped to its patch size. (2) **Each improvement is just the next
