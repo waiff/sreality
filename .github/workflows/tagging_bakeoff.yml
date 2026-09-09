@@ -7,12 +7,15 @@ name: "NEW DEDUP: tagging bake-off (manifest / embed / train)"
 #
 # THREE STAGES, THREE MACHINES, and the order matters:
 #   1. manifest — a plain runner. Creates the run + arm rows, picks the heads, mints a
-#      7-day presigned R2 URL per image, uploads the manifest, and fills in the free
-#      `clip-b32-stored` arm by copying the incumbent's live CLIP vectors. Spends nothing.
+#      7-day presigned R2 URL per image and uploads the manifest. Spends nothing. Since
+#      the 2026-09-09 ruling the default preset is 512 px and up (nine arms, all GPU);
+#      the two 224 px CLIP arms are retired and reachable only by naming them in `arms`,
+#      and naming `clip-b32-stored` is now the only thing that triggers the free copy of
+#      the incumbent's live CLIP vectors.
 #   2. embed — rents a GPU pod (RunPod) that fetches this repo BY SHA, bootstraps a
 #      Python 3.12 with cu118 torch (the image ships 3.10; this project needs >=3.12),
 #      installs the `clip` extra and embeds the manifest's images under every pending
-#      arm. THE ONLY STAGE THAT COSTS MONEY: ~10.8k images x ~9 GPU arms, on the order
+#      arm. THE ONLY STAGE THAT COSTS MONEY: ~10.8k images x 9 GPU arms, on the order
 #      of an hour on an RTX 3090 at roughly $0.20-0.30/hr — call it well under a dollar.
 #      The wait window is the hard ceiling; the WATCHDOG is what makes the usual case
 #      cheaper than the ceiling. It polls the arm rows every 60s and tears the pod down
@@ -93,7 +96,7 @@ on:
         default: ""
         type: string
       arms:
-        description: "Comma-separated arm names to narrow a stage to (e.g. dinov3-b16@512/bf16). Empty = every arm."
+        description: "Comma-separated arm names to narrow a stage to (e.g. dinov3-b16@512/bf16). Empty = the default preset (512 px and up). Naming an arm is also the only way to reach a retired one (clip-b32-laion@224/fp32, clip-b32-stored)."
         required: false
         default: ""
         type: string

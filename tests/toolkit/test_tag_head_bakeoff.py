@@ -362,7 +362,9 @@ def test_a_head_that_cannot_be_graded_is_recorded_not_skipped() -> None:
 def test_run_bakeoff_covers_the_whole_cross_product_and_resumes() -> None:
     pytest.importorskip("sklearn")
     conn = _conn()
-    outcomes = bo.run_bakeoff(conn, run_id=3,
+    # Every mode NAMED: the retired ones still run on request (ruling 2026-09-09), and
+    # the cross product is what this test is about.
+    outcomes = bo.run_bakeoff(conn, run_id=3, modes=th.MODES,
                               n_splits=3, trained_at=TRAINED_AT)
     # 1 arm x 3 modes x 2 heads
     assert len(outcomes) == 6
@@ -372,14 +374,24 @@ def test_run_bakeoff_covers_the_whole_cross_product_and_resumes() -> None:
     assert len(conn.written_metrics) == 6
 
     # A second pass with the metrics already there writes nothing new.
-    again = bo.run_bakeoff(conn, run_id=3, n_splits=3,
+    again = bo.run_bakeoff(conn, run_id=3, modes=th.MODES, n_splits=3,
                            trained_at=TRAINED_AT)
     assert again == []
 
     # ...unless asked to redo it.
-    forced = bo.run_bakeoff(conn, run_id=3, n_splits=3,
+    forced = bo.run_bakeoff(conn, run_id=3, modes=th.MODES, n_splits=3,
                             force=True, trained_at=TRAINED_AT)
     assert len(forced) == 6
+
+
+def test_a_default_run_trains_pos_neg_alone() -> None:
+    # Ruling 2026-09-09: the positive-only modes are off the default set, so an
+    # un-narrowed run is one mode wide — 1 arm x 1 mode x 2 heads.
+    pytest.importorskip("sklearn")
+    conn = _conn()
+    outcomes = bo.run_bakeoff(conn, run_id=3, n_splits=3, trained_at=TRAINED_AT)
+    assert {o.mode for o in outcomes} == {th.MODE_POS_NEG}
+    assert len(outcomes) == 2
 
 
 def test_run_bakeoff_without_an_exam_still_produces_cv_numbers() -> None:
@@ -395,7 +407,7 @@ def test_run_bakeoff_without_an_exam_still_produces_cv_numbers() -> None:
 def test_an_arm_with_no_vectors_is_marked_failed_not_sixty_broken_heads() -> None:
     conn = _conn()
     conn.vectors = {}
-    outcomes = bo.run_bakeoff(conn, run_id=3, n_splits=3,
+    outcomes = bo.run_bakeoff(conn, run_id=3, modes=th.MODES, n_splits=3,
                               trained_at=TRAINED_AT)
     assert outcomes == []
     updates = [p for s, p in conn.executed

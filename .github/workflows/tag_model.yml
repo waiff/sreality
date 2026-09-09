@@ -1,0 +1,250 @@
+name: "NEW DEDUP: tag model (promote / score / activate)"
+
+# Runs the tag model lane: turn one cell of a finished tagging bake-off into a versioned,
+# permanent model, score images with it, and then — as a separate, explicit step — make that
+# version the one the product reads. Manual dispatch only; one stage per run; CPU only, no
+# GPU, no R2, no money.
+#
+# WHY FOUR STAGES AND NOT ONE. A tag model is a frozen decision (this encoder, this training
+# mode, this set of heads, these weights) with a version string as its name, and the product's
+# rule is that an image's tag is simply the head that scored HIGHEST — no per-head yes/no
+# anywhere. That makes activation the risky moment, not scoring: a version that is only half
+# scored must never be readable. So `promote` writes a `candidate` nobody reads, `score` fills
+# its store at whatever pace and is resumable, and `activate` flips exactly one version in a
+# single transaction. Rolling back is `activate` on the previous version.
+#
+#   1. status   — what exists: every version, its head count, how many images it has scored,
+#                 and which one is active. Reads only.
+#   2. promote  — trains one head per selected tag of a bake-off run on that run's stored
+#                 vectors and writes them as a new `candidate` version. Needs the `training`
+#                 extra (scikit-learn). Minutes of CPU, no GPU.
+#   3. score    — every head's probability for each image, plus the winner, into
+#                 `image_tag_scores`. Pure-Python inference, no ML library. Resumable: an
+#                 image this version already scored is skipped unless `force`.
+#   4. activate — make one version THE version. One statement pair, one transaction.
+#
+# START WITH dry_run (the default): promote reports the run's arms and head list and trains
+# nothing; score reports what it would consider and writes nothing; activate says which
+# version would be retired.
+#
+# Sources for `score`: `bakeoff` reads the model's own bake-off arm vectors (the labelled set
+# plus the sealed exam — the cheap iteration loop), `production` reads
+# `image_dinov3_embeddings` under the model's seven encoder identity facts (the future corpus
+# pass; it works and returns nothing until that table is populated for this configuration).
+#
+# Requires migration 490's tag_head_models / tag_head_model_heads / image_tag_scores to have
+# been applied. Secrets: SUPABASE_DB_URL only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "status (read) -> promote (train a candidate) -> score (fill its store) -> activate (make it the one consumers read)."
+        required: true
+        default: "status"
+        type: choice
+        options: ["status", "promote", "score", "activate"]
+      version:
+        description: "Model version string, e.g. v1. Required for promote/score/activate; optional detail filter for status."
+        required: false
+        default: ""
+        type: string
+      run_id:
+        description: "promote only: the dedup_sim.tag_head_bakeoff_runs id to promote from."
+        required: false
+        default: ""
+        type: string
+      arm:
+        description: "promote only: the arm name within that run, e.g. dinov2-l14-reg@504/bf16."
+        required: false
+        default: ""
+        type: string
+      mode:
+        description: "promote only: the training mode. pos_neg is the LIVE one; pos_only_free_neg (borrowed no) and pos_only_centroid (closeness only) were retired from the experiment on 2026-09-09 and are kept only to reproduce a bake-off cell — a centroid head's score is a cosine, not a calibrated probability. One model is ONE mode: the winner is an argmax, and two score scales cannot be compared."
+        required: false
+        default: "pos_neg"
+        type: choice
+        options: ["pos_neg", "pos_only_free_neg", "pos_only_centroid"]
+      label:
+        description: "promote only: a short human name for the version."
+        required: false
+        default: ""
+        type: string
+      note:
+        description: "promote only: free-text note recorded on the model row."
+        required: false
+        default: ""
+        type: string
+      heads:
+        description: "promote only: comma-separated tag ids, overriding the run's frozen head list."
+        required: false
+        default: ""
+        type: string
+      source:
+        description: "score only: bakeoff (the model's own run), bakeoff:<run_id>, or production (image_dinov3_embeddings)."
+        required: false
+        default: "bakeoff"
+        type: string
+      limit:
+        description: "score only: stop after this many images considered. Empty = everything the source offers."
+        required: false
+        default: ""
+        type: string
+      batch:
+        description: "score only: images per page/upsert batch."
+        required: false
+        default: "500"
+        type: string
+      force:
+        description: "score only: re-score images this version already scored (the upsert overwrites; the version is the identity)."
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      dry_run:
+        description: "Report the plan and exit. promote trains nothing, score writes nothing, activate flips nothing."
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+concurrency:
+  group: tag-model
+  cancel-in-progress: false
+
+jobs:
+  tag-model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Inputs are validated ONCE, here, before any stage sees them: every one travels via env
+      # (never `${{ }}` interpolated into a shell) and the ones that reach argv are
+      # charset-checked. `label`/`note` are free text and are quoted rather than pattern-matched,
+      # since they only ever reach a Python argv list.
+      - name: Validate inputs
+        env:
+          STAGE: ${{ inputs.stage }}
+          VERSION: ${{ inputs.version }}
+          RUN_ID: ${{ inputs.run_id }}
+          ARM: ${{ inputs.arm }}
+          HEADS: ${{ inputs.heads }}
+          SOURCE: ${{ inputs.source }}
+          LIMIT: ${{ inputs.limit }}
+          BATCH: ${{ inputs.batch }}
+        run: |
+          set -euo pipefail
+          # A version is a name people type into a workflow form and read off a page.
+          case "${VERSION:-}" in
+            *[!A-Za-z0-9._-]*) echo "::error::version may hold letters, digits, . _ - only"; exit 1 ;;
+          esac
+          case "${RUN_ID:-}" in
+            *[!0-9]*) echo "::error::run_id must be a number"; exit 1 ;;
+          esac
+          case "${LIMIT:-}" in
+            *[!0-9]*) echo "::error::limit must be a number (or empty for no limit)"; exit 1 ;;
+          esac
+          case "${BATCH:-500}" in
+            ''|*[!0-9]*) echo "::error::batch must be a number"; exit 1 ;;
+          esac
+          case "${HEADS:-}" in
+            *[!0-9,\ ]*) echo "::error::heads must be a comma-separated list of tag ids"; exit 1 ;;
+          esac
+          # Arm names carry @ / . - (dinov2-l14-reg@504/bf16); nothing else.
+          case "${ARM:-}" in
+            *[!A-Za-z0-9@/._-]*) echo "::error::arm must be an arm name"; exit 1 ;;
+          esac
+          case "${SOURCE:-bakeoff}" in
+            *[!A-Za-z0-9:_-]*) echo "::error::source must be bakeoff, bakeoff:<run_id> or production"; exit 1 ;;
+          esac
+          if [ "${STAGE}" != "status" ] && [ -z "${VERSION:-}" ]; then
+            echo "::error::stage=${STAGE} needs a version"; exit 1
+          fi
+          if [ "${STAGE}" = "promote" ]; then
+            if [ -z "${RUN_ID:-}" ]; then echo "::error::promote needs run_id"; exit 1; fi
+            if [ -z "${ARM:-}" ]; then echo "::error::promote needs arm"; exit 1; fi
+          fi
+
+      # Only promote trains, so only promote needs scikit-learn. Scoring is a dot product and
+      # a logistic in pure Python — deliberately, so the corpus pass never needs an ML install.
+      - name: Install (promote)
+        if: inputs.stage == 'promote'
+        run: pip install -e '.[training]'
+
+      - name: Install (status / score / activate)
+        if: inputs.stage != 'promote'
+        run: pip install -e .
+
+      - name: Report the model registry
+        if: inputs.stage == 'status'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          ARGS=(status)
+          if [ -n "${VERSION:-}" ]; then ARGS+=(--version "${VERSION}"); fi
+          python -m scripts.tag_model "${ARGS[@]}"
+
+      - name: Promote a bake-off cell into a candidate model
+        if: inputs.stage == 'promote'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          VERSION: ${{ inputs.version }}
+          RUN_ID: ${{ inputs.run_id }}
+          ARM: ${{ inputs.arm }}
+          MODE: ${{ inputs.mode }}
+          LABEL: ${{ inputs.label }}
+          NOTE: ${{ inputs.note }}
+          HEADS: ${{ inputs.heads }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          ARGS=(promote --run-id "${RUN_ID}" --arm "${ARM}" --mode "${MODE:-pos_neg}")
+          ARGS+=(--version "${VERSION}")
+          # `if`, not `[ ... ] && ...`: under `set -e` a false test in the last position of a
+          # step's script is itself a non-zero exit and would fail the step.
+          if [ -n "${LABEL:-}" ]; then ARGS+=(--label "${LABEL}"); fi
+          if [ -n "${NOTE:-}" ]; then ARGS+=(--note "${NOTE}"); fi
+          if [ -n "${HEADS:-}" ]; then ARGS+=(--heads "${HEADS}"); fi
+          if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi
+          python -m scripts.tag_model "${ARGS[@]}"
+
+      - name: Score images under one version
+        if: inputs.stage == 'score'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          VERSION: ${{ inputs.version }}
+          SOURCE: ${{ inputs.source }}
+          LIMIT: ${{ inputs.limit }}
+          BATCH: ${{ inputs.batch }}
+          FORCE: ${{ inputs.force }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          ARGS=(score --version "${VERSION}" --source "${SOURCE:-bakeoff}")
+          ARGS+=(--batch "${BATCH:-500}")
+          if [ -n "${LIMIT:-}" ]; then ARGS+=(--limit "${LIMIT}"); fi
+          if [ "${FORCE:-false}" = "true" ]; then ARGS+=(--force); fi
+          if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi
+          python -m scripts.tag_model "${ARGS[@]}"
+
+      - name: Activate one version
+        if: inputs.stage == 'activate'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          ARGS=(activate --version "${VERSION}")
+          if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi
+          python -m scripts.tag_model "${ARGS[@]}"

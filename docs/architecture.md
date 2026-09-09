@@ -964,6 +964,16 @@ renumber.** Navigate by area:
     preprocessing, dtype) is null. Those six are the target table's primary key, because any
     one of them changing means a **new population, not a new value**. The CLIP lane keeps
     running in parallel for comparison; nothing has been retired.
+    A fifth producer is the **versioned tag model** (migration 490, `toolkit/tag_models.py` →
+    `scripts/tag_model.py` / `tag_model.yml`): a promoted bake-off cell — one encoder, one
+    training mode, one frozen head set — stored under a version name, at most one of which is
+    `active`, whose per-image output lands in `image_tag_scores` as **every head's probability
+    plus the ARGMAX winner** (ties toward the lower tag id, no threshold and no per-head yes/no
+    stored — a consumer applies its own floor to `winner_score`; the operator's 2026-09-09
+    ruling, ask 1 of five — the full list is in `docs/design/new-dedup/PROGRAM.md`'s
+    `2026-09-09 (b)` ledger entry).
+    Adding heads is a new version, never an edit, and `activate` is a separate step from `score`
+    so no consumer ever reads a half-scored version. Nothing has been promoted or scored yet.
 16. **Watchdog and Browse share one definition of "matches."** Saved watchdog filters live
     in `notification_subscriptions` (migration 056); the background matcher in
     `api/notifications.py` builds its WHERE clauses from the **same** logic Browse uses

@@ -36,6 +36,7 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,6 +54,31 @@ LOG = logging.getLogger("location_data.refetch_cohort")
 # resume cursor; its lane is `location_enrichment_state.lane`, a different column and a
 # different namespace, shared on purpose with the producer that fills it.
 COHORT_LANE = "sreality_detail_refetch"
+
+# W4(b). bezrealitky's live GraphQL query has requested `ruianId` since W0 item 0m
+# (2026-08-10); a row whose payload lacks the KEY outright predates that and is a
+# re-FETCH order. A row carrying the key with a `null` value is the portal withholding
+# it — the ~48 % ceiling W1v measured — and a refetch returns the same null, so the key's
+# presence, not its value, is what "placed" means on this lane. No producer fills it:
+# `enroll()` selects the remainder from `listings` directly, idempotently.
+BEZREALITKY_LANE = "bezrealitky_ruian_refetch"
+ENROLL_VERSION = "refetch_cohort@1"
+
+# `claims_intake.sreality_payload_shape` restated as ONE exhaustive SQL CASE, for the two
+# readers that must classify in SQL (the W4 gate report's full-corpus scan and the
+# payload-shape drift check). Post-cutover tested first; `IS DISTINCT FROM 'object'`
+# because `jsonb_typeof(NULL)` is NULL and a plain `<>` silently drops the truncated rows;
+# `ELSE 'absent'` for the classifier's second absent arm. `test_refetch_cohort` and
+# `test_location_w4_gate_report` both feed every key named here through the Python
+# function, key by key, so the two cannot drift.
+SREALITY_SHAPE_CASE_SQL = """
+    CASE
+      WHEN jsonb_typeof(raw_json->'locality') IS DISTINCT FROM 'object' THEN 'absent'
+      WHEN raw_json->'locality' ?| array['gps_lat','gps_lon','entity_type','inaccuracy_type','city','citypart'] THEN 'post_cutover'
+      WHEN raw_json->'locality' ?| array['name','value','accuracy'] THEN 'legacy'
+      ELSE 'absent'
+    END
+"""
 
 # The lease-row CAS, never an advisory lock — the transaction-mode pooler strands one. It
 # is a second, orthogonal guard to the workflow's concurrency group: it also catches a
@@ -89,14 +115,125 @@ class DueRow:
 
 @dataclass(frozen=True)
 class CohortRow:
-    """A cohort member as reconcile sees it. `locality` is the projected
-    `raw_json->'locality'` ONLY — never the whole payload, which on sreality carries the
-    geometry blob that made these rows truncated in the first place."""
+    """A cohort member as reconcile sees it. `probe` is the lane's projected probe
+    expression ONLY (`raw_json->'locality'` on sreality, `raw_json ? 'ruianId'` on
+    bezrealitky) — never the whole payload, which on sreality carries the geometry blob
+    that made these rows truncated in the first place."""
 
     listing_id: int
     is_active: bool
     attempts: int
-    locality: Any
+    probe: Any
+
+
+@dataclass(frozen=True)
+class LaneSpec:
+    """What makes a cohort lane: which portal, the scan that projects its probe per row,
+    when a row is placed, and — for a lane with no producer — how to enroll its cohort
+    (plus the count of what enroll WOULD insert, so a dry run can size the work)."""
+
+    lane: str
+    source: str
+    scan_sql: str
+    placed: Callable[[Any], bool]
+    enroll_sql: str | None = None
+    enroll_count_sql: str | None = None
+
+
+def _sreality_placed(probe: Any) -> bool:
+    return sreality_payload_shape({"locality": probe}) == "post_cutover"
+
+
+def _bezrealitky_placed(probe: Any) -> bool:
+    return probe is True
+
+
+# One complete, PREPARE-able statement per lane — never a template with a token in it.
+# The schema-replay CI gate discovers every module-level `*_SQL` constant and PREPAREs it
+# against the live catalog; a placeholder token is a 42703 there, and the concrete forms
+# built inside a function body would be outside the only check that compiles SQL.
+# Reconcile scans the whole non-retired cohort, including rows that are NOT due: a row
+# retired here is one the driver never has to claim again, and `is_active` / payload shape
+# both change out from under this table without touching it. `l.source` is pinned so a
+# row of the wrong portal in a lane is never read with the other portal's probe.
+_COHORT_SCAN_SREALITY_SQL = """
+    SELECT es.listing_id, l.is_active, es.attempts, l.raw_json->'locality'
+    FROM location_enrichment_state es
+    JOIN listings l ON l.id = es.listing_id
+    WHERE es.lane = %(lane)s
+      AND l.source = %(source)s
+      AND NOT es.given_up
+      AND es.listing_id > %(after_id)s
+    ORDER BY es.listing_id
+    LIMIT %(batch_size)s
+"""
+
+_COHORT_SCAN_BEZREALITKY_SQL = """
+    SELECT es.listing_id, l.is_active, es.attempts, (l.raw_json ? 'ruianId')
+    FROM location_enrichment_state es
+    JOIN listings l ON l.id = es.listing_id
+    WHERE es.lane = %(lane)s
+      AND l.source = %(source)s
+      AND NOT es.given_up
+      AND es.listing_id > %(after_id)s
+    ORDER BY es.listing_id
+    LIMIT %(batch_size)s
+"""
+
+_ENROLL_BEZREALITKY_SQL = """
+    INSERT INTO location_enrichment_state
+        (listing_id, method, lane, attempts, last_outcome, last_error,
+         extractor_version, next_eligible_at)
+    SELECT l.id, 'portal_structured_field'::location_extraction_method, %(lane)s, 0,
+           'skipped', 'ruianId key absent: pre-0m payload shape, a re-fetch order (W4b)',
+           %(extractor_version)s, now()
+    FROM listings l
+    WHERE l.source = 'bezrealitky' AND l.is_active AND NOT (l.raw_json ? 'ruianId')
+    ON CONFLICT (listing_id, method, lane) DO NOTHING
+"""
+
+_ENROLL_BEZREALITKY_COUNT_SQL = """
+    SELECT count(*)
+    FROM listings l
+    WHERE l.source = 'bezrealitky' AND l.is_active AND NOT (l.raw_json ? 'ruianId')
+      AND NOT EXISTS (
+        SELECT 1 FROM location_enrichment_state es
+        WHERE es.listing_id = l.id
+          AND es.method = 'portal_structured_field'::location_extraction_method
+          AND es.lane = %(lane)s)
+"""
+
+# A row retired `not_applicable` was delisted at scan time. A sighting reactivates a
+# listing (rule #3), and nothing else clears `given_up`: the producer's DO UPDATE never
+# touches it and enroll's DO NOTHING cannot reach an existing row. So reconcile re-arms
+# exactly that case — active again, still `not_applicable` — and no other: an `error`
+# retirement (MAX_ATTEMPTS refetches without a flip) is a portal fact and stays retired.
+_REARM_REACTIVATED_SQL = """
+    UPDATE location_enrichment_state es
+    SET given_up = false, attempts = 0, last_outcome = 'skipped', last_error = NULL,
+        next_eligible_at = now()
+    FROM listings l
+    WHERE l.id = es.listing_id
+      AND es.lane = %(lane)s
+      AND l.source = %(source)s
+      AND es.given_up
+      AND es.last_outcome = 'not_applicable'
+      AND l.is_active
+"""
+
+LANES: dict[str, LaneSpec] = {
+    COHORT_LANE: LaneSpec(COHORT_LANE, "sreality", _COHORT_SCAN_SREALITY_SQL, _sreality_placed),
+    BEZREALITKY_LANE: LaneSpec(BEZREALITKY_LANE, "bezrealitky", _COHORT_SCAN_BEZREALITKY_SQL,
+                               _bezrealitky_placed, _ENROLL_BEZREALITKY_SQL,
+                               _ENROLL_BEZREALITKY_COUNT_SQL),
+}
+
+
+def lane_spec(lane: str) -> LaneSpec:
+    try:
+        return LANES[lane]
+    except KeyError:
+        raise ValueError(f"unknown refetch lane {lane!r}; known: {sorted(LANES)}") from None
 
 
 def statement_timeout_s() -> int:
@@ -114,26 +251,13 @@ _DUE_SQL = """
     FROM location_enrichment_state es
     JOIN listings l ON l.id = es.listing_id
     WHERE es.lane = %(lane)s
+      AND l.source = %(source)s
       AND NOT es.given_up
       AND es.next_eligible_at IS NOT NULL
       AND es.next_eligible_at <= now()
       AND l.is_active
     ORDER BY es.next_eligible_at, es.listing_id
     LIMIT %(limit)s
-"""
-
-# Reconcile scans the whole non-retired cohort, including rows that are NOT due: a row
-# retired here is one the driver never has to claim again, and `is_active` / payload shape
-# both change out from under this table without touching it.
-_COHORT_SCAN_SQL = """
-    SELECT es.listing_id, l.is_active, es.attempts, l.raw_json->'locality'
-    FROM location_enrichment_state es
-    JOIN listings l ON l.id = es.listing_id
-    WHERE es.lane = %(lane)s
-      AND NOT es.given_up
-      AND es.listing_id > %(after_id)s
-    ORDER BY es.listing_id
-    LIMIT %(batch_size)s
 """
 
 # Completion. `next_eligible_at = NULL` is the retirement, NOT `given_up`: 384 gives
@@ -162,28 +286,54 @@ _MARK_DISPATCHED_SQL = """
 """
 
 
-def classify(row: CohortRow) -> str:
+def classify(row: CohortRow, spec: LaneSpec = LANES[COHORT_LANE]) -> str:
     """`placed` | `not_applicable` | `exhausted` | `pending`.
 
-    The shape test calls W1's own `sreality_payload_shape` rather than restating it in
-    SQL. The classifier returns `absent` from TWO arms (not-a-dict, and an object carrying
-    neither key set) and tests post-cutover BEFORE legacy, so a hand-written SQL mirror
-    drifts on exactly the truncation cohort this lane exists to drain.
+    The sreality lane's placed test calls W1's own `sreality_payload_shape` rather than
+    restating it in SQL. The classifier returns `absent` from TWO arms (not-a-dict, and an
+    object carrying neither key set) and tests post-cutover BEFORE legacy, so a hand-written
+    SQL mirror drifts on exactly the truncation cohort this lane exists to drain.
     """
     if not row.is_active:
         return "not_applicable"
-    if sreality_payload_shape({"locality": row.locality}) == "post_cutover":
+    if spec.placed(row.probe):
         return "placed"
     if row.attempts >= MAX_ATTEMPTS:
         return "exhausted"
     return "pending"
 
 
+def enroll(conn: psycopg.Connection, spec: LaneSpec, dry_run: bool = False) -> int:
+    """Fill a producer-less lane's cohort from `listings`, idempotently (ON CONFLICT DO
+    NOTHING keeps every existing row's attempts and schedule). A dry run COUNTS what a
+    real run would insert instead of inserting nothing silently — on a lane whose rows do
+    not exist until enroll creates them, "0 scanned" would otherwise read as "no work"."""
+    if spec.enroll_sql is None:
+        return 0
+    if dry_run:
+        with conn.cursor() as cur:
+            cur.execute(spec.enroll_count_sql, {"lane": spec.lane})
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+    with guarded(conn, statement_timeout_s()) as cur:
+        cur.execute(spec.enroll_sql, {"lane": spec.lane, "extractor_version": ENROLL_VERSION})
+        return cur.rowcount or 0
+
+
+def rearm_reactivated(conn: psycopg.Connection, spec: LaneSpec, dry_run: bool = False) -> int:
+    if dry_run:
+        return 0
+    with guarded(conn, statement_timeout_s()) as cur:
+        cur.execute(_REARM_REACTIVATED_SQL, {"lane": spec.lane, "source": spec.source})
+        return cur.rowcount or 0
+
+
 def claim_due(
     conn: psycopg.Connection, lane: str = COHORT_LANE, limit: int = DEFAULT_DISPATCH_LIMIT,
 ) -> list[DueRow]:
+    spec = lane_spec(lane)
     with conn.cursor() as cur:
-        cur.execute(_DUE_SQL, {"lane": lane, "limit": limit})
+        cur.execute(_DUE_SQL, {"lane": lane, "source": spec.source, "limit": limit})
         return [DueRow(listing_id=r[0], source=r[1], source_id_native=str(r[2]),
                        attempts=r[3])
                 for r in cur.fetchall()]
@@ -237,14 +387,17 @@ def reconcile(
 
     Without this the table only grows and the gate reads a number that can never fall."""
     started = time.monotonic()
-    stats = {"scanned": 0, "placed": 0, "not_applicable": 0, "exhausted": 0, "pending": 0}
+    spec = lane_spec(lane)
+    stats = {"rearmed": rearm_reactivated(conn, spec, dry_run=dry_run),
+             "scanned": 0, "placed": 0, "not_applicable": 0, "exhausted": 0, "pending": 0}
     after_id = 0
 
     while True:
         with conn.cursor() as cur:
-            cur.execute(_COHORT_SCAN_SQL, {
-                "lane": lane, "after_id": after_id, "batch_size": batch_size})
-            batch = [CohortRow(listing_id=r[0], is_active=r[1], attempts=r[2], locality=r[3])
+            cur.execute(spec.scan_sql, {
+                "lane": lane, "source": spec.source, "after_id": after_id,
+                "batch_size": batch_size})
+            batch = [CohortRow(listing_id=r[0], is_active=r[1], attempts=r[2], probe=r[3])
                      for r in cur.fetchall()]
         if not batch:
             break
@@ -253,7 +406,7 @@ def reconcile(
 
         verdicts: dict[str, list[int]] = {}
         for row in batch:
-            verdicts.setdefault(classify(row), []).append(row.listing_id)
+            verdicts.setdefault(classify(row, spec), []).append(row.listing_id)
         for verdict, ids in verdicts.items():
             stats[verdict] += len(ids)
 
@@ -282,9 +435,12 @@ def run(
     reconcile_only: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Reconcile FIRST, then dispatch — so a row the last pass already fixed is retired
-    before this pass can spend a fetch on it."""
+    """Enroll (producer-less lanes only), reconcile, THEN dispatch — so a row the last
+    pass already fixed is retired before this pass can spend a fetch on it. On a dry run
+    `enrolled` is the count a real run WOULD insert."""
     stats: dict[str, Any] = {"lane": lane, "dry_run": dry_run}
+    stats["enrolled" if not dry_run else "would_enroll"] = enroll(
+        conn, lane_spec(lane), dry_run=dry_run)
     stats["reconcile"] = reconcile(
         conn, lane=lane, batch_size=batch_size, max_seconds=max_seconds, dry_run=dry_run)
     stats["dispatch"] = (
@@ -295,7 +451,7 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--lane", default=COHORT_LANE)
+    parser.add_argument("--lane", default=COHORT_LANE, choices=sorted(LANES))
     parser.add_argument("--limit", type=int, default=DEFAULT_DISPATCH_LIMIT)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--max-seconds", type=float, default=None)

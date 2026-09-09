@@ -92,14 +92,42 @@ def test_default_preset_is_the_run_the_operator_asked_for():
     assert "dinov3-l16@512/bf16" in names
     assert "dinov2-l14-reg@504/bf16" in names
     assert any(n.startswith("siglip2-b16@") for n in names)
-    assert "clip-b32-laion@224/fp32" in names
-    assert arms_mod.STORED_CLIP_ARM in names
     # One arm per name; a duplicate would mean two rows fighting over one unique key.
     assert len(names) == len(set(names))
 
 
-def test_every_arm_carries_all_seven_identity_facts():
+def test_the_default_preset_is_512px_and_up():
+    # Ruling 2026-09-09: run 1 measured the 224 px arms 0.03-0.06 mean F1 below the
+    # field, so nothing under 512 runs by itself any more. DINOv2's 504 is 512 snapped
+    # to patch 14 and is the one number below 512 that is allowed.
     for arm in arms_mod.default_arms():
+        assert arm.effective_resolution >= 504, arm.name
+    names = [a.name for a in arms_mod.default_arms()]
+    assert "clip-b32-laion@224/fp32" not in names
+    assert arms_mod.STORED_CLIP_ARM not in names
+
+
+def test_a_retired_arm_is_reachable_by_name_and_only_by_name():
+    retired = [a.name for a in arms_mod.retired_arms()]
+    assert retired == ["clip-b32-laion@224/fp32", arms_mod.STORED_CLIP_ARM]
+    catalogue = [a.name for a in arms_mod.all_arms()]
+    assert catalogue[-2:] == retired
+    assert len(catalogue) == len(set(catalogue))
+    # An un-narrowed manifest run gets the default preset; naming one widens the
+    # catalogue enough to find it, and only it.
+    wide = manifest.build_arms(only=[arms_mod.STORED_CLIP_ARM], hf_token=None,
+                               siglip_probe=lambda token: ("google/siglip2", 512))
+    assert [a.name for a in wide] == [arms_mod.STORED_CLIP_ARM]
+    plain = manifest.build_arms(only=[], hf_token=None,
+                                siglip_probe=lambda token: ("google/siglip2", 512))
+    assert arms_mod.STORED_CLIP_ARM not in [a.name for a in plain]
+    assert [a.name for a in plain] == [a.name for a in arms_mod.default_arms()]
+
+
+def test_every_arm_carries_all_seven_identity_facts():
+    # all_arms(), not default_arms(): a retired arm still gets written as a row when
+    # someone names it, so its identity has to stay complete.
+    for arm in arms_mod.all_arms():
         identity = arm.identity(revision="deadbeef")
         for field in ("model", "revision", "library", "pooling", "resolution",
                       "preprocessing", "dtype"):
@@ -111,7 +139,7 @@ def test_dino_arms_speak_the_production_config_vocabulary():
     # pooling label has to be the one scraper/dinov3_tagger.py already implements.
     from scraper import dinov3_tagger
 
-    for arm in arms_mod.default_arms():
+    for arm in arms_mod.all_arms():
         if not arm.model.startswith("facebook/dino"):
             continue
         assert arm.pooling in dinov3_tagger.POOLING_MODES
@@ -127,7 +155,7 @@ def test_resolution_snaps_to_the_patch_grid():
 
 
 def test_default_arms_need_no_snapping_but_record_the_effective_value():
-    for arm in arms_mod.default_arms():
+    for arm in arms_mod.all_arms():
         assert arm.effective_resolution == arm.resolution, arm.name
         assert arm.identity(revision="x")["resolution"] == arm.effective_resolution
 
@@ -140,44 +168,8 @@ def test_a_snapped_arm_is_renamed_to_what_it_actually_runs():
     assert arms_mod.renamed_to_effective(arm).effective_resolution == 504
 
 
-def test_the_512_floor_retires_the_224_arms_and_keeps_dinov2s_504():
-    # The ruling of 2026-09-09: nothing below 512 px competes any more, and dinov2's 504
-    # IS that 512 snapped to its 14 px patch grid. A rule that retired the arm it was
-    # written to keep would be the one failure mode worth a test of its own.
-    preset = arms_mod.default_arms(siglip_model="google/siglip2-base-patch16-512",
-                                   siglip_resolution=512)
-    retired = {a.name for a in preset if arms_mod.is_retired(a)}
-    assert retired == {"clip-b32-laion@224/fp32", arms_mod.STORED_CLIP_ARM}
-    live = {a.name for a in arms_mod.live_arms(preset)}
-    assert "dinov2-l14-reg@504/bf16" in live
-    assert "siglip2-b16@512/bf16" in live
-    assert not (live & retired)
-    # The floor is a resolution rule, not a name list: if the Hub only ever served
-    # SigLIP2's 256 fallback, that arm would be below 512 too and would be retired with
-    # the rest — which is the ruling applied, not an exception to it.
-    fallback = arms_mod.default_arms(siglip_model="google/siglip2-base-patch16-256",
-                                     siglip_resolution=256)
-    assert "siglip2-b16@256/bf16" not in {a.name for a in arms_mod.live_arms(fallback)}
-
-
-def test_a_default_run_mints_no_retired_arm_but_naming_one_still_runs_it():
-    def _probe(*, token=None):
-        return "google/siglip2-base-patch16-512", 512
-
-    default = manifest.build_arms(only=None, hf_token=None, siglip_probe=_probe)
-    assert [a.name for a in default] == \
-        [a.name for a in arms_mod.live_arms(arms_mod.default_arms(
-            siglip_model="google/siglip2-base-patch16-512", siglip_resolution=512))]
-    assert arms_mod.STORED_CLIP_ARM not in {a.name for a in default}
-    # Naming it is the operator asking for it anyway — the ruling narrowed the DEFAULT,
-    # it did not delete an arm, and the incumbent baseline has to stay re-runnable.
-    named = manifest.build_arms(only=[arms_mod.STORED_CLIP_ARM], hf_token=None,
-                                siglip_probe=_probe)
-    assert [a.name for a in named] == [arms_mod.STORED_CLIP_ARM]
-
-
 def test_select_arms_narrows_and_rejects_typos():
-    arms = arms_mod.default_arms()
+    arms = arms_mod.all_arms()
     picked = arms_mod.select_arms(arms, ["clip-b32-stored", "dinov3-b16@512/bf16"])
     assert [a.name for a in picked] == ["dinov3-b16@512/bf16", "clip-b32-stored"]
     assert arms_mod.select_arms(arms, []) == arms
@@ -212,9 +204,13 @@ def test_siglip_checkpoint_prefers_the_largest_that_exists():
     assert arms_mod.resolve_siglip_checkpoint(get=_get) == (
         "google/siglip2-base-patch16-512", 512)
 
-    # Every probe failing degrades to the defensible fallback, never to no control arm.
+    # Every probe failing returns the 512 candidate unprobed — the embed stage resolves
+    # the sha again and skips the arm if it cannot. Since 2026-09-09 there is no 256
+    # fallback to degrade to: a below-512 arm is retired, so a missing control is the
+    # honest outcome.
     assert arms_mod.resolve_siglip_checkpoint(get=lambda *a, **k: _Resp(404)) == (
         arms_mod.SIGLIP2_CANDIDATES[-1])
+    assert [res for _, res in arms_mod.SIGLIP2_CANDIDATES] == [512]
 
 
 # --------------------------------------------------------------------------------
@@ -307,7 +303,7 @@ def test_stored_clip_copy_is_scoped_to_the_incumbent_model_and_this_run():
 
 
 def test_manifest_document_is_self_contained_and_leaks_no_answers():
-    arms = arms_mod.select_arms(arms_mod.default_arms(), ["clip-b32-stored"])
+    arms = arms_mod.select_arms(arms_mod.all_arms(), ["clip-b32-stored"])
     heads = [{"tag_id": 1, "label": "kuchyne", "positives": 200, "negatives": 300,
               "image_ids": [1, 2]}]
     doc = manifest.manifest_document(
@@ -556,8 +552,7 @@ def test_the_image_cache_is_filled_once_and_reused(tmp_path):
 
 def _args(**overrides) -> argparse.Namespace:
     base = dict(stage="manifest", run_id=0, label="", note="",
-                heads="", arms="", modes="", batch_size=32, workers=16,
-                job_max_seconds=7200,
+                heads="", arms="", batch_size=32, workers=16, job_max_seconds=7200,
                 ref="main", image="img", gpu_allowlist="3090", dry_run=False)
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -901,16 +896,6 @@ def test_the_train_stage_passes_the_comma_joined_arms_through():
         ["--run-id", "1"]
 
 
-def test_the_train_stage_forwards_modes_only_when_the_operator_names_them():
-    # Empty means "the trainer's own default", which since 2026-09-09 is the live mode
-    # set. Restating that default here would freeze a second copy of the ruling.
-    assert not [a for a in dispatch.plan_stage(_args(stage="train", run_id=1)).argv
-                if a.startswith("--modes")]
-    plan = dispatch.plan_stage(_args(stage="train", run_id=1,
-                                     modes="pos_neg,pos_only_centroid"))
-    assert "--modes=pos_neg,pos_only_centroid" in plan.argv
-
-
 # --------------------------------------------------------------------------------
 # The trainer's list-shaped flags
 # --------------------------------------------------------------------------------
@@ -931,26 +916,23 @@ def test_the_trainer_reads_a_comma_joined_arms_token_as_a_list():
     assert trainer.parse_args(["--run-id", "1"]).arms is None
 
 
-def test_a_default_train_run_trains_the_live_modes_only():
-    # Ruling 2026-09-09 b. Before it, a bare run trained all three modes on every head —
-    # so the lane kept paying to re-measure two readings the operator had already
-    # rejected. The retired modes are still MODES, just not defaults.
-    assert trainer.parse_args(["--run-id", "1"]).modes == ["pos_neg"]
-    assert set(trainer.RETIRED_MODES) == {"pos_only_free_neg", "pos_only_centroid"}
-    assert set(trainer.LIVE_MODES) | set(trainer.RETIRED_MODES) == set(th.MODES)
-    # Named, a retired mode still runs: nothing was deleted.
-    assert trainer.parse_args(["--run-id", "1", "--modes=pos_only_centroid"]).modes == \
-        ["pos_only_centroid"]
-
-
 def test_the_trainer_reads_modes_and_heads_the_same_way():
     args = trainer.parse_args(["--run-id", "1", "--heads=4, 7,9",
                                "--modes=pos_neg,pos_only_centroid"])
     assert args.heads == [4, 7, 9]
     assert args.modes == ["pos_neg", "pos_only_centroid"]
-    # Defaults survive the normalisation: the live modes, no head/arm narrowing.
+    # Defaults survive the normalisation: the default mode set, no head/arm narrowing.
     plain = trainer.parse_args(["--run-id", "1"])
-    assert plain.modes == list(trainer.LIVE_MODES) and plain.heads is None
+    assert plain.modes == list(th.DEFAULT_MODES) and plain.heads is None
+
+
+def test_the_trainers_default_mode_set_is_pos_neg_alone():
+    # Ruling 2026-09-09: the two positive-only modes lost run 1 by 0.05-0.07 mean F1,
+    # so a plain run no longer trains them — but naming one still does.
+    assert th.DEFAULT_MODES == (th.MODE_POS_NEG,)
+    assert trainer.parse_args(["--run-id", "1"]).modes == ["pos_neg"]
+    named = trainer.parse_args(["--run-id", "1", "--modes=pos_only_free_neg"])
+    assert named.modes == ["pos_only_free_neg"]
 
 
 def test_the_trainer_still_rejects_a_mode_that_does_not_exist():

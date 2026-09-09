@@ -2,7 +2,8 @@
 
     python -m scripts.tag_head_bakeoff --run-id 3 --dry-run
     python -m scripts.tag_head_bakeoff --run-id 3
-    python -m scripts.tag_head_bakeoff --run-id 3 --arms dinov3-b16@768 --modes pos_neg
+    python -m scripts.tag_head_bakeoff --run-id 3 --arms dinov3-b16@768/bf16
+    python -m scripts.tag_head_bakeoff --run-id 3 --modes pos_neg pos_only_centroid
 
 The run and its arms are rows the operator (or the manifest lane) inserted into
 `dedup_sim.tag_head_bakeoff_runs` / `_arms`; the GPU job fills
@@ -15,11 +16,10 @@ already has a metrics row is skipped unless `--force`; a cell that could not be
 trained is RECORDED as failed rather than skipped, so a resume does not retry it
 forever and the page can say why it is missing.
 
-MODES ARE NARROWED BY DEFAULT (ruling 2026-09-09 b). Run 1 measured all three and the
-two positive-only readings lost, so a run that names no `--modes` trains `pos_neg` only —
-the cross product a default dispatch pays for is the LIVE one. Naming a retired mode
-still runs it (`--modes pos_only_centroid`): the ruling narrowed the default, it did not
-delete a mode, and no result was erased.
+THE DEFAULT MODE SET IS `pos_neg` ALONE (ruling 2026-09-09). The two positive-only
+modes measured 0.05-0.07 mean F1 below it in run 1, so they no longer run by
+themselves; `--modes pos_only_free_neg` still runs one when the operator asks for it,
+and `tag_heads.MODES` is still the whole vocabulary the flag validates against.
 
 HEADS ARE CHOSEN BY THE OPERATOR'S READY FLAG (ruling 2026-09-08) — the Ready /
 Not ready / Skip toggle on `/new-dedup/training-set`, read through
@@ -40,13 +40,6 @@ from toolkit import tag_head_bakeoff as bo
 from toolkit import tag_heads as th
 
 LOG = logging.getLogger("tag_head_bakeoff")
-
-# RETIRED BY THE OPERATOR, 2026-09-09: the two positive-only modes lost run 1 and stop
-# competing. This is the DEFAULT only — every mode in `th.MODES` is still accepted by
-# name, and every row either of them wrote is still in the database and still on the
-# bake-off page behind its "show retired set-ups" toggle.
-RETIRED_MODES: tuple[str, ...] = (th.MODE_POS_ONLY_FREE_NEG, th.MODE_POS_ONLY_CENTROID)
-LIVE_MODES: tuple[str, ...] = tuple(m for m in th.MODES if m not in RETIRED_MODES)
 
 
 def split_list(values: Sequence[str] | None) -> list[str]:
@@ -109,10 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--heads", nargs="+", default=None,
                     help="Tag ids to run, overriding the operator's ready flag. "
                          "A named list is itself an operator decision.")
-    ap.add_argument("--modes", nargs="+", default=list(LIVE_MODES),
+    ap.add_argument("--modes", nargs="+", default=list(th.DEFAULT_MODES),
                     help=f"Training modes to run, from {', '.join(th.MODES)} "
-                         f"(default: the live one(s), {', '.join(LIVE_MODES)}; the "
-                         "others were retired on 2026-09-09 and run only when named).")
+                         f"(default: {', '.join(th.DEFAULT_MODES)}). The "
+                         "positive-only modes are retired from the default set "
+                         "(ruling 2026-09-09) and run only when named here.")
     ap.add_argument("--arms", nargs="+", default=None,
                     help="Arm names to run (default: every arm of the run).")
     ap.add_argument("--n-splits", type=int, default=th.DEFAULT_N_SPLITS)
@@ -136,7 +130,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ap = build_parser()
     args = ap.parse_args(argv)
     args.arms = split_list(args.arms) or None
-    args.modes = split_list(args.modes) or list(LIVE_MODES)
+    args.modes = split_list(args.modes) or list(th.DEFAULT_MODES)
     unknown = [m for m in args.modes if m not in th.MODES]
     if unknown:
         ap.error(f"--modes: unknown mode(s) {', '.join(unknown)}; "

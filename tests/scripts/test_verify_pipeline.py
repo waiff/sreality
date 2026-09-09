@@ -1948,3 +1948,103 @@ def test_worker_lane_stall_does_not_double_alarm_a_dead_worker() -> None:
     out = check_worker_lane_stall(_LaneConn([]), T)
     assert out["status"] == "warn"
     assert "worker_liveness" in out["message"]
+
+
+# --- location_payload_shape_drift (W4's standing P6 check) ---------------------
+
+class _ShapeDriftConn:
+    def __init__(self, rows: list[tuple[str, int, int]]) -> None:
+        self._rows = rows
+        self.executed: list[str] = []
+
+    def cursor(self) -> "_ShapeDriftConn":
+        return self
+
+    def transaction(self) -> "_ShapeDriftConn":
+        return self
+
+    def __enter__(self) -> "_ShapeDriftConn":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.executed.append(sql)
+
+    def fetchall(self) -> Any:
+        return self._rows
+
+
+def test_location_payload_shape_drift_is_registered() -> None:
+    """An unregistered check is dead code that never writes a row."""
+    from scripts.verify_pipeline import _CHECKS, check_location_payload_shape_drift
+
+    assert ("location_payload_shape_drift", check_location_payload_shape_drift) in _CHECKS
+
+
+def test_location_payload_shape_drift_reds_on_a_source_side_shape_change() -> None:
+    """The W4 gate's fourth arm: the next cutover must force re-extraction instead of
+    silently degrading. A shape change is ~100% of the rows first seen since it landed."""
+    from scripts.verify_pipeline import check_location_payload_shape_drift
+
+    conn = _ShapeDriftConn([("sreality", 1200, 1150), ("bezrealitky", 80, 0)])
+    out = check_location_payload_shape_drift(conn, T)
+    assert out["status"] == "fail"
+    assert out["value"] == 95.83
+    assert "sreality" in out["message"] and "sreality_payload_shape" in out["message"]
+    assert "bezrealitky" not in out["details"]["offenders"][0]
+    assert out["details"]["window_hours"] == 48
+    assert any("statement_timeout" in s for s in conn.executed)
+
+
+def test_location_payload_shape_drift_rings_on_the_first_tick_after_a_cutover() -> None:
+    """The window is the detection latency: after a total cutover the share is
+    elapsed/window, so one 6-hourly tick into a 48 h window reads 12.5% — above fail.
+    A 7-day window would sit below the same line for ~1.4 days."""
+    from scripts.verify_pipeline import DEFAULT_THRESHOLDS, check_location_payload_shape_drift
+
+    window = DEFAULT_THRESHOLDS["location_payload_shape_drift_window_hours"]
+    fail = DEFAULT_THRESHOLDS["location_payload_shape_drift_fail"]
+    assert 6 / window >= fail, "one lane tick after a cutover must already read fail"
+    out = check_location_payload_shape_drift(_ShapeDriftConn([("sreality", 800, 100)]), T)
+    assert out["status"] == "fail"
+
+
+def test_location_payload_shape_drift_names_bezrealitkys_own_remedy() -> None:
+    from scripts.verify_pipeline import check_location_payload_shape_drift
+
+    out = check_location_payload_shape_drift(
+        _ShapeDriftConn([("sreality", 1200, 0), ("bezrealitky", 90, 60)]), T)
+    assert out["status"] == "fail"
+    assert "_DETAIL_QUERY" in out["message"]
+
+
+def test_location_payload_shape_drift_is_ok_when_fresh_rows_are_clean() -> None:
+    from scripts.verify_pipeline import check_location_payload_shape_drift
+
+    out = check_location_payload_shape_drift(
+        _ShapeDriftConn([("sreality", 1200, 3), ("bezrealitky", 80, 1)]), T)
+    assert out["status"] == "ok"
+    assert out["value"] == 1.25
+    assert out["details"]["arms_scored"] == 2
+
+
+def test_location_payload_shape_drift_refuses_ok_when_nothing_reached_min_rows() -> None:
+    """A check that scored nothing has certified nothing."""
+    from scripts.verify_pipeline import check_location_payload_shape_drift
+
+    out = check_location_payload_shape_drift(_ShapeDriftConn([("sreality", 10, 10)]), T)
+    assert out["status"] == "warn"
+    assert out["value"] is None
+    assert out["details"]["arms_scored"] == 0
+
+
+def test_location_payload_shape_drift_sql_shares_the_gate_classifier_and_reads_the_fresh_arm() -> None:
+    from location_data.refetch_cohort import SREALITY_SHAPE_CASE_SQL
+    from scripts.verify_pipeline import _LOCATION_PAYLOAD_SHAPE_DRIFT_SQL as sql
+
+    assert SREALITY_SHAPE_CASE_SQL.strip() in sql
+    assert "first_seen_at > now() - make_interval(hours => %(window_hours)s)" in sql
+    assert "NOT (raw_json ? 'ruianId')" in sql
+    assert "IS DISTINCT FROM 'object'" in sql

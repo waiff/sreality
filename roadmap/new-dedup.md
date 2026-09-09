@@ -406,7 +406,7 @@ W1 (shared prerequisites + labeling program):
       / $163 (@1024)** on a $0.22/hr 3090 — far above ENCODER-DECISION.md's $1-12 band, which
       was synthetic-tensor throughput. Results are browsable at `/new-dedup/tagging-bakeoff`.
 - [x] **Tagging bake-off, phase 2c — the operator's rulings of 2026-09-09, and the product
-      contract they settle (PROGRAM.md ledger (b)):** **tags are assigned WINNER-TAKES-ALL** —
+      contract they settle (PROGRAM.md ledger (c)):** **tags are assigned WINNER-TAKES-ALL** —
       every head scores the photo, the highest score names the tag, and **the product takes no
       per-head yes/no decision at all**. The winner is **recomputed from whatever heads a run
       holds, never stored** (heads keep being added, and a stored winner would be a fact about
@@ -426,6 +426,29 @@ W1 (shared prerequisites + labeling program):
       narrowed default must not become a locked door. Read surface now **six** routes:
       `.../runs/{id}/scores` (one head's ranking, keyset-paged) and
       `.../runs/{id}/images/{image_id}` (one photo across every arm, mode, head and split).
+- [x] **Tag model, iteration 1 — the versioned model + the winner store (2026-09-09, PR #1366;
+      PROGRAM.md ledger entry `2026-09-09 (b)`, which also lists the day's ruling in
+      full):** the bake-off produced evidence; this is where a chosen cell of it becomes
+      something the product can use. Migration 490 adds three PUBLIC-schema tables —
+      `tag_head_models` (one frozen decision: encoder, training mode, head set, weights, under a
+      version name like `v1`; a partial unique index makes two active models impossible),
+      `tag_head_model_heads` (the `toolkit/tag_heads.py` artifact plus the bake-off's cv/exam
+      numbers COPIED at promotion) and `image_tag_scores` (one row per image per version: every
+      head's probability, the winner tag, its score). Public and NOT `dedup_sim`, with no foreign
+      key into it, because that schema is dropped wholesale at Wave 8 and this store outlives it.
+      **The operator's rule (2026-09-09), which decides the shape: the tag is the head that scored
+      HIGHEST — no per-head yes/no anywhere.** So every head's score is stored, no threshold and no
+      boolean is (a consumer applies its own floor to `winner_score`), ties break toward the lower
+      tag id, and **adding a head is a new version rather than an edit** — an argmax is only
+      meaningful over one head set, so the set is frozen on the model and two versions can hold
+      different answers for the same photo. The loop is
+      `a new bake-off run -> promote -> score -> activate`: a promoted version is a `candidate`
+      nobody reads, scoring is resumable and pure-Python (no ML library at inference), and
+      **activation is a separate explicit step** so no consumer ever meets a half-scored version.
+      `toolkit/tag_models.py` + `scripts/tag_model.py` + `tag_model.yml` (dispatch-only, dry-run by
+      default, CPU, `SUPABASE_DB_URL` only); read surface
+      `/new-dedup/tags/{models, models/{version}/heads, images/{image_id}}`, admin-gated.
+      **Nothing is trained, scored or activated yet, and no corpus pass is run.**
 - [ ] **NEXT — read run 1 with the operator, then turn the cheap knobs.** In order: (1) look at
       the **false-positive buckets in view B** before tuning anything — the exam column is a
       *prevalence* story (250 random photos hold few positives of a rare tag: garáž 2 true
@@ -443,6 +466,23 @@ W1 (shared prerequisites + labeling program):
       (`preprocessing` was already ruled `letterbox_pad`, `dtype` is answered by the data) — now
       a $34-vs-$163 decision; (5) **run the near-duplicate bake-off (#1300's "Set 2")** before
       concluding anything about the encoder choice from the tagging numbers.
+
+- [ ] **PARALLEL TRACK — accuracy keeps iterating; the shape does not.** The operator is content
+      with the cost, licence and speed of both DINOv3 and DINOv2 and is **not yet content with
+      accuracy** (the 2026-09-09 ruling, **ask 5 "keep iterating"** — the ruling's five asks are
+      listed in full in PROGRAM.md's `2026-09-09 (b)` entry; cite them by NUMBER, because the
+      letters in a ledger heading are that day's entries, not the ruling's parts). So the
+      training set, the head set, the model and the parameters go on changing together. Two
+      things follow. (1) **Narrow the experiment** (**ask 2**, shipping in **PR #1365**): drop
+      the two weak training modes — `pos_only_free_neg` (the "borrowed no") and
+      `pos_only_centroid` (the "closeness only") — and every arm below 512 px, keeping dinov2's
+      504 because that IS 512 snapped to its patch size. (2) **Each improvement is just the next
+      version**: promote, score, activate, and the previous version stays readable for
+      comparison. **The full 11.5M image pool is scored only when the operator is satisfied** —
+      until then scoring runs over the bake-off arm's 9,514 labelled + exam photos, which costs
+      nothing. The same ruling's **asks 3 and 4** (per-head probabilities when zooming into a
+      photo; a third view listing every photo a head scored, sorted by score) ship in
+      **PR #1368**.
 
 Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
 
