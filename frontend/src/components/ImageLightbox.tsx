@@ -240,62 +240,62 @@ export default function ImageLightbox({
             asideAt ? 'flex-col md:flex-row md:items-start' : 'flex-col',
           ].join(' ')}
         >
-        <div className="min-h-0 flex flex-col items-center justify-center gap-3">
-        <div className="relative min-h-0 flex items-center justify-center">
-          {errored ? (
-            <div
-              className="px-12 py-10 border border-[var(--color-rule-strong)] text-[var(--color-ink-4)] tracking-[0.14em] uppercase text-sm"
-            >
-              Image unavailable
+          <div className="min-h-0 flex flex-col items-center justify-center gap-3">
+            <div className="relative min-h-0 flex items-center justify-center">
+              {errored ? (
+                <div
+                  className="px-12 py-10 border border-[var(--color-rule-strong)] text-[var(--color-ink-4)] tracking-[0.14em] uppercase text-sm"
+                >
+                  Image unavailable
+                </div>
+              ) : (
+                <>
+                  <img
+                    key={current.id}
+                    src={imageSrc(current)}
+                    alt=""
+                    onError={() => setErrored(true)}
+                    className={[
+                      // The bar is a SIBLING, not an overlay: it takes its height
+                      // out of the photo's rather than sitting on top of it, so a
+                      // control never covers the part being judged.
+                      'object-contain',
+                      asideAt ? 'max-w-[92vw] md:max-w-[58vw]' : 'max-w-[92vw]',
+                      // Stacked under a narrow screen's aside, the photo has to
+                      // give up half the height or the pair overflows the dialog;
+                      // side by side on a wide one, it gives up nothing.
+                      actionsAt ? 'max-h-[74vh]'
+                        : asideAt ? 'max-h-[46vh] md:max-h-[88vh]' : 'max-h-[88vh]',
+                      'border border-[var(--color-copper)]/40',
+                      dim,
+                    ].join(' ')}
+                  />
+                  <ImageTagBadge
+                    tag={badge.tag}
+                    confidence={badge.confidence}
+                    className="absolute bottom-2 left-2 text-[0.7rem]"
+                  />
+                  <ImageRenderBadge
+                    renderScore={current.clip_render_score}
+                    className="absolute bottom-2 right-2 text-[0.7rem]"
+                  />
+                </>
+              )}
             </div>
-          ) : (
-            <>
-              <img
-                key={current.id}
-                src={imageSrc(current)}
-                alt=""
-                onError={() => setErrored(true)}
-                className={[
-                  // The bar is a SIBLING, not an overlay: it takes its height
-                  // out of the photo's rather than sitting on top of it, so a
-                  // control never covers the part being judged.
-                  'object-contain',
-                  asideAt ? 'max-w-[92vw] md:max-w-[58vw]' : 'max-w-[92vw]',
-                  // Stacked under a narrow screen's aside, the photo has to
-                  // give up half the height or the pair overflows the dialog;
-                  // side by side on a wide one, it gives up nothing.
-                  actionsAt ? 'max-h-[74vh]'
-                    : asideAt ? 'max-h-[46vh] md:max-h-[88vh]' : 'max-h-[88vh]',
-                  'border border-[var(--color-copper)]/40',
-                  dim,
-                ].join(' ')}
-              />
-              <ImageTagBadge
-                tag={badge.tag}
-                confidence={badge.confidence}
-                className="absolute bottom-2 left-2 text-[0.7rem]"
-              />
-              <ImageRenderBadge
-                renderScore={current.clip_render_score}
-                className="absolute bottom-2 right-2 text-[0.7rem]"
-              />
-            </>
+            {actionsAt && (
+              <div data-testid="lightbox-actions" className="w-full max-w-[46rem] shrink-0">
+                {actionsAt(i)}
+              </div>
+            )}
+          </div>
+          {asideAt && (
+            <div
+              data-testid="lightbox-aside"
+              className="w-full md:w-[26rem] shrink-0 max-h-[40vh] md:max-h-[88vh] overflow-y-auto rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-3"
+            >
+              {asideAt(i)}
+            </div>
           )}
-        </div>
-        {actionsAt && (
-          <div data-testid="lightbox-actions" className="w-full max-w-[46rem] shrink-0">
-            {actionsAt(i)}
-          </div>
-        )}
-        </div>
-        {asideAt && (
-          <div
-            data-testid="lightbox-aside"
-            className="w-full md:w-[26rem] shrink-0 max-h-[40vh] md:max-h-[88vh] overflow-y-auto rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-3"
-          >
-            {asideAt(i)}
-          </div>
-        )}
         </div>
       </div>
     </div>,

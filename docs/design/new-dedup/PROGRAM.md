@@ -194,6 +194,77 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-09 (b) — **The tagging bake-off, phase 2c: the operator's three rulings of the day,
+  and the product contract they settle. TAGS ARE ASSIGNED WINNER-TAKES-ALL — the product takes
+  no per-head yes/no decision at all.** Phase 2a gave run 1 a face and (a) read its numbers;
+  this entry records what the operator DECIDED on reading them, because two of the three
+  rulings change what gets built next and one of them changes what "a tag" means.
+
+  Vocabulary once, since the rulings turn on it. A **head** is one yes/no classifier for one
+  photo tag ("is this a kitchen?"). An **arm** is one encoder configuration — a model at a
+  resolution, pooled a particular way. A **mode** is what a head was allowed to train on. A
+  **threshold** is the cut a score has to clear before a head is read as saying "yes".
+
+  - **Ruling (a) — HOW A TAG GETS ASSIGNED, and it is the durable one.** Every head scores the
+    photograph; the **highest score names the tag**; no head's own yes/no verdict is consulted
+    anywhere in the product. Three consequences the later waves inherit and must not quietly
+    undo:
+    - **A per-head threshold is no longer a product decision.** It cannot be: winner-takes-all
+      compares scores against each other, never against a cut. Thresholds keep exactly one job
+      — reading the EXPERIMENT (an F1, a confusion square, a "wrongly caught" pile all need a
+      cut to exist at all) — and that is a measurement knob, not a step towards shipping. Entry
+      (a)'s open item (3) and the roadmap's "next knob" line are narrowed to that reading.
+    - **The winner is DERIVED, never stored.** Heads will be added over time, and a stored
+      winner would be a fact about the head set that existed when it was written. Recomputing
+      it from whatever heads a run holds means a new head can change a photo's tag with nothing
+      re-decided and nothing migrated.
+    - **A winner is only a winner within one (arm, mode, split).** Two arms are two different
+      models, and the modes do not even share a scale — the two logistic modes score in [0, 1]
+      while `pos_only_centroid` is a cosine in [-1, 1]. A ranking that mixed them would be
+      arithmetic on incomparable numbers.
+  - **Ruling (b) — RETIRE THE LOSERS so the experiment narrows.** Out: the two positive-only
+    training modes (`pos_only_free_neg`, `pos_only_centroid`) and **every arm below 512 px**.
+    **DINOv2's 504 stays** — patch 14 does not divide 512, so 504 IS this arm's 512, snapped to
+    its own grid. Retirement means *stops competing*, never *deleted*: every row run 1 wrote is
+    still in `dedup_sim` and still on the page behind a "show retired set-ups" toggle.
+  - **Ruling (c) — cost, licence and speed are ACCEPTED for both DINOv3 and DINOv2; accuracy is
+    not yet.** So the training set, the head set, the model and the parameters keep iterating in
+    parallel, and **the full image pool is scored only after that** — no corpus pass is
+    scheduled by this entry.
+
+  **What shipped (#1368).** The page gained the third view and the modal the rulings need, and
+  the LANE was narrowed to match, which is the half a display filter cannot do:
+  - **View C, "all photos by score"** — view B's cell with the buckets removed: every photo the
+    head scored, strongest first, abstentions included. Ranked by **the head's score, not F1**:
+    F1 is one number for a whole head, so it can rank heads against each other but cannot order
+    photographs. The view says so in its own help line rather than substituting silently.
+  - **The per-photo probability panel** — opening any photo in any view lists **every head's raw
+    probability for that photograph, strongest first, the top one marked winner**. That panel IS
+    ruling (a) made visible, and it is recomputed from the scores on screen every time.
+  - **The narrowing is enforced in TWO places, deliberately.** On the page it is a display
+    filter (`RETIRED_MODES` / `MIN_LIVE_RESOLUTION = 504` in
+    `frontend/src/pages/NewDedupTaggingBakeoff.tsx`), so no result is erased and the toggle
+    brings the retired set-ups back. In the LANE it is a **default**: `scripts/tag_head_bakeoff.py`
+    trains `pos_neg` only (`LIVE_MODES`), `scripts/tagging_bakeoff_manifest.build_arms` mints no
+    arm below 504 px (`tagging_bakeoff_arms.live_arms`), and the workflow gained a `modes` input
+    beside its `arms` one. **Naming a retired set-up still runs it** — `arms=clip-b32-stored`
+    re-mints the zero-GPU incumbent baseline, `modes=pos_only_centroid` re-trains a retired mode
+    — because ruling (c) has the experiment iterating and a narrowed default must not become a
+    locked door. Without the lane half, the next default dispatch would have re-embedded a
+    retired arm on a rented GPU and re-trained both retired modes on every head; the page would
+    simply not have shown the result.
+  - **The read surface is now SIX routes**, all admin-gated and read-only:
+    `/new-dedup/tagging-bakeoff/{runs, runs/{id}/metrics, runs/{id}/images, runs/{id}/buckets,
+    runs/{id}/scores, runs/{id}/images/{image_id}}`. The ranking pages by **keyset cursor** —
+    the API hands back the last row and you ask for what follows it — because scores tie
+    constantly and an offset over a tied ordering shows one photo twice and skips another.
+  - **The incumbent baseline is among the retired.** `clip-b32-stored` is the zero-GPU copy of
+    the live CLIP vectors that readout 4 measures every other arm against ("leaving the incumbent
+    is worth about +0.06 mean CV F1"), and the 512 px floor hides it by the same rule that hides
+    the LAION arm. That is the ruling applied, not an oversight — the toggle and
+    `arms=clip-b32-stored` are how the comparison anchor comes back when a new arm needs
+    measuring against it.
+
 - 2026-09-09 (a) — **Run 1 of the tagging bake-off COMPLETED. 11 heads x 11 encoder arms x 3
   training modes = 363 trained cells, 529,188 per-photo scores, 0 ungradable, ~$1.55 of GPU
   in total.** The experiment (d) built and (e) gave a face has now been run end to end, and
@@ -309,6 +380,10 @@ the two gaps found while adding property list are closed in the same PR that add
       is far below 1:3. A head calibrated for a balanced tray **over-fires** at natural
       prevalence. **Per-head thresholds read off each head's own precision/recall curve are the
       next knob**, and they are cheap: no re-embedding, no re-training, just a number per head.
+      (**Narrowed the same day by ruling (a), entry (b) above**: the product assigns tags
+      winner-takes-all and reads no head's yes/no, so a threshold now tunes only what the
+      MEASUREMENT says — the F1s, the confusion square, the wrongly-caught pile — and is not a
+      step towards shipping.)
       **Before turning it, the operator should look at the false-positive buckets** on
       `/new-dedup/tagging-bakeoff` **view B** — the wrongly-caught pile, most-confident first —
       because some of those "errors" will be photos the head got right and the label got wrong,
@@ -329,9 +404,10 @@ the two gaps found while adding property list are closed in the same PR that add
     answered by the data (readout 1), **`resolution` is the live question** (readout 2 + the
     cost arithmetic). (2) Whether the tagging result changes the encoder choice at all — it
     cannot be settled until the near-duplicate bake-off runs, because that is the job the
-    choice was made on. (3) Per-head thresholds. (4) Property list's definition. (5) Whether
-    some exam-side false positives should be re-judged before any of the above is tuned
-    against them.
+    choice was made on. (3) Per-head thresholds — **a measurement knob only, since ruling (a)
+    of the same day (entry (b) above) assigns tags winner-takes-all and takes no per-head
+    yes/no in the product**. (4) Property list's definition. (5) Whether some exam-side false
+    positives should be re-judged before any of the above is tuned against them.
 
 - 2026-09-08 (j) — **Attempt 5 was killed by our own two definitions of `failed`, 2 s in,
   $0.00 — and a retry was impossible as designed.** GitHub run 34274077032 rented pod
