@@ -36,6 +36,14 @@ ANY_CONFIDENCE = "any"
 
 GRAINS: tuple[str, ...] = ("listing", "property")
 
+# Operator action A5 (MASTER.md §8.2), DECIDED 2026-09-09: a location filter's default is
+# `certain ∪ possible` with the possible rows badged — 05 §5.3.3's two predicates, both
+# shown, the second labelled. The alternative (strict by default, an "include approximate"
+# toggle) stays a legal value so a consumer can offer it as the toggle's other state; it is
+# not the default of any filter. Due "before the first filter flips": no filter has.
+FILTER_SEMANTICS: tuple[str, ...] = ("include_and_badge", "strict_with_toggle")
+FILTER_DEFAULT_SEMANTICS = "include_and_badge"
+
 
 @dataclass(frozen=True, slots=True)
 class FeatureFloor:

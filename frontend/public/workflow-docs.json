@@ -3674,6 +3674,47 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_remine_verify.yml"
     },
     {
+      "filename": "location_contract_shadow.yml",
+      "name": "Jobs: location contract shadow / un-shadow (W2 gate switch)",
+      "description": "DISPATCH-ONLY. The operator's per-portal un-shadow switch, and its reverse.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "verb",
+          "description": "unshadow (make the contract's claims resolver inputs) | shadow (take it back out of serving)",
+          "required": false,
+          "type": "choice",
+          "default": "unshadow",
+          "options": [
+            "unshadow",
+            "shadow"
+          ]
+        },
+        {
+          "name": "targets",
+          "description": "space-separated <portal>@<version>, e.g. 'remax@3 ceskereality@5' (the version on disk in contracts/portals/<portal>.yaml)",
+          "required": true,
+          "type": "string",
+          "default": null,
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "location-contract-shadow",
+      "cancelInProgress": false,
+      "timeoutMinutes": 30,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_contract_shadow.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_contract_shadow.yml"
+    },
+    {
       "filename": "location_labelled_sample.yml",
       "name": "Jobs: location labelled-sample draw (06 6.4.0)",
       "description": "DISPATCH-ONLY. Draws the frozen random labelled sample for one portal (migration 399): n >= 100 active listings, uniform random, snapshotting the OLD system's serving values at draw time. The sample MUST be drawn BEFORE that portal's extraction sweep / refetch wave (06 6.4.0: \"drawn before the sweep, randomly\"), and is then hand-labelled by the operator; contract acceptance is precision on this sample, not yield.",

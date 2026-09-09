@@ -89,6 +89,14 @@ def test_a_loaded_rank_table_overrides_the_offline_default() -> None:
     assert not sc.meets_floor("map_pin", granularity="obec", match_confidence="high")
 
 
+def test_a5_default_is_include_and_badge_and_a_declared_value() -> None:
+    # Operator decision 2026-09-09. Changing the default is a decision, not a refactor —
+    # this test is where that shows up as a diff.
+    assert sc.FILTER_DEFAULT_SEMANTICS == "include_and_badge"
+    assert sc.FILTER_DEFAULT_SEMANTICS in sc.FILTER_SEMANTICS
+    assert sc.FILTER_SEMANTICS == ("include_and_badge", "strict_with_toggle")
+
+
 def test_confidence_at_least_walks_the_declared_order() -> None:
     assert sc.confidence_at_least("exact", "high")
     assert sc.confidence_at_least("medium", "medium")
