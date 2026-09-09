@@ -758,3 +758,76 @@ describe('<NewDedupTaggingBakeoff> — the per-photo probability modal', () => {
       .toContain('you said no');
   });
 });
+
+describe('<NewDedupTaggingBakeoff> — the cell pickers follow the top selection', () => {
+  it('offers only the arms and modes turned on at the top', async () => {
+    // The run has three arms; only arm 7 is on, so the cell's picker lists one.
+    renderPage('/new-dedup/tagging-bakeoff?view=buckets&mode=pos_neg&arms=7&tag=19');
+    const picker = await screen.findByTestId('bucket-arm-picker');
+    expect(within(picker).getAllByRole('option').map((o) => o.textContent)).toEqual([ARM_A.arm]);
+    // Modes likewise: pos_neg alone is on, so the cell is offered pos_neg alone.
+    expect(screen.getByTestId('bmode-pos_neg')).toBeInTheDocument();
+    expect(screen.queryByTestId('bmode-pos_only_free_neg')).not.toBeInTheDocument();
+
+    // Turn arm 8 on at the top and the picker gains it.
+    await userEvent.click(screen.getByTestId('arm-8'));
+    await waitFor(() => expect(
+      within(screen.getByTestId('bucket-arm-picker')).getAllByRole('option').map((o) => o.textContent),
+    ).toEqual([ARM_A.arm, ARM_B.arm]));
+  });
+
+  it('turning off the arm the cell is on hands the cell to the first arm still on', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?view=buckets&mode=pos_neg&arms=7,8&barm=8&tag=19');
+    await waitFor(() => expect(api.getBakeoffBuckets).toHaveBeenLastCalledWith(
+      3, expect.objectContaining({ arm_id: 8 }),
+    ));
+    await userEvent.click(screen.getByTestId('arm-8'));
+    // No control below could undo a cell left on a switched-off arm, so the
+    // cell follows the selection instead.
+    await waitFor(() => expect(api.getBakeoffBuckets).toHaveBeenLastCalledWith(
+      3, expect.objectContaining({ arm_id: 7 }),
+    ));
+    expect(within(screen.getByTestId('bucket-arm-picker')).getAllByRole('option')
+      .map((o) => o.textContent)).toEqual([ARM_A.arm]);
+  });
+
+  it('keeps an arm a link named for the cell, so it can be undone', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?view=buckets&mode=pos_neg&arms=7&barm=8&tag=19');
+    const picker = await screen.findByTestId('bucket-arm-picker');
+    expect(within(picker).getAllByRole('option').map((o) => o.textContent))
+      .toEqual([ARM_A.arm, ARM_B.arm]);
+    expect(picker).toHaveValue('8');
+  });
+});
+
+describe('<NewDedupTaggingBakeoff> — the modal’s top head per model', () => {
+  it('leads with the top head and its score per model, and says when there was no contest', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?mode=pos_neg&arms=7,8&tag=19');
+    await userEvent.click(await screen.findByLabelText('Open photo 555'));
+    const tops = await screen.findByTestId('top-heads');
+    const a = within(tops).getByTestId('top-head-7-pos_neg-cv');
+    expect(a).toHaveTextContent(ARM_A.arm);
+    expect(a).toHaveTextContent('kuchyně');
+    expect(a).toHaveTextContent('0.970');
+    expect(a).toHaveTextContent('of 2 heads');
+    const b = within(tops).getByTestId('top-head-8-pos_neg-cv');
+    expect(b).toHaveTextContent('koupelna');
+    expect(b).toHaveTextContent('0.550');
+    // The split on show only, until widened.
+    expect(within(tops).queryByTestId('top-head-7-pos_neg-exam')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByTestId('probability-widen'));
+    const exam = await within(screen.getByTestId('top-heads')).findByTestId('top-head-7-pos_neg-exam');
+    // One head scored the photo on the exam in this fixture: a "winner" with
+    // nothing to beat is said so, not dressed up as a verdict.
+    expect(exam).toHaveTextContent('only head that scored it');
+  });
+
+  it('lists models only for the arms turned on at the top', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?mode=pos_neg&arms=7&tag=19');
+    await userEvent.click(await screen.findByLabelText('Open photo 555'));
+    const tops = await screen.findByTestId('top-heads');
+    expect(within(tops).getByTestId('top-head-7-pos_neg-cv')).toBeInTheDocument();
+    expect(within(tops).queryByTestId('top-head-8-pos_neg-cv')).not.toBeInTheDocument();
+  });
+});
