@@ -6150,6 +6150,147 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/street_key_parity.yml"
     },
     {
+      "filename": "tag_model.yml",
+      "name": "NEW DEDUP: tag model (promote / score / activate)",
+      "description": "Runs the tag model lane: turn one cell of a finished tagging bake-off into a versioned, permanent model, score images with it, and then — as a separate, explicit step — make that version the one the product reads. Manual dispatch only; one stage per run; CPU only, no GPU, no R2, no money.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "stage",
+          "description": "status (read) -> promote (train a candidate) -> score (fill its store) -> activate (make it the one consumers read).",
+          "required": true,
+          "type": "choice",
+          "default": "status",
+          "options": [
+            "status",
+            "promote",
+            "score",
+            "activate"
+          ]
+        },
+        {
+          "name": "version",
+          "description": "Model version string, e.g. v1. Required for promote/score/activate; optional detail filter for status.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "run_id",
+          "description": "promote only: the dedup_sim.tag_head_bakeoff_runs id to promote from.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "arm",
+          "description": "promote only: the arm name within that run, e.g. dinov2-l14-reg@504/bf16.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "mode",
+          "description": "promote only: the training mode. One model is ONE mode — the winner is an argmax, and two score scales cannot be compared.",
+          "required": false,
+          "type": "choice",
+          "default": "pos_neg",
+          "options": [
+            "pos_neg",
+            "pos_only_free_neg",
+            "pos_only_centroid"
+          ]
+        },
+        {
+          "name": "label",
+          "description": "promote only: a short human name for the version.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "note",
+          "description": "promote only: free-text note recorded on the model row.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "heads",
+          "description": "promote only: comma-separated tag ids, overriding the run's frozen head list.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "source",
+          "description": "score only: bakeoff (the model's own run), bakeoff:<run_id>, or production (image_dinov3_embeddings).",
+          "required": false,
+          "type": "string",
+          "default": "bakeoff",
+          "options": null
+        },
+        {
+          "name": "limit",
+          "description": "score only: stop after this many images considered. Empty = everything the source offers.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "batch",
+          "description": "score only: images per page/upsert batch.",
+          "required": false,
+          "type": "string",
+          "default": "500",
+          "options": null
+        },
+        {
+          "name": "force",
+          "description": "score only: re-score images this version already scored (the upsert overwrites; the version is the identity).",
+          "required": false,
+          "type": "choice",
+          "default": "false",
+          "options": [
+            "false",
+            "true"
+          ]
+        },
+        {
+          "name": "dry_run",
+          "description": "Report the plan and exit. promote trains nothing, score writes nothing, activate flips nothing.",
+          "required": false,
+          "type": "choice",
+          "default": "true",
+          "options": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "tag-model",
+      "cancelInProgress": false,
+      "timeoutMinutes": 120,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/tag_model.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/tag_model.yml"
+    },
+    {
       "filename": "tagging_bakeoff.yml",
       "name": "NEW DEDUP: tagging bake-off (manifest / embed / train)",
       "description": "Runs the tagging bake-off: embed every labelled training photo (plus the 250 sealed-exam photos) under several encoder configurations — \"arms\" — then train and compare a per-tag yes/no classifier on each, so the choice of encoder is decided by measurement instead of by argument. Manual dispatch only; one stage per run.",

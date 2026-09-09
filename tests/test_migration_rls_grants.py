@@ -346,6 +346,11 @@ _ADMIN_ONLY_RELATIONS = frozenset({
     "dedup_sim.tag_head_bakeoff_vectors",
     "dedup_sim.tag_head_bakeoff_scores",
     "dedup_sim.tag_head_bakeoff_metrics",
+    # The versioned tag model (migration 490, PUBLIC schema — it must survive
+    # Wave 8's drop of dedup_sim): the model registry, its per-tag artifacts, and
+    # the per-image winner store. Backend-only, NO `_public` view; the SPA reads
+    # them through the admin-gated API (/new-dedup/tags/*).
+    "tag_head_models", "tag_head_model_heads", "image_tag_scores",
 })
 
 _CREATE_GATED_OBJ = re.compile(
