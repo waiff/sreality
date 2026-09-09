@@ -1792,18 +1792,37 @@ same day:**
   `serving_contracts.FILTER_DEFAULT_SEMANTICS` with `strict_with_toggle` kept as the toggle's other
   legal state, and pinned by a test so a change of default shows up as a diff, not a drift. The
   filter flip itself is still unbuilt; A5 was due "before the first filter flips" and it is.
-- **Un-shadow, per portal — DECIDED 2026-09-09: all seven.** The operator's ruling covers the seven
-  W2-6…W2-12 portals at the versions on disk: **bazos@3** (one header — the W2-6 structured entries
-  and the W2-10 `llm_text` entries share it, so there is no separate `bazos@2` to flip; the un-shadow
+- **Un-shadow, per portal — DECIDED 2026-09-09: all seven; EXECUTED the same day, 17:54–17:59Z.**
+  The operator's ruling covers the seven W2-6…W2-12 portals at the versions on disk: **bazos@3** (one
+  header in git — the W2-6 structured entries and the W2-10 `llm_text` entries share it; the un-shadow
   admits both families, but the LLM lane writes nothing until its dispatch-only workflow runs, and
   that dispatch is held until its first output has been eyeballed), ceskereality@5, idnes@2,
   maxima@2, mmreality@2, realitymix@4, remax@3. The switch had no cloud lane — `--unshadow` was
   a local command and the agent shell holds no DB URL — so it got one:
   **`location_contract_shadow.yml`** (dispatch-only; `verb` = unshadow | shadow, `targets` =
   space-separated `<portal>@<version>`, inputs reach bash through env vars, each target its own
-  `set_shadow` transaction, idempotent). The execution record — per-portal `moved` / `enqueued`
-  counts and the timestamp — is appended below once the lane has run from `main`. The archived-HTML
-  sweeps (`location_claims_remine_archive.yml`) stay a separate operator dispatch.
+  `set_shadow` transaction, idempotent).
+  **Execution record** (runs 34385772911 + 34386270723, `verb=unshadow`): every target `moved=True`;
+  `enqueued` — listings that already held a stored claim under that version and were not already in
+  `dirty_locations` — remax@3 **0** · ceskereality@5 **285** · realitymix@4 **147** · idnes@2 **579** ·
+  mmreality@2 **0** · maxima@2 **0** · bazos@3 **69** · and **bazos@2 0**: git has no v2 file, but the
+  DB keeps the superseded header the 09-05 bump left inactive-and-shadowed (the gate report printed
+  `SHADOWED: 2` for bazos after the @3 flip), holding zero claims — flipped so no shadowed header
+  remains anywhere. **Readout two minutes later** (`location_w2_gate_report`, run 34385979837,
+  `--skip-denominator`): `location_claims_shadow` is **0 claims on all seven** — nothing is parked any
+  more, and the header-grain freeze on new listings has ended. Where the live claims come FROM differs
+  by portal, and that is the next dispatch: **remax, mmreality and maxima were fully swept on 09-08**
+  (unattended driver, `reached_end=true`) — 13,187 / 13,299 (99.2 %), 12,978 / 13,842 (93.8 %) and
+  510 / 517 (98.6 %) archived listings carry an `archived_html` claim, all live as of the flip;
+  **ceskereality, realitymix and idnes have never been swept** — 0 archived claims over 92,812 / 79,771
+  / 231,534 archived detail bodies, so their live claims today are the hourly intake lane's only, and
+  their sweeps (`location_claims_remine_archive.yml`, ≈70 h at the measured 2.4 pages/s across the
+  three) are the operator's next dispatch; **bazos** 0 archived claims over 133,940 bodies — structured
+  sweep not run, LLM dispatch held. The `enqueued=0` on the three swept portals is the queue already
+  holding their listings (`ON CONFLICT DO NOTHING`; the drain DELETEs a row only when it has
+  resolved that listing): the ~26.7k listings the 09-08 sweeps enqueued had not been drained by
+  17:55Z the next day, so the `*/15` resolve lane is behind by at least that much — and every one of
+  them now resolves against live claims when its turn comes, which is the point of the flip.
 - **The registry canonical street form** (W1v finding above) — still open, by design: decide when
   the first `street_name`-reading feature (street filter, dedup Tier 1, comparables) is next to flip.
 
