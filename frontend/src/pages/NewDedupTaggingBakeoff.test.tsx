@@ -147,18 +147,16 @@ const BUCKETS = {
 };
 
 /* VIEW C. One cell, unbucketed: the four buckets poured into one ranked list
- * plus the abstentions, which are in none of them. The last row is the cursor
- * for the next page — the PAIR, because scores tie. */
+ * plus the abstentions, which are in none of them. Paged by offset like the
+ * training-set grid; `total` is the whole cell. */
 const SCORES = {
   arm_id: 7, mode: 'pos_neg' as const, tag_id: 19, split: 'cv' as const,
-  total: 9264,
+  total: 9264, limit: 50, offset: 0,
   rows: [
     { image_id: 555, listing_id: 99213, storage_path: 'a.jpg', score: 0.9713, label: 1 as const, predicted: true, fold: 2, outcome: 'tp' as const },
     { image_id: 556, listing_id: null, storage_path: 'b.jpg', score: 0.8800, label: 0 as const, predicted: true, fold: 1, outcome: 'fp' as const },
     { image_id: 557, listing_id: 99213, storage_path: 'c.jpg', score: 0.4412, label: null, predicted: false, fold: null, outcome: 'abstained' as const },
   ],
-  next_after_score: 0.4412,
-  next_after_image_id: 557,
 };
 
 /* VIEW D. One photo, every score the run gave it. Arm 7 makes it a kitchen and
@@ -518,7 +516,7 @@ describe('<NewDedupTaggingBakeoff> — view C, all photos by score', () => {
     renderPage(entry);
     await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(
       3, expect.objectContaining({
-        arm_id: 7, mode: 'pos_neg', tag_id: 19, split: 'cv', limit: 60,
+        arm_id: 7, mode: 'pos_neg', tag_id: 19, split: 'cv', limit: 50, offset: 0,
       }),
     ));
     const grid = await screen.findByTestId('score-grid');
@@ -550,21 +548,73 @@ describe('<NewDedupTaggingBakeoff> — view C, all photos by score', () => {
       .toContain('abstained');
   });
 
-  it('pages forward on the (score, image) pair and back on its own stack', async () => {
+  it('pages by offset, one page size at a time, and back to the top', async () => {
     renderPage(entry);
     const next = await screen.findByTestId('score-next');
     expect(screen.getByTestId('score-prev')).toBeDisabled();
     await userEvent.click(next);
-    // The PAIR, not the score alone: scores tie, so a score-only cursor would
-    // drop or repeat photographs.
     await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(
-      3, expect.objectContaining({ after_score: 0.4412, after_image_id: 557 }),
+      3, expect.objectContaining({ limit: 50, offset: 50 }),
     ));
     expect(screen.getByTestId('score-prev')).toBeEnabled();
     await userEvent.click(screen.getByTestId('score-prev'));
-    await waitFor(() => expect(
-      vi.mocked(api.getBakeoffScores).mock.lastCall?.[1]?.after_image_id,
-    ).toBeUndefined());
+    await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(
+      3, expect.objectContaining({ offset: 0 }),
+    ));
+    expect(screen.getByTestId('score-prev')).toBeDisabled();
+  });
+
+  it('offers the training-set grid\'s page sizes, and a size change restarts at the top', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?view=scores&mode=pos_neg&arms=7&tag=19&soff=100');
+    await screen.findByTestId('score-grid');
+    const group = screen.getByRole('group', { name: 'per page' });
+    // The same five choices as the training-set page, to the number.
+    expect(within(group).getAllByRole('button').map((b) => b.textContent))
+      .toEqual(['50', '100', '500', '2000', '10000']);
+    expect(screen.getByTestId('score-per-page-50')).toHaveAttribute('aria-pressed', 'true');
+    await userEvent.click(screen.getByTestId('score-per-page-500'));
+    // An offset is a position in pages of ONE size, so it does not carry over.
+    await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(
+      3, expect.objectContaining({ limit: 500, offset: 0 }),
+    ));
+    expect(screen.getByTestId('score-per-page-500')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('shows "x–y of N" and jumps to the last page from the total', async () => {
+    renderPage(entry);
+    await screen.findByTestId('score-grid');
+    expect(screen.getByTestId('score-page-range')).toHaveTextContent('1–3 of 9,264');
+    // 9,264 photos at 50 a page: the last page starts at 9,250.
+    await userEvent.click(screen.getByTestId('score-last'));
+    await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(
+      3, expect.objectContaining({ limit: 50, offset: 9250 }),
+    ));
+    // On the last page there is nothing further to jump to.
+    vi.mocked(api.getBakeoffScores).mockResolvedValue({
+      data: { ...SCORES, offset: 9250, rows: SCORES.rows.slice(0, 1) },
+    });
+    await waitFor(() => expect(screen.queryByTestId('score-last')).not.toBeInTheDocument());
+  });
+
+  it('the next button goes dead at the end of the cell, not at a short page', async () => {
+    // A three-photo cell: everything fits on page one.
+    vi.mocked(api.getBakeoffScores).mockResolvedValue({ data: { ...SCORES, total: 3 } });
+    renderPage(entry);
+    await screen.findByTestId('score-grid');
+    expect(screen.getByTestId('score-next')).toBeDisabled();
+    expect(screen.queryByTestId('score-last')).not.toBeInTheDocument();
+  });
+
+  it('has the training-set grid\'s Small/Large switch, sized to the same two widths', async () => {
+    renderPage(entry);
+    const grid = await screen.findByTestId('score-grid');
+    expect(grid).toHaveAttribute('data-size', 'small');
+    expect(grid.style.gridTemplateColumns).toContain('8rem');
+    const toggle = screen.getByRole('group', { name: 'Ranking grid image size' });
+    await userEvent.click(within(toggle).getByRole('button', { name: /large/i }));
+    expect(screen.getByTestId('score-grid')).toHaveAttribute('data-size', 'large');
+    expect(screen.getByTestId('score-grid').style.gridTemplateColumns).toContain('16rem');
+    expect(within(toggle).getByRole('button', { name: /large/i })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('shares the cell with view B, so switching angle re-picks nothing', async () => {
@@ -578,17 +628,18 @@ describe('<NewDedupTaggingBakeoff> — view C, all photos by score', () => {
     ));
   });
 
-  it('a link reproduces the ranking, cursor included', async () => {
+  it('a link reproduces the ranking, page and page size included', async () => {
     renderPage('/new-dedup/tagging-bakeoff?view=scores&arms=7&tag=19&barm=7'
-               + '&bmode=pos_neg&split=exam&sc=0.44,557');
+               + '&bmode=pos_neg&split=exam&n=500&soff=1000');
     await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(3, {
-      arm_id: 7, mode: 'pos_neg', tag_id: 19, split: 'exam',
-      after_score: 0.44, after_image_id: 557, limit: 60,
+      arm_id: 7, mode: 'pos_neg', tag_id: 19, split: 'exam', limit: 500, offset: 1000,
     }));
     expect(screen.getByTestId('view-scores')).toHaveAttribute('aria-pressed', 'true');
+    await screen.findByTestId('score-grid');
+    expect(screen.getByTestId('score-per-page-500')).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('numbers the ranks from the top, and refuses to when it landed mid-list', async () => {
+  it('numbers the ranks from the top of the whole cell, on every page', async () => {
     renderPage(entry);
     // Page one: these ARE ranks 1..3 in the whole cell.
     await screen.findByTestId('score-grid');
@@ -596,41 +647,38 @@ describe('<NewDedupTaggingBakeoff> — view C, all photos by score', () => {
     expect(screen.getByTestId('score-row-555')).toHaveTextContent('1');
 
     cleanup();
-    // A link that starts part-way down carries a cursor but no history, so the
-    // absolute position is unknown — and an unknown position is said, not
-    // guessed as 1.
-    renderPage('/new-dedup/tagging-bakeoff?view=scores&arms=7&tag=19&sc=0.88,556');
+    // A link that starts part-way down knows its position — it is the offset —
+    // so the ranks continue from there rather than restarting at 1.
+    vi.mocked(api.getBakeoffScores).mockResolvedValue({ data: { ...SCORES, offset: 100 } });
+    renderPage('/new-dedup/tagging-bakeoff?view=scores&arms=7&tag=19&soff=100');
     await screen.findByTestId('score-grid');
-    expect(screen.getByTestId('scores-range'))
-      .toHaveTextContent('somewhere below the top');
-    expect(screen.getByTestId('scores-range')).not.toHaveTextContent('showing 1');
+    expect(screen.getByTestId('scores-range')).toHaveTextContent('showing 101–103');
+    expect(screen.getByTestId('score-row-555')).toHaveTextContent('101');
   });
 
-  it('an empty last page ends the ranking without becoming a dead end', async () => {
-    // A cell whose size is an exact multiple of the page size hands back a
-    // cursor for a page that turns out to be empty.
+  it('an offset past the end ends the ranking without becoming a dead end', async () => {
+    // A link can name an offset the cell no longer reaches (re-scored smaller,
+    // or copied under a wider page size).
     vi.mocked(api.getBakeoffScores).mockResolvedValue({
-      data: { ...SCORES, rows: [], next_after_score: null, next_after_image_id: null },
+      data: { ...SCORES, offset: 9300, rows: [] },
     });
-    renderPage('/new-dedup/tagging-bakeoff?view=scores&arms=7&tag=19&sc=0.88,556');
+    renderPage('/new-dedup/tagging-bakeoff?view=scores&arms=7&tag=19&soff=9300');
     expect(await screen.findByTestId('scores-end')).toBeInTheDocument();
     // Not "this head scored nothing" — the cell has 9,264 photos.
     expect(screen.queryByTestId('no-scores')).not.toBeInTheDocument();
-    // And there is a way out: no stack to step back through, but the top of the
-    // ranking is a position we can always name.
+    // And there is a way out: one page back.
     const back = screen.getByTestId('score-prev');
     expect(back).toBeEnabled();
-    expect(back).toHaveTextContent('back to the top');
     await userEvent.click(back);
-    await waitFor(() => expect(
-      vi.mocked(api.getBakeoffScores).mock.lastCall?.[1]?.after_image_id,
-    ).toBeUndefined());
+    await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(
+      3, expect.objectContaining({ offset: 9250 }),
+    ));
   });
 
-  it('ignores a malformed cursor rather than paging from a made-up position', async () => {
-    renderPage('/new-dedup/tagging-bakeoff?view=scores&arms=7&tag=19&sc=nonsense');
+  it('ignores a malformed page size or offset rather than paging from a made-up position', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?view=scores&arms=7&tag=19&n=77&soff=nonsense');
     await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(
-      3, expect.objectContaining({ after_score: undefined, after_image_id: undefined }),
+      3, expect.objectContaining({ limit: 50, offset: 0 }),
     ));
   });
 });

@@ -233,53 +233,51 @@ SCORE_ROWS = [
 ]
 
 
-def test_scores_ranks_the_whole_cell_and_pages_on_the_score_id_pair(client) -> None:
+def test_scores_ranks_the_whole_cell_and_pages_by_offset(client) -> None:
     conn = _scripted([("count(*)", [(9264,)]), ("ORDER BY s.score DESC", SCORE_ROWS)])
     data = client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
                       "&split=cv&limit=3").json()["data"]
 
     assert [r["image_id"] for r in data["rows"]] == [555, 556, 557]
     # The cell's whole size, not this page's — the operator needs to know how
-    # deep the ranking goes before deciding to walk it.
+    # deep the ranking goes before deciding to walk it — and the page's own
+    # window, echoed back so "x–y of N" is drawn from what was actually served.
     assert data["total"] == 9264
-    # A FULL page hands back its own last row as the cursor. The pair, not the
-    # score alone: scores tie, and a cursor that is not unique loses rows.
-    assert data["next_after_score"] == SCORE_ROWS[-1][3]
-    assert data["next_after_image_id"] == 557
+    assert data["limit"] == 3 and data["offset"] == 0
     # An abstention keeps its real score and prediction and is in the list —
     # this view is the union of the buckets PLUS the rows that are in none.
     assert data["rows"][2]["label"] is None
     assert data["rows"][2]["outcome"] == "abstained"
-    assert conn.params_for("ORDER BY s.score DESC")["arm_id"] == 7
-
-
-def test_scores_last_page_offers_no_cursor(client) -> None:
-    _scripted([("count(*)", [(3,)]), ("ORDER BY s.score DESC", SCORE_ROWS)])
-    # Three rows against a limit of 60 is a short page, so the walk is over.
-    data = client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
-                      "&limit=60").json()["data"]
-    assert data["next_after_score"] is None
-    assert data["next_after_image_id"] is None
-
-
-def test_scores_carries_the_cursor_pair_into_the_query(client) -> None:
-    conn = _scripted([("count(*)", [(9264,)]), ("ORDER BY s.score DESC", [])])
-    client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
-               "&after_score=0.44&after_image_id=557")
     params = conn.params_for("ORDER BY s.score DESC")
-    assert params["after_score"] == 0.44 and params["after_image_id"] == 557
+    assert params["arm_id"] == 7 and params["limit"] == 3 and params["offset"] == 0
 
 
-def test_scores_refuses_half_a_cursor(client) -> None:
-    _scripted([("count(*)", [(0,)])])
-    # Half a cursor cannot be applied to a tied ordering, and guessing the other
-    # half would silently drop or repeat photos.
-    one = client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
-                     "&after_score=0.44")
-    assert one.status_code == 422 and "together" in one.json()["detail"]
-    other = client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
-                       "&after_image_id=557")
-    assert other.status_code == 422
+def test_scores_offset_is_a_position_in_a_total_order(client) -> None:
+    # An offset is only a stable position if the ORDER BY is total; scores tie,
+    # so the query must break ties on image_id and page with OFFSET, never a
+    # cursor the client has to carry.
+    conn = _scripted([("count(*)", [(9264,)]), ("ORDER BY s.score DESC", [])])
+    data = client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
+                      "&limit=500&offset=9000").json()["data"]
+    sql, params = next(
+        (s, p) for s, p in conn.cur.seen if "ORDER BY s.score DESC" in s)
+    assert "ORDER BY s.score DESC, s.image_id DESC" in sql
+    assert "OFFSET %(offset)s" in sql
+    assert params["limit"] == 500 and params["offset"] == 9000
+    assert data["offset"] == 9000 and data["rows"] == []
+
+
+def test_scores_page_size_matches_the_training_set_grid(client) -> None:
+    # The training-set page offers 50 … 10,000 a page; the ranking must accept
+    # the same widest page, and refuse a negative offset or an empty page.
+    _scripted([("count(*)", [(0,)]), ("ORDER BY s.score DESC", [])])
+    ok = client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
+                    "&limit=10000")
+    assert ok.status_code == 200
+    assert client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
+                      "&limit=10001").status_code == 422
+    assert client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
+                      "&offset=-1").status_code == 422
 
 
 def test_scores_needs_its_cell_keys_and_a_known_run_and_split(client) -> None:
