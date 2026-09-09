@@ -448,7 +448,57 @@ W1 (shared prerequisites + labeling program):
       `toolkit/tag_models.py` + `scripts/tag_model.py` + `tag_model.yml` (dispatch-only, dry-run by
       default, CPU, `SUPABASE_DB_URL` only); read surface
       `/new-dedup/tags/{models, models/{version}/heads, images/{image_id}}`, admin-gated.
-      **Nothing is trained, scored or activated yet, and no corpus pass is run.**
+      **v1 IS NOW LIVE (2026-09-09, PROGRAM.md ledger `(d)`).** Migration 490 applied to
+      production ~08:45 UTC (public schema, row-level security on, the browser-facing `anon` /
+      `authenticated` roles revoked — verified after applying); #1365, #1366 and #1368 merged in
+      that order and the page rollout confirmed on Railway. **v1** was promoted from bake-off
+      run 1, arm `dinov3-b16@768/bf16`, mode `pos_neg`, **11 heads** (tag ids 3, 17, 22, 25, 28,
+      39, 42, 43, 45, 46, 48) refit on all their training rows, each head's bake-off numbers
+      copied onto the model (katastrální mapa 0.969, půdorys 0.961, obývací pokoj 0.918, 3d plán
+      0.909, letecký snímek 0.881, technické zařízení 0.873, property list 0.687). It **scored
+      9,514 images** — 9,264 training photos + the sealed 250-photo exam — from the bake-off
+      arm's own vectors (`source bakeoff:1`), **0 missing, in ~70 s on a free runner** (inference
+      is a dot product and a logistic in plain Python: no GPU, no bill), and was **activated** —
+      it is THE active model, read by `toolkit.tag_models.winners()` and
+      `GET /new-dedup/tags/images/{id}`. All three `tag_model.yml` stages ran with
+      `dry_run=false`. **The winner rule's first grade, on the sealed exam:** of the 94 exam
+      photos carrying a human positive on one of the 11 heads, **the winner names that tag
+      95.7%** of the time (against a mean per-head exam F1 of **0.73** under independent yes/no
+      decisions — competition between heads removes most cross-tag false alarms), and 96.8% of
+      those clear a 0.5 score. **The open problem is "none of the above":** of the 156 exam
+      photos with no positive on any of the 11 heads, all get a winner by construction and
+      **41% get one scoring ≥ 0.5**. So a **floor** — a minimum the consumer insists on before
+      believing the tag, not a per-head yes/no — is not optional in practice: 0.5 keeps 96.8% of
+      the true tags and cuts the confident-looking wrong ones from 100% to 41%; a higher floor
+      trades the two. Training-pool figures are **in-sample** and read as optimistic: 88.4% of
+      the 2,940 training photos with a positive get it as winner, 72% of all 9,514 clear 0.5,
+      mean winner score 0.70. **A measurement gap:** the bake-off cross-validated each head only
+      on its OWN training rows, so no winner can be graded out-of-fold across the training pool
+      (restricting it to that subset returns a meaningless 99.8%). Still **not done, on purpose**:
+      no corpus pass (the production source needs `image_dinov3_embeddings` under the model's
+      seven encoder facts and nothing populates it yet), the three nulls in
+      `data/dinov3_config.json` (v1's identity lives in the registry, not that config), and the
+      encoder decision for the near-duplicate job (#1300's harness still unrun).
+- [ ] **NEXT — the four decisions v1's first grade puts in front of the operator** (listed, not
+      decided; PROGRAM.md ledger `(d)`): (1) **the winner floor — or an "other" head instead**,
+      the two answers to the 41% "none of the above" number, and they are not exclusive: a floor
+      is a consumer's minimum on `winner_score`, an "other" head is a twelfth head trained on
+      exactly those photos so the argmax has somewhere honest to put them; (2) **which arm
+      iteration 2 promotes** — `dinov2-l14-reg@504/bf16` has the best exam F1 and is the fastest
+      DINO arm, `dinov3-b16@768/bf16` is the programme's accepted encoder and is what v1 froze,
+      and neither can be settled on tagging numbers alone (readout 3); (3) **property list's
+      definition**, still 0.687 with high recall and poor precision — the shape of a definition
+      admitting too much, not of a training failure; (4) **a fresh exam cohort covering all 11
+      heads** — the current one cannot grade `3d plán` or `property list` at all (both post-date
+      it) and answered `garáž` and the document tags under older definitions, so 94 gradable
+      photos is a thin foundation for the 95.7% headline and this is the cheapest way to thicken
+      it.
+- [ ] **NEXT — run 2 grades the winner OUT-OF-FOLD.** The bake-off validated each head only on
+      its own training rows, so today the winner rule has an honest grade on the exam's 94
+      photos and nothing else. Run 2 should score **every image with every head out-of-fold**
+      under **one shared grouped split used by all heads** (grouped so no photo is ever scored
+      by a model that saw another photo from its listing), which gives the winner rule a
+      training-pool grade beside the exam instead of resting on it alone.
 - [ ] **NEXT — read run 1 with the operator, then turn the cheap knobs.** In order: (1) look at
       the **false-positive buckets in view B** before tuning anything — the exam column is a
       *prevalence* story (250 random photos hold few positives of a rare tag: garáž 2 true
@@ -473,7 +523,8 @@ W1 (shared prerequisites + labeling program):
       listed in full in PROGRAM.md's `2026-09-09 (b)` entry; cite them by NUMBER, because the
       letters in a ledger heading are that day's entries, not the ruling's parts). So the
       training set, the head set, the model and the parameters go on changing together. Two
-      things follow. (1) **Narrow the experiment** (**ask 2**, shipping in **PR #1365**): drop
+      things follow. (1) **Narrow the experiment** (**ask 2**, shipped as **PR #1365**,
+      merged 2026-09-09): drop
       the two weak training modes — `pos_only_free_neg` (the "borrowed no") and
       `pos_only_centroid` (the "closeness only") — and every arm below 512 px, keeping dinov2's
       504 because that IS 512 snapped to its patch size. (2) **Each improvement is just the next
@@ -481,8 +532,8 @@ W1 (shared prerequisites + labeling program):
       comparison. **The full 11.5M image pool is scored only when the operator is satisfied** —
       until then scoring runs over the bake-off arm's 9,514 labelled + exam photos, which costs
       nothing. The same ruling's **asks 3 and 4** (per-head probabilities when zooming into a
-      photo; a third view listing every photo a head scored, sorted by score) ship in
-      **PR #1368**.
+      photo; a third view listing every photo a head scored, sorted by score) shipped as
+      **PR #1368**, merged the same day.
 
 Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
 
