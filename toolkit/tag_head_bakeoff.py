@@ -28,6 +28,11 @@ EVERY MODE IS GRADED ON THE SAME ROWS. The modes differ in what reaches the fit,
 never in what is graded — otherwise "positive-only did better" could just mean
 "positive-only was asked an easier question". `tag_heads._fold_training_rows`
 enforces that split.
+
+A DEFAULT RUN IS `pos_neg` ALONE since the 2026-09-09 ruling (`th.DEFAULT_MODES`);
+the two positive-only modes lost run 1 by 0.05-0.07 mean F1 and are now run only
+when a caller NAMES them. `th.MODES` is still the whole vocabulary — what may be
+asked for — so nothing was deleted, only taken off the default.
 """
 
 from __future__ import annotations
@@ -669,7 +674,7 @@ def set_arm_status(
 
 def run_bakeoff(
     conn: psycopg.Connection, *, run_id: int,
-    modes: Sequence[str] = th.MODES,
+    modes: Sequence[str] = th.DEFAULT_MODES,
     arm_names: Sequence[str] | None = None,
     tag_ids: Sequence[int] | None = None,
     n_splits: int = th.DEFAULT_N_SPLITS,
@@ -685,6 +690,9 @@ def run_bakeoff(
 
     Ordered arm-outermost so one arm's vectors are read once and reused across
     every mode and head — the vectors are the expensive read, the fits are not.
+
+    `modes` defaults to `th.DEFAULT_MODES` (pos_neg alone); the retired
+    positive-only modes still run when named.
     """
     bad = [m for m in modes if m not in th.MODES]
     if bad:

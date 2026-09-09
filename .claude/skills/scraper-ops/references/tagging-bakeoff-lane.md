@@ -18,7 +18,7 @@ the admin API. They meet at the table contract and nowhere else.
 
 | Stage | Where | What it does | Cost |
 | --- | --- | --- | --- |
-| `manifest` | plain runner | run + arm rows, head selection, presigned URLs, the free `clip-b32-stored` arm | $0 |
+| `manifest` | plain runner | run + arm rows, head selection, presigned URLs (and the free `clip-b32-stored` copy, only if that retired arm is named) | $0 |
 | `embed` | rented GPU pod | every pending arm's vectors | the only stage that spends |
 | `train` | plain runner (`training` extra) | the sibling's `scripts.tag_head_bakeoff` | $0 |
 
@@ -44,25 +44,46 @@ revision, library, pooling, resolution, preprocessing, dtype (`scraper/dinov3_co
 That is deliberate: the winner's seven facts are copied into `data/dinov3_config.json`
 verbatim, with no translation step where a mistake could hide.
 
+**The default preset — nine arms, every one at 512 px or above:**
+
 | Arm | Model | Res | dtype | Why it is in the run |
 | --- | --- | --- | --- | --- |
 | `dinov3-b16@512/{fp32,bf16}` | DINOv3 ViT-B/16 (gated) | 512 | both | the operator's floor: at least 512, bars not crops |
 | `dinov3-b16@768/{fp32,bf16}` | " | 768 | both | above the largest portal's stored width — does upsampling buy anything? |
 | `dinov3-b16@1024/{fp32,bf16}` | " | 1024 | both | "what about even larger?" |
 | `dinov3-l16@512/bf16` | DINOv3 ViT-L/16 (gated) | 512 | bf16 | is the bigger model worth its cost? |
-| `dinov2-l14-reg@504/bf16` | DINOv2-L/14-with-registers | **504** | bf16 | Apache-2.0 — the licence fallback. Patch 14 does not divide 512 |
-| `siglip2-b16@{512,256}/bf16` | SigLIP2 B/16 | largest that exists | bf16 | the language-supervised control (its own attention-pool head) |
-| `clip-b32-laion@224/fp32` | LAION CLIP B/32 | 224 | fp32 | tells "the CLIP family is weak" apart from "the 2021 checkpoint is weak" |
-| `clip-b32-stored` | `openai/clip-vit-base-patch32` | — | — | **zero GPU** — the incumbent's live vectors, copied by SQL |
+| `dinov2-l14-reg@504/bf16` | DINOv2-L/14-with-registers | **504** | bf16 | Apache-2.0 — the licence fallback. Patch 14 does not divide 512, so 504 IS the 512 arm |
+| `siglip2-b16@512/bf16` | SigLIP2 B/16 | 512 | bf16 | the language-supervised control (its own attention-pool head) |
 
 All six DINOv3 B/16 arms use `letterbox_pad`: the operator asked for bars rather than
 crops, and centre-cropping discards the left/right bands where portal watermarks live.
+
+### Retired: nothing below 512 px runs by itself (ruling 2026-09-09)
+
+| Arm | Res | Status |
+| --- | --- | --- |
+| `clip-b32-laion@224/fp32` | 224 | retired — runs only when `arms` names it |
+| `clip-b32-stored` | 224 | retired — runs only when `arms` names it, and naming it is what triggers the free SQL copy |
+
+**Why**: run 1 measured them. The two 224 px arms came in **0.03 to 0.06 mean F1 below**
+the 512-and-up field, which answers "how much better than what we already have?" — the
+incumbent is behind, and repeating the measurement every run buys nothing. Retiring is
+not deleting: `retired_arms()` still holds both, `all_arms()` is the catalogue an
+explicit `arms` list resolves against, so
+`arms: clip-b32-stored` re-runs the incumbent baseline whenever the operator wants it
+back. Only `default_arms()` — what a run measures when nobody narrows it — shrank.
+
+**The SigLIP2 256 fallback went with them.** `SIGLIP2_CANDIDATES` used to end at
+`siglip2-base-patch16-256` so a Hub outage still produced a control arm; that would now
+smuggle a retired resolution into an un-narrowed run, so the list holds 512 alone. If
+512 will not resolve, the embed stage **skips** the arm with the reason recorded. A
+missing control is readable in the arms table; a quietly smaller one is not.
 
 **Resolution snaps to the model's patch grid and the snapped value is what gets
 recorded.** A ViT cannot take a resolution off its grid, so a requested 512 on patch-14
 DINOv2 *is* 504 whatever anyone writes down; `renamed_to_effective` renames the arm too,
 so no arm can be called by a resolution it did not run at. (With today's preset nothing
-snaps — 512/768/1024 are multiples of 16, 504 of 14, 224 of 32 — but the machinery is
+snaps — 512/768/1024 are multiples of 16, 504 of 14 — but the machinery is
 what makes that a checked fact rather than a lucky one.)
 
 **Revisions are resolved at run time, never hardcoded.** `hub_sha` asks the public
@@ -74,6 +95,7 @@ whose sha will not resolve (gated weights, no `HF_TOKEN`, licence not accepted) 
 ## Cost
 
 Roughly **10.8k images x 9 GPU arms ≈ 97k forward passes**, most at 512, a pair at 1024.
+(Before the 2026-09-09 narrowing that was ten GPU arms plus the free stored one.)
 On an RTX 3090 that is on the order of an hour wall-clock including the one-time image
 download and per-arm weight loads — call it **well under a dollar** at community pricing
 ($0.20–0.30/hr). The wait window (`job_max_seconds` + a 900 s startup grace) is the hard
@@ -105,16 +127,18 @@ dispatcher hands the pod in its env. So the bootstrap deadline now runs from the
 not from launch: a slow 2 GB torch download keeps buying time, a dead clone does not. A
 background beat repeats the current step every 300 s, so silence really is silence.
 
-The tenth arm, `clip-b32-stored`, costs nothing at all — it is a `SELECT … INSERT` out of
-the live `image_clip_embeddings`, done in the manifest stage. It is the baseline every
-other arm is measured against, so a run without it measures nothing useful.
+`clip-b32-stored` costs nothing at all — it is a `SELECT … INSERT` out of the live
+`image_clip_embeddings`, done in the manifest stage rather than on a pod that would have
+nothing to compute. It was the incumbent baseline every other arm was measured against
+in run 1; since the 2026-09-09 ruling it is retired, so an un-narrowed run does no
+copying at all and naming it in `arms` is what brings the copy back.
 
 ## Running it
 
 Always start with `dry_run: true` (the default).
 
 1. **manifest** — `stage: manifest`, optionally `label`, `heads` (explicit tag ids), `arms`
-   (narrow the preset). **Head selection is the operator's ready flag** — the Ready / Not
+   (narrow the run — and the only way to reach a retired arm). **Head selection is the operator's ready flag** — the Ready / Not
    ready / Skip toggle on `/new-dedup/training-set` (`tag_taxonomy.review_state = 'ready'`),
    read through the one shared selector `toolkit.tag_head_bakeoff.ready_heads`, which the
    CPU runner uses too; `heads` is the only override, and the admitted positive/negative
@@ -128,6 +152,26 @@ Always start with `dry_run: true` (the default).
    `arms` narrows the pass; `batch_size` comes down if a 1024 arm runs out of GPU memory.
 3. **train** — `stage: train`, `run_id: N`. `dry_run` here only *prints* the command:
    the trainer is the sibling's CLI and this lane does not assume what its flags mean.
+
+## The training modes
+
+A **mode** is what reaches the fit — never what is graded, so "positive-only did better"
+can never mean "positive-only was asked an easier question". Three exist
+(`toolkit/tag_heads.MODES`); **one runs by default** (`th.DEFAULT_MODES`).
+
+| Mode | What it fits | Default? |
+| --- | --- | --- |
+| `pos_neg` | the operator's positives against the operator's negatives | **yes** |
+| `pos_only_free_neg` ("borrowed no") | positives against the OTHER heads' positives, which cost no labelling | retired 2026-09-09 |
+| `pos_only_centroid` ("closeness only") | no classifier: cosine to the mean of this head's positives | retired 2026-09-09 |
+
+**Why**: run 1 measured them, and both positive-only readings landed **0.05 to 0.07 mean
+F1 below `pos_neg`**. The operator's instruction that produced them ("positive training
+only, no negative training") admitted two honest readings and both have now been
+answered, so a plain run stops paying for them. The code stays: `--modes
+pos_only_centroid` on `scripts.tag_head_bakeoff` still trains one, which is how run 1's
+numbers can be reproduced or the question re-asked on a new head set. Only the DEFAULT
+narrowed — `MODES` is still the whole vocabulary the flag validates against.
 
 ## Reading the readouts
 
@@ -254,6 +298,11 @@ with no fresh `pod booted` line means the bootstrap never reached the payload �
   `all-terminal` two seconds in for exactly that reason (2026-09-08 (j)). `ok`/`skipped`
   never move without `force_arms`, which needs `arms` and only re-opens the arms it names;
   a dry run prints what it would reset and writes nothing.
+- **`arms` is both the narrowing knob and the retired-arm door.** An empty `arms` gets
+  the default preset (512 px and up); a named list resolves against the wider catalogue,
+  which is the only way `clip-b32-laion@224/fp32` or `clip-b32-stored` runs at all. An
+  unknown name is still an error rather than a silent no-op — a typo that ran the whole
+  grid would cost real GPU minutes.
 - **Naming an arm in `arms` overrides its status.** That is how a `skipped` arm is
   retried once the token is fixed or the licence accepted; an already-finished arm named
   this way is a no-op, because the per-image skip still applies. Leaving `arms` empty

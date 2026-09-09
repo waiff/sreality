@@ -6206,7 +6206,7 @@
         },
         {
           "name": "arms",
-          "description": "Comma-separated arm names to narrow a stage to (e.g. dinov3-b16@512/bf16). Empty = every arm.",
+          "description": "Comma-separated arm names to narrow a stage to (e.g. dinov3-b16@512/bf16). Empty = the default preset (512 px and up). Naming an arm is also the only way to reach a retired one (clip-b32-laion@224/fp32, clip-b32-stored).",
           "required": false,
           "type": "string",
           "default": "",

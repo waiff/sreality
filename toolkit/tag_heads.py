@@ -63,10 +63,17 @@ DEFAULT_SEED = 0
 #     positives. The strict reading, where negatives touch nothing but the
 #     evaluation.
 # Both are scored the same way as `pos_neg` and shown side by side.
+# RETIRED FROM THE DEFAULT SET (operator ruling 2026-09-09): run 1 measured both
+# 0.05-0.07 mean F1 BELOW pos_neg, so the question they were asked is answered.
+# The implementations stay — a retired mode is still runnable when NAMED, which
+# is how run 1's numbers can be reproduced or re-asked on a new head set.
 MODE_POS_NEG = "pos_neg"
 MODE_POS_ONLY_FREE_NEG = "pos_only_free_neg"
 MODE_POS_ONLY_CENTROID = "pos_only_centroid"
 MODES = (MODE_POS_NEG, MODE_POS_ONLY_FREE_NEG, MODE_POS_ONLY_CENTROID)
+# What a run trains when nobody says otherwise. MODES is what may be named;
+# DEFAULT_MODES is what happens by itself, and since the ruling they differ.
+DEFAULT_MODES = (MODE_POS_NEG,)
 
 # The composite primary key of image_dinov3_embeddings minus image_id: what
 # "which encoder produced this vector" means. Deliberately a local, minimal
