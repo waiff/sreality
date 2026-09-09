@@ -441,6 +441,35 @@ def test_walk_category_gone_page_past_the_declared_end_is_an_end(monkeypatch):
     assert client.offsets == [0, 30]
 
 
+def test_walk_category_gone_page_on_the_last_declared_page_is_an_end(monkeypatch):
+    """Replays prodam/pozemek on 2026-09-09 03:54: bazos declared 13,461, the
+    walk collected 13,451 (the last page held 11), the pager still offered the
+    next offset and bazos 404'd it -- one row short of the declared count. The
+    404 landed ON the last page the counter implies, so it is the portal's end;
+    a row-exact rule called it ours and a 13k-row scope nominated nothing."""
+    full = [_page([f"p{n}-{i}" for i in range(20)], total=13_461, next_offset=20 * (n + 1))
+            for n in range(672)]
+    last = _page([f"tail-{i}" for i in range(11)], total=13_461, next_offset=13_460)
+    (seen, _c, result_size, _pages, reached_end), client = _walk(
+        monkeypatch, full + [last], client=_RecIdxClient(ok_pages=673),
+    )
+    assert len(seen) == 13_451 and result_size == 13_461
+    assert client.offsets[-1] == 13_460      # followed the pager, got the 404
+    assert reached_end is True
+
+
+def test_walk_category_gone_page_pages_before_the_declared_end_is_not_an_end(monkeypatch):
+    # The page-grain tolerance is ONE page: a 404 two pages before the counter's
+    # end is still unplaceable (a soft block wearing a 404), so nothing nominates.
+    pages = [_page([f"p{n}-{i}" for i in range(20)], total=100, next_offset=20 * (n + 1))
+             for n in range(2)]
+    (seen, _c, result_size, _pages, reached_end), client = _walk(
+        monkeypatch, pages, client=_RecIdxClient(ok_pages=2),
+    )
+    assert len(seen) == 40 and result_size == 100
+    assert client.offsets[-1] == 40 and reached_end is False
+
+
 def test_walk_category_a_full_page_with_no_pager_is_corroborated(monkeypatch):
     """`_next_offset` returns None both for bazos's last page and for a pager we
     failed to parse. A FULL page claiming no next page must be proven: one fetch

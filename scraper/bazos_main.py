@@ -140,6 +140,7 @@ class BazosPortal:
         items: list[tuple[str, str, int | None]] = []  # (native, detail_path, idx_price)
         total: int | None = None
         pages = 0
+        page_size = 0  # largest page bazos served this scope; places a 404 at page grain
         offset = 0
         # The largest page this scope has served. bazos publishes no page size, so
         # the walk measures it: it is what tells a SHORT tail page (bazos ran out
@@ -177,6 +178,7 @@ class BazosPortal:
                 # is decided by _classify_gone, not by this break.
                 stop = self._classify_gone(
                     total=total, collected=len(seen), pages=pages, offset=offset,
+                    page_size=page_size,
                 )
                 LOG.info(
                     "INDEX end-of-results at offset=%d (gone) stop=%s", offset, stop
@@ -184,6 +186,7 @@ class BazosPortal:
                 break
             page = parse_index(html)
             pages += 1
+            page_size = max(page_size, len(page.items))
             if page.total is not None:
                 total = page.total
             page_size = max(page_size, len(page.items))
@@ -313,25 +316,33 @@ class BazosPortal:
 
     def _classify_gone(
         self, *, total: int | None, collected: int, pages: int, offset: int,
+        page_size: int = 0,
     ) -> StopReason:
         """Is a 404/410 on an index page bazos's past-the-end marker, or ours?
 
         A soft block served as a 404 is byte-for-byte the same signal, so the
         404 alone proves nothing: it is the portal's end only once the walk has
         actually read a page of this scope AND bazos's own counter agrees that
-        this offset is at or past the end. A 404 while the declared total is
-        still far away — or while no total was ever readable, so nothing can
-        place the 404 at all — is a stop of ours. That an unreadable counter
-        costs us the 404 terminator is fine: the probe (2026-09-08) shows bazos's
-        genuine last page carries no "Další" link at all, so a healthy walk ends
-        on `pager_end`, and the past-the-end 404 is the abnormal event."""
+        this offset is on or past the LAST page it implies. Page, not row: the
+        counter over-counts by a handful (ads removed between the count and the
+        page render), and the pager does sometimes advertise one page past the
+        end -- 2026-09-09 03:54, prodam/pozemek: 13,451 collected of a declared
+        13,461, the last page held 11, the pager still offered offset 13,460,
+        bazos 404'd it, and a row-exact rule (offset >= total) called that a
+        stop of ours, so a 13k-row scope nominated nothing. A count one row
+        long must never veto a walk the portal itself ended (rule #3).
+
+        A 404 while the declared total is still pages away -- or while no
+        total was ever readable, so nothing can place the 404 at all -- is a
+        stop of ours. That an unreadable counter costs us the 404 terminator is
+        fine: a healthy walk usually ends on `pager_end`."""
         if pages == 0:
             return "error"
         if total is None:
             return "error"
         if collected >= total:
             return "declared_total_reached"
-        if offset >= total:
+        if offset + max(page_size, 0) >= total:
             return "empty_confirmed"
         return "error"
 
