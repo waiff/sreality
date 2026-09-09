@@ -167,11 +167,14 @@ def decide_bezrealitky(active: int, key_present: int, key_absent: int, with_id: 
         # The ceiling: rows carrying the key whose value the portal published as null. A
         # refetch of those returns the same null. Only the key-absent rows are ours to fix.
         null_rows = key_present - with_id
-        ceiling = _pct(key_present, active)
+        # The most this arm can ever read: every row that already has an id, plus every
+        # key-absent row IF its refetch returns one. The rows publishing null are the
+        # portal's, and no refetch changes them.
+        ceiling = _pct(with_id + key_absent, active)
         share = Arm("bezrealitky active rows with a ruianId", VERDICT_PORTAL_CAPPED,
                     f"{pct} %", f">= {RUIAN_ID_MIN_PCT} %",
-                    f"{with_id}/{active}; {null_rows} publish null (portal ceiling "
-                    f"{ceiling} % even if every pre-0m row is refetched)")
+                    f"{with_id}/{active}; {null_rows} publish null — the arm cannot exceed "
+                    f"{ceiling} % even if every pre-0m row refetches with an id")
     remainder = Arm("bezrealitky pre-0m-shape rows still to refetch",
                     VERDICT_PASS if key_absent == 0 else VERDICT_FAIL,
                     str(key_absent), "0", f"key absent on {key_absent} of {active} active rows")
