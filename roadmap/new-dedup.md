@@ -374,7 +374,8 @@ W1 (shared prerequisites + labeling program):
       arm x mode x head cross product on CPU, resumable per cell, grading the sealed exam by the
       ratified rule (`exam_machine_review.human_verdict`, now extracted so the two graders cannot
       drift). Read surface: `/new-dedup/tagging-bakeoff/{runs,runs/{id}/metrics,runs/{id}/images,
-      runs/{id}/buckets}`, admin-gated and read-only.
+      runs/{id}/buckets}`, admin-gated and read-only — **two more routes since phase 2c below,
+      six in all**.
 - [x] **Tagging bake-off, phase 2a — the comparison page (2026-09-08, PROGRAM.md ledger (e)):**
       `NEW DEDUP · Tagging bake-off` at `/new-dedup/tagging-bakeoff`, a pure consumer of the four
       routes above. A matrix of head x (arm x mode) with F1 leading and the graded n always beside
@@ -404,6 +405,27 @@ W1 (shared prerequisites + labeling program):
       end-to-end rather than GPU-only: **11.5M images ≈ $27 (DINOv2-L) / $34 (@512) / $59 (@768)
       / $163 (@1024)** on a $0.22/hr 3090 — far above ENCODER-DECISION.md's $1-12 band, which
       was synthetic-tensor throughput. Results are browsable at `/new-dedup/tagging-bakeoff`.
+- [x] **Tagging bake-off, phase 2c — the operator's rulings of 2026-09-09, and the product
+      contract they settle (PROGRAM.md ledger (c)):** **tags are assigned WINNER-TAKES-ALL** —
+      every head scores the photo, the highest score names the tag, and **the product takes no
+      per-head yes/no decision at all**. The winner is **recomputed from whatever heads a run
+      holds, never stored** (heads keep being added, and a stored winner would be a fact about
+      yesterday's head set), and it is only a winner **within one (arm, mode, split)**, since two
+      arms are two models and the modes do not share a scale. The page gained the two views that
+      make this readable: **view C**, one head's whole ranking unbucketed, sorted by the head's
+      SCORE (F1 is one number per head and cannot order photographs), and a **per-photo
+      probability panel** listing every head's raw score strongest-first with the winner marked.
+      **The retirement is enforced twice, deliberately:** on the page as a display filter
+      (`RETIRED_MODES` / `MIN_LIVE_RESOLUTION = 504`, with a toggle that brings the retired rows
+      back — nothing is deleted), and in the LANE as a default (`scripts/tag_head_bakeoff.py`
+      trains `pos_neg` only, `tagging_bakeoff_manifest.build_arms` mints no arm below 504 px, and
+      the workflow gained a `modes` input), so the next default dispatch cannot re-embed a retired
+      arm on a rented GPU or re-train a rejected mode. **Naming one still runs it**
+      (`arms=clip-b32-stored` — the zero-GPU incumbent baseline — or `modes=pos_only_centroid`),
+      because ruling (c) keeps the training set, head set, model and parameters iterating and a
+      narrowed default must not become a locked door. Read surface now **six** routes:
+      `.../runs/{id}/scores` (one head's ranking, keyset-paged) and
+      `.../runs/{id}/images/{image_id}` (one photo across every arm, mode, head and split).
 - [x] **Tag model, iteration 1 — the versioned model + the winner store (2026-09-09, PR #1366;
       PROGRAM.md ledger entry `2026-09-09 (b)`, which also lists the day's ruling in
       full):** the bake-off produced evidence; this is where a chosen cell of it becomes
@@ -435,7 +457,10 @@ W1 (shared prerequisites + labeling program):
       gradable cells), and some "errors" will be label mistakes worth re-judging first;
       (2) **per-head thresholds** off each head's own precision/recall curve — heads trained at
       ~1:3 pos:neg and judged at 0.5 over-fire at natural prevalence, and this costs no
-      re-embedding and no re-training; (3) **property list's definition** — the one weak head at
+      re-embedding and no re-training. **A MEASUREMENT knob only, since phase 2c:** the product
+      assigns tags winner-takes-all and reads no head's yes/no, so a threshold now only sharpens
+      what the experiment REPORTS (the F1s, the confusion square, the wrongly-caught pile) and is
+      not a step towards shipping; (3) **property list's definition** — the one weak head at
       0.69 CV F1 (precision 0.57 / recall 0.87), a shape that reads as a definition admitting too
       much rather than a training failure; (4) **fill `resolution` in `data/dinov3_config.json`**
       (`preprocessing` was already ruled `letterbox_pad`, `dtype` is answered by the data) — now

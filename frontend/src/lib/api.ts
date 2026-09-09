@@ -1919,6 +1919,86 @@ export const getBakeoffBuckets = (
     `/new-dedup/tagging-bakeoff/runs/${runId}/buckets`, { query: params, jwt: true },
   );
 
+export interface BakeoffScoreRow {
+  image_id: number;
+  listing_id: number | null;
+  storage_path: string | null;
+  score: number;
+  label: 1 | 0 | null;
+  predicted: boolean;
+  fold: number | null;
+  outcome: BakeoffOutcome | 'abstained';
+}
+
+export interface BakeoffScores {
+  arm_id: number;
+  mode: BakeoffMode;
+  tag_id: number;
+  split: BakeoffSplit;
+  /* The size of the whole cell, not of this page. */
+  total: number;
+  rows: BakeoffScoreRow[];
+  /* The pair IS the cursor: scores tie constantly, so image_id is what makes
+   * the ordering total. Both are null on the last page. */
+  next_after_score: number | null;
+  next_after_image_id: number | null;
+}
+
+/* VIEW C. The same cell as View B, UNBUCKETED: every photo the head scored, in
+ * score order. Paged by the (score, image_id) pair the previous page returned —
+ * an offset over a tied ORDER BY would show one photo twice and skip another,
+ * so the two travel together and the API refuses one without the other. */
+export const getBakeoffScores = (
+  runId: number,
+  params: {
+    arm_id: number;
+    mode: BakeoffMode;
+    tag_id: number;
+    split?: BakeoffSplit;
+    after_score?: number;
+    after_image_id?: number;
+    limit?: number;
+  },
+): Promise<{ data: BakeoffScores }> =>
+  request<{ data: BakeoffScores }>(
+    `/new-dedup/tagging-bakeoff/runs/${runId}/scores`, { query: params, jwt: true },
+  );
+
+export interface BakeoffImageDetailScore {
+  arm_id: number;
+  arm: string;
+  resolution: number | null;
+  mode: BakeoffMode;
+  tag_id: number;
+  tag_label: string | null;
+  split: BakeoffSplit;
+  fold: number | null;
+  label: 1 | 0 | null;
+  score: number;
+  predicted: boolean;
+  outcome: BakeoffOutcome | 'abstained';
+}
+
+export interface BakeoffImageDetail {
+  image_id: number;
+  listing_id: number | null;
+  storage_path: string | null;
+  scores: BakeoffImageDetailScore[];
+}
+
+/* VIEW D. One photograph, every score the run gave it. This is RAW MODEL
+ * OUTPUT — the probability each head assigned this photo — not a metric, which
+ * is why the modal built on it never shows an F1. Ranking heads against each
+ * other is meaningful only WITHIN one (arm, mode, split): the scales differ
+ * across modes and two arms are two different models. */
+export const getBakeoffImageDetail = (
+  runId: number,
+  imageId: number,
+): Promise<{ data: BakeoffImageDetail }> =>
+  request<{ data: BakeoffImageDetail }>(
+    `/new-dedup/tagging-bakeoff/runs/${runId}/images/${imageId}`, { jwt: true },
+  );
+
 // "Border case" flag (migration 310): even a human isn't confident about this
 // image's classification. Independent of image_training_examples — no label
 // required, may coexist with one (a best-guess flagged as uncertain).

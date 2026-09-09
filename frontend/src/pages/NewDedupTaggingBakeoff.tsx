@@ -4,9 +4,13 @@ import { useSearchParams } from 'react-router-dom';
 
 import {
   getBakeoffBuckets,
+  getBakeoffImageDetail,
   getBakeoffImages,
   getBakeoffMetrics,
+  getBakeoffScores,
   listBakeoffRuns,
+  type BakeoffArm,
+  type BakeoffImageDetailScore,
   type BakeoffImageScore,
   type BakeoffMetric,
   type BakeoffMode,
@@ -28,8 +32,32 @@ import type { ImagePublic } from '@/lib/types';
  *   1. the MATRIX — how did each arm do on each head? (the number)
  *   2. VIEW A     — what did the arms say about the SAME photograph? (the row)
  *   3. VIEW B     — what did one head get wrong, most-confident first? (the cell)
+ *   4. VIEW C     — the same cell UNBUCKETED: every photo it scored, ranked.
  * The operator moves number → photo → mistake without losing their selection:
  * arms, modes, head and split live in the URL and survive the view switch.
+ *
+ * VIEW C IS RANKED BY THE HEAD'S SCORE, NOT BY F1. The operator asked for the
+ * list "sorted by the F1 score", and F1 is a property of a HEAD — one number per
+ * (arm, mode, head) — so it cannot order photographs. The per-photo sort key is
+ * the score that head gave that photo, which is what F1 is computed FROM. The
+ * view says so in its own help line rather than quietly substituting.
+ *
+ * THE NARROWING (operator ruling 2026-09-09 b). Two training modes and every arm
+ * below 512 px are RETIRED: hidden from the selectors and therefore from the
+ * matrix, never deleted. One toggle brings them back, and anything the URL names
+ * stays visible regardless — a shared link must reproduce its screen, and a
+ * selection you cannot see is a selection you cannot unpick. THE EXPERIMENT LANE
+ * WAS NARROWED TO MATCH, in the same PR and by the same numbers: the trainer's
+ * default modes (scripts/tag_head_bakeoff.LIVE_MODES) and the manifest's default
+ * arms (scripts/tagging_bakeoff_arms.live_arms, same 504 floor). Hiding a set-up
+ * here while the lane kept re-running it would cost GPU money invisibly.
+ *
+ * THE MODAL (operator ruling 2026-09-09 a). Tags will be assigned WINNER-TAKES-
+ * ALL: every head scores the photo and the strongest wins. So opening a photo in
+ * ANY view shows, beside it, each head's raw probability sorted strongest-first,
+ * with the top one marked — the model's own output, never an F1. Heads are ranked
+ * only WITHIN one (arm, mode, split); the scales differ across modes and two arms
+ * are two different models.
  *
  * TWO CONVENTIONS FROM THE CONTRACT ARE RENDERED, NOT ASSUMED (api/new_dedup_bakeoff.py):
  *   * a null precision/recall/f1 means NOTHING WAS PROPOSED — never zero. Every
@@ -81,6 +109,25 @@ const MODE_HELP: Record<BakeoffMode, string> = {
   pos_only_centroid:
     'pos_only_centroid — no classifier at all: just how close a photo sits to the average of your yes photos. The strict positive-only reading. Its score is a cosine (−1…1), not a probability, so it is never comparable with the other two.',
 };
+
+/* RETIRED BY THE OPERATOR, 2026-09-09: the two positive-only modes lost the
+ * bake-off and stop competing. Their rows are still in the database and still
+ * render behind the toggle — this narrows the experiment, it does not erase a
+ * result. */
+const RETIRED_MODES: readonly BakeoffMode[] = ['pos_only_free_neg', 'pos_only_centroid'];
+const LIVE_MODES: readonly BakeoffMode[] = MODES.filter((m) => !RETIRED_MODES.includes(m));
+
+/* Retired the same day and for the same reason: an arm below 512 px is out.
+ * The floor is written as 504 because dinov2 tokenises in 14 px patches, so ITS
+ * 512 lands on 504 — the same arm snapped to its own grid, not a smaller one.
+ * An arm whose resolution is unknown is left visible: hiding a thing we cannot
+ * measure is how a live arm disappears without anyone deciding it should. */
+const MIN_LIVE_RESOLUTION = 504;
+const armIsRetired = (a: BakeoffArm): boolean =>
+  a.resolution != null && a.resolution < MIN_LIVE_RESOLUTION;
+
+const RETIRED_HELP =
+  'Set-ups the operator retired on 2026-09-09: the two positive-only training modes, and every arm below 512 px (dinov2’s 504 is that same 512 snapped to its 14 px patch grid, so it stays). Among them is clip-b32-stored, the free copy of the incumbent’s live vectors that every other arm was measured against — reveal it when you want the old baseline back in the comparison. Nothing was deleted, here or in the database, and the bake-off lane now defaults to the same live set, so no new run pays to re-measure these.';
 
 const SPLITS: readonly BakeoffSplit[] = ['cv', 'exam'];
 const SPLIT_LABEL: Record<BakeoffSplit, string> = {
@@ -456,6 +503,7 @@ const asImagePublic = (t: { image_id: number; storage_path: string | null }): Im
 
 const PAGE_A = 60;
 const PAGE_B = 24;
+const PAGE_C = 60;
 
 export default function NewDedupTaggingBakeoff() {
   const [params, setParams] = useSearchParams();
@@ -463,6 +511,8 @@ export default function NewDedupTaggingBakeoff() {
   /* Forward-only cursor paging (the contract gives `next_after_image_id` and no
    * inverse), so "previous" is a stack this page keeps. */
   const [cursors, setCursors] = useState<number[]>([]);
+  /* The same, for View C — whose cursor is a (score, image_id) pair. */
+  const [scoreCursors, setScoreCursors] = useState<string[]>([]);
 
   const patch = (next: Record<string, string | null>) => {
     const merged = new URLSearchParams(params);
@@ -472,6 +522,12 @@ export default function NewDedupTaggingBakeoff() {
     }
     setParams(merged, { replace: true });
   };
+
+  /* A cursor is a position in ONE ordering. Change which rows are being listed
+   * — the run, the cell, the split, the head — and every stored position is
+   * about a list that no longer exists, so all three are dropped together. */
+  const REWIND = { after: null, off: null, sc: null };
+  const rewind = () => { setCursors([]); setScoreCursors([]); };
 
   const runsQ = useQuery({ queryKey: ['bakeoff-runs'], queryFn: () => listBakeoffRuns() });
   const runs = useMemo(() => runsQ.data?.data ?? [], [runsQ.data]);
@@ -501,22 +557,30 @@ export default function NewDedupTaggingBakeoff() {
   const arms = useMemo(() => run?.arms ?? [], [run]);
 
   /* Selections. A default derived from the data is NOT written into the URL —
-   * a shared link then says only what the operator actually chose. */
+   * a shared link then says only what the operator actually chose. The DEFAULTS
+   * are the narrowed experiment: every live arm, the full training mode, the
+   * first head, cross-validation. */
   const armIds = useMemo(() => {
     const raw = (params.get('arms') ?? '').split(',').map(Number)
       .filter((n) => Number.isFinite(n) && n > 0);
     const known = raw.filter((id) => arms.some((a) => a.id === id));
-    return known.length ? known : arms.slice(0, 2).map((a) => a.id);
+    if (known.length) return known;
+    const live = arms.filter((a) => !armIsRetired(a));
+    /* Falling back to every arm when none survives the floor: a page with no
+     * columns would read as "the run has no arms", which is a different claim. */
+    return (live.length ? live : arms).map((a) => a.id);
   }, [params, arms]);
 
   const modeSel = useMemo(() => {
     const raw = (params.get('mode') ?? '').split(',')
       .filter((m): m is BakeoffMode => (MODES as readonly string[]).includes(m));
-    return raw.length ? raw : [...MODES];
+    return raw.length ? raw : [...LIVE_MODES];
   }, [params]);
 
   const split: BakeoffSplit = params.get('split') === 'exam' ? 'exam' : 'cv';
-  const view = params.get('view') === 'buckets' ? 'buckets' : 'photos';
+  const rawView = params.get('view');
+  const view = rawView === 'buckets' || rawView === 'scores' ? rawView : 'photos';
+  const showRetired = params.get('retired') === '1';
 
   /* 'all' is a real choice in View A, and the reason the outcome filter can be
    * unavailable — it is not the absence of a choice. View B has no such option:
@@ -528,13 +592,13 @@ export default function NewDedupTaggingBakeoff() {
 
   const toggleArm = (id: number) => {
     const next = armIds.includes(id) ? armIds.filter((a) => a !== id) : [...armIds, id];
-    setCursors([]);
-    patch({ arms: next.length ? next.join(',') : String(id), after: null });
+    rewind();
+    patch({ arms: next.length ? next.join(',') : String(id), ...REWIND });
   };
   const toggleMode = (m: BakeoffMode) => {
     const next = modeSel.includes(m) ? modeSel.filter((x) => x !== m) : [...modeSel, m];
-    setCursors([]);
-    patch({ mode: next.length ? next.join(',') : m, after: null });
+    rewind();
+    patch({ mode: next.length ? next.join(',') : m, ...REWIND });
   };
 
   /* The matrix: one row per head, one column per (arm x mode) selected. */
@@ -633,6 +697,75 @@ export default function NewDedupTaggingBakeoff() {
     (m) => m.arm_id === bArmId && m.mode === bMode && m.tag_id === tagId,
   ) ?? null;
 
+  /* ------------------------------------------------------------- view C data */
+
+  /* View C looks at the SAME cell as View B and shares its arm/mode keys, so
+   * switching between "what did it get wrong" and "the whole ranking" never
+   * re-asks which cell. Its cursor is the (score, image_id) PAIR the API
+   * returned, carried as one URL value — scores tie, so the score alone is not
+   * a position. "Previous" is a stack, as in View A: the contract pages forward
+   * only. */
+  const rawCursor = params.get('sc');
+  const scoreCursor = useMemo(() => {
+    const parts = (rawCursor ?? '').split(',');
+    if (parts.length !== 2) return null;
+    const score = Number(parts[0]);
+    const imageId = Number(parts[1]);
+    return Number.isFinite(score) && Number.isInteger(imageId) && imageId > 0
+      ? { score, imageId }
+      : null;
+  }, [rawCursor]);
+
+  const scoresQ = useQuery({
+    queryKey: ['bakeoff-scores', runId, bArmId, bMode, tagId, split, rawCursor],
+    queryFn: () => getBakeoffScores(runId as number, {
+      arm_id: bArmId as number, mode: bMode, tag_id: tagId as number, split,
+      after_score: scoreCursor?.score,
+      after_image_id: scoreCursor?.imageId,
+      limit: PAGE_C,
+    }),
+    enabled: runId != null && view === 'scores' && bArmId != null && tagId != null,
+  });
+  const scoreRows = useMemo(() => scoresQ.data?.data.rows ?? [], [scoresQ.data]);
+  const galleryC = useMemo(() => scoreRows.map(asImagePublic), [scoreRows]);
+  const scoreTotal = scoresQ.data?.data.total ?? 0;
+  /* The cursor for the NEXT page, as the one URL value it is stored as. Null on
+   * the last page — the API says so; the page never infers it from a count. */
+  const nextScoreCursor = scoresQ.data?.data.next_after_image_id == null
+    ? null
+    : `${scoresQ.data.data.next_after_score},${scoresQ.data.data.next_after_image_id}`;
+  /* Rank is a position in the whole ranking, not on this page — the operator is
+   * looking for "how far down does the good stuff go", and a counter restarting
+   * at 1 on every page would answer a different question. The stack depth IS the
+   * page number, since every page but the last is full.
+   *
+   * A shared link that lands mid-ranking arrives with a cursor and NO stack, so
+   * the absolute position is genuinely unknown. The page then shows no rank at
+   * all rather than numbering that page from 1 — which would be a wrong fact,
+   * not a rounded one. */
+  const rankKnown = scoreCursor == null || scoreCursors.length > 0;
+  const rankBase = scoreCursors.length * PAGE_C;
+
+  /* --------------------------------------------------- what stays on screen */
+
+  /* A retired arm or mode is hidden — UNLESS something on screen is using it.
+   * The URL may name one (a link from before the ruling, or a deliberate
+   * comparison), and a selection with no control is a selection the operator
+   * cannot undo. */
+  const visibleArms = useMemo(() => {
+    if (showRetired) return arms;
+    const inUse = new Set([...armIds, ...(bArmId != null ? [bArmId] : [])]);
+    return arms.filter((a) => !armIsRetired(a) || inUse.has(a.id));
+  }, [arms, armIds, bArmId, showRetired]);
+
+  const visibleModes = useMemo(() => {
+    if (showRetired) return MODES;
+    return MODES.filter(
+      (m) => !RETIRED_MODES.includes(m) || modeSel.includes(m) || m === bMode);
+  }, [modeSel, bMode, showRetired]);
+
+  const hiddenCount = (arms.length - visibleArms.length) + (MODES.length - visibleModes.length);
+
   /* ------------------------------------------------------------------ render */
 
   if (runsQ.isLoading) return <div className="p-6"><Spinner /></div>;
@@ -656,6 +789,62 @@ export default function NewDedupTaggingBakeoff() {
   const headName = (id: number | null) =>
     heads.find((h) => h.id === id)?.label ?? (id == null ? 'all heads' : `tag ${id}`);
 
+  /* Views B and C look at the SAME one cell from two angles — the four outcome
+   * columns, and the whole ranking — so they share one set of controls under
+   * their own URL keys. Written once: two copies would drift, and the operator
+   * would have to re-pick the cell every time they switched angle. */
+  const cellControls = (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+      <span className="flex items-center gap-1">
+        <Caption>arm</Caption>
+        <select
+          aria-label="Arm to inspect"
+          data-testid="bucket-arm-picker"
+          className={selectClass}
+          value={bArmId ?? ''}
+          onChange={(e) => { rewind(); patch({ barm: e.target.value, ...REWIND }); }}
+        >
+          {visibleArms.map((a) => <option key={a.id} value={a.id}>{a.arm}</option>)}
+        </select>
+      </span>
+      <span className="flex flex-wrap items-center gap-1" role="group" aria-label="Training mode to inspect">
+        <Caption>trained on</Caption>
+        {visibleModes.map((m) => (
+          <Chip
+            key={m}
+            testId={`bmode-${m}`}
+            on={bMode === m}
+            onClick={() => { rewind(); patch({ bmode: m, ...REWIND }); }}
+            title={MODE_HELP[m]}
+          >
+            {MODE_LABEL[m]}
+          </Chip>
+        ))}
+      </span>
+      <span className="text-[0.7rem] text-[var(--color-ink-3)]" data-testid="bucket-scope">
+        One cell at a time: <b>{headName(tagId)}</b> on <b>{armName(bArmId)}</b>, trained{' '}
+        <b>{MODE_LABEL[bMode]}</b>, on the <b>{SPLIT_LABEL[split].toLowerCase()}</b> numbers.
+        Your arm and mode selections above are left alone.
+      </span>
+    </div>
+  );
+
+  /* Every view opens the SAME modal, so the probabilities read the same wherever
+   * the operator got to the photograph from. */
+  const asideForImage = (image: ImagePublic | undefined) => (
+    image && runId != null
+      ? (
+        <ImageProbabilityPanel
+          runId={runId}
+          imageId={image.id}
+          split={split}
+          armIds={armIds}
+          modes={modeSel}
+        />
+      )
+      : null
+  );
+
   return (
     <div className="max-w-[112rem] mx-auto px-4 py-6">
       {/* ------------------------------------------------------------ header */}
@@ -664,9 +853,13 @@ export default function NewDedupTaggingBakeoff() {
         <p className="mt-0.5 max-w-prose text-xs text-[var(--color-ink-3)]">
           One yes/no classifier &mdash; a <b>head</b> &mdash; per photo tag, trained on the
           picture-numbers of each encoder configuration &mdash; an <b>arm</b> &mdash; under each
-          training <b>mode</b>, then asked about every photo you have labelled. Read it in three
-          steps: the table says which arm did best on which tag; <b>Photos</b> shows what every arm
-          said about the same photograph; <b>By head</b> shows what one head actually got wrong.
+          training <b>mode</b>, then asked about every photo you have labelled. The table says
+          which arm did best on which tag, and three views sit under it:
+          {' '}<b>Photos</b> puts one photograph in front of you with what every selected arm said
+          about it; <b>By head</b> sorts one head&rsquo;s photos into what it caught, wrongly
+          caught, missed and correctly rejected; <b>All photos by score</b> is that same head
+          without the four columns &mdash; every photo it scored, strongest first. Open any photo
+          in any view to see each head&rsquo;s probability for it, strongest first.
         </p>
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -676,7 +869,7 @@ export default function NewDedupTaggingBakeoff() {
             data-testid="run-picker"
             className={selectClass}
             value={runId ?? ''}
-            onChange={(e) => { setCursors([]); patch({ run: e.target.value, after: null, off: null }); }}
+            onChange={(e) => { rewind(); patch({ run: e.target.value, ...REWIND }); }}
           >
             {runs.map((r) => (
               <option key={r.id} value={r.id}>
@@ -700,7 +893,7 @@ export default function NewDedupTaggingBakeoff() {
         <div className="mt-2 flex flex-wrap items-start gap-x-4 gap-y-2">
           <span className="flex flex-wrap items-center gap-1" role="group" aria-label="Arms">
             <Caption>arms</Caption>
-            {arms.map((a) => (
+            {visibleArms.map((a) => (
               <Chip
                 key={a.id}
                 testId={`arm-${a.id}`}
@@ -715,7 +908,7 @@ export default function NewDedupTaggingBakeoff() {
 
           <span className="flex flex-wrap items-center gap-1" role="group" aria-label="Training modes">
             <Caption>trained on</Caption>
-            {MODES.map((m) => (
+            {visibleModes.map((m) => (
               <Chip
                 key={m}
                 testId={`mode-${m}`}
@@ -728,6 +921,22 @@ export default function NewDedupTaggingBakeoff() {
             ))}
           </span>
 
+          <span className="flex flex-wrap items-center gap-1">
+            <Chip
+              testId="toggle-retired"
+              on={showRetired}
+              title={RETIRED_HELP}
+              onClick={() => patch({ retired: showRetired ? null : '1' })}
+            >
+              {showRetired ? 'Hide retired set-ups' : 'Show retired set-ups'}
+              {!showRetired && hiddenCount > 0 && (
+                <span className="ml-1 text-[0.6rem] text-[var(--color-ink-4)]" data-testid="retired-count">
+                  {hiddenCount}
+                </span>
+              )}
+            </Chip>
+          </span>
+
           <span className="flex flex-wrap items-center gap-1" role="group" aria-label="Which numbers">
             <Caption>numbers from</Caption>
             {SPLITS.map((s) => (
@@ -735,7 +944,7 @@ export default function NewDedupTaggingBakeoff() {
                 key={s}
                 testId={`split-${s}`}
                 on={split === s}
-                onClick={() => { setCursors([]); patch({ split: s, after: null, off: null }); }}
+                onClick={() => { rewind(); patch({ split: s, ...REWIND }); }}
                 title={SPLIT_HELP[s]}
               >
                 {SPLIT_LABEL[s]}
@@ -843,6 +1052,14 @@ export default function NewDedupTaggingBakeoff() {
         >
           By head: right and wrong
         </Chip>
+        <Chip
+          testId="view-scores"
+          on={view === 'scores'}
+          onClick={() => patch({ view: 'scores' })}
+          title="The same head, arm and mode as the buckets — but every photo it scored in one ranked list instead of four columns."
+        >
+          All photos by score
+        </Chip>
 
         <span className="ml-2 flex items-center gap-1">
           <Caption>head</Caption>
@@ -852,8 +1069,8 @@ export default function NewDedupTaggingBakeoff() {
             className={selectClass}
             value={tagId == null ? 'all' : String(tagId)}
             onChange={(e) => {
-              setCursors([]);
-              patch({ tag: e.target.value, after: null, off: null, outcome: null });
+              rewind();
+              patch({ tag: e.target.value, ...REWIND, outcome: null });
             }}
           >
             {view === 'photos' && <option value="all">All heads</option>}
@@ -871,7 +1088,7 @@ export default function NewDedupTaggingBakeoff() {
               testId="outcome-any"
               on={!outcome}
               disabled={!outcomeOk}
-              onClick={() => { setCursors([]); patch({ outcome: null, after: null }); }}
+              onClick={() => { rewind(); patch({ outcome: null, ...REWIND }); }}
             >
               any
             </Chip>
@@ -882,7 +1099,7 @@ export default function NewDedupTaggingBakeoff() {
                 on={outcome === o}
                 disabled={!outcomeOk}
                 title={outcomeOk ? OUTCOME_HELP[o] : 'Pick one head first — an outcome is one head’s verdict.'}
-                onClick={() => { setCursors([]); patch({ outcome: o, after: null }); }}
+                onClick={() => { rewind(); patch({ outcome: o, ...REWIND }); }}
               >
                 {OUTCOME_WORD[o]} <span className="text-[0.6rem] text-[var(--color-ink-4)]">{o}</span>
               </Chip>
@@ -1002,39 +1219,7 @@ export default function NewDedupTaggingBakeoff() {
       {/* ------------------------------------------------------------ view B */}
       {view === 'buckets' && (
         <section className="mt-4">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-            <span className="flex items-center gap-1">
-              <Caption>arm</Caption>
-              <select
-                aria-label="Arm to inspect"
-                data-testid="bucket-arm-picker"
-                className={selectClass}
-                value={bArmId ?? ''}
-                onChange={(e) => patch({ barm: e.target.value, off: null })}
-              >
-                {arms.map((a) => <option key={a.id} value={a.id}>{a.arm}</option>)}
-              </select>
-            </span>
-            <span className="flex flex-wrap items-center gap-1" role="group" aria-label="Training mode to inspect">
-              <Caption>trained on</Caption>
-              {MODES.map((m) => (
-                <Chip
-                  key={m}
-                  testId={`bmode-${m}`}
-                  on={bMode === m}
-                  onClick={() => patch({ bmode: m, off: null })}
-                  title={MODE_HELP[m]}
-                >
-                  {MODE_LABEL[m]}
-                </Chip>
-              ))}
-            </span>
-            <span className="text-[0.7rem] text-[var(--color-ink-3)]" data-testid="bucket-scope">
-              One cell at a time: <b>{headName(tagId)}</b> on <b>{armName(bArmId)}</b>, trained{' '}
-              <b>{MODE_LABEL[bMode]}</b>, on the <b>{SPLIT_LABEL[split].toLowerCase()}</b> numbers.
-              Your arm and mode selections above are left alone.
-            </span>
-          </div>
+          {cellControls}
 
           {tagId == null ? (
             <p className="mt-8 text-center text-sm text-[var(--color-ink-2)]">Pick a head.</p>
@@ -1154,6 +1339,172 @@ export default function NewDedupTaggingBakeoff() {
         </section>
       )}
 
+      {/* ------------------------------------------------------------ view C */}
+      {view === 'scores' && (
+        <section className="mt-4">
+          {cellControls}
+          <p className="mt-1.5 max-w-prose text-[0.7rem] text-[var(--color-ink-3)]" data-testid="scores-help">
+            Every photo this head scored, most confident first &mdash; the four buckets of{' '}
+            <b>By head</b> poured into one list, plus the photos you abstained on, which are in no
+            bucket. The order is the <b>head&rsquo;s own score for each photo</b>, not F1: an F1 is
+            one number for the whole head, so it can rank heads against each other but cannot rank
+            photographs.
+          </p>
+
+          {tagId == null || bArmId == null ? (
+            <p className="mt-8 text-center text-sm text-[var(--color-ink-2)]">Pick a head.</p>
+          ) : scoresQ.isLoading ? (
+            <div className="py-10 flex justify-center"><Spinner /></div>
+          ) : scoresQ.error ? (
+            <div className="mt-3"><ErrorBanner message={(scoresQ.error as Error).message} /></div>
+          ) : scoreRows.length === 0 && scoreCursor == null ? (
+            <p className="mt-8 text-center text-sm text-[var(--color-ink-2)]" data-testid="no-scores">
+              This head scored no photographs on the {SPLIT_LABEL[split].toLowerCase()} split.
+            </p>
+          ) : (
+            <>
+              <div className="mt-2 flex flex-wrap items-baseline gap-x-3 text-[0.7rem] text-[var(--color-ink-3)]">
+                <span data-testid="scores-total">
+                  {fmtN(scoreTotal)} photo{scoreTotal === 1 ? '' : 's'} in this cell
+                </span>
+                <span className="text-[var(--color-ink-4)]" data-testid="scores-range">
+                  {rankKnown
+                    ? <>showing {fmtN(rankBase + 1)}&ndash;{fmtN(rankBase + scoreRows.length)}</>
+                    : <span title="You arrived here on a link that starts part-way down the ranking, so this page's position in it is not known — only that these photos come after the one the link named.">
+                        somewhere below the top
+                      </span>}
+                  {' · '}scores are a {scoreUnit(bMode)}
+                </span>
+              </div>
+
+              {scoreRows.length === 0 ? (
+                /* A cell whose size is an exact multiple of the page size hands
+                 * back a cursor for a page that turns out to be empty. That is
+                 * the end of the ranking, not an empty cell — and the pager
+                 * below still renders, so this is never a dead end. */
+                <p className="mt-6 text-center text-sm text-[var(--color-ink-2)]" data-testid="scores-end">
+                  The ranking ends here. Step back for the previous page.
+                </p>
+              ) : (
+              <ul
+                className="mt-2 grid gap-2"
+                style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(11rem, 1fr))' }}
+                data-testid="score-grid"
+              >
+                {scoreRows.map((r, i) => {
+                  const colour = r.outcome === 'abstained'
+                    ? 'var(--color-ink-3)'
+                    : OUTCOME_COLOR[r.outcome];
+                  const said = r.label === 1 ? 'yes' : r.label === 0 ? 'no' : 'nothing';
+                  const verdict = r.outcome === 'abstained'
+                    ? ABSTAINED_HELP
+                    : `${OUTCOME_WORD[r.outcome]} (${r.outcome}) — ${OUTCOME_HELP[r.outcome]}`;
+                  return (
+                    <li
+                      key={r.image_id}
+                      data-testid={`score-row-${r.image_id}`}
+                      className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] p-1.5"
+                      /* The outcome colour is a LEFT EDGE, not a fill: the photo
+                       * is the thing being judged and a tinted tile would change
+                       * how it reads. */
+                      style={{ borderLeft: `3px solid ${colour}` }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setLightbox({ images: galleryC, index: i })}
+                        aria-label={`Open photo ${r.image_id}`}
+                        title={`#${r.image_id} · score ${r.score.toFixed(4)} (${scoreUnit(bMode)}) · model said ${r.predicted ? 'yes' : 'no'} · you said ${said}\n${verdict}${r.fold != null ? `\nfold ${r.fold}` : ''}`}
+                        className="block h-24 w-full rounded-[var(--radius-xs)] bg-[var(--color-inset)]"
+                      >
+                        <img
+                          src={imageSrc({ sreality_url: '', storage_path: r.storage_path })}
+                          alt={`Photo ${r.image_id}`}
+                          loading="lazy"
+                          className="h-full w-full rounded-[var(--radius-xs)] object-cover"
+                        />
+                      </button>
+                      <div className="mt-1 flex items-baseline gap-1">
+                        {rankKnown && (
+                          <span className="font-mono text-[0.55rem] tabular-nums text-[var(--color-ink-4)]">
+                            {fmtN(rankBase + i + 1)}
+                          </span>
+                        )}
+                        <span
+                          className="font-mono text-xs tabular-nums"
+                          style={{ color: colour }}
+                          data-testid={`score-row-${r.image_id}-score`}
+                        >
+                          {r.score.toFixed(3)}
+                        </span>
+                        <span
+                          className="ml-auto text-[0.6rem] cursor-help"
+                          style={{ color: colour }}
+                          title={verdict}
+                          data-testid={`score-row-${r.image_id}-label`}
+                        >
+                          you said {said}
+                        </span>
+                      </div>
+                      <span className="relative mt-0.5 block h-1.5 overflow-hidden rounded-[1px] bg-[var(--color-inset)]">
+                        <span
+                          className="absolute inset-y-0 left-0"
+                          style={{
+                            width: `${barFraction(r.score, bMode) * 100}%`,
+                            background: colour,
+                            opacity: r.outcome === 'abstained' ? 0.4 : 0.75,
+                          }}
+                        />
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+              )}
+
+              <div className="mt-4 flex items-center justify-center gap-3 text-xs">
+                {/* Stepping back needs a stack. A shared link that lands
+                  * mid-ranking has none — but the top of the ranking is a
+                  * position we can always name, so the button rewinds there
+                  * rather than going dead and stranding the operator. */}
+                <button
+                  type="button"
+                  data-testid="score-prev"
+                  disabled={scoreCursors.length === 0 && scoreCursor == null}
+                  onClick={() => {
+                    if (scoreCursors.length === 0) { patch({ sc: null }); return; }
+                    const stack = [...scoreCursors];
+                    stack.pop();
+                    setScoreCursors(stack);
+                    patch({ sc: stack.length ? stack[stack.length - 1] : null });
+                  }}
+                  className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-3 py-1 text-[var(--color-ink-3)] disabled:opacity-40"
+                >
+                  {scoreCursors.length === 0 && scoreCursor != null
+                    ? <>&uarr; back to the top</>
+                    : <>&larr; previous</>}
+                </button>
+                <span className="tabular-nums text-[var(--color-ink-4)]">
+                  {scoreRows.length} photos
+                </span>
+                <button
+                  type="button"
+                  data-testid="score-next"
+                  disabled={nextScoreCursor == null}
+                  onClick={() => {
+                    if (nextScoreCursor == null) return;
+                    setScoreCursors([...scoreCursors, nextScoreCursor]);
+                    patch({ sc: nextScoreCursor });
+                  }}
+                  className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-3 py-1 text-[var(--color-ink-3)] disabled:opacity-40"
+                >
+                  next &rarr;
+                </button>
+              </div>
+            </>
+          )}
+        </section>
+      )}
+
       {/* ---------------------------------------------------------- the words */}
       <details className="mt-6 rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-3 py-2 text-xs text-[var(--color-ink-2)]">
         <summary className="cursor-pointer select-none text-[var(--color-ink)]">
@@ -1172,6 +1523,7 @@ export default function NewDedupTaggingBakeoff() {
                 asked an easier question.</li>
               <li><b>Cross-validation</b> &mdash; {SPLIT_HELP.cv}</li>
               <li><b>Exam</b> &mdash; {SPLIT_HELP.exam}</li>
+              <li><b>Retired</b> &mdash; {RETIRED_HELP}</li>
             </ul>
             <p className="mt-2 font-medium text-[var(--color-ink)]">The three modes</p>
             <ul className="mt-0.5 list-disc space-y-0.5 pl-4">
@@ -1194,6 +1546,14 @@ export default function NewDedupTaggingBakeoff() {
               <li><b>Abstained</b> &mdash; {ABSTAINED_HELP}</li>
               <li><b>Threshold</b> &mdash; the score at or above which the head says yes. Marked on
                 the histogram.</li>
+              <li><b>Score</b> &mdash; what the head actually output for one photograph, before any
+                yes/no line is drawn. It is what ranks the photos in <b>All photos by score</b>,
+                and it is what F1 is computed from &mdash; F1 itself is one number for a whole
+                head, so it can rank heads but never photographs.</li>
+              <li><b>Winner</b> &mdash; in the photo modal, the head with the highest score for
+                that photograph on one arm, mode and split. That is how a tag will be assigned:
+                every head scores the photo and the strongest wins, so adding a head later can
+                change the answer without anything being re-decided.</li>
             </ul>
             <p className="mt-2 font-medium text-[var(--color-ink)]">The four outcomes</p>
             <ul className="mt-0.5 list-disc space-y-0.5 pl-4">
@@ -1219,6 +1579,9 @@ export default function NewDedupTaggingBakeoff() {
           images={lightbox.images}
           startIndex={lightbox.index}
           onClose={() => setLightbox(null)}
+          /* Indexed by POSITION, not captured at open: the arrow keys walk the
+           * gallery inside the viewer, and the panel must follow the photo. */
+          asideAt={(i) => asideForImage(lightbox.images[i])}
         />
       )}
     </div>
@@ -1287,5 +1650,184 @@ function ArmRow({
         );
       })}
     </>
+  );
+}
+
+
+/* THE PER-IMAGE PROBABILITY PANEL — the modal's right-hand column, and the one
+ * place on this page that shows RAW MODEL OUTPUT rather than a measurement.
+ *
+ * Tags will be assigned WINNER-TAKES-ALL (operator ruling 2026-09-09 a): every
+ * head scores the photo, and the strongest score names the tag. No per-head
+ * yes/no decision is taken in the product at all — which is why this panel ranks
+ * heads by score and marks the top one, and why no F1 appears in it. Heads will
+ * be ADDED over time, so the winner is recomputed here from whatever heads the
+ * run scored; it is never a stored verdict.
+ *
+ * ONE RANKING PER (arm, mode, split), NEVER ACROSS THEM. Two arms are two
+ * different models, the logistic modes score in [0, 1] while the centroid mode
+ * is a cosine, and the two splits are different questions. So each group is
+ * ranked and won independently and the page never puts them in one list.
+ *
+ * The panel opens filtered to what the operator was already looking at — their
+ * selected arms and modes, on the split on show — with one chip to widen to
+ * every group the run has. */
+function ImageProbabilityPanel({
+  runId, imageId, split, armIds, modes,
+}: {
+  runId: number;
+  imageId: number;
+  split: BakeoffSplit;
+  armIds: number[];
+  modes: BakeoffMode[];
+}) {
+  const [wide, setWide] = useState(false);
+  const q = useQuery({
+    queryKey: ['bakeoff-image-detail', runId, imageId],
+    queryFn: () => getBakeoffImageDetail(runId, imageId),
+  });
+
+  const detail = q.data?.data ?? null;
+
+  const groups = useMemo(() => {
+    const rows = detail?.scores ?? [];
+    const kept = wide
+      ? rows
+      : rows.filter((s) => s.split === split && armIds.includes(s.arm_id)
+                           && modes.includes(s.mode));
+    const by = new Map<string, { arm: string; armId: number; mode: BakeoffMode;
+                                 split: BakeoffSplit; rows: BakeoffImageDetailScore[] }>();
+    for (const s of kept) {
+      const key = `${s.arm_id}|${s.mode}|${s.split}`;
+      const g = by.get(key)
+        ?? { arm: s.arm, armId: s.arm_id, mode: s.mode, split: s.split, rows: [] };
+      g.rows.push(s);
+      by.set(key, g);
+    }
+    for (const g of by.values()) g.rows.sort((a, b) => b.score - a.score);
+    return [...by.values()].sort(
+      (a, b) => a.armId - b.armId || a.mode.localeCompare(b.mode)
+                || a.split.localeCompare(b.split));
+  }, [detail, wide, split, armIds, modes]);
+
+  return (
+    <div data-testid="probability-panel" className="text-xs">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="text-sm font-medium text-[var(--color-ink)]">
+          What each head made of this photo
+        </h3>
+        <Chip
+          testId="probability-widen"
+          on={wide}
+          onClick={() => setWide(!wide)}
+          title="Every arm, mode and split this run scored the photo under — not only the ones you have selected."
+        >
+          {wide ? 'Your selection' : 'Every arm'}
+        </Chip>
+      </div>
+      <p className="mt-1 text-[0.68rem] text-[var(--color-ink-3)]">
+        The raw number each head gave this photograph, strongest first &mdash; not an F1. The
+        strongest head is the tag a winner-takes-all reading would assign, so it is marked{' '}
+        <b>winner</b>. Heads are only ever ranked <b>within</b> one arm, mode and split: two arms
+        are two different models, and the modes do not share a scale. The colour on each row is
+        that head&rsquo;s own yes/no verdict at the run&rsquo;s threshold &mdash; a
+        measurement, kept here because it says which rows the experiment scored right, and read by
+        nothing that assigns a tag.
+      </p>
+      {detail?.listing_id != null && (
+        <p className="mt-1 font-mono text-[0.6rem] tabular-nums text-[var(--color-ink-4)]">
+          #{detail.image_id} &middot; listing {detail.listing_id}
+        </p>
+      )}
+
+      {q.isLoading ? (
+        <div className="py-6 flex justify-center"><Spinner /></div>
+      ) : q.error ? (
+        <div className="mt-2"><ErrorBanner message={(q.error as Error).message} /></div>
+      ) : groups.length === 0 ? (
+        <p className="mt-3 text-[var(--color-ink-2)]" data-testid="probability-empty">
+          No head scored this photo under the arms, modes and split you have selected. Widen to{' '}
+          <b>Every arm</b> to see what the run does hold for it.
+        </p>
+      ) : (
+        <div className="mt-2 flex flex-col gap-3">
+          {groups.map((g) => (
+            <div
+              key={`${g.armId}|${g.mode}|${g.split}`}
+              data-testid={`probability-group-${g.armId}-${g.mode}-${g.split}`}
+              className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] p-2"
+            >
+              <div className="flex flex-wrap items-baseline gap-x-1.5">
+                <span className="text-[var(--color-ink)]">{g.arm}</span>
+                <span className="text-[0.6rem] text-[var(--color-ink-3)]" title={MODE_HELP[g.mode]}>
+                  {MODE_LABEL[g.mode]}
+                </span>
+                <span className="text-[0.6rem] text-[var(--color-ink-4)]">
+                  {SPLIT_LABEL[g.split].toLowerCase()} &middot; {scoreUnit(g.mode)}
+                </span>
+              </div>
+              <ul className="mt-1 flex flex-col gap-0.5">
+                {g.rows.map((s, rank) => {
+                  const colour = s.outcome === 'abstained'
+                    ? 'var(--color-ink-3)'
+                    : OUTCOME_COLOR[s.outcome];
+                  const said = s.label === 1 ? 'yes' : s.label === 0 ? 'no' : 'nothing';
+                  const glyph = s.label === 1 ? '✓' : s.label === 0 ? '✗' : '–';
+                  return (
+                    <li
+                      key={s.tag_id}
+                      data-testid={`probability-${g.armId}-${g.mode}-${g.split}-${s.tag_id}`}
+                      className="grid items-center gap-x-1.5"
+                      style={{ gridTemplateColumns: '1fr auto 5.4rem 0.8rem' }}
+                    >
+                      <span className="truncate text-[var(--color-ink-2)]" title={s.tag_label ?? undefined}>
+                        {shortHead(s.tag_label ?? `tag ${s.tag_id}`)}
+                      </span>
+                      {rank === 0 ? (
+                        <span
+                          className="rounded-[2px] border border-[var(--color-copper)] px-1 text-[0.52rem] uppercase tracking-[0.08em] text-[var(--color-copper)]"
+                          title="The strongest head on this arm, mode and split — the tag a winner-takes-all reading would give this photo."
+                        >
+                          winner
+                        </span>
+                      ) : <span />}
+                      <span className="flex items-center gap-1">
+                        {/* Normalised by its OWN mode's scale — the centroid
+                          * mode is a cosine, and a bar drawn on the wrong axis
+                          * is a lie about a number nobody can re-derive. */}
+                        <span className="relative h-1.5 w-8 shrink-0 overflow-hidden rounded-[1px] bg-[var(--color-inset)]">
+                          <span
+                            className="absolute inset-y-0 left-0"
+                            style={{
+                              width: `${barFraction(s.score, s.mode) * 100}%`,
+                              background: colour,
+                              opacity: s.outcome === 'abstained' ? 0.4 : 0.75,
+                            }}
+                          />
+                        </span>
+                        <span
+                          className="font-mono text-[0.65rem] tabular-nums"
+                          style={{ color: colour }}
+                        >
+                          {s.score.toFixed(3)}
+                        </span>
+                      </span>
+                      <span
+                        className="cursor-help text-center text-[0.6rem]"
+                        style={{ color: colour }}
+                        data-testid={`probability-${g.armId}-${g.mode}-${g.split}-${s.tag_id}-label`}
+                        title={`you said ${said}${s.outcome === 'abstained' ? ` — ${ABSTAINED_HELP}` : ` · ${OUTCOME_WORD[s.outcome]} (${s.outcome})`}`}
+                      >
+                        {glyph}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
