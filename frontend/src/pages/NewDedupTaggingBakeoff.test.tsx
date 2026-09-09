@@ -11,7 +11,7 @@
  * Backend shape is covered by tests/api/test_new_dedup_bakeoff.py.
  */
 
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -30,16 +30,25 @@ const ARM_A = {
   pooling: 'cls', resolution: 768, preprocessing: 'resize-shortest-768-centercrop',
   dtype: 'bfloat16',
 };
+/* 504 is dinov2's 512: it tokenises in 14 px patches, so the 512-px rule lands
+ * on 504 for that model. It is a LIVE arm and the fixture says so, because the
+ * one thing a resolution floor must not do is retire the arm it was written to
+ * keep. */
 const ARM_B = {
-  ...ARM_A, id: 8, arm: 'clip-l14@336/fp16', dim: 1024, model: 'openai/clip-vit-large-patch14',
-  resolution: 336, dtype: 'float16',
+  ...ARM_A, id: 8, arm: 'dinov2-l14@504/fp16', dim: 1024, model: 'facebook/dinov2-large',
+  resolution: 504, dtype: 'float16',
+};
+/* Retired by the 2026-09-09 ruling: below 512 px, and no snapping saves it. */
+const ARM_C = {
+  ...ARM_A, id: 9, arm: 'clip-l14@224/fp16', dim: 768, model: 'openai/clip-vit-large-patch14',
+  resolution: 224, dtype: 'float16',
 };
 
 const RUNS = [
   {
     id: 3, created_at: '2026-09-08T12:00:00+00:00', label: 'set-1 v1', note: null,
     status: 'ok', manifest_key: 'bakeoff/3/manifest.json', heads: [19, 22],
-    min_train_positives: 100, arms: [ARM_A, ARM_B],
+    min_train_positives: 100, arms: [ARM_A, ARM_B, ARM_C],
   },
   {
     id: 2, created_at: '2026-09-01T09:00:00+00:00', label: 'pilot', note: null,
@@ -137,6 +146,42 @@ const BUCKETS = {
   },
 };
 
+/* VIEW C. One cell, unbucketed: the four buckets poured into one ranked list
+ * plus the abstentions, which are in none of them. The last row is the cursor
+ * for the next page — the PAIR, because scores tie. */
+const SCORES = {
+  arm_id: 7, mode: 'pos_neg' as const, tag_id: 19, split: 'cv' as const,
+  total: 9264,
+  rows: [
+    { image_id: 555, listing_id: 99213, storage_path: 'a.jpg', score: 0.9713, label: 1 as const, predicted: true, fold: 2, outcome: 'tp' as const },
+    { image_id: 556, listing_id: null, storage_path: 'b.jpg', score: 0.8800, label: 0 as const, predicted: true, fold: 1, outcome: 'fp' as const },
+    { image_id: 557, listing_id: 99213, storage_path: 'c.jpg', score: 0.4412, label: null, predicted: false, fold: null, outcome: 'abstained' as const },
+  ],
+  next_after_score: 0.4412,
+  next_after_image_id: 557,
+};
+
+/* VIEW D. One photo, every score the run gave it. Arm 7 makes it a kitchen and
+ * arm 8 makes it a bathroom — two models, two winners, which is exactly why the
+ * panel ranks inside a group and never across groups. */
+const detail = (
+  arm_id: number, arm: string, resolution: number, split: 'cv' | 'exam',
+  tag_id: number, tag_label: string, score: number, label: 1 | 0 | null,
+  predicted: boolean, outcome: 'tp' | 'fp' | 'fn' | 'tn' | 'abstained',
+) => ({ arm_id, arm, resolution, mode: 'pos_neg' as const, tag_id, tag_label,
+        split, fold: 2, label, score, predicted, outcome });
+
+const IMAGE_DETAIL = {
+  image_id: 555, listing_id: 99213, storage_path: 'a.jpg',
+  scores: [
+    detail(7, ARM_A.arm, 768, 'cv', 19, 'interier - kuchyně', 0.97, 1, true, 'tp'),
+    detail(7, ARM_A.arm, 768, 'cv', 22, 'interier - koupelna', 0.11, 0, false, 'tn'),
+    detail(7, ARM_A.arm, 768, 'exam', 19, 'interier - kuchyně', 0.81, null, true, 'abstained'),
+    detail(8, ARM_B.arm, 504, 'cv', 19, 'interier - kuchyně', 0.21, 1, false, 'fn'),
+    detail(8, ARM_B.arm, 504, 'cv', 22, 'interier - koupelna', 0.55, 0, true, 'fp'),
+  ],
+};
+
 function renderPage(entry = '/new-dedup/tagging-bakeoff') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -154,6 +199,8 @@ beforeEach(() => {
   vi.mocked(api.getBakeoffMetrics).mockResolvedValue({ data: METRICS });
   vi.mocked(api.getBakeoffImages).mockResolvedValue({ data: IMAGES });
   vi.mocked(api.getBakeoffBuckets).mockResolvedValue({ data: BUCKETS });
+  vi.mocked(api.getBakeoffScores).mockResolvedValue({ data: SCORES });
+  vi.mocked(api.getBakeoffImageDetail).mockResolvedValue({ data: IMAGE_DETAIL });
 });
 
 describe('<NewDedupTaggingBakeoff> — the run picker', () => {
@@ -164,7 +211,7 @@ describe('<NewDedupTaggingBakeoff> — the run picker', () => {
     expect(opts).toHaveLength(2);
     expect(opts[0]).toHaveTextContent('set-1 v1');
     expect(opts[0]).toHaveTextContent('ok');
-    expect(opts[0]).toHaveTextContent('2 arms');
+    expect(opts[0]).toHaveTextContent('3 arms');
     expect(opts[0]).toHaveTextContent('2 heads');
     expect(opts[1]).toHaveTextContent('pilot');
     // Newest first is the API's order; the page must not re-sort it away.
@@ -302,6 +349,7 @@ describe('<NewDedupTaggingBakeoff> — view A, photos across arms', () => {
     await waitFor(() => expect(api.getBakeoffImages).toHaveBeenLastCalledWith(
       3, expect.objectContaining({ mode: 'pos_neg' }),
     ));
+    await userEvent.click(screen.getByTestId('toggle-retired'));
     await userEvent.click(screen.getByTestId('mode-pos_only_centroid'));
     await waitFor(() => expect(
       vi.mocked(api.getBakeoffImages).mock.lastCall?.[1]?.mode,
@@ -396,5 +444,230 @@ describe('<NewDedupTaggingBakeoff> — URL state', () => {
       3, expect.objectContaining({ arm_id: 8, mode: 'pos_neg', tag_id: 19, split: 'exam' }),
     ));
     expect(screen.getByTestId('arm-8')).toHaveAttribute('aria-pressed', 'true');
+  });
+});
+
+describe('<NewDedupTaggingBakeoff> — the narrowed defaults', () => {
+  it('offers only the full training mode, and hides the two retired ones', async () => {
+    renderPage();
+    expect(await screen.findByTestId('mode-pos_neg')).toBeInTheDocument();
+    expect(screen.queryByTestId('mode-pos_only_free_neg')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('mode-pos_only_centroid')).not.toBeInTheDocument();
+    // Hidden from the SELECTOR is hidden from the matrix: the columns are the
+    // selection, so a retired mode has no column either.
+    expect(screen.queryByTestId('cell-19-7-pos_only_centroid')).not.toBeInTheDocument();
+  });
+
+  it('hides arms below 512 px and keeps dinov2’s 504, which is that same rule', async () => {
+    renderPage();
+    // 768 and 504 stay; 224 goes. 504 is 512 snapped to a 14 px patch grid — the
+    // arm the floor was written to keep, not a smaller one.
+    expect(await screen.findByTestId('arm-7')).toBeInTheDocument();
+    expect(screen.getByTestId('arm-8')).toBeInTheDocument();
+    expect(screen.queryByTestId('arm-9')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('cell-19-9-pos_neg')).not.toBeInTheDocument();
+  });
+
+  it('starts on every live arm, the full mode, the first head and cross-validation', async () => {
+    renderPage();
+    await waitFor(() => expect(api.getBakeoffImages).toHaveBeenLastCalledWith(
+      3, expect.objectContaining({ arms: '7,8', mode: 'pos_neg', split: 'cv', tag_id: 22 }),
+    ));
+    // The heads are ordered by label, so "interier - koupelna" leads.
+    expect((screen.getByTestId('tag-picker') as HTMLSelectElement).value).toBe('22');
+    expect(screen.getByTestId('split-cv')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('the toggle reveals the retired arms and modes, and hides them again', async () => {
+    renderPage();
+    expect(await screen.findByTestId('retired-count')).toHaveTextContent('3');
+    await userEvent.click(screen.getByTestId('toggle-retired'));
+    expect(await screen.findByTestId('arm-9')).toBeInTheDocument();
+    expect(screen.getByTestId('mode-pos_only_centroid')).toBeInTheDocument();
+    // Revealing is not selecting: nothing retired joins the matrix on its own.
+    expect(screen.getByTestId('arm-9')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('mode-pos_only_centroid')).toHaveAttribute('aria-pressed', 'false');
+    await userEvent.click(screen.getByTestId('toggle-retired'));
+    await waitFor(() => expect(screen.queryByTestId('arm-9')).not.toBeInTheDocument());
+  });
+
+  it('shows a retired arm the URL names, so a shared link is never un-unpickable', async () => {
+    // Hiding a SELECTED thing would leave the operator with a column they can
+    // see and no control to remove it.
+    renderPage('/new-dedup/tagging-bakeoff?arms=7,9&mode=pos_neg');
+    expect(await screen.findByTestId('arm-9')).toHaveAttribute('aria-pressed', 'true');
+    expect(await screen.findByTestId('cell-19-9-pos_neg')).toBeInTheDocument();
+    // Only the SELECTED retired arm comes back — revealing one is not revealing
+    // the shelf. The live arms are of course all still there, unselected.
+    expect(screen.getByTestId('arm-8')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByTestId('mode-pos_only_centroid')).not.toBeInTheDocument();
+  });
+
+  it('shows a retired mode the URL names', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?mode=pos_only_free_neg');
+    expect(await screen.findByTestId('mode-pos_only_free_neg'))
+      .toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByTestId('mode-pos_only_centroid')).not.toBeInTheDocument();
+  });
+});
+
+describe('<NewDedupTaggingBakeoff> — view C, all photos by score', () => {
+  const entry = '/new-dedup/tagging-bakeoff?view=scores&mode=pos_neg&arms=7&tag=19';
+
+  it('asks for one cell and ranks every photo it scored', async () => {
+    renderPage(entry);
+    await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(
+      3, expect.objectContaining({
+        arm_id: 7, mode: 'pos_neg', tag_id: 19, split: 'cv', limit: 60,
+      }),
+    ));
+    const grid = await screen.findByTestId('score-grid');
+    // The API's order is the ranking; the page must not re-sort it away.
+    const tiles = within(grid).getAllByRole('listitem');
+    expect(tiles).toHaveLength(3);
+    expect(within(tiles[0]).getByTestId('score-row-555-score')).toHaveTextContent('0.971');
+    expect(within(tiles[2]).getByTestId('score-row-557-score')).toHaveTextContent('0.441');
+    expect(screen.getByTestId('scores-total')).toHaveTextContent('9,264');
+  });
+
+  it('says in words that the sort key is the score, not F1', async () => {
+    // The operator asked for "sorted by the F1 score"; F1 is one number per
+    // head, so the view has to say what it actually sorted on.
+    renderPage(entry);
+    const help = await screen.findByTestId('scores-help');
+    expect(help).toHaveTextContent('head’s own score for each photo');
+    expect(help).toHaveTextContent('not F1');
+  });
+
+  it('shows the label and the outcome colour on every row, abstentions included', async () => {
+    renderPage(entry);
+    expect(await screen.findByTestId('score-row-555-label')).toHaveTextContent('you said yes');
+    expect(screen.getByTestId('score-row-556-label')).toHaveTextContent('you said no');
+    // An abstention is in no bucket, but it IS in this list — it carries a real
+    // score, and hiding it would make the ranking lie about its own depth.
+    expect(screen.getByTestId('score-row-557-label')).toHaveTextContent('you said nothing');
+    expect(screen.getByTestId('score-row-557-label').getAttribute('title'))
+      .toContain('abstained');
+  });
+
+  it('pages forward on the (score, image) pair and back on its own stack', async () => {
+    renderPage(entry);
+    const next = await screen.findByTestId('score-next');
+    expect(screen.getByTestId('score-prev')).toBeDisabled();
+    await userEvent.click(next);
+    // The PAIR, not the score alone: scores tie, so a score-only cursor would
+    // drop or repeat photographs.
+    await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(
+      3, expect.objectContaining({ after_score: 0.4412, after_image_id: 557 }),
+    ));
+    expect(screen.getByTestId('score-prev')).toBeEnabled();
+    await userEvent.click(screen.getByTestId('score-prev'));
+    await waitFor(() => expect(
+      vi.mocked(api.getBakeoffScores).mock.lastCall?.[1]?.after_image_id,
+    ).toBeUndefined());
+  });
+
+  it('shares the cell with view B, so switching angle re-picks nothing', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?view=buckets&mode=pos_neg&arms=7,8&tag=19&barm=8');
+    await waitFor(() => expect(api.getBakeoffBuckets).toHaveBeenLastCalledWith(
+      3, expect.objectContaining({ arm_id: 8 }),
+    ));
+    await userEvent.click(screen.getByTestId('view-scores'));
+    await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(
+      3, expect.objectContaining({ arm_id: 8, mode: 'pos_neg', tag_id: 19 }),
+    ));
+  });
+
+  it('a link reproduces the ranking, cursor included', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?view=scores&arms=7&tag=19&barm=7'
+               + '&bmode=pos_neg&split=exam&sc=0.44,557');
+    await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(3, {
+      arm_id: 7, mode: 'pos_neg', tag_id: 19, split: 'exam',
+      after_score: 0.44, after_image_id: 557, limit: 60,
+    }));
+    expect(screen.getByTestId('view-scores')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('ignores a malformed cursor rather than paging from a made-up position', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?view=scores&arms=7&tag=19&sc=nonsense');
+    await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(
+      3, expect.objectContaining({ after_score: undefined, after_image_id: undefined }),
+    ));
+  });
+});
+
+describe('<NewDedupTaggingBakeoff> — the per-photo probability modal', () => {
+  it('opens from view A and ranks every head by its raw score', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?mode=pos_neg&arms=7,8&tag=19');
+    await userEvent.click(await screen.findByLabelText('Open photo 555'));
+    expect(await screen.findByTestId('probability-panel')).toBeInTheDocument();
+    await waitFor(() => expect(api.getBakeoffImageDetail).toHaveBeenCalledWith(3, 555));
+
+    const group = screen.getByTestId('probability-group-7-pos_neg-cv');
+    const rows = within(group).getAllByRole('listitem');
+    // Strongest first — kuchyně 0.97 above koupelna 0.11 — and the top one is
+    // the tag a winner-takes-all reading would assign.
+    expect(rows[0]).toHaveTextContent('kuchyně');
+    expect(rows[0]).toHaveTextContent('0.970');
+    expect(rows[0]).toHaveTextContent('winner');
+    expect(rows[1]).toHaveTextContent('koupelna');
+    expect(rows[1]).not.toHaveTextContent('winner');
+  });
+
+  it('never shows an F1 — it is the model’s output, not a measurement', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?mode=pos_neg&arms=7,8&tag=19');
+    await userEvent.click(await screen.findByLabelText('Open photo 555'));
+    const panel = await screen.findByTestId('probability-panel');
+    expect(panel).toHaveTextContent('not an F1');
+    expect(panel).not.toHaveTextContent(/\bF1\b\s+0/);
+  });
+
+  it('ranks within one arm, mode and split — never across them', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?mode=pos_neg&arms=7,8&tag=19');
+    await userEvent.click(await screen.findByLabelText('Open photo 555'));
+    await screen.findByTestId('probability-panel');
+    // Two selected arms, one mode, one split = two separate rankings, each with
+    // its own winner. Arm 8 scores kuchyně lowest, so its winner differs.
+    const armA = screen.getByTestId('probability-group-7-pos_neg-cv');
+    const armB = screen.getByTestId('probability-group-8-pos_neg-cv');
+    expect(within(armA).getAllByRole('listitem')[0]).toHaveTextContent('kuchyně');
+    expect(within(armB).getAllByRole('listitem')[0]).toHaveTextContent('koupelna');
+    expect(within(armB).getAllByRole('listitem')[0]).toHaveTextContent('winner');
+  });
+
+  it('shows only the selected arms and split until asked to widen', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?mode=pos_neg&arms=7&tag=19');
+    await userEvent.click(await screen.findByLabelText('Open photo 555'));
+    await screen.findByTestId('probability-panel');
+    expect(screen.queryByTestId('probability-group-8-pos_neg-cv')).not.toBeInTheDocument();
+    // The exam rows are in the payload, but the operator is on cross-validation.
+    expect(screen.queryByTestId('probability-group-7-pos_neg-exam')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByTestId('probability-widen'));
+    expect(await screen.findByTestId('probability-group-8-pos_neg-cv')).toBeInTheDocument();
+    expect(screen.getByTestId('probability-group-7-pos_neg-exam')).toBeInTheDocument();
+  });
+
+  it('opens the same panel from view B and from view C', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?view=buckets&mode=pos_neg&arms=7&tag=19');
+    await userEvent.click(await screen.findByLabelText('Open photo 556'));
+    expect(await screen.findByTestId('probability-panel')).toBeInTheDocument();
+    await waitFor(() => expect(api.getBakeoffImageDetail).toHaveBeenLastCalledWith(3, 556));
+
+    cleanup();
+    renderPage('/new-dedup/tagging-bakeoff?view=scores&mode=pos_neg&arms=7&tag=19');
+    await userEvent.click(await screen.findByLabelText('Open photo 557'));
+    expect(await screen.findByTestId('probability-panel')).toBeInTheDocument();
+    await waitFor(() => expect(api.getBakeoffImageDetail).toHaveBeenLastCalledWith(3, 557));
+  });
+
+  it('marks the operator’s own label beside each head', async () => {
+    renderPage('/new-dedup/tagging-bakeoff?mode=pos_neg&arms=7&tag=19');
+    await userEvent.click(await screen.findByLabelText('Open photo 555'));
+    await screen.findByTestId('probability-panel');
+    expect(screen.getByTestId('probability-7-pos_neg-cv-19-label').getAttribute('title'))
+      .toContain('you said yes');
+    expect(screen.getByTestId('probability-7-pos_neg-cv-22-label').getAttribute('title'))
+      .toContain('you said no');
   });
 });

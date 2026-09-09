@@ -6,7 +6,7 @@ into `dedup_sim.tag_head_bakeoff_*` comes from `scripts/tag_head_bakeoff.py` (th
 CPU runner) or the GPU embedding job, never from a browser. The live consumer is
 the bake-off comparison page.
 
-FOUR ROUTES, and each answers a different question:
+SIX ROUTES, and each answers a different question:
 
   GET /runs                     — which experiments exist, with their arms.
   GET /runs/{id}/metrics        — the whole arm x mode x head table, one payload.
@@ -15,6 +15,13 @@ FOUR ROUTES, and each answers a different question:
   GET /runs/{id}/buckets   (B)  — one head under one arm and mode, split into its
                                   four outcome buckets plus a score histogram.
                                   "Show me what it got wrong."
+  GET /runs/{id}/scores    (C)  — the same cell as (B) UNBUCKETED: every photo the
+                                  head scored, ranked by that score. "Show me the
+                                  whole ranking."
+  GET /runs/{id}/images/{image_id}
+                           (D)  — one photo, every score the run gave it, across
+                                  arms, modes, heads and splits. "What did each
+                                  head think this photograph was?"
 
 RESPONSE SHAPES ARE DOCUMENTED IN EACH DOCSTRING and are the contract the frontend
 codes against. Two conventions run through all of them:
@@ -213,3 +220,191 @@ def get_buckets(
             limit=limit, offset=offset)}
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# --- views C and D --------------------------------------------------------
+#
+# The SQL for these two lives HERE rather than in toolkit/tag_head_bakeoff.py
+# (which holds the readers for views A and B) only because that module is under
+# concurrent change; it is the same table, read the same way, and belongs beside
+# its siblings once both branches have landed.
+#
+# `_OUTCOME_SQL` is BORROWED from the toolkit rather than restated. It is the one
+# expression that decides what a false positive is — the page filter, the bucket
+# counts and the tiles all share it precisely so they cannot disagree — and a
+# fourth copy of that CASE is how "wrongly caught" starts meaning two things.
+
+_SCORES_TOTAL_SQL = """
+    SELECT count(*)::bigint
+    FROM dedup_sim.tag_head_bakeoff_scores s
+    WHERE s.arm_id = %(arm_id)s AND s.mode = %(mode)s
+      AND s.tag_id = %(tag_id)s AND s.split = %(split)s
+"""
+
+# Keyset on (score DESC, image_id DESC), never OFFSET: scores tie constantly (a
+# centroid mode rounds many rows to the same cosine), and an ORDER BY that ties
+# reshuffles rows between pages — one photo shown twice and another never shown.
+# image_id is the unique tiebreaker that makes the order total.
+_SCORES_PAGE_SQL = f"""
+    SELECT s.image_id, i.listing_id, i.storage_path, s.score, s.label,
+           s.predicted, s.fold, ({bo._OUTCOME_SQL}) AS outcome
+    FROM dedup_sim.tag_head_bakeoff_scores s
+    JOIN images i ON i.id = s.image_id
+    WHERE s.arm_id = %(arm_id)s AND s.mode = %(mode)s
+      AND s.tag_id = %(tag_id)s AND s.split = %(split)s
+      AND (%(after_score)s::real IS NULL
+           OR (s.score, s.image_id)
+              < (%(after_score)s::real, %(after_image_id)s::bigint))
+    ORDER BY s.score DESC, s.image_id DESC
+    LIMIT %(limit)s
+"""
+
+_IMAGE_ROW_SQL = """
+    SELECT i.id, i.listing_id, i.storage_path
+    FROM images i
+    WHERE i.id = %(image_id)s
+"""
+
+_IMAGE_DETAIL_SQL = f"""
+    SELECT s.arm_id, a.arm, a.resolution, s.mode, s.tag_id, t.label AS tag_label,
+           s.split, s.fold, s.label, s.score, s.predicted,
+           ({bo._OUTCOME_SQL}) AS outcome
+    FROM dedup_sim.tag_head_bakeoff_scores s
+    JOIN dedup_sim.tag_head_bakeoff_arms a ON a.id = s.arm_id
+    LEFT JOIN tag_taxonomy t ON t.id = s.tag_id
+    WHERE a.run_id = %(run_id)s AND s.image_id = %(image_id)s
+    ORDER BY s.arm_id, s.mode, s.split, s.score DESC, s.tag_id
+"""
+
+
+@router.get("/runs/{run_id}/scores")
+def get_scores(
+    run_id: int,
+    arm_id: int,
+    mode: str,
+    tag_id: int,
+    split: str = Query(default="cv", pattern="^(cv|exam)$"),
+    after_score: float | None = None,
+    after_image_id: int | None = None,
+    limit: int = Query(default=100, ge=1, le=200),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """VIEW C — every photo one head scored, highest score first, unbucketed.
+
+    View B shows the same cell split into its four outcome buckets; this is the
+    UNION of those buckets (plus the abstentions, which are in none of them) as
+    one flat ranked list. The sort key is the HEAD'S RAW SCORE — F1 is a property
+    of the head, not of a photo, so it cannot order photos.
+
+    Paged by a keyset cursor, not an offset: `after_score` and `after_image_id`
+    travel TOGETHER (one without the other is a 422) and are the last row of the
+    previous page. Scores tie constantly, so the pair is what makes the order
+    total; an OFFSET over a tied ORDER BY shows one photo twice and skips another.
+
+    {"data": {
+      "arm_id": 7, "mode": "pos_neg", "tag_id": 19, "split": "cv",
+      "total": 9264,                             # the whole cell, not this page
+      "rows": [{
+        "image_id": 84211, "listing_id": 99213,
+        "storage_path": "images/2026/…/3.jpg",   # feed to GET /images/{path}
+        "score": 0.9713, "label": 1 | 0 | null, "predicted": true,
+        "fold": 2 | null,                        # null on the exam split
+        "outcome": "tp"|"fp"|"fn"|"tn"|"abstained"
+      }],
+      "next_after_score": 0.4412 | null,         # null = last page
+      "next_after_image_id": 84211 | null
+    }}
+
+    A score is a probability in [0, 1] for the two logistic modes and a COSINE in
+    [-1, 1] for `pos_only_centroid` — the ranking is meaningful within one cell,
+    and the raw numbers are not comparable across modes.
+    """
+    if bo.get_run(conn, run_id=run_id) is None:
+        raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+    if (after_score is None) != (after_image_id is None):
+        raise HTTPException(
+            status_code=422,
+            detail="after_score and after_image_id travel together — the cursor "
+                   "is the pair, because scores tie")
+    keys = {"arm_id": arm_id, "mode": mode, "tag_id": tag_id, "split": split}
+    with conn.cursor() as cur:
+        cur.execute(_SCORES_TOTAL_SQL, keys)
+        row = cur.fetchone()
+        total = int(row[0]) if row else 0
+        cur.execute(_SCORES_PAGE_SQL, {
+            **keys, "after_score": after_score, "after_image_id": after_image_id,
+            "limit": limit})
+        rows = cur.fetchall()
+    out = [{
+        "image_id": int(r[0]),
+        "listing_id": None if r[1] is None else int(r[1]),
+        "storage_path": r[2],
+        "score": float(r[3]),
+        "label": None if r[4] is None else int(r[4]),
+        "predicted": bool(r[5]),
+        "fold": None if r[6] is None else int(r[6]),
+        "outcome": r[7],
+    } for r in rows]
+    # A short page is the last page. A full one carries its own last row forward
+    # as the cursor, so the client never invents one.
+    last = out[-1] if len(out) == limit else None
+    return {"data": {
+        **keys, "total": total, "rows": out,
+        "next_after_score": last["score"] if last else None,
+        "next_after_image_id": last["image_id"] if last else None,
+    }}
+
+
+@router.get("/runs/{run_id}/images/{image_id}")
+def get_image_detail(
+    run_id: int, image_id: int, conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """VIEW D — one photograph, and every score this run ever gave it.
+
+    The whole cross-section for one image: every arm x mode x head x split cell
+    that mentions it. Bounded by the experiment's own size (a dozen arms x three
+    modes x twenty heads x two splits), so it is one payload with no paging.
+
+    This is RAW MODEL OUTPUT, not a metric: the probability each head assigned
+    this photograph, so the strongest head is the tag a winner-takes-all reading
+    would give it. Ranking heads is meaningful only WITHIN one (arm, mode, split)
+    — the scales differ across modes, and two arms are two different models.
+
+    {"data": {
+      "image_id": 84211, "listing_id": 99213,
+      "storage_path": "images/2026/…/3.jpg",
+      "scores": [{
+        "arm_id": 7, "arm": "dinov3-b16@768/bf16", "resolution": 768,
+        "mode": "pos_neg", "tag_id": 19, "tag_label": "kuchyně", "split": "cv",
+        "fold": 2 | null, "label": 1 | 0 | null, "score": 0.9713,
+        "predicted": true, "outcome": "tp"|"fp"|"fn"|"tn"|"abstained"
+      }]
+    }}
+
+    404 when this run scored no such image — a run only ever sees the corpus it
+    was given, so "not in this run" is a real answer, and an empty list would
+    read as "every head said nothing".
+    """
+    if bo.get_run(conn, run_id=run_id) is None:
+        raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+    with conn.cursor() as cur:
+        cur.execute(_IMAGE_DETAIL_SQL, {"run_id": run_id, "image_id": image_id})
+        rows = cur.fetchall()
+        if not rows:
+            raise HTTPException(
+                status_code=404, detail=f"run {run_id} scored no image {image_id}")
+        cur.execute(_IMAGE_ROW_SQL, {"image_id": image_id})
+        meta = cur.fetchone()
+    return {"data": {
+        "image_id": image_id,
+        "listing_id": None if meta is None or meta[1] is None else int(meta[1]),
+        "storage_path": None if meta is None else meta[2],
+        "scores": [{
+            "arm_id": int(r[0]), "arm": r[1],
+            "resolution": None if r[2] is None else int(r[2]),
+            "mode": r[3], "tag_id": int(r[4]), "tag_label": r[5], "split": r[6],
+            "fold": None if r[7] is None else int(r[7]),
+            "label": None if r[8] is None else int(r[8]),
+            "score": float(r[9]), "predicted": bool(r[10]), "outcome": r[11],
+        } for r in rows],
+    }}

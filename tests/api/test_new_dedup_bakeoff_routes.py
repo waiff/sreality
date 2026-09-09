@@ -158,7 +158,7 @@ def test_every_bakeoff_route_is_admin_gated() -> None:
 
     routes = [r for r in _collect(api_main.app.routes)
               if r.path.startswith(PREFIX)]
-    assert len(routes) == 4, [r.path for r in routes]
+    assert len(routes) == 6, [r.path for r in routes]
     for route in routes:
         names = {getattr(d.call, "__name__", "") for d in route.dependant.dependencies}
         nested = {getattr(sub.call, "__name__", "")
@@ -173,3 +173,159 @@ def test_the_gate_actually_rejects_without_an_admin_session() -> None:
         assert resp.status_code in (401, 403)
     finally:
         api_main.app.dependency_overrides.clear()
+
+
+# --- views C and D ---------------------------------------------------------
+#
+# Views A and B delegate to a monkeypatched toolkit, so their tests only prove
+# the route layer. C and D run their SQL on the connection themselves, so these
+# use a SCRIPTED cursor instead: it answers by matching a fragment of the query,
+# which keeps the fixtures readable and still pins WHICH statement ran with WHICH
+# parameters — the cursor and the keys reaching the database intact are the whole
+# contract here.
+
+
+class _ScriptedCursor:
+    def __init__(self, script: list[tuple[str, list[Any]]]) -> None:
+        self._script = script
+        self._rows: list[Any] = []
+        self.seen: list[tuple[str, Any]] = []
+
+    def __enter__(self) -> "_ScriptedCursor":
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.seen.append((sql, params))
+        self._rows = next((rows for marker, rows in self._script if marker in sql), [])
+
+    def fetchall(self) -> list[Any]:
+        return self._rows
+
+    def fetchone(self) -> Any:
+        return self._rows[0] if self._rows else None
+
+
+class _ScriptedConn:
+    def __init__(self, script: list[tuple[str, list[Any]]]) -> None:
+        self.cur = _ScriptedCursor(script)
+
+    def cursor(self) -> _ScriptedCursor:
+        return self.cur
+
+    def params_for(self, marker: str) -> Any:
+        return next(p for sql, p in self.cur.seen if marker in sql)
+
+
+def _scripted(script: list[tuple[str, list[Any]]]) -> _ScriptedConn:
+    conn = _ScriptedConn(script)
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: conn
+    return conn
+
+
+# (image_id, listing_id, storage_path, score, label, predicted, fold, outcome)
+SCORE_ROWS = [
+    (555, 99213, "a.jpg", 0.9713, 1, True, 2, "tp"),
+    (556, None, "b.jpg", 0.8800, 0, True, 1, "fp"),
+    (557, 99213, "c.jpg", 0.4412, None, False, None, "abstained"),
+]
+
+
+def test_scores_ranks_the_whole_cell_and_pages_on_the_score_id_pair(client) -> None:
+    conn = _scripted([("count(*)", [(9264,)]), ("ORDER BY s.score DESC", SCORE_ROWS)])
+    data = client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
+                      "&split=cv&limit=3").json()["data"]
+
+    assert [r["image_id"] for r in data["rows"]] == [555, 556, 557]
+    # The cell's whole size, not this page's — the operator needs to know how
+    # deep the ranking goes before deciding to walk it.
+    assert data["total"] == 9264
+    # A FULL page hands back its own last row as the cursor. The pair, not the
+    # score alone: scores tie, and a cursor that is not unique loses rows.
+    assert data["next_after_score"] == SCORE_ROWS[-1][3]
+    assert data["next_after_image_id"] == 557
+    # An abstention keeps its real score and prediction and is in the list —
+    # this view is the union of the buckets PLUS the rows that are in none.
+    assert data["rows"][2]["label"] is None
+    assert data["rows"][2]["outcome"] == "abstained"
+    assert conn.params_for("ORDER BY s.score DESC")["arm_id"] == 7
+
+
+def test_scores_last_page_offers_no_cursor(client) -> None:
+    _scripted([("count(*)", [(3,)]), ("ORDER BY s.score DESC", SCORE_ROWS)])
+    # Three rows against a limit of 60 is a short page, so the walk is over.
+    data = client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
+                      "&limit=60").json()["data"]
+    assert data["next_after_score"] is None
+    assert data["next_after_image_id"] is None
+
+
+def test_scores_carries_the_cursor_pair_into_the_query(client) -> None:
+    conn = _scripted([("count(*)", [(9264,)]), ("ORDER BY s.score DESC", [])])
+    client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
+               "&after_score=0.44&after_image_id=557")
+    params = conn.params_for("ORDER BY s.score DESC")
+    assert params["after_score"] == 0.44 and params["after_image_id"] == 557
+
+
+def test_scores_refuses_half_a_cursor(client) -> None:
+    _scripted([("count(*)", [(0,)])])
+    # Half a cursor cannot be applied to a tied ordering, and guessing the other
+    # half would silently drop or repeat photos.
+    one = client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
+                     "&after_score=0.44")
+    assert one.status_code == 422 and "together" in one.json()["detail"]
+    other = client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
+                       "&after_image_id=557")
+    assert other.status_code == 422
+
+
+def test_scores_needs_its_cell_keys_and_a_known_run_and_split(client) -> None:
+    _scripted([("count(*)", [(0,)])])
+    # A ranking is ONE head under ONE arm and mode — none of the three optional.
+    assert client.get(f"{PREFIX}/runs/3/scores?arm_id=7").status_code == 422
+    assert client.get(f"{PREFIX}/runs/3/scores?arm_id=7&mode=pos_neg&tag_id=11"
+                      "&split=holdout").status_code == 422
+    assert client.get(f"{PREFIX}/runs/99/scores?arm_id=7&mode=pos_neg"
+                      "&tag_id=11").status_code == 404
+
+
+# (arm_id, arm, resolution, mode, tag_id, tag_label, split, fold, label, score,
+#  predicted, outcome)
+DETAIL_ROWS = [
+    (7, "dinov3-b16@768/bf16", 768, "pos_neg", 11, "kuchyně", "cv", 2, 1, 0.97, True, "tp"),
+    (7, "dinov3-b16@768/bf16", 768, "pos_neg", 12, "koupelna", "cv", 2, 0, 0.11, False, "tn"),
+    (8, "clip-l14@224/fp16", 224, "pos_neg", 11, "kuchyně", "cv", 1, 1, 0.42, False, "fn"),
+]
+
+
+def test_image_detail_returns_every_head_on_every_arm_with_the_photo(client) -> None:
+    conn = _scripted([("a.resolution", DETAIL_ROWS),
+                      ("FROM images i", [(555, 99213, "a.jpg")])])
+    data = client.get(f"{PREFIX}/runs/3/images/555").json()["data"]
+
+    assert data["image_id"] == 555 and data["listing_id"] == 99213
+    assert data["storage_path"] == "a.jpg"
+    assert len(data["scores"]) == 3
+    # The raw probability per head per arm — what the winner-takes-all reading
+    # needs. The arm's resolution rides along so the page can tell a retired
+    # low-resolution arm from a live one without a second lookup.
+    assert data["scores"][0]["score"] == 0.97
+    assert data["scores"][0]["tag_label"] == "kuchyně"
+    assert data["scores"][2]["arm_id"] == 8 and data["scores"][2]["resolution"] == 224
+    assert conn.params_for("a.resolution") == {"run_id": 3, "image_id": 555}
+
+
+def test_image_detail_is_404_when_this_run_never_scored_that_photo(client) -> None:
+    # Not an empty list: "this run never saw the photo" and "every head said
+    # nothing about it" are different answers, and only one of them is true.
+    _scripted([("a.resolution", []), ("FROM images i", [(555, None, "a.jpg")])])
+    resp = client.get(f"{PREFIX}/runs/3/images/555")
+    assert resp.status_code == 404 and "scored no image" in resp.json()["detail"]
+
+
+def test_image_detail_rejects_an_unknown_run(client) -> None:
+    _scripted([("a.resolution", DETAIL_ROWS)])
+    assert client.get(f"{PREFIX}/runs/99/images/555").status_code == 404

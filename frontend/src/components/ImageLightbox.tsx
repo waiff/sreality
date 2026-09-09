@@ -52,6 +52,13 @@ interface Props {
    * three clicks. Callers that only display photos pass nothing and the
    * viewer is unchanged. */
   actionsAt?: (index: number) => React.ReactNode;
+  /* A panel BESIDE the photo (below it on a narrow screen), for the position on
+   * show. `actionsAt` is a control bar — a few buttons under the picture;
+   * this is a readable column, for callers whose reason to enlarge a photo is
+   * to read something ABOUT it (the tagging bake-off's per-head probabilities)
+   * while still stepping through the gallery with the arrow keys. It scrolls
+   * inside itself so a long panel never pushes the photo off the screen. */
+  asideAt?: (index: number) => React.ReactNode;
   /* Single-key shortcuts for the photo on show, keyed by `e.key` lowercased —
    * with the space bar spelled 'space', because ' ' as an object key is too
    * easy to misread. They live HERE rather than in the calling page so they
@@ -68,6 +75,7 @@ export default function ImageLightbox({
   dim = '',
   tagAt,
   actionsAt,
+  asideAt,
   shortcuts,
 }: Props) {
   const [index, setIndex] = useState(startIndex);
@@ -222,7 +230,17 @@ export default function ImageLightbox({
           </>
         )}
 
-        <div className="relative max-w-[92vw] max-h-[88vh] flex flex-col items-center justify-center gap-3">
+        <div
+          className={[
+            'relative max-w-[92vw] max-h-[88vh] flex items-center justify-center gap-3',
+            // The aside is a COLUMN beside the photo on a wide screen and a
+            // block under it on a narrow one — never an overlay, for the same
+            // reason the action bar is a sibling: nothing covers the part
+            // being judged.
+            asideAt ? 'flex-col md:flex-row md:items-start' : 'flex-col',
+          ].join(' ')}
+        >
+        <div className="min-h-0 flex flex-col items-center justify-center gap-3">
         <div className="relative min-h-0 flex items-center justify-center">
           {errored ? (
             <div
@@ -241,8 +259,13 @@ export default function ImageLightbox({
                   // The bar is a SIBLING, not an overlay: it takes its height
                   // out of the photo's rather than sitting on top of it, so a
                   // control never covers the part being judged.
-                  'max-w-[92vw] object-contain',
-                  actionsAt ? 'max-h-[74vh]' : 'max-h-[88vh]',
+                  'object-contain',
+                  asideAt ? 'max-w-[92vw] md:max-w-[58vw]' : 'max-w-[92vw]',
+                  // Stacked under a narrow screen's aside, the photo has to
+                  // give up half the height or the pair overflows the dialog;
+                  // side by side on a wide one, it gives up nothing.
+                  actionsAt ? 'max-h-[74vh]'
+                    : asideAt ? 'max-h-[46vh] md:max-h-[88vh]' : 'max-h-[88vh]',
                   'border border-[var(--color-copper)]/40',
                   dim,
                 ].join(' ')}
@@ -262,6 +285,15 @@ export default function ImageLightbox({
         {actionsAt && (
           <div data-testid="lightbox-actions" className="w-full max-w-[46rem] shrink-0">
             {actionsAt(i)}
+          </div>
+        )}
+        </div>
+        {asideAt && (
+          <div
+            data-testid="lightbox-aside"
+            className="w-full md:w-[26rem] shrink-0 max-h-[40vh] md:max-h-[88vh] overflow-y-auto rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-3"
+          >
+            {asideAt(i)}
           </div>
         )}
         </div>
