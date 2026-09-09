@@ -1,5 +1,4 @@
-"""Bootstrap one tagging bake-off run: the run row, the arm rows, the image manifest,
-and the free `clip-b32-stored` baseline.
+"""Bootstrap one tagging bake-off run: the run row, the arm rows and the image manifest.
 
 Stage 1 of 3 (`.github/workflows/tagging_bakeoff.yml`). Runs on a plain GitHub runner
 with SUPABASE_DB_URL and the R2_* secrets; installs no torch, downloads no weights,
@@ -11,10 +10,11 @@ WHAT IT PRODUCES:
   * `bakeoff/tagging/<run_id>/manifest.json` in R2 — one 7-day presigned GET URL per
     image, so the GPU pod that consumes it needs NO database and NO R2 credentials to
     read the pictures,
-  * the `clip-b32-stored` arm's vectors, COPIED by SQL out of the live
-    `image_clip_embeddings`. That arm is the incumbent baseline every other arm is
-    measured against and it costs zero GPU seconds, so it is done here rather than
-    dispatched to a pod that would have nothing to compute.
+  * ONLY IF THE RUN NAMES IT: the `clip-b32-stored` arm's vectors, COPIED by SQL out of
+    the live `image_clip_embeddings`. That arm costs zero GPU seconds, so it is done
+    here rather than dispatched to a pod that would have nothing to compute — but the
+    2026-09-09 ruling retired it (224 px), so the copy now runs only when
+    `--arms clip-b32-stored` asks for it. An un-narrowed run does no copying at all.
 
 THE IMAGE SET IS ASSEMBLED FROM SANCTIONED READERS ONLY. Every training image arrives
 through `toolkit.machine_labeling.training_rows`, the one door onto training labels
@@ -184,14 +184,19 @@ def stored_images(conn: Any, image_ids: Sequence[int]) -> dict[int, str]:
 
 def build_arms(*, only: Sequence[str] | None, hf_token: str | None,
                siglip_probe: Any = None) -> list[arms_mod.Arm]:
-    """The preset, narrowed by `--arms`, with SigLIP2's checkpoint resolved live."""
+    """The preset, narrowed by `--arms`, with SigLIP2's checkpoint resolved live.
+
+    An un-narrowed run gets `default_arms()` — 512 px and up since the 2026-09-09
+    ruling. `--arms` resolves against the WIDER `all_arms()` catalogue instead, so a
+    retired arm (the two 224 px CLIP ones) is reachable by name and only by name.
+    """
     if siglip_probe is None:
         siglip_probe = arms_mod.resolve_siglip_checkpoint
     siglip_model, siglip_resolution = siglip_probe(token=hf_token)
-    preset = arms_mod.default_arms(siglip_model=siglip_model,
-                                   siglip_resolution=siglip_resolution)
-    preset = [arms_mod.renamed_to_effective(a) for a in preset]
-    return arms_mod.select_arms(preset, only)
+    catalogue = (arms_mod.all_arms if only else arms_mod.default_arms)(
+        siglip_model=siglip_model, siglip_resolution=siglip_resolution)
+    catalogue = [arms_mod.renamed_to_effective(a) for a in catalogue]
+    return arms_mod.select_arms(catalogue, only)
 
 
 def _create_run(conn: Any, *, label: str, note: str, heads: Sequence[int]) -> int:
@@ -277,8 +282,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                    help="Comma-separated tag ids. Overrides the operator's ready "
                         "flag entirely — an explicit list is the operator's call.")
     p.add_argument("--arms", default="",
-                   help="Comma-separated arm names to narrow the preset to. Empty = "
-                        "every arm. An unknown name is an error, not a silent no-op.")
+                   help="Comma-separated arm names to narrow the run to. Empty = the "
+                        "default preset (512 px and up). Naming arms resolves against "
+                        "the wider catalogue, which is the only way to reach a retired "
+                        "arm. An unknown name is an error, not a silent no-op.")
     p.add_argument("--expires", type=int, default=DEFAULT_EXPIRES_S,
                    help="Presigned URL lifetime in seconds (default 7 days, R2's max).")
     p.add_argument("--dry-run", action="store_true",

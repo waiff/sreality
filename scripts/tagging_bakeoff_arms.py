@@ -23,9 +23,16 @@ WHAT THE DEFAULT RUN ASKS. The operator's questions, one arm each:
   * "what if the licence falls through?"               -> DINOv2-L/14-with-registers
     (Apache-2.0), at 504 because patch 14 does not divide 512
   * "is a language-supervised encoder better at TAGS?" -> SigLIP2 B/16, its own pooling
-  * "how much better than what we already have?"       -> LAION CLIP B/32 @224, plus the
-    zero-GPU `clip-b32-stored` arm, which copies the INCUMBENT's live vectors. That one
-    is the baseline every other arm is measured against and it costs nothing.
+
+NOTHING BELOW 512 PX IS IN THE DEFAULT ANY MORE (operator ruling 2026-09-09). Run 1
+measured the two 224 px arms — LAION CLIP B/32 and the zero-GPU `clip-b32-stored` copy
+of the INCUMBENT's live vectors — 0.03 to 0.06 mean F1 below the 512+ field, which
+answers "how much better than what we already have?" once. They are not deleted:
+`retired_arms()` keeps them, `all_arms()` is the catalogue an explicit
+`--arms clip-b32-stored` resolves against, and a named retired arm still runs. It is
+`default_arms()` — what a run measures when nobody narrows it — that has stopped
+spending GPU minutes on a settled question. DINOv2's 504 is 512 snapped to patch 14,
+so it stays.
 
 RESOLUTION SNAPS TO THE PATCH GRID and the snapped value is what gets recorded. DINOv2
 is patch 14, so a requested 512 is really 504; recording the request and calling the
@@ -62,11 +69,13 @@ STORED_CLIP_DIM = 512
 
 # SigLIP2 B/16 at the largest fixed-resolution checkpoint that exists. Probed in this
 # order at run time; the first that resolves wins. `-512` is the operator's "as large as
-# it goes" question applied to the tag-side control; `-256` is the checkpoint PR #1300
-# defended and the guaranteed fallback.
+# it goes" question applied to the tag-side control. The `-256` fallback PR #1300
+# defended was DROPPED on 2026-09-09: the ruling put a 512 floor under the default
+# preset, so silently degrading this control to 256 would smuggle a retired resolution
+# back into a run nobody narrowed. If 512 will not resolve the embed stage skips the
+# arm and says so — a missing control is readable, a quietly smaller one is not.
 SIGLIP2_CANDIDATES: tuple[tuple[str, int], ...] = (
     ("google/siglip2-base-patch16-512", 512),
-    ("google/siglip2-base-patch16-256", 256),
 )
 
 
@@ -188,22 +197,47 @@ def default_arms(*, siglip_model: str = SIGLIP2_CANDIDATES[-1][0],
              "learned attention-pooling head, so `pooler_output` here is a different "
              "mechanism from the DINO arms' post-LN CLS that happens to share a name",
     ))
-    arms.append(Arm(
-        name="clip-b32-laion@224/fp32", model=LAION_CLIP_B32, library="transformers",
-        pooling="image_embeds", resolution=224, preprocessing="square_squash",
-        dtype="fp32", patch=32, model_class="CLIPVisionModelWithProjection",
-        note="the FAIR CLIP baseline (MIT, ungated) at its native geometry — tells "
-             "'the CLIP family is weak here' apart from 'the 2021 checkpoint is weak'",
-    ))
-    arms.append(Arm(
-        name=STORED_CLIP_ARM, model=STORED_CLIP_MODEL, library="pgvector (stored)",
-        pooling="image_embeds", resolution=224, preprocessing="square_squash",
-        dtype="fp32", patch=32, model_class="",
-        note="ZERO GPU. The incumbent's LIVE vectors, copied out of "
-             "image_clip_embeddings by SQL in the manifest stage. Every other arm is "
-             "measured against this one, and it is free",
-    ))
     return arms
+
+
+def retired_arms() -> list[Arm]:
+    """The arms the 2026-09-09 ruling took OFF the default: everything under 512 px.
+
+    Kept rather than deleted, because run 1's rows name them and a settled question can
+    still be re-asked. Nothing here runs unless `--arms` names it.
+    """
+    return [
+        Arm(
+            name="clip-b32-laion@224/fp32", model=LAION_CLIP_B32,
+            library="transformers", pooling="image_embeds", resolution=224,
+            preprocessing="square_squash", dtype="fp32", patch=32,
+            model_class="CLIPVisionModelWithProjection",
+            note="RETIRED 2026-09-09 (under 512 px). The LAION CLIP baseline (MIT, "
+                 "ungated) at its native geometry — told 'the CLIP family is weak "
+                 "here' apart from 'the 2021 checkpoint is weak'",
+        ),
+        Arm(
+            name=STORED_CLIP_ARM, model=STORED_CLIP_MODEL,
+            library="pgvector (stored)", pooling="image_embeds", resolution=224,
+            preprocessing="square_squash", dtype="fp32", patch=32, model_class="",
+            note="RETIRED 2026-09-09 (under 512 px). ZERO GPU: the incumbent's LIVE "
+                 "vectors, copied out of image_clip_embeddings by SQL in the manifest "
+                 "stage. Run 1 measured that baseline; naming this arm is how a later "
+                 "run measures it again",
+        ),
+    ]
+
+
+def all_arms(*, siglip_model: str = SIGLIP2_CANDIDATES[-1][0],
+             siglip_resolution: int = SIGLIP2_CANDIDATES[-1][1]) -> list[Arm]:
+    """Every arm a NAME can resolve to — the default preset plus the retired ones.
+
+    The catalogue `--arms` is checked against, so asking for a retired arm is a
+    request rather than a typo, while a run nobody narrowed still gets only
+    `default_arms()`.
+    """
+    return default_arms(siglip_model=siglip_model,
+                        siglip_resolution=siglip_resolution) + retired_arms()
 
 
 def select_arms(arms: Sequence[Arm], names: Iterable[str] | None) -> list[Arm]:
@@ -274,9 +308,10 @@ def resolve_siglip_checkpoint(*, token: str | None = None,
     """(repo_id, resolution) for the largest SigLIP2 B/16 checkpoint that exists.
 
     Probes `SIGLIP2_CANDIDATES` largest-first and returns the first that resolves. The
-    last candidate is returned unprobed if every probe fails, so a Hub outage degrades
-    to the defensible 256 arm instead of dropping the control entirely — the embed stage
-    resolves the sha again anyway and skips the arm if it cannot.
+    last candidate is returned unprobed if every probe fails — since the 2026-09-09
+    ruling dropped the 256 fallback that is the 512 checkpoint itself, so a Hub outage
+    ends in the embed stage resolving the sha again and SKIPPING the arm, never in a
+    quietly smaller control.
     """
     for repo_id, resolution in SIGLIP2_CANDIDATES:
         try:
