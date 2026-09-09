@@ -194,6 +194,145 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-09 (a) — **Run 1 of the tagging bake-off COMPLETED. 11 heads x 11 encoder arms x 3
+  training modes = 363 trained cells, 529,188 per-photo scores, 0 ungradable, ~$1.55 of GPU
+  in total.** The experiment (d) built and (e) gave a face has now been run end to end, and
+  every number below is measured on run 1 (`run_id 1`, schema `dedup_sim`) rather than
+  estimated. It answers three of the four things ENCODER-DECISION.md §5 said had to be
+  measured before the corpus is embedded; the fourth (near-duplicate matching) is still
+  untouched.
+  - **What was run.** The 11 heads are exactly the tags the operator has marked
+    `review_state='ready'` on `/new-dedup/training-set` — fasáda, garáž, koupelna, kuchyně,
+    obývací pokoj, 3d plán, katastrální mapa, letecký snímek s ohraničením, property list,
+    půdorys, technické zařízení — selected by the flag, never by a list (the (d) addendum's
+    ruling). **9,264 training photos** and the sealed **250-photo exam**; **0 exam photos
+    appear in any training tray** (verified, not assumed — that separation is the only thing
+    that makes the exam an exam). 264 cells were trained in the first pass and 99 in the
+    second, and not one cell came back ungradable.
+  - **The cost of getting here.** Seven pod attempts, all on 2026-09-08: ≈ $0.50 + $0.08 +
+    $0.12 + $0.09 + $0.00 + $0.36 + $0.40 ≈ **$1.55**. The first five are post-mortemed in
+    entries (f)–(j) — a clone that could never have worked, a bootstrap that could not report
+    itself, a crash loop over an undersized disk, a missing `torchvision`, and two rules that
+    each defined `failed` correctly in their own scope and deadlocked together. The CPU train
+    stages cost nothing (they are not GPU work). The watchdog built in (f) is what kept the
+    total at a dollar and a half instead of the two-hour idle bill the first attempt was on
+    course for.
+  - **What F1 means, once.** A head can be wrong two ways: it flags photos that are not the
+    tag (**precision** = of what it flagged, how much was right) and it misses photos that
+    are (**recall** = of what was really there, how much it found). **F1 is the harmonic mean
+    of the two** — 1.0 is perfect, and it is only high when BOTH are, so it cannot be gamed by
+    flagging everything (perfect recall, useless precision) or by flagging only the single
+    photo the model is surest of (perfect precision, useless recall). Two F1s are reported per
+    cell and they answer different questions: **CV F1** is grouped 5-fold cross-validation over
+    the training photos — every photo scored by a model that never saw any photo from its
+    listing, so it measures the head on material like the material it was taught on — and
+    **exam F1** is the sealed `exam_v1` holdout graded by the ratified rule, which measures the
+    head on a random slice of the real corpus.
+
+  Mean F1 across the 11 heads, `pos_neg` mode (the head trained on the operator's own yes AND
+  no labels), with end-to-end throughput measured on an RTX 3090 at batch 32, 16 decode
+  workers, `letterbox_pad` — decode, preprocessing and forward pass together, which is the
+  number §5.3 asked for and never had:
+
+  | arm | CV F1 | exam F1 | img/s |
+  | --- | --- | --- | --- |
+  | `dinov3-l16@512/bf16` | 0.905 | 0.739 | 5.0 |
+  | `dinov2-l14-reg@504/bf16` | 0.904 | **0.758** | 26.2 |
+  | `dinov3-b16@1024/bf16` | 0.903 | 0.744 | 4.3 |
+  | `dinov3-b16@1024/fp32` | 0.903 | 0.742 | 2.9 |
+  | `dinov3-b16@768/bf16` | 0.903 | 0.732 | 12.0 |
+  | `dinov3-b16@768/fp32` | 0.903 | 0.732 | 4.5 |
+  | `dinov3-b16@512/bf16` | 0.903 | 0.708 | 20.5 |
+  | `dinov3-b16@512/fp32` | 0.903 | 0.708 | 12.9 |
+  | `siglip2-b16@512/bf16` | 0.878 | 0.694 | 37.0 |
+  | `clip-b32-laion@224/fp32` | 0.876 | 0.669 | 55.9 |
+  | `clip-b32-stored` (incumbent, copied) | 0.841 | 0.633 | — |
+
+  - **1. Half-precision is free speed — bf16 and fp32 agree to three decimals on every arm.**
+    `bf16` stores each number in half the space, which was the one thing that could have made
+    it worse; on this job it does not move F1 at any resolution and it runs **1.6-2.7× faster**
+    (512: 12.9 → 20.5 img/s; 768: 4.5 → 12.0; 1024: 2.9 → 4.3). For the `dtype` null in
+    `data/dinov3_config.json` this is as close to a decided answer as measurement gets: fp32
+    buys nothing and costs between a third and two thirds of the throughput.
+  - **2. Resolution buys a little, and it is expensive.** On DINOv3-B the CV F1 is **identical**
+    at 512, 768 and 1024 (0.903 three times) — on the training material, the extra pixels teach
+    the head nothing. On the exam it does move, monotonically: **0.708 → 0.732 → 0.744**, for
+    **20.5 → 12.0 → 4.3 img/s**. So 1024 is worth about 3.6 F1 points over 512 on real-corpus
+    photos and costs **4.8× the compute**. That is a price question, not an accuracy question,
+    and the arithmetic is below.
+  - **3. DINOv2-L is not worse than any DINOv3 arm on THIS job — and it is Apache-2.0.**
+    `dinov2-l14-reg@504/bf16` posts the **best exam F1 of the whole field (0.758)**, ties the
+    best CV F1 to a thousandth, and is the **fastest DINO arm by 6×** (26.2 img/s against
+    DINOv3-B@768's 12.0). It also carries no licence acceptance step. **This does not overturn
+    ENCODER-DECISION.md**, and it must not be read as if it did: that document chose DINOv3 on
+    **near-duplicate retrieval** — telling two photographs of the same flat apart from two
+    photographs of similar flats — which is a different job from tagging and is **still
+    completely unmeasured** here. The harness for it exists (#1300's "Set 2"). Until it runs,
+    the honest statement is: on tagging, DINOv2-L is at least as good and much cheaper; on the
+    job the encoder was actually chosen for, we have no measurement at all.
+  - **4. Leaving the incumbent CLIP is worth about +0.06 mean CV F1**, and the gain is
+    concentrated where the incumbent is weakest rather than spread thinly: **3d plán 0.71 →
+    0.91**, **obývací pokoj 0.83 → 0.92**, **letecký snímek 0.77 → 0.88**, **technické zařízení
+    0.81 → 0.87**. Those are the four heads where the stored CLIP vectors were not good enough
+    to build on; a better encoder fixes them without a single new label.
+  - **5. The operator's negative labels are worth roughly what a whole encoder upgrade is
+    worth — and the value is wildly uneven.** Comparing `pos_neg` against `pos_only_free_neg`
+    (the mode that borrows other heads' positives as free stand-in negatives) on
+    `dinov3-b16@768/bf16`: **+0.055 CV / +0.074 exam** on average. Per head: **≈0 on the
+    document tags and on koupelna** (a floor plan is so unlike anything else that free
+    negatives are enough), **+0.11 on garáž and obývací pokoj**, **+0.22 on property list**.
+    Dropping negatives entirely (`pos_only_centroid`, no classifier at all — just cosine
+    distance to the average positive) costs a further **−0.07** (0.833 CV / 0.647 exam). The
+    reading: labelling negatives is not universally necessary, but on the confusable heads it
+    is the difference-maker, and the operator can now spend label-days on the heads where it
+    pays instead of uniformly.
+  - **6. Per-head CV F1 (`dinov3-b16@768/bf16`), and the one weak head.** katastrální mapa
+    0.97, koupelna 0.97, půdorys 0.96, kuchyně 0.95, garáž 0.92, obývací pokoj 0.92, 3d plán
+    0.91, fasáda 0.89, letecký snímek 0.88, technické zařízení 0.87 — and **property list
+    0.69** (precision 0.57, recall 0.87). Ten heads are usable; property list finds most of
+    what it should but nearly half of what it flags is wrong. Recall that high with precision
+    that low is the signature of a **definition** that is admitting more than it means to, not
+    of a training failure — which is why it appears in the open decisions below rather than in
+    a threshold sweep.
+  - **7. The exam column is a PREVALENCE story, not a definition story — read it that way or
+    it will mislead.** Exam recall is ~1.0 nearly everywhere; what collapses is precision, and
+    it collapses on the RARE tags for an arithmetic reason. The exam is 250 photos drawn at
+    random, so a tag that is rare in the corpus has almost no positives in it: **garáž 2 true
+    positives against 7 false; katastrální mapa 10 against 9; letecký snímek 8 against 10;
+    fasáda 19 against 15**. A handful of extra false flags halves a precision computed over two
+    or ten true ones. **technické zařízení has 0 positives in the exam at all** — its metrics
+    are correctly NULL (nothing to grade), which is the (d) contract behaving as designed. **3d
+    plán and property list have no gradable exam cells** because they are post-exam tags: they
+    did not exist when the exam was answered.
+    - **The mechanism, plainly:** every head is trained at roughly **1:3 positives to
+      negatives** and then judged at the **0.5** threshold, but out in the corpus the true rate
+      is far below 1:3. A head calibrated for a balanced tray **over-fires** at natural
+      prevalence. **Per-head thresholds read off each head's own precision/recall curve are the
+      next knob**, and they are cheap: no re-embedding, no re-training, just a number per head.
+      **Before turning it, the operator should look at the false-positive buckets** on
+      `/new-dedup/tagging-bakeoff` **view B** — the wrongly-caught pile, most-confident first —
+      because some of those "errors" will be photos the head got right and the label got wrong,
+      and a threshold tuned against mislabelled evidence bakes the mistake in.
+  - **The corpus-cost arithmetic, stated as arithmetic and not as a recommendation.** At the
+    measured end-to-end rates, **11.5M stored images** on a **$0.22/hr RTX 3090**:
+    `dinov2-l14` ≈ **123 h ≈ $27**; `dinov3-b16@512/bf16` ≈ **156 h ≈ $34**;
+    `@768/bf16` ≈ **266 h ≈ $59**; `@1024/bf16` ≈ **743 h ≈ $163**. **This is far above
+    ENCODER-DECISION.md's $1-12 band**, and the band is what is wrong, not the measurement:
+    that band came from GPU-only synthetic-tensor throughput, while these numbers include JPEG
+    decode and preprocessing — the very thing §5.3 said had to be measured once before the
+    corpus pass was scheduled. This is that measurement. Bigger batches, more decode workers or
+    a faster card may well move it, but **nothing here measured that**, so nothing here claims
+    it. What it does establish is that resolution is now a **$34-vs-$163** decision rather than
+    a rounding error.
+  - **Open, and the operator's to decide — listed, not decided here.** (1) The three nulls in
+    `data/dinov3_config.json`: `preprocessing` was already ruled `letterbox_pad`, `dtype` is
+    answered by the data (readout 1), **`resolution` is the live question** (readout 2 + the
+    cost arithmetic). (2) Whether the tagging result changes the encoder choice at all — it
+    cannot be settled until the near-duplicate bake-off runs, because that is the job the
+    choice was made on. (3) Per-head thresholds. (4) Property list's definition. (5) Whether
+    some exam-side false positives should be re-judged before any of the above is tuned
+    against them.
+
 - 2026-09-08 (j) — **Attempt 5 was killed by our own two definitions of `failed`, 2 s in,
   $0.00 — and a retry was impossible as designed.** GitHub run 34274077032 rented pod
   `w8rh1rekxwo57z` for run 1's embed stage and the watchdog tore it down immediately with
