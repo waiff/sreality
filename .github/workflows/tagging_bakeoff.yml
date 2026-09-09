@@ -38,15 +38,6 @@ name: "NEW DEDUP: tagging bake-off (manifest / embed / train)"
 #   3. train — back on a runner with the `training` extra, running the results half of
 #      the experiment.
 #
-# WHAT A DEFAULT DISPATCH MEASURES, SINCE THE 2026-09-09 RULING. The operator retired the
-# two positive-only training modes and every arm below 512 px, so this lane's DEFAULTS are
-# narrowed to match: the manifest stage mints no 224 px CLIP arm (neither the LAION one nor
-# the free stored copy) and the train stage trains `pos_neg` only. Nothing was deleted —
-# run 1's rows are all still there and still readable on /new-dedup/tagging-bakeoff behind
-# its "show retired set-ups" toggle — and naming a retired set-up runs it again on purpose:
-# `arms=clip-b32-stored` re-mints the zero-GPU incumbent baseline, `modes=pos_only_centroid`
-# re-trains a retired mode. The point is that no GPU minute goes on a decided question.
-#
 # START WITH dry_run (the default). The manifest stage's dry run reports which heads the
 # operator has marked ready on /new-dedup/training-set and how many distinct images the run
 # would embed, and writes nothing; the embed stage's prints the pod plan and launches nothing.
@@ -97,11 +88,6 @@ on:
         type: string
       arms:
         description: "Comma-separated arm names to narrow a stage to (e.g. dinov3-b16@512/bf16). Empty = the default preset (512 px and up). Naming an arm is also the only way to reach a retired one (clip-b32-laion@224/fp32, clip-b32-stored)."
-        required: false
-        default: ""
-        type: string
-      modes:
-        description: "train only: comma-separated training modes. Empty = the live set (pos_neg). The two positive-only modes were retired on 2026-09-09 and run only when named here."
         required: false
         default: ""
         type: string
@@ -176,7 +162,6 @@ jobs:
           RUN_ID: ${{ inputs.run_id }}
           HEADS: ${{ inputs.heads }}
           ARMS: ${{ inputs.arms }}
-          MODES: ${{ inputs.modes }}
           BATCH_SIZE: ${{ inputs.batch_size }}
           WORKERS: ${{ inputs.workers }}
           JOB_MAX_SECONDS: ${{ inputs.job_max_seconds }}
@@ -212,10 +197,6 @@ jobs:
           # Arm names carry @ / . - and commas (dinov3-b16@768/bf16); nothing else.
           case "${ARMS:-}" in
             *[!A-Za-z0-9@/.,_-]*) echo "::error::arms must be comma-separated arm names"; exit 1 ;;
-          esac
-          # Mode names are lowercase words joined by underscores (pos_only_free_neg).
-          case "${MODES:-}" in
-            *[!a-z_,\ ]*) echo "::error::modes must be comma-separated mode names"; exit 1 ;;
           esac
           if [ "${STAGE}" != "manifest" ] && [ -z "${RUN_ID:-}" ]; then
             echo "::error::stage=${STAGE} needs run_id (the manifest stage prints it)"; exit 1
@@ -301,12 +282,10 @@ jobs:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           RUN_ID: ${{ inputs.run_id }}
           ARMS: ${{ inputs.arms }}
-          MODES: ${{ inputs.modes }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
           ARGS=(--stage train --run-id "${RUN_ID}")
           if [ -n "${ARMS:-}" ]; then ARGS+=(--arms "${ARMS}"); fi
-          if [ -n "${MODES:-}" ]; then ARGS+=(--modes "${MODES}"); fi
           if [ "${DRY_RUN:-true}" = "true" ]; then ARGS+=(--dry-run); fi
           python -m scripts.tagging_bakeoff_dispatch "${ARGS[@]}"
