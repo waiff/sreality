@@ -241,10 +241,13 @@ _SCORES_TOTAL_SQL = """
       AND s.tag_id = %(tag_id)s AND s.split = %(split)s
 """
 
-# Keyset on (score DESC, image_id DESC), never OFFSET: scores tie constantly (a
-# centroid mode rounds many rows to the same cosine), and an ORDER BY that ties
-# reshuffles rows between pages — one photo shown twice and another never shown.
-# image_id is the unique tiebreaker that makes the order total.
+# Offset paging over a TOTAL order. Scores tie constantly (a centroid mode rounds
+# many rows to the same cosine), and an OFFSET over an ORDER BY that ties would
+# reshuffle rows between pages — one photo shown twice and another never shown.
+# image_id is the unique tiebreaker that makes the order total, and a total
+# order is what makes an offset a stable position: page 3 at 50 a page is the
+# same 50 photos on every visit. That stability is what lets the page offer the
+# training-set page's controls (a page size, "of N", a last-page jump).
 _SCORES_PAGE_SQL = f"""
     SELECT s.image_id, i.listing_id, i.storage_path, s.score, s.label,
            s.predicted, s.fold, ({bo._OUTCOME_SQL}) AS outcome
@@ -252,11 +255,8 @@ _SCORES_PAGE_SQL = f"""
     JOIN images i ON i.id = s.image_id
     WHERE s.arm_id = %(arm_id)s AND s.mode = %(mode)s
       AND s.tag_id = %(tag_id)s AND s.split = %(split)s
-      AND (%(after_score)s::real IS NULL
-           OR (s.score, s.image_id)
-              < (%(after_score)s::real, %(after_image_id)s::bigint))
     ORDER BY s.score DESC, s.image_id DESC
-    LIMIT %(limit)s
+    LIMIT %(limit)s OFFSET %(offset)s
 """
 
 _IMAGE_ROW_SQL = """
@@ -284,9 +284,11 @@ def get_scores(
     mode: str,
     tag_id: int,
     split: str = Query(default="cv", pattern="^(cv|exam)$"),
-    after_score: float | None = None,
-    after_image_id: int | None = None,
-    limit: int = Query(default=100, ge=1, le=200),
+    # The same page sizes as the training-set grid (50 … 10,000): a cell is at
+    # most the corpus the run was given (~10k photos), and the operator's way of
+    # reading a ranking is to widen the page until the whole cell is one scroll.
+    limit: int = Query(default=50, ge=1, le=10000),
+    offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
     """VIEW C — every photo one head scored, highest score first, unbucketed.
@@ -296,23 +298,22 @@ def get_scores(
     one flat ranked list. The sort key is the HEAD'S RAW SCORE — F1 is a property
     of the head, not of a photo, so it cannot order photos.
 
-    Paged by a keyset cursor, not an offset: `after_score` and `after_image_id`
-    travel TOGETHER (one without the other is a 422) and are the last row of the
-    previous page. Scores tie constantly, so the pair is what makes the order
-    total; an OFFSET over a tied ORDER BY shows one photo twice and skips another.
+    Paged by limit/offset over a TOTAL order (score desc, then image_id as the
+    unique tiebreaker), so an offset names the same photos on every visit and
+    `total` lets the client draw "x–y of N" and jump to the last page. Rank in
+    the cell = offset + position on the page.
 
     {"data": {
       "arm_id": 7, "mode": "pos_neg", "tag_id": 19, "split": "cv",
       "total": 9264,                             # the whole cell, not this page
+      "limit": 50, "offset": 0,
       "rows": [{
         "image_id": 84211, "listing_id": 99213,
         "storage_path": "images/2026/…/3.jpg",   # feed to GET /images/{path}
         "score": 0.9713, "label": 1 | 0 | null, "predicted": true,
         "fold": 2 | null,                        # null on the exam split
         "outcome": "tp"|"fp"|"fn"|"tn"|"abstained"
-      }],
-      "next_after_score": 0.4412 | null,         # null = last page
-      "next_after_image_id": 84211 | null
+      }]
     }}
 
     A score is a probability in [0, 1] for the two logistic modes and a COSINE in
@@ -321,19 +322,12 @@ def get_scores(
     """
     if bo.get_run(conn, run_id=run_id) is None:
         raise HTTPException(status_code=404, detail=f"run {run_id} not found")
-    if (after_score is None) != (after_image_id is None):
-        raise HTTPException(
-            status_code=422,
-            detail="after_score and after_image_id travel together — the cursor "
-                   "is the pair, because scores tie")
     keys = {"arm_id": arm_id, "mode": mode, "tag_id": tag_id, "split": split}
     with conn.cursor() as cur:
         cur.execute(_SCORES_TOTAL_SQL, keys)
         row = cur.fetchone()
         total = int(row[0]) if row else 0
-        cur.execute(_SCORES_PAGE_SQL, {
-            **keys, "after_score": after_score, "after_image_id": after_image_id,
-            "limit": limit})
+        cur.execute(_SCORES_PAGE_SQL, {**keys, "limit": limit, "offset": offset})
         rows = cur.fetchall()
     out = [{
         "image_id": int(r[0]),
@@ -345,14 +339,7 @@ def get_scores(
         "fold": None if r[6] is None else int(r[6]),
         "outcome": r[7],
     } for r in rows]
-    # A short page is the last page. A full one carries its own last row forward
-    # as the cursor, so the client never invents one.
-    last = out[-1] if len(out) == limit else None
-    return {"data": {
-        **keys, "total": total, "rows": out,
-        "next_after_score": last["score"] if last else None,
-        "next_after_image_id": last["image_id"] if last else None,
-    }}
+    return {"data": {**keys, "total": total, "limit": limit, "offset": offset, "rows": out}}
 
 
 @router.get("/runs/{run_id}/images/{image_id}")

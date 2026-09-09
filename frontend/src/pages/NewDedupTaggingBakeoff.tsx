@@ -19,6 +19,7 @@ import {
 } from '@/lib/api';
 import ErrorBanner from '@/components/ErrorBanner';
 import ImageLightbox from '@/components/ImageLightbox';
+import ImageSizeToggle from '@/components/ImageSizeToggle';
 import Spinner from '@/components/Spinner';
 import { imageSrc } from '@/lib/imageUrl';
 import type { ImagePublic } from '@/lib/types';
@@ -88,6 +89,9 @@ import type { ImagePublic } from '@/lib/types';
  *     yet gets a head picker that names them by tag id.
  *   * /images pages forward only (`next_after_image_id`, no inverse), so
  *     "previous" is a cursor stack this page keeps.
+ *   * /scores pages by offset over a total order, so View C carries the
+ *     training-set grid's controls unchanged: the same page sizes, "x–y of N",
+ *     a last-page jump, and the Small/Large photo switch.
  */
 
 /* ---------------------------------------------------------------- vocabulary */
@@ -503,7 +507,12 @@ const asImagePublic = (t: { image_id: number; storage_path: string | null }): Im
 
 const PAGE_A = 60;
 const PAGE_B = 24;
-const PAGE_C = 60;
+/* View C's page sizes are the training-set grid's, to the number: the operator
+ * reads a ranking the way they read a tray, widening the page until the whole
+ * cell is one scroll. */
+const SCORE_PAGE_SIZES = [50, 100, 500, 2000, 10000] as const;
+type ScorePageSize = (typeof SCORE_PAGE_SIZES)[number];
+const DEFAULT_SCORE_PAGE: ScorePageSize = 50;
 
 export default function NewDedupTaggingBakeoff() {
   const [params, setParams] = useSearchParams();
@@ -511,8 +520,9 @@ export default function NewDedupTaggingBakeoff() {
   /* Forward-only cursor paging (the contract gives `next_after_image_id` and no
    * inverse), so "previous" is a stack this page keeps. */
   const [cursors, setCursors] = useState<number[]>([]);
-  /* The same, for View C — whose cursor is a (score, image_id) pair. */
-  const [scoreCursors, setScoreCursors] = useState<string[]>([]);
+  /* View C's photo size — the same switch, and the same two sizes, as the
+   * training-set grid, so "large" means one thing on both pages. */
+  const [large, setLarge] = useState(false);
 
   const patch = (next: Record<string, string | null>) => {
     const merged = new URLSearchParams(params);
@@ -526,8 +536,8 @@ export default function NewDedupTaggingBakeoff() {
   /* A cursor is a position in ONE ordering. Change which rows are being listed
    * — the run, the cell, the split, the head — and every stored position is
    * about a list that no longer exists, so all three are dropped together. */
-  const REWIND = { after: null, off: null, sc: null };
-  const rewind = () => { setCursors([]); setScoreCursors([]); };
+  const REWIND = { after: null, off: null, soff: null };
+  const rewind = () => { setCursors([]); };
 
   const runsQ = useQuery({ queryKey: ['bakeoff-runs'], queryFn: () => listBakeoffRuns() });
   const runs = useMemo(() => runsQ.data?.data ?? [], [runsQ.data]);
@@ -701,50 +711,36 @@ export default function NewDedupTaggingBakeoff() {
 
   /* View C looks at the SAME cell as View B and shares its arm/mode keys, so
    * switching between "what did it get wrong" and "the whole ranking" never
-   * re-asks which cell. Its cursor is the (score, image_id) PAIR the API
-   * returned, carried as one URL value — scores tie, so the score alone is not
-   * a position. "Previous" is a stack, as in View A: the contract pages forward
-   * only. */
-  const rawCursor = params.get('sc');
-  const scoreCursor = useMemo(() => {
-    const parts = (rawCursor ?? '').split(',');
-    if (parts.length !== 2) return null;
-    const score = Number(parts[0]);
-    const imageId = Number(parts[1]);
-    return Number.isFinite(score) && Number.isInteger(imageId) && imageId > 0
-      ? { score, imageId }
-      : null;
-  }, [rawCursor]);
+   * re-asks which cell. It pages by offset, exactly as the training-set grid
+   * does (`n` = page size, `soff` = offset): the API orders by score with
+   * image_id as the unique tiebreaker, so an offset is a stable position even
+   * though scores tie, and a link reproduces the page it was copied from. */
+  const rawScoreN = Number(params.get('n') ?? DEFAULT_SCORE_PAGE);
+  const scorePageSize: ScorePageSize = (SCORE_PAGE_SIZES as readonly number[]).includes(rawScoreN)
+    ? (rawScoreN as ScorePageSize) : DEFAULT_SCORE_PAGE;
+  const scoreOffset = Math.max(0, Number(params.get('soff') ?? 0) || 0);
 
   const scoresQ = useQuery({
-    queryKey: ['bakeoff-scores', runId, bArmId, bMode, tagId, split, rawCursor],
+    queryKey: ['bakeoff-scores', runId, bArmId, bMode, tagId, split, scoreOffset, scorePageSize],
     queryFn: () => getBakeoffScores(runId as number, {
       arm_id: bArmId as number, mode: bMode, tag_id: tagId as number, split,
-      after_score: scoreCursor?.score,
-      after_image_id: scoreCursor?.imageId,
-      limit: PAGE_C,
+      limit: scorePageSize, offset: scoreOffset,
     }),
     enabled: runId != null && view === 'scores' && bArmId != null && tagId != null,
   });
   const scoreRows = useMemo(() => scoresQ.data?.data.rows ?? [], [scoresQ.data]);
   const galleryC = useMemo(() => scoreRows.map(asImagePublic), [scoreRows]);
   const scoreTotal = scoresQ.data?.data.total ?? 0;
-  /* The cursor for the NEXT page, as the one URL value it is stored as. Null on
-   * the last page — the API says so; the page never infers it from a count. */
-  const nextScoreCursor = scoresQ.data?.data.next_after_image_id == null
-    ? null
-    : `${scoresQ.data.data.next_after_score},${scoresQ.data.data.next_after_image_id}`;
   /* Rank is a position in the whole ranking, not on this page — the operator is
    * looking for "how far down does the good stuff go", and a counter restarting
-   * at 1 on every page would answer a different question. The stack depth IS the
-   * page number, since every page but the last is full.
-   *
-   * A shared link that lands mid-ranking arrives with a cursor and NO stack, so
-   * the absolute position is genuinely unknown. The page then shows no rank at
-   * all rather than numbering that page from 1 — which would be a wrong fact,
-   * not a rounded one. */
-  const rankKnown = scoreCursor == null || scoreCursors.length > 0;
-  const rankBase = scoreCursors.length * PAGE_C;
+   * at 1 on every page would answer a different question. With offset paging
+   * the position is always known: it is the offset. */
+  const rankBase = scoreOffset;
+  /* The last page's offset, from the cell's total — the same arithmetic as the
+   * training-set grid's "last page" jump. */
+  const lastScoreOffset = Math.max(
+    0, Math.floor(Math.max(0, scoreTotal - 1) / scorePageSize) * scorePageSize,
+  );
 
   /* --------------------------------------------------- what stays on screen */
 
@@ -1357,39 +1353,41 @@ export default function NewDedupTaggingBakeoff() {
             <div className="py-10 flex justify-center"><Spinner /></div>
           ) : scoresQ.error ? (
             <div className="mt-3"><ErrorBanner message={(scoresQ.error as Error).message} /></div>
-          ) : scoreRows.length === 0 && scoreCursor == null ? (
+          ) : scoreRows.length === 0 && scoreOffset === 0 ? (
             <p className="mt-8 text-center text-sm text-[var(--color-ink-2)]" data-testid="no-scores">
               This head scored no photographs on the {SPLIT_LABEL[split].toLowerCase()} split.
             </p>
           ) : (
             <>
-              <div className="mt-2 flex flex-wrap items-baseline gap-x-3 text-[0.7rem] text-[var(--color-ink-3)]">
+              <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.7rem] text-[var(--color-ink-3)]">
                 <span data-testid="scores-total">
                   {fmtN(scoreTotal)} photo{scoreTotal === 1 ? '' : 's'} in this cell
                 </span>
                 <span className="text-[var(--color-ink-4)]" data-testid="scores-range">
-                  {rankKnown
-                    ? <>showing {fmtN(rankBase + 1)}&ndash;{fmtN(rankBase + scoreRows.length)}</>
-                    : <span title="You arrived here on a link that starts part-way down the ranking, so this page's position in it is not known — only that these photos come after the one the link named.">
-                        somewhere below the top
-                      </span>}
-                  {' · '}scores are a {scoreUnit(bMode)}
+                  {scoreRows.length > 0 && (
+                    <>showing {fmtN(rankBase + 1)}&ndash;{fmtN(rankBase + scoreRows.length)}{' · '}</>
+                  )}
+                  scores are a {scoreUnit(bMode)}
+                </span>
+                <span className="ml-auto">
+                  <ImageSizeToggle large={large} onChange={setLarge} label="Ranking grid image size" />
                 </span>
               </div>
 
               {scoreRows.length === 0 ? (
-                /* A cell whose size is an exact multiple of the page size hands
-                 * back a cursor for a page that turns out to be empty. That is
-                 * the end of the ranking, not an empty cell — and the pager
-                 * below still renders, so this is never a dead end. */
+                /* A link can name an offset past the cell's end (the cell was
+                 * re-scored smaller, or the page size changed). That is the end
+                 * of the ranking, not an empty cell — and the pager below still
+                 * renders, so this is never a dead end. */
                 <p className="mt-6 text-center text-sm text-[var(--color-ink-2)]" data-testid="scores-end">
                   The ranking ends here. Step back for the previous page.
                 </p>
               ) : (
               <ul
                 className="mt-2 grid gap-2"
-                style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(11rem, 1fr))' }}
+                style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${large ? '16rem' : '8rem'}, 1fr))` }}
                 data-testid="score-grid"
+                data-size={large ? 'large' : 'small'}
               >
                 {scoreRows.map((r, i) => {
                   const colour = r.outcome === 'abstained'
@@ -1414,7 +1412,7 @@ export default function NewDedupTaggingBakeoff() {
                         onClick={() => setLightbox({ images: galleryC, index: i })}
                         aria-label={`Open photo ${r.image_id}`}
                         title={`#${r.image_id} · score ${r.score.toFixed(4)} (${scoreUnit(bMode)}) · model said ${r.predicted ? 'yes' : 'no'} · you said ${said}\n${verdict}${r.fold != null ? `\nfold ${r.fold}` : ''}`}
-                        className="block h-24 w-full rounded-[var(--radius-xs)] bg-[var(--color-inset)]"
+                        className={`block w-full rounded-[var(--radius-xs)] bg-[var(--color-inset)] ${large ? 'h-56' : 'h-28'}`}
                       >
                         <img
                           src={imageSrc({ sreality_url: '', storage_path: r.storage_path })}
@@ -1423,12 +1421,10 @@ export default function NewDedupTaggingBakeoff() {
                           className="h-full w-full rounded-[var(--radius-xs)] object-cover"
                         />
                       </button>
-                      <div className="mt-1 flex items-baseline gap-1">
-                        {rankKnown && (
-                          <span className="font-mono text-[0.55rem] tabular-nums text-[var(--color-ink-4)]">
-                            {fmtN(rankBase + i + 1)}
-                          </span>
-                        )}
+                      <div className="mt-1 flex flex-wrap items-baseline gap-x-1">
+                        <span className="font-mono text-[0.55rem] tabular-nums text-[var(--color-ink-4)]">
+                          {fmtN(rankBase + i + 1)}
+                        </span>
                         <span
                           className="font-mono text-xs tabular-nums"
                           style={{ color: colour }}
@@ -1461,44 +1457,61 @@ export default function NewDedupTaggingBakeoff() {
               </ul>
               )}
 
-              <div className="mt-4 flex items-center justify-center gap-3 text-xs">
-                {/* Stepping back needs a stack. A shared link that lands
-                  * mid-ranking has none — but the top of the ranking is a
-                  * position we can always name, so the button rewinds there
-                  * rather than going dead and stranding the operator. */}
+              {/* The training-set grid's pager, control for control: page size,
+                * previous, "x–y of N", next, and a jump to the last page. A
+                * page-size change restarts at the top — an offset is a position
+                * in pages of ONE size, so it does not carry across. */}
+              <div className="mt-4 flex flex-wrap items-center justify-center gap-3 text-xs">
+                <span className="flex items-center gap-1" role="group" aria-label="per page">
+                  <span className="mr-0.5 text-[0.65rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)]">per page</span>
+                  {SCORE_PAGE_SIZES.map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      data-testid={`score-per-page-${n}`}
+                      aria-pressed={scorePageSize === n}
+                      onClick={() => patch({ n: String(n), soff: null })}
+                      className={`rounded-[var(--radius-sm)] border px-2 py-1 ${scorePageSize === n ? 'border-[var(--color-ink-2)] text-[var(--color-ink)]' : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]'}`}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </span>
                 <button
                   type="button"
                   data-testid="score-prev"
-                  disabled={scoreCursors.length === 0 && scoreCursor == null}
+                  disabled={scoreOffset === 0}
                   onClick={() => {
-                    if (scoreCursors.length === 0) { patch({ sc: null }); return; }
-                    const stack = [...scoreCursors];
-                    stack.pop();
-                    setScoreCursors(stack);
-                    patch({ sc: stack.length ? stack[stack.length - 1] : null });
+                    const back = Math.max(0, scoreOffset - scorePageSize);
+                    patch({ soff: back === 0 ? null : String(back) });
                   }}
                   className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-3 py-1 text-[var(--color-ink-3)] disabled:opacity-40"
                 >
-                  {scoreCursors.length === 0 && scoreCursor != null
-                    ? <>&uarr; back to the top</>
-                    : <>&larr; previous</>}
+                  &larr; previous
                 </button>
-                <span className="tabular-nums text-[var(--color-ink-4)]">
-                  {scoreRows.length} photos
+                <span className="tabular-nums text-[var(--color-ink-4)]" data-testid="score-page-range">
+                  {scoreRows.length > 0 ? <>{fmtN(scoreOffset + 1)}&ndash;{fmtN(scoreOffset + scoreRows.length)}</> : 'none'}
+                  {' of '}{fmtN(scoreTotal)}
                 </span>
                 <button
                   type="button"
                   data-testid="score-next"
-                  disabled={nextScoreCursor == null}
-                  onClick={() => {
-                    if (nextScoreCursor == null) return;
-                    setScoreCursors([...scoreCursors, nextScoreCursor]);
-                    patch({ sc: nextScoreCursor });
-                  }}
+                  disabled={scoreOffset + scoreRows.length >= scoreTotal}
+                  onClick={() => patch({ soff: String(scoreOffset + scorePageSize) })}
                   className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-3 py-1 text-[var(--color-ink-3)] disabled:opacity-40"
                 >
                   next &rarr;
                 </button>
+                {lastScoreOffset > scoreOffset && (
+                  <button
+                    type="button"
+                    data-testid="score-last"
+                    onClick={() => patch({ soff: String(lastScoreOffset) })}
+                    className="rounded-[var(--radius-sm)] border border-[var(--color-sage)] px-3 py-1 text-[var(--color-ink)]"
+                  >
+                    last page &#8677;
+                  </button>
+                )}
               </div>
             </>
           )}

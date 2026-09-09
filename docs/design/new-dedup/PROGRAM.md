@@ -194,6 +194,19 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-09 (e) — **"All photos by score" gets the training-set grid's controls, to the
+  control: the same five page sizes (50 … 10,000), "x–y of N", a last-page jump, and the
+  Small/Large photo switch (operator ask, same day).** To carry them, `/runs/{id}/scores`
+  moved from the keyset cursor described in (c) to **limit/offset paging** — which is safe
+  precisely because the ordering was already total: `score desc, image_id desc` has a unique
+  tiebreaker, so an offset names the same photos on every visit; the cursor was guarding
+  against a reshuffle that this ORDER BY cannot produce. `limit` now accepts up to 10,000 (the
+  widest training-set page; a cell is at most the run's ~10k-photo corpus). Ranks are now
+  known on every page (offset + place), so the "somewhere below the top" state for a
+  mid-ranking link is gone. Page state travels in the URL as `n` (page size) and `soff`
+  (offset), rewound with the rest of the position keys when the cell changes; the photo size
+  is page-local state, as on the training-set page, and uses the same 8rem/16rem grid
+  minimums so "large" means one thing on both pages. Views A and B are untouched.
 - 2026-09-09 (d) — **Tag model v1 is LIVE: migration 490 applied, the whole loop
   (promote -> score -> activate) run for real, and the winner rule graded for the first time.
   On the sealed exam the winner names the operator's own tag 95.7% of the time; the open

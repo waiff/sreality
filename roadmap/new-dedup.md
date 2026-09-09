@@ -424,7 +424,8 @@ W1 (shared prerequisites + labeling program):
       (`arms=clip-b32-stored` — the zero-GPU incumbent baseline — or `modes=pos_only_centroid`),
       because ruling (c) keeps the training set, head set, model and parameters iterating and a
       narrowed default must not become a locked door. Read surface now **six** routes:
-      `.../runs/{id}/scores` (one head's ranking, keyset-paged) and
+      `.../runs/{id}/scores` (one head's ranking; offset-paged with the training-set grid's
+      page sizes and Small/Large switch since ledger `2026-09-09 (e)`) and
       `.../runs/{id}/images/{image_id}` (one photo across every arm, mode, head and split).
 - [x] **Tag model, iteration 1 — the versioned model + the winner store (2026-09-09, PR #1366;
       PROGRAM.md ledger entry `2026-09-09 (b)`, which also lists the day's ruling in

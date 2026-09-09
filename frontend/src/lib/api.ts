@@ -1937,17 +1937,17 @@ export interface BakeoffScores {
   split: BakeoffSplit;
   /* The size of the whole cell, not of this page. */
   total: number;
+  /* The window that was actually served, echoed back. */
+  limit: number;
+  offset: number;
   rows: BakeoffScoreRow[];
-  /* The pair IS the cursor: scores tie constantly, so image_id is what makes
-   * the ordering total. Both are null on the last page. */
-  next_after_score: number | null;
-  next_after_image_id: number | null;
 }
 
 /* VIEW C. The same cell as View B, UNBUCKETED: every photo the head scored, in
- * score order. Paged by the (score, image_id) pair the previous page returned —
- * an offset over a tied ORDER BY would show one photo twice and skip another,
- * so the two travel together and the API refuses one without the other. */
+ * score order. Paged by limit/offset like the training-set grid (the API orders
+ * by score with image_id as the unique tiebreaker, so an offset is a stable
+ * position even though scores tie); rank in the cell = offset + place on the
+ * page. `limit` up to 10,000, the training-set page's widest page. */
 export const getBakeoffScores = (
   runId: number,
   params: {
@@ -1955,9 +1955,8 @@ export const getBakeoffScores = (
     mode: BakeoffMode;
     tag_id: number;
     split?: BakeoffSplit;
-    after_score?: number;
-    after_image_id?: number;
     limit?: number;
+    offset?: number;
   },
 ): Promise<{ data: BakeoffScores }> =>
   request<{ data: BakeoffScores }>(
