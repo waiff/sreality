@@ -194,6 +194,110 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-09 (d) — **Tag model v1 is LIVE: migration 490 applied, the whole loop
+  (promote -> score -> activate) run for real, and the winner rule graded for the first time.
+  On the sealed exam the winner names the operator's own tag 95.7% of the time; the open
+  problem is the photos that are none of the eleven tags.** Entry (b) built the machinery and
+  deliberately left it empty — "nothing is trained, scored or activated yet". This entry is
+  that sentence retired. Every number below is **measured on 2026-09-09**, not projected.
+
+  **Two words used throughout, defined once.** A model is **activated** when it becomes the one
+  version consumers read — a separate, explicit flip, so nobody ever meets a half-scored model.
+  A **floor** is a minimum the *consumer* insists on before it believes a tag ("give me the
+  winner, but only if its score clears 0.5") — it is not a per-head yes/no and does not
+  reintroduce one, because the winner is still chosen by competition between heads and the floor
+  only decides whether to trust the competition's answer at all.
+
+  - **What went live.** Migration 490 was applied to production at **~08:45 UTC**: the three
+    tables of entry (b) exist in the **public** schema with row-level security on and the
+    browser-facing roles (`anon`, `authenticated`) revoked — verified after applying, not
+    assumed. The three pull requests of the round merged in order — **#1365** (the narrowed
+    experiment, ask 2), **#1366** (the tag-model shape, ask 1), **#1368** (the page's third view,
+    the narrowed defaults and the per-photo probability modal, asks 3 and 4) — and the page
+    rollout was confirmed on Railway rather than inferred from the merge.
+  - **What v1 IS — one frozen decision, named.** Promoted from **bake-off run 1**, arm
+    **`dinov3-b16@768/bf16`**, mode **`pos_neg`** (the heads trained on the operator's own yes
+    *and* no labels), **11 heads** — tag ids 3, 17, 22, 25, 28, 39, 42, 43, 45, 46, 48 — each
+    refit on all of its training rows rather than on a cross-validation fold, because the
+    shipped head should learn from every label there is. Promotion **copied** each head's
+    bake-off numbers onto the model so they cannot drift from the artifact they describe:
+    katastrální mapa 0.969, půdorys 0.961, obývací pokoj 0.918, 3d plán 0.909, letecký snímek
+    0.881, technické zařízení 0.873, and property list **0.687**, still the one weak head.
+  - **What it scored, and what that cost.** **9,514 images** — the 9,264 training photos plus
+    the sealed 250-photo exam — read from the bake-off arm's own stored vectors (`source
+    bakeoff:1`), **0 missing**, in **about 70 seconds on a free GitHub runner**. Inference is a
+    dot product and a logistic function in plain Python, so there is no ML install, no GPU and
+    no bill anywhere in this step. v1 was then **activated**: it is THE active model, and
+    `toolkit.tag_models.winners()` plus `GET /new-dedup/tags/images/{image_id}` now answer from
+    it. The lane `tag_model.yml` carried all three stages (promote / score / activate, plus
+    status) and each ran with `dry_run=false` — the dispatch-only lane built in (b) has now done
+    real work, not only a rehearsal.
+
+  **The winner rule's first honest grade.** The exam is the only place this can be measured
+  properly: 250 photographs sealed away from every training tray, with the operator's own
+  answers on them. All eleven heads scored all 250, and the winner — the highest scorer — was
+  compared with what the operator said.
+  - **When the photo really is one of the eleven tags, the winner is right 95.7% of the time.**
+    Of the 94 exam photos carrying a human positive on one of the eleven heads, the winner names
+    that tag in 90 of them. Set that beside the same heads' **mean exam F1 of 0.73** under
+    independent yes/no decisions and the gap is the whole argument for ruling 1: **competition
+    between heads removes most cross-tag false alarms.** A head that fires on a photo belonging
+    to another head no longer produces a wrong tag — it just loses. **96.8%** of those correct
+    winners also clear a 0.5 score.
+  - **The remaining problem is "none of the above", and it is the real one.** 156 of the 250
+    exam photos carry no positive on any of the eleven heads — they are bedrooms, corridors,
+    balconies, whatever the eleven tags do not cover. **All of them get a winner**, by
+    construction: an argmax always names something. **41% of them get a winner scoring 0.5 or
+    higher** — a confident-looking tag on a photo the model has no tag for.
+  - **So a consumer floor is not optional in practice.** At 0.5 it keeps **96.8%** of the true
+    tags while cutting the confident-looking wrong ones on "other" photos from 100% to **41%**;
+    raising it trades one against the other. **Whose decision this is has not changed** — the
+    floor belongs to the consumer, because the product takes no per-head yes/no (ruling 1). The
+    alternative is an explicit **"other" head**, trained on exactly those photos so the argmax
+    has somewhere honest to put them. That is an operator decision and is listed below, not
+    taken here.
+  - **The training-pool numbers, marked as what they are.** 88.4% of the 2,940 training photos
+    carrying a positive get it as their winner; 72% of all 9,514 scored photos clear 0.5; the
+    mean winner score is 0.70. These are **in-sample** — v1's heads were refit on these very
+    photos — so they are optimistic and belong beside the exam figures, never instead of them.
+  - **A measurement gap found, and the fix belongs to run 2.** The bake-off's cross-validated
+    scores exist only for each head's **own** training rows — every head was validated on its
+    own tray, not on the whole pool — so there is no way to grade a winner **out-of-fold**
+    (scored by a model that never saw the photo) across the training pool. Restricting a
+    "winner" to that subset produces **99.8%**, a number that measures nothing but the
+    restriction. **NEXT for run 2: score every image with every head out-of-fold, under one
+    shared grouped split used by all heads**, so the winner rule gets an honest training-pool
+    grade beside the exam's 94 photos instead of resting on them alone.
+
+  - **The iteration loop is now proven end to end, and it is free.** `a new bake-off run ->
+    promote -> score -> activate`, all of it on CPU at no cost while scoring stays inside the
+    bake-off arm's 9,514 photos. **Adding heads is a new version**, never an edit to this one —
+    an argmax is only meaningful over one frozen head set. That is what makes ask 5 ("keep
+    iterating") cheap to obey: each improvement is another turn of the same four verbs, and the
+    previous version stays readable for comparison.
+  - **Not done, on purpose, and by whose rule.** (1) **No corpus pass.** The production vector
+    source reads `image_dinov3_embeddings` under the model's seven encoder-identity facts, and
+    **nothing has populated that table for this configuration** — the full 11.5M-image pass is
+    ask 5's, waiting on the operator being satisfied with accuracy. (2) **The three nulls in
+    `data/dinov3_config.json` are still untouched**, and v1 did not need them: a model's identity
+    lives in the **registry row**, not in that config file, so activating v1 settles nothing there
+    and nothing there gates v1. (3) **The encoder decision for the near-duplicate job is still
+    unmade** — #1300's Set 2 harness remains unrun, so everything measured here is about tagging
+    only, exactly as entry (a) readout 3 warned.
+  - **Open, and the operator's to decide — listed, not decided here.**
+    1. **The winner floor — or an "other" head instead.** The measured trade is above; both
+       answers are legitimate and they are not exclusive.
+    2. **Which arm the next iteration promotes.** `dinov2-l14-reg@504/bf16` posts the best exam
+       F1 and is the fastest DINO arm; `dinov3-b16@768/bf16` is the program's accepted encoder
+       and is what v1 froze. Entry (a) readout 3 still applies: this cannot be settled on tagging
+       numbers alone.
+    3. **Property list's definition** — 0.687 CV F1 with high recall and poor precision still
+       reads as a definition admitting too much, not as a training failure.
+    4. **A fresh exam cohort covering all eleven heads.** The current one cannot grade **3d plán**
+       or **property list** at all (both post-date it), and **garáž** and the document tags were
+       answered under **older definitions**. The 94 gradable photos are a thin foundation for the
+       headline number above, and this is the cheapest way to thicken it.
+
 - 2026-09-09 (c) — **The tagging bake-off, phase 2c: the operator's three rulings of the day,
   and the product contract they settle. TAGS ARE ASSIGNED WINNER-TAKES-ALL — the product takes
   no per-head yes/no decision at all.** Phase 2a gave run 1 a face and (a) read its numbers;
