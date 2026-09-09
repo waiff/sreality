@@ -13,8 +13,13 @@ Two words do a lot of work below:
 
 ## The rule everything follows from
 
-The operator's ruling (2026-09-09): **an image's tag is the head that scored highest.** There
-are **no per-head yes/no decisions in the product at all.** So:
+The operator's ruling of 2026-09-09 had five asks; this lane exists for the first of them, and
+the whole list (with which PR carried out each) is in `docs/design/new-dedup/PROGRAM.md`'s
+`2026-09-09 (b)` ledger entry. **Cite an ask by its number**, never by a letter — the letters in
+a ledger heading are that day's *entries*, not the ruling's parts.
+
+Ask 1: **an image's tag is the head that scored highest.** There are **no per-head yes/no
+decisions in the product at all.** So:
 
 - every head's probability is stored for every image, not just the winner's;
 - **no threshold and no boolean is stored** — a head's own threshold lives inside its artifact
@@ -117,10 +122,19 @@ There is no page yet.
   holdout-excluded door. `toolkit/tag_models.py` contains no SQL naming `image_tag_labels`,
   deliberately — `tests/test_holdout_exclusion_census.py` therefore has nothing here to exempt,
   and it must stay that way.
-- **One model is one training mode.** The winner is an argmax, and a centroid head's cosine and
-  a logistic head's probability are not the same quantity; the mode is stamped on the model row
-  so the two can never be mixed.
+- **One model is one training mode, and `pos_neg` is the live one.** `pos_only_free_neg` (the
+  "borrowed no") and `pos_only_centroid` (the "closeness only") were **retired from the
+  experiment on 2026-09-09** (ask 2, PR #1365); the lane still accepts them by name so a
+  bake-off cell can be reproduced, and both help texts say so. The winner is an argmax, and a
+  centroid head's cosine and a logistic head's probability are not the same quantity; the mode
+  is stamped on the model row so the two can never be mixed. Read a centroid version's stored
+  value as a score, not as a percentage.
 - **Never edit a version in place.** A new training set, a new head, a new encoder, new
   parameters: all the same move, a new version.
 - **Never store a per-head decision.** If a surface needs "only confident tags", it applies a
   floor to `winner_score` at read time.
+- **`image_tag_scores` is DERIVED, not history.** Rule #3's "never delete" is about listings; a
+  retired version's rows are recomputable from its stored heads and are **safe to prune** when
+  the disk matters (`delete from image_tag_scores where model_id = …`, or drop the model row and
+  let the cascade do it). The operator decides when; nothing prunes automatically. The `active`
+  version's rows are never pruned — that is what consumers read.

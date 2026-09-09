@@ -289,6 +289,9 @@ def test_promote_freezes_one_cell_as_a_candidate() -> None:
     assert model.source_run_id == 1 and model.source_arm == ARM.arm
     assert model.dataset_hash, "the model names its training material"
     assert [o.status for o in outcomes] == ["ok", "ok"]
+    assert conn.transactions == 1, (
+        "the model row and its heads are ONE write: a crash between them would "
+        "strand a headless candidate on a version name that can never be reused")
 
     heads = tm.model_heads(conn, model_id=model.id)
     assert [h.tag_id for h in heads] == [11, 12]
@@ -300,6 +303,9 @@ def test_promote_freezes_one_cell_as_a_candidate() -> None:
         # The bake-off numbers are COPIED, so they outlive dedup_sim.
         assert head.metrics["cv"]["graded_n"] > 0
         assert head.metrics["dataset_hash"] == head.artifact["dataset_hash"]
+        # Nothing was dropped for want of a vector, and the count is recorded so
+        # a half-trained head cannot look like a merely bad one.
+        assert head.metrics["n_missing_embedding"] == 0
 
 
 def test_promote_refuses_to_reuse_a_version() -> None:
@@ -323,6 +329,22 @@ def test_promote_writes_nothing_when_no_head_can_be_trained() -> None:
         "immutable, so the name could never be reused")
 
 
+def test_a_labelled_image_without_a_vector_is_counted_not_hidden() -> None:
+    """The operator's loop is "label more, promote, look at the numbers". An image
+    labelled but not yet embedded silently leaves the fit, so the count travels
+    with the head's metrics instead of only existing in a log nobody kept."""
+    pytest.importorskip("sklearn")
+    conn = _fixture()
+    del conn.vectors[7]
+    model, outcomes = tm.promote(
+        conn, run_id=1, arm=ARM.arm, mode=th.MODE_POS_NEG, version="v1",
+        label="one image short", n_splits=3, trained_at=TRAINED_AT)
+    assert [o.status for o in outcomes] == ["ok", "ok"]
+    assert all(o.metrics["n_missing_embedding"] == 1 for o in outcomes)
+    assert all(h.metrics["n_missing_embedding"] == 1
+               for h in tm.model_heads(conn, model_id=model.id))
+
+
 def test_promote_rejects_an_unknown_arm_and_an_unknown_mode() -> None:
     conn = _fixture()
     with pytest.raises(tm.TagModelError, match="no arm named"):
@@ -341,9 +363,11 @@ def test_activation_keeps_exactly_one_active_model() -> None:
     first = _promote(conn, version="v1")
     second = _promote(conn, version="v2")
 
+    before = conn.transactions
     tm.activate(conn, version="v1")
     assert tm.active_model(conn).version == "v1"
-    assert conn.transactions == 1, "the flip is one transaction, not two writes"
+    assert conn.transactions == before + 1, (
+        "the flip is one transaction, not two writes")
 
     tm.activate(conn, version="v2")
     live = tm.active_model(conn)

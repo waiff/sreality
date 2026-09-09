@@ -969,7 +969,9 @@ renumber.** Navigate by area:
     training mode, one frozen head set — stored under a version name, at most one of which is
     `active`, whose per-image output lands in `image_tag_scores` as **every head's probability
     plus the ARGMAX winner** (ties toward the lower tag id, no threshold and no per-head yes/no
-    stored — a consumer applies its own floor to `winner_score`; operator ruling 2026-09-09).
+    stored — a consumer applies its own floor to `winner_score`; the operator's 2026-09-09
+    ruling, ask 1 of five — the full list is in `docs/design/new-dedup/PROGRAM.md`'s
+    `2026-09-09 (b)` ledger entry).
     Adding heads is a new version, never an edit, and `activate` is a separate step from `score`
     so no consumer ever reads a half-scored version. Nothing has been promoted or scored yet.
 16. **Watchdog and Browse share one definition of "matches."** Saved watchdog filters live

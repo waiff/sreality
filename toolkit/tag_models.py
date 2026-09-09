@@ -6,10 +6,13 @@ name. Migration 490 stores it: `tag_head_models` (the identity),
 `tag_head_model_heads` (one artifact + its copied metrics per tag), and
 `image_tag_scores` (one row per image per model version).
 
-THE WINNER RULE (operator ruling 2026-09-09 (a)), which decides most of this
-module's shape: **an image's tag is the head with the highest score, ties broken
-toward the lower tag_id.** There are no per-head yes/no decisions in the product
-at all. Three consequences, all deliberate:
+THE WINNER RULE, which decides most of this module's shape: **an image's tag is
+the head with the highest score, ties broken toward the lower tag_id.** There are
+no per-head yes/no decisions in the product at all. (It is ask 1 of the operator's
+2026-09-09 ruling. All five asks are listed in docs/design/new-dedup/PROGRAM.md's
+`2026-09-09 (b)` entry, and are cited by NUMBER: the letters in a ledger heading
+are that day's entries, not the ruling's parts.) Three consequences, all
+deliberate:
 
   * Every head's probability is stored, not just the winner's — a winner is only
     meaningful beside the field it beat, and a later consumer may want the runner
@@ -23,9 +26,9 @@ at all. Three consequences, all deliberate:
     `tag_head_models.heads` freezes the set and `image_tag_scores` is keyed by
     model.
 
-THE ITERATION LOOP, which is the whole point of the shape (ruling 2026-09-09 (c):
-the training set, the head set, the model and the parameters keep iterating in
-parallel, and the full image pool is scored only afterwards):
+THE ITERATION LOOP, which is the whole point of the shape (same ruling, ask 5
+"keep iterating": the training set, the head set, the model and the parameters
+keep iterating in parallel, and the full image pool is scored only afterwards):
 
     a new bake-off run  ->  promote  ->  score  ->  activate
 
@@ -364,6 +367,19 @@ def _head_metrics(head: th.TrainedHead, run_metrics: Mapping[str, Any] | None,
 
     A copy rather than a join. `dedup_sim` is dropped at Wave 8 and "how good was
     this head when we shipped it" must not go with it.
+
+    Two honesty fields ride along, because the operator reads these numbers to
+    decide whether to activate a version:
+
+      * `n_missing_embedding` — labelled images this arm holds no vector for.
+        They are dropped from training, and a head trained on half its set
+        because the embedding pass had not caught up is exactly the failure a
+        number nobody prints would hide.
+      * `bakeoff.dataset_moved` — true when the bake-off measured this head on
+        DIFFERENT training material than this promotion just fitted on. The
+        labels keep moving by design, and `bakeoff.exam_f1` is the only exam
+        number a version carries; when this flag is true that number describes
+        the older fit, not this one.
     """
     out: dict[str, Any] = {
         "cv": head.metrics.as_dict(),
@@ -371,6 +387,7 @@ def _head_metrics(head: th.TrainedHead, run_metrics: Mapping[str, Any] | None,
         "n_positive": head.snapshot.n_positive,
         "n_negative": head.snapshot.n_negative,
         "n_groups": head.snapshot.n_groups,
+        "n_missing_embedding": len(head.snapshot.missing_embedding),
         "dataset_hash": head.snapshot.dataset_hash,
     }
     if run_metrics:
@@ -378,8 +395,12 @@ def _head_metrics(head: th.TrainedHead, run_metrics: Mapping[str, Any] | None,
             k: run_metrics.get(k) for k in (
                 "arm", "mode", "cv_precision", "cv_recall", "cv_f1", "cv_graded_n",
                 "exam_precision", "exam_recall", "exam_f1", "exam_graded_n",
-                "exam_abstained_n", "threshold", "status", "note", "trained_at")
+                "exam_abstained_n", "threshold", "dataset_hash", "status", "note",
+                "trained_at")
         }
+        run_hash = run_metrics.get("dataset_hash") or ""
+        out["bakeoff"]["dataset_moved"] = bool(
+            run_hash and run_hash != head.snapshot.dataset_hash)
     return out
 
 
@@ -394,11 +415,15 @@ def promote(
     """Freeze one (run, arm, mode) cell of a bake-off into a `candidate` model.
 
     Trains ONE head per selected tag on that arm's stored vectors, refit on all
-    admitted training rows — the same refit the bake-off's exam scoring already
-    uses for its shipped weights, so a promoted head is the head the bake-off's
-    exam column measured and not a differently-fitted cousin. The out-of-fold
-    numbers come along as `metrics`, together with the bake-off's own row for the
-    cell when it exists.
+    admitted training rows — the same refit the bake-off's exam scoring uses for
+    its shipped weights, so the FITTING PROCEDURE is the bake-off's and not a
+    differently-fitted cousin. It is the same HEAD only while the labels have not
+    moved since the run, which under this round's "keep iterating" they routinely
+    do: migration 489 stores no artifacts, so promotion must retrain, and the
+    copied `bakeoff.exam_f1` therefore describes the run's fit. `metrics` carries
+    the fresh out-of-fold numbers, the bake-off's own row for the cell when it
+    exists, and `bakeoff.dataset_moved` — true exactly when the training material
+    has changed and the copied exam numbers are about the older fit.
 
     The head set is the run's frozen `heads` array (what the operator's ready flag
     selected when the run executed) unless `tag_ids` names one explicitly. A tag
@@ -470,6 +495,16 @@ def promote(
                                          status="failed", note=str(exc)))
             continue
         metrics = _head_metrics(head, by_cell.get(tag_id))
+        if metrics["n_missing_embedding"]:
+            LOG.warning(
+                "TAGMODEL %s head %d (%s) trained WITHOUT %d labelled image(s) — "
+                "arm %s holds no vector for them yet",
+                version, tag_id, name, metrics["n_missing_embedding"], the_arm.arm)
+        if metrics.get("bakeoff", {}).get("dataset_moved"):
+            LOG.warning(
+                "TAGMODEL %s head %d (%s): the training set has moved since run %d — "
+                "the bake-off numbers copied beside this head describe the older fit",
+                version, tag_id, name, run_id)
         fitted.append((tag_id, head, metrics))
         outcomes.append(PromotedHead(tag_id=tag_id, label=name, status="ok",
                                      metrics=metrics))
@@ -479,17 +514,22 @@ def promote(
             f"no head of run {run_id} arm {arm!r} mode {mode!r} could be trained "
             "— nothing to promote")
 
-    model_id = _insert_model(
-        conn, version=version, label=label, note=note, mode=mode,
-        run_id=run_id, arm=the_arm, heads=[t for t, _, _ in fitted],
-        dataset_hash=_model_dataset_hash(
-            [h.snapshot.dataset_hash for _, h, _ in fitted]))
-    with conn.cursor() as cur:
-        cur.executemany(_UPSERT_HEAD_SQL, [
-            {"model_id": model_id, "tag_id": tag_id,
-             "artifact": json.dumps(head.artifact, sort_keys=True),
-             "metrics": json.dumps(metrics, sort_keys=True, default=str)}
-            for tag_id, head, metrics in fitted])
+    # THE MODEL AND ITS HEADS ARE ONE WRITE. `db.connect()` is autocommit, so
+    # without this a crash between the two statements would leave a headless
+    # `candidate` holding an immutable version name forever: promote refuses it
+    # ("version already exists") and activate refuses it ("has no heads").
+    with conn.transaction():
+        model_id = _insert_model(
+            conn, version=version, label=label, note=note, mode=mode,
+            run_id=run_id, arm=the_arm, heads=[t for t, _, _ in fitted],
+            dataset_hash=_model_dataset_hash(
+                [h.snapshot.dataset_hash for _, h, _ in fitted]))
+        with conn.cursor() as cur:
+            cur.executemany(_UPSERT_HEAD_SQL, [
+                {"model_id": model_id, "tag_id": tag_id,
+                 "artifact": json.dumps(head.artifact, sort_keys=True),
+                 "metrics": json.dumps(metrics, sort_keys=True, default=str)}
+                for tag_id, head, metrics in fitted])
     model = get_model(conn, model_id=model_id)
     assert model is not None
     return model, outcomes

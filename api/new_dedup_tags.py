@@ -5,16 +5,23 @@ Mounted under `/new-dedup/tags/*`, admin-gated, READ-ONLY: every write into
 `tag_head_models` / `tag_head_model_heads` / `image_tag_scores` comes from
 `scripts/tag_model.py` (promote / score / activate), never from a browser.
 
-TWO ROUTES, and each answers a different question:
+THREE ROUTES, and each answers a different question:
 
-  GET /models             — which model versions exist, which one is ACTIVE, how
-                            many heads each carries and how many images it has
-                            scored. "What could we be tagging with?"
-  GET /images/{image_id}  — one photo's whole score map and its winner under the
-                            active model (or a named `version`). "What does the
-                            model think this photo is?"
+  GET /models                    — which model versions exist, which one is
+                                   ACTIVE, how many heads each carries and how
+                                   many images it has scored. "What could we be
+                                   tagging with?"
+  GET /models/{version}/heads    — that version's head set with the numbers
+                                   copied at promotion. Weights are never
+                                   returned. "How good was each head?"
+  GET /images/{image_id}         — one photo's whole score map and its winner
+                                   under the active model (or a named
+                                   `version`). "What does the model think this
+                                   photo is?"
 
-THE ONE CONVENTION THAT RUNS THROUGH BOTH (operator ruling 2026-09-09): the tag
+THE ONE CONVENTION THAT RUNS THROUGH ALL THREE (the operator's 2026-09-09 ruling,
+ask 1 — PROGRAM.md's `2026-09-09 (b)` entry lists the day's five asks in full):
+the tag
 is the ARGMAX over that model's heads, ties broken toward the lower tag_id, and
 there is no per-head yes/no anywhere. `scores` therefore carries every head's
 probability and no boolean, and no threshold is applied on the way out — a

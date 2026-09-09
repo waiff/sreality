@@ -198,16 +198,45 @@ the two gaps found while adding property list are closed in the same PR that add
   per-image winner store, and the three jobs that move a model through its life (migration 490).**
   W3 already said "train probe on the gated training set (grouped splits, pinned encoder,
   versioned artifact) … campaign-retag the corpus into the sim tag store"; this pulls that shape
-  forward so W2-W5 can be built against it **while training keeps iterating** (ruling (c) below).
+  forward so W2-W5 can be built against it **while training keeps iterating** (ask 5 below).
   Nothing is trained, scored or activated by the build itself.
+  - **THE OPERATOR'S RULING OF 2026-09-09, IN FULL — five asks, and where each one landed.**
+    One list, because the round split the ruling across three pull requests and nothing else in
+    the repo holds all of it: a reader coming in cold needs the whole instruction, not the fifth
+    of it that any single PR happened to build. **The asks are NUMBERED, never lettered** — the
+    `(a)` / `(b)` in a ledger heading are that DAY'S ENTRIES (this is entry (b), and (a) is
+    run 1 of the bake-off), so a citation like "ruling 2026-09-09 (c)" points at an entry that
+    does not exist. Cite an ask by its number or by its short name.
+    1. **THE WINNER RULE** — *"tags will be assigned by the winner: for each image store the
+       probability for each head, the tag is the head with the highest score; no per-head yes/no
+       decisions in the product at all; heads will be added over time, so the winner must be
+       recomputable from an expanded head set."*
+       → **BUILT HERE** (PR **#1366**, migration 490, `toolkit/tag_models.py`). The recomputable
+       half is what makes "adding a head is a new version, never an edit" non-negotiable.
+    2. **THE NARROWING** — *"remove the worst set-ups so the experiment narrows: the 'borrowed
+       no' and 'closeness only' training modes, and every arm below 512 px — dinov2's 504 IS the
+       512 arm snapped to its patch size, so keep it."*
+       → **PR #1365**, in the bake-off's own lane. Retired is not deleted: run 1's 363 cells stay
+       readable and the retired set-ups stay reachable by name for reproduction.
+    3. **THE ZOOM READ-OUT** — *"when zooming into any image on the bake-off page, show per-head
+       probabilities for each model sorted by raw score."*
+       → **PR #1368**, on `/new-dedup/tagging-bakeoff`.
+    4. **THE THIRD VIEW** — *"add a third view listing every photo a head scored, sorted by
+       score."*
+       → **PR #1368**, beside view A (per-image) and view B (buckets).
+    5. **KEEP ITERATING** — *the operator is content with the cost, licence and speed of both
+       DINOv3 and DINOv2, and is **not** content with accuracy, so the training set, the head
+       set, the model and the parameters keep iterating in parallel; the full image pool is
+       scored only after that.*
+       → **the shape built here serves it** (promote / score / activate is cheap to repeat, and
+       scoring runs over the bake-off arm's 9,514 photos for nothing), and it stays **OPEN** as
+       the roadmap's parallel track. It is also the reason no corpus pass is run yet.
   - **Vocabulary, once.** A **head** is one yes/no classifier for one photo tag. A **model** is
     one FROZEN DECISION — this encoder configuration, this training mode, this set of heads,
     these weights — with a **version** string as its name (`v1`). The bake-off produced 363
     heads as evidence; a model is what you get when one cell of that grid is chosen and made
     permanent.
-  - **THE WINNER RULE, and it decides the whole shape (operator ruling 2026-09-09 (a), verbatim
-    intent: *"for each image store the probability for each head, the tag is the head with the
-    highest score; no per-head yes/no decisions in the product at all"*).** An image's tag is the
+  - **THE WINNER RULE, and it decides the whole shape (ask 1 above).** An image's tag is the
     **argmax** — the highest-scoring head — with **ties broken toward the lower tag_id**.
     Three consequences are schema, not convention:
     1. **Every head's probability is stored**, not only the winner's: a winner means nothing
@@ -254,14 +283,24 @@ the two gaps found while adding property list are closed in the same PR that add
     `GET /new-dedup/tags/{models, models/{version}/heads, images/{image_id}}` — admin-gated,
     read-only, weights never returned. Labels still arrive ONLY through
     `machine_labeling.training_rows`, so the holdout census has nothing new to exempt.
-  - **DELIBERATELY NOT DONE.** No corpus pass — the full image pool is scored only after the
-    operator is satisfied with accuracy (ruling (c): the training set, the head set, the model
-    and the parameters keep iterating in parallel). The three nulls in `data/dinov3_config.json`
-    are untouched. No frontend. And **removing the two weak training modes and every sub-512 arm
-    (ruling (b): drop `pos_only_free_neg` "borrowed no" and `pos_only_centroid` "closeness only";
-    keep dinov2's 504, which is 512 snapped to its patch size)** belongs to the bake-off's own
-    lane, not here — a model is single-mode by construction, so this store simply records which
-    mode it was.
+  - **DELIBERATELY NOT DONE HERE — and by whom instead.** No corpus pass: the full image pool is
+    scored only once the operator is satisfied with accuracy (**ask 5**). The three nulls in
+    `data/dinov3_config.json` are untouched. No frontend of this store's own. The other three
+    asks of the same ruling are being carried out in the bake-off's own lane, in the same round:
+    **ask 2, the narrowing, is PR #1365** (drop `pos_only_free_neg` "borrowed no" and
+    `pos_only_centroid` "closeness only", drop every arm below 512 px, keep dinov2's 504) and
+    **asks 3 and 4, the zoom read-out and the third view, are PR #1368**. Nothing of the ruling
+    is unowned. The narrowing in particular is not this PR's business because a model is
+    single-mode by construction — this store only records which mode a version was frozen at;
+    what the promote lane *offers* as a default is a separate question, answered in the lane
+    note below.
+  - **THE PROMOTE LANE IS PRODUCT-FACING, so it says which mode is live.** `pos_neg` — a real
+    labelled "no" — is the mode the product should be promoted from. The other two remain
+    selectable **only to reproduce a bake-off cell**, and the lane's own input description says
+    so, because a promoted model is what the product tags with and three unlabelled equal
+    choices would read as three equally good ones. It also keeps the store from misdescribing
+    itself: a `pos_only_centroid` head's score is a cosine similarity, not a calibrated
+    probability, so a version promoted from it must be read as evidence, not as a percentage.
 
 - 2026-09-09 (a) — **Run 1 of the tagging bake-off COMPLETED. 11 heads x 11 encoder arms x 3
   training modes = 363 trained cells, 529,188 per-photo scores, 0 ungradable, ~$1.55 of GPU

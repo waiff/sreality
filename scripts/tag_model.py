@@ -120,9 +120,16 @@ def _do_promote(conn, args: argparse.Namespace) -> int:
     for outcome in outcomes:
         if outcome.status == "ok":
             cv = outcome.metrics.get("cv", {})
-            LOG.info("TAGMODEL   head %-6d %-30s f1=%.3f graded_n=%d",
+            # missing= is the count of labelled images this arm has no vector for:
+            # they never reach the fit, and a silent drop looks like a bad head.
+            LOG.info("TAGMODEL   head %-6d %-30s f1=%.3f graded_n=%d missing=%d%s",
                      outcome.tag_id, outcome.label[:30],
-                     float(cv.get("f1", 0.0)), int(cv.get("graded_n", 0)))
+                     float(cv.get("f1", 0.0)), int(cv.get("graded_n", 0)),
+                     int(outcome.metrics.get("n_missing_embedding", 0)),
+                     "  [training set moved since the run — the copied bake-off "
+                     "numbers describe the older fit]"
+                     if outcome.metrics.get("bakeoff", {}).get("dataset_moved")
+                     else "")
         else:
             LOG.warning("TAGMODEL   head %d %s NOT promoted: %s",
                         outcome.tag_id, outcome.label, outcome.note)
@@ -197,9 +204,14 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Arm name from that run (e.g. dinov2-l14-reg@504/bf16).")
     prom.add_argument("--mode", default=th.MODE_POS_NEG,
                       choices=list(th.MODES),
-                      help="Training mode; one model is one mode, because the "
-                           "winner is an argmax and mixed score scales cannot be "
-                           "compared.")
+                      help="Training mode. pos_neg is the live one; "
+                           "pos_only_free_neg (the 'borrowed no') and "
+                           "pos_only_centroid (the 'closeness only') were retired "
+                           "from the experiment on 2026-09-09 and stay reachable "
+                           "only to reproduce a bake-off cell — a centroid head's "
+                           "score is a cosine, not a calibrated probability. One "
+                           "model is one mode, because the winner is an argmax and "
+                           "mixed score scales cannot be compared.")
     prom.add_argument("--version", required=True, help="e.g. v1. Immutable.")
     prom.add_argument("--label", default=None, help="Short human name.")
     prom.add_argument("--note", default=None)

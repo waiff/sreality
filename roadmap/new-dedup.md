@@ -404,8 +404,9 @@ W1 (shared prerequisites + labeling program):
       end-to-end rather than GPU-only: **11.5M images ≈ $27 (DINOv2-L) / $34 (@512) / $59 (@768)
       / $163 (@1024)** on a $0.22/hr 3090 — far above ENCODER-DECISION.md's $1-12 band, which
       was synthetic-tensor throughput. Results are browsable at `/new-dedup/tagging-bakeoff`.
-- [x] **Tag model, iteration 1 — the versioned model + the winner store (2026-09-09, PROGRAM.md
-      ledger (b)):** the bake-off produced evidence; this is where a chosen cell of it becomes
+- [x] **Tag model, iteration 1 — the versioned model + the winner store (2026-09-09, PR #1366;
+      PROGRAM.md ledger entry `2026-09-09 (b)`, which also lists the day's ruling in
+      full):** the bake-off produced evidence; this is where a chosen cell of it becomes
       something the product can use. Migration 490 adds three PUBLIC-schema tables —
       `tag_head_models` (one frozen decision: encoder, training mode, head set, weights, under a
       version name like `v1`; a partial unique index makes two active models impossible),
@@ -443,15 +444,20 @@ W1 (shared prerequisites + labeling program):
 
 - [ ] **PARALLEL TRACK — accuracy keeps iterating; the shape does not.** The operator is content
       with the cost, licence and speed of both DINOv3 and DINOv2 and is **not yet content with
-      accuracy** (ruling 2026-09-09 (c)), so the training set, the head set, the model and the
-      parameters go on changing together. Two things follow. (1) **Narrow the experiment**
-      (ruling (b)): drop the two weak training modes — `pos_only_free_neg` (the "borrowed no")
-      and `pos_only_centroid` (the "closeness only") — and every arm below 512 px, keeping
-      dinov2's 504 because that IS 512 snapped to its patch size. (2) **Each improvement is just
-      the next version**: promote, score, activate, and the previous version stays readable for
+      accuracy** (the 2026-09-09 ruling, **ask 5 "keep iterating"** — the ruling's five asks are
+      listed in full in PROGRAM.md's `2026-09-09 (b)` entry; cite them by NUMBER, because the
+      letters in a ledger heading are that day's entries, not the ruling's parts). So the
+      training set, the head set, the model and the parameters go on changing together. Two
+      things follow. (1) **Narrow the experiment** (**ask 2**, shipping in **PR #1365**): drop
+      the two weak training modes — `pos_only_free_neg` (the "borrowed no") and
+      `pos_only_centroid` (the "closeness only") — and every arm below 512 px, keeping dinov2's
+      504 because that IS 512 snapped to its patch size. (2) **Each improvement is just the next
+      version**: promote, score, activate, and the previous version stays readable for
       comparison. **The full 11.5M image pool is scored only when the operator is satisfied** —
       until then scoring runs over the bake-off arm's 9,514 labelled + exam photos, which costs
-      nothing.
+      nothing. The same ruling's **asks 3 and 4** (per-head probabilities when zooming into a
+      photo; a third view listing every photo a head scored, sorted by score) ship in
+      **PR #1368**.
 
 Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
 

@@ -60,7 +60,7 @@ on:
         default: ""
         type: string
       mode:
-        description: "promote only: the training mode. One model is ONE mode — the winner is an argmax, and two score scales cannot be compared."
+        description: "promote only: the training mode. pos_neg is the LIVE one; pos_only_free_neg (borrowed no) and pos_only_centroid (closeness only) were retired from the experiment on 2026-09-09 and are kept only to reproduce a bake-off cell — a centroid head's score is a cosine, not a calibrated probability. One model is ONE mode: the winner is an argmax, and two score scales cannot be compared."
         required: false
         default: "pos_neg"
         type: choice
