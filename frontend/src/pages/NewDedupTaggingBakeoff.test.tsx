@@ -588,6 +588,24 @@ describe('<NewDedupTaggingBakeoff> — view C, all photos by score', () => {
     expect(screen.getByTestId('view-scores')).toHaveAttribute('aria-pressed', 'true');
   });
 
+  it('numbers the ranks from the top, and refuses to when it landed mid-list', async () => {
+    renderPage(entry);
+    // Page one: these ARE ranks 1..3 in the whole cell.
+    await screen.findByTestId('score-grid');
+    expect(screen.getByTestId('scores-range')).toHaveTextContent('showing 1–3');
+    expect(screen.getByTestId('score-row-555')).toHaveTextContent('1');
+
+    cleanup();
+    // A link that starts part-way down carries a cursor but no history, so the
+    // absolute position is unknown — and an unknown position is said, not
+    // guessed as 1.
+    renderPage('/new-dedup/tagging-bakeoff?view=scores&arms=7&tag=19&sc=0.88,556');
+    await screen.findByTestId('score-grid');
+    expect(screen.getByTestId('scores-range'))
+      .toHaveTextContent('somewhere below the top');
+    expect(screen.getByTestId('scores-range')).not.toHaveTextContent('showing 1');
+  });
+
   it('ignores a malformed cursor rather than paging from a made-up position', async () => {
     renderPage('/new-dedup/tagging-bakeoff?view=scores&arms=7&tag=19&sc=nonsense');
     await waitFor(() => expect(api.getBakeoffScores).toHaveBeenLastCalledWith(

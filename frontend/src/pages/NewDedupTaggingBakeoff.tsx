@@ -733,7 +733,13 @@ export default function NewDedupTaggingBakeoff() {
   /* Rank is a position in the whole ranking, not on this page — the operator is
    * looking for "how far down does the good stuff go", and a counter restarting
    * at 1 on every page would answer a different question. The stack depth IS the
-   * page number, since every page but the last is full. */
+   * page number, since every page but the last is full.
+   *
+   * A shared link that lands mid-ranking arrives with a cursor and NO stack, so
+   * the absolute position is genuinely unknown. The page then shows no rank at
+   * all rather than numbering that page from 1 — which would be a wrong fact,
+   * not a rounded one. */
+  const rankKnown = scoreCursor == null || scoreCursors.length > 0;
   const rankBase = scoreCursors.length * PAGE_C;
 
   /* --------------------------------------------------- what stays on screen */
@@ -1341,7 +1347,7 @@ export default function NewDedupTaggingBakeoff() {
             photographs.
           </p>
 
-          {tagId == null ? (
+          {tagId == null || bArmId == null ? (
             <p className="mt-8 text-center text-sm text-[var(--color-ink-2)]">Pick a head.</p>
           ) : scoresQ.isLoading ? (
             <div className="py-10 flex justify-center"><Spinner /></div>
@@ -1357,9 +1363,13 @@ export default function NewDedupTaggingBakeoff() {
                 <span data-testid="scores-total">
                   {fmtN(scoreTotal)} photo{scoreTotal === 1 ? '' : 's'} in this cell
                 </span>
-                <span className="text-[var(--color-ink-4)]">
-                  showing {fmtN(rankBase + 1)}&ndash;{fmtN(rankBase + scoreRows.length)} &middot;
-                  scores are a {scoreUnit(bMode)}
+                <span className="text-[var(--color-ink-4)]" data-testid="scores-range">
+                  {rankKnown
+                    ? <>showing {fmtN(rankBase + 1)}&ndash;{fmtN(rankBase + scoreRows.length)}</>
+                    : <span title="You arrived here on a link that starts part-way down the ranking, so this page's position in it is not known — only that these photos come after the one the link named.">
+                        somewhere below the top
+                      </span>}
+                  {' · '}scores are a {scoreUnit(bMode)}
                 </span>
               </div>
 
@@ -1401,9 +1411,11 @@ export default function NewDedupTaggingBakeoff() {
                         />
                       </button>
                       <div className="mt-1 flex items-baseline gap-1">
-                        <span className="font-mono text-[0.55rem] tabular-nums text-[var(--color-ink-4)]">
-                          {fmtN(rankBase + i + 1)}
-                        </span>
+                        {rankKnown && (
+                          <span className="font-mono text-[0.55rem] tabular-nums text-[var(--color-ink-4)]">
+                            {fmtN(rankBase + i + 1)}
+                          </span>
+                        )}
                         <span
                           className="font-mono text-xs tabular-nums"
                           style={{ color: colour }}
