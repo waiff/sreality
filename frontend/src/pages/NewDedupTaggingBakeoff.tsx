@@ -600,15 +600,27 @@ export default function NewDedupTaggingBakeoff() {
     ? null
     : (Number(rawTag ?? 0) || heads[0]?.id || null);
 
+  /* Turning an arm or mode off at the top also lets go of it below: the cell
+   * pickers (Views B and C, and the zoom panel) offer only what is turned on
+   * here, so a cell left pointing at a switched-off arm would be a choice with
+   * no control to undo it. The cell then falls back to the first selected. */
   const toggleArm = (id: number) => {
     const next = armIds.includes(id) ? armIds.filter((a) => a !== id) : [...armIds, id];
+    const kept = next.length ? next : [id];
     rewind();
-    patch({ arms: next.length ? next.join(',') : String(id), ...REWIND });
+    patch({
+      arms: kept.join(','), ...REWIND,
+      ...(bArmId != null && !kept.includes(bArmId) ? { barm: null } : {}),
+    });
   };
   const toggleMode = (m: BakeoffMode) => {
     const next = modeSel.includes(m) ? modeSel.filter((x) => x !== m) : [...modeSel, m];
+    const kept = next.length ? next : [m];
     rewind();
-    patch({ mode: next.length ? next.join(',') : m, ...REWIND });
+    patch({
+      mode: kept.join(','), ...REWIND,
+      ...(kept.includes(bMode) ? {} : { bmode: null }),
+    });
   };
 
   /* The matrix: one row per head, one column per (arm x mode) selected. */
@@ -762,6 +774,20 @@ export default function NewDedupTaggingBakeoff() {
 
   const hiddenCount = (arms.length - visibleArms.length) + (MODES.length - visibleModes.length);
 
+  /* WHAT THE CELL PICKERS OFFER — operator ruling 2026-09-09: the arm and mode
+   * chips at the top are THE selection, and every picker below answers within
+   * it. The one exception is an arm or mode a link already names for the cell
+   * (`barm` / `bmode` outside the selection): it stays listed so it can be
+   * undone, exactly as a retired arm in use stays visible above. */
+  const cellArms = useMemo(
+    () => arms.filter((a) => armIds.includes(a.id) || a.id === bArmId),
+    [arms, armIds, bArmId],
+  );
+  const cellModes = useMemo(
+    () => MODES.filter((m) => modeSel.includes(m) || m === bMode),
+    [modeSel, bMode],
+  );
+
   /* ------------------------------------------------------------------ render */
 
   if (runsQ.isLoading) return <div className="p-6"><Spinner /></div>;
@@ -800,12 +826,12 @@ export default function NewDedupTaggingBakeoff() {
           value={bArmId ?? ''}
           onChange={(e) => { rewind(); patch({ barm: e.target.value, ...REWIND }); }}
         >
-          {visibleArms.map((a) => <option key={a.id} value={a.id}>{a.arm}</option>)}
+          {cellArms.map((a) => <option key={a.id} value={a.id}>{a.arm}</option>)}
         </select>
       </span>
       <span className="flex flex-wrap items-center gap-1" role="group" aria-label="Training mode to inspect">
         <Caption>trained on</Caption>
-        {visibleModes.map((m) => (
+        {cellModes.map((m) => (
           <Chip
             key={m}
             testId={`bmode-${m}`}
@@ -820,7 +846,8 @@ export default function NewDedupTaggingBakeoff() {
       <span className="text-[0.7rem] text-[var(--color-ink-3)]" data-testid="bucket-scope">
         One cell at a time: <b>{headName(tagId)}</b> on <b>{armName(bArmId)}</b>, trained{' '}
         <b>{MODE_LABEL[bMode]}</b>, on the <b>{SPLIT_LABEL[split].toLowerCase()}</b> numbers.
-        Your arm and mode selections above are left alone.
+        These pickers offer only the arms and modes turned on above; the selection there is
+        left alone.
       </span>
     </div>
   );
@@ -1723,6 +1750,13 @@ function ImageProbabilityPanel({
                 || a.split.localeCompare(b.split));
   }, [detail, wide, split, armIds, modes]);
 
+  /* The one-line answer per model, read off the top of each ranking: the head
+   * a winner-takes-all reading gives this photo under that arm, and how many
+   * heads it beat. That count matters — on cross-validation a photo is scored
+   * only by the heads whose training set holds it, so a "winner" among one
+   * head was never a contest, and the line says so rather than dressing it up. */
+  const manyModes = new Set(groups.map((g) => g.mode)).size > 1;
+
   return (
     <div data-testid="probability-panel" className="text-xs">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -1763,6 +1797,59 @@ function ImageProbabilityPanel({
           <b>Every arm</b> to see what the run does hold for it.
         </p>
       ) : (
+        <>
+        <div
+          data-testid="top-heads"
+          className="mt-2 rounded-[var(--radius-sm)] border border-[var(--color-copper)] bg-[var(--color-paper-2)] p-2"
+        >
+          <div className="text-[0.62rem] uppercase tracking-[0.16em] text-[var(--color-ink-4)]">
+            top head per model
+          </div>
+          <ul className="mt-1 flex flex-col gap-0.5">
+            {groups.map((g) => {
+              const top = g.rows[0];
+              const contest = g.rows.length === 1
+                ? 'only head that scored it'
+                : `of ${g.rows.length} heads`;
+              return (
+                <li
+                  key={`${g.armId}|${g.mode}|${g.split}`}
+                  data-testid={`top-head-${g.armId}-${g.mode}-${g.split}`}
+                  className="grid items-baseline gap-x-1.5"
+                  style={{ gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) auto auto' }}
+                >
+                  <span
+                    className="truncate text-[var(--color-ink)]"
+                    title={`${g.arm} · ${MODE_LABEL[g.mode]} · ${SPLIT_LABEL[g.split]}`}
+                  >
+                    {g.arm}
+                    {manyModes && <span className="text-[var(--color-ink-3)]"> · {MODE_LABEL[g.mode]}</span>}
+                    {wide && <span className="text-[var(--color-ink-4)]"> · {SPLIT_LABEL[g.split].toLowerCase()}</span>}
+                  </span>
+                  <span className="truncate text-[var(--color-ink-2)]" title={top.tag_label ?? undefined}>
+                    {shortHead(top.tag_label ?? `tag ${top.tag_id}`)}
+                  </span>
+                  <span className="font-mono text-[0.65rem] tabular-nums text-[var(--color-ink)]">
+                    {top.score.toFixed(3)}
+                  </span>
+                  <span
+                    className="cursor-help text-[0.6rem] text-[var(--color-ink-4)]"
+                    title={g.rows.length === 1
+                      ? 'No other head scored this photo under this arm, mode and split, so there was nothing to beat. On cross-validation a photo is scored only by the heads whose training set holds it; the exam scores every photo with every head.'
+                      : `The highest of ${g.rows.length} heads that scored this photo under this arm, mode and split.`}
+                  >
+                    {contest}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          <p className="mt-1 text-[0.62rem] text-[var(--color-ink-4)]">
+            The strongest head under each model &mdash; the tag a winner-takes-all reading gives
+            this photo. Models are listed only for the arms and modes turned on at the top of the
+            page, on the split on show; <b>Every arm</b> widens it.
+          </p>
+        </div>
         <div className="mt-2 flex flex-col gap-3">
           {groups.map((g) => (
             <div
@@ -1840,6 +1927,7 @@ function ImageProbabilityPanel({
             </div>
           ))}
         </div>
+        </>
       )}
     </div>
   );

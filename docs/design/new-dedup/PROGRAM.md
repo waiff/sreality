@@ -194,6 +194,19 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-09 (f) — **The bake-off page's top selectors now govern the whole page, and the zoom
+  panel leads with the top head per model (two operator asks, same day).** (1) The ARM
+  dropdown and TRAINED ON chips in the cell controls (Views B and C) offer only the arms and
+  modes turned on in the chips at the top — the one exception is an arm or mode a link already
+  names for the cell, which stays listed so it can be undone; turning off the arm or mode the
+  cell is on hands the cell to the first one still on, because a cell left on a switched-off
+  arm would be a choice with no control to undo it. The zoom panel already filtered to the
+  selection by default (its **Every arm** chip widens). (2) The zoom panel now opens with a
+  **top head per model** block: for each selected arm (and mode, on the split on show) the
+  strongest head, its score, and how many heads it beat — "only head that scored it" when there
+  was no contest, which on cross-validation is the common case, since a photo is scored only by
+  the heads whose training set holds it (the exam scores every photo with every head). The
+  per-head detail groups follow unchanged.
 - 2026-09-09 (e) — **"All photos by score" gets the training-set grid's controls, to the
   control: the same five page sizes (50 … 10,000), "x–y of N", a last-page jump, and the
   Small/Large photo switch (operator ask, same day).** To carry them, `/runs/{id}/scores`
