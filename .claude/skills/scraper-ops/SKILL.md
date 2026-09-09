@@ -213,11 +213,11 @@ unwritten so the `property_maintenance` check alarms). The visual-signal produce
 (`scripts/clip_tag_backfill.py` — zero-shot CLIP room/plot tags into `image_clip_tags` + a 512-d
 vector into `image_clip_embeddings`), `clip_retag.yml` (re-runs the zero-shot over each image's
 STORED embedding when the taxonomy changes, per `app_settings.clip_taxonomy_retag_after`; no R2
-download, no re-inference) and `backfill_render_score.yml` (render-vs-photo axis). Newest, GPU,
-**dispatch-only and never yet run on real data**: `dinov3_embed_backfill.yml` (inert until the
-encoder config is complete; its write-rate input is not optional) and `tagging_bakeoff.yml`, the
-three-stage encoder EXPERIMENT (`dedup_sim` only). **Read `references/dinov3-embedding-lane.md` /
-`references/tagging-bakeoff-lane.md` before touching either.**
+download, no re-inference) and `backfill_render_score.yml` (render-vs-photo axis). Newest and
+**dispatch-only**: `dinov3_embed_backfill.yml` (GPU, inert until the encoder config is complete),
+`tagging_bakeoff.yml` (GPU, the three-stage encoder EXPERIMENT, `dedup_sim` only) and
+`tag_model.yml` (CPU, promote/score/activate ONE versioned tag model, migration 490 — the tag is
+the argmax head, no per-head yes/no). **Read the matching `references/*-lane.md` before touching.**
 
 **There is NO scheduled dedup job any more.** The automatic decision layer — the engine, its
 queues, its batch warmer, its geo/byt-geo runs, the model-compare and vision A/B harnesses, and

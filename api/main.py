@@ -67,6 +67,7 @@ from api.routes.filter_presets import router as filter_presets_router
 from api.routes.images import router as images_router
 from api.new_dedup_bakeoff import router as new_dedup_bakeoff_router
 from api.new_dedup_labeling import router as new_dedup_labeling_router
+from api.new_dedup_tags import router as new_dedup_tags_router
 from api.routes.location_quality import router as location_quality_router
 from api.routes.new_dedup import router as new_dedup_router
 from api.routes.notifications import router as notifications_router
@@ -286,6 +287,11 @@ app.include_router(new_dedup_labeling_router)
 # best, with the photos behind every number. Writes come from the CPU runner
 # (scripts/tag_head_bakeoff.py), never from a browser.
 app.include_router(new_dedup_bakeoff_router)
+# /new-dedup/tags/* (the versioned tag model, migration 490) — read-only,
+# admin-gated: which model versions exist and which is active, and one image's
+# whole score map plus its winner. The tag is the ARGMAX over the model's heads;
+# there is no per-head yes/no. Writes come from scripts/tag_model.py.
+app.include_router(new_dedup_tags_router)
 # /location/* (location-quality dashboard, frozen labelled samples, operator
 # corrections) — the FIRST consumer of the location serving projection
 # (location program W1v), admin-gated (require_admin). Reads via
