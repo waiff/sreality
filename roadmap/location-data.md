@@ -1735,8 +1735,9 @@ but the run does not partition them by verdict — each is somewhere in 6,519 / 
   (136 rows). After the drain: `mode=reconcile` then `mode=gate` on that lane; record the remainder
   arm flipping to PASS and W4 closes.
 - Soak, then promote `location_payload_shape_drift` into `llm_health.yml`'s `--only` list. The check
-  has run in the 6-hourly `verify_pipeline.yml` lane only since 2026-09-08 15:04Z (#1351) — checked
-  2026-09-09, one day is not a soak; judge it on a week of `pipeline_check_results` rows first.
+  has run in the 6-hourly `verify_pipeline.yml` lane only since #1351 merged, 2026-09-09 07:44Z
+  (one scheduled run by the time this was checked, 11:31Z the same day) — that is not a soak; judge
+  it on a week of `pipeline_check_results` rows first.
 - **R4 (Mapy purge) stays carved out and operator-gated.** It is the program's only destructive
   surface and the only part touching live serving; 06 §6.4's coexistence promise ("nothing in the
   ingest write path changes") covers W1–W3 and pointedly excludes W4.
@@ -1749,8 +1750,10 @@ the 2026-09-08 no-labelling ruling. W6 opened instead, and this PR builds exactl
 in the W6 row that are code rather than decisions — nothing here changes what any consumer reads.
 
 - **`location_data/serving_flags.py` — the `location_v2.<feature>` runtime flags.** `FEATURES` is
-  the R12 cutover order verbatim (`dashboards`, `dedup`, `filters`, `map`, `estimation`); one
-  `app_settings` key each (`location_v2.<feature>`), the same mechanism as
+  MASTER.md §2.2's ascending-blast-radius cutover order (dashboards → dedup blocking → filters and
+  statistics → map rendering → estimation comparables) in this file's shorthand (`dashboards`,
+  `dedup`, `filters`, `map`, `estimation`); R12 is why they are runtime flags ("reversible without
+  a deploy"). One `app_settings` key each (`location_v2.<feature>`), the same mechanism as
   `location_payload_shadow_hash` and `gate2_null_sreality_id_enabled`, and like those two **not
   seeded by a migration**: a missing row reads OFF, which is "keep reading `listings.geom`", the
   safe direction. An undeclared feature name raises rather than reading a nonexistent key. The
@@ -1785,9 +1788,12 @@ none flips here.
 - **A5, the filter semantics default** — MASTER.md §8.2's written default is include-and-badge
   (`certain ∪ possible`), and the table's own note is why it still needs saying out loud: "it changes
   every filter's semantics, so it must be an explicit decision". Due "before the first filter flips".
-- **Un-shadow, per portal** — the seven W2-6…W2-12 contracts (bazos@2, ceskereality@5, idnes@2,
-  maxima@2, mmreality@2, realitymix@4, remax@3) and bazos@3 are still `shadow: true`. The gate is the
-  operator's joint-review ruling (2026-09-08); the machinery is one command per portal
+- **Un-shadow, per portal** — the seven W2-6…W2-12 portals are still `shadow: true`, at the
+  versions on disk: **bazos@3** (one header — the W2-6 structured entries and the W2-10 `llm_text`
+  entries share it, so there is no separate `bazos@2` to flip; an un-shadow makes both families'
+  claims admissible, but the LLM lane writes nothing until its dispatch-only workflow runs),
+  ceskereality@5, idnes@2, maxima@2, mmreality@2, realitymix@4, remax@3. The gate is the operator's
+  joint-review ruling (2026-09-08); the machinery is one command per portal
   (`python -m location_data.contracts --unshadow <portal>@<version>`, then budgeted
   `location_claims_remine_archive.yml` sweeps). The cost of waiting is header-grain: every new
   listing on a shadowed portal gets no live claim (9,864 of 10,023 since 09-05, measured 09-08).

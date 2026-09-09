@@ -1,11 +1,12 @@
-"""`location_v2.<feature>` runtime flags — the W6 serving-flip precondition (05 §5.0,
+"""`location_v2.<feature>` runtime flags — the W6 serving-flip precondition (MASTER.md §2.2,
 roadmap location-data.md W6 row).
 
 W6 is a per-feature cutover, not a wave-wide switch: each downstream consumer of the new
 location stack (`listing_location_current` / `property_location_current`) flips onto it
-independently, in the declared order `dashboards → dedup → filters → map → estimation`
-(MASTER.md R12 — "per-feature runtime flags so every non-estimation flip is reversible
-without a deploy"). A flag lives in `app_settings` (migration 020), the same mechanism
+independently, in MASTER.md §2.2's ascending-blast-radius order — dashboards → dedup blocking
+→ filters and statistics → map rendering → estimation comparables — spelled here with the
+roadmap's shorthand. R12 is why they are runtime flags at all: "so every non-estimation flip
+is reversible without a deploy". A flag lives in `app_settings` (migration 020), the same mechanism
 already used for `location_payload_shadow_hash` and `gate2_null_sreality_id_enabled`
 (`scraper/db.py`); it is intentionally NOT seeded by a migration — a feature is unflipped
 until an operator writes the row, and a missing row reads as OFF, i.e. "keep reading
