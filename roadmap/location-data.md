@@ -21,7 +21,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W4 targeted refetch cohorts | sreality legacy-shape + truncated refetch, bezrealitky remainder | 🟡 **sreality arms PASS 2026-09-09; one gate arm still red — W4(b)'s 136-row remainder — pending one operator dispatch** — consumer (#1083), lane (#1108), gate report (#1349), bezrealitky lane + standing shape-drift check (#1351). The 38,612-row cohort measured as **32,055 delisted + 614 already fixed + 5,943 real refetches** (the real reconcile, run 34226558436); the operator dispatched the 5,943 on 09-08 12:54Z at `priority = −1` and by 09-09 morning 0 remained at −1, without promotion. **Gate (full corpus, run 34325552203): legacy-shape share of active sreality rows 0.03 %** (34 / 103,802; W0 baseline 8.4 %, gate < 2 %) **PASS · D3 axes on the refetched cohort 99.48 %** (6,519 / 6,553, gate ≥ 95 %) **PASS**. W4(c) truncated cohort **empty**. W4(d) `location_payload_shape_drift` live in the 6-hourly health lane. **Open: W4(b)** — 136 pre-0m bezrealitky rows, one operator command (`gh workflow run location_refetch_cohort.yml -f lane=bezrealitky_ruian_refetch -f mode=dispatch`), then `mode=reconcile` + `mode=gate` on that lane; the ≥ 95 % `ruianId` arm is **portal-capped at 47.3 %** (2,913 of 5,786 publish `null`) by construction. **R4 (Mapy purge) is NOT in this wave** — its own operator-gated PR |
 | W2-10 bazos free-text LLM lane | one structured LLM call per archived bazos body → evidence-quoted `llm_text` claims | 🟡 **lane + 3-model bake-off shipped, lane INERT** (2026-09-05) — `location_data/claims_llm.py` (LANE `location_claims_llm`, `claims_llm@1`, group `location-llm`), a THIRD reader registry (`LLM_READERS` / `claims_intake.LLM_ONLY_READERS` / `contracts.READER_CONTRACTS['llm_location_text']`, with the three shipped equalities re-scoped in the same commit), migration 471 (`called_for` += `extract_location_claims`, `location_llm_bakeoff`; renumbered from 470 after the activation wave took it), `QwenProvider` registered + `PRICES` rows for gpt-5-nano / gpt-5.6-luna / qwen3.7-flash, and `scripts/location_llm_bakeoff.py` + two dispatch-only workflows. **bazos@3 SHIPPED 2026-09-05 and the lane is live-able**: the contract now names `llm_location_text` on **sixteen** entries — eight output fields (`obec_name`, `cast_obce_name`, `psc`, `street_name`, `house_number_cp/co`, `landmark`, `address_line_verbatim`) read from the ad's DESCRIPTION and the same eight from its TITLE — and **migration 472** adds the `('portal:bazos','llm_text', rank 350, min_confidence='medium', may_overwrite_non_null=false, requires_independent_agreement=FALSE)` rungs for the six of those that are survivorship fields. Two rulings are baked in: the two entry families are the two RUNGS of ONE ladder (the lane emits exactly one claim per output field per listing, description-first, title as fallback — policy cannot see `surface`, so this is an EXTRACTOR decision), and rank 350 puts the free text above every structured read on this portal because they are okres-grade (the town anchor's text is the okres; `postal_town` disagrees with the geo obec on 57.0 % of rows; the pin-derived obec is itself wrong). `requires_independent_agreement=FALSE` is a deliberate D7 relaxation: bazos free text is the only carrier for these fields, so requiring a second source makes single-source claims permanently unusable. **Still shadowed** (`shadow: true` carries forward) and the workflow is still dispatch-only — nothing runs until an operator dispatches it, and nothing it writes reaches `location_claims_live` until `--unshadow bazos@3`. **Bake-off DONE (2026-09-07/08), two arms.** Free-form (150 listings): luna 86.6 % gazetteer / qwen 74.0 % / nano 74.6 %, 26 of 40 obec disagreements = Czech declension. **Constrained arm (#1334, run 34188800806, 100 listings, `--mode both`)** — pick ONE obec from the closed list of every obec in the okres(es) of the listing's PSČ (mean 78.6 names): **luna picked 90/99, 0 out-of-list, quote-valid 96.7 %, p50 1.1 s, $0.00034/call; qwen 65/99 with 3 out-of-list picks and 34 abstentions (27 where its own free form had the town); where both picked, 62/62 agree** — the list deletes the declension disagreement class outright. **Verdict: gpt-5.6-luna; the constrained pick becomes the OBEC rung of the lane** (free-form stays for street / č.p. / landmark). Prompt gap to close first: "u X" (NEAR X) is read as X. **Candidates probe (#1338, run 34204978317, 100 ads, luna, $0.65)** answered the operator's objections with per-ad rows: the town the ad names (reference = an unanchored pick from the NATIONAL list, 5,346 names, $0.0057/call) sat **inside the PSČ-okres list 90/90, within 15 km of the pin 90/90 (inside the town's own polygon 72/90), in the text-matched list 87/90, in text ∪ pin-radius 90/90**; picks from the PSČ list and from the union agreed with the reference 90/90. **`claims_llm@2` SHIPPED (2026-09-08): lists everywhere the registry can supply one, portal-agnostic.** `location_data/town_candidates.py` builds the town list from registry names found in the text ∪ obce within 15 km of `listings.geom` (in-memory index of the 6,258 obce with centroids, one read per run); `CandidateCaller` picks the town (`pick_obec`, national-list retry on an abstention when the ad has any anchor, no call at all when it has none), then the část obce and street from the picked obec's registry names found in the text plus the house number as literal digits (`record_address`), and assembles the free-form answer shape so `extract_payload`, its gazetteer gates, bazos@3's entries and the policy rows are untouched. Prompt rules added: "u X" = NEAR X; a longer name containing a list name ≠ that name (Rajecké Teplice ≠ Teplice, the probe's one false positive). `psc` / `landmark` / `lokalita_line` are not asked in @2 (recorded `not_attempted`). `DEFAULT_MODEL` = gpt-5.6-luna; `PROMPT_VERSION` = `bzs.loc@2`. **CLOSED as a build (operator wrap-up ruling 2026-09-08): a scheduled lane and a "first capped campaign" are scope creep and are not proposed again.** The only switch this wave still owns is the operator's per-portal un-shadow (`python -m location_data.contracts --unshadow bazos@3`) |
 | W5 LLM lane, triggered only | 06 §6.4's named cohorts: idnes out-of-bbox, bazos `Zahraničí`, maxima; then a ~25 % triggered miner | ⚪ **not started as a wave — its MECHANISM is W2-10's** (`claims_llm@2`, span-validated, graded write-back, luna). What W5 adds and W2-10 did not: the idnes out-of-bbox cohort (**still 10,566 active rows** out of the CZ bbox on 2026-09-08 + 15,880 with no geom), the trigger/attempts ledger, the four-fabrication fixture test. Its "precision on the frozen labelled samples" gate arm is unanswerable under the 09-08 ruling (no labelling) — the joint review is the gate |
-| W6 serving flip + legacy retirement | per-feature cutover behind `location_v2.<feature>` runtime flags, dashboards → dedup → filters → map → estimation last | ⚪ **not started.** Hard preconditions from the corpus, none yet met: the `location_v2.<feature>` flag (zero hits in the repo), per-consumer minimum-granularity declarations (05 §5.5.2), operator action **A5** (filter semantics default, "before the first filter flips"), the registry canonical-street-form decision carried from W1v, and — mechanically — un-shadowed contracts, since a shadowed claim never reaches resolution. Today exactly ONE consumer reads a projection: the admin-gated Location Quality page (W6 step 1, flipped in W1v); Browse / watchdog / map / dedup / estimation all still read `listings.geom` + geo-derived admin ids |
+| W6 serving flip + legacy retirement | per-feature cutover behind `location_v2.<feature>` runtime flags, dashboards → dedup → filters → map → estimation last | 🟡 **scaffolding shipped 2026-09-09, no consumer flipped.** Of the five hard preconditions, the two that were build work are met: the `location_v2.<feature>` flags exist (`location_data/serving_flags.py` — `app_settings`-backed, unseeded, missing = OFF) and the per-consumer minimum-granularity floors are declared (`location_data/serving_contracts.py`, 05 §5.5.2 row by row). The three that are decisions are still open and were surfaced to the operator with recommendations the same day: operator action **A5** (filter semantics default — MASTER.md's written default is include-and-badge, `certain ∪ possible`; "before the first filter flips"), the per-portal **un-shadow** ruling (a shadowed claim never reaches resolution; measured 2026-09-08: 9,864 of 10,023 listings first seen on the seven shadowed portals since 09-05 have no live claim), and the registry canonical-street-form decision carried from W1v. Still exactly ONE consumer reads a projection: the admin-gated Location Quality page (W6 step 1, flipped in W1v, wired before the flag existed); Browse / watchdog / map / dedup / estimation all still read `listings.geom` + geo-derived admin ids. See the W6 section |
 
 ## W0 — done
 
@@ -1734,10 +1734,71 @@ but the run does not partition them by verdict — each is somewhere in 6,519 / 
 - **Operator: `gh workflow run location_refetch_cohort.yml -f lane=bezrealitky_ruian_refetch -f mode=dispatch`**
   (136 rows). After the drain: `mode=reconcile` then `mode=gate` on that lane; record the remainder
   arm flipping to PASS and W4 closes.
-- Soak, then promote `location_payload_shape_drift` into `llm_health.yml`'s `--only` list.
+- Soak, then promote `location_payload_shape_drift` into `llm_health.yml`'s `--only` list. The check
+  has run in the 6-hourly `verify_pipeline.yml` lane only since #1351 merged, 2026-09-09 07:44Z
+  (one scheduled run by the time this was checked, 11:31Z the same day) — that is not a soak; judge
+  it on a week of `pipeline_check_results` rows first.
 - **R4 (Mapy purge) stays carved out and operator-gated.** It is the program's only destructive
   surface and the only part touching live serving; 06 §6.4's coexistence promise ("nothing in the
   ingest write path changes") covers W1–W3 and pointedly excludes W4.
+
+## W6 — kickoff (2026-09-09): the serving-flip scaffolding, no consumer flipped
+
+W5 was deliberately skipped in front of W6: its named cohorts are small, its mechanism is already
+W2-10's (`claims_llm@2`), and its "precision on the frozen labelled samples" arm is unanswerable under
+the 2026-09-08 no-labelling ruling. W6 opened instead, and this PR builds exactly the two preconditions
+in the W6 row that are code rather than decisions — nothing here changes what any consumer reads.
+
+- **`location_data/serving_flags.py` — the `location_v2.<feature>` runtime flags.** `FEATURES` is
+  MASTER.md §2.2's ascending-blast-radius cutover order (dashboards → dedup blocking → filters and
+  statistics → map rendering → estimation comparables) in this file's shorthand (`dashboards`,
+  `dedup`, `filters`, `map`, `estimation`); R12 is why they are runtime flags ("reversible without
+  a deploy"). One `app_settings` key each (`location_v2.<feature>`), the same mechanism as
+  `location_payload_shadow_hash` and `gate2_null_sreality_id_enabled`, and like those two **not
+  seeded by a migration**: a missing row reads OFF, which is "keep reading `listings.geom`", the
+  safe direction. An undeclared feature name raises rather than reading a nonexistent key. The
+  module docstring carries the one-statement INSERT an operator runs to flip a feature; no consumer
+  calls `is_enabled` yet — `dashboards` (the Location Quality page) reads the projection
+  unconditionally because W1v wired it before this flag existed, and retrofitting it buys nothing.
+- **`location_data/serving_contracts.py` — 05 §5.5.2 as code.** `FEATURE_FLOORS` transcribes the
+  design table row by row: 19 floors (grain, min granularity, min confidence, the prose extra gate),
+  with the two rows that declare no floor documented as absent on purpose ("dedup verification" is
+  §5.4.5's acceptance criterion; "property-grain aggregate" resolves to its listing-grain row, §5.5.3
+  rule 4). `meets_floor()` compares through `GranularityRank` and `MATCH_CONFIDENCE_ORDER` from
+  `resolver.types` — never string order, never enum ordinality (01 §0.4) — and `"any"` is the
+  table's own spelling for no confidence floor. §5.5.2's warning that "a missing flag reads as no
+  gate and fails open" is inverted into a `KeyError` on an undeclared feature. `extra_gates` is
+  carried, not evaluated: each names a different projection column and belongs to the consumer that
+  wires the feature.
+- Tests: `tests/location_data/test_serving_flags.py` (missing/NULL → OFF, the exact SELECT, both
+  jsonb and text spellings, no query for an undeclared feature) and `test_serving_contracts.py`
+  (every floor spelled with a ranked rung and a real label, the table asserted row by row, rank-not-
+  string ordering, a loaded rank table overriding the offline default).
+
+**Deliberately NOT done, and why.** No consumer is wired to a flag. The next feature in R12 order is
+`dedup`, and "same-location identity for dedup" (05 §5.4) is the NEW DEDUP program's simulation-first
+rebuild (rule 15, `docs/design/new-dedup/PROGRAM.md`) — its flip is that program's gate, not this
+wave's. No flag is seeded, no A5 answer is encoded (both `certain ∪ possible` and strict-with-toggle
+remain expressible once decided; §5.3.3's two predicates are the mechanism either way), and the W1v
+canonical-street-form finding is untouched — it only bites a feature that reads `street_name`, and
+none flips here.
+
+**What W6 waits on now (all operator decisions, surfaced 2026-09-09 with recommendations):**
+
+- **A5, the filter semantics default** — MASTER.md §8.2's written default is include-and-badge
+  (`certain ∪ possible`), and the table's own note is why it still needs saying out loud: "it changes
+  every filter's semantics, so it must be an explicit decision". Due "before the first filter flips".
+- **Un-shadow, per portal** — the seven W2-6…W2-12 portals are still `shadow: true`, at the
+  versions on disk: **bazos@3** (one header — the W2-6 structured entries and the W2-10 `llm_text`
+  entries share it, so there is no separate `bazos@2` to flip; an un-shadow makes both families'
+  claims admissible, but the LLM lane writes nothing until its dispatch-only workflow runs),
+  ceskereality@5, idnes@2, maxima@2, mmreality@2, realitymix@4, remax@3. The gate is the operator's
+  joint-review ruling (2026-09-08); the machinery is one command per portal
+  (`python -m location_data.contracts --unshadow <portal>@<version>`, then budgeted
+  `location_claims_remine_archive.yml` sweeps). The cost of waiting is header-grain: every new
+  listing on a shadowed portal gets no live claim (9,864 of 10,023 since 09-05, measured 09-08).
+- **The registry canonical street form** (W1v finding above) — decide when the first
+  `street_name`-reading feature (street filter, dedup Tier 1, comparables) is next to flip.
 
 ## Standing decisions
 
