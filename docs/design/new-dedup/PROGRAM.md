@@ -194,6 +194,75 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-09 (b) — **Wave-1 "iteration 1": the versioned TAG MODEL is built — a registry, a
+  per-image winner store, and the three jobs that move a model through its life (migration 490).**
+  W3 already said "train probe on the gated training set (grouped splits, pinned encoder,
+  versioned artifact) … campaign-retag the corpus into the sim tag store"; this pulls that shape
+  forward so W2-W5 can be built against it **while training keeps iterating** (ruling (c) below).
+  Nothing is trained, scored or activated by the build itself.
+  - **Vocabulary, once.** A **head** is one yes/no classifier for one photo tag. A **model** is
+    one FROZEN DECISION — this encoder configuration, this training mode, this set of heads,
+    these weights — with a **version** string as its name (`v1`). The bake-off produced 363
+    heads as evidence; a model is what you get when one cell of that grid is chosen and made
+    permanent.
+  - **THE WINNER RULE, and it decides the whole shape (operator ruling 2026-09-09 (a), verbatim
+    intent: *"for each image store the probability for each head, the tag is the head with the
+    highest score; no per-head yes/no decisions in the product at all"*).** An image's tag is the
+    **argmax** — the highest-scoring head — with **ties broken toward the lower tag_id**.
+    Three consequences are schema, not convention:
+    1. **Every head's probability is stored**, not only the winner's: a winner means nothing
+       except beside the field it beat, and a consumer may want the runner-up.
+    2. **No threshold and no boolean is stored anywhere.** A head's own threshold still lives
+       inside its artifact because that is what the bake-off measured it at — it is EVIDENCE,
+       not a gate. **A floor is the consumer's**: anything wanting "…and only if it is
+       confident" applies its own minimum to `winner_score`.
+    3. **A tie rule is stated rather than left to chance.** Two heads returning the same number
+       is ordinary on a photo neither recognises, and "whichever the dict yielded first" would
+       tag the same image differently between two runs of the same model.
+  - **Adding heads is a NEW VERSION, never an edit** — which is exactly what makes the ruling's
+    "the winner must be recomputable from an expanded head set" true. An argmax is only
+    meaningful over one head set at a time, so `tag_head_models.heads` freezes the set and
+    `image_tag_scores` is keyed by model: v1 and v2 coexist, each with its own answer for the
+    same photo.
+  - **The store (migration 490, PUBLIC schema).** `tag_head_models` (version, status
+    candidate/active/retired, mode, the seven encoder identity facts as columns, the frozen head
+    set, a dataset hash; a **partial unique index makes two active models impossible** — that is
+    an ambiguous state, not a degraded one), `tag_head_model_heads` (the `toolkit/tag_heads.py`
+    artifact plus the bake-off's cv/exam numbers **COPIED** at promotion), `image_tag_scores`
+    (one row per image per model version: `scores` jsonb, `winner_tag_id`, `winner_score`).
+    **Public and not `dedup_sim` on purpose**: the bake-off's tables are evidence and are dropped
+    wholesale at Wave 8, and this is the model the product tags with. For the same reason there
+    is **no foreign key into `dedup_sim`** — `source_run_id` / `source_arm` are provenance
+    values, so dropping the evidence cannot cascade into the product. One row per (image, model)
+    rather than per head: 11.5M x ~300 B at the eventual corpus pass against eleven times that
+    for identical information, and the read everyone makes ("what is this photo?") stays a
+    primary-key lookup.
+  - **THE ITERATION CONTRACT** — `a new bake-off run -> promote -> score -> activate`, and the
+    reason it is four verbs and not one. `promote` freezes one (run, arm, mode) cell into a
+    `candidate` and **nothing reads what it writes**; `score` fills that version's store,
+    resumably and at whatever pace (pure-Python inference — a dot product and a logistic — so
+    the corpus pass never needs an ML install); `activate` flips exactly one version in one
+    transaction. **Activation being separate is the guarantee**: no consumer ever meets a
+    half-scored version. Rolling forward is another promote, rolling back is `activate` on the
+    older version. Two vector sources: `bakeoff:<run_id>` (the arm's own stored vectors — the
+    cheap loop over run 1's 9,514 labelled + exam photos) and `production`
+    (`image_dinov3_embeddings` under the model's seven facts — works today, returns nothing,
+    because nothing has populated that table for this configuration yet).
+  - **Surfaces.** `toolkit/tag_models.py` (`promote` / `activate` / `score` / `winners`, the read
+    contract later waves code against), `scripts/tag_model.py`, `.github/workflows/tag_model.yml`
+    (dispatch-only, `dry_run` default true, `SUPABASE_DB_URL` only, CPU), and read routes
+    `GET /new-dedup/tags/{models, models/{version}/heads, images/{image_id}}` — admin-gated,
+    read-only, weights never returned. Labels still arrive ONLY through
+    `machine_labeling.training_rows`, so the holdout census has nothing new to exempt.
+  - **DELIBERATELY NOT DONE.** No corpus pass — the full image pool is scored only after the
+    operator is satisfied with accuracy (ruling (c): the training set, the head set, the model
+    and the parameters keep iterating in parallel). The three nulls in `data/dinov3_config.json`
+    are untouched. No frontend. And **removing the two weak training modes and every sub-512 arm
+    (ruling (b): drop `pos_only_free_neg` "borrowed no" and `pos_only_centroid` "closeness only";
+    keep dinov2's 504, which is 512 snapped to its patch size)** belongs to the bake-off's own
+    lane, not here — a model is single-mode by construction, so this store simply records which
+    mode it was.
+
 - 2026-09-09 (a) — **Run 1 of the tagging bake-off COMPLETED. 11 heads x 11 encoder arms x 3
   training modes = 363 trained cells, 529,188 per-photo scores, 0 ungradable, ~$1.55 of GPU
   in total.** The experiment (d) built and (e) gave a face has now been run end to end, and
