@@ -17,7 +17,9 @@ routine, and it is exactly why dispositions key on the version-free `dedupe_key`
 from __future__ import annotations
 
 # v1 = S1-S7 as specified in 03 §3.3-§3.9, first shipped implementation.
-RESOLVER_VERSION = "resolver:v1"
+# v2 = 2026-09-10: on a registry-bound row the official RÚIAN `street_name` overwrites the
+#      portal's spelling (`core._override_street_name`, rule `registry:street`).
+RESOLVER_VERSION = "resolver:v2"
 
 # v1 = the cheap structural rule set of 03 §3.11.1 (no LLM, no geometry beyond distances).
 RECONCILER_VERSION = "reconciler:v1"

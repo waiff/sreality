@@ -53,7 +53,13 @@ def test_a_carousel_street_never_wins_the_street_field():
         ]
     )
     assert str(resolution.fields["street_name"].value).startswith("Nad Bořislavkou")
-    assert resolution.fields["street_name"].source_claim_ids == (2,)
+    # Since 2026-09-10 the registry spells the winner on a registry-bound row, so the
+    # carousel's defeat reads as the ABSENCE of the override signal claim 3 would have
+    # opened had it been the incumbent (its match key differs from `nad borislavkou`).
+    assert resolution.fields["street_name"].rule == "registry:street"
+    assert not [
+        s for s in resolution.contradiction_signals if s.rule == "street_form_registry_override"
+    ]
 
 
 def test_a_carousel_street_never_ranks_a_candidate_or_carries_the_admin_chain():

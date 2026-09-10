@@ -294,6 +294,28 @@ claim is emitted and policy v1's `('ruian','registry_derived',100)` row — whic
 the portal's 300 — never gets a chance. **Not fixed in W1v on purpose**: it changes
 resolution output for every registry-bound row corpus-wide (sreality is 26.9 % kód ADM), so
 it is a W2/W6 decision, and the contradiction ledger is meanwhile doing exactly its job.
+
+**DECIDED + SHIPPED 2026-09-10 — the official RÚIAN form wins on registry-bound rows.** The
+operator's call, and it needed no policy change: `_fill_from_registry` now emits a
+`street_name` winner from `ruian_streets.name` (rule **`registry:street`**, method
+`registry_derived`, `source_claim_ids=()`) whenever the winning candidate carries
+`ruian_adm_kod`, OVERRIDING the portal's spelling — the one exemption is an
+`operator_manual` winner, which the registry never respells. The comparison is
+like-with-like — S7's winner is the TYPE-STRIPPED name S1 parsed out of the claim, so it is
+tested against `split_street_type(ruian_streets.name)`: the case-convention bulk (`Na Strži`
+→ `Na strži`) AND the dropped-prefix class (`Budovatelů` → `nám. Budovatelů`, which S1 makes
+indistinguishable from a portal that wrote the prefix) respell SILENTLY. Only a genuinely
+different name appends an **info**-severity `street_form_registry_override` to the ledger,
+carrying what the portal said and the overridden winner's claim ids; the reconciler counts
+that rule as EVALUATED whenever the override ran (`_signal_rules_evaluated`), so such a
+finding can auto-close. `street_not_in_obec` stops firing on these rows because the served
+string is now the mirror's own. `AddressPoint` carries
+`street_name` beside `street_name_norm` (both `_ADDRESS_POINT_SQL` copies select `s.name`).
+This is a resolver OUTPUT change, so **`RESOLVER_VERSION` = `resolver:v2`**; the projection's
+`street_claim_id` is truthfully NULL on registry-bound rows. Rollout: `location_resolve.yml
+mode=full-resolve kraje=19,27` first (W6-2's side-by-side scope — the new `--kraje` /
+`_FULL_SWEEP_KRAJE_SQL` restricts the stale set by the CURRENT projection's `kraj_kod`, so
+unprojected rows stay the unscoped sweep's job), then corpus-wide with the full rollout.
 - **Operator items:** **A1** (ČÚZK helpdesk) — letter drafted, awaiting send. **A5** (filter
   semantics default) — **decided 2026-09-09: include-and-badge** (see the W6 section). **A2**
   (quarterly licence review) standing. **A4** (Supabase plan/tier) no longer blocks: W1 is applied

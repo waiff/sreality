@@ -15,7 +15,9 @@ name: "Location: resolve"
 #                      precision.
 #   mode=full-resolve  `location_resolve_sweep` — the reconcile backstop: enqueue everything
 #                      whose projection is missing or built at a stale version tuple, then
-#                      drain it.
+#                      drain it. `kraje` scopes the stale set to those kraj_kods so a
+#                      resolver bump lands on a real cohort first; a scoped sweep can only
+#                      see rows that ALREADY have a projection to filter on.
 #
 # Both jobs take a lease-row CAS on location_jobs, never a session advisory lock (a lock
 # taken on one transaction-pooler backend and released on another strands), and the
@@ -55,6 +57,11 @@ on:
         type: string
       sources:
         description: "epoch mode: comma-separated portals; blank = every source"
+        required: false
+        default: ""
+        type: string
+      kraje:
+        description: "full-resolve mode: comma-separated kraj_kod scope; blank = whole corpus"
         required: false
         default: ""
         type: string
@@ -111,6 +118,7 @@ jobs:
       MAX_SECONDS: ${{ inputs.max_seconds || '600' }}
       BATCH_SIZE: ${{ inputs.batch_size || '250' }}
       SOURCES: ${{ inputs.sources }}
+      KRAJE: ${{ inputs.kraje }}
       DRY_RUN: ${{ inputs.dry_run }}
     steps:
       - uses: actions/checkout@v6
@@ -138,7 +146,7 @@ jobs:
               python -m location_data.resolver.epoch_job --sources "$SOURCES" $ARGS
               ;;
             full-resolve)
-              python -m location_data.resolver.drain --full-sweep \
+              python -m location_data.resolver.drain --full-sweep --kraje "$KRAJE" \
                 --max-seconds "$MAX_SECONDS" --batch-size "$BATCH_SIZE" $ARGS
               ;;
             *)

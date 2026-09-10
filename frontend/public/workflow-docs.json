@@ -4493,6 +4493,14 @@
           "options": null
         },
         {
+          "name": "kraje",
+          "description": "full-resolve mode: comma-separated kraj_kod scope; blank = whole corpus",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
           "name": "dry_run",
           "description": "resolve and log, write nothing",
           "required": false,

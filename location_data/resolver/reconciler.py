@@ -328,7 +328,9 @@ def _signal_rules_evaluated(resolution: Resolution) -> set[str]:
 
     `country_dispute` always: S2 runs on every resolution. The other two are conditional on
     inputs the resolution itself records — a registry point AND a pin for the cross-check,
-    a mapped declared label for the precision comparison."""
+    a mapped declared label for the precision comparison. `street_form_registry_override`
+    joins them whenever S7's registry fill actually respelled the street — without it a
+    finding it opened could never auto-close."""
     rules = {"country_dispute"}
     positions = {c.position_source for c in resolution.candidates}
     kinds = {c.target_kind for c in resolution.candidates}
@@ -336,6 +338,9 @@ def _signal_rules_evaluated(resolution: Resolution) -> set[str]:
         rules.add("pin_registry_distance")
     if any(cap.startswith("declared:") for cap in resolution.precision.declared_caps):
         rules.add("declared_precision_vs_assigned")
+    street = resolution.fields.get("street_name")
+    if street is not None and street.rule == "registry:street":
+        rules.add("street_form_registry_override")
     return rules
 
 

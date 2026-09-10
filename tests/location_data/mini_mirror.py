@@ -274,25 +274,37 @@ def default_mirror() -> MiniMirror:
                obec_unit_id=13, obec_kod=554782),
         Street(street_id=3, code=103, name="Slunečná", name_norm="slunecna",
                obec_unit_id=10, obec_kod=599212),
+        # The dropped-prefix class: the portal says `Budovatelů`, RÚIAN says `nám.
+        # Budovatelů` — same street, and `name_norm` keeps the type word RÚIAN spells.
+        Street(street_id=4, code=104, name="nám. Budovatelů", name_norm="nam budovatelu",
+               obec_unit_id=10, obec_kod=599212),
     ]
     points = [
         AddressPoint(
             kod_adm=21690278, obec_unit_id=13, obec_kod=554782, psc="16000",
             lat=50.10100, lon=14.34800, street_id=1, ulice_kod=101,
-            street_name_norm="nad borislavkou", cislo_domovni=487, cislo_orientacni=40,
+            street_name_norm="nad borislavkou", street_name="Nad Bořislavkou",
+            cislo_domovni=487, cislo_orientacni=40,
             stavebni_objekt_code=555001, cast_obce_unit_id=14, cast_obce_kod=490067,
         ),
         AddressPoint(
             kod_adm=21690279, obec_unit_id=13, obec_kod=554782, psc="16000",
             lat=50.10110, lon=14.34810, street_id=1, ulice_kod=101,
-            street_name_norm="nad borislavkou", cislo_domovni=488, cislo_orientacni=41,
+            street_name_norm="nad borislavkou", street_name="Nad Bořislavkou",
+            cislo_domovni=488, cislo_orientacni=41,
             stavebni_objekt_code=555002, cast_obce_unit_id=14, cast_obce_kod=490067,
         ),
         AddressPoint(
             kod_adm=33000001, obec_unit_id=10, obec_kod=599212, psc="74301",
             lat=49.75740, lon=18.01590, street_id=3, ulice_kod=103,
-            street_name_norm="slunecna", cislo_domovni=12,
+            street_name_norm="slunecna", street_name="Slunečná", cislo_domovni=12,
             stavebni_objekt_code=556001,
+        ),
+        AddressPoint(
+            kod_adm=33000002, obec_unit_id=10, obec_kod=599212, psc="74301",
+            lat=49.75750, lon=18.01600, street_id=4, ulice_kod=104,
+            street_name_norm="nam budovatelu", street_name="nám. Budovatelů",
+            cislo_domovni=5, stavebni_objekt_code=556002,
         ),
     ]
     return MiniMirror(

@@ -9,6 +9,7 @@ joins `listings`, and the schema-replay job is the only other place that would n
 from __future__ import annotations
 
 import inspect
+import re
 from contextlib import contextmanager
 from typing import Any
 
@@ -112,6 +113,49 @@ def test_the_queue_slice_has_a_unique_tiebreaker():
     another starves."""
     flat = " ".join(drain._CLAIM_SLICE_SQL.split()).lower()
     assert "order by enqueued_at, listing_id" in flat
+
+
+# ------------------------------------------------------- the kraj-scoped full sweep
+
+
+def test_the_kraj_scoped_sweep_is_a_whole_prepareable_constant():
+    """A second constant, never `_FULL_SWEEP_SQL` + a formatted predicate: the offline
+    placeholder guard and the schema-aware PREPARE sweep only see module-level `*_SQL`."""
+    flat = " ".join(drain._FULL_SWEEP_KRAJE_SQL.split()).lower()
+    assert "p.kraj_kod = any(%s::bigint[])" in flat
+    assert "join listing_location_current p on p.listing_id = c.listing_id" in flat
+    # INNER, not LEFT: a row with no projection has no kraj to be scoped by.
+    assert "left join" not in flat
+    assert re.sub(r"%\(\w+\)s|%s", "", flat).count("%") == 0
+    assert flat.count("%s") == 4
+
+
+def test_kraje_picks_the_scoped_statement_and_passes_the_codes_first():
+    state = _state()
+    drain.enqueue_full_sweep(_FakeConn(state), policy_version="v1", kraje=(19, 27))
+    sql, params = next(
+        (text, p) for text, p in state["executed"] if text.startswith("insert into dirty_locations")
+    )
+    assert "kraj_kod = any(%s::bigint[])" in sql
+    assert params[0] == [19, 27]
+    assert params[1] == RESOLVER_VERSION
+
+
+def test_no_kraje_keeps_the_corpus_wide_sweep_that_also_sees_unprojected_rows():
+    state = _state()
+    drain.enqueue_full_sweep(_FakeConn(state), policy_version="v1", kraje=())
+    sql, params = next(
+        (text, p) for text, p in state["executed"] if text.startswith("insert into dirty_locations")
+    )
+    assert "kraj_kod" not in sql
+    assert "p.listing_id is null" in sql
+    assert params[0] == RESOLVER_VERSION
+
+
+def test_the_kraje_argument_parses_a_comma_separated_workflow_input():
+    assert drain._parse_kraje("") == ()
+    assert drain._parse_kraje("19,27") == (19, 27)
+    assert drain._parse_kraje("19, 27") == (19, 27)
 
 
 # ------------------------------------------------------------ the drain's round-trip budget
@@ -417,7 +461,7 @@ def _fake_resolution(street: str | None, obec_kod: int | None) -> Any:
     if street is not None:
         fields["street_name"] = type(
             "W", (), {"value": street, "method": "portal_structured_field",
-                      "source_claim_ids": (1,)}
+                      "rule": "policy:v1:rank300:sreality", "source_claim_ids": (1,)}
         )()
     admin = type("A", (), {"obec_name": "Praha", "obec_kod": obec_kod})()
     precision = Precision(
@@ -452,6 +496,25 @@ def test_the_same_rule_is_reported_when_its_guard_did_run():
         _fake_resolution("Nad Bořislavkou", 554782), [], {}, registry=_Registry()
     )
     assert "street_not_in_obec" in evaluated
+
+
+def test_the_registry_street_override_is_evaluated_whenever_it_ran():
+    """Its findings are opened by S7, not by a reconciler detector, so without this the rule
+    is never in the evaluated set and an open `street_form_registry_override` could never
+    auto-close once the portal fixed its spelling."""
+    class _Registry:
+        def streets_in_obec(self, obec_kod: int):
+            return []
+
+    resolution = _fake_resolution("Nad Bořislavkou", 554782)
+    assert "street_form_registry_override" not in reconciler.run_with_coverage(
+        resolution, [], {}, registry=_Registry()
+    )[1]
+    resolution.fields["street_name"].rule = "registry:street"
+    _, evaluated = reconciler.run_with_coverage(
+        resolution, [], {}, registry=_Registry()
+    )
+    assert "street_form_registry_override" in evaluated
 
 
 # ------------------------------------------------------- one threshold, one comparison
