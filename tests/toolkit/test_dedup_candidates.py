@@ -18,6 +18,7 @@ INPUTS: dict[str, Any] = {
     "path": "C",
     "generator_version": "c1",
     "l0_path_c_town_key": "obec_kod",
+    "l0_candidate_scope": "all",
     "l0_floor_tolerance": 2,
     "l0_area_tolerance_pct_general": 5,
     "l0_area_tolerance_pct_pozemek": 2,
@@ -98,7 +99,7 @@ def test_fingerprint_pins_the_ruled_defaults() -> None:
     # The literal hash of the ruled parameter set. A changed default or generator version
     # MUST move it — pairs generated under different inputs live in different key spaces —
     # and whoever changes it must say so in the ledger.
-    assert dc.fingerprint(INPUTS) == "ebc60a2894867cc7"
+    assert dc.fingerprint(INPUTS) == "0ec174f0693a2c01"  # moved by PR 2: l0_candidate_scope joined the inputs
 
 
 def test_fingerprint_is_canonical_over_how_a_number_was_typed() -> None:
@@ -217,6 +218,14 @@ def test_floor_rule_applies_to_byt_pairs_with_both_floors_and_is_skipped_otherwi
     assert houses is not None and houses.floor_checked is False
     # the floor rule vetoes on C3 as well as C1
     assert dc.evaluate_pair(_l(1, dispo=None, floor=1), _l(2, floor=4), INPUTS) is None
+
+
+def test_unknown_category_never_lets_the_floor_rule_veto() -> None:
+    # the SQL mirrors this with COALESCE(category_main, '') = 'byt'
+    v = dc.evaluate_pair(_l(1, cmain=None, floor=1), _l(2, floor=9), INPUTS)
+    assert v is not None and v.floor_checked is False
+    v = dc.evaluate_pair(_l(1, cmain=None, floor=1), _l(2, cmain=None, floor=9), INPUTS)
+    assert v is not None and v.floor_checked is False
 
 
 def test_floor_tolerance_comes_from_the_inputs() -> None:
@@ -356,6 +365,17 @@ def test_get_generation_reads_jsonb_as_dicts_or_strings() -> None:
     gen2 = dc.get_generation(_Conn([as_strings]), 9)
     assert gen2 is not None and gen2.inputs == INPUTS and gen2.stats == {"pairs": 1}
     assert dc.get_generation(_Conn([None]), 9) is None
+
+
+def test_reopen_generation_puts_both_rows_back_to_running() -> None:
+    conn = _Conn([None, (1,), (2,), (3,)])
+    gen = dc.begin_generation(conn, "C")
+    conn.calls.clear()
+    dc.reopen_generation(conn, gen)
+    assert [c[0].split(" SET")[0] for c in conn.calls] == [
+        "UPDATE dedup_sim.candidate_generations", "UPDATE dedup_sim.simulation_runs"]
+    assert "status = 'running', completed_at = NULL, error_message = NULL" in conn.calls[0][0]
+    assert conn.calls[0][1] == {"id": 3} and conn.calls[1][1] == {"id": 1}
 
 
 def test_record_progress_and_latest_generation_roundtrip() -> None:

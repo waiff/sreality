@@ -215,9 +215,9 @@ vector into `image_clip_embeddings`), `clip_retag.yml` (re-runs the zero-shot ov
 STORED embedding when the taxonomy changes, per `app_settings.clip_taxonomy_retag_after`; no R2
 download, no re-inference) and `backfill_render_score.yml` (render-vs-photo axis). Newest and
 **dispatch-only**: `dinov3_embed_backfill.yml` (GPU, inert until the encoder config is complete),
-`tagging_bakeoff.yml` (GPU, the three-stage encoder EXPERIMENT, `dedup_sim` only) and
-`tag_model.yml` (CPU, promote/score/activate ONE versioned tag model, migration 490 — the tag is
-the argmax head, no per-head yes/no). **Read the matching `references/*-lane.md` before touching.**
+`tagging_bakeoff.yml` (GPU, the encoder EXPERIMENT, `dedup_sim` only), `tag_model.yml` (CPU, ONE
+versioned tag model, mig 490 — the tag is the argmax head) and `new_dedup_candidates.yml` (CPU, Level 0
+path C = same town + disposition/area; `estimate`/`verify` read only). **Read the matching `references/*-lane.md` before touching.**
 
 **There is NO scheduled dedup job any more.** The automatic decision layer — the engine, its
 queues, its batch warmer, its geo/byt-geo runs, the model-compare and vision A/B harnesses, and

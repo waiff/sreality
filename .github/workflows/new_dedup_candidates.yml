@@ -1,0 +1,144 @@
+name: "NEW DEDUP: candidate generation (path C)"
+
+# Level 0 of the rebuilt dedup: find the listing pairs worth comparing later, by path C —
+# "same town" (the location engine's obec_kod) plus disposition (rung C1) or, when a
+# disposition is missing on either side, area (rung C3). Manual dispatch only; nothing runs
+# on a schedule. Design: docs/design/new-dedup/PROGRAM.md, ledger 2026-09-10.
+#
+#   estimate  — READS ONLY. Counts how many pairs a generation would write, per rung and per
+#               town, for each scope asked for (all listings / both sides active), and prints
+#               the listing-side funnel per portal × type and the largest (town, disposition)
+#               buckets into the job summary. Needs no migration-492 table. Run this first:
+#               Praha at town grain is on the order of 10^8 pairs, and the operator decides
+#               with that number in hand.
+#   verify    — READS ONLY. For the named (small) towns, runs the rung statements as plain
+#               SELECTs and compares every pair, rung and evidence value with the Python
+#               oracle (toolkit/dedup_candidates.evaluate_pair) on the same listings. The SQL
+#               and the rule as written must agree exactly; the job fails if they do not.
+#   generate  — WRITES into dedup_sim.candidate_pairs under the current settings (one
+#               simulation_runs row + one candidate_generations row per run; the same inputs
+#               upsert into the same rows). Town by town, id range by id range, with a resume
+#               cursor after every chunk; `resume=true` continues the last running generation
+#               of the same parameter set. After the last town: the audit statistics onto the
+#               generation row, and — only when no `blocks` limit was given — the stale sweep.
+#               Requires migration 492. `dry_run` (the default) prints the plan and exits.
+#
+# Costs nothing but GitHub minutes and database time; no external service, no money.
+# Secrets: SUPABASE_DB_URL only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "estimate (reads only, counts what a generation would write), verify (reads only, SQL vs the Python oracle on the named towns) or generate (writes pairs)."
+        required: true
+        default: "estimate"
+        type: choice
+        options: ["estimate", "verify", "generate"]
+      scopes:
+        description: "estimate only: which scopes to count — all, active, or all,active. (generate takes its scope from the l0_candidate_scope setting.)"
+        required: false
+        default: "all,active"
+        type: string
+      blocks:
+        description: "Comma-separated obec_kod list to limit the run to (a pilot: e.g. 582786 for Brno). Empty = every town. A limited generate never runs the stale sweep."
+        required: false
+        default: ""
+        type: string
+      chunk:
+        description: "generate only: listing ids per upsert statement (each statement pairs that many listings against the whole town)."
+        required: false
+        default: "2000"
+        type: string
+      max_listings:
+        description: "verify only: skip a town with more listings than this (the oracle compares every pair in Python)."
+        required: false
+        default: "3000"
+        type: string
+      resume:
+        description: "generate only: continue the last running generation of the same parameter set from its cursor."
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      dry_run:
+        description: "generate only: print the plan and write nothing."
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+concurrency:
+  group: new-dedup-candidates
+  cancel-in-progress: false
+
+jobs:
+  candidates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Every input travels via env (never `${{ }}` interpolated into a shell) and is
+      # charset-checked before it reaches argv.
+      - name: Validate inputs
+        env:
+          SCOPES: ${{ inputs.scopes }}
+          BLOCKS: ${{ inputs.blocks }}
+          CHUNK: ${{ inputs.chunk }}
+          MAX_LISTINGS: ${{ inputs.max_listings }}
+        run: |
+          set -euo pipefail
+          case "${SCOPES:-all,active}" in
+            ''|*[!a-z,]*) echo "::error::scopes must be all, active or all,active"; exit 1 ;;
+          esac
+          case "${BLOCKS:-}" in
+            *[!0-9,\ ]*) echo "::error::blocks must be a comma-separated list of obec_kod numbers"; exit 1 ;;
+          esac
+          case "${CHUNK:-2000}" in
+            ''|*[!0-9]*) echo "::error::chunk must be a number"; exit 1 ;;
+          esac
+          case "${MAX_LISTINGS:-3000}" in
+            ''|*[!0-9]*) echo "::error::max_listings must be a number"; exit 1 ;;
+          esac
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MODE: ${{ inputs.mode }}
+          SCOPES: ${{ inputs.scopes }}
+          BLOCKS: ${{ inputs.blocks }}
+          CHUNK: ${{ inputs.chunk }}
+          MAX_LISTINGS: ${{ inputs.max_listings }}
+          RESUME: ${{ inputs.resume }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=(--mode "$MODE" --blocks "${BLOCKS:-}" --chunk "${CHUNK:-2000}" --json-out report.json)
+          if [ "$MODE" = "estimate" ]; then
+            args+=(--scopes "${SCOPES:-all,active}")
+          elif [ "$MODE" = "verify" ]; then
+            args+=(--max-listings "${MAX_LISTINGS:-3000}")
+          else
+            if [ "${RESUME:-false}" = "true" ]; then args+=(--resume); fi
+            if [ "${DRY_RUN:-true}" = "true" ]; then args+=(--dry-run); fi
+          fi
+          python -m scripts.dedup_candidates_generate "${args[@]}"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidates-${{ inputs.mode }}-${{ github.run_id }}
+          path: report.json
+          if-no-files-found: ignore

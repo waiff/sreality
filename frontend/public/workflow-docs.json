@@ -4694,6 +4694,94 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/monitor_workflow_failures.yml"
     },
     {
+      "filename": "new_dedup_candidates.yml",
+      "name": "NEW DEDUP: candidate generation (path C)",
+      "description": "Level 0 of the rebuilt dedup: find the listing pairs worth comparing later, by path C — \"same town\" (the location engine's obec_kod) plus disposition (rung C1) or, when a disposition is missing on either side, area (rung C3). Manual dispatch only; nothing runs on a schedule. Design: docs/design/new-dedup/PROGRAM.md, ledger 2026-09-10.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "mode",
+          "description": "estimate (reads only, counts what a generation would write), verify (reads only, SQL vs the Python oracle on the named towns) or generate (writes pairs).",
+          "required": true,
+          "type": "choice",
+          "default": "estimate",
+          "options": [
+            "estimate",
+            "verify",
+            "generate"
+          ]
+        },
+        {
+          "name": "scopes",
+          "description": "estimate only: which scopes to count — all, active, or all,active. (generate takes its scope from the l0_candidate_scope setting.)",
+          "required": false,
+          "type": "string",
+          "default": "all,active",
+          "options": null
+        },
+        {
+          "name": "blocks",
+          "description": "Comma-separated obec_kod list to limit the run to (a pilot: e.g. 582786 for Brno). Empty = every town. A limited generate never runs the stale sweep.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "chunk",
+          "description": "generate only: listing ids per upsert statement (each statement pairs that many listings against the whole town).",
+          "required": false,
+          "type": "string",
+          "default": "2000",
+          "options": null
+        },
+        {
+          "name": "max_listings",
+          "description": "verify only: skip a town with more listings than this (the oracle compares every pair in Python).",
+          "required": false,
+          "type": "string",
+          "default": "3000",
+          "options": null
+        },
+        {
+          "name": "resume",
+          "description": "generate only: continue the last running generation of the same parameter set from its cursor.",
+          "required": false,
+          "type": "choice",
+          "default": "false",
+          "options": [
+            "false",
+            "true"
+          ]
+        },
+        {
+          "name": "dry_run",
+          "description": "generate only: print the plan and write nothing.",
+          "required": false,
+          "type": "choice",
+          "default": "true",
+          "options": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "new-dedup-candidates",
+      "cancelInProgress": false,
+      "timeoutMinutes": 350,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/new_dedup_candidates.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/new_dedup_candidates.yml"
+    },
+    {
       "filename": "new_dedup_runpod_smoke_test.yml",
       "name": "NEW DEDUP RunPod smoke test (one-off)",
       "description": "Proves the RunPod pipeline end-to-end (docs/design/new-dedup/PROGRAM.md, Wave 1): launch the cheapest available GPU pod, run a trivial CUDA op, confirm it, guarantee teardown either way (scripts/runpod_client.py's run_job). Not scheduled — manual trigger only, matching the design's \"manual batches only\" cost-conscious posture. Wave 5's real embedding batches will reuse the same client, different payload.",

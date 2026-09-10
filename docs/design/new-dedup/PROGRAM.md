@@ -209,6 +209,53 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-10 (b) — **W2 PR 2: the path C generation LANE — `new_dedup_candidates.yml`,
+  three modes, nothing run yet.** PR 1 (entry (a)) built the store and wrote the rule as
+  Python; this PR turns the rule into set-based SQL and a dispatchable GitHub Actions lane that
+  can be run before, and independently of, migration 492 being applied.
+  - **The SQL** (`toolkit/dedup_candidates_sql.py`): one `base` per town — the projection row
+    (`obec_kod`, granularity floor applied by RANK) joined to the listing's attributes, nothing
+    legacy — and one statement per rung, in three forms that share ONE select body so they
+    cannot drift: INSERT (upsert into the store), COUNT (estimate) and ROWS (verify). C1 joins on
+    equal disposition; C3 takes pairs with a disposition missing on either side and compares
+    areas. **The area rung uses a log-band**: `band = floor(ln(area) / w)`, w = −ln(1 − t) for
+    the widest tolerance t, so "within t of each other" implies "adjacent or same band", and a
+    town-wide range join (Praha: ~3 × 10⁹ comparisons as a nested loop) becomes three equality
+    hash joins on `band + d`, d ∈ {−1, 0, +1}, with the exact per-pair tolerance re-checked
+    after. Every statement is a `*_SQL` constant, so CI's schema-replay job PREPAREs each one
+    against a freshly migrated database on every push.
+  - **The lane** (`scripts/dedup_candidates_generate.py`): `estimate` (reads only — pairs per
+    rung and per town for every scope asked, the funnel per portal × type, the largest
+    (town, disposition) buckets, the town-assignment breakdown; needs no 492 table), `verify`
+    (reads only — for the named small towns, the SQL's pair set must equal the oracle's,
+    rung for rung and evidence value for evidence value; the job FAILS on any disagreement),
+    and `generate` (writes — one `simulation_runs` + one `candidate_generations` row, then town
+    by town in id-range chunks with a resume cursor after every chunk; `resume=true` continues
+    the last running generation of the same parameter set; the audit statistics are computed
+    once at the end onto the generation row; the stale sweep runs only after a COMPLETE run,
+    never after a `blocks`-limited pilot). `dry_run` is the default for `generate`.
+  - **One new setting, marked undecided**: `l0_candidate_scope` (`all` / `active`), because
+    the operator's open question 2 needs a switch the estimate can report both sides of. It
+    is part of path C's fingerprint, which moves the ruled defaults' fingerprint from
+    `ebc60a2894867cc7` (PR 1) to `0ec174f0693a2c01` — no pair rows exist yet, so nothing is
+    orphaned. Its default, `all`, is the mission's "entire database".
+  - **Skill updated** (`scraper-ops`, plus `references/new-dedup-candidates-lane.md`): the
+    order of operations is estimate → verify on two or three small towns → generate dry-run →
+    a Brno pilot → the corpus.
+  - **Reviewed adversarially before merge (three lenses, two refuters per finding): three real
+    defects, fixed.** (1) The byt floor guard was three-valued — a NULL `category_main` (which
+    exists: remax/mmreality can leave it unknown) made `NULL = 'byt'` poison the whole AND, so the
+    SQL dropped pairs the oracle keeps and would have written NULL into a NOT NULL column;
+    `COALESCE(category_main, '')` makes it two-valued, and verify mode now treats a NULL
+    `floor_checked` as a mismatch. (2) A resumed generation took "partial" from the CURRENT
+    dispatch, so resuming an interrupted pilot without repeating `blocks` would have run the
+    corpus-wide stale sweep; the scope now comes from the generation row, a differing `blocks`
+    is refused, and a `failed` generation is resumable (reopened first). (3) A zero area
+    tolerance — registry-legal — overflowed the int4 band; the band is a bigint.
+  - **Not run.** Dispatching needs the workflow on `main`; the estimate is the first dispatch
+    and is read-only. The generate needs migration 492 applied — asked together with the
+    estimate's numbers.
+
 - 2026-09-10 (a) — **Gate 1 CLOSED. Wave 2 opened on the operator's PATH C ruling. PR 1 of
   three: the candidate store (migration 492 — written, NOT applied), the parameters as settings,
   the rule as code. And one number the operator has to see before anything is generated.**
