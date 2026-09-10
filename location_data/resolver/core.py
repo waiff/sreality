@@ -29,6 +29,7 @@ from location_data.resolver import precision as s6
 from location_data.resolver import serialize
 from location_data.resolver import survivorship as s7
 from location_data.resolver.types import (
+    AddressPoint,
     Candidate,
     CandidateSet,
     Claim,
@@ -186,7 +187,8 @@ def resolve(
         SURVIVORSHIP_FIELDS, ordered, normalized, ctx.field_policy, field_ctx
     )
     signals.extend(survivorship.signals)
-    fields = _fill_from_registry(survivorship.fields, winner_candidate, ctx)
+    fields, registry_signals = _fill_from_registry(survivorship.fields, winner_candidate, ctx)
+    signals.extend(registry_signals)
 
     status = _status(ordered, country, candidate_set, position)
     resolution = Resolution(
@@ -265,15 +267,21 @@ def _stamp_content_hash(resolution: Resolution) -> Resolution:
 
 def _fill_from_registry(
     fields: dict[str, Any], winner: Candidate | None, ctx: ResolverContext
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], tuple[ContradictionSignal, ...]]:
     """PRESERVE-IF-NULL fill from the matched address point (03 §3.9.3: registry wins čp/čo
     and PSČ when R0/R1 matched). Only NULLs are filled — a claimed value that DISAGREES is
-    S9's `house_number_disagreement`, not a silent overwrite here."""
+    S9's `house_number_disagreement`, not a silent overwrite here.
+
+    `street_name` is the ONE exception, decided 2026-09-10: on a registry-bound row the
+    official RÚIAN form OVERWRITES the portal's spelling (`Na strži`, not `Na Strži`;
+    `nám. Budovatelů`, not `Budovatelů`). Policy v1's ('ruian','registry_derived',100) row
+    always outranked the portal's 300 — preserve-if-null is why it never got a chance.
+    """
     if winner is None or winner.ruian_adm_kod is None:
-        return dict(fields)
+        return dict(fields), ()
     point = ctx.registry.address_point(winner.ruian_adm_kod)
     if point is None:
-        return dict(fields)
+        return dict(fields), ()
     out = dict(fields)
     for name, value in (
         ("house_number_cp", point.cislo_domovni),
@@ -291,7 +299,51 @@ def _fill_from_registry(
             granularity=winner.granularity,
             confidence="exact",
         )
-    return out
+    return out, _override_street_name(out, point, winner)
+
+
+def _override_street_name(
+    out: dict[str, Any], point: AddressPoint, winner: Candidate
+) -> tuple[ContradictionSignal, ...]:
+    if point.street_name is None:
+        return ()
+    incumbent = out.get("street_name")
+    # An operator correction is the one thing the registry does not get to overwrite.
+    if incumbent is not None and incumbent.method == "operator_manual":
+        return ()
+    signals: tuple[ContradictionSignal, ...] = ()
+    if incumbent is not None and incumbent.value is not None:
+        claimed = str(incumbent.value)
+        # Compare like with like: S7's winner is the TYPE-STRIPPED name S1 parsed out of the
+        # claim ('nám. Budovatelů' arrives as 'Budovatelů'), so the official name has to be
+        # stripped the same way before the keys are compared — otherwise every registry-bound
+        # row on a nám./ulice/třída street opens a permanent finding for a street it agrees on.
+        # Same key = same street, differently spelled: overrides SILENTLY, which is the point.
+        if s1.normalize_match_key(claimed) != s1.normalize_match_key(
+            s1.split_street_type(point.street_name)[0]
+        ):
+            signals = (
+                ContradictionSignal(
+                    rule="street_form_registry_override",
+                    field="street_name",
+                    severity="info",
+                    stored=point.street_name,
+                    claimed=[claimed],
+                    # NOT a new auto_action verb: `location_contradictions.auto_action` is
+                    # CHECK-constrained to none/blocked_write/downgraded_precision (mig 384).
+                    evidence_claim_ids=incumbent.source_claim_ids,
+                ),
+            )
+    out["street_name"] = FieldWinner(
+        field="street_name",
+        value=point.street_name,
+        source_claim_ids=(),
+        rule="registry:street",
+        method="registry_derived",
+        granularity=winner.granularity,
+        confidence="exact",
+    )
+    return signals
 
 
 def _status(

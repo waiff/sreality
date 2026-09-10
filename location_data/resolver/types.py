@@ -152,6 +152,9 @@ class AddressPoint:
     street_id: int | None = None
     ulice_kod: int | None = None
     street_name_norm: str | None = None
+    # The OFFICIAL display form (`ruian_streets.name`), not the match key: on a
+    # registry-bound row it is what gets served (03 §3.9.3).
+    street_name: str | None = None
     cislo_domovni: int | None = None
     cislo_orientacni: int | None = None
     znak_orientacniho: str | None = None

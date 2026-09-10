@@ -120,8 +120,13 @@ def test_the_row_carries_its_whole_version_tuple():
 
 def test_field_provenance_names_the_claims_behind_every_winning_field():
     row = _row(_address_claims())
-    assert row["field_provenance"]["street_name"]["claim_ids"] == [2]
-    assert row["street_claim_id"] == 2
+    assert row["field_provenance"]["obec_name"]["claim_ids"] == [1]
+    # A registry-bound row's street comes from the MIRROR, not from a claim (2026-09-10), so
+    # the truthful provenance is no claim id at all and the rule that names the producer.
+    assert row["field_provenance"]["street_name"] == {
+        "claim_ids": [], "method": "registry_derived", "rule": "registry:street"
+    }
+    assert row["street_claim_id"] is None
 
 
 def test_a_declared_gps_pin_with_no_street_is_coarse_but_still_precise_positionally():

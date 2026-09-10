@@ -63,7 +63,9 @@ def test_as_of_is_the_max_observed_at_not_a_wall_clock():
 def test_changing_any_one_version_input_changes_the_identity():
     base = _resolve()
     others = [
-        core.resolve(_claims(), mm.context(), resolver_version="resolver:v2",
+        # Derived, never a literal: a hard-coded "next" version silently stopped varying
+        # the input the day RESOLVER_VERSION caught up with it.
+        core.resolve(_claims(), mm.context(), resolver_version=f"{RESOLVER_VERSION}+next",
                      registry_version_id=7, policy_version="v1", collision_epoch_id=11),
         core.resolve(_claims(), mm.context(), resolver_version=RESOLVER_VERSION,
                      registry_version_id=8, policy_version="v1", collision_epoch_id=11),

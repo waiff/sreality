@@ -152,7 +152,7 @@ _CLAIMS_BULK_SQL = (
 
 _ADDRESS_POINT_SQL = """
 SELECT ap.kod_adm, ap.obec_unit_id, ap.obec_kod, ap.psc,
-       ST_Y(ap.geom), ST_X(ap.geom), ap.street_id, ap.ulice_kod, s.name_norm,
+       ST_Y(ap.geom), ST_X(ap.geom), ap.street_id, ap.ulice_kod, s.name_norm, s.name,
        ap.cislo_domovni, ap.cislo_orientacni, ap.znak_orientacniho,
        ap.stavebni_objekt_code, ap.cast_obce_unit_id, ap.cast_obce_kod, ap.momc_unit_id
   FROM ruian_address_points ap
@@ -186,7 +186,7 @@ _OBEC_UNIT_ID_SUBQUERY = """
 
 _ADDRESS_POINTS_BY_NUMBER_SQL = f"""
 SELECT ap.kod_adm, ap.obec_unit_id, ap.obec_kod, ap.psc,
-       ST_Y(ap.geom), ST_X(ap.geom), ap.street_id, ap.ulice_kod, s.name_norm,
+       ST_Y(ap.geom), ST_X(ap.geom), ap.street_id, ap.ulice_kod, s.name_norm, s.name,
        ap.cislo_domovni, ap.cislo_orientacni, ap.znak_orientacniho,
        ap.stavebni_objekt_code, ap.cast_obce_unit_id, ap.cast_obce_kod, ap.momc_unit_id
   FROM ruian_address_points ap
@@ -619,9 +619,10 @@ def _address_point(row: Sequence[Any]) -> AddressPoint:
         kod_adm=int(row[0]), obec_unit_id=int(row[1]), obec_kod=int(row[2]), psc=str(row[3]),
         lat=None if row[4] is None else float(row[4]),
         lon=None if row[5] is None else float(row[5]),
-        street_id=row[6], ulice_kod=row[7], street_name_norm=row[8], cislo_domovni=row[9],
-        cislo_orientacni=row[10], znak_orientacniho=row[11], stavebni_objekt_code=row[12],
-        cast_obce_unit_id=row[13], cast_obce_kod=row[14], momc_unit_id=row[15],
+        street_id=row[6], ulice_kod=row[7], street_name_norm=row[8], street_name=row[9],
+        cislo_domovni=row[10], cislo_orientacni=row[11], znak_orientacniho=row[12],
+        stavebni_objekt_code=row[13], cast_obce_unit_id=row[14], cast_obce_kod=row[15],
+        momc_unit_id=row[16],
     )
 
 

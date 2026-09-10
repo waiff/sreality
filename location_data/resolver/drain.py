@@ -81,7 +81,7 @@ import logging
 import os
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -209,6 +209,22 @@ SELECT DISTINCT c.listing_id, 'full_sweep'
     OR p.resolver_version <> %s
     OR p.policy_version <> %s
     OR p.registry_version_id <> %s
+ON CONFLICT (listing_id) DO NOTHING
+"""
+
+# The same stale set, restricted to a few kraje — a resolver bump can then be rolled out on
+# a real cohort before the corpus. INNER JOIN, not LEFT: a listing with NO projection has no
+# `kraj_kod` to filter on, so a kraj-scoped sweep cannot honestly claim it. Those rows are
+# the unscoped sweep's job.
+_FULL_SWEEP_KRAJE_SQL = """
+INSERT INTO dirty_locations (listing_id, reason)
+SELECT DISTINCT c.listing_id, 'full_sweep'
+  FROM location_claims_live c
+  JOIN listing_location_current p ON p.listing_id = c.listing_id
+ WHERE p.kraj_kod = ANY(%s::bigint[])
+   AND (p.resolver_version <> %s
+        OR p.policy_version <> %s
+        OR p.registry_version_id <> %s)
 ON CONFLICT (listing_id) DO NOTHING
 """
 
@@ -717,7 +733,12 @@ def _queue_health(conn: psycopg.Connection, timeout_s: int) -> tuple[int, float]
     return int(depth), float(oldest)
 
 
-def enqueue_full_sweep(conn: psycopg.Connection, *, policy_version: str) -> int:
+def enqueue_full_sweep(
+    conn: psycopg.Connection,
+    *,
+    policy_version: str,
+    kraje: Sequence[int] | None = None,
+) -> int:
     """`location_resolve_sweep`: the backstop for lost enqueues. The incremental lane stays
     the primary path — this only re-enqueues what a version bump or a dropped enqueue left
     behind.
@@ -725,14 +746,32 @@ def enqueue_full_sweep(conn: psycopg.Connection, *, policy_version: str) -> int:
     Its own (much larger) budget: one corpus-wide anti-join is minutes of honest work, so
     the batch ceiling would fail it every time — but "minutes" is not "forever", and this
     used to run with no ceiling at all.
+
+    `kraje` scopes the stale set to those `kraj_kod`s, which is how a resolver bump gets a
+    side-by-side cohort before the corpus-wide run.
     """
     seconds = loader_db.env_timeout_s(SWEEP_TIMEOUT_ENV, DEFAULT_SWEEP_TIMEOUT_S)
     with _bounded(conn, seconds) as cur:
         registry_version_id, _ = resolve_db.current_registry_version(conn)
-        cur.execute(_FULL_SWEEP_SQL, (RESOLVER_VERSION, policy_version, registry_version_id))
+        if kraje:
+            cur.execute(
+                _FULL_SWEEP_KRAJE_SQL,
+                (list(kraje), RESOLVER_VERSION, policy_version, registry_version_id),
+            )
+        else:
+            cur.execute(_FULL_SWEEP_SQL, (RESOLVER_VERSION, policy_version, registry_version_id))
         enqueued = cur.rowcount
-    LOG.info("SWEEP enqueued=%d timeout=%ds", enqueued, seconds)
+    LOG.info(
+        "SWEEP enqueued=%d timeout=%ds kraje=%s",
+        enqueued,
+        seconds,
+        ",".join(str(k) for k in kraje) if kraje else "all",
+    )
     return enqueued
+
+
+def _parse_kraje(raw: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in raw.replace(",", " ").split())
 
 
 def open_connection() -> psycopg.Connection:
@@ -755,6 +794,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--policy-version", default=POLICY_VERSION_DEFAULT)
     parser.add_argument("--listing-id", type=int, default=None)
     parser.add_argument("--full-sweep", action="store_true", help="enqueue the stale set first")
+    parser.add_argument(
+        "--kraje", default="", help="full-sweep only: comma-separated kraj_kod scope"
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -769,7 +811,11 @@ def main(argv: list[str] | None = None) -> int:
                 LOG.info("DRAIN skipped: another run holds the %s lease", JOB_NAME)
                 return 0
             if args.full_sweep and not args.dry_run:
-                enqueue_full_sweep(conn, policy_version=args.policy_version)
+                enqueue_full_sweep(
+                    conn,
+                    policy_version=args.policy_version,
+                    kraje=_parse_kraje(args.kraje),
+                )
             run(
                 conn,
                 batch_size=args.batch_size,
