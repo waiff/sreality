@@ -68,6 +68,22 @@ def test_placeholders_are_all_named_and_cast_where_their_type_is_not_implied() -
                 f"{name} is neither cast nor compared: …{before!r}")
 
 
+def test_every_statement_the_lane_runs_is_covered_by_the_full_parameter_set() -> None:
+    """The regression this pins: BLOCK_IDS_SQL is built from the same base CTE as the rungs,
+    so when the CTE grew a district parameter the statement silently needed one too. The lane
+    now passes the WHOLE parameter set to every per-town statement; this asserts that is
+    enough for all of them, so the next parameter the CTE grows cannot break a call site."""
+    supplied = set(_lane_args())
+    per_town = {
+        "BLOCK_IDS_SQL": sql.BLOCK_IDS_SQL,
+        "BLOCK_ATTRS_SQL": sql.BLOCK_ATTRS_SQL,
+        **{f"{r}/{f}": st for r, forms in sql.RUNG_SQL.items() for f, st in forms.items()},
+    }
+    for name, statement in per_town.items():
+        missing = _placeholders(statement) - supplied
+        assert not missing, f"{name} names {missing}, which no call site supplies"
+
+
 def test_the_location_read_stays_on_the_projection_never_the_legacy_columns() -> None:
     corpus = "\n".join(
         [s for stmts in sql.RUNG_SQL.values() for s in stmts.values()]

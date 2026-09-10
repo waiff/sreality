@@ -208,6 +208,81 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-10 (e) — **The full-corpus estimate under the ruled rule: 56.5 million candidate pairs,
+  a quarter of the number feared. And three data-quality findings that are what Gate 2 is
+  actually for — one of them costs a whole portal.** Read-only; nothing was written.
+
+  **The headline.** Over the whole database (`l0_candidate_scope='all'`, fingerprint
+  `240e8a20612db357`), 2 h 32 m of database time, 5,961 towns, 611,602 listings that reach a
+  town: **56,474,623 pairs — 54,215,526 on C1 and 2,259,097 on C3.** Entry (a) put Praha alone
+  "on the order of 10⁸ pairs all-time" from a 3 % sample of the unrefined rule; the ruled rule
+  produces 44.4 M in Praha and 56.5 M in the country. The refinements are most of the
+  difference: the city-district split and C1's ±20 % area check each removed a large slice, and
+  the small-town verify runs measured the area check on its own at 9–17 %.
+
+  | town | listings | C1 | C3 |
+  | --- | ---: | ---: | ---: |
+  | Praha | 108,773 | 42,885,137 | 1,515,697 |
+  | Brno | 27,555 | 3,362,820 | 129,548 |
+  | Ostrava | 17,061 | 1,547,165 | 43,480 |
+  | Plzeň | 11,016 | 1,362,612 | 40,695 |
+  | Olomouc | 8,355 | 892,618 | 19,216 |
+
+  **Praha is still 79 % of the whole country's pairs** even after being split into 119 quarters.
+  Four towns produce over a million pairs each, fifteen produce 100 k–1 M, and 236 towns produce
+  none at all. **Plzeň is the obvious next candidate for the district split** — it is fourth at
+  1.4 M and is not currently split; that is a settings change (`l0_path_c_district_split_towns`),
+  not a code change, and it re-generates the pairs, so it is the operator's call and no more.
+
+  **Reachability, per portal — the Gate 2 table.** A listing can be a path C candidate only if it
+  has a town AND at least one attribute. Two thirds of the corpus qualify.
+
+  | source | listings | with town | with area | C1-eligible | C3-eligible | town, no attribute | reach |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | idnes | 232,971 | 172,277 | 232,249 | 71,351 | 100,850 | 76 | 74 % |
+  | sreality | 231,110 | 182,437 | 227,020 | 76,977 | 105,451 | 9 | 79 % |
+  | bazos | 138,997 | 98,985 | **0** | 60,434 | 0 | 38,551 | 43 % |
+  | ceskereality | 93,541 | 72,069 | 88,238 | 33,204 | 37,745 | 1,120 | 76 % |
+  | realitymix | 80,132 | 56,916 | 35,764 | 23,922 | 12,272 | 20,722 | 45 % |
+  | bezrealitky | 18,024 | 17,155 | 17,994 | 12,377 | 4,750 | 28 | 95 % |
+  | mmreality | 13,929 | 11,796 | 9,418 | 2,568 | 4,938 | 4,290 | 54 % |
+  | remax | 13,375 | **0** | 9,739 | 0 | 0 | 0 | **0 %** |
+  | maxima | 520 | 441 | 238 | 241 | 200 | 0 | 85 % |
+  | **total** | **822,599** | 612,076 | 620,660 | 281,074 | 266,206 | 64,796 | **67 %** |
+
+  **Finding 1 — bazos has no floor area at all, and it is recoverable.** Not "little": **zero of
+  138,997 bazos listings carry a `usable_area` or an `estate_area`.** The consequence for path C
+  is exact: a bazos listing can never take rung C3, which needs an area on both sides, so a bazos
+  listing without a disposition is invisible to the path — **38,551 of them have a town and are
+  lost for this reason alone**, plus 40,012 more that have no town. Bazos reach is 43 %, the
+  worst of any portal that resolves at all. **The area is in the source text**: 2,404 of a
+  3,000-row sample of bazos flat descriptions contain an "m²" figure, so this is a bazos PARSER
+  gap, not an absence in the market. Fixing it is scraper work, outside this program, and it
+  would move tens of thousands of listings into path C at no cost to the dedup rule. **This is
+  also the single strongest vindication of the sub-decision flagged in entry (d)** — had "no
+  area" dropped a C1 pair instead of skipping the check, bazos would have been erased from path
+  C entirely rather than merely halved.
+
+  **Finding 2 — remax resolves to nothing at all, so none of it reaches path C.** All **12,964**
+  remax rows in `listing_location_current` sit at `granularity = 'unknown'`, `country_status =
+  'undetermined'`, `position_source = 'none'` and `kraj_kod` NULL — the resolver produced a row
+  and resolved nothing in it. remax's reach is **0 %** of 13,375 listings. This is a LOCATION
+  program defect, not a dedup one, and is handed over as such: the 2026-09-08 archive sweep
+  reported 99.2 % of archived remax listings carrying a claim, so the claims exist and the
+  resolution is what fails.
+
+  **Finding 3 — realitymix loses a quarter of itself to missing attributes.** 20,722 listings
+  have a town but state neither a disposition nor an area; area coverage is 35,764 of 80,132.
+  Reach 45 %. Less acute than bazos and the same shape of fix.
+
+  **What this does NOT say.** Nothing here is a merge, a decision, or evidence that any pair is a
+  duplicate; it is the size and the shape of the shortlist. Gate 2 is answered by the operator
+  reading the audit page over a real generation, which needs a `generate` run, and the storage
+  that implies is the one thing asked before it: ~56.5 M rows at roughly 185 bytes with the
+  primary key is on the order of **10 GB** in `dedup_sim`, which is real money on the Supabase
+  plan and is therefore the operator's to authorise. The write path itself is proven separately
+  on three tiny towns first.
+
 - 2026-09-10 (d) — **All six open questions ANSWERED, and the ruling that came back changes the
   rule itself: the big cities are split by quarter, and the disposition rung gains an area check.
   Migration 492 is APPLIED.** Entry (a) opened Wave 2 by listing what the brief had left

@@ -92,10 +92,13 @@ def chunk_ranges(ids: Sequence[int], chunk: int) -> list[tuple[int, int]]:
     return out
 
 
-def block_ids(conn: Any, block_key: str, *, active_only: bool) -> list[int]:
+def block_ids(conn: Any, block_key: str, params: dict[str, Any]) -> list[int]:
+    """The listing ids of one town, sorted. Takes the WHOLE parameter set, not a hand-picked
+    subset: this statement is built from the same base CTE as the rungs, so every parameter
+    the CTE grows reaches it automatically. Extra keys are ignored by psycopg."""
     with conn.transaction(), conn.cursor() as cur:
         _set_timeout(cur)
-        cur.execute(sql.BLOCK_IDS_SQL, {"block_key": int(block_key), "active_only": active_only})
+        cur.execute(sql.BLOCK_IDS_SQL, {**params, "block_key": int(block_key)})
         return [int(r[0]) for r in cur.fetchall()]
 
 
@@ -253,7 +256,7 @@ def verify(conn: Any, inputs: dict[str, Any], *, only: Sequence[str], max_listin
             continue
         with conn.transaction(), conn.cursor() as cur:
             _set_timeout(cur)
-            cur.execute(sql.BLOCK_ATTRS_SQL, {"block_key": int(b.key), "active_only": params["active_only"]})
+            cur.execute(sql.BLOCK_ATTRS_SQL, {**params, "block_key": int(b.key)})
             attrs = [
                 dc.ListingAttrs(int(r[0]), b.key, r[1], r[2], r[3], r[4], r[5], r[6],
                                 dc.district_of(b.key, r[7], inputs))
@@ -391,7 +394,7 @@ def generate(conn: Any, path: str, *, only: Sequence[str], chunk: int, resume: b
         for b in blocks:
             if last_key is not None and b.key < last_key:
                 continue
-            ids = block_ids(conn, b.key, active_only=params["active_only"])
+            ids = block_ids(conn, b.key, params)
             if last_key is not None and b.key == last_key and last_id_to is not None:
                 ids = [i for i in ids if i >= int(last_id_to)]
                 if last_id_to >= ID_MAX:
