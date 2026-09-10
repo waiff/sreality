@@ -1,6 +1,6 @@
 ---
 name: scraper-ops
-description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/estimation lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
+description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/estimation/location-resolve lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
 ---
 
 # Scraper operations
@@ -377,25 +377,25 @@ Lanes shipped so far:
 - **sreality count-probe lane** (migration 270, PR #696) — a lightweight per-`(category_main,
   category_type)` count check that detects a market-wide count swing faster than a full index
   walk would, feeding the completeness/delisting rails.
-- **Tightened delisting rails for sreality** (PR #697) — the completeness gate moved 1.0→0.995;
-  its unseen-staleness window was retired 2026-09-07 with absence-based delisting.
 - **Property-maintenance lane**, every 2 min (PR #716) — runs `run_incremental_pass` against
-  `dirty_properties` (rule #20) far more often than the 5-min GH Actions cron. Its first cut
-  serialized against the GH cron + daily sweep with a SESSION advisory lock, which is unsound
-  over the transaction pooler and stranded within minutes of deploy (PR #717 fixed it with the
-  lease-row CAS pattern — see the `database` skill's connection-modes section; don't reintroduce
-  a session advisory lock on any pooled connection).
+  `dirty_properties` (rule #20) far more often than the 5-min GH Actions cron. It serializes
+  against the GH cron + daily sweep with the lease-row CAS pattern (PR #717): **never a session
+  advisory lock on a pooled connection** — the first cut stranded within minutes of deploy.
 - **Estimation job lane** (migration 349, Wave 1 W1-3 / Phase 1 Amendment A10) — moves agent +
-  deterministic rent-estimate EXECUTION off the FastAPI request threadpool (a 240 s agent run
-  used to pin a Starlette token; a deploy SIGTERM killed paid runs mid-flight). Claims one
-  `pending` `estimation_runs` row per pass via `FOR UPDATE SKIP LOCKED`, flips it `running` +
-  stamps `claimed_at`/`worker`, runs the SAME `execute_pending_run` path from a `{body,
-  resolution}` snapshot the submit route stored in `job_payload` (the run row stays the job — no
-  new table), then clears the payload. Each pass first runs the periodic stuck-run sweep (keyed
-  off `coalesce(claimed_at, created_at)`) so a run orphaned by a crash frees its slot. Ships
-  **DARK**: idle until `estimation_job_lane_enabled` is set — the SAME flag makes
+  deterministic rent-estimate EXECUTION off the FastAPI request threadpool (a 240 s agent run used
+  to pin a Starlette token; a deploy SIGTERM killed paid runs mid-flight). Claims one `pending`
+  `estimation_runs` row per pass via `FOR UPDATE SKIP LOCKED`, runs the SAME `execute_pending_run`
+  path from the `job_payload` snapshot (the run row stays the job — no new table). Each pass first
+  sweeps stuck runs (keyed off `coalesce(claimed_at, created_at)`) so a crash-orphaned run frees
+  its slot. Ships **DARK**: idle until `estimation_job_lane_enabled` is set — the SAME flag makes
   `POST /estimations` route rows to the lane instead of an in-process BackgroundTask, so the
   cutover (and rollback) is one setting, no deploy.
+- **Location-resolve lane** (Decision 8b) — THE resolver drain from here, not only from the
+  `location_resolve.yml` cron (round-trip-bound: 0.7 listings/s from a US runner). Ships DARK;
+  enable via `realtime_location_resolve_enabled`. Live tuning:
+  `realtime_location_resolve_{interval_seconds,max_seconds,batch_size}` (15/240/250), interval `0`
+  idles. **Idle it before an `epoch_job`** — a pass in flight when an epoch is minted resolves
+  against the outgoing one. Exclusion, budgets, lease/lock: `docs/design/realtime-scrapers.md`.
 
 ## Pipeline verification (migration 274)
 

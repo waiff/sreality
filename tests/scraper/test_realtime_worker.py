@@ -847,3 +847,321 @@ def test_a_hung_pass_is_abandoned_and_the_lane_keeps_going(monkeypatch):
     assert lane["failed_passes"] >= 1, "the abandoned pass was not counted"
     assert lane["passes"] >= 1, "the lane never completed a pass after the wedge"
     assert lane["started_at"] is None
+
+
+# --- location-resolve lane (Decision 8b) ------------------------------------
+#
+# The lane is a CALLER of location_data.resolver.drain — never a copy of it. The
+# two things a test must pin are therefore identity (the shared JOB_NAME lease on
+# the drain's own connection, so the GH lane and this one can never drain at
+# once) and boundedness (a budget that stays under the stall warn and the lane
+# pass timeout). Hermetic: drain.run / lease.held / open_connection are stubbed.
+
+
+class _ResolveConn:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _stub_stats(**over: Any) -> Any:
+    from location_data.resolver.drain import DrainStats
+
+    stats = DrainStats(
+        claimed=40, resolved=38, failed=2, batches=3, fallbacks=1, seconds=12.34)
+    for k, v in over.items():
+        setattr(stats, k, v)
+    return stats
+
+
+def _patch_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    acquired: bool = True,
+    run: Any = None,
+    conn: Any = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Stub the resolver entry points the lane touches and capture the lease
+    kwargs. Returns (conn, captured)."""
+    import contextlib as _contextlib
+
+    conn = conn or _ResolveConn()
+    captured: dict[str, Any] = {}
+
+    @_contextlib.contextmanager
+    def fake_held(c: Any, job_name: str, **kwargs: Any) -> Any:
+        captured["conn"] = c
+        captured["job_name"] = job_name
+        captured.update(kwargs)
+        yield acquired
+
+    def default_run(c: Any, *, batch_size: int, max_seconds: int) -> Any:
+        captured["run_conn"] = c
+        captured["batch_size"] = batch_size
+        captured["max_seconds"] = max_seconds
+        return _stub_stats()
+
+    monkeypatch.setattr(rw.db, "connect_session", lambda *a, **k: conn)
+    monkeypatch.setattr("location_data.resolver.lease.held", fake_held)
+    monkeypatch.setattr("location_data.resolver.drain.run", run or default_run)
+    monkeypatch.setattr(rw, "_read_location_resolve_max_seconds", lambda: 240)
+    monkeypatch.setattr(rw, "_read_location_resolve_batch_size", lambda: 250)
+    monkeypatch.setattr(rw, "_RESOLVE_LEASE_BUSY_LOGGED", False)
+    monkeypatch.setattr(rw, "_RESOLVE_SESSION_WARNED", False)
+    monkeypatch.setattr(rw, "_RESOLVE_WEDGE_LOGGED", False)
+    monkeypatch.setattr(rw, "_RESOLVE_LAST_IDLE", False)
+    monkeypatch.setattr(rw, "_RESOLVE_PASS_LOCK", threading.Lock())
+    return conn, captured
+
+
+def test_location_resolve_lane_registered_and_dark_by_default(monkeypatch):
+    # Registered in _amain, and DARK: with the flag absent the interval is 0 so
+    # _lane_loop idles it — no lease attempt, no connection, no drain.
+    src = inspect.getsource(rw._amain)
+    assert '("location_resolve"' in src
+    monkeypatch.setattr(rw, "_read_flag", lambda key: False)
+    assert rw._read_location_resolve_interval() == 0
+
+
+def test_location_resolve_interval_uses_configured_when_enabled(monkeypatch):
+    monkeypatch.setattr(rw, "_read_flag", lambda key: True)
+    monkeypatch.setattr(rw, "_read_int", lambda key, default: 7)
+    assert rw._read_location_resolve_interval() == 7
+
+
+def test_location_resolve_max_seconds_is_clamped_below_the_lane_pass_timeout(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # A HEALTHY pass must never read as a stall (1200 s warn) and must never be
+    # abandoned by the lane loop. The lease is NOT bounded by this — see
+    # test_location_resolve_lease_ttl_covers_the_budget_plus_one_batch.
+    monkeypatch.setattr(rw, "_read_int", lambda key, default: 99999)
+    clamped = rw._read_location_resolve_max_seconds()
+    assert clamped == rw.LOCATION_RESOLVE_MAX_SECONDS_CEILING
+    assert clamped < 1200, "a healthy pass would trip check_worker_lane_stall"
+    assert clamped < rw.LANE_PASS_TIMEOUT_SECONDS
+    monkeypatch.setattr(rw, "_read_int", lambda key, default: 60)
+    assert rw._read_location_resolve_max_seconds() == 60
+
+
+def test_location_resolve_batch_size_is_clamped(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The lease TTL is derived from the batch size, and drain.run only checks its
+    # budget BETWEEN batches, so an unbounded batch is an unbounded overrun.
+    monkeypatch.setattr(rw, "_read_int", lambda key, default: 999999)
+    assert rw._read_location_resolve_batch_size() == rw.LOCATION_RESOLVE_BATCH_CEILING
+    monkeypatch.setattr(rw, "_read_int", lambda key, default: 0)
+    assert rw._read_location_resolve_batch_size() == 1
+
+
+def test_location_resolve_lease_ttl_covers_the_budget_plus_one_batch() -> None:
+    # drain.run tests its budget between batches, so a pass runs max_seconds plus
+    # ONE whole batch; the lease is stamped once and never renewed, so the TTL
+    # has to cover that batch or the GH cron can acquire the row mid-drain.
+    ttl = rw._location_resolve_lease_ttl(240, 250)
+    assert ttl == 240 + 250 * rw.LOCATION_RESOLVE_LEASE_SECONDS_PER_LISTING
+    # ...and the headroom grows with the operator's batch-size knob rather than
+    # being a flat constant that only one batch size ever justified.
+    assert rw._location_resolve_lease_ttl(240, 1000) > ttl
+    # A tiny batch still gets a floor.
+    assert (rw._location_resolve_lease_ttl(240, 1)
+            == 240 + rw.LOCATION_RESOLVE_LEASE_HEADROOM_MIN_SECONDS)
+
+
+def test_location_resolve_sync_takes_the_shared_resolver_lease(monkeypatch):
+    from location_data.resolver import drain
+
+    conn, captured = _patch_resolver(monkeypatch)
+    rw._location_resolve_sync()
+
+    # THE shared lease row — a re-spelled literal here would be a silent loss of
+    # mutual exclusion with location_resolve.yml.
+    assert captured["job_name"] == drain.JOB_NAME
+    assert captured["concurrency_group"] == drain.CONCURRENCY_GROUP
+    assert captured["ttl_seconds"] == rw._location_resolve_lease_ttl(240, 250)
+    # ...and it must be held on the connection the drain actually uses.
+    assert captured["conn"] is conn
+    assert captured["run_conn"] is conn
+
+
+def test_location_resolve_sync_runs_the_shared_drain_with_configured_budget(
+        monkeypatch):
+    conn, captured = _patch_resolver(monkeypatch)
+    monkeypatch.setattr(rw, "_read_location_resolve_max_seconds", lambda: 120)
+    monkeypatch.setattr(rw, "_read_location_resolve_batch_size", lambda: 50)
+
+    out = rw._location_resolve_sync()
+
+    assert (captured["batch_size"], captured["max_seconds"]) == (50, 120)
+    assert out["acquired"] is True
+    assert out["claimed"] == 40
+    assert out["resolved"] == 38
+    assert out["failed"] == 2
+    assert out["batches"] == 3
+    assert out["fallbacks"] == 1
+    assert out["seconds"] == 12.3
+    assert out["rate"] == round(40 / 12.34, 2)
+    assert conn.closed is True
+
+
+def test_location_resolve_sync_skips_cheaply_when_the_lease_is_held(monkeypatch):
+    def never(*a, **k):
+        raise AssertionError("drain.run must not run while another lane holds the lease")
+
+    conn, _ = _patch_resolver(monkeypatch, acquired=False, run=never)
+
+    out = rw._location_resolve_sync()
+
+    assert out["acquired"] is False
+    assert conn.closed is True
+
+
+def test_location_resolve_sync_uses_the_resolver_session_connection(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The whole point of moving the lane here is round-trip economics, so it must
+    # open a SESSION-pooler connection, never the worker's db.connect().
+    conn, _ = _patch_resolver(monkeypatch)
+    monkeypatch.setenv("SUPABASE_DB_SESSION_URL", "postgresql://session/db")
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise AssertionError("the resolve lane must not use the transaction pooler")
+
+    monkeypatch.setattr(rw.db, "connect", boom)
+
+    out = rw._location_resolve_sync()
+
+    assert out["acquired"] is True
+    assert out["session_pooler"] is True
+    assert conn.closed is True
+
+
+def test_location_resolve_sync_reports_transaction_pooler_fallback(monkeypatch):
+    _patch_resolver(monkeypatch)
+    monkeypatch.delenv("SUPABASE_DB_SESSION_URL", raising=False)
+    assert rw._location_resolve_sync()["session_pooler"] is False
+
+    _patch_resolver(monkeypatch)
+    monkeypatch.setenv("SUPABASE_DB_SESSION_URL", "postgresql://session/db")
+    assert rw._location_resolve_sync()["session_pooler"] is True
+
+
+def test_location_resolve_sync_closes_the_connection_and_reraises_when_the_drain_fails(
+        monkeypatch):
+    # The raise IS the signal: lease.held stamps last_outcome='failed' and
+    # re-raises, _lane_loop records the failed pass. Swallowing it would make a
+    # broken drain look like a healthy idle lane.
+    def boom(*a, **k):
+        raise RuntimeError("no pin_cluster_epochs row")
+
+    conn, _ = _patch_resolver(monkeypatch, run=boom)
+
+    with pytest.raises(RuntimeError):
+        rw._location_resolve_sync()
+    assert conn.closed is True
+
+
+def test_location_resolve_pass_records_counters(monkeypatch):
+    monkeypatch.setattr(
+        rw, "_location_resolve_sync",
+        lambda: {"acquired": True, "claimed": 40, "resolved": 38, "failed": 2,
+                 "seconds": 12.3, "rate": 3.24, "session_pooler": True})
+    state = rw._new_state()
+    asyncio.run(rw._location_resolve_pass(asyncio.Event(), state))
+    lane = state["lanes"]["location_resolve"]
+    assert lane["passes"] == 1
+    assert lane["last"]["acquired"] is True
+    assert lane["last"]["resolved"] == 38
+
+
+def test_location_resolve_pass_records_lease_skip(monkeypatch):
+    # The machine-readable signal for "the GH lane is draining right now" is the
+    # heartbeat, not a log line (which is transition-only).
+    monkeypatch.setattr(
+        rw, "_location_resolve_sync", lambda: {"acquired": False})
+    state = rw._new_state()
+    asyncio.run(rw._location_resolve_pass(asyncio.Event(), state))
+    assert state["lanes"]["location_resolve"]["last"]["acquired"] is False
+
+
+def test_location_resolve_sync_refuses_to_run_beside_an_abandoned_pass(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # A pass abandoned at LANE_PASS_TIMEOUT_SECONDS keeps running (Python cannot
+    # kill the thread) and its lease has already expired, so the lease alone
+    # cannot stop the NEXT pass from draining beside it in this same process.
+    # The in-process lock is what does — and it must not touch the lease at all.
+    def never(*a: Any, **k: Any) -> Any:
+        raise AssertionError("a second drain must not start beside a live one")
+
+    _patch_resolver(monkeypatch, run=never)
+    monkeypatch.setattr(
+        "location_data.resolver.lease.held",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("the lease must not be touched while a pass is live")))
+    rw._RESOLVE_PASS_LOCK.acquire()  # stands in for the still-running thread
+    try:
+        out = rw._location_resolve_sync()
+    finally:
+        rw._RESOLVE_PASS_LOCK.release()
+
+    assert out["acquired"] is False
+    assert out["previous_pass_running"] is True
+
+
+def test_location_resolve_sync_releases_the_pass_lock_when_the_drain_raises(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("no pin_cluster_epochs row")
+
+    _patch_resolver(monkeypatch, run=boom)
+    with pytest.raises(RuntimeError):
+        rw._location_resolve_sync()
+    assert rw._RESOLVE_PASS_LOCK.acquire(blocking=False), "the pass lock leaked"
+    rw._RESOLVE_PASS_LOCK.release()
+
+
+def test_location_resolve_quiets_the_drain_log_only_once_the_queue_is_empty(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Five INFO lines per run is ~7 runs/day on the GH lane and ~29k lines/day
+    # here. Quiet when idle, loud while there is a backlog to diagnose.
+    import logging
+
+    drain_log = logging.getLogger("location_data.resolver.drain")
+    original = drain_log.level
+    try:
+        def idle_run(c: Any, *, batch_size: int, max_seconds: int) -> Any:
+            return _stub_stats(claimed=0, resolved=0, failed=0, batches=0)
+
+        _patch_resolver(monkeypatch, run=idle_run)
+        rw._location_resolve_sync()
+        assert drain_log.level == logging.NOTSET, "the first pass must be loud"
+        assert rw._RESOLVE_LAST_IDLE is True
+
+        _patch_resolver(monkeypatch, run=idle_run)
+        monkeypatch.setattr(rw, "_RESOLVE_LAST_IDLE", True)
+        rw._location_resolve_sync()
+        assert drain_log.level == logging.WARNING
+    finally:
+        drain_log.setLevel(original)
+
+
+def test_location_resolve_lane_is_dark_when_the_settings_read_fails() -> None:
+    # _lane_loop keeps default_interval when read_interval() RAISES, and the
+    # flag lives inside the read that just failed. A positive fallback would run
+    # a full drain pass on any app_settings blip while the operator believes the
+    # lane is off (e.g. during an epoch recompute).
+    src = inspect.getsource(rw._amain)
+    lane = src.split('("location_resolve"', 1)[1].split(")),", 1)[0]
+    assert "default_interval=0" in lane
+
+
+def test_location_resolve_pass_returns_early_when_stopping(monkeypatch):
+    def never():
+        raise AssertionError("a stopping worker must not start a new drain pass")
+
+    monkeypatch.setattr(rw, "_location_resolve_sync", never)
+    stop = asyncio.Event()
+    stop.set()
+    state = rw._new_state()
+    asyncio.run(rw._location_resolve_pass(stop, state))
+    assert "location_resolve" not in state["lanes"]

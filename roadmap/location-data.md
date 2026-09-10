@@ -1930,6 +1930,18 @@ seeded; nothing writes.
    resolver version in days. **Decision 8 surfaced to the operator:** take the resolve drain out of
    the outer `location-batch` group (reverses the 2026-08-10 incident decision) and/or run it from
    the always-on worker (EU round-trips). Recommendation: both.
+   **Decision 8b SHIPPED DARK** — the worker half: a `location_resolve` lane in
+   `scraper/realtime_worker.py` calls THE drain (`location_data.resolver.drain.run`, not a copy)
+   under THE shared `location_jobs` lease on `drain.open_connection()`, so it and
+   `location_resolve.yml` can never drain at once and the GH lane stays the backstop (and keeps
+   `--full-sweep` / `--dry-run` / `--listing-id`). Continuous instead of ~7 ticks/day, EU
+   round-trips instead of US. Off until
+   `app_settings.realtime_location_resolve_enabled = true`; knobs
+   `realtime_location_resolve_{interval_seconds,max_seconds,batch_size}` = 15 / 240 (clamped ≤900)
+   / 250; the realtime-worker Railway service needs `SUPABASE_DB_SESSION_URL`. **The other half —
+   taking the drain out of the `location-batch` group — is untouched**, and the worker is outside
+   that group anyway, so idle the lane (flag false, or interval 0) before an epoch recompute or a
+   heavy location batch.
 2. **Sweep and LLM state, 2026-09-10 07:25Z.** idnes: run 1 = 58,500 bodies → 202,467 claims in 45 min
    (`outcome=stopped`, resumable; the roadmap's earlier "2.4 pages/s ≈ 70 h" predated the 16-wide R2
    fetch and is superseded — ~22 pages/s, so idnes is ~4 runs, ceskereality ~2, realitymix ~2); run 2
@@ -1939,11 +1951,22 @@ seeded; nothing writes.
    `max_usd=10` per hop, `mode=full`. Until each portal's sweep reports `reached_end=true`, its
    older listings read thin on the NEW side and inflate "old shows, new doesn't".
 
-**Next, in order:** apply migration 491 (operator, MCP) → Decision 8 → the canonical-street-form
-resolver PR (registry `ruian_streets.name` fills `street_name` for registry-bound rows, resolver
-version bump, re-resolve scoped to kraje 19/27 first) → operator review on `/location-compare` →
-approve full rollout = seed `location_v2.filters` / `location_v2.map` and wire Browse + the map to
-the same predicates → R4 after the map flip.
+**DONE 2026-09-10:** migration 491 applied (operator); the canonical-street-form resolver PR
+(#1380, `resolver:v2`); **Decision 8a** (#1383, the drain out of `location-batch` — verified live:
+the next full-resolve started alongside a running archive sweep instead of queueing); the
+kraj-scoped sweep timeout fix (#1384); **Decision 8b** shipped dark (#1386).
+
+**Next, in order:** enable the worker lane — `realtime_location_resolve_enabled` (operator, one
+`app_settings` row; no migration) — then **read `BATCH n=… rate=…/s` in the worker log**, which is
+the only honest test of whether the Railway service sits in the EU: at ~0.7 listings/s we bought
+the always-on win (3.5 drain-hours/day → 24) but not the latency win, and the service region is
+then the next thing to look at. Also set `SUPABASE_DB_SESSION_URL` on the realtime-worker service
+if absent (the lane runs without it, several times slower, and says so once per process) →
+re-resolve kraje 19/27 at v2 → operator review on `/location-compare` → approve full rollout =
+seed `location_v2.filters` / `location_v2.map` and wire Browse + the map to the same predicates →
+R4 after the map flip. **Before the corpus-wide full-resolve**, the UNSCOPED sweep needs the same
+treatment #1384 gave the scoped one — it must drive off the claims to see unprojected rows, so it
+will hit the 900 s ceiling and needs a raised budget or per-kraj batching.
 
 ## Standing decisions
 
