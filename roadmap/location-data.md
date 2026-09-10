@@ -1976,6 +1976,41 @@ waiting (the 10:00Z intake went the same way). The archive sweep's chain step no
 checks every other group member for a waiting run and ends instead of re-dispatching; the sweep
 resumes from its cursor on the next manual dispatch.
 
+**FIX 2026-09-10 — the page timed out on FILTERS — OKRESY; the cohort is now precomputed.**
+Production returned `QueryCanceled: canceling statement due to statement timeout` on the okresy
+section. Cause, in one line: every one of the page's 6–9 statements rebuilt the same three-table
+cohort join from scratch (~1,130 MB of heap read each — the `b.region_id = ANY(:kraje) OR
+p.kraj_kod = ANY(:kraje)` predicate spans two tables, so no index can drive it), and the okres
+aggregate then joined the result on an OR (`m.old_okres_id = o.kod OR m.new_okres_kod = o.kod`),
+which the planner can only serve as a nested loop re-scanning the cohort once per district — 810k
+of a 1.02M plan cost. Cold `pg_stat_statements`: 22 s + 9 s + 5 s + 33 s for the four `scope()`
+statements, max 97.5 s, against a 120 s budget on an IO-saturated instance.
+Fix (migration 493): the whole-corpus cohort is stored once in `location_compare_cohort` (UNLOGGED
+plain table, blue-green rebuild by `refresh_location_compare_cohort()` from **pg_cron at :11/:41**,
+~2 min, ~355k rows), and `toolkit/location_compare.py` (now 18 `*_SQL` constants) only ever reads
+it — the module still cannot write, and the REFRESH deliberately lives in the database. The three
+OR-joins became two-arm `UNION ALL` aggregates. **Nothing about the page's meaning changed**: same
+verdict CASE, same denominators, same union-of-both-sides cohort (the snapshot stores
+`scope_kraj_kod` = the property rollup that scoped it, separately from `new_kraj_kod` = the winner
+row every counter compares), same Praha-9999 nulling. Not a materialized view on purpose:
+`rebuild_browse_list()` drops `browse_list` every 15 min and a matview's dependency would freeze
+Browse platform-wide — the migration header says so.
+The refresh's budget is **240 s, deliberately smaller than the job could afford**: it holds
+ACCESS SHARE on `browse_list` for its whole transaction, and `rebuild_browse_list()` republishes
+that table with a DROP and no `lock_timeout`, so an overlap would park every later Browse reader
+behind a pending ACCESS EXCLUSIVE. 240 s from :11 cannot reach the :15 tick at all (live 24 h:
+that rebuild ran 96x, mean 325 s, max 603 s — capped by its own 600 s budget, so :00 always
+finishes by :10). The snapshot also carries a `derived_artifacts` row, so the Health dashboard
+sees it age like every other precomputed artifact.
+What the operator must know: **the numbers are now up to 40 minutes old** (30 min cohort + 10 min
+in-process cache), and the page's header stamp finally says which — it reads the snapshot's build
+time, not the request clock, and shows "generating…" before the first refresh. **A correction made
+in the projections will not move these numbers until the next tick.** Off switch, no deploy:
+`select cron.alter_job((select jobid from cron.job where jobname='location-compare-cohort-refresh'),
+active := false);` — the page keeps serving the last snapshot with a visibly ageing stamp. **Run
+exactly that when W6-2's review closes**: the snapshot is derived, rebuildable and read by nothing
+else, so turning the job off is the whole deactivation.
+
 ## Standing decisions
 
 - **The heavy location lanes share ONE outer concurrency group, `location-batch`**

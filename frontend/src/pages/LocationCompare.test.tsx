@@ -65,8 +65,12 @@ const okres = (okres_kod: number, name: string, kraj_kod: number): OkresRow => (
   n_no_row: 3, n_only_old: 8, n_only_new: 4, agreement_pct: 92,
 });
 
+const COHORT_REFRESHED_AT = '2026-09-10T07:41:00Z';
+
 const scope: CompareScope = {
   generated_at: '2026-09-10T08:00:00Z',
+  cohort_refreshed_at: COHORT_REFRESHED_AT,
+  cohort_ready: true,
   kraje: [19, 27],
   kraje_rows: [{
     kraj_kod: 19, name: 'Hlavní město Praha',
@@ -80,6 +84,8 @@ const scope: CompareScope = {
 
 const units: CompareUnits = {
   generated_at: scope.generated_at,
+  cohort_refreshed_at: COHORT_REFRESHED_AT,
+  cohort_ready: true,
   kraje: [19, 27],
   level: 'obec',
   parent_kod: 2109,
@@ -91,6 +97,8 @@ const units: CompareUnits = {
 
 const unit: CompareUnit = {
   generated_at: scope.generated_at,
+  cohort_refreshed_at: COHORT_REFRESHED_AT,
+  cohort_ready: true,
   kraje: [19, 27],
   level: 'okres',
   code: 3100,
@@ -113,6 +121,8 @@ const unit: CompareUnit = {
 
 const emptyMap: CompareMap = {
   generated_at: scope.generated_at,
+  cohort_refreshed_at: COHORT_REFRESHED_AT,
+  cohort_ready: true,
   kraje: [19, 27],
   rows: [],
   truncated: false,
@@ -148,6 +158,26 @@ describe('LocationCompare', () => {
     renderPage();
     expect(screen.getByRole('button', { name: 'Praha (19)' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: 'Středočeský (27)' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('stamps the header with the cohort build time, not the request clock', async () => {
+    /* The numbers come from a snapshot refreshed every 30 min (migration 493);
+     * `generated_at` would over-claim freshness on a cache hit. */
+    renderPage();
+    expect(await screen.findByText(`generated ${COHORT_REFRESHED_AT}`)).toBeInTheDocument();
+    expect(screen.queryByText(`generated ${scope.generated_at}`)).toBeNull();
+  });
+
+  it('says "generating…" when the snapshot is not ready, even though the stamp survived', async () => {
+    /* The cohort is UNLOGGED and its stamp is LOGGED, so crash recovery leaves a
+     * confident old timestamp over an empty table. Zeros on this page read as "the
+     * new engine has no coverage anywhere" — the header must not corroborate them. */
+    vi.mocked(lc.fetchCompareScope).mockResolvedValue({
+      ...scope, cohort_ready: false, kraje_rows: [], okresy: [],
+    });
+    renderPage();
+    expect(await screen.findByText('generating…')).toBeInTheDocument();
+    expect(screen.queryByText(`generated ${COHORT_REFRESHED_AT}`)).toBeNull();
   });
 
   it('renders every section heading', async () => {

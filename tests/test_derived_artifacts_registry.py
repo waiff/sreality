@@ -49,7 +49,7 @@ pytestmark = pytest.mark.skipif(
 # Derived artifacts that are ordinary relations rather than materialized views, so the
 # catalog cannot recognise them on its own. Curated deliberately: this is a short list that a
 # new rollup joins by hand, which is the same one-line cost as its registry row.
-_ROLLUP_TABLES = frozenset({"browse_list", "llm_cost_hour_rollup"})
+_ROLLUP_TABLES = frozenset({"browse_list", "llm_cost_hour_rollup", "location_compare_cohort"})
 
 # EMPTIED BY MIGRATION 440 (W7a), which is the wave's entire definition of done. This set
 # named the thirteen artifacts that already existed, unregistered, when the registry shipped;
