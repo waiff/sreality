@@ -141,9 +141,18 @@ def test_the_resolve_drain_is_out_of_the_shared_group():
     per-lane job group (never overlaps itself) and, in the drain, the `location_jobs`
     lease CAS (never overlaps the Railway worker lane)."""
     wf = _workflow("location_resolve.yml")
-    assert wf.get("concurrency") is None, (
-        "location_resolve.yml has a workflow-level concurrency group again — the drain is "
-        "latency-bound and must not queue behind the heavy lanes; see this file's docstring"
+    group = (wf.get("concurrency") or {}).get("group", "")
+    # Mode-conditional, not absent: `full-resolve` opens with a corpus-wide bulk INSERT into
+    # dirty_locations and MUST still queue with the heavy lanes — on 2026-09-10 it overlapped
+    # the archive sweep, which bulk-inserts the same keys, and killed it with
+    # LockNotAvailable (run 34456211996). The drain must NOT be grouped that way.
+    assert "github.event.inputs.mode == 'full-resolve'" in group, (
+        "the resolve lane's group is no longer mode-conditional — a full-resolve enqueue "
+        "running beside an archive sweep deadlocks it out of dirty_locations"
+    )
+    assert f"'{OUTER_GROUP}'" in group, "full-resolve must still land in the heavy-lane group"
+    assert group.split("||")[-1].strip().strip("}").strip() != f"'{OUTER_GROUP}'", (
+        "the drain branch of the group expression is the heavy-lane group — that re-starves it"
     )
     inner = {
         job["concurrency"]["group"]

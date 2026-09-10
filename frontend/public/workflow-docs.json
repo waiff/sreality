@@ -4513,8 +4513,8 @@
         "SUPABASE_DB_SESSION_URL",
         "SUPABASE_DB_URL"
       ],
-      "concurrencyGroup": null,
-      "cancelInProgress": null,
+      "concurrencyGroup": "${{ github.event.inputs.mode == 'full-resolve' && 'location-batch' || 'location-resolve-lane' }}",
+      "cancelInProgress": false,
       "timeoutMinutes": 60,
       "permissions": "contents: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_resolve.yml",
