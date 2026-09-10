@@ -169,10 +169,18 @@ _CURRENT_UNITS_CTE = """
       ORDER BY u.level, u.code, (u.valid_to IS NULL) DESC, u.valid_from DESC
     )"""
 
+# Legacy stamps every Prague listing okres_id = 9999 (99,287 rows, region 19 and no
+# other, measured 2026-09-10). No such unit exists: the registry mirror's Prague path is
+# t1.g19.k19.b554782 — region straight to city, no district level — so the new side
+# honestly stores NULL. Compared raw, the okres level would list a phantom district 9999
+# that the new engine "loses" for all of Prague; nulled here, Prague compares at the kraj
+# and obec levels and has no okres row on either side, which is the truth.
+LEGACY_PRAHA_OKRES_SENTINEL = 9999
+
 # The cohort is the UNION of the two sides' opinions about the selected kraje,
 # so a property one side places inside and the other outside stays visible as a
 # disagreement instead of silently leaving the denominator.
-_COHORT_CTE = """
+_COHORT_CTE = f"""
     cohort AS (
       SELECT b.property_id,
              b.listing_id,
@@ -180,7 +188,7 @@ _COHORT_CTE = """
              b.lat AS old_lat,
              b.lng AS old_lng,
              b.region_id AS old_region_id,
-             b.okres_id AS old_okres_id,
+             nullif(b.okres_id, {LEGACY_PRAHA_OKRES_SENTINEL}) AS old_okres_id,
              b.obec_id AS old_obec_id,
              coalesce(b.place_search_text, concat_ws(', ', b.obec, b.okres)) AS old_label,
              (w.listing_id IS NOT NULL) AS has_row,
