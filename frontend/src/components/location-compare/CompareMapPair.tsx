@@ -297,7 +297,14 @@ function ComparePane({
 
   return (
     <div className="relative h-[26rem] rounded-[var(--radius-md)] overflow-hidden border border-[var(--color-rule)]">
-      <div ref={containerRef} className="absolute inset-0" />
+      <div
+        ref={containerRef}
+        className="absolute inset-0"
+        // inline, as DetailMap/ComparablesMap do: maplibre-gl.css sets `.maplibregl-map
+        // { position: relative }` on the container, which beats Tailwind's `absolute` and
+        // collapses the pane to height 0 (measured on production 2026-09-10)
+        style={{ position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, width: '100%', height: '100%' }}
+      />
       <div className="absolute left-2 top-2 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-3)]/95 px-2 py-1 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
         {side === 'old' ? 'Old — browse_list' : 'New — projection'}
       </div>
