@@ -487,7 +487,9 @@ that don't key on street.
   **append-only** — a wrong claim is retracted and a new one inserted, never UPDATEd, and the Mapy
   licence-evidence tables are trigger-immutable (42501 on UPDATE/DELETE/TRUNCATE); every heavy batch
   lane shares the ONE `location-batch` Actions concurrency group and arms a `SET LOCAL
-  statement_timeout`; and the RÚIAN loaders + the resolve drain run on **`connect_session()`** (the
+  statement_timeout` — **except the resolve drain, which left that group on 2026-09-10** because it is
+  latency-bound, not instance-bound, and the self-chaining archive sweeps were starving it (its
+  exclusion guard is the `location_jobs` lease CAS, shared with the Railway worker's resolve lane); and the RÚIAN loaders + the resolve drain run on **`connect_session()`** (the
   loader refuses the transaction-pooler fallback — a 3 M-row COPY needs session GUCs). Rationale:
   `docs/architecture.md` § Location data (W1); sequencing: `roadmap/location-data.md`.
 

@@ -92,16 +92,33 @@ on:
     # why a backfill that needs this group should expect to pause both.
     - cron: "*/15 * * * *"
 
-concurrency:
-  # OUTER, cross-lane: shared with the registry load, the claim intake and the Mapy
-  # inventory so at most ONE heavy location lane runs at a time. On 2026-08-10 this drain
-  # (run 31439340945) wedged mid-batch for 30 minutes with no error while a registry
-  # boundary pack, a claims intake and an inventory scan hammered the same instance. The
-  # drain is cadenced, so queueing behind a long registry load is the intended trade: the
-  # queue IS the cursor, a skipped tick costs nothing, and GitHub supersedes an older
-  # pending run so ticks collapse instead of piling up. See location_registry_load.yml.
-  group: location-batch
-  cancel-in-progress: false
+# NO workflow-level concurrency group. This lane LEFT the outer `location-batch` group on
+# 2026-09-10 (operator decision), reversing the 2026-08-10 incident response for this one
+# member. What that group buys and what it cost here:
+#
+#   The group serializes the heavy location lanes so at most one hammers the shared instance
+#   — the answer to the night four of them dropped backends and wedged this drain mid-batch
+#   (run 31439340945, 30 minutes of silence). The trade was stated as free: "the drain is
+#   cadenced, the queue IS the cursor, a skipped tick costs nothing."
+#
+#   That trade stopped being free when the queue stopped being small. Measured 2026-09-10:
+#   the drain resolves 0.7 listings/s (11 registry round-trips per listing at ~120 ms from a
+#   US runner to the EU instance), GitHub fires this schedule ~7x/day, and the W2-13 archived
+#   HTML sweeps now hold the group for ~55 minutes at a time BACK TO BACK (they self-chain).
+#   Between 05:59Z and 08:57Z the lane got zero ticks while the queue stood above 100k rows.
+#   A skipped tick costs nothing only when the next tick catches up; here they never do.
+#
+#   Leaving the group is safe for THIS member specifically because the drain is the light
+#   one: 11 small indexed reads plus one projection write per listing, no COPY, no corpus
+#   scan, no detoast — it is latency-bound, not instance-bound, which is also why it gains
+#   so little from queueing and loses so much. It READS the claim spine the intake and the
+#   archive sweep write, so it does not carry their "must never overlap" constraint; those
+#   two stay in the group and keep it.
+#
+# Two guards remain and are the real ones: the job-level `location-resolve` group below
+# (this lane never overlaps ITSELF) and the `location_jobs` lease-row CAS in the drain
+# (a second drainer — including the Railway worker lane — finds the lease held and exits).
+# Rails: tests/location_data/test_location_batch_hardening.py.
 
 jobs:
   resolve:

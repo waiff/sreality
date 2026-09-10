@@ -103,7 +103,7 @@ on:
 
 concurrency:
   # OUTER, cross-lane: shared with the registry load, the claim intake, the Mapy inventory,
-  # the resolve drain and the churn probe so at most ONE heavy location lane runs at a time
+  # the churn probe so at most ONE heavy location lane runs at a time
   # (2026-08-10 incident — four concurrent lanes against the shared production instance).
   # See location_registry_load.yml for the full note. This lane belongs in it on rows AND
   # on bytes: 445k detoasted bodies is the largest single read the program performs.
