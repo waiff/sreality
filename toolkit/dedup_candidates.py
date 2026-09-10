@@ -509,3 +509,80 @@ def finish_generation(
             },
         )
         cur.execute(_FINISH_RUN_SQL, {**params_common, "id": gen.simulation_run_id})
+
+
+# --------------------------------------------------------------------------- audit reads
+
+# What the Candidate audit page (api/routes/new_dedup_candidates.py) reads. It never scans
+# the pair table: the numbers were computed once, at the end of a generation, onto
+# `candidate_generations.stats` (scripts/dedup_candidates_generate.py:generation_stats).
+
+_STORE_READY_SQL = "SELECT to_regclass('dedup_sim.candidate_pairs') IS NOT NULL"
+
+# Column order IS the contract of `list_recent_generations` — the rows are zipped onto
+# `_RECENT_COLUMNS`, because the fake connections of the tests carry no cursor.description.
+_RECENT_COLUMNS: tuple[str, ...] = (
+    "id",
+    "status",
+    "created_at",
+    "completed_at",
+    "fingerprint",
+    "scope",
+    "partial",
+    "pairs_total",
+)
+
+_RECENT_GENERATIONS_SQL = (
+    "SELECT g.id, g.status, g.created_at, g.completed_at, i.fingerprint, "
+    "g.stats->>'scope' AS scope, (g.stats->>'partial')::boolean AS partial, "
+    "(g.stats->'pairs'->>'total')::bigint AS pairs_total "
+    "FROM dedup_sim.candidate_generations g "
+    "JOIN dedup_sim.candidate_inputs i ON i.id = g.inputs_id "
+    "WHERE i.path = %(path)s "
+    "ORDER BY g.created_at DESC, g.id DESC LIMIT %(limit)s"
+)
+
+_GENERATION_TIMES_COLUMNS: tuple[str, ...] = (
+    "created_at",
+    "started_at",
+    "completed_at",
+    "error_message",
+)
+
+_GENERATION_TIMES_SQL = (
+    "SELECT created_at, started_at, completed_at, error_message "
+    "FROM dedup_sim.candidate_generations WHERE id = %(id)s"
+)
+
+
+def store_ready(conn: "psycopg.Connection") -> bool:
+    """Does the candidate store of migration 492 exist? A catalog probe (`to_regclass`
+    answers NULL for a missing relation instead of raising), asked BEFORE any other query
+    so a database without the migration renders "store not created yet" rather than a 500."""
+    with conn.cursor() as cur:
+        cur.execute(_STORE_READY_SQL)
+        row = cur.fetchone()
+    return bool(row and row[0])
+
+
+def list_recent_generations(
+    conn: "psycopg.Connection", code: str, limit: int = 20
+) -> list[dict[str, Any]]:
+    """The newest generations of one path, every status, for the audit page's run picker:
+    id, status, the two timestamps, the parameter set's fingerprint, and the three facts
+    read straight off `stats` (scope, partial, total pairs — NULL while a run has no stats
+    yet). Newest first, `id` breaking a `created_at` tie so the order never reshuffles."""
+    with conn.cursor() as cur:
+        cur.execute(_RECENT_GENERATIONS_SQL, {"path": code, "limit": limit})
+        rows = cur.fetchall()
+    return [dict(zip(_RECENT_COLUMNS, row)) for row in rows]
+
+
+def generation_timestamps(conn: "psycopg.Connection", generation_id: int) -> dict[str, Any] | None:
+    """The four generation-row columns `get_generation` does not carry (its `Generation` is
+    the lane's working record, not the audit's): when the run was created, started and
+    completed, and the message of a failed one."""
+    with conn.cursor() as cur:
+        cur.execute(_GENERATION_TIMES_SQL, {"id": generation_id})
+        row = cur.fetchone()
+    return dict(zip(_GENERATION_TIMES_COLUMNS, row)) if row else None

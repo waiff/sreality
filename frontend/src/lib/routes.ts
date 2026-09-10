@@ -118,6 +118,7 @@ export const ROUTES = {
   settings: def('/settings'),
   newDedup: def('/new-dedup'),
   newDedupSettings: def('/new-dedup/settings'),
+  newDedupCandidates: def('/new-dedup/candidates'),
   newDedupLabeling: def('/new-dedup/labeling'),
   newDedupTaxonomy: def('/new-dedup/labeling/taxonomy'),
   newDedupTrainingSet: def('/new-dedup/training-set'),

@@ -70,6 +70,7 @@ from api.new_dedup_labeling import router as new_dedup_labeling_router
 from api.new_dedup_tags import router as new_dedup_tags_router
 from api.routes.location_quality import router as location_quality_router
 from api.routes.new_dedup import router as new_dedup_router
+from api.routes.new_dedup_candidates import router as new_dedup_candidates_router
 from api.routes.notifications import router as notifications_router
 from scraper import image_storage
 from scraper.db import sweep_stuck_scrape_runs
@@ -292,6 +293,13 @@ app.include_router(new_dedup_bakeoff_router)
 # whole score map plus its winner. The tag is the ARGMAX over the model's heads;
 # there is no per-head yes/no. Writes come from scripts/tag_model.py.
 app.include_router(new_dedup_tags_router)
+# /new-dedup/candidates/* (Level 0 candidate audit, migration 492) — read-only,
+# admin-gated: the path registry, one generation's parameter set, and the audit
+# numbers computed onto that generation row. Never scans the pair table; answers
+# store_ready=false instead of failing when the migration is not applied. Writes
+# come from the generation lane (scripts/dedup_candidates_generate.py). See
+# toolkit/dedup_candidates.py and docs/design/new-dedup/PROGRAM.md (Wave 2).
+app.include_router(new_dedup_candidates_router)
 # /location/* (location-quality dashboard, frozen labelled samples, operator
 # corrections) — the FIRST consumer of the location serving projection
 # (location program W1v), admin-gated (require_admin). Reads via

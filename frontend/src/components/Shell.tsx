@@ -53,10 +53,11 @@ const settingsItems: ReadonlyArray<MenuItem> = [
 ];
 
 // The NEW DEDUP program's own group. Admin-only, same posture as the
-// Settings group. Dashboard is still a Wave 0 placeholder (real content
-// lands with the funnel/cost work); Settings + Labeling are real (Wave 1).
+// Settings group. Dashboard carries the funnel + cost table (Wave 2);
+// Settings + Labeling are Wave 1; Candidates is the Wave 2 audit page.
 const newDedupItems: ReadonlyArray<MenuItem> = [
   { to: ROUTES.newDedup.build(), label: 'Dashboard', end: true },
+  { to: ROUTES.newDedupCandidates.build(), label: 'Candidates' },
   { to: ROUTES.newDedupSettings.build(), label: 'Settings' },
   // `end` so /new-dedup/labeling/taxonomy lights only Taxonomy — NavMenu passes
   // this straight to NavLink, whose default prefix match would light both.
