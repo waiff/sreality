@@ -355,6 +355,16 @@ _FINISH_GENERATION_SQL = (
     "error_message = %(error)s WHERE id = %(id)s"
 )
 
+_REOPEN_GENERATION_SQL = (
+    "UPDATE dedup_sim.candidate_generations SET status = 'running', completed_at = NULL, "
+    "error_message = NULL WHERE id = %(id)s"
+)
+
+_REOPEN_RUN_SQL = (
+    "UPDATE dedup_sim.simulation_runs SET status = 'running', completed_at = NULL, "
+    "error_message = NULL WHERE id = %(id)s"
+)
+
 _FINISH_RUN_SQL = (
     "UPDATE dedup_sim.simulation_runs SET status = %(status)s, completed_at = now(), "
     "stats = COALESCE(%(stats)s::jsonb, stats), error_message = %(error)s WHERE id = %(id)s"
@@ -460,6 +470,14 @@ def latest_generation(
 def record_progress(conn: "psycopg.Connection", generation_id: int, progress: dict[str, Any]) -> None:
     with conn.cursor() as cur:
         cur.execute(_UPDATE_PROGRESS_SQL, {"id": generation_id, "progress": json.dumps(progress)})
+
+
+def reopen_generation(conn: "psycopg.Connection", gen: Generation) -> None:
+    """A FAILED generation resumes from its cursor: both rows go back to `running`, the
+    error is cleared, and `finish_generation` will write the final verdict later."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(_REOPEN_GENERATION_SQL, {"id": gen.id})
+        cur.execute(_REOPEN_RUN_SQL, {"id": gen.simulation_run_id})
 
 
 def finish_generation(

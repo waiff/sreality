@@ -58,7 +58,7 @@ _BASE_CTE = (
 
 _BAND_CTE = (
     ", band AS ("
-    " SELECT base.*, FLOOR(LN(area) / %(band_width)s::float8)::int AS band"
+    " SELECT base.*, FLOOR(LN(area) / %(band_width)s::float8)::bigint AS band"
     " FROM base WHERE area IS NOT NULL"
     ")"
 )
@@ -72,8 +72,12 @@ _CATEGORY_GUARD = (
     "      OR (a.category_main = 'komercni' AND b.category_main = 'dum'))"
 )
 
+# Two-valued on purpose: category_main is nullable, and `NULL = 'byt'` would make the whole
+# guard NULL — dropping pairs the oracle keeps (an unchecked rule cannot veto) and writing a
+# NULL into a NOT NULL column. COALESCE turns "unknown category" into "not byt", which is
+# exactly what floor_rule() in the oracle does with None.
 _FLOOR_CHECKED = (
-    "(a.category_main = 'byt' AND b.category_main = 'byt'"
+    "(COALESCE(a.category_main, '') = 'byt' AND COALESCE(b.category_main, '') = 'byt'"
     " AND a.floor IS NOT NULL AND b.floor IS NOT NULL)"
 )
 
@@ -292,6 +296,8 @@ def band_width(area_pct_general: float, area_pct_pozemek: float) -> float:
     if t >= 1.0:
         return 1e9
     if t <= 0.0:
+        # "exactly equal areas only": a band this narrow keeps equal areas together and
+        # everything else apart; ln(area)/w stays far inside bigint (the band column's type).
         return 1e-9
     return -math.log(1.0 - t)
 

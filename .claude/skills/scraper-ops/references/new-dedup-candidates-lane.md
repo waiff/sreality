@@ -56,10 +56,13 @@ changing one and re-running writes a NEW parameter set and leaves the old rows a
    acceptable outcome; a DISAGREE lists the first pairs on each side.
 3. **`generate` with `dry_run=true`**, then on a **pilot** (`blocks=582786` for Brno) with
    `dry_run=false`, then the whole corpus. A partial run never sweeps stale rows.
-4. A generation that stopped (job timeout at 350 min, a network error) resumes with
-   `resume=true` — same settings, same parameter set; it continues from the cursor in
-   `candidate_generations.progress` (`last_block_key` + `last_id_to`). Changing a setting
-   between the two runs makes it a NEW parameter set, and `resume` will find nothing to resume.
+4. A generation that stopped (job timeout at 350 min, a network error — `running` or
+   `failed`) resumes with `resume=true` — same settings, same parameter set; it continues from
+   the cursor in `candidate_generations.progress` (`last_block_key` + `last_id_to`) and a failed
+   one is reopened first. **A resume keeps the scope the generation was opened over**: a pilot
+   stays a pilot (no stale sweep) whatever `blocks` says now, and a `blocks` value that differs
+   from the stored one is refused. Changing a setting between the two runs makes it a NEW
+   parameter set, and `resume` will find nothing to resume.
 
 The `INFO` lines name the town, its listing count and the running pair total on every large
 town (≥ 5,000 listings) and every 200th town; the job summary carries the final matrix.

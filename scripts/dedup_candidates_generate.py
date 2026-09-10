@@ -218,7 +218,8 @@ def compare_block(oracle: dict[tuple[int, int], dc.PairVerdict],
         if o.rung != g["rung"]:
             rung_mismatch.append((key, o.rung, g["rung"]))
             continue
-        if bool(o.floor_checked) != bool(g["floor_checked"]):
+        if g["floor_checked"] is None or bool(o.floor_checked) != bool(g["floor_checked"]):
+            # a NULL from SQL is a mismatch in its own right — the column is NOT NULL
             evidence_mismatch.append((key, "floor_checked", o.floor_checked, g["floor_checked"]))
         if o.rung == "C1" and o.disposition != g["disposition"]:
             evidence_mismatch.append((key, "disposition", o.disposition, g["disposition"]))
@@ -348,10 +349,28 @@ def generate(conn: Any, path: str, *, only: Sequence[str], chunk: int, resume: b
         log.info("DRY RUN — plan: %s", json.dumps(plan, ensure_ascii=False))
         return {"dry_run": True, **plan}
 
-    gen = dc.latest_generation(conn, path, fingerprint_=fp, status="running") if resume else None
+    gen = None
+    if resume:
+        gen = dc.latest_generation(conn, path, fingerprint_=fp, status="running") or \
+            dc.latest_generation(conn, path, fingerprint_=fp, status="failed")
     if gen is not None:
-        log.info("resuming generation %s (run %s) from %s", gen.id, gen.simulation_run_id, gen.progress)
         progress = dict(gen.progress or {})
+        # The scope a generation was OPENED over is the scope it keeps: a resumed pilot must
+        # not turn into a corpus run (or the other way round), because the stale sweep at the
+        # end trusts `partial`. Argv must repeat the original blocks, or say nothing.
+        stored_only = sorted(progress.get("only") or [])
+        if only and sorted(only) != stored_only:
+            raise SystemExit(
+                f"generation {gen.id} was opened over blocks {stored_only or 'ALL'}; "
+                f"resume with the same --blocks (got {sorted(only)}) or without --blocks"
+            )
+        only = tuple(stored_only)
+        partial = bool(progress.get("partial")) or bool(only)
+        blocks = fetch_blocks(conn, active_only=params["active_only"], only=only)
+        if gen.status == "failed":
+            dc.reopen_generation(conn, gen)
+        log.info("resuming generation %s (run %s, was %s) from %s", gen.id, gen.simulation_run_id,
+                 gen.status, progress)
     else:
         progress = {"blocks_total": len(blocks), "blocks_done": 0, "chunks_done": 0,
                     "pairs_upserted": 0, "last_block_key": None, "last_id_to": None,

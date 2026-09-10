@@ -60,9 +60,10 @@ class _Conn:
     """Answers by statement identity. `blocks` = {obec_kod: [listing ids]}."""
 
     def __init__(self, blocks: dict[str, list[int]], *, running: dict[str, Any] | None = None,
-                 fail_on_block: str | None = None) -> None:
+                 fail_on_block: str | None = None, running_status: str = "running") -> None:
         self.blocks = blocks
         self.running = running
+        self.running_status = running_status
         self.fail_on_block = fail_on_block
         self.calls: list[tuple[str, Any]] = []
         self.next_id = 100
@@ -94,10 +95,14 @@ class _Conn:
         if s.startswith("INSERT INTO dedup_sim.candidate_generations"):
             return [(42,)], None, 1
         if "FROM dedup_sim.candidate_generations g" in s:
-            if self.running is None:
+            if self.running is None or p["status"] != self.running_status:
                 return [], None, -1
-            return [(42, 1, 7, "C", dc.fingerprint(INPUTS), json.dumps(INPUTS), "running",
+            return [(42, 1, 7, "C", dc.fingerprint(INPUTS), json.dumps(INPUTS), self.running_status,
                      json.dumps(self.running), None)], None, -1
+        if s.startswith("UPDATE dedup_sim.candidate_generations SET status = 'running'"):
+            return [], None, 1
+        if s.startswith("UPDATE dedup_sim.simulation_runs SET status = 'running'"):
+            return [], None, 1
         if s.startswith("UPDATE dedup_sim.candidate_generations SET progress"):
             return [], None, 1
         if s.startswith("UPDATE dedup_sim.candidate_generations SET status") or s.startswith("UPDATE dedup_sim.simulation_runs"):
@@ -237,6 +242,38 @@ def test_resume_with_a_finished_last_block_moves_on() -> None:
     assert inserts == [500002]
 
 
+def test_resumed_pilot_keeps_its_scope_and_never_sweeps() -> None:
+    # the interrupted run was a pilot over one town; a resume WITHOUT --blocks must not widen
+    # it into a corpus run — the stale sweep would delete every other town's rows
+    running = {"partial": True, "only": ["500002"], "last_block_key": "500002", "last_id_to": 11,
+               "blocks_done": 0, "chunks_done": 1, "pairs_upserted": 1}
+    conn = _Conn({"500001": [1, 2], "500002": [10, 11, 12], "500003": [20]}, running=running)
+    result = lane.generate(conn, "C", only=(), chunk=10, resume=True, top=5, dry_run=False)
+    inserts = [(c[1]["block_key"], c[1]["id_from"]) for c in conn.calls if c[0] == sql.RUNG_SQL["C1"]["insert"]]
+    assert inserts == [(500002, 11)]
+    assert conn.statements(sql.STALE_SWEEP_SQL) == []
+    assert result["partial"] is True and result["only"] == ["500002"]
+
+
+def test_resume_with_different_blocks_is_refused() -> None:
+    running = {"partial": True, "only": ["500002"], "last_block_key": "500002", "last_id_to": 11}
+    conn = _Conn({"500001": [1, 2], "500002": [10, 11, 12]}, running=running)
+    with pytest.raises(SystemExit, match="opened over blocks"):
+        lane.generate(conn, "C", only=("500001",), chunk=10, resume=True, top=5, dry_run=False)
+    assert conn.statements("INSERT INTO") == []
+
+
+def test_a_failed_generation_resumes_and_is_reopened() -> None:
+    running = {"partial": False, "only": [], "last_block_key": "500001", "last_id_to": lane.ID_MAX,
+               "blocks_done": 1, "chunks_done": 1, "pairs_upserted": 2}
+    conn = _Conn({"500001": [1, 2], "500002": [9]}, running=running, running_status="failed")
+    lane.generate(conn, "C", only=(), chunk=10, resume=True, top=5, dry_run=False)
+    assert len(conn.statements("UPDATE dedup_sim.candidate_generations SET status = 'running'")) == 1
+    inserts = [c[1]["block_key"] for c in conn.calls if c[0] == sql.RUNG_SQL["C1"]["insert"]]
+    assert inserts == [500002]
+    assert len(conn.statements(sql.STALE_SWEEP_SQL)) == 1  # a complete corpus run: sweep allowed
+
+
 def test_resume_without_a_running_generation_opens_a_new_one() -> None:
     conn = _Conn({"500001": [1]}, running=None)
     lane.generate(conn, "C", only=(), chunk=10, resume=True, top=5, dry_run=False)
@@ -304,7 +341,7 @@ def test_compare_block_reports_every_kind_of_disagreement() -> None:
         (2, 4): dc.PairVerdict("C3", None, 60.0, 60.0, 0.0, True),
     }
     got = {
-        (1, 2): {"rung": "C1", "disposition": "2+kk", "floor_checked": True},
+        (1, 2): {"rung": "C1", "disposition": "2+kk", "floor_checked": None},  # NULL = mismatch
         (1, 4): {"rung": "C1", "disposition": None, "floor_checked": True},  # rung mismatch
         (3, 4): {"rung": "C3", "floor_checked": False, "area_lo": 1, "area_hi": 1, "area_diff_pct": 0},  # only sql
     }
@@ -312,6 +349,7 @@ def test_compare_block_reports_every_kind_of_disagreement() -> None:
     assert cmp["agree"] is False
     assert cmp["only_oracle"] == [(2, 4)] and cmp["only_sql"] == [(3, 4)]
     assert cmp["rung_mismatch"] == [((1, 4), "C3", "C1")]
+    assert cmp["evidence_mismatch"] == [((1, 2), "floor_checked", True, None)]
     assert lane.compare_block(oracle, {k: {"rung": v.rung, "disposition": v.disposition, "floor_checked": v.floor_checked,
                                            "area_lo": v.area_lo, "area_hi": v.area_hi, "area_diff_pct": v.area_diff_pct}
                                        for k, v in oracle.items()})["agree"] is True

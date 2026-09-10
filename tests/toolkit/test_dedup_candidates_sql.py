@@ -122,6 +122,27 @@ def test_band_never_separates_two_areas_within_the_widest_tolerance(general: flo
             assert abs(band_a - band_b) <= 1, (a, b, band_a, band_b)
 
 
+def test_floor_guard_is_two_valued_when_a_category_is_unknown() -> None:
+    # category_main is nullable; `NULL = 'byt'` would make the whole guard NULL and either
+    # drop the pair or write NULL into a NOT NULL column. The oracle treats None as "not byt".
+    for rung in ("C1", "C3"):
+        s = sql.RUNG_SQL[rung]["rows"]
+        assert "COALESCE(a.category_main, '') = 'byt' AND COALESCE(b.category_main, '') = 'byt'" in s
+        assert "(a.category_main = 'byt' AND b.category_main = 'byt'" not in s
+
+
+def test_band_is_a_bigint_and_a_zero_tolerance_stays_in_range() -> None:
+    # tolerance 0 is a registry-legal value ("areas must match exactly"); the sentinel
+    # width makes ln(area)/w ~1e10 for a 100 m2 flat — far outside int4, inside bigint.
+    assert "::bigint AS band" in sql.RUNG_SQL["C3"]["rows"]
+    w = sql.band_width(0, 0)
+    for area in (1.0, 8.6, 100.0, 12345.0, 1e9):
+        band = math.floor(math.log(area) / w)
+        assert -(2**63) < band < 2**63 - 1
+    assert math.floor(math.log(100.0) / w) == math.floor(math.log(100.0) / w)
+    assert math.floor(math.log(100.0) / w) != math.floor(math.log(100.01) / w)
+
+
 def test_band_width_edges() -> None:
     assert sql.band_width(5, 2) == pytest.approx(-math.log(0.95))
     assert sql.band_width(100, 2) == 1e9

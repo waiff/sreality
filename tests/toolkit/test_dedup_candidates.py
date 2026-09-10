@@ -220,6 +220,14 @@ def test_floor_rule_applies_to_byt_pairs_with_both_floors_and_is_skipped_otherwi
     assert dc.evaluate_pair(_l(1, dispo=None, floor=1), _l(2, floor=4), INPUTS) is None
 
 
+def test_unknown_category_never_lets_the_floor_rule_veto() -> None:
+    # the SQL mirrors this with COALESCE(category_main, '') = 'byt'
+    v = dc.evaluate_pair(_l(1, cmain=None, floor=1), _l(2, floor=9), INPUTS)
+    assert v is not None and v.floor_checked is False
+    v = dc.evaluate_pair(_l(1, cmain=None, floor=1), _l(2, cmain=None, floor=9), INPUTS)
+    assert v is not None and v.floor_checked is False
+
+
 def test_floor_tolerance_comes_from_the_inputs() -> None:
     tight = {**INPUTS, "l0_floor_tolerance": 0}
     assert dc.evaluate_pair(_l(1, floor=2), _l(2, floor=3), tight) is None
@@ -357,6 +365,17 @@ def test_get_generation_reads_jsonb_as_dicts_or_strings() -> None:
     gen2 = dc.get_generation(_Conn([as_strings]), 9)
     assert gen2 is not None and gen2.inputs == INPUTS and gen2.stats == {"pairs": 1}
     assert dc.get_generation(_Conn([None]), 9) is None
+
+
+def test_reopen_generation_puts_both_rows_back_to_running() -> None:
+    conn = _Conn([None, (1,), (2,), (3,)])
+    gen = dc.begin_generation(conn, "C")
+    conn.calls.clear()
+    dc.reopen_generation(conn, gen)
+    assert [c[0].split(" SET")[0] for c in conn.calls] == [
+        "UPDATE dedup_sim.candidate_generations", "UPDATE dedup_sim.simulation_runs"]
+    assert "status = 'running', completed_at = NULL, error_message = NULL" in conn.calls[0][0]
+    assert conn.calls[0][1] == {"id": 3} and conn.calls[1][1] == {"id": 1}
 
 
 def test_record_progress_and_latest_generation_roundtrip() -> None:

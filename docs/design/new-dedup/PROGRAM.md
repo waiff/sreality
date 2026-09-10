@@ -242,6 +242,16 @@ the two gaps found while adding property list are closed in the same PR that add
   - **Skill updated** (`scraper-ops`, plus `references/new-dedup-candidates-lane.md`): the
     order of operations is estimate → verify on two or three small towns → generate dry-run →
     a Brno pilot → the corpus.
+  - **Reviewed adversarially before merge (three lenses, two refuters per finding): three real
+    defects, fixed.** (1) The byt floor guard was three-valued — a NULL `category_main` (which
+    exists: remax/mmreality can leave it unknown) made `NULL = 'byt'` poison the whole AND, so the
+    SQL dropped pairs the oracle keeps and would have written NULL into a NOT NULL column;
+    `COALESCE(category_main, '')` makes it two-valued, and verify mode now treats a NULL
+    `floor_checked` as a mismatch. (2) A resumed generation took "partial" from the CURRENT
+    dispatch, so resuming an interrupted pilot without repeating `blocks` would have run the
+    corpus-wide stale sweep; the scope now comes from the generation row, a differing `blocks`
+    is refused, and a `failed` generation is resumable (reopened first). (3) A zero area
+    tolerance — registry-legal — overflowed the int4 band; the band is a bigint.
   - **Not run.** Dispatching needs the workflow on `main`; the estimate is the first dispatch
     and is read-only. The generate needs migration 492 applied — asked together with the
     estimate's numbers.
