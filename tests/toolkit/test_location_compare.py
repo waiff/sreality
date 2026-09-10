@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import math
 import re
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -51,12 +53,30 @@ class _Txn:
         return None
 
 
+# The readiness probe every cohort endpoint issues first (migration 493). It is
+# answered by DEFAULT so a test that says nothing about the snapshot exercises the
+# populated path; pass cohort_ready=False to exercise the "generating…" path.
+_STATE_NEEDLE = "FROM location_compare_cohort_state"
+_REFRESHED_AT = datetime(2026, 9, 10, 7, 41, tzinfo=timezone.utc)
+
+
 class _FakeConn:
     autocommit = True
 
-    def __init__(self, canned: dict[str, list[dict[str, Any]]] | None = None) -> None:
+    def __init__(
+        self,
+        canned: dict[str, list[dict[str, Any]]] | None = None,
+        *,
+        cohort_ready: bool = True,
+    ) -> None:
         self.executed: list[tuple[str, Any]] = []
-        self.canned = canned or {}
+        self.canned = dict(canned or {})
+        # setdefault last, so an explicit entry from the caller still wins.
+        self.canned.setdefault(
+            _STATE_NEEDLE,
+            [{"refreshed_at": _REFRESHED_AT if cohort_ready else None,
+              "ready": cohort_ready}],
+        )
 
     def rows_for(self, sql: str) -> list[dict[str, Any]]:
         for needle, rows in self.canned.items():
@@ -87,6 +107,7 @@ def _sql_constants() -> dict[str, str]:
 # --------------------------------------------------------------------------
 
 _MIGRATION_380 = _ROOT / "migrations" / "380_location_w1_enums_and_config.sql"
+_MIGRATION_493 = _ROOT / "migrations" / "493_location_compare_cohort.sql"
 
 
 def _admin_assignment_method_labels() -> list[str]:
@@ -186,10 +207,98 @@ def test_radius_uses_the_dwithin_prefilter_and_never_st_buffer():
 
 
 def test_the_cohort_is_the_union_of_both_sides():
-    assert "b.region_id = ANY(%(kraje)s::bigint[])" in lc._COHORT_CTE
-    assert "OR p.kraj_kod = ANY(%(kraje)s::bigint[])" in lc._COHORT_CTE
-    assert "w.listing_id = p.winner_listing_id" in lc._COHORT_CTE
-    assert "b.is_active" in lc._COHORT_CTE
+    """Same definition, one relation later: migration 493 stores the join and the
+    module filters it. The scope side must stay `p.kraj_kod` — the PROPERTY rollup,
+    which is what the live predicate read — and NOT the winner row's `w.kraj_kod`
+    that every counter uses. The two agree on today's data by coincidence, not by
+    construction."""
+    mig = _MIGRATION_493.read_text(encoding="utf-8")
+    assert "b.is_active" in mig
+    assert "w.listing_id = p.winner_listing_id" in mig
+    assert "p.kraj_kod AS scope_kraj_kod" in mig
+    assert "w.kraj_kod AS scope_kraj_kod" not in mig
+    assert "w.kraj_kod AS new_kraj_kod" in mig
+
+    assert "FROM location_compare_cohort c" in lc._COHORT_CTE
+    assert "c.old_region_id = ANY(%(kraje)s::bigint[])" in lc._COHORT_CTE
+    assert "OR c.scope_kraj_kod = ANY(%(kraje)s::bigint[])" in lc._COHORT_CTE
+
+
+def test_the_page_never_rebuilds_the_three_table_join():
+    """The regression that reintroduces the 2026-09-10 timeout: a statement that
+    reaches past the snapshot back to browse_list + both projections."""
+    for name, sql in _sql_constants().items():
+        for table in (
+            "browse_list", "property_location_current", "listing_location_current"
+        ):
+            assert table not in sql, f"{name} rebuilds the cohort from {table}"
+
+
+def test_the_snapshot_state_table_is_logged_and_upserted():
+    mig = _MIGRATION_493.read_text(encoding="utf-8")
+    assert "create unlogged table if not exists location_compare_cohort as" in mig
+    # LOGGED: it has to outlive the crash recovery that truncates the UNLOGGED
+    # cohort, or the page prints a confident stamp over an empty table.
+    assert "create table location_compare_cohort_state" in mig
+    assert "unlogged table location_compare_cohort_state" not in mig
+    # Upsert, not UPDATE ... WHERE id = 1: a lost seed row would match nothing and
+    # strand the stamp at "generating…" forever.
+    assert "on conflict (id) do update" in mig
+    # The refresh runs from pg_cron, never from a request path (this module cannot
+    # write), and arms its budget in the cron command — migration 371's lesson.
+    assert "'location-compare-cohort-refresh'" in mig
+    assert "set statement_timeout='240s'; select public.refresh_location_compare_cohort();" in mig
+
+
+def test_the_refresh_cannot_run_into_the_browse_list_rebuild():
+    """The refresh reads browse_list, so it holds ACCESS SHARE on it for its whole
+    transaction; rebuild_browse_list() republishes that table with a DROP and arms no
+    lock_timeout of its own, and Postgres parks every later browse_list reader behind
+    that pending ACCESS EXCLUSIVE. A budget that let a :11 run reach the :15 tick would
+    stall Browse platform-wide, so the budget is bounded to the gap, not to what this
+    job could otherwise afford."""
+    mig = _MIGRATION_493.read_text(encoding="utf-8")
+    slot, budget = "'11,41 * * * *'", 240
+    assert slot in mig
+    assert f"set statement_timeout='{budget}s';" in mig
+    start_min = 11
+    assert start_min + budget / 60 <= 15, "the refresh can reach the next */15 rebuild"
+
+
+def test_the_refresh_lock_is_transaction_scoped():
+    """plpgsql's `exception when others` matches every error class EXCEPT
+    query_canceled — so a statement_timeout or an operator's cancel, the two failures
+    an unlock handler exists for, would skip it and strand a SESSION lock; every later
+    tick would then log 'previous run still active' and return success while the
+    snapshot silently stopped refreshing. A transaction lock needs no handler."""
+    mig = _MIGRATION_493.read_text(encoding="utf-8")
+    assert "pg_try_advisory_xact_lock(hashtext('refresh_location_compare_cohort'))" in mig
+    assert "pg_advisory_unlock(" not in mig
+    assert "pg_try_advisory_lock(" not in mig
+
+
+def test_the_function_revoke_follows_the_create():
+    """`revoke ... on function` has no IF EXISTS form: placed before the CREATE it
+    raises 42883 and aborts the whole migration. And a `create or replace` that
+    actually creates re-applies the default EXECUTE TO PUBLIC, so a revoke placed
+    before it would be undone by the statement it guards."""
+    mig = _MIGRATION_493.read_text(encoding="utf-8")
+    create = mig.index("create or replace function refresh_location_compare_cohort()")
+    revoke = mig.index("revoke all on function refresh_location_compare_cohort()")
+    assert revoke > create
+    assert mig.count("revoke all on function refresh_location_compare_cohort()") == 1
+
+
+def test_the_snapshot_is_registered_as_a_derived_artifact():
+    """Corollary E (migration 437): a precomputed artifact declares its producer,
+    cadence and staleness budget, or nobody can tell it is stale. The registry row is
+    what tests/test_derived_artifacts_registry.py checks and what the Health dashboard
+    reads; the plain UPDATE stamp matches rebuild_browse_list()'s."""
+    mig = _MIGRATION_493.read_text(encoding="utf-8")
+    assert "insert into public.derived_artifacts" in mig
+    assert "'location_compare_cohort', 'refresh_location_compare_cohort', 'pg_cron'" in mig
+    assert "update derived_artifacts" in mig
+    assert "where name = 'location_compare_cohort';" in mig
 
 
 # --------------------------------------------------------------------------
@@ -357,10 +466,19 @@ def test_radius_passes_the_browse_bbox_and_the_max_uncertainty_prefilter():
 # --------------------------------------------------------------------------
 
 
-def test_scope_runs_four_reads_and_publishes_the_denominators():
+def _cohort_stmts(conn: _FakeConn) -> list[tuple[str, Any]]:
+    """The parameterized statements that actually read the snapshot — the readiness
+    probe every endpoint issues first is plumbing, not a cohort read."""
+    return [
+        (sql, p) for sql, p in conn.executed
+        if p is not None and "FROM location_compare_cohort c" in sql
+    ]
+
+
+def test_scope_probes_the_snapshot_then_runs_four_reads_and_publishes_the_denominators():
     conn = _FakeConn(
         {
-            "k AS (SELECT unnest": [
+            "k AS (SELECT DISTINCT unnest": [
                 {"kraj_kod": 19, "name": "Praha", "n_old": 200, "n_agree": 150,
                  "n_new_certain": 140, "n_new_possible": 20, "n_new_no": 30,
                  "n_no_row": 20, "n_only_old": 50, "n_only_new": 10}
@@ -376,7 +494,8 @@ def test_scope_runs_four_reads_and_publishes_the_denominators():
     for key in ("n_old", "n_new_certain", "n_new_possible", "n_new_no", "n_no_row",
                 "n_only_old", "n_only_new"):
         assert key in row
-    assert len([p for _, p in conn.executed if p is not None]) == 4
+    assert len([p for _, p in conn.executed if p is not None]) == 5  # probe + 4
+    assert len(_cohort_stmts(conn)) == 4
 
 
 def test_units_picks_the_obec_query_for_obec_and_the_parts_query_for_cast_obce():
@@ -490,22 +609,24 @@ def test_map_rows_reports_truncation_against_the_full_box_count():
 def test_scope_and_units_are_served_from_the_cache_within_the_ttl(monkeypatch):
     conn = _FakeConn()
     first = lc.scope(conn, [19, 27])
-    n_queries = len([p for _, p in conn.executed if p is not None])
+    n_queries = len(_cohort_stmts(conn))
     again = lc.scope(conn, [19, 27])
     assert again is first
-    assert len([p for _, p in conn.executed if p is not None]) == n_queries
+    # A hit still probes (the stamp is part of the key) and reads nothing else.
+    assert len(_cohort_stmts(conn)) == n_queries
+    assert len([p for _, p in conn.executed if p is not None]) == n_queries + 2
     # a different scope is a different key
     lc.scope(conn, [19])
-    assert len([p for _, p in conn.executed if p is not None]) == 2 * n_queries
+    assert len(_cohort_stmts(conn)) == 2 * n_queries
     # units: same shape
     lc.units(conn, level="obec", parent_kod=3100, kraje=[19])
-    before = len(conn.executed)
+    before = len(_cohort_stmts(conn))
     lc.units(conn, level="obec", parent_kod=3100, kraje=[19])
-    assert len(conn.executed) == before
+    assert len(_cohort_stmts(conn)) == before
     # expiry: move the clock past the TTL and the scan runs again
     monkeypatch.setattr(lc.time, "monotonic", lambda: 10 ** 9)
     lc.scope(conn, [19, 27])
-    assert len([p for _, p in conn.executed if p is not None]) > 2 * n_queries
+    assert len(_cohort_stmts(conn)) > 2 * n_queries
 
 
 def test_the_statement_budget_covers_a_cold_cohort_scan():
@@ -520,7 +641,144 @@ def test_legacy_praha_okres_sentinel_is_nulled_before_the_sides_are_compared():
     raw, the okres level lists a phantom district 9999 that the new engine "loses" for
     all of Prague, and an operator review reads that as a finding."""
     assert lc.LEGACY_PRAHA_OKRES_SENTINEL == 9999
+    mig = _MIGRATION_493.read_text(encoding="utf-8")
     assert (
-        f"nullif(b.okres_id, {lc.LEGACY_PRAHA_OKRES_SENTINEL}) AS old_okres_id" in lc._COHORT_CTE
+        f"nullif(b.okres_id, {lc.LEGACY_PRAHA_OKRES_SENTINEL}) AS old_okres_id" in mig
     )
-    assert "b.okres_id AS old_okres_id" not in lc._COHORT_CTE
+    assert "b.okres_id AS old_okres_id" not in mig
+
+
+# --------------------------------------------------------------------------
+# The cohort snapshot (migration 493): join shapes, readiness, the stamp.
+# --------------------------------------------------------------------------
+
+_REWRITTEN = ("_SCOPE_KRAJE_SQL", "_SCOPE_OKRESY_SQL", "_UNITS_OBEC_SQL")
+
+
+def test_no_unit_aggregate_joins_on_an_or():
+    """`LEFT JOIN mv m ON m.old_x = key OR m.new_x = key` can only be served as a
+    nested loop that re-scans the cohort once per unit — 810k of the 1.02M plan cost
+    that timed out on FILTERS — OKRESY. Two UNION ALL arms, each grouped on its own
+    key, count exactly the same rows in one pass."""
+    for name in _REWRITTEN:
+        sql = getattr(lc, name)
+        for or_join in ("= k.kod OR", "= o.kod OR", "= codes.kod OR"):
+            assert or_join not in sql, f"{name} still joins on an OR"
+        assert "UNION ALL" in sql, name
+
+
+def test_the_obec_units_aggregate_is_not_scoped_to_the_parent_okres():
+    """`codes` sets the KEY SET (which obce are listed); the arms set the COUNTED
+    rows and run over the whole kraje-scoped cohort, exactly as the OR-join did.
+    Pushing %(parent_kod)s down would drop every row whose old okres is NULL — all
+    ~99k Praha rows, whose 9999 sentinel is nulled — and undercount the page."""
+    sql = lc._UNITS_OBEC_SQL
+    codes = sql.split("codes AS (")[1].split("pairs AS (")[0]
+    arms = sql.split("pairs AS (")[1].split("agg AS (")[0]
+    assert "%(parent_kod)s" in codes
+    assert "%(parent_kod)s" not in arms
+
+
+def test_every_union_arm_sum_is_cast_to_bigint():
+    """sum(bigint) is numeric -> psycopg hands Python a Decimal -> _pct's
+    `100.0 * agree / n_old` raises TypeError."""
+    for name in _REWRITTEN:
+        sql = getattr(lc, name)
+        for match in re.finditer(r"sum\([^()]*\)(::bigint)?", sql):
+            assert match.group(1), f"{name}: {match.group(0)} is not cast to bigint"
+
+
+def test_an_unpopulated_cohort_is_reported_not_counted():
+    """Before the first refresh (and after a crash truncates the UNLOGGED snapshot)
+    the page says "generating…" instead of publishing zeros as findings — and never
+    memoizes that answer."""
+    conn = _FakeConn(dict(_CZ_BBOX_ROWS), cohort_ready=False)
+
+    out = lc.scope(conn, [19, 27])
+    assert out["cohort_ready"] is False and out["cohort_refreshed_at"] is None
+    assert out["kraje_rows"] == [] and out["okresy"] == []
+    assert out["by_method"] == [] and out["by_source"] == []
+
+    units = lc.units(conn, level="obec", parent_kod=3100, kraje=[19])
+    assert units["rows"] == [] and units["parent_kod"] == 3100
+
+    detail = lc.unit_detail(conn, level="obec", code=554782, kraje=[19], limit=10)
+    assert detail["name"] is None
+    assert set(detail["counts"]) == set(lc._UNIT_COUNT_KEYS)
+    assert set(detail["counts"].values()) == {0}
+    assert detail["only_old"] == [] and detail["only_new"] == []
+
+    mp = lc.map_rows(conn, west=14.0, south=50.0, east=14.5, north=50.5, kraje=[19], limit=2)
+    assert mp["rows"] == [] and mp["truncated"] is False
+    assert set(mp["counts"]) == set(lc._MAP_COUNT_KEYS) and set(mp["counts"].values()) == {0}
+    assert mp["bbox"] == {"west": 14.0, "south": 50.0, "east": 14.5, "north": 50.5}
+
+    rad = lc.radius(conn, lat=50.0755, lng=14.4378, radius_m=1000.0, kraje=[19], limit=5)
+    assert rad["old_bbox_count"] == 0 and rad["new_certain"] == 0
+    assert rad["max_uncertainty_radius_m"] == 0.0
+    assert rad["only_old"] == [] and rad["only_new"] == []
+
+    # Not one cohort statement was issued, and nothing was cached: a ready
+    # connection must go to the database.
+    assert _cohort_stmts(conn) == []
+    ready = _FakeConn()
+    lc.scope(ready, [19, 27])
+    assert len(_cohort_stmts(ready)) == 4
+
+
+def test_the_cache_drops_the_generation_a_refresh_retired():
+    """Every cache key carries the snapshot's refresh stamp, so a tick retires a whole
+    generation of keys at once and nothing ever looks one up again to notice it
+    expired. `_cached` only refuses to SERVE a stale entry, so without a sweep on write
+    the dict would grow for the life of the (long-lived) API process."""
+    retired = ("scope", (19,), "the stamp before last")
+    lc._CACHE[retired] = (time.monotonic() - 1.0, {"kraje_rows": []})
+
+    lc.scope(_FakeConn(), [19, 27])
+
+    assert retired not in lc._CACHE
+    assert len(lc._CACHE) == 1
+
+
+def test_every_cohort_envelope_publishes_the_refresh_stamp():
+    """`generated_at` stays the request clock; `cohort_refreshed_at` is when the
+    numbers were actually computed. Before this the header claimed the request time
+    over cache-hit numbers up to CACHE_TTL_S old."""
+    stamp = _REFRESHED_AT.isoformat()
+
+    scope_out = lc.scope(_FakeConn(), [19, 27])
+    units_out = lc.units(_FakeConn(), level="obec", parent_kod=3100, kraje=[19])
+    unit_out = lc.unit_detail(
+        _FakeConn({
+            "AS n_old": [
+                {"n_old": 0, "n_new_certain": 0, "n_new_possible": 0, "n_new_no": 0,
+                 "n_no_row": 0, "n_only_old": 0, "n_only_new": 0, "n_claimed": 0,
+                 "by_method": [], "by_source": []}
+            ],
+        }),
+        level="obec", code=554782, kraje=[19], limit=10,
+    )
+    map_out = lc.map_rows(
+        _FakeConn({
+            "AS n_total": [
+                {"n_total": 0, "both": 0, "only_old_geom": 0, "only_new_geom": 0,
+                 "moved_gt_100m": 0, "demoted_to_circle": 0, "no_geom_either": 0}
+            ],
+        }),
+        west=14.0, south=50.0, east=14.5, north=50.5, kraje=[19], limit=2,
+    )
+    radius_out = lc.radius(
+        _FakeConn({
+            **_CZ_BBOX_ROWS,
+            "AS max_u": [{"max_u": 0.0}],
+            "AS old_bbox_count": [
+                {"old_bbox_count": 0, "new_certain": 0, "new_possible": 0}
+            ],
+        }),
+        lat=50.0755, lng=14.4378, radius_m=1000.0, kraje=[19], limit=5,
+    )
+
+    for out in (scope_out, units_out, unit_out, map_out, radius_out):
+        assert out["cohort_refreshed_at"] == stamp
+        assert out["cohort_ready"] is True
+        assert out["generated_at"] != stamp  # still the request clock

@@ -559,7 +559,16 @@ export default function LocationCompare() {
     }
   }, [okresKod]);
 
-  const generatedAt = scope.data?.generated_at ?? null;
+  /* The cohort's build time, not the request clock: the numbers on this page come
+   * from a snapshot refreshed every 30 min (migration 493), and a cache hit could
+   * otherwise stamp them up to CACHE_TTL_S newer than they are.
+   *
+   * GATED ON cohort_ready, not on the stamp's nullness. The snapshot is UNLOGGED and
+   * its stamp is LOGGED, so crash recovery leaves the stamp intact over an empty
+   * cohort: the API then answers ready:false with zeroed counters AND a confident
+   * old timestamp. On this page a zero is a finding — "the new engine has no coverage
+   * anywhere" — so the one state that must never render as numbers is this one. */
+  const generatedAt = scope.data?.cohort_ready ? scope.data.cohort_refreshed_at : null;
 
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-2xl mx-auto">

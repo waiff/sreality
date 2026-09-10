@@ -56,6 +56,11 @@ export type OkresRow = ScopeCounters & {
  * counter rows of /compare/scope ride under their own key. */
 export type CompareScope = {
   generated_at: string;
+  /* When the precomputed cohort this answer was counted from was last built
+   * (migration 493, pg_cron every 30 min); null until the first refresh.
+   * `generated_at` remains the request clock. */
+  cohort_refreshed_at: string | null;
+  cohort_ready: boolean;
   kraje: number[];
   kraje_rows: KrajRow[];
   okresy: OkresRow[];
@@ -75,6 +80,11 @@ export type UnitsRow = {
 
 export type CompareUnits = {
   generated_at: string;
+  /* When the precomputed cohort this answer was counted from was last built
+   * (migration 493, pg_cron every 30 min); null until the first refresh.
+   * `generated_at` remains the request clock. */
+  cohort_refreshed_at: string | null;
+  cohort_ready: boolean;
   kraje: number[];
   level: 'obec' | 'cast_obce';
   parent_kod: number;
@@ -98,6 +108,11 @@ export type CompareRow = {
 
 export type CompareUnit = {
   generated_at: string;
+  /* When the precomputed cohort this answer was counted from was last built
+   * (migration 493, pg_cron every 30 min); null until the first refresh.
+   * `generated_at` remains the request clock. */
+  cohort_refreshed_at: string | null;
+  cohort_ready: boolean;
   kraje: number[];
   level: UnitLevel;
   code: number;
@@ -145,6 +160,11 @@ export type MapRow = {
 
 export type CompareMap = {
   generated_at: string;
+  /* When the precomputed cohort this answer was counted from was last built
+   * (migration 493, pg_cron every 30 min); null until the first refresh.
+   * `generated_at` remains the request clock. */
+  cohort_refreshed_at: string | null;
+  cohort_ready: boolean;
   kraje: number[];
   rows: MapRow[];
   truncated: boolean;
@@ -177,6 +197,11 @@ export type RadiusOnlyNew = {
 
 export type CompareRadius = {
   generated_at: string;
+  /* When the precomputed cohort this answer was counted from was last built
+   * (migration 493, pg_cron every 30 min); null until the first refresh.
+   * `generated_at` remains the request clock. */
+  cohort_refreshed_at: string | null;
+  cohort_ready: boolean;
   kraje: number[];
   old_bbox_count: number;
   new_certain: number;

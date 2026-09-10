@@ -30,6 +30,14 @@ with only %(name)s placeholders - CI PREPAREs them against the replayed schema.
 The unit level is a BOUND PARAMETER inside CASE expressions, not string
 interpolation, so there is no dynamic SQL anywhere in this module; the Python
 allowlist exists to 400 junk before it reaches the database, not to build SQL.
+
+THE COHORT IS PRECOMPUTED. Every statement used to rebuild the three-table join
+above from scratch (~1,130 MB of heap per statement), and a cold page load of
+6-9 such statements timed out in production on 2026-09-10. Migration 493 stores
+that projection whole-corpus in `location_compare_cohort`, refreshed blue-green
+by pg_cron every 30 min; this module only ever READS it, filtered to the
+selected kraje. Nothing here writes, and the REFRESH deliberately lives in the
+database, not on a request path.
 """
 
 from __future__ import annotations
@@ -42,15 +50,17 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
-# Admin-only review page, not a user path: every endpoint re-derives the same cohort (a scan of
-# every active browse_list row joined to both projections), and the cold scan measured
-# ~30-40 s on production 2026-09-10 — a 30 s budget returned 500 on first load and the page
-# rendered only because the client retried against a warm cache.
+# Admin-only review page, not a user path. Since migration 493 a statement reads the
+# precomputed snapshot instead of rebuilding the three-table join: ~120 MB scanned at the
+# shipped 2-kraj scope rather than ~1,130 MB, which is 10-30x inside this budget even at the
+# pathological ~10 MB/s the instance was observed serving while the resolve lane saturated IO.
+# Kept at 120 s rather than narrowed: the budget is not what failed, the query shape was.
 STATEMENT_TIMEOUT_S = 120
 
-# The two aggregate endpoints answer the same question for minutes at a time (the projection is
-# rebuilt by a */15 drain that moves ~500 rows a tick), so a short in-process cache turns the
-# operator's second load, okres switch and back-navigation from a 40 s scan into a lookup.
+# The two aggregate endpoints answer the same question for minutes at a time (the snapshot
+# itself only moves every 30 min), so a short in-process cache turns the operator's second
+# load, okres switch and back-navigation into a lookup. Keyed on the snapshot's refresh stamp,
+# so a cache entry can never show a fresh timestamp beside numbers from an older build.
 CACHE_TTL_S = 600.0
 _CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 
@@ -63,7 +73,14 @@ def _cached(key: tuple[Any, ...]) -> dict[str, Any] | None:
 
 
 def _remember(key: tuple[Any, ...], value: dict[str, Any]) -> dict[str, Any]:
-    _CACHE[key] = (time.monotonic() + CACHE_TTL_S, value)
+    # Sweep, don't just overwrite: every key carries the snapshot's refresh stamp, so a
+    # tick retires the whole previous generation of keys and nothing would ever look one
+    # up again to notice it had expired. Without this the dict grows for the life of the
+    # (long-lived, Railway) process.
+    now = time.monotonic()
+    for stale in [k for k, (deadline, _) in _CACHE.items() if deadline <= now]:
+        del _CACHE[stale]
+    _CACHE[key] = (now + CACHE_TTL_S, value)
     return value
 
 
@@ -173,55 +190,35 @@ _CURRENT_UNITS_CTE = """
 # other, measured 2026-09-10). No such unit exists: the registry mirror's Prague path is
 # t1.g19.k19.b554782 — region straight to city, no district level — so the new side
 # honestly stores NULL. Compared raw, the okres level would list a phantom district 9999
-# that the new engine "loses" for all of Prague; nulled here, Prague compares at the kraj
-# and obec levels and has no okres row on either side, which is the truth.
+# that the new engine "loses" for all of Prague; nulled, Prague compares at the kraj and
+# obec levels and has no okres row on either side, which is the truth. The nulling itself
+# now happens in migration 493's projection; this constant is what pins it there.
 LEGACY_PRAHA_OKRES_SENTINEL = 9999
 
 # The cohort is the UNION of the two sides' opinions about the selected kraje,
 # so a property one side places inside and the other outside stays visible as a
-# disagreement instead of silently leaving the denominator.
-_COHORT_CTE = f"""
+# disagreement instead of silently leaving the denominator. `old_region_id` is
+# browse_list's region_id and `scope_kraj_kod` is property_location_current's
+# kraj_kod — the same two columns the predicate spanned before migration 493
+# folded the join into a snapshot, now on one relation so an index can drive it.
+_COHORT_CTE = """
     cohort AS (
-      SELECT b.property_id,
-             b.listing_id,
-             b.source,
-             b.lat AS old_lat,
-             b.lng AS old_lng,
-             b.region_id AS old_region_id,
-             nullif(b.okres_id, {LEGACY_PRAHA_OKRES_SENTINEL}) AS old_okres_id,
-             b.obec_id AS old_obec_id,
-             coalesce(b.place_search_text, concat_ws(', ', b.obec, b.okres)) AS old_label,
-             (w.listing_id IS NOT NULL) AS has_row,
-             w.kraj_kod AS new_kraj_kod,
-             w.okres_kod AS new_okres_kod,
-             w.obec_kod AS new_obec_kod,
-             w.cast_obce_kod AS new_cast_obce_kod,
-             w.ulice_kod AS new_ulice_kod,
-             w.display_label AS new_label,
-             w.geom AS new_geom,
-             w.granularity::text AS granularity,
-             w.match_confidence::text AS match_confidence,
-             w.admin_assignment_method::text AS admin_assignment_method,
-             w.position_source::text AS position_source,
-             w.uncertainty_radius_m::double precision AS uncertainty_radius_m,
-             w.distance_to_nearest_boundary_m::double precision
-               AS distance_to_nearest_boundary_m,
-             w.renderable_as_point,
-             w.render_as,
-             w.pin_collision_class,
-             w.location_disputed,
-             gr.rank AS granularity_rank,
-             p.member_spread_m::double precision AS member_spread_m,
-             p.disagreement_flags,
-             p.member_count
-      FROM browse_list b
-      LEFT JOIN property_location_current p ON p.property_id = b.property_id
-      LEFT JOIN listing_location_current w ON w.listing_id = p.winner_listing_id
-      LEFT JOIN location_granularity_rank gr ON gr.granularity = w.granularity
-      WHERE b.is_active
-        AND (b.region_id = ANY(%(kraje)s::bigint[])
-             OR p.kraj_kod = ANY(%(kraje)s::bigint[]))
+      SELECT c.* FROM location_compare_cohort c
+      WHERE c.old_region_id = ANY(%(kraje)s::bigint[])
+         OR c.scope_kraj_kod = ANY(%(kraje)s::bigint[])
     )"""
+
+COHORT_STATE_ID = 1
+
+# Readiness is proven on the RELATION, never on the stamp: the snapshot is UNLOGGED, so
+# crash recovery truncates it while the LOGGED stamp would happily keep claiming 355k
+# rows. EXISTS is O(1).
+_COHORT_STATE_SQL = """
+SELECT s.refreshed_at,
+       (SELECT EXISTS (SELECT 1 FROM location_compare_cohort)) AS ready
+FROM location_compare_cohort_state s
+WHERE s.id = %(state_id)s::smallint
+"""
 
 # The method verdict, level-independent: 'no_row' when the new engine has no
 # opinion at all, otherwise the (A) lookup on the assignment.
@@ -316,80 +313,139 @@ _ROW_COLUMNS = """
 # Assembled, PREPARE-able statements.
 # --------------------------------------------------------------------------
 
+# TWO ARMS, NOT AN OR-JOIN. `m ON m.old_region_id = k.kod OR m.new_kraj_kod = k.kod`
+# can only be served as a nested loop that re-scans the cohort once per kraj. Every
+# counter's FILTER already implies either old = kod or new = kod, so each belongs to
+# exactly one arm — and inside that arm `kod` IS the grouping column, which turns
+# `IS DISTINCT FROM k.kod` into the same test against the arm's own column. The
+# `::bigint` on every sum() is mandatory: sum(bigint) is numeric, psycopg hands that
+# back as Decimal, and _pct's `100.0 * agree / n_old` then raises TypeError.
 _SCOPE_KRAJE_SQL = f"""
 WITH{_COHORT_CTE},{_METHOD_VERDICT_CTE},
-     k AS (SELECT unnest(%(kraje)s::bigint[]) AS kod)
+     pairs AS (
+       SELECT m.old_region_id AS kod,
+              count(*)::bigint AS n_old,
+              0::bigint AS n_new_certain,
+              0::bigint AS n_new_possible,
+              count(*) FILTER (WHERE m.has_row
+                                 AND (m.new_kraj_kod IS DISTINCT FROM m.old_region_id
+                                      OR m.mverdict = 'no'))::bigint AS n_new_no,
+              count(*) FILTER (WHERE NOT m.has_row)::bigint AS n_no_row,
+              count(*) FILTER (WHERE NOT m.has_row
+                                 OR m.new_kraj_kod IS DISTINCT FROM m.old_region_id
+                                 OR m.mverdict = 'no')::bigint AS n_only_old,
+              0::bigint AS n_only_new,
+              count(*) FILTER (WHERE m.new_kraj_kod = m.old_region_id
+                                 AND m.mverdict IN ('certain', 'possible'))::bigint
+                AS n_agree
+       FROM mv m WHERE m.old_region_id IS NOT NULL GROUP BY 1
+       UNION ALL
+       SELECT m.new_kraj_kod,
+              0::bigint,
+              count(*) FILTER (WHERE m.mverdict = 'certain')::bigint,
+              count(*) FILTER (WHERE m.mverdict = 'possible')::bigint,
+              0::bigint, 0::bigint, 0::bigint,
+              count(*) FILTER (WHERE m.mverdict IN ('certain', 'possible')
+                                 AND m.old_region_id IS DISTINCT FROM m.new_kraj_kod)::bigint,
+              0::bigint
+       FROM mv m WHERE m.new_kraj_kod IS NOT NULL GROUP BY 1
+     ),
+     agg AS (
+       SELECT kod,
+              sum(n_old)::bigint AS n_old,
+              sum(n_new_certain)::bigint AS n_new_certain,
+              sum(n_new_possible)::bigint AS n_new_possible,
+              sum(n_new_no)::bigint AS n_new_no,
+              sum(n_no_row)::bigint AS n_no_row,
+              sum(n_only_old)::bigint AS n_only_old,
+              sum(n_only_new)::bigint AS n_only_new,
+              sum(n_agree)::bigint AS n_agree
+       FROM pairs GROUP BY kod
+     ),
+     -- DISTINCT, not the old GROUP BY: the page lists the chips the operator
+     -- picked, so a kraj with no cohort rows still renders a row of zeros, and a
+     -- duplicated ?kraje=19,19 (parse_kraje does not dedupe) still renders once.
+     k AS (SELECT DISTINCT unnest(%(kraje)s::bigint[]) AS kod)
 SELECT k.kod AS kraj_kod,
        u.name AS name,
-       count(*) FILTER (WHERE m.old_region_id = k.kod) AS n_old,
-       count(*) FILTER (WHERE m.new_kraj_kod = k.kod
-                          AND m.mverdict = 'certain') AS n_new_certain,
-       count(*) FILTER (WHERE m.new_kraj_kod = k.kod
-                          AND m.mverdict = 'possible') AS n_new_possible,
-       count(*) FILTER (WHERE m.old_region_id = k.kod AND m.has_row
-                          AND (m.new_kraj_kod IS DISTINCT FROM k.kod
-                               OR m.mverdict = 'no')) AS n_new_no,
-       count(*) FILTER (WHERE m.old_region_id = k.kod
-                          AND NOT m.has_row) AS n_no_row,
-       count(*) FILTER (WHERE m.old_region_id = k.kod
-                          AND (NOT m.has_row
-                               OR m.new_kraj_kod IS DISTINCT FROM k.kod
-                               OR m.mverdict = 'no')) AS n_only_old,
-       count(*) FILTER (WHERE m.new_kraj_kod = k.kod
-                          AND m.mverdict IN ('certain', 'possible')
-                          AND m.old_region_id IS DISTINCT FROM k.kod) AS n_only_new,
-       count(*) FILTER (WHERE m.old_region_id = k.kod
-                          AND m.new_kraj_kod = k.kod
-                          AND m.mverdict IN ('certain', 'possible')) AS n_agree
+       coalesce(agg.n_old, 0)::bigint AS n_old,
+       coalesce(agg.n_new_certain, 0)::bigint AS n_new_certain,
+       coalesce(agg.n_new_possible, 0)::bigint AS n_new_possible,
+       coalesce(agg.n_new_no, 0)::bigint AS n_new_no,
+       coalesce(agg.n_no_row, 0)::bigint AS n_no_row,
+       coalesce(agg.n_only_old, 0)::bigint AS n_only_old,
+       coalesce(agg.n_only_new, 0)::bigint AS n_only_new,
+       coalesce(agg.n_agree, 0)::bigint AS n_agree
 FROM k
-LEFT JOIN mv m ON m.old_region_id = k.kod OR m.new_kraj_kod = k.kod
+LEFT JOIN agg ON agg.kod = k.kod
 LEFT JOIN LATERAL (
     SELECT ru.name FROM ruian_admin_units ru
     WHERE ru.level = 'kraj' AND ru.code = k.kod AND ru.retired_at IS NULL
     ORDER BY (ru.valid_to IS NULL) DESC, ru.valid_from DESC LIMIT 1
 ) u ON true
-GROUP BY k.kod, u.name
 ORDER BY k.kod
 """
 
+# The statement that timed out on 2026-09-10. Same two-arm rewrite as the kraje
+# aggregate: the emitted key set is the union of both arms' groups, i.e. exactly the
+# `o` CTE this replaces, and each counter keeps its truth value verbatim.
 _SCOPE_OKRESY_SQL = f"""
 WITH{_CURRENT_UNITS_CTE},{_COHORT_CTE},{_METHOD_VERDICT_CTE},
-     o AS (
-       SELECT DISTINCT kod FROM (
-         SELECT old_okres_id AS kod FROM cohort WHERE old_okres_id IS NOT NULL
-         UNION
-         SELECT new_okres_kod FROM cohort WHERE new_okres_kod IS NOT NULL
-       ) t
+     pairs AS (
+       SELECT m.old_okres_id AS kod,
+              count(*)::bigint AS n_old,
+              0::bigint AS n_new_certain,
+              0::bigint AS n_new_possible,
+              count(*) FILTER (WHERE m.has_row
+                                 AND (m.new_okres_kod IS DISTINCT FROM m.old_okres_id
+                                      OR m.mverdict = 'no'))::bigint AS n_new_no,
+              count(*) FILTER (WHERE NOT m.has_row)::bigint AS n_no_row,
+              count(*) FILTER (WHERE NOT m.has_row
+                                 OR m.new_okres_kod IS DISTINCT FROM m.old_okres_id
+                                 OR m.mverdict = 'no')::bigint AS n_only_old,
+              0::bigint AS n_only_new,
+              count(*) FILTER (WHERE m.new_okres_kod = m.old_okres_id
+                                 AND m.mverdict IN ('certain', 'possible'))::bigint
+                AS n_agree
+       FROM mv m WHERE m.old_okres_id IS NOT NULL GROUP BY 1
+       UNION ALL
+       SELECT m.new_okres_kod,
+              0::bigint,
+              count(*) FILTER (WHERE m.mverdict = 'certain')::bigint,
+              count(*) FILTER (WHERE m.mverdict = 'possible')::bigint,
+              0::bigint, 0::bigint, 0::bigint,
+              count(*) FILTER (WHERE m.mverdict IN ('certain', 'possible')
+                                 AND m.old_okres_id IS DISTINCT FROM m.new_okres_kod)::bigint,
+              0::bigint
+       FROM mv m WHERE m.new_okres_kod IS NOT NULL GROUP BY 1
+     ),
+     agg AS (
+       SELECT kod,
+              sum(n_old)::bigint AS n_old,
+              sum(n_new_certain)::bigint AS n_new_certain,
+              sum(n_new_possible)::bigint AS n_new_possible,
+              sum(n_new_no)::bigint AS n_new_no,
+              sum(n_no_row)::bigint AS n_no_row,
+              sum(n_only_old)::bigint AS n_only_old,
+              sum(n_only_new)::bigint AS n_only_new,
+              sum(n_agree)::bigint AS n_agree
+       FROM pairs GROUP BY kod
      )
-SELECT o.kod AS okres_kod,
+SELECT agg.kod AS okres_kod,
        ku.code AS kraj_kod,
        ou.name AS name,
-       count(*) FILTER (WHERE m.old_okres_id = o.kod) AS n_old,
-       count(*) FILTER (WHERE m.new_okres_kod = o.kod
-                          AND m.mverdict = 'certain') AS n_new_certain,
-       count(*) FILTER (WHERE m.new_okres_kod = o.kod
-                          AND m.mverdict = 'possible') AS n_new_possible,
-       count(*) FILTER (WHERE m.old_okres_id = o.kod AND m.has_row
-                          AND (m.new_okres_kod IS DISTINCT FROM o.kod
-                               OR m.mverdict = 'no')) AS n_new_no,
-       count(*) FILTER (WHERE m.old_okres_id = o.kod
-                          AND NOT m.has_row) AS n_no_row,
-       count(*) FILTER (WHERE m.old_okres_id = o.kod
-                          AND (NOT m.has_row
-                               OR m.new_okres_kod IS DISTINCT FROM o.kod
-                               OR m.mverdict = 'no')) AS n_only_old,
-       count(*) FILTER (WHERE m.new_okres_kod = o.kod
-                          AND m.mverdict IN ('certain', 'possible')
-                          AND m.old_okres_id IS DISTINCT FROM o.kod) AS n_only_new,
-       count(*) FILTER (WHERE m.old_okres_id = o.kod
-                          AND m.new_okres_kod = o.kod
-                          AND m.mverdict IN ('certain', 'possible')) AS n_agree
-FROM o
-LEFT JOIN mv m ON m.old_okres_id = o.kod OR m.new_okres_kod = o.kod
-LEFT JOIN cur_units ou ON ou.level = 'okres' AND ou.code = o.kod
+       agg.n_old,
+       agg.n_new_certain,
+       agg.n_new_possible,
+       agg.n_new_no,
+       agg.n_no_row,
+       agg.n_only_old,
+       agg.n_only_new,
+       agg.n_agree
+FROM agg
+LEFT JOIN cur_units ou ON ou.level = 'okres' AND ou.code = agg.kod
 LEFT JOIN ruian_admin_units ku ON ku.id = ou.parent_id
-GROUP BY o.kod, ku.code, ou.name
-ORDER BY n_old DESC, o.kod
+ORDER BY agg.n_old DESC, agg.kod
 """
 
 _SCOPE_BY_METHOD_SQL = f"""
@@ -426,25 +482,51 @@ WITH{_CURRENT_UNITS_CTE},{_COHORT_CTE},{_METHOD_VERDICT_CTE},
          SELECT new_obec_kod FROM mv
          WHERE new_okres_kod = %(parent_kod)s::bigint AND new_obec_kod IS NOT NULL
        ) t
+     ),
+     -- The arms are deliberately NOT filtered by %(parent_kod)s. `codes` above sets
+     -- the KEY SET (which obce are listed); the aggregate sets the COUNTED ROWS, and
+     -- today's OR-join runs against the unfiltered mv. Pushing the okres filter down
+     -- here would exclude every row whose old okres is NULL — all ~99k Praha rows, whose
+     -- 9999 sentinel is nulled — and undercount the page that approves the cutover.
+     pairs AS (
+       SELECT m.old_obec_id AS kod,
+              count(*)::bigint AS n_old,
+              0::bigint AS n_new_certain,
+              0::bigint AS n_new_possible,
+              count(*) FILTER (WHERE NOT m.has_row
+                                 OR m.new_obec_kod IS DISTINCT FROM m.old_obec_id
+                                 OR m.mverdict = 'no')::bigint AS n_only_old,
+              0::bigint AS n_only_new
+       FROM mv m WHERE m.old_obec_id IS NOT NULL GROUP BY 1
+       UNION ALL
+       SELECT m.new_obec_kod,
+              0::bigint,
+              count(*) FILTER (WHERE m.mverdict = 'certain')::bigint,
+              count(*) FILTER (WHERE m.mverdict = 'possible')::bigint,
+              0::bigint,
+              count(*) FILTER (WHERE m.mverdict IN ('certain', 'possible')
+                                 AND m.old_obec_id IS DISTINCT FROM m.new_obec_kod)::bigint
+       FROM mv m WHERE m.new_obec_kod IS NOT NULL GROUP BY 1
+     ),
+     agg AS (
+       SELECT kod,
+              sum(n_old)::bigint AS n_old,
+              sum(n_new_certain)::bigint AS n_new_certain,
+              sum(n_new_possible)::bigint AS n_new_possible,
+              sum(n_only_old)::bigint AS n_only_old,
+              sum(n_only_new)::bigint AS n_only_new
+       FROM pairs GROUP BY kod
      )
 SELECT codes.kod AS code,
        u.name AS name,
-       count(*) FILTER (WHERE m.old_obec_id = codes.kod) AS n_old,
-       count(*) FILTER (WHERE m.new_obec_kod = codes.kod
-                          AND m.mverdict = 'certain') AS n_new_certain,
-       count(*) FILTER (WHERE m.new_obec_kod = codes.kod
-                          AND m.mverdict = 'possible') AS n_new_possible,
-       count(*) FILTER (WHERE m.old_obec_id = codes.kod
-                          AND (NOT m.has_row
-                               OR m.new_obec_kod IS DISTINCT FROM codes.kod
-                               OR m.mverdict = 'no')) AS n_only_old,
-       count(*) FILTER (WHERE m.new_obec_kod = codes.kod
-                          AND m.mverdict IN ('certain', 'possible')
-                          AND m.old_obec_id IS DISTINCT FROM codes.kod) AS n_only_new
+       coalesce(agg.n_old, 0)::bigint AS n_old,
+       coalesce(agg.n_new_certain, 0)::bigint AS n_new_certain,
+       coalesce(agg.n_new_possible, 0)::bigint AS n_new_possible,
+       coalesce(agg.n_only_old, 0)::bigint AS n_only_old,
+       coalesce(agg.n_only_new, 0)::bigint AS n_only_new
 FROM codes
-LEFT JOIN mv m ON m.old_obec_id = codes.kod OR m.new_obec_kod = codes.kod
+LEFT JOIN agg ON agg.kod = codes.kod
 LEFT JOIN cur_units u ON u.level = 'obec' AND u.code = codes.kod
-GROUP BY codes.kod, u.name
 ORDER BY n_old DESC, codes.kod
 """
 
@@ -740,8 +822,37 @@ UNION ALL
 # --------------------------------------------------------------------------
 
 
-def _envelope(kraje: list[int], **payload: Any) -> dict[str, Any]:
-    return {"generated_at": _utcnow(), "kraje": kraje, **payload}
+_NOT_READY: dict[str, Any] = {"refreshed_at": None, "ready": False}
+
+# The eight counters /compare/unit publishes, so a not-ready answer has the same
+# shape (zeroed) as a real one and the frontend needs no new type.
+_UNIT_COUNT_KEYS = (
+    "n_old", "n_new_certain", "n_new_possible", "n_new_no",
+    "n_no_row", "n_only_old", "n_only_new", "n_claimed",
+)
+_MAP_COUNT_KEYS = (
+    "both", "only_old_geom", "only_new_geom",
+    "moved_gt_100m", "demoted_to_circle", "no_geom_either",
+)
+
+
+def _iso(value: Any) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _envelope(
+    kraje: list[int], state: dict[str, Any] | None = None, **payload: Any
+) -> dict[str, Any]:
+    """`generated_at` stays the REQUEST clock; `cohort_refreshed_at` is when the
+    numbers below it were actually computed (migration 493's snapshot)."""
+    state = state or _NOT_READY
+    return {
+        "generated_at": _utcnow(),
+        "cohort_refreshed_at": _iso(state["refreshed_at"]),
+        "cohort_ready": state["ready"],
+        "kraje": kraje,
+        **payload,
+    }
 
 
 def _pct(agree: int, n_old: int) -> float | None:
@@ -760,6 +871,12 @@ def _query(
         return cur.fetchall()
 
 
+def _cohort_state(conn: psycopg.Connection) -> dict[str, Any]:
+    rows = _query(conn, _COHORT_STATE_SQL, {"state_id": COHORT_STATE_ID})
+    row = rows[0] if rows else {}
+    return {"refreshed_at": row.get("refreshed_at"), "ready": bool(row.get("ready"))}
+
+
 def cz_bbox(conn: psycopg.Connection) -> dict[str, float]:
     rows = _query(conn, _CZ_BBOX_SQL, {"name": CZ_BBOX_CONSTANT})
     if not rows:
@@ -770,13 +887,19 @@ def cz_bbox(conn: psycopg.Connection) -> dict[str, float]:
 
 
 def scope(conn: psycopg.Connection, kraje: list[int]) -> dict[str, Any]:
-    key = ("scope", tuple(kraje))
-    cached = _cached(key)
-    if cached is not None:
-        return cached
     params = {"kraje": list(kraje)}
     with conn.transaction():
         _timeout(conn)
+        state = _cohort_state(conn)
+        if not state["ready"]:
+            return _envelope(
+                list(kraje), state,
+                kraje_rows=[], okresy=[], by_method=[], by_source=[],
+            )
+        key = ("scope", tuple(kraje), state["refreshed_at"])
+        cached = _cached(key)
+        if cached is not None:
+            return cached
         kraj_rows = _query(conn, _SCOPE_KRAJE_SQL, params)
         okres_rows = _query(conn, _SCOPE_OKRESY_SQL, params)
         by_method = _query(conn, _SCOPE_BY_METHOD_SQL, params)
@@ -787,6 +910,7 @@ def scope(conn: psycopg.Connection, kraje: list[int]) -> dict[str, Any]:
 
     return _remember(key, _envelope(
         list(kraje),
+        state,
         kraje_rows=kraj_rows,
         okresy=okres_rows,
         by_method=by_method,
@@ -798,17 +922,23 @@ def units(
     conn: psycopg.Connection, *, level: str, parent_kod: int, kraje: list[int]
 ) -> dict[str, Any]:
     check_level(level, allowed=UNIT_LIST_LEVELS)
-    key = ("units", level, parent_kod, tuple(kraje))
-    cached = _cached(key)
-    if cached is not None:
-        return cached
     params = {"kraje": list(kraje), "parent_kod": parent_kod}
     sql = _UNITS_OBEC_SQL if level == "obec" else _UNITS_CAST_OBCE_SQL
     with conn.transaction():
         _timeout(conn)
+        state = _cohort_state(conn)
+        if not state["ready"]:
+            return _envelope(
+                list(kraje), state, level=level, parent_kod=parent_kod, rows=[]
+            )
+        key = ("units", level, parent_kod, tuple(kraje), state["refreshed_at"])
+        cached = _cached(key)
+        if cached is not None:
+            return cached
         rows = _query(conn, sql, params)
     return _remember(
-        key, _envelope(list(kraje), level=level, parent_kod=parent_kod, rows=rows)
+        key,
+        _envelope(list(kraje), state, level=level, parent_kod=parent_kod, rows=rows),
     )
 
 
@@ -851,6 +981,15 @@ def unit_detail(
     check_level(level)
     with conn.transaction():
         _timeout(conn)
+        state = _cohort_state(conn)
+        # Before _resolve_unit: with no snapshot there is nothing to compare, and a
+        # registry lookup that 400s on a bad code would hide that from the operator.
+        if not state["ready"]:
+            return _envelope(
+                list(kraje), state, level=level, code=code, name=None,
+                counts={k: 0 for k in _UNIT_COUNT_KEYS},
+                by_method=[], by_source=[], only_old=[], only_new=[],
+            )
         name, parent_obec_kod, name_pat = _resolve_unit(conn, level=level, code=code)
         params = {
             "kraje": list(kraje),
@@ -872,6 +1011,7 @@ def unit_detail(
 
     return _envelope(
         list(kraje),
+        state,
         level=level,
         code=code,
         name=name,
@@ -912,17 +1052,25 @@ def map_rows(
         "north": north,
         "limit": limit,
     }
+    bbox = {"west": west, "south": south, "east": east, "north": north}
     with conn.transaction():
         _timeout(conn)
+        state = _cohort_state(conn)
+        if not state["ready"]:
+            return _envelope(
+                list(kraje), state, rows=[], truncated=False,
+                counts={k: 0 for k in _MAP_COUNT_KEYS}, bbox=bbox,
+            )
         counts = _query(conn, _MAP_COUNTS_SQL, params)[0]
         rows = _query(conn, _MAP_ROWS_SQL, params)
     n_total = counts.pop("n_total")
     return _envelope(
         list(kraje),
+        state,
         rows=rows,
         truncated=n_total > len(rows),
         counts=counts,
-        bbox={"west": west, "south": south, "east": east, "north": north},
+        bbox=bbox,
     )
 
 
@@ -948,6 +1096,20 @@ def radius(
             raise CompareInputError("lat is outside the CZ bounding box")
         if not (cz["west"] <= lng <= cz["east"]):
             raise CompareInputError("lng is outside the CZ bounding box")
+        # After validation, never before: a 400 must not wait on the readiness probe.
+        state = _cohort_state(conn)
+        if not state["ready"]:
+            return _envelope(
+                list(kraje), state,
+                centre={"lat": lat, "lng": lng, "radius_m": radius_m},
+                old_bbox=bbox,
+                max_uncertainty_radius_m=0.0,
+                old_bbox_count=0,
+                new_certain=0,
+                new_possible=0,
+                only_old=[],
+                only_new=[],
+            )
         max_u = _query(conn, _MAX_UNCERTAINTY_SQL, {"kraje": list(kraje)})[0]["max_u"]
         params = {
             "kraje": list(kraje),
@@ -968,6 +1130,7 @@ def radius(
 
     return _envelope(
         list(kraje),
+        state,
         centre={"lat": lat, "lng": lng, "radius_m": radius_m},
         old_bbox=bbox,
         max_uncertainty_radius_m=float(max_u or 0),
