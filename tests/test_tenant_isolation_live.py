@@ -144,6 +144,13 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
     # the per-image winner store. Backend-only, NO `_public` view; the SPA reads
     # them through the admin-gated API (/new-dedup/tags/*).
     "tag_head_models", "tag_head_model_heads", "image_tag_scores",
+    # The Level-0 candidate store (migration 492, schema dedup_sim): parameter
+    # sets, generation runs and the listing-pair evidence rows. Backend-only, NO
+    # `_public` view; the Candidate audit page reads them through the admin-gated
+    # API (/new-dedup/candidates/*).
+    "dedup_sim.candidate_inputs",
+    "dedup_sim.candidate_generations",
+    "dedup_sim.candidate_pairs",
 ]
 
 # Relations that read the above but are legitimately reachable without the gate.

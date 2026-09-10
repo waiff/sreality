@@ -27,7 +27,8 @@ def test_every_floor_uses_a_ranked_granularity_and_a_known_confidence() -> None:
 
 
 def test_the_table_transcribes_the_design_row_by_row() -> None:
-    # The design's 21 rows minus the two that declare no floor (see the module docstring).
+    # The design's 21 rows minus the two that declare no floor (see the module docstring),
+    # plus the path C row added by operator ruling on 2026-09-10.
     expected = {
         "map_pin": ("listing", "building", "high"),
         "map_circle": ("listing", "obec", "any"),
@@ -41,6 +42,9 @@ def test_the_table_transcribes_the_design_row_by_row() -> None:
         "dedup_rung_0c": ("listing", "parcel", "high"),
         "dedup_tier_1": ("listing", "street", "medium"),
         "dedup_tier_2": ("listing", "street_segment", "medium"),
+        # + the one row ruled after the design was written: path C's "same town" rung
+        # (NEW DEDUP ledger 2026-09-10; docs/design/location-serving-contract.md §3).
+        "dedup_path_c": ("listing", "obec", "any"),
         "property_map_pin": ("property", "building", "high"),
         "property_card_location": ("property", "obec", "any"),
         "comparables_estimation": ("listing", "street", "medium"),

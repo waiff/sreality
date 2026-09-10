@@ -74,10 +74,31 @@ REGISTRY: dict[str, SettingDef] = {
             value_type=ValueType.NUMERIC,
             default=75,
             explanation=(
-                "How close two listings' coordinates need to be, in meters, "
-                "to become a geo-based candidate pair. 75m covers GPS and "
-                "geocoding noise for the same building without pulling in "
-                "the next lot."
+                "Path A only. How close two listings' coordinates need to be, "
+                "in meters, to become a geo-based candidate pair. 75m covers "
+                "GPS and geocoding noise for the same building without "
+                "pulling in the next lot. Path C has no radius at all: being "
+                "in the same town IS its location match, so this knob does "
+                "not reach it."
+            ),
+        ),
+        SettingDef(
+            key="l0_path_c_town_key",
+            category=Category.L0_CANDIDATES,
+            value_type=ValueType.TEXT,
+            default="obec_kod",
+            enum_choices=("obec_kod",),
+            explanation=(
+                "Which location field path C means by 'town'. obec_kod is the "
+                "official municipality code (RÚIAN) from the new location "
+                "engine's projection, the coarsest grain the input data is "
+                "reliably right at (operator ruling 2026-09-10). Two listings "
+                "must share it to be looked at together on path C; a listing "
+                "without one has no path C candidates. Only one choice exists "
+                "today — a finer key (e.g. a city district for Praha or Brno) "
+                "would be a second choice here plus its column in the "
+                "generation SQL, and would re-generate every path C pair; the "
+                "lane refuses a value its SQL does not implement."
             ),
         ),
         SettingDef(
@@ -89,7 +110,9 @@ REGISTRY: dict[str, SettingDef] = {
                 "For apartments (byt) only: how many floors apart two "
                 "listings can be and still count as a candidate pair. Floor "
                 "numbers are self-reported and often off by one or two, so "
-                "an exact match would miss real duplicates."
+                "an exact match would miss real duplicates. Applies on every "
+                "path and rung; when either side has no floor the rule cannot "
+                "be checked and the pair is kept, marked as unchecked."
             ),
         ),
         SettingDef(
@@ -101,7 +124,10 @@ REGISTRY: dict[str, SettingDef] = {
             explanation=(
                 "How far apart two listings' usable area can be, as a "
                 "percent of the larger one, and still count as a candidate "
-                "pair. Applies to every property type except pozemek (land)."
+                "pair. Applies to every property type except pozemek (land). "
+                "This is the area rung's test (path A rung A3, path C rung "
+                "C3); an area that is missing or zero on either side means "
+                "the rung cannot be evaluated for that pair."
             ),
         ),
         SettingDef(

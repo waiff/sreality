@@ -23,8 +23,11 @@ non-negotiables" for the full rationale.
 ## Status
 
 🟢 **W0 DONE — Gate 0 closed 2026-09-05** (Wave 0 — backup + teardown + scaffolding),
-**W1 in progress** (Wave 1 — shared prerequisites). See PROGRAM.md's progress ledger for
-session-by-session detail; this file tracks only the phase-to-phase status.
+🟢 **W1 DONE — Gate 1 closed 2026-09-09** (Wave 1 — shared prerequisites + labeling program;
+operator confirmation: training set finalized, tag model v1 live — the accuracy iteration
+continues as a parallel track), **W2 in progress** (Wave 2 — Level 0 candidate selection,
+**path C first**, ruled 2026-09-10). See PROGRAM.md's progress ledger for session-by-session
+detail; this file tracks only the phase-to-phase status.
 
 W0 was recorded done on 2026-08-25 and was not. Migration 432 dropped only the two funnel/cost
 matviews; every other CUTOFF §4 object, the whole publication gate (§3 step 2) and the
@@ -63,8 +66,8 @@ W1 (shared prerequisites + labeling program):
 - [x] Settings API (`api/routes/new_dedup.py`, admin-gated) + the real NEW DEDUP Settings page
       (`frontend/src/pages/NewDedupSettings.tsx`, replaces PR-2's placeholder) — operator can now
       review/tune every decided default ahead of any wave consuming it.
-- [ ] Dashboard skeleton (funnel + cost table) — still just PR-2's placeholder; genuinely no data
-      to show until W2+ produces candidates/decisions. Revisit once W2 lands.
+- [ ] Dashboard skeleton (funnel + cost table) — **carried into W2** (2026-09-10), not built yet: the
+      funnel top ships with the Candidate audit page (W2 PR 3), the first moment there is a count to show.
 - [x] Labeling page, tri-state rework (docs/design/tag-annotation-matrix.md, 2026-08-26) — the
       taxonomy and the confirmed ground truth are now PERMANENT tables outside `dedup_sim`:
       `tag_taxonomy` + `image_tag_labels` (migration 442, one positive/negative/excluded row per
@@ -536,7 +539,42 @@ W1 (shared prerequisites + labeling program):
       photo; a third view listing every photo a head scored, sorted by score) shipped as
       **PR #1368**, merged the same day.
 
-Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
+## W2 — Level 0: candidate selection (path C first)
+
+Operator ruling 2026-09-10 (PROGRAM.md decisions ledger "Candidate path C" + the 2026-09-10 (a)
+entry): paths A and B are NOT built in this wave; **path C = town + attributes**, where town is
+`listing_location_current.obec_kod` from the new location engine (rule 24 — never the legacy
+`listings.obec_id`/`geom`/`street`), rung **C1 = town + disposition**, **C3 = town + area** when a
+disposition is not available on either side, no radius, the rest unchanged (area 5 %/2 %, byt
+floor ±2, sale ≠ rent, dům ↔ komerční only). Built expandable to path A (a second `PathDef`).
+
+- [x] **PR 1 — the candidate store + parameters + the rule as code.** Migration **492**
+      (`dedup_sim.candidate_inputs` / `candidate_generations` / `candidate_pairs`: one row per
+      listing pair × path × inputs, PK `(inputs_id, lo, hi)`, a fingerprint per parameter set so a
+      changed input re-generates the pair, a `simulation_runs` row per generation run,
+      `triggered_by` + `'lane'`), `l0_path_c_town_key` in the settings registry + path-aware blurbs,
+      the `dedup_path_c` floor in `location_data/serving_contracts.py`, `toolkit/dedup_candidates.py`
+      (path/rung registry, fingerprint, `evaluate_pair` as the oracle, generation lifecycle), tests.
+      **Migration 492 is written, NOT applied** (apply-after-OK).
+- [ ] **PR 2 — path C generation lane** (`.github/workflows/new_dedup_candidates.yml`, dispatch
+      only): `estimate` (reads only — the exact pair volume per town and rung, all-time and
+      active-only, before a row is written) and `generate` (set-based SQL per town block and id
+      range, upsert into the store, resumable from `progress`, stale sweep, the funnel + audit
+      stats onto the generation row).
+- [ ] **PR 3 — Candidate audit page + dashboard funnel top** under NEW DEDUP: property type ×
+      path matrix (path-B column from day one, empty), missing-data tables (overall, then per
+      portal per type), town/bucket statistics (the pin/clique analogue; clique guard stays
+      parked), funnel: all listings → with town → candidates by type and path.
+- [ ] **Gate 2** (the operator's wording): the operator, reading the audit page, is satisfied that
+      path C loses no rightful candidates to data quality; path B's first output reviewed — the
+      second clause needs W3's path B, flagged as open question 5 in PROGRAM.md 2026-09-10 (a).
+
+**Open for the operator (from the 2026-09-10 (a) entry):** confirm the four "not available" /
+fallback definitions; the scope of the first generation (all-time vs active-only); **Praha at obec
+grain is on the order of 10⁸ pairs all-time** — accept, or rule a finer town key for statutory
+cities; OK to apply migration 492; whether Gate 2 closes on path C alone; the 12th target tag.
+
+Waves W3-W8 (retag + path B through production wiring) are not started; see PROGRAM.md.
 
 ## Data-quality prerequisite (operator-run, parallel to the code work)
 

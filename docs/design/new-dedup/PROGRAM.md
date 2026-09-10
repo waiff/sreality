@@ -38,7 +38,8 @@ until the whole stack is approved end-to-end. Other rules:
 | pHash | Global default ≤11 + per-tag overrides (drawing-tag risk) |
 | Embeddings (ruled 2026-09-05) | **DINOv3 ViT-B/16, 768-d `halfvec`, corpus-wide, is the PRIMARY embedding for all three consumers — the tag heads, Level 3 similarity, and path B** — conditional on the operator accepting the DINOv3 licence (free of charge + commercial use permitted; the terms in ENCODER-DECISION.md §2.8 are the operator's to accept). If declined: DINOv2 ViT-L/14-with-registers (Apache-2.0). ≥0.98 starting L3 threshold, expect recalibration. **The CLIP lane keeps running on new images in parallel** so results can be compared later. Cadence for new images: OPEN (see 2026-09-05 (b)) |
 | Candidate path B (2026-08-27; vectors re-ruled 2026-09-05) | **Image-similarity candidate generation runs in parallel with path A**, all property types: batch k-NN over per-type priority **same-tag** image embeddings proposes pairs, using the **DINOv3 vectors** (same store as the heads and L3) once W3's retag supplies the new tags. **B is only another way to FIND pairs** — everything downstream (levels, rules, settings) is identical to A; nothing B-specific exists. B's two search parameters (neighbor count, minimum similarity to propose a pair) are not yet specified — the operator is asked at build time. Audit C (W5) shows whether CLIP vectors suffice or B should read DINOv2 vectors — operator decides |
-| Gate 1 (ruled 2026-09-05; supersedes "Probe scope 2026-08-27") | **Target tags = 12**: fasáda, nezařízená místnost, půdorys, katastrální mapa, kuchyně, obývací pokoj, koupelna, garáž, jídelna, ložnice, technické zařízení, domovní vchod (open: which of the two "domovní vchod" tags — exteriér id 2 or interiér id 19). **Machine-made labels COUNT** toward the per-tag target; the operator expects ~300–400 positives per head, machine-labeled under the operator-approved definitions and process. The per-head agreement report stays a **diagnostic the operator reads**, not a threshold in code. **The training set is not finalized or reviewed yet — no training on it until the operator says so.** Open question carried: how ostatní's any-two-interior rule is represented at labeling time |
+| Candidate path C (ruled 2026-09-10) | **Town + attributes, built FIRST and alone; paths A and B are not being built now.** Path C replaces path A's "street + geo" and "geo" tests and every ± metre distance with **"same town" = `listing_location_current.obec_kod`** (the new location engine's projection — never the legacy `listings.obec_id` / `geom`), because the input location data is only reliably right at town grain. Rungs: **C1 = town + disposition**; **C2 not applicable** (town already stands in for both of A's first two location tests); **C3 = town + area**, taken when a disposition is **not available** on either side ("if not available then fall back" — absence, never a mismatch); **radius not applicable**; the rest (area tolerance 5 % / 2 % pozemek, byt floor ±2, sale ≠ rent, dům ↔ komerční only, same-portal pairs valid) stays the same. Keep the build expandable to path A (a second `PathDef`, not a second engine). **That is the ruling.** *Defined by PR 1 and AWAITING the operator's confirmation (open question 1 of 2026-09-10 (a)) — not ruled:* fallback on absence only, never on a mismatch; "not available", per side: disposition NULL/blank, area NULL/zero (`usable_area`, `estate_area` for pozemek), town = no `obec_kod`, floor NULL = rule unchecked and the pair kept; the category guards = the merge chokepoint's (NULL = unknown); scope = the entire database (the mission's wording; open question 2); the floor row `dedup_path_c` in `location_data/serving_contracts.py` (obec, any confidence). |
+| Gate 1 (ruled 2026-09-05; supersedes "Probe scope 2026-08-27"; **CLOSED 2026-09-09** — the operator's confirmation, relayed in the 2026-09-10 session brief: "Wave 1 is complete (Gate 1 closed: set finalized, tag model v1 live)"; see 2026-09-10 (a)) | **Target tags = 12**: fasáda, nezařízená místnost, půdorys, katastrální mapa, kuchyně, obývací pokoj, koupelna, garáž, jídelna, ložnice, technické zařízení, domovní vchod (open: which of the two "domovní vchod" tags — exteriér id 2 or interiér id 19). **Machine-made labels COUNT** toward the per-tag target; the operator expects ~300–400 positives per head, machine-labeled under the operator-approved definitions and process. The per-head agreement report stays a **diagnostic the operator reads**, not a threshold in code. ~~**The training set is not finalized or reviewed yet — no training on it until the operator says so.**~~ (superseded by the closure above: the set as finalized is the one tag model v1 was trained on — 11 heads, per 2026-09-09 (d); the confirmation as relayed did not name which "domovní vchod" tag is the 12th, so that question is carried as open question 6 of 2026-09-10 (a), not silently closed). Open question carried: how ostatní's any-two-interior rule is represented at labeling time |
 | RunPod | Set up in Wave 1; serverless/on-demand only, **<$1/day** run-rate; may reuse PR #804 harness |
 | Vision | GPT-5-mini, manual batches only; qwen pluggable later |
 | Taxonomy v1 | The operator-curated `image_training_examples` label set (49 labels: `interier -*`, `exterier -*`, `podklad -*`, standalone garáž/technické zařízení/other); "katastr" ≙ `podklad - katastrální mapa`; tag-family defaults reconfirmed at training-set finalization |
@@ -50,7 +51,8 @@ until the whole stack is approved end-to-end. Other rules:
 Schema `dedup_sim` (droppable wholesale). Two-tier recompute:
 
 - **Evidence tier (expensive, computed once, reused across runs):** candidate pairs from L0
-  (keyed by listing pair + path + inputs; paths = A1 street / A2 geo+dispo / A3 geo+area and,
+  (keyed by listing pair + path + inputs; paths = **C** town+disposition (C1) / town+area (C3)
+  — built first, migration 492 —, A1 street / A2 geo+dispo / A3 geo+area (not built) and,
   from W3, B image-similarity), and per `(pair, tag_family)` image-comparison
   evidence — best/qualifying pHash distances + pair counts, later best/qualifying DINOv2
   similarities. Evidence rows carry the image-set fingerprint so stale rows recompute when a
@@ -83,14 +85,27 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   gallery-flip hazard); iterate sample until 300 proposals for ≥50% of the **target** categories,
   then assess coverage with operator. Operator confirms/dismisses into the training set. ⛳ per
   sample round.
-  **Gate 1: 150 training images (human or machine) per target tag — the 12 tags ruled 2026-09-05 — AND the operator has reviewed and finalized the set.**
-- **W2 — Level 0: candidate selection.** Primary path + 2 fallbacks + byt floor rule, sim
-  candidate store, **Candidate audit page** (type × path matrix, **with a path-B column from day
-  one** — empty until W3; missing-field tables overall + per portal per type; pin/clique
-  statistics). Recall diagnostic vs legacy manual merges only if
-  granted (**bold request** at that moment). ⛳ after mechanics, after audit page.
-  **Gate 2: operator satisfied path A loses no rightful candidates to data quality (poor-geo
-  gaps explicitly covered later by path B + the operator's parallel location-DQ work).**
+  **Gate 1: 150 training images (human or machine) per target tag — the 12 tags ruled 2026-09-05 — AND the operator has reviewed and finalized the set.** **CLOSED 2026-09-09** (operator confirmation; tag model v1 live per 2026-09-09 (d)). The dashboard skeleton, W1's one unbuilt bullet, is carried into W2 (its funnel top ships with the candidate audit page).
+- **W2 — Level 0: candidate selection — PATH C FIRST (ruling 2026-09-10; paths A and B are
+  not built in this wave).** Three PRs, each draft-first with tests and CI green, the ledger
+  updated at every handoff: **(1)** the sim candidate store (migration 492: one row per listing
+  pair × path × the inputs that produced it, a fingerprint so a changed input re-generates the
+  pair; a `simulation_runs` row per generation run; the confirmed parameters as settings);
+  **(2)** path C generation as a dispatchable GitHub Actions lane (set-based SQL, full corpus,
+  re-runnable — an estimate mode that writes nothing comes first, because the volume at obec
+  grain is the open question) plus the funnel counts it feeds; **(3)** the **Candidate audit
+  page** (property type × path matrix **with a path-B column from day one** — empty until W3;
+  missing-data tables overall, then per portal per type; town/bucket statistics in the place of
+  pin/clique statistics — the clique guard stays parked) and the dashboard's funnel top (all
+  listings → candidates by type and path). Location is read ONLY through the projection
+  (CLAUDE.md rule 24, `docs/design/location-serving-contract.md` §7). Recall diagnostic vs
+  legacy manual merges only if granted (**bold request** at that moment). ⛳ after each PR.
+  **Gate 2 (the operator's wording, brief of 2026-09-10): the operator, reading the audit page,
+  is satisfied that the built path loses no rightful candidates to data quality (poor-geo gaps
+  explicitly covered later by path B + the operator's parallel location-DQ work); path B's first
+  output reviewed.** Flagged, not resolved: the second clause can only be met once W3 has built
+  path B, so as written Gate 2 cannot close before W3 starts — open question 5 of 2026-09-10 (a)
+  asks whether it closes on path C alone.
 - **W3 — Linear probe + full retag + candidate path B.** Train probe on the gated training set
   (grouped splits, pinned encoder, versioned artifact); validate on the Labeling page;
   campaign-retag the corpus into the sim tag store. Then **path B generation**: a batch k-NN job
@@ -128,9 +143,9 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 ## Parked / open items
 
 - Clique guard (operator location-DQ sessions running in parallel; revisit before W2 gate).
-- **Same-town candidate rung (operator request 2026-09-08; definition pending — see the
-  2026-09-08 (b) ledger entry).** Not in the L0 spec today (which uses coordinates + 75 m and
-  explicitly no obec field). Nothing is designed until the operator states the rule.
+- ~~Same-town candidate rung (operator request 2026-09-08; definition pending)~~ — **RULED
+  2026-09-10 as candidate path C** (decisions ledger row + the 2026-09-10 (a) entry). What is
+  still open about it is the VOLUME it implies at obec grain in Praha, listed in that entry.
 - **Path B risk, noted only — no mechanism designed (no-invented-rules instruction):** B has no
   location anchor, so identical marketing photos (developer catalogs, staged/stock interiors,
   reused renders across a project's units) can become candidate pairs and would merge at L2
@@ -193,6 +208,114 @@ the two gaps found while adding property list are closed in the same PR that add
 8. **Ledger entry** here, memory note, roadmap line.
 
 ## Progress ledger (update every session, newest first)
+
+- 2026-09-10 (a) — **Gate 1 CLOSED. Wave 2 opened on the operator's PATH C ruling. PR 1 of
+  three: the candidate store (migration 492 — written, NOT applied), the parameters as settings,
+  the rule as code. And one number the operator has to see before anything is generated.**
+
+  **Gate 1, closed.** The operator confirmed on 2026-09-09 that Wave 1 is complete: the training
+  set is finalized and tag model v1 is live (entry (d) of that day). The one W1 bullet still open
+  — the dashboard skeleton (funnel + cost table) — is carried into this wave and ships with PR 3,
+  because until a generation has run there is still nothing for a funnel to count.
+
+  **The ruling, in the operator's terms.** Candidate selection has several paths; **paths A and B
+  are not being built now — path C is, alone, and the build stays expandable to A.** Path C
+  differs from A in one move: every "street + geo" and "geo" test, and every ± metre distance, is
+  replaced by **"same town"**, because our location data on input can be inaccurate and the best
+  relatively confident accuracy is at town level. Town is `listing_location_current.obec_kod` —
+  the new location engine's projection (CLAUDE.md rule 24; the serving contract's §7 query is the
+  ONE way location is read), never `listings.obec_id` / `geom` / `street`, even where those
+  legacy columns are better populated today: they are being deprecated. Rung **A1 → C1 = town +
+  disposition; A2 → not applicable; A3 → C3 = town + area; radius → not applicable;** the rest
+  stays the same (5 % / 2 % pozemek area tolerance, byt floor ±2, sale ≠ rent, dům ↔ komerční the
+  only cross-type, same-portal pairs valid, the whole database, legacy merges ignored).
+
+  **What the brief left to be defined, and how PR 1 defines it (the operator asked for "the 'if
+  not available then fall back' rule and what 'not available' means on each side" — these are
+  the answers, written so they can be overruled in one line each):**
+  1. **Fallback is on ABSENCE only.** A pair is evaluated on C1 when BOTH listings carry a
+     disposition; if EITHER lacks one, the pair is evaluated on C3 instead. Two present but
+     different dispositions are NOT a candidate and do not fall back to area — a mismatch is an
+     answer, not a gap.
+  2. **"Not available", per field, per side:** disposition = NULL or blank after trimming; area
+     = NULL or zero (`usable_area`; `estate_area` when the listing is pozemek); town = no
+     `obec_kod` (no projection row counts as unknown, never as "no town"); floor = NULL.
+  3. **A missing floor does not drop the pair.** The byt ±2 rule is checked only when both sides
+     are byt with a known floor; otherwise the pair is kept and marked `floor_checked = false`,
+     so the audit page can say how often the rule could not be applied. (The alternative —
+     dropping the pair — would lose candidates to data quality, which is what Gate 2 guards.)
+  4. **The category guards are the merge chokepoint's, verbatim** (`toolkit/property_identity.py`):
+     `category_type` equal, NULL = unknown = not a conflict; `category_main_compatible` (equal, or
+     dům ↔ komerční). The pozemek area tolerance applies when EITHER side is pozemek.
+  5. **Floor for the town key**: a new row `dedup_path_c` (obec, any confidence, `obec_kod`
+     present) in `location_data/serving_contracts.py` — the contract said the rung "needs its own
+     operator ruling"; it now has one, so the row exists rather than an inline exception.
+
+  **Built (PR 1).** Migration **492**: `dedup_sim.candidate_inputs` (one parameter set: path,
+  fingerprint = 16 hex of SHA-256 over the canonical inputs JSON + generator version — the ruled
+  defaults hash to `ebc60a2894867cc7`, pinned by a test so a moved default is a visible change —,
+  the inputs themselves), `dedup_sim.candidate_generations` (one run of one parameter set, linked to its
+  `simulation_runs` row; `progress` = the lane's resume cursor, `stats` = the funnel and audit
+  numbers, computed once at the end), `dedup_sim.candidate_pairs` (PK `(inputs_id, lo, hi)`,
+  `lo < hi` enforced, `rung` an attribute — a pair sits on exactly one rung per path — and TYPED
+  evidence columns: the shared disposition, the two areas and their gap in percent, the two
+  floors and `floor_checked`; no per-row jsonb, no foreign key into `listings`). A re-run under
+  the same inputs UPSERTS (same key space; `generation_id` and `last_seen_at` move); changed
+  inputs land in a new key space; the pair table carries NO secondary index — the primary key's
+  `inputs_id` prefix already serves the stale sweep and every per-parameter-set aggregate, and
+  leaving `generation_id` / `last_seen_at` unindexed keeps a re-run's upserts cheap. Two
+  generations of one parameter set are kept from overlapping by the lane's concurrency group, not
+  by the schema. `simulation_runs.triggered_by` gains `'lane'`. Settings: one new knob,
+  `l0_path_c_town_key` (only choice `obec_kod`, in the fingerprint; a finer key for statutory
+  cities would be a second choice there AND its column in the generation SQL — the lane refuses
+  a value its SQL does not implement), and the geo-radius / floor / area blurbs now say which
+  path each reaches. Code: `toolkit/dedup_candidates.py` — the path/rung registry
+  (`PATHS["C"]`, rungs C1/C3 with plain-language explanations), `path_inputs` + `fingerprint`,
+  the rule as pure Python (`evaluate_pair`, the ORACLE the lane's SQL is held to in tests), and
+  the lifecycle (`begin_generation` → `record_progress` → `finish_generation`, a failed run keeps
+  its row). Tests: the migration's shape, every definition above, symmetry of the rule, the
+  lifecycle over a fake connection; both RLS rails register the three tables. **The migration is
+  NOT applied** — additive, but the operator's rule is apply-after-OK; PR 2's estimate mode does
+  not need it.
+
+  **Measured 2026-09-10 (projection + listings, read-only; the lane's estimate mode will give the
+  exact figure):** projection rows 755,650, of which **610,119 carry an `obec_kod` (80.7 %)** —
+  path C's whole population; `geo_blockable` only 77,407 (10.2 %) and a street key on 132,530
+  (17.5 %), which is the size of the gap path C exists for. Listings 819,401 (388,629 active);
+  disposition on 362,133, `usable_area` on 513,941, `estate_area` on 262,288, floor on 339,849.
+  **Praha (obec 554782) holds 108,552 projection rows.** A 3 % sample of them: 70 % carry a
+  disposition; the single largest C1 bucket, pronájem / byt / 2+kk, scales to ~16k listings —
+  **~1.3 × 10⁸ pairs on its own before the floor rule**, and Praha's C1 rungs together are on the
+  order of 10⁸ rows all-time (roughly a seventh of that active-only; every other town is at least
+  16× smaller, Brno being ¼ of Praha's listings and so ¹⁄₁₆ of its pairs). **This volume follows
+  from the rule as stated — "same town" at obec grain in the capital — not from any knob.** It is
+  not a problem the code hides: the store is built narrow for it, and PR 2 runs an estimate
+  before writing a row. Whether the number is acceptable, or whether Praha needs the "town
+  district" the operator's first phrasing mentioned, is the operator's call, with the exact count
+  in hand. One caveat on every coverage number above: the idnes / ceskereality / realitymix archive
+  sweeps run from 2026-09-10, so their older listings are thin on the projection until each reports
+  `reached_end=true` (serving contract §6) — "with a town" will grow for those three portals without
+  any change to path C, and the audit page's per-portal table is where that shows.
+
+  **Open, and the operator's to decide (numbered; answers move into the decisions ledger):**
+  1. Confirm the four definitions above (fallback on absence only; "not available" per field;
+     missing floor = kept, unchecked; chokepoint category guards).
+  2. **Scope:** the whole database (active + inactive, per the mission) is what is built. The
+     estimate will show all-time and active-only side by side; say which the first generation
+     runs on.
+  3. **Praha at obec grain** (10⁸-row order): accept, or rule a finer town key for the statutory
+     cities (`momc_kod` exists on the projection). Nothing is designed until ruled.
+  4. OK to apply migration 492 — asked at the PR 2 handoff together with the estimate.
+  5. **Gate 2's second clause.** The brief's Gate 2 wording ends "path B's first output reviewed";
+     path B is built in W3, which sits after Gate 2 in the wave order. Does Gate 2 close on path
+     C alone, with B's first output reviewed at Gate 3 as already written there?
+  6. **The 12th target tag.** Gate 1 was ruled at 12 tags with "domovní vchod" (exteriér id 2 or
+     interiér id 19) left open; the finalized set that trained v1 has 11 heads. Is the 12th tag
+     dropped, or still to be added as a new model version?
+
+  **Housekeeping.** Draft PR #1186 (2026-08-26, "L0 parallel candidate path B — geo-free town
+  blocking", docs only) proposed town blocking under the name path B before B became image
+  similarity; this ruling supersedes it under the name path C — closing it is suggested, not done.
 
 - 2026-09-10 — **The location engine is readable; read it, not the legacy columns** (recorded
   by the location track, not a dedup session). All seven W2 portal contracts un-shadowed
