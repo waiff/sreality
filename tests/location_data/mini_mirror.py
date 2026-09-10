@@ -371,15 +371,23 @@ def claim(
 _MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
 
 
+# Every migration that seeds `location_uncertainty_policy` v1 rows, in apply order — the
+# resolver meets the UNION of them, so the test seed must too.
+UNCERTAINTY_SEED_MIGRATIONS = (
+    "383_location_w1_resolutions.sql",
+    "491_location_uncertainty_policy_street_rungs.sql",
+)
+
+
 def v1_uncertainty_policy() -> tuple[UncertaintyPolicyRow, ...]:
-    """`location_uncertainty_policy`'s v1 seed, parsed out of migration 383."""
+    """`location_uncertainty_policy`'s v1 seed, parsed out of the seeding migrations."""
     from tests.location_data.test_location_schema_contracts import _unquote, _values_rows
     from tests.test_migration_rls_grants import _strip_comments
 
-    sql = _strip_comments(
-        (_MIGRATIONS / "383_location_w1_resolutions.sql").read_text(encoding="utf-8")
-    )
-    rows = _values_rows(sql, "location_uncertainty_policy")
+    rows: list[tuple[str, ...]] = []
+    for name in UNCERTAINTY_SEED_MIGRATIONS:
+        sql = _strip_comments((_MIGRATIONS / name).read_text(encoding="utf-8"))
+        rows.extend(_values_rows(sql, "location_uncertainty_policy"))
     out: list[UncertaintyPolicyRow] = []
     for row in rows:
         r95 = row[4].strip()
@@ -394,7 +402,7 @@ def v1_uncertainty_policy() -> tuple[UncertaintyPolicyRow, ...]:
                 derivation=_unquote(row[6]) or "constant",
             )
         )
-    assert out, "migration 383 seeds no location_uncertainty_policy rows"
+    assert out, "the seeding migrations seed no location_uncertainty_policy rows"
     return tuple(out)
 
 

@@ -199,3 +199,23 @@ def test_a_field_that_produces_no_winner_is_surfaced_as_blocked():
     assert "claim_lacks_independent_agreement" in {
         s.rule for s in resolution.contradiction_signals
     }
+
+
+# Migration 491: the two rungs the 2026-09-10 06:00Z tick failed 73 of 500 listings on.
+def test_491_covers_the_two_rungs_the_drain_failed_on():
+    for position_source, granularity, expected in (
+        ("registry_point", "street", 300.0),
+        ("portal_pin_blurred", "street_segment", 500.0),
+    ):
+        radius, semantics = uncertainty.radius_for(
+            SEED, position_source=position_source, granularity=granularity, source="sreality",
+        )
+        assert (radius, semantics) == (expected, "geometric_bound"), (position_source, granularity)
+
+
+def test_491_never_undercuts_the_street_blur_band():
+    # A blurred pin at a finer rung must not claim a smaller blur than the street row.
+    street = uncertainty.lookup(SEED, position_source="portal_pin_blurred", granularity="street", source="*")
+    segment = uncertainty.lookup(SEED, position_source="portal_pin_blurred", granularity="street_segment", source="*")
+    assert street is not None and segment is not None
+    assert segment.r95_m >= street.r95_m
