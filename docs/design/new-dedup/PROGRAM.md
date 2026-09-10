@@ -240,9 +240,18 @@ the two gaps found while adding property list are closed in the same PR that add
     histogram's **0-pairs band is blank**, because `generation_stats` builds that histogram from
     the pair rows — a town that produced no pair never enters it, so a printed "0" there would
     read as "every town produced a pair". (Only estimate mode feeds `_distribution` every town.)
-  - **Not run, not decided.** The page has no finished generation to show until the estimate is
-    read, migration 492 is applied and a generate runs. Gate 2 stays open, and so do the six
-    open questions of entry (a) — including question 5 (whether Gate 2 closes on path C alone).
+  - **The lane's first two dispatches, on `main` after PR 2 merged (both read-only).**
+    `verify` over three small towns — Aš (554499, 665 listings), Bohumín (599051, 601),
+    Benátky nad Jizerou (535451, 475): **AGREE on all three** — the SQL returned exactly the
+    pair set the Python rule accepts (7,262 / 3,091 / 1,745 pairs), rung for rung, evidence
+    value for evidence value, zero disagreements of any class. So the set-based SQL IS the rule
+    as written in entry (a), on real data, before a single row is stored. A first sense of the
+    volume at small-town scale: 3–11 pairs per listing. `estimate` over the whole corpus
+    (scopes all + active) was dispatched right after; its job summary is the number the open
+    questions 2 and 3 are answered with.
+  - **Not decided.** The page has no finished generation to show until the estimate is read,
+    migration 492 is applied and a generate runs. Gate 2 stays open, and so do the six open
+    questions of entry (a) — including question 5 (whether Gate 2 closes on path C alone).
 
 - 2026-09-10 (b) — **W2 PR 2: the path C generation LANE — `new_dedup_candidates.yml`,
   three modes, nothing run yet.** PR 1 (entry (a)) built the store and wrote the rule as
