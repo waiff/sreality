@@ -44,6 +44,8 @@ class _FakeCursor:
             self._result = list(self.state["pins"])
         elif text.startswith("insert into pin_cluster_epochs"):
             self._result = [(99,)]
+        elif text.startswith("select coalesce(max(id), 0) from listings"):
+            self._result = [(self.state.get("max_listing_id", 0),)]
         else:
             self._result = []
 
@@ -67,8 +69,13 @@ class _FakeConn:
         yield
 
 
-def _state(pins: list[tuple[Any, ...]] | None = None) -> dict[str, Any]:
-    return {"executed": [], "transactions": 0, "pins": pins or []}
+def _state(
+    pins: list[tuple[Any, ...]] | None = None, max_listing_id: int = 0,
+) -> dict[str, Any]:
+    return {
+        "executed": [], "transactions": 0, "pins": pins or [],
+        "max_listing_id": max_listing_id,
+    }
 
 
 def _wrote_an_epoch(state: dict[str, Any]) -> bool:
@@ -158,7 +165,7 @@ def test_kraje_picks_the_scoped_statement_and_passes_the_codes_first():
 
 
 def test_no_kraje_keeps_the_corpus_wide_sweep_that_also_sees_unprojected_rows():
-    state = _state()
+    state = _state(max_listing_id=1_000)
     drain.enqueue_full_sweep(_FakeConn(state), policy_version="v1", kraje=())
     sql, params = next(
         (text, p) for text, p in state["executed"] if text.startswith("insert into dirty_locations")
@@ -166,6 +173,41 @@ def test_no_kraje_keeps_the_corpus_wide_sweep_that_also_sees_unprojected_rows():
     assert "kraj_kod" not in sql
     assert "p.listing_id is null" in sql
     assert params[0] == RESOLVER_VERSION
+
+
+def _sweep_windows(state: dict[str, Any]) -> list[tuple[str, Any]]:
+    return [(t, p) for t, p in state["executed"] if t.startswith("insert into dirty_locations")]
+
+
+def test_the_corpus_wide_sweep_walks_listing_id_windows_each_in_its_own_transaction():
+    """The unscoped sweep MUST drive off the claim corpus (a listing with no projection
+    exists nowhere else), and that corpus grows ~150k rows an hour under the archive
+    sweeps — so one statement over all of it cannot finish under the 900 s ceiling (the
+    kraj-scoped cousin already died that way, run 34459466027, 2026-09-10). Windows bound
+    the work by id range; one bounded transaction per window means an interrupted sweep
+    loses at most a window and re-running is idempotent."""
+    state = _state(max_listing_id=600_000)
+    drain.enqueue_full_sweep(_FakeConn(state), policy_version="v1", kraje=(), window=250_000)
+    windows = _sweep_windows(state)
+    assert [(p[-2], p[-1]) for _, p in windows] == [
+        (0, 250_000), (250_000, 500_000), (500_000, 600_000),
+    ]
+    assert all("c.listing_id > %s and c.listing_id <= %s" in t for t, _ in windows)
+    assert state["transactions"] == len(windows)
+    # The bound is an index probe on listings' primary key, never max() over the claims view.
+    assert any(t.startswith("select coalesce(max(id), 0) from listings") for t, _ in state["executed"])
+    assert not any("max(" in t and "location_claims" in t for t, _ in state["executed"])
+    flat = " ".join(drain._FULL_SWEEP_SQL.split()).lower()
+    assert flat.count("%s") == 5
+
+
+def test_an_empty_corpus_sweeps_nothing_and_a_non_positive_window_is_refused():
+    state = _state(max_listing_id=0)
+    assert drain.enqueue_full_sweep(_FakeConn(state), policy_version="v1", kraje=()) == 0
+    assert _sweep_windows(state) == []
+    import pytest
+    with pytest.raises(ValueError):
+        drain.enqueue_full_sweep(_FakeConn(_state(max_listing_id=5)), policy_version="v1", kraje=(), window=0)
 
 
 def test_the_kraje_argument_parses_a_comma_separated_workflow_input():

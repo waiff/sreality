@@ -174,6 +174,8 @@ DEFAULT_BATCH_TIMEOUT_S = 30
 # projection; minutes is normal for it and only for it.
 SWEEP_TIMEOUT_ENV = "LOCATION_RESOLVE_SWEEP_TIMEOUT_S"
 DEFAULT_SWEEP_TIMEOUT_S = 900
+# Listing-id width of one corpus-sweep window (see _FULL_SWEEP_SQL).
+DEFAULT_SWEEP_WINDOW = 250_000
 LOCK_TIMEOUT_S = 5
 
 
@@ -200,17 +202,32 @@ def _bounded(conn: psycopg.Connection, seconds: int) -> Iterator[psycopg.Cursor]
 
 # `location_resolve_sweep` — the daily reconcile backstop for lost enqueues. Everything
 # whose projection is missing or was built at a version tuple that is no longer current.
+#
+# Walked in LISTING-ID WINDOWS, never as one statement. This has to drive off the claim
+# corpus — a listing with NO projection exists nowhere else — and that corpus is what the
+# W2-13 archive sweeps grow by ~150k rows an hour, so the single-statement form stopped
+# fitting under the 900 s sweep ceiling on 2026-09-10 (the kraj-scoped cousin died first,
+# run 34459466027; #1384 inverted that one onto the projection, which this one cannot do).
+# A window bounds the work by id range: the claim index range-scans it, the anti-join
+# touches only that range's rows, and each window commits on its own, so an interrupted
+# sweep resumes by simply re-running (ON CONFLICT makes every window idempotent).
 _FULL_SWEEP_SQL = """
 INSERT INTO dirty_locations (listing_id, reason)
 SELECT DISTINCT c.listing_id, 'full_sweep'
   FROM location_claims_live c
   LEFT JOIN listing_location_current p ON p.listing_id = c.listing_id
- WHERE p.listing_id IS NULL
-    OR p.resolver_version <> %s
-    OR p.policy_version <> %s
-    OR p.registry_version_id <> %s
+ WHERE (p.listing_id IS NULL
+        OR p.resolver_version <> %s
+        OR p.policy_version <> %s
+        OR p.registry_version_id <> %s)
+   AND c.listing_id > %s AND c.listing_id <= %s
 ON CONFLICT (listing_id) DO NOTHING
 """
+
+# The window walk's upper bound. `listings.id` bounds every claim's listing_id and max()
+# over its primary key is an index probe — max() over the claims VIEW would be the very
+# corpus scan the windows exist to avoid.
+_SWEEP_UPPER_BOUND_SQL = "SELECT coalesce(max(id), 0) FROM listings"
 
 # The same stale set, restricted to a few kraje — a resolver bump can then be rolled out on
 # a real cohort before the corpus. A listing with NO projection has no `kraj_kod` to filter
@@ -762,34 +779,57 @@ def enqueue_full_sweep(
     *,
     policy_version: str,
     kraje: Sequence[int] | None = None,
+    window: int = DEFAULT_SWEEP_WINDOW,
 ) -> int:
     """`location_resolve_sweep`: the backstop for lost enqueues. The incremental lane stays
     the primary path — this only re-enqueues what a version bump or a dropped enqueue left
     behind.
 
-    Its own (much larger) budget: one corpus-wide anti-join is minutes of honest work, so
-    the batch ceiling would fail it every time — but "minutes" is not "forever", and this
-    used to run with no ceiling at all.
+    Every statement here gets the sweep budget rather than the batch ceiling — but never
+    the whole corpus in one statement; see `_FULL_SWEEP_SQL` for why it is windowed.
 
     `kraje` scopes the stale set to those `kraj_kod`s, which is how a resolver bump gets a
-    side-by-side cohort before the corpus-wide run.
+    side-by-side cohort before the corpus-wide run; that shape drives off the projection
+    and is one bounded statement.
     """
     seconds = loader_db.env_timeout_s(SWEEP_TIMEOUT_ENV, DEFAULT_SWEEP_TIMEOUT_S)
-    with _bounded(conn, seconds) as cur:
-        registry_version_id, _ = resolve_db.current_registry_version(conn)
-        if kraje:
+    registry_version_id, _ = resolve_db.current_registry_version(conn)
+    if kraje:
+        with _bounded(conn, seconds) as cur:
             cur.execute(
                 _FULL_SWEEP_KRAJE_SQL,
                 (list(kraje), RESOLVER_VERSION, policy_version, registry_version_id),
             )
-        else:
-            cur.execute(_FULL_SWEEP_SQL, (RESOLVER_VERSION, policy_version, registry_version_id))
-        enqueued = cur.rowcount
+            enqueued = cur.rowcount
+        LOG.info(
+            "SWEEP enqueued=%d timeout=%ds kraje=%s",
+            enqueued, seconds, ",".join(str(k) for k in kraje),
+        )
+        return enqueued
+    if window <= 0:
+        raise ValueError("sweep window must be positive")
+    with conn.cursor() as cur:
+        cur.execute(_SWEEP_UPPER_BOUND_SQL)
+        row = cur.fetchone()
+        upper = int(row[0]) if row else 0
+    enqueued = 0
+    after = 0
+    windows = 0
+    while after < upper:
+        hi = min(after + window, upper)
+        with _bounded(conn, seconds) as cur:
+            cur.execute(
+                _FULL_SWEEP_SQL,
+                (RESOLVER_VERSION, policy_version, registry_version_id, after, hi),
+            )
+            n = max(cur.rowcount, 0)
+        enqueued += n
+        windows += 1
+        LOG.info("SWEEP window=(%d,%d] enqueued=%d", after, hi, n)
+        after = hi
     LOG.info(
-        "SWEEP enqueued=%d timeout=%ds kraje=%s",
-        enqueued,
-        seconds,
-        ",".join(str(k) for k in kraje) if kraje else "all",
+        "SWEEP enqueued=%d windows=%d width=%d timeout=%ds kraje=all",
+        enqueued, windows, window, seconds,
     )
     return enqueued
 
@@ -821,6 +861,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--kraje", default="", help="full-sweep only: comma-separated kraj_kod scope"
     )
+    parser.add_argument(
+        "--sweep-window", type=int, default=DEFAULT_SWEEP_WINDOW,
+        help="corpus-wide full-sweep only: listing-id width of one bounded window",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -839,6 +883,7 @@ def main(argv: list[str] | None = None) -> int:
                     conn,
                     policy_version=args.policy_version,
                     kraje=_parse_kraje(args.kraje),
+                    window=args.sweep_window,
                 )
             run(
                 conn,
