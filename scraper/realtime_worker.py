@@ -2,7 +2,7 @@
 
 A SECOND Railway service from the same Docker image (start command
 `python -m scraper.realtime_worker`) that replaces cron quantization for the
-latency-critical path. Six settings-paced asyncio lanes (the proven
+latency-critical path. Settings-paced asyncio lanes (the proven
 matcher/outbox pattern from api/notifications + api/notification_outbox):
 
 - probe:     every `realtime_probe_interval_seconds` (default 180), run the
@@ -46,6 +46,14 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              lease row (migration 279 — pooler-proof CAS; a session advisory
              lock strands over the transaction pooler) — a concurrent caller
              skips.
+- location_resolve: every `realtime_location_resolve_interval_seconds`
+             (default 15), one bounded pass of THE location resolver drain
+             (location_data.resolver.drain.run — the same code
+             location_resolve.yml runs), budget
+             `realtime_location_resolve_max_seconds` (default 240, clamped) over
+             `realtime_location_resolve_batch_size` rows (default 250, clamped).
+             DARK until `realtime_location_resolve_enabled` is set. Safe beside
+             location_resolve.yml: both take the SAME location_jobs lease row.
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
              worker_heartbeats (migration 269) — the Health-page liveness hook.
 
@@ -72,6 +80,7 @@ import importlib
 import logging
 import os
 import signal
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -132,6 +141,44 @@ ESTIMATION_JOB_LANE_SETTING = "estimation_job_lane_enabled"
 ESTIMATION_INTERVAL_DEFAULT = 5
 ESTIMATION_STUCK_MINUTES_DEFAULT = 15
 
+# location_resolve lane (Decision 8b): THE resolver drain
+# (location_data.resolver.drain.run) run from here instead of only from
+# location_resolve.yml. The drain's cost is round trips, not work — ~11 registry
+# round trips per listing at ~120 ms from a US GitHub runner measured 0.7
+# listings/s, and GitHub fires the schedule ~7x/day, against a >100k
+# dirty_locations queue. This worker sits next to the database in the EU, so the
+# same code costs ~1-2 ms per trip and runs continuously. The GH lane STAYS as
+# the backstop (and owns --full-sweep / --dry-run / --listing-id); the two can
+# never drain at once because both take the SAME location_jobs lease row.
+# Named location_resolve, never "resolve"/"drain": this worker already has a
+# lane called `drain` (the portal detail drain) whose heartbeat key and
+# check_worker_lane_stall offender string would become unreadable.
+LOCATION_RESOLVE_LANE_SETTING = "realtime_location_resolve_enabled"
+LOCATION_RESOLVE_INTERVAL_DEFAULT = 15
+LOCATION_RESOLVE_MAX_SECONDS_DEFAULT = 240
+# A pass must stay clear of check_worker_lane_stall's 1200 s in_flight warn (a
+# healthy pass must never read as a stall) and of LANE_PASS_TIMEOUT_SECONDS (a
+# healthy pass must never be abandoned). It does NOT bound the lease — see
+# _location_resolve_lease_ttl.
+LOCATION_RESOLVE_MAX_SECONDS_CEILING = 900
+# mirrors drain.DEFAULT_BATCH; duplicated to keep location_data off the import path
+LOCATION_RESOLVE_BATCH_DEFAULT = 250
+# The batch size is an operator knob that the lease TTL is derived from, so it
+# needs a ceiling of its own: drain.run checks its budget only BETWEEN batches,
+# so an unbounded batch is an unbounded overrun past the budget (and one
+# unbounded transaction).
+LOCATION_RESOLVE_BATCH_CEILING = 1000
+# Lease headroom over the pass budget, per listing in one batch. drain.run's
+# `while` tests the budget between batches, so a pass runs `max_seconds` plus
+# ONE whole batch; the lease is stamped once and never renewed, so the TTL has
+# to cover that batch or the GH lane's cron can acquire the row mid-drain. 2 s
+# is ~1.6x the drain's own ~1.2 s/listing target and above the 1.43 s/listing
+# the GH runner measured, which is the slowest this batch has ever been seen to
+# run. Kept derived rather than a flat constant precisely because batch_size is
+# tunable: a flat 120 s was only ever right for one batch size.
+LOCATION_RESOLVE_LEASE_SECONDS_PER_LISTING = 2
+LOCATION_RESOLVE_LEASE_HEADROOM_MIN_SECONDS = 120
+
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
 # param, so its own probe (added Phase 4 of portal-order-fidelity) can only
 # diff ids seen on a shallow unsplit page walk, not request a true newest-first
@@ -183,6 +230,22 @@ DISPATCH_WORKFLOW = "index_walk.yml"
 DISPATCH_REF = os.environ.get("WORKER_GH_REF", "main")
 # log-once-per-process guard when dispatch is enabled but no token is configured.
 _DISPATCH_WARNED: set[str] = set()
+
+# log-once-per-process guard: the resolve lane running on the TRANSACTION pooler.
+_RESOLVE_SESSION_WARNED = False
+# Logged on the TRANSITION into a skipped pass, not per pass: at a 15 s interval
+# a 30-minute GH run would otherwise emit 120 identical lines.
+_RESOLVE_LEASE_BUSY_LOGGED = False
+_RESOLVE_WEDGE_LOGGED = False
+# The lane's own mutual exclusion, INSIDE this process. A pass abandoned at
+# LANE_PASS_TIMEOUT_SECONDS keeps running (Python cannot kill the thread) while
+# its lease expires strictly earlier, so the lease alone cannot stop the next
+# pass from draining beside the still-live one. Held for the whole pass; a pass
+# that cannot take it does not touch the lease at all.
+_RESOLVE_PASS_LOCK = threading.Lock()
+# Whether the last pass came back with an empty queue — drives the drain's log
+# level (see _tune_resolver_log_level).
+_RESOLVE_LAST_IDLE = False
 
 
 # --- settings (read per pass so operator edits take effect without restart) ---
@@ -273,6 +336,45 @@ def _read_estimation_interval() -> int:
 def _read_estimation_stuck_minutes() -> int:
     return _read_int(
         "estimation_stuck_run_minutes", ESTIMATION_STUCK_MINUTES_DEFAULT)
+
+
+def _read_location_resolve_interval() -> int:
+    # The flag gates the lane via interval<=0 (idle-not-dead, the _lane_loop
+    # contract): disabled => 0 (no lease attempt at all), enabled => the
+    # configured poll interval. Ships dark because the flag defaults absent.
+    if not _read_flag(LOCATION_RESOLVE_LANE_SETTING):
+        return 0
+    return _read_int(
+        "realtime_location_resolve_interval_seconds",
+        LOCATION_RESOLVE_INTERVAL_DEFAULT,
+    )
+
+
+def _read_location_resolve_max_seconds() -> int:
+    # Clamped, not trusted: a mis-set setting must still leave a HEALTHY pass
+    # below check_worker_lane_stall's 1200 s in_flight warn and below
+    # LANE_PASS_TIMEOUT_SECONDS, or the lane would abandon its own normal work.
+    value = _read_int(
+        "realtime_location_resolve_max_seconds",
+        LOCATION_RESOLVE_MAX_SECONDS_DEFAULT,
+    )
+    return max(1, min(value, LOCATION_RESOLVE_MAX_SECONDS_CEILING))
+
+
+def _read_location_resolve_batch_size() -> int:
+    value = _read_int(
+        "realtime_location_resolve_batch_size", LOCATION_RESOLVE_BATCH_DEFAULT)
+    return max(1, min(value, LOCATION_RESOLVE_BATCH_CEILING))
+
+
+def _location_resolve_lease_ttl(max_seconds: int, batch_size: int) -> int:
+    """Lease TTL for one pass: the budget plus the one batch that can start just
+    under it. Both inputs are clamped, so the TTL is bounded too."""
+    headroom = max(
+        LOCATION_RESOLVE_LEASE_HEADROOM_MIN_SECONDS,
+        batch_size * LOCATION_RESOLVE_LEASE_SECONDS_PER_LISTING,
+    )
+    return max_seconds + headroom
 
 
 def _read_flag(key: str) -> bool:
@@ -895,6 +997,137 @@ async def _estimation_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> 
     _record_pass(state, "estimation", last)
 
 
+def _tune_resolver_log_level(*, idle: bool) -> None:
+    """The drain logs five INFO lines per run (DRAIN start / QUEUE depth / QUEUE
+    empty / DRAIN done / DRAIN queries). That is ~7 runs a day on the GH lane and
+    a run every `realtime_location_resolve_interval_seconds` here, i.e. ~29k
+    lines/day burying the other seven lanes in the Railway log once the queue is
+    drained. So: full INFO while there is a backlog, where those numbers are the
+    diagnosis, and WARNING once a pass comes back empty. Slice and per-listing
+    failures are WARNING and always pass through."""
+    logging.getLogger("location_data.resolver.drain").setLevel(
+        logging.WARNING if idle else logging.NOTSET)
+
+
+def _location_resolve_sync() -> dict[str, Any]:
+    """One bounded pass of THE resolver drain (location_data.resolver.drain.run)
+    under THE shared location_jobs lease, so this lane and location_resolve.yml
+    can never drain at once — plus an in-process lock, because an abandoned pass
+    outlives its lease. Lazy import keeps location_data off the worker's startup
+    path; module-attribute calls (drain.run / lease.held) keep both patchable in
+    tests. No try/except around run(): a raise is the signal — lease.held stamps
+    last_outcome='failed' and re-raises, and _lane_loop records the failed
+    pass."""
+    from location_data.resolver import drain, lease
+
+    global _RESOLVE_SESSION_WARNED, _RESOLVE_LEASE_BUSY_LOGGED
+    global _RESOLVE_WEDGE_LOGGED, _RESOLVE_LAST_IDLE
+
+    session_pooler = bool(os.environ.get("SUPABASE_DB_SESSION_URL"))
+    if not _RESOLVE_PASS_LOCK.acquire(blocking=False):
+        # The previous pass was abandoned at LANE_PASS_TIMEOUT_SECONDS and its
+        # thread is still inside drain.run. Its lease has already expired (the
+        # TTL is deliberately shorter, so a DEAD worker frees the lane), so the
+        # lease cannot stop us here — this lock is what does. Never touch the
+        # lease on this path: acquiring it would hand a second drain the row.
+        if not _RESOLVE_WEDGE_LOGGED:
+            _RESOLVE_WEDGE_LOGGED = True
+            LOG.warning(
+                "LOCATION_RESOLVE lane skipped: the previous pass was abandoned "
+                "and its thread is still draining"
+            )
+        return {
+            "acquired": False,
+            "session_pooler": session_pooler,
+            "previous_pass_running": True,
+        }
+    _RESOLVE_WEDGE_LOGGED = False
+    try:
+        max_seconds = _read_location_resolve_max_seconds()
+        batch_size = _read_location_resolve_batch_size()
+        if not session_pooler and not _RESOLVE_SESSION_WARNED:
+            _RESOLVE_SESSION_WARNED = True
+            LOG.warning(
+                "LOCATION_RESOLVE lane running on the TRANSACTION pooler: set "
+                "SUPABASE_DB_SESSION_URL on the realtime-worker service for "
+                "prepared-statement throughput"
+            )
+        _tune_resolver_log_level(idle=_RESOLVE_LAST_IDLE)
+        # db.connect_session() IS what drain.open_connection() returns; called
+        # directly because the wrapper's one extra behaviour is an unconditional
+        # per-call WARNING about the transaction pooler — right for a lane that
+        # runs ~7x/day, ~5.7k lines/day here. The warning above says the same
+        # thing (with the service to fix it named) once per process instead.
+        conn = db.connect_session()
+        try:
+            # The lease MUST be taken on the drain's own connection (drain.main
+            # does the same); JOB_NAME/CONCURRENCY_GROUP are imported, never
+            # re-spelled — a typo'd literal is a SILENT loss of mutual
+            # exclusion. cadence/runner only ever land on a fresh DB
+            # (_UPSERT_JOB_SQL is ON CONFLICT DO NOTHING); runtime attribution
+            # comes from lease_holder, so never "fix" location_jobs.runner by
+            # writing to it.
+            with lease.held(
+                conn,
+                drain.JOB_NAME,
+                cadence="15 minutes",
+                concurrency_group=drain.CONCURRENCY_GROUP,
+                runner="railway-realtime-worker",
+                ttl_seconds=_location_resolve_lease_ttl(max_seconds, batch_size),
+            ) as acquired:
+                if not acquired:
+                    if not _RESOLVE_LEASE_BUSY_LOGGED:
+                        _RESOLVE_LEASE_BUSY_LOGGED = True
+                        # Never says WHY: _ACQUIRE_SQL carries `AND enabled`, so
+                        # a lease held by location_resolve.yml and an operator's
+                        # `location_jobs.enabled = false` are the same answer
+                        # here, and guessing between them misdirects whoever is
+                        # asking why the queue is not draining.
+                        LOG.info(
+                            "LOCATION_RESOLVE lane skipped: the %s lease was not "
+                            "acquired", drain.JOB_NAME,
+                        )
+                    return {"acquired": False, "session_pooler": session_pooler}
+                _RESOLVE_LEASE_BUSY_LOGGED = False
+                stats = drain.run(
+                    conn, batch_size=batch_size, max_seconds=max_seconds)
+            _RESOLVE_LAST_IDLE = stats.claimed == 0
+            return {
+                "acquired": True,
+                "session_pooler": session_pooler,
+                "claimed": stats.claimed,
+                "resolved": stats.resolved,
+                "failed": stats.failed,
+                "batches": stats.batches,
+                "fallbacks": stats.fallbacks,
+                "seconds": round(stats.seconds, 1),
+                "rate": round(stats.rate, 2),
+            }
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
+    finally:
+        _RESOLVE_PASS_LOCK.release()
+
+
+async def _location_resolve_pass(
+    stop_event: asyncio.Event, state: dict[str, Any],
+) -> None:
+    if stop_event.is_set():
+        return
+    last = await asyncio.to_thread(_location_resolve_sync)
+    # Only when the pass did work: at a 15 s cadence an unconditional summary is
+    # 5.7k lines/day of "claimed=0" once the queue is drained. The heartbeat
+    # records every pass either way.
+    if last.get("claimed"):
+        LOG.info(
+            "LOCATION_RESOLVE lane claimed=%d resolved=%d failed=%d %.1fs rate=%.2f/s",
+            last["claimed"], last["resolved"], last["failed"],
+            last["seconds"], last["rate"],
+        )
+    _record_pass(state, "location_resolve", last)
+
+
 def _lane_snapshot(lanes: dict[str, Any]) -> dict[str, Any]:
     """The lane state as written to the heartbeat, with elapsed time resolved.
 
@@ -1074,6 +1307,16 @@ async def _amain() -> int:
             lambda: _estimation_pass(stop_event, state),
             state,
             default_interval=ESTIMATION_INTERVAL_DEFAULT)),
+        # default_interval=0 is the FAIL-SAFE, not a default: _lane_loop keeps
+        # this value when the app_settings read RAISES, and the flag lives
+        # inside the read that just failed. A positive fallback would turn a
+        # dark, deliberately-idled lane ON for one pass on any pooler blip —
+        # e.g. mid-epoch_job, which is exactly when it must not drain.
+        ("location_resolve", lambda: _lane_loop(
+            "location_resolve", stop_event, _read_location_resolve_interval,
+            lambda: _location_resolve_pass(stop_event, state),
+            state,
+            default_interval=0)),
         ("heartbeat", lambda: _lane_loop(
             "heartbeat", stop_event, lambda: HEARTBEAT_INTERVAL_SECONDS,
             lambda: _heartbeat_pass(state),

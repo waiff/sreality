@@ -73,7 +73,10 @@ tenant-scoped:
   connect handshake (PR #663).
 - `connect_session()` — **only** for a long-lived hot loop that repeats the same SQL
   thousands of times: the scraper's detail-write loop (`scraper/main.py:_run_full`), the
-  location resolve drain (`location_data/resolver/drain.py`), and the registry loaders
+  location resolve drain (`location_data/resolver/drain.py` — including the realtime worker's
+  `location_resolve` lane, the ONE worker lane that is not transaction-pooler `db.connect()`;
+  it calls `connect_session()` directly rather than `drain.open_connection()`, whose per-call
+  pooler WARNING suits a 7x/day cron and not a 15 s lane), and the registry loaders
   (`location_data/loader_db.py`, which additionally REFUSES the fallback — a 3 M-row COPY
   needs session GUCs). Points at `SUPABASE_DB_SESSION_URL` (the **Session-mode pooler**,
   port 5432) and leaves `prepare_threshold` at psycopg3's default, so the repeated upsert +
@@ -488,7 +491,11 @@ that don't key on street.
   licence-evidence tables are trigger-immutable (42501 on UPDATE/DELETE/TRUNCATE); every heavy batch
   lane shares the ONE `location-batch` Actions concurrency group and arms a `SET LOCAL
   statement_timeout`; and the RÚIAN loaders + the resolve drain run on **`connect_session()`** (the
-  loader refuses the transaction-pooler fallback — a 3 M-row COPY needs session GUCs). Rationale:
+  loader refuses the transaction-pooler fallback — a 3 M-row COPY needs session GUCs). One
+  exception to the group discipline since Decision 8b: the resolve drain ALSO runs from the
+  always-on Railway worker (`realtime_location_resolve_enabled`, dark by default), which is
+  outside the `location-batch` Actions group entirely — the two lanes are serialized only by the
+  `location_jobs` lease row, so idle the worker lane before a heavy location batch. Rationale:
   `docs/architecture.md` § Location data (W1); sequencing: `roadmap/location-data.md`.
 
 ## See also

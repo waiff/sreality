@@ -139,6 +139,64 @@ churn, sreality hash flaps, idnes area truncation) + the measurement substrate. 
 - **W5a** (#697) — delisting rails: sreality `INDEX_MIN_COMPLETENESS` 1.0→0.995 + a new 3h
   `min_unseen_hours` rail; the 6 h portals 24h→12h.
 
+**Location-resolve lane (Decision 8b, ships dark):** the location resolver's `dirty_locations`
+drain now also runs from this worker, not only from `location_resolve.yml`. The drain's cost is
+round trips, not work — ~11 registry round trips per listing at ~120 ms from a US GitHub runner
+measured **0.7 listings/s**, and GitHub fires the schedule ~7x/day against a >100k queue. The
+worker sits beside the database in the EU (~1–2 ms) and runs continuously. It **reuses**
+`location_data.resolver.drain.run()` and `lease.held()` — no copy of the drain, the CAS or the
+resolver — and takes the SAME `location_jobs` lease row (`drain.JOB_NAME`, imported never
+re-spelled) on the drain's own session-pooler connection, so the worker lane and the
+Actions lane can never drain at once; a busy lease is a cheap no-op (`{"acquired": false}` in
+the heartbeat, logged on the transition only). The GH lane stays the backstop and keeps
+`--full-sweep` / `--dry-run` / `--listing-id`. Dark until
+`app_settings.realtime_location_resolve_enabled` is set; tuning keys
+`realtime_location_resolve_{interval_seconds,max_seconds,batch_size}` (15 s / 240 s / 250).
+Budget shape, and the two rails that make the shared lease actually exclusive:
+- `max_seconds` is clamped to ≤ 900 and `batch_size` to ≤ 1000, so a HEALTHY pass stays far below
+  `check_worker_lane_stall`'s 1200 s `in_flight` warn and below `LANE_PASS_TIMEOUT_SECONDS`.
+  Throughput does not need a long pass — the queue IS the cursor.
+- **The lease TTL is `max_seconds + batch_size × 2 s` (floor 120 s), not a flat constant.**
+  `lease.held` stamps `lease_expires_at` once and never renews it, and `drain.run` tests its
+  budget only BETWEEN batches — so a pass runs `max_seconds` plus one whole batch, and a flat
+  headroom was only ever right for one batch size. 2 s/listing is ~1.6x the drain's own
+  ~1.2 s/listing target and above the 1.43 s/listing the GH runner measured. A SIGKILLed worker
+  still frees the lane in ~12 minutes at the defaults rather than the lease default's hour.
+- **An in-process lock, because an abandoned pass outlives its lease.** A pass abandoned at
+  `LANE_PASS_TIMEOUT_SECONDS` keeps running (Python cannot kill the thread) while its lease has
+  already expired, so the lease alone would let the next pass, 15 s later, drain beside it inside
+  the same process. `_RESOLVE_PASS_LOCK` is taken non-blockingly for the whole pass: a pass that
+  cannot take it returns `{"acquired": false, "previous_pass_running": true}` and never touches
+  the lease row. The lease is what excludes the GH lane; the lock is what excludes this worker
+  from itself.
+- **The dark gate is fail-safe.** The lane is registered with `default_interval=0`, because
+  `_lane_loop` keeps `default_interval` when the `app_settings` read RAISES and the flag lives
+  inside the read that just failed. With a positive fallback one pooler blip would run a full
+  drain pass while the operator believes the lane is off — including mid-`epoch_job`, the one
+  moment the procedure below exists to protect.
+
+**The realtime-worker Railway service needs `SUPABASE_DB_SESSION_URL`**
+(the API service and the GH lane already have it); without it the lane still works on the
+transaction pooler, several times slower, and says so once in the log and every pass in
+`worker_heartbeats.details->'location_resolve'->'last'->>'session_pooler'`.
+
+Two caveats this lane accepts rather than fixes:
+- **The `location-batch` Actions concurrency group does not reach Railway** (that is the point of
+  Decision 8). The worker drain can now run concurrently with the registry load, claim intake and
+  Mapy inventory, which the 2026-08-10 incident deliberately serialized. Mitigations already in
+  place: one connection, batch 250, `SET LOCAL statement_timeout`/`lock_timeout` on every batch
+  transaction, and `realtime_location_resolve_interval_seconds = 0` as the operator's instant idle
+  switch before a heavy lane. A cross-runner group is explicitly out of scope here.
+- **Epoch recompute overlap.** The inner `location-resolve` Actions group is what stopped
+  `epoch_job` from overlapping a drain; the worker is outside it and the two lease rows do not
+  exclude each other. `run()` reads `current_epoch` once per pass, so a pass in flight when a new
+  epoch is minted resolves the epoch job's freshly enqueued rows against the OUTGOING epoch and
+  deletes their `dirty_locations` rows — and the full sweep's stale predicate keys on
+  `resolver_version`/`policy_version`/`registry_version_id`, not the epoch, so it does not
+  self-heal. The 240 s budget bounds it to one pass; the procedure is: disable the flag (or set
+  interval 0) → wait ≤ interval + one pass → run the epoch job → re-enable. A shared lease for the
+  epoch job (or an epoch re-check between batches) is the real fix, and is a follow-up.
+
 **Deferred — W5b (health/SLO re-derivation):** cadence-scale the fixed thresholds
 (`detail_queue_backlog` by oldest-row AGE not count — matview line ~301; `delisting_spike` as
 % of portal size — line ~264), close silent-greens (image-pipeline liveness, dedup
