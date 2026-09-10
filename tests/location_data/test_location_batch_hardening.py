@@ -548,3 +548,21 @@ class _GuardAwareCursor(_Cursor):
         if conn.depth and conn.first_in_transaction < 0:
             conn.first_in_transaction = len(conn.executed)
         super().execute(sql, params)
+
+
+def test_the_archive_sweep_chain_yields_to_a_waiting_group_member():
+    """The one pending slot of `location-batch` is a trap for a self-chaining lane: GitHub
+    supersedes the OLDER pending run, so a chain hop dispatched in the last seconds evicts
+    whatever was waiting. 2026-09-10: the hourly intake (10:00Z) and the corpus-wide
+    full-resolve (12:15Z) were both cancelled that way. The chain step must check every
+    other member for a waiting run and END rather than re-dispatch."""
+    wf = _workflow("location_claims_remine_archive.yml")
+    steps = [s for job in wf["jobs"].values() for s in job.get("steps", [])]
+    chain = next(s for s in steps if s.get("name") == "Chain the next run")
+    script = chain["run"]
+    others = set(LOCATION_BATCH_WORKFLOWS) - {"location_claims_remine_archive.yml"}
+    for name in others | {"location_resolve.yml"}:
+        assert name in script, f"the chain step does not check {name} for a waiting run"
+    assert "chain yields" in script
+    # the yield must come BEFORE the self-dispatch
+    assert script.index("chain yields") < script.index("gh workflow run location_claims_remine_archive.yml")

@@ -213,6 +213,25 @@ jobs:
             | python3 -c 'import json,sys; print(json.load(sys.stdin).get("outcome",""))' 2>/dev/null || true)
           echo "outcome=${outcome:-unknown}"
           if [ "$outcome" != "stopped" ]; then echo "chain ends (outcome=${outcome:-unknown})"; exit 0; fi
+          # YIELD before re-dispatching. The outer `location-batch` group keeps ONE pending
+          # slot and GitHub supersedes the OLDER pending run when a newer one arrives — so a
+          # chain hop dispatched in this run's last seconds always evicts whatever was
+          # waiting. Measured 2026-09-10: the hourly claim intake (10:00Z) and the operator's
+          # corpus-wide full-resolve (12:15Z) were both cancelled that way; a self-chaining
+          # sweep otherwise owns the group for as long as it has pages. If any member of the
+          # group is waiting, the chain ENDS here and the waiting run gets the slot; the sweep
+          # resumes from its cursor on the next manual dispatch.
+          for wf in location_registry_load.yml location_claims_intake.yml location_mapy_inventory.yml \
+                    location_payload_churn.yml location_payload_backfill.yml location_payload_prune.yml \
+                    location_claims_remine.yml location_resolve.yml; do
+            waiting=$(gh run list --workflow="$wf" --limit 5 --json databaseId,status \
+              -q '.[] | select(.status == "queued" or .status == "pending" or .status == "waiting" or .status == "requested") | .databaseId' \
+              | head -1)
+            if [ -n "$waiting" ]; then
+              echo "chain yields: $wf run $waiting is waiting on the location-batch group; not re-dispatching"
+              exit 0
+            fi
+          done
           gh workflow run location_claims_remine_archive.yml --ref "${{ github.ref_name }}" \
             -f source="$SOURCE" -f mode="$MODE" -f max_seconds="$MAX_SECONDS" -f batch_size="$BATCH_SIZE" \
             -f limit="$LIMIT" -f note="$NOTE" -f chain=true

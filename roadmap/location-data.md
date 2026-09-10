@@ -1966,7 +1966,12 @@ if absent (the lane runs without it, several times slower, and says so once per 
 re-resolve kraje 19/27 at v2 → operator review on `/location-compare` → approve full rollout =
 seed `location_v2.filters` / `location_v2.map` and wire Browse + the map to the same predicates →
 R4 after the map flip. The corpus-wide full-resolve is
-unblocked: the unscoped sweep is windowed by listing id (same PR as this note).
+unblocked on the SQL side (#1390, id windows) — and was then **cancelled at 12:15Z by the
+`location-batch` group itself**: GitHub keeps ONE pending slot and supersedes the OLDER pending
+run, so a self-chaining sweep's next hop, dispatched in its last seconds, evicts whatever is
+waiting (the 10:00Z intake went the same way). The archive sweep's chain step now YIELDS — it
+checks every other group member for a waiting run and ends instead of re-dispatching; the sweep
+resumes from its cursor on the next manual dispatch.
 
 ## Standing decisions
 
