@@ -88,13 +88,16 @@ raises — never a permissive default. The dedup rows:
 | `dedup_rung_0c` | `parcel` | `high` | `parcela_id` present; `pozemek` / auction / cadastral |
 | `dedup_tier_1` | `street` | `medium` | ≥ 1 side has a portal-claimed house number |
 | `dedup_tier_2` | `street_segment` | `medium` | `geo_blockable` |
+| `dedup_path_c` | `obec` | any | `obec_kod` present (added 2026-09-10 on the dedup operator's path C ruling — not one of 05 §5.5.2's original rows) |
 
 Two consequences the dedup design (`docs/design/new-dedup/PROGRAM.md`) must reckon with: the L0
 "geo 75 m" rung is Tier 2 and therefore applies only to `geo_blockable` rows — a 75 m circle
 around a town-centroid pin is the false-merge factory the classes above exist to catch; and the
-"same town only" rung the operator raised on 2026-09-08 is *definable* on this projection
-(`obec_kod` at `granularity = 'obec'`, `admin_assignment_method` says whether that obec is claimed
-or inferred) but is not a floor in §5.5.2 — it needs its own operator ruling.
+"same town only" rung the operator raised on 2026-09-08 was ruled on 2026-09-10 as **path C**
+(NEW DEDUP ledger, that date): town = `obec_kod`, no radius, attributes (disposition, then area)
+do the rest. Its floor is the `dedup_path_c` row above — `obec` at any confidence, keyed on
+`obec_kod` alone; `admin_assignment_method` is carried into the candidate audit as a breakdown,
+not used as a gate.
 
 ## 4. The flag
 

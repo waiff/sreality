@@ -88,6 +88,10 @@ FEATURE_FLOORS: dict[str, FeatureFloor] = {
         "listing", "street", "medium", "textual; ≥1 side portal-claimed house number",
     ),
     "dedup_tier_2": FeatureFloor("listing", "street_segment", "medium", "geo; geo_blockable"),
+    # Not one of 05 §5.5.2's rows: the "same town" rung the dedup program's operator ruled on
+    # 2026-09-10 (PROGRAM.md ledger, path C). Town = obec_kod; any confidence, because the
+    # town is the one grain the input data is trusted at and a `low` obec is still an obec.
+    "dedup_path_c": FeatureFloor("listing", "obec", ANY_CONFIDENCE, "town; obec_kod present"),
     "property_map_pin": FeatureFloor(
         "property", "building", "high",
         "disagreement_flags = '{}' and member_spread_m ≤ f(r,r)",
