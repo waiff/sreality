@@ -92,9 +92,24 @@ on:
     # why a backfill that needs this group should expect to pause both.
     - cron: "*/15 * * * *"
 
-# NO workflow-level concurrency group. This lane LEFT the outer `location-batch` group on
-# 2026-09-10 (operator decision), reversing the 2026-08-10 incident response for this one
-# member. What that group buys and what it cost here:
+# The group depends on the MODE, because the two modes are not the same animal.
+#
+# `drain` (and `epoch`) left the outer `location-batch` group on 2026-09-10. `full-resolve`
+# did NOT, and the reason is a production failure the same afternoon: its FIRST step is one
+# corpus-wide `INSERT ... ON CONFLICT` into `dirty_locations`, and the archived-HTML sweep
+# bulk-inserts into that same table with overlapping listing ids. Two transactions inserting
+# the same key means the second WAITS for the first to commit, so the sweep died on
+# `LockNotAvailable: canceling statement due to lock timeout` (run 34456211996, 09:17Z) and
+# its self-chain stopped with it. The enqueue is a heavy corpus-wide writer — exactly what
+# the outer group is for — even though the drain that follows it is not.
+#
+# `github.event.inputs.mode` is empty on a schedule, so a cron tick takes the drain branch.
+concurrency:
+  group: ${{ github.event.inputs.mode == 'full-resolve' && 'location-batch' || 'location-resolve-lane' }}
+  cancel-in-progress: false
+
+# Why the DRAIN left that group on 2026-09-10 (operator decision), reversing the 2026-08-10
+# incident response for this one member. What that group buys and what it cost here:
 #
 #   The group serializes the heavy location lanes so at most one hammers the shared instance
 #   — the answer to the night four of them dropped backends and wedged this drain mid-batch
@@ -108,12 +123,16 @@ on:
 #   Between 05:59Z and 08:57Z the lane got zero ticks while the queue stood above 100k rows.
 #   A skipped tick costs nothing only when the next tick catches up; here they never do.
 #
-#   Leaving the group is safe for THIS member specifically because the drain is the light
-#   one: 11 small indexed reads plus one projection write per listing, no COPY, no corpus
-#   scan, no detoast — it is latency-bound, not instance-bound, which is also why it gains
-#   so little from queueing and loses so much. It READS the claim spine the intake and the
-#   archive sweep write, so it does not carry their "must never overlap" constraint; those
-#   two stay in the group and keep it.
+#   Leaving the group is safe for the DRAIN because it is the light one: 11 small indexed
+#   reads plus one projection write per listing, no COPY, no corpus scan, no detoast — it is
+#   latency-bound, not instance-bound, which is also why it gains so little from queueing and
+#   loses so much. It READS the claim spine the intake and the archive sweep write, so it
+#   does not carry their "must never overlap" constraint; those two stay in the group.
+#
+#   That argument was first written as if it covered the whole LANE, and it does not — the
+#   `full-resolve` mode opens with a corpus-wide bulk INSERT that is instance-heavy by every
+#   measure the sentence above uses to excuse the drain. Correcting that cost a sweep run
+#   and its chain the same afternoon; see the mode-conditional group above.
 #
 # Two guards remain and are the real ones: the job-level `location-resolve` group below
 # (this lane never overlaps ITSELF) and the `location_jobs` lease-row CAS in the drain
