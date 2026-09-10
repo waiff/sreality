@@ -211,6 +211,14 @@ def _bounded(conn: psycopg.Connection, seconds: int) -> Iterator[psycopg.Cursor]
 # A window bounds the work by id range: the claim index range-scans it, the anti-join
 # touches only that range's rows, and each window commits on its own, so an interrupted
 # sweep resumes by simply re-running (ON CONFLICT makes every window idempotent).
+#
+# Both statements pre-filter `NOT EXISTS (... dirty_locations ...)` rather than leaning on
+# ON CONFLICT alone. Since Decision 8b a drain slice is nearly always in flight (the Railway
+# lane), holding its 250 rows FOR UPDATE for the whole slice; an INSERT ... ON CONFLICT on
+# one of those keys must WAIT for that transaction to learn whether the row survives, and
+# the sweep's 5 s lock_timeout then kills the window. The NOT EXISTS is an MVCC read — it
+# sees the queued row and skips it without touching the lock. ON CONFLICT stays as the net
+# for the race between that read and the write; `_execute_window` retries that case.
 _FULL_SWEEP_SQL = """
 INSERT INTO dirty_locations (listing_id, reason)
 SELECT DISTINCT c.listing_id, 'full_sweep'
@@ -221,6 +229,7 @@ SELECT DISTINCT c.listing_id, 'full_sweep'
         OR p.policy_version <> %s
         OR p.registry_version_id <> %s)
    AND c.listing_id > %s AND c.listing_id <= %s
+   AND NOT EXISTS (SELECT 1 FROM dirty_locations d WHERE d.listing_id = c.listing_id)
 ON CONFLICT (listing_id) DO NOTHING
 """
 
@@ -266,6 +275,7 @@ INSERT INTO dirty_locations (listing_id, reason)
 SELECT s.listing_id, 'full_sweep'
   FROM stale s
  WHERE EXISTS (SELECT 1 FROM location_claims_live c WHERE c.listing_id = s.listing_id)
+   AND NOT EXISTS (SELECT 1 FROM dirty_locations d WHERE d.listing_id = s.listing_id)
 ON CONFLICT (listing_id) DO NOTHING
 """
 
@@ -774,6 +784,28 @@ def _queue_health(conn: psycopg.Connection, timeout_s: int) -> tuple[int, float]
     return int(depth), float(oldest)
 
 
+SWEEP_WINDOW_ATTEMPTS = 3
+SWEEP_WINDOW_RETRY_S = 2.0
+
+
+def _execute_window(
+    conn: psycopg.Connection, seconds: int, sql: str, params: tuple[Any, ...],
+) -> int:
+    """One bounded sweep statement, retried on a lock wait the NOT EXISTS pre-filter could
+    not prevent (a row queued between our read and our write and immediately claimed)."""
+    for attempt in range(1, SWEEP_WINDOW_ATTEMPTS + 1):
+        try:
+            with _bounded(conn, seconds) as cur:
+                cur.execute(sql, params)
+                return max(cur.rowcount, 0)
+        except psycopg.errors.LockNotAvailable:
+            if attempt == SWEEP_WINDOW_ATTEMPTS:
+                raise
+            LOG.warning("SWEEP window hit a lock wait (attempt %d); retrying", attempt)
+            time.sleep(SWEEP_WINDOW_RETRY_S)
+    raise AssertionError("unreachable")
+
+
 def enqueue_full_sweep(
     conn: psycopg.Connection,
     *,
@@ -817,12 +849,10 @@ def enqueue_full_sweep(
     windows = 0
     while after < upper:
         hi = min(after + window, upper)
-        with _bounded(conn, seconds) as cur:
-            cur.execute(
-                _FULL_SWEEP_SQL,
-                (RESOLVER_VERSION, policy_version, registry_version_id, after, hi),
-            )
-            n = max(cur.rowcount, 0)
+        n = _execute_window(
+            conn, seconds, _FULL_SWEEP_SQL,
+            (RESOLVER_VERSION, policy_version, registry_version_id, after, hi),
+        )
         enqueued += n
         windows += 1
         LOG.info("SWEEP window=(%d,%d] enqueued=%d", after, hi, n)
@@ -869,6 +899,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     with open_connection() as conn:
+        # The sweep ENQUEUES before the lease is even attempted. The lease guards the
+        # DRAIN (claim, resolve, write); the enqueue is an idempotent insert whose only
+        # exclusion need — the archive sweep's bulk writes into the same table — is the
+        # `location-batch` Actions group this mode runs in. Since Decision 8b the Railway
+        # lane holds the drain lease ~94% of the time, so an enqueue gated behind it ran on
+        # 2026-09-10 as a 20-second "DRAIN skipped" success that enqueued nothing (run
+        # 34482389394). Enqueue first; then whoever holds the lease drains it.
+        if args.full_sweep and not args.dry_run:
+            enqueue_full_sweep(
+                conn,
+                policy_version=args.policy_version,
+                kraje=_parse_kraje(args.kraje),
+                window=args.sweep_window,
+            )
         with lease.held(
             conn,
             JOB_NAME,
@@ -876,15 +920,12 @@ def main(argv: list[str] | None = None) -> int:
             concurrency_group=CONCURRENCY_GROUP,
         ) as acquired:
             if not acquired:
-                LOG.info("DRAIN skipped: another run holds the %s lease", JOB_NAME)
-                return 0
-            if args.full_sweep and not args.dry_run:
-                enqueue_full_sweep(
-                    conn,
-                    policy_version=args.policy_version,
-                    kraje=_parse_kraje(args.kraje),
-                    window=args.sweep_window,
+                LOG.info(
+                    "DRAIN skipped: another run holds the %s lease%s", JOB_NAME,
+                    " (the sweep above is enqueued; that holder drains it)"
+                    if args.full_sweep and not args.dry_run else "",
                 )
+                return 0
             run(
                 conn,
                 batch_size=args.batch_size,

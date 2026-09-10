@@ -1966,7 +1966,10 @@ if absent (the lane runs without it, several times slower, and says so once per 
 re-resolve kraje 19/27 at v2 → operator review on `/location-compare` → approve full rollout =
 seed `location_v2.filters` / `location_v2.map` and wire Browse + the map to the same predicates →
 R4 after the map flip. The corpus-wide full-resolve is
-unblocked on the SQL side (#1390, id windows) — and was then **cancelled at 12:15Z by the
+unblocked on the SQL side (#1390, id windows; its enqueue now runs BEFORE the drain lease — run
+34482389394 was a 20 s "DRAIN skipped" that enqueued nothing because the Railway lane holds that
+lease ~94% of the time — and both sweeps pre-filter `NOT EXISTS dirty_locations` so a queued row a
+drain slice holds FOR UPDATE is skipped, never waited on) — and was then **cancelled at 12:15Z by the
 `location-batch` group itself**: GitHub keeps ONE pending slot and supersedes the OLDER pending
 run, so a self-chaining sweep's next hop, dispatched in its last seconds, evicts whatever is
 waiting (the 10:00Z intake went the same way). The archive sweep's chain step now YIELDS — it
