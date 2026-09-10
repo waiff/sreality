@@ -377,61 +377,25 @@ Lanes shipped so far:
 - **sreality count-probe lane** (migration 270, PR #696) — a lightweight per-`(category_main,
   category_type)` count check that detects a market-wide count swing faster than a full index
   walk would, feeding the completeness/delisting rails.
-- **Tightened delisting rails for sreality** (PR #697) — the completeness gate moved 1.0→0.995;
-  its unseen-staleness window was retired 2026-09-07 with absence-based delisting.
 - **Property-maintenance lane**, every 2 min (PR #716) — runs `run_incremental_pass` against
-  `dirty_properties` (rule #20) far more often than the 5-min GH Actions cron. Its first cut
-  serialized against the GH cron + daily sweep with a SESSION advisory lock, which is unsound
-  over the transaction pooler and stranded within minutes of deploy (PR #717 fixed it with the
-  lease-row CAS pattern — see the `database` skill's connection-modes section; don't reintroduce
-  a session advisory lock on any pooled connection).
+  `dirty_properties` (rule #20) far more often than the 5-min GH Actions cron. It serializes
+  against the GH cron + daily sweep with the lease-row CAS pattern (PR #717): **never a session
+  advisory lock on a pooled connection** — the first cut stranded within minutes of deploy.
 - **Estimation job lane** (migration 349, Wave 1 W1-3 / Phase 1 Amendment A10) — moves agent +
-  deterministic rent-estimate EXECUTION off the FastAPI request threadpool (a 240 s agent run
-  used to pin a Starlette token; a deploy SIGTERM killed paid runs mid-flight). Claims one
-  `pending` `estimation_runs` row per pass via `FOR UPDATE SKIP LOCKED`, flips it `running` +
-  stamps `claimed_at`/`worker`, runs the SAME `execute_pending_run` path from a `{body,
-  resolution}` snapshot the submit route stored in `job_payload` (the run row stays the job — no
-  new table), then clears the payload. Each pass first runs the periodic stuck-run sweep (keyed
-  off `coalesce(claimed_at, created_at)`) so a run orphaned by a crash frees its slot. Ships
-  **DARK**: idle until `estimation_job_lane_enabled` is set — the SAME flag makes
+  deterministic rent-estimate EXECUTION off the FastAPI request threadpool (a 240 s agent run used
+  to pin a Starlette token; a deploy SIGTERM killed paid runs mid-flight). Claims one `pending`
+  `estimation_runs` row per pass via `FOR UPDATE SKIP LOCKED`, runs the SAME `execute_pending_run`
+  path from the `job_payload` snapshot (the run row stays the job — no new table). Each pass first
+  sweeps stuck runs (keyed off `coalesce(claimed_at, created_at)`) so a crash-orphaned run frees
+  its slot. Ships **DARK**: idle until `estimation_job_lane_enabled` is set — the SAME flag makes
   `POST /estimations` route rows to the lane instead of an in-process BackgroundTask, so the
   cutover (and rollback) is one setting, no deploy.
-- **Location-resolve lane** (Decision 8b) — runs THE resolver drain
-  (`location_data.resolver.drain.run`) from here instead of only from the `location_resolve.yml`
-  cron, because the drain is round-trip-bound: ~11 registry round trips per listing at ~120 ms
-  from a US GitHub runner measured **0.7 listings/s**, and GitHub fires the schedule ~7x/day
-  against a >100k `dirty_locations` queue. Mutual exclusion with the Actions lane is the SAME
-  `location_jobs` lease row (`drain.JOB_NAME`, taken on the drain's own session-pooler
-  connection) — a busy lease is a no-op recorded as `{"acquired": false}`, and the GH lane stays
-  the backstop plus the only `--full-sweep` / `--dry-run` / `--listing-id` path. Ships **DARK**;
-  turn it on with:
-  ```sql
-  insert into app_settings (key, value) values ('realtime_location_resolve_enabled', 'true'::jsonb)
-  on conflict (key) do update set value = excluded.value;
-  ```
-  Tuning (all optional, all read live per pass): `realtime_location_resolve_interval_seconds`
-  (15), `realtime_location_resolve_max_seconds` (240, clamped to ≤900 so a pass stays under the
-  1200 s `in_flight` stall warn), `realtime_location_resolve_batch_size` (250, clamped to ≤1000
-  — the lease TTL is derived from it: `max_seconds + batch_size × 2 s`, floor 120 s, because
-  `lease.held` never renews and `drain.run` checks its budget only BETWEEN batches). Interval
-  `0` idles the lane without losing the tuned values. A `{"acquired": false,
-  "previous_pass_running": true}` heartbeat means a previous pass was abandoned and its thread
-  is still draining — the lane refuses to start a second one; repeated ones are the wedge alarm.
-  **Check it is getting the throughput the move was for:**
-  `worker_heartbeats.details->'location_resolve'->'last'->>'session_pooler'` — `false` means the
-  realtime-worker Railway service is missing `SUPABASE_DB_SESSION_URL` (the lane still works on
-  the transaction pooler, several times slower).
-  **Idle the lane before an epoch recompute**: the worker is outside the Actions
-  `location-resolve` group, so nothing stops `epoch_job` overlapping a drain pass, and a pass in
-  flight when a new epoch is minted resolves that job's rows against the outgoing epoch without
-  self-healing on the next sweep. Set the flag `false` (or interval `0`), wait ≤ interval + one
-  pass, run the epoch job, re-enable. The off-switch holds through a bad `app_settings` read —
-  the lane is registered `default_interval=0`, so a failed read idles it rather than running it.
-  **Log volume:** the drain's five INFO lines per run (`DRAIN start` / `QUEUE depth` / `QUEUE
-  empty` / `DRAIN done` / `DRAIN queries`) are silenced to WARNING after a pass comes back with
-  an empty queue and restored the moment there is a backlog again, and the lane's own
-  `LOCATION_RESOLVE lane claimed=…` summary is logged only for a pass that claimed rows — so an
-  idle lane is silent, and `SLICE` / `RESOLVE failed` warnings always show.
+- **Location-resolve lane** (Decision 8b) — THE resolver drain from here, not only from the
+  `location_resolve.yml` cron (round-trip-bound: 0.7 listings/s from a US runner). Ships DARK;
+  enable via `realtime_location_resolve_enabled`. Live tuning:
+  `realtime_location_resolve_{interval_seconds,max_seconds,batch_size}` (15/240/250), interval `0`
+  idles. **Idle it before an `epoch_job`** — a pass in flight when an epoch is minted resolves
+  against the outgoing one. Exclusion, budgets, lease/lock: `docs/design/realtime-scrapers.md`.
 
 ## Pipeline verification (migration 274)
 
