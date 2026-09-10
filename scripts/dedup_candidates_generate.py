@@ -95,7 +95,7 @@ def chunk_ranges(ids: Sequence[int], chunk: int) -> list[tuple[int, int]]:
 def block_ids(conn: Any, block_key: str, *, active_only: bool) -> list[int]:
     with conn.transaction(), conn.cursor() as cur:
         _set_timeout(cur)
-        cur.execute(sql.BLOCK_IDS_SQL, {"block_key": block_key, "active_only": active_only})
+        cur.execute(sql.BLOCK_IDS_SQL, {"block_key": int(block_key), "active_only": active_only})
         return [int(r[0]) for r in cur.fetchall()]
 
 
@@ -103,7 +103,7 @@ def _rung_args(params: dict[str, Any], *, block_key: str, id_from: int, id_to: i
                inputs_id: int, generation_id: int) -> dict[str, Any]:
     return {
         **params,
-        "block_key": block_key,
+        "block_key": int(block_key),  # obec_kod is a bigint on the projection
         "id_from": id_from,
         "id_to": id_to,
         "inputs_id": inputs_id,
@@ -252,7 +252,7 @@ def verify(conn: Any, inputs: dict[str, Any], *, only: Sequence[str], max_listin
             continue
         with conn.transaction(), conn.cursor() as cur:
             _set_timeout(cur)
-            cur.execute(sql.BLOCK_ATTRS_SQL, {"block_key": b.key, "active_only": params["active_only"]})
+            cur.execute(sql.BLOCK_ATTRS_SQL, {"block_key": int(b.key), "active_only": params["active_only"]})
             attrs = [dc.ListingAttrs(int(r[0]), b.key, r[1], r[2], r[3], r[4], r[5], r[6]) for r in cur.fetchall()]
         oracle = oracle_pairs(attrs, inputs)
         got = sql_pairs(conn, params, b.key)
@@ -290,7 +290,8 @@ def fetch_top_buckets(conn: Any, *, active_only: bool, limit: int) -> list[dict[
 def _block_names(conn: Any, keys: Sequence[str]) -> dict[str, str | None]:
     if not keys:
         return {}
-    return {r["obec_kod"]: r["obec_name"] for r in _rows(conn, sql.BLOCK_NAMES_SQL, {"keys": list(keys)})}
+    rows = _rows(conn, sql.BLOCK_NAMES_SQL, {"keys": [int(k) for k in keys]})
+    return {str(r["obec_kod"]): r["obec_name"] for r in rows}
 
 
 def generation_stats(conn: Any, gen: dc.Generation, *, top: int) -> dict[str, Any]:

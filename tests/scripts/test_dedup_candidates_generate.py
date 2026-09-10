@@ -73,6 +73,11 @@ class _Conn:
     def transaction(self) -> _Tx:
         return _Tx()
 
+    def _block(self, p: Any) -> list[int]:
+        # the lane passes obec_kod as an int (bigint on the projection); the fake keys by string
+        assert isinstance(p["block_key"], int), "block_key must reach SQL as an int"
+        return self.blocks[str(p["block_key"])]
+
     def answer(self, s: str, p: Any) -> tuple[list[tuple[Any, ...]], list[str] | None, int]:
         if s.startswith("SET LOCAL"):
             return [], None, -1
@@ -81,7 +86,7 @@ class _Conn:
         if s == sql.BLOCKS_SQL:
             return [(k, len(v)) for k, v in sorted(self.blocks.items())], None, -1
         if s == sql.BLOCK_IDS_SQL:
-            return [(i,) for i in sorted(self.blocks[p["block_key"]])], None, -1
+            return [(i,) for i in sorted(self._block(p))], None, -1
         if s.startswith("INSERT INTO dedup_sim.simulation_runs"):
             return [(1,)], None, 1
         if s.startswith("INSERT INTO dedup_sim.candidate_inputs"):
@@ -99,12 +104,12 @@ class _Conn:
             return [], None, 1
         for rung, stmts in sql.RUNG_SQL.items():
             if s == stmts["insert"]:
-                if self.fail_on_block and p["block_key"] == self.fail_on_block:
-                    raise RuntimeError("boom on " + p["block_key"])
-                ids = [i for i in self.blocks[p["block_key"]] if p["id_from"] <= i < p["id_to"]]
+                if self.fail_on_block and str(p["block_key"]) == self.fail_on_block:
+                    raise RuntimeError("boom on " + str(p["block_key"]))
+                ids = [i for i in self._block(p) if p["id_from"] <= i < p["id_to"]]
                 return [], None, len(ids)  # one "pair" per lo-side id, per rung
             if s == stmts["count"]:
-                ids = [i for i in self.blocks[p["block_key"]] if p["id_from"] <= i < p["id_to"]]
+                ids = [i for i in self._block(p) if p["id_from"] <= i < p["id_to"]]
                 return [(len(ids),)], None, -1
         if s == sql.STALE_SWEEP_SQL:
             return [], None, 3
@@ -125,7 +130,8 @@ class _Conn:
         if s == sql.TOWN_ASSIGNMENT_SQL:
             return [("point_in_polygon", 9)], ["method", "listings"], -1
         if s == sql.BLOCK_NAMES_SQL:
-            return [(k, "Town " + k) for k in p["keys"]], ["obec_kod", "obec_name"], -1
+            assert all(isinstance(k, int) for k in p["keys"])
+            return [(str(k), "Town " + str(k)) for k in p["keys"]], ["obec_kod", "obec_name"], -1
         raise AssertionError("unexpected statement: " + s[:80])
 
     def statements(self, prefix_or_exact: str) -> list[tuple[str, Any]]:
@@ -169,7 +175,7 @@ def test_generate_walks_every_town_in_id_chunks_and_records_progress() -> None:
     assert result["generation_id"] == 42 and result["simulation_run_id"] == 1
     inserts = [c[1] for c in conn.calls if c[0] == sql.RUNG_SQL["C1"]["insert"]]
     assert [(p["block_key"], p["id_from"], p["id_to"]) for p in inserts] == [
-        ("500001", 1, 3), ("500001", 3, 5), ("500001", 5, lane.ID_MAX), ("500002", 9, lane.ID_MAX),
+        (500001, 1, 3), (500001, 3, 5), (500001, 5, lane.ID_MAX), (500002, 9, lane.ID_MAX),
     ]
     assert all(p["inputs_id"] == 7 and p["generation_id"] == 42 for p in inserts)
     assert all(p["floor_tolerance"] == 2 and p["active_only"] is False for p in inserts)
@@ -199,7 +205,7 @@ def test_partial_run_never_sweeps_stale_rows() -> None:
     conn = _Conn({"500001": [1, 2], "500002": [9]})
     result = lane.generate(conn, "C", only=("500002",), chunk=10, resume=False, top=5, dry_run=False)
     inserts = [c[1]["block_key"] for c in conn.calls if c[0] == sql.RUNG_SQL["C1"]["insert"]]
-    assert inserts == ["500002"]
+    assert inserts == [500002]
     assert conn.statements(sql.STALE_SWEEP_SQL) == []
     assert result["partial"] is True and result["stale_deleted"] == 0
 
@@ -214,7 +220,7 @@ def test_resume_skips_finished_towns_and_continues_after_the_cursor() -> None:
     assert conn.statements("INSERT INTO dedup_sim.candidate_generations") == []
     inserts = [c[1] for c in conn.calls if c[0] == sql.RUNG_SQL["C1"]["insert"]]
     assert [(p["block_key"], p["id_from"], p["id_to"]) for p in inserts] == [
-        ("500002", 12, 14), ("500002", 14, lane.ID_MAX), ("500003", 20, lane.ID_MAX),
+        (500002, 12, 14), (500002, 14, lane.ID_MAX), (500003, 20, lane.ID_MAX),
     ]
     finish = conn.statements("UPDATE dedup_sim.candidate_generations SET status")[0][1]
     assert finish["status"] == "success"
@@ -228,7 +234,7 @@ def test_resume_with_a_finished_last_block_moves_on() -> None:
     conn = _Conn({"500001": [1, 2], "500002": [9]}, running=running)
     lane.generate(conn, "C", only=(), chunk=10, resume=True, top=5, dry_run=False)
     inserts = [c[1]["block_key"] for c in conn.calls if c[0] == sql.RUNG_SQL["C1"]["insert"]]
-    assert inserts == ["500002"]
+    assert inserts == [500002]
 
 
 def test_resume_without_a_running_generation_opens_a_new_one() -> None:
@@ -265,7 +271,7 @@ def test_estimate_counts_every_town_for_every_scope_and_writes_nothing() -> None
     assert conn.statements("INSERT INTO") == [] and conn.statements("UPDATE") == []
     counts = [c[1] for c in conn.calls if c[0] == sql.RUNG_SQL["C1"]["count"]]
     assert [(p["block_key"], p["active_only"]) for p in counts] == [
-        ("500001", False), ("500002", False), ("500001", True), ("500002", True)]
+        (500001, False), (500002, False), (500001, True), (500002, True)]
     assert all(p["id_from"] == 0 and p["id_to"] == lane.ID_MAX for p in counts)
     s = report["scopes"]["all"]
     assert s["towns"] == 2 and s["listings"] == 4

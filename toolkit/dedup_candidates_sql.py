@@ -38,7 +38,8 @@ from typing import Any
 # --------------------------------------------------------------------------- fragments
 
 # Path C's floor (dedup_path_c: granularity ≥ obec, any confidence, obec_kod present),
-# compared by rank. `active_only` narrows to listings active on BOTH sides (scope 'active').
+# compared by rank. `obec_kod` is a BIGINT on the projection (migration 384); the lane passes
+# the block key as an int and the pair row stores it as text. `active_only` narrows to listings active on BOTH sides (scope 'active').
 _BASE_CTE = (
     "WITH base AS ("
     " SELECT x.id AS listing_id, x.category_type, x.category_main,"
@@ -49,7 +50,7 @@ _BASE_CTE = (
     " FROM listing_location_current l"
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " JOIN listings x ON x.id = l.listing_id"
-    " WHERE l.obec_kod = %(block_key)s::text"
+    " WHERE l.obec_kod = %(block_key)s::bigint"
     " AND gr.rank >= (SELECT r.rank FROM location_granularity_rank r WHERE r.granularity = 'obec')"
     " AND (NOT %(active_only)s::boolean OR x.is_active)"
     ")"
@@ -157,7 +158,7 @@ BLOCK_ATTRS_SQL = (
     " FROM listing_location_current l"
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " JOIN listings x ON x.id = l.listing_id"
-    " WHERE l.obec_kod = %(block_key)s::text"
+    " WHERE l.obec_kod = %(block_key)s::bigint"
     " AND gr.rank >= (SELECT r.rank FROM location_granularity_rank r WHERE r.granularity = 'obec')"
     " AND (NOT %(active_only)s::boolean OR x.is_active)"
     " ORDER BY x.id"
@@ -165,7 +166,7 @@ BLOCK_ATTRS_SQL = (
 
 # The towns, in a fixed order, with how many listings path C sees in each.
 BLOCKS_SQL = (
-    "SELECT l.obec_kod, count(*) AS listings"
+    "SELECT l.obec_kod::text AS block_key, count(*) AS listings"
     " FROM listing_location_current l"
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " JOIN listings x ON x.id = l.listing_id"
@@ -234,7 +235,7 @@ TOWN_ASSIGNMENT_SQL = (
 # The largest (town, disposition) buckets — the C1 "candidate storm" view, from the listing
 # side (cheap; no pair rows needed). The pin/clique analogue for a path with no pins.
 TOP_BUCKETS_SQL = (
-    "SELECT l.obec_kod, l.obec_name, NULLIF(BTRIM(x.disposition), '') AS disposition,"
+    "SELECT l.obec_kod::text AS obec_kod, l.obec_name, NULLIF(BTRIM(x.disposition), '') AS disposition,"
     " count(*) AS listings, count(*) FILTER (WHERE x.is_active) AS active"
     " FROM listing_location_current l"
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
@@ -275,8 +276,8 @@ PAIRS_PER_BLOCK_SQL = (
 )
 
 BLOCK_NAMES_SQL = (
-    "SELECT obec_kod, min(obec_name) AS obec_name FROM listing_location_current"
-    " WHERE obec_kod = ANY(%(keys)s::text[]) GROUP BY obec_kod"
+    "SELECT obec_kod::text AS obec_kod, min(obec_name) AS obec_name FROM listing_location_current"
+    " WHERE obec_kod = ANY(%(keys)s::bigint[]) GROUP BY obec_kod"
 )
 
 
