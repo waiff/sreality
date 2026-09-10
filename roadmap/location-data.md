@@ -316,6 +316,19 @@ This is a resolver OUTPUT change, so **`RESOLVER_VERSION` = `resolver:v2`**; the
 mode=full-resolve kraje=19,27` first (W6-2's side-by-side scope — the new `--kraje` /
 `_FULL_SWEEP_KRAJE_SQL` restricts the stale set by the CURRENT projection's `kraj_kod`, so
 unprojected rows stay the unscoped sweep's job), then corpus-wide with the full rollout.
+  **The first rollout attempt FAILED (run 34459466027, 2026-09-10):** `QueryCanceled` at the
+  900 s sweep ceiling. The statement drove off `location_claims_live` and DISTINCT'd the claim
+  corpus down to a listing-id set *before* the join could discard all but two kraje — work
+  proportional to the CLAIMS for an answer proportional to the PROJECTION, on a claim corpus
+  the W2-13 archive sweeps are growing by ~150k rows an hour. Inverted to drive off
+  `listing_location_current` (whose `listing_id` is the PK, so the DISTINCT had nothing left
+  to do) with a correlated `EXISTS` behind a `MATERIALIZED` fence — the fence matters because
+  `location_claims_live` is a view over a view and the planner will otherwise flatten the
+  EXISTS back into a hash semi-join over every claim. Rail:
+  `test_the_kraj_scoped_sweep_drives_off_the_projection_not_the_claim_corpus`. **Not fixed for
+  the UNSCOPED sweep**, which must drive off the claims to see unprojected rows and will hit
+  the same ceiling on the corpus-wide run — that one needs its own answer (a raised ceiling,
+  or batching by kraj) before the full rollout.
 - **Operator items:** **A1** (ČÚZK helpdesk) — letter drafted, awaiting send. **A5** (filter
   semantics default) — **decided 2026-09-09: include-and-badge** (see the W6 section). **A2**
   (quarterly licence review) standing. **A4** (Supabase plan/tier) no longer blocks: W1 is applied
