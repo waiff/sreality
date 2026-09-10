@@ -511,3 +511,16 @@ def test_scope_and_units_are_served_from_the_cache_within_the_ttl(monkeypatch):
 def test_the_statement_budget_covers_a_cold_cohort_scan():
     # measured 2026-09-10: ~30-40 s cold on production; 30 s returned 500 on first load
     assert lc.STATEMENT_TIMEOUT_S >= 120
+
+
+def test_legacy_praha_okres_sentinel_is_nulled_before_the_sides_are_compared():
+    """Legacy stamps every Prague listing okres_id=9999 (99,287 rows, region 19 only,
+    measured 2026-09-10). No such unit exists — the registry mirror's Prague path is
+    t1.g19.k19.b554782, region straight to city — so the new side stores NULL. Compared
+    raw, the okres level lists a phantom district 9999 that the new engine "loses" for
+    all of Prague, and an operator review reads that as a finding."""
+    assert lc.LEGACY_PRAHA_OKRES_SENTINEL == 9999
+    assert (
+        f"nullif(b.okres_id, {lc.LEGACY_PRAHA_OKRES_SENTINEL}) AS old_okres_id" in lc._COHORT_CTE
+    )
+    assert "b.okres_id AS old_okres_id" not in lc._COHORT_CTE
