@@ -35,13 +35,40 @@ allowlist exists to 400 junk before it reaches the database, not to build SQL.
 from __future__ import annotations
 
 import math
+import time
 from datetime import datetime, timezone
 from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
 
-STATEMENT_TIMEOUT_S = 30
+# Admin-only review page, not a user path: every endpoint re-derives the same cohort (a scan of
+# every active browse_list row joined to both projections), and the cold scan measured
+# ~30-40 s on production 2026-09-10 — a 30 s budget returned 500 on first load and the page
+# rendered only because the client retried against a warm cache.
+STATEMENT_TIMEOUT_S = 120
+
+# The two aggregate endpoints answer the same question for minutes at a time (the projection is
+# rebuilt by a */15 drain that moves ~500 rows a tick), so a short in-process cache turns the
+# operator's second load, okres switch and back-navigation from a 40 s scan into a lookup.
+CACHE_TTL_S = 600.0
+_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+
+
+def _cached(key: tuple[Any, ...]) -> dict[str, Any] | None:
+    hit = _CACHE.get(key)
+    if hit is None or hit[0] <= time.monotonic():
+        return None
+    return hit[1]
+
+
+def _remember(key: tuple[Any, ...], value: dict[str, Any]) -> dict[str, Any]:
+    _CACHE[key] = (time.monotonic() + CACHE_TTL_S, value)
+    return value
+
+
+def clear_cache() -> None:
+    _CACHE.clear()
 
 DEFAULT_KRAJE = (19, 27)
 
@@ -735,6 +762,10 @@ def cz_bbox(conn: psycopg.Connection) -> dict[str, float]:
 
 
 def scope(conn: psycopg.Connection, kraje: list[int]) -> dict[str, Any]:
+    key = ("scope", tuple(kraje))
+    cached = _cached(key)
+    if cached is not None:
+        return cached
     params = {"kraje": list(kraje)}
     with conn.transaction():
         _timeout(conn)
@@ -746,25 +777,31 @@ def scope(conn: psycopg.Connection, kraje: list[int]) -> dict[str, Any]:
     for row in (*kraj_rows, *okres_rows):
         row["agreement_pct"] = _pct(row.pop("n_agree"), row["n_old"])
 
-    return _envelope(
+    return _remember(key, _envelope(
         list(kraje),
         kraje_rows=kraj_rows,
         okresy=okres_rows,
         by_method=by_method,
         by_source=by_source,
-    )
+    ))
 
 
 def units(
     conn: psycopg.Connection, *, level: str, parent_kod: int, kraje: list[int]
 ) -> dict[str, Any]:
     check_level(level, allowed=UNIT_LIST_LEVELS)
+    key = ("units", level, parent_kod, tuple(kraje))
+    cached = _cached(key)
+    if cached is not None:
+        return cached
     params = {"kraje": list(kraje), "parent_kod": parent_kod}
     sql = _UNITS_OBEC_SQL if level == "obec" else _UNITS_CAST_OBCE_SQL
     with conn.transaction():
         _timeout(conn)
         rows = _query(conn, sql, params)
-    return _envelope(list(kraje), level=level, parent_kod=parent_kod, rows=rows)
+    return _remember(
+        key, _envelope(list(kraje), level=level, parent_kod=parent_kod, rows=rows)
+    )
 
 
 def _resolve_unit(
