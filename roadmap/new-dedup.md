@@ -589,8 +589,12 @@ expandable to path A (a second `PathDef`).
       figure, so it is a parser gap and recoverable; 38,551 listings are lost to it),
       **remax resolves to nothing** (all 12,964 projection rows unresolved → 0 % reach; a location
       program defect, handed over), and realitymix loses 20,722 to missing attributes.
-- [ ] **A generate**, then Gate 2. Awaiting the operator: ~56.5 M rows is on the order of 10 GB in
-      `dedup_sim`, which is real storage cost. The write path is proven on three tiny towns first.
+- [x] **Pilot generate + the write path proven** (2026-09-10, entry (f)): 10,672 pairs over three
+      small towns as generation 2; the audit page renders all five sections from it in production.
+      The pilot caught a missing SQL parameter that had passed 7,460 offline tests, and a funnel
+      that read a partial run as a 98 % loss; both fixed with rails.
+- [ ] **The full-corpus generate**, then Gate 2. **Awaiting the operator**: ~56.5 M rows is on the
+      order of 10 GB in `dedup_sim`, which is real storage cost on the Supabase plan.
 - [ ] **Gate 2** (RULED 2026-09-10: it closes on path C alone): the operator, reading the audit
       page over a real generation, is satisfied that path C loses no rightful candidates to data
       quality. Path B's first output is reviewed at Gate 3, where that clause already stood.

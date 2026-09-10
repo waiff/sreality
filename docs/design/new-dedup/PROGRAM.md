@@ -208,6 +208,34 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-10 (f) — **The write path is proven, and looking at the page with real data on it
+  found a reading defect no test would have.** A pilot `generate` over three small towns —
+  Aš, Bohumín, Benátky nad Jizerou — wrote **10,672 pairs** (C1 8,421, C3 2,251) in 402 s as
+  generation 2, `partial=true`, no stale sweep, exactly as designed. The audit page then rendered
+  all five of its sections from that generation in the production browser with zero console or
+  page errors.
+
+  **Two things the pilot caught that green tests had not.**
+  1. **The lane could not execute its first statement.** `BLOCK_IDS_SQL` is composed from the same
+     base CTE as the rung statements, so when entry (d)'s rule change gave that CTE a
+     city-district parameter, the town-id query silently needed one too while its call site still
+     hand-picked two keys by name — `psycopg.ProgrammingError: query parameter missing:
+     district_split_towns`. `estimate` and `verify` were unaffected because they pass the whole
+     parameter set, which is why both had already run green over the entire corpus. Fixed by
+     passing the whole set everywhere, plus **two rails**: the SQL tests now require every
+     per-town statement to be covered by the full parameter set (proven to fire against the old
+     call, not assumed), and the fake connection now raises on an unsupplied named placeholder
+     exactly as psycopg does — it had answered happily, which is precisely how 7,460 offline
+     tests stayed green while the real run could not start.
+  2. **A partial run's funnel read as a catastrophe.** The funnel's steps are computed over the
+     WHOLE database, because "how many listings have a town" is a fact about the listings; only
+     its last step, the pair count, comes from what was generated. On a three-town pilot that
+     renders as 612,076 listings narrowing to 10,672 pairs, which an operator would reasonably
+     read as path C throwing away 98 % of the corpus. The run picker and the parameter-set panel
+     both said "partial", but not where the number is. The funnel now says so itself, in the
+     place the misreading would happen. **Found by opening the page, not by a test** — and it is
+     the surface Gate 2 is answered from, so a misleading reading there is a defect in the gate.
+
 - 2026-09-10 (e) — **The full-corpus estimate under the ruled rule: 56.5 million candidate pairs,
   a quarter of the number feared. And three data-quality findings that are what Gate 2 is
   actually for — one of them costs a whole portal.** Read-only; nothing was written.

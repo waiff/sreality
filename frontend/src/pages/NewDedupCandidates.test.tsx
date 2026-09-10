@@ -376,4 +376,21 @@ describe('<NewDedupCandidates>', () => {
       expect(api.getNewDedupCandidateOverview).toHaveBeenCalledWith(null),
     );
   });
+
+  it('warns that a partial run\'s funnel is not comparable with its pair count', async () => {
+    vi.mocked(api.getNewDedupCandidateOverview).mockResolvedValue({
+      data: overview({ stats: { ...STATS, partial: true, only: ['554499', '599051'] } }),
+    });
+    renderPage();
+    expect(
+      await screen.findByText(/covered only part of the country/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/2 towns/)).toBeInTheDocument();
+  });
+
+  it('says nothing about partial runs when the run covered everything', async () => {
+    renderPage();
+    await screen.findByText(/Candidate pairs found/i);
+    expect(screen.queryByText(/covered only part of the country/i)).toBeNull();
+  });
 });

@@ -190,6 +190,22 @@ export default function CandidateFunnel({
         })}
       </ol>
 
+      {stats.partial ? (
+        <p className="mt-4 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-3 py-2 text-[0.72rem] leading-relaxed text-[var(--color-ink-2)]">
+          <strong className="font-medium text-[var(--color-ink)]">
+            This run covered only part of the country, so the last step is not comparable with
+            the steps above it.
+          </strong>{' '}
+          Every step down to "has an attribute to compare" counts the whole database, because
+          that is a fact about the listings. The pair count below it was produced over{' '}
+          {stats.only && stats.only.length > 0
+            ? `${fmtCount(stats.only.length)} town${stats.only.length === 1 ? '' : 's'}`
+            : 'a limited set of towns'}{' '}
+          only. Read the drop into the last step as meaningless here; a full run is what makes
+          it mean something.
+        </p>
+      ) : null}
+
       <div className="mt-4 pt-3 border-t border-[var(--color-rule-soft)] flex flex-wrap items-baseline gap-x-6 gap-y-1">
         <span className="text-sm text-[var(--color-ink)]">
           Candidate pairs found:{' '}
