@@ -194,6 +194,19 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-10 — **The location engine is readable; read it, not the legacy columns** (recorded
+  by the location track, not a dedup session). All seven W2 portal contracts un-shadowed
+  2026-09-09; `listing_location_current` / `property_location_current` carry the precision axes,
+  the RÚIAN codes and precomputed `addr_block_key` / `building_block_key` / `street_block_key` /
+  `geo_cell_key` (the last only when `geo_blockable`). The 2026-09-08 (b) sequencing note — "W2
+  should read location through ONE query it can later point at the location projection" — can
+  now point at it directly: the query, the dedup floors (`dedup_rung_0a/0b/0c`, `dedup_tier_1/2`)
+  and the do-not-read list are `docs/design/location-serving-contract.md` (CLAUDE.md rule 24).
+  The L0 "geo 75 m" rung is Tier 2 there, so it applies only to `geo_blockable` rows; the
+  "same town only" rung is definable on `obec_kod` + `admin_assignment_method` but still needs
+  its own ruling. Coverage caveat: idnes / ceskereality / realitymix archive sweeps run from
+  2026-09-10 — until each reports `reached_end=true`, their older listings are thin.
+  `location_v2.dedup` is this program's flag to flip, after its own 7-day shadow compare.
 - 2026-09-09 (f) — **The bake-off page's top selectors now govern the whole page, and the zoom
   panel leads with the top head per model (two operator asks, same day).** (1) The ARM
   dropdown and TRAINED ON chips in the cell controls (Views B and C) offer only the arms and
