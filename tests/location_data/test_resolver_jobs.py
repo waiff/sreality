@@ -201,6 +201,63 @@ def test_the_corpus_wide_sweep_walks_listing_id_windows_each_in_its_own_transact
     assert flat.count("%s") == 5
 
 
+def test_both_sweep_statements_skip_rows_already_queued_without_touching_their_locks():
+    """Since 8b a drain slice is almost always in flight, holding its rows FOR UPDATE; an
+    INSERT ... ON CONFLICT on one of those keys waits for that transaction and the 5 s
+    lock_timeout kills the window. The NOT EXISTS is an MVCC read: skip, never wait."""
+    for sql, placeholders in ((drain._FULL_SWEEP_SQL, 5), (drain._FULL_SWEEP_KRAJE_SQL, 4)):
+        flat = " ".join(sql.split()).lower()
+        assert "not exists (select 1 from dirty_locations d where d.listing_id =" in flat
+        assert "on conflict (listing_id) do nothing" in flat
+        assert flat.count("%s") == placeholders
+
+
+def test_a_window_retries_a_lock_wait_then_gives_up_loudly(monkeypatch):
+    import psycopg
+    monkeypatch.setattr(drain, "SWEEP_WINDOW_RETRY_S", 0.0)
+    calls = {"n": 0}
+
+    class _Cur:
+        rowcount = 7
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            if not sql.lower().startswith("insert"):
+                return  # _bounded's SET LOCAL guards pass through
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise psycopg.errors.LockNotAvailable("canceling statement due to lock timeout")
+
+    class _Conn:
+        def cursor(self): return _Cur()
+        @contextmanager
+        def transaction(self): yield
+
+    assert drain._execute_window(_Conn(), 10, "INSERT ...", ()) == 7
+    assert calls["n"] == 3  # two lock waits, third insert lands
+    calls["n"] = -10  # never succeeds within the attempts
+    import pytest
+    with pytest.raises(psycopg.errors.LockNotAvailable):
+        drain._execute_window(_Conn(), 10, "INSERT ...", ())
+
+
+def test_main_enqueues_the_full_sweep_before_the_drain_lease_is_even_attempted(monkeypatch):
+    """Run 34482389394 (2026-09-10): a corpus-wide full-resolve that finished in 20 s as
+    'DRAIN skipped' and enqueued NOTHING, because the enqueue sat inside the lease block and
+    the Railway lane holds that lease ~94% of the time. The default fake never grants the
+    lease (fetchone -> None), which is exactly the production condition."""
+    import contextlib as _cl
+    state = _state(max_listing_id=300_000)
+    monkeypatch.setattr(drain, "open_connection", lambda: _cl.nullcontext(_FakeConn(state)))
+    assert drain.main(["--full-sweep", "--max-seconds", "1"]) == 0
+    executed = [t for t, _ in state["executed"]]
+    inserts = [i for i, t in enumerate(executed) if t.startswith("insert into dirty_locations")]
+    acquires = [i for i, t in enumerate(executed) if "location_jobs" in t and "lease" in t]
+    assert inserts, "the sweep did not enqueue"
+    assert acquires, "the drain never attempted its lease"
+    assert max(inserts) < min(acquires), "the enqueue must run BEFORE the lease is attempted"
+
+
 def test_an_empty_corpus_sweeps_nothing_and_a_non_positive_window_is_refused():
     state = _state(max_listing_id=0)
     assert drain.enqueue_full_sweep(_FakeConn(state), policy_version="v1", kraje=()) == 0
