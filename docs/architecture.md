@@ -1589,6 +1589,31 @@ renumber.** Navigate by area:
     revokes that grant (additive) and the drop itself stays with the operator. The whole program
     is written up in `docs/design/ppm2-measure-unification.md`.
 
+24. **Two location paths coexist until W6 retires one; new location-reading code reads the
+    projection.** The location-data program (design `~/location-data-architecture-2026-08-10/`,
+    track `roadmap/location-data.md`) did not edit the legacy columns in place — it built a second
+    path beside them: claims mined per portal contract → a resolver (S1–S9) → two projections,
+    `listing_location_current` and `property_location_current` (migration 384). The reason is the
+    thing the legacy path cannot say: a `listings.geom` point carries no statement of how precisely
+    or how trustworthily it is known, and the corpus made that fatal — remax disagreement is
+    predicted on 54.3 % of raw addresses, bazos runs 5.56 listings per pin with 51.5 % in clusters
+    of 20+, three of the five corpus `foreign_suspect` rows are Czech geocoder artifacts. So every
+    projection row carries the four precision axes (`granularity`, `position_source`,
+    `match_confidence`, `blur_evidence`, all NOT NULL), the registry codes it resolved to, the
+    collision class of its pin, and precomputed blocking keys with `geo_cell_key` written **only**
+    when `geo_blockable`. A consumer that reads the projection inherits all of that; one that
+    reads `listings.geom` inherits none of it, and a 75 m dedup circle around a town-centroid pin
+    is exactly the false-merge class the axes exist to prevent. The cutover (W6) is per feature,
+    in ascending blast-radius order (dashboards → dedup → filters and stats → map → estimation
+    last), each behind a `location_v2.<feature>` `app_settings` flag so it reverts without a
+    deploy (design risk R12), each preceded by a ≥ 7-day shadow compare and the operator's review
+    of the clustered disagreements; the legacy columns stay populated and read-only for a full
+    registry cycle after their consumer flips, then a forward migration prunes them. Until a
+    feature flips, its legacy read is correct — the rule is about *new* code and about never
+    back-porting a projection value into `listings`. The engine is readable now (un-shadowed
+    2026-09-09); the consumer contract, including the dedup floors and the one query, is
+    `docs/design/location-serving-contract.md`.
+
 
 ## Broker identity merges — auto-merge and the suppression rail
 

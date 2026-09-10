@@ -5,7 +5,6 @@ holds the hard rules only; the WHY (full rationale, edge cases, incident history
 `docs/architecture.md`, and operational how-tos live in on-demand skills under
 `.claude/skills/`. Read the relevant one before changing code it governs. When a rule here
 keeps getting broken, fix it here — don't repeat the correction by hand.
-
 ## What this project is
 
 A **market-wide real-estate intelligence platform** for the Czech market. It began as an
@@ -41,7 +40,6 @@ the SAME image, gated by `REALTIME_WORKER_ENABLED`) runs the latency-critical lo
 probes, a bounded detail drain (skips sources in `realtime_drain_disabled_sources`), images-first
 downloads, a sreality count-probe, heartbeats to `worker_heartbeats` — replacing cron quantization
 for the real-time program (design + shipped waves: `docs/design/realtime-scrapers.md`).
-
 ## Territories
 
 Three top-level territories with deliberately different rules — identify which one a task is
@@ -65,7 +63,6 @@ in before starting. Deep per-territory rationale: `docs/architecture.md` § Terr
   (Path 1; ship `dist/` to trusted operators only). Backend + SPA rules don't apply here.
 
 When in doubt which territory a task is in, ask. Don't import frontend deps into the Python tree or vice versa.
-
 ## Working with the operator
 
 The owner works locally in **VS Code on WSL2 Ubuntu** with a full terminal, local Git/Python,
@@ -74,7 +71,6 @@ Production still runs in the cloud (Actions + Railway); local is for dev/test/de
 operator is **non-technical by training but learns fast** — explain the *why*, define jargon
 on first use ("upsert", "JWT", "RLS", "draft PR"), and give click-by-click steps for browser
 tasks (Supabase SQL editor, GitHub settings pages).
-
 ## Git workflow and pull requests
 
 Short-lived branches, merge via PR. **Never push directly to `main`** — Railway auto-deploys
@@ -88,7 +84,6 @@ from `main`, so a merged PR *is* the deploy; PR + branch protection + CI is the 
 - **If a PR changes behavior that a skill or `docs/architecture.md` documents, update that
   document in the same PR.** A stale skill is worse than a missing one — sessions trust it
   and load it by default. CI warns (non-blocking) when this is skipped for a mapped path.
-
 ## Autonomy and the safety net
 
 Default to **full autopilot**: create the branch, push early, open a **draft PR** so the
@@ -104,7 +99,6 @@ operator can watch, and work to completion.
   needed. For frontend-visible changes, follow with a real-browser check against the
   production URL — read-only only; never drive a mutating action (merge/unmerge, delete,
   send, …) against production autonomously.
-
 ## Fetching live state (fetch, don't ask)
 
 Dynamic state lives outside Git — don't ask, fetch it:
@@ -114,7 +108,6 @@ Dynamic state lives outside Git — don't ask, fetch it:
   NOT the Supabase MCP (its verbose output persists in context) — but when `psql` or that env
   var is absent (cloud-only sessions) the fallback IS MCP `execute_sql`, one aggregate row per
   question. Both recipes + the reserved-for-migrations MCP policy: the `database` skill.
-
 ## Roadmap maintenance
 
 `ROADMAP.md` is a **<120-line index**; phase content lives in `roadmap/<track>.md` and completed
@@ -122,7 +115,6 @@ work in `roadmap/archive.md`. After shipping meaningful work, in the SAME PR upd
 relevant `roadmap/<track>.md` (move a bullet to done, add new "next" items) + the index's status
 cell if the track's status changed — **never open all track files to make one edit**. A large
 restructure is its own PR.
-
 ## Context discipline
 
 - Prefer `grep` / targeted line-range reads over whole-file reads for files >500 lines (this file,
@@ -132,7 +124,6 @@ restructure is its own PR.
   output stays out of the main context.
 - Load a skill (`database`, `toolkit-api`, `llm-pipelines`, `scraper-ops`) when its trigger fits,
   rather than re-deriving from memory.
-
 ## Architectural rules (do not violate without asking)
 
 **Numbers are cited by code/tests/design-docs — never renumber.** Full rationale, edge cases, and
@@ -253,17 +244,22 @@ incident history: `docs/architecture.md` § Architectural rules.
     (`tests/test_measure_registry_census.py` + `toolkit.measures.REGISTERED_SITES` — three arms over six
     source trees + every migration statement; it names its own blind spots, so read them before trusting
     a green run) and `FilterDef.basis`. Full rationale: `docs/architecture.md` § rule 23.
+24. **Two location paths coexist until W6 retires one; NEW location-reading code reads the PROJECTION**
+    (`listing_location_current` / `property_location_current`, migration 384 — precision axes NOT NULL,
+    RÚIAN codes, precomputed blocking keys, `geo_blockable`), never `listings.geom` + the geo-derived
+    columns (`obec_id`…`ku_id`, trigger 289, `street`/`street_name_key`), which stay populated and serve
+    every un-flipped feature. `location_v2.<feature>` (`serving_flags.py`, missing = OFF) picks the path;
+    `serving_contracts.py` declares the floor (05 §5.5.2; undeclared raises). Granularity compares by RANK.
+    Never back-port a projection value into `listings`. Contract: `docs/design/location-serving-contract.md`.
 
 Full rationale, edge cases, and incident history: read `docs/architecture.md` before modifying anything
 these rules touch.
-
 ## Coding conventions
 
 - Python 3.12, type hints on every signature. Prefer the stdlib; justify each dependency.
 - No comments unless the WHY is non-obvious; no multi-paragraph docstrings (one-liners fine).
 - `requests` for HTTP, `psycopg` for DB — don't add `httpx` / `aiohttp` / `sqlalchemy` / `supabase-py` lightly.
 - Small single-purpose files: `sreality_client.py` = HTTP only, `parser.py` = JSON→row only, `db.py` = DB I/O only.
-
 ## How to test changes
 
 - **Locally:** one-time `pip install -e ".[dev,api,geo]"`, then `pytest -q` (or `pytest tests/path -q`).
@@ -271,13 +267,11 @@ these rules touch.
 - **CI:** every push runs `.github/workflows/test.yml` (`gh run watch`, or `scripts/logs.sh <run-id> [pattern]`
   to fetch pre-filtered logs) — CI + branch protection is the autopilot safety net.
 - No-DB end-to-end: `--dry-run`. Single listing: `--detail-only <id>`. Small live run: `--limit 10`.
-
 ## Secrets
 
 Never commit secrets (`.env` is gitignored). API keys are **backend-only** — never `VITE_*`-prefix a backend
 secret (the frontend build must not see it). **Full env-var / secrets reference** (DB, R2, LLM, maps, API,
 notifications, scraper orchestration, frontend build-time): the `toolkit-api` skill.
-
 ## What is explicitly out of scope right now
 
 - **Auth / user management** — single-operator platform, one shared API token, no per-user identity.
@@ -286,7 +280,6 @@ notifications, scraper orchestration, frontend build-time): the `toolkit-api` sk
 ClickUp is *not* out of scope (a supported API consumer; `'clickup'` is a reserved `estimation_runs.source`).
 A free email/Telegram notification channel is planned (tracked in ROADMAP, not here). Don't start anything
 out of scope without explicit direction in a new session.
-
 ## Where the detail lives
 
 | Need | Load |
