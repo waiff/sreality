@@ -102,6 +102,11 @@ on:
         required: false
         default: ""
         type: string
+      chain:
+        description: "re-dispatch this run with identical inputs when it stops on its budget with work left (outcome=stopped); ends by itself at reached_end. Not a schedule: nothing runs unless an operator dispatched the first run"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   # OUTER, cross-lane: shared with the registry load, the claim intake, the Mapy inventory,
@@ -128,6 +133,10 @@ jobs:
     timeout-minutes: 55
     permissions:
       contents: read
+      # `chain`: the last step re-dispatches this workflow via `gh workflow run` with the
+      # job token. workflow_dispatch is one of the two events a GITHUB_TOKEN-triggered
+      # action IS allowed to create, so the chain does not need a PAT.
+      actions: write
     steps:
       - uses: actions/checkout@v6
 
@@ -169,6 +178,7 @@ jobs:
         # A bash ARRAY, not a string: an unquoted "$ARGS" word-splits, and `note` is free
         # text that will contain spaces.
         run: |
+          set -o pipefail   # `| tee` must not hide a failed lane behind tee's exit 0
           ARGS=(--mode "${MODE:-full}")
           if [ -n "$SOURCE" ]; then ARGS+=(--source "$SOURCE"); fi
           if [ -n "$BATCH_SIZE" ]; then ARGS+=(--batch-size "$BATCH_SIZE"); fi
@@ -180,4 +190,30 @@ jobs:
           # runner and leaving its batch row `running`.
           ARGS+=(--max-seconds "${MAX_SECONDS:-2700}")
           echo "python -m location_data.claims_remine_archive ${ARGS[*]}"
-          python -m location_data.claims_remine_archive "${ARGS[@]}"
+          python -m location_data.claims_remine_archive "${ARGS[@]}" 2>&1 | tee sweep.log
+
+      # The chain keys on the lane's own terminal line: `outcome` is 'stopped' only when the
+      # budget ended a run that still had bodies ahead of its cursor, and the next `full`
+      # dispatch resumes from that cursor (`_resume_point`). 'ok' means reached_end — the
+      # chain ends. Dispatched as the LAST step while this run still holds the group's
+      # running slot, so the pending slot is held for seconds, not minutes (a cron tick
+      # arriving in that window displaces the older pending entry — this one).
+      - name: Chain the next run
+        if: inputs.chain && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ inputs.source }}
+          MODE: ${{ inputs.mode }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+          BATCH_SIZE: ${{ inputs.batch_size }}
+          LIMIT: ${{ inputs.limit }}
+          NOTE: ${{ inputs.note }}
+        run: |
+          outcome=$(grep -o 'REMINE-ARCHIVE done {.*' sweep.log | tail -1 | sed 's/^REMINE-ARCHIVE done //' \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("outcome",""))' 2>/dev/null || true)
+          echo "outcome=${outcome:-unknown}"
+          if [ "$outcome" != "stopped" ]; then echo "chain ends (outcome=${outcome:-unknown})"; exit 0; fi
+          gh workflow run location_claims_remine_archive.yml --ref "${{ github.ref_name }}" \
+            -f source="$SOURCE" -f mode="$MODE" -f max_seconds="$MAX_SECONDS" -f batch_size="$BATCH_SIZE" \
+            -f limit="$LIMIT" -f note="$NOTE" -f chain=true
+          echo "chained: next run dispatched"
