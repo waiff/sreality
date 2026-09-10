@@ -147,8 +147,8 @@ describe('<NewDedupDashboard>', () => {
 
     /* The pair totals, split by rung. */
     expect(screen.getByText(/Candidate pairs found/)).toHaveTextContent('157');
-    expect(screen.getByText(/town \+ disposition rung/)).toHaveTextContent('120');
-    expect(screen.getByText(/town \+ area rung/)).toHaveTextContent('37');
+    expect(screen.getByText(/disposition rung/)).toHaveTextContent('120');
+    expect(screen.getByText(/area rung/)).toHaveTextContent('37');
   });
 
   it('splits the last funnel step by property type, not only by rung', async () => {

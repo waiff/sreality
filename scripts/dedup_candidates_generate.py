@@ -254,7 +254,11 @@ def verify(conn: Any, inputs: dict[str, Any], *, only: Sequence[str], max_listin
         with conn.transaction(), conn.cursor() as cur:
             _set_timeout(cur)
             cur.execute(sql.BLOCK_ATTRS_SQL, {"block_key": int(b.key), "active_only": params["active_only"]})
-            attrs = [dc.ListingAttrs(int(r[0]), b.key, r[1], r[2], r[3], r[4], r[5], r[6]) for r in cur.fetchall()]
+            attrs = [
+                dc.ListingAttrs(int(r[0]), b.key, r[1], r[2], r[3], r[4], r[5], r[6],
+                                dc.district_of(b.key, r[7], inputs))
+                for r in cur.fetchall()
+            ]
         oracle = oracle_pairs(attrs, inputs)
         got = sql_pairs(conn, params, b.key)
         cmp = compare_block(oracle, got)

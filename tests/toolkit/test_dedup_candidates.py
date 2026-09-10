@@ -16,10 +16,13 @@ from toolkit import dedup_sim_settings as dss
 
 INPUTS: dict[str, Any] = {
     "path": "C",
-    "generator_version": "c1",
+    "generator_version": "c2",
     "l0_path_c_town_key": "obec_kod",
+    "l0_path_c_district_key": "cast_obce_kod",
+    "l0_path_c_district_split_towns": "554782,582786,554821",
     "l0_candidate_scope": "all",
     "l0_floor_tolerance": 2,
+    "l0_c1_area_tolerance_pct": 20,
     "l0_area_tolerance_pct_general": 5,
     "l0_area_tolerance_pct_pozemek": 2,
 }
@@ -35,8 +38,9 @@ def _l(
     floor: int | None = 3,
     usable: float | None = 60.0,
     estate: float | None = None,
+    district: str | None = None,
 ) -> dc.ListingAttrs:
-    return dc.ListingAttrs(listing_id, town, ctype, cmain, dispo, floor, usable, estate)
+    return dc.ListingAttrs(listing_id, town, ctype, cmain, dispo, floor, usable, estate, district)
 
 
 # ------------------------------------------------------------------ registry + inputs
@@ -98,8 +102,9 @@ def test_fingerprint_is_stable_order_independent_and_sensitive_to_every_input() 
 def test_fingerprint_pins_the_ruled_defaults() -> None:
     # The literal hash of the ruled parameter set. A changed default or generator version
     # MUST move it — pairs generated under different inputs live in different key spaces —
-    # and whoever changes it must say so in the ledger.
-    assert dc.fingerprint(INPUTS) == "0ec174f0693a2c01"  # moved by PR 2: l0_candidate_scope joined the inputs
+    # and whoever changes it must say so in the ledger. Moved 2026-09-10 by the district
+    # split + the C1 area check (generator version c1 -> c2).
+    assert dc.fingerprint(INPUTS) == "240e8a20612db357"
 
 
 def test_fingerprint_is_canonical_over_how_a_number_was_typed() -> None:
@@ -113,6 +118,40 @@ def test_the_town_key_setting_must_match_the_column_the_sql_implements() -> None
     with pytest.raises(ValueError, match="l0_path_c_town_key='momc_kod' is not implemented"):
         dc.path_inputs("C", {**dss.effective_settings(None), "l0_path_c_town_key": "momc_kod"})
     assert dss.REGISTRY["l0_path_c_town_key"].enum_choices == (dc.path_def("C").block_key,)
+
+
+def test_the_district_key_setting_must_match_the_column_the_sql_implements() -> None:
+    with pytest.raises(ValueError, match="l0_path_c_district_key='momc_kod' is not implemented"):
+        dc.path_inputs("C", {**dss.effective_settings(None), "l0_path_c_district_key": "momc_kod"})
+    assert dss.REGISTRY["l0_path_c_district_key"].enum_choices == (dc.path_def("C").district_key,)
+
+
+# ------------------------------------------------------------------ the city-district split
+
+
+def test_split_towns_parses_the_setting() -> None:
+    assert dc.split_towns(INPUTS) == ("554782", "582786", "554821")
+    assert dc.split_towns({**INPUTS, "l0_path_c_district_split_towns": " 1, 2 ,"}) == ("1", "2")
+    assert dc.split_towns({**INPUTS, "l0_path_c_district_split_towns": ""}) == ()
+
+
+def test_district_applies_only_inside_a_split_town_and_only_when_known() -> None:
+    assert dc.district_of("554782", "490067", INPUTS) == "490067"   # Praha, quarter known
+    assert dc.district_of("554782", None, INPUTS) is None            # Praha, quarter unknown
+    assert dc.district_of("554499", "490067", INPUTS) is None        # a small town is never split
+    assert dc.district_of(None, "490067", INPUTS) is None
+    assert dc.district_of("554782", "490067", {**INPUTS, "l0_path_c_district_split_towns": ""}) is None
+
+
+def test_two_known_districts_must_match_but_an_unknown_one_never_vetoes() -> None:
+    praha = {"town": "554782", "dispo": "2+kk"}
+    same = dc.evaluate_pair(_l(1, district="A", **praha), _l(2, district="A", **praha), INPUTS)
+    assert same is not None and same.rung == "C1"
+    assert dc.evaluate_pair(_l(1, district="A", **praha), _l(2, district="B", **praha), INPUTS) is None
+    # the whole point of the fallback: a listing with no quarter still reaches the town
+    assert dc.evaluate_pair(_l(1, district=None, **praha), _l(2, district="B", **praha), INPUTS) is not None
+    assert dc.evaluate_pair(_l(1, district="A", **praha), _l(2, district=None, **praha), INPUTS) is not None
+    assert dc.districts_compatible(_l(1, district=None), _l(2, district="B")) is True
 
 
 # ------------------------------------------------------------------ "not available"
@@ -175,11 +214,33 @@ def test_category_main_guard_is_the_chokepoints() -> None:
 
 def test_c1_needs_both_dispositions_and_they_must_match() -> None:
     v = dc.evaluate_pair(_l(1, dispo="2+kk"), _l(2, dispo="2+kk"), INPUTS)
-    assert v == dc.PairVerdict("C1", "2+kk", None, None, None, True)
+    assert v == dc.PairVerdict("C1", "2+kk", 60.0, 60.0, 0.0, True)
     # a mismatch does NOT fall back to the area rung — only absence does
     assert dc.evaluate_pair(_l(1, dispo="2+kk"), _l(2, dispo="3+kk", usable=60.0), INPUTS) is None
     # whitespace is not a different disposition
     assert dc.evaluate_pair(_l(1, dispo="2+kk"), _l(2, dispo=" 2+kk "), INPUTS) is not None
+
+
+def test_c1_also_checks_the_area_when_both_sides_state_one() -> None:
+    # ruled 2026-09-10: town + disposition + area, +/- 20% by default
+    ok = dc.evaluate_pair(_l(1, usable=100), _l(2, usable=81), INPUTS)
+    assert ok is not None and ok.rung == "C1"
+    assert (ok.area_lo, ok.area_hi) == (100.0, 81.0) and ok.area_diff_pct == pytest.approx(19.0)
+    assert dc.evaluate_pair(_l(1, usable=100), _l(2, usable=79), INPUTS) is None
+    tight = {**INPUTS, "l0_c1_area_tolerance_pct": 5}
+    assert dc.evaluate_pair(_l(1, usable=100), _l(2, usable=81), tight) is None
+
+
+def test_c1_keeps_the_pair_when_an_area_is_missing_as_with_an_unknown_floor() -> None:
+    for a, b in ((_l(1, usable=None), _l(2)), (_l(1), _l(2, usable=0))):
+        v = dc.evaluate_pair(a, b, INPUTS)
+        assert v is not None and v.rung == "C1"
+        assert (v.area_lo, v.area_hi, v.area_diff_pct) == (None, None, None)
+
+
+def test_c1_area_lo_hi_follow_listing_id_order() -> None:
+    v = dc.evaluate_pair(_l(9, usable=100), _l(4, usable=90), INPUTS)
+    assert v is not None and (v.area_lo, v.area_hi) == (90.0, 100.0)
 
 
 def test_missing_disposition_on_either_side_falls_back_to_the_area_rung() -> None:

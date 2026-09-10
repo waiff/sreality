@@ -38,8 +38,8 @@ until the whole stack is approved end-to-end. Other rules:
 | pHash | Global default ≤11 + per-tag overrides (drawing-tag risk) |
 | Embeddings (ruled 2026-09-05) | **DINOv3 ViT-B/16, 768-d `halfvec`, corpus-wide, is the PRIMARY embedding for all three consumers — the tag heads, Level 3 similarity, and path B** — conditional on the operator accepting the DINOv3 licence (free of charge + commercial use permitted; the terms in ENCODER-DECISION.md §2.8 are the operator's to accept). If declined: DINOv2 ViT-L/14-with-registers (Apache-2.0). ≥0.98 starting L3 threshold, expect recalibration. **The CLIP lane keeps running on new images in parallel** so results can be compared later. Cadence for new images: OPEN (see 2026-09-05 (b)) |
 | Candidate path B (2026-08-27; vectors re-ruled 2026-09-05) | **Image-similarity candidate generation runs in parallel with path A**, all property types: batch k-NN over per-type priority **same-tag** image embeddings proposes pairs, using the **DINOv3 vectors** (same store as the heads and L3) once W3's retag supplies the new tags. **B is only another way to FIND pairs** — everything downstream (levels, rules, settings) is identical to A; nothing B-specific exists. B's two search parameters (neighbor count, minimum similarity to propose a pair) are not yet specified — the operator is asked at build time. Audit C (W5) shows whether CLIP vectors suffice or B should read DINOv2 vectors — operator decides |
-| Candidate path C (ruled 2026-09-10) | **Town + attributes, built FIRST and alone; paths A and B are not being built now.** Path C replaces path A's "street + geo" and "geo" tests and every ± metre distance with **"same town" = `listing_location_current.obec_kod`** (the new location engine's projection — never the legacy `listings.obec_id` / `geom`), because the input location data is only reliably right at town grain. Rungs: **C1 = town + disposition**; **C2 not applicable** (town already stands in for both of A's first two location tests); **C3 = town + area**, taken when a disposition is **not available** on either side ("if not available then fall back" — absence, never a mismatch); **radius not applicable**; the rest (area tolerance 5 % / 2 % pozemek, byt floor ±2, sale ≠ rent, dům ↔ komerční only, same-portal pairs valid) stays the same. Keep the build expandable to path A (a second `PathDef`, not a second engine). **That is the ruling.** *Defined by PR 1 and AWAITING the operator's confirmation (open question 1 of 2026-09-10 (a)) — not ruled:* fallback on absence only, never on a mismatch; "not available", per side: disposition NULL/blank, area NULL/zero (`usable_area`, `estate_area` for pozemek), town = no `obec_kod`, floor NULL = rule unchecked and the pair kept; the category guards = the merge chokepoint's (NULL = unknown); scope = the entire database (the mission's wording; open question 2); the floor row `dedup_path_c` in `location_data/serving_contracts.py` (obec, any confidence). |
-| Gate 1 (ruled 2026-09-05; supersedes "Probe scope 2026-08-27"; **CLOSED 2026-09-09** — the operator's confirmation, relayed in the 2026-09-10 session brief: "Wave 1 is complete (Gate 1 closed: set finalized, tag model v1 live)"; see 2026-09-10 (a)) | **Target tags = 12**: fasáda, nezařízená místnost, půdorys, katastrální mapa, kuchyně, obývací pokoj, koupelna, garáž, jídelna, ložnice, technické zařízení, domovní vchod (open: which of the two "domovní vchod" tags — exteriér id 2 or interiér id 19). **Machine-made labels COUNT** toward the per-tag target; the operator expects ~300–400 positives per head, machine-labeled under the operator-approved definitions and process. The per-head agreement report stays a **diagnostic the operator reads**, not a threshold in code. ~~**The training set is not finalized or reviewed yet — no training on it until the operator says so.**~~ (superseded by the closure above: the set as finalized is the one tag model v1 was trained on — 11 heads, per 2026-09-09 (d); the confirmation as relayed did not name which "domovní vchod" tag is the 12th, so that question is carried as open question 6 of 2026-09-10 (a), not silently closed). Open question carried: how ostatní's any-two-interior rule is represented at labeling time |
+| Candidate path C (ruled 2026-09-10; refined the same day) | **Town + attributes, built FIRST and alone; paths A and B are not being built now.** Path C replaces path A's "street + geo" and "geo" tests and every ± metre distance with **"same town" = `listing_location_current.obec_kod`** (the new location engine's projection — never the legacy `listings.obec_id` / `geom`), because the input location data is only reliably right at town grain. Rungs: **C1 = town + disposition + area** (the area within `l0_c1_area_tolerance_pct`, **20 %**, checked only when both sides state one — a wide sanity check on top of the disposition, not the match itself); **C2 not applicable**; **C3 = town + area**, taken when a disposition is **not available** on either side ("if not available then fall back" — absence, never a mismatch); **radius not applicable**; the rest (C3 area tolerance 5 % / 2 % pozemek, byt floor ±2, sale ≠ rent, dům ↔ komerční only, same-portal pairs valid) stays the same. **In Praha, Brno and Ostrava the town is split by city district** (`cast_obce_kod`, the historic quarter — 85 % coverage against `momc_kod`'s 24 %; the towns are the `l0_path_c_district_split_towns` setting): two listings that both name a quarter must name the same one, and a listing whose quarter is unknown still reaches the whole town, so the split costs no reach. "Not available", per side: disposition NULL/blank; area NULL/zero (`usable_area`, `estate_area` for pozemek); town = no `obec_kod`; floor NULL = rule unchecked, pair kept; district NULL = whole town. **Scope: everything ever seen** (`l0_candidate_scope='all'`). Category guards = the merge chokepoint's (NULL = unknown). Keep the build expandable to path A (a second `PathDef`, not a second engine). Floor: `dedup_path_c` in `location_data/serving_contracts.py` (obec, any confidence). |
+| Gate 1 (ruled 2026-09-05; supersedes "Probe scope 2026-08-27"; **CLOSED 2026-09-09** — the operator's confirmation, relayed in the 2026-09-10 session brief: "Wave 1 is complete (Gate 1 closed: set finalized, tag model v1 live)"; see 2026-09-10 (a)) | **Target tags = 12**: fasáda, nezařízená místnost, půdorys, katastrální mapa, kuchyně, obývací pokoj, koupelna, garáž, jídelna, ložnice, technické zařízení, domovní vchod (open: which of the two "domovní vchod" tags — exteriér id 2 or interiér id 19). **Machine-made labels COUNT** toward the per-tag target; the operator expects ~300–400 positives per head, machine-labeled under the operator-approved definitions and process. The per-head agreement report stays a **diagnostic the operator reads**, not a threshold in code. ~~**The training set is not finalized or reviewed yet — no training on it until the operator says so.**~~ (superseded by the closure above: the set as finalized is the one tag model v1 was trained on — 11 heads, per 2026-09-09 (d); the confirmation as relayed did not name which "domovní vchod" tag is the 12th, so that question was carried as open question 6 of 2026-09-10 (a) and ANSWERED that day: **eleven heads is correct for now**, the twelfth is not owed). Open question carried: how ostatní's any-two-interior rule is represented at labeling time |
 | RunPod | Set up in Wave 1; serverless/on-demand only, **<$1/day** run-rate; may reuse PR #804 harness |
 | Vision | GPT-5-mini, manual batches only; qwen pluggable later |
 | Taxonomy v1 | The operator-curated `image_training_examples` label set (49 labels: `interier -*`, `exterier -*`, `podklad -*`, standalone garáž/technické zařízení/other); "katastr" ≙ `podklad - katastrální mapa`; tag-family defaults reconfirmed at training-set finalization |
@@ -100,12 +100,11 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   listings → candidates by type and path). Location is read ONLY through the projection
   (CLAUDE.md rule 24, `docs/design/location-serving-contract.md` §7). Recall diagnostic vs
   legacy manual merges only if granted (**bold request** at that moment). ⛳ after each PR.
-  **Gate 2 (the operator's wording, brief of 2026-09-10): the operator, reading the audit page,
+  **Gate 2 (RULED 2026-09-10, answering open question 5): the operator, reading the audit page,
   is satisfied that the built path loses no rightful candidates to data quality (poor-geo gaps
-  explicitly covered later by path B + the operator's parallel location-DQ work); path B's first
-  output reviewed.** Flagged, not resolved: the second clause can only be met once W3 has built
-  path B, so as written Gate 2 cannot close before W3 starts — open question 5 of 2026-09-10 (a)
-  asks whether it closes on path C alone.
+  explicitly covered later by path B + the operator's parallel location-DQ work). Gate 2 closes
+  on path C alone**; path B's first output is reviewed at Gate 3, where that clause already
+  stood.
 - **W3 — Linear probe + full retag + candidate path B.** Train probe on the gated training set
   (grouped splits, pinned encoder, versioned artifact); validate on the Labeling page;
   campaign-retag the corpus into the sim tag store. Then **path B generation**: a batch k-NN job
@@ -208,6 +207,91 @@ the two gaps found while adding property list are closed in the same PR that add
 8. **Ledger entry** here, memory note, roadmap line.
 
 ## Progress ledger (update every session, newest first)
+
+- 2026-09-10 (d) — **All six open questions ANSWERED, and the ruling that came back changes the
+  rule itself: the big cities are split by quarter, and the disposition rung gains an area check.
+  Migration 492 is APPLIED.** Entry (a) opened Wave 2 by listing what the brief had left
+  undefined; this entry is that list retired, and it is the operator's answers that matter here,
+  not the questions.
+
+  **The six answers, verbatim in substance.** (1) The four definitions PR 1 wrote — fallback on
+  absence only and never on a mismatch; what "not available" means per field; a missing floor
+  keeps the pair unchecked; the category guards are the merge chokepoint's — are **approved**,
+  and have moved out of "defined by PR 1, awaiting confirmation" into the decisions ledger as
+  ruled. (2) Scope is **everything ever seen**, not active-only; `l0_candidate_scope` is now a
+  decided setting at `all`. (3) **Split the big cities by city district — Praha, Brno, Ostrava —
+  and additionally change C1 from "town + disposition" to "town + disposition + area" with a
+  modifiable ±20 % tolerance.** (4) **Apply migration 492.** (5) **Gate 2 closes on path C
+  alone.** (6) **Eleven heads is correct for now**, so the twelfth target tag is not owed.
+
+  **Migration 492 is applied** (2026-09-10, via the Supabase MCP): the three tables exist in
+  `dedup_sim`, row-level security is on, and `anon` / `authenticated` hold zero privileges on
+  any of them — verified after applying, not assumed. The Candidate audit page therefore stops
+  saying "the store has not been created yet" and starts saying "no run yet".
+
+  **The measurement that changed answer 3 in the operator's favour, and why it is recorded here.**
+  The obvious field for "city district" is `momc_kod`, the administrative district — Praha 1,
+  Praha 6, Brno-střed. Measured before building: **only 24 % of Praha's 108,770 listings carry
+  one**, because `momc_kod` is assigned by point-in-polygon from a precise coordinate, and three
+  quarters of Praha's listings are resolved no more precisely than "Praha". `cast_obce_kod` — the
+  historic quarter, Vinohrady / Žižkov / Smíchov — is carried by **85 %**, because portals *name*
+  the quarter in their text even when the exact address is unknown, and the location engine
+  records that claim. It is also finer: 119 quarters against 57 administrative districts. So the
+  district key is `cast_obce_kod`, and the settings registry says so with the measurement in its
+  own blurb. Had the split used `momc_kod`, three quarters of Praha would have fallen into one
+  undifferentiated bucket and the split would have bought almost nothing.
+
+  | town | listings | carry a quarter | quarters | pairs at town grain | pairs with the split |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | Praha (554782) | 108,770 | 92,359 | 119 | 5,916 M | 1,759 M |
+  | Brno (582786) | 27,555 | 21,857 | 52 | 380 M | 151 M |
+  | Ostrava (554821) | 17,061 | 13,543 | 38 | 146 M | 65 M |
+
+  (Raw geometric pairs before the disposition and area filters; the ratio is what matters —
+  **about a 70 % cut in Praha, 60 % in the other two**.)
+
+  **THE SPLIT COSTS NO REACH, and that is the load-bearing design decision.** A listing whose
+  quarter is unknown is **not** put in a bucket of its own — it keeps the whole town. The rule is
+  "two listings that BOTH name a quarter must name the same one"; an unknown quarter cannot veto,
+  exactly as an unknown floor cannot (definition 3, which the operator had just approved). The
+  alternative — quarter-or-nothing — would have cut Praha to 3,430 M pairs instead of 1,759 M but
+  would have made it **impossible** for a precisely-geocoded listing to ever meet a vaguely-placed
+  one, which is among the commonest shapes a real cross-portal duplicate takes. Structurally this
+  is not a new block key at all: the walk still goes town by town, and the district is one extra
+  predicate inside the town, so the lane's chunking, resume cursor and statistics are untouched.
+
+  **C1's new area check, and the one sub-decision it forced.** C1 is now town + disposition +
+  area. The tolerance is its own setting (`l0_c1_area_tolerance_pct`, default 20 %) and is
+  deliberately four times wider than the area RUNG's 5 %: on C1 the disposition has already done
+  the matching and the area is a sanity check, so a 2+kk measured 45 m² by one agent and 52 m² by
+  another must still pair, while a 2+kk of 45 m² and one of 120 m² must not. **The sub-decision,
+  flagged because the ruling did not cover it: when either side states no area the check cannot
+  be made and the pair is KEPT, marked as unchecked** — the same shape as the floor rule the
+  operator approved an hour earlier, and the reading that does not lose candidates to missing
+  data, which is what Gate 2 guards. A C1 row now stores both areas and their gap when the check
+  was made and NULL when it was not, so a stored row says for itself which happened; no new
+  column and no new migration.
+
+  **What that costs in compute, stated honestly.** The district test is a predicate on the join's
+  output, not part of the join key, so the *work* Postgres does per town is roughly unchanged;
+  what drops by ~70 % in Praha is the number of rows produced and stored. The area check on C1 is
+  likewise a filter on already-joined rows. If the estimate shows the join itself is the problem
+  rather than the row count, the fix is a compound key, and that is a later measurement, not a
+  guess made now.
+
+  **Shipped.** `GENERATOR_VERSION` C goes **c1 → c2** — the meaning of the SQL changed, so every
+  pair generated under the old meaning would land in a different key space from the new one; the
+  ruled parameter set's fingerprint moves to `240e8a20612db357`. Three new settings
+  (`l0_path_c_district_key`, `l0_path_c_district_split_towns`, `l0_c1_area_tolerance_pct`), the
+  oracle (`districts_compatible`, `district_of`, `split_towns`, C1's area branch), the SQL (the
+  district column in the base CTE, the guard on both rungs, C1's area predicate and evidence),
+  the lane's verify mode, and the tests for every one of those. The audit page needed no change
+  to describe the new rule: it renders the path and rung explanations straight from the registry,
+  which is what that indirection was for.
+
+  **Still open, and nothing else is.** The full-corpus estimate under the NEW rule has not run —
+  the one dispatched at 11:15Z was computing the old rule and is superseded. Gate 2 stays open
+  until the operator reads the audit page over a real generation.
 
 - 2026-09-10 (c) — **W2 PR 3: the Candidate audit page + the dashboard's funnel top.**
   The last of W2's three PRs, and the surface Gate 2 is read against. Nothing is generated or
