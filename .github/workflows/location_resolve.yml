@@ -22,9 +22,13 @@ name: "Location: resolve"
 # concurrency group below is the second guard. The CAS is correct on either pooler mode,
 # which is why the drain can take the SESSION pooler for its prepared-statement throughput.
 #
-# The two budgets are deliberately different. The `*/15` CRON keeps a 600 s budget so a tick
-# always finishes well inside its own cadence; a DISPATCH defaults to 2400 s, which is the
-# corpus-shaped setting (the queue is worked down by dispatching, not by waiting for cron).
+# The two budgets are deliberately different. The CRON keeps a budget that finishes well
+# inside its own cadence — and the cadence is NOT 15 minutes: GitHub fires this repo's
+# schedules ~hourly at best (measured 2026-07-07 fleet-wide, re-measured 2026-09-10: 7 ticks
+# in 24 h), so the 600 s budget that fit a 15-minute tick drained ~500 listings per tick at
+# the measured 0.7 listings/s and ~4k a day. 1800 s still ends well inside an hourly tick and
+# triples that. A DISPATCH defaults to 2400 s, the corpus-shaped setting (the queue is worked
+# down by dispatching, not by waiting for cron).
 # `timeout-minutes` has to stay above the largest budget plus checkout/install, or the job is
 # killed mid-batch and the slice's rows come back on the next tick.
 #
@@ -44,7 +48,7 @@ on:
           - epoch
           - full-resolve
       max_seconds:
-        description: "drain budget in seconds (drain / full-resolve); cron uses 600"
+        description: "drain budget in seconds (drain / full-resolve); cron uses 1800"
         required: false
         default: "2400"
         type: string
@@ -65,7 +69,7 @@ on:
         type: boolean
   schedule:
     # Steady state: every 15 minutes, `mode=drain` on the cron budget (the env block below
-    # falls back to 600 s / batch 250 when a run carries no dispatch inputs). The queue is a
+    # falls back to 1800 s / batch 250 when a run carries no dispatch inputs). The queue is a
     # few hundred newly scraped listings per tick; judge it by oldest-row AGE, not length.
     #
     # This cron was REMOVED for the duration of the W1 backfill and restored when the corpus
@@ -108,7 +112,7 @@ jobs:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
       MODE: ${{ inputs.mode || 'drain' }}
-      MAX_SECONDS: ${{ inputs.max_seconds || '600' }}
+      MAX_SECONDS: ${{ inputs.max_seconds || '1800' }}
       BATCH_SIZE: ${{ inputs.batch_size || '250' }}
       SOURCES: ${{ inputs.sources }}
       DRY_RUN: ${{ inputs.dry_run }}

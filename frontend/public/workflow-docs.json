@@ -4470,7 +4470,7 @@
         },
         {
           "name": "max_seconds",
-          "description": "drain budget in seconds (drain / full-resolve); cron uses 600",
+          "description": "drain budget in seconds (drain / full-resolve); cron uses 1800",
           "required": false,
           "type": "string",
           "default": "2400",
