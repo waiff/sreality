@@ -74,8 +74,8 @@ on:
         type: boolean
 
 concurrency:
-  # OUTER, cross-lane: shared with the registry load, the claim intake, the Mapy inventory
-  # and the resolve drain, so at most ONE heavy location lane runs at a time. Same incident
+  # OUTER, cross-lane: shared with the registry load, the claim intake and the Mapy
+  # inventory, so at most ONE heavy location lane runs at a time. Same incident
   # this note has cited every time since 2026-08-10 (four heavy lanes concurrently dropped
   # backends across the shared production instance) — see location_registry_load.yml for
   # the full account.

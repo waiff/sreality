@@ -123,18 +123,34 @@ def test_the_kraj_scoped_sweep_is_a_whole_prepareable_constant():
     placeholder guard and the schema-aware PREPARE sweep only see module-level `*_SQL`."""
     flat = " ".join(drain._FULL_SWEEP_KRAJE_SQL.split()).lower()
     assert "p.kraj_kod = any(%s::bigint[])" in flat
-    assert "join listing_location_current p on p.listing_id = c.listing_id" in flat
-    # INNER, not LEFT: a row with no projection has no kraj to be scoped by.
-    assert "left join" not in flat
     assert re.sub(r"%\(\w+\)s|%s", "", flat).count("%") == 0
     assert flat.count("%s") == 4
+
+
+def test_the_kraj_scoped_sweep_drives_off_the_projection_not_the_claim_corpus():
+    """The 2026-09-10 QueryCanceled (run 34459466027) in one assertion.
+
+    Driving off `location_claims_live` and DISTINCT-ing it down cost work proportional to
+    the CLAIM corpus — which the archive sweeps grow by ~150k rows an hour — for an answer
+    proportional to the projection, and blew the 900 s ceiling. The driving relation must
+    stay the projection, with the claims reached only through a correlated EXISTS, and the
+    MATERIALIZED fence must stay: `location_claims_live` is a view over a view, so without
+    it the planner may flatten the EXISTS back into a hash semi-join over every claim."""
+    flat = " ".join(drain._FULL_SWEEP_KRAJE_SQL.split()).lower()
+    assert "with stale as materialized" in flat
+    assert "from listing_location_current p" in flat
+    assert "exists (select 1 from location_claims_live c where c.listing_id = s.listing_id)" in flat
+    # `listing_id` is the projection's PRIMARY KEY, so DISTINCT is not merely cheaper here
+    # than in the old shape — it has nothing left to deduplicate.
+    assert "distinct" not in flat
+    assert "join location_claims_live" not in flat
 
 
 def test_kraje_picks_the_scoped_statement_and_passes_the_codes_first():
     state = _state()
     drain.enqueue_full_sweep(_FakeConn(state), policy_version="v1", kraje=(19, 27))
     sql, params = next(
-        (text, p) for text, p in state["executed"] if text.startswith("insert into dirty_locations")
+        (text, p) for text, p in state["executed"] if "insert into dirty_locations" in text
     )
     assert "kraj_kod = any(%s::bigint[])" in sql
     assert params[0] == [19, 27]

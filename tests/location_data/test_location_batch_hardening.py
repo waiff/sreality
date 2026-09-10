@@ -15,6 +15,18 @@ Two rails answer that, and this file is the gate on both:
   1. the four lanes share ONE outer concurrency group, so they queue instead of competing;
   2. no batch statement runs without a ceiling — a wedge has to become an error that the
      existing per-row / per-unit resilience already knows how to handle.
+
+AMENDED 2026-09-10 (operator decision): the RESOLVE DRAIN left the group. Rail 1 assumed a
+skipped tick is free, which held while the queue was a few hundred rows per tick. It stopped
+holding when the W2-13 archived-HTML sweeps began self-chaining ~55-minute runs back to back
+against a queue above 100k: the drain resolves 0.7 listings/s and got zero ticks in three
+hours. The drain is also the one member that is latency-bound rather than instance-bound
+(11 small indexed reads + one projection write per listing — no COPY, no corpus scan, no
+detoast), so it contributed least to the incident and lost most to the queueing. It READS
+the claim spine that the intake and the archive sweep WRITE, so it never carried their
+"must never overlap" constraint. Its guards are now the job-level `location-resolve` group
+and the `location_jobs` lease CAS; `test_the_resolve_drain_is_out_of_the_shared_group` below
+is the rail that keeps it out.
 """
 
 from __future__ import annotations
@@ -37,7 +49,6 @@ LOCATION_BATCH_WORKFLOWS = (
     "location_registry_load.yml",
     "location_claims_intake.yml",
     "location_mapy_inventory.yml",
-    "location_resolve.yml",
     # W2a-3. Heavy in TIME rather than in rows — the probe holds one portal for ~10
     # minutes per 200 listings and the readout aggregates the whole instrument — but the
     # rails are the same ones, and a probe overlapping a claims intake would put the
@@ -120,6 +131,32 @@ def test_the_four_lanes_are_the_only_members_of_the_group():
         .get("group") == OUTER_GROUP
     }
     assert members == set(LOCATION_BATCH_WORKFLOWS)
+
+
+def test_the_resolve_drain_is_out_of_the_shared_group():
+    """The 2026-09-10 amendment, as a rail rather than a comment.
+
+    Re-adding the drain to `location-batch` would re-starve it behind the self-chaining
+    archive sweeps — the failure this reverses. Its own two guards have to stay: the
+    per-lane job group (never overlaps itself) and, in the drain, the `location_jobs`
+    lease CAS (never overlaps the Railway worker lane)."""
+    wf = _workflow("location_resolve.yml")
+    assert wf.get("concurrency") is None, (
+        "location_resolve.yml has a workflow-level concurrency group again — the drain is "
+        "latency-bound and must not queue behind the heavy lanes; see this file's docstring"
+    )
+    inner = {
+        job["concurrency"]["group"]
+        for job in wf["jobs"].values()
+        if isinstance(job.get("concurrency"), dict)
+    }
+    assert inner == {"location-resolve"}, (
+        f"the drain's per-lane guard is {inner!r} — without it two ticks overlap"
+    )
+    assert "lease" in inspect.getsource(drain.main), (
+        "drain.main no longer takes the location_jobs lease — with the outer group gone "
+        "that CAS is the only thing keeping a second drainer out"
+    )
 
 
 # ---------------------------------------------------------------- 2. loader_db helpers

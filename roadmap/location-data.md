@@ -316,6 +316,19 @@ This is a resolver OUTPUT change, so **`RESOLVER_VERSION` = `resolver:v2`**; the
 mode=full-resolve kraje=19,27` first (W6-2's side-by-side scope — the new `--kraje` /
 `_FULL_SWEEP_KRAJE_SQL` restricts the stale set by the CURRENT projection's `kraj_kod`, so
 unprojected rows stay the unscoped sweep's job), then corpus-wide with the full rollout.
+  **The first rollout attempt FAILED (run 34459466027, 2026-09-10):** `QueryCanceled` at the
+  900 s sweep ceiling. The statement drove off `location_claims_live` and DISTINCT'd the claim
+  corpus down to a listing-id set *before* the join could discard all but two kraje — work
+  proportional to the CLAIMS for an answer proportional to the PROJECTION, on a claim corpus
+  the W2-13 archive sweeps are growing by ~150k rows an hour. Inverted to drive off
+  `listing_location_current` (whose `listing_id` is the PK, so the DISTINCT had nothing left
+  to do) with a correlated `EXISTS` behind a `MATERIALIZED` fence — the fence matters because
+  `location_claims_live` is a view over a view and the planner will otherwise flatten the
+  EXISTS back into a hash semi-join over every claim. Rail:
+  `test_the_kraj_scoped_sweep_drives_off_the_projection_not_the_claim_corpus`. **Not fixed for
+  the UNSCOPED sweep**, which must drive off the claims to see unprojected rows and will hit
+  the same ceiling on the corpus-wide run — that one needs its own answer (a raised ceiling,
+  or batching by kraj) before the full rollout.
 - **Operator items:** **A1** (ČÚZK helpdesk) — letter drafted, awaiting send. **A5** (filter
   semantics default) — **decided 2026-09-09: include-and-badge** (see the W6 section). **A2**
   (quarterly licence review) standing. **A4** (Supabase plan/tier) no longer blocks: W1 is applied
@@ -1938,19 +1951,34 @@ seeded; nothing writes.
    `max_usd=10` per hop, `mode=full`. Until each portal's sweep reports `reached_end=true`, its
    older listings read thin on the NEW side and inflate "old shows, new doesn't".
 
-**Next, in order:** apply migration 491 (operator, MCP) → enable the Decision 8b worker lane
-(`realtime_location_resolve_enabled`, after `SUPABASE_DB_SESSION_URL` is on the realtime-worker
-service) → the rest of Decision 8 (out of `location-batch`) → the canonical-street-form
-resolver PR (registry `ruian_streets.name` fills `street_name` for registry-bound rows, resolver
-version bump, re-resolve scoped to kraje 19/27 first) → operator review on `/location-compare` →
-approve full rollout = seed `location_v2.filters` / `location_v2.map` and wire Browse + the map to
-the same predicates → R4 after the map flip.
+**DONE 2026-09-10:** migration 491 applied (operator); the canonical-street-form resolver PR
+(#1380, `resolver:v2`); **Decision 8a** (#1383, the drain out of `location-batch` — verified live:
+the next full-resolve started alongside a running archive sweep instead of queueing); the
+kraj-scoped sweep timeout fix (#1384); **Decision 8b** shipped dark (#1386).
+
+**Next, in order:** enable the worker lane — `realtime_location_resolve_enabled` (operator, one
+`app_settings` row; no migration) — then **read `BATCH n=… rate=…/s` in the worker log**, which is
+the only honest test of whether the Railway service sits in the EU: at ~0.7 listings/s we bought
+the always-on win (3.5 drain-hours/day → 24) but not the latency win, and the service region is
+then the next thing to look at. Also set `SUPABASE_DB_SESSION_URL` on the realtime-worker service
+if absent (the lane runs without it, several times slower, and says so once per process) →
+re-resolve kraje 19/27 at v2 → operator review on `/location-compare` → approve full rollout =
+seed `location_v2.filters` / `location_v2.map` and wire Browse + the map to the same predicates →
+R4 after the map flip. **Before the corpus-wide full-resolve**, the UNSCOPED sweep needs the same
+treatment #1384 gave the scoped one — it must drive off the claims to see unprojected rows, so it
+will hit the 900 s ceiling and needs a raised budget or per-kraj batching.
 
 ## Standing decisions
 
-- **The four heavy location lanes share ONE outer concurrency group, `location-batch`**
-  (registry load, claim intake, Mapy inventory, resolve), each keeping its own group at
-  the JOB level. Set after the 2026-08-10 incident: four lanes ran concurrently against
+- **The heavy location lanes share ONE outer concurrency group, `location-batch`**
+  (registry load, claim intake, Mapy inventory, churn probe, payload backfill/prune, both
+  re-mine sweeps), each keeping its own group at the JOB level. **AMENDED 2026-09-10: the
+  resolve drain left the group** (operator Decision 8a) — at 0.7 listings/s, ~7 ticks/day and
+  a queue above 100k, the self-chaining archive sweeps starved it to zero ticks in three
+  hours, and it is the one member that is latency-bound rather than instance-bound (11 small
+  indexed reads + one projection write per listing). It reads the claim spine the intake and
+  the archive sweep write, so it never carried their must-never-overlap constraint. Guards
+  now: the job-level `location-resolve` group + the `location_jobs` lease CAS. Set after the 2026-08-10 incident: four lanes ran concurrently against
   the shared 75 GB production instance, dropped backends across the fleet (SSL EOF, one
   AdminShutdown), degraded the live Browse rebuild to multi-minute DataFileReads, and
   wedged two lanes with no error at all. A new heavy location lane joins the group.

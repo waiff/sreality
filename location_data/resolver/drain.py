@@ -213,18 +213,42 @@ ON CONFLICT (listing_id) DO NOTHING
 """
 
 # The same stale set, restricted to a few kraje — a resolver bump can then be rolled out on
-# a real cohort before the corpus. INNER JOIN, not LEFT: a listing with NO projection has no
-# `kraj_kod` to filter on, so a kraj-scoped sweep cannot honestly claim it. Those rows are
-# the unscoped sweep's job.
+# a real cohort before the corpus. A listing with NO projection has no `kraj_kod` to filter
+# on, so a kraj-scoped sweep cannot honestly claim it; those rows are the unscoped sweep's
+# job. This drives off the PROJECTION and probes the claims with a correlated EXISTS, which
+# is the whole point of the rewrite:
+#
+#   The first shape drove off `location_claims_live` and DISTINCT'd millions of claim rows
+#   down to a listing id set before the join could discard all but two kraje. That is work
+#   proportional to the CLAIM corpus for an answer proportional to the PROJECTION, and the
+#   claim corpus is the thing the W2-13 archive sweeps grow by ~150k rows an hour. It went
+#   from "minutes of honest work" to a `QueryCanceled` at the 900 s ceiling on 2026-09-10
+#   (run 34459466027, the resolver:v2 rollout for kraje 19+27), which is a sweep that can
+#   never run again rather than a sweep that is slow.
+#
+#   Inverted, the driving side is `listing_location_current` filtered to the kraje — and
+#   `listing_id` is its PRIMARY KEY, so the DISTINCT is not merely cheaper, it is
+#   unnecessary. The claim table's own `(listing_id, ...)` index serves the EXISTS probe.
+#
+# MATERIALIZED is an optimizer fence, deliberately: `location_claims_live` is a view over a
+# view (unretracted, minus shadowed contracts), so without the fence the planner is free to
+# flatten the EXISTS back into a hash semi-join over the whole claim corpus — reintroducing
+# exactly the plan this rewrite exists to prevent. There is no index on `kraj_kod`; the
+# filtered scan of the projection is the accepted cost and is bounded by the table, not by
+# the claims.
 _FULL_SWEEP_KRAJE_SQL = """
+WITH stale AS MATERIALIZED (
+  SELECT p.listing_id
+    FROM listing_location_current p
+   WHERE p.kraj_kod = ANY(%s::bigint[])
+     AND (p.resolver_version <> %s
+          OR p.policy_version <> %s
+          OR p.registry_version_id <> %s)
+)
 INSERT INTO dirty_locations (listing_id, reason)
-SELECT DISTINCT c.listing_id, 'full_sweep'
-  FROM location_claims_live c
-  JOIN listing_location_current p ON p.listing_id = c.listing_id
- WHERE p.kraj_kod = ANY(%s::bigint[])
-   AND (p.resolver_version <> %s
-        OR p.policy_version <> %s
-        OR p.registry_version_id <> %s)
+SELECT s.listing_id, 'full_sweep'
+  FROM stale s
+ WHERE EXISTS (SELECT 1 FROM location_claims_live c WHERE c.listing_id = s.listing_id)
 ON CONFLICT (listing_id) DO NOTHING
 """
 

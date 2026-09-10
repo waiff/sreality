@@ -490,12 +490,16 @@ that don't key on street.
   **append-only** — a wrong claim is retracted and a new one inserted, never UPDATEd, and the Mapy
   licence-evidence tables are trigger-immutable (42501 on UPDATE/DELETE/TRUNCATE); every heavy batch
   lane shares the ONE `location-batch` Actions concurrency group and arms a `SET LOCAL
-  statement_timeout`; and the RÚIAN loaders + the resolve drain run on **`connect_session()`** (the
-  loader refuses the transaction-pooler fallback — a 3 M-row COPY needs session GUCs). One
-  exception to the group discipline since Decision 8b: the resolve drain ALSO runs from the
-  always-on Railway worker (`realtime_location_resolve_enabled`, dark by default), which is
-  outside the `location-batch` Actions group entirely — the two lanes are serialized only by the
-  `location_jobs` lease row, so idle the worker lane before a heavy location batch. Rationale:
+  statement_timeout` — **except the resolve drain, which is no longer in that group on either host
+  (2026-09-10, Decisions 8a+8b)**: its Actions lane left because it is latency-bound rather than
+  instance-bound and the self-chaining archive sweeps were starving it, and it now ALSO runs from the
+  always-on Railway worker (`realtime_location_resolve_enabled`, dark by default), which the Actions
+  group cannot reach at all. The two lanes are serialized ONLY by the `location_jobs` lease row plus
+  the worker's in-process pass lock, so **idle the worker lane before a heavy location batch** — the
+  group will not do it for you. And the RÚIAN loaders + the resolve drain run on **`connect_session()`**
+  (the loader refuses the transaction-pooler fallback — a 3 M-row COPY needs session GUCs; the worker
+  lane calls it directly to skip a per-call pooler warning that suits a 7x/day cron, not a 15 s lane).
+  Rationale:
   `docs/architecture.md` § Location data (W1); sequencing: `roadmap/location-data.md`.
 
 ## See also

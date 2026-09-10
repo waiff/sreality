@@ -110,7 +110,7 @@ on:
 
 concurrency:
   # OUTER, cross-lane: shared with the registry load, the claim intake, the Mapy inventory,
-  # the resolve drain, the churn probe, the payload backfill/prune and the W3 re-mine, so at
+  # the churn probe, the payload backfill/prune and the W3 re-mine, so at
   # most ONE heavy location lane runs at a time (2026-08-10 incident — see
   # location_registry_load.yml for the full account). This lane belongs in it on three axes
   # at once: R2 egress, runner memory, and a write into the same claim spine the hourly
