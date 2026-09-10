@@ -123,12 +123,17 @@ create table if not exists dedup_sim.candidate_pairs (
   check (listing_id_lo < listing_id_hi)
 );
 
--- The only secondary index: the stale sweep after a successful run
--- ("rows of this inputs_id that this generation did not re-produce") and
--- the per-generation counts. Everything the audit page shows comes from
--- `candidate_generations.stats`, so no per-column index is paid for here.
-create index if not exists candidate_pairs_generation_idx
-  on dedup_sim.candidate_pairs (inputs_id, generation_id);
+-- NO secondary index, on purpose. Every read of this table is per parameter
+-- set ("WHERE inputs_id = …" — the stale sweep, the per-generation counts,
+-- the audit aggregates), and the primary key's leading column already
+-- serves that. Indexing `generation_id` would cost gigabytes at 10^8 rows
+-- AND turn every re-run's upsert into a non-HOT update (the column moves on
+-- each run). Everything the audit page shows comes from
+-- `candidate_generations.stats`, computed once at the end of a run.
+-- `generation_id` carries no foreign key either: it is provenance, and a
+-- generation row must stay deletable without cascading through 10^8 rows.
+-- Two generations of one parameter set never run at once — the lane's
+-- GitHub Actions concurrency group serializes them; the schema does not.
 
 ------------------------------------------------------------------
 -- simulation_runs.triggered_by: + 'lane'.

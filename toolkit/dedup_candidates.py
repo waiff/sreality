@@ -138,13 +138,36 @@ def path_inputs(code: str, settings: dict[str, Any]) -> dict[str, Any]:
     }
     for k in pd.settings_keys:
         inputs[k] = settings[k]
+    if pd.code == "C" and inputs["l0_path_c_town_key"] != pd.block_key:
+        # The setting exists so the town key is visible and in the fingerprint; the
+        # generation SQL implements exactly one column. A second choice is a code change
+        # to both, never a silent no-op.
+        raise ValueError(
+            f"l0_path_c_town_key={inputs['l0_path_c_town_key']!r} is not implemented by path C's "
+            f"SQL (block key {pd.block_key!r})"
+        )
     return inputs
+
+
+def _canonical(value: Any) -> Any:
+    """JSON has no int/float distinction but Python does: an override typed as 5.0 and the
+    default 5 are the same parameter set, so integral floats hash as ints."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {k: _canonical(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonical(v) for v in value]
+    return value
 
 
 def fingerprint(inputs: dict[str, Any]) -> str:
     """16 hex chars of the SHA-256 over the canonical JSON of `inputs`. Canonical = sorted
-    keys, no whitespace, so the same values always hash the same regardless of dict order."""
-    canon = json.dumps(inputs, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    keys, no whitespace, integral floats as ints — so the same values always hash the same
+    regardless of dict order or how a number was typed."""
+    canon = json.dumps(_canonical(inputs), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
 
 

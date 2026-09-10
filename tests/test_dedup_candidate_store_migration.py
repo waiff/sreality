@@ -108,8 +108,15 @@ def test_security_posture_rls_on_and_browser_roles_revoked() -> None:
         assert f"revoke all on dedup_sim.{table} from anon, authenticated" in code, table
 
 
-def test_only_one_secondary_index_on_the_pair_table() -> None:
-    # Every index on a 10^8-row table is gigabytes; the audit reads precomputed stats.
+def test_no_secondary_index_on_the_pair_table() -> None:
+    # Every index on a 10^8-row table is gigabytes, and one on generation_id would defeat
+    # HOT updates on every re-run; the PK prefix (inputs_id) serves every read.
     code = _code()
-    on_pairs = re.findall(r"create index if not exists (\w+) on dedup_sim\.candidate_pairs", code)
-    assert on_pairs == ["candidate_pairs_generation_idx"]
+    on_pairs = re.findall(r"create (?:unique )?index (?:if not exists )?(\w+) on dedup_sim\.candidate_pairs", code)
+    assert on_pairs == []
+
+
+def test_no_alter_adds_a_foreign_key_into_production() -> None:
+    code = _code()
+    for m in re.finditer(r"alter table dedup_sim\.candidate_pairs[^;]*;", code):
+        assert "references" not in m.group(0)

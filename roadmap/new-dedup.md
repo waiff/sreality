@@ -66,8 +66,8 @@ W1 (shared prerequisites + labeling program):
 - [x] Settings API (`api/routes/new_dedup.py`, admin-gated) + the real NEW DEDUP Settings page
       (`frontend/src/pages/NewDedupSettings.tsx`, replaces PR-2's placeholder) — operator can now
       review/tune every decided default ahead of any wave consuming it.
-- [x] ~~Dashboard skeleton (funnel + cost table)~~ — **carried into W2** (2026-09-10): the funnel
-      top ships with the Candidate audit page (W2 PR 3), the first moment there is a count to show.
+- [ ] Dashboard skeleton (funnel + cost table) — **carried into W2** (2026-09-10), not built yet: the
+      funnel top ships with the Candidate audit page (W2 PR 3), the first moment there is a count to show.
 - [x] Labeling page, tri-state rework (docs/design/tag-annotation-matrix.md, 2026-08-26) — the
       taxonomy and the confirmed ground truth are now PERMANENT tables outside `dedup_sim`:
       `tag_taxonomy` + `image_tag_labels` (migration 442, one positive/negative/excluded row per
@@ -565,13 +565,14 @@ floor ±2, sale ≠ rent, dům ↔ komerční only). Built expandable to path A 
       path matrix (path-B column from day one, empty), missing-data tables (overall, then per
       portal per type), town/bucket statistics (the pin/clique analogue; clique guard stays
       parked), funnel: all listings → with town → candidates by type and path.
-- [ ] **Gate 2:** the operator, reading the audit page, is satisfied that path C loses no rightful
-      candidates to data quality; path B's first output reviewed (W3).
+- [ ] **Gate 2** (the operator's wording): the operator, reading the audit page, is satisfied that
+      path C loses no rightful candidates to data quality; path B's first output reviewed — the
+      second clause needs W3's path B, flagged as open question 5 in PROGRAM.md 2026-09-10 (a).
 
 **Open for the operator (from the 2026-09-10 (a) entry):** confirm the four "not available" /
 fallback definitions; the scope of the first generation (all-time vs active-only); **Praha at obec
 grain is on the order of 10⁸ pairs all-time** — accept, or rule a finer town key for statutory
-cities; OK to apply migration 492.
+cities; OK to apply migration 492; whether Gate 2 closes on path C alone; the 12th target tag.
 
 Waves W3-W8 (retag + path B through production wiring) are not started; see PROGRAM.md.
 

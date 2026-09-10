@@ -95,9 +95,23 @@ def test_fingerprint_is_stable_order_independent_and_sensitive_to_every_input() 
 
 
 def test_fingerprint_pins_the_ruled_defaults() -> None:
-    # A changed default (or generator version) MUST move this — that is the point: pairs
-    # generated under different inputs live in different key spaces.
-    assert dc.fingerprint(INPUTS) == dc.fingerprint(json.loads(json.dumps(INPUTS)))
+    # The literal hash of the ruled parameter set. A changed default or generator version
+    # MUST move it — pairs generated under different inputs live in different key spaces —
+    # and whoever changes it must say so in the ledger.
+    assert dc.fingerprint(INPUTS) == "ebc60a2894867cc7"
+
+
+def test_fingerprint_is_canonical_over_how_a_number_was_typed() -> None:
+    # JSON has no int/float distinction: an override typed as 5.0 IS the default 5.
+    assert dc.fingerprint({**INPUTS, "l0_area_tolerance_pct_general": 5.0}) == dc.fingerprint(INPUTS)
+    assert dc.fingerprint({**INPUTS, "l0_area_tolerance_pct_general": 5.5}) != dc.fingerprint(INPUTS)
+    assert dc._canonical({"a": [1.0, 2.5, True], "b": {"c": 3.0}}) == {"a": [1, 2.5, True], "b": {"c": 3}}
+
+
+def test_the_town_key_setting_must_match_the_column_the_sql_implements() -> None:
+    with pytest.raises(ValueError, match="l0_path_c_town_key='momc_kod' is not implemented"):
+        dc.path_inputs("C", {**dss.effective_settings(None), "l0_path_c_town_key": "momc_kod"})
+    assert dss.REGISTRY["l0_path_c_town_key"].enum_choices == (dc.path_def("C").block_key,)
 
 
 # ------------------------------------------------------------------ "not available"
@@ -319,6 +333,29 @@ def test_failed_generation_keeps_its_row_and_records_the_error() -> None:
     assert conn.calls[0][1]["error"] == "boom"
     assert json.loads(conn.calls[0][1]["progress"]) == {"block_index": 4}
     assert conn.calls[1][1]["error"] == "boom"
+
+
+def test_an_operator_override_reaches_the_inputs_the_fingerprint_and_the_snapshot() -> None:
+    # settings overrides answered as rows of (key, value), then run id, inputs id, gen id
+    conn = _Conn([("l0_floor_tolerance", 3), (11,), (5,), (77,)])
+    gen = dc.begin_generation(conn, "C")
+    assert gen.inputs["l0_floor_tolerance"] == 3
+    assert gen.fingerprint == dc.fingerprint({**INPUTS, "l0_floor_tolerance": 3}) != dc.fingerprint(INPUTS)
+    assert json.loads(conn.calls[1][1]["snapshot"])["l0_floor_tolerance"] == 3
+
+
+def test_get_generation_reads_jsonb_as_dicts_or_strings() -> None:
+    # psycopg hands jsonb back as dicts; the str branch covers a driver that does not
+    as_dicts = (9, 4, 2, "C", "abcd", dict(INPUTS), "success", {"blocks_done": 3}, {"pairs": {"total": 7}})
+    conn = _Conn([as_dicts])
+    gen = dc.get_generation(conn, 9)
+    assert gen is not None and gen.inputs == INPUTS and gen.stats == {"pairs": {"total": 7}}
+    assert gen.progress == {"blocks_done": 3} and gen.status == "success"
+    assert conn.calls[-1][1] == {"id": 9}
+    as_strings = (9, 4, 2, "C", "abcd", json.dumps(INPUTS), "success", '{"blocks_done": 3}', '{"pairs": 1}')
+    gen2 = dc.get_generation(_Conn([as_strings]), 9)
+    assert gen2 is not None and gen2.inputs == INPUTS and gen2.stats == {"pairs": 1}
+    assert dc.get_generation(_Conn([None]), 9) is None
 
 
 def test_record_progress_and_latest_generation_roundtrip() -> None:

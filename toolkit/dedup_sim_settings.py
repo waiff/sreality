@@ -96,8 +96,9 @@ REGISTRY: dict[str, SettingDef] = {
                 "must share it to be looked at together on path C; a listing "
                 "without one has no path C candidates. Only one choice exists "
                 "today — a finer key (e.g. a city district for Praha or Brno) "
-                "would be a new choice here, not a code change, and would "
-                "re-generate every path C pair."
+                "would be a second choice here plus its column in the "
+                "generation SQL, and would re-generate every path C pair; the "
+                "lane refuses a value its SQL does not implement."
             ),
         ),
         SettingDef(
