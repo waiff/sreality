@@ -18,6 +18,7 @@ INPUTS: dict[str, Any] = {
     "path": "C",
     "generator_version": "c1",
     "l0_path_c_town_key": "obec_kod",
+    "l0_candidate_scope": "all",
     "l0_floor_tolerance": 2,
     "l0_area_tolerance_pct_general": 5,
     "l0_area_tolerance_pct_pozemek": 2,
@@ -98,7 +99,7 @@ def test_fingerprint_pins_the_ruled_defaults() -> None:
     # The literal hash of the ruled parameter set. A changed default or generator version
     # MUST move it — pairs generated under different inputs live in different key spaces —
     # and whoever changes it must say so in the ledger.
-    assert dc.fingerprint(INPUTS) == "ebc60a2894867cc7"
+    assert dc.fingerprint(INPUTS) == "0ec174f0693a2c01"  # moved by PR 2: l0_candidate_scope joined the inputs
 
 
 def test_fingerprint_is_canonical_over_how_a_number_was_typed() -> None:

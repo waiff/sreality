@@ -217,7 +217,12 @@ download, no re-inference) and `backfill_render_score.yml` (render-vs-photo axis
 **dispatch-only**: `dinov3_embed_backfill.yml` (GPU, inert until the encoder config is complete),
 `tagging_bakeoff.yml` (GPU, the three-stage encoder EXPERIMENT, `dedup_sim` only) and
 `tag_model.yml` (CPU, promote/score/activate ONE versioned tag model, migration 490 — the tag is
-the argmax head, no per-head yes/no). **Read the matching `references/*-lane.md` before touching.**
+the argmax head, no per-head yes/no) and `new_dedup_candidates.yml` (CPU, the rebuilt engine's
+**Level 0 candidate generation, path C** = same town + disposition / area; `estimate` and `verify`
+READ ONLY — run them first —, `generate` writes `dedup_sim.candidate_pairs` under migration 492
+town by town with a resume cursor; `scripts/dedup_candidates_generate.py`,
+`toolkit/dedup_candidates_sql.py`; PROGRAM.md ledger 2026-09-10). **Read the matching
+`references/*-lane.md` before touching.**
 
 **There is NO scheduled dedup job any more.** The automatic decision layer — the engine, its
 queues, its batch warmer, its geo/byt-geo runs, the model-compare and vision A/B harnesses, and

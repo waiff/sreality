@@ -75,6 +75,7 @@ PATHS: dict[str, PathDef] = {
         floor_feature="dedup_path_c",
         settings_keys=(
             "l0_path_c_town_key",
+            "l0_candidate_scope",
             "l0_floor_tolerance",
             "l0_area_tolerance_pct_general",
             "l0_area_tolerance_pct_pozemek",

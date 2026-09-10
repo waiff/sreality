@@ -102,6 +102,25 @@ REGISTRY: dict[str, SettingDef] = {
             ),
         ),
         SettingDef(
+            key="l0_candidate_scope",
+            category=Category.L0_CANDIDATES,
+            value_type=ValueType.TEXT,
+            default="all",
+            enum_choices=("all", "active"),
+            decided=False,
+            explanation=(
+                "Which listings a candidate generation looks at. 'all' is every "
+                "listing ever seen, active or delisted — the simulation's mission "
+                "says the entire database, and a duplicate can be a listing that "
+                "went offline months before its twin appeared on another portal. "
+                "'active' pairs only listings that are BOTH active today. Marked "
+                "undecided because the operator has not ruled on the first "
+                "generation's scope (open question, 2026-09-10 (a)); the estimate "
+                "lane reports both. Part of the fingerprint: the two scopes are "
+                "two parameter sets and never share pair rows."
+            ),
+        ),
+        SettingDef(
             key="l0_floor_tolerance",
             category=Category.L0_CANDIDATES,
             value_type=ValueType.INTEGER,

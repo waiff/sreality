@@ -556,11 +556,14 @@ floor ±2, sale ≠ rent, dům ↔ komerční only). Built expandable to path A 
       the `dedup_path_c` floor in `location_data/serving_contracts.py`, `toolkit/dedup_candidates.py`
       (path/rung registry, fingerprint, `evaluate_pair` as the oracle, generation lifecycle), tests.
       **Migration 492 is written, NOT applied** (apply-after-OK).
-- [ ] **PR 2 — path C generation lane** (`.github/workflows/new_dedup_candidates.yml`, dispatch
-      only): `estimate` (reads only — the exact pair volume per town and rung, all-time and
-      active-only, before a row is written) and `generate` (set-based SQL per town block and id
-      range, upsert into the store, resumable from `progress`, stale sweep, the funnel + audit
-      stats onto the generation row).
+- [x] **PR 2 — path C generation lane** (`.github/workflows/new_dedup_candidates.yml`, dispatch
+      only; `scripts/dedup_candidates_generate.py` + `toolkit/dedup_candidates_sql.py`):
+      `estimate` (reads only — the exact pair volume per town and rung, all-time and active-only,
+      before a row is written), `verify` (reads only — the SQL's pairs vs the Python oracle on
+      named small towns; fails on disagreement) and `generate` (set-based SQL per town block and
+      id range with a log-band on area, upsert into the store, resumable from `progress`, stale
+      sweep after complete runs only, the funnel + audit stats onto the generation row). Setting
+      `l0_candidate_scope` (undecided; in the fingerprint). **Not run yet** — estimate first.
 - [ ] **PR 3 — Candidate audit page + dashboard funnel top** under NEW DEDUP: property type ×
       path matrix (path-B column from day one, empty), missing-data tables (overall, then per
       portal per type), town/bucket statistics (the pin/clique analogue; clique guard stays
