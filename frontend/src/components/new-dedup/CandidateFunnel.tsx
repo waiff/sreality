@@ -198,11 +198,11 @@ export default function CandidateFunnel({
           </strong>
         </span>
         <span className="text-[0.72rem] text-[var(--color-ink-3)]">
-          on the town + disposition rung (C1):{' '}
+          on the disposition rung (C1):{' '}
           <span className="font-mono tabular-nums">{fmtCount(pairs?.C1 ?? null)}</span>
         </span>
         <span className="text-[0.72rem] text-[var(--color-ink-3)]">
-          on the town + area rung (C3):{' '}
+          on the area rung (C3):{' '}
           <span className="font-mono tabular-nums">{fmtCount(pairs?.C3 ?? null)}</span>
         </span>
       </div>
@@ -210,7 +210,8 @@ export default function CandidateFunnel({
         A <em>pair</em> is two listings the rule thinks might be the same property; a{' '}
         <em>rung</em> is which attributes it compared them on. Every pair sits on exactly one
         rung — C1 when both listings state a disposition, C3 when at least one does not and the
-        rule falls back to floor area. Being a candidate is not a decision that they are the same
+        rule falls back to floor area. C1 checks the floor area too, but as a wide sanity check
+        rather than the match itself. Being a candidate is not a decision that they are the same
         property; it is only the shortlist the later levels look at.
       </p>
     </div>

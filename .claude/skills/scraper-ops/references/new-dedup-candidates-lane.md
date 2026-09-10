@@ -13,9 +13,10 @@ Three words do the work below:
   projection (CLAUDE.md rule 24), never the legacy `listings.obec_id` / `geom` / `street` —
   and compares attributes. Path A (street / geo / radius) is a second `PathDef` in
   `toolkit/dedup_candidates.py`, not built; path B (image similarity) is Wave 3.
-- a **rung** is which attributes were compared: **C1** = town + disposition (both sides carry
-  one), **C3** = town + area (taken when a disposition is missing on either side — the
-  fallback is on ABSENCE, never on a mismatch). C2 does not exist.
+- a **rung** is which attributes were compared: **C1** = town + disposition + area (both sides
+  carry a disposition; the areas, when both are stated, must be within the wide C1 tolerance),
+  **C3** = town + area (taken when a disposition is missing on either side — the fallback is on
+  ABSENCE, never on a mismatch). C2 does not exist.
 - a **parameter set** (`dedup_sim.candidate_inputs`) is the settings a run used, identified by
   a **fingerprint**; a **generation** (`dedup_sim.candidate_generations`) is one run of one
   parameter set, linked to its `dedup_sim.simulation_runs` row.
@@ -26,11 +27,15 @@ Three words do the work below:
 (`toolkit/dedup_candidates_sql.py`) is held to. What it says, and what `verify` checks:
 
 - same town (`obec_kod`), granularity at least `obec` by RANK (`dedup_path_c` floor);
+- in a split town (`l0_path_c_district_split_towns`: Praha, Brno, Ostrava) the two listings must
+  name the same city district (`cast_obce_kod`) **when both name one**; an unknown district
+  reaches the whole town and never vetoes;
 - sale ≠ rent, `category_type` NULL = unknown = not a conflict; `category_main` equal, NULL, or
   the one sanctioned dům ↔ komerční cross-type — the merge chokepoint's guards, verbatim;
 - byt floor rule ±`l0_floor_tolerance`, checked only when BOTH sides are byt with a floor,
   otherwise the pair is kept and marked `floor_checked = false`;
-- C1: equal disposition (trimmed; NULL/blank = not available);
+- C1: equal disposition (trimmed; NULL/blank = not available), plus the areas within
+  `l0_c1_area_tolerance_pct` when both sides state one — skipped, pair kept, when either does not;
 - C3: both areas present and > 0 (`estate_area` for pozemek, else `usable_area`), the gap as a
   percent of the larger side ≤ `l0_area_tolerance_pct_general` (or `_pozemek` when either side
   is land);

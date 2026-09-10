@@ -102,22 +102,74 @@ REGISTRY: dict[str, SettingDef] = {
             ),
         ),
         SettingDef(
+            key="l0_path_c_district_key",
+            category=Category.L0_CANDIDATES,
+            value_type=ValueType.TEXT,
+            default="cast_obce_kod",
+            enum_choices=("cast_obce_kod",),
+            explanation=(
+                "In the biggest cities, 'same town' is too wide to be useful, "
+                "so path C splits those towns by city district. This says "
+                "which field the district is read from. cast_obce_kod is the "
+                "historic quarter (Vinohrady, Zizkov, Smichov) and is the one "
+                "chosen because it is the one we actually have: measured on "
+                "2026-09-10, 85% of Prague listings carry a quarter, against "
+                "24% for the administrative district (Praha 1, Praha 6), "
+                "which needs a precise address the portals often do not give. "
+                "A different field would be a new choice here AND its column "
+                "in the generation SQL; the lane refuses a value it cannot run."
+            ),
+        ),
+        SettingDef(
+            key="l0_path_c_district_split_towns",
+            category=Category.L0_CANDIDATES,
+            value_type=ValueType.TEXT,
+            default="554782,582786,554821",
+            explanation=(
+                "Which towns are big enough to be split by city district, as "
+                "official municipality codes, comma-separated. The three set "
+                "today are 554782 Praha, 582786 Brno, 554821 Ostrava "
+                "(operator ruling 2026-09-10). In a town on this list, two "
+                "listings that BOTH name a district must name the same one; a "
+                "listing whose district is unknown still reaches the whole "
+                "town, so nothing is lost to missing data. Every other town is "
+                "matched whole. Emptying this list turns the split off. It is "
+                "part of the fingerprint, so changing it re-generates the pairs."
+            ),
+        ),
+        SettingDef(
+            key="l0_c1_area_tolerance_pct",
+            category=Category.L0_CANDIDATES,
+            value_type=ValueType.NUMERIC,
+            default=20,
+            minimum=0,
+            explanation=(
+                "On the disposition rung (C1), how far apart the two listings' "
+                "areas may be, as a percent of the larger one. The disposition "
+                "has already done the matching here, so this is a sanity check "
+                "rather than the test itself, which is why it is much wider "
+                "than the area rung's own tolerance: a 2+kk measured 45 m2 by "
+                "one agent and 52 m2 by another is plausibly one flat. Set to "
+                "20% by operator ruling 2026-09-10. When either side states no "
+                "area the check cannot be made and the pair is kept, exactly "
+                "as with the floor rule."
+            ),
+        ),
+        SettingDef(
             key="l0_candidate_scope",
             category=Category.L0_CANDIDATES,
             value_type=ValueType.TEXT,
             default="all",
             enum_choices=("all", "active"),
-            decided=False,
             explanation=(
                 "Which listings a candidate generation looks at. 'all' is every "
                 "listing ever seen, active or delisted — the simulation's mission "
                 "says the entire database, and a duplicate can be a listing that "
                 "went offline months before its twin appeared on another portal. "
-                "'active' pairs only listings that are BOTH active today. Marked "
-                "undecided because the operator has not ruled on the first "
-                "generation's scope (open question, 2026-09-10 (a)); the estimate "
-                "lane reports both. Part of the fingerprint: the two scopes are "
-                "two parameter sets and never share pair rows."
+                "'active' pairs only listings that are BOTH active today. "
+                "RULED 2026-09-10: 'all' — everything ever seen. Part of the "
+                "fingerprint, so the two scopes are two parameter sets and "
+                "never share pair rows."
             ),
         ),
         SettingDef(
@@ -144,9 +196,11 @@ REGISTRY: dict[str, SettingDef] = {
                 "How far apart two listings' usable area can be, as a "
                 "percent of the larger one, and still count as a candidate "
                 "pair. Applies to every property type except pozemek (land). "
-                "This is the area rung's test (path A rung A3, path C rung "
-                "C3); an area that is missing or zero on either side means "
-                "the rung cannot be evaluated for that pair."
+                "This is the AREA RUNG's own test (path A rung A3, path C rung "
+                "C3), where the area is the whole match and so is kept tight; "
+                "the disposition rung has its own, much wider tolerance. An "
+                "area that is missing or zero on either side means the area "
+                "rung cannot be evaluated for that pair."
             ),
         ),
         SettingDef(

@@ -96,8 +96,12 @@ around a town-centroid pin is the false-merge factory the classes above exist to
 "same town only" rung the operator raised on 2026-09-08 was ruled on 2026-09-10 as **path C**
 (NEW DEDUP ledger, that date): town = `obec_kod`, no radius, attributes (disposition, then area)
 do the rest. Its floor is the `dedup_path_c` row above — `obec` at any confidence, keyed on
-`obec_kod` alone; `admin_assignment_method` is carried into the candidate audit as a breakdown,
-not used as a gate.
+`obec_kod`; `admin_assignment_method` is carried into the candidate audit as a breakdown, not used
+as a gate. Refined the same day: in Praha, Brno and Ostrava the town is additionally split by
+**`cast_obce_kod`**, chosen over `momc_kod` on measured coverage (85 % vs 24 % of Praha listings,
+because the quarter is often *claimed* in portal text while the administrative district needs a
+resolved address). That split does not raise the floor: a row with no `cast_obce_kod` still
+qualifies and simply matches against its whole town.
 
 ## 4. The flag
 

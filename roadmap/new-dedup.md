@@ -541,12 +541,16 @@ W1 (shared prerequisites + labeling program):
 
 ## W2 — Level 0: candidate selection (path C first)
 
-Operator ruling 2026-09-10 (PROGRAM.md decisions ledger "Candidate path C" + the 2026-09-10 (a)
-entry): paths A and B are NOT built in this wave; **path C = town + attributes**, where town is
-`listing_location_current.obec_kod` from the new location engine (rule 24 — never the legacy
-`listings.obec_id`/`geom`/`street`), rung **C1 = town + disposition**, **C3 = town + area** when a
-disposition is not available on either side, no radius, the rest unchanged (area 5 %/2 %, byt
-floor ±2, sale ≠ rent, dům ↔ komerční only). Built expandable to path A (a second `PathDef`).
+Operator ruling 2026-09-10, refined the same day (PROGRAM.md decisions ledger "Candidate path C"
++ the 2026-09-10 (a) and (d) entries): paths A and B are NOT built in this wave; **path C = town +
+attributes**, where town is `listing_location_current.obec_kod` from the new location engine
+(rule 24 — never the legacy `listings.obec_id`/`geom`/`street`), rung **C1 = town + disposition +
+area** (±20 %, checked only when both sides state an area), **C3 = town + area** (±5 %/2 %) when a
+disposition is not available on either side, no radius, the rest unchanged (byt floor ±2, sale ≠
+rent, dům ↔ komerční only). **Praha, Brno and Ostrava are split by city district**
+(`cast_obce_kod`, 85 % coverage against `momc_kod`'s 24 %); a listing whose quarter is unknown
+still reaches the whole town, so the split costs no reach. Scope: everything ever seen. Built
+expandable to path A (a second `PathDef`).
 
 - [x] **PR 1 — the candidate store + parameters + the rule as code.** Migration **492**
       (`dedup_sim.candidate_inputs` / `candidate_generations` / `candidate_pairs`: one row per
@@ -574,14 +578,18 @@ floor ±2, sale ≠ rent, dům ↔ komerční only). Built expandable to path A 
       closes W1's carried-forward dashboard skeleton. Reads only the generation row's `stats`;
       renders a gap, never a zero, where nothing was measured. **Nothing to show until 492 is
       applied and a generate runs** — until then every route answers `store_ready: false`.
-- [ ] **Gate 2** (the operator's wording): the operator, reading the audit page, is satisfied that
-      path C loses no rightful candidates to data quality; path B's first output reviewed — the
-      second clause needs W3's path B, flagged as open question 5 in PROGRAM.md 2026-09-10 (a).
+- [x] **The rule refinement** (PROGRAM.md 2026-09-10 (d)): city-district split for the three big
+      towns + C1's ±20 % area check; three new settings; generator version c1 → c2. **Migration
+      492 APPLIED** 2026-09-10 (RLS on, browser roles hold zero privileges — verified).
+- [ ] **The first full-corpus estimate under the new rule**, then a generate.
+- [ ] **Gate 2** (RULED 2026-09-10: it closes on path C alone): the operator, reading the audit
+      page over a real generation, is satisfied that path C loses no rightful candidates to data
+      quality. Path B's first output is reviewed at Gate 3, where that clause already stood.
 
-**Open for the operator (from the 2026-09-10 (a) entry):** confirm the four "not available" /
-fallback definitions; the scope of the first generation (all-time vs active-only); **Praha at obec
-grain is on the order of 10⁸ pairs all-time** — accept, or rule a finer town key for statutory
-cities; OK to apply migration 492; whether Gate 2 closes on path C alone; the 12th target tag.
+**All six questions of the 2026-09-10 (a) entry are ANSWERED** (entry (d)): the four definitions
+approved; scope = everything ever seen; the big cities split by city district AND C1 given a ±20 %
+area check; migration 492 applied; Gate 2 closes on path C alone; eleven tag heads correct for now.
+Nothing is waiting on the operator until the estimate has run under the new rule.
 
 Waves W3-W8 (retag + path B through production wiring) are not started; see PROGRAM.md.
 

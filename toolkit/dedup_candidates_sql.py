@@ -35,6 +35,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from toolkit import dedup_candidates as dc
+
 # --------------------------------------------------------------------------- fragments
 
 # Path C's floor (dedup_path_c: granularity ≥ obec, any confidence, obec_kod present),
@@ -46,7 +48,12 @@ _BASE_CTE = (
     " NULLIF(BTRIM(x.disposition), '') AS disposition, x.floor,"
     " CASE WHEN x.category_main = 'pozemek'"
     "      THEN CASE WHEN x.estate_area > 0 THEN x.estate_area END"
-    "      ELSE CASE WHEN x.usable_area > 0 THEN x.usable_area END END AS area"
+    "      ELSE CASE WHEN x.usable_area > 0 THEN x.usable_area END END AS area,"
+    # The city district, but ONLY in a split town and ONLY when the projection knows it.
+    # NULL means "reaches the whole town": an unknown district cannot veto a pair, exactly
+    # as an unknown floor cannot (operator ruling 2026-09-10).
+    " CASE WHEN l.obec_kod = ANY(%(district_split_towns)s::bigint[])"
+    "      THEN l.cast_obce_kod END AS district"
     " FROM listing_location_current l"
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " JOIN listings x ON x.id = l.listing_id"
@@ -76,6 +83,11 @@ _CATEGORY_GUARD = (
 # guard NULL — dropping pairs the oracle keeps (an unchecked rule cannot veto) and writing a
 # NULL into a NOT NULL column. COALESCE turns "unknown category" into "not byt", which is
 # exactly what floor_rule() in the oracle does with None.
+# Two listings in a split town must name the same district — when both name one.
+_DISTRICT_GUARD = (
+    " AND (a.district IS NULL OR b.district IS NULL OR a.district = b.district)"
+)
+
 _FLOOR_CHECKED = (
     "(COALESCE(a.category_main, '') = 'byt' AND COALESCE(b.category_main, '') = 'byt'"
     " AND a.floor IS NOT NULL AND b.floor IS NOT NULL)"
@@ -87,6 +99,8 @@ _FLOOR_GUARD = (
 
 _ID_RANGE = " AND a.listing_id >= %(id_from)s::bigint AND a.listing_id < %(id_to)s::bigint"
 
+_AREA_DIFF_PCT = "ABS(a.area - b.area) / GREATEST(a.area, b.area) * 100"
+
 _PAIR_COLUMNS = (
     "inputs_id, listing_id_lo, listing_id_hi, rung, generation_id, block_key,"
     " category_type, category_main_lo, category_main_hi, disposition,"
@@ -97,13 +111,17 @@ _C1_SELECT = (
     " SELECT %(inputs_id)s::bigint, a.listing_id, b.listing_id, 'C1', %(generation_id)s::bigint,"
     " %(block_key)s::text, COALESCE(a.category_type, b.category_type),"
     " a.category_main, b.category_main, a.disposition,"
-    " NULL::numeric, NULL::numeric, NULL::numeric, a.floor, b.floor, " + _FLOOR_CHECKED +
+    # The areas are recorded when both are known and are NULL together otherwise, so a
+    # stored C1 row says for itself whether the area check was made.
+    " a.area, b.area, " + _AREA_DIFF_PCT + ", a.floor, b.floor, " + _FLOOR_CHECKED +
     " FROM base a"
     " JOIN base b ON b.disposition = a.disposition AND b.listing_id > a.listing_id"
-    " WHERE a.disposition IS NOT NULL" + _ID_RANGE + _CATEGORY_GUARD + _FLOOR_GUARD
+    " WHERE a.disposition IS NOT NULL" + _ID_RANGE + _DISTRICT_GUARD + _CATEGORY_GUARD +
+    _FLOOR_GUARD +
+    " AND (a.area IS NULL OR b.area IS NULL OR " + _AREA_DIFF_PCT +
+    " <= %(c1_area_pct)s::numeric)"
 )
 
-_AREA_DIFF_PCT = "ABS(a.area - b.area) / GREATEST(a.area, b.area) * 100"
 _AREA_TOLERANCE = (
     "CASE WHEN 'pozemek' IN (a.category_main, b.category_main)"
     " THEN %(area_pct_pozemek)s::numeric ELSE %(area_pct_general)s::numeric END"
@@ -117,8 +135,8 @@ _C3_SELECT = (
     " FROM band a"
     " JOIN (VALUES (-1), (0), (1)) d(off) ON TRUE"
     " JOIN band b ON b.band = a.band + d.off AND b.listing_id > a.listing_id"
-    " WHERE (a.disposition IS NULL OR b.disposition IS NULL)" + _ID_RANGE + _CATEGORY_GUARD +
-    _FLOOR_GUARD +
+    " WHERE (a.disposition IS NULL OR b.disposition IS NULL)" + _ID_RANGE + _DISTRICT_GUARD +
+    _CATEGORY_GUARD + _FLOOR_GUARD +
     " AND " + _AREA_DIFF_PCT + " <= " + _AREA_TOLERANCE
 )
 
@@ -158,7 +176,7 @@ PAIR_COLUMN_NAMES: tuple[str, ...] = tuple(c.strip() for c in _PAIR_COLUMNS.spli
 # available" definitions itself — the point of verify mode is that SQL and Python agree).
 BLOCK_ATTRS_SQL = (
     "SELECT x.id AS listing_id, x.category_type, x.category_main, x.disposition, x.floor,"
-    " x.usable_area, x.estate_area"
+    " x.usable_area, x.estate_area, l.cast_obce_kod::text AS district_code"
     " FROM listing_location_current l"
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " JOIN listings x ON x.id = l.listing_id"
@@ -306,8 +324,10 @@ def rung_params(inputs: dict[str, Any]) -> dict[str, Any]:
     """The placeholder values every rung statement needs from one parameter set."""
     return {
         "floor_tolerance": int(inputs["l0_floor_tolerance"]),
+        "c1_area_pct": float(inputs["l0_c1_area_tolerance_pct"]),
         "area_pct_general": float(inputs["l0_area_tolerance_pct_general"]),
         "area_pct_pozemek": float(inputs["l0_area_tolerance_pct_pozemek"]),
+        "district_split_towns": [int(t) for t in dc.split_towns(inputs)],
         "band_width": band_width(
             inputs["l0_area_tolerance_pct_general"], inputs["l0_area_tolerance_pct_pozemek"]
         ),

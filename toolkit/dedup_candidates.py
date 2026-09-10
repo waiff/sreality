@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 # Bump a path's version when the MEANING of its SQL changes (a predicate, a rung, an
 # availability definition). It is part of the fingerprint, so every pair generated under the
 # old meaning lands in a different key space from the new one — never silently mixed.
-GENERATOR_VERSION: dict[str, str] = {"C": "c1"}
+GENERATOR_VERSION: dict[str, str] = {"C": "c2"}
 
 
 @dataclass(frozen=True)
@@ -61,6 +61,7 @@ class PathDef:
     code: str
     label: str
     block_key: str
+    district_key: str
     floor_feature: str
     settings_keys: tuple[str, ...]
     rungs: tuple[RungDef, ...]
@@ -72,23 +73,30 @@ PATHS: dict[str, PathDef] = {
         code="C",
         label="town + attributes",
         block_key="obec_kod",
+        district_key="cast_obce_kod",
         floor_feature="dedup_path_c",
         settings_keys=(
             "l0_path_c_town_key",
+            "l0_path_c_district_key",
+            "l0_path_c_district_split_towns",
             "l0_candidate_scope",
             "l0_floor_tolerance",
+            "l0_c1_area_tolerance_pct",
             "l0_area_tolerance_pct_general",
             "l0_area_tolerance_pct_pozemek",
         ),
         rungs=(
             RungDef(
                 code="C1",
-                label="town + disposition",
+                label="town + disposition + area",
                 needs=("disposition",),
                 explanation=(
                     "Both listings are in the same town and state the same disposition "
-                    "(e.g. 2+kk). For apartments the floors, when both are known, must be "
-                    "within the floor tolerance."
+                    "(e.g. 2+kk). When both also state an area, the two areas must be "
+                    "within the disposition rung's own, wide tolerance — a sanity check "
+                    "on top of the disposition, not the match itself; when either states "
+                    "no area the check is skipped and the pair is kept. For apartments "
+                    "the floors, when both are known, must be within the floor tolerance."
                 ),
             ),
             RungDef(
@@ -107,7 +115,11 @@ PATHS: dict[str, PathDef] = {
             "Path C replaces every 'street + coordinates + N metres' test of path A with "
             "'same town' (the location engine's obec_kod), because the input location data "
             "is only reliably right at town grain. There is no radius. C2 does not exist: "
-            "town already stands in for both of path A's first two location tests."
+            "town already stands in for both of path A's first two location tests. In the "
+            "few towns big enough for 'same town' to mean very little — Praha, Brno, "
+            "Ostrava — the town is split by city district, but only for the listings that "
+            "state one: a listing whose district is unknown still reaches the whole town, "
+            "so the split costs no reach."
         ),
     ),
 }
@@ -139,6 +151,11 @@ def path_inputs(code: str, settings: dict[str, Any]) -> dict[str, Any]:
     }
     for k in pd.settings_keys:
         inputs[k] = settings[k]
+    if pd.code == "C" and inputs["l0_path_c_district_key"] != pd.district_key:
+        raise ValueError(
+            f"l0_path_c_district_key={inputs['l0_path_c_district_key']!r} is not implemented "
+            f"by path C's SQL (district key {pd.district_key!r})"
+        )
     if pd.code == "C" and inputs["l0_path_c_town_key"] != pd.block_key:
         # The setting exists so the town key is visible and in the fingerprint; the
         # generation SQL implements exactly one column. A second choice is a code change
@@ -192,6 +209,7 @@ class ListingAttrs:
     floor: int | None
     usable_area: float | None
     estate_area: float | None
+    district: str | None = None
 
 
 @dataclass(frozen=True)
@@ -227,6 +245,30 @@ def area_of(category_main: str | None, usable_area: float | None, estate_area: f
 
 def area_diff_pct(a: float, b: float) -> float:
     return abs(a - b) / max(a, b) * 100.0
+
+
+def split_towns(inputs: dict[str, Any]) -> tuple[str, ...]:
+    """The town codes that are split by city district, as strings."""
+    raw = str(inputs.get("l0_path_c_district_split_towns") or "")
+    return tuple(t.strip() for t in raw.split(",") if t.strip())
+
+
+def district_of(
+    block_key: str | None, district_code: str | None, inputs: dict[str, Any]
+) -> str | None:
+    """A listing's district for blocking: its district code when its town is one of the
+    split towns and the code is known, else None. None means "reaches the whole town"."""
+    if block_key is None or district_code is None:
+        return None
+    return district_code if str(block_key) in split_towns(inputs) else None
+
+
+def districts_compatible(a: "ListingAttrs", b: "ListingAttrs") -> bool:
+    """Two listings in one split town must name the same district — but only when BOTH
+    name one. An unknown district cannot veto, exactly as an unknown floor cannot."""
+    if a.district is None or b.district is None:
+        return True
+    return a.district == b.district
 
 
 def area_tolerance_pct(cm_a: str | None, cm_b: str | None, inputs: dict[str, Any]) -> float:
@@ -269,6 +311,8 @@ def evaluate_pair(a: ListingAttrs, b: ListingAttrs, inputs: dict[str, Any]) -> P
         return None
     if a.block_key is None or b.block_key is None or a.block_key != b.block_key:
         return None
+    if not districts_compatible(a, b):
+        return None
     if not categories_compatible(a, b):
         return None
     checked, passes = floor_rule(a, b, int(inputs["l0_floor_tolerance"]))
@@ -279,7 +323,16 @@ def evaluate_pair(a: ListingAttrs, b: ListingAttrs, inputs: dict[str, Any]) -> P
         da, db = normalized_disposition(a.disposition), normalized_disposition(b.disposition)
         if da != db:
             return None
-        return PairVerdict(rung, da, None, None, None, checked)
+        area_a = area_of(a.category_main, a.usable_area, a.estate_area)
+        area_b = area_of(b.category_main, b.usable_area, b.estate_area)
+        if area_a is None or area_b is None:
+            # the area check cannot be made; the pair is kept, as with an unknown floor
+            return PairVerdict(rung, da, None, None, None, checked)
+        diff = area_diff_pct(area_a, area_b)
+        if diff > float(inputs["l0_c1_area_tolerance_pct"]):
+            return None
+        lo, hi = (area_a, area_b) if a.listing_id < b.listing_id else (area_b, area_a)
+        return PairVerdict(rung, da, lo, hi, diff, checked)
     area_a = area_of(a.category_main, a.usable_area, a.estate_area)
     area_b = area_of(b.category_main, b.usable_area, b.estate_area)
     if area_a is None or area_b is None:

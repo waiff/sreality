@@ -28,7 +28,7 @@ def _placeholders(statement: str) -> set[str]:
 
 
 def _lane_args() -> dict[str, object]:
-    return {**sql.rung_params(INPUTS), "block_key": "554782", "id_from": 0, "id_to": 1 << 62,
+    return {**sql.rung_params(INPUTS), "block_key": 554782, "id_from": 0, "id_to": 1 << 62,
             "inputs_id": 1, "generation_id": 1}
 
 
@@ -103,6 +103,25 @@ def test_category_guard_and_floor_rule_are_the_same_predicates_on_both_rungs() -
         assert "b.listing_id > a.listing_id" in s
 
 
+def test_both_rungs_carry_the_district_guard_and_it_never_vetoes_on_an_unknown() -> None:
+    for rung in ("C1", "C3"):
+        body = sql.RUNG_SQL[rung]["rows"]
+        assert "(a.district IS NULL OR b.district IS NULL OR a.district = b.district)" in body
+    # the district is read only inside a split town, and only from the projection
+    base = sql.RUNG_SQL["C1"]["rows"]
+    assert "CASE WHEN l.obec_kod = ANY(%(district_split_towns)s::bigint[])" in base
+    assert "THEN l.cast_obce_kod END AS district" in base
+
+
+def test_c1_checks_the_area_but_only_when_both_are_known() -> None:
+    body = sql.RUNG_SQL["C1"]["rows"]
+    assert "AND (a.area IS NULL OR b.area IS NULL OR " in body
+    assert "<= %(c1_area_pct)s::numeric)" in body
+    # and it records them, so a stored row says whether the check was made
+    assert " a.area, b.area, ABS(a.area - b.area) / GREATEST(a.area, b.area) * 100," in body
+    assert "NULL::numeric, NULL::numeric, NULL::numeric" not in body
+
+
 def test_area_is_the_plot_for_land_and_zero_means_missing() -> None:
     assert "CASE WHEN x.category_main = 'pozemek'" in sql.RUNG_SQL["C3"]["rows"]
     assert "CASE WHEN x.estate_area > 0 THEN x.estate_area END" in sql.RUNG_SQL["C3"]["rows"]
@@ -152,7 +171,9 @@ def test_band_width_edges() -> None:
 def test_rung_params_come_from_the_inputs() -> None:
     p = sql.rung_params(INPUTS)
     assert p == {
-        "floor_tolerance": 2, "area_pct_general": 5.0, "area_pct_pozemek": 2.0,
+        "floor_tolerance": 2, "c1_area_pct": 20.0,
+        "area_pct_general": 5.0, "area_pct_pozemek": 2.0,
+        "district_split_towns": [554782, 582786, 554821],
         "band_width": pytest.approx(-math.log(0.95)), "active_only": False,
     }
     assert sql.rung_params({**INPUTS, "l0_candidate_scope": "active"})["active_only"] is True
