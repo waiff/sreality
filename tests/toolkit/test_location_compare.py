@@ -98,6 +98,14 @@ def _admin_assignment_method_labels() -> list[str]:
     return re.findall(r"'([a-z_]+)'", block.group(1))
 
 
+@pytest.fixture(autouse=True)
+def _cold_cache():
+    # scope()/units() memoize per process; every test starts cold or it reads a neighbour's rows.
+    lc.clear_cache()
+    yield
+    lc.clear_cache()
+
+
 def test_every_assignment_method_label_is_decided_by_the_verdict_case():
     labels = _admin_assignment_method_labels()
     assert set(labels) == {
@@ -477,3 +485,29 @@ def test_map_rows_reports_truncation_against_the_full_box_count():
         "both", "only_old_geom", "only_new_geom",
         "moved_gt_100m", "demoted_to_circle", "no_geom_either",
     }
+
+
+def test_scope_and_units_are_served_from_the_cache_within_the_ttl(monkeypatch):
+    conn = _FakeConn()
+    first = lc.scope(conn, [19, 27])
+    n_queries = len([p for _, p in conn.executed if p is not None])
+    again = lc.scope(conn, [19, 27])
+    assert again is first
+    assert len([p for _, p in conn.executed if p is not None]) == n_queries
+    # a different scope is a different key
+    lc.scope(conn, [19])
+    assert len([p for _, p in conn.executed if p is not None]) == 2 * n_queries
+    # units: same shape
+    lc.units(conn, level="obec", parent_kod=3100, kraje=[19])
+    before = len(conn.executed)
+    lc.units(conn, level="obec", parent_kod=3100, kraje=[19])
+    assert len(conn.executed) == before
+    # expiry: move the clock past the TTL and the scan runs again
+    monkeypatch.setattr(lc.time, "monotonic", lambda: 10 ** 9)
+    lc.scope(conn, [19, 27])
+    assert len([p for _, p in conn.executed if p is not None]) > 2 * n_queries
+
+
+def test_the_statement_budget_covers_a_cold_cohort_scan():
+    # measured 2026-09-10: ~30-40 s cold on production; 30 s returned 500 on first load
+    assert lc.STATEMENT_TIMEOUT_S >= 120

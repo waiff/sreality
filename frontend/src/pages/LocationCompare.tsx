@@ -288,7 +288,7 @@ function UnitDetail({ level, code, kraje }: {
   const q = useQuery({
     queryKey: ['loc-compare', 'unit', level, code, kraje.join(',')],
     queryFn: ({ signal }) => fetchCompareUnit(level, code, kraje, 200, signal),
-    staleTime: 60_000,
+    staleTime: 600_000,
   });
   if (q.error) return <ErrorBanner error={q.error} />;
   if (!q.data) return <Skeleton rows={4} />;
@@ -333,7 +333,7 @@ function StreetSection({ obecKod, obecName, kraje }: {
     queryKey: ['loc-compare', 'streets', obecKod, debounced],
     queryFn: ({ signal }) => fetchCompareStreets(obecKod, debounced, 20, signal),
     enabled: debounced.trim().length >= 2,
-    staleTime: 60_000,
+    staleTime: 600_000,
   });
   return (
     <Card title={`Filters — street in ${obecName ?? obecKod}`}>
@@ -475,14 +475,14 @@ export default function LocationCompare() {
   const scope = useQuery({
     queryKey: ['loc-compare', 'scope', krajeKey],
     queryFn: ({ signal }) => fetchCompareScope(kraje, signal),
-    staleTime: 60_000,
+    staleTime: 600_000,
   });
 
   const units = useQuery({
     queryKey: ['loc-compare', 'units', okresKod, krajeKey],
     queryFn: ({ signal }) => fetchCompareUnits('obec', okresKod!, kraje, signal),
     enabled: okresKod != null,
-    staleTime: 60_000,
+    staleTime: 600_000,
   });
 
   const debouncedBbox = useDebounced(bbox, 400);
