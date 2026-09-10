@@ -222,6 +222,8 @@ def test_a_window_retries_a_lock_wait_then_gives_up_loudly(monkeypatch):
         def __enter__(self): return self
         def __exit__(self, *a): return None
         def execute(self, sql, params=None):
+            if not sql.lower().startswith("insert"):
+                return  # _bounded's SET LOCAL guards pass through
             calls["n"] += 1
             if calls["n"] < 3:
                 raise psycopg.errors.LockNotAvailable("canceling statement due to lock timeout")
@@ -231,12 +233,12 @@ def test_a_window_retries_a_lock_wait_then_gives_up_loudly(monkeypatch):
         @contextmanager
         def transaction(self): yield
 
-    assert drain._execute_window(_Conn(), 10, "insert ...", ()) == 7
-    assert calls["n"] == 3
+    assert drain._execute_window(_Conn(), 10, "INSERT ...", ()) == 7
+    assert calls["n"] == 3  # two lock waits, third insert lands
     calls["n"] = -10  # never succeeds within the attempts
     import pytest
     with pytest.raises(psycopg.errors.LockNotAvailable):
-        drain._execute_window(_Conn(), 10, "insert ...", ())
+        drain._execute_window(_Conn(), 10, "INSERT ...", ())
 
 
 def test_main_enqueues_the_full_sweep_before_the_drain_lease_is_even_attempted(monkeypatch):
