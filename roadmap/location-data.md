@@ -325,10 +325,11 @@ unprojected rows stay the unscoped sweep's job), then corpus-wide with the full 
   to do) with a correlated `EXISTS` behind a `MATERIALIZED` fence — the fence matters because
   `location_claims_live` is a view over a view and the planner will otherwise flatten the
   EXISTS back into a hash semi-join over every claim. Rail:
-  `test_the_kraj_scoped_sweep_drives_off_the_projection_not_the_claim_corpus`. **Not fixed for
-  the UNSCOPED sweep**, which must drive off the claims to see unprojected rows and will hit
-  the same ceiling on the corpus-wide run — that one needs its own answer (a raised ceiling,
-  or batching by kraj) before the full rollout.
+  `test_the_kraj_scoped_sweep_drives_off_the_projection_not_the_claim_corpus`. The UNSCOPED
+  sweep cannot take the same inversion (it must drive off the claims to see unprojected rows),
+  so it now walks the corpus in **listing-id windows** (`DEFAULT_SWEEP_WINDOW` 250k ids, one
+  bounded transaction each, idempotent, resumable by re-running) — the operator's observation
+  that a rollout never needs to *compute* the stale set, only to walk everything.
 - **Operator items:** **A1** (ČÚZK helpdesk) — letter drafted, awaiting send. **A5** (filter
   semantics default) — **decided 2026-09-09: include-and-badge** (see the W6 section). **A2**
   (quarterly licence review) standing. **A4** (Supabase plan/tier) no longer blocks: W1 is applied
@@ -1964,9 +1965,8 @@ then the next thing to look at. Also set `SUPABASE_DB_SESSION_URL` on the realti
 if absent (the lane runs without it, several times slower, and says so once per process) →
 re-resolve kraje 19/27 at v2 → operator review on `/location-compare` → approve full rollout =
 seed `location_v2.filters` / `location_v2.map` and wire Browse + the map to the same predicates →
-R4 after the map flip. **Before the corpus-wide full-resolve**, the UNSCOPED sweep needs the same
-treatment #1384 gave the scoped one — it must drive off the claims to see unprojected rows, so it
-will hit the 900 s ceiling and needs a raised budget or per-kraj batching.
+R4 after the map flip. The corpus-wide full-resolve is
+unblocked: the unscoped sweep is windowed by listing id (same PR as this note).
 
 ## Standing decisions
 
