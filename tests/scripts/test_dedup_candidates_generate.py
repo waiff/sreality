@@ -6,6 +6,7 @@ test asserts the lane's control flow and parameters, never the database."""
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import pytest
@@ -38,6 +39,7 @@ class _Cursor:
 
     def execute(self, statement: str, params: Any = None) -> None:
         self.conn.calls.append((statement, params))
+        _Conn._require_named_params(statement, params)
         self.rows, cols, self.rowcount = self.conn.answer(statement, params)
         self.description = [_Col(c) for c in cols] if cols else None
 
@@ -78,6 +80,13 @@ class _Conn:
         # the lane passes obec_kod as an int (bigint on the projection); the fake keys by string
         assert isinstance(p["block_key"], int), "block_key must reach SQL as an int"
         return self.blocks[str(p["block_key"])]
+
+    @staticmethod
+    def _require_named_params(statement: str, p: Any) -> None:
+        """psycopg raises on a named placeholder the caller did not supply; the fake must too,
+        or a statement that grows a parameter passes here and fails on the real database."""
+        missing = set(re.findall(r"%\((\w+)\)s", statement)) - set(p or {})
+        assert not missing, f"query parameter missing: {sorted(missing)}"
 
     def answer(self, s: str, p: Any) -> tuple[list[tuple[Any, ...]], list[str] | None, int]:
         if s.startswith("SET LOCAL"):

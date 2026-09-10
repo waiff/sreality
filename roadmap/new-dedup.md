@@ -581,7 +581,16 @@ expandable to path A (a second `PathDef`).
 - [x] **The rule refinement** (PROGRAM.md 2026-09-10 (d)): city-district split for the three big
       towns + C1's ±20 % area check; three new settings; generator version c1 → c2. **Migration
       492 APPLIED** 2026-09-10 (RLS on, browser roles hold zero privileges — verified).
-- [ ] **The first full-corpus estimate under the new rule**, then a generate.
+- [x] **The first full-corpus estimate under the new rule** (2026-09-10, PROGRAM.md entry (e)):
+      **56,474,623 pairs** — C1 54.2 M, C3 2.3 M over 5,961 towns; Praha is 79 % of them even
+      split into 119 quarters; Plzeň (1.4 M, unsplit) is the obvious next split and is a settings
+      change. Reach is 67 % of the corpus. Three data-quality findings, all Gate 2 material:
+      **bazos carries NO area at all** (0 of 138,997 — but 80 % of its descriptions contain an m²
+      figure, so it is a parser gap and recoverable; 38,551 listings are lost to it),
+      **remax resolves to nothing** (all 12,964 projection rows unresolved → 0 % reach; a location
+      program defect, handed over), and realitymix loses 20,722 to missing attributes.
+- [ ] **A generate**, then Gate 2. Awaiting the operator: ~56.5 M rows is on the order of 10 GB in
+      `dedup_sim`, which is real storage cost. The write path is proven on three tiny towns first.
 - [ ] **Gate 2** (RULED 2026-09-10: it closes on path C alone): the operator, reading the audit
       page over a real generation, is satisfied that path C loses no rightful candidates to data
       quality. Path B's first output is reviewed at Gate 3, where that clause already stood.
