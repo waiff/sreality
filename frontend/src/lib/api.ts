@@ -723,6 +723,181 @@ export const resetNewDedupSetting = (key: string): Promise<NewDedupSetting> =>
     jwt: true,
   });
 
+/* NEW DEDUP Level 0 · candidate audit (api/routes/new_dedup_candidates.py;
+ * docs/design/new-dedup/PROGRAM.md Wave 2, ledger 2026-09-10 (a)/(b)).
+ *
+ * A GENERATION is one run of the candidate lane under one PARAMETER SET (its
+ * `fingerprint`). Its audit numbers are computed once, at the end of that run,
+ * onto the generation row — so the page reads `stats` and never scans pairs.
+ * Every one of those numbers is produced by
+ * scripts/dedup_candidates_generate.py:generation_stats; the shapes below
+ * mirror that function field for field, which is why several are optional:
+ * a run that failed before the statistics step carries `stats: null`, and the
+ * page must render the gap rather than a zero. */
+
+export interface NewDedupCandidateRung {
+  code: string;
+  label: string;
+  needs: string[];
+  explanation: string;
+}
+
+export interface NewDedupCandidatePath {
+  code: string;
+  label: string;
+  /* false for the paths the program has not built (A, and B until Wave 3).
+   * They still arrive, with no rungs — an empty column is the honest answer. */
+  built: boolean;
+  block_key: string | null;
+  explanation: string;
+  rungs: NewDedupCandidateRung[];
+}
+
+export interface NewDedupCandidateGeneration {
+  id: number;
+  simulation_run_id: number;
+  inputs_id: number;
+  path: string;
+  fingerprint: string;
+  status: string;
+  created_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  inputs: Record<string, unknown>;
+  progress: Record<string, unknown> | null;
+  error_message: string | null;
+}
+
+/* One (rung × the pair's two property types × deal) cell of the pair table.
+ * `floor_checked` counts the pairs in that cell where the apartment floor rule
+ * could actually be applied (both sides byt with a known floor). */
+export interface NewDedupCandidateMatrixRow {
+  rung: string;
+  category_main_lo: string | null;
+  category_main_hi: string | null;
+  category_type: string | null;
+  pairs: number;
+  floor_checked: number;
+}
+
+/* The listing-side funnel, one row per (portal, property type, deal). */
+export interface NewDedupCandidateFunnelRow {
+  source: string;
+  category_main: string | null;
+  category_type: string | null;
+  listings: number;
+  active: number;
+  with_projection: number;
+  with_town: number;
+  with_disposition: number;
+  with_area: number;
+  byt: number;
+  byt_with_floor: number;
+  c1_eligible: number;
+  c3_eligible: number;
+  town_no_attribute: number;
+}
+
+/* `listings` is only carried by the lane's estimate mode; a generation's own
+ * top-town rows have the two rung counts and the name. Optional, so the page
+ * renders an em dash instead of inventing a number. */
+export interface NewDedupCandidateTownRow {
+  block_key: string;
+  obec_name?: string | null;
+  C1: number;
+  C3: number;
+  listings?: number | null;
+}
+
+export interface NewDedupCandidateBucketRow {
+  obec_kod: string;
+  obec_name: string | null;
+  disposition: string | null;
+  listings: number;
+  active: number;
+}
+
+/* One band of the "how many towns produced this many pairs" histogram.
+ * `pairs_to: null` is the open-ended top band. */
+export interface NewDedupCandidateDistributionRow {
+  pairs_from: number;
+  pairs_to: number | null;
+  towns: number;
+}
+
+export interface NewDedupCandidateTownAssignmentRow {
+  method: string | null;
+  listings: number;
+}
+
+export interface NewDedupCandidateTypeCount {
+  category_main: string | null;
+  listings: number;
+}
+
+export interface NewDedupCandidateStats {
+  matrix: NewDedupCandidateMatrixRow[];
+  pairs: { C1: number; C3: number; total: number };
+  listings_with_candidates: NewDedupCandidateTypeCount[];
+  towns_with_pairs: number;
+  top_towns: NewDedupCandidateTownRow[];
+  distribution: NewDedupCandidateDistributionRow[];
+  funnel: NewDedupCandidateFunnelRow[];
+  top_buckets: NewDedupCandidateBucketRow[];
+  town_assignment: NewDedupCandidateTownAssignmentRow[];
+  /* Stamped onto the stats after the statistics step, so a run that predates a
+   * field (or failed early) simply has none. */
+  partial?: boolean;
+  only?: string[];
+  stale_deleted?: number;
+  chunks_done?: number;
+  pairs_upserted?: number;
+  seconds?: number;
+  scope?: string;
+}
+
+/* The run picker's rows — three facts read straight off `stats`, NULL while a
+ * run has none yet. Column order is the backend's `_RECENT_COLUMNS` contract. */
+export interface NewDedupCandidateRecentGeneration {
+  id: number;
+  status: string;
+  created_at: string | null;
+  completed_at: string | null;
+  fingerprint: string;
+  scope: string | null;
+  partial: boolean | null;
+  pairs_total: number | null;
+}
+
+export interface NewDedupCandidateOverview {
+  /* false until migration 492 is applied — the page says "not created yet"
+   * instead of failing. */
+  store_ready: boolean;
+  paths: NewDedupCandidatePath[];
+  generation: NewDedupCandidateGeneration | null;
+  stats: NewDedupCandidateStats | null;
+  recent: NewDedupCandidateRecentGeneration[];
+}
+
+/* The whole audit page in one call. Without `generationId`, the newest
+ * SUCCESSFUL path C run; with one, that run (any status) so two parameter sets
+ * can be compared. */
+export const getNewDedupCandidateOverview = (
+  generationId?: number | null,
+): Promise<{ data: NewDedupCandidateOverview }> =>
+  request<{ data: NewDedupCandidateOverview }>('/new-dedup/candidates/overview', {
+    query: { generation_id: generationId ?? null },
+    jwt: true,
+  });
+
+export const listNewDedupCandidateGenerations = (): Promise<{
+  data: NewDedupCandidateRecentGeneration[];
+}> =>
+  request<{ data: NewDedupCandidateRecentGeneration[] }>(
+    '/new-dedup/candidates/generations',
+    { jwt: true },
+  );
+
 // Tag annotation matrix (docs/design/tag-annotation-matrix.md) — the
 // operator-curated tag taxonomy, the relabel sample, and the tri-state
 // (positive/negative/excluded) ground truth every per-tag classifier head

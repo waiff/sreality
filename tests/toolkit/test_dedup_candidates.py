@@ -389,3 +389,59 @@ def test_record_progress_and_latest_generation_roundtrip() -> None:
     assert gen.progress == {"block_index": 2} and gen.stats is None
     assert conn.calls[-1][1] == {"path": "C", "fingerprint": "abcd", "status": "running"}
     assert dc.latest_generation(_Conn([None]), "C") is None
+
+
+# --------------------------------------------------------------------------- audit reads
+
+
+def test_store_ready_probes_the_catalog_and_never_raises() -> None:
+    """`to_regclass` answers NULL for a relation that is not there, so the audit page can
+    ask "is migration 492 applied?" without a failing query to recover from."""
+    conn = _Conn([(True,)])
+    assert dc.store_ready(conn) is True
+    assert "to_regclass" in conn.calls[0][0]
+    assert conn.calls[0][1] is None  # a catalog probe takes no parameters
+    assert dc.store_ready(_Conn([(None,)])) is False
+    assert dc.store_ready(_Conn([None])) is False
+
+
+def test_list_recent_generations_zips_the_column_contract() -> None:
+    row = (77, "success", "2026-09-10T08:00:00", "2026-09-10T09:30:12", "abcd", "all", False, 421_100)
+    conn = _Conn([row])
+    assert dc.list_recent_generations(conn, "C", 20) == [
+        {
+            "id": 77,
+            "status": "success",
+            "created_at": "2026-09-10T08:00:00",
+            "completed_at": "2026-09-10T09:30:12",
+            "fingerprint": "abcd",
+            "scope": "all",
+            "partial": False,
+            "pairs_total": 421_100,
+        }
+    ]
+    sql, params = conn.calls[-1]
+    assert params == {"path": "C", "limit": 20}
+    # The three facts read straight off `stats`, and a tiebreaker so the picker's order
+    # never reshuffles between two runs created in the same instant.
+    assert "g.stats->>'scope'" in sql and "g.stats->'pairs'->>'total'" in sql
+    assert "ORDER BY g.created_at DESC, g.id DESC" in sql
+    assert dc.list_recent_generations(_Conn([]), "C") == []
+
+
+def test_list_recent_generations_defaults_to_twenty() -> None:
+    conn = _Conn([])
+    dc.list_recent_generations(conn, "C")
+    assert conn.calls[-1][1] == {"path": "C", "limit": 20}
+
+
+def test_generation_timestamps_returns_the_four_audit_columns() -> None:
+    conn = _Conn([("2026-09-10T08:00:00", "2026-09-10T08:00:03", None, "statement timeout")])
+    assert dc.generation_timestamps(conn, 77) == {
+        "created_at": "2026-09-10T08:00:00",
+        "started_at": "2026-09-10T08:00:03",
+        "completed_at": None,
+        "error_message": "statement timeout",
+    }
+    assert conn.calls[-1][1] == {"id": 77}
+    assert dc.generation_timestamps(_Conn([None]), 77) is None

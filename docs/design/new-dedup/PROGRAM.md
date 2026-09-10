@@ -209,6 +209,50 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-10 (c) — **W2 PR 3: the Candidate audit page + the dashboard's funnel top.**
+  The last of W2's three PRs, and the surface Gate 2 is read against. Nothing is generated or
+  decided here — the page is read-only, admin-gated, and every figure on it is read off the
+  generation row's `stats` (written once by `scripts/dedup_candidates_generate.py:generation_stats`).
+  - **The page** (`/new-dedup/candidates`, `frontend/src/pages/NewDedupCandidates.tsx`), five
+    sections in the order Gate 2's question is argued: **the funnel** (every listing → known to
+    the location engine → placed to a town → has a comparable attribute → ended up in a pair),
+    **property type × path** (a column per path, **A and B present and empty from day one** —
+    an omitted column would hide the gap; each carries the plain-language reason it is empty),
+    **missing data** overall and then per portal per property type, **town statistics** (the
+    pair histogram over towns, the towns that produced the most, the largest (town, disposition)
+    buckets, the town-assignment breakdown — the pin/clique analogue; the clique guard stays
+    parked), and **the parameter set** the run used. The run is in the URL
+    (`?generation_id=`), so comparing two parameter sets is a link the operator can keep;
+    without it the newest SUCCESSFUL path C run is shown.
+  - **The funnel is ONE component** (`frontend/src/components/new-dedup/CandidateFunnel.tsx`)
+    rendered by both the audit page and the program dashboard, so the two surfaces can never
+    disagree about how many listings the program can reach. Its last step is broken out **by
+    property type** (the `listings_with_candidates` rows) and **by rung** (C1 / C3), which is
+    the wave text's "by type and path"; the dashboard has no matrix underneath it, so the type
+    half of that requirement lives in the funnel or nowhere. This closes **W1's carried-forward
+    dashboard skeleton** (named in entry (a) as shipping with PR 3).
+  - **The API** (`api/routes/new_dedup_candidates.py`): `/new-dedup/candidates/overview` is the
+    whole page in one read, plus `/generations` for the run picker. **Migration 492 is still not
+    applied**, so every route answers `store_ready: false` with empty content rather than a 500,
+    and the page says the store has not been created yet.
+  - **A gap is rendered as a gap.** Two calls worth recording, because both look like data:
+    a run that carries no per-town listing count shows an em dash, not a zero; and the town
+    histogram's **0-pairs band is blank**, because `generation_stats` builds that histogram from
+    the pair rows — a town that produced no pair never enters it, so a printed "0" there would
+    read as "every town produced a pair". (Only estimate mode feeds `_distribution` every town.)
+  - **The lane's first two dispatches, on `main` after PR 2 merged (both read-only).**
+    `verify` over three small towns — Aš (554499, 665 listings), Bohumín (599051, 601),
+    Benátky nad Jizerou (535451, 475): **AGREE on all three** — the SQL returned exactly the
+    pair set the Python rule accepts (7,262 / 3,091 / 1,745 pairs), rung for rung, evidence
+    value for evidence value, zero disagreements of any class. So the set-based SQL IS the rule
+    as written in entry (a), on real data, before a single row is stored. A first sense of the
+    volume at small-town scale: 3–11 pairs per listing. `estimate` over the whole corpus
+    (scopes all + active) was dispatched right after; its job summary is the number the open
+    questions 2 and 3 are answered with.
+  - **Not decided.** The page has no finished generation to show until the estimate is read,
+    migration 492 is applied and a generate runs. Gate 2 stays open, and so do the six open
+    questions of entry (a) — including question 5 (whether Gate 2 closes on path C alone).
+
 - 2026-09-10 (b) — **W2 PR 2: the path C generation LANE — `new_dedup_candidates.yml`,
   three modes, nothing run yet.** PR 1 (entry (a)) built the store and wrote the rule as
   Python; this PR turns the rule into set-based SQL and a dispatchable GitHub Actions lane that

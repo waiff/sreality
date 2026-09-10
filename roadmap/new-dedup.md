@@ -564,10 +564,16 @@ floor ±2, sale ≠ rent, dům ↔ komerční only). Built expandable to path A 
       id range with a log-band on area, upsert into the store, resumable from `progress`, stale
       sweep after complete runs only, the funnel + audit stats onto the generation row). Setting
       `l0_candidate_scope` (undecided; in the fingerprint). **Not run yet** — estimate first.
-- [ ] **PR 3 — Candidate audit page + dashboard funnel top** under NEW DEDUP: property type ×
-      path matrix (path-B column from day one, empty), missing-data tables (overall, then per
-      portal per type), town/bucket statistics (the pin/clique analogue; clique guard stays
-      parked), funnel: all listings → with town → candidates by type and path.
+- [x] **PR 3 — Candidate audit page + dashboard funnel top** (`/new-dedup/candidates`,
+      `api/routes/new_dedup_candidates.py`, read-only + admin-gated): five sections — funnel,
+      property type × path matrix (paths A **and** B present and empty from day one), missing
+      data overall then per portal per type, town/bucket statistics (the pin/clique analogue;
+      clique guard stays parked), and the parameter set; the run is in the URL
+      (`?generation_id=`). The funnel is ONE shared component rendered by this page and the
+      dashboard, ending "by type and path" (per-type rows + the C1/C3 split) — which also
+      closes W1's carried-forward dashboard skeleton. Reads only the generation row's `stats`;
+      renders a gap, never a zero, where nothing was measured. **Nothing to show until 492 is
+      applied and a generate runs** — until then every route answers `store_ready: false`.
 - [ ] **Gate 2** (the operator's wording): the operator, reading the audit page, is satisfied that
       path C loses no rightful candidates to data quality; path B's first output reviewed — the
       second clause needs W3's path B, flagged as open question 5 in PROGRAM.md 2026-09-10 (a).
