@@ -19,11 +19,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from api import dependencies as deps
-from toolkit import location_labels, location_quality
+from toolkit import location_compare, location_labels, location_quality
 
 router = APIRouter(
     prefix="/location", tags=["location"], dependencies=[Depends(deps.require_admin)]
@@ -163,3 +163,111 @@ def submit_correction(
     result["resolved"] = oc.resolve_now(conn, body.listing_id)
     result["projection"] = oc.read_projection(conn, body.listing_id)
     return {"data": result}
+
+
+# ---------------------------------------------------------------------------
+# compare — the DARK old-vs-new review surface (location W6).
+#
+# The filter + map cutover is built dark and the operator approves it from a
+# side-by-side page scoped to a set of kraje (default Praha + Středočeský).
+# Read-only: no route here writes anything. All logic + SQL is in
+# toolkit/location_compare.py; these handlers only validate and map errors.
+# ---------------------------------------------------------------------------
+
+
+def _kraje(raw: str | None) -> list[int]:
+    try:
+        return location_compare.parse_kraje(raw)
+    except location_compare.CompareInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/compare/scope")
+def compare_scope(
+    kraje: str | None = None, conn: Any = Depends(deps.get_db_conn)
+) -> dict[str, Any]:
+    return location_compare.scope(conn, _kraje(kraje))
+
+
+@router.get("/compare/units")
+def compare_units(
+    level: str,
+    parent_kod: int,
+    kraje: str | None = None,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    codes = _kraje(kraje)
+    try:
+        return location_compare.units(
+            conn, level=level, parent_kod=parent_kod, kraje=codes
+        )
+    except location_compare.CompareInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/compare/unit")
+def compare_unit(
+    level: str,
+    code: int,
+    kraje: str | None = None,
+    limit: int = Query(200, ge=1, le=2000),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    codes = _kraje(kraje)
+    try:
+        return location_compare.unit_detail(
+            conn, level=level, code=code, kraje=codes, limit=limit
+        )
+    except location_compare.CompareInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/compare/streets")
+def compare_streets(
+    obec_kod: int,
+    q: str | None = None,
+    limit: int = Query(20, ge=1, le=200),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    return location_compare.streets(conn, obec_kod=obec_kod, q=q, limit=limit)
+
+
+@router.get("/compare/map")
+def compare_map(
+    west: float,
+    south: float,
+    east: float,
+    north: float,
+    kraje: str | None = None,
+    limit: int = Query(5000, ge=1, le=20000),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    if south >= north or west >= east:
+        raise HTTPException(status_code=400, detail="bbox must be south<north, west<east")
+    return location_compare.map_rows(
+        conn,
+        west=west,
+        south=south,
+        east=east,
+        north=north,
+        kraje=_kraje(kraje),
+        limit=limit,
+    )
+
+
+@router.get("/compare/radius")
+def compare_radius(
+    lat: float,
+    lng: float,
+    radius_m: float,
+    kraje: str | None = None,
+    limit: int = Query(100, ge=1, le=1000),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    codes = _kraje(kraje)
+    try:
+        return location_compare.radius(
+            conn, lat=lat, lng=lng, radius_m=radius_m, kraje=codes, limit=limit
+        )
+    except location_compare.CompareInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

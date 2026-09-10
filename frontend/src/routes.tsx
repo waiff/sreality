@@ -34,6 +34,7 @@ const Outreach = lazyChunk(() => import('./pages/Outreach'));
 const OutreachDetail = lazyChunk(() => import('./pages/OutreachDetail'));
 const BrokerReview = lazyChunk(() => import('./pages/BrokerReview'));
 const LocationQuality = lazyChunk(() => import('./pages/LocationQuality'));
+const LocationCompare = lazyChunk(() => import('./pages/LocationCompare'));
 const NewDedupDashboard = lazyChunk(() => import('./pages/NewDedupDashboard'));
 const NewDedupSettings = lazyChunk(() => import('./pages/NewDedupSettings'));
 const NewDedupLabeling = lazyChunk(() => import('./pages/NewDedupLabeling'));
@@ -111,6 +112,7 @@ export const routes: RouteObject[] = [
       { path: ROUTES.watchdogEdit.childPath, element: <WatchdogEdit />, handle: { title: 'Edit watchdog' } },
       { path: ROUTES.notifications.childPath, element: <Notifications />, handle: { title: 'Notifications' } },
       { path: ROUTES.locationQuality.childPath, element: <AdminPage><LocationQuality /></AdminPage>, handle: { title: 'Location quality' } },
+      { path: ROUTES.locationCompare.childPath, element: <AdminPage><LocationCompare /></AdminPage>, handle: { title: 'Location compare' } },
       { path: ROUTES.settings.childPath, element: <AdminPage><Settings /></AdminPage>, handle: { title: 'Settings' } },
       { path: ROUTES.newDedup.childPath, element: <AdminPage><NewDedupDashboard /></AdminPage>, handle: { title: 'NEW DEDUP' } },
       { path: ROUTES.newDedupSettings.childPath, element: <AdminPage><NewDedupSettings /></AdminPage>, handle: { title: 'NEW DEDUP · Settings' } },

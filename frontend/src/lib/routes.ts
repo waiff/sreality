@@ -114,6 +114,7 @@ export const ROUTES = {
   watchdogEdit: def('/watchdog/:id/edit'),
   notifications: def('/notifications'),
   locationQuality: def('/location-quality'),
+  locationCompare: def('/location-compare'),
   settings: def('/settings'),
   newDedup: def('/new-dedup'),
   newDedupSettings: def('/new-dedup/settings'),
