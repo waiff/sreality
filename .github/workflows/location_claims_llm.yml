@@ -64,6 +64,11 @@ on:
         required: false
         default: true
         type: boolean
+      chain:
+        description: "re-dispatch this run with identical inputs when it stops on its budget with work left (outcome=stopped); ends by itself at reached_end. Not a schedule: nothing runs unless an operator dispatched the first run"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: location-llm
@@ -75,6 +80,9 @@ jobs:
     timeout-minutes: 55
     permissions:
       contents: read
+      # `chain` re-dispatches via `gh workflow run` with the job token (workflow_dispatch is
+      # exempt from the no-GITHUB_TOKEN-triggered-runs rule).
+      actions: write
     steps:
       - uses: actions/checkout@v6
 
@@ -108,6 +116,7 @@ jobs:
           MODEL: ${{ inputs.model }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
+          set -o pipefail   # `| tee` must not hide a failed lane behind tee's exit 0
           ARGS="--source bazos --mode ${MODE:-incremental}"
           if [ -n "$LIMIT" ]; then ARGS="$ARGS --limit $LIMIT"; fi
           if [ -n "$MAX_USD" ]; then ARGS="$ARGS --max-usd $MAX_USD"; fi
@@ -115,4 +124,27 @@ jobs:
           if [ -n "$MODEL" ]; then ARGS="$ARGS --model $MODEL"; fi
           if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           echo "python -m location_data.claims_llm $ARGS"
-          python -m location_data.claims_llm $ARGS
+          python -m location_data.claims_llm $ARGS 2>&1 | tee llm.log
+
+      # Chain on the lane's terminal line: `outcome` 'stopped' = budget ended a run with
+      # listings still ahead of its cursor (the next `full` dispatch resumes there); 'ok' =
+      # reached_end, the chain ends. Each hop re-applies the same per-run --max-usd cap, so
+      # the total spend is bounded by the cohort, never by the chain length.
+      - name: Chain the next run
+        if: inputs.chain && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode }}
+          LIMIT: ${{ inputs.limit }}
+          MAX_USD: ${{ inputs.max_usd }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          outcome=$(grep -o 'CLAIMS-LLM done {.*' llm.log | tail -1 | sed 's/^CLAIMS-LLM done //' \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("outcome",""))' 2>/dev/null || true)
+          echo "outcome=${outcome:-unknown}"
+          if [ "$outcome" != "stopped" ]; then echo "chain ends (outcome=${outcome:-unknown})"; exit 0; fi
+          gh workflow run location_claims_llm.yml --ref "${{ github.ref_name }}" \
+            -f mode="$MODE" -f limit="$LIMIT" -f max_usd="$MAX_USD" -f max_seconds="$MAX_SECONDS" \
+            -f model="$MODEL" -f dry_run=false -f chain=true
+          echo "chained: next run dispatched"

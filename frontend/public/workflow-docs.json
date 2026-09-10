@@ -3435,6 +3435,14 @@
           "type": "boolean",
           "default": "true",
           "options": null
+        },
+        {
+          "name": "chain",
+          "description": "re-dispatch this run with identical inputs when it stops on its budget with work left (outcome=stopped); ends by itself at reached_end. Not a schedule: nothing runs unless an operator dispatched the first run",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
         }
       ],
       "secrets": [
@@ -3449,7 +3457,7 @@
       "concurrencyGroup": "location-llm",
       "cancelInProgress": false,
       "timeoutMinutes": 55,
-      "permissions": "contents: read",
+      "permissions": "contents: read, actions: write",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_claims_llm.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_llm.yml"
     },
@@ -3609,6 +3617,14 @@
           "type": "string",
           "default": "",
           "options": null
+        },
+        {
+          "name": "chain",
+          "description": "re-dispatch this run with identical inputs when it stops on its budget with work left (outcome=stopped); ends by itself at reached_end. Not a schedule: nothing runs unless an operator dispatched the first run",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
         }
       ],
       "secrets": [
@@ -3621,7 +3637,7 @@
       "concurrencyGroup": "location-batch",
       "cancelInProgress": false,
       "timeoutMinutes": 55,
-      "permissions": "contents: read",
+      "permissions": "contents: read, actions: write",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_claims_remine_archive.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_remine_archive.yml"
     },
