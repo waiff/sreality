@@ -52,8 +52,8 @@ on:
         type: boolean
 
 concurrency:
-  # OUTER, cross-lane: shared with the registry load, the claim intake and the resolve
-  # drain so at most ONE heavy location lane runs at a time (2026-08-10 incident — four
+  # OUTER, cross-lane: shared with the registry load and the claim intake so at most ONE
+  # heavy location lane runs at a time (2026-08-10 incident — four
   # concurrent lanes against the shared production instance). See
   # location_registry_load.yml for the full note.
   group: location-batch

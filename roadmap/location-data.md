@@ -1934,9 +1934,15 @@ the same predicates → R4 after the map flip.
 
 ## Standing decisions
 
-- **The four heavy location lanes share ONE outer concurrency group, `location-batch`**
-  (registry load, claim intake, Mapy inventory, resolve), each keeping its own group at
-  the JOB level. Set after the 2026-08-10 incident: four lanes ran concurrently against
+- **The heavy location lanes share ONE outer concurrency group, `location-batch`**
+  (registry load, claim intake, Mapy inventory, churn probe, payload backfill/prune, both
+  re-mine sweeps), each keeping its own group at the JOB level. **AMENDED 2026-09-10: the
+  resolve drain left the group** (operator Decision 8a) — at 0.7 listings/s, ~7 ticks/day and
+  a queue above 100k, the self-chaining archive sweeps starved it to zero ticks in three
+  hours, and it is the one member that is latency-bound rather than instance-bound (11 small
+  indexed reads + one projection write per listing). It reads the claim spine the intake and
+  the archive sweep write, so it never carried their must-never-overlap constraint. Guards
+  now: the job-level `location-resolve` group + the `location_jobs` lease CAS. Set after the 2026-08-10 incident: four lanes ran concurrently against
   the shared 75 GB production instance, dropped backends across the fleet (SSL EOF, one
   AdminShutdown), degraded the live Browse rebuild to multi-minute DataFileReads, and
   wedged two lanes with no error at all. A new heavy location lane joins the group.

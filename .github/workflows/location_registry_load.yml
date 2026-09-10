@@ -79,7 +79,12 @@ on:
 
 concurrency:
   # OUTER, cross-lane: every heavy location batch lane (registry load, claim intake, Mapy
-  # inventory, resolve) shares ONE group so at most one of them runs at a time. On
+  # inventory, the churn probe, the payload backfill/prune and both re-mine sweeps) shares
+  # ONE group so at most one of them runs at a time. The RESOLVE DRAIN left the group on
+  # 2026-09-10: it is latency-bound rather than instance-bound (11 small indexed reads and
+  # one projection write per listing, no COPY, no scan, no detoast), so it contributed
+  # least to the incident below and lost most to the queueing — the self-chaining archive
+  # sweeps starved it to zero ticks in three hours. See location_resolve.yml. On
   # 2026-08-10 four of them ran concurrently against the shared 75 GB production instance
   # and took the whole database with them — backends dropped ("SSL connection has been
   # closed unexpectedly" plus one AdminShutdown), two lanes wedged mid-statement for hours,

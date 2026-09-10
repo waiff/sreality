@@ -1849,9 +1849,18 @@ unconditional, like the operator-correction lane, so a re-run after a failed dra
 button. `shadow` is excluded from `contract_sha256` — it is operational state, so editing it in git is
 not a `contract_version` bump (and a bump would re-shadow the contract, discarding the passed sample).
 
-**Ops rules the incidents wrote.** All four heavy lanes — registry load, claim intake, Mapy inventory,
-resolve — share the OUTER `location-batch` concurrency group so **at most one runs at a time** (each
-keeps its own inner group at job level); a new heavy lane joins it. On 2026-08-10 four concurrent
+**Ops rules the incidents wrote.** The heavy lanes — registry load, claim intake, Mapy inventory, the
+churn probe, the payload backfill/prune, both re-mine sweeps — share the OUTER `location-batch`
+concurrency group so **at most one runs at a time** (each keeps its own inner group at job level); a new
+heavy lane joins it. **The resolve drain left the group on 2026-09-10** (operator decision): it is the one
+member that is latency-bound rather than instance-bound — 11 small indexed reads and one projection write
+per listing, no COPY, no corpus scan, no detoast — so it contributed least to the incident and lost most
+to the queueing. What forced the reversal: at a measured 0.7 listings/s, ~7 GitHub ticks a day and a queue
+above 100k, the self-chaining W2-13 archive sweeps (~55 min back to back) starved it to zero ticks in three
+hours, and "a skipped tick costs nothing" only holds when a later tick catches up. It READS the claim
+spine the intake and the archive sweep WRITE, so it never carried their must-never-overlap constraint. Its
+guards are now the job-level `location-resolve` group plus the `location_jobs` lease CAS, which is also
+what keeps it exclusive against the always-on Railway worker's resolve lane. On 2026-08-10 four concurrent
 lanes dropped backends across the fleet, degraded the live Browse rebuild to multi-minute
 DataFileReads and wedged two lanes with no error at all. **No batch statement runs without a ceiling**:
 `statement_timeout = 0` is for genuine bulk phases (COPY, index build, whole-table rebuild) and
