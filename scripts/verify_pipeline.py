@@ -2755,6 +2755,13 @@ def check_sreality_image_template(conn: Any, thresholds: dict[str, Any]) -> dict
     except requests.RequestException as exc:
         return _probe_skipped(f"the sreality CDN is unreachable ({exc})",
                               {"image_url": image_url, "transform": transform})
+    # 403/429 is how sreality throttles (never a dead template) and a 5xx is
+    # theirs to fix — a transient must read as "verified nothing", not as a
+    # catalogue change, or one busy minute pages the operator.
+    if cdn_status in (403, 429) or cdn_status >= 500:
+        return _probe_skipped(f"the sreality CDN throttled or errored: HTTP {cdn_status}",
+                              {"image_url": image_url, "transform": transform,
+                               "http_status": cdn_status})
     elapsed_ms = int((_time.monotonic() - started) * 1000)
     size = image_dimensions(data) if _media.is_image_bytes(data) is not None else None
     width, height = size if size else (None, None)

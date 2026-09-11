@@ -6436,6 +6436,32 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/smoke_agent.yml"
     },
     {
+      "filename": "sreality_image_canary.yml",
+      "name": "Monitoring: sreality image template (daily)",
+      "description": "Runs the ONE outbound check of the verify harness — `sreality_image_template`, which requests a fresh sreality photo through the deployed download template (`scraper/image_storage.IMAGE_TRANSFORM_OPS`) and judges the served frame against the estate's declared size — on a lane of its own. It is registered LAST in verify_pipeline's registry so a slow CDN can never starve a database check, but that also means the 6-hourly verify lane routinely exhausts its 120 s budget before reaching it (observed on its first run). Here it has the budget to itself, once a day, the way `llm_health.yml` gives the acute checks theirs. A `fail` reds this run and rings the incident ladder; a throttle, a network error or an empty index is a `warn` that verified nothing.",
+      "portal": null,
+      "manual": true,
+      "schedules": [
+        {
+          "cron": "40 5 * * *",
+          "human": "Daily at 05:40 UTC"
+        }
+      ],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "sreality-image-canary",
+      "cancelInProgress": false,
+      "timeoutMinutes": 10,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/sreality_image_canary.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/sreality_image_canary.yml"
+    },
+    {
       "filename": "street_key_parity.yml",
       "name": "Monitoring: street_name_key parity",
       "description": "Weekly sampled drift check: stored listings.street_name_key == the Python normalizer (scraper.street.street_name_key). Guards the STALE-key class the migration-264 presence CHECK cannot see — a normalizer edit without the required backfill_street_name_key.yml all=true re-key, or a writer stamping a wrong value. Silent drift costs dedup recall (the --dirty scoped load matches peers by the STORED key). A mismatch FAILS the run, which monitor_workflow_failures records and the Health page lists — zero new alerting plumbing. NOT a portal ingest workflow, so no `# portal:` tag.",

@@ -1,0 +1,46 @@
+name: "Monitoring: sreality image template (daily)"
+
+# Runs the ONE outbound check of the verify harness — `sreality_image_template`,
+# which requests a fresh sreality photo through the deployed download template
+# (`scraper/image_storage.IMAGE_TRANSFORM_OPS`) and judges the served frame
+# against the estate's declared size — on a lane of its own. It is registered
+# LAST in verify_pipeline's registry so a slow CDN can never starve a database
+# check, but that also means the 6-hourly verify lane routinely exhausts its
+# 120 s budget before reaching it (observed on its first run). Here it has the
+# budget to itself, once a day, the way `llm_health.yml` gives the acute checks
+# theirs. A `fail` reds this run and rings the incident ladder; a throttle,
+# a network error or an empty index is a `warn` that verified nothing.
+#
+# Required secret: SUPABASE_DB_URL (the result row + alert live in the database).
+
+on:
+  schedule:
+    - cron: "40 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sreality-image-canary
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Probe the deployed sreality image template
+        run: python -m scripts.verify_pipeline --only sreality_image_template --exit-nonzero-on-fail
