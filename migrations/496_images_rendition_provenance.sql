@@ -24,8 +24,11 @@
 --                         crop retained. TERMINAL: the lane never reconsiders a
 --                         row stamped this, so a dead source cannot be retried
 --                         forever.
---   'native'              a non-sreality portal's own file, stamped by the
---                         download path from now on.
+--   'native'              a non-sreality portal's own file. Reserved: the
+--                         download path gains the keyword in this migration
+--                         (scraper/db.mark_image_stored) but no caller passes it
+--                         yet, so nothing writes 'native' until the download PR
+--                         lands — a non-sreality row stays NULL until then.
 --
 -- images.stored_width / images.stored_height — the DECODED pixel size measured
 -- at upload, so "did the re-master actually land bigger bytes?" is answerable
@@ -35,12 +38,27 @@
 -- serves exactly it):
 --   rendition IS NULL AND storage_path IS NOT NULL AND sreality_url LIKE '%sdn.cz%'
 --
--- APPLY SHAPE. This file is applied with `psql -f`, so every statement
--- autocommits on its own — there is no enclosing transaction (confirmed against
--- the replay loop in .github/workflows/migrations.yml, which runs
--- `psql -v ON_ERROR_STOP=1 -q -f "$f"` per file). Two consequences, both
--- deliberate: CREATE INDEX CONCURRENTLY is legal here, and every statement is
--- written idempotently so a re-apply after a mid-file failure is a no-op.
+-- APPLY SHAPE. Prod applies this through the Supabase MCP (`apply_migration`),
+-- which wraps its payload in ONE transaction — so `CREATE INDEX CONCURRENTLY`
+-- cannot appear in this file (25001), exactly as migrations 429, 370 and 231
+-- record. The index below is therefore written in the plain form, which is what
+-- a fresh rebuild (CI's `psql -f` replay over an empty database) wants anyway;
+-- on prod the real build is done OUT OF BAND as
+--   CREATE INDEX CONCURRENTLY images_sreality_remaster_pending_idx
+--     ON images (id)
+--     WHERE rendition IS NULL AND storage_path IS NOT NULL
+--       AND sreality_url LIKE '%sdn.cz%';
+-- (no IF NOT EXISTS out of band, deliberately: a CONCURRENTLY build that is
+-- killed leaves an INVALID index behind, and IF NOT EXISTS would then make every
+-- repair attempt a silent no-op). Verify the build with
+--   SELECT indisvalid FROM pg_index WHERE indexrelid =
+--     'images_sreality_remaster_pending_idx'::regclass;
+-- and if it reads false, `DROP INDEX CONCURRENTLY images_sreality_remaster_pending_idx;`
+-- and rebuild. Once it exists on prod, this file's plain CREATE INDEX IF NOT
+-- EXISTS is a no-op there.
+--
+-- Every statement here is written idempotently (IF NOT EXISTS / CREATE OR
+-- REPLACE), so a re-apply after a mid-file failure is a no-op.
 --
 -- Purely additive: three new nullable columns, one new trailing view column, one
 -- new index. No grants (images_public's ACL is authenticated-SELECT-only and
@@ -90,7 +108,9 @@ CREATE OR REPLACE VIEW images_public AS
 
 -- Serves the re-master lane's pending predicate exactly. Partial, so it shrinks
 -- to nothing as the corpus is stamped — the same idiom as migration 232's
--- clip_tagged_at markers.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS images_sreality_remaster_pending_idx
+-- clip_tagged_at markers. Plain (not CONCURRENTLY) per the APPLY SHAPE note
+-- above: this form is for fresh rebuilds and is a no-op on prod, where the index
+-- is built concurrently out of band before this migration is applied.
+CREATE INDEX IF NOT EXISTS images_sreality_remaster_pending_idx
   ON images (id)
   WHERE rendition IS NULL AND storage_path IS NOT NULL AND sreality_url LIKE '%sdn.cz%';

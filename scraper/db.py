@@ -2483,7 +2483,7 @@ _DROP_DINOV3_EMBEDDINGS_SQL = """
 
 
 def invalidate_derived_signals(
-    conn: Any,
+    conn: psycopg.Connection,
     image_ids: Sequence[int],
     *,
     drop_dinov3: bool = False,
@@ -2540,7 +2540,7 @@ _MARK_IMAGE_REMASTERED_SQL = """
 
 
 def mark_image_remastered(
-    conn: Any,
+    conn: psycopg.Connection,
     image_id: int,
     *,
     rendition: str,
@@ -2549,13 +2549,20 @@ def mark_image_remastered(
     phash: int | None,
     sreality_url: str | None = None,
 ) -> None:
-    """Stamp provenance on a row whose R2 object was overwritten in place (mig 496)."""
-    invalidate_derived_signals(conn, [image_id])
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            _MARK_IMAGE_REMASTERED_SQL,
-            (rendition, width, height, phash, sreality_url, image_id),
-        )
+    """Stamp provenance on a row whose R2 object was overwritten in place (mig 496).
+
+    Invalidation and the stamp commit TOGETHER: the outer `conn.transaction()`
+    demotes `invalidate_derived_signals`'s own block to a savepoint, so a crash
+    between them can't leave the row's signals nulled while `rendition` stays
+    NULL (which would keep it in the pending index and re-download it).
+    """
+    with conn.transaction():
+        invalidate_derived_signals(conn, [image_id])
+        with conn.cursor() as cur:
+            cur.execute(
+                _MARK_IMAGE_REMASTERED_SQL,
+                (rendition, width, height, phash, sreality_url, image_id),
+            )
 
 
 def mark_image_attempt(
