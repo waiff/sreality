@@ -126,6 +126,53 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_listings_pk_swap.yml"
     },
     {
+      "filename": "apply_migration.yml",
+      "name": "Ops: apply one migration file",
+      "description": "Applies ONE numbered migration file from `migrations/` to the database with `psql -f` — the same statement-autocommit semantics as the CI schema replay (`migrations.yml`), so a file the replay accepted applies identically here. This is the no-MCP path for the database skill's apply-before-merge rule: dispatch it with `--ref <branch>` while the PR is still open, so a merged file is never unapplied (the migration-438 class of outage).",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "file",
+          "description": "Migration filename under migrations/, e.g. 496_images_rendition_provenance.sql",
+          "required": true,
+          "type": "string",
+          "default": null,
+          "options": null
+        },
+        {
+          "name": "dry_run",
+          "description": "true = validate + connectivity only. false = apply (needs confirm=APPLY).",
+          "required": false,
+          "type": "boolean",
+          "default": "true",
+          "options": null
+        },
+        {
+          "name": "confirm",
+          "description": "Type APPLY to arm the real apply. Ignored when dry_run=true.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_SESSION_URL",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "apply-migration",
+      "cancelInProgress": false,
+      "timeoutMinutes": 60,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/apply_migration.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_migration.yml"
+    },
+    {
       "filename": "apply_r2_constraints.yml",
       "name": "Apply R2 constraints (indexes + FKs)",
       "description": "Phase B of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 3). Indexes each surrogate column the backfill filled, then mirrors the legacy FK onto it (NOT VALID -> VALIDATE) wherever the legacy column had one.",
