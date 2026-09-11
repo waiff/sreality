@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import pytest
 from typing import Any
 
 from pathlib import Path
@@ -2322,6 +2323,20 @@ def test_sreality_image_template_fails_when_the_cdn_refuses_the_template(monkeyp
     r = vp.check_sreality_image_template(None, T)
     assert r["status"] == "fail" and r["details"]["http_status"] == 400
     assert "REFUSED" in r["message"]
+
+
+@pytest.mark.parametrize("status_code", [403, 429, 502, 503])
+def test_sreality_image_template_warns_when_the_cdn_throttles_or_errors(
+    monkeypatch: Any, status_code: int
+) -> None:
+    """403/429 is how sreality throttles and a 5xx is theirs — neither says anything
+    about our template, so a busy minute must read as 'verified nothing', never page."""
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _live_seam((status_code, b""), []))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["status"] == "warn" and r["details"]["skipped"] is True
+    assert r["details"]["http_status"] == status_code
 
 
 def test_sreality_image_template_warns_when_the_image_left_the_cdn_host(monkeypatch: Any) -> None:
