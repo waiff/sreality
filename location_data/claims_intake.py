@@ -652,10 +652,19 @@ _RESUME_SQL = """
 # (`listings_source_native_uidx`, migration 091), so it stays 1:1.
 #
 # `page_kind = 'detail'` because that is the only kind stored: index bodies are never
-# archived. "Latest body" is `ORDER BY first_observed_at DESC, id DESC` rather than
-# `version_seq` — 403 added that counter with no backfill, so every older body is NULL
-# there and a `>` against NULL would rank the older row as the latest. Only OK bodies are
-# mined, matching `payloads._PRUNE_SQL`'s own ranking (403 cites idnes' 503 interstitial).
+# archived. Only OK bodies are mined, matching `payloads._PRUNE_SQL`'s own ranking (403
+# cites idnes' 503 interstitial).
+#
+# "LATEST BODY" IS `last_observed_at`, NOT `first_observed_at`. The store is
+# content-addressed and append-on-change, so a page that goes A -> B -> A does not append a
+# third row: it collides on A's `payload_sha256` and bumps A's `last_observed_at`. Ordering
+# by FIRST observation would then leave B permanently "latest" while the portal has been
+# serving A for weeks, and the lane would mine a body the page no longer has. Not
+# `version_seq` either — 403 added that counter with no backfill, so every older body is
+# NULL there and a comparison against NULL ranks the older row as the latest.
+# `prp_native (source, source_id_native, page_kind, first_observed_at desc)` still drives
+# the equality lookup; the ordering is a sort over the handful of rows the version cap
+# (2) allows per key, not a scan.
 #
 # `body_unmined` IS THE HASH GATE, computed in SQL against the portal's own ACTIVE contract
 # so a per-portal version can never be applied to the wrong portal's body. NULL (a body
@@ -678,7 +687,7 @@ _BODY_JOIN = """
           AND p.source_id_native = l.source_id_native
           AND p.page_kind = 'detail'
           AND (p.http_status IS NULL OR p.http_status BETWEEN 200 AND 299)
-        ORDER BY p.first_observed_at DESC, p.id DESC
+        ORDER BY p.last_observed_at DESC, p.id DESC
         LIMIT 1
     ) pb ON TRUE
 """
@@ -1247,14 +1256,38 @@ def run(
                     for row, body, version in candidates:
                         raw = bodies.get(body.id)
                         if raw is None:
+                            # The object could not be read this run (see `load_bodies`).
+                            # Left UNSTAMPED so the next run asks for it again.
                             continue
                         register = registers.get(row.source)
                         if register is None:
                             continue
-                        result.extend(page_readers.extract_page(
-                            replace(body, body=raw), row,
-                            entries_by_source[row.source], register=register,
-                            max_value_bytes=max_value_bytes))
+                        try:
+                            page_result = page_readers.extract_page(
+                                replace(body, body=raw), row,
+                                entries_by_source[row.source], register=register,
+                                max_value_bytes=max_value_bytes)
+                        except IntakeRefused as refused:
+                            # A CONTENT-triggered refusal about ONE listing — a reader that
+                            # returned a coordinate without its position branch, a span the
+                            # evidence CHECK would reject, a blur class a migration may not
+                            # write. Refusing the whole batch over it is the same wedge a
+                            # failed GET would be: the payload claims beside it roll back,
+                            # the watermark stays put, and the next run re-reads the same
+                            # immutable body and dies identically. Counted, unstamped,
+                            # retried at the next contract version.
+                            LOG.warning(
+                                "PAGE extract refused listing_id=%d source=%s payload_id=%d: %s",
+                                row.listing_id, row.source, body.id, refused)
+                            result.refuse(f"page_extract_refused:{row.source}")
+                            continue
+                        result.extend(page_result)
+                        if "scope_incomplete" in page_result.refusals:
+                            # The scoper fails closed and this body yielded nothing. A
+                            # stamp would record it as mined AT this contract version and
+                            # hide the miss until the next bump — so leave it unstamped and
+                            # let the refusal counter carry it.
+                            continue
                         stamps.append({"id": body.id, "version": version})
                     stats["bodies_mined"] += len(stamps)
 

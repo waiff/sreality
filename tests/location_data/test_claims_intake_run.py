@@ -318,9 +318,14 @@ def test_the_scan_joins_the_latest_stored_detail_body_per_portal_key():
         assert "LEFT JOIN LATERAL" in one
         assert "p.source = l.source AND p.source_id_native = l.source_id_native" in one
         assert "p.listing_id" not in one
-        # "Latest" is (first_observed_at, id), never `version_seq`: 403 added that counter
-        # with no backfill, so every older body is NULL there.
-        assert "ORDER BY p.first_observed_at DESC, p.id DESC LIMIT 1" in one
+        # "LATEST" IS `last_observed_at`. The store is content-addressed and
+        # append-on-change, so a page that goes A -> B -> A appends no third row: it
+        # collides on A's sha and bumps A's `last_observed_at`. Ordering by FIRST
+        # observation would leave B permanently "latest" while the portal has served A for
+        # weeks — the lane would mine a body the page no longer has. Never `version_seq`
+        # either: 403 added that counter with no backfill, so every older body is NULL.
+        assert "ORDER BY p.last_observed_at DESC, p.id DESC LIMIT 1" in one
+        assert "p.first_observed_at DESC" not in one
         assert "p.page_kind = 'detail'" in one
         # Only OK bodies: idnes' 503 interstitial carries no claim anyone can mine.
         assert "p.http_status IS NULL OR p.http_status BETWEEN 200 AND 299" in one

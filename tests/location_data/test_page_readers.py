@@ -1005,9 +1005,17 @@ def test_every_body_lands_on_its_own_payload_id_whatever_order_they_arrive_in():
         assert bodies[i] == objects[f"payloads/remax/{i:02d}/body.html"]
 
 
-def test_one_failed_download_aborts_the_batch_rather_than_writing_a_partial_page_set():
-    """Serially this raised out of the batch's transaction and rolled it back; concurrently
-    it must still raise, or a page set with holes would be written as though complete."""
+@pytest.mark.parametrize("workers", [1, 5])
+def test_one_bad_object_costs_one_listings_page_entries_never_the_batch(workers):
+    """THE WEDGE THIS CLOSES. The batch is ONE transaction, so a single 404/timeout/decode
+    error propagating out of the fan-out would roll back the PAYLOAD claims computed beside
+    it — sreality's and bezrealitky's, over a remax body — stamp the batch `failed`, leave
+    the watermark (which reads `outcome='ok'` only) where it was, and hand the next hourly
+    run the same immutable object to die on again. Forever, for a body that is simply gone.
+
+    So the failure is per OBJECT: warned, dropped from the result, and the caller finds no
+    body for that id. Asserted on BOTH paths — the serial one and the pool — because the
+    pool's `map` re-raises on consumption and only a returning `fetch` avoids that."""
     rows, objects = _spilled_rows(5)
 
     class _FlakyStore:
@@ -1016,9 +1024,26 @@ def test_one_failed_download_aborts_the_batch_rather_than_writing_a_partial_page
                 raise OSError("R2 timed out")
             return objects[key]
 
-    with pytest.raises(OSError, match="R2 timed out"):
-        page_readers.load_bodies(
-            _BodyCursor(rows), list(range(5)), store=_FlakyStore(), workers=5)
+    bodies, from_r2 = page_readers.load_bodies(
+        _BodyCursor(rows), list(range(5)), store=_FlakyStore(), workers=workers)
+
+    # The four readable objects are all there; the fifth is absent, not empty — the caller
+    # leaves it UNSTAMPED and the next run asks for it again.
+    assert sorted(bodies) == [0, 1, 2, 4]
+    assert 3 not in bodies
+    for i in (0, 1, 2, 4):
+        assert bodies[i] == objects[f"payloads/remax/{i:02d}/body.html"]
+    # `from_r2` counts what was ATTEMPTED, so the run log still shows the fetch happening.
+    assert from_r2 == 5
+
+
+def test_a_spilled_row_with_no_store_at_all_still_raises():
+    """The distinction the swallow keeps. A bad OBJECT is a fact about one page; NO STORE
+    is a misconfigured lane, and mining only the database-resident rows would report
+    coverage over a corpus that is almost entirely in the bucket."""
+    rows, _ = _spilled_rows(1)
+    with pytest.raises(IntakeRefused, match="no object store is configured"):
+        page_readers.load_bodies(_BodyCursor(rows), [0], store=None)
 
 
 def test_the_width_is_bounded_by_the_batch_and_one_worker_stays_serial():

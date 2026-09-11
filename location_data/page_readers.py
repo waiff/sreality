@@ -106,8 +106,8 @@ POSITION_BRANCHES = frozenset({POSITION_BRANCH_PORTAL_PIN, POSITION_BRANCH_PORTA
 # (`ON CONFLICT DO UPDATE SET html`) and every body older than the last fetch is simply
 # gone, and the post-W2a append-on-change store only starts accumulating from 2026-08. So
 # "how much of this listing's history does this substrate carry" is honestly 'none' — the
-# claim's own time series lives in `location_claim_observations`, and W1's per-source
-# `HISTORY_COMPLETENESS` answers a question about a different substrate.
+# per-source `HISTORY_COMPLETENESS` answers a question about a different substrate, and the
+# claim's own re-sighting series is gone (rule 25: nobody read it).
 ARCHIVE_HISTORY_COMPLETENESS = "none"
 
 # Every `LEGACY_COLUMNS` key present, every value NULL. `_legacy_column` REFUSES a key the
@@ -1787,7 +1787,20 @@ def load_bodies(
     boundary — so `body IS NULL AND body_r2_key IS NOT NULL` holds on essentially every
     row. A version of this that counted those and moved on would mine an empty corpus and
     report success. `store` is therefore required whenever a row is spilled, and a spilled
-    row with no store is an error, not a skipped page."""
+    row with no store is an error, not a skipped page.
+
+    ONE BAD OBJECT COSTS ONE LISTING'S PAGE ENTRIES, NEVER THE BATCH. A per-body 404,
+    timeout or decode error is warned and dropped from the result; the caller simply finds
+    no body for that id, leaves it UNSTAMPED, and the next run retries it. Letting it
+    propagate is a wedge, not a safety property: the batch is one transaction, so a single
+    missing remax object would roll back the sreality and bezrealitky PAYLOAD claims
+    computed beside it, stamp the batch `failed`, leave the watermark (which reads
+    `outcome='ok'` only) where it was — and the next hourly run would re-select the same
+    object and die the same way, forever, for a body that is simply gone.
+
+    The distinction kept: a spilled row with NO STORE AT ALL still raises. That is a
+    misconfigured lane rather than a bad object, and mining only the database-resident rows
+    would report coverage over a corpus that is almost entirely in the bucket."""
     if not payload_ids:
         return {}, 0
     bodies: dict[int, bytes] = {}
@@ -1817,26 +1830,35 @@ def load_bodies(
     # Unreachable with store=None: a spilled row with no store raised above, per row.
     assert store is not None
 
-    def fetch(item: tuple[int, str, str]) -> tuple[int, bytes]:
+    def fetch(item: tuple[int, str, str]) -> tuple[int, bytes | None]:
+        """One GET, decoded. None is a body this run could not read — never an exception:
+        the failure is per OBJECT and the transaction it would abort is per BATCH."""
         payload_id, key, encoding = item
-        return payload_id, payloads.decode_body(store.download_bytes(key), encoding)
+        try:
+            return payload_id, payloads.decode_body(store.download_bytes(key), encoding)
+        except Exception as exc:  # noqa: BLE001 - one bad object must not wedge the lane
+            LOG.warning("PAGE body fetch failed payload_id=%d key=%s: %s",
+                        payload_id, key, exc)
+            return payload_id, None
+
+    def keep(payload_id: int, decoded: bytes | None) -> None:
+        if decoded is not None:
+            bodies[payload_id] = decoded
 
     width = payloads.body_fetch_workers() if workers is None else workers
     width = max(1, min(len(spilled), width))
     if width == 1:
         for item in spilled:
-            payload_id, decoded = fetch(item)
-            bodies[payload_id] = decoded
+            keep(*fetch(item))
         return bodies, len(spilled)
     # ONE GET PER PAGE IS THE WHOLE COST OF A SWEEP (0.7 % of an 844 s run was the
     # database), so the fetch runs wide. Threads, not async: `download_bytes` is a blocking
     # botocore call — botocore clients are documented thread-safe — and both the socket
-    # wait and zlib's decompression release the GIL. An exception propagates as it did
-    # serially: `pool.map` re-raises the first failure as its results are consumed and the
-    # context manager's shutdown waits for the rest, so the batch aborts and its
-    # transaction rolls back rather than writing a partial page set.
+    # wait and zlib's decompression release the GIL. `pool.map` preserves input order and
+    # `fetch` returns rather than raises, so a failure inside the pool is one None in the
+    # stream instead of an exception re-raised on consumption.
     with ThreadPoolExecutor(max_workers=width,
                             thread_name_prefix="archive-body") as pool:
         for payload_id, decoded in pool.map(fetch, spilled):
-            bodies[payload_id] = decoded
+            keep(payload_id, decoded)
     return bodies, len(spilled)

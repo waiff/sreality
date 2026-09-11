@@ -3704,19 +3704,21 @@ def append_payload_if_enabled(
     content_type: str | None = None,
     http_status: int | None = None,
 ) -> None:
-    """Limit-gated, never-raising dual-write into the payload archive (W2a-2).
+    """Never-raising dual-write into the payload archive.
 
-    A `detail` body passes `payload_dual_write` alone; EVERY other page_kind —
-    index, map, gazetteer, snapshot, archive, none — passes `payload_index_archive`
-    as well (W2a-6), because all of them are surface-grain artefacts refetched on
-    a walk cadence rather than one listing's body.
+    A `detail` body is ALWAYS archived; EVERY other page_kind — index, map,
+    gazetteer, snapshot, archive, none — is never, because all of them are
+    surface-grain artefacts refetched on a walk cadence rather than one
+    listing's body (`_payload_archive_enabled`). It was three flags until
+    2026-09-11; rule 25 made the stored detail body the claim lane's second
+    substrate, so archiving it is no longer an opt-in experiment.
 
     `portal_raw_pages` is latest-wins, so the body a claim's evidence span
     points into is gone the moment the page is refetched;
     `location_data.payloads.append_payload` is the append-on-change store that
     ends that, and this is the ONLY form scrapers should call it in. Every
-    failure — limit read, normaliser, append — warns and returns: the archive
-    is downstream of the scrape and must never be able to stop it.
+    failure — normaliser, append — warns and returns: the archive is downstream
+    of the scrape and must never be able to stop it.
 
     `body` should be a THUNK wherever producing the bytes costs anything (the
     churn hook's reasoning: sreality's index payload is multi-MB and this rides
