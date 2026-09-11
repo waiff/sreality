@@ -25,6 +25,9 @@ const CHECK_LABELS: Record<string, string> = {
   area_vs_usable_divergence: 'Area vs usable area',
   ppm2_measure_coverage: 'Kč/m² coverage',
   location_payload_shape_drift: 'Location payload shape',
+  outbound_url_coverage: 'Portal URL coverage',
+  outbound_url_parity: 'Portal URL parity',
+  outbound_url_conformance: 'Portal URL conformance',
 };
 
 /* The four per-m² plausibility checks emit a share or a ratio, and the number is
@@ -36,6 +39,7 @@ const CHECK_VALUE_UNIT: Record<string, string> = {
   area_vs_usable_divergence: '%',
   ppm2_measure_coverage: '%',
   location_payload_shape_drift: '%',
+  outbound_url_conformance: '%',
 };
 
 export function pipelineCheckLabel(key: string): string {
