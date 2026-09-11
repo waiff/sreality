@@ -367,10 +367,14 @@ def test_mapy_membership_vetoes_a_coordinate_on_the_archived_substrate_too():
     assert vetoed.reason == "listing_in_mapy_affected_inventory"
 
 
-def test_remax_publishes_no_payload_coordinate_but_does_publish_an_archived_one():
-    """The gap this table closes: today's `COORDINATE_RULES` describe `raw_json` only, and
-    remax's answer there is 'none' while `#printMap[data-gps]` is a first-party pin."""
-    assert not coordinate_verdict("remax", "page", in_mapy_inventory=False).admitted
+def test_remax_admits_the_same_pin_on_both_substrates_once_it_is_stamped():
+    """Until 2026-09-11 `COORDINATE_RULES["remax"]` was 'none' — the parser stamped no
+    provenance, so the payload arm refused the very `#printMap[data-gps]` pin the archived
+    arm admitted. The parser now stamps the subject-map pin `page`; an UNSTAMPED row (drained
+    before the stamp) is still refused on the payload arm, never admitted on faith."""
+    assert coordinate_verdict("remax", "page", in_mapy_inventory=False).admitted
+    assert coordinate_verdict("remax", None, in_mapy_inventory=False).reason == (
+        "coordinate_provenance_unestablished")
     assert coordinate_verdict(
         "remax", None, in_mapy_inventory=False, substrate=SUBSTRATE_ARCHIVED_HTML,
         entry_id="rx.det.gps").admitted

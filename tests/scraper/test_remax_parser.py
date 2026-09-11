@@ -277,6 +277,8 @@ def test_parse_detail_full():
     # never the carousel card's (first-occurrence rule holds for gps only).
     assert listing.lat is not None and 50.08 < listing.lat < 50.10
     assert listing.lon is not None and 14.48 < listing.lon < 14.50
+    # The subject-map pin is first-party and says so (the licence ladder reads this key).
+    assert listing.raw["coords"] == {"source": "page"}
     assert "Žižkov" in (listing.locality or "")
     # W0 item 0d: street comes from the subject's own pd-header__address
     # ("ulice Na vrcholu, ..."), NEVER from data-address — every data-address
@@ -390,3 +392,26 @@ def test_uzitna_beats_celkova_and_says_so():
     )
     listing = parse_detail(html, source_url=_DETAIL_URL)
     assert (listing.area_m2, listing.area_basis) == (45.0, "usable")
+
+
+def test_the_subject_map_pin_is_stamped_page_on_the_real_capture():
+    """`#printMap[data-gps]` on the real archived body (445483, Úvaly): the same pin the
+    archived-HTML lane admits, now admitted on the hourly lane too because it is stamped."""
+    import pathlib
+
+    body = (pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "portal_html"
+            / "remax_detail.html").read_text(encoding="utf-8")
+    listing = parse_detail(body, source_url="https://www.remax-czech.cz/reality/detail/445483/x")
+    assert listing.lat is not None and 50.05 < listing.lat < 50.08
+    assert listing.lon is not None and 14.70 < listing.lon < 14.75
+    assert listing.raw["coords"] == {"source": "page"}
+
+
+def test_a_pin_found_only_outside_the_subject_map_is_kept_but_never_stamped():
+    """No subject map element: the document-wide first `data-gps` (a recommended card's on
+    this fixture) still fills lat/lon as before, but carries no provenance stamp — so the
+    claim ladder keeps refusing it instead of admitting a neighbour's pin as the subject's."""
+    body = DETAIL_HTML.replace('<div class="pd-map"', '<div class="pd-map-removed"')
+    listing = parse_detail(body, source_url=_DETAIL_URL)
+    assert listing.lat is not None
+    assert "coords" not in listing.raw

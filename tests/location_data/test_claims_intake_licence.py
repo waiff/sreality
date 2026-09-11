@@ -123,8 +123,13 @@ def test_verdict_reasons_are_stable_and_never_leak_a_licence_class():
         verdict = coordinate_verdict("bazos", stamp, in_mapy_inventory=False)
         assert verdict.admitted is False
         assert verdict.licence_class is None
-    assert coordinate_verdict("remax", "page", in_mapy_inventory=False).reason == (
-        "no_first_party_coordinate_on_this_portal")
+    # remax joined the geom_column portals on 2026-09-11: the subject-map pin is stamped
+    # `page` by the parser; a row drained before the stamp existed carries None and stays
+    # refused until its next drain — never admitted on faith.
+    assert coordinate_verdict("remax", "page", in_mapy_inventory=False).admitted is True
+    assert coordinate_verdict("remax", None, in_mapy_inventory=False).reason == (
+        "coordinate_provenance_unestablished")
+    assert coordinate_verdict("remax", "geocode", in_mapy_inventory=False).admitted is False
     assert coordinate_verdict("bazos", "link", in_mapy_inventory=False).admitted is True
     assert coordinate_verdict("idnes", "link", in_mapy_inventory=False).admitted is False
 
