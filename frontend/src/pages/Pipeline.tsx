@@ -38,6 +38,18 @@ import { type ListingStatus } from '@/lib/filters';
 import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
 import TagColorPicker from '@/components/TagColorPicker';
 import { FunnelIcon, InfoIcon } from '@/components/icons';
+import SizeToggle, {
+  LargeImageGlyph,
+  MediumImageGlyph,
+  SmallImageGlyph,
+} from '@/components/SizeToggle';
+import {
+  PIPELINE_CARD_GEOMETRY,
+  PIPELINE_CARD_SIZE_LABELS,
+  PIPELINE_CARD_SIZES,
+  usePipelineCardSize,
+  type PipelineCardSize,
+} from '@/lib/pipelineCardSize';
 import BoardCard, {
   CardFace,
   CARD_PREFIX,
@@ -93,6 +105,10 @@ export default function Pipeline() {
     setDistricts,
     setSort,
   } = usePipelineViewState();
+  /* Card size is a workspace preference, NOT part of the URL view state above:
+   * a shared link carries which deals to look at, not how this browser likes
+   * its photos. Same split Browse draws for its own image-size switch. */
+  const cardSize = usePipelineCardSize();
   const stagesQ = useQuery({
     queryKey: pipelineKeys.stages,
     queryFn: fetchPipelineStages,
@@ -303,7 +319,7 @@ export default function Pipeline() {
               row rather than floating in a new header toolbar — it is another
               knob on the same cohort, and the operator's eye is already here.
               Ordering applies WITHIN each column. */}
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="shrink-0 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
               Řazení
             </span>
@@ -328,6 +344,23 @@ export default function Pipeline() {
                 </option>
               ))}
             </select>
+            {/* Card size shares the Řazení row rather than claiming a fifth
+                one: both are about how the board PRESENTS the cohort, while
+                Stav/Typ/Lokalita choose the cohort itself. */}
+            <span className="ml-auto shrink-0 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+              Karty
+            </span>
+            <SizeToggle
+              label="Velikost karet"
+              value={cardSize.value}
+              onChange={cardSize.set}
+              steps={PIPELINE_CARD_SIZES.map((v) => ({
+                value: v,
+                label: PIPELINE_CARD_SIZE_LABELS[v].label,
+                title: PIPELINE_CARD_SIZE_LABELS[v].title,
+                glyph: CARD_SIZE_GLYPH[v],
+              }))}
+            />
           </div>
         </div>
       )}
@@ -342,7 +375,7 @@ export default function Pipeline() {
            cards are still in flight. That is the whole shape of this page, and
            it lands ~0.35s before the cards do; a bare "Načítání…" threw that
            away and made an interactive board look like a blank screen. */
-        <BoardSkeleton stages={stages} />
+        <BoardSkeleton stages={stages} size={cardSize.value} />
       ) : cards.length === 0 ? (
         <p className="mt-8 text-sm text-[var(--color-ink-3)]">
           Zatím prázdné. Přidejte nemovitost do pipeline tlačítkem „Přidat do
@@ -361,6 +394,7 @@ export default function Pipeline() {
             cards={filteredCards}
             byStage={byStage}
             cityQuality={cityQuality}
+            size={cardSize.value}
           />
         </CardHydrationProvider>
       )}
@@ -368,14 +402,13 @@ export default function Pipeline() {
   );
 }
 
-/* The drop zone's floor: three card rows (3 × ~5.5rem card + the 0.5rem gaps).
- *
- * A stage with one card — or none — used to offer a ~6rem target pinned to the
- * top of a board that runs thousands of pixels tall. Scrolled down to the card
- * you wanted to move, the empty stage had no reachable target at all. The zones
- * now stretch to the tallest column (`items-stretch` on the row, `grow` on the
- * list), and this floor keeps a SHORT board from collapsing back to a sliver. */
-const DROP_ZONE_MIN = 'min-h-[18rem]';
+/* One glyph per card size — the switch's vocabulary, shared with the boolean
+ * ImageSizeToggle the other grids use. */
+const CARD_SIZE_GLYPH: Record<PipelineCardSize, JSX.Element> = {
+  sm: <SmallImageGlyph />,
+  md: <MediumImageGlyph />,
+  lg: <LargeImageGlyph />,
+};
 
 /* The board's shape, drawn from the stage list alone.
  *
@@ -384,13 +417,23 @@ const DROP_ZONE_MIN = 'min-h-[18rem]';
  * columns that were already there — no reflow, no jump. Falls back to three
  * neutral columns on the rare path where even the stages are cold, which keeps
  * the page from collapsing to a single line of text. */
-function BoardSkeleton({ stages }: { stages: PipelineStage[] }) {
+function BoardSkeleton({
+  stages,
+  size,
+}: {
+  stages: PipelineStage[];
+  size: PipelineCardSize;
+}) {
   const columns: Array<PipelineStage | null> =
     stages.length > 0 ? stages : [null, null, null];
+  const geo = PIPELINE_CARD_GEOMETRY[size];
   return (
     <div className="mt-6 flex items-stretch gap-4 overflow-x-auto pb-4" aria-busy="true">
       {columns.map((s, i) => (
-        <div key={s?.id ?? `skeleton-${i}`} className="flex w-72 shrink-0 flex-col">
+        <div
+          key={s?.id ?? `skeleton-${i}`}
+          className={`flex shrink-0 flex-col ${geo.column}`}
+        >
           <div
             className="flex items-baseline justify-between px-1 pb-2 border-b-2"
             style={{ borderColor: s ? stageColor(s) : 'var(--color-rule)' }}
@@ -402,11 +445,11 @@ function BoardSkeleton({ stages }: { stages: PipelineStage[] }) {
               {s?.label ?? ' '}
             </span>
           </div>
-          <ul className={`mt-3 grow space-y-2 p-1 ${DROP_ZONE_MIN}`}>
+          <ul className={`mt-3 grow space-y-2 p-1 ${geo.dropZoneMin}`}>
             {[0, 1].map((n) => (
               <li
                 key={n}
-                className="h-[4.5rem] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] opacity-60"
+                className={`${geo.skeletonRow} rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] opacity-60`}
               />
             ))}
           </ul>
@@ -445,11 +488,13 @@ function Board({
   cards,
   byStage,
   cityQuality,
+  size,
 }: {
   stages: PipelineStage[];
   cards: PipelineBoardCard[];
   byStage: Map<number, PipelineBoardCard[]>;
   cityQuality: CityQualityByObec;
+  size: PipelineCardSize;
 }) {
   const qc = useQueryClient();
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -520,6 +565,7 @@ function Board({
             stage={s}
             cards={byStage.get(s.id) ?? []}
             cityQuality={cityQuality}
+            size={size}
             onRemove={(propertyId) => remove.mutate(propertyId)}
           />
         ))}
@@ -530,8 +576,10 @@ function Board({
           reappears — a visible jump back. Vanish the overlay instantly. */}
       <DragOverlay dropAnimation={null}>
         {activeCard ? (
-          <div className="w-64 rounded-[var(--radius-md)] border border-[var(--color-rule-strong)] bg-[var(--color-paper-2)] p-2.5 shadow-lg">
-            <CardFace card={activeCard} cityQuality={cityQuality} />
+          <div
+            className={`${PIPELINE_CARD_GEOMETRY[size].overlay} rounded-[var(--radius-md)] border border-[var(--color-rule-strong)] bg-[var(--color-paper-2)] p-2.5 shadow-lg`}
+          >
+            <CardFace card={activeCard} cityQuality={cityQuality} size={size} />
           </div>
         ) : null}
       </DragOverlay>
@@ -810,16 +858,19 @@ function StageColumn({
   stage,
   cards,
   cityQuality,
+  size,
   onRemove,
 }: {
   stage: PipelineStage;
   cards: PipelineBoardCard[];
   cityQuality: CityQualityByObec;
+  size: PipelineCardSize;
   onRemove: (propertyId: number) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `${STAGE_PREFIX}${stage.id}` });
+  const geo = PIPELINE_CARD_GEOMETRY[size];
   return (
-    <div className="flex w-72 shrink-0 flex-col">
+    <div className={`flex shrink-0 flex-col ${geo.column}`}>
       <div
         className="flex items-baseline justify-between px-1 pb-2 border-b-2"
         style={{ borderColor: stageColor(stage) }}
@@ -836,7 +887,7 @@ function StageColumn({
       </div>
       <ul
         ref={setNodeRef}
-        className={`mt-3 grow space-y-2 rounded-[var(--radius-md)] p-1 transition-colors ${DROP_ZONE_MIN} ${
+        className={`mt-3 grow space-y-2 rounded-[var(--radius-md)] p-1 transition-colors ${geo.dropZoneMin} ${
           isOver
             ? 'bg-[var(--color-inset)] outline outline-1 outline-[var(--color-rule-strong)]'
             : ''
@@ -847,7 +898,12 @@ function StageColumn({
         ) : (
           cards.map((c) => (
             <li key={c.property_id}>
-              <BoardCard card={c} cityQuality={cityQuality} onRemove={onRemove} />
+              <BoardCard
+                card={c}
+                cityQuality={cityQuality}
+                size={size}
+                onRemove={onRemove}
+              />
             </li>
           ))
         )}

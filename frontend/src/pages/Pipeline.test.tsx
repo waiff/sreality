@@ -201,6 +201,7 @@ function renderBoard() {
 
 describe('<Pipeline> board', () => {
   beforeEach(() => {
+    localStorage.clear();
     vi.mocked(queries.fetchPipelineStages).mockResolvedValue(STAGES);
     vi.mocked(queries.fetchPipelineBoard).mockResolvedValue(CARDS);
     vi.mocked(api.movePipelineCard).mockResolvedValue({
@@ -213,6 +214,35 @@ describe('<Pipeline> board', () => {
     vi.mocked(brokersApi.fetchListingBrokersByIds).mockResolvedValue(
       new Map([[111, listingBroker(false)]]),
     );
+  });
+
+  /* The card-size switch. jsdom lays nothing out, so what is pinned here is
+     that the choice REACHES the board — column width, the card's own photo
+     frame, and the stored preference — not how any of it looks; the geometry
+     itself was measured in a real browser and is pinned in
+     lib/pipelineCardSize.test.ts. */
+  it('restyles the board and remembers the card size', async () => {
+    renderBoard();
+    await screen.findByLabelText('Přetáhnout kartu do jiné fáze');
+    const column = () => document.querySelector('ul')?.parentElement;
+    /* The cover read is mocked empty, so every card draws the placeholder
+       frame — which carries exactly the geometry the photo would. */
+    const thumb = () => document.querySelector('ul li div[aria-hidden]');
+
+    expect(column()?.className).toContain('w-72');
+    expect(thumb()?.className).toContain('h-12 w-12');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Velké' }));
+    expect(column()?.className).toContain('w-[26rem]');
+    /* lg is a different card design, not a scaled one: the photo spans the
+       card instead of sitting in a fixed square beside the text. */
+    expect(thumb()?.className).toContain('aspect-[16/10]');
+    expect(localStorage.getItem('sreality.pipeline.cardSize')).toBe('lg');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Střední' }));
+    expect(column()?.className).toContain('w-[24rem]');
+    expect(thumb()?.className).toContain('h-24 w-24');
+    expect(localStorage.getItem('sreality.pipeline.cardSize')).toBe('md');
   });
 
   it('renders draggable cards with a drag handle + enriched content', async () => {
