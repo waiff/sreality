@@ -2565,6 +2565,38 @@ def mark_image_remastered(
             )
 
 
+# The re-master lane's two non-success terminals. Both stamp ONLY the attempt
+# clock — `storage_path`, `download_attempts` and `phash` describe bytes that are
+# still in the bucket and still valid, and a re-master that fetched nothing has
+# not replaced them. The terminal one also claims the row's rendition: the stored
+# object IS the legacy crop, the source for anything better is gone, and saying so
+# retires the row from the pending set instead of re-fetching a dead URL forever.
+_MARK_IMAGE_REMASTER_TERMINAL_SQL = """
+    UPDATE images
+    SET rendition = 'sreality-749-crop',
+        last_download_attempt_at = now()
+    WHERE id = %s
+    """
+
+_MARK_IMAGE_REMASTER_DEFERRED_SQL = """
+    UPDATE images
+    SET last_download_attempt_at = now()
+    WHERE id = %s
+    """
+
+
+def mark_image_remaster_terminal(conn: psycopg.Connection, image_id: int) -> None:
+    """The stored crop is all there will ever be — retire the row from the queue."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(_MARK_IMAGE_REMASTER_TERMINAL_SQL, (image_id,))
+
+
+def mark_image_remaster_deferred(conn: psycopg.Connection, image_id: int) -> None:
+    """A transient failure: leave `rendition` NULL so the next tick re-selects it."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(_MARK_IMAGE_REMASTER_DEFERRED_SQL, (image_id,))
+
+
 def mark_image_attempt(
     conn: psycopg.Connection,
     image_id: int,

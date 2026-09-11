@@ -775,7 +775,11 @@ renumber.** Navigate by area:
    measured at upload. A job that REPLACES an object's bytes under its existing `storage_path`
    must go through `db.invalidate_derived_signals` — the one chokepoint that re-arms the phash +
    CLIP lanes by nulling their own predicates (`phash`, `clip_tagged_at`) and deletes no label,
-   review or CLIP-cache row.
+   review or CLIP-cache row. **Outside the download path itself, the ONLY job that replaces stored
+   bytes is the re-master lane** (`scripts/remaster_sreality_images.py` / `sreality_image_remaster.yml`):
+   it overwrites the object under the row's existing `storage_path` and stamps `rendition` +
+   dimensions through `db.mark_image_remastered`, which runs that invalidation in the same
+   transaction — so no other job may rewrite an object without going through the same pair.
    **Two consequences of the template switch, both live until the re-master lane finishes.**
    (a) *The visual-signal corpus is MIXED-RENDITION.* dHash and CLIP are framing-sensitive, so the
    same photo stored as the old 4:3 crop and as the whole frame yields materially different signals:
