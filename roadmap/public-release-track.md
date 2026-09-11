@@ -68,6 +68,18 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
   a write). W1's sentinel-account route test became a `resolve_account_id` that RAISES, and
   `tests/test_tenant_isolation_live.py` gained the assertion nothing in the repo could make before:
   A sees the card, B does not, one output row per requested item — live, role-switched, RLS-bound.
+- **2026-09-11 W4 (writes carry exactly ONE account)** — the third definition of the caller
+  (the None-able optional account) is gone. `tenant_pool.require_account_id` resolves it ONCE
+  at the route edge and 400s "no account for caller"; the seven `/pipeline/*` writes, the three
+  curation writes and `POST /notifications/subscriptions` (whose inline shape it hoists) declare it, replacing pipeline's bare `None` (empty 200 / "no entry stage
+  configured" 500) and curation's `or SYSTEM_ACCOUNT_ID` — a value migration 290's WITH CHECK
+  has no SYSTEM arm to accept, so that fallback could only ever 500. `api/pipeline.py`'s 17
+  `account_id IS NOT DISTINCT FROM %s` became `= %s` (the columns are NOT NULL since 295, so
+  the NULL-tolerant spelling tolerated nothing) and its five "the legacy service-role branch
+  bypasses RLS" comments now state the real reason: the PK is `(account_id, property_id)` and
+  the entry-stage unique is per account, so a write must NAME its one owner. Every route fake
+  lost its `account_id=None` default, so an identical one-line revert is a `TypeError`, not a
+  green CI run. It lives in `tenant_pool`, not `dependencies` (circular import).
 - **Phase 1 (multi-tenant foundations)** — in progress.
   - Increment 1 ✅ — accounts/account_members/admins, `current_account_ids()` /
     `is_platform_admin()`, the on-signup handler, JWT verify (JWKS/ES256) (migrations

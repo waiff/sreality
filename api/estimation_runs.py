@@ -815,6 +815,10 @@ def create_estimation_run(
     llm_client: "LLMClient",
     body: s.CreateEstimationIn,
     background_tasks: Any | None = None,
+    # Stays optional where every other write path is now required: this runs on
+    # the SERVICE-ROLE connection and building_runs' internal child-run caller
+    # has no request identity — estimation_runs genuinely carries the SYSTEM arm
+    # (migration 291), which the curation/pipeline tables do not.
     account_id: str | None = None,
     claims: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1852,6 +1856,8 @@ def _persist_failed_run(
     recorder: TraceRecorder,
     error_msg: str,
     extra_warnings: list[str],
+    # Optional for the same reason as create_estimation_run's: it inherits that
+    # caller's account and falls back to SYSTEM below.
     account_id: str | None = None,
 ) -> dict[str, Any]:
     trace = recorder.to_dict(f"failed: {error_msg.split(':', 1)[0]}")
