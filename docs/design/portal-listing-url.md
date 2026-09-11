@@ -2,7 +2,10 @@
 
 **Status (2026-09-11):** W0 merged + live (#1400); W1 merged (#1402, refinement #1404); the dry run
 walked 824,207 rows (227,319 sreality rows to fill, zero unknown codes); W2 (#1403) waits on migration
-494 being applied; W3 rails in PR. Operator rulings: the Supabase MCP is
+494 being applied; W3 rails in PR (#1405, migration 495). **W1 write pass DONE 2026-09-11 07:48Z**
+(after #1406): conformance gate 40/40 exact; 824,349 rows walked in 9 min; 227,292 sreality rows
+written (103,885 active / 123,407 inactive), 93 already canonical from W0, 4,076 declined (4,073
+`sub_cb_null`, 3 `locality_null`), zero unknown codes. Operator rulings: the Supabase MCP is
 the DB access path; inactive rows DO get URLs; canonical string or nothing (never a placeholder);
 the weekly HEAD probe is approved; CLAUDE.md gets a rule-21 clause (not a new rule). Investigation
 + a five-lens adversarial verification + a three-angle design panel (Opus 5) sit behind every
