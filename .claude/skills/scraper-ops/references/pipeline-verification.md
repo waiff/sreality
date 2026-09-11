@@ -431,3 +431,60 @@ the message names the remedy per source (sreality: update `sreality_payload_shap
 `payload_schema_detector`, re-extract; bezrealitky: restore `ruianId` in `_DETAIL_QUERY`, then refetch
 the rows fetched meanwhile). 6-hourly lane + in-app bell only; promotion into `llm_health.yml`'s
 hourly `--only` list is a deliberate step after a soak, like the ppm2 checks.
+
+`sreality_image_template` — the **only check in the harness that leaves the database**, and
+the reason it has to: every other check reads a table we wrote, and a CDN that started
+refusing our transform writes nothing, so there is no row to read. Sreality's image CDN is an
+exact-template **allowlist**, not a transform language — the download path ships
+`scraper/image_storage.IMAGE_TRANSFORM_OPS` (`res,1800,1800,1|shr,,20|jpg,80`, their
+SQUARE_1800_JPG whole-frame template) and anything off the list 400s. Sreality re-cut that
+catalogue once before with no notice; `_classify_image_failure` parks a 400 **terminally**
+(`source_unavailable`, never retried), so a catalogue change would park every image in flight
+and surface only as a download lane that quietly stopped storing bytes.
+The probe, three calls behind one seam: GET the live v1 search (`INDEX_URL`, byt/prodej/CZ,
+`limit=1`) with the client's browser headers for a FRESH `hash_id` (never a stored URL — that
+proves only that the template worked the day we stored it), GET that listing's `DETAIL_URL`,
+and take `advert_images[0]` through `parse_images`. **The detail endpoint, not the search
+one**: v1 search returns `advert_images` as bare URL **strings** (`parse_images` skips every
+non-dict, so reading images off the index returns `[]` and the probe would short-circuit to a
+warn forever); only detail carries the `{url, width, height, order}` dicts — the same payload
+the real download path consumes. Then request `image_storage.with_transform(url)` — the
+**deployed** chain by construction, never a literal copy, so the probe cannot drift from the
+code it guards — and measure the bytes with `image_storage.image_dimensions`. The seam,
+`_fetch_sreality_probe(url, timeout, max_bytes)`, streams under two bounds: a 6 MB cap on
+MEMORY and a monotonic wall-clock deadline of `connect + read` (`timeout=(5, 8)`) per call,
+because requests' read timeout is per socket read — a peer trickling one chunk per 7.9 s would
+otherwise hold the lane for minutes, and nothing outside can preempt it (the lane budget is
+armed only as a Postgres `statement_timeout`, and `run_checks` tests the lane deadline only
+BEFORE a check starts). Worst case 3 × 13 s = 39 s, inside the 45 s per-check budget.
+`fail` on CDN non-200 (the allowlist rejected us), a non-image or undecodable body, or a served
+frame under `sreality_image_template_min_ratio` (0.9) of what the deployed `res` op should
+yield **for that estate's own declared source size**, on EITHER axis. The size arm is the one
+that matters — the silent downgrade answers **HTTP 200** with a smaller or cropped rendition,
+which no status check would ever see, and the superseded `res,749,562,3` chain (the regression
+the master-template work undid) served 749 px and cropped 3:2 to 4:3, which is why both axes
+are compared. The verdict is RELATIVE, never an absolute px floor: `res,1800,1800,1` fits
+inside the source and **never upscales**, so a listing whose first photo is a 640×480 original
+comes back at 640×480 through a perfectly healthy template (~4% of live byt/prodej first
+photos measure under 1000 px; a 1867×1400 source measures 1800×1349 against an expected 1350,
+which is what the 0.9 tolerates). An estate that declares no size for the image is judged on
+the HTTP + decodability arms only, and says so in its message.
+A network error, a non-200/empty/idless index, an unreachable or non-200 detail, an imageless
+estate, or an image that has left the sdn.cz host (where `with_transform` is a no-op, so
+nothing would be exercised) is `warn` with `details.skipped` ("verified NOTHING"), never
+`fail`: the canary reached nothing, and a flaky lane must not read as "sreality rejected our
+template". `value` is the measured width in px; `details` carries `image_url`, `transform`,
+`detail_url`, `http_status`, `width`, `height`, `source_width`, `source_height`,
+`expected_width`, `expected_height`, `min_ratio`, `bytes`, `elapsed_ms`.
+Registered **last** in `_CHECKS` on purpose — the one outbound check is the one the lane budget
+should drop first. 6-hourly lane + in-app bell; promotion into `llm_health.yml`'s hourly `--only`
+list is a deliberate post-soak step, like the ppm2 checks. The remedy when it reds: re-derive the
+template from sreality's own frontend and update `IMAGE_TRANSFORM_OPS`.
+
+**Its own lane.** `.github/workflows/sreality_image_canary.yml` runs it daily
+(`--only sreality_image_template --exit-nonzero-on-fail`): it is registered LAST so a slow CDN
+can never starve a database check, and for the same reason the 6-hourly verify lane routinely
+exhausts its 120 s budget before reaching it (observed on its first run: `lane budget 120s
+exhausted; check sreality_image_template not run`). A CDN 403/429 (sreality's throttle) or a
+5xx is a `warn` that verified nothing — only a 4xx refusal, a non-image body or a downgraded
+frame is a `fail`.

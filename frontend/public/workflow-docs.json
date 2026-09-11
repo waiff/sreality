@@ -6436,6 +6436,32 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/smoke_agent.yml"
     },
     {
+      "filename": "sreality_image_canary.yml",
+      "name": "Monitoring: sreality image template (daily)",
+      "description": "Runs the ONE outbound check of the verify harness — `sreality_image_template`, which requests a fresh sreality photo through the deployed download template (`scraper/image_storage.IMAGE_TRANSFORM_OPS`) and judges the served frame against the estate's declared size — on a lane of its own. It is registered LAST in verify_pipeline's registry so a slow CDN can never starve a database check, but that also means the 6-hourly verify lane routinely exhausts its 120 s budget before reaching it (observed on its first run). Here it has the budget to itself, once a day, the way `llm_health.yml` gives the acute checks theirs. A `fail` reds this run and rings the incident ladder; a throttle, a network error or an empty index is a `warn` that verified nothing.",
+      "portal": null,
+      "manual": true,
+      "schedules": [
+        {
+          "cron": "40 5 * * *",
+          "human": "Daily at 05:40 UTC"
+        }
+      ],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "sreality-image-canary",
+      "cancelInProgress": false,
+      "timeoutMinutes": 10,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/sreality_image_canary.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/sreality_image_canary.yml"
+    },
+    {
       "filename": "sreality_image_remaster.yml",
       "name": "Jobs: sreality image re-master",
       "description": "Re-downloads stored sreality photos at the whole-frame `SQUARE_1800_JPG` master template and OVERWRITES each row's existing R2 object in place, under the `images.storage_path` the row already carries — the ~3.55M rows with `rendition IS NULL` hold the superseded `res,749,562,3` CROP, which cost ~85% of photos their edges. sreality ROTATES image URLs when a listing is edited, so a 404/410 (or a dead-URL 400/401/415) on the stored URL is re-resolved from the listing's CURRENT detail payload by image `order`, and the fresh URL is stored with the bytes. Every success stamps `rendition` + decoded dimensions and re-arms the phash/CLIP lanes; bytes that come back as the 749x562 crop are an anomaly and are never stamped.",

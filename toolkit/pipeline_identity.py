@@ -15,10 +15,12 @@ reconcilers run in the `merge_properties` / `unmerge_group` transactions:
     snapshot (lossless); in the move-if-empty case (survivor had no pre-merge
     card) drop the card the survivor absorbed so the restore isn't duplicated.
 
-Every join/exists/update between the retired and survivor sides is partitioned
-by account: this runs as service-role (BYPASSRLS), so the account predicates
-must be explicit, and they use IS NOT DISTINCT FROM because pre-backfill legacy
-rows carry account_id NULL (migrations 294/295).
+Every join/exists/update between the retired and survivor sides is partitioned by
+account with an EXPLICIT, NULL-tolerant predicate. That is the third shape of the
+tenancy doctrine and the only place it is legal: this runs as service-role
+(BYPASSRLS), so the predicate is the sole gate rather than a second definition of a
+caller RLS already scopes. Doctrine + the other three shapes:
+`.claude/skills/database/references/tenancy.md`.
 
 The survivor's own stage is NOT force-restored on unmerge — that would clobber a
 later merge's effect in a chained merge/unmerge. The retired side (the
