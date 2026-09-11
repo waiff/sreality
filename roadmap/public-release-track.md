@@ -57,6 +57,17 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
   `TENANT_POOL_DB_URL` now RAISES instead of silently degrading to an RLS-off connection —
   the shape that hid the bad-DSN incident below. The `legacy_backfill_claim` TABLE stays
   (the signup CAS in `handle_new_user`); no tenant-route test runs on the RLS-bypass path.
+- **2026-09-11 W3 ("One Account, One Answer" — reads go RLS-only)**: the architectural payoff.
+  `lookup_portal_listings` now takes NO account at all and its SQL carries no account predicate —
+  `current_account_ids()` is the single membership definition, so the extension's answer IS the
+  SPA's by construction and there is no second definition left to drift. The two pipeline LEFT
+  JOINs collapsed into ONE `LEFT JOIN LATERAL … ORDER BY pp.updated_at DESC, pp.account_id LIMIT 1`
+  because RLS is PLURAL: a multi-membership caller could otherwise match >1 card and multiply rows
+  (residual gap — such a caller sees the most recently updated card; the active-account primitive
+  is the future fix). `api/pipeline.list_stages` lost its account the same way (a display read, not
+  a write). W1's sentinel-account route test became a `resolve_account_id` that RAISES, and
+  `tests/test_tenant_isolation_live.py` gained the assertion nothing in the repo could make before:
+  A sees the card, B does not, one output row per requested item — live, role-switched, RLS-bound.
 - **Phase 1 (multi-tenant foundations)** — in progress.
   - Increment 1 ✅ — accounts/account_members/admins, `current_account_ids()` /
     `is_platform_admin()`, the on-signup handler, JWT verify (JWKS/ES256) (migrations
