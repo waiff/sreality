@@ -164,13 +164,33 @@ def test_from_columns_declines_an_unmapped_stored_type() -> None:
     ) == (None, su.Declined.TYPE_UNMAPPED)
 
 
-def test_from_columns_uses_the_street_only_when_the_portal_supplied_it() -> None:
+def test_from_columns_uses_the_street_unless_the_resolver_wrote_it() -> None:
     kw = dict(category_type="prodej", category_main="dum", category_sub_cb=37,
               locality="Praha - Michle", street="Pod Sychrovem I", sreality_id=1915215948)
-    with_parser = su.from_columns(street_source="parser", **kw)[0]
-    with_resolver = su.from_columns(street_source="resolver", **kw)[0]
-    assert with_parser.endswith("/praha-michle-pod-sychrovem-i/1915215948")
-    assert with_resolver.endswith("/praha-michle-/1915215948")
+    # parser-stamped and pre-stamping (NULL provenance) streets are the portal's own;
+    # only a RÚIAN-resolved street is left out (it was never on sreality's page).
+    assert su.from_columns(street_source="parser", **kw)[0].endswith("/praha-michle-pod-sychrovem-i/1915215948")
+    assert su.from_columns(street_source=None, **kw)[0].endswith("/praha-michle-pod-sychrovem-i/1915215948")
+    assert su.from_columns(street_source="resolver", **kw)[0].endswith("/praha-michle-/1915215948")
+
+
+def test_from_columns_recovers_the_street_from_the_legacy_locality_prefix() -> None:
+    url, _ = su.from_columns(
+        category_type="pronajem", category_main="byt", category_sub_cb=4,
+        locality="Jižní, Olomouc - Slavonín", street=None, street_source=None, sreality_id=2836292428,
+    )
+    assert url == "https://www.sreality.cz/detail/pronajem/byt/2+kk/olomouc-slavonin-jizni/2836292428"
+    assert su.legacy_street("Jižní, Olomouc - Slavonín") == "Jižní"
+    assert su.legacy_street("Olomouc - Slavonín") is None
+
+
+@pytest.mark.parametrize(
+    "street,expected",
+    [("Z. M. Kuděje", "z-m-kudeje"), ("nábřeží Svazu protifašistických bojovníků",
+      "nabrezi-svazu-protifasistickych-bojovniku"), ("U Dálnice", "u-dalnice")],
+)
+def test_slugify_matches_srealitys_street_seo_names_from_the_first_live_sample(street, expected) -> None:
+    assert su.slugify(street) == expected
 
 
 def test_adapters_agree_on_the_fixture_payload() -> None:

@@ -170,20 +170,28 @@ def from_columns(
     """Adapter 2 — the reconciler, over stored typed columns (never raw_json).
 
     `slugify(display column)` reproduces sreality's seo names (223/223 on a live sample). The
-    street is used only when the PORTAL supplied it (`street_source = 'parser'`): a resolver-
-    sourced RÚIAN street was never on sreality's page, and omitting it yields sreality's own
-    trailing-hyphen form — at worst a 301, never a 404.
+    street is used unless the RESOLVER wrote it (`street_source = 'resolver'`, migration 262):
+    a RÚIAN-resolved street was never on sreality's page. A NULL provenance is a street the
+    parser stored BEFORE stamping existed (155k rows) and counts as the portal's — the first
+    live conformance sample (2026-09-11) showed 7/40 active rows redirecting to a canonical
+    WITH the street while the column held it under a NULL stamp. When the street column is
+    empty, the legacy locality shape ("Street, City - Part") still carries it. Omitting a
+    street yields sreality's own trailing-hyphen form — at worst a 301, never a 404.
     """
     if category_type and category_type not in STORED_TYPE_SLUG:
         return None, Declined.TYPE_UNMAPPED
     city, citypart = split_locality(locality)
+    if street_source == "resolver":
+        street = None
+    elif not street:
+        street = legacy_street(locality)
     return canonical_url(
         type_slug=STORED_TYPE_SLUG.get(category_type or ""),
         main_slug=category_main,
         sub_cb=category_sub_cb,
         city_slug=slugify(city),
         citypart_slug=slugify(citypart),
-        street_slug=slugify(street) if street_source == "parser" else None,
+        street_slug=slugify(street),
         listing_id=sreality_id,
     )
 
@@ -220,6 +228,15 @@ def split_locality(locality: str | None) -> tuple[str | None, str | None]:
     city = city.strip() or None
     citypart = citypart.strip() or None if sep else None
     return city, citypart
+
+
+def legacy_street(locality: str | None) -> str | None:
+    """The "Street, " prefix of the legacy v2 locality shape ("Jižní, Olomouc - Slavonín"),
+    else None. The current shape never carries a comma-prefixed street."""
+    if not isinstance(locality, str) or ", " not in locality:
+        return None
+    prefix = locality.split(", ", 1)[0].strip()
+    return prefix or None
 
 
 def _cb_value(obj: Any) -> int | None:

@@ -325,6 +325,8 @@ URL — **before any migration or SPA change**.
 | Where the sreality vocabulary lives | `scraper/sreality_url.py` only | The contract YAML is under a governed hash and read by no code |
 | Index on `source_url` | **Measure, then decide** (own PR) | `EXPLAIN (ANALYZE, BUFFERS)` on `_match_listing_by_url` after the write pass; index only above ~200 ms, `CREATE INDEX CONCURRENTLY … WHERE source_url IS NOT NULL`, which cannot run inside a transaction block |
 | CLAUDE.md | One clause on rule #21 (recommended); a new #23 is the operator's alternative | The file is at 293 of a hard 300-line cap |
+| Street in the column adapter (build finding, 2026-09-11) | Use `street` unless `street_source = 'resolver'`; a NULL stamp is a pre-migration-262 parser street; fall back to the legacy `"Street, "` locality prefix | The first live conformance sample blocked the write: 7/40 active rows redirected to a canonical WITH the street while our column held it under a NULL provenance stamp (155k rows) |
+| The write gate on a locality-only redirect | PASS, counted as `locality_301`; FAIL on any 404 or a redirect to a different type/main/sub/id | sreality confirmed it is the same page; the gate exists to catch codebook/type errors. Active rows converge to the ingest-canonical on their next drain (a non-null parser value always wins); the weekly parity counts only 404-critical disagreements |
 
 ## 7. Decisions that are genuinely the operator's
 

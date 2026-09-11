@@ -29,9 +29,11 @@ Modes:
     Off by default so the first live pass can never reduce coverage; the dry run reports
     `would_clear` first.
   * `--conformance N`: pre-flight acceptance gate — HEAD-probe N random ACTIVE sreality
-    rows' derived URLs at <=2 req/s; 200, or a 301 whose target equals the derived URL,
-    passes; any 404 exits 4 BEFORE anything is written. Active rows only: a delisted
-    sreality page 404s at any URL.
+    rows' derived URLs at <=2 req/s; 200 (or a redirect to the derived URL) passes; a
+    redirect that keeps every 404-critical segment is the SAME page (sreality canonicalised
+    the locality) and is counted as `locality_301`, not failed; any 404 or a redirect to a
+    different type/main/sub/id exits 4 BEFORE anything is written. Active rows only: a
+    delisted sreality page 404s at any URL.
   * `--report-check`: persist one `pipeline_check_results` row (`outbound_url_parity`) so the
     weekly dry run is the only detector that reaches the inactive archive.
 
@@ -306,8 +308,23 @@ def probe(url: str, session: requests.Session) -> tuple[int, str | None]:
     return resp.status_code, resp.headers.get("Location")
 
 
+def conformance_outcome(status: int, location: str | None, derived: str) -> str:
+    """`ok` (200, or a redirect to exactly the derived URL), `locality_301` (a redirect that
+    keeps every 404-critical segment — the same page; sreality canonicalised the locality),
+    or `fail:<status>` (a 404, or a redirect to a different type/main/sub/id)."""
+    if status == 200:
+        return "ok"
+    if status in (301, 302, 307, 308) and location:
+        if location == derived:
+            return "ok"
+        target = location if location.startswith("http") else sreality_url.BASE_URL.rsplit("/detail", 1)[0] + location
+        if critical_segments(target) is not None and critical_segments(target) == critical_segments(derived):
+            return "locality_301"
+    return f"fail:{status}"
+
+
 def conforms(status: int, location: str | None, derived: str) -> bool:
-    return status == 200 or (status in (301, 302, 308) and location == derived)
+    return conformance_outcome(status, location, derived) != f"fail:{status}"
 
 
 def run_conformance(conn: Any, n: int) -> Counter[str]:
@@ -328,13 +345,14 @@ def run_conformance(conn: Any, n: int) -> Counter[str]:
             LOG.warning("CONFORMANCE id=%s error=%s", row.sreality_id, exc)
             codes["error"] += 1
             continue
-        ok = conforms(status, location, d.url)
-        codes["ok" if ok else f"fail:{status}"] += 1
-        if not ok:
-            LOG.warning("CONFORMANCE id=%s cb=%s status=%s location=%s derived=%s",
-                        row.sreality_id, row.category_sub_cb, status, location, d.url)
+        outcome = conformance_outcome(status, location, d.url)
+        codes[outcome] += 1
+        if outcome != "ok":
+            LOG.warning("CONFORMANCE %s id=%s cb=%s status=%s location=%s derived=%s",
+                        outcome, row.sreality_id, row.category_sub_cb, status, location, d.url)
         time.sleep(_PROBE_INTERVAL_S)
-    LOG.info("CONFORMANCE sampled=%d %s", len(rows), dict(codes))
+    LOG.info("CONFORMANCE sampled=%d %s (locality_301 = same page, sreality canonicalised the "
+             "locality; counted, not a failure)", len(rows), dict(codes))
     return codes
 
 

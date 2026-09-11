@@ -158,15 +158,19 @@ def test_parity_is_ok_when_nothing_disagrees_and_fails_past_the_threshold() -> N
 @pytest.mark.parametrize(
     "status,location,expected",
     [
-        (200, None, True),
-        (301, CANON, True),                       # a redirect to exactly the derived URL
-        (301, CANON.replace("rodinny", "vila"), False),
-        (404, None, False),
-        (302, "https://login.seznam.cz/...", False),
+        (200, None, "ok"),
+        (301, CANON, "ok"),                                            # exactly the derived URL
+        (301, "/detail/prodej/dum/rodinny/praha-michle-/1915215948", "locality_301"),  # relative, same page
+        (301, CANON.replace("pod-sychrovem-i", "x"), "locality_301"),
+        (301, CANON.replace("rodinny", "vila"), "fail:301"),           # a different sub-category
+        (301, CANON.replace("1915215948", "1"), "fail:301"),           # a different listing
+        (404, None, "fail:404"),
+        (302, "https://login.seznam.cz/...", "fail:302"),
     ],
 )
-def test_conformance_accepts_200_or_a_redirect_to_itself(status, location, expected) -> None:
-    assert mod.conforms(status, location, CANON) is expected
+def test_conformance_outcomes(status, location, expected) -> None:
+    assert mod.conformance_outcome(status, location, CANON) == expected
+    assert mod.conforms(status, location, CANON) is (not expected.startswith("fail"))
 
 
 # --- the SQL shape --------------------------------------------------------------------------
