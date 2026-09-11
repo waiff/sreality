@@ -28,12 +28,16 @@ const CHECK_LABELS: Record<string, string> = {
   outbound_url_coverage: 'Portal URL coverage',
   outbound_url_parity: 'Portal URL parity',
   outbound_url_conformance: 'Portal URL conformance',
+  sreality_image_template: 'Sreality image template',
 };
 
 /* The four per-m² plausibility checks emit a share or a ratio, and the number is
  * meaningless without its unit — "20.03" reads as a count. Every older check's value
  * is a bare count/rate whose meaning lives in its own message, so they stay bare. */
 const CHECK_VALUE_UNIT: Record<string, string> = {
+  /* The image canary's value is the measured width of the frame the CDN served \u2014
+   * "1600" alone reads as a count of something. */
+  sreality_image_template: 'px',
   ppm2_median_shift: '\u00d7',
   ppm2_basis_floor_share: '%',
   area_vs_usable_divergence: '%',

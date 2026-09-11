@@ -45,9 +45,22 @@ import time as _time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlencode
+
+import requests
 
 from location_data.refetch_cohort import SREALITY_SHAPE_CASE_SQL
+from scraper import media as _media
 from scraper.db import QUEUE_PRIORITY_NEW, connect
+from scraper.image_storage import IMAGE_TRANSFORM_OPS, image_dimensions, with_transform
+from scraper.parser import parse_images
+from scraper.portal_base import _BASE_HEADERS as _PORTAL_HEADERS
+from scraper.sreality_client import (
+    CZ_COUNTRY_ID,
+    DETAIL_URL as _SREALITY_DETAIL_URL,
+    INDEX_URL as _SREALITY_INDEX_URL,
+    _unwrap_estate as _unwrap_sreality_estate,
+)
 from toolkit.listing_identity import R2_CARRIERS as _PARITY_CARRIERS
 from toolkit.system_alerts import (
     AlertPolicy,
@@ -278,6 +291,25 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # what a quiet week looks like. The cursor is the only thing that distinguishes them.
     "workflow_poller_stale_warn_hours": 6.0,
     "workflow_poller_stale_fail_hours": 12.0,
+    # Sreality image template canary. The CDN is an exact-template ALLOWLIST, not a
+    # transform language, and sreality has re-cut its catalogue once before with no
+    # notice: the day the deployed chain leaves the allowlist every request 400s,
+    # `_classify_image_failure` parks each one terminally, and the only symptom is a
+    # download lane that quietly stops storing bytes. The canary asks the live CDN,
+    # daily, whether the template we ACTUALLY ship still returns a full-size frame.
+    # The verdict is RELATIVE, never an absolute px floor: `res,1800,1800,1` fits inside
+    # the source and never upscales, so a listing whose first photo is a 640x480 original
+    # comes back at 640x480 through a perfectly healthy template (measured: ~4% of live
+    # byt/prodej first photos). An absolute floor would page on ordinary data. The
+    # estate's OWN declared width/height (the DETAIL payload carries them per image) says
+    # what the deployed chain should return; 0.9 tolerates the CDN's rounding (a
+    # 1867x1400 source measured 1800x1349 against an expected 1350) while the superseded
+    # `res,749,562,3` chain — the regression the master-template work undid — lands far
+    # under it on both axes, which is also how a CROP is caught. Timeout is the read half
+    # of a (5, 8) connect/read pair, bounded per call in the seam; worst case across the
+    # three calls is 39 s, inside the 45 s per-check budget.
+    "sreality_image_template_min_ratio": 0.9,
+    "sreality_image_template_timeout_s": 8.0,
     # --- alert escalation policy (W3.4) -------------------------------------
     # Not per-check thresholds: these govern toolkit.system_alerts, so EVERY check
     # inherits one escalation policy instead of each one growing its own. Scalars, one
@@ -2527,6 +2559,265 @@ def check_outbound_url_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[s
     }
 
 
+# --- the sreality image template canary (daily probe of the DEPLOYED chain) --
+#
+# The one check in this harness that leaves the database. Everything else reads
+# our own tables, which can only tell us what we already stored; a CDN that
+# started refusing our transform stores nothing, so there is no row to read.
+
+_SREALITY_PROBE_MAX_BYTES = 6 * 1024 * 1024
+
+# byt / prodej / CZ, one row, newest page — the same v1 search the walk uses, at
+# limit 1. Any live category would do; byt-prodej is simply the slice that is
+# never empty.
+_SREALITY_PROBE_PARAMS: dict[str, Any] = {
+    "category_main_cb": 1,
+    "category_type_cb": 1,
+    "locality_country_id": CZ_COUNTRY_ID,
+    "limit": 1,
+    "offset": 0,
+}
+
+
+def _fetch_sreality_probe(
+    url: str, timeout: tuple[float, float], max_bytes: int, *, accept: str = "*/*"
+) -> tuple[int, bytes]:
+    """The canary's ONE network seam — the whole check is hermetic behind it.
+
+    Two independent bounds, because neither covers the other and nothing outside can
+    preempt this call (the lane budget is armed only as a Postgres statement_timeout,
+    and run_checks tests the lane deadline BEFORE a check starts): `max_bytes` bounds
+    MEMORY if the CDN ever answers an image URL with a video, and the monotonic deadline
+    bounds WALL CLOCK — requests' read timeout is per socket read, so a peer trickling
+    one chunk per 7.9 s would otherwise hold the lane for minutes without ever tripping it.
+    """
+    connect_timeout, read_timeout = timeout
+    budget_s = connect_timeout + read_timeout
+    deadline = _time.monotonic() + budget_s
+    headers = {**_PORTAL_HEADERS, "Accept": accept}
+    with requests.get(url, timeout=timeout, headers=headers, stream=True) as response:
+        buf = bytearray()
+        for chunk in response.iter_content(chunk_size=65536):
+            buf += chunk
+            if len(buf) >= max_bytes:
+                break
+            if _time.monotonic() >= deadline:
+                raise requests.Timeout(
+                    f"probe exceeded its {budget_s:.0f}s wall-clock budget reading {url}"
+                )
+        return response.status_code, bytes(buf)
+
+
+def _probe_skipped(detail: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """warn, never fail: the canary could not REACH sreality, so it verified nothing
+    about our transform — and a flaky network must not manufacture a red that reads as
+    'the CDN rejected our template'."""
+    return {
+        "check_key": "sreality_image_template",
+        "status": "warn",
+        "value": None,
+        "details": {"skipped": True, "reason": detail, **(extra or {})},
+        "message": (
+            f"Sreality image template verified NOTHING this run — {detail}. The "
+            "deployed transform is UNKNOWN, not healthy; if this persists the probe "
+            "itself needs attention."
+        ),
+    }
+
+
+def _fit_box(ops: str) -> tuple[int, int] | None:
+    """The (w, h) box the deployed chain's `res` op fits a frame inside.
+
+    Read OUT of IMAGE_TRANSFORM_OPS rather than restated beside it, so the expectation
+    moves with the template the day the template moves.
+    """
+    for op in ops.split("|"):
+        parts = op.split(",")
+        if parts[0] == "res" and len(parts) >= 3 and parts[1].isdigit() and parts[2].isdigit():
+            return int(parts[1]), int(parts[2])
+    return None
+
+
+def _expected_frame(source: tuple[int, int] | None, ops: str) -> tuple[int, int] | None:
+    """What the CDN should serve for a source frame of this size: fit inside the `res`
+    box, NEVER upscaled (verified live — a 1450x967 source comes back untouched)."""
+    box = _fit_box(ops)
+    if box is None or source is None:
+        return None
+    width, height = source
+    scale = min(1.0, box[0] / width, box[1] / height)
+    return max(1, round(width * scale)), max(1, round(height * scale))
+
+
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _declared_source_size(estate: dict[str, Any], image_url: str) -> tuple[int, int] | None:
+    """The estate's own width/height for this image — the only honest yardstick for what
+    the transform should return (the CDN does not upscale a small original)."""
+    for img in estate.get("advert_images") or []:
+        if not isinstance(img, dict):
+            continue
+        url = img.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        if ("https:" + url if url.startswith("//") else url) != image_url:
+            continue
+        width, height = img.get("width"), img.get("height")
+        if _positive_int(width) and _positive_int(height):
+            return int(width), int(height)
+        return None
+    return None
+
+
+def check_sreality_image_template(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Does sreality's CDN still serve the transform template the download path ships?
+
+    Walks the live v1 index (one row) to a FRESH listing id, fetches that listing's
+    DETAIL payload — the endpoint whose `advert_images` carries the `{url, width,
+    height}` dicts `parse_images` and the download path both read; the search endpoint
+    sends bare URL strings the parser skips — and requests the first image through
+    `image_storage.with_transform`, so the probe is the deployed chain by construction
+    and cannot drift from it. Nothing stored is consulted: a stored URL proves only that
+    the template worked the day we stored it.
+
+    The failure mode that matters answers HTTP 200 with a smaller or cropped rendition,
+    which no status check would ever see. The verdict is RELATIVE — the served frame
+    against what the `res` op should yield for THIS estate's declared source size —
+    because the CDN never upscales, so a small original is not a template fault.
+    """
+    min_ratio = float(thresholds["sreality_image_template_min_ratio"])
+    read_timeout = float(thresholds["sreality_image_template_timeout_s"])
+    timeout = (5.0, read_timeout)
+    index_url = f"{_SREALITY_INDEX_URL}?{urlencode(_SREALITY_PROBE_PARAMS)}"
+
+    try:
+        status_code, body = _fetch_sreality_probe(
+            index_url, timeout, _SREALITY_PROBE_MAX_BYTES, accept="application/json")
+    except requests.RequestException as exc:
+        return _probe_skipped(f"the sreality index is unreachable ({exc})")
+    if status_code != 200:
+        return _probe_skipped(f"the sreality index answered HTTP {status_code}",
+                              {"http_status": status_code})
+    try:
+        payload = json.loads(body)
+    except ValueError as exc:
+        return _probe_skipped(f"the sreality index body is not JSON ({exc})")
+    results = (payload or {}).get("results") or []
+    if not results or not isinstance(results[0], dict):
+        return _probe_skipped("the sreality index returned no estates")
+    hash_id = results[0].get("hash_id")
+    if not isinstance(hash_id, (int, str)) or not str(hash_id).strip():
+        return _probe_skipped("the newest sreality estate carries no hash_id")
+
+    detail_url = _SREALITY_DETAIL_URL.format(id=hash_id)
+    try:
+        detail_status, detail_body = _fetch_sreality_probe(
+            detail_url, timeout, _SREALITY_PROBE_MAX_BYTES, accept="application/json")
+    except requests.RequestException as exc:
+        return _probe_skipped(f"the sreality detail endpoint is unreachable ({exc})",
+                              {"detail_url": detail_url})
+    if detail_status != 200:
+        return _probe_skipped(f"the sreality detail endpoint answered HTTP {detail_status}",
+                              {"detail_url": detail_url, "http_status": detail_status})
+    try:
+        detail_payload = json.loads(detail_body)
+    except ValueError as exc:
+        return _probe_skipped(f"the sreality detail body is not JSON ({exc})")
+    if not isinstance(detail_payload, dict):
+        return _probe_skipped("the sreality detail body is not an estate object")
+    estate = _unwrap_sreality_estate(detail_payload)
+    images = parse_images(estate)
+    if not images:
+        return _probe_skipped(f"sreality estate {hash_id} carries no images",
+                              {"detail_url": detail_url})
+
+    image_url = images[0]["url"]
+    transform = with_transform(image_url)
+    if transform == image_url:
+        # with_transform is a no-op off the sreality CDN host, so the bare URL would
+        # serve a normal photo and the check would report health for a template it
+        # never exercised. A host migration must surface, not green.
+        return _probe_skipped(
+            "the probed image is not on the sreality CDN host, so our transform is a "
+            "no-op on it — the template was not exercised",
+            {"image_url": image_url, "detail_url": detail_url},
+        )
+    source = _declared_source_size(estate, image_url)
+    expected = _expected_frame(source, IMAGE_TRANSFORM_OPS)
+    source_width, source_height = source if source else (None, None)
+    expected_width, expected_height = expected if expected else (None, None)
+    started = _time.monotonic()
+    try:
+        cdn_status, data = _fetch_sreality_probe(
+            transform, timeout, _SREALITY_PROBE_MAX_BYTES, accept="image/*")
+    except requests.RequestException as exc:
+        return _probe_skipped(f"the sreality CDN is unreachable ({exc})",
+                              {"image_url": image_url, "transform": transform})
+    elapsed_ms = int((_time.monotonic() - started) * 1000)
+    size = image_dimensions(data) if _media.is_image_bytes(data) is not None else None
+    width, height = size if size else (None, None)
+    details: dict[str, Any] = {
+        "image_url": image_url, "transform": transform, "http_status": cdn_status,
+        "width": width, "height": height, "bytes": len(data), "elapsed_ms": elapsed_ms,
+        "source_width": source_width, "source_height": source_height,
+        "expected_width": expected_width, "expected_height": expected_height,
+        "min_ratio": min_ratio, "detail_url": detail_url,
+    }
+    # Both axes: a CROP keeps one of them and collapses the other (the superseded
+    # 749x562 chain cut a 3:2 frame to 4:3), so one-axis-only would miss it.
+    downgraded = bool(
+        expected_width and expected_height and width is not None and height is not None
+        and (width < expected_width * min_ratio or height < expected_height * min_ratio)
+    )
+
+    if cdn_status != 200:
+        message = (
+            f"Sreality REFUSED our image transform: HTTP {cdn_status} for "
+            f"`{IMAGE_TRANSFORM_OPS}`. Their CDN is an exact-template allowlist, so this "
+            "is a catalogue change — every image download is now parking terminally. "
+            "Re-derive the template from sreality's own frontend and update "
+            "scraper/image_storage.IMAGE_TRANSFORM_OPS."
+        )
+    elif width is None:
+        kind = "a non-image body" if _media.is_image_bytes(data) is None else "undecodable bytes"
+        message = (
+            f"Sreality answered HTTP 200 for our image transform but returned {kind} "
+            f"({len(data)} bytes) — the template is off their allowlist or the URL no "
+            "longer serves a photo. Check scraper/image_storage.IMAGE_TRANSFORM_OPS."
+        )
+    elif downgraded:
+        message = (
+            f"Sreality's CDN served {width}x{height} px for a "
+            f"{source_width}x{source_height} px source, where `{IMAGE_TRANSFORM_OPS}` "
+            f"should return {expected_width}x{expected_height} px — the template "
+            "silently downgraded (the superseded chain served 749 px and cropped to "
+            "4:3). Downloads are storing small, possibly cropped frames. Re-derive "
+            "IMAGE_TRANSFORM_OPS."
+        )
+    elif expected_width:
+        message = (
+            f"Sreality's image template is live: {width}x{height} px for a "
+            f"{source_width}x{source_height} px source, {len(data)} bytes in "
+            f"{elapsed_ms} ms."
+        )
+    else:
+        message = (
+            f"Sreality's image template is live: {width}x{height} px, {len(data)} bytes "
+            f"in {elapsed_ms} ms. The estate declares no source size for this image, so "
+            "the frame size itself was not judged this run."
+        )
+    status = "ok" if cdn_status == 200 and width is not None and not downgraded else "fail"
+    return {
+        "check_key": "sreality_image_template",
+        "status": status,
+        "value": width,
+        "details": details,
+        "message": message,
+    }
+
+
 _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("llm_errors", check_llm_errors),
     ("llm_liveness", check_llm_liveness),
@@ -2557,6 +2848,10 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     # Portal-URL contract: absolute count of active rows with no page URL. 6h lane +
     # in-app bell; not in the hourly --only list (ship, soak, then promote).
     ("outbound_url_coverage", check_outbound_url_coverage),
+    # LAST deliberately: the only check that makes an outbound request, so if the
+    # lane budget runs out it is the one that goes unrun, never a DB check. 6h lane
+    # + in-app bell; not in llm_health.yml's hourly --only list (ship, soak, promote).
+    ("sreality_image_template", check_sreality_image_template),
 ]
 # (the check body sits above this registry; the SQL it runs is
 # `_LOCATION_PAYLOAD_SHAPE_DRIFT_SQL`, built on the shape CASE the W4 gate shares)
