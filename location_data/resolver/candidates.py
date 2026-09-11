@@ -21,6 +21,7 @@ regression tests (Krásný Les, Bílovec, Bořislav 40) are in
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -44,6 +45,10 @@ _TRGM_THRESHOLD = 0.45
 _TRGM_MARGIN = 0.10
 # `ambiguous` when the top two scores are this close (03 §3.5.2).
 AMBIGUITY_MARGIN = 5.0
+
+# Qualifiers that settle a tie by evidence weaker than a validated name: the answer is
+# served, but never above `low` confidence (03 §3.5.3, amended by the 2026-09-11 audit).
+LOW_CONFIDENCE_QUALIFIERS = frozenset({"coordinate_tiebreak_imprecise", "postal_town"})
 
 _RUNG_BASE_SCORE = {
     "R0": 100.0,
@@ -94,6 +99,10 @@ class Constraints:
     kod_adm: int | None = None
     stavebni_objekt_kod: int | None = None
     pin: tuple[float, float] | None = None
+    # The Czech Post town from a `postal_town` claim, PSČ prefix stripped. NOT admin-bearing
+    # (it names a post office, not an obec) — it is consulted only to break a tie between
+    # obce that already share the listing's PSČ.
+    postal_town_key: str | None = None
     claim_ids: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
 
@@ -110,6 +119,7 @@ def collect_constraints(
     street_key = street_verbatim = None
     cp = co = kod_adm = so_kod = None
     pin: tuple[float, float] | None = None
+    postal_town_key: str | None = None
 
     def note(kind: str, claim_id: int) -> None:
         ids.setdefault(kind, []).append(claim_id)
@@ -174,6 +184,10 @@ def collect_constraints(
         elif t == "homonym_qualifier" and key:
             buckets["qualifier"].append(key)
             note("homonym_qualifier", claim.id)
+        elif t == "postal_town" and claim.value_text and postal_town_key is None:
+            postal_town_key = _postal_town_key(claim.value_text)
+            if postal_town_key:
+                note("postal_town", claim.id)
         elif t == "coordinate" and claim.has_position and pin is None:
             pin = (float(claim.lat), float(claim.lon))  # type: ignore[arg-type]
             note("coordinate", claim.id)
@@ -195,8 +209,17 @@ def collect_constraints(
         kod_adm=kod_adm,
         stavebni_objekt_kod=so_kod,
         pin=pin,
+        postal_town_key=postal_town_key,
         claim_ids={k: tuple(v) for k, v in sorted(ids.items())},
     )
+
+
+_PSC_PREFIX_RE = re.compile(r"^\s*\d{3}\s?\d{2}\s+")
+
+
+def _postal_town_key(value: str) -> str | None:
+    key = normalize_match_key(_PSC_PREFIX_RE.sub("", value))
+    return key or None
 
 
 def _as_int(value: str | None) -> int | None:
@@ -286,6 +309,30 @@ def qualify_obec_candidates(
                 surviving = filtered
                 applied.append("coordinate_tiebreak")
 
+    # A tie that survived every qualifier is answered by the pin's containing obec even when
+    # the pin is NOT precise, at `low` confidence (`_admin_candidate`). Six obce share PSČ
+    # 674 01; ranking them by admin_unit_id served Kožichovice for a pin inside Třebíč on
+    # 24,601 bazos rows (audit 2026-09-11). An honest low-confidence answer beats an
+    # arbitrary one, and it is decided here, never queued to a person. The Krásný Les hazard
+    # (a geocode of the ambiguous name IS the wrong town's centroid) cannot reach this
+    # branch: a Mapy geocode is class E and never becomes a coordinate claim.
+    if constraints.pin and len(surviving) > 1:
+        covering = registry.containing_obec(*constraints.pin)
+        if covering is not None:
+            filtered = [u for u in surviving if u.code == covering.code]
+            if filtered:
+                surviving = filtered
+                applied.append("coordinate_tiebreak_imprecise")
+
+    # Last resort: the Czech Post town named next to the PSČ ("674 01 Třebíč"). Not an admin
+    # fact, but among obce that share that PSČ the one carrying the post town's own name is
+    # the most probable, and the answer is still capped at `low`.
+    if constraints.postal_town_key and len(surviving) > 1:
+        filtered = [u for u in surviving if u.name_norm == constraints.postal_town_key]
+        if filtered:
+            surviving = filtered
+            applied.append("postal_town")
+
     return surviving, applied
 
 
@@ -325,12 +372,18 @@ def generate(
             _dedupe_units(found), constraints, registry=registry, pin_is_precise=pin_is_precise
         )
     elif constraints.psc:
-        obec_units = [
+        # A PSČ-only set goes through the same qualifier ladder a name-matched set does —
+        # several obce share one PSČ, and until 2026-09-11 this branch skipped the ladder,
+        # so nothing (not even a pin inside one of them) could break the tie.
+        by_psc = [
             u
             for k in registry.obec_codes_for_psc(constraints.psc)
             if (u := registry.admin_unit_by_code("obec", k))
         ]
-        obec_qualifiers = ["psc"]
+        obec_units, applied = qualify_obec_candidates(
+            _dedupe_units(by_psc), constraints, registry=registry, pin_is_precise=pin_is_precise
+        )
+        obec_qualifiers = list(dict.fromkeys(["psc", *applied]))
 
     constraining_obec_kods = tuple(sorted({u.code for u in obec_units}))
 
@@ -674,10 +727,16 @@ def _admin_candidate(
         containment_radius_m=unit.containment_radius_m,
     )
     bonus = 5.0 * len(qualifiers)
+    if any(q in LOW_CONFIDENCE_QUALIFIERS for q in qualifiers):
+        confidence = "low"
+    elif qualifiers:
+        confidence = "high"
+    else:
+        confidence = "medium"
     return Candidate(
         rung=rung, rank=0, score=_RUNG_BASE_SCORE[rung] + bonus, target_kind="admin_unit",
         granularity=granularity, position_source=position_source,
-        match_confidence="high" if qualifiers else "medium", uncertainty_radius_m=radius,
+        match_confidence=confidence, uncertainty_radius_m=radius,
         radius_semantics=semantics, licence_class="cc_by_ruian", lat=unit.lat, lon=unit.lon,
         admin_unit_id=unit.unit_id, component_match={"obec": "matched"},
         source_claim_ids=claim_ids, relaxations=qualifiers,

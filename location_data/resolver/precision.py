@@ -59,6 +59,9 @@ DECLARED_CAP: dict[str, str] = {
     "regional": "obec",
     "municipality": "obec",
     "obec": "obec",
+    # idnes' "Na mapě nezobrazujeme přesnou adresu" disclaimer: the contract declares
+    # `granularity_max: cast_obce_or_quarter` for it (idnes.yaml, id.det.no_exact_disclaimer).
+    "no_exact_address": "cast_obce_or_quarter",
 }
 
 PRECISE_SOURCES = frozenset({"registry_point", "portal_pin"})
@@ -106,8 +109,11 @@ def assess(
         if capped is not None:
             caps.append(f"declared:{declared.label}->{capped}")
             granularity = rank.coarser_of(granularity, capped)
-    if declared.blurred and not declared.label:
-        caps.append("blur_hint->street")
+    if declared.blurred and (not declared.label or declared.label not in DECLARED_CAP):
+        # A blurred declaration whose label this ladder does not know still says "not
+        # address-grade": it takes the same generic fallback a bare blur_hint takes. Before
+        # 2026-09-11 an unmapped label suppressed this branch AND capped nothing.
+        caps.append("blur_hint->street" if not declared.label else f"declared:{declared.label}(unmapped)->street")
         granularity = rank.coarser_of(granularity, "street")
 
     # ---- 3. collision cap, evaluated against the stamped epoch.

@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 from location_data.resolver import core
+from location_data.resolver import position as s4
 from location_data.resolver.version import RESOLVER_VERSION
 from tests.location_data import mini_mirror as mm
 
@@ -183,3 +186,56 @@ def test_a_foreign_listing_skips_cz_resolution_but_keeps_its_pin():
 def test_distance_to_nearest_boundary_is_precomputed_for_the_membership_verdict():
     resolution = _resolve(_address_claims())
     assert resolution.admin.distance_to_nearest_boundary_m is not None
+
+
+# ------------------------------------------- 2026-09-11 audit: ambiguity, labels, caps
+
+
+def test_an_ambiguous_name_never_beats_the_pin_as_a_validated_claim():
+    """Two Krásný Les, a pin inside Bílovec (neither of them): the tie cannot be broken, so
+    the set stays `ambiguous` — and an ambiguous rank-1 is not a validated claim that §3.7.3
+    rule 2 may prefer over point-in-polygon."""
+    claims = [
+        mm.claim(1, "obec_name", value_text="Krásný Les", source="maxima"),
+        mm.claim(2, "coordinate", lat=49.7573, lon=18.0158, source="maxima"),
+    ]
+    resolution = _resolve(claims)
+    assert resolution.status == "ambiguous"
+    assert resolution.admin.method == "pip_containment"
+    assert resolution.admin.obec_kod == 599212
+
+
+def test_our_own_coords_stamp_is_not_the_portals_declared_precision():
+    """`coords.source` ('page', 'carry_forward') grades OUR write path; read as a label it
+    made a map VIEW CENTRE count as a precise pin for the homonym tie-break."""
+    stamp = mm.claim(1, "precision_declaration", value_text="page",
+                     extraction_method="legacy_column", source="maxima")
+    assert s4.read_declared_precision([stamp]).label is None
+    legend = mm.claim(2, "precision_declaration", source="idnes",
+                      value_text="Na mapě zobrazujeme jen nemovitosti s přesnou adresou.")
+    assert s4.read_declared_precision([legend]).label is None
+    spoken = mm.claim(3, "precision_declaration", value_text="street", source="sreality")
+    declared = s4.read_declared_precision([spoken])
+    assert declared.label == "street" and declared.blurred
+
+
+def test_the_no_exact_address_disclaimer_caps_at_the_quarter_as_the_contract_declares():
+    claims = _address_claims(label=None) + [
+        mm.claim(4, "precision_declaration", source="idnes",
+                 declared_precision_label="no_exact_address", blur_evidence="declared"),
+    ]
+    resolution = _resolve(claims)
+    assert resolution.precision.granularity == "cast_obce_or_quarter"
+
+
+def test_a_blurred_label_the_ladder_does_not_know_still_caps_at_street():
+    claims = _address_claims(label=None) + [
+        mm.claim(4, "precision_declaration", source="idnes",
+                 declared_precision_label="fuzzy", blur_evidence="declared"),
+    ]
+    # (registry_point, street) is a shipped v1 pair (migration 491) the hand-written
+    # fixture never needed before this cap existed.
+    ctx = dataclasses.replace(mm.context(), uncertainty_policy=mm.v1_uncertainty_policy())
+    resolution = _resolve(claims, ctx=ctx)
+    rank = ctx.granularity_rank
+    assert rank.rank(resolution.precision.granularity) <= rank.rank("street")
