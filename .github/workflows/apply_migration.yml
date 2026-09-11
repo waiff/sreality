@@ -1,0 +1,136 @@
+name: "Ops: apply one migration file"
+
+# Applies ONE numbered migration file from `migrations/` to the database with
+# `psql -f` — the same statement-autocommit semantics as the CI schema replay
+# (`migrations.yml`), so a file the replay accepted applies identically here.
+# This is the no-MCP path for the database skill's apply-before-merge rule:
+# dispatch it with `--ref <branch>` while the PR is still open, so a merged
+# file is never unapplied (the migration-438 class of outage).
+#
+# CONTRACT for files applied here: idempotent statements (IF NOT EXISTS /
+# CREATE OR REPLACE), a plain `SET lock_timeout = '5s';` near the top (SET
+# LOCAL is a no-op without a transaction), every statement terminated with
+# `;`. There is deliberately NO --single-transaction: statements autocommit
+# exactly as in CI, CREATE INDEX CONCURRENTLY is legal, and a lock-timeout
+# retry simply re-runs the file, which the contract makes safe. Runs on the
+# session pooler when the secret exists, so a long CONCURRENTLY build is not
+# subject to the transaction pooler's ~2-minute statement cap.
+#
+# dry_run=true (the default) only validates the filename, prints the objects
+# the file declares and checks connectivity. The real apply needs
+# dry_run=false AND confirm=APPLY. After a successful apply the receipt step
+# probes the LIVE catalog for every object the file declares (the same probe
+# verify_pipeline's migration_drift check uses) and fails if any is absent.
+#
+# Required secrets: SUPABASE_DB_URL (SUPABASE_DB_SESSION_URL preferred when set).
+
+on:
+  workflow_dispatch:
+    inputs:
+      file:
+        description: "Migration filename under migrations/, e.g. 496_images_rendition_provenance.sql"
+        required: true
+        type: string
+      dry_run:
+        description: "true = validate + connectivity only. false = apply (needs confirm=APPLY)."
+        required: false
+        default: true
+        type: boolean
+      confirm:
+        description: "Type APPLY to arm the real apply. Ignored when dry_run=true."
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: apply-migration
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      DATABASE_URL: ${{ secrets.SUPABASE_DB_SESSION_URL || secrets.SUPABASE_DB_URL }}
+      PGCONNECT_TIMEOUT: "15"
+    steps:
+      - uses: actions/checkout@v6
+
+      # `file` is free text and is the one thing that reaches the shell, so it
+      # travels through the environment and is charset-guarded before use:
+      # NNN_slug.sql, lowercase, no path separators, exactly one dot.
+      - name: Validate the filename
+        env:
+          FILE: ${{ inputs.file }}
+        run: |
+          set -euo pipefail
+          case "$FILE" in
+            [0-9][0-9][0-9]_*.sql) ;;
+            *) echo "::error::file must look like NNN_slug.sql"; exit 1 ;;
+          esac
+          case "$FILE" in
+            *[!a-z0-9_.]*) echo "::error::file may only contain a-z 0-9 _ and the .sql suffix"; exit 1 ;;
+          esac
+          case "${FILE%.sql}" in
+            *.*) echo "::error::only the .sql suffix may contain a dot"; exit 1 ;;
+          esac
+          test -f "migrations/$FILE" || { echo "::error::migrations/$FILE does not exist"; exit 1; }
+          echo "MIGRATION_FILE=$FILE" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Install psql
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - name: Show plan (declared objects, statement count)
+        run: python -m scripts.apply_migration_receipt --plan "migrations/$MIGRATION_FILE"
+
+      - name: Connectivity (read-only)
+        run: psql -X -v ON_ERROR_STOP=1 "$DATABASE_URL" -c "select current_user, version();"
+
+      - name: Guard the real apply
+        if: ${{ !inputs.dry_run }}
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "APPLY" ]; then
+            echo "::error::dry_run=false requires confirm=APPLY"
+            exit 1
+          fi
+
+      - name: Apply (psql -f, statement autocommit, lock-timeout retry)
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -uo pipefail
+          for attempt in $(seq 1 30); do
+            echo ">>> attempt $attempt: psql -f migrations/$MIGRATION_FILE"
+            if psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" -f "migrations/$MIGRATION_FILE" 2> psql.err; then
+              cat psql.err
+              echo "applied migrations/$MIGRATION_FILE"
+              exit 0
+            fi
+            cat psql.err
+            if grep -q -e "canceling statement due to lock timeout" -e "could not obtain lock" psql.err; then
+              echo "lock timeout on a hot relation; retrying in 20s"
+              sleep 20
+              continue
+            fi
+            echo "::error::apply failed with a non-lock error (see psql output above)"
+            exit 1
+          done
+          echo "::error::gave up after 30 lock-timeout attempts"
+          exit 1
+
+      - name: Receipt (probe the live catalog for every declared object)
+        if: ${{ !inputs.dry_run }}
+        run: python -m scripts.apply_migration_receipt --verify "migrations/$MIGRATION_FILE"

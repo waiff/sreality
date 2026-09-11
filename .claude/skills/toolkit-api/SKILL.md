@@ -113,7 +113,7 @@ it (`api/`). They do not apply to the scraper.
    `/skill-refinements/*`, `/location-audit/*`, and dataset-write/dispatch routes on
    price-stats use `require_admin` (JWT-gated, see below) instead of plain `require_token`;
    `/pipeline/*`, `/collections` (GET), `/estimations` create/detail/scenario, notes,
-   `/listings/lookup`, and `/brokers/*` use `verify_jwt`/`tenant_conn` for per-account
+   `/listings/lookup` (which also resolves the account and binds it into its pipeline + collection predicates — binding NULL matches nothing: the 2026-07-23→09-11 extension regression), and `/brokers/*` use `verify_jwt`/`tenant_conn` for per-account
    identity without the admin claim; every other route is still `require_token`-only (a
    shared secret, no identity — `POST /collections`, tags, buildings, manual estimates,
    filter-presets). `/brokers/*` moved off `require_token` on 2026-08-12 (D1/D2 of the
