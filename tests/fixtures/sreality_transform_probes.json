@@ -1,0 +1,86 @@
+{
+  "why": "ONE shared contract for the sreality CDN transform, run against BOTH copies of the normaliser: scraper/image_storage.py `with_transform` (tests/test_image_transform_parity.py) and frontend/src/lib/imageUrl.ts `imageSrc` on the CDN fallback (frontend/src/lib/imageUrl.test.ts). Pinning only the template string let the two logics drift apart invisibly; these vectors compare behaviour. Expected values are literal - the chain is never URL-encoded ('%2C'/'%7C' are off the CDN's exact-template allowlist).",
+  "ops": "res,1800,1800,1|shr,,20|jpg,80",
+  "probes": [
+    {
+      "why": "bare URL - the CDN 401s it, so the template is appended",
+      "input": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg",
+      "expected": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=res,1800,1800,1|shr,,20|jpg,80"
+    },
+    {
+      "why": "the legacy 749 mode-3 CROP chain is normalised, never passed through",
+      "input": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=res,749,562,3|shr,,20|jpg,90",
+      "expected": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=res,1800,1800,1|shr,,20|jpg,80"
+    },
+    {
+      "why": "a rot prefix chain is a per-photo fact - kept in front of the template",
+      "input": "https://d18-a.sdn.cz/d_18/x/sw6Lvw.mpo?fl=rot,180,0|",
+      "expected": "https://d18-a.sdn.cz/d_18/x/sw6Lvw.mpo?fl=rot,180,0|res,1800,1800,1|shr,,20|jpg,80"
+    },
+    {
+      "why": "rot kept, the legacy serving ops next to it replaced",
+      "input": "https://d18-a.sdn.cz/d_18/x/sw6Lvw.mpo?fl=rot,90,0|res,749,562,3|shr,,20|jpg,90",
+      "expected": "https://d18-a.sdn.cz/d_18/x/sw6Lvw.mpo?fl=rot,90,0|res,1800,1800,1|shr,,20|jpg,80"
+    },
+    {
+      "why": "idempotent - a URL already on the template is unchanged",
+      "input": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=res,1800,1800,1|shr,,20|jpg,80",
+      "expected": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=res,1800,1800,1|shr,,20|jpg,80"
+    },
+    {
+      "why": "an UNRECOGNISED op is dropped, not carried - carrying it builds a chain off the allowlist, which 400s and parks the row terminally",
+      "input": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=crp,1,2|res,749,562,3|shr,,20|jpg,90",
+      "expected": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=res,1800,1800,1|shr,,20|jpg,80"
+    },
+    {
+      "why": "format/watermark ops are ours to choose - dropped even without a res op present",
+      "input": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=webp,80|wrm,logo,1|rot,270,0",
+      "expected": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=rot,270,0|res,1800,1800,1|shr,,20|jpg,80"
+    },
+    {
+      "why": "a non-fl query param survives, in place, and fl is rebuilt last",
+      "input": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?v=7&fl=res,749,562,3",
+      "expected": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?v=7&fl=res,1800,1800,1|shr,,20|jpg,80"
+    },
+    {
+      "why": "fl moves to the end when another param followed it",
+      "input": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=rot,180,0|&cb=1",
+      "expected": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?cb=1&fl=rot,180,0|res,1800,1800,1|shr,,20|jpg,80"
+    },
+    {
+      "why": "two fl params collapse into one chain",
+      "input": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=rot,180,0|&fl=res,749,562,3",
+      "expected": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=rot,180,0|res,1800,1800,1|shr,,20|jpg,80"
+    },
+    {
+      "why": "an empty query segment is ignored rather than re-emitted",
+      "input": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?&fl=rot,180,0|",
+      "expected": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=rot,180,0|res,1800,1800,1|shr,,20|jpg,80"
+    },
+    {
+      "why": "a fragment stays a fragment - the chain goes in the query, ahead of it",
+      "input": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=res,749,562,3|shr,,20|jpg,90#top",
+      "expected": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=res,1800,1800,1|shr,,20|jpg,80#top"
+    },
+    {
+      "why": "bare URL with a fragment",
+      "input": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg#top",
+      "expected": "https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=res,1800,1800,1|shr,,20|jpg,80#top"
+    },
+    {
+      "why": "any sdn.cz subdomain is sreality's CDN",
+      "input": "https://d64-a.sdn.cz/d_64/c_img_QP_p/abc.jpeg",
+      "expected": "https://d64-a.sdn.cz/d_64/c_img_QP_p/abc.jpeg?fl=res,1800,1800,1|shr,,20|jpg,80"
+    },
+    {
+      "why": "another portal's image URL is left exactly alone",
+      "input": "https://www.bazos.cz/img/1t/835/218425835.jpg",
+      "expected": "https://www.bazos.cz/img/1t/835/218425835.jpg"
+    },
+    {
+      "why": "the host gate wins even over an fl-looking query on a foreign host",
+      "input": "https://img.idnes.cz/x.jpg?fl=res,749,562,3",
+      "expected": "https://img.idnes.cz/x.jpg?fl=res,749,562,3"
+    }
+  ]
+}

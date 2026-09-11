@@ -34,6 +34,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -324,6 +325,7 @@ def main(argv: list[str] | None = None) -> int:
                 shard=_parse_shard(args.image_shard),
                 sources=_parse_sources(args.image_sources),
                 max_concurrency_per_host=image_max_concurrency_per_host,
+                max_seconds=args.image_max_seconds,
             )
             # A suspicious-stop is a deliberate, healthy backoff (one CDN
             # throttling us), NOT a run failure: the phase still stored every
@@ -528,6 +530,19 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "(default: per-portal config, 8). Bounds the pile-up that makes a "
             "small portal CDN time out under the full worker pool; a fast CDN "
             "is unaffected. 0 disables the cap."
+        ),
+    )
+    p.add_argument(
+        "--image-max-seconds",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Wall-clock budget for the image phase (checked between batches). "
+            "This — not the count cap — is what keeps a sharded run inside its "
+            "job timeout: per-image cost changes (the 1800px sreality master) "
+            "move a count cap's runtime, and an overrun is SIGKILLed with no "
+            "finalize. Unset = unbounded."
         ),
     )
     p.add_argument(
@@ -1769,6 +1784,7 @@ def _run_image_downloads(
     shard: tuple[int, int] | None = None,
     sources: tuple[str, ...] | None = None,
     max_concurrency_per_host: int = 8,
+    max_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Drain pending image downloads. Returns aggregates for scrape_runs.
 
@@ -1778,8 +1794,17 @@ def _run_image_downloads(
     pure selection predicates passed through to `pending_image_downloads`.
 
     Loops in batches until either (a) the pending queue is empty,
-    (b) the per-run cap is reached (if max_downloads > 0), or (c) every
-    CDN host still left in the queue has been quarantined.
+    (b) the per-run cap is reached (if max_downloads > 0), (c) every
+    CDN host still left in the queue has been quarantined, or (d) the
+    wall-clock budget `max_seconds` is spent.
+
+    `max_seconds` is what actually keeps a CI shard inside its job timeout. The
+    per-run COUNT cap can't: it is calibrated against a measured images/hour, and
+    per-image cost moves under it (the sreality template went from a 749px crop to
+    the ≤1800px master, multiplying bytes on both the download and the R2 upload
+    leg). A cap sized against the old rate then overruns into a SIGKILL, which
+    skips finalize and strands the scrape_runs row. The budget is checked between
+    batches, so overrun is bounded by one batch rather than by a guess.
 
     Two per-host guards localize a struggling CDN so one slow portal can't
     starve the others (the image stream is multi-portal): a concurrency cap
@@ -1867,11 +1892,14 @@ def _run_image_downloads(
             return None
         return max(0, max_downloads - counts["attempted"])
 
+    deadline = (time.monotonic() + max_seconds) if max_seconds else None
+
     with db.connect() as conn:
         LOG.info(
-            "IMAGES start cap=%s workers=%d per_host=%s active_only=%s "
+            "IMAGES start cap=%s budget=%s workers=%d per_host=%s active_only=%s "
             "shard=%s sources=%s",
             "unlimited" if max_downloads <= 0 else max_downloads,
+            "unbounded" if deadline is None else f"{max_seconds:.0f}s",
             workers,
             "off" if max_concurrency_per_host <= 0 else max_concurrency_per_host,
             active_only,
@@ -1886,6 +1914,13 @@ def _run_image_downloads(
             remaining = _remaining_cap()
             if remaining == 0:
                 LOG.info("IMAGES cap reached at attempted=%d", counts["attempted"])
+                break
+            if deadline_reached(deadline):
+                LOG.info(
+                    "IMAGES budget spent at attempted=%d — exiting cleanly before "
+                    "the job timeout; the next tick continues the drain",
+                    counts["attempted"],
+                )
                 break
             this_batch = min(batch_size, remaining or batch_size)
             pending = db.pending_image_downloads(
@@ -1942,11 +1977,15 @@ def _run_image_downloads(
                     image_id = future_to_id[future]
                     sid = sid_by_image[image_id]
                     host = host_by_image[image_id]
-                    key, phash, error = future.result()
+                    key, phash, rendition, dimensions, error = future.result()
                     counts["attempted"] += 1
 
                     if error is None:
-                        db.mark_image_stored(conn, image_id, key, phash=phash)
+                        width, height = dimensions or (None, None)
+                        db.mark_image_stored(
+                            conn, image_id, key, phash=phash,
+                            rendition=rendition, width=width, height=height,
+                        )
                         counts["downloaded"] += 1
                         host_windows[host].append("ok")
                         cat_key = cat_lookup.get(image_id, (None, None))
@@ -2178,9 +2217,13 @@ def _fetch_one_image(
     url: str,
     r2: image_storage.R2Client,
     semaphore: "threading.BoundedSemaphore | None" = None,
-) -> tuple[str, int | None, Exception | None]:
+) -> tuple[str, int | None, str, tuple[int, int] | None, Exception | None]:
     """Worker: download from the portal CDN, validate, upload to R2.
-    Returns (key, phash, error).
+    Returns (key, phash, rendition, dimensions, error).
+
+    `rendition` + `dimensions` are the provenance of the bytes actually stored
+    (migration 496), measured here where the bytes are in hand; the main thread
+    does every DB write.
 
     The byte-level guard (after the URL-level filter at ingest) is what keeps a
     non-image — a video served under an image URL, an HTML error page — from being
@@ -2193,6 +2236,7 @@ def _fetch_one_image(
     unbounded — so a small portal CDN isn't dogpiled by the full worker pool.
     """
     key = image_storage.image_key(sreality_id, sequence)
+    rendition = image_storage.rendition_for(url)
     try:
         if semaphore is not None:
             with semaphore:
@@ -2205,9 +2249,15 @@ def _fetch_one_image(
                 f"downloaded {len(data)} bytes are not a recognised image"
             )
         r2.upload_bytes(key, data, content_type=content_type)
-        return (key, _phash_or_none(data), None)
+        return (
+            key,
+            _phash_or_none(data),
+            rendition,
+            image_storage.image_dimensions(data),
+            None,
+        )
     except Exception as exc:
-        return (key, None, exc)
+        return (key, None, rendition, None, exc)
 
 
 def _run_condition_scoring(max_scores: int) -> None:

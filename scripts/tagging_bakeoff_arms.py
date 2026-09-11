@@ -16,9 +16,13 @@ into `data/dinov3_config.json`, with no translation step in between.
 WHAT THE DEFAULT RUN ASKS. The operator's questions, one arm each:
   * "at least 512, and pad with bars rather than crop" -> 512/768/1024 x letterbox_pad
   * "test both precisions"                             -> fp32 and bf16 at each
-  * "what about even larger?"                          -> the 1024 pair. Stored photos
-    are 749x562 (sreality, the largest portal) to ~1800 px wide, so 768 and above mostly
-    UPSAMPLE the biggest portal. Whether that buys anything is the measurement.
+  * "what about even larger?"                          -> the 1024 pair. AS MEASURED
+    (run 1, 2026-09), stored photos were 749x562 (sreality, the largest portal) to
+    ~1800 px wide, so 768 and above mostly UPSAMPLED the biggest portal. Whether that
+    buys anything is the measurement. That premise EXPIRED on 2026-09-11: sreality now
+    downloads the whole frame at up to 1800 px, so the corpus is mixed-rendition
+    (`images.rendition`) until the re-master lane finishes and a re-run of these arms
+    measures a different population from run 1's.
   * "is a bigger model worth it?"                      -> DINOv3 ViT-L/16 @512
   * "what if the licence falls through?"               -> DINOv2-L/14-with-registers
     (Apache-2.0), at 504 because patch 14 does not divide 512

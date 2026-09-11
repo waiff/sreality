@@ -19,26 +19,42 @@ const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 // the path, so the query is ignored server-side — but changing this value makes the
 // browser/edge treat it as a fresh URL, flushing any redirect cached against the old
 // URL. BUMP THIS after a serve-path change (e.g. an R2 credential rotation) to clear
-// cover images that browsers cached while the path was broken.
+// cover images that browsers cached while the path was broken. It CANNOT flush image
+// BYTES: those are cached under the presigned R2 URL the redirect mints, which is
+// day-anchored and therefore rolls over on its own at 00:00 UTC.
 const IMG_CACHE_BUST = '2';
 
-// sreality's CDN 401s a BARE image URL — it only serves bytes with the render-transform
-// query present (mirrors scraper/image_storage.py `_with_transform`, including completing
-// a prefix chain like `?fl=rot,180,0|`, which 400s as-is). Many stored `sreality_url`s
-// are bare, so the fallback below must append it or every not-yet-in-R2 sreality photo
-// 401s. Gated on the sdn.cz host; complete chains (containing `res,`) pass untouched.
+// sreality's CDN 401s a BARE image URL and is an exact-template ALLOWLIST — only their
+// SQUARE_1800_JPG chain (whole frame, up to 1800px, no watermark) returns the master.
+// Mirrors scraper/image_storage.py `with_transform`, and the mirror is parity-tested on
+// the constants AND on shared probe vectors (tests/fixtures/sreality_transform_probes.json):
+// keep only the per-photo ops below (`rot,<deg>,0`) in front, drop everything else a stored
+// chain carries (the legacy 749 CROP, and any op we don't recognise — carrying it through
+// would build a chain off the allowlist, which 400s). Gated on the sdn.cz host.
 const SREALITY_IMG_HOST = 'sdn.cz';
-const SREALITY_TRANSFORM_OPS = 'res,749,562,3|shr,,20|jpg,90';
-const SREALITY_TRANSFORM = `fl=${SREALITY_TRANSFORM_OPS}`;
+const SREALITY_TRANSFORM_OPS = 'res,1800,1800,1|shr,,20|jpg,80';
+const PRESERVED_OP_HEADS = new Set(['rot']);
 
 const withSrealityTransform = (url: string): string => {
   if (!url.includes(SREALITY_IMG_HOST)) return url;
-  if (!url.includes('fl=')) {
-    return `${url}${url.includes('?') ? '&' : '?'}${SREALITY_TRANSFORM}`;
+  const [head, ...fragmentParts] = url.split('#');
+  const fragment = fragmentParts.length ? `#${fragmentParts.join('#')}` : '';
+  const queryAt = head.indexOf('?');
+  if (queryAt < 0) return `${head}?fl=${SREALITY_TRANSFORM_OPS}${fragment}`;
+  const base = head.slice(0, queryAt);
+  const others: string[] = [];
+  const preserved: string[] = [];
+  for (const param of head.slice(queryAt + 1).split('&')) {
+    if (!param.startsWith('fl=')) {
+      if (param) others.push(param);
+      continue;
+    }
+    for (const op of param.slice(3).split('|')) {
+      if (op && PRESERVED_OP_HEADS.has(op.split(',')[0])) preserved.push(op);
+    }
   }
-  if (url.includes('res,')) return url;
-  // Prefix chain (e.g. `?fl=rot,180,0|`): complete it, preserving the rot op.
-  return `${url.replace(/\|+$/, '')}|${SREALITY_TRANSFORM_OPS}`;
+  const chain = [...preserved, SREALITY_TRANSFORM_OPS].join('|');
+  return `${base}?${[...others, `fl=${chain}`].join('&')}${fragment}`;
 };
 
 export interface ImageRef {
@@ -51,6 +67,7 @@ export const imageSrc = (img: ImageRef): string => {
     return `${API_BASE}/images/${img.storage_path}?v=${IMG_CACHE_BUST}`;
   }
   // No R2 copy yet → fall back to the original CDN. sreality needs the render-transform
-  // appended (a bare sdn.cz URL 401s); other portals serve their bare URLs directly.
+  // normalised onto the URL (a bare sdn.cz URL 401s, and a stored legacy chain would
+  // serve the 4:3 crop); other portals serve their bare URLs directly.
   return withSrealityTransform(img.sreality_url);
 };
