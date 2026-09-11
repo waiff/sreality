@@ -1,8 +1,9 @@
 # Portal listing URLs — one contract, nine portals
 
-**Status (2026-09-11):** W0 merged + live (#1400); W1 merged (#1402, refinement #1404); the dry run
-walked 824,207 rows (227,319 sreality rows to fill, zero unknown codes); W2 (#1403) waits on migration
-494 being applied; W3 rails in PR (#1405, migration 495). **W1 write pass DONE 2026-09-11 07:48Z**
+**Status (2026-09-11): SHIPPED, all four waves.** W0 #1400, W1 #1402 (+ #1404, #1406), W2 #1403
+(migration 494 applied), W3 #1405 (migration 495 applied) — all merged and rolled out; production
+browser-verified on the reported listing and on a merged property with two sreality siblings of
+different sub-types. The three rails are seeded (coverage ok, conformance ok; parity weekly). **W1 write pass DONE 2026-09-11 07:48Z**
 (after #1406): conformance gate 40/40 exact; 824,349 rows walked in 9 min; 227,292 sreality rows
 written (103,885 active / 123,407 inactive), 93 already canonical from W0, 4,076 declined (4,073
 `sub_cb_null`, 3 `locality_null`), zero unknown codes. Operator rulings: the Supabase MCP is
