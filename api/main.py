@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import uuid
 from datetime import timedelta
 from typing import Any, AsyncIterator, Literal
 
@@ -1306,9 +1307,8 @@ def post_estimate_yield(
 def post_create_collection(
     body: s.CreateCollectionIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims) or deps.SYSTEM_ACCOUNT_ID
     return curation.create_collection(conn, body, account_id=str(account_id))
 
 
@@ -1462,9 +1462,8 @@ def post_property_note(
     property_id: int,
     body: s.CreateNoteIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims) or deps.SYSTEM_ACCOUNT_ID
     return curation.create_note(conn, property_id, body, account_id=str(account_id))
 
 
@@ -1501,9 +1500,8 @@ def get_tags(
 def post_tag(
     body: s.CreateTagIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims) or deps.SYSTEM_ACCOUNT_ID
     return curation.create_tag(conn, body, account_id=str(account_id))
 
 
@@ -1569,9 +1567,8 @@ def get_pipeline_stages(
 def post_pipeline_stage(
     body: s.CreateStageIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
     return pipeline_module.create_stage(conn, body, account_id=account_id)
 
 
@@ -1579,9 +1576,8 @@ def post_pipeline_stage(
 def post_pipeline_stages_reorder(
     body: s.ReorderStagesIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
     return pipeline_module.reorder_stages(conn, body, account_id=account_id)
 
 
@@ -1590,9 +1586,8 @@ def patch_pipeline_stage(
     stage_id: int,
     body: s.UpdateStageIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
     return pipeline_module.update_stage(conn, stage_id, body, account_id=account_id)
 
 
@@ -1600,9 +1595,8 @@ def patch_pipeline_stage(
 def delete_pipeline_stage(
     stage_id: int,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
     return pipeline_module.archive_stage(conn, stage_id, account_id=account_id)
 
 
@@ -1610,9 +1604,8 @@ def delete_pipeline_stage(
 def post_pipeline_card(
     body: s.AddPipelineCardIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
     return pipeline_module.add_card(conn, body, account_id=account_id)
 
 
@@ -1621,9 +1614,8 @@ def patch_pipeline_card(
     property_id: int,
     body: s.MoveCardIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
     return pipeline_module.move_card(conn, property_id, body, account_id=account_id)
 
 
@@ -1631,9 +1623,8 @@ def patch_pipeline_card(
 def delete_pipeline_card(
     property_id: int,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
     return pipeline_module.remove_card(conn, property_id, account_id=account_id)
 
 

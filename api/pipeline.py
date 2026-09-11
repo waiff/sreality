@@ -6,12 +6,17 @@ kanban) come in a later phase. Single-valued (one row per property per account);
 writes go through the bearer-gated API, reads (membership) via
 property_pipeline_public.
 
-Account scoping (Phase 1, migrations 294/295): every WRITE path takes the
-caller's account_id and predicates with `account_id IS NOT DISTINCT FROM %s` —
-explicit even under RLS, because the legacy service-role branch bypasses RLS;
-NULL-safe because pre-backfill legacy rows carry account_id NULL. The card
-INSERT's ON CONFLICT stays bare (no inference target) so it works against both
-the (property_id) PK and the (account_id, property_id) PK migration 295 swaps in.
+Account scoping (Phase 1, migrations 294/295): every WRITE path takes exactly
+one required account_id (resolved at the route edge by
+tenant_pool.require_account_id) and predicates with `account_id = %s`. Explicit
+even under RLS, and NOT because RLS can be bypassed: the PK is
+(account_id, property_id) and `pipeline_stages_one_entry` is unique per account,
+so a write must NAME its one owner — RLS's WITH CHECK can validate the account a
+row claims, it cannot choose one. The columns are NOT NULL (migration 295), so a
+NULL-tolerant spelling would tolerate nothing; it would only convert a lost
+account into silence. The card INSERT's ON CONFLICT stays bare (no inference
+target) so it works against both the (property_id) PK and the
+(account_id, property_id) PK migration 295 swaps in.
 """
 
 from __future__ import annotations
@@ -44,7 +49,7 @@ def list_stages(conn: "psycopg.Connection") -> dict[str, Any]:
 
 def create_stage(
     conn: "psycopg.Connection", body: s.CreateStageIn, *,
-    account_id: uuid.UUID | None,
+    account_id: uuid.UUID,
 ) -> dict[str, Any]:
     """Append a new column to the right. New stages are never the entry stage."""
     _validate_color(body.color)
@@ -53,7 +58,7 @@ def create_stage(
         key = _unique_key(cur, body.label, account_id)
         cur.execute(
             "SELECT coalesce(max(position), 0) + 1 FROM pipeline_stages "
-            "WHERE account_id IS NOT DISTINCT FROM %s",
+            "WHERE account_id = %s",
             (account_id,),
         )
         position = int(cur.fetchone()[0])
@@ -73,7 +78,7 @@ def create_stage(
 
 def update_stage(
     conn: "psycopg.Connection", stage_id: int, body: s.UpdateStageIn, *,
-    account_id: uuid.UUID | None,
+    account_id: uuid.UUID,
 ) -> dict[str, Any]:
     """Rename / recolor / recode / retag a stage, or move the entry crown onto it."""
     _validate_color(body.color)
@@ -83,12 +88,12 @@ def update_stage(
             422, "re-home the entry stage by crowning another, not by un-crowning",
         )
     with conn.transaction(), conn.cursor() as cur:
-        # account-scoped (like every write in this module): the legacy
-        # service-role branch bypasses RLS, so a bare `WHERE id = %s` would let
-        # a legacy caller read/rename/re-flag another account's stage by id.
+        # account-scoped (like every write in this module): a bare
+        # `WHERE id = %s` would 404-or-rename by id alone, so a stage id leaked
+        # from another account would decide the row instead of RLS.
         cur.execute(
             "SELECT is_entry, is_terminal FROM pipeline_stages "
-            "WHERE id = %s AND account_id IS NOT DISTINCT FROM %s",
+            "WHERE id = %s AND account_id = %s",
             (stage_id, account_id),
         )
         cur_row = cur.fetchone()
@@ -104,12 +109,12 @@ def update_stage(
             raise HTTPException(422, "the entry stage cannot also be terminal")
 
         if body.is_entry:  # move the single-entry crown onto this stage
-            # account-scoped: a legacy service-role call must never un-crown
-            # another tenant's entry stage (RLS doesn't apply on that branch).
+            # account-scoped: `pipeline_stages_one_entry` is unique PER
+            # account (mig 294), so the un-crown must name this account's crown.
             cur.execute(
                 "UPDATE pipeline_stages SET is_entry = false, updated_at = now() "
                 "WHERE is_entry AND id <> %s "
-                "AND account_id IS NOT DISTINCT FROM %s",
+                "AND account_id = %s",
                 (stage_id, account_id),
             )
 
@@ -137,7 +142,7 @@ def update_stage(
             params += [stage_id, account_id]
             cur.execute(
                 f"UPDATE pipeline_stages SET {', '.join(sets)} "
-                "WHERE id = %s AND account_id IS NOT DISTINCT FROM %s "
+                "WHERE id = %s AND account_id = %s "
                 "RETURNING id, key, label, position, color, is_terminal, is_entry, code",
                 params,
             )
@@ -145,7 +150,7 @@ def update_stage(
         else:
             cur.execute(
                 "SELECT id, key, label, position, color, is_terminal, is_entry, code "
-                "FROM pipeline_stages WHERE id = %s AND account_id IS NOT DISTINCT FROM %s",
+                "FROM pipeline_stages WHERE id = %s AND account_id = %s",
                 (stage_id, account_id),
             )
             row = cur.fetchone()
@@ -154,13 +159,13 @@ def update_stage(
 
 def reorder_stages(
     conn: "psycopg.Connection", body: s.ReorderStagesIn, *,
-    account_id: uuid.UUID | None,
+    account_id: uuid.UUID,
 ) -> dict[str, Any]:
     """Rewrite left-to-right order. `ordered_ids` must be exactly the live set."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "SELECT id FROM pipeline_stages WHERE archived_at IS NULL "
-            "AND account_id IS NOT DISTINCT FROM %s",
+            "AND account_id = %s",
             (account_id,),
         )
         live = {int(r[0]) for r in cur.fetchall()}
@@ -179,17 +184,16 @@ def reorder_stages(
 
 def archive_stage(
     conn: "psycopg.Connection", stage_id: int, *,
-    account_id: uuid.UUID | None,
+    account_id: uuid.UUID,
 ) -> dict[str, Any]:
     """Soft-retire a stage. Refused if it is the entry stage or still holds cards."""
     with conn.transaction(), conn.cursor() as cur:
-        # account-scoped throughout (the legacy service-role branch bypasses
-        # RLS): otherwise a legacy caller could archive another account's stage
-        # by id, and the cards-check would leak (via 409-vs-success) whether a
-        # foreign stage holds cards.
+        # account-scoped throughout: on a bare `WHERE id = %s` the cards-check
+        # would leak (via 409-vs-success) whether a foreign stage holds cards
+        # even where RLS blocks the archive itself.
         cur.execute(
             "SELECT is_entry, archived_at FROM pipeline_stages "
-            "WHERE id = %s AND account_id IS NOT DISTINCT FROM %s",
+            "WHERE id = %s AND account_id = %s",
             (stage_id, account_id),
         )
         row = cur.fetchone()
@@ -201,14 +205,14 @@ def archive_stage(
             return {"archived": False, "stage_id": stage_id}
         cur.execute(
             "SELECT 1 FROM property_pipeline WHERE stage_id = %s "
-            "AND account_id IS NOT DISTINCT FROM %s LIMIT 1",
+            "AND account_id = %s LIMIT 1",
             (stage_id, account_id),
         )
         if cur.fetchone() is not None:
             raise HTTPException(409, "stage still holds cards; move them first")
         cur.execute(
             "UPDATE pipeline_stages SET archived_at = now(), updated_at = now() "
-            "WHERE id = %s AND account_id IS NOT DISTINCT FROM %s",
+            "WHERE id = %s AND account_id = %s",
             (stage_id, account_id),
         )
     return {"archived": True, "stage_id": stage_id}
@@ -216,7 +220,7 @@ def archive_stage(
 
 def add_card(
     conn: "psycopg.Connection", body: s.AddPipelineCardIn, *,
-    account_id: uuid.UUID | None,
+    account_id: uuid.UUID,
 ) -> dict[str, Any]:
     """Bookmark a property: insert a card at the entry stage. Idempotent.
 
@@ -231,7 +235,7 @@ def add_card(
                 raise HTTPException(422, "property not found")
             cur.execute(
                 "SELECT id FROM pipeline_stages "
-                "WHERE is_entry AND account_id IS NOT DISTINCT FROM %s LIMIT 1",
+                "WHERE is_entry AND account_id = %s LIMIT 1",
                 (account_id,),
             )
             row = cur.fetchone()
@@ -252,7 +256,7 @@ def add_card(
             cur.execute(
                 "SELECT coalesce(max(board_position), 0) + 1 "
                 "FROM property_pipeline "
-                "WHERE account_id IS NOT DISTINCT FROM %s AND stage_id = %s",
+                "WHERE account_id = %s AND stage_id = %s",
                 (account_id, entry_stage_id),
             )
             next_pos = cur.fetchone()[0]
@@ -286,13 +290,13 @@ def add_card(
 
 def remove_card(
     conn: "psycopg.Connection", property_id: int, *,
-    account_id: uuid.UUID | None,
+    account_id: uuid.UUID,
 ) -> dict[str, Any]:
     """Un-bookmark: drop the card, logging its prior stage to the ledger."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "SELECT stage_id FROM property_pipeline "
-            "WHERE property_id = %s AND account_id IS NOT DISTINCT FROM %s",
+            "WHERE property_id = %s AND account_id = %s",
             (property_id, account_id),
         )
         row = cur.fetchone()
@@ -301,7 +305,7 @@ def remove_card(
         from_stage_id = int(row[0])
         cur.execute(
             "DELETE FROM property_pipeline "
-            "WHERE property_id = %s AND account_id IS NOT DISTINCT FROM %s",
+            "WHERE property_id = %s AND account_id = %s",
             (property_id, account_id),
         )
         cur.execute(
@@ -315,7 +319,7 @@ def remove_card(
 
 def move_card(
     conn: "psycopg.Connection", property_id: int, body: s.MoveCardIn, *,
-    account_id: uuid.UUID | None,
+    account_id: uuid.UUID,
 ) -> dict[str, Any]:
     """Move a card to another stage and/or reorder it within a stage.
 
@@ -326,7 +330,7 @@ def move_card(
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "SELECT stage_id FROM property_pipeline WHERE property_id = %s "
-            "AND account_id IS NOT DISTINCT FROM %s FOR UPDATE",
+            "AND account_id = %s FOR UPDATE",
             (property_id, account_id),
         )
         row = cur.fetchone()
@@ -351,7 +355,7 @@ def move_card(
             try:
                 cur.execute(
                     f"UPDATE property_pipeline SET {', '.join(sets)} "
-                    "WHERE property_id = %s AND account_id IS NOT DISTINCT FROM %s",
+                    "WHERE property_id = %s AND account_id = %s",
                     params,
                 )
             except psycopg.errors.ForeignKeyViolation:
@@ -389,12 +393,12 @@ def _slugify(label: str) -> str:
 
 
 def _unique_key(
-    cur: "psycopg.Cursor", label: str, account_id: uuid.UUID | None,
+    cur: "psycopg.Cursor", label: str, account_id: uuid.UUID,
 ) -> str:
     base = _slugify(label)
     cur.execute(
         "SELECT lower(key) FROM pipeline_stages "
-        "WHERE account_id IS NOT DISTINCT FROM %s",
+        "WHERE account_id = %s",
         (account_id,),
     )
     taken = {r[0] for r in cur.fetchall()}
@@ -407,13 +411,13 @@ def _unique_key(
 
 
 def _fetch_card(
-    conn: "psycopg.Connection", property_id: int, account_id: uuid.UUID | None,
+    conn: "psycopg.Connection", property_id: int, account_id: uuid.UUID,
 ) -> dict[str, Any] | None:
     sql = (
         "SELECT pp.property_id, pp.stage_id, ps.key, ps.label, pp.board_position, "
         "       pp.note, pp.entered_stage_at, pp.added_at, ps.code, ps.color "
         "FROM property_pipeline pp JOIN pipeline_stages ps ON ps.id = pp.stage_id "
-        "WHERE pp.property_id = %s AND pp.account_id IS NOT DISTINCT FROM %s"
+        "WHERE pp.property_id = %s AND pp.account_id = %s"
     )
     with conn.cursor() as cur:
         cur.execute(sql, (property_id, account_id))

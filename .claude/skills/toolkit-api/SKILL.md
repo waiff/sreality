@@ -242,31 +242,27 @@ it (`api/`). They do not apply to the scraper.
 
 ## Identity, login, and admin gating (Phase 1, `api/dependencies.py`)
 
-Four auth primitives now coexist in `api/dependencies.py`:
+Five auth primitives coexist — four in `api/dependencies.py`, one in `api/tenant_pool.py`:
 - `require_token` — the original bearer-token gate (rule #8's baseline), unchanged.
-- `account_scope` — an EITHER gate that also returns a READ SCOPE, for routes that must serve
-  both a browser session and a non-browser caller over the one `Authorization` header: the
-  static token resolves to `[SYSTEM]` (it ships in the SPA bundle, so it is not an identity),
-  a verified JWT to `[that account, SYSTEM]` — mirroring the `estimation_runs_tenant_read`
-  policy (migration 291) rather than defining tenancy a second time. Its unset/wrong-credential
-  contract matches `require_token` exactly (503 / 401). Used by `GET /estimations` and
-  `GET /estimations/latest-by-listing`, which stay on the SERVICE-ROLE connection on purpose:
-  their query LEFT JOINs `listings` + `parsed_url_cache`, both RLS-on-with-zero-policies, so a
-  tenant connection would silently NULL `locality_display` on every row. Callers pass the
-  resulting `account_ids` to the read helpers, where it is a REQUIRED kwarg with no default —
+- `account_scope` — an EITHER gate returning a READ SCOPE, for routes serving both a browser
+  session and a non-browser caller over the one `Authorization` header: the static token
+  resolves to `[SYSTEM]` (it ships in the SPA bundle, so it is no identity), a verified JWT to
+  `[that account, SYSTEM]` — mirroring `estimation_runs_tenant_read` (291), never a second
+  tenancy definition. Unset/wrong-credential contract matches `require_token` (503 / 401).
+  Used by `GET /estimations{,/latest-by-listing}`, deliberately SERVICE-ROLE: their LEFT JOIN
+  onto `listings` + `parsed_url_cache` (RLS-on, zero policies) would silently NULL
+  `locality_display` on a tenant conn. `account_ids` is a REQUIRED kwarg on the read helpers —
   omitting it is a `TypeError`, never a silent unscoped read.
 - `verify_jwt` — verifies a Supabase user JWT and returns its claims. Preferred path:
   asymmetric JWKS (`SUPABASE_URL` → `/auth/v1/.well-known/jwks.json`, ES256/RS256, cached
   via `PyJWKClient`, no shared secret). Falls back to a shared HS256 secret
   (`SUPABASE_JWT_SECRET`) if that's all that's configured. Fails closed with `503` if
   neither JWKS nor the HS256 secret is configured (an unconfigured auth backend must
-  never authenticate anyone). **The legacy dual-auth branch is gone (removed 2026-08-04):**
-  it used to check the static `API_TOKEN` bearer FIRST and, if it matched, return a
-  synthetic claims dict `{"sub": None, "role": "operator", "is_admin": True, "legacy":
-  True}` — so any route behind `verify_jwt`/`require_admin` accepted the SPA-bundle-
-  embedded token as a god-credential. Presenting that token now just fails normal JWT
-  decoding (401) like any other garbage bearer value. See
-  `docs/design/api-token-rotation-and-spa-jwt-migration.md` for the incident + fix.
+  never authenticate anyone). **The legacy dual-auth branch is gone (removed 2026-08-04):** it
+  checked the static `API_TOKEN` bearer FIRST and returned a synthetic `is_admin: True` claims
+  dict, so every `verify_jwt`/`require_admin` route accepted the SPA-bundle-embedded token as a
+  god-credential; it now 401s like any garbage bearer. Incident + fix:
+  `docs/design/api-token-rotation-and-spa-jwt-migration.md`.
 - `require_admin` (`Depends(verify_jwt)`) — gates on `claims["is_admin"]` or
   `claims["app_metadata"]["is_admin"]`; `403` otherwise. Only reachable now via a real
   Supabase JWT whose `app_metadata.is_admin` was stamped `true` (the `admins` table is the
@@ -274,21 +270,27 @@ Four auth primitives now coexist in `api/dependencies.py`:
   attribute — Supabase includes `app_metadata` in every issued JWT by default, no Custom
   Access Token Hook needed or configured).
 
-`SYSTEM_ACCOUNT_ID = "00000000-0000-0000-0000-000000000000"` mirrors migration 286's
-fixed system account — the fallback owner for a run/write whose caller has no resolvable
-account (service-role/background writers that never had a JWT `sub` to begin with; no
-longer describes a "legacy caller" path since `verify_jwt` has none).
+- `require_account_id` — in `api/tenant_pool.py`, NOT `dependencies.py` (tenant_pool imports it, so
+  `Depends(tenant_conn)` there is circular). The ONE no-account posture: resolved once at the route edge,
+  else `400 "no account for caller"`. EVERY tenant-connection WRITE declares it (`/pipeline/*` writes,
+  `POST /collections` `/tags` `/properties/{id}/notes` `/notifications/subscriptions`); reads take no
+  account (RLS). It replaced three postures: notifications' 400, curation's `SYSTEM` fallback (290 has no
+  SYSTEM arm → RLS rejects the row, a 500) and pipeline's bare `None` (empty 200 or 500).
+
+`SYSTEM_ACCOUNT_ID = "00000000-0000-0000-0000-000000000000"` (migration 286) owns a SERVICE-ROLE
+write whose caller has no JWT `sub`, and ONLY where the table carries a SYSTEM RLS arm
+(`estimation_runs`, 291/292) — never a fallback on a tenant conn (290 gave curation none).
 
 For routes that need per-account **data isolation** (not just an admin/non-admin split),
 use `api/tenant_pool.py`'s `tenant_conn` dependency instead of the service-role
 `get_db_conn` — it opens an RLS-scoped transaction under the `tenant_pool` role. See the
 `database` skill's connection-modes + Multi-tenancy sections for the mechanics;
-`verify_jwt` is authentication, `tenant_conn` (via RLS) is authorization. Its
-`resolve_account_id(conn, claims)` helper picks the caller's own account. The
-`if claims.get("legacy")` branches both carried (service-role fallback / legacy-backfill
-read) were DELETED 2026-09-11 — dead since PR #941 — so `tenant_conn` has no fallback
-connection and raises when `TENANT_POOL_DB_URL` is unset. The `legacy_backfill_claim`
-TABLE remains, as the signup CAS in `handle_new_user`.
+`verify_jwt` is authentication, `tenant_conn` (via RLS) is authorization; reads are scoped
+by RLS alone, writes by `require_account_id` above. The `if claims.get("legacy")` branches
+both carried (service-role fallback / legacy-backfill read) were DELETED 2026-09-11 — dead
+since PR #941 — so `tenant_conn` has no fallback connection and raises when
+`TENANT_POOL_DB_URL` is unset. The `legacy_backfill_claim` TABLE remains, as the signup CAS
+in `handle_new_user`.
 
 **Billing skeleton** (`api/routes/billing.py`, migration 298, PR #769 — Phase 1 increment
 5) adds a **fourth** auth class alongside the three above: `POST /billing/webhook` verifies

@@ -1111,7 +1111,11 @@ renumber.** Navigate by area:
     `CurationBlock` uses (the viewed advert's `sreality_id` as `origin_listing_id`); notes are
     NOT batched into `POST /listings/lookup` (too heavy per index card) — the panel fetches them
     lazily via `GET /properties/{id}/notes` on open. Tags are the one curation surface the
-    extension does not yet expose.
+    extension does not yet expose. **Every property-grain operator write (curation here, the
+    pipeline in rule #22) carries exactly ONE account, resolved once at the route edge by
+    `tenant_pool.require_account_id` — a caller with no membership is a loud `400`, never a
+    `SYSTEM` fallback migration 290's WITH CHECK would reject; reads take no account at all and
+    are scoped by RLS (`current_account_ids()`) alone.**
     Same no-hard-delete spirit as the rest of the data model.
     **Every curation route runs on the tenant pool (`tenant_conn` + `verify_jwt`), with no
     exceptions** (hydration sprint W-1c). Until then the collection CRUD (`POST /collections`,

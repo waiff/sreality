@@ -25,6 +25,7 @@ Two routes deliberately stay on the service-role connection + `require_token`:
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -75,14 +76,8 @@ def get_subscriptions(
 def post_subscription(
     body: CreateSubscriptionIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
-    if account_id is None:
-        # No resolvable account (a JWT with no membership, or the legacy operator
-        # before their first signup claimed the backfill) — the account_id column
-        # is NOT NULL (migration 364), so refuse rather than 500 on the insert.
-        raise HTTPException(status_code=400, detail="no account for caller")
     return nf.create_subscription(
         conn,
         name=body.name,

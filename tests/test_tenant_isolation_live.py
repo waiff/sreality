@@ -911,6 +911,33 @@ def test_portal_lookup_membership_is_rls_only(
     assert entry_b["pipeline"]["stage_label"] is None
 
 
+def test_pipeline_card_read_is_account_scoped_after_respelling(
+    tenants: dict[str, uuid.UUID],
+    seeded_tenant_rows: dict[str, tuple[str, tuple[Any, ...]]],
+) -> None:
+    """W4 re-spelled every api.pipeline write-path predicate from
+    `account_id IS NOT DISTINCT FROM %s` to `account_id = %s` (the columns are
+    NOT NULL since migration 295, so the NULL-tolerant form tolerated nothing).
+    This is the assertion PREPARE cannot make: the rewritten SQL still reads
+    account A's card for A and returns nothing for B — on B's own account AND on
+    B naming A's account, where RLS is the backstop."""
+    from api import pipeline as pipeline_module
+
+    prop_id = seeded_tenant_rows["property_pipeline_public"][1][0]
+    a_acc, b_acc = tenants["a_acc"], tenants["b_acc"]
+
+    with _scoped(tenants["a_user"]) as conn_a:
+        card = pipeline_module._fetch_card(conn_a, prop_id, a_acc)
+    assert card is not None, "tenant A must read back its own card"
+    assert card["stage_label"] == "iso"
+
+    with _scoped(tenants["b_user"]) as conn_b:
+        assert pipeline_module._fetch_card(conn_b, prop_id, b_acc) is None
+        assert pipeline_module._fetch_card(conn_b, prop_id, a_acc) is None, (
+            "naming another account must not surface its card — RLS is the backstop"
+        )
+
+
 # Migration 318: admin-only operational views/functions the SPA reads directly
 # (dedup engine internals, scraper health, LLM cost, image training/labeling
 # state, workflow health) that CANNOT use migration 316's security_invoker +

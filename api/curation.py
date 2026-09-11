@@ -8,7 +8,8 @@ function returning a dict; EVERY FastAPI route in api/main.py that wraps them no
 uses tenant_pool.tenant_conn + Depends(verify_jwt) (RLS-scoped by the caller's
 verified JWT) — reads then need no account_id in code, RLS filters them; top-level
 INSERTs with no account-owned parent to derive it from (create_collection,
-create_tag, create_note) take an explicit account_id.
+create_tag, create_note) take one REQUIRED account_id (no default): the route
+resolves it once via tenant_pool.require_account_id, or 400s.
 
 The stragglers still on Depends(get_db_conn) + Depends(require_token) — collection
 CRUD and every /tags route — were moved here in one pass: that pair is service-role
@@ -56,7 +57,7 @@ _COLLECTION_FULL_PROJECTION = (
 
 def create_collection(
     conn: "psycopg.Connection", body: s.CreateCollectionIn,
-    account_id: str | None = None,
+    account_id: str,
 ) -> dict[str, Any]:
     # account_id: `collections` is a top-level table with no owning parent to
     # derive it from — unlike collection_properties, whose BEFORE trigger
@@ -301,7 +302,7 @@ def create_note(
     conn: "psycopg.Connection",
     property_id: int,
     body: s.CreateNoteIn,
-    account_id: str | None = None,
+    account_id: str,
 ) -> dict[str, Any]:
     # origin_listing_ref_id is the surrogate; origin_listing_id holds the legacy
     # sreality_id. Prefer a caller-supplied surrogate and derive the legacy handle
@@ -312,8 +313,8 @@ def create_note(
     # account_id: property_notes has no owning-parent to derive it from (unlike
     # collection_properties/property_tags, mig 292) and no DEFAULT (unlike
     # estimation_runs) — a tenant_conn caller with account_id left NULL fails
-    # the table's WITH CHECK closed. Callers on the (still) service-role bridge
-    # pass None; RLS never applies there so the NULL is harmless.
+    # the table's WITH CHECK closed, so it is REQUIRED (no default): the route
+    # resolves exactly one via tenant_pool.require_account_id, or 400s.
     #
     # The id<->sreality_id map reads through listing_natural_key_public, NOT base
     # `listings`: on the tenant conn (SET LOCAL ROLE authenticated) `listings` is
@@ -405,7 +406,7 @@ def list_tags(conn: "psycopg.Connection") -> dict[str, Any]:
 
 def create_tag(
     conn: "psycopg.Connection", body: s.CreateTagIn,
-    account_id: str | None = None,
+    account_id: str,
 ) -> dict[str, Any]:
     # account_id: same top-level case as create_collection — property_tags
     # inherits it from the parent tag via trigger, `tags` itself has nothing

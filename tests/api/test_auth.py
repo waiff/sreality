@@ -35,8 +35,13 @@ def client(monkeypatch):
     # tenant-pool routes: the connection is stubbed but the route-level
     # verify_jwt is left REAL — that's the auth gate under test.
     api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
+    # A resolvable account: since W4 the write routes gate on
+    # `require_account_id`, which 400s without one — and this census asserts
+    # AUTHENTICATION (401 vs 200), not membership. `_ACCT` (defined below with
+    # the account_scope tests) is this fixture's caller; the no-account posture
+    # itself is asserted in test_pipeline.py / test_curation.py.
     monkeypatch.setattr(
-        tenant_pool, "resolve_account_id", lambda conn, claims: None,
+        tenant_pool, "resolve_account_id", lambda conn, claims: _ACCT,
     )
 
     def fake_find(conn, target, filters):
@@ -72,7 +77,8 @@ def client(monkeypatch):
                 "metadata": {"tool": "find_anchor_amenities"}}
 
     def fake_create_run(conn, c, llm_client, body, background_tasks=None,
-                        account_id=None, claims=None):
+                        account_id=None, claims=None):  # POST /estimations keeps
+        # its optional account: service-role connection + the SYSTEM arm (mig 291).
         return {"id": 1, "status": "success"}
 
     def fake_get_run(conn, run_id):
@@ -114,7 +120,7 @@ def client(monkeypatch):
     # test_curation.py. Stub each handler to a constant successful dict.
     monkeypatch.setattr(
         api_curation, "create_collection",
-        lambda conn, body, account_id=None: {
+        lambda conn, body, account_id: {
             "id": 1, "name": body.name, "listing_count": 0,
         },
     )
@@ -148,7 +154,7 @@ def client(monkeypatch):
     )
     monkeypatch.setattr(
         api_curation, "create_note",
-        lambda conn, pid, body, account_id=None: {
+        lambda conn, pid, body, account_id: {
             "id": 1, "property_id": pid, "body": body.body,
         },
     )
@@ -158,7 +164,7 @@ def client(monkeypatch):
     )
     monkeypatch.setattr(
         api_curation, "create_tag",
-        lambda conn, body, account_id=None: {
+        lambda conn, body, account_id: {
             "id": 1, "name": body.name, "color": body.color, "listing_count": 0,
         },
     )
@@ -183,21 +189,21 @@ def client(monkeypatch):
     )
     monkeypatch.setattr(
         api_pipeline, "list_stages",
-        lambda conn, *, account_id=None: {"data": []},
+        lambda conn: {"data": []},
     )
     monkeypatch.setattr(
         api_pipeline, "add_card",
-        lambda conn, body, *, account_id=None: {
+        lambda conn, body, *, account_id: {
             "property_id": body.property_id, "added": True,
         },
     )
     monkeypatch.setattr(
         api_pipeline, "remove_card",
-        lambda conn, pid, *, account_id=None: {"removed": True},
+        lambda conn, pid, *, account_id: {"removed": True},
     )
     monkeypatch.setattr(
         api_pipeline, "move_card",
-        lambda conn, pid, body, *, account_id=None: {
+        lambda conn, pid, body, *, account_id: {
             "property_id": pid, "stage_id": body.stage_id,
         },
     )
