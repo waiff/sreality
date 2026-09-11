@@ -117,11 +117,15 @@ def assign(
         boundary_m = registry.distance_to_admin_boundary_m(
             covering.unit_id, position.lat, position.lon
         )
-        # §3.7.3 rule 2: an uncertain pin does not get to overrule a validated claim.
+        # §3.7.3 rule 2: an uncertain pin does not get to overrule a VALIDATED claim. An
+        # `ambiguous` candidate set has no validated claim — its rank-1 unit is one of several
+        # equal scores ordered by id — so the pin's containing obec wins (audit 2026-09-11:
+        # 24,601 bazos rows served the id-order winner as `claimed` over the pin).
         if (
             claimed is not None
             and claimed.unit is not None
             and claimed.unit.code != covering.code
+            and candidate_set.ambiguity_status != "ambiguous"
             and boundary_m is not None
             and position.uncertainty_radius_m > boundary_m
         ):

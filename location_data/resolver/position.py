@@ -59,6 +59,14 @@ BLURRED_DECLARED_LABELS = frozenset(
     }
 )
 PRECISE_DECLARED_LABELS = frozenset({"gps", "address", "exact", "presna", "rooftop", "ruian"})
+# A `precision_declaration` with no `declared_precision_label` may still carry the portal's
+# vocabulary in `value_text` (sreality's `inaccuracy_type`). Anything else in `value_text` —
+# our own `coords.source` stamp ('page', 'carry_forward'), a map-legend sentence — is NOT a
+# declared precision and must never become the listing's label (audit 2026-09-11: it set
+# `pin_is_precise` on five portals, including for a map VIEW CENTRE).
+KNOWN_DECLARED_LABELS = BLURRED_DECLARED_LABELS | PRECISE_DECLARED_LABELS | frozenset(
+    {"no_exact_address"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +140,9 @@ def read_declared_precision(
             blurred, declared_seen = True, True
             ids.append(claim.id)
             continue
-        raw = (claim.declared_precision_label or claim.value_text or "").strip().lower()
+        labelled = (claim.declared_precision_label or "").strip().lower()
+        spoken = (claim.value_text or "").strip().lower()
+        raw = labelled or (spoken if spoken in KNOWN_DECLARED_LABELS else "")
         # Several portals hang the precision flag on the COORDINATE claim itself
         # (sreality `locality.inaccuracy_type`, mmreality `accurate`), not on a separate
         # precision_declaration row.
