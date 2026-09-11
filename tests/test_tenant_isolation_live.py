@@ -844,6 +844,73 @@ def test_tenant_view_scopes_both_ways(
             )
 
 
+@pytest.fixture(scope="module")
+def seeded_lookup_listing(
+    svc: Any, seeded_tenant_rows: dict[str, tuple[str, tuple[Any, ...]]],
+) -> "Iterator[tuple[int, str, str]]":
+    """A listings row attached to the property that already carries account A's
+    pipeline card, so POST /listings/lookup has something to resolve.
+
+    The card's property id is the parameter of the fixture's own
+    property_pipeline_public filter — reused rather than re-seeded so the card,
+    the stage and the listing are guaranteed to be the same property.
+    `source='sreality'` needs sreality_id > 0 (listings_sreality_id_sign_check)
+    and source_id_native NOT NULL (listings_source_id_native_present)."""
+    prop_id = seeded_tenant_rows["property_pipeline_public"][1][0]
+    srid = 900_000_000 + int(uuid.uuid4().int % 50_000_000)
+    native = f"iso-lookup-{srid}"
+    with svc.cursor() as cur:
+        cur.execute(
+            "INSERT INTO listings (sreality_id, source, source_id_native, raw_json, "
+            "property_id) VALUES (%s, 'sreality', %s, '{}'::jsonb, %s) RETURNING id",
+            (srid, native, prop_id),
+        )
+        listing_id = cur.fetchone()[0]
+    try:
+        yield listing_id, "sreality", native
+    finally:
+        with svc.cursor() as cur:
+            cur.execute("DELETE FROM listing_snapshots WHERE listing_id = %s", (listing_id,))
+            cur.execute("DELETE FROM listings WHERE id = %s", (listing_id,))
+
+
+def test_portal_lookup_membership_is_rls_only(
+    svc: Any,
+    tenants: dict[str, uuid.UUID],
+    seeded_lookup_listing: tuple[int, str, str],
+) -> None:
+    """The assertion nothing else in this repo can make: `lookup_portal_listings`
+    takes NO account and still answers per-caller, because `current_account_ids()`
+    is the only membership definition left. `_ACCOUNT_SQL` is a `{values}` format
+    template, so the PREPARE sweep skips it — and PREPARE could not evaluate a
+    bind value anyway. Only a live, role-switched connection proves this."""
+    from api import schemas as api_schemas
+    from api.portal_lookup import lookup_portal_listings
+
+    _, source, native = seeded_lookup_listing
+    items = [api_schemas.PortalLookupItem(source=source, source_id=native)]
+
+    with _scoped(tenants["a_user"]) as conn_a:
+        out_a = lookup_portal_listings(svc, conn_a, items)
+    assert len(out_a["data"]) == len(items), "the LATERAL must not multiply rows"
+    entry_a = out_a["data"][0]
+    assert entry_a["found"] is True
+    assert entry_a["pipeline"]["in_pipeline"] is True, (
+        "tenant A owns the card — RLS alone must surface it"
+    )
+    assert entry_a["pipeline"]["stage_label"] == "iso"
+
+    with _scoped(tenants["b_user"]) as conn_b:
+        out_b = lookup_portal_listings(svc, conn_b, items)
+    assert len(out_b["data"]) == len(items)
+    entry_b = out_b["data"][0]
+    assert entry_b["found"] is True, "market facts are service-role, not per-tenant"
+    assert entry_b["pipeline"]["in_pipeline"] is False, (
+        "tenant B must not see tenant A's card"
+    )
+    assert entry_b["pipeline"]["stage_label"] is None
+
+
 # Migration 318: admin-only operational views/functions the SPA reads directly
 # (dedup engine internals, scraper health, LLM cost, image training/labeling
 # state, workflow health) that CANNOT use migration 316's security_invoker +

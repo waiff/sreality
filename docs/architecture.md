@@ -1348,6 +1348,12 @@ renumber.** Navigate by area:
     scope chip + its sidebar stage picker, AND the Chrome-extension panel (the glyph reproduced
     by value in vanilla TS — separate territory, no React import) — so the "into the pipeline"
     concept reads as one icon everywhere.**
+    **Pipeline MEMBERSHIP likewise has exactly ONE definition — `current_account_ids()`, the
+    database's own membership function — on every surface, the extension's `POST /listings/lookup`
+    included: it takes no account argument and its SQL carries no account predicate, so its answer
+    IS the SPA's answer by construction, which is what makes the "MEANS one thing" claim below
+    true rather than aspirational** (a second, explicitly-bound definition is precisely what made
+    the extension disagree with the SPA for seven weeks, 2026-07-23 → 09-11).
     **And it MEANS the same thing everywhere.** Out of the pipeline, a click adds at the entry
     stage — cheap, reversible, one keystroke in the middle of triage. Already in it, a click opens
     the shared `<PipelineStageMenu>`: every live stage (badged, current one checked, terminal stages

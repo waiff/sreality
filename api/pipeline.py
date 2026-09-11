@@ -6,7 +6,7 @@ kanban) come in a later phase. Single-valued (one row per property per account);
 writes go through the bearer-gated API, reads (membership) via
 property_pipeline_public.
 
-Account scoping (Phase 1, migrations 294/295): every public function takes the
+Account scoping (Phase 1, migrations 294/295): every WRITE path takes the
 caller's account_id and predicates with `account_id IS NOT DISTINCT FROM %s` —
 explicit even under RLS, because the legacy service-role branch bypasses RLS;
 NULL-safe because pre-backfill legacy rows carry account_id NULL. The card
@@ -29,16 +29,15 @@ from api import schemas as s
 from toolkit.property_identity import resolve_active_property_id
 
 
-def list_stages(
-    conn: "psycopg.Connection", *, account_id: uuid.UUID | None,
-) -> dict[str, Any]:
+def list_stages(conn: "psycopg.Connection") -> dict[str, Any]:
+    """The caller's stages — RLS-only: no account argument, because reading is
+    "what may I see" (`current_account_ids()`), not "which account am I writing"."""
     sql = (
         "SELECT id, key, label, position, color, is_terminal, is_entry, code "
-        "FROM pipeline_stages WHERE archived_at IS NULL "
-        "AND account_id IS NOT DISTINCT FROM %s ORDER BY position"
+        "FROM pipeline_stages WHERE archived_at IS NULL ORDER BY position"
     )
     with conn.cursor() as cur:
-        cur.execute(sql, (account_id,))
+        cur.execute(sql)
         rows = cur.fetchall()
     return {"data": [_to_stage(r) for r in rows]}
 
@@ -175,7 +174,7 @@ def reorder_stages(
                 "WHERE id = %s",
                 (pos, sid),
             )
-    return list_stages(conn, account_id=account_id)
+    return list_stages(conn)
 
 
 def archive_stage(

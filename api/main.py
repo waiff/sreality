@@ -1024,19 +1024,19 @@ def post_listings_lookup(
     body: s.PortalLookupIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
     market_conn: Any = Depends(deps.get_db_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     """Batch (source, native id) → MF rent/yield + latest estimate, for the
     Chrome extension's detail panel + index-card overlay across all portals.
 
     Two connections on purpose: shared market facts on the service-role conn
     (listings/properties are RLS-enabled-with-zero-policies — broker PII, the
-    A5 correction), per-account joins on the tenant conn (RLS-scoped). The
-    caller's account is resolved here and passed explicitly: the pipeline +
-    collection predicates bind it, and binding NULL instead matches nothing
-    (2026-07-23 → 2026-09-11 regression: every panel read "not in pipeline")."""
-    account_id = tenant_pool.resolve_account_id(conn, claims)
-    return lookup_portal_listings(market_conn, conn, body.items, account_id=account_id)
+    A5 correction), per-account joins on the tenant conn. RLS-ONLY BY DESIGN:
+    no account is resolved here, because membership must be the same answer the
+    SPA gets, and the SPA reads property_pipeline_public under the plural
+    `current_account_ids()`. A second definition is what broke this route from
+    2026-07-23 to 2026-09-11. Wave 5's route census lists it on the explicit
+    RLS-only allowlist for exactly that reason."""
+    return lookup_portal_listings(market_conn, conn, body.items)
 
 
 @app.post("/buildings")
@@ -1558,8 +1558,11 @@ def get_pipeline_stages(
     conn: Any = Depends(tenant_pool.tenant_conn),
     claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
-    return pipeline_module.list_stages(conn, account_id=account_id)
+    """Pure display read — RLS scopes it, so no account is resolved. `claims` is
+    declared, unused, purely to keep the gate explicit (as delete_property_tag
+    does): test_auth's census overrides tenant_conn, so this Depends is the only
+    fail-closed assertion left standing for this route."""
+    return pipeline_module.list_stages(conn)
 
 
 @app.post("/pipeline/stages")

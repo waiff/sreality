@@ -35,9 +35,11 @@ def client(monkeypatch):
     monkeypatch.setattr(
         tenant_pool, "resolve_account_id", lambda conn, claims: _ACCT,
     )
+    # list_stages is the one RLS-only read here (W3): the stub takes NO
+    # account_id, so the route passing one would be a TypeError, not a silent pass.
     monkeypatch.setattr(
         pipeline_module, "list_stages",
-        lambda conn, *, account_id=None: {"data": [{
+        lambda conn: {"data": [{
             "id": 1, "key": "interested", "label": "Zájem", "position": 1,
             "color": "copper", "is_terminal": False, "is_entry": True,
         }]},
@@ -86,9 +88,31 @@ def client(monkeypatch):
 
 
 def test_list_stages(client):
+    """A pure display read: RLS scopes it, so the route resolves no account and
+    the helper takes none (the stub's arity is the assertion)."""
     res = client.get("/pipeline/stages")
     assert res.status_code == 200
     assert res.json()["data"][0]["is_entry"] is True
+
+
+def test_list_stages_sql_carries_no_account_predicate() -> None:
+    """The display read's SQL must bind nothing: membership is `current_account_ids()`
+    on this surface exactly as it is on /listings/lookup."""
+    captured: dict[str, Any] = {}
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return None
+        def execute(self, sql, params=None): captured["sql"], captured["params"] = sql, params
+        def fetchall(self): return []
+
+    class _Conn:
+        def cursor(self, **_kw): return _Cur()
+
+    assert pipeline_module.list_stages(_Conn()) == {"data": []}
+    assert captured["params"] is None
+    assert "account_id" not in captured["sql"]
+    assert "%s" not in captured["sql"]
 
 
 def test_bookmark_property(client):
