@@ -60,6 +60,11 @@ on:
         required: false
         type: boolean
         default: false
+      reopen:
+        description: "With listing_ids: un-retire their 'sreality-749-crop' rows first (two-strike path again)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -102,6 +107,7 @@ jobs:
           INPUT_MAX_IMAGES: ${{ inputs.max_images }}
           INPUT_LISTING_IDS: ${{ inputs.listing_ids }}
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_REOPEN: ${{ inputs.reopen }}
         run: |
           # Spaces become separators, never deleted: "101 102" is two listings.
           IDS="${INPUT_LISTING_IDS// /,}"
@@ -119,6 +125,9 @@ jobs:
           fi
           if [ -n "$IDS" ]; then
             ARGS="$ARGS --listing-ids $IDS"
+            if [ "$INPUT_REOPEN" = "true" ] && [ "$INPUT_DRY_RUN" != "true" ]; then
+              ARGS="$ARGS --reopen"
+            fi
           fi
           echo "Running with: $ARGS"
           python -m scripts.remaster_sreality_images $ARGS

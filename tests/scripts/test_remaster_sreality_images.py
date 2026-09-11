@@ -568,6 +568,41 @@ def test_db_helpers_write_exactly_what_they_promise() -> None:
     assert "phash" not in terminal and "phash" not in deferred
 
 
+def test_retried_means_stamped_by_this_lane_not_by_the_original_download() -> None:
+    """Every legacy row carries the stamp its ORIGINAL download wrote, so 'has a
+    stamp' would retire it on the first strike — the pilot did exactly that."""
+    sql = " ".join(remaster._PENDING_IMAGES_SQL.split())
+    assert "(i.last_download_attempt_at >= %(epoch)s::timestamptz) AS retried" in sql
+    assert "IS NOT NULL) AS retried" not in sql
+    conn = _one_image_conn()
+    remaster._pending_images(conn, [(101, 55501, True)])
+    params = next(p for s, p in conn.statements if "FROM images" in s)
+    assert params["epoch"] == remaster.REMASTER_EPOCH == "2026-09-11T11:40:00+00:00"
+
+
+def test_reopen_unretires_only_the_named_listings_terminal_rows() -> None:
+    conn = _Conn()
+    remaster.reopen(conn, [4, 12])
+    sql, params = conn.statements[-1]
+    assert " ".join(sql.split()) == (
+        "UPDATE images SET rendition = NULL, last_download_attempt_at = NULL "
+        "WHERE listing_id = ANY(%(ids)s::bigint[]) AND rendition = 'sreality-749-crop'"
+    )
+    assert params == {"ids": [4, 12]}
+
+
+def test_reopen_flag_requires_listing_ids_and_refuses_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgres://x")
+    with pytest.raises(SystemExit) as exc:
+        remaster.main(["--reopen"])
+    assert exc.value.code == 2
+    with pytest.raises(SystemExit) as exc:
+        remaster.main(["--reopen", "--listing-ids", "4", "--dry-run"])
+    assert exc.value.code == 2
+
+
 def _workflow() -> dict[str, Any]:
     return yaml.safe_load(WORKFLOW.read_text())
 

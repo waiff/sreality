@@ -114,9 +114,15 @@ _LISTINGS_BY_ID_SQL = """
 # a row that just failed cannot be retried by the next shard tick. Its second
 # duty is the two-strike rule — `retried` is what tells a worker that this row's
 # failure has already been seen once.
+# A stored row's `last_download_attempt_at` was first written by the ORIGINAL
+# download, so "has a stamp" is true for every legacy row and would retire it on
+# its first strike. Only this lane stamps stored rows after its first production
+# run, so a stamp at or after that instant is the lane's own earlier sighting.
+REMASTER_EPOCH = "2026-09-11T11:40:00+00:00"
+
 _PENDING_IMAGES_SQL = """
     SELECT i.id, i.listing_id, i.sequence, i.sreality_url, i.storage_path,
-           (i.last_download_attempt_at IS NOT NULL) AS retried
+           (i.last_download_attempt_at >= %(epoch)s::timestamptz) AS retried
     FROM images i
     WHERE i.listing_id = ANY(%(ids)s::bigint[])
       AND i.storage_path IS NOT NULL
@@ -445,7 +451,9 @@ def _iter_listing_pages(
 
 def _pending_images(conn: Any, listing_rows: Sequence[tuple[Any, ...]]) -> list[_ImageRow]:
     sreality_ids = {row[0]: row[1] for row in listing_rows}
-    rows = _fetchall(conn, _PENDING_IMAGES_SQL, {"ids": list(sreality_ids)})
+    rows = _fetchall(
+        conn, _PENDING_IMAGES_SQL, {"ids": list(sreality_ids), "epoch": REMASTER_EPOCH}
+    )
     return [
         _ImageRow(
             image_id=image_id,
@@ -652,6 +660,26 @@ def _parse_shard(value: str) -> tuple[int, int]:
     return index, count
 
 
+_REOPEN_SQL = """
+    UPDATE images
+    SET rendition = NULL, last_download_attempt_at = NULL
+    WHERE listing_id = ANY(%(ids)s::bigint[])
+      AND rendition = 'sreality-749-crop'
+"""
+
+
+def reopen(conn: Any, listing_ids: Sequence[int]) -> int:
+    """Un-retire a pilot cohort so it takes the two-strike path again.
+
+    Retirement is the lane's only irreversible decision, so this is deliberately
+    bounded to explicit listing ids: the rendition claim and the attempt stamp
+    both go, which makes the rows pending AND first-sighting.
+    """
+    with conn.cursor() as cur:
+        cur.execute(_REOPEN_SQL, {"ids": list(listing_ids)})
+        return int(cur.rowcount or 0)
+
+
 def _parse_listing_ids(value: str) -> list[int]:
     return [int(part) for part in value.replace(",", " ").split() if part]
 
@@ -667,8 +695,12 @@ def main(argv: Iterable[str] | None = None) -> int:
                     help="Select and report only: no network, no writes.")
     ap.add_argument("--listing-ids", type=_parse_listing_ids, default=None,
                     help="Pilot mode: only these listings.id (ignores --shard).")
+    ap.add_argument("--reopen", action="store_true",
+                    help="With --listing-ids: un-retire their 'sreality-749-crop' rows first.")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(list(argv) if argv is not None else None)
+    if args.reopen and (not args.listing_ids or args.dry_run):
+        ap.error("--reopen needs --listing-ids and is incompatible with --dry-run")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -693,6 +725,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         SrealityClient(category_main=1, category_type=2)
     )
     with db.connect_session() as conn:
+        if args.reopen:
+            LOG.info("REMASTER reopened %d retired rows for listings %s",
+                     reopen(conn, args.listing_ids), args.listing_ids)
         stats = run_remaster(
             conn,
             r2,
