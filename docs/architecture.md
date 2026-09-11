@@ -743,7 +743,14 @@ renumber.** Navigate by area:
    photos. The `images` table tracks per-image download state via `storage_path`,
    `download_attempts`, and `last_download_attempt_at`. Image-download is a separate phase
    after the scrape phase; it's a no-op if R2 env vars are missing, so a partial deploy
-   never breaks the scrape.
+   never breaks the scrape. Migration 496 adds provenance: `rendition` = WHAT bytes the object
+   holds (NULL pre-provenance — for sreality the legacy 749x562 mode-3 crop, else the portal's
+   native file; `sreality-1800-fit` the uncropped master; `sreality-749-crop` assessed/source
+   gone/crop retained, TERMINAL; `native` a non-sreality file), plus `stored_width`/`stored_height`
+   measured at upload. A job that REPLACES an object's bytes under its existing `storage_path`
+   must go through `db.invalidate_derived_signals` — the one chokepoint that re-arms the phash +
+   CLIP lanes by nulling their own predicates (`phash`, `clip_tagged_at`) and deletes no label,
+   review or CLIP-cache row.
 7. **No new dependencies without justification.** Each entry in `pyproject.toml` should
    have a clear reason. Prefer the stdlib.
 8. **Latest-wins data model with snapshot history.** The `listings` table always reflects

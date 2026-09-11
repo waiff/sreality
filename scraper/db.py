@@ -2421,26 +2421,140 @@ def pending_image_downloads(
         return list(cur.fetchall())
 
 
+# Provenance columns ride the SAME write as the bytes (migration 496), but only
+# when the caller measured them — an empty `{extra}` reproduces the pre-496
+# statement byte-for-byte, so no existing caller's SQL changes.
+_MARK_IMAGE_STORED_SQL = """
+            UPDATE images
+            SET storage_path = %s,
+                phash = COALESCE(%s, phash),{extra}
+                last_download_attempt_at = now(),
+                download_attempts = download_attempts + 1
+            WHERE id = %s
+            """
+
+
 def mark_image_stored(
     conn: psycopg.Connection,
     image_id: int,
     storage_path: str,
     phash: int | None = None,
+    *,
+    rendition: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
 ) -> None:
     """`phash` rides the same statement as `storage_path` (computed inline on
     the bytes already in hand — Wave C-4); None preserves any existing hash so
-    the hourly compute_image_phash backfill stays the backstop."""
+    the hourly compute_image_phash backfill stays the backstop. `rendition` /
+    `width` / `height` (migration 496) are written only when measured, so a
+    caller that doesn't decode the bytes leaves them untouched."""
+    extra = ""
+    params: list[Any] = [storage_path, phash]
+    if rendition is not None:
+        extra += "\n                rendition = %s,"
+        params.append(rendition)
+    if width is not None:
+        extra += "\n                stored_width = %s,"
+        params.append(width)
+    if height is not None:
+        extra += "\n                stored_height = %s,"
+        params.append(height)
+    params.append(image_id)
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(_MARK_IMAGE_STORED_SQL.format(extra=extra), tuple(params))
+
+
+_INVALIDATE_DERIVED_SIGNALS_SQL = """
+    UPDATE images
+    SET phash = NULL,
+        clip_tagged_at = NULL
+    WHERE id = ANY(%s::bigint[])
+    """
+
+# The DINOv3 table is created under a pg_available_extensions guard (migration
+# 480), so it can legitimately be absent; probe rather than assume.
+_DINOV3_TABLE_PROBE_SQL = "SELECT to_regclass('public.image_dinov3_embeddings') IS NOT NULL"
+
+_DROP_DINOV3_EMBEDDINGS_SQL = """
+    DELETE FROM image_dinov3_embeddings
+    WHERE image_id = ANY(%s::bigint[])
+    """
+
+
+def invalidate_derived_signals(
+    conn: Any,
+    image_ids: Sequence[int],
+    *,
+    drop_dinov3: bool = False,
+) -> int:
+    """The ONE chokepoint every byte-changing job calls after replacing an R2 object.
+
+    Nulling `images.phash` and `images.clip_tagged_at` is not a deletion of data
+    but a re-arming of two producers: both columns ARE the selection predicates of
+    `scripts/compute_image_phash.py` (`phash IS NULL`) and
+    `scripts/clip_tag_backfill.py` (`clip_tagged_at IS NULL`), so the hourly lanes
+    recompute the stale signals on their own with no separate backlog to manage.
+    `drop_dinov3` is opt-in and default OFF for the mirror-image reason: DINOv3's
+    refill lane (`scripts/dinov3_embed_backfill.py`) is an anti-join dispatched by
+    hand on a GPU, so deleting vectors creates a backlog nothing scheduled will
+    drain. NEVER touched, by anything, ever: `image_tag_labels` (and its
+    `in_training` flag), `tag_exam_*`, `tag_review_samples`, `tag_label_notes`,
+    `tag_candidates`, `image_tag_annotations`, `phash_pair_notes`,
+    `image_training_examples`, `image_border_cases`, `dedup_sim.*`,
+    `image_tag_scores`, `image_room_classifications`, `listing_image_comparisons`,
+    `image_clip_tags` and `image_clip_embeddings` — the last two are UPSERTED in
+    place by the CLIP lane (never deleted) and are joined by
+    `toolkit/tag_candidates.py` to build its centroids, so a delete here would
+    silently degrade recall instead of merely costing a recompute.
+    """
+    ids = list(image_ids)
+    if not ids:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(_INVALIDATE_DERIVED_SIGNALS_SQL, (ids,))
+        updated = cur.rowcount or 0
+        if drop_dinov3:
+            cur.execute(_DINOV3_TABLE_PROBE_SQL)
+            row = cur.fetchone()
+            if row and row[0]:
+                cur.execute(_DROP_DINOV3_EMBEDDINGS_SQL, (ids,))
+    return updated
+
+
+# `phash = %s` is a PLAIN assignment, never COALESCE: the old hash describes bytes
+# that no longer exist, so a failed inline hash must leave NULL for the phash lane
+# to pick up rather than resurrect a stale value. `storage_path` and
+# `download_attempts` are deliberately absent — the key is reused, not recomputed,
+# and a re-master is not a download attempt.
+_MARK_IMAGE_REMASTERED_SQL = """
+    UPDATE images
+    SET rendition = %s,
+        stored_width = %s,
+        stored_height = %s,
+        phash = %s,
+        last_download_attempt_at = now(),
+        sreality_url = COALESCE(%s, sreality_url)
+    WHERE id = %s
+    """
+
+
+def mark_image_remastered(
+    conn: Any,
+    image_id: int,
+    *,
+    rendition: str,
+    width: int | None,
+    height: int | None,
+    phash: int | None,
+    sreality_url: str | None = None,
+) -> None:
+    """Stamp provenance on a row whose R2 object was overwritten in place (mig 496)."""
+    invalidate_derived_signals(conn, [image_id])
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            """
-            UPDATE images
-            SET storage_path = %s,
-                phash = COALESCE(%s, phash),
-                last_download_attempt_at = now(),
-                download_attempts = download_attempts + 1
-            WHERE id = %s
-            """,
-            (storage_path, phash, image_id),
+            _MARK_IMAGE_REMASTERED_SQL,
+            (rendition, width, height, phash, sreality_url, image_id),
         )
 
 

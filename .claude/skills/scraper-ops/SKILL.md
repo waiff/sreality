@@ -219,18 +219,18 @@ download, no re-inference) and `backfill_render_score.yml` (render-vs-photo axis
 versioned tag model, mig 490 — the tag is the argmax head) and `new_dedup_candidates.yml` (CPU, Level 0
 path C = same town + disposition/area; `estimate`/`verify` read only). **Read the matching `references/*-lane.md` before touching.**
 
-**There is NO scheduled dedup job any more.** The automatic decision layer — the engine, its
-queues, its batch warmer, its geo/byt-geo runs, the model-compare and vision A/B harnesses, and
-the publication gate — was removed wholesale in the 2026-08 NEW DEDUP cutoff (architectural rule
-#15; `docs/design/new-dedup/CUTOFF.md`). Nothing auto-merges; merges are operator-ordered through
-`POST /properties/merge`. The tagging/pHash/embedding lanes above are kept running precisely
-because the rebuilt engine (`docs/design/new-dedup/PROGRAM.md`) consumes them, so treat a stalled
-`clip_tag.yml` or `compute_image_phash.yml` as a real problem even though nothing reads their
-output for decisions today. Do not resurrect the removed workflows or scripts.
+**There is NO scheduled dedup job any more** — the whole automatic decision layer (the engine, its queues,
+its batch warmer, its geo/byt-geo runs, the model-compare and vision A/B harnesses, the publication gate) was
+removed wholesale in the 2026-08 NEW DEDUP cutoff (architectural rule #15; `docs/design/new-dedup/CUTOFF.md`)
+and its workflows/scripts must never be resurrected; nothing auto-merges (merges are operator-ordered through
+`POST /properties/merge`). The tagging/pHash/embedding lanes above ARE kept running because the rebuilt engine
+(`docs/design/new-dedup/PROGRAM.md`) consumes them, so treat a stalled `clip_tag.yml` or
+`compute_image_phash.yml` as a real problem even though nothing reads their output for decisions today.
 
-**CLIP tagging persists an embedding for every TAGGED image, not just active-listing ones**
-(PR #748) — it closed a ~19% coverage gap; a spare-capacity repair phase (PR #751) backfilled the
-pre-existing tagged-but-vectorless backlog.
+**CLIP tagging persists an embedding for every TAGGED image** (PR #748, ~19% coverage gap; PR #751 backfilled the tagged-but-vectorless backlog).
+**Any job that REPLACES an image's bytes under its existing `storage_path`** (the sreality re-master lane — `images.rendition` / `stored_width` /
+`stored_height`, migration 496) **must go through `db.invalidate_derived_signals`**: the one chokepoint that re-arms these producers by nulling their
+OWN predicates (`phash`, `clip_tagged_at`). It deletes no label/review/CLIP-cache row; DINOv3 vectors go only on `drop_dinov3=True` (hand-dispatched GPU refill).
 
 A unified `CoordResolver` (`scraper/location.py`, migration 288, PR #749) now backs
 idnes/realitymix/maxima/remax/mmreality/ceskereality — four of those had no geocode path at
