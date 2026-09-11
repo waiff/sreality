@@ -1153,10 +1153,9 @@ renumber.** Navigate by area:
     NOT batched into `POST /listings/lookup` (too heavy per index card) — the panel fetches them
     lazily via `GET /properties/{id}/notes` on open. Tags are the one curation surface the
     extension does not yet expose. **Every property-grain operator write (curation here, the
-    pipeline in rule #22) carries exactly ONE account, resolved once at the route edge by
-    `tenant_pool.require_account_id` — a caller with no membership is a loud `400`, never a
-    `SYSTEM` fallback migration 290's WITH CHECK would reject; reads take no account at all and
-    are scoped by RLS (`current_account_ids()`) alone.**
+    pipeline in rule #22) carries exactly ONE account, resolved once at the route edge; reads take
+    none and are scoped by RLS. The doctrine and its standing gates are stated once — rule #22's
+    tenancy note below.**
     Same no-hard-delete spirit as the rest of the data model.
     **Every curation route runs on the tenant pool (`tenant_conn` + `verify_jwt`), with no
     exceptions** (hydration sprint W-1c). Until then the collection CRUD (`POST /collections`,
@@ -1393,12 +1392,18 @@ renumber.** Navigate by area:
     scope chip + its sidebar stage picker, AND the Chrome-extension panel (the glyph reproduced
     by value in vanilla TS — separate territory, no React import) — so the "into the pipeline"
     concept reads as one icon everywhere.**
-    **Pipeline MEMBERSHIP likewise has exactly ONE definition — `current_account_ids()`, the
-    database's own membership function — on every surface, the extension's `POST /listings/lookup`
-    included: it takes no account argument and its SQL carries no account predicate, so its answer
-    IS the SPA's answer by construction, which is what makes the "MEANS one thing" claim below
-    true rather than aspirational** (a second, explicitly-bound definition is precisely what made
-    the extension disagree with the SPA for seven weeks, 2026-07-23 → 09-11).
+    **TENANCY NOTE — stated here once, for rule #18 as well.** Pipeline MEMBERSHIP has exactly ONE
+    definition: `current_account_ids()`, the database's own membership function, on every surface —
+    the extension's `POST /listings/lookup` included, which takes no account argument and whose SQL
+    carries no account predicate, so its answer IS the SPA's answer by construction. That is what
+    makes the "MEANS one thing" claim below true rather than aspirational (a second,
+    explicitly-bound definition is precisely what made the extension disagree with the SPA for
+    seven weeks, 2026-07-23 → 09-11). The same doctrine governs every account-scoped route,
+    curation included: reads on a tenant connection scoped by RLS alone, writes carrying ONE
+    account resolved at the route edge, an explicit `account_id = %s` predicate only where RLS is
+    off and it is the sole gate. **It is written out in full exactly once** — with the fourth
+    shape (`deps.account_scope`), the post-mortem's two test rules and the standing censuses —
+    in `.claude/skills/database/references/tenancy.md`. Don't restate it here or under rule #18.
     **And it MEANS the same thing everywhere.** Out of the pipeline, a click adds at the entry
     stage — cheap, reversible, one keystroke in the middle of triage. Already in it, a click opens
     the shared `<PipelineStageMenu>`: every live stage (badged, current one checked, terminal stages
