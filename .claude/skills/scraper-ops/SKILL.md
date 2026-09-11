@@ -333,21 +333,21 @@ the selector targets only listings whose geo-derived `region_id` is in
 (`listings.condition_levels_propagated_from` records provenance) before every submit/backfill,
 so a duplicate never re-bills the LLM. `check_llm_health` mirrors the same scope.
 
-**Images** stay decoupled across three workflows (both halves of the scrape split pass
-`--no-image-downloads`; the drain's write phase only records image-URL rows — bytes land in R2 via
-these jobs). sreality comes through their `SQUARE_1800_JPG` template (`res,1800,1800,1|shr,,20|jpg,80`:
-whole frame, ≤1800px, no watermark); their CDN is an exact-template allowlist, so a stored legacy
-`res,749,562,3…` chain is NORMALISED onto it (only a `rot` op survives) and every stored row is stamped
-`rendition` + decoded `stored_width`/`stored_height` (mig 496) — **phash/CLIP compare only WITHIN a
-rendition** until the re-master lane finishes. The timeout guard is `--image-max-seconds` (wall clock,
-between batches), NOT `--max-image-downloads`: that cap's ~11k/hr basis predates the bigger master —
-re-measure with a small dispatch before resizing it.
+**Images** stay decoupled across four workflows (both halves of the scrape split pass
+`--no-image-downloads`; the drain only records image-URL rows — bytes land in R2 via these jobs).
+sreality comes through their `SQUARE_1800_JPG` template (`res,1800,1800,1|shr,,20|jpg,80`: whole frame,
+≤1800px), an exact-template allowlist, so a stored legacy chain is NORMALISED onto it (only `rot` survives)
+and every row is stamped `rendition` + `stored_width`/`stored_height` (mig 496): **phash/CLIP compare only
+WITHIN a rendition**. Timeout guard = `--image-max-seconds`, NOT the count cap (~11k/hr basis predates it).
 - `images.yml` (2-hourly) — THE deep backlog drain across ALL portals, **sharded into 4 parallel jobs**
   (`--image-shard k/4` = the `image_id mod 4` slice), each with its own cap, breaker and runner IP.
 - `images_fresh.yml` (`*/15` + self-chaining via `SCRAPE_CHAIN_TOKEN` while work remains) — newest
   ACTIVE listings' photos first, so a fresh card renders an image in minutes, not 2 hours.
 - `refresh_stale_images.yml` (every 6h) — re-enqueues active listings whose un-downloaded image URLs
   rotated/went stale into `listing_detail_queue` (low priority) so the detail drain repoints them.
+- `sreality_image_remaster.yml` (`15 */2`, 6 shards; scheduled runs gated on the `SREALITY_REMASTER_CRON` repo
+  variable — the kill-switch, dispatch always runs) — re-downloads `rendition IS NULL` rows at the master template,
+  OVERWRITING each R2 object under its stored key; dead URLs re-resolve from live detail. Final: `REMASTER done …`.
 
 **Cadence:** `*/15` for each half, deliberately — frequent index walks surface delistings fast,
 while the bounded drain keeps a steady, polite fetch volume. GitHub throttles scheduled

@@ -15,9 +15,21 @@ Independent of the analytical, UI, and map tracks.
   provenance is now written on every download: `rendition` + decoded `stored_width`/`stored_height`.
   The image phase gained a wall-clock bound (`--image-max-seconds`, both workflows) because the count
   cap's throughput basis predates the bigger master.
-- **Next:** (1) the re-master lane over the ~3.55M stored legacy-crop rows (mig 496 + `mark_image_remastered`
-  + `invalidate_derived_signals` are in place, the driver is not) — until it finishes, phash/CLIP are
-  comparable only WITHIN a rendition; (2) a thumbnail rendition — the SPA/extension currently serve a
+  **The re-master lane now exists** (`scripts/remaster_sreality_images.py` +
+  `sreality_image_remaster.yml`, 6 shards, `15 */2`): it re-downloads the ~3.55M `rendition IS NULL`
+  rows at the master template and OVERWRITES each R2 object under its stored `storage_path`, stamping
+  provenance + re-arming phash/CLIP through `mark_image_remastered`. sreality ROTATES image URLs when a
+  listing is edited (~75% of stored URLs are dead on the longest-lived actives), so a 404/410/dead-URL
+  on the stored URL re-resolves from the listing's CURRENT detail by image `order` and persists the
+  fresh URL; bytes that come back 749x562 are an anomaly (never uploaded, never stamped as a master).
+  Every outcome stamps the attempt clock, and retiring a row from the queue always takes two sightings
+  20h apart, so one CDN blip can never claim `sreality-749-crop`. **Sequence: pilot with
+  `listing_ids` (and/or `dry_run`) first, read the `REMASTER done …` line, THEN arm the cron by setting
+  the `SREALITY_REMASTER_CRON` repo variable to `on`** — until it is armed the schedule is inert.
+- **Next:** (1) run the re-master to completion — each shard merges its OWN sub-key (`"k/6"`) into
+  `app_settings.sreality_remaster_last_complete` once it has walked its slice out AND confirmed no
+  convertible row is left, so the lane is done when all six sub-keys are there; until then phash/CLIP
+  are comparable only WITHIN a rendition; (2) a thumbnail rendition — the SPA/extension currently serve a
   master into every grid tile; (3) re-measure one image shard at the new template and resize
   `MAX_IMG` / the fresh lane's cap from the result; (4) one census of what stored chains actually
   carry — `SELECT DISTINCT split_part(op, ',', 1) FROM (SELECT unnest(string_to_array(split_part(

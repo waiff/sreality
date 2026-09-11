@@ -1,0 +1,124 @@
+name: "Jobs: sreality image re-master"
+
+# Re-downloads stored sreality photos at the whole-frame `SQUARE_1800_JPG` master
+# template and OVERWRITES each row's existing R2 object in place, under the
+# `images.storage_path` the row already carries — the ~3.55M rows with
+# `rendition IS NULL` hold the superseded `res,749,562,3` CROP, which cost ~85% of
+# photos their edges. sreality ROTATES image URLs when a listing is edited, so a
+# 404/410 (or a dead-URL 400/401/415) on the stored URL is re-resolved from the
+# listing's CURRENT detail payload by image `order`, and the fresh URL is stored
+# with the bytes. Every success stamps `rendition` + decoded dimensions and
+# re-arms the phash/CLIP lanes; bytes that come back as the 749x562 crop are an
+# anomaly and are never stamped.
+#
+# Bounded, resumable, no cursor: the pending set IS the queue (`rendition IS
+# NULL`), so a row leaves it the moment it is stamped. Each shard walks listings
+# newest-first, ACTIVE before inactive, under three bounds — a per-run image cap,
+# a wall-clock budget (`--max-seconds 5700`, checked between batches, so the job
+# exits cleanly inside the 110-min timeout) and a per-CDN-host transient-failure
+# breaker that pauses 60s and gives up after three trips.
+#
+#   * Six shards over `abs(hashint8(listings.id)) mod 6`, each with its own
+#     concurrency group (cancel-in-progress false) so a still-running shard is
+#     never killed and the next tick queues behind it. The denominator is written
+#     into the run step as `/6` and MUST match the matrix length — a test pins it.
+#   * The schedule is a kill-switch WITHOUT a code change: scheduled runs only
+#     execute while the repository variable SREALITY_REMASTER_CRON == 'on'.
+#     Dispatch always runs, so the pilot (`listing_ids`, or `dry_run`) works
+#     before the cron is ever armed.
+#   * A shard that walked its whole slice out AND then confirmed no convertible
+#     row is left merges its own sub-key into `app_settings
+#     .sreality_remaster_last_complete` — one row, six sub-keys, so a fast shard
+#     can never read as "the lane is done".
+#   * Dispatch inputs reach the script through `env`, never interpolated into
+#     the shell.
+#   * CDN politeness: 6 shards x `_MAX_CONCURRENCY_PER_HOST` (4) is the lane's
+#     real footprint on sdn.cz, and images.yml is fetching the same host in the
+#     same window. Re-measure 403 pressure during the pilot before raising
+#     either. Worth one `EXPLAIN (ANALYZE, BUFFERS)` of a listing page query at
+#     `--shard 1/6` too: nothing indexes `(source, is_active, id)`.
+
+on:
+  schedule:
+    # :15 only staggers the START away from images.yml's :00 — a 95-minute job
+    # necessarily overlaps the next one; the per-host cap is what keeps it polite.
+    - cron: "15 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      max_images:
+        description: "Per-shard images-per-run cap (0 = uncapped, bounded by --max-seconds)"
+        required: false
+        type: string
+        default: "16000"
+      listing_ids:
+        description: "Pilot mode: comma-separated listings.id (ignores the shard slice)"
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "Select and report only: no network, no writes"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  remaster:
+    # The schedule's kill-switch: flip the SREALITY_REMASTER_CRON repo variable
+    # off to stop the cron without touching this file. Dispatch is unaffected.
+    if: ${{ github.event_name != 'schedule' || vars.SREALITY_REMASTER_CRON == 'on' }}
+    strategy:
+      fail-fast: false        # one shard's CDN hiccup must not cancel the others
+      max-parallel: 6
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    runs-on: ubuntu-latest
+    timeout-minutes: 110      # under the 2h cron interval so we never overlap ourselves
+    concurrency:
+      group: sreality-image-remaster-${{ matrix.shard }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Re-master shard ${{ matrix.shard }}
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          SHARD: ${{ matrix.shard }}
+          INPUT_MAX_IMAGES: ${{ inputs.max_images }}
+          INPUT_LISTING_IDS: ${{ inputs.listing_ids }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          # Spaces become separators, never deleted: "101 102" is two listings.
+          IDS="${INPUT_LISTING_IDS// /,}"
+          # Pilot mode ignores the shard slice, so running it on all six shards
+          # would re-process the same listings six times over.
+          if [ -n "$IDS" ] && [ "$SHARD" != "1" ]; then
+            echo "listing_ids pilot runs on shard 1 only — skipping shard $SHARD"
+            exit 0
+          fi
+          MAX_IMG="${INPUT_MAX_IMAGES:-16000}"
+          # The /6 denominator is the matrix length. Change one, change both.
+          ARGS="--shard ${SHARD}/6 --max-images ${MAX_IMG} --max-seconds 5700 --workers 16"
+          if [ "$INPUT_DRY_RUN" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ -n "$IDS" ]; then
+            ARGS="$ARGS --listing-ids $IDS"
+          fi
+          echo "Running with: $ARGS"
+          python -m scripts.remaster_sreality_images $ARGS

@@ -6462,6 +6462,61 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/sreality_image_canary.yml"
     },
     {
+      "filename": "sreality_image_remaster.yml",
+      "name": "Jobs: sreality image re-master",
+      "description": "Re-downloads stored sreality photos at the whole-frame `SQUARE_1800_JPG` master template and OVERWRITES each row's existing R2 object in place, under the `images.storage_path` the row already carries — the ~3.55M rows with `rendition IS NULL` hold the superseded `res,749,562,3` CROP, which cost ~85% of photos their edges. sreality ROTATES image URLs when a listing is edited, so a 404/410 (or a dead-URL 400/401/415) on the stored URL is re-resolved from the listing's CURRENT detail payload by image `order`, and the fresh URL is stored with the bytes. Every success stamps `rendition` + decoded dimensions and re-arms the phash/CLIP lanes; bytes that come back as the 749x562 crop are an anomaly and are never stamped.",
+      "portal": null,
+      "manual": true,
+      "schedules": [
+        {
+          "cron": "15 */2 * * *",
+          "human": "Every 2 hours at :15"
+        }
+      ],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "max_images",
+          "description": "Per-shard images-per-run cap (0 = uncapped, bounded by --max-seconds)",
+          "required": false,
+          "type": "string",
+          "default": "16000",
+          "options": null
+        },
+        {
+          "name": "listing_ids",
+          "description": "Pilot mode: comma-separated listings.id (ignores the shard slice)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "dry_run",
+          "description": "Select and report only: no network, no writes",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "R2_ACCESS_KEY_ID",
+        "R2_ACCOUNT_ID",
+        "R2_BUCKET_NAME",
+        "R2_SECRET_ACCESS_KEY",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": null,
+      "cancelInProgress": null,
+      "timeoutMinutes": 110,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/sreality_image_remaster.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/sreality_image_remaster.yml"
+    },
+    {
       "filename": "street_key_parity.yml",
       "name": "Monitoring: street_name_key parity",
       "description": "Weekly sampled drift check: stored listings.street_name_key == the Python normalizer (scraper.street.street_name_key). Guards the STALE-key class the migration-264 presence CHECK cannot see — a normalizer edit without the required backfill_street_name_key.yml all=true re-key, or a writer stamping a wrong value. Silent drift costs dedup recall (the --dirty scoped load matches peers by the STORED key). A mismatch FAILS the run, which monitor_workflow_failures records and the Health page lists — zero new alerting plumbing. NOT a portal ingest workflow, so no `# portal:` tag.",
