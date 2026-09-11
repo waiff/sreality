@@ -38,6 +38,19 @@ locality leniently (301 to canonical). An unknown code yields NULL + a counted r
 guess; the column is preserve-if-null at the write and **display-only** (the SSR page is a
 login-redirect loop — `db.detail_ref` keeps it off every fetch queue). No surface reconstructs
 a URL; design + waves: `docs/design/portal-listing-url.md`.
+**Photos** come off their CDN (`*.sdn.cz`) through a render-transform chain, and that CDN is an
+**exact-template allowlist**, not a transform language: only templates they publish return bytes,
+everything else 400s (and a bare URL 401s). We download through their `SQUARE_1800_JPG` template,
+`res,1800,1800,1|shr,,20|jpg,80` — the **whole frame** (mode 1 = fit, no crop) at up to 1800px, no
+watermark. It replaced `res,749,562,3|shr,,20|jpg,90`, whose mode 3 CROPPED to 4:3 (~85% of sreality
+photos lost their edges; a floor plan lost a whole floor) at a fraction of the master's resolution.
+`image_storage.with_transform` is the one definition: a stored `sreality_url` may be bare, carry the
+legacy chain, or carry a prefix chain (`?fl=rot,180,0|`), and all three are **normalised** onto the
+current template — serving ops (`res`/`shr`/`jpg`/`webp`/`wrm`) are dropped and replaced, per-photo
+facts (notably `rot,<deg>,0`, without which the CDN returns 200 and stores the photo unrotated) are
+kept in front. The chain is split by hand and never URL-encoded: the allowlist matches literally, so
+`%2C`/`%7C` are rejected. `frontend/src/lib/imageUrl.ts` mirrors it for the not-yet-downloaded
+fallback and `tests/test_image_transform_parity.py` fails if the two copies drift.
 
 **Data source (bazos.cz).** A separate HTML crawler (`scraper/bazos_client.py`,
 `bazos_parser.py`, `bazos_main.py`) lands bazos listings into the same
@@ -743,7 +756,12 @@ renumber.** Navigate by area:
    photos. The `images` table tracks per-image download state via `storage_path`,
    `download_attempts`, and `last_download_attempt_at`. Image-download is a separate phase
    after the scrape phase; it's a no-op if R2 env vars are missing, so a partial deploy
-   never breaks the scrape. Migration 496 adds provenance: `rendition` = WHAT bytes the object
+   never breaks the scrape. sreality photos are fetched through their `SQUARE_1800_JPG` template
+   (whole frame, ≤1800px, no watermark) and a legacy chain on a stored URL is NORMALISED onto it at
+   download, never passed through — see § Data source (sreality) for the allowlist mechanics.
+   Migration 496 adds provenance, and **every stored row is stamped with what was actually stored**:
+   the download path passes `rendition` + the decoded `stored_width`/`stored_height` into
+   `db.mark_image_stored`. `rendition` = WHAT bytes the object
    holds (NULL pre-provenance — for sreality the legacy 749x562 mode-3 crop, else the portal's
    native file; `sreality-1800-fit` the uncropped master; `sreality-749-crop` assessed/source
    gone/crop retained, TERMINAL; `native` a non-sreality file), plus `stored_width`/`stored_height`

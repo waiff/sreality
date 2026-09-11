@@ -7,6 +7,7 @@ methods. Without R2_* env vars the image-download phase is a no-op.
 from __future__ import annotations
 
 import datetime
+import io
 import logging
 import os
 import time
@@ -106,10 +107,19 @@ def image_key(listing_id: int, sequence: int | None) -> str:
 
 
 # sreality's v1 rebuild serves bare image URLs; the CDN 401s a bare URL and
-# only returns bytes when the render-transform query is present. Pre-rebuild
-# stored URLs already carry the complete chain.
-IMAGE_TRANSFORM_OPS = "res,749,562,3|shr,,20|jpg,90"
-IMAGE_TRANSFORM = "fl=" + IMAGE_TRANSFORM_OPS
+# only returns bytes when the render-transform query is present. Their CDN is an
+# exact-template ALLOWLIST, not a transform language: this chain is their
+# SQUARE_1800_JPG template and returns the WHOLE frame (mode 1 = fit, no crop)
+# at up to 1800px with no watermark; anything off the allowlist 400s. The
+# superseded "res,749,562,3|shr,,20|jpg,90" used mode 3, which CROPS to 4:3 —
+# ~85% of sreality photos lost their edges (a floor plan lost a whole floor).
+IMAGE_TRANSFORM_OPS = "res,1800,1800,1|shr,,20|jpg,80"
+
+# The `images.rendition` vocabulary (migration 496) — WHAT bytes the stored
+# object holds.
+RENDITION_SREALITY_MASTER = "sreality-1800-fit"
+RENDITION_SREALITY_LEGACY_CROP = "sreality-749-crop"
+RENDITION_NATIVE = "native"
 
 # The render-transform is a sreality CDN (*.sdn.cz / Seznam) feature. Other
 # portals (bazos and onward) serve plain image URLs and would 404/ignore the
@@ -117,30 +127,77 @@ IMAGE_TRANSFORM = "fl=" + IMAGE_TRANSFORM_OPS
 # portal-agnostic now that non-sreality images flow through it (multi-portal).
 _SREALITY_IMAGE_HOST = "sdn.cz"
 
+# Ops that decide HOW the photo is served — ours to choose, so a stored chain's
+# copy of them is dropped and replaced. Everything else in a chain (notably
+# `rot,<deg>,0`) is a per-photo FACT: completing a chain without the rot op
+# returns 200 but stores the photo unrotated (curl-verified).
+_SERVING_OP_HEADS = frozenset({"res", "shr", "jpg", "webp", "wrm"})
 
-def _with_transform(url: str) -> str:
+
+def rendition_for(url: str) -> str:
+    """The `images.rendition` value the download path stores for this URL."""
+    if _SREALITY_IMAGE_HOST in url:
+        return RENDITION_SREALITY_MASTER
+    return RENDITION_NATIVE
+
+
+def with_transform(url: str, ops: str = IMAGE_TRANSFORM_OPS) -> str:
+    """Normalise a sreality CDN URL onto `ops`, preserving non-serving ops.
+
+    Stored `sreality_url`s come in three shapes: bare, a complete legacy chain
+    ("?fl=res,749,562,3|shr,,20|jpg,90") and a prefix chain with a trailing pipe
+    ("?fl=rot,180,0|"). All three must end up requesting the SAME template, so a
+    legacy chain is rewritten rather than passed through. Idempotent. Split by
+    hand — urlencode would percent-encode ',' and '|', which the CDN rejects.
+    """
     if _SREALITY_IMAGE_HOST not in url:
         return url
-    if "fl=" not in url:
-        return f"{url}{'&' if '?' in url else '?'}{IMAGE_TRANSFORM}"
-    if "res," in url:
-        # Legacy stored URL with a complete chain — already renderable.
-        return url
-    # Prefix chain like '?fl=rot,180,0|' (trailing pipe): the CDN 400s it as-is
-    # AND with the pipe stripped; only completing the chain returns bytes. The
-    # rot op MUST be preserved — completing without it returns 200 but stores
-    # the photo unrotated (curl-verified).
-    return url.rstrip("|") + "|" + IMAGE_TRANSFORM_OPS
+    head, hash_sep, fragment = url.partition("#")
+    base, query_sep, query = head.partition("?")
+    if not query_sep:
+        return f"{base}?fl={ops}{hash_sep}{fragment}"
+    others: list[str] = []
+    preserved: list[str] = []
+    for param in query.split("&"):
+        if not param.startswith("fl="):
+            if param:
+                others.append(param)
+            continue
+        for op in param[len("fl=") :].split("|"):
+            if op and op.split(",", 1)[0] not in _SERVING_OP_HEADS:
+                preserved.append(op)
+    chain = "|".join([*preserved, ops])
+    rebuilt = "&".join([*others, f"fl={chain}"])
+    return f"{base}?{rebuilt}{hash_sep}{fragment}"
 
 
-def download_image(url: str, timeout: float = 15.0) -> bytes:
+def image_dimensions(data: bytes) -> tuple[int, int] | None:
+    """Decoded pixel size from the header alone (Pillow is lazy), None if undecodable.
+
+    Lazy import: Pillow is a scraper-runtime dependency, not an import-time
+    requirement of this module (the toolkit pulls it in transitively).
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as image:
+            width, height = image.size
+        return (int(width), int(height))
+    except Exception:  # noqa: BLE001 - measuring must never fail a download
+        return None
+
+
+def download_image(
+    url: str, timeout: float = 15.0, *, transform_ops: str = IMAGE_TRANSFORM_OPS
+) -> bytes:
     """Download one image, capped at media.MAX_IMAGE_BYTES.
 
     Streams so an oversize body (e.g. a video served under an image-looking URL)
     is rejected without buffering it all into memory — a Content-Length over the
     cap short-circuits before the first byte. Raises NotAnImageError on oversize.
     """
-    with requests.get(_with_transform(url), timeout=timeout, stream=True) as response:
+    target = with_transform(url, transform_ops)
+    with requests.get(target, timeout=timeout, stream=True) as response:
         response.raise_for_status()
         declared = response.headers.get("Content-Length")
         if declared and declared.isdigit() and int(declared) > media.MAX_IMAGE_BYTES:

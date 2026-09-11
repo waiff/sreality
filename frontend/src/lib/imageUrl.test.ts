@@ -1,33 +1,44 @@
 /* imageSrc — URL resolution for listing photos.
  *
  * Focused on the CDN fallback (no R2 copy yet, storage_path null), which must
- * append sreality's render-transform: a BARE sdn.cz URL 401s, so without this
- * every not-yet-downloaded sreality photo renders UNAVAILABLE.
+ * normalise sreality's render-transform onto the URL: a BARE sdn.cz URL 401s,
+ * and a stored LEGACY chain would serve the 4:3 crop instead of the master.
  */
 
 import { describe, expect, it } from 'vitest';
 
 import { imageSrc } from './imageUrl';
 
+const OPS = 'res,1800,1800,1|shr,,20|jpg,80';
+
 describe('imageSrc — CDN fallback (storage_path null)', () => {
-  it('appends the render-transform to a bare sdn.cz URL', () => {
+  it('appends the 1800px whole-frame transform to a bare sdn.cz URL', () => {
     expect(
       imageSrc({ sreality_url: 'https://d18-a.sdn.cz/d_18/x/c6cb.jpeg', storage_path: null }),
-    ).toBe('https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=res,749,562,3|shr,,20|jpg,90');
+    ).toBe(`https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=${OPS}`);
   });
 
-  it('leaves an already-transformed sreality URL unchanged', () => {
-    const u = 'https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=res,749,562,3|shr,,20|jpg,90';
-    expect(imageSrc({ sreality_url: u, storage_path: null })).toBe(u);
+  it('normalises a legacy 749 crop chain onto the 1800 template', () => {
+    expect(
+      imageSrc({
+        sreality_url: 'https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=res,749,562,3|shr,,20|jpg,90',
+        storage_path: null,
+      }),
+    ).toBe(`https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=${OPS}`);
   });
 
-  it('completes a prefix transform chain, preserving the rot op', () => {
+  it('preserves a rot prefix chain in front of the transform', () => {
     expect(
       imageSrc({
         sreality_url: 'https://d18-a.sdn.cz/d_18/x/sw6Lvw.mpo?fl=rot,180,0|',
         storage_path: null,
       }),
-    ).toBe('https://d18-a.sdn.cz/d_18/x/sw6Lvw.mpo?fl=rot,180,0|res,749,562,3|shr,,20|jpg,90');
+    ).toBe(`https://d18-a.sdn.cz/d_18/x/sw6Lvw.mpo?fl=rot,180,0|${OPS}`);
+  });
+
+  it('is idempotent — a URL already on the 1800 template is unchanged', () => {
+    const u = `https://d18-a.sdn.cz/d_18/x/c6cb.jpeg?fl=${OPS}`;
+    expect(imageSrc({ sreality_url: u, storage_path: null })).toBe(u);
   });
 
   it('leaves non-sreality URLs (bazos/idnes/bezrealitky) untouched', () => {

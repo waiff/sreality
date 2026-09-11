@@ -481,10 +481,13 @@ def test_fetch_one_image_success_with_semaphore(monkeypatch):
         def upload_bytes(self, key, data, content_type="image/jpeg"):
             return None
 
-    key, phash, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", _R2(), sem)
+    key, phash, rendition, dims, err = scraper_main._fetch_one_image(
+        7, 0, "https://h/x.jpg", _R2(), sem
+    )
     assert err is None
     assert key == scraper_main.image_storage.image_key(7, 0)
     assert phash == 42
+    assert (rendition, dims) == ("native", None)  # non-sreality host, unmeasurable bytes
     assert sem.acquire(blocking=False)  # slot was released
     sem.release()
 
@@ -498,9 +501,12 @@ def test_fetch_one_image_releases_semaphore_on_error(monkeypatch):
         raise requests.ConnectionError("read timed out")
 
     monkeypatch.setattr(scraper_main.image_storage, "download_image", _boom)
-    key, phash, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", object(), sem)
+    key, phash, rendition, dims, err = scraper_main._fetch_one_image(
+        7, 0, "https://h/x.jpg", object(), sem
+    )
     assert err is not None
     assert phash is None
+    assert dims is None
     # Both slots are free again (none leaked).
     assert sem.acquire(blocking=False) and sem.acquire(blocking=False)
     sem.release()
@@ -519,7 +525,9 @@ def test_fetch_one_image_works_without_semaphore(monkeypatch):
         def upload_bytes(self, key, data, content_type="image/jpeg"):
             return None
 
-    key, phash, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", _R2(), None)
+    key, phash, rendition, dims, err = scraper_main._fetch_one_image(
+        7, 0, "https://h/x.jpg", _R2(), None
+    )
     assert err is None
 
 
@@ -589,7 +597,9 @@ def test_phash_failure_never_fails_the_store(monkeypatch):
         def upload_bytes(self, key, data, content_type="image/jpeg"):
             return None
 
-    key, phash, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", _R2(), None)
+    key, phash, rendition, dims, err = scraper_main._fetch_one_image(
+        7, 0, "https://h/x.jpg", _R2(), None
+    )
     assert err is None
     assert phash is None
     assert key == scraper_main.image_storage.image_key(7, 0)
@@ -680,7 +690,7 @@ def _drive_image_loop(monkeypatch, batches, fetch_result):
     monkeypatch.setattr(scraper_main.db, "pending_image_downloads", _fake_pending)
     monkeypatch.setattr(
         scraper_main.db, "mark_image_stored",
-        lambda conn, iid, key, phash=None: (
+        lambda conn, iid, key, phash=None, **kw: (
             stored.append(iid), stored_phashes.append(phash),
         ),
     )
@@ -697,7 +707,12 @@ def _drive_image_loop(monkeypatch, batches, fetch_result):
     def _fake_fetch(sid, seq, url, r2, semaphore=None):
         err = fetch_result(url)
         phash = None if err is not None else 777
-        return (scraper_main.image_storage.image_key(sid, seq), phash, err)
+        return (
+            scraper_main.image_storage.image_key(sid, seq), phash,
+            scraper_main.image_storage.rendition_for(url),
+            None if err is not None else (1800, 1200),
+            err,
+        )
 
     monkeypatch.setattr(scraper_main, "_fetch_one_image", _fake_fetch)
 
@@ -757,3 +772,75 @@ def test_run_stops_suspicious_when_only_quarantined_host_remains(monkeypatch):
 
     assert len(stored) == 2  # only the good images
     assert out["stopped_suspicious"] is True
+
+
+# ---- rendition + stored size provenance (migration 496) ---------------------
+
+
+def _drive_real_fetch_loop(monkeypatch, url, *, dimensions):
+    """Drive one image through the loop with the REAL _fetch_one_image, so the
+    provenance the worker measures is the provenance the main thread writes.
+    Returns the kwargs of the single mark_image_stored call."""
+    monkeypatch.setattr(scraper_main.image_storage, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        scraper_main.image_storage.R2Client, "from_env", lambda **kw: object()
+    )
+    monkeypatch.setattr(scraper_main.db, "connect", _fake_connect)
+
+    script = [[(1, 500, 0, url, "byt", "prodej", 500)]]
+
+    monkeypatch.setattr(
+        scraper_main.db, "pending_image_downloads",
+        lambda conn, **kw: script.pop(0) if script else [],
+    )
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        scraper_main.db, "mark_image_stored",
+        lambda conn, iid, key, **kw: calls.append({"image_id": iid, "key": key, **kw}),
+    )
+    monkeypatch.setattr(
+        scraper_main.image_storage, "download_image", lambda u, **kw: b"\xff\xd8\xff"
+    )
+    monkeypatch.setattr(scraper_main.media, "is_image_bytes", lambda data: "image/jpeg")
+    monkeypatch.setattr(scraper_main, "_phash_or_none", lambda data: 5)
+    monkeypatch.setattr(
+        scraper_main.image_storage, "image_dimensions", lambda data: dimensions
+    )
+
+    class _R2:
+        def upload_bytes(self, key, data, content_type="image/jpeg"):
+            return None
+
+    monkeypatch.setattr(scraper_main.image_storage.R2Client, "from_env", lambda **kw: _R2())
+    scraper_main._run_image_downloads(max_downloads=1, workers=1)
+    assert len(calls) == 1
+    return calls[0]
+
+
+def test_stored_sreality_image_carries_master_rendition_and_measured_size(monkeypatch):
+    """Bytes fetched through the 1800 template are stamped with WHAT they are —
+    the re-master lane's pending predicate keys on exactly this."""
+    call = _drive_real_fetch_loop(
+        monkeypatch, "https://d18-a.sdn.cz/d_18/x/y.jpeg", dimensions=(1800, 1200)
+    )
+    assert call["rendition"] == scraper_main.image_storage.RENDITION_SREALITY_MASTER
+    assert (call["width"], call["height"]) == (1800, 1200)
+
+
+def test_stored_non_sreality_image_is_stamped_native(monkeypatch):
+    """Other portals serve their own file; the transform never touches them."""
+    call = _drive_real_fetch_loop(
+        monkeypatch, "https://www.bazos.cz/img/1/1/1.jpg", dimensions=(640, 480)
+    )
+    assert call["rendition"] == scraper_main.image_storage.RENDITION_NATIVE
+    assert (call["width"], call["height"]) == (640, 480)
+
+
+def test_unmeasurable_bytes_store_with_size_left_untouched(monkeypatch):
+    """A size we could not decode must not be invented — width/height stay None
+    so mark_image_stored omits them from the SET list."""
+    call = _drive_real_fetch_loop(
+        monkeypatch, "https://d18-a.sdn.cz/d_18/x/y.jpeg", dimensions=None
+    )
+    assert call["rendition"] == scraper_main.image_storage.RENDITION_SREALITY_MASTER
+    assert call["width"] is None and call["height"] is None

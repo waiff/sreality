@@ -54,7 +54,12 @@ Node 20+ required.
   base into the build or exposing the bucket publicly. The single
   `imageSrc()` helper (`src/lib/imageUrl.ts`) builds `${VITE_API_BASE_URL}/images/${storage_path}`,
   falling back to the original CDN URL only for a just-scraped listing whose
-  bytes the async image job hasn't downloaded yet.
+  bytes the async image job hasn't downloaded yet. On that fallback a sreality
+  (`sdn.cz`) URL is normalised onto their `res,1800,1800,1|shr,,20|jpg,80`
+  template — the same whole-frame, ≤1800px template the scraper downloads
+  through (their CDN is an exact-template allowlist; a bare URL 401s and a
+  stored legacy `res,749,…` chain would serve a 4:3 crop). The two copies of
+  the template are kept in step by `tests/test_image_transform_parity.py`.
 
 ## Project layout
 

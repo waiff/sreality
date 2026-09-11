@@ -1942,11 +1942,15 @@ def _run_image_downloads(
                     image_id = future_to_id[future]
                     sid = sid_by_image[image_id]
                     host = host_by_image[image_id]
-                    key, phash, error = future.result()
+                    key, phash, rendition, dimensions, error = future.result()
                     counts["attempted"] += 1
 
                     if error is None:
-                        db.mark_image_stored(conn, image_id, key, phash=phash)
+                        width, height = dimensions or (None, None)
+                        db.mark_image_stored(
+                            conn, image_id, key, phash=phash,
+                            rendition=rendition, width=width, height=height,
+                        )
                         counts["downloaded"] += 1
                         host_windows[host].append("ok")
                         cat_key = cat_lookup.get(image_id, (None, None))
@@ -2178,9 +2182,13 @@ def _fetch_one_image(
     url: str,
     r2: image_storage.R2Client,
     semaphore: "threading.BoundedSemaphore | None" = None,
-) -> tuple[str, int | None, Exception | None]:
+) -> tuple[str, int | None, str, tuple[int, int] | None, Exception | None]:
     """Worker: download from the portal CDN, validate, upload to R2.
-    Returns (key, phash, error).
+    Returns (key, phash, rendition, dimensions, error).
+
+    `rendition` + `dimensions` are the provenance of the bytes actually stored
+    (migration 496), measured here where the bytes are in hand; the main thread
+    does every DB write.
 
     The byte-level guard (after the URL-level filter at ingest) is what keeps a
     non-image — a video served under an image URL, an HTML error page — from being
@@ -2193,6 +2201,7 @@ def _fetch_one_image(
     unbounded — so a small portal CDN isn't dogpiled by the full worker pool.
     """
     key = image_storage.image_key(sreality_id, sequence)
+    rendition = image_storage.rendition_for(url)
     try:
         if semaphore is not None:
             with semaphore:
@@ -2205,9 +2214,15 @@ def _fetch_one_image(
                 f"downloaded {len(data)} bytes are not a recognised image"
             )
         r2.upload_bytes(key, data, content_type=content_type)
-        return (key, _phash_or_none(data), None)
+        return (
+            key,
+            _phash_or_none(data),
+            rendition,
+            image_storage.image_dimensions(data),
+            None,
+        )
     except Exception as exc:
-        return (key, None, exc)
+        return (key, None, rendition, None, exc)
 
 
 def _run_condition_scoring(max_scores: int) -> None:

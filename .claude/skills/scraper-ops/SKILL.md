@@ -335,19 +335,19 @@ so a duplicate never re-bills the LLM. `check_llm_health` mirrors the same scope
 
 **Images** stay decoupled across three workflows (both halves of the scrape split pass
 `--no-image-downloads`; the drain's write phase only records image-URL rows — bytes land in R2
-via these jobs):
-- `images.yml` ("Scraping: image backlog drain (sharded)", 2-hourly) — THE deep backlog drain
-  across ALL portals, horizontally **sharded into 4 parallel jobs** (each owns the
-  `image_id mod 4 == shard` slice via `--image-shard k/4`), each with its own per-shard cap,
-  suspicious-stop circuit-breaker, and runner IP.
+via these jobs). sreality photos come through their `SQUARE_1800_JPG` template
+(`res,1800,1800,1|shr,,20|jpg,80`: whole frame, ≤1800px, no watermark) — the CDN is an exact-template
+allowlist, so a stored legacy `res,749,562,3…` chain is NORMALISED onto it, and every stored row is
+stamped `rendition` + decoded `stored_width`/`stored_height` (migration 496):
+- `images.yml` ("Scraping: image backlog drain (sharded)", 2-hourly) — THE deep backlog drain across
+  ALL portals, **sharded into 4 parallel jobs** (`--image-shard k/4`, the `image_id mod 4 == shard`
+  slice), each with its own per-shard cap, suspicious-stop circuit-breaker, and runner IP.
 - `images_fresh.yml` ("Scraping: fresh-listing image fast lane", cron `*/15` + self-chaining via
-  `SCRAPE_CHAIN_TOKEN` while work remains) — drains the newest ACTIVE listings' photos first so
-  a freshly-scraped card renders an image within minutes instead of waiting for the 2-hourly
-  drain.
+  `SCRAPE_CHAIN_TOKEN` while work remains) — drains the newest ACTIVE listings' photos first so a
+  freshly-scraped card renders an image within minutes instead of the 2-hourly drain.
 - `refresh_stale_images.yml` ("Jobs: refresh stale image URLs", every 6h) — re-enqueues active
   listings whose un-downloaded image URLs have rotated/gone stale into `listing_detail_queue`
-  (low priority) so the detail drain repoints the URLs and the backfill can then store the
-  bytes.
+  (low priority) so the detail drain repoints the URLs and the backfill can then store the bytes.
 
 **Cadence:** `*/15` for each half, deliberately — frequent index walks surface delistings fast,
 while the bounded drain keeps a steady, polite fetch volume. GitHub throttles scheduled
