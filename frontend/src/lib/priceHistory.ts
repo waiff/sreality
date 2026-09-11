@@ -8,7 +8,6 @@ import type {
   ListingPublic,
   PropertyStatusEventPublic,
 } from '@/lib/types';
-import { portalListingUrl } from '@/lib/portals';
 
 const DAY_MS = 86_400_000;
 
@@ -54,14 +53,9 @@ export function listingUrlRows(
   sources: PropertySource[],
   listing: ListingPublic,
 ): UrlRow[] {
-  // sreality stores no source_url; reconstruct it from the property's category
-  // triple (shared across its sources) so the per-source link resolves instead
-  // of pointing nowhere. Other portals keep their stored source_url.
-  const srealityCategory = {
-    categoryType: listing.category_type,
-    categoryMain: listing.category_main,
-    categorySubCb: listing.category_sub_cb,
-  };
+  // Each row's URL is ITS OWN stored `source_url` (migration 494 / the URL-contract
+  // sprint): a merged property's siblings carry different category triples, so
+  // the parent-derived reconstruction this used to do could never be right per row.
   if (sources.length > 0) {
     return [...sources]
       .sort(
@@ -70,11 +64,10 @@ export function listingUrlRows(
       )
       .map((s) => ({
         // s.id is the surrogate (property_sources_public.id) — NEVER null on a
-        // real row. s.sreality_id still drives the sreality URL below since
-        // that's a portal-native id, not an internal identity key.
+        // real row.
         id: s.id,
         source: s.source,
-        url: portalListingUrl(s.source, s.source_url, s.sreality_id, srealityCategory),
+        url: s.source_url ?? null,
         isActive: s.is_active,
         price: s.price_czk,
         firstSeen: s.first_seen_at,
@@ -85,12 +78,7 @@ export function listingUrlRows(
     {
       id: listing.id,
       source: listing.source ?? 'sreality',
-      url: portalListingUrl(
-        listing.source ?? 'sreality',
-        null,
-        listing.sreality_id,
-        srealityCategory,
-      ),
+      url: listing.source_url ?? null,
       isActive: listing.is_active,
       price: listing.price_czk,
       firstSeen: listing.first_seen_at,

@@ -410,7 +410,16 @@ function Inventory({
                     {fmtCzk(l.price_czk)}
                   </td>
                   <td className="px-3 py-1.5 whitespace-nowrap text-[var(--color-ink-3)] font-[family-name:var(--font-sans)]">
-                    {portalShort(l.source)}
+                    {l.source_url ? (
+                      <a
+                        href={l.source_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="hover:text-[var(--color-copper)] transition-colors"
+                      >
+                        {portalShort(l.source)}
+                      </a>
+                    ) : portalShort(l.source)}
                   </td>
                   <td className="px-3 py-1.5 whitespace-nowrap text-[var(--color-ink-4)] font-[family-name:var(--font-sans)]">
                     {fmtRelative(l.last_seen_at)}

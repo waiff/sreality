@@ -25,7 +25,7 @@ import {
   fmtCzk,
   fmtRelative,
 } from '@/lib/format';
-import { portalListingUrl, portalShort } from '@/lib/portals';
+import { portalShort } from '@/lib/portals';
 import { listingKindLabel } from '@/lib/enums';
 import { listingPath } from '@/lib/listingUrl';
 import type {
@@ -562,10 +562,9 @@ function PriceCell({ dispatch }: { dispatch: WatchdogDispatch }) {
 }
 
 /* The portal the property was last seen on, as a clickable chip. Links to the
- * portal's own listing page — the stored source_url when known, else a
- * reconstructed sreality URL from the native id (portalListingUrl); when neither
- * is available it falls back to our internal listing detail. Clicking marks the
- * dispatch read, like the listing-name link. */
+ * portal's own listing page — the stored source_url (every portal, sreality
+ * included); when it is null it falls back to our internal listing detail.
+ * Clicking marks the dispatch read, like the listing-name link. */
 function PortalCell({
   dispatch,
   onMarkSeen,
@@ -587,9 +586,7 @@ function PortalCell({
     + 'rounded-[var(--radius-xs)] bg-[var(--color-paper)] border '
     + 'border-[var(--color-rule)] text-[var(--color-ink-2)] '
     + 'hover:text-[var(--color-copper)] hover:border-[var(--color-rule-strong)] transition-colors';
-  const externalUrl = portalListingUrl(
-    dispatch.source, dispatch.source_url, dispatch.sreality_id,
-  );
+  const externalUrl = dispatch.source_url;
   if (externalUrl) {
     return (
       <a

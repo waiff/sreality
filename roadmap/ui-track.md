@@ -7,6 +7,18 @@ This track runs in parallel with the analytical phases above; the
 toolkit is what makes the UI worth building, but the UI doesn't gate
 toolkit work.
 
+### Portal links read the stored URL — reconstruction deleted (2026-09-11, W2 of the URL contract)
+- Operator-reported: the listing page's Sreality chip 404'd (`rodinny-dum` vs sreality's `rodinny`).
+  The SPA rebuilt sreality URLs from `CATEGORY_SUB_LABELS`; wrong for 14 of 48 codes, both auction
+  types, no link at all for land/other, and a merged property's siblings unreconstructable per row
+  (`priceHistory` applied the PARENT's triple to every sibling). `docs/design/portal-listing-url.md`.
+- Migration 494 appends `source_url` to `listings_public` (from 425's body); `ListingPublic` +
+  `DETAIL_COLS` carry it. `srealityListingUrl` / `portalListingUrl` / `SrealityCategory` are DELETED
+  (with `portals.test.ts`, which asserted the 404 as correct); six read sites read `source_url`
+  (header chips, price history, estimation prefill, comparable modal — now linked for all nine
+  portals —, Watchdog chip, BrokerDetail Portál cell). `portalUrl.census.test.ts` fails the build if
+  app code ever assembles a sreality URL again.
+
 ### Phase U0: Foundation (done)
 - `frontend/` folder with README declaring conventions.
 - Migration 008 creates `*_public` views and grants `SELECT` to the
