@@ -158,10 +158,18 @@ DEFAULT_WRITE_CHUNK_BYTES = 32 * 1024 * 1024  # ~8x under the hard limit, per st
 
 # ONE BODY FETCH PER BODY IS THE WHOLE COST OF THE PAGE HALF, and the fleet appends
 # ~8k bodies a day (~50-80 an hour), so a run's fan-out is bounded by churn. This ceiling
-# is the second rail: a contract bump makes every latest body eligible at once, and without
-# it one run would try to pull the whole corpus through the bucket.
+# is the second rail, PER BATCH: a contract bump makes every latest body eligible at once,
+# and without it one batch would try to pull the whole corpus through the bucket.
+#
+# 1500, not the scan batch: a batch is ONE transaction and every decompressed body in it is
+# live in memory at once (41-245 KB each), so the bound is the runner's memory and the time
+# the transaction sits idle across the fan-out, not the row count. 1500 is ~150 MB and ~20x
+# an hour of churn — a bumped contract drains over a handful of batches instead of one
+# multi-gigabyte transaction holding thousands of round trips open against the
+# transaction-mode pooler. That is the lesson the deleted archive lane's own bounds carried
+# (it refused to share W1's 10,000-row floor for exactly this reason).
 BODY_FETCH_CAP_ENV = "LOCATION_INTAKE_BODY_CAP"
-DEFAULT_BODY_FETCH_CAP = 4_000
+DEFAULT_BODY_FETCH_CAP = 1_500
 
 
 # ------------------------------------------------------------------ THE registry
