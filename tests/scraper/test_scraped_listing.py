@@ -75,3 +75,14 @@ def test_area_basis_is_not_hashed():
     a = _listing(area_m2=70.0, area_basis=None)
     b = replace(a, area_basis="usable")
     assert a.content_hash() == b.content_hash()
+
+
+def test_source_url_lands_in_to_row_and_is_required():
+    # Identity, not content: in the row (so it rides LISTING_COLUMNS), never hashed, and
+    # refused when empty — the write is preserve-if-null, so a None would keep a stale URL.
+    row = _listing().to_row(-5)
+    assert row["source_url"] == "https://reality.bazos.cz/inzerat/219122924/x.php"
+    assert "source_url" not in _HASH_FIELDS
+    import pytest
+    with pytest.raises(ValueError):
+        _listing(source_url="")

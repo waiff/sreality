@@ -176,9 +176,11 @@ def test_ingest_first_sight_returns_surrogate_not_synthetic(monkeypatch):
     assert rows and rows[0]["source_id_native"] == "218865547"
     # The legacy sreality_id column still gets the synthetic negative (pre-flip rail).
     assert rows and rows[0]["sreality_id"] == -1
-    # source_url UPDATE keys on the surrogate id (8001), not the synthetic sreality_id.
-    src = _find(conn.executed, "UPDATE listings SET source_url =")
-    assert src is not None and src[1] == ("https://bazos.cz/x", 8001)
+    # source_url rides the shared column registry, so it is IN the upsert row — there is
+    # no second statement to key on; the surrogate-identity intent survives via
+    # listing_id == 8001 and _ensure_property below.
+    assert rows and rows[0]["source_url"] == "https://bazos.cz/x"
+    assert _find(conn.executed, "UPDATE listings SET source_url =") is None
     assert _find(conn.executed, "UPDATE listings SET source =") is None
     assert _find(conn.executed, "INSERT INTO properties") is not None
 

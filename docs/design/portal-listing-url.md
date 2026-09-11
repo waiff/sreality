@@ -156,7 +156,7 @@ URL — **before any migration or SPA change**.
    - Deliberate non-choice: the codebook does **not** live in `contracts/portals/sreality.yaml`. Its
      `url_template` rows are read by no code, and the contract files sit under a governed hash whose
      accidental change once killed intake for three days. Executable vocabulary lives in Python; the
-     contract gets a one-line prose pointer.
+     contract file is not touched at all (a comment line would change its governed hash).
 2. **`scraper/parser.py`** — `parse_listing` returns one more key: `"source_url": sreality_url.from_payload(raw)[0]`.
    Both sreality write paths, freshness, and the pasted-URL persist path pick it up unchanged.
 3. **`scraper/db.py`** — `LISTING_COLUMNS += ("source_url",)`, `_LISTING_COLUMN_PGTYPE["source_url"] = "text"`,
@@ -375,13 +375,13 @@ URL — **before any migration or SPA change**.
   only copy if that ever changes).
 - **bezrealitky's `detail_url(uri)` can produce `…/None`** — a pre-existing, separate bug; the new
   non-empty contract guard does not catch it and is not meant to.
-- **`contracts/portals/*.yaml` `url_template`** stays prose.
+- **`contracts/portals/*.yaml`** is not touched: its `url_template` rows are prose read by no code, and the files sit under a governed hash.
 
 ## 9. Documentation that changes with the code (same PR, CI warns otherwise)
 
 | PR | Doc |
 |---|---|
-| W0 | `docs/architecture.md` § Data sources (sreality) + rule 21 clause; `.claude/skills/scraper-ops` (one line in, one line out, same section); `roadmap/scraper-track.md`; `contracts/portals/sreality.yaml` one-line pointer |
+| W0 | `docs/architecture.md` § Data sources (sreality) + rule 21 clause; `CLAUDE.md` rule 21 clause; `.claude/skills/scraper-ops` (same section, net zero lines); `roadmap/scraper-track.md` |
 | W1 | `frontend/src/lib/workflowDocs.generated.ts` (codegen); `.claude/skills/scraper-ops` only if the reconciler earns a dispatch line (trim to fit) |
 | W2 | `roadmap/ui-track.md`; `.claude/skills/database` only if the view-append pattern gains a line (at cap — trim) |
 | W3 | `frontend/src/lib/pipelineChecks.ts` labels; `roadmap/reliability-track.md` or `scraper-track.md` (one file) |

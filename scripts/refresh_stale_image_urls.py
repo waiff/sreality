@@ -57,13 +57,15 @@ def enqueue_entry(
 ) -> tuple[str, str | None, int | None, int]:
     """One `db.enqueue_detail` entry: (native_id, detail_ref, index_price, priority).
 
-    sreality derives its detail URL from the id (detail_ref=None); crawler portals fetch
-    by URL, so detail_ref is the stored source_url. Lowest priority so the refresh never
-    delays genuine new-listing detail fetches.
+    sreality fetches by id (db.detail_ref returns None for it — its stored source_url is
+    the human page, never a fetch target); crawler portals fetch by URL, so detail_ref is
+    the stored source_url. Lowest priority so the refresh never delays genuine
+    new-listing detail fetches.
     """
+    ref = db.detail_ref(source, source_url)
     if source == "sreality":
-        return (str(sreality_id), None, None, db.QUEUE_PRIORITY_NEW)
-    return (str(source_id_native), source_url, None, db.QUEUE_PRIORITY_NEW)
+        return (str(sreality_id), ref, None, db.QUEUE_PRIORITY_NEW)
+    return (str(source_id_native), ref, None, db.QUEUE_PRIORITY_NEW)
 
 
 def main() -> int:

@@ -5,6 +5,20 @@
 Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
+### Portal listing URLs — one contract, nine portals (2026-09-11, in progress)
+- Operator-reported: the listing page's Sreality chip 404s (`rodinny-dum` vs sreality's `rodinny`).
+  Root cause is ONE asymmetry — sreality was the only portal whose page URL was not a stored fact,
+  so the SPA reconstructed it from display labels. North star + waves:
+  `docs/design/portal-listing-url.md`.
+- **W0 (this entry):** `scraper/sreality_url.py` (closed sitemap-sourced codebook, one assembler,
+  two adapters, declines never raise); `parse_listing` emits `source_url`; the column rides
+  `LISTING_COLUMNS` preserve-if-null on both write paths; the crawler path's bespoke post-insert
+  UPDATE is gone; `ScrapedListing` refuses an empty URL; `db.detail_ref` keeps sreality's page off
+  every queue; both snapshot-diff sites skip the key.
+- **Next:** W1 `scripts/reconcile_source_url.py` (narrow-column fill of ~232k rows, counters gate
+  the write) → mig 494 (`listings_public.source_url`, from 425's body) → W2 SPA deletes the
+  reconstruction → W3 rails (coverage view row + check, weekly parity, weekly HEAD conformance).
+
 ### The nomination gate went STRUCTURAL — counts stopped vetoing (2026-09-08, done)
 - The 5th element of `walk_category` now means **"the walk reached the portal's end"**
   (`portal.walk_reached_end` over a shared `StopReason` / `PORTAL_ENDS` / `OUR_STOPS`

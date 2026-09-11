@@ -51,6 +51,9 @@ _LISTING_FIELDS: tuple[str, ...] = (
     "energy_rating", "estate_area", "usable_area", "garden_area",
     "category_sub_cb", "subtype", "furnished", "terrace", "cellar", "garage",
     "parking_lots", "ownership", "description", "published_at",
+    # The listing's page on its portal — identity, not content (never hashed); rides
+    # LISTING_COLUMNS like every other column (docs/design/portal-listing-url.md).
+    "source_url",
 )
 
 
@@ -110,6 +113,15 @@ class ScrapedListing:
     published_at: datetime | date | None = None
     # The source's own payload, stored verbatim in listings.raw_json.
     raw: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # `source_url: str` was never enforced. With the column preserve-if-null at the
+        # write, a None from a parser would silently KEEP a stale URL instead of clearing
+        # it — so refuse at the contract boundary (fails one drain item, not the lane).
+        if not isinstance(self.source_url, str) or not self.source_url.strip():
+            raise ValueError(
+                f"{self.source}/{self.source_id_native}: source_url is required"
+            )
 
     def content_hash(self) -> str:
         payload = {k: getattr(self, k) for k in _HASH_FIELDS}

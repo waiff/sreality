@@ -28,7 +28,16 @@ holds the typed attributes). No cookies needed. The deep-pagination cap still ap
 (HTTP 422 past the window), so large categories are walked per-district
 (`SPLIT_THRESHOLD` / `DISTRICT_IDS`). `parser.parse_listing` maps that object to the
 row contract; `scraper/hashing.py` strips the volatile fields (`params.stats` view
-counter, `note`/`rus`/`rusReply`).
+counter, `note`/`rus`/`rusReply`). The parser also emits the listing's **page URL**
+(`listings.source_url`) like every crawler portal does: `scraper/sreality_url.py` assembles
+`/detail/{type}/{main}/{sub}/{locality}/{hash_id}` from the payload's `category_*_cb` codes and
+`locality.*_seo_name` values through a **closed, sreality-sourced codebook** (its sitemap; the sub
+slug is NOT a slugified label — 37 "Rodinný dům" is `rodinny`; auction types are `drazby`/`podily`,
+not the stored `drazba`/`podil`). sreality validates type/main/sub strictly (404) and only the
+locality leniently (301 to canonical). An unknown code yields NULL + a counted reason, never a
+guess; the column is preserve-if-null at the write and **display-only** (the SSR page is a
+login-redirect loop — `db.detail_ref` keeps it off every fetch queue). No surface reconstructs
+a URL; design + waves: `docs/design/portal-listing-url.md`.
 
 **Data source (bazos.cz).** A separate HTML crawler (`scraper/bazos_client.py`,
 `bazos_parser.py`, `bazos_main.py`) lands bazos listings into the same
@@ -1256,7 +1265,11 @@ renumber.** Navigate by area:
     byte-identical reactivation (a delisted listing reappears with no content change) produces
     no snapshot, so it waits for the daily sweep — rare, documented.
 21. **Every portal runs through ONE shared framework (Phase 4); per-portal code is a fetcher +
-    a parser + a config row — no per-portal branches in shared code.** The pieces:
+    a parser + a config row — no per-portal branches in shared code.** The parser's outputs
+    include the row's `source_url` (its page on the portal): a stored fact every surface READS and
+    none reconstructs — sreality's assembler is `scraper/sreality_url.py`, the 8 crawlers' are their
+    `<portal>_client.detail_url`; the column rides `LISTING_COLUMNS` preserve-if-null on every write
+    path (`docs/design/portal-listing-url.md`). The pieces:
     `scraper/portal_base.py` (`BasePortalClient` — the shared HTTP session/headers, `RateLimiter`
     pacing + 429/403 penalize, retry/backoff, `ListingGoneError` on 404/410); `scraper/portal.py`
     (`PortalConfig` + `load_portal_config`, backed by the operational columns on the `portals`
