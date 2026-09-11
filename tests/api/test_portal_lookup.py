@@ -8,6 +8,7 @@ tests exercise the bearer gate, request validation, and delegation.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -22,6 +23,9 @@ from api import main as api_main
 from api import portal_lookup as pl
 from api import schemas as s
 from api import tenant_pool
+
+_USER = uuid.uuid4()
+_ACCT = uuid.uuid4()
 
 
 # ----------------------------------------------------------------------
@@ -130,6 +134,7 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
         _FakeConn(market_rows), _FakeConn(account_rows),
         _items(("sreality", "1184977484"), ("bazos", "220291221"),
                ("idnes", "deadbeef")),
+        account_id=_ACCT,
     )
     data = out["data"]
     assert [d["source"] for d in data] == ["sreality", "bazos", "idnes"]
@@ -184,6 +189,7 @@ def test_lookup_binds_one_value_pair_per_item() -> None:
     market_conn, tenant_conn = _FakeConn([]), _FakeConn([])
     pl.lookup_portal_listings(
         market_conn, tenant_conn, _items(("sreality", "1"), ("idnes", "abc")),
+        account_id=_ACCT,
     )
     sql, params = market_conn.cur.executed
     # two (%s::text, %s::text) tuples → 4 bound params, in request order
@@ -194,8 +200,6 @@ def test_lookup_binds_one_value_pair_per_item() -> None:
 
 
 def test_lookup_account_query_targets_only_found_listings() -> None:
-    import uuid
-
     market_rows = [
         _mk_market_row("sreality", "a", True, sreality_id=1, listing_id=11,
                        property_id=100, source_url="https://sreality.cz/x",
@@ -206,7 +210,8 @@ def test_lookup_account_query_targets_only_found_listings() -> None:
     tenant_conn = _FakeConn([_mk_account_row(11)])
     acct = uuid.uuid4()
     pl.lookup_portal_listings(
-        market_conn, tenant_conn, _items(("sreality", "a"), ("idnes", "miss")), acct,
+        market_conn, tenant_conn, _items(("sreality", "a"), ("idnes", "miss")),
+        account_id=acct,
     )
     sql, params = tenant_conn.cur.executed
     # one (listing_id, property_id, source_url) tuple — the miss is excluded —
@@ -224,6 +229,7 @@ def test_lookup_preserves_request_order_even_if_db_reorders() -> None:
     ]
     out = pl.lookup_portal_listings(
         _FakeConn(rows), _FakeConn([]), _items(("sreality", "a"), ("idnes", "b")),
+        account_id=_ACCT,
     )
     assert [d["source_id"] for d in out["data"]] == ["a", "b"]
 
@@ -259,6 +265,7 @@ def test_fond_default_is_withheld_wherever_the_denominator_is_a_parcel() -> None
         _FakeConn(rows), _FakeConn([]),
         _items(("sreality", "flat"), ("sreality", "plot"),
                ("sreality", "plot-rent"), ("idnes", "unknown")),
+        account_id=_ACCT,
     )
     served = [d["fond_per_m2_czk_default"] for d in out["data"]]
     assert served == [s.DEFAULT_FOND_CZK_PER_M2, None, None,
@@ -270,6 +277,7 @@ def test_fond_default_is_served_for_an_item_with_no_row_at_all() -> None:
     so the defensive no-row shape must carry it too or the field goes blank."""
     out = pl.lookup_portal_listings(
         _FakeConn([]), _FakeConn([]), _items(("sreality", "nothing")),
+        account_id=_ACCT,
     )
     assert out["data"][0]["fond_per_m2_czk_default"] == s.DEFAULT_FOND_CZK_PER_M2
 
@@ -283,15 +291,14 @@ def client(monkeypatch) -> Any:
     # The route runs on the tenant pool since Phase 1 — stub the whole
     # tenant_conn chain (auth included) for delegation/validation tests; the
     # auth gate itself is exercised by test_route_fails_closed_without_token.
-    # verify_jwt is overridden too (the route now also depends on it directly to
-    # resolve account_id) and resolve_account_id is stubbed so no SQL hits the
-    # fake connection object.
+    # verify_jwt is overridden with a production-shaped claim and
+    # resolve_account_id is stubbed to a SENTINEL account — never None: None is
+    # exactly what a dropped argument produces, which is why the 2026-07-23
+    # revert (#917) stayed invisible to this suite for seven weeks.
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
     api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
-    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {
-        "sub": None, "legacy": True,
-    }
-    monkeypatch.setattr(tenant_pool, "resolve_account_id", lambda conn, claims: None)
+    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {"sub": str(_USER)}
+    monkeypatch.setattr(tenant_pool, "resolve_account_id", lambda conn, claims: _ACCT)
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 
@@ -299,8 +306,9 @@ def client(monkeypatch) -> Any:
 def test_route_delegates_and_returns_data(client, monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_lookup(market_conn, tenant_conn, items, account_id=None):
+    def fake_lookup(market_conn, tenant_conn, items, *, account_id):
         captured["items"] = items
+        captured["account_id"] = account_id
         return {"data": [{"source": "sreality", "source_id": "1", "found": True}]}
 
     monkeypatch.setattr(api_main, "lookup_portal_listings", fake_lookup)
@@ -311,6 +319,8 @@ def test_route_delegates_and_returns_data(client, monkeypatch) -> None:
     assert res.status_code == 200
     assert res.json()["data"][0]["source"] == "sreality"
     assert [(i.source, i.source_id) for i in captured["items"]] == [("sreality", "1")]
+    # The seam #917 silently broke: the resolved account must reach the lookup.
+    assert captured["account_id"] == _ACCT
 
 
 def test_route_rejects_empty_items(client) -> None:

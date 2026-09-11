@@ -213,7 +213,8 @@ def lookup_portal_listings(
     market_conn: "psycopg.Connection",
     tenant_conn: "psycopg.Connection",
     items: "list[s.PortalLookupItem]",
-    account_id: "uuid.UUID | None" = None,
+    *,
+    account_id: "uuid.UUID | None",
 ) -> dict[str, Any]:
     """Resolve each (source, source_id) to its MF facts + latest estimate.
 
