@@ -91,7 +91,7 @@
           "field": "coordinate",
           "reason": "not_attempted",
           "extraction_method": "legacy_column",
-          "detail": "no_first_party_coordinate_on_this_portal"
+          "detail": "coordinate_provenance_unestablished"
         }
       ],
       "enrichment": [],
@@ -143,7 +143,7 @@
           "field": "coordinate",
           "reason": "not_attempted",
           "extraction_method": "legacy_column",
-          "detail": "no_first_party_coordinate_on_this_portal"
+          "detail": "coordinate_provenance_unestablished"
         }
       ],
       "enrichment": [],
@@ -222,7 +222,7 @@
           "field": "coordinate",
           "reason": "not_attempted",
           "extraction_method": "legacy_column",
-          "detail": "no_first_party_coordinate_on_this_portal"
+          "detail": "coordinate_provenance_unestablished"
         }
       ],
       "enrichment": [],

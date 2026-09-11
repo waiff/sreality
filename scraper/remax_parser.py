@@ -647,12 +647,26 @@ def parse_detail(
             _text(tree.css_first(".pd-table__value--price")), category_type
         )
 
-    # Coordinates: the first data-gps on the page is the subject listing's (the
-    # rest belong to recommended cards). CZ-bbox-guarded.
+    # Coordinates: the SUBJECT's own map element carries `data-gps` (`#printMap` /
+    # `#listingMap` on the real page, `.pd-map` on the pinned fixture); the recommended
+    # cards lower down carry their own. A pin read from the subject element is stamped
+    # `coords.source='page'` — the first-party provenance idnes/ceskereality/realitymix/
+    # maxima already write — so the location claim ladder can admit it
+    # (`location_data.claims_intake.COORDINATE_RULES`). Until 2026-09-11 remax stamped
+    # nothing, and "no stamp" read as "unestablished provenance": the portal's own pin was
+    # refused on every hourly pass. The document-wide first match stays as a fallback for
+    # markup we have not seen, but it is NOT stamped: unproven provenance stays refused.
     lat = lon = None
-    gps_match = _GPS_ATTR_RE.search(html)
-    if gps_match is not None:
-        lat, lon = parse_dms_pair(gps_match.group(1))
+    coords: dict[str, str] | None = None
+    subject_map = tree.css_first("#printMap[data-gps], #listingMap[data-gps], .pd-map[data-gps]")
+    if subject_map is not None:
+        lat, lon = parse_dms_pair(unescape(subject_map.attributes.get("data-gps") or ""))
+        if lat is not None and lon is not None:
+            coords = {"source": "page"}
+    if lat is None or lon is None:
+        gps_match = _GPS_ATTR_RE.search(html)
+        if gps_match is not None:
+            lat, lon = parse_dms_pair(gps_match.group(1))
 
     locality, district = _h1_locality(title)
     # W0 item 0d: the subject's own location line. "ulice <Street>, <Town>" when
@@ -714,6 +728,7 @@ def parse_detail(
         "broker": _broker(tree),
         "image_urls": image_urls,
         "params": params,
+        **({"coords": coords} if coords else {}),
     }
 
     return ScrapedListing(

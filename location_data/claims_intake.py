@@ -201,9 +201,13 @@ COORDINATE_RULES: dict[str, CoordinateRule] = {
                                  carry_forward_admissible=True),
     "maxima": CoordinateRule("geom_column", frozenset({"page"}),
                              carry_forward_admissible=True),
-    # remax stamps NO `coords` key at all while its geocoder was enabled — every remax
-    # coordinate is of unestablished provenance [db-raw §3.4, 06 §6.1.2 last row].
-    "remax": CoordinateRule("none"),
+    # remax stamped NO `coords` key until 2026-09-11, so every stored remax coordinate read
+    # as unestablished provenance and the portal was the fleet's only `"none"` rule — while
+    # 7,932 of its 8,009 unstamped active rows were the page's own `#printMap[data-gps]`
+    # pin (audit 2026-09-11). `scraper.remax_parser` now stamps the subject-map pin `page`;
+    # rows drained before that carry no stamp and stay refused
+    # (`coordinate_provenance_unestablished`) until their next 6 h drain rewrites raw_json.
+    "remax": CoordinateRule("geom_column", frozenset({"page"}), carry_forward_admissible=True),
 }
 
 # The two substrates the ladder can be asked about. `COORDINATE_RULES` above describes the
