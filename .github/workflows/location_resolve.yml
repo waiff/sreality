@@ -91,6 +91,13 @@ on:
     # each other. That is why pausing the hourly claim intake alone did not free a slot, and
     # why a backfill that needs this group should expect to pause both.
     - cron: "*/15 * * * *"
+    # The DAILY reconcile backstop (`mode=full-resolve` + the orphan sweep) and the WEEKLY
+    # collision epoch — both existed only behind `workflow_dispatch` until 2026-09-11, so the
+    # net every other repair mechanism leans on was never deployed (audit findings
+    # projection-5/6). The env block below maps each cron expression to its mode; a cron
+    # carries no inputs, so the expression is the only thing that can name it.
+    - cron: "17 3 * * *"
+    - cron: "41 4 * * 0"
 
 # The group depends on the MODE, because the two modes are not the same animal.
 #
@@ -105,7 +112,7 @@ on:
 #
 # `github.event.inputs.mode` is empty on a schedule, so a cron tick takes the drain branch.
 concurrency:
-  group: ${{ github.event.inputs.mode == 'full-resolve' && 'location-batch' || 'location-resolve-lane' }}
+  group: ${{ (github.event.inputs.mode == 'full-resolve' || github.event.schedule == '17 3 * * *') && 'location-batch' || 'location-resolve-lane' }}
   cancel-in-progress: false
 
 # Why the DRAIN left that group on 2026-09-10 (operator decision), reversing the 2026-08-10
@@ -154,7 +161,7 @@ jobs:
     env:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
-      MODE: ${{ inputs.mode || 'drain' }}
+      MODE: ${{ inputs.mode || (github.event.schedule == '17 3 * * *' && 'full-resolve') || (github.event.schedule == '41 4 * * 0' && 'epoch') || 'drain' }}
       MAX_SECONDS: ${{ inputs.max_seconds || '1800' }}
       BATCH_SIZE: ${{ inputs.batch_size || '250' }}
       SOURCES: ${{ inputs.sources }}
@@ -186,7 +193,7 @@ jobs:
               python -m location_data.resolver.epoch_job --sources "$SOURCES" $ARGS
               ;;
             full-resolve)
-              python -m location_data.resolver.drain --full-sweep --kraje "$KRAJE" \
+              python -m location_data.resolver.drain --full-sweep --orphan-sweep --kraje "$KRAJE" \
                 --max-seconds "$MAX_SECONDS" --batch-size "$BATCH_SIZE" $ARGS
               ;;
             *)

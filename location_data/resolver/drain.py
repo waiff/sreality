@@ -233,6 +233,25 @@ SELECT DISTINCT c.listing_id, 'full_sweep'
 ON CONFLICT (listing_id) DO NOTHING
 """
 
+# `location_resolve_sweep`'s second statement: the listings the engine has NEVER LOOKED AT.
+# Every other enqueue presupposes a claim (intake, un-shadow, the stale sweep above drives
+# off `location_claims_live`), so a listing whose payload yielded no claim — a portal whose
+# page-reading entries only run on a manual sweep, a contract shadowed at intake time, an
+# intake refusal — had no projection row and nothing that would ever notice (10,679 active
+# rows on 2026-09-11). This drives off `listings` itself; the drain then writes a `no_input`
+# row for a claimless listing, so coverage becomes `count(projection) = count(active)`.
+_ORPHAN_SWEEP_SQL = """
+INSERT INTO dirty_locations (listing_id, reason)
+SELECT l.id, 'full_sweep'
+  FROM listings l
+  LEFT JOIN listing_location_current p ON p.listing_id = l.id
+ WHERE l.is_active
+   AND p.listing_id IS NULL
+   AND l.id > %s AND l.id <= %s
+   AND NOT EXISTS (SELECT 1 FROM dirty_locations d WHERE d.listing_id = l.id)
+ON CONFLICT (listing_id) DO NOTHING
+"""
+
 # The window walk's upper bound. `listings.id` bounds every claim's listing_id and max()
 # over its primary key is an index probe — max() over the claims VIEW would be the very
 # corpus scan the windows exist to avoid.
@@ -307,6 +326,7 @@ class _Slice:
     previous_inputs: dict[int, tuple[str, int, str, int]] = field(default_factory=dict)
     property_ids: dict[int, int | None] = field(default_factory=dict)
     open_keys: dict[int, tuple[tuple[str, str], ...]] = field(default_factory=dict)
+    sources: dict[int, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -333,6 +353,7 @@ def _prefetch(conn: psycopg.Connection, listing_ids: list[int]) -> _Slice:
         previous_inputs=resolve_db.previous_consumed_inputs_bulk(conn, listing_ids),
         property_ids=resolve_db.property_ids_bulk(conn, listing_ids),
         open_keys=resolve_db.open_dedupe_keys_bulk(conn, listing_ids),
+        sources=resolve_db.sources_bulk(conn, listing_ids),
     )
 
 
@@ -615,8 +636,12 @@ def _compute_one(
     so the whole slice can be computed before the first statement goes out."""
     claims = slice_.claims.get(listing_id, [])
     if not claims:
-        LOG.info("RESOLVE skip listing_id=%s reason=no_claims", listing_id)
-        return None
+        # A queued listing with no live claim is an ANSWER, not a skip. Until 2026-09-11 it
+        # was dropped from the queue and either kept a stale row (re-shadow, retraction) or
+        # never got one at all — the 10,679 active orphans the audit measured. A `no_input`
+        # resolution states "nothing to go on" (granularity unknown, no position), so
+        # coverage is measurable and the orphan sweep does not re-enqueue it every night.
+        LOG.info("RESOLVE no_input listing_id=%s reason=no_claims", listing_id)
     resolution = core.resolve(
         claims,
         ctx,
@@ -624,6 +649,8 @@ def _compute_one(
         registry_version_id=registry_version_id,
         policy_version=policy_version,
         collision_epoch_id=epoch_id,
+        listing_id=listing_id,
+        source=slice_.sources.get(listing_id, "unknown"),
     )
     if dry_run:
         LOG.info(
@@ -864,6 +891,28 @@ def enqueue_full_sweep(
     return enqueued
 
 
+def enqueue_orphan_sweep(conn: psycopg.Connection, *, window: int = DEFAULT_SWEEP_WINDOW) -> int:
+    """Enqueue every ACTIVE listing with no projection row at all — see `_ORPHAN_SWEEP_SQL`.
+    Windowed and bounded exactly like the stale sweep; idempotent, so re-running is safe."""
+    if window <= 0:
+        raise ValueError("sweep window must be positive")
+    seconds = loader_db.env_timeout_s(SWEEP_TIMEOUT_ENV, DEFAULT_SWEEP_TIMEOUT_S)
+    with conn.cursor() as cur:
+        cur.execute(_SWEEP_UPPER_BOUND_SQL)
+        row = cur.fetchone()
+        upper = int(row[0]) if row else 0
+    enqueued = windows = after = 0
+    while after < upper:
+        hi = min(after + window, upper)
+        n = _execute_window(conn, seconds, _ORPHAN_SWEEP_SQL, (after, hi))
+        enqueued += n
+        windows += 1
+        LOG.info("ORPHAN SWEEP window=(%d,%d] enqueued=%d", after, hi, n)
+        after = hi
+    LOG.info("ORPHAN SWEEP enqueued=%d windows=%d width=%d timeout=%ds", enqueued, windows, window, seconds)
+    return enqueued
+
+
 def _parse_kraje(raw: str) -> tuple[int, ...]:
     return tuple(int(part) for part in raw.replace(",", " ").split())
 
@@ -889,6 +938,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--listing-id", type=int, default=None)
     parser.add_argument("--full-sweep", action="store_true", help="enqueue the stale set first")
     parser.add_argument(
+        "--orphan-sweep", action="store_true",
+        help="also enqueue every active listing that has no projection row at all",
+    )
+    parser.add_argument(
         "--kraje", default="", help="full-sweep only: comma-separated kraj_kod scope"
     )
     parser.add_argument(
@@ -913,6 +966,8 @@ def main(argv: list[str] | None = None) -> int:
                 kraje=_parse_kraje(args.kraje),
                 window=args.sweep_window,
             )
+        if args.orphan_sweep and not args.dry_run:
+            enqueue_orphan_sweep(conn, window=args.sweep_window)
         with lease.held(
             conn,
             JOB_NAME,

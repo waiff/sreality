@@ -70,10 +70,17 @@ def resolve(
     policy_version: str,
     collision_epoch_id: int,
     incumbent: dict[str, Any] | None = None,
+    listing_id: int | None = None,
+    source: str | None = None,
 ) -> Resolution:
+    """An EMPTY claim set is a legal input and yields a `no_input` resolution — granularity
+    `unknown`, no position, no admin chain — so a listing the engine has nothing to go on
+    still gets a projection row that says so (`listing_id` / `source` then have to come
+    from the caller; with claims they are read off the claims and the arguments are
+    ignored). Before 2026-09-11 such a listing was skipped and had no row at all."""
     ordered = sorted(claims, key=lambda c: c.id)
-    listing_id = ordered[0].listing_id if ordered else 0
-    source = ordered[0].source if ordered else "unknown"
+    listing_id = ordered[0].listing_id if ordered else int(listing_id or 0)
+    source = ordered[0].source if ordered else (source or "unknown")
     as_of = serialize.as_of(ordered)
     claim_set_hash = serialize.claim_set_hash(ordered)
     signals: list[ContradictionSignal] = []

@@ -1431,6 +1431,7 @@ SELECT c.listing_id, c.rule, encode(c.dedupe_key, 'hex')
 """
 
 _PROPERTY_IDS_BULK_SQL = "SELECT id, property_id FROM listings WHERE id = ANY(%s::bigint[])"
+_SOURCES_BULK_SQL = "SELECT id, source FROM listings WHERE id = ANY(%s::bigint[])"
 
 # What the PREVIOUS projection consumed. `inputs_changed` (00 §8.2) is a comparison against
 # these four, never an assumption — auto-close must not fire on a re-run of the same inputs.
@@ -1672,6 +1673,16 @@ def property_ids_bulk(
         return {
             int(r[0]): (None if r[1] is None else int(r[1])) for r in cur.fetchall()
         }
+
+
+def sources_bulk(conn: psycopg.Connection, listing_ids: Sequence[int]) -> dict[int, str]:
+    """`listings.source` for a whole slice — the one fact a `no_input` resolution cannot
+    read off a claim, because it has none."""
+    if not listing_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(_SOURCES_BULK_SQL, (list(listing_ids),))
+        return {int(r[0]): str(r[1]) for r in cur.fetchall()}
 
 
 def append_auto_close(conn: psycopg.Connection, closes: Sequence[Any]) -> None:
