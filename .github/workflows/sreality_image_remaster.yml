@@ -20,19 +20,29 @@ name: "Jobs: sreality image re-master"
 #
 #   * Six shards over `abs(hashint8(listings.id)) mod 6`, each with its own
 #     concurrency group (cancel-in-progress false) so a still-running shard is
-#     never killed and the next tick queues behind it.
+#     never killed and the next tick queues behind it. The denominator is written
+#     into the run step as `/6` and MUST match the matrix length — a test pins it.
 #   * The schedule is a kill-switch WITHOUT a code change: scheduled runs only
 #     execute while the repository variable SREALITY_REMASTER_CRON == 'on'.
 #     Dispatch always runs, so the pilot (`listing_ids`, or `dry_run`) works
 #     before the cron is ever armed.
-#   * A shard that finds nothing pending stamps `app_settings
-#     .sreality_remaster_last_complete` — the O(1) "this shard is done" signal.
+#   * A shard that walked its whole slice out AND then confirmed no convertible
+#     row is left merges its own sub-key into `app_settings
+#     .sreality_remaster_last_complete` — one row, six sub-keys, so a fast shard
+#     can never read as "the lane is done".
 #   * Dispatch inputs reach the script through `env`, never interpolated into
 #     the shell.
+#   * CDN politeness: 6 shards x `_MAX_CONCURRENCY_PER_HOST` (4) is the lane's
+#     real footprint on sdn.cz, and images.yml is fetching the same host in the
+#     same window. Re-measure 403 pressure during the pilot before raising
+#     either. Worth one `EXPLAIN (ANALYZE, BUFFERS)` of a listing page query at
+#     `--shard 1/6` too: nothing indexes `(source, is_active, id)`.
 
 on:
   schedule:
-    - cron: "15 */2 * * *"   # offset from images.yml's :00 so the two never collide
+    # :15 only staggers the START away from images.yml's :00 — a 95-minute job
+    # necessarily overlaps the next one; the per-host cap is what keeps it polite.
+    - cron: "15 */2 * * *"
   workflow_dispatch:
     inputs:
       max_images:
@@ -50,11 +60,6 @@ on:
         required: false
         type: boolean
         default: false
-      shards:
-        description: "Shard denominator N passed to the script (the matrix stays 6 jobs)"
-        required: false
-        type: string
-        default: "6"
 
 permissions:
   contents: read
@@ -97,18 +102,18 @@ jobs:
           INPUT_MAX_IMAGES: ${{ inputs.max_images }}
           INPUT_LISTING_IDS: ${{ inputs.listing_ids }}
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          INPUT_SHARDS: ${{ inputs.shards }}
         run: |
-          IDS="${INPUT_LISTING_IDS// /}"
+          # Spaces become separators, never deleted: "101 102" is two listings.
+          IDS="${INPUT_LISTING_IDS// /,}"
           # Pilot mode ignores the shard slice, so running it on all six shards
           # would re-process the same listings six times over.
           if [ -n "$IDS" ] && [ "$SHARD" != "1" ]; then
             echo "listing_ids pilot runs on shard 1 only — skipping shard $SHARD"
             exit 0
           fi
-          SHARDS="${INPUT_SHARDS:-6}"
           MAX_IMG="${INPUT_MAX_IMAGES:-16000}"
-          ARGS="--shard ${SHARD}/${SHARDS} --max-images ${MAX_IMG} --max-seconds 5700 --workers 16"
+          # The /6 denominator is the matrix length. Change one, change both.
+          ARGS="--shard ${SHARD}/6 --max-images ${MAX_IMG} --max-seconds 5700 --workers 16"
           if [ "$INPUT_DRY_RUN" = "true" ]; then
             ARGS="$ARGS --dry-run"
           fi

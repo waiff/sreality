@@ -9,6 +9,8 @@ each failure produces, and what is (and is NOT) written for each.
 from __future__ import annotations
 
 import pathlib
+import re
+import time
 from typing import Any
 
 import pytest
@@ -58,7 +60,7 @@ class _Conn:
     def __init__(
         self,
         listings: list[tuple[int, int | None, bool]] | None = None,
-        images: list[tuple[int, int, int | None, str, str | None]] | None = None,
+        images: list[tuple[int, int, int | None, str, str | None, bool]] | None = None,
     ) -> None:
         self.statements: list[tuple[str, Any]] = []
         self.result: list[tuple[Any, ...]] = []
@@ -66,7 +68,22 @@ class _Conn:
         self._images = images or []
         self._listing_pages = 0
 
+    def _still_convertible(self) -> list[tuple[Any, ...]]:
+        """What the rail-free completion probe would see: unretired, serve-shaped keys."""
+        retired = {
+            params[-1]
+            for sql, params in self.statements
+            if sql.startswith("UPDATE images SET rendition")
+        }
+        return [
+            (1,)
+            for row in self._images
+            if row[0] not in retired and remaster._KEY_RE.match(row[4] or "")
+        ][:1]
+
     def answer(self, sql: str, params: Any) -> list[tuple[Any, ...]]:
+        if "JOIN listings" in sql:
+            return self._still_convertible()
         if "FROM listings" in sql:
             # One page per (active, inactive) loop, then exhausted.
             if params and params.get("active") is False:
@@ -133,10 +150,13 @@ def _no_pillow(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(remaster, "_phash_or_none", lambda data: 4242)
 
 
-def _one_image_conn(url: str = "https://d18-a.sdn.cz/x/1.jpg") -> _Conn:
+def _one_image_conn(
+    url: str = "https://d18-a.sdn.cz/x/1.jpg", *, retried: bool = False
+) -> _Conn:
+    """`retried` is the row's own `last_download_attempt_at`: a second sighting."""
     return _Conn(
         listings=[(101, 55501, True)],
-        images=[(9001, 101, 3, url, "101/0003.jpg")],
+        images=[(9001, 101, 3, url, "101/0003.jpg", retried)],
     )
 
 
@@ -190,24 +210,33 @@ def test_stale_url_is_re_resolved_from_the_current_detail(
     assert r2.puts[0][0] == "101/0003.jpg"
 
 
-def test_detail_gone_is_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_detail_gone_defers_the_first_time_and_retires_the_second(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from scraper.portal_base import ListingGoneError
 
-    conn = _one_image_conn()
-    r2 = _R2()
-    client = _Client({55501: ListingGoneError("u", 404)})
     monkeypatch.setattr(remaster, "_download_bytes", _boom(404))
 
-    stats = _run(conn, r2, remaster._DetailResolver(client))
+    # First sighting: one 404 is not proof, so the row only gets the attempt clock
+    # and comes back in 20 hours. Retiring claims the rendition FOREVER.
+    first = _one_image_conn()
+    stats = _run(first, _R2(), remaster._DetailResolver(_Client({55501: ListingGoneError("u", 404)})))
+    assert stats.deferred == 1 and stats.terminal == 0
+    assert [sql for sql, _ in _updates(first)] == [
+        " ".join(db._MARK_IMAGE_REMASTER_DEFERRED_SQL.split())
+    ]
 
+    second = _one_image_conn(retried=True)
+    r2 = _R2()
+    stats = _run(second, r2, remaster._DetailResolver(_Client({55501: ListingGoneError("u", 404)})))
     assert stats.terminal == 1 and stats.remastered == 0 and not r2.puts
-    assert [sql for sql, _ in _updates(conn)] == [
+    assert [sql for sql, _ in _updates(second)] == [
         " ".join(db._MARK_IMAGE_REMASTER_TERMINAL_SQL.split())
     ]
 
 
 def test_missing_sequence_in_detail_is_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
-    conn = _one_image_conn()
+    conn = _one_image_conn(retried=True)
     client = _Client({55501: {"advert_images": [{"url": "https://x.sdn.cz/a.jpg", "order": 1}]}})
     monkeypatch.setattr(remaster, "_download_bytes", _boom(410))
 
@@ -217,7 +246,7 @@ def test_missing_sequence_in_detail_is_terminal(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_fresh_url_also_gone_is_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
-    conn = _one_image_conn()
+    conn = _one_image_conn(retried=True)
     fresh = "https://d18-a.sdn.cz/fresh/9.jpg"
     client = _Client({55501: {"advert_images": [{"url": fresh, "order": 3}]}})
     monkeypatch.setattr(remaster, "_download_bytes", _boom(404))
@@ -225,6 +254,24 @@ def test_fresh_url_also_gone_is_terminal(monkeypatch: pytest.MonkeyPatch) -> Non
     stats = _run(conn, _R2(), remaster._DetailResolver(client))
 
     assert stats.terminal == 1 and stats.detail_fetches == 1
+
+
+def test_an_unedited_listing_is_never_probed_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The detail hands back the URL that just died — that is one URL, not two."""
+    stored = "https://d18-a.sdn.cz/x/1.jpg"
+    conn = _one_image_conn(stored, retried=True)
+    client = _Client({55501: {"advert_images": [{"url": stored, "order": 3}]}})
+    attempts: list[str] = []
+
+    def _download(url: str) -> bytes:
+        attempts.append(url)
+        raise _http_error(404)
+
+    monkeypatch.setattr(remaster, "_download_bytes", _download)
+    stats = _run(conn, _R2(), remaster._DetailResolver(client))
+
+    assert stats.terminal == 1
+    assert len(attempts) == 1
 
 
 def test_throttle_403_defers_and_writes_only_the_attempt_clock(
@@ -265,7 +312,49 @@ def test_legacy_crop_dimensions_are_an_anomaly_not_a_master(
     stats = _run(conn, r2)
 
     assert stats.anomalies == 1 and stats.remastered == 0
-    assert not r2.puts and not _updates(conn)
+    assert not r2.puts
+    # Nothing is uploaded and no rendition is claimed — but the attempt clock IS
+    # stamped, or the row is re-downloaded on every tick for ever.
+    assert [sql for sql, _ in _updates(conn)] == [
+        " ".join(db._MARK_IMAGE_REMASTER_DEFERRED_SQL.split())
+    ]
+
+
+def test_a_repeat_anomaly_is_retired_instead_of_re_downloaded_forever(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _one_image_conn(retried=True)
+    r2 = _R2()
+    monkeypatch.setattr(remaster, "_download_bytes", lambda url: JPEG)
+    monkeypatch.setattr(image_storage, "image_dimensions", lambda data: (749, 562))
+
+    stats = _run(conn, r2)
+
+    assert stats.anomalies == 1 and not r2.puts
+    assert [sql for sql, _ in _updates(conn)] == [
+        " ".join(db._MARK_IMAGE_REMASTER_TERMINAL_SQL.split())
+    ]
+    # ... and being retired is what lets the shard ever report itself complete.
+    assert stats.complete is True
+
+
+def test_an_oversize_body_is_an_anomaly_not_an_endless_deferral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`NotAnImageError` documents itself as terminal, not transient."""
+    conn = _one_image_conn()
+
+    def _download(url: str) -> bytes:
+        raise image_storage.NotAnImageError("body exceeds the cap")
+
+    monkeypatch.setattr(remaster, "_download_bytes", _download)
+    stats = _run(conn, _R2(), remaster._DetailResolver(_Client({})))
+
+    assert stats.anomalies == 1 and stats.deferred == 0
+    # No detail fetch either: the URL resolved, its payload is simply unusable.
+    assert [sql for sql, _ in _updates(conn)] == [
+        " ".join(db._MARK_IMAGE_REMASTER_DEFERRED_SQL.split())
+    ]
 
 
 def test_non_jpeg_bytes_are_an_anomaly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -278,12 +367,16 @@ def test_non_jpeg_bytes_are_an_anomaly(monkeypatch: pytest.MonkeyPatch) -> None:
     assert stats.anomalies == 1 and not r2.puts
 
 
-def test_twenty_anomalies_abort_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+def _anomalous_conn(count: int) -> _Conn:
     images = [
-        (9000 + n, 101, n, f"https://d18-a.sdn.cz/x/{n}.jpg", f"101/{n:04d}.jpg")
-        for n in range(1, 41)
+        (9000 + n, 101, n, f"https://d18-a.sdn.cz/x/{n}.jpg", f"101/{n:04d}.jpg", False)
+        for n in range(1, count + 1)
     ]
-    conn = _Conn(listings=[(101, 55501, True)], images=images)
+    return _Conn(listings=[(101, 55501, True)], images=images)
+
+
+def test_a_wall_of_anomalies_aborts_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _anomalous_conn(40)
     monkeypatch.setattr(remaster, "_download_bytes", lambda url: JPEG)
     monkeypatch.setattr(image_storage, "image_dimensions", lambda data: (749, 562))
 
@@ -294,17 +387,44 @@ def test_twenty_anomalies_abort_the_run(monkeypatch: pytest.MonkeyPatch) -> None
     assert stats.remastered == 0
 
 
-def test_bad_storage_path_is_never_written(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_sparse_scatter_of_anomalies_does_not_red_the_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The floor alone would mean 20 permanently odd objects stop every future run."""
+    conn = _anomalous_conn(400)
+    odd = {f"https://d18-a.sdn.cz/x/{n}.jpg" for n in range(1, 26)}
+    monkeypatch.setattr(
+        remaster,
+        "_download_bytes",
+        lambda url: b"<html>" + b"\x00" * 32 if url.split("?")[0] in odd else JPEG,
+    )
+
+    stats = _run(conn, _R2(), workers=2)
+
+    assert stats.anomalies == 25 and stats.stopped == ""
+    assert stats.remastered == 375
+
+
+def test_bad_storage_path_is_never_uploaded_and_never_claims_a_rendition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     conn = _Conn(
         listings=[(101, 55501, True)],
-        images=[(9001, 101, 3, "https://d18-a.sdn.cz/x/1.jpg", "sreality/101/3.jpeg")],
+        images=[(9001, 101, 3, "https://d18-a.sdn.cz/x/1.jpg", "sreality/101/3.jpeg", False)],
     )
     r2 = _R2()
     monkeypatch.setattr(remaster, "_download_bytes", lambda url: JPEG)
 
     stats = _run(conn, r2)
 
-    assert stats.bad_key == 1 and not r2.puts and not _updates(conn)
+    assert stats.bad_key == 1 and not r2.puts
+    # A key shape this lane refuses is not a fact about the bytes: no rendition
+    # claim, so widening `_KEY_RE` later can still recover the row.
+    assert [sql for sql, _ in _updates(conn)] == [
+        " ".join(db._MARK_IMAGE_REMASTER_DEFERRED_SQL.split())
+    ]
+    # ... and it must not hold the completion stamp hostage either.
+    assert stats.complete is True
 
 
 def test_dry_run_touches_neither_network_nor_database(
@@ -325,7 +445,7 @@ def test_dry_run_touches_neither_network_nor_database(
 
 def test_max_images_caps_the_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     images = [
-        (9000 + n, 101, n, f"https://d18-a.sdn.cz/x/{n}.jpg", f"101/{n:04d}.jpg")
+        (9000 + n, 101, n, f"https://d18-a.sdn.cz/x/{n}.jpg", f"101/{n:04d}.jpg", False)
         for n in range(1, 6)
     ]
     conn = _Conn(listings=[(101, 55501, True)], images=images)
@@ -361,16 +481,68 @@ def test_shard_arithmetic_is_zero_based_and_sign_safe() -> None:
     assert "abs(hashint8(id)::bigint)" in remaster._LISTING_PAGE_SQL
 
 
-def test_completion_stamp_only_when_a_whole_pass_found_nothing(
+def test_completion_is_a_confirmed_empty_queue_not_an_idle_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     empty = _Conn(listings=[(101, 55501, True)], images=[])
-    stats = _run(empty, _R2())
-    assert stats.complete is True
+    assert _run(empty, _R2()).complete is True
 
+    # A pass that converted the last row IS complete — `scanned == 0` alone would
+    # have denied it, and then claimed it two hours later out of pure idleness.
     busy = _one_image_conn()
     monkeypatch.setattr(remaster, "_download_bytes", lambda url: JPEG)
-    assert _run(busy, _R2()).complete is False
+    assert _run(busy, _R2()).complete is True
+
+    # The row that a throttle deferred is invisible to the pass's own 20-hour
+    # rail but NOT to the probe: work is outstanding, so nothing is stamped.
+    throttled = _one_image_conn()
+    monkeypatch.setattr(remaster, "_download_bytes", _boom(403))
+    assert _run(throttled, _R2(), remaster._DetailResolver(_Client({}))).complete is False
+
+
+def test_a_bounded_stop_never_reports_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _anomalous_conn(5)
+    monkeypatch.setattr(remaster, "_download_bytes", lambda url: JPEG)
+    monkeypatch.setattr(remaster, "_IMAGE_BATCH", 2)
+
+    stats = _run(conn, _R2(), max_images=3)
+
+    assert stats.stopped == "max_images" and stats.complete is False
+
+
+def test_a_spent_deadline_stops_the_listing_walk_itself() -> None:
+    """The budget has to bite on the page loop: a late pass walks millions of
+    listings that carry no pending row at all, and never enters the batch loop."""
+    conn = _Conn(listings=[(101, 55501, True)], images=[])
+
+    stats = _run(conn, _R2(), deadline=time.monotonic() - 10_000)
+
+    assert stats.stopped == "deadline" and stats.complete is False
+    assert len([sql for sql, _ in conn.statements if "FROM listings" in sql]) == 1
+
+
+def test_the_completion_probe_ignores_the_rail_and_the_keys_we_refuse() -> None:
+    probe = remaster._PENDING_REMAINS_SQL
+    # "the pass saw nothing" is also what a shard looks like two hours after it
+    # deferred its last rows — so the probe must not carry the 20-hour rail.
+    assert "last_download_attempt_at" not in probe
+    pattern = re.search(r"storage_path ~ '([^']+)'", probe)
+    assert pattern is not None
+    compiled = re.compile(pattern.group(1))
+    for key in ("101/0003.jpg", "-9/0001.jpg", "sreality/101/3.jpeg", "101/3.jpg", "101/0003.png"):
+        assert bool(compiled.match(key)) is bool(remaster._KEY_RE.match(key))
+
+
+def test_each_shard_stamps_its_own_sub_key_under_one_row() -> None:
+    conn = _Conn()
+    remaster.stamp_complete(conn, remaster._Stats(shard="3/6", elapsed_s=12.5))
+
+    sql, params = conn.statements[-1]
+    assert params == {"shard": "3/6", "elapsed_s": 12.5}
+    # Merged, never replaced: six shards finish at different times and the first
+    # one home must not read as "the lane is done".
+    assert "COALESCE(app_settings.value, '{}'::jsonb) || excluded.value" in sql
+    assert "jsonb_build_object( %(shard)s::text," in sql
 
 
 def test_key_regex_matches_the_serve_path_shape() -> None:
@@ -408,7 +580,9 @@ def test_workflow_is_dispatchable_and_scheduled() -> None:
     assert inputs["max_images"]["default"] == "16000"
     assert inputs["listing_ids"]["default"] == ""
     assert inputs["dry_run"]["type"] == "boolean" and inputs["dry_run"]["default"] is False
-    assert inputs["shards"]["default"] == "6"
+    # No shard-denominator input: an N that disagreed with the static matrix would
+    # either red the surplus jobs (argparse) or silently leave the tail unwalked.
+    assert "shards" not in inputs
 
 
 def test_workflow_cron_is_kill_switchable_without_a_code_change() -> None:
@@ -434,3 +608,14 @@ def test_workflow_carries_the_five_secrets_and_no_input_interpolation() -> None:
     # Dispatch inputs reach the shell through env only — never spliced into it.
     assert "${{ inputs." not in step["run"]
     assert "--max-seconds 5700" in step["run"]
+
+
+def test_the_shard_denominator_is_the_matrix_length() -> None:
+    job = _workflow()["jobs"]["remaster"]
+    step = next(s for s in job["steps"] if "--shard" in s.get("run", ""))
+    shards = len(job["strategy"]["matrix"]["shard"])
+
+    assert "--shard ${SHARD}/%d " % shards in step["run"]
+    # Spaces separate listing ids, they do not vanish: deleting them would splice
+    # "101 102" into one listing that does not exist and report a clean run.
+    assert "${INPUT_LISTING_IDS// /,}" in step["run"]

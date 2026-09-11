@@ -6474,14 +6474,6 @@
           "type": "boolean",
           "default": "false",
           "options": null
-        },
-        {
-          "name": "shards",
-          "description": "Shard denominator N passed to the script (the matrix stays 6 jobs)",
-          "required": false,
-          "type": "string",
-          "default": "6",
-          "options": null
         }
       ],
       "secrets": [

@@ -780,6 +780,14 @@ renumber.** Navigate by area:
    it overwrites the object under the row's existing `storage_path` and stamps `rendition` +
    dimensions through `db.mark_image_remastered`, which runs that invalidation in the same
    transaction — so no other job may rewrite an object without going through the same pair.
+   Two properties of that lane matter outside it. *Every* outcome stamps `last_download_attempt_at`
+   (the pending set's only anti-thrash rail), and RETIREMENT — claiming `sreality-749-crop`, which
+   is irreversible for the lane — always takes two sightings 20h apart. And because a stored URL that
+   404s is re-resolved from the live detail **by image `order`**, the lane inherits the platform's
+   image identity: a row is `(listing_id, sequence)`, a POSITION, so a reordered gallery re-points it
+   onto whatever photo now sits at that order — exactly as the `(listing_id, sequence)` images upsert,
+   the detail drain and `refresh_stale_images` already do. Labels keyed on `images.id` follow the
+   position, not the photograph; that is a property of the upsert key, not of this lane.
    **Two consequences of the template switch, both live until the re-master lane finishes.**
    (a) *The visual-signal corpus is MIXED-RENDITION.* dHash and CLIP are framing-sensitive, so the
    same photo stored as the old 4:3 crop and as the whole frame yields materially different signals:

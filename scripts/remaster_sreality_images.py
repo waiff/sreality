@@ -14,11 +14,22 @@ The queue IS the cursor: pending rows are `rendition IS NULL` and leave the
 selection the moment they are stamped, so no persisted cursor and no new index
 are needed. Listings are paged newest-first, ACTIVE before inactive.
 
+EVERY outcome stamps `last_download_attempt_at`, because that clock is the
+pending set's only anti-thrash rail: a row left unstamped would be re-selected —
+and re-downloaded — on the very next tick, forever. Retirement from the queue
+(`rendition = 'sreality-749-crop'`) always takes TWO sightings 20h apart, since
+it is irreversible for this lane.
+
 sreality ROTATES image URLs when a listing is edited: on the longest-lived
 actives ~75% of stored URLs are dead while the listing's CURRENT urls resolve
 fine. A 404/410 (or a dead-URL 400/401/415) on the stored URL therefore
 re-resolves from the live detail payload, mapping `parse_images` `sequence` ->
-`images.sequence`, and the fresh URL is persisted alongside the bytes.
+`images.sequence`, and the fresh URL is persisted alongside the bytes. An image
+row's identity is that POSITION — the same `(listing_id, sequence)` key the
+images upsert itself uses — so a reordered gallery re-points the row onto
+whatever photo now sits at that order, exactly as the detail drain and
+`refresh_stale_images` already do. The bytes under the key follow the position,
+not the photograph.
 
 Usage:  python -m scripts.remaster_sreality_images --shard 1/6 --max-images 16000
 Required: SUPABASE_DB_URL (+ R2_* to do any work at all).
@@ -64,10 +75,16 @@ _IMAGE_BATCH = 200
 # mean the request was served the CROP, so stamping them as the master would
 # poison the rendition vocabulary for every consumer that groups on it.
 _LEGACY_CROP_DIMS = (749, 562)
+# A wall of anomalies means the CDN stopped honouring the master template — but a
+# handful of permanently odd objects must never red the lane, so the abort needs
+# BOTH an absolute floor and a share of what the run actually looked at.
 _ANOMALY_ABORT = 20
+_ANOMALY_ABORT_RATIO = 0.5
 _BREAKER_SLEEP_S = 60.0
 _BREAKER_TRIP_ABORT = 3
-_MAX_CONCURRENCY_PER_HOST = 8
+# Six shards share one CDN, so the per-process cap is a sixth of the lane's real
+# footprint — and images.yml is fetching the same host in the same window.
+_MAX_CONCURRENCY_PER_HOST = 4
 _MAX_BIGINT = 9223372036854775807
 
 # `hashint8` returns a SIGNED int4, so a bare `%` yields negative residues that
@@ -93,11 +110,13 @@ _LISTINGS_BY_ID_SQL = """
     ORDER BY id DESC
 """
 
-# `last_download_attempt_at` is the anti-thrash rail: every terminal and
-# deferred outcome stamps it, so a row that just failed cannot be retried by the
-# next shard tick.
+# `last_download_attempt_at` is the anti-thrash rail: EVERY outcome stamps it, so
+# a row that just failed cannot be retried by the next shard tick. Its second
+# duty is the two-strike rule — `retried` is what tells a worker that this row's
+# failure has already been seen once.
 _PENDING_IMAGES_SQL = """
-    SELECT i.id, i.listing_id, i.sequence, i.sreality_url, i.storage_path
+    SELECT i.id, i.listing_id, i.sequence, i.sreality_url, i.storage_path,
+           (i.last_download_attempt_at IS NOT NULL) AS retried
     FROM images i
     WHERE i.listing_id = ANY(%(ids)s::bigint[])
       AND i.storage_path IS NOT NULL
@@ -108,19 +127,40 @@ _PENDING_IMAGES_SQL = """
     ORDER BY i.listing_id DESC, i.sequence
 """
 
-# Written ONLY when a pass over BOTH loops found nothing pending — the O(1)
-# "this shard is done" signal, since the pending set has no count anyone can
-# afford to take over 3.55M rows on every tick.
+# The completion question, asked ONCE per run and only by a pass that already
+# walked both loops out: is any row this lane could still convert left in the
+# shard? Deliberately WITHOUT the 20-hour rail — "the pass saw nothing" is also
+# what a shard looks like two hours after it deferred its last rows — and
+# deliberately WITHOUT keys this lane refuses to touch, which would otherwise
+# block the stamp forever.
+_PENDING_REMAINS_SQL = """
+    SELECT 1
+    FROM images i
+    JOIN listings l ON l.id = i.listing_id
+    WHERE l.source = 'sreality'
+      AND abs(hashint8(l.id)::bigint) %% %(n)s = %(k)s
+      AND i.storage_path IS NOT NULL
+      AND i.storage_path ~ '^-?[0-9]+/[0-9]{4}\\.jpg$'
+      AND i.rendition IS NULL
+      AND i.sreality_url LIKE '%%sdn.cz%%'
+    LIMIT 1
+"""
+
+# One row, one sub-key per shard, merged in: six shards finish at different
+# times, so a single flat value would let whichever finished last read as "the
+# lane is done".
 _STAMP_COMPLETE_SQL = """
     INSERT INTO app_settings (key, value, updated_by)
     VALUES ('sreality_remaster_last_complete',
             jsonb_build_object(
-                'completed_at', now(),
-                'shard', %(shard)s::text,
-                'elapsed_s', %(elapsed_s)s::numeric),
+                %(shard)s::text,
+                jsonb_build_object(
+                    'completed_at', now(),
+                    'elapsed_s', %(elapsed_s)s::numeric)),
             'remaster_sreality_images')
     ON CONFLICT (key) DO UPDATE
-      SET value = excluded.value, updated_at = now(),
+      SET value = COALESCE(app_settings.value, '{}'::jsonb) || excluded.value,
+          updated_at = now(),
           updated_by = excluded.updated_by
 """
 
@@ -137,6 +177,7 @@ class _ImageRow:
     sreality_url: str
     storage_path: str | None
     sreality_id: int | None
+    retried: bool = False
 
 
 @dataclass(frozen=True)
@@ -279,6 +320,19 @@ def _dead_url(error: Exception) -> bool:
     return _is_gone_image_error(error) or _is_dead_url_image_error(error)
 
 
+def _dead_outcome(row: _ImageRow, host: str, note: str) -> _Outcome:
+    """Nothing left to fetch — but retire the row only on the SECOND sighting.
+
+    `mark_image_remaster_terminal` claims the rendition, which drops the row out
+    of the pending set for good, so one transient CDN miss must not be enough.
+    `retried` is the row's own `last_download_attempt_at`, so the confirmation is
+    a different run at least 20 hours later.
+    """
+    return _Outcome(
+        row=row, kind="terminal" if row.retried else "deferred", host=host, note=note
+    )
+
+
 def remaster_one(
     row: _ImageRow,
     r2: Any,
@@ -294,6 +348,12 @@ def remaster_one(
     try:
         data = _download(image_storage.with_transform(row.sreality_url), semaphores.get(host))
     except Exception as exc:  # noqa: BLE001 - classified below, never fatal
+        if isinstance(exc, image_storage.NotAnImageError):
+            # That type's own contract is TERMINAL, not transient: the CDN
+            # answered with something that is not an image (or is oversize), and
+            # re-requesting it cannot change that. Anomaly, so it defers once and
+            # then retires rather than deferring forever with no ceiling.
+            return _Outcome(row=row, kind="anomaly", host=host, note=str(exc))
         if not _dead_url(exc):
             return _Outcome(row=row, kind="deferred", host=host, note=str(exc))
         candidate = (
@@ -302,18 +362,26 @@ def remaster_one(
             else _DETAIL_GONE
         )
         if candidate is _DETAIL_GONE:
-            return _Outcome(row=row, kind="terminal", host=host, note=str(exc))
+            return _dead_outcome(row, host, str(exc))
         if candidate is None:
             return _Outcome(row=row, kind="deferred", host=host, note=str(exc))
         fresh_url = str(candidate)
+        if fresh_url == row.sreality_url:
+            # The listing was never edited: the live detail hands back the very
+            # URL that just died, so a retry is the same request twice and its
+            # failure is no corroboration at all.
+            return _dead_outcome(row, host, str(exc))
         fresh_host = _image_host(fresh_url)
         try:
             data = _download(
                 image_storage.with_transform(fresh_url), semaphores.get(fresh_host)
             )
         except Exception as retry_exc:  # noqa: BLE001
-            kind = "terminal" if _dead_url(retry_exc) else "deferred"
-            return _Outcome(row=row, kind=kind, host=fresh_host, note=str(retry_exc))
+            if isinstance(retry_exc, image_storage.NotAnImageError):
+                return _Outcome(row=row, kind="anomaly", host=fresh_host, note=str(retry_exc))
+            if _dead_url(retry_exc):
+                return _dead_outcome(row, fresh_host, str(retry_exc))
+            return _Outcome(row=row, kind="deferred", host=fresh_host, note=str(retry_exc))
 
     if media.is_image_bytes(data) != "image/jpeg":
         return _Outcome(row=row, kind="anomaly", host=host, note="not a jpeg")
@@ -386,8 +454,9 @@ def _pending_images(conn: Any, listing_rows: Sequence[tuple[Any, ...]]) -> list[
             sreality_url=url,
             storage_path=storage_path,
             sreality_id=sreality_ids.get(listing_id),
+            retried=bool(retried),
         )
-        for image_id, listing_id, sequence, url, storage_path in rows
+        for image_id, listing_id, sequence, url, storage_path, retried in rows
     ]
 
 
@@ -397,7 +466,12 @@ def _chunks(rows: Sequence[_ImageRow], size: int) -> Iterator[list[_ImageRow]]:
 
 
 def _apply(conn: Any, outcome: _Outcome, stats: _Stats) -> None:
-    """Main thread only: every DB write for one finished download."""
+    """Main thread only: every DB write for one finished download.
+
+    EVERY branch writes, because `last_download_attempt_at` is the pending set's
+    only anti-thrash rail: a row left unstamped is re-selected — and, except for
+    `bad_key`, re-downloaded — two hours later, forever.
+    """
     if outcome.kind == "remastered":
         db.mark_image_remastered(
             conn,
@@ -418,12 +492,25 @@ def _apply(conn: Any, outcome: _Outcome, stats: _Stats) -> None:
         stats.deferred += 1
     elif outcome.kind == "anomaly":
         stats.anomalies += 1
+        if outcome.row.retried:
+            # Twice now the CDN has answered with something that is not a master.
+            # The stored object IS the legacy crop and nothing better is coming:
+            # retire it, or it sits in the pending set re-downloading forever.
+            db.mark_image_remaster_terminal(conn, outcome.row.image_id)
+        else:
+            db.mark_image_remaster_deferred(conn, outcome.row.image_id)
         LOG.warning(
-            "REMASTER anomaly id=%s: %s — not stamped, not uploaded",
+            "REMASTER anomaly id=%s: %s — nothing uploaded (%s)",
             outcome.row.image_id, outcome.note,
+            "retired as the legacy crop" if outcome.row.retried else "one more look in 20h",
         )
     else:
         stats.bad_key += 1
+        # No rendition claim: the key shape is this lane's refusal, not a fact
+        # about the bytes, and widening `_KEY_RE` later must be able to recover
+        # these rows. `_PENDING_REMAINS_SQL` skips them so they can't block the
+        # completion stamp.
+        db.mark_image_remaster_deferred(conn, outcome.row.image_id)
         LOG.warning("REMASTER bad_key id=%s key=%r", outcome.row.image_id, outcome.note)
 
 
@@ -449,6 +536,12 @@ def run_remaster(
     pool = None if dry_run else ThreadPoolExecutor(max_workers=max(1, workers))
     try:
         for listing_rows in _iter_listing_pages(conn, shard=shard, listing_ids=listing_ids):
+            # At the top of the PAGE loop, not just the batch loop: once the
+            # shard's pending set empties from the newest end, a run walks
+            # millions of listings finding nothing, and a budget only the inner
+            # loop checks is no budget at all.
+            if deadline_reached(deadline):
+                raise _StopRun("deadline")
             for _, _, is_active in listing_rows:
                 if is_active:
                     stats.active_listings += 1
@@ -478,7 +571,7 @@ def run_remaster(
                         host_windows[outcome.host].append(
                             "transient" if outcome.kind == "deferred" else "ok"
                         )
-                    if stats.anomalies >= _ANOMALY_ABORT:
+                    if _anomalies_exceeded(stats):
                         raise _StopRun("anomalies")
                 LOG.info(
                     "REMASTER progress scanned=%d remastered=%d terminal=%d "
@@ -495,8 +588,30 @@ def run_remaster(
 
     if resolver is not None:
         stats.detail_fetches = resolver.fetches
-    stats.complete = not stats.stopped and stats.scanned == 0
+    if not stats.stopped and not listing_ids:
+        stats.complete = not _pending_remains(conn, shard)
     return stats
+
+
+def _anomalies_exceeded(stats: _Stats) -> bool:
+    """A share AND a floor: a scatter of odd objects must not red the lane.
+
+    What this alarm is for is a template that silently regressed, and that looks
+    like EVERY download coming back wrong — not like twenty of them.
+    """
+    return (
+        stats.anomalies >= _ANOMALY_ABORT
+        and stats.anomalies >= _ANOMALY_ABORT_RATIO * stats.scanned
+    )
+
+
+def _pending_remains(conn: Any, shard: tuple[int, int]) -> bool:
+    """Is there a row left in this shard that the lane could still convert?"""
+    shard_index, shard_count = shard
+    rows = _fetchall(
+        conn, _PENDING_REMAINS_SQL, {"n": shard_count, "k": shard_index - 1}
+    )
+    return bool(rows)
 
 
 def _check_breaker(host_windows: dict[str, "deque[str]"], trips: int) -> int:
@@ -519,6 +634,7 @@ def _check_breaker(host_windows: dict[str, "deque[str]"], trips: int) -> int:
 
 
 def stamp_complete(conn: Any, stats: _Stats) -> None:
+    """Merge THIS shard's completion under the one key — never overwrite the row."""
     with conn.cursor() as cur:
         cur.execute(
             _STAMP_COMPLETE_SQL,
@@ -591,7 +707,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         stats.elapsed_s = time.monotonic() - started
         if stats.complete and not args.dry_run and not args.listing_ids:
             stamp_complete(conn, stats)
-            LOG.info("REMASTER shard %s has no pending rows left", stats.shard)
+            LOG.info("REMASTER shard %s has no convertible rows left", stats.shard)
     LOG.info("%s", stats.line())
     # A tripped breaker is a healthy backoff (exit 0); a wall of anomalies means
     # the CDN served something other than the master and must go red.
