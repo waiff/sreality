@@ -1,5 +1,5 @@
 """_agent_estimation_quota: the /billing/me block driving the extension's
-"(zbývá X)" counter. Admin/legacy/no-account callers are unmetered (unlimited);
+"(zbývá X)" counter. Admin and no-account callers are unmetered (unlimited);
 a real tenant reuses the metering resolver + monthly count."""
 
 from __future__ import annotations

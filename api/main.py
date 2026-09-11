@@ -837,7 +837,6 @@ def get_latest_estimations_by_listing(
 def get_estimation(
     run_id: int,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     row = get_estimation_run(conn, run_id)
     if row is None:
@@ -850,7 +849,6 @@ def patch_estimation_scenario(
     run_id: int,
     body: s.ScenarioUpdateIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     """Persist the operator's yield-scenario overrides.
 
@@ -1315,7 +1313,6 @@ def post_create_collection(
 @app.get("/collections")
 def get_list_collections(
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.list_collections(conn)
 
@@ -1324,7 +1321,6 @@ def get_list_collections(
 def get_collection(
     collection_id: int,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.get_collection(conn, collection_id)
 
@@ -1334,7 +1330,6 @@ def patch_collection(
     collection_id: int,
     body: s.UpdateCollectionIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.update_collection(conn, collection_id, body)
 
@@ -1343,7 +1338,6 @@ def patch_collection(
 def delete_collection(
     collection_id: int,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.delete_collection(conn, collection_id)
 
@@ -1353,7 +1347,6 @@ def post_collection_properties(
     collection_id: int,
     body: s.AddPropertiesToCollectionIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.add_properties_to_collection(conn, collection_id, body)
 
@@ -1363,7 +1356,6 @@ def delete_collection_property(
     collection_id: int,
     property_id: int,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.remove_property_from_collection(
         conn, collection_id, property_id,
@@ -1452,7 +1444,6 @@ def get_price_stat_city_series(
 def get_property_notes(
     property_id: int,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.list_notes(conn, property_id)
 
@@ -1473,7 +1464,6 @@ def patch_property_note(
     note_id: int,
     body: s.UpdateNoteIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.update_note(conn, property_id, note_id, body)
 
@@ -1483,7 +1473,6 @@ def delete_property_note(
     property_id: int,
     note_id: int,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.delete_note(conn, property_id, note_id)
 
@@ -1491,7 +1480,6 @@ def delete_property_note(
 @app.get("/tags")
 def get_tags(
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.list_tags(conn)
 
@@ -1510,7 +1498,6 @@ def patch_tag(
     tag_id: int,
     body: s.UpdateTagIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.update_tag(conn, tag_id, body)
 
@@ -1519,7 +1506,6 @@ def patch_tag(
 def delete_tag(
     tag_id: int,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.delete_tag(conn, tag_id)
 
@@ -1529,7 +1515,6 @@ def post_attach_tag(
     property_id: int,
     body: s.AttachTagIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.attach_tag(conn, property_id, body)
 
@@ -1539,7 +1524,6 @@ def delete_property_tag(
     property_id: int,
     tag_id: int,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.detach_tag(conn, property_id, tag_id)
 
@@ -1548,18 +1532,13 @@ def delete_property_tag(
 # Phase 0: bookmark a property into the pipeline (entry stage) / remove it.
 # Membership reads go through property_pipeline_public via the anon key.
 # tenant_conn replaces get_db_conn + require_token: its verify_jwt fails
-# closed, and non-legacy callers get an RLS-scoped one-transaction connection.
-# The route-level Depends(verify_jwt) is cached by FastAPI — no double verify.
+# closed and every caller gets an RLS-scoped one-transaction connection.
 
 @app.get("/pipeline/stages")
 def get_pipeline_stages(
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    """Pure display read — RLS scopes it, so no account is resolved. `claims` is
-    declared, unused, purely to keep the gate explicit (as delete_property_tag
-    does): test_auth's census overrides tenant_conn, so this Depends is the only
-    fail-closed assertion left standing for this route."""
+    """Pure display read — RLS scopes it, so no account is resolved."""
     return pipeline_module.list_stages(conn)
 
 

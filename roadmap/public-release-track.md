@@ -80,6 +80,21 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
   the entry-stage unique is per account, so a write must NAME its one owner. Every route fake
   lost its `account_id=None` default, so an identical one-line revert is a `TypeError`, not a
   green CI run. It lives in `tenant_pool`, not `dependencies` (circular import).
+- **2026-09-11 W5 (the end state made enforceable, and written down once)** — closes the sprint.
+  Two standing censuses: `tests/api/test_admin_route_coverage.py` now requires every
+  tenant-connection route to reach `require_account_id` or sit in `_RLS_ONLY_ALLOWLIST` (27
+  entries, each with a reason naming what scopes it instead), and a new
+  `tests/api/test_account_scope_census.py` bans a `None`-defaulted `account_id` anywhere in `api/`
+  and enumerates the four hand-rolled `resolve_account_id` calls. Proven to bite: dropping
+  `require_account_id` from `POST /pipeline/cards` turns both red. `test_auth.py`'s JWT census now
+  follows the REAL dependency graph (its `tenant_conn` stub `Depends(verify_jwt)` instead of
+  severing it), so the 17 declared-but-unread `claims` parameters could go — `claims` in
+  `api/main.py` now means "this route reads claims", exactly once. The doctrine (four shapes,
+  plus the two test rules that would have caught #917) is stated once in
+  `.claude/skills/database/references/tenancy.md`, summarised in the `database` skill and pointed
+  at from everywhere else. **Caveat worth naming: these gates are CI, and CI only guards `main`
+  while branch protection is ON — it is currently OFF (an operator decision), so today they
+  protect a PR, not the branch.**
 - **Phase 1 (multi-tenant foundations)** — in progress.
   - Increment 1 ✅ — accounts/account_members/admins, `current_account_ids()` /
     `is_platform_admin()`, the on-signup handler, JWT verify (JWKS/ES256) (migrations

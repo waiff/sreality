@@ -42,16 +42,12 @@ psql "$SUPABASE_DB_URL" -c "\d listings" | head -60
 
 ## Database access
 
-We connect directly to Supabase Postgres with `psycopg` v3 (not the Supabase REST
-client), for two reasons:
-- **PostGIS support:** inserting `geography(point, 4326)` is one line of SQL with
-  `ST_SetSRID(ST_MakePoint(lon, lat), 4326)`. The PostgREST equivalent needs a stored
-  procedure or fragile GeoJSON casting.
-- **Atomic transactions:** writing `listings`, `listing_snapshots`, and `images` for one
-  listing happens inside a single transaction. The REST client cannot span tables
-  atomically.
-
-Do not introduce `supabase-py` without an explicit reason and a discussion.
+We connect directly to Supabase Postgres with `psycopg` v3 (not the Supabase REST client),
+for two reasons. **PostGIS support:** inserting `geography(point, 4326)` is one line of SQL
+with `ST_SetSRID(ST_MakePoint(lon, lat), 4326)`, where the PostgREST equivalent needs a stored
+procedure or fragile GeoJSON casting. **Atomic transactions:** `listings`, `listing_snapshots`
+and `images` for one listing write inside a single transaction, which the REST client cannot
+span. Do not introduce `supabase-py` without an explicit reason and a discussion.
 
 **`connect()` and `connect_session()` are BOTH `autocommit=True`** — "callers manage
 transactions explicitly". Anything that must be atomic needs an explicit
@@ -95,11 +91,9 @@ tenant-scoped:
   BOTH the route's reads and writes — a `SET LOCAL` evaporates at transaction end, so a
   post-commit read-back on a fresh transaction would run claims-less and RLS would hide
   the row just written. `verify_jwt` is authentication; `tenant_conn` (via RLS) is
-  authorization — a route needing per-account isolation must use it, not `get_db_conn`. The
-  **legacy**-caller bypass (static `API_TOKEN` → the unscoped service-role connection) is
-  GONE (2026-09-11): `verify_jwt` is the sole claims producer and cannot emit a `legacy`
-  claim, so `tenant_conn` has NO fallback — an unset `TENANT_POOL_DB_URL` raises. The
-  `legacy_backfill_claim` TABLE stays (signup CAS); see `references/tenancy.md`.
+  authorization — a route needing per-account isolation must use it, not `get_db_conn`. There
+  is NO fallback connection (the static-`API_TOKEN` bypass was deleted 2026-09-11): an unset
+  `TENANT_POOL_DB_URL` raises. The `legacy_backfill_claim` TABLE stays (signup CAS).
 
 **Pooler-safe mutual exclusion: lease-row CAS, not session advisory locks (migration
 279, PR #717).** `pg_advisory_lock`/`unlock` are **session-scoped** — sound only on a
@@ -195,61 +189,67 @@ only, no `authenticated` grant). See the "Identity, login, and admin gating" sec
 
 ## Multi-tenancy and RLS (Phase 1, migrations 286–295)
 
-RLS is enabled **per-table, not project-wide** — check whether a table you're touching
-has a policy before assuming service-role-only access still applies everywhere. The
-model: `accounts` (`kind ∈ {personal,team,system}`, one fixed SYSTEM account
-`00000000-0000-0000-0000-000000000000`) + `account_members(account_id, user_id, role)`
-+ a separate `admins(user_id)` platform-admin allowlist (migration 286). Two SECURITY
-DEFINER helpers, `current_account_ids()` and `is_platform_admin()` (keyed off the JWT
-`sub` claim via `account_members`/`admins`), are the **sole** definition point for every
-per-account RLS policy since — don't hand-roll a second way to check tenancy.
+RLS is enabled **per-table, not project-wide** — check whether a table you're touching has a
+policy before assuming service-role-only access still applies everywhere. The model: `accounts`
+(`kind ∈ {personal,team,system}`, one fixed SYSTEM account
+`00000000-0000-0000-0000-000000000000`) + `account_members(account_id, user_id, role)` + a
+separate `admins(user_id)` platform-admin allowlist (migration 286). Two SECURITY DEFINER
+helpers, `current_account_ids()` and `is_platform_admin()` (keyed off the JWT `sub` claim via
+`account_members`/`admins`), are the **sole** definition point for every per-account RLS policy
+since — don't hand-roll a second way to check tenancy.
 
-Per-table RLS pattern, repeated across migrations 290 (6 curation tables: `collections`,
-`tags`, `property_notes`, `filter_presets`, `notification_subscriptions`,
-`manual_rental_estimates`), 291 (`estimation_runs`/`building_runs`, `account_id`
-NULLABLE, defaults to SYSTEM), 292 (6 child-grain tables incl. `notification_dispatches`,
-`account_id` **trigger-derived** from the parent row, not caller-supplied), and 294
-(pipeline tables): `revoke all ... from anon, authenticated` → `grant
-select/insert/update/delete ... to authenticated` → a `for all using/with check
-(account_id in (select current_account_ids()))` policy. **Grant the id sequence's
-`USAGE` too** — `GRANT INSERT` on the table does not cover it, and a table with a
-`bigserial`/`serial` PK will fail every `authenticated` insert until the sequence grant
-is added (a real bug the tenant-isolation CI lane caught before deploy).
+Per-table RLS pattern, repeated across migrations 290 (6 curation tables: `collections`, `tags`,
+`property_notes`, `filter_presets`, `notification_subscriptions`, `manual_rental_estimates`),
+291 (`estimation_runs`/`building_runs`, `account_id` NULLABLE, defaults to SYSTEM), 292 (6
+child-grain tables incl. `notification_dispatches`, `account_id` **trigger-derived** from the
+parent row, not caller-supplied), and 294 (pipeline tables): `revoke all ... from anon,
+authenticated` → `grant select/insert/update/delete ... to authenticated` → a `for all
+using/with check (account_id in (select current_account_ids()))` policy. **Grant the id
+sequence's `USAGE` too** — `GRANT INSERT` on the table does not cover it, and a `bigserial` PK
+fails every `authenticated` insert until it is added (a real bug the CI lane caught pre-deploy).
 
 `property_pipeline` gets a **composite PK swap**, `(property_id)` → `(account_id,
-property_id)`, migration 295 — the one table where the PK itself changed, not just an
-added column. This migration is **explicitly gated**: it `raise exception`s if any NULL
-`account_id` rows remain, and its own header states it must ship in the same deploy
-window as `api/pipeline.py`'s matching `ON CONFLICT (account_id, property_id)` rewrite.
-Don't assume every table with `account_id` also got a composite PK — check the specific
-migration.
+property_id)`, migration 295 — the one table where the PK itself changed. **Explicitly
+gated**: it `raise exception`s if any NULL `account_id` rows remain, and must ship in the same
+deploy window as `api/pipeline.py`'s matching `ON CONFLICT (account_id, property_id)` rewrite.
+Don't assume every `account_id` table got a composite PK — check the specific migration.
 
-**Tenant DB role and pool**: `tenant_pool` (migration 293, `LOGIN NOINHERIT`, zero access
-until an explicit `SET LOCAL ROLE authenticated`, fail-closed by construction) +
-`api/tenant_pool.py`'s `tenant_conn` — see the connection-modes section above for the
-runtime mechanics.
+**Tenant DB role and pool**: `tenant_pool` (migration 293, `LOGIN NOINHERIT`, zero access until
+an explicit `SET LOCAL ROLE authenticated`) + `tenant_conn` — mechanics in connection-modes above.
 
-**Shared-market tables under the tenant role (Amendment A5, migration 349)**: the
-shared `listings`/`properties`/`images` tables are RLS-enabled-with-**zero**-policies
-(deny-all), so a `tenant_conn` handler reading them directly gets nothing — the anon/tenant
-SPA is expected to read the owner-bypass `*_public` views instead. **Exception: `properties`
-now carries one permissive `FOR SELECT TO authenticated` policy** (its base columns are
-market-only, no broker PII), so the merge-survivor resolver and similar tenant-conn reads
-work. **`listings` stays deny-all** (broker_email/phone/name + raw_json inline — a row
-policy would leak them column-wise via PostgREST); read a listing's identity on the tenant
-conn through `listing_natural_key_public`, and market facts through a service-role
-connection (as `portal_lookup` does), never a blanket policy. Don't add a `USING (true)`
-policy to `listings`.
+**Shared-market tables under the tenant role (Amendment A5, migration 349)**: the shared
+`listings`/`properties`/`images` tables are RLS-enabled-with-**zero**-policies (deny-all), so a
+`tenant_conn` handler reading them directly gets nothing — the anon/tenant SPA reads the
+owner-bypass `*_public` views instead. **Exception: `properties` carries one permissive
+`FOR SELECT TO authenticated` policy** (base columns are market-only, no broker PII), so the
+merge-survivor resolver and similar tenant-conn reads work. **`listings` stays deny-all**
+(broker_email/phone/name + raw_json inline — a row policy would leak them column-wise via
+PostgREST); read a listing's identity on the tenant conn through `listing_natural_key_public`,
+and market facts through a service-role connection (as `portal_lookup` does). Don't add a
+`USING (true)` policy to `listings`.
 
 **First-signup backfill race**: the on-signup trigger (migration 294) does an atomic
-INSERT-with-`ON CONFLICT` CAS into `legacy_backfill_claim` (mirrors the lease-row CAS
-pattern above) — whoever signs up first wins and claims every pre-tenancy NULL-
-`account_id` row via `backfill_legacy_account_id`; every later signup instead gets
-`seed_default_pipeline`/`seed_default_collections`. The migration comment flags this as
-unsafe once public (non-operator) signup ships — revisit before then.
+INSERT-with-`ON CONFLICT` CAS into `legacy_backfill_claim` (mirrors the lease-row CAS pattern
+above) — whoever signs up first wins and claims every pre-tenancy NULL-`account_id` row via
+`backfill_legacy_account_id`; every later signup instead gets `seed_default_pipeline` /
+`seed_default_collections`. The migration comment flags this as unsafe once public
+(non-operator) signup ships — revisit before then.
 
-Full table-by-table migration list, RLS policy text, and the composite-FK detail on
-`property_pipeline`: `.claude/skills/database/references/tenancy.md`.
+**THE TENANCY DOCTRINE — four shapes, only four.** Full version, the table-by-table migration
+list and policy text, and the two test rules that would have caught the 2026-09 seven-week
+outage: `references/tenancy.md`. (1) **Reads on a tenant connection are scoped by RLS alone** —
+`current_account_ids()` is the ONE definition of who the caller is (PLURAL, because membership
+is); a read route takes no account, and an UPDATE/DELETE *by id* is this shape too (its policy's
+USING clause is the scope). (2) **Writes carry exactly ONE account, resolved once at the route
+edge** by `tenant_pool.require_account_id` — `400 "no account for caller"` on none, never a
+silent NULL nor a SYSTEM fallback 290's WITH CHECK has no arm to accept. (3) **An explicit
+`account_id = %s` predicate appears ONLY on a service-role connection**
+(`toolkit/pipeline_identity.py`, `api/estimation_runs.py`, the Stripe webhook), where RLS is off
+and the predicate is the SOLE gate. (4) **`deps.account_scope` returns `[account_id, SYSTEM]`**
+for the `/estimations` read family — a service-role read mirroring 291's three-arm policy, named
+here so nobody rediscovers it as a divergence. Standing gates:
+`tests/api/test_admin_route_coverage.py` (every tenant route resolves an account or is
+allowlisted with a reason) + `tests/api/test_account_scope_census.py` (no nullable tenant scope).
 
 ## Read-model patterns
 
