@@ -6,12 +6,12 @@ The user-facing surface — subscription CRUD, the dispatch feed, unread-count,
 mark-seen/mark-all-seen — runs on the **tenant pool** (`tenant_pool.tenant_conn`,
 RLS-scoped by the caller's JWT claims), so every read/write is account-isolated
 by the policies migrations 290/292 put on `notification_subscriptions` /
-`notification_dispatches`. A legacy static-`API_TOKEN` caller (the operator's SPA
-today) has no Supabase `sub`, so `tenant_conn` routes it to the unscoped
-service-role connection — behaviour-preserving until the SPA/extension send real
-user JWTs, at which point RLS becomes a live boundary. `verify_jwt` (which
-`tenant_conn` depends on) accepts BOTH the JWT and the legacy token, so no route
-loses the operator.
+`notification_dispatches`. There is no bypass: `verify_jwt` accepts a real Supabase
+JWT and nothing else, and `tenant_conn` has no fallback connection — RLS is a live
+boundary on every request. Reads here take no account at all (`current_account_ids()`
+is the scope); `POST /subscriptions` is the one write, and it carries exactly one
+account via `tenant_pool.require_account_id`. Doctrine:
+`.claude/skills/database/references/tenancy.md`.
 
 Two routes deliberately stay on the service-role connection + `require_token`:
 - `POST /dispatches/{id}/estimate` kicks off an estimation that reads the shared

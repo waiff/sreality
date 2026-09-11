@@ -10,7 +10,9 @@ ledger (A9: INSERT .. ON CONFLICT DO NOTHING, never check-then-act) and
 
 GET /billing/me is a normal per-account read on the RLS-scoped tenant pool.
 `require_entitlement(agenda)` is the plan gate future agenda routers attach
-(first consumer: Wave 1) — admin/legacy callers always pass.
+(first consumer: Wave 1) — admin callers always pass, and a caller with no
+resolvable account gets the default plan rather than a 400 (the one sanctioned
+nullable account; see `.claude/skills/database/references/tenancy.md`).
 """
 
 from __future__ import annotations

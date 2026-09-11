@@ -125,3 +125,79 @@ one definition of who the caller is, so a tenant-connection read is scoped by RL
 of it was dead. The table is the atomic first-signup CAS inside `handle_new_user`
 (migrations 294/362, swept by 299): the first user to sign up claims the pre-tenancy
 backfill exactly once. That claim is made in SQL, not in `api/tenant_pool.py`.
+
+## The tenancy doctrine — four shapes, and only four
+
+This is the canonical statement. The `database` skill body carries the four-line summary;
+`docs/architecture.md` (rules 18/22) points here; nothing else restates it. If you find a
+fifth shape in the code, it is a bug or an undocumented exception — make it one of these
+four, or add it here with a reason, but do not leave it unnamed.
+
+**1. Reads on a tenant connection are scoped by RLS alone.** `current_account_ids()` — the
+SECURITY DEFINER function every per-account policy already calls — is the ONE definition of
+who the caller is. It is **plural**, because membership is plural: a user may belong to more
+than one account, and any code that picks "the" account re-defines the caller more narrowly
+than the database does. A read route on `tenant_conn` therefore takes **no account argument**
+and its SQL carries **no account predicate**. An `UPDATE`/`DELETE` *by id* is this same shape:
+the policy's `USING` clause is the row set, so supplying an account would be a second
+definition of it, not a gate.
+
+**2. Writes carry exactly ONE account, resolved once at the route edge.**
+`tenant_pool.require_account_id` (FastAPI dependency) resolves it and raises
+`400 "no account for caller"` when there is none. Never a silent `None` (the account columns
+are `NOT NULL` since migrations 290/295, so a forwarded NULL is an empty result set or an
+opaque 500) and never a `SYSTEM` fallback (migration 290's `WITH CHECK` has no SYSTEM arm to
+accept it, so that fallback could only ever 500). The single best shape is the one where the
+route names no account at all because a **BEFORE INSERT trigger derives it from the parent
+row** (migration 292): `POST /collections/{id}/properties` and `POST /properties/{id}/tags`
+cannot be got wrong, because there is nothing at the route to get wrong.
+
+**3. An explicit `account_id = %s` predicate belongs ONLY on a service-role connection.**
+There, RLS is off (BYPASSRLS) and the predicate is the SOLE gate rather than a second opinion
+about a caller the database has already scoped. The live sites: `toolkit/pipeline_identity.py`
+(the merge/unmerge reconcilers, which run inside `merge_properties`' service-role transaction
+and must partition every join between the retired and survivor sides), `api/estimation_runs.py`
+(service-role child runs from `building_runs`), and the Stripe webhook (no caller identity at
+all — the HMAC over the raw body is the auth). On a tenant connection the same predicate is the
+#917 bug: `POST /listings/lookup` bound `NULL` into three `account_id IS NOT DISTINCT FROM %s`
+predicates for seven weeks and answered "not in pipeline" for every caller.
+
+**4. `deps.account_scope` returns `[account_id, SYSTEM]`** — the fourth shape, named here so
+nobody rediscovers it as a divergence and "fixes" it. The `/estimations` read family
+(`GET /estimations`, `GET /estimations/latest-by-listing`) runs on the SERVICE-ROLE connection
+on purpose: its `LEFT JOIN` onto `listings` + `parsed_url_cache` (RLS-on, zero policies) would
+silently NULL `locality_display` on a tenant connection. So it scopes with an explicit list,
+and that list mirrors migration 291's three-arm policy (own account OR SYSTEM OR platform
+admin) rather than inventing a second tenancy definition. It never widens and never returns
+empty: an unresolvable account narrows to `[SYSTEM]`, a missing or bad credential raises.
+
+### The two test rules that would have caught #917
+
+The outage survived seven weeks because three guards looked away at once, and two of them
+were in the tests. Both rules generalize:
+
+- **Never stub an identity resolver to the value its absence produces.** The route test
+  monkeypatched `resolve_account_id → None` — the exact value a dropped argument yields — so
+  every assertion about the account was unfalsifiable. Stub it to a distinctive sentinel and
+  assert the sentinel ARRIVES; where the correct posture is "must resolve", stub it to RAISE.
+- **Never give a tenant-scope parameter a default.** `account_id: uuid.UUID | None = None`
+  turned a three-argument call to a four-parameter function into a silent NULL instead of a
+  `TypeError`. Required, keyword-only, no default: then the revert is red at the call site.
+
+A third guard was prose: a fixture COMMENT ("the route now resolves account_id") stood in for
+an assertion, and outlived the behaviour it described. A comment is not a rail.
+
+### The standing gates
+
+- `tests/api/test_admin_route_coverage.py` — the ROUTE-SCOPE CENSUS. Walks the live FastAPI
+  app; every route on a tenant connection must either reach `require_account_id` or appear in
+  `_RLS_ONLY_ALLOWLIST` with a reason naming what scopes it instead. Routes that reach
+  `verify_jwt` on the service-role connection (`/brokers/*`, `POST /estimations`) are excluded
+  structurally, not enumerated. It has its own non-vacuity sentinel.
+- `tests/api/test_account_scope_census.py` — the ACCOUNT-SCOPE CENSUS, one layer down: no
+  `account_id`/`account_ids` parameter in `api/` defaults to `None`, and every hand-rolled
+  `resolve_account_id` call is enumerated with a reason. Both arms declare their blind spots.
+
+Neither gate can protect `main` on its own: they run in CI, and CI is only a merge gate while
+branch protection is ON. It is currently OFF (an operator decision) — so today they protect a
+PR, not the branch.

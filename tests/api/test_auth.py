@@ -32,9 +32,17 @@ def client(monkeypatch):
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
     api_main.app.dependency_overrides[deps.get_sreality_client] = lambda: object()
     api_main.app.dependency_overrides[deps.get_llm_client] = lambda: object()
-    # tenant-pool routes: the connection is stubbed but the route-level
-    # verify_jwt is left REAL — that's the auth gate under test.
-    api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
+    # tenant-pool routes: the CONNECTION is stubbed, but the stub keeps verify_jwt
+    # as its OWN dependency, so the census still walks the real graph. Overriding
+    # tenant_conn with a bare `lambda: object()` severed verify_jwt from the chain:
+    # a route whose only JWT gate lives inside tenant_conn (or require_account_id)
+    # then looked un-gated here, which is why W3 had to leave a declared-but-unread
+    # `claims` on GET /pipeline/stages purely to keep this census honest. It no
+    # longer does — the gate under test is the one production actually uses.
+    def _stub_tenant_conn(claims: dict = fastapi.Depends(deps.verify_jwt)) -> object:
+        return object()
+
+    api_main.app.dependency_overrides[tenant_pool.tenant_conn] = _stub_tenant_conn
     # A resolvable account: since W4 the write routes gate on
     # `require_account_id`, which 400s without one — and this census asserts
     # AUTHENTICATION (401 vs 200), not membership. `_ACCT` (defined below with
