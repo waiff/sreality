@@ -150,21 +150,21 @@ explicitly on every new function; grant back only the roles that need it.
   numbered file, commit it, apply via MCP, verify with a SELECT, and report. No approval
   gate; CI + the tracked file are the net.
 - **Open with `set local lock_timeout = '5s';` when a migration GRANT/REVOKEs or
-  CREATE-OR-REPLACEs a hot or cron-refreshed relation** (any matview, `browse_list`,
-  `listings`). Those take ACCESS EXCLUSIVE, and a whole-transaction loop holds every
-  lock it has already taken — so without a timeout it queues behind, or blocks, the
-  `*/10` health refresh or the 30-min map rebuild. Fail fast and retry instead.
+  CREATE-OR-REPLACEs a hot or cron-refreshed relation** (any matview, `browse_list`, `listings`).
+  Those take ACCESS EXCLUSIVE and a whole-transaction loop holds every lock it already took —
+  without a timeout it queues behind, or blocks, the `*/10` health refresh or the map rebuild.
 - **Destructive migrations** (`DROP TABLE`/`COLUMN`, type-changing `ALTER`, `DELETE`
   without `WHERE`, `TRUNCATE`) — **pause for explicit operator OK** ("yes, apply it") and
   take a `pg_dump` backup of the affected tables *first*. There's no staging DB, so these
   are largely irreversible.
-- Read-only inspection (counts, sample rows, schema introspection, verifying backfills)
-  needs no confirmation — just do it and report.
+- Read-only inspection (counts, sample rows, schema, verifying backfills) needs no confirmation.
 
 Correct flow for any schema change: (1) write the new numbered migration file in
 `migrations/`; (2) for destructive changes, get explicit approval + back up first;
-(3) apply via MCP (`apply_migration`), verify with a SELECT; (4) commit the migration
-file in the same change; (5) report what was applied and verified.
+(3) apply BEFORE merging — via MCP (`apply_migration`), or with no MCP in the session
+`gh workflow run apply_migration.yml --ref <branch> -f file=NNN_x.sql -f dry_run=false -f confirm=APPLY`
+(`psql -f`, statement autocommit: every statement idempotent, plain `SET lock_timeout`); verify
+with a SELECT; (4) commit the migration file in the same change; (5) report what was applied.
 
 **APPLY BEFORE YOU MERGE when the code reads the new schema.** Merging and applying are
 separate acts and nothing couples them. Migration 438 merged 2026-08-25 17:12 and was
