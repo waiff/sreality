@@ -37,6 +37,49 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
   existing `test_migration_rls_grants.py` scanner deliberately treats dollar-quoted function
   bodies as opaque); wired `browse_read_model_state_public` into the Health page (it existed
   since migration 276 but nothing read it) so a stalled rebuild is visible within 15/60 min.
+- **2026-09-11 regression + fix ("One Account, One Answer" W1 — extension pipeline/watch
+  status)**: `POST /listings/lookup` had answered `in_pipeline=false` + `collection_ids=[]` for
+  EVERY caller since 2026-07-23. PR #917 (unrelated image tools, branched before #912 merged)
+  carried an exact reverse hunk of #912's three wiring lines, so the route stopped resolving the
+  account while the `IS NOT DISTINCT FROM %s` predicates it had just gained bound NULL against
+  NOT NULL columns (mig 295) — the extension's funnel + bell read "Přidat"/"Sledovat" for seven
+  weeks; the SPA (RLS read of `property_pipeline_public`) was right all along. The route test
+  could not fail: it stubbed `resolve_account_id → None` (the value the omission produces) and
+  its fake lookup defaulted the argument. W1 restores the wiring, makes `account_id` keyword-only
+  with NO default (a dropped argument is a TypeError, not an empty 200), and asserts the sentinel
+  account reaches the lookup. Damage check (read-only): every login has one membership, no
+  property is carded in two accounts, five "1. For Review" cards removed 08-06/08-11 no longer
+  exist (candidate two-click undos; operator's call to restore). W2–W5 follow as their own PRs:
+  delete the dead legacy branch, RLS-only reads, `require_account_id`, the route-scope census.
+- **2026-09-11 W2** — legacy `claims.get("legacy")` bypass deleted (dead since #941, which
+  stopped `verify_jwt` emitting the claim). `tenant_conn`'s service-role fallback and
+  `resolve_account_id`'s `legacy_backfill_claim` read are gone, so an unset
+  `TENANT_POOL_DB_URL` now RAISES instead of silently degrading to an RLS-off connection —
+  the shape that hid the bad-DSN incident below. The `legacy_backfill_claim` TABLE stays
+  (the signup CAS in `handle_new_user`); no tenant-route test runs on the RLS-bypass path.
+- **2026-09-11 W3 ("One Account, One Answer" — reads go RLS-only)**: the architectural payoff.
+  `lookup_portal_listings` now takes NO account at all and its SQL carries no account predicate —
+  `current_account_ids()` is the single membership definition, so the extension's answer IS the
+  SPA's by construction and there is no second definition left to drift. The two pipeline LEFT
+  JOINs collapsed into ONE `LEFT JOIN LATERAL … ORDER BY pp.updated_at DESC, pp.account_id LIMIT 1`
+  because RLS is PLURAL: a multi-membership caller could otherwise match >1 card and multiply rows
+  (residual gap — such a caller sees the most recently updated card; the active-account primitive
+  is the future fix). `api/pipeline.list_stages` lost its account the same way (a display read, not
+  a write). W1's sentinel-account route test became a `resolve_account_id` that RAISES, and
+  `tests/test_tenant_isolation_live.py` gained the assertion nothing in the repo could make before:
+  A sees the card, B does not, one output row per requested item — live, role-switched, RLS-bound.
+- **2026-09-11 W4 (writes carry exactly ONE account)** — the third definition of the caller
+  (the None-able optional account) is gone. `tenant_pool.require_account_id` resolves it ONCE
+  at the route edge and 400s "no account for caller"; the seven `/pipeline/*` writes, the three
+  curation writes and `POST /notifications/subscriptions` (whose inline shape it hoists) declare it, replacing pipeline's bare `None` (empty 200 / "no entry stage
+  configured" 500) and curation's `or SYSTEM_ACCOUNT_ID` — a value migration 290's WITH CHECK
+  has no SYSTEM arm to accept, so that fallback could only ever 500. `api/pipeline.py`'s 17
+  `account_id IS NOT DISTINCT FROM %s` became `= %s` (the columns are NOT NULL since 295, so
+  the NULL-tolerant spelling tolerated nothing) and its five "the legacy service-role branch
+  bypasses RLS" comments now state the real reason: the PK is `(account_id, property_id)` and
+  the entry-stage unique is per account, so a write must NAME its one owner. Every route fake
+  lost its `account_id=None` default, so an identical one-line revert is a `TypeError`, not a
+  green CI run. It lives in `tenant_pool`, not `dependencies` (circular import).
 - **Phase 1 (multi-tenant foundations)** — in progress.
   - Increment 1 ✅ — accounts/account_members/admins, `current_account_ids()` /
     `is_platform_admin()`, the on-signup handler, JWT verify (JWKS/ES256) (migrations

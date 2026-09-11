@@ -1,12 +1,12 @@
 """Admin endpoints: skills + app_settings + agent tool inventory + billing tiers.
 
 Routes under the `/admin/*` prefix. Admin-gated — the router carries
-`Depends(require_admin)`, so each call needs either a Supabase JWT whose
-claims carry `is_admin` (top-level or `app_metadata`) or, during the
-dual-auth window, the legacy static `API_TOKEN` bearer (which maps to
-synthetic admin claims). Fails closed (401/503) when neither is
-configured. Writes go through a service-role psycopg connection; the
-frontend never touches Postgres directly for these tables.
+`Depends(require_admin)`, so each call needs a Supabase JWT whose claims
+carry `is_admin` (top-level or `app_metadata`). The static `API_TOKEN`
+bearer is NOT accepted (that dual-auth window is closed); fails closed
+(401/503) when auth is unconfigured. Writes go through a service-role
+psycopg connection; the frontend never touches Postgres directly for
+these tables.
 """
 
 from __future__ import annotations

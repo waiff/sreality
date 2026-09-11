@@ -54,7 +54,7 @@ import {
   summarizePriceHistory,
 } from '@/lib/priceHistory';
 import { timeLabelFull } from '@/lib/chartAxis';
-import { portalShort, srealityListingUrl } from '@/lib/portals';
+import { portalShort } from '@/lib/portals';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import Skeleton from '@/components/Skeleton';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
@@ -306,15 +306,9 @@ export default function ListingDetail() {
     const currentSource = (sourcesQ.data?.sources ?? []).find(
       (s) => s.id === listing.id,
     );
-    const url =
-      currentSource?.source_url
-      ?? (listing.source === 'sreality'
-        ? (srealityListingUrl(listing.sreality_id, {
-            categoryType: listing.category_type,
-            categoryMain: listing.category_main,
-            categorySubCb: listing.category_sub_cb,
-          }) ?? undefined)
-        : undefined);
+    // The stored portal URL (the row's own, else the listing's — migration 494);
+    // never reconstructed from the category triple.
+    const url = currentSource?.source_url ?? listing.source_url ?? undefined;
     if (!url) return undefined;
     const categoryMain =
       listing.category_main === 'byt'

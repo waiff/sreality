@@ -1,0 +1,54 @@
+name: "Monitoring: portal URL conformance"
+
+# Weekly live check that the stored portal URLs still resolve (W3 of the portal-URL
+# contract, docs/design/portal-listing-url.md). Samples ACTIVE rows — a rotating
+# quarter of sreality's sub-category codebook chosen by the ISO week (three rows per
+# code) plus one row per crawler portal — and sends ~44 HEAD requests at <= 2/s.
+# Status-code HEAD only: never follows a redirect, never reads a body, never
+# authenticates. Writes one `outbound_url_conformance` row into
+# pipeline_check_results and rings the in-app bell through the shared transition
+# alerts. Thresholds by CONCENTRATION: a whole (category, sub-code) cell failing
+# together is a slug defect; a scattered 404 is a delisting the presence check has
+# not reached. Its own lane, deliberately outside verify_pipeline's DB-only budget.
+#
+# Required GitHub secret: SUPABASE_DB_URL.
+
+on:
+  schedule:
+    - cron: "17 5 * * 2"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Probe + log only; write no result row and send no alert"
+        type: boolean
+        default: false
+
+concurrency:
+  group: portal-url-conformance
+  cancel-in-progress: false
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Probe stored portal URLs
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m scripts.verify_outbound_urls $ARGS

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from api import curation
 from api import schemas as s
 
@@ -63,13 +65,12 @@ def test_create_note_stamps_explicit_account_id(monkeypatch: Any) -> None:
     assert params[-1] == tenant_id
 
 
-def test_create_note_omitted_account_id_binds_none(monkeypatch: Any) -> None:
-    """Documents the sharp edge: a caller on the (still) service-role bridge
-    that passes no account_id binds NULL -- harmless there (RLS never
-    applies), but would fail closed under tenant_conn. main.py's
-    post_property_note always resolves one before calling in."""
+def test_create_note_without_account_id_is_a_type_error(monkeypatch: Any) -> None:
+    """The sharp edge is now unreachable: account_id is REQUIRED (W4), so the
+    service-role bridge that used to bind a silent NULL can't exist. An identical
+    one-line revert on post_property_note raises here instead of writing a row
+    that migration 290's WITH CHECK (no SYSTEM arm) would reject."""
     monkeypatch.setattr(curation, "resolve_active_property_id", lambda conn, pid: pid)
     conn = _FakeConn()
-    curation.create_note(conn, 99, s.CreateNoteIn(body="hello"))
-    _, params = conn.executed[0]
-    assert params[-1] is None
+    with pytest.raises(TypeError, match="account_id"):
+        curation.create_note(conn, 99, s.CreateNoteIn(body="hello"))

@@ -1152,7 +1152,11 @@ renumber.** Navigate by area:
     `CurationBlock` uses (the viewed advert's `sreality_id` as `origin_listing_id`); notes are
     NOT batched into `POST /listings/lookup` (too heavy per index card) — the panel fetches them
     lazily via `GET /properties/{id}/notes` on open. Tags are the one curation surface the
-    extension does not yet expose.
+    extension does not yet expose. **Every property-grain operator write (curation here, the
+    pipeline in rule #22) carries exactly ONE account, resolved once at the route edge by
+    `tenant_pool.require_account_id` — a caller with no membership is a loud `400`, never a
+    `SYSTEM` fallback migration 290's WITH CHECK would reject; reads take no account at all and
+    are scoped by RLS (`current_account_ids()`) alone.**
     Same no-hard-delete spirit as the rest of the data model.
     **Every curation route runs on the tenant pool (`tenant_conn` + `verify_jwt`), with no
     exceptions** (hydration sprint W-1c). Until then the collection CRUD (`POST /collections`,
@@ -1389,6 +1393,12 @@ renumber.** Navigate by area:
     scope chip + its sidebar stage picker, AND the Chrome-extension panel (the glyph reproduced
     by value in vanilla TS — separate territory, no React import) — so the "into the pipeline"
     concept reads as one icon everywhere.**
+    **Pipeline MEMBERSHIP likewise has exactly ONE definition — `current_account_ids()`, the
+    database's own membership function — on every surface, the extension's `POST /listings/lookup`
+    included: it takes no account argument and its SQL carries no account predicate, so its answer
+    IS the SPA's answer by construction, which is what makes the "MEANS one thing" claim below
+    true rather than aspirational** (a second, explicitly-bound definition is precisely what made
+    the extension disagree with the SPA for seven weeks, 2026-07-23 → 09-11).
     **And it MEANS the same thing everywhere.** Out of the pipeline, a click adds at the entry
     stage — cheap, reversible, one keystroke in the middle of triage. Already in it, a click opens
     the shared `<PipelineStageMenu>`: every live stage (badged, current one checked, terminal stages

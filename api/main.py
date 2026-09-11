@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import uuid
 from datetime import timedelta
 from typing import Any, AsyncIterator, Literal
 
@@ -236,10 +237,10 @@ skills_module.AGENT_TOOL_NAMES = set(AGENT_TOOLS.keys())
 skills_module.PROVIDER_NAMES = set(deps.get_providers().keys())
 
 # /admin/* is admin-gated — the router itself carries Depends(require_admin)
-# (see api/routes/admin.py): is_admin claim required; the legacy operator
-# token passes during the dual-auth window. The old "private Railway URL is
-# the perimeter" exemption gave no real protection: that URL ships inside
-# the public SPA bundle.
+# (see api/routes/admin.py): a real is_admin JWT claim is required and the
+# static operator token no longer passes (that dual-auth window is closed).
+# The old "private Railway URL is the perimeter" exemption gave no real
+# protection: that URL ships inside the public SPA bundle.
 app.include_router(admin_router)
 # /billing/* — the Stripe webhook is its OWN auth class (HMAC signature over the
 # raw body vs STRIPE_WEBHOOK_SECRET), distinct from bearer/JWT and token-exempt;
@@ -1030,8 +1031,12 @@ def post_listings_lookup(
 
     Two connections on purpose: shared market facts on the service-role conn
     (listings/properties are RLS-enabled-with-zero-policies — broker PII, the
-    A5 correction), per-account joins on the tenant conn (RLS-scoped). The
-    tenant_conn dependency also carries verify_jwt, so auth is unchanged."""
+    A5 correction), per-account joins on the tenant conn. RLS-ONLY BY DESIGN:
+    no account is resolved here, because membership must be the same answer the
+    SPA gets, and the SPA reads property_pipeline_public under the plural
+    `current_account_ids()`. A second definition is what broke this route from
+    2026-07-23 to 2026-09-11. Wave 5's route census lists it on the explicit
+    RLS-only allowlist for exactly that reason."""
     return lookup_portal_listings(market_conn, conn, body.items)
 
 
@@ -1302,9 +1307,8 @@ def post_estimate_yield(
 def post_create_collection(
     body: s.CreateCollectionIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims) or deps.SYSTEM_ACCOUNT_ID
     return curation.create_collection(conn, body, account_id=str(account_id))
 
 
@@ -1458,9 +1462,8 @@ def post_property_note(
     property_id: int,
     body: s.CreateNoteIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims) or deps.SYSTEM_ACCOUNT_ID
     return curation.create_note(conn, property_id, body, account_id=str(account_id))
 
 
@@ -1497,9 +1500,8 @@ def get_tags(
 def post_tag(
     body: s.CreateTagIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims) or deps.SYSTEM_ACCOUNT_ID
     return curation.create_tag(conn, body, account_id=str(account_id))
 
 
@@ -1554,17 +1556,19 @@ def get_pipeline_stages(
     conn: Any = Depends(tenant_pool.tenant_conn),
     claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
-    return pipeline_module.list_stages(conn, account_id=account_id)
+    """Pure display read — RLS scopes it, so no account is resolved. `claims` is
+    declared, unused, purely to keep the gate explicit (as delete_property_tag
+    does): test_auth's census overrides tenant_conn, so this Depends is the only
+    fail-closed assertion left standing for this route."""
+    return pipeline_module.list_stages(conn)
 
 
 @app.post("/pipeline/stages")
 def post_pipeline_stage(
     body: s.CreateStageIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
     return pipeline_module.create_stage(conn, body, account_id=account_id)
 
 
@@ -1572,9 +1576,8 @@ def post_pipeline_stage(
 def post_pipeline_stages_reorder(
     body: s.ReorderStagesIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
     return pipeline_module.reorder_stages(conn, body, account_id=account_id)
 
 
@@ -1583,9 +1586,8 @@ def patch_pipeline_stage(
     stage_id: int,
     body: s.UpdateStageIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
     return pipeline_module.update_stage(conn, stage_id, body, account_id=account_id)
 
 
@@ -1593,9 +1595,8 @@ def patch_pipeline_stage(
 def delete_pipeline_stage(
     stage_id: int,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
     return pipeline_module.archive_stage(conn, stage_id, account_id=account_id)
 
 
@@ -1603,9 +1604,8 @@ def delete_pipeline_stage(
 def post_pipeline_card(
     body: s.AddPipelineCardIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
     return pipeline_module.add_card(conn, body, account_id=account_id)
 
 
@@ -1614,9 +1614,8 @@ def patch_pipeline_card(
     property_id: int,
     body: s.MoveCardIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
     return pipeline_module.move_card(conn, property_id, body, account_id=account_id)
 
 
@@ -1624,9 +1623,8 @@ def patch_pipeline_card(
 def delete_pipeline_card(
     property_id: int,
     conn: Any = Depends(tenant_pool.tenant_conn),
-    claims: dict = Depends(deps.verify_jwt),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
-    account_id = tenant_pool.resolve_account_id(conn, claims)
     return pipeline_module.remove_card(conn, property_id, account_id=account_id)
 
 

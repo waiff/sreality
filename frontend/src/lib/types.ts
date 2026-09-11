@@ -110,6 +110,11 @@ export interface ListingPublic {
   usable_area: number | null;
   garden_area: number | null;
   category_sub_cb: number | null;
+  /* Migration 494. The listing's page on its own portal — stored by the portal's
+   * parser at ingest (sreality included since the URL-contract sprint). NEVER
+   * reconstruct one from the category triple: sreality's sub slugs are its own
+   * closed vocabulary, not our display labels. NULL → in-app view, not a guess. */
+  source_url: string | null;
   furnished: Furnished | null;
   terrace: boolean | null;
   cellar: boolean | null;

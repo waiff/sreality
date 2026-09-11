@@ -22,10 +22,9 @@ import uuid
 from collections.abc import Iterator
 
 import psycopg
-from fastapi import Depends
+from fastapi import Depends, HTTPException
 
 from api import dependencies as deps
-from scraper import db
 
 _TENANT_POOL_ENV = "TENANT_POOL_DB_URL"
 
@@ -39,28 +38,10 @@ def tenant_conn(
     results per request, so a route that also declares Depends(verify_jwt)
     pays no second verification.
 
-    Dual-auth window: a legacy static-API_TOKEN caller has no Supabase `sub`,
-    so under RLS it would see zero rows on every tenant table — a silent
-    regression for the operator's current SPA/extension (the only production
-    callers today). Legacy callers therefore stay on the unscoped service-role
-    connection (today's exact behavior) until they re-auth with a real JWT.
+    There is NO fallback connection: every caller is a real Supabase JWT and
+    gets the RLS-scoped tenant-pool transaction. An unconfigured pool must
+    fail loudly here rather than silently degrade to an unscoped connection.
     """
-    if claims.get("legacy"):
-        # Mirror get_db_conn exactly (this branch IS the service-role path):
-        # db.connect adds the one-retry-on-pooler-blip + TCP keepalives + a clean
-        # RuntimeError when SUPABASE_DB_URL is unset, which the bare
-        # psycopg.connect(os.environ[...]) here did not (a transient hiccup
-        # 500'd every /pipeline/* route, and a missing env var raised KeyError).
-        conn = db.connect(
-            attempts=deps._API_CONNECT_ATTEMPTS,
-            retry_delay=deps._API_CONNECT_RETRY_DELAY,
-        )
-        try:
-            yield conn
-        finally:
-            conn.close()
-        return
-
     dsn = os.environ.get(_TENANT_POOL_ENV)
     if not dsn:
         raise RuntimeError(f"{_TENANT_POOL_ENV} not configured")
@@ -90,22 +71,7 @@ def tenant_conn(
 
 
 def resolve_account_id(conn: psycopg.Connection, claims: dict) -> uuid.UUID | None:
-    """The account rows are written under: the caller's own (first) account, or —
-    for the legacy static-token operator — the account that claimed the legacy
-    backfill (None until the operator's first signup)."""
-    if claims.get("legacy"):
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT account_id FROM legacy_backfill_claim "
-                    "WHERE claim_key = 'legacy_backfill_v1'"
-                )
-                row = cur.fetchone()
-        except psycopg.errors.UndefinedTable:
-            # pre-294 schema during the rollout window; the legacy service-role
-            # branch is autocommit, so the failed statement poisons nothing.
-            return None
-        return row[0] if row else None
+    """The caller's own (first) account, or None when the user has no membership."""
     with conn.cursor() as cur:
         # ORDER BY for a deterministic pick: account_members has only a composite
         # PK, so a user with >1 membership (already legal — team/multi-account is
@@ -119,3 +85,27 @@ def resolve_account_id(conn: psycopg.Connection, claims: dict) -> uuid.UUID | No
         )
         row = cur.fetchone()
     return row[0] if row else None
+
+
+def require_account_id(
+    conn: psycopg.Connection = Depends(tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
+) -> uuid.UUID:
+    """The ONE account a write is scoped to, resolved once at the route edge.
+
+    A caller with no membership is a loud 400, never a silently empty 200 or an
+    opaque 500: every account-predicated write column is NOT NULL (migrations
+    290/295) and RLS's WITH CHECK can only validate the account a row claims, not
+    choose one — so a route that forwards None writes a row RLS is guaranteed to
+    reject, or predicates a DELETE/UPDATE that matches nothing.
+
+    Lives in tenant_pool, not api.dependencies: this module imports that one
+    (tenant_conn's verify_jwt default), so Depends(tenant_conn) over there is a
+    circular import — and a lazily-imported wrapper would be a SECOND callable,
+    which FastAPI caches separately, splitting a route's reads and writes across
+    two tenant transactions (the Amendment A1 boundary).
+    """
+    account_id = resolve_account_id(conn, claims)
+    if account_id is None:
+        raise HTTPException(status_code=400, detail="no account for caller")
+    return account_id

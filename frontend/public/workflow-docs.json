@@ -126,6 +126,53 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_listings_pk_swap.yml"
     },
     {
+      "filename": "apply_migration.yml",
+      "name": "Ops: apply one migration file",
+      "description": "Applies ONE numbered migration file from `migrations/` to the database with `psql -f` — the same statement-autocommit semantics as the CI schema replay (`migrations.yml`), so a file the replay accepted applies identically here. This is the no-MCP path for the database skill's apply-before-merge rule: dispatch it with `--ref <branch>` while the PR is still open, so a merged file is never unapplied (the migration-438 class of outage).",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "file",
+          "description": "Migration filename under migrations/, e.g. 496_images_rendition_provenance.sql",
+          "required": true,
+          "type": "string",
+          "default": null,
+          "options": null
+        },
+        {
+          "name": "dry_run",
+          "description": "true = validate + connectivity only. false = apply (needs confirm=APPLY).",
+          "required": false,
+          "type": "boolean",
+          "default": "true",
+          "options": null
+        },
+        {
+          "name": "confirm",
+          "description": "Type APPLY to arm the real apply. Ignored when dry_run=true.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_SESSION_URL",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "apply-migration",
+      "cancelInProgress": false,
+      "timeoutMinutes": 60,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/apply_migration.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_migration.yml"
+    },
+    {
       "filename": "apply_r2_constraints.yml",
       "name": "Apply R2 constraints (indexes + FKs)",
       "description": "Phase B of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 3). Indexes each surrogate column the backfill filled, then mirrors the legacy FK onto it (NOT VALID -> VALIDATE) wherever the legacy column had one.",
@@ -5143,7 +5190,12 @@
       "description": "Dispatch-only reconciler for the portal-URL contract (docs/design/portal-listing-url.md). sreality was the only portal whose page URL was not a stored fact — the parser never emitted `listings.source_url` and the SPA rebuilt one from display labels that 404. W0 made every fresh detail fetch emit it; this job fills the ~232k rows written before that and, run weekly in dry-run with `report_check`, is the standing drift detector (`outbound_url_parity` in pipeline_check_results). It reads NO raw_json: every 404-critical segment is a typed column, and the locality is slugified through the same assembler ingest uses (`scraper.sreality_url`). Canonical string or nothing — never a placeholder. Writes only `listings.source_url`, which is out of every content hash (zero snapshots, no trigger). DML, not DDL; waits for a read-model rebuild gap and replays a batch that loses a lock fight with the hourly MF recompute. Two gates stop a write pass: an unknown category_sub_cb on a row seen in the last 7 days (the codebook moved), and `conformance` > 0 finding any 404 on a live sample. NOT a portal ingest workflow, so it carries no `# portal:` tag.",
       "portal": null,
       "manual": true,
-      "schedules": [],
+      "schedules": [
+        {
+          "cron": "41 5 * * 1",
+          "human": "41 5 * * 1"
+        }
+      ],
       "onPush": false,
       "onPullRequest": false,
       "paths": null,
@@ -6735,6 +6787,41 @@
       "permissions": null,
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/test.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/test.yml"
+    },
+    {
+      "filename": "verify_outbound_urls.yml",
+      "name": "Monitoring: portal URL conformance",
+      "description": "Weekly live check that the stored portal URLs still resolve (W3 of the portal-URL contract, docs/design/portal-listing-url.md). Samples ACTIVE rows — a rotating quarter of sreality's sub-category codebook chosen by the ISO week (three rows per code) plus one row per crawler portal — and sends ~44 HEAD requests at <= 2/s. Status-code HEAD only: never follows a redirect, never reads a body, never authenticates. Writes one `outbound_url_conformance` row into pipeline_check_results and rings the in-app bell through the shared transition alerts. Thresholds by CONCENTRATION: a whole (category, sub-code) cell failing together is a slug defect; a scattered 404 is a delisting the presence check has not reached. Its own lane, deliberately outside verify_pipeline's DB-only budget.",
+      "portal": null,
+      "manual": true,
+      "schedules": [
+        {
+          "cron": "17 5 * * 2",
+          "human": "17 5 * * 2"
+        }
+      ],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "dry_run",
+          "description": "Probe + log only; write no result row and send no alert",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "portal-url-conformance",
+      "cancelInProgress": false,
+      "timeoutMinutes": 15,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/verify_outbound_urls.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/verify_outbound_urls.yml"
     },
     {
       "filename": "verify_pipeline.yml",

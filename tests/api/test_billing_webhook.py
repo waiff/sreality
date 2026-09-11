@@ -319,9 +319,9 @@ def test_checkout_completed_missing_reference_ignored():
 
 # --- require_entitlement -------------------------------------------------------
 
-def test_require_entitlement_legacy_bypasses():
+def test_require_entitlement_top_level_admin_bypasses():
     gate = billing.require_entitlement("browse")
-    claims = {"sub": None, "is_admin": True, "legacy": True}
+    claims = {"sub": str(uuid.uuid4()), "is_admin": True}
     assert gate(claims=claims, conn=object()) is claims
 
 

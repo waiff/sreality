@@ -25,20 +25,21 @@ from api import dependencies as deps
 from api import main as api_main
 from api import tenant_pool
 
+_SUB = "11111111-1111-1111-1111-111111111111"
+_ACCT = "22222222-2222-2222-2222-222222222222"
+
 
 @pytest.fixture()
 def client(monkeypatch):
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
     # /collections list + /collections/{id}/properties + /properties/{id}/notes
-    # moved onto the tenant pool (Wave 1 W1-1) — overridden to a legacy
-    # identity here, same as tests/api/test_pipeline.py; auth correctness
-    # itself lives in tests/api/test_auth.py.
+    # moved onto the tenant pool (Wave 1 W1-1) — overridden to a production-
+    # shaped JWT identity here, same as tests/api/test_pipeline.py; auth
+    # correctness itself lives in tests/api/test_auth.py.
     api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
-    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {
-        "sub": None, "legacy": True,
-    }
+    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {"sub": _SUB}
     monkeypatch.setattr(
-        tenant_pool, "resolve_account_id", lambda conn, claims: None,
+        tenant_pool, "resolve_account_id", lambda conn, claims: _ACCT,
     )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
@@ -68,7 +69,7 @@ def store(monkeypatch):
         count = sum(1 for (_, tt) in state["tag_links"] if tt == tid)
         return {**t, "listing_count": count}
 
-    def fake_create_collection(conn, body, account_id=None):
+    def fake_create_collection(conn, body, account_id):
         for c in state["collections"].values():
             if c["name"].lower() == body.name.lower():
                 from fastapi import HTTPException
@@ -152,7 +153,7 @@ def store(monkeypatch):
         items.sort(key=lambda n: (n["created_at"], n["id"]), reverse=True)
         return {"data": items}
 
-    def fake_create_note(conn, pid, body, account_id=None):
+    def fake_create_note(conn, pid, body, account_id):
         nid = state["next_note"]
         state["next_note"] += 1
         note = {
@@ -170,7 +171,7 @@ def store(monkeypatch):
         rows.sort(key=lambda r: r["name"].lower())
         return {"data": rows}
 
-    def fake_create_tag(conn, body, account_id=None):
+    def fake_create_tag(conn, body, account_id):
         for t in state["tags"].values():
             if t["name"].lower() == body.name.lower():
                 from fastapi import HTTPException
@@ -578,7 +579,9 @@ def test_create_collection_helper_inserts_and_returns():
         (1, "x", None, "2026-05-10T00:00:00+00:00", "2026-05-10T00:00:00+00:00",
          False, [], False),
     ])
-    out = curation.create_collection(conn, s.CreateCollectionIn(name="x"))
+    out = curation.create_collection(
+        conn, s.CreateCollectionIn(name="x"), account_id=_ACCT,
+    )
     assert out["id"] == 1
     assert out["listing_count"] == 0
     assert out["monitoring_enabled"] is False
@@ -656,7 +659,7 @@ def test_create_tag_helper_409_on_unique_violation():
 
     with pytest.raises(HTTPException) as exc:
         curation.create_tag(
-            _BoomConn(), s.CreateTagIn(name="hot", color="brick"),
+            _BoomConn(), s.CreateTagIn(name="hot", color="brick"), account_id=_ACCT,
         )
     assert exc.value.status_code == 409
 
@@ -734,7 +737,7 @@ def test_create_note_redirects_merged_away_to_survivor():
         (lambda q: "INSERT INTO property_notes" in q,
          [(1, 42, "hi", None, datetime(2026, 1, 1), None)]),
     ])
-    out = curation.create_note(conn, 99, _s.CreateNoteIn(body="hi"))
+    out = curation.create_note(conn, 99, _s.CreateNoteIn(body="hi"), account_id=_ACCT)
     assert out["property_id"] == 42
     ins = [p for q, p in conn.executed if "INSERT INTO property_notes" in q]
     assert ins and ins[0][0] == 42  # inserted onto the survivor, not 99
@@ -743,7 +746,7 @@ def test_create_note_redirects_merged_away_to_survivor():
 def test_create_note_no_survivor_is_404():
     conn = _ScriptConn([(lambda q: "RECURSIVE chain" in q, [])])
     with pytest.raises(fastapi.HTTPException) as ei:
-        curation.create_note(conn, 7, _s.CreateNoteIn(body="x"))
+        curation.create_note(conn, 7, _s.CreateNoteIn(body="x"), account_id=_ACCT)
     assert ei.value.status_code == 404
 
 
@@ -775,3 +778,31 @@ def test_get_collection_properties_repr_join_uses_the_surrogate(monkeypatch):
     props_sql = next(q for q, _ in conn.executed if "collection_properties cp" in q)
     assert "LEFT JOIN listings rl ON rl.id = p.repr_listing_ref_id" in props_sql
     assert "sreality_id = p.repr_listing_id" not in props_sql
+
+
+# --- the no-account posture (W4) -------------------------------------------
+
+
+def test_curation_writes_without_an_account_are_400(client, store, monkeypatch):
+    """A membership-less JWT is ONE loud 400 on every top-level curation write.
+
+    These three routes used to fall back to `deps.SYSTEM_ACCOUNT_ID`, which
+    CANNOT work: migration 290 gives collections / tags / property_notes a plain
+    `with check (account_id in (select current_account_ids()))` with no SYSTEM
+    arm (that exists only in 291/292, for the estimation tables), so the fallback
+    wrote a value RLS is guaranteed to reject — turning a diagnosable "you have
+    no account" into an opaque 500. Reads stay RLS-only, hence 200.
+    """
+    monkeypatch.setattr(tenant_pool, "resolve_account_id", lambda conn, claims: None)
+
+    assert client.get("/collections").status_code == 200
+
+    writes = [
+        ("post", "/collections", {"name": "test"}),
+        ("post", "/properties/1/notes", {"body": "smoke"}),
+        ("post", "/tags", {"name": "hot", "color": "brick"}),
+    ]
+    for method, path, body in writes:
+        res = getattr(client, method)(path, json=body)
+        assert res.status_code == 400, f"{method.upper()} {path} -> {res.status_code}"
+        assert res.json()["detail"] == "no account for caller"

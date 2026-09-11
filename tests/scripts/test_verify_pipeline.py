@@ -2048,3 +2048,55 @@ def test_location_payload_shape_drift_sql_shares_the_gate_classifier_and_reads_t
     assert "first_seen_at > now() - make_interval(hours => %(window_hours)s)" in sql
     assert "NOT (raw_json ? 'ruianId')" in sql
     assert "IS DISTINCT FROM 'object'" in sql
+
+
+# --- outbound_url_coverage (portal-URL contract) ----------------------------
+
+
+class _UrlCoverageConn:
+    """A cursor that answers one SELECT with scripted rows."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def cursor(self):
+        conn = self
+
+        class _Cur:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+            def execute(self_inner, sql, params=None):
+                assert "source_url IS NULL" in sql
+
+            def fetchall(self_inner):
+                return conn._rows
+
+        return _Cur()
+
+
+def test_outbound_url_coverage_is_an_absolute_count_per_source() -> None:
+    from scripts.verify_pipeline import check_outbound_url_coverage
+    r = check_outbound_url_coverage(_UrlCoverageConn([
+        ("bazos", 60000, 0, 0), ("sreality", 110000, 120, 120),
+    ]), T)
+    assert r["check_key"] == "outbound_url_coverage"
+    assert r["status"] == "warn" and r["value"] == 120       # 50 <= 120 < 500
+    assert "sreality 120 active rows without a URL (120 first seen in 7d)" in r["message"]
+    assert "scraper/sreality_url.py" in r["message"]
+
+
+def test_outbound_url_coverage_fails_past_the_absolute_fail_count() -> None:
+    from scripts.verify_pipeline import check_outbound_url_coverage
+    r = check_outbound_url_coverage(_UrlCoverageConn([("sreality", 110000, 5000, 4)]), T)
+    assert r["status"] == "fail" and r["value"] == 5000
+
+
+def test_outbound_url_coverage_clean_is_ok() -> None:
+    from scripts.verify_pipeline import check_outbound_url_coverage
+    r = check_outbound_url_coverage(_UrlCoverageConn([("bazos", 1, 0, 0), ("sreality", 1, 3, 0)]), T)
+    assert r["status"] == "ok" and r["value"] == 3
+    assert r["message"].startswith("Every active listing")

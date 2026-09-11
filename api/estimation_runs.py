@@ -558,8 +558,8 @@ def execute_pending_run(
 # The paid agent estimation is metered per SUCCESSFUL run against a MONTHLY quota
 # (operator decision 2026-07-22 — run-count, not USD; free = 3/mo, trial = 10).
 # Deterministic runs stay free + ungated. Only a real, non-admin tenant sending
-# mode='agent' is metered; admin / legacy-static-token / SYSTEM callers (operator,
-# ClickUp, tests) bypass everything, exactly like require_entitlement.
+# mode='agent' is metered; admin / SYSTEM callers (operator, ClickUp, tests)
+# bypass everything, exactly like require_entitlement.
 #
 # The spine is atomic (A9 — check-then-act is TOCTOU-racy over the tx pooler, the
 # mig-279 lesson): idempotency + single-in-flight ride a UNIQUE partial index +
@@ -588,11 +588,11 @@ class _MeterDecision:
 
 
 def _is_privileged(claims: dict[str, Any] | None) -> bool:
-    """Admin / legacy-static-token callers bypass metering (operator, ClickUp,
-    internal + tests), mirroring require_entitlement's bypass."""
+    """Admin callers bypass metering (operator, ClickUp, internal + tests),
+    mirroring require_entitlement's bypass."""
     if claims is None:
         return True   # internal caller (ClickUp / agent / test) — never metered
-    if claims.get("legacy") or claims.get("is_admin") is True:
+    if claims.get("is_admin") is True:
         return True
     meta = claims.get("app_metadata") or {}
     return meta.get("is_admin") is True
@@ -815,6 +815,10 @@ def create_estimation_run(
     llm_client: "LLMClient",
     body: s.CreateEstimationIn,
     background_tasks: Any | None = None,
+    # Stays optional where every other write path is now required: this runs on
+    # the SERVICE-ROLE connection and building_runs' internal child-run caller
+    # has no request identity — estimation_runs genuinely carries the SYSTEM arm
+    # (migration 291), which the curation/pipeline tables do not.
     account_id: str | None = None,
     claims: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -837,9 +841,9 @@ def create_estimation_run(
     `account_id` is the caller's account, resolved from the verified JWT by
     the route handler (Wave 1 W1-1) — hand-threaded because the run persists
     on the service-role connection, which has no JWT/RLS context to read it
-    from. Falls back to the platform SYSTEM account for legacy static-token
-    callers (today's exact prior behavior — the column no longer relies on
-    its own DEFAULT once it's named explicitly in every INSERT).
+    from. Falls back to the platform SYSTEM account for an internal caller that
+    has no JWT (the column no longer relies on its own DEFAULT once it's named
+    explicitly in every INSERT).
     """
     account_id = account_id or SYSTEM_ACCOUNT_ID
 
@@ -850,7 +854,7 @@ def create_estimation_run(
     _reject_ungeocodable_submit(conn, body)
 
     # Submit-time gates BEFORE any spend (entitlement + monthly budget +
-    # concurrency + idempotency). Ungated for admin/legacy/ClickUp/deterministic;
+    # concurrency + idempotency). Ungated for admin/ClickUp/deterministic;
     # a rejected metered submit raises HTTPException here, before the URL parse.
     meter = _prepare_metered_submit(conn, claims, body, account_id)
     if meter is not None and meter.short_circuit_run is not None:
@@ -1852,6 +1856,8 @@ def _persist_failed_run(
     recorder: TraceRecorder,
     error_msg: str,
     extra_warnings: list[str],
+    # Optional for the same reason as create_estimation_run's: it inherits that
+    # caller's account and falls back to SYSTEM below.
     account_id: str | None = None,
 ) -> dict[str, Any]:
     trace = recorder.to_dict(f"failed: {error_msg.split(':', 1)[0]}")

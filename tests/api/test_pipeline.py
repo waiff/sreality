@@ -20,53 +20,56 @@ from api import pipeline as pipeline_module
 from api import schemas as s
 from api import tenant_pool
 
+_SUB = "11111111-1111-1111-1111-111111111111"
+_ACCT = "22222222-2222-2222-2222-222222222222"
+
 
 @pytest.fixture()
 def client(monkeypatch):
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
-    # Pipeline routes run on the tenant pool since Phase 1; the route-level
-    # verify_jwt is overridden to a legacy identity and account resolution is
+    # Pipeline routes run on the tenant pool since Phase 1; verify_jwt is
+    # overridden to a production-shaped JWT identity and account resolution is
     # stubbed so no SQL hits the fake connection object.
     api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
-    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {
-        "sub": None, "legacy": True,
-    }
+    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {"sub": _SUB}
     monkeypatch.setattr(
-        tenant_pool, "resolve_account_id", lambda conn, claims: None,
+        tenant_pool, "resolve_account_id", lambda conn, claims: _ACCT,
     )
+    # list_stages is the one RLS-only read here (W3): the stub takes NO
+    # account_id, so the route passing one would be a TypeError, not a silent pass.
     monkeypatch.setattr(
         pipeline_module, "list_stages",
-        lambda conn, *, account_id=None: {"data": [{
+        lambda conn: {"data": [{
             "id": 1, "key": "interested", "label": "Zájem", "position": 1,
             "color": "copper", "is_terminal": False, "is_entry": True,
         }]},
     )
     monkeypatch.setattr(
         pipeline_module, "add_card",
-        lambda conn, body, *, account_id=None: {
+        lambda conn, body, *, account_id: {
             "property_id": body.property_id, "stage_key": "interested", "added": True,
         },
     )
     monkeypatch.setattr(
         pipeline_module, "remove_card",
-        lambda conn, pid, *, account_id=None: {"removed": True},
+        lambda conn, pid, *, account_id: {"removed": True},
     )
     monkeypatch.setattr(
         pipeline_module, "move_card",
-        lambda conn, pid, body, *, account_id=None: {
+        lambda conn, pid, body, *, account_id: {
             "property_id": pid, "stage_id": body.stage_id, "stage_key": "offer",
         },
     )
     monkeypatch.setattr(
         pipeline_module, "create_stage",
-        lambda conn, body, *, account_id=None: {
+        lambda conn, body, *, account_id: {
             "id": 9, "key": "due_diligence", "label": body.label, "position": 6,
             "color": body.color, "is_terminal": body.is_terminal, "is_entry": False,
         },
     )
     monkeypatch.setattr(
         pipeline_module, "update_stage",
-        lambda conn, sid, body, *, account_id=None: {
+        lambda conn, sid, body, *, account_id: {
             "id": sid, "key": "viewing", "label": body.label or "Prohlídka",
             "position": 2, "color": body.color, "is_terminal": False,
             "is_entry": bool(body.is_entry),
@@ -74,20 +77,42 @@ def client(monkeypatch):
     )
     monkeypatch.setattr(
         pipeline_module, "reorder_stages",
-        lambda conn, body, *, account_id=None: {"data": [{"id": i} for i in body.ordered_ids]},
+        lambda conn, body, *, account_id: {"data": [{"id": i} for i in body.ordered_ids]},
     )
     monkeypatch.setattr(
         pipeline_module, "archive_stage",
-        lambda conn, sid, *, account_id=None: {"archived": True, "stage_id": sid},
+        lambda conn, sid, *, account_id: {"archived": True, "stage_id": sid},
     )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 
 
 def test_list_stages(client):
+    """A pure display read: RLS scopes it, so the route resolves no account and
+    the helper takes none (the stub's arity is the assertion)."""
     res = client.get("/pipeline/stages")
     assert res.status_code == 200
     assert res.json()["data"][0]["is_entry"] is True
+
+
+def test_list_stages_sql_carries_no_account_predicate() -> None:
+    """The display read's SQL must bind nothing: membership is `current_account_ids()`
+    on this surface exactly as it is on /listings/lookup."""
+    captured: dict[str, Any] = {}
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return None
+        def execute(self, sql, params=None): captured["sql"], captured["params"] = sql, params
+        def fetchall(self): return []
+
+    class _Conn:
+        def cursor(self, **_kw): return _Cur()
+
+    assert pipeline_module.list_stages(_Conn()) == {"data": []}
+    assert captured["params"] is None
+    assert "account_id" not in captured["sql"]
+    assert "%s" not in captured["sql"]
 
 
 def test_bookmark_property(client):
@@ -179,7 +204,7 @@ def test_add_card_inserts_at_entry_stage_and_logs_event():
         (lambda q: "INSERT INTO property_pipeline (" in q, [(42,)]),  # RETURNING -> inserted
         (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q, [_CARD_ROW]),
     ])
-    out = pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=42), account_id=None)
+    out = pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=42), account_id=_ACCT)
     assert out["added"] is True
     assert out["stage_key"] == "interested"
     assert any(
@@ -196,7 +221,7 @@ def test_add_card_idempotent_returns_existing_stage_no_event():
         (lambda q: "INSERT INTO property_pipeline (" in q, []),  # ON CONFLICT -> no row
         (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q, [existing]),
     ])
-    out = pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=42), account_id=None)
+    out = pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=42), account_id=_ACCT)
     assert out["added"] is False
     assert out["stage_key"] == "offer"  # the existing card's stage, untouched
     assert not any(
@@ -214,7 +239,7 @@ def test_add_card_redirects_merged_away_property_to_survivor():
         (lambda q: "INSERT INTO property_pipeline (" in q, [(42,)]),
         (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q, [_CARD_ROW]),
     ])
-    out = pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=99), account_id=None)
+    out = pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=99), account_id=_ACCT)
     assert out["added"] is True
     inserts = [p for q, p in conn.executed if "INSERT INTO property_pipeline (" in q]
     assert inserts and inserts[0][0] == 42
@@ -235,7 +260,7 @@ def test_add_card_locks_entry_stage_before_computing_board_position():
         (lambda q: "INSERT INTO property_pipeline (" in q, [(42,)]),
         (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q, [_CARD_ROW]),
     ])
-    pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=42), account_id=None)
+    pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=42), account_id=_ACCT)
     sqls = [q for q, _ in conn.executed]
     lock_idx = next(i for i, q in enumerate(sqls) if "FOR UPDATE" in q)
     max_idx = next(i for i, q in enumerate(sqls) if "max(board_position)" in q)
@@ -248,7 +273,7 @@ def test_add_card_locks_entry_stage_before_computing_board_position():
 def test_add_card_no_active_survivor_is_422():
     conn = _FakeConn([(lambda q: "RECURSIVE chain" in q, [])])  # missing / broken chain
     with pytest.raises(fastapi.HTTPException) as ei:
-        pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=7), account_id=None)
+        pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=7), account_id=_ACCT)
     assert ei.value.status_code == 422
 
 
@@ -258,7 +283,7 @@ def test_move_card_to_new_stage_logs_event_and_stamps_entered():
         (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q,
          [(42, 3, "offer", "Nabídka", 2, None, None, None, "3", "teal")]),
     ])
-    out = pipeline_module.move_card(conn, 42, s.MoveCardIn(stage_id=3), account_id=None)
+    out = pipeline_module.move_card(conn, 42, s.MoveCardIn(stage_id=3), account_id=_ACCT)
     sqls = [q for q, _ in conn.executed]
     assert any(
         "UPDATE property_pipeline SET" in q and "entered_stage_at = now()" in q
@@ -274,7 +299,7 @@ def test_move_card_reorder_only_logs_no_event():
         (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q,
          [(42, 1, "interested", "Zájem", 3, None, None, None, "1", "copper")]),
     ])
-    pipeline_module.move_card(conn, 42, s.MoveCardIn(stage_id=1, board_position=2.5), account_id=None)
+    pipeline_module.move_card(conn, 42, s.MoveCardIn(stage_id=1, board_position=2.5), account_id=_ACCT)
     sqls = [q for q, _ in conn.executed]
     assert any("UPDATE property_pipeline SET" in q and "board_position" in q for q in sqls)
     assert not any("entered_stage_at = now()" in q for q in sqls)
@@ -335,7 +360,7 @@ def test_create_stage_derives_key_and_appends_position():
         (lambda q: "INSERT INTO pipeline_stages" in q, [stage_row]),
     ])
     out = pipeline_module.create_stage(
-        conn, s.CreateStageIn(label="Due diligence", color="plum"), account_id=None,
+        conn, s.CreateStageIn(label="Due diligence", color="plum"), account_id=_ACCT,
     )
     assert out["key"] == "due_diligence"
     assert out["position"] == 6
@@ -346,7 +371,7 @@ def test_create_stage_derives_key_and_appends_position():
 def test_create_stage_rejects_palette_violation():
     conn = _FakeConn([])
     with pytest.raises(fastapi.HTTPException) as ei:
-        pipeline_module.create_stage(conn, s.CreateStageIn(label="X", color="neon"), account_id=None)
+        pipeline_module.create_stage(conn, s.CreateStageIn(label="X", color="neon"), account_id=_ACCT)
     assert ei.value.status_code == 422
 
 
@@ -356,7 +381,7 @@ def test_create_stage_rejects_a_padded_code():
     conn = _FakeConn([])
     with pytest.raises(fastapi.HTTPException) as ei:
         pipeline_module.create_stage(
-            conn, s.CreateStageIn(label="X", code=" 1"), account_id=None,
+            conn, s.CreateStageIn(label="X", code=" 1"), account_id=_ACCT,
         )
     assert ei.value.status_code == 422
 
@@ -371,7 +396,7 @@ def test_update_stage_clears_the_code_when_sent_explicit_null():
         (lambda q: "UPDATE pipeline_stages SET" in q and "RETURNING" in q, [updated]),
     ])
     out = pipeline_module.update_stage(
-        conn, 2, s.UpdateStageIn.model_validate({"code": None}), account_id=None,
+        conn, 2, s.UpdateStageIn.model_validate({"code": None}), account_id=_ACCT,
     )
     assert out["code"] is None
     sql, params = next(
@@ -389,7 +414,7 @@ def test_update_stage_leaves_the_code_alone_when_absent():
         (lambda q: "UPDATE pipeline_stages SET" in q and "RETURNING" in q, [updated]),
     ])
     pipeline_module.update_stage(
-        conn, 2, s.UpdateStageIn(label="Prohlídka"), account_id=None,
+        conn, 2, s.UpdateStageIn(label="Prohlídka"), account_id=_ACCT,
     )
     sql = next(
         q for q, _ in conn.executed if "UPDATE pipeline_stages SET" in q and "RETURNING" in q
@@ -404,7 +429,7 @@ def test_update_stage_crowning_entry_demotes_the_others():
          [(False, False)]),
         (lambda q: "UPDATE pipeline_stages SET" in q and "RETURNING" in q, [updated]),
     ])
-    out = pipeline_module.update_stage(conn, 2, s.UpdateStageIn(is_entry=True), account_id=None)
+    out = pipeline_module.update_stage(conn, 2, s.UpdateStageIn(is_entry=True), account_id=_ACCT)
     assert out["is_entry"] is True
     sqls = [q for q, _ in conn.executed]
     assert any(
@@ -412,9 +437,10 @@ def test_update_stage_crowning_entry_demotes_the_others():
         for q in sqls
     )
     # F1: the lookup + the row's own UPDATE are account-scoped too (not just the
-    # sibling-demote), so a legacy service-role call can't touch another account.
+    # sibling-demote) — a write must name its one owner (mig 294's per-account
+    # entry unique), which RLS can validate but cannot choose.
     assert all(
-        "account_id IS NOT DISTINCT FROM %s" in q
+        "account_id = %s" in q
         for q in sqls
         if "pipeline_stages" in q and ("WHERE id" in q or "RETURNING" in q)
     )
@@ -423,7 +449,7 @@ def test_update_stage_crowning_entry_demotes_the_others():
 def test_update_stage_rejects_uncrowning_entry():
     conn = _FakeConn([])
     with pytest.raises(fastapi.HTTPException) as ei:
-        pipeline_module.update_stage(conn, 1, s.UpdateStageIn(is_entry=False), account_id=None)
+        pipeline_module.update_stage(conn, 1, s.UpdateStageIn(is_entry=False), account_id=_ACCT)
     assert ei.value.status_code == 422
 
 
@@ -433,7 +459,7 @@ def test_update_stage_rejects_entry_that_is_terminal():
          [(False, True)]),  # already terminal
     ])
     with pytest.raises(fastapi.HTTPException) as ei:
-        pipeline_module.update_stage(conn, 4, s.UpdateStageIn(is_entry=True), account_id=None)
+        pipeline_module.update_stage(conn, 4, s.UpdateStageIn(is_entry=True), account_id=_ACCT)
     assert ei.value.status_code == 422
 
 
@@ -443,7 +469,7 @@ def test_reorder_rejects_set_mismatch():
          [(1,), (2,), (3,)]),
     ])
     with pytest.raises(fastapi.HTTPException) as ei:
-        pipeline_module.reorder_stages(conn, s.ReorderStagesIn(ordered_ids=[1, 2]), account_id=None)
+        pipeline_module.reorder_stages(conn, s.ReorderStagesIn(ordered_ids=[1, 2]), account_id=_ACCT)
     assert ei.value.status_code == 422
 
 
@@ -453,7 +479,7 @@ def test_archive_refuses_entry_stage():
          [(True, None)]),
     ])
     with pytest.raises(fastapi.HTTPException) as ei:
-        pipeline_module.archive_stage(conn, 1, account_id=None)
+        pipeline_module.archive_stage(conn, 1, account_id=_ACCT)
     assert ei.value.status_code == 409
 
 
@@ -464,7 +490,7 @@ def test_archive_refuses_stage_with_cards():
         (lambda q: "SELECT 1 FROM property_pipeline WHERE stage_id" in q, [(1,)]),
     ])
     with pytest.raises(fastapi.HTTPException) as ei:
-        pipeline_module.archive_stage(conn, 3, account_id=None)
+        pipeline_module.archive_stage(conn, 3, account_id=_ACCT)
     assert ei.value.status_code == 409
 
 
@@ -474,14 +500,46 @@ def test_archive_soft_retires_empty_stage():
          [(False, None)]),
         (lambda q: "SELECT 1 FROM property_pipeline WHERE stage_id" in q, []),
     ])
-    out = pipeline_module.archive_stage(conn, 3, account_id=None)
+    out = pipeline_module.archive_stage(conn, 3, account_id=_ACCT)
     assert out == {"archived": True, "stage_id": 3}
     assert any("SET archived_at = now()" in q for q, _ in conn.executed)
     # F2: every statement (existence check, cards-check, the archive UPDATE) is
-    # account-scoped — a legacy service-role call can't archive or probe another
-    # account's stage by id.
+    # account-scoped, so a stage id from another account can't be archived or
+    # probed (the 409-vs-success answer would leak that it holds cards).
     assert all(
-        "account_id IS NOT DISTINCT FROM %s" in q
+        "account_id = %s" in q
         for q, _ in conn.executed
         if "pipeline_stages WHERE id" in q or "property_pipeline WHERE stage_id" in q
     )
+
+
+# --- the no-account posture (W4) -------------------------------------------
+
+
+def test_pipeline_writes_without_an_account_are_400(client, monkeypatch):
+    """A membership-less JWT is ONE loud 400 on every pipeline write.
+
+    Before `require_account_id` each route forwarded the bare None into
+    account-predicated SQL: POST /pipeline/cards 500'd ("no entry stage
+    configured") because the entry-stage lookup matched nothing, and the stage
+    writes answered an empty 200 — the same silent shape that hid the seven-week
+    /listings/lookup outage. The RLS-only display read stays 200.
+    """
+    monkeypatch.setattr(tenant_pool, "resolve_account_id", lambda conn, claims: None)
+
+    assert client.get("/pipeline/stages").status_code == 200
+
+    writes = [
+        ("post", "/pipeline/cards", {"property_id": 42}),
+        ("patch", "/pipeline/cards/42", {"stage_id": 3}),
+        ("delete", "/pipeline/cards/42", None),
+        ("post", "/pipeline/stages", {"label": "Due diligence", "color": "plum"}),
+        ("post", "/pipeline/stages/reorder", {"ordered_ids": [1, 2]}),
+        ("patch", "/pipeline/stages/2", {"label": "Prohlídka"}),
+        ("delete", "/pipeline/stages/5", None),
+    ]
+    for method, path, body in writes:
+        call = getattr(client, method)
+        res = call(path, json=body) if body is not None else call(path)
+        assert res.status_code == 400, f"{method.upper()} {path} -> {res.status_code}"
+        assert res.json()["detail"] == "no account for caller"

@@ -95,11 +95,11 @@ tenant-scoped:
   BOTH the route's reads and writes — a `SET LOCAL` evaporates at transaction end, so a
   post-commit read-back on a fresh transaction would run claims-less and RLS would hide
   the row just written. `verify_jwt` is authentication; `tenant_conn` (via RLS) is
-  authorization — a route needing per-account isolation must use it, not `get_db_conn`. A
-  **legacy** caller (static `API_TOKEN` bearer, no Supabase `sub`) has no account
-  membership and would see zero rows under RLS, so it's routed to the unscoped
-  service-role connection instead (today's behavior, unchanged) until it re-auths with a
-  real JWT.
+  authorization — a route needing per-account isolation must use it, not `get_db_conn`. The
+  **legacy**-caller bypass (static `API_TOKEN` → the unscoped service-role connection) is
+  GONE (2026-09-11): `verify_jwt` is the sole claims producer and cannot emit a `legacy`
+  claim, so `tenant_conn` has NO fallback — an unset `TENANT_POOL_DB_URL` raises. The
+  `legacy_backfill_claim` TABLE stays (signup CAS); see `references/tenancy.md`.
 
 **Pooler-safe mutual exclusion: lease-row CAS, not session advisory locks (migration
 279, PR #717).** `pg_advisory_lock`/`unlock` are **session-scoped** — sound only on a
@@ -150,21 +150,21 @@ explicitly on every new function; grant back only the roles that need it.
   numbered file, commit it, apply via MCP, verify with a SELECT, and report. No approval
   gate; CI + the tracked file are the net.
 - **Open with `set local lock_timeout = '5s';` when a migration GRANT/REVOKEs or
-  CREATE-OR-REPLACEs a hot or cron-refreshed relation** (any matview, `browse_list`,
-  `listings`). Those take ACCESS EXCLUSIVE, and a whole-transaction loop holds every
-  lock it has already taken — so without a timeout it queues behind, or blocks, the
-  `*/10` health refresh or the 30-min map rebuild. Fail fast and retry instead.
+  CREATE-OR-REPLACEs a hot or cron-refreshed relation** (any matview, `browse_list`, `listings`).
+  Those take ACCESS EXCLUSIVE and a whole-transaction loop holds every lock it already took —
+  without a timeout it queues behind, or blocks, the `*/10` health refresh or the map rebuild.
 - **Destructive migrations** (`DROP TABLE`/`COLUMN`, type-changing `ALTER`, `DELETE`
   without `WHERE`, `TRUNCATE`) — **pause for explicit operator OK** ("yes, apply it") and
   take a `pg_dump` backup of the affected tables *first*. There's no staging DB, so these
   are largely irreversible.
-- Read-only inspection (counts, sample rows, schema introspection, verifying backfills)
-  needs no confirmation — just do it and report.
+- Read-only inspection (counts, sample rows, schema, verifying backfills) needs no confirmation.
 
 Correct flow for any schema change: (1) write the new numbered migration file in
 `migrations/`; (2) for destructive changes, get explicit approval + back up first;
-(3) apply via MCP (`apply_migration`), verify with a SELECT; (4) commit the migration
-file in the same change; (5) report what was applied and verified.
+(3) apply BEFORE merging — via MCP (`apply_migration`), or with no MCP in the session
+`gh workflow run apply_migration.yml --ref <branch> -f file=NNN_x.sql -f dry_run=false -f confirm=APPLY`
+(`psql -f`, statement autocommit: every statement idempotent, plain `SET lock_timeout`); verify
+with a SELECT; (4) commit the migration file in the same change; (5) report what was applied.
 
 **APPLY BEFORE YOU MERGE when the code reads the new schema.** Merging and applying are
 separate acts and nothing couples them. Migration 438 merged 2026-08-25 17:12 and was

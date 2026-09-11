@@ -15,7 +15,7 @@ Independent of the analytical, UI, and map tracks.
   provenance is now written on every download: `rendition` + decoded `stored_width`/`stored_height`.
   The image phase gained a wall-clock bound (`--image-max-seconds`, both workflows) because the count
   cap's throughput basis predates the bigger master.
-- **Next:** (1) the re-master lane over the ~1.5M legacy-crop rows (mig 496 + `mark_image_remastered`
+- **Next:** (1) the re-master lane over the ~3.55M stored legacy-crop rows (mig 496 + `mark_image_remastered`
   + `invalidate_derived_signals` are in place, the driver is not) — until it finishes, phash/CLIP are
   comparable only WITHIN a rendition; (2) a thumbnail rendition — the SPA/extension currently serve a
   master into every grid tile; (3) re-measure one image shard at the new template and resize
@@ -24,7 +24,7 @@ Independent of the analytical, UI, and map tracks.
   sreality_url, 'fl=', 2), '|')) op FROM images WHERE sreality_url LIKE '%fl=%') t` — to confirm the
   kept-op allowlist (`rot`) drops nothing that carried meaning.
 
-### Portal listing URLs — one contract, nine portals (2026-09-11, in progress)
+### Portal listing URLs — one contract, nine portals (2026-09-11, done)
 - Operator-reported: the listing page's Sreality chip 404s (`rodinny-dum` vs sreality's `rodinny`).
   Root cause is ONE asymmetry — sreality was the only portal whose page URL was not a stored fact,
   so the SPA reconstructed it from display labels. North star + waves:
@@ -41,9 +41,26 @@ Independent of the analytical, UI, and map tracks.
   `--conformance N` HEAD gate, `--report-check` → `outbound_url_parity`. Rails lifted into
   `scripts/backfill_support.py` (rebuild-gap wait + lock-fight retry) so `backfill_area_basis`
   shares them.
-- **Next:** operator dispatch (dry-run → conformance=40 → write) → mig 494 (`listings_public
-  .source_url`, from 425's body) → W2 SPA deletes the reconstruction → W3 rails (coverage view row
-  + check, weekly parity, weekly HEAD conformance).
+- **W3 (rails):** mig 495 adds a `source_url` row to `data_quality_by_source` (free 6-hourly
+  per-portal trend via the existing pg_cron capture); `outbound_url_coverage` in `verify_pipeline`
+  (ABSOLUTE active-NULL count per source, warn 50 / fail 500 — a new sreality code silently
+  producing NULLs would never move a share); `outbound_url_parity` = the reconciler's weekly dry
+  run with `--report-check` (Mon 05:41 UTC; the only detector that reaches the inactive archive);
+  `outbound_url_conformance` = `scripts/verify_outbound_urls.py` weekly (Tue 05:17 UTC; ~44 HEADs,
+  rotating quarter of the codebook per ISO week, concentration thresholds).
+- **Closed 2026-09-11:** migs 494 + 495 applied (hosted Supabase MCP), W2 #1403 + W3 #1405 merged,
+  Railway rolled out, read-only Playwright check on production: the reported listing's chip is the
+  exact canonical and a merged property's two sreality siblings (property 60, `rodinny` + `chalupa`)
+  each link their OWN page. W1 write pass: 227,292 rows filled (103,885 active / 123,407 inactive),
+  4,076 declined (`sub_cb_null` 4,073), zero unknown codes; the conformance gate BLOCKED the first
+  attempt (street held under a NULL provenance stamp → #1406) and passed 40/40 after. Rails seeded:
+  coverage ok (20 active sreality rows without a URL, warn at 50), conformance ok 2.27 % (1/44 = an
+  mmreality page answering 403 to HEAD — a portal quirk, not a URL defect; a crawler-portal HEAD
+  refusal is a known soft spot of the probe). **Filed, not built:**
+  the SPA's `api.ts` source registry is missing ceskereality/realitymix, BUT `estimation_runs.
+  source_kind`'s CHECK (mig 020) lists neither either — a URL of those portals pasted into the
+  estimation flow may violate the constraint; needs its own investigation (inbound URL→portal
+  registries, four copies), not a 4-line SPA patch.
 
 ### The nomination gate went STRUCTURAL — counts stopped vetoing (2026-09-08, done)
 - The 5th element of `walk_category` now means **"the walk reached the portal's end"**

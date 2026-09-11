@@ -364,11 +364,11 @@ The bundle itself carries no secret and every write is per-user + RLS-scoped
   `alarms`, `storage`, the two `host_permissions` origins) + a single-purpose
   statement in the Developer Dashboard listing.
 - Staged rollout, with the API kept backward-compatible across at least two
-  extension versions (the dual-auth window in `verify_jwt` already covers
-  this for the auth switch itself — older installed builds keep working
-  against a static `API_TOKEN` until that's rotated platform-wide, a
-  separate, deliberately-sequenced cutover per
-  `docs/design/waves-1-4-public-features.md`).
+  extension versions. **No auth safety net remains**: the `verify_jwt`
+  dual-auth window closed 2026-08-04 (PR #941), so a build still presenting
+  the static `API_TOKEN` gets a flat `401` today — it does not keep working
+  (`tests/api/test_auth.py` asserts this). Every install must carry a real
+  Supabase JWT; plan the rollout accordingly.
 
 Full detail: `docs/design/waves-1-4-public-features.md`, "Chrome Web Store
 readiness".

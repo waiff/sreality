@@ -119,6 +119,20 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "migration_drift_window": 25,
     "walk_coverage_warn_gap": 0.05,
     "walk_coverage_fail_gap": 0.15,
+    # Portal-URL contract (docs/design/portal-listing-url.md). ABSOLUTE counts of active
+    # rows with no source_url, per source: the failure being watched — sreality adds a
+    # sub-category code the closed codebook does not know and every new row of it
+    # silently gets NULL — would never move a share against ~800k rows, but it moves a
+    # count within a day. Crawler portals always emit a URL, so any NULL there is a
+    # parser regression.
+    "outbound_url_null_warn": 50,
+    "outbound_url_null_fail": 500,
+    # Weekly live conformance (scripts/verify_outbound_urls.py): a slug defect fails a
+    # whole (category_main, category_sub_cb) cell together, a scattered 404 is a
+    # delisting rule #3 has not caught up with — so the fail arm is CONCENTRATION.
+    "outbound_url_conformance_warn_share": 0.05,
+    "outbound_url_conformance_cell_min": 3,
+    "outbound_url_conformance_cell_fail_share": 0.67,
     # Property maintenance (2026-08-06 incident: 4 days of silently dead daily
     # sweeps + a stranded lease freezing every maintenance lane). The sweep
     # stamps app_settings.property_sweep_last_complete ONLY on a complete
@@ -2454,6 +2468,65 @@ def check_location_payload_shape_drift(conn: Any, thresholds: dict[str, Any]) ->
     }
 
 
+_OUTBOUND_URL_COVERAGE_SQL = """
+    SELECT source,
+           count(*)                                                       AS active_n,
+           count(*) FILTER (WHERE source_url IS NULL)                     AS null_n,
+           count(*) FILTER (WHERE source_url IS NULL
+                              AND first_seen_at > now() - interval '7 days') AS null_7d
+    FROM listings
+    WHERE is_active
+    GROUP BY source
+    ORDER BY source
+"""
+
+
+def check_outbound_url_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Active rows with no page URL, per portal — an ABSOLUTE count, not a share.
+
+    A listing's `source_url` is a stored fact for all nine portals (W0 of
+    docs/design/portal-listing-url.md): the eight crawlers emit the page they fetched,
+    sreality assembles its canonical from a closed codebook. The one silent failure is
+    sreality adding a sub-category code the codebook does not know — every new row of it
+    gets NULL, the SPA shows no chip, and a percentage over ~800k rows never notices.
+    A count of active NULLs does, within a day; `null_7d` names the fresh cohort so a
+    standing archive gap (rows the reconciler declined) is not mistaken for a regression.
+    The remedy is one codebook entry in scraper/sreality_url.py + a reconciler run.
+    """
+    with conn.cursor() as cur:
+        cur.execute(_OUTBOUND_URL_COVERAGE_SQL)
+        rows = cur.fetchall()
+    warn = int(thresholds["outbound_url_null_warn"])
+    fail = int(thresholds["outbound_url_null_fail"])
+    per_source = [
+        {"source": src, "active_n": int(active), "null_n": int(nulls), "null_7d": int(fresh)}
+        for src, active, nulls, fresh in rows
+    ]
+    worst = max(per_source, key=lambda r: r["null_n"], default=None)
+    worst_n = worst["null_n"] if worst else 0
+    status = "fail" if worst_n >= fail else "warn" if worst_n >= warn else "ok"
+    offenders = [r for r in per_source if r["null_n"] >= warn]
+    named = "; ".join(
+        f"{r['source']} {r['null_n']} active rows without a URL ({r['null_7d']} first seen "
+        f"in 7d)" for r in sorted(offenders, key=lambda r: -r["null_n"])[:4]
+    )
+    if offenders:
+        message = (
+            f"{named}. A sreality NULL means a sub-category code outside the closed "
+            "codebook (scraper/sreality_url.py) — add the entry, then run "
+            "reconcile_source_url; a crawler NULL is a parser regression."
+        )
+    else:
+        message = "Every active listing on every portal carries its page URL."
+    return {
+        "check_key": "outbound_url_coverage",
+        "status": status,
+        "value": worst_n,
+        "details": {"per_source": per_source, "warn": warn, "fail": fail},
+        "message": message,
+    }
+
+
 _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("llm_errors", check_llm_errors),
     ("llm_liveness", check_llm_liveness),
@@ -2481,6 +2554,9 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     # W4's standing P6 check. 6h lane + in-app bell; NOT in llm_health.yml's hourly
     # --only list yet — ship, soak, then promote (the same ladder as the ppm2 checks).
     ("location_payload_shape_drift", check_location_payload_shape_drift),
+    # Portal-URL contract: absolute count of active rows with no page URL. 6h lane +
+    # in-app bell; not in the hourly --only list (ship, soak, then promote).
+    ("outbound_url_coverage", check_outbound_url_coverage),
 ]
 # (the check body sits above this registry; the SQL it runs is
 # `_LOCATION_PAYLOAD_SHAPE_DRIFT_SQL`, built on the shape CASE the W4 gate shares)

@@ -4,10 +4,16 @@ native id) → MF rent/yield + sreality_id (app deep-link) + latest-estimate.
 The logic tests drive `lookup_portal_listings` against a tiny fake cursor that
 returns dict rows (the real query uses psycopg's dict_row factory); the route
 tests exercise the bearer gate, request validation, and delegation.
+
+Since W3 the read is RLS-only: it takes no account argument and its SQL carries
+no account predicate, so `current_account_ids()` is the single definition of
+membership shared with the SPA.
 """
 
 from __future__ import annotations
 
+import inspect
+import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -22,6 +28,8 @@ from api import main as api_main
 from api import portal_lookup as pl
 from api import schemas as s
 from api import tenant_pool
+
+_USER = uuid.uuid4()
 
 
 # ----------------------------------------------------------------------
@@ -194,8 +202,6 @@ def test_lookup_binds_one_value_pair_per_item() -> None:
 
 
 def test_lookup_account_query_targets_only_found_listings() -> None:
-    import uuid
-
     market_rows = [
         _mk_market_row("sreality", "a", True, sreality_id=1, listing_id=11,
                        property_id=100, source_url="https://sreality.cz/x",
@@ -204,15 +210,22 @@ def test_lookup_account_query_targets_only_found_listings() -> None:
     ]
     market_conn = _FakeConn(market_rows)
     tenant_conn = _FakeConn([_mk_account_row(11)])
-    acct = uuid.uuid4()
     pl.lookup_portal_listings(
-        market_conn, tenant_conn, _items(("sreality", "a"), ("idnes", "miss")), acct,
+        market_conn, tenant_conn, _items(("sreality", "a"), ("idnes", "miss")),
     )
     sql, params = tenant_conn.cur.executed
-    # one (listing_id, property_id, source_url) tuple — the miss is excluded —
-    # then account_id thrice (collection subquery + the two joins, F3 scoping).
-    assert params == [11, 100, "https://sreality.cz/x", acct, acct, acct]
-    assert sql.count("account_id IS NOT DISTINCT FROM %s") == 3
+    # One (listing_id, property_id, source_url) tuple — the miss is excluded —
+    # and NOTHING else: no account is bound, because none is taken.
+    assert params == [11, 100, "https://sreality.cz/x"]
+    assert sql.count("%s") == len(params)  # nothing else CAN be bound
+    # RLS-only by construction. Not "the predicate binds the right value" but
+    # "there is no predicate left to bind wrong" — the shape #917 broke is gone.
+    # `account_id` survives ONLY as the LATERAL's deterministic tiebreak.
+    code = "\n".join(line.split("--")[0] for line in sql.splitlines())
+    assert "IS NOT DISTINCT FROM" not in code
+    assert "account_id" not in code.replace(
+        "ORDER BY pp.updated_at DESC, pp.account_id", "",
+    )
 
 
 def test_lookup_preserves_request_order_even_if_db_reorders() -> None:
@@ -274,6 +287,36 @@ def test_fond_default_is_served_for_an_item_with_no_row_at_all() -> None:
     assert out["data"][0]["fond_per_m2_czk_default"] == s.DEFAULT_FOND_CZK_PER_M2
 
 
+def test_lookup_takes_no_account_argument() -> None:
+    """The assertable form of "this read has no second definition of membership":
+    there is no parameter an account could be passed to, so none can be dropped."""
+    assert "account_id" not in inspect.signature(pl.lookup_portal_listings).parameters
+
+
+def test_lookup_never_multiplies_rows_for_a_multi_membership_caller() -> None:
+    """RLS is plural — two accounts' cards on one property are two rows to the
+    tenant query. The SQL's LATERAL collapses them; this pins that the Python
+    shaping cannot undo that (one output row per REQUESTED item, always)."""
+    market_rows = [
+        _mk_market_row("sreality", "a", True, sreality_id=1, listing_id=11,
+                       property_id=100, category_main="byt",
+                       category_type="prodej", is_active=True),
+    ]
+    # Two rows for listing 11 — what an un-collapsed plural join would return.
+    account_rows = [
+        _mk_account_row(11, in_pipeline=True, pipeline_stage_id=3,
+                        pipeline_stage_key="interested", pipeline_stage_label="Zájem"),
+        _mk_account_row(11, in_pipeline=True, pipeline_stage_id=8,
+                        pipeline_stage_key="offer", pipeline_stage_label="Nabídka"),
+    ]
+    items = _items(("sreality", "a"))
+    out = pl.lookup_portal_listings(
+        _FakeConn(market_rows), _FakeConn(account_rows), items,
+    )
+    assert len(out["data"]) == len(items)
+    assert out["data"][0]["pipeline"]["in_pipeline"] is True
+
+
 # ----------------------------------------------------------------------
 # Route: POST /listings/lookup
 # ----------------------------------------------------------------------
@@ -283,15 +326,16 @@ def client(monkeypatch) -> Any:
     # The route runs on the tenant pool since Phase 1 — stub the whole
     # tenant_conn chain (auth included) for delegation/validation tests; the
     # auth gate itself is exercised by test_route_fails_closed_without_token.
-    # verify_jwt is overridden too (the route now also depends on it directly to
-    # resolve account_id) and resolve_account_id is stubbed so no SQL hits the
-    # fake connection object.
+    # resolve_account_id RAISES: the route is RLS-only, so reaching account
+    # resolution at all is the regression (a resolved account is a second
+    # definition of membership, and #917 proved it can silently bind NULL).
+    def _no_account(conn: Any, claims: dict) -> None:
+        raise AssertionError("route must not resolve an account")
+
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
     api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
-    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {
-        "sub": None, "legacy": True,
-    }
-    monkeypatch.setattr(tenant_pool, "resolve_account_id", lambda conn, claims: None)
+    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {"sub": str(_USER)}
+    monkeypatch.setattr(tenant_pool, "resolve_account_id", _no_account)
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 
@@ -299,7 +343,7 @@ def client(monkeypatch) -> Any:
 def test_route_delegates_and_returns_data(client, monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_lookup(market_conn, tenant_conn, items, account_id=None):
+    def fake_lookup(market_conn, tenant_conn, items):
         captured["items"] = items
         return {"data": [{"source": "sreality", "source_id": "1", "found": True}]}
 
@@ -308,6 +352,8 @@ def test_route_delegates_and_returns_data(client, monkeypatch) -> None:
         "/listings/lookup",
         json={"items": [{"source": "sreality", "source_id": "1"}]},
     )
+    # 200 with the fixture's raising resolve_account_id in place: the route
+    # never asked who the caller is — RLS on the tenant connection did.
     assert res.status_code == 200
     assert res.json()["data"][0]["source"] == "sreality"
     assert [(i.source, i.source_id) for i in captured["items"]] == [("sreality", "1")]

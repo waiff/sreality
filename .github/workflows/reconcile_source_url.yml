@@ -22,6 +22,12 @@ name: Reconcile source_url (sreality page URLs from typed columns)
 # Required GitHub secret: SUPABASE_DB_URL.
 
 on:
+  # Weekly parity (W3): the same walk in DRY-RUN with report_check — rows whose stored
+  # URL disagrees with today's derivation on a 404-critical segment, plus the unknown-
+  # code histogram — lands in pipeline_check_results as `outbound_url_parity`. It is the
+  # only detector that reaches the inactive archive; it writes nothing to listings.
+  schedule:
+    - cron: "41 5 * * 1"
   workflow_dispatch:
     inputs:
       write:
@@ -115,7 +121,7 @@ jobs:
           if [ -n "${{ inputs.max_seconds }}" ]; then ARGS="$ARGS --max-seconds ${{ inputs.max_seconds }}"; fi
           if [ "${{ inputs.write }}" = "true" ]; then ARGS="$ARGS --write"; fi
           if [ "${{ inputs.clear }}" = "true" ]; then ARGS="$ARGS --clear"; fi
-          if [ "${{ inputs.report_check }}" = "true" ]; then ARGS="$ARGS --report-check"; fi
+          if [ "${{ inputs.report_check }}" = "true" ] || [ "${{ github.event_name }}" = "schedule" ]; then ARGS="$ARGS --report-check"; fi
           if [ -n "${{ inputs.rebuild_wait_seconds }}" ]; then ARGS="$ARGS --rebuild-wait-seconds ${{ inputs.rebuild_wait_seconds }}"; fi
           if [ "${{ inputs.ignore_rebuild }}" = "true" ]; then ARGS="$ARGS --ignore-rebuild"; fi
           if [ "${{ inputs.verbose }}" = "true" ]; then ARGS="$ARGS --verbose"; fi

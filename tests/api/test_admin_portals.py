@@ -113,7 +113,7 @@ def client(monkeypatch):
     conn = _Conn(_seed_portals())
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: conn
     api_main.app.dependency_overrides[deps.require_admin] = (
-        lambda: {"is_admin": True, "legacy": True}
+        lambda: {"sub": "00000000-0000-0000-0000-0000000000ad", "app_metadata": {"is_admin": True}}
     )
     c = TestClient(api_main.app)
     c._conn = conn  # type: ignore[attr-defined]
