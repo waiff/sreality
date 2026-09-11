@@ -368,6 +368,15 @@ export default function Pipeline() {
   );
 }
 
+/* The drop zone's floor: three card rows (3 × ~5.5rem card + the 0.5rem gaps).
+ *
+ * A stage with one card — or none — used to offer a ~6rem target pinned to the
+ * top of a board that runs thousands of pixels tall. Scrolled down to the card
+ * you wanted to move, the empty stage had no reachable target at all. The zones
+ * now stretch to the tallest column (`items-stretch` on the row, `grow` on the
+ * list), and this floor keeps a SHORT board from collapsing back to a sliver. */
+const DROP_ZONE_MIN = 'min-h-[18rem]';
+
 /* The board's shape, drawn from the stage list alone.
  *
  * Not a generic shimmer: it is the real column layout with the real labels and
@@ -379,9 +388,9 @@ function BoardSkeleton({ stages }: { stages: PipelineStage[] }) {
   const columns: Array<PipelineStage | null> =
     stages.length > 0 ? stages : [null, null, null];
   return (
-    <div className="mt-6 flex gap-4 overflow-x-auto pb-4" aria-busy="true">
+    <div className="mt-6 flex items-stretch gap-4 overflow-x-auto pb-4" aria-busy="true">
       {columns.map((s, i) => (
-        <div key={s?.id ?? `skeleton-${i}`} className="w-72 shrink-0">
+        <div key={s?.id ?? `skeleton-${i}`} className="flex w-72 shrink-0 flex-col">
           <div
             className="flex items-baseline justify-between px-1 pb-2 border-b-2"
             style={{ borderColor: s ? stageColor(s) : 'var(--color-rule)' }}
@@ -393,7 +402,7 @@ function BoardSkeleton({ stages }: { stages: PipelineStage[] }) {
               {s?.label ?? ' '}
             </span>
           </div>
-          <ul className="mt-3 min-h-24 space-y-2 p-1">
+          <ul className={`mt-3 grow space-y-2 p-1 ${DROP_ZONE_MIN}`}>
             {[0, 1].map((n) => (
               <li
                 key={n}
@@ -502,7 +511,9 @@ function Board({
         if (plan) move.mutate(plan);
       }}
     >
-      <div className="mt-6 flex gap-4 overflow-x-auto pb-4">
+      {/* items-stretch: every column is as tall as the tallest, so each stage's
+          drop zone spans the whole board height instead of a header-high sliver. */}
+      <div className="mt-6 flex items-stretch gap-4 overflow-x-auto pb-4">
         {stages.map((s) => (
           <StageColumn
             key={s.id}
@@ -808,7 +819,7 @@ function StageColumn({
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `${STAGE_PREFIX}${stage.id}` });
   return (
-    <div className="w-72 shrink-0">
+    <div className="flex w-72 shrink-0 flex-col">
       <div
         className="flex items-baseline justify-between px-1 pb-2 border-b-2"
         style={{ borderColor: stageColor(stage) }}
@@ -825,7 +836,7 @@ function StageColumn({
       </div>
       <ul
         ref={setNodeRef}
-        className={`mt-3 min-h-24 space-y-2 rounded-[var(--radius-md)] p-1 transition-colors ${
+        className={`mt-3 grow space-y-2 rounded-[var(--radius-md)] p-1 transition-colors ${DROP_ZONE_MIN} ${
           isOver
             ? 'bg-[var(--color-inset)] outline outline-1 outline-[var(--color-rule-strong)]'
             : ''
