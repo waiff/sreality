@@ -6500,6 +6500,14 @@
           "type": "boolean",
           "default": "false",
           "options": null
+        },
+        {
+          "name": "reopen",
+          "description": "With listing_ids: un-retire their 'sreality-749-crop' rows first (two-strike path again)",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
         }
       ],
       "secrets": [
