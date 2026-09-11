@@ -22,9 +22,18 @@ Independent of the analytical, UI, and map tracks.
   `--conformance N` HEAD gate, `--report-check` → `outbound_url_parity`. Rails lifted into
   `scripts/backfill_support.py` (rebuild-gap wait + lock-fight retry) so `backfill_area_basis`
   shares them.
-- **Next:** operator dispatch (dry-run → conformance=40 → write) → mig 494 (`listings_public
-  .source_url`, from 425's body) → W2 SPA deletes the reconstruction → W3 rails (coverage view row
-  + check, weekly parity, weekly HEAD conformance).
+- **W3 (rails):** mig 495 adds a `source_url` row to `data_quality_by_source` (free 6-hourly
+  per-portal trend via the existing pg_cron capture); `outbound_url_coverage` in `verify_pipeline`
+  (ABSOLUTE active-NULL count per source, warn 50 / fail 500 — a new sreality code silently
+  producing NULLs would never move a share); `outbound_url_parity` = the reconciler's weekly dry
+  run with `--report-check` (Mon 05:41 UTC; the only detector that reaches the inactive archive);
+  `outbound_url_conformance` = `scripts/verify_outbound_urls.py` weekly (Tue 05:17 UTC; ~44 HEADs,
+  rotating quarter of the codebook per ISO week, concentration thresholds).
+- **Open:** apply mig 494 then merge W2 (#1403); apply mig 495 then merge W3. **Filed, not built:**
+  the SPA's `api.ts` source registry is missing ceskereality/realitymix, BUT `estimation_runs.
+  source_kind`'s CHECK (mig 020) lists neither either — a URL of those portals pasted into the
+  estimation flow may violate the constraint; needs its own investigation (inbound URL→portal
+  registries, four copies), not a 4-line SPA patch.
 
 ### The nomination gate went STRUCTURAL — counts stopped vetoing (2026-09-08, done)
 - The 5th element of `walk_category` now means **"the walk reached the portal's end"**

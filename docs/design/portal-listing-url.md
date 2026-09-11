@@ -1,6 +1,11 @@
 # Portal listing URLs — one contract, nine portals
 
-**Status (2026-09-11):** W0 in PR #1400; W1 stacked on it. Operator rulings: the Supabase MCP is
+**Status (2026-09-11):** W0 merged + live (#1400); W1 merged (#1402, refinement #1404); the dry run
+walked 824,207 rows (227,319 sreality rows to fill, zero unknown codes); W2 (#1403) waits on migration
+494 being applied; W3 rails in PR (#1405, migration 495). **W1 write pass DONE 2026-09-11 07:48Z**
+(after #1406): conformance gate 40/40 exact; 824,349 rows walked in 9 min; 227,292 sreality rows
+written (103,885 active / 123,407 inactive), 93 already canonical from W0, 4,076 declined (4,073
+`sub_cb_null`, 3 `locality_null`), zero unknown codes. Operator rulings: the Supabase MCP is
 the DB access path; inactive rows DO get URLs; canonical string or nothing (never a placeholder);
 the weekly HEAD probe is approved; CLAUDE.md gets a rule-21 clause (not a new rule). Investigation
 + a five-lens adversarial verification + a three-angle design panel (Opus 5) sit behind every
@@ -366,7 +371,10 @@ URL — **before any migration or SPA change**.
 - **Inbound URL→portal classification** has four registries (`chrome-extension/src/portals.ts`,
   `scraper/source_dispatcher._KIND_SUFFIXES`, `scraper/url_parser.py`, `frontend/src/lib/api.ts`) and the
   fourth has already drifted (missing `ceskereality`, `realitymix`). That is a different contract
-  (parse, not build). The **drift** ships as a 4-line PR (W3.4); the **unification** is filed, not started.
+  (parse, not build). **Build note (2026-09-11):** the "4-line drift fix" was NOT shipped — migration
+  020's `estimation_runs.source_kind` CHECK constraint lists neither portal either, so the SPA fix
+  alone could move the failure from wrong copy to a constraint error. Filed for its own
+  investigation with the registry unification.
 - **The 8 crawler `detail_url()` builders and 7 extension id-extractors** stay where rule #21 puts them.
 - **`canonical_url()` normalisation of pasted URLs** in the estimation entry, and the two-things-named-
   `source_url` in the pasted-URL envelope (`estimation_runs.input_url` = what was pasted;
