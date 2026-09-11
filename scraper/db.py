@@ -111,6 +111,10 @@ LISTING_COLUMNS: tuple[str, ...] = (
     # Portal-declared publication/last-bump timestamp (migration 266). Out of
     # every content hash (bazos re-stamps it per bump; backfills stay free).
     "published_at",
+    # The listing's page on its own portal, emitted by every portal's parser (sreality
+    # assembles it in scraper.sreality_url) — a stored fact read everywhere and
+    # reconstructed nowhere. Out of every content hash (identity, not content).
+    "source_url",
 )
 
 # Postgres type for each LISTING_COLUMN, used to build the jsonb_to_recordset
@@ -158,6 +162,7 @@ _LISTING_COLUMN_PGTYPE: dict[str, str] = {
     "street_id": "integer",
     "street_name_key": "text",
     "published_at": "timestamptz",
+    "source_url": "text",
 }
 assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
     "_LISTING_COLUMN_PGTYPE drifted from LISTING_COLUMNS"
@@ -177,7 +182,27 @@ assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
 # fetch that yields no date must not erase what an earlier fetch or a raw_json backfill
 # recorded — a fresher portal date still wins. Same rails: out of the content hash,
 # informational only.
-_PRESERVE_IF_NULL_COLUMNS = frozenset({"street", "house_number", "published_at"})
+# source_url (docs/design/portal-listing-url.md): an incoming NULL can only mean "the
+# parser could not assemble the URL" (a sreality code outside its codebook, a missing
+# locality), never "the listing left its page" — so it must not erase a stored URL, or
+# one detail-drain cycle would wipe the history reconciler's fill (the migration-262
+# street incident again). Clearing a known-bad URL is a deliberate act that belongs to
+# scripts/reconcile_source_url.py, never to the ingest path. Behaviour-preserving for the
+# crawler portals, whose parsers always emit a non-empty URL (ScrapedListing enforces it).
+_PRESERVE_IF_NULL_COLUMNS = frozenset({"street", "house_number", "published_at", "source_url"})
+
+
+def detail_ref(source: str, source_url: str | None) -> str | None:
+    """The URL a detail fetch may use, or None to fetch by native id.
+
+    sreality is ALWAYS None, and that is a safety boundary, not an optimisation: its
+    listings.source_url is the human page, which 302s into a login.seznam.cz autologin
+    chain and an infinite `cwtkn=` redirect loop (contracts/portals/sreality.yaml — "must
+    not be" evaded). The scraper reaches sreality by id through /api/v1/estates. This is
+    the one place that decision lives; every enqueue path that carries a stored URL into
+    the queue routes through it.
+    """
+    return None if source == "sreality" else source_url
 
 # street_name_key is NOT independently preserve-if-null: it is a pure function of
 # street, so it must follow the STREET's preserve decision — preserved exactly when
@@ -871,8 +896,8 @@ def ingest_scraped_listing(
     # because its column default is 'sreality' — inserting only source_id_native would
     # transiently write ('sreality', <native_id>) and could collide with a real sreality
     # row on the UNIQUE(source, source_id_native) index (ON CONFLICT (sreality_id) does
-    # not arbitrate it → unique_violation → drain wedge). source_url is not part of the
-    # key, so it stays on the post-insert UPDATE.
+    # not arbitrate it → unique_violation → drain wedge). source_url rides the shared
+    # column registry like every other parsed column (LISTING_COLUMNS).
     row["source"] = listing.source
     row["source_id_native"] = listing.source_id_native
     row["discovery_seq"] = discovery_seq
@@ -889,11 +914,6 @@ def ingest_scraped_listing(
                     (listing.source, listing.source_id_native),
                 )
                 listing_id = int(cur.fetchone()[0])
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE listings SET source_url = %s WHERE id = %s",
-                (listing.source_url, listing_id),
-            )
         _ensure_property(conn, listing_id, listing.source)
         if result != "unchanged":
             # Enqueue for the incremental property-stats recompute — the exact
@@ -1541,9 +1561,8 @@ def presence_candidates(
             tuple(scope_params) + (ids,),
         )
         rows = cur.fetchall()
-    ref_none = seen_key == "sreality_id"
     return (
-        [(str(r[0]), None if ref_none else r[1], r[2]) for r in rows],
+        [(str(r[0]), detail_ref(source, r[1]), r[2]) for r in rows],
         active_rows,
     )
 

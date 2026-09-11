@@ -215,7 +215,8 @@ incident history: `docs/architecture.md` § Architectural rules.
     attaches new singletons + recomputes only queued properties (O(changes)); the daily full sweep (04:15) is
     the reconcile backstop. Both share the `sreality-property-maintenance` concurrency group.
 21. **Every portal runs through ONE shared framework (Phase 4); per-portal code is a fetcher + parser +
-    config row — no per-portal branches in shared code.** `portal_base` / `portal` / `portal_runner`; one
+    config row — no per-portal branches in shared code.** The parser emits the row's `source_url` — a stored
+    fact read everywhere, reconstructed nowhere (sreality: `scraper/sreality_url.py`). `portal_base` / `portal` / `portal_runner`; one
     source-generic `listing_detail_queue`. A walk that can't be proven complete nominates nothing; its
     listings close only through gone detail fetches (rule #3). `supports_complete_walk` is posture. Sanctioned
     per-portal hooks: sreality's district-split; ceskereality's and sreality's bespoke `probe_category`

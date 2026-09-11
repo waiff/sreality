@@ -15,6 +15,7 @@ import re
 from typing import Any
 from unicodedata import combining, normalize
 
+from scraper import sreality_url
 from scraper.area import derive_headline_area
 from scraper.published import iso_date
 from scraper.street import street_from_locality
@@ -267,6 +268,11 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         # present on ~40% of rows) is the weak fallback bound for publish-to-
         # ingest SLO math, not first publication.
         "published_at": iso_date(raw.get("edited")),
+        # The listing's page on sreality — a stored FACT every surface reads and none
+        # reconstructs (docs/design/portal-listing-url.md). Assembled from sreality's own
+        # seo names + its closed sub-category codebook; None (counted upstream) when a
+        # part is missing, and preserve-if-null at the write so a None never erases.
+        "source_url": sreality_url.from_payload(raw)[0],
     }
 
 

@@ -30,7 +30,9 @@ GONE_STATUSES: frozenset[int] = frozenset({404, 410})
 
 Outcome = Literal["unchanged", "updated", "gone", "fetch_error"]
 
-_DIFF_SKIP_KEYS: frozenset[str] = frozenset({"sreality_id", "lon", "lat"})
+# source_url is identity, not content: a locality slug drifting or the 2026-05-26 payload
+# rebuild must not read as "the listing changed" (docs/design/portal-listing-url.md).
+_DIFF_SKIP_KEYS: frozenset[str] = frozenset({"sreality_id", "lon", "lat", "source_url"})
 
 
 class FreshnessResult(TypedDict):

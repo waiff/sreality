@@ -15,10 +15,10 @@ test / log helpers: `scripts/test-summary.sh` and `scripts/logs.sh <run-id> [pat
 1. Add the column with a new numbered migration (`alter table listings add column ...`). Never
    touch `001_initial.sql`.
 2. Update the parser in `scraper/parser.py` to extract the field.
-3. Update the upsert in `scraper/db.py` to include the new column.
-4. Backfill old rows: either leave them NULL (acceptable if the column is nullable) or run a
-   one-off SQL update from the `raw_json` column, which already contains the full source
-   record.
+3. Add it to `scraper/db.py` `LISTING_COLUMNS` + `_LISTING_COLUMN_PGTYPE` (covers BOTH write paths) and,
+   for crawler portals, `scraped_listing._LISTING_FIELDS`; `_PRESERVE_IF_NULL_COLUMNS` only if a NULL must never erase.
+4. Backfill old rows from NARROW typed columns via a `scripts/backfill_*.py` dispatch job (never a
+   `raw_json` pass — ~62 KB/row detoast); NULL is acceptable for a nullable column.
 
 ## Refreshing per-source HTML fixtures
 
