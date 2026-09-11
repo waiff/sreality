@@ -84,7 +84,10 @@ _BREAKER_SLEEP_S = 60.0
 _BREAKER_TRIP_ABORT = 3
 # Six shards share one CDN, so the per-process cap is a sixth of the lane's real
 # footprint — and images.yml is fetching the same host in the same window.
-_MAX_CONCURRENCY_PER_HOST = 4
+# Measured 2026-09-11 over the first two full ticks (~114k downloads at 4 per host
+# alongside images.yml): zero 403s, zero breaker trips, 0.5% transient deferrals —
+# throughput was bound by this cap, not by the workers. 8 halves the campaign.
+_MAX_CONCURRENCY_PER_HOST = 8
 _MAX_BIGINT = 9223372036854775807
 
 # `hashint8` returns a SIGNED int4, so a bare `%` yields negative residues that
