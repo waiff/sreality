@@ -47,6 +47,21 @@ component is slimmed twice — each wave rewrites one component and slims its st
   snapshot re-mine, LLM lane and their workflows go; each contract is rewritten to ≤ 10 entries, one
   per claim type, the town entry mandatory and live; the loader refuses any other shape; the claims
   table slims to 8 columns and its side tables go. Done when the red line is zero for every portal.
+  - **W1-a shipped** (2026-09-11): the hourly intake is the only writer of `location_claims`. It
+    joins the LATEST stored detail body per `(source, source_id_native)` and mines it with the 14
+    page readers, hash-gated on `portal_raw_payloads.contract_version IS DISTINCT FROM` the portal's
+    active contract version (no new table — 403's column, never populated). ONE registry of 24
+    readers (`claims_intake.READERS`), the three name-only mirrors gone. R2 unconfigured skips the
+    page half with one warning; the payload half never depends on the bucket. Folded in:
+    `page_readers.py` + `claims_common.py` out of the archive lane. Deleted: 9 modules
+    (claims_remine, claims_remine_archive, claims_remine_verify, claims_llm, town_candidates,
+    refetch_cohort, payload_backfill, payload_prune, payload_budget), 12 workflows, 10 scripts,
+    19 test modules, the `payload_dual_write` / `payload_index_archive` limits and the payload-churn
+    instrument (detail bodies are always archived now, index bodies never), and the intake's writes
+    to `location_claim_observations` / `location_claim_absences` / `location_enrichment_state` — a
+    refusal is a counter and one log line per reason. bazos@4 drops the 16 never-executed LLM
+    entries. 27,420 lines deleted / 2,559 added. **Next (W1-b):** drop those three tables, rewrite each contract
+    to <= 10 entries with the town entry mandatory, slim `location_claims`.
 - **W2 — the resolver at four steps, the answer table at 27 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and

@@ -101,65 +101,38 @@ so that is a deliberate choice. Hashed fields are written with a targeted single
 never by replaying a whole `ScrapedListing`, which would rewrite every other column from a
 possibly-stale stored page and could regress a price the portal has since changed.
 
-## The location-data gates riding the ingest path
+## The payload archive riding the ingest path
 
-All are OFF by default, cached ~60 s per process (a flip reaches the always-on worker within a minute, a
-cron run instantly), and wrapped so any failure warns and returns — an instrument or an archive must never
-break the scrape it rides in. **None may be enabled before the operator's churn + storage sign-off**
-(02 §2.3.2's gate; `python -m scripts.location_payload_churn_report`).
+**A `detail` body is ALWAYS archived; every other `page_kind` NEVER is.** One page-kind comparison
+(`scraper.db._payload_archive_enabled`) — no flag, no per-portal limit, no measurement corpus. The
+three gates that stood here until 2026-09-11 (`PortalLimits.payload_dual_write`, the non-detail
+`payload_index_archive`, a weighed-surface check against `location_data.payload_budget`) went with
+the modules that read them, along with the `location_payload_shadow_hash` churn instrument: rule 25
+makes the stored detail body the hourly claim lane's SECOND SUBSTRATE, not an opt-in experiment. The
+surviving rule is GRAIN — a `detail` body is ONE listing's page and is mined for that listing's
+claims; index/map/gazetteer/snapshot bodies are whole-SURFACE artefacts refetched on the walk cadence
+that no listing's claim can come from.
 
-- **`app_settings.location_payload_shadow_hash`** (W2a-0) — the *instrument*. Counts fetches and
-  raw-vs-normalised changes into `portal_payload_churn`, one row per `(source, source_id_native,
-  page_kind, normalizer_version)`, **no body ever stored**.
-- **`PortalLimits.payload_dual_write`** (W2a-2) — the *archive*, and the OUTER gate every body passes:
-  everything `upsert_portal_raw_page` stages (7 HTML detail writers + 3 index archivers) plus sreality's
-  estate JSON and bezrealitky's advert-with-query from their own `append_payload_if_enabled` call sites. A
-  per-portal **operational limit**, not an app_settings flag, so no migration. Alone: only `detail`.
-- **`PortalLimits.payload_index_archive`** (W2a-6) — the *surface-grain second gate*, ANDed on top for
-  **every `page_kind` except `detail`**. The split is about GRAIN, not the word "index": ceskereality's map
-  and bezrealitky's gazetteer declare `archive: true`, so a gate naming only `'index'` would have let both
-  archive every walk. It only narrows dual-write, never widens it.
-- **A measured page weight** (W2a-7) — the *third gate, not an operator switch*. The chokepoint refuses any
-  `(source, page_kind)` missing from `location_data.payload_budget.PORTAL_STORAGE` (today: every portal's
-  `detail`), since archiving an uncosted surface silently invalidates the signed ceiling.
-  **`payload_index_archive` does nothing until that surface is measured** in —
-  `python -m scripts.location_payload_storage_ceiling` re-derives it; logs `payload archive refuses
-  unmeasured surface source=… page_kind=…`.
+Everything `upsert_portal_raw_page` stages (7 HTML detail writers) passes through it, plus sreality's
+estate JSON and bezrealitky's advert-with-query from their own `append_payload_if_enabled` call
+sites. Every failure warns and returns — an archive must never break the scrape it rides in.
 
-**Bodies live in R2, so `payload_dual_write` needs the R2 env vars** (the image lane's four) — on all 14
-page-fetching lanes since #1074, held by `tests/test_scrape_lane_r2_env.py`; MISSING when the flag was first
-called ready, and INVISIBLE: the append warns `payload archive needs R2 for …` and archives nothing while the
-scrape stays green. Railway's worker: own dashboard. Over `LOCATION_PAYLOAD_R2_THRESHOLD_BYTES` (2048, TOAST)
-compressed spills to `body_r2_key` — every portal but bezrealitky, whose small bodies archive inline.
-Knobs: `LOCATION_PAYLOAD_VERSION_CAP` (2), `LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS` (7, per-listing time
-floor; 0 disables), `LOCATION_PAYLOAD_STATS_EVERY` (200).
-
-```sql
--- one portal; swap the key for "payload_index_archive" to add its non-detail surfaces
-update portals set operational_limits = coalesce(operational_limits, '{}'::jsonb)
-  || '{"payload_dual_write": true}'::jsonb where source = 'idnes';
-insert into app_settings (key, value) values                  -- or the global underlay
-  ('scraper_limits_global', '{"payload_dual_write": true}'::jsonb)
-  on conflict (key) do update set value = app_settings.value || excluded.value;
-```
+**Bodies live in R2, so the archive needs the R2 env vars** (the image lane's four) — on all 14
+page-fetching lanes since #1074 AND on `location_claims_intake.yml` (which now READS them back),
+held by `tests/test_scrape_lane_r2_env.py`; MISSING when the path was first called ready, and
+INVISIBLE: the append warns `payload archive needs R2 for …` and archives nothing while the scrape
+stays green. Railway's worker: own dashboard. Over `LOCATION_PAYLOAD_R2_THRESHOLD_BYTES` (2048,
+TOAST) compressed spills to `body_r2_key` — every portal but bezrealitky, whose small bodies archive
+inline. Knobs: `LOCATION_PAYLOAD_VERSION_CAP` (2), `LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS` (7,
+per-listing time floor; 0 disables), `LOCATION_PAYLOAD_STATS_EVERY` (200).
 
 Verify with `select source, page_kind, count(*), max(version_seq) from portal_raw_payloads group by 1,2;`
-— append-on-CHANGE, so an unchanged refetch must add no row. Failures read `payload archive append failed
-source=… key=…` / `payload archive limit read failed source=…` in the walk or drain log and are never fatal
-— so **a broken archive looks like a healthy scrape**: `portal_raw_pages` keeps filling while
-`portal_raw_payloads` silently stops. The audit below catches that (it calls it STALLED).
-
-**Before flipping `payload_index_archive`, run
-`python -m scripts.location_index_archive_audit`** (`--skip-db` for the code/contract half
-alone, which also degrades to that half on its own if the DB read times out). It reports each
-portal on three axes — what the contract asks, whether the code's archive call site is
-`wired`/`gated`/`absent`, and whether staging AND payload rows are accumulating. Today all three
-call sites (sreality, remax, ceskereality) are **gated**: their client-side freshness skip returns
-before the archive call, so enabling the flag archives an index body at most once per
-`INDEX_ARCHIVE_REFRESH_HOURS` (22 h) per page position and drops every intra-window change. A
-KNOWN GAP, commented at each call site; reworking the skip is an open P2 question — the audit
-measures it, it does not fix it. Classification is by **reachability**, not by the guard merely
-being present, so when P2 hoists the append above the guard the audit reads `wired`.
+— append-on-CHANGE, so an unchanged refetch must add no row; `detail` is the only kind you will see.
+Failures read `payload archive append failed source=… key=…` in the walk or drain log and are never
+fatal — so **a broken archive looks like a healthy scrape**: `portal_raw_pages` keeps filling while
+`portal_raw_payloads` silently stops, and the hourly claim lane's page half quietly mines nothing.
+`select source, count(*) filter (where contract_version is null) from portal_raw_payloads
+where page_kind = 'detail' group by 1;` is the backlog the lane's hash gate is working through.
 
 ## How to manually trigger the scrapers
 
