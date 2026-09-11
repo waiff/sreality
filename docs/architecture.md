@@ -1703,6 +1703,32 @@ renumber.** Navigate by area:
     `docs/design/location-serving-contract.md`.
 
 
+25. **Location: one store, one lane, nine claim types, no flags; every location PR deletes at least as
+    much as it adds.** Written 2026-09-11 from the full-programme audit ("Where the Town Lives"). The
+    programme had built a completeness-first engine wave after wave — 62 tables, 81 projection columns,
+    40 claim types, 5 claim-producing lanes, 19 workflows, 5 policy tables — and never flipped a
+    consumer, so nothing exercised it end to end and nothing was ever deleted; 733 verified findings
+    came out of that shape, not out of any one bug. The rule is the corrective: the answer table shrinks
+    to 27 fields (pin, the eight names plus psč, six registry ids, confidence/level/radius, statuses,
+    housekeeping), the claim vocabulary to ten types (the portal's precision flag rides on the pin
+    claim), each contract to at most one entry per type with the **town entry mandatory and on the
+    hourly lane** (the loader refuses any other shape), the lanes to one (the hourly intake reads the
+    stored payload and the stored page body, hash-gated), the resolver to four steps (bind the finest
+    registry entity → fill the hierarchy from the registry → grade: one confidence, one radius from a
+    per-level table in code → check: the pin must fall inside the resolved town, else `disputed`).
+    Everything the resolver needs later derives from three kept things: the stored page body, the
+    append-only claims, and the RÚIAN mirror joined from the finest bound id. **The invariant** is
+    that every active listing has a projection row and every active Czech listing has a town
+    (`obec_kod`); `check_location_town_coverage` (scripts/verify_pipeline.py) reports it per portal in
+    absolute counts and is red until both are zero — the resolver's fallback chain is town by name →
+    the town containing the pin → the towns sharing the postal code (tie by pin or post town, low
+    confidence) → the district, and foreign is a determination (a country field, a foreign section,
+    a pin outside the country), never the default for "no town found". Speed: Browse and the map read
+    `browse_list`, which copies the 27 fields at rebuild, so no consumer query joins the projection; a
+    field is added only after a measured slowdown and only there. The one step that adds work — the
+    intake parsing changed page bodies — is bounded by page churn, and moves to the Railway worker if
+    the hourly budget is ever exceeded.
+
 ## Broker identity merges — auto-merge and the suppression rail
 
 Unlike property merges (rule #15, operator-only), broker identities DO auto-merge. The nightly
@@ -1879,13 +1905,14 @@ and a new one inserted. `location_resolutions` + `location_resolution_candidates
 no network, no randomness, enforced by an AST scan — so a resolution replays byte-identically from
 its inputs and the five version ids stamped on it. `listing_location_current` +
 `property_location_current` are **rebuildable caches**, never a store of record: the
-`dirty_locations` drain rebuilds a row from its resolution, the full sweep anything built at a stale
-version tuple. Since 2026-09-11 that sweep runs on a **daily cron** (`location_resolve.yml`,
-03:17 UTC, `mode=full-resolve`) and also enqueues every active listing that has **no projection
-row at all** (`--orphan-sweep`, driving off `listings`); a listing with no live claim then gets a
-`no_input` row (granularity `unknown`, no position) instead of no row, so coverage is
-`count(listing_location_current) = count(active listings)` by construction. The collision epoch
-is minted weekly by the same workflow (Sunday 04:41 UTC).
+`dirty_locations` drain rebuilds a row from its resolution; **one sweep** (`_SWEEP_SQL`, driving off
+`listings` in id windows) enqueues every active listing whose row is missing or built at a stale
+version tuple. It runs on a **daily cron** (`location_resolve.yml`, 03:17 UTC, `mode=full-resolve`);
+a listing with no live claim gets a `no_input` row (granularity `unknown`, no position) instead of
+no row, so coverage is `count(listing_location_current) = count(active listings)` by construction.
+Until 2026-09-11 this was three statements (a claim-driven stale sweep that could not see a claimless
+listing, a kraj-scoped cousin, an orphan sweep); they were folded into the one above under rule 25.
+The collision epoch is minted weekly by the same workflow (Sunday 04:41 UTC).
 
 **Four precision axes, mandatory next to every coordinate** (D3): `granularity` (ordinal enum,
 country → … → address_point), `position_source` (admin_centroid → carried_forward →

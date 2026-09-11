@@ -75,7 +75,6 @@ contract_version: 4
 # in `location_claims_shadow`. Claims already written under v3 stay live, so this is a freeze
 # and not a blackout, and it lasts until an operator runs
 # `python -m location_data.contracts --unshadow realitymix@4` on a passing frozen sample.
-shadow: true
 extractor_runtime: ">=1.0"
 identity_ladder: [structured_address, portal_precise_coord, text_geocode]
 

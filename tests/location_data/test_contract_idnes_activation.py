@@ -154,12 +154,9 @@ def test_v2_activates_exactly_five_entries_and_leaves_the_line_parser_inert() ->
     assert not (ACTIVATED & declared_ahead)
 
 
-def test_the_activation_ships_shadowed() -> None:
-    """`shadow` is HEADER-grain and `project()` deactivates v1 when it activates v2, so this
-    freezes idnes' already-live W1 claims until an operator runs `--unshadow idnes@2`. That is
-    the sequencing ruling, and it belongs in a test because a dropped `shadow:` line is a
-    one-character diff that ships a portal live."""
-    assert CONTRACT.shadow is True
+def test_the_activation_ships_live() -> None:
+    """Un-shadowed 2026-09-09 (operator ruling); the stale YAML line went 2026-09-11."""
+    assert CONTRACT.shadow is False
 
 
 def test_every_activated_entry_names_a_reader_this_lane_implements() -> None:

@@ -148,13 +148,9 @@ def test_the_bump_activates_exactly_three_detail_entries():
                      "rx.det.location_line", "rx.det.h1_tail", "rx.det.params_umisteni"}
 
 
-def test_the_contract_ships_shadowed():
-    """W2 sequencing: the seven DOM contracts activate SHADOWED. `shadow` is header-grain
-    and `project()` deactivates the previous version, so remax's four already-live W1
-    entries go dark with it — a freeze, ruled for deliberately, and reversed by
-    `python -m location_data.contracts --unshadow remax@3`, never by editing the YAML of a
-    version already projected."""
-    assert CONTRACT.shadow is True
+def test_the_contract_ships_live():
+    """Un-shadowed 2026-09-09 (operator ruling); the stale YAML line went 2026-09-11."""
+    assert CONTRACT.shadow is False
 
 
 def test_the_coordinate_entry_keeps_the_id_the_licence_ladder_names():

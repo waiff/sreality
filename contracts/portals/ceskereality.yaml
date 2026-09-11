@@ -127,7 +127,6 @@
 
 portal: ceskereality
 contract_version: 5
-shadow: true
 extractor_runtime: ">=1.0"
 identity_ladder: [structured_address, portal_precise_coord, text_geocode]
 

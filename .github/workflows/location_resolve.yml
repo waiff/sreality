@@ -13,11 +13,9 @@ name: "Location: resolve"
 #                      row plus its pin_clusters, then enqueues only the listings whose
 #                      bucket changed. An epoch that never advances silently freezes
 #                      precision.
-#   mode=full-resolve  `location_resolve_sweep` — the reconcile backstop: enqueue everything
-#                      whose projection is missing or built at a stale version tuple, then
-#                      drain it. `kraje` scopes the stale set to those kraj_kods so a
-#                      resolver bump lands on a real cohort first; a scoped sweep can only
-#                      see rows that ALREADY have a projection to filter on.
+#   mode=full-resolve  `location_resolve_sweep` — the reconcile backstop: ONE statement off
+#                      `listings` enqueues every active listing whose projection row is
+#                      missing or built at a stale version tuple, then the drain works it.
 #
 # Both jobs take a lease-row CAS on location_jobs, never a session advisory lock (a lock
 # taken on one transaction-pooler backend and released on another strands), and the
@@ -64,11 +62,6 @@ on:
         required: false
         default: ""
         type: string
-      kraje:
-        description: "full-resolve mode: comma-separated kraj_kod scope; blank = whole corpus"
-        required: false
-        default: ""
-        type: string
       dry_run:
         description: "resolve and log, write nothing"
         required: false
@@ -91,7 +84,7 @@ on:
     # each other. That is why pausing the hourly claim intake alone did not free a slot, and
     # why a backfill that needs this group should expect to pause both.
     - cron: "*/15 * * * *"
-    # The DAILY reconcile backstop (`mode=full-resolve` + the orphan sweep) and the WEEKLY
+    # The DAILY reconcile backstop (`mode=full-resolve`, one sweep off `listings`) and the WEEKLY
     # collision epoch — both existed only behind `workflow_dispatch` until 2026-09-11, so the
     # net every other repair mechanism leans on was never deployed (audit findings
     # projection-5/6). The env block below maps each cron expression to its mode; a cron
@@ -165,7 +158,6 @@ jobs:
       MAX_SECONDS: ${{ inputs.max_seconds || '1800' }}
       BATCH_SIZE: ${{ inputs.batch_size || '250' }}
       SOURCES: ${{ inputs.sources }}
-      KRAJE: ${{ inputs.kraje }}
       DRY_RUN: ${{ inputs.dry_run }}
     steps:
       - uses: actions/checkout@v6
@@ -193,7 +185,7 @@ jobs:
               python -m location_data.resolver.epoch_job --sources "$SOURCES" $ARGS
               ;;
             full-resolve)
-              python -m location_data.resolver.drain --full-sweep --orphan-sweep --kraje "$KRAJE" \
+              python -m location_data.resolver.drain --full-sweep \
                 --max-seconds "$MAX_SECONDS" --batch-size "$BATCH_SIZE" $ARGS
               ;;
             *)

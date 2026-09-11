@@ -105,13 +105,9 @@ def by_id(result) -> dict[str, object]:
 # ------------------------------------------------- the contract, as shipped
 
 def test_mmreality_ships_at_version_two_in_shadow():
-    """Shadow is HEADER-grain and its cost is stated in the YAML: it darkens the portal's
-    already-live W1 claims too, until `--unshadow mmreality@2`. It ships anyway because
-    W2-13 gives `claims_remine_archive` a dispatcher, and
-    `test_a_dom_contract_must_be_shadowed_once_a_lane_can_run_it` is the rail that says a
-    runnable DOM contract may not be live."""
+    """Version 2 is the DOM contract; it ships live since the 2026-09-09 un-shadow."""
     assert CONTRACT.version == 2
-    assert CONTRACT.shadow is True
+    assert CONTRACT.shadow is False  # un-shadowed 2026-09-09; stale YAML line deleted 2026-09-11
 
 
 def test_the_activated_entries_are_exactly_the_seven_this_wave_names():

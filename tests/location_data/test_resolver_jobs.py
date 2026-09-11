@@ -122,94 +122,58 @@ def test_the_queue_slice_has_a_unique_tiebreaker():
     assert "order by enqueued_at, listing_id" in flat
 
 
-# ------------------------------------------------------- the kraj-scoped full sweep
-
-
-def test_the_kraj_scoped_sweep_is_a_whole_prepareable_constant():
-    """A second constant, never `_FULL_SWEEP_SQL` + a formatted predicate: the offline
-    placeholder guard and the schema-aware PREPARE sweep only see module-level `*_SQL`."""
-    flat = " ".join(drain._FULL_SWEEP_KRAJE_SQL.split()).lower()
-    assert "p.kraj_kod = any(%s::bigint[])" in flat
-    assert re.sub(r"%\(\w+\)s|%s", "", flat).count("%") == 0
-    assert flat.count("%s") == 4
-
-
-def test_the_kraj_scoped_sweep_drives_off_the_projection_not_the_claim_corpus():
-    """The 2026-09-10 QueryCanceled (run 34459466027) in one assertion.
-
-    Driving off `location_claims_live` and DISTINCT-ing it down cost work proportional to
-    the CLAIM corpus — which the archive sweeps grow by ~150k rows an hour — for an answer
-    proportional to the projection, and blew the 900 s ceiling. The driving relation must
-    stay the projection, with the claims reached only through a correlated EXISTS, and the
-    MATERIALIZED fence must stay: `location_claims_live` is a view over a view, so without
-    it the planner may flatten the EXISTS back into a hash semi-join over every claim."""
-    flat = " ".join(drain._FULL_SWEEP_KRAJE_SQL.split()).lower()
-    assert "with stale as materialized" in flat
-    assert "from listing_location_current p" in flat
-    assert "exists (select 1 from location_claims_live c where c.listing_id = s.listing_id)" in flat
-    # `listing_id` is the projection's PRIMARY KEY, so DISTINCT is not merely cheaper here
-    # than in the old shape — it has nothing left to deduplicate.
-    assert "distinct" not in flat
-    assert "join location_claims_live" not in flat
-
-
-def test_kraje_picks_the_scoped_statement_and_passes_the_codes_first():
-    state = _state()
-    drain.enqueue_full_sweep(_FakeConn(state), policy_version="v1", kraje=(19, 27))
-    sql, params = next(
-        (text, p) for text, p in state["executed"] if "insert into dirty_locations" in text
-    )
-    assert "kraj_kod = any(%s::bigint[])" in sql
-    assert params[0] == [19, 27]
-    assert params[1] == RESOLVER_VERSION
-
-
-def test_no_kraje_keeps_the_corpus_wide_sweep_that_also_sees_unprojected_rows():
-    state = _state(max_listing_id=1_000)
-    drain.enqueue_full_sweep(_FakeConn(state), policy_version="v1", kraje=())
-    sql, params = next(
-        (text, p) for text, p in state["executed"] if text.startswith("insert into dirty_locations")
-    )
-    assert "kraj_kod" not in sql
-    assert "p.listing_id is null" in sql
-    assert params[0] == RESOLVER_VERSION
+# ------------------------------------------------------------------- the one sweep
 
 
 def _sweep_windows(state: dict[str, Any]) -> list[tuple[str, Any]]:
     return [(t, p) for t, p in state["executed"] if t.startswith("insert into dirty_locations")]
 
 
-def test_the_corpus_wide_sweep_walks_listing_id_windows_each_in_its_own_transaction():
-    """The unscoped sweep MUST drive off the claim corpus (a listing with no projection
-    exists nowhere else), and that corpus grows ~150k rows an hour under the archive
-    sweeps — so one statement over all of it cannot finish under the 900 s ceiling (the
-    kraj-scoped cousin already died that way, run 34459466027, 2026-09-10). Windows bound
-    the work by id range; one bounded transaction per window means an interrupted sweep
-    loses at most a window and re-running is idempotent."""
+def test_the_sweep_is_one_statement_off_listings_that_sees_missing_and_stale_rows():
+    """Until 2026-09-11 there were three sweeps: a claim-driven stale one (which had to
+    DISTINCT a claim corpus growing ~150k rows an hour and died at the 900 s ceiling, run
+    34459466027), a kraj-scoped cousin, and an orphan sweep off `listings` — because a
+    listing with no claim existed nowhere but `listings`. Driving the one sweep off
+    `listings` sees every active listing there is; the projection join is on its primary
+    key, so "missing" and "stale" are the same cheap predicate."""
+    flat = " ".join(drain._SWEEP_SQL.split()).lower()
+    assert "from listings l" in flat and "left join listing_location_current p" in flat
+    assert "l.is_active" in flat
+    assert "p.listing_id is null" in flat
+    assert "p.resolver_version <> %s" in flat and "p.policy_version <> %s" in flat
+    assert "p.registry_version_id <> %s" in flat
+    assert "location_claims" not in flat and "distinct" not in flat and "kraj_kod" not in flat
+    # The offline placeholder guard and the schema-aware PREPARE sweep only see module-level
+    # `*_SQL` constants, so the statement is whole and prepareable.
+    assert re.sub(r"%\(\w+\)s|%s", "", flat).count("%") == 0
+    assert flat.count("%s") == 5
+    assert not hasattr(drain, "_FULL_SWEEP_SQL") and not hasattr(drain, "_ORPHAN_SWEEP_SQL")
+    assert not hasattr(drain, "_FULL_SWEEP_KRAJE_SQL") and not hasattr(drain, "enqueue_orphan_sweep")
+
+
+def test_the_sweep_walks_listing_id_windows_each_in_its_own_transaction():
+    """One bounded transaction per window means an interrupted sweep loses at most a window
+    and re-running is idempotent; the upper bound is an index probe on `listings`' key."""
     state = _state(max_listing_id=600_000)
-    drain.enqueue_full_sweep(_FakeConn(state), policy_version="v1", kraje=(), window=250_000)
+    drain.enqueue_full_sweep(_FakeConn(state), policy_version="v1", window=250_000)
     windows = _sweep_windows(state)
     assert [(p[-2], p[-1]) for _, p in windows] == [
         (0, 250_000), (250_000, 500_000), (500_000, 600_000),
     ]
-    assert all("c.listing_id > %s and c.listing_id <= %s" in t for t, _ in windows)
-    assert state["transactions"] == len(windows)
-    # The bound is an index probe on listings' primary key, never max() over the claims view.
+    assert all("l.id > %s and l.id <= %s" in t for t, _ in windows)
+    assert all(p[0] == RESOLVER_VERSION and p[1] == "v1" and p[2] == 7 for _, p in windows)
+    # one bounded transaction per window, plus the bounded upper-bound probe
+    assert state["transactions"] == len(windows) + 1
     assert any(t.startswith("select coalesce(max(id), 0) from listings") for t, _ in state["executed"])
-    assert not any("max(" in t and "location_claims" in t for t, _ in state["executed"])
-    flat = " ".join(drain._FULL_SWEEP_SQL.split()).lower()
-    assert flat.count("%s") == 5
 
 
-def test_both_sweep_statements_skip_rows_already_queued_without_touching_their_locks():
+def test_the_sweep_skips_rows_already_queued_without_touching_their_locks():
     """Since 8b a drain slice is almost always in flight, holding its rows FOR UPDATE; an
     INSERT ... ON CONFLICT on one of those keys waits for that transaction and the 5 s
     lock_timeout kills the window. The NOT EXISTS is an MVCC read: skip, never wait."""
-    for sql, placeholders in ((drain._FULL_SWEEP_SQL, 5), (drain._FULL_SWEEP_KRAJE_SQL, 4)):
-        flat = " ".join(sql.split()).lower()
-        assert "not exists (select 1 from dirty_locations d where d.listing_id =" in flat
-        assert "on conflict (listing_id) do nothing" in flat
-        assert flat.count("%s") == placeholders
+    flat = " ".join(drain._SWEEP_SQL.split()).lower()
+    assert "not exists (select 1 from dirty_locations d where d.listing_id = l.id)" in flat
+    assert "on conflict (listing_id) do nothing" in flat
 
 
 def test_a_window_retries_a_lock_wait_then_gives_up_loudly(monkeypatch):
@@ -241,7 +205,7 @@ def test_a_window_retries_a_lock_wait_then_gives_up_loudly(monkeypatch):
         drain._execute_window(_Conn(), 10, "INSERT ...", ())
 
 
-def test_main_enqueues_the_full_sweep_before_the_drain_lease_is_even_attempted(monkeypatch):
+def test_main_enqueues_the_sweep_before_the_drain_lease_is_even_attempted(monkeypatch):
     """Run 34482389394 (2026-09-10): a corpus-wide full-resolve that finished in 20 s as
     'DRAIN skipped' and enqueued NOTHING, because the enqueue sat inside the lease block and
     the Railway lane holds that lease ~94% of the time. The default fake never grants the
@@ -260,17 +224,18 @@ def test_main_enqueues_the_full_sweep_before_the_drain_lease_is_even_attempted(m
 
 def test_an_empty_corpus_sweeps_nothing_and_a_non_positive_window_is_refused():
     state = _state(max_listing_id=0)
-    assert drain.enqueue_full_sweep(_FakeConn(state), policy_version="v1", kraje=()) == 0
+    assert drain.enqueue_full_sweep(_FakeConn(state), policy_version="v1") == 0
     assert _sweep_windows(state) == []
     import pytest
     with pytest.raises(ValueError):
-        drain.enqueue_full_sweep(_FakeConn(_state(max_listing_id=5)), policy_version="v1", kraje=(), window=0)
+        drain.enqueue_full_sweep(_FakeConn(_state(max_listing_id=5)), policy_version="v1", window=0)
 
 
-def test_the_kraje_argument_parses_a_comma_separated_workflow_input():
-    assert drain._parse_kraje("") == ()
-    assert drain._parse_kraje("19,27") == (19, 27)
-    assert drain._parse_kraje("19, 27") == (19, 27)
+def test_the_cli_has_one_sweep_flag_and_no_scope():
+    parser_source = inspect.getsource(drain.main)
+    assert "--full-sweep" in parser_source
+    for gone in ("--orphan-sweep", "--kraje"):
+        assert gone not in parser_source
 
 
 # ------------------------------------------------------------ the drain's round-trip budget
@@ -853,25 +818,6 @@ def test_a_failed_warm_degrades_instead_of_ending_the_run():
 # ------------------------------------------------ 2026-09-11 audit: every listing gets a row
 
 
-def test_the_orphan_sweep_drives_off_listings_and_walks_windows():
-    """Every other enqueue presupposes a claim, so a listing whose payload yielded none had
-    no projection row and nothing that would ever notice (10,679 active rows measured on
-    2026-09-11). This one drives off `listings` itself, windowed like the stale sweep."""
-    state = _state(max_listing_id=600_000)
-    drain.enqueue_orphan_sweep(_FakeConn(state), window=250_000)
-    windows = _sweep_windows(state)
-    assert [(p[0], p[1]) for _, p in windows] == [
-        (0, 250_000), (250_000, 500_000), (500_000, 600_000),
-    ]
-    flat = " ".join(drain._ORPHAN_SWEEP_SQL.split()).lower()
-    assert "from listings l" in flat and "left join listing_location_current p" in flat
-    assert "l.is_active" in flat and "p.listing_id is null" in flat
-    assert "not exists (select 1 from dirty_locations d where d.listing_id =" in flat
-    assert "on conflict (listing_id) do nothing" in flat
-    assert flat.count("%s") == 2
-    assert state["transactions"] == len(windows)
-
-
 def test_a_queued_listing_with_no_live_claims_gets_a_no_input_row_not_a_skip():
     """Until 2026-09-11 `_compute_one` returned None here: the queue row was deleted and the
     listing either kept a stale projection (re-shadow, retraction) or never got one. The
@@ -885,16 +831,3 @@ def test_a_queued_listing_with_no_live_claims_gets_a_no_input_row_not_a_skip():
     assert item.resolution.precision.granularity == "unknown"
     assert item.resolution.position.position_source == "none"
     assert item.resolution.input_claim_ids == ()
-
-
-def test_main_runs_the_orphan_sweep_next_to_the_stale_sweep_before_the_lease(monkeypatch):
-    import contextlib as _cl
-    state = _state(max_listing_id=300_000)
-    monkeypatch.setattr(drain, "open_connection", lambda: _cl.nullcontext(_FakeConn(state)))
-    assert drain.main(["--full-sweep", "--orphan-sweep", "--max-seconds", "1"]) == 0
-    executed = [t for t, _ in state["executed"]]
-    orphan = [i for i, t in enumerate(executed) if t.startswith("insert into dirty_locations") and "from listings l" in t]
-    stale = [i for i, t in enumerate(executed) if t.startswith("insert into dirty_locations") and "from location_claims_live c" in t]
-    acquires = [i for i, t in enumerate(executed) if "location_jobs" in t and "lease" in t]
-    assert stale and orphan and acquires
-    assert max(stale + orphan) < min(acquires)

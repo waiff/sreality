@@ -193,50 +193,15 @@ def test_the_scorer_is_the_one_reader_of_the_shadow_relation():
 
 # ------------------------------------------------------------------ the projection
 
-def test_the_shadow_flag_of_every_shipped_contract_is_the_one_we_decided():
-    """Was `test_every_shipped_contract_is_unshadowed`, and the rename is the change: from
-    W2-4 until the W2-6…W2-12 activation wave the answer was "none, ever", because no lane
-    could execute a DOM entry and shadowing a header would have taken that portal's LIVE W1
-    entries dark for nothing.
-
-    The wave made both halves of that true at once — W2-13 shipped the dispatcher and seven
-    contracts gained executable archive entries — so seven now ship dark BY DECISION, and
-    the freeze is real: `shadow` is header-grain, so each of the seven also parks its own
-    already-live W1 entries until the operator un-shadows it
-    (`python -m location_data.contracts --unshadow <portal>@<v>`), per-portal, off the
-    W2-13 gate report.
-
-    An explicit map, not a derived one: a set comprehension over `c.shadow` would keep
-    passing if a portal flipped in either direction, and BOTH directions are the bug —
-    a shadowed portal serving live is unreviewed extraction reaching the projection, and
-    an un-shadowed one going dark is a silent outage of a working W1 lane."""
+def test_no_shipped_contract_carries_a_shadow_line():
+    """The seven `shadow: true` lines (W2-6…W2-12) were cleared in the DB on 2026-09-09 by
+    the operator's ruling (joint review is the gate, never a score) and DELETED from the
+    YAMLs on 2026-09-11 (audit decision 1): `project()` writes the header flag only on
+    INSERT, so a stale `true` in the file meant every later contract_version bump would
+    ship that portal dark again, silently. The line sits outside `contract_body_hash`, so
+    deleting it cost no version bump. The flag itself goes with the contract rewrite."""
     assert {c.source: c.shadow for c in contracts.load_all()} == {
-        # The seven activated by W2-6…W2-12, dark until the operator says otherwise.
-        "bazos": True,
-        "ceskereality": True,
-        "idnes": True,
-        "maxima": True,
-        "mmreality": True,
-        "realitymix": True,
-        "remax": True,
-        # The two that name no archive reader, so there is nothing to review and nothing
-        # to gate: they stay live, exactly as they were.
-        "sreality": False,
-        "bezrealitky": False,
-    }
-    # …and the split is not a coincidence of editing: shadowed is EXACTLY the set that can
-    # now execute on the archived lane. A portal activated without the flag, or shadowed
-    # without an executable entry, breaks this line before it reaches the operator.
-    assert ({c.source for c in contracts.load_all() if c.shadow}
-            == set(_contracts_with_executable_dom_entries()))
-    assert set(contracts.EXTRACTOR_PREFIXES) == {
-        c.source for c in contracts.load_all()}
-
-
-def _contracts_with_executable_dom_entries() -> list[str]:
-    return sorted(
-        c.source for c in contracts.load_all()
-        if any(e.reader in ARCHIVE_READERS for e in c.entries))
+        source: False for source in contracts.EXTRACTOR_PREFIXES}
 
 
 # The module name is the thing being searched for, spelled once. `claims_remine` (W3) is a
@@ -295,48 +260,6 @@ def test_the_dispatcher_scan_sees_a_lane_however_it_is_spelled(tmp_path: Path):
     assert "w3.yml" not in archive_lane_dispatchers(workflows, scripts)
 
 
-def test_a_dom_contract_must_be_shadowed_once_a_lane_can_run_it():
-    """THE rail behind shipping DOM contracts live, and the reason W2-6's first attempt was
-    reverted.
-
-    `shadow` is HEADER-grain: `location_claims_live` excludes every claim whose contract is
-    shadowed, and projecting a new version deactivates the old one, so W1 loads the new
-    version's entries too. Shipping a portal's DOM version with `shadow: true` therefore
-    takes that portal's ALREADY-LIVE W1 entries dark as well — a certain, immediate
-    regression, open-ended because it lasts until the operator un-shadows.
-
-    Until W2-13 a DOM contract could ship LIVE, safe for exactly one reason: nothing could
-    execute a DOM entry. `claims_intake` skips them (`ARCHIVE_ONLY_READERS`) and only
-    `claims_remine_archive` runs them — and that lane had no workflow. The safety was the
-    ABSENCE of a dispatch path, asserted rather than assumed so that the day the workflow
-    landed this test would red and force the shadow decision in the same commit.
-
-    THAT DAY CAME. W2-13 shipped `location_claims_remine_archive.yml` and W2-6…W2-12 gave
-    seven contracts executable DOM entries, so this rail is no longer vacuous — it is the
-    line all seven `shadow: true` flags are answering to, and what it now forbids is
-    activating an EIGHTH portal without one. The operator's later `--unshadow` does not
-    trip it and must not: that writes the DB column, never the file (mig 404's
-    "operational UPDATE, not a contract_version bump").
-
-    Shadow is a mutable header column (`--shadow <portal>@<v>`), so complying costs a flag,
-    not a version bump."""
-    lanes = archive_lane_dispatchers(
-        _ROOT / ".github" / "workflows", _ROOT / "scripts")
-    dom_contracts = _contracts_with_executable_dom_entries()
-    if not lanes:
-        # No dispatch path, so DOM entries execute nowhere and live is safe. The branch that
-        # matters is exercised by `test_the_dispatcher_scan_sees_a_lane_however_it_is_spelled`
-        # against a synthetic tree — without that, this guard would never fire in CI and
-        # would be a rail nobody has watched work.
-        return
-    shadowed = {c.source for c in contracts.load_all() if c.shadow}
-    unprotected = [s for s in dom_contracts if s not in shadowed]
-    assert not unprotected, (
-        f"{lanes} can dispatch the archived re-mine lane, so every contract with an "
-        f"executable DOM entry must ship shadowed — these do not: {unprotected}. Either "
-        f"add `shadow: true` to each, or hold the workflow.")
-
-
 def test_a_yaml_without_the_key_projects_as_live(tmp_path: Path):
     contract = _rewritten("maxima", tmp_path, shadow=None)
     assert contract.shadow is False
@@ -380,37 +303,24 @@ def test_the_hash_is_the_file_minus_the_two_blocks_that_are_not_extraction():
     migration's literals can be re-derived from the repo."""
     import hashlib
 
-    # This assertion used to read `b"\nshadow:" not in body` for every yaml — a
-    # PRECONDITION recording that no contract had ever shipped shadowed, which meant the
-    # arithmetic below was only ever checked against files with nothing to subtract. The
-    # W2-6…W2-12 wave inverted it, and the inverted form is the stronger test: seven files
-    # now DO carry the line, and each one proves the subtraction rather than assuming it.
-    shadowed = {c.source for c in contracts.load_all() if c.shadow}
-    assert len(shadowed) == 7, shadowed
+    # Until 2026-09-11 seven files carried `shadow: true` and each one proved the
+    # subtraction. The lines were deleted under exactly the guarantee this test pins (the
+    # line is outside the governed hash, so deleting it costs no version bump), so the proof
+    # now runs the other way round: putting a line back must not move the governed hash.
+    assert {c.source for c in contracts.load_all() if c.shadow} == set()
     for path in sorted(contracts.CONTRACT_DIR.glob("*.yaml")):
         body = path.read_bytes()
-        carries_shadow = b"\nshadow:" in b"\n" + body
-        # The flag on the parsed header and the line in the bytes are the same fact. They
-        # can drift exactly one way — `--shadow` / `--unshadow` writes the DB column, not
-        # the file — and this is where that drift becomes visible in CI.
-        assert carries_shadow == (path.stem in shadowed), path.name
+        assert b"\nshadow:" not in b"\n" + body, path.name
         assert b"\npersistence:" in b"\n" + body, path.name
         assert contracts.contract_body_hash(body) != hashlib.sha256(body).digest(), (
             path.name)
         assert contracts.contract_body_hash(body) == hashlib.sha256(
             _governed_by_hand(body)).digest(), path.name
-        if carries_shadow:
-            # The exclusion IS the mechanism migration 404 promises: clearing the flag is
-            # "an operational UPDATE, not a contract_version bump". Deleting the line from
-            # one of the seven must not move the governed hash — otherwise tidying it away
-            # after the operator un-shadows would demand a bump, and the bump would
-            # re-shadow the contract and discard the sample that had just passed.
-            without = b"".join(
-                line for line in body.splitlines(keepends=True)
-                if not line.startswith(b"shadow:"))
-            assert without != body, path.name
-            assert contracts.contract_body_hash(without) == (
-                contracts.contract_body_hash(body)), path.name
+        with_line = body.replace(
+            b"\nextractor_runtime:", b"\nshadow: true\nextractor_runtime:", 1)
+        assert with_line != body, path.name
+        assert contracts.contract_body_hash(with_line) == (
+            contracts.contract_body_hash(body)), path.name
 
 
 def _governed_by_hand(body: bytes) -> bytes:

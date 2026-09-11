@@ -87,10 +87,11 @@ def value(entry_id: str, doc: ScopedDocument | None = None) -> str | None:
 
 # ------------------------------------------------------------------ the contract itself
 
-def test_the_activation_is_shadowed_and_names_only_registered_readers():
+def test_the_activation_is_live_and_names_only_registered_readers():
     """A reader in `ARCHIVE_READERS` but not in `ARCHIVE_ONLY_READERS` takes the HOURLY W1
-    intake down for this portal, so the pair is asserted per entry rather than fleet-wide."""
-    assert CONTRACT.version == 4 and CONTRACT.shadow is True
+    intake down for this portal, so the pair is asserted per entry rather than fleet-wide.
+    Un-shadowed 2026-09-09; the stale YAML line went 2026-09-11."""
+    assert CONTRACT.version == 4 and CONTRACT.shadow is False
     dom = [e for e in CONTRACT.entries if e.reader in ARCHIVE_READERS]
     assert {e.entry_id for e in dom} == {
         "rm.det.gps", "rm.det.agency_gps_flag", "rm.det.agency_est_flag",
