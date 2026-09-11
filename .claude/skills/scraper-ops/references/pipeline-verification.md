@@ -441,24 +441,41 @@ SQUARE_1800_JPG whole-frame template) and anything off the list 400s. Sreality r
 catalogue once before with no notice; `_classify_image_failure` parks a 400 **terminally**
 (`source_unavailable`, never retried), so a catalogue change would park every image in flight
 and surface only as a download lane that quietly stopped storing bytes.
-The probe: GET the live v1 search (`INDEX_URL`, byt/prodej/CZ, `limit=1`) with the client's
-browser headers, take `results[0].advert_images[0].url` through `parse_images` semantics
-(`//` → `https:`), then request `image_storage.with_transform(url)` — the **deployed** chain by
-construction, never a literal copy, so the probe cannot drift from the code it guards — and
-measure the bytes with `image_storage.image_dimensions`. Both calls stream behind one seam,
-`_fetch_sreality_probe(url, timeout, max_bytes)`, at `timeout=(5, 8)` and a 6 MB read cap: the
-lane budget is enforced only as a Postgres `statement_timeout`, which cannot bound a hung
-socket. A FRESH index URL, never a stored one — a stored URL proves only that the template
-worked the day we stored it.
-`fail` on CDN non-200 (the allowlist rejected us), a non-image or undecodable body, or a width
-under `sreality_image_template_min_width` (1000). The width floor is the arm that matters: the
-silent downgrade answers **HTTP 200** with a smaller or cropped rendition, which no status check
-would ever see, and the superseded `res,749,562,3` chain — the exact regression the master-template
-work undid — served 749 px and cropped to 4:3. 1800-fit clears 1000 with 800 px of headroom even
-on a portrait photo. A network error or a non-200/empty/imageless index is `warn` with
-`details.skipped` ("verified NOTHING"), never `fail`: the canary reached nothing, and a flaky lane
-must not read as "sreality rejected our template". `value` is the measured width in px; `details`
-carries `image_url`, `transform`, `http_status`, `width`, `height`, `bytes`, `elapsed_ms`.
+The probe, three calls behind one seam: GET the live v1 search (`INDEX_URL`, byt/prodej/CZ,
+`limit=1`) with the client's browser headers for a FRESH `hash_id` (never a stored URL — that
+proves only that the template worked the day we stored it), GET that listing's `DETAIL_URL`,
+and take `advert_images[0]` through `parse_images`. **The detail endpoint, not the search
+one**: v1 search returns `advert_images` as bare URL **strings** (`parse_images` skips every
+non-dict, so reading images off the index returns `[]` and the probe would short-circuit to a
+warn forever); only detail carries the `{url, width, height, order}` dicts — the same payload
+the real download path consumes. Then request `image_storage.with_transform(url)` — the
+**deployed** chain by construction, never a literal copy, so the probe cannot drift from the
+code it guards — and measure the bytes with `image_storage.image_dimensions`. The seam,
+`_fetch_sreality_probe(url, timeout, max_bytes)`, streams under two bounds: a 6 MB cap on
+MEMORY and a monotonic wall-clock deadline of `connect + read` (`timeout=(5, 8)`) per call,
+because requests' read timeout is per socket read — a peer trickling one chunk per 7.9 s would
+otherwise hold the lane for minutes, and nothing outside can preempt it (the lane budget is
+armed only as a Postgres `statement_timeout`, and `run_checks` tests the lane deadline only
+BEFORE a check starts). Worst case 3 × 13 s = 39 s, inside the 45 s per-check budget.
+`fail` on CDN non-200 (the allowlist rejected us), a non-image or undecodable body, or a served
+frame under `sreality_image_template_min_ratio` (0.9) of what the deployed `res` op should
+yield **for that estate's own declared source size**, on EITHER axis. The size arm is the one
+that matters — the silent downgrade answers **HTTP 200** with a smaller or cropped rendition,
+which no status check would ever see, and the superseded `res,749,562,3` chain (the regression
+the master-template work undid) served 749 px and cropped 3:2 to 4:3, which is why both axes
+are compared. The verdict is RELATIVE, never an absolute px floor: `res,1800,1800,1` fits
+inside the source and **never upscales**, so a listing whose first photo is a 640×480 original
+comes back at 640×480 through a perfectly healthy template (~4% of live byt/prodej first
+photos measure under 1000 px; a 1867×1400 source measures 1800×1349 against an expected 1350,
+which is what the 0.9 tolerates). An estate that declares no size for the image is judged on
+the HTTP + decodability arms only, and says so in its message.
+A network error, a non-200/empty/idless index, an unreachable or non-200 detail, an imageless
+estate, or an image that has left the sdn.cz host (where `with_transform` is a no-op, so
+nothing would be exercised) is `warn` with `details.skipped` ("verified NOTHING"), never
+`fail`: the canary reached nothing, and a flaky lane must not read as "sreality rejected our
+template". `value` is the measured width in px; `details` carries `image_url`, `transform`,
+`detail_url`, `http_status`, `width`, `height`, `source_width`, `source_height`,
+`expected_width`, `expected_height`, `min_ratio`, `bytes`, `elapsed_ms`.
 Registered **last** in `_CHECKS` on purpose — the one outbound check is the one the lane budget
 should drop first. 6-hourly lane + in-app bell; promotion into `llm_health.yml`'s hourly `--only`
 list is a deliberate post-soak step, like the ppm2 checks. The remedy when it reds: re-derive the

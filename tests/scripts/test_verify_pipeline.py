@@ -2108,6 +2108,23 @@ def test_outbound_url_coverage_clean_is_ok() -> None:
 # The one check that leaves the database, so the one check whose tests must pin a
 # network seam: tests/conftest.py has no socket guard, and a real request here would
 # make the suite depend on sreality being up.
+#
+# Every payload here is built from the REAL captured fixtures, never hand-written: the
+# first cut of this check hand-wrote the index body in the DETAIL endpoint's image shape
+# ({url, order} dicts), which the search endpoint never returns (it sends bare URL
+# STRINGS), so the suite was green while the check was inert in production.
+
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+_SEARCH_FIXTURE = json.loads((_FIXTURES / "sample_search.json").read_text())
+_DETAIL_FIXTURE = json.loads((_FIXTURES / "sample_listing.json").read_text())
+_PROBE_INDEX_BODY = json.dumps(_SEARCH_FIXTURE).encode()
+_PROBE_DETAIL_BODY = json.dumps(_DETAIL_FIXTURE).encode()
+# The fixture's first image, as parse_images yields it and as the estate declares it.
+_PROBE_IMAGE_URL = "https:" + _DETAIL_FIXTURE["advert_images"][0]["url"]
+_PROBE_SOURCE = (
+    _DETAIL_FIXTURE["advert_images"][0]["width"],
+    _DETAIL_FIXTURE["advert_images"][0]["height"],
+)
 
 
 def _jpeg_bytes(width: int, height: int) -> bytes:
@@ -2118,22 +2135,31 @@ def _jpeg_bytes(width: int, height: int) -> bytes:
     return buf.getvalue()
 
 
-_PROBE_INDEX_BODY = json.dumps(
-    {"results": [{"advert_images": [{"url": "//d18-a.sdn.cz/d_18/c_img_QK_x/abc.jpeg",
-                                    "order": 0}]}]}
-).encode()
+def _detail_body(width: int | None, height: int | None, url: str | None = None) -> bytes:
+    """The detail fixture with its first image's declared size (or host) overridden."""
+    payload = json.loads(_PROBE_DETAIL_BODY)
+    first = payload["advert_images"][0]
+    if url is not None:
+        first["url"] = url
+    for key, value in (("width", width), ("height", height)):
+        if value is None:
+            first.pop(key, None)
+        else:
+            first[key] = value
+    return json.dumps(payload).encode()
 
 
 def _probe_seam(
     index: tuple[int, bytes] | Exception,
+    detail: tuple[int, bytes] | Exception,
     cdn: tuple[int, bytes] | Exception,
     calls: list[str],
 ) -> Any:
-    """A seam that answers the index call first and the CDN call second."""
+    """A seam that answers the index call, then the detail call, then the CDN call."""
 
     def _fetch(url: str, timeout: Any, max_bytes: int, *, accept: str = "*/*") -> tuple[int, bytes]:
         calls.append(url)
-        answer = index if len(calls) == 1 else cdn
+        answer = (index, detail, cdn)[min(len(calls), 3) - 1]
         if isinstance(answer, Exception):
             raise answer
         return answer
@@ -2141,32 +2167,68 @@ def _probe_seam(
     return _fetch
 
 
-def test_sreality_image_template_is_registered_last() -> None:
-    """An unregistered check is dead code that never writes a row. It is registered
-    LAST on purpose: the only outbound check must be the one the lane budget drops."""
+def _live_seam(cdn: tuple[int, bytes] | Exception, calls: list[str]) -> Any:
+    """The captured fixtures verbatim on both sreality legs — the negative control that
+    the probe actually REACHES the CDN with the endpoints' real payload shapes."""
+    return _probe_seam((200, _PROBE_INDEX_BODY), (200, _PROBE_DETAIL_BODY), cdn, calls)
+
+
+def test_sreality_image_template_is_registered_and_last_outbound() -> None:
+    """An unregistered check is dead code that never writes a row. The ordering rule:
+    the only check that leaves the DB must sit after every DB check, so a lane-budget
+    exhaustion drops the outbound probe rather than a DB measurement."""
     from scripts.verify_pipeline import _CHECKS, check_sreality_image_template
 
+    keys = [key for key, _ in _CHECKS]
     assert ("sreality_image_template", check_sreality_image_template) in _CHECKS
-    assert _CHECKS[-1] == ("sreality_image_template", check_sreality_image_template)
+    assert keys.count("sreality_image_template") == 1
+    assert keys.index("sreality_image_template") == len(keys) - 1, (
+        "sreality_image_template is the harness' only outbound check and must stay "
+        "AFTER every database check in _CHECKS; append new DB checks before it"
+    )
 
 
 def test_sreality_image_template_thresholds_have_code_defaults() -> None:
     """load_thresholds merges app_settings OVER the defaults, so a key no seed
     migration carries must still resolve — a KeyError here reds the check every run."""
-    for key in ("sreality_image_template_min_width", "sreality_image_template_timeout_s"):
+    for key in ("sreality_image_template_min_ratio", "sreality_image_template_timeout_s"):
         assert key in DEFAULT_THRESHOLDS
+
+
+def test_sreality_image_template_reaches_the_cdn_on_the_real_payload_shapes(
+    monkeypatch: Any,
+) -> None:
+    """The regression that shipped once: the v1 SEARCH endpoint sends advert_images as
+    bare STRINGS, which parse_images skips, so reading images off the index short-
+    circuited to a warn forever and the CDN leg never ran. Assert the third call."""
+    import scripts.verify_pipeline as vp
+
+    search_images = _SEARCH_FIXTURE["results"][0]["advert_images"]
+    assert isinstance(search_images[0], str), "the captured index shape is bare strings"
+    assert not vp.parse_images(_SEARCH_FIXTURE["results"][0]), (
+        "parse_images cannot read the index shape — the check must route via DETAIL"
+    )
+
+    calls: list[str] = []
+    monkeypatch.setattr(vp, "_fetch_sreality_probe",
+                        _live_seam((200, _jpeg_bytes(*_PROBE_SOURCE)), calls))
+    r = vp.check_sreality_image_template(None, T)
+    assert len(calls) == 3, f"the CDN leg never ran: {calls}"
+    assert str(_SEARCH_FIXTURE["results"][0]["hash_id"]) in calls[1]
+    assert r["status"] == "ok"
 
 
 def test_sreality_image_template_ok_on_a_full_size_frame(monkeypatch: Any) -> None:
     import scripts.verify_pipeline as vp
 
     calls: list[str] = []
-    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
-        (200, _PROBE_INDEX_BODY), (200, _jpeg_bytes(1600, 1000)), calls))
+    monkeypatch.setattr(vp, "_fetch_sreality_probe",
+                        _live_seam((200, _jpeg_bytes(*_PROBE_SOURCE)), calls))
     r = vp.check_sreality_image_template(None, T)
     assert r["check_key"] == "sreality_image_template"
-    assert r["status"] == "ok" and r["value"] == 1600
-    assert r["details"]["width"] == 1600 and r["details"]["height"] == 1000
+    assert r["status"] == "ok" and r["value"] == _PROBE_SOURCE[0]
+    assert r["details"]["width"] == _PROBE_SOURCE[0]
+    assert (r["details"]["expected_width"], r["details"]["expected_height"]) == _PROBE_SOURCE
     assert r["details"]["http_status"] == 200 and r["details"]["bytes"] > 0
     assert "skipped" not in r["details"]
 
@@ -2178,15 +2240,30 @@ def test_sreality_image_template_probes_the_deployed_transform(monkeypatch: Any)
     from scraper.image_storage import with_transform
 
     calls: list[str] = []
-    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
-        (200, _PROBE_INDEX_BODY), (200, _jpeg_bytes(1600, 1000)), calls))
+    monkeypatch.setattr(vp, "_fetch_sreality_probe",
+                        _live_seam((200, _jpeg_bytes(*_PROBE_SOURCE)), calls))
     r = vp.check_sreality_image_template(None, T)
-    expected = with_transform("https://d18-a.sdn.cz/d_18/c_img_QK_x/abc.jpeg")
-    assert r["details"]["image_url"] == "https://d18-a.sdn.cz/d_18/c_img_QK_x/abc.jpeg"
+    expected = with_transform(_PROBE_IMAGE_URL)
+    assert r["details"]["image_url"] == _PROBE_IMAGE_URL
     assert r["details"]["transform"] == expected
-    assert calls[1] == expected
+    assert calls[2] == expected
     assert calls[0].startswith("https://www.sreality.cz/api/v1/estates/search?")
     assert "limit=1" in calls[0] and "locality_country_id=112" in calls[0]
+
+
+def test_sreality_image_template_ok_when_the_source_photo_is_small(monkeypatch: Any) -> None:
+    """The CDN does NOT upscale: res,1800,1800,1 fits inside the source, so a listing
+    whose first photo is a 640x480 original comes back at 640x480 through a perfectly
+    healthy template. An absolute px floor paged on ordinary data (~4% of live first
+    photos measure under 1000 px); the verdict is relative to the declared source."""
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
+        (200, _PROBE_INDEX_BODY), (200, _detail_body(640, 480)),
+        (200, _jpeg_bytes(640, 480)), []))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["status"] == "ok" and r["value"] == 640
+    assert r["details"]["expected_width"] == 640
 
 
 def test_sreality_image_template_fails_on_the_superseded_749_rendition(monkeypatch: Any) -> None:
@@ -2194,18 +2271,42 @@ def test_sreality_image_template_fails_on_the_superseded_749_rendition(monkeypat
     that only reads the HTTP status."""
     import scripts.verify_pipeline as vp
 
-    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
-        (200, _PROBE_INDEX_BODY), (200, _jpeg_bytes(749, 562)), []))
+    monkeypatch.setattr(vp, "_fetch_sreality_probe",
+                        _live_seam((200, _jpeg_bytes(749, 562)), []))
     r = vp.check_sreality_image_template(None, T)
     assert r["status"] == "fail" and r["value"] == 749
     assert "749x562" in r["message"] and "IMAGE_TRANSFORM_OPS" in r["message"]
 
 
-def test_sreality_image_template_fails_on_a_non_image_body(monkeypatch: Any) -> None:
+def test_sreality_image_template_fails_on_a_crop_that_keeps_its_width(monkeypatch: Any) -> None:
+    """A crop collapses ONE axis, so a width-only verdict would call it healthy."""
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _live_seam(
+        (200, _jpeg_bytes(_PROBE_SOURCE[0], int(_PROBE_SOURCE[1] * 0.75))), []))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["status"] == "fail" and r["value"] == _PROBE_SOURCE[0]
+    assert "silently downgraded" in r["message"]
+
+
+def test_sreality_image_template_ok_when_the_estate_declares_no_size(monkeypatch: Any) -> None:
+    """No declared source means no yardstick — verify what CAN be verified (the CDN
+    accepted the template and returned a photo) and say the size went unjudged."""
     import scripts.verify_pipeline as vp
 
     monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
-        (200, _PROBE_INDEX_BODY), (200, b"<html>not an image at all</html>"), []))
+        (200, _PROBE_INDEX_BODY), (200, _detail_body(None, None)),
+        (200, _jpeg_bytes(800, 600)), []))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["status"] == "ok" and r["details"]["expected_width"] is None
+    assert "not judged" in r["message"]
+
+
+def test_sreality_image_template_fails_on_a_non_image_body(monkeypatch: Any) -> None:
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_fetch_sreality_probe",
+                        _live_seam((200, b"<html>not an image at all</html>"), []))
     r = vp.check_sreality_image_template(None, T)
     assert r["status"] == "fail" and r["value"] is None
     assert "non-image body" in r["message"]
@@ -2217,11 +2318,26 @@ def test_sreality_image_template_fails_when_the_cdn_refuses_the_template(monkeyp
     transform — a fail, not the network-error warn."""
     import scripts.verify_pipeline as vp
 
-    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
-        (200, _PROBE_INDEX_BODY), (400, b""), []))
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _live_seam((400, b""), []))
     r = vp.check_sreality_image_template(None, T)
     assert r["status"] == "fail" and r["details"]["http_status"] == 400
     assert "REFUSED" in r["message"]
+
+
+def test_sreality_image_template_warns_when_the_image_left_the_cdn_host(monkeypatch: Any) -> None:
+    """with_transform is a no-op off sdn.cz, so a host migration would serve a normal
+    photo and green a template that was never exercised."""
+    import scripts.verify_pipeline as vp
+
+    calls: list[str] = []
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
+        (200, _PROBE_INDEX_BODY),
+        (200, _detail_body(1280, 853, url="//images.example.com/d_18/abc.jpeg")),
+        (200, _jpeg_bytes(1280, 853)), calls))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["status"] == "warn" and r["details"]["skipped"] is True
+    assert "not on the sreality CDN host" in r["details"]["reason"]
+    assert len(calls) == 2, "the CDN must not be probed with an untransformed URL"
 
 
 def test_sreality_image_template_warns_when_the_index_is_unreachable(monkeypatch: Any) -> None:
@@ -2232,11 +2348,23 @@ def test_sreality_image_template_warns_when_the_index_is_unreachable(monkeypatch
     import scripts.verify_pipeline as vp
 
     monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
-        requests.ConnectionError("boom"), (200, b""), []))
+        requests.ConnectionError("boom"), (200, b""), (200, b""), []))
     r = vp.check_sreality_image_template(None, T)
     assert r["status"] == "warn" and r["value"] is None
     assert r["details"]["skipped"] is True
     assert "verified NOTHING" in r["message"]
+
+
+def test_sreality_image_template_warns_when_the_detail_is_unreachable(monkeypatch: Any) -> None:
+    import requests
+
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
+        (200, _PROBE_INDEX_BODY), requests.Timeout("slow"), (200, b""), []))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["status"] == "warn" and r["details"]["skipped"] is True
+    assert "detail endpoint is unreachable" in r["details"]["reason"]
 
 
 def test_sreality_image_template_warns_when_the_cdn_is_unreachable(monkeypatch: Any) -> None:
@@ -2244,8 +2372,8 @@ def test_sreality_image_template_warns_when_the_cdn_is_unreachable(monkeypatch: 
 
     import scripts.verify_pipeline as vp
 
-    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
-        (200, _PROBE_INDEX_BODY), requests.Timeout("slow"), []))
+    monkeypatch.setattr(vp, "_fetch_sreality_probe",
+                        _live_seam(requests.Timeout("slow"), []))
     r = vp.check_sreality_image_template(None, T)
     assert r["status"] == "warn" and r["details"]["skipped"] is True
     assert r["details"]["transform"].endswith("fl=res,1800,1800,1|shr,,20|jpg,80")
@@ -2255,7 +2383,7 @@ def test_sreality_image_template_warns_on_an_empty_index(monkeypatch: Any) -> No
     import scripts.verify_pipeline as vp
 
     monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
-        (200, json.dumps({"results": []}).encode()), (200, b""), []))
+        (200, json.dumps({"results": []}).encode()), (200, b""), (200, b""), []))
     r = vp.check_sreality_image_template(None, T)
     assert r["status"] == "warn" and r["details"]["skipped"] is True
     assert "no estates" in r["details"]["reason"]
@@ -2264,8 +2392,9 @@ def test_sreality_image_template_warns_on_an_empty_index(monkeypatch: Any) -> No
 def test_sreality_image_template_warns_on_an_estate_with_no_images(monkeypatch: Any) -> None:
     import scripts.verify_pipeline as vp
 
+    estate = {k: v for k, v in _DETAIL_FIXTURE.items() if k != "advert_images"}
     monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
-        (200, json.dumps({"results": [{"advert_images": []}]}).encode()), (200, b""), []))
+        (200, _PROBE_INDEX_BODY), (200, json.dumps(estate).encode()), (200, b""), []))
     r = vp.check_sreality_image_template(None, T)
     assert r["status"] == "warn" and r["details"]["skipped"] is True
     assert "no images" in r["details"]["reason"]
@@ -2274,6 +2403,39 @@ def test_sreality_image_template_warns_on_an_estate_with_no_images(monkeypatch: 
 def test_sreality_image_template_warns_on_a_non_200_index(monkeypatch: Any) -> None:
     import scripts.verify_pipeline as vp
 
-    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam((503, b""), (200, b""), []))
+    monkeypatch.setattr(vp, "_fetch_sreality_probe",
+                        _probe_seam((503, b""), (200, b""), (200, b""), []))
     r = vp.check_sreality_image_template(None, T)
     assert r["status"] == "warn" and r["details"]["http_status"] == 503
+
+
+def test_sreality_probe_seam_stops_on_its_wall_clock_deadline(monkeypatch: Any) -> None:
+    """requests' read timeout is per socket READ, not a total: a peer trickling one
+    chunk just inside it would hold the lane for minutes, and nothing outside can
+    preempt this call (the lane budget is armed only as a Postgres statement_timeout)."""
+    import requests
+
+    import scripts.verify_pipeline as vp
+
+    class _Response:
+        status_code = 200
+
+        def __enter__(self) -> "_Response":
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+        def iter_content(self, chunk_size: int) -> Any:
+            while True:
+                yield b"x" * 1024
+
+    monkeypatch.setattr(vp.requests, "get", lambda *a, **k: _Response())
+    try:
+        # A zero budget makes the deadline the FIRST thing the loop trips on; the cap
+        # (6 MB at 1 KB a chunk) would otherwise take 6144 iterations to reach.
+        vp._fetch_sreality_probe("https://example.test/x", (0.0, 0.0), 6 * 1024 * 1024)
+    except requests.Timeout as exc:
+        assert "wall-clock budget" in str(exc)
+    else:  # pragma: no cover - the guard is the point of the test
+        raise AssertionError("the seam never tripped its deadline")
