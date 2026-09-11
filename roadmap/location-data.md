@@ -23,22 +23,45 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W5 LLM lane, triggered only | 06 §6.4's named cohorts: idnes out-of-bbox, bazos `Zahraničí`, maxima; then a ~25 % triggered miner | ⚪ **not started as a wave — its MECHANISM is W2-10's** (`claims_llm@2`, span-validated, graded write-back, luna). What W5 adds and W2-10 did not: the idnes out-of-bbox cohort (**still 10,566 active rows** out of the CZ bbox on 2026-09-08 + 15,880 with no geom), the trigger/attempts ledger, the four-fabrication fixture test. Its "precision on the frozen labelled samples" gate arm is unanswerable under the 09-08 ruling (no labelling) — the joint review is the gate |
 | W6 serving flip + legacy retirement | per-feature cutover behind `location_v2.<feature>` runtime flags, dashboards → dedup → filters → map → estimation last | 🟡 **W6-2 side-by-side SHIPPED 2026-09-10 (operator decision: filters + map, Praha + Středočeský, reviewed before any rollout) — see the W6-2 section; still no consumer flipped.** Kickoff 2026-09-09: Of the five hard preconditions, the two that were build work are met: the `location_v2.<feature>` flags exist (`location_data/serving_flags.py` — `app_settings`-backed, unseeded, missing = OFF) and the per-consumer minimum-granularity floors are declared (`location_data/serving_contracts.py`, 05 §5.5.2 row by row). The three that are decisions were surfaced to the operator with recommendations the same day and **two were decided 2026-09-09**: operator action **A5** = include-and-badge (`certain ∪ possible`, `serving_contracts.FILTER_DEFAULT_SEMANTICS`), and **un-shadow all seven** W2-6…W2-12 portals (bazos@3, ceskereality@5, idnes@2, maxima@2, mmreality@2, realitymix@4, remax@3) — executed through the new dispatch-only `location_contract_shadow.yml`, since a shadowed claim never reaches resolution and the freeze was parking new listings (9,864 of 10,023 since 09-05, measured 09-08). The registry canonical-street-form decision carried from W1v stays open until a `street_name` reader is next to flip. Still exactly ONE consumer reads a projection: the admin-gated Location Quality page (W6 step 1, flipped in W1v, wired before the flag existed); Browse / watchdog / map / dedup / estimation all still read `listings.geom` + geo-derived admin ids. See the W6 section |
 
-## Audit 2026-09-11 → Wave A (in progress)
+## The simplification sprint (2026-09-11 →): one store, one lane, nine fields, no flags
 
-The full-program audit ("Where the Town Lives", materials in
-`~/location-data-architecture-2026-08-10/audit-2026-09-11/`) measured 84.0 % town coverage
-over active listings and found the town on bazos decided by an arbitrary PSČ tie-break on
-24,601 rows. Wave A = make the projection complete and correct; every item is an
-additive PR, one contract bump per portal once the operator settles `shadow` (decision 1).
+**North star:** *every Czech listing has its town; one slim store answers every question; the app
+gets faster because there is less.* Every decision in this sprint is tested against those three
+clauses, in that order. CLAUDE.md rule 25 is the standing form. The audit that started it ("Where the
+Town Lives", materials in `~/location-data-architecture-2026-08-10/audit-2026-09-11/`) measured 84.0 %
+town coverage over active listings, 41,965 active Czech listings without a town, and a stack of
+62 tables / 81 projection columns / 40 claim types / 5 lanes / 19 workflows that no consumer read.
 
-- **A4 resolver tie-break + declared-label guard** (`resolver:v3`): a PSČ-only obec set now
-  goes through the qualifier ladder; a tie is broken by the pin's containing obec (any
-  precision) or by the post town's name, at `low` confidence; an `ambiguous` set can no
-  longer be served as `claimed` over point-in-polygon; `precision_declaration.value_text`
-  becomes a label only when it is in the known vocabulary (our own `coords.source` stamp no
-  longer sets `pin_is_precise`); `no_exact_address` caps at `cast_obce_or_quarter` and an
-  unmapped blurred label at `street`. Dispatch `location_resolve.yml` `mode=full-resolve`
-  after the deploy so every row built at `resolver:v2` re-resolves.
+Waves, in delivery order (reordered from the plan's S0–S5 so that coverage lands first and no
+component is slimmed twice — each wave rewrites one component and slims its store with it):
+
+- **W0 — stop the growth** (shipped): rule 25 in CLAUDE.md; ONE sweep off `listings` replaces the
+  claim-driven stale sweep, the kraj-scoped sweep and the orphan sweep (`_SWEEP_SQL`); the seven stale
+  `shadow: true` lines and the test that forced them are deleted (decision 1); the
+  `location_town_coverage` health check reports, per portal, active listings without a row and
+  active Czech listings without `obec_kod` — red until both are zero. Wave A's #1420 (resolver v3
+  tie-break), #1421 (remax pin stamped `page`), #1422 (no_input rows + daily/weekly crons) merged the
+  same day.
+- **W1 — one lane, ten claim types, nine-entry contracts** (= plan S2 + the claims half of S1): the
+  hourly intake reads the stored payload and the stored page body (hash-gated); the archive sweep,
+  snapshot re-mine, LLM lane and their workflows go; each contract is rewritten to ≤ 10 entries, one
+  per claim type, the town entry mandatory and live; the loader refuses any other shape; the claims
+  table slims to 8 columns and its side tables go. Done when the red line is zero for every portal.
+- **W2 — the resolver at four steps, the answer table at 27 fields** (= plan S3 + the projection
+  half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
+  verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and
+  36 property columns dropped.
+- **W3 — consumers, display first** (= plan S4): the 27 fields into `browse_list` and the public
+  views; one label, one code predicate, one circle; `placeLabel.ts` assemblies, the five chip
+  predicates, the sreality-only filters, `home_city_id` deleted rather than ported. Estimation last.
+- **W4 — delete legacy** (= plan S5): Mapy purge, geocoder + cache, street extractor, the trigger
+  and the 24 `listings` columns, the property-grain geography, the second page archive, the
+  backfill scripts and workflows; rule 24 rewritten to the end state.
+
+Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
+ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
+campaigns or schedules; foreign is a determination, never a default; a field is added only after a
+measured Browse/map slowdown and only to `browse_list`.
 
 ## W0 — done
 

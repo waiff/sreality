@@ -54,7 +54,6 @@
 
 portal: remax
 contract_version: 3
-shadow: true
 extractor_runtime: ">=1.0"
 identity_ladder: [structured_address, portal_precise_coord]
 

@@ -2500,6 +2500,65 @@ def check_location_payload_shape_drift(conn: Any, thresholds: dict[str, Any]) ->
     }
 
 
+# The location programme's one invariant (CLAUDE.md rule 25, 2026-09-11): every active
+# listing has a projection row, and every active listing that is not foreign has a town
+# (`obec_kod`). Per portal, absolute counts, red when either is not zero — this is the line
+# the S2 contract rewrites drive to zero portal by portal and the guard that keeps it there.
+# `country_status <> 'foreign'` deliberately counts `undetermined` and `disputed` as Czech:
+# foreign is a determination the resolver makes, never a default for "no town found".
+_LOCATION_TOWN_COVERAGE_SQL = """
+    SELECT l.source,
+           count(*)                                                   AS active_n,
+           count(*) FILTER (WHERE p.listing_id IS NULL)                AS no_row_n,
+           count(*) FILTER (WHERE p.listing_id IS NOT NULL
+                              AND p.country_status <> 'foreign'
+                              AND p.obec_kod IS NULL)                  AS cz_no_town_n,
+           count(*) FILTER (WHERE p.obec_kod IS NOT NULL)              AS town_n
+      FROM listings l
+      LEFT JOIN listing_location_current p ON p.listing_id = l.id
+     WHERE l.is_active
+     GROUP BY l.source
+     ORDER BY l.source
+"""
+
+
+def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Red when any active listing has no projection row, or any active non-foreign listing
+    has no town. Absolute counts, no threshold: the invariant is zero, and a number that is
+    not zero names the portal whose contract has to change."""
+    rows = _fetchall(conn, _LOCATION_TOWN_COVERAGE_SQL)
+    cells = [{"source": s, "active": int(a), "no_row": int(nr), "cz_no_town": int(nt),
+              "town": int(t), "town_share": (int(t) / int(a)) if int(a) else None}
+             for s, a, nr, nt, t in rows]
+    no_row = sum(c["no_row"] for c in cells)
+    cz_no_town = sum(c["cz_no_town"] for c in cells)
+    active = sum(c["active"] for c in cells)
+    if not cells:
+        return {"check_key": "location_town_coverage", "status": "warn", "value": None,
+                "details": {"skipped": "no active listings read", "cells": []},
+                "message": "Location town coverage verified NOTHING — no active listings read."}
+    offenders = [f"{c['source']}: {c['no_row']:,} without a row, {c['cz_no_town']:,} Czech "
+                 f"without a town (of {c['active']:,})"
+                 for c in cells if c["no_row"] or c["cz_no_town"]]
+    missing = no_row + cz_no_town
+    status = "fail" if missing else "ok"
+    message = (
+        f"{missing:,} of {active:,} active listings have no town "
+        f"({no_row:,} without a projection row, {cz_no_town:,} Czech without obec_kod): "
+        + "; ".join(offenders)
+        if missing
+        else f"Every one of {active:,} active listings has a projection row and every Czech one a town."
+    )
+    return {
+        "check_key": "location_town_coverage",
+        "status": status,
+        "value": missing,
+        "details": {"active": active, "no_row": no_row, "cz_no_town": cz_no_town,
+                    "cells": cells, "offenders": offenders},
+        "message": message,
+    }
+
+
 _OUTBOUND_URL_COVERAGE_SQL = """
     SELECT source,
            count(*)                                                       AS active_n,
@@ -2852,6 +2911,9 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     # W4's standing P6 check. 6h lane + in-app bell; NOT in llm_health.yml's hourly
     # --only list yet — ship, soak, then promote (the same ladder as the ppm2 checks).
     ("location_payload_shape_drift", check_location_payload_shape_drift),
+    # The location programme's coverage invariant (rule 25): absolute counts per portal,
+    # red until they are zero. 6h lane + in-app bell; not in the hourly e-mail list.
+    ("location_town_coverage", check_location_town_coverage),
     # Portal-URL contract: absolute count of active rows with no page URL. 6h lane +
     # in-app bell; not in the hourly --only list (ship, soak, then promote).
     ("outbound_url_coverage", check_outbound_url_coverage),

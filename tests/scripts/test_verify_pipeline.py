@@ -1952,6 +1952,54 @@ def test_worker_lane_stall_does_not_double_alarm_a_dead_worker() -> None:
     assert "worker_liveness" in out["message"]
 
 
+# --- location_town_coverage (rule 25's invariant, 2026-09-11) --------------------
+
+
+def test_location_town_coverage_is_registered() -> None:
+    from scripts.verify_pipeline import _CHECKS, check_location_town_coverage
+
+    assert ("location_town_coverage", check_location_town_coverage) in _CHECKS
+
+
+def test_location_town_coverage_is_red_while_any_czech_listing_lacks_a_town() -> None:
+    """Absolute counts, no threshold: the invariant is zero. The message names the portal,
+    because a non-zero number is a contract that has to change, not a trend to watch."""
+    from scripts.verify_pipeline import check_location_town_coverage
+
+    conn = _ShapeDriftConn([
+        ("bazos", 40_000, 0, 120, 39_500),
+        ("idnes", 30_000, 900, 11_000, 18_000),
+        ("sreality", 200_000, 0, 0, 199_000),
+    ])
+    out = check_location_town_coverage(conn, T)
+    assert out["status"] == "fail"
+    assert out["value"] == 12_020
+    assert out["details"]["no_row"] == 900 and out["details"]["cz_no_town"] == 11_120
+    assert "idnes: 900 without a row, 11,000 Czech without a town" in out["message"]
+    assert "sreality" not in out["message"]
+    assert any("statement_timeout" in s for s in conn.executed)
+
+
+def test_location_town_coverage_is_ok_only_at_zero() -> None:
+    from scripts.verify_pipeline import check_location_town_coverage
+
+    out = check_location_town_coverage(
+        _ShapeDriftConn([("bazos", 40_000, 0, 0, 39_000), ("idnes", 30_000, 0, 0, 10_000)]), T)
+    assert out["status"] == "ok" and out["value"] == 0
+    assert out["details"]["cells"][1]["town_share"] == 10_000 / 30_000
+
+
+def test_location_town_coverage_counts_undetermined_as_czech() -> None:
+    """Foreign is a determination the resolver makes; a listing with no Czech town and no
+    foreign signal is missing, never quietly foreign. The SQL states that directly."""
+    from scripts.verify_pipeline import _LOCATION_TOWN_COVERAGE_SQL
+
+    flat = " ".join(_LOCATION_TOWN_COVERAGE_SQL.split()).lower()
+    assert "p.country_status <> 'foreign' and p.obec_kod is null" in flat
+    assert "from listings l left join listing_location_current p on p.listing_id = l.id" in flat
+    assert "where l.is_active" in flat
+
+
 # --- location_payload_shape_drift (W4's standing P6 check) ---------------------
 
 class _ShapeDriftConn:

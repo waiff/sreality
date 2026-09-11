@@ -35,7 +35,6 @@
 
 portal: mmreality
 contract_version: 2
-shadow: true   # W2-13 dispatches claims_remine_archive; cleared with `python -m location_data.contracts --unshadow mmreality@2` once the frozen-sample floors pass. This whole LINE is outside contract_body_hash (_SHADOW_LINE, contracts.py), so deleting it later costs no version bump.
 extractor_runtime: ">=1.0"
 identity_ladder: [obec_code, structured_address, portal_precise_coord]
 

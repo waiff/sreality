@@ -170,11 +170,11 @@ _DELETE_ROWS_SQL = "DELETE FROM dirty_locations WHERE listing_id = ANY(%s::bigin
 # the default cannot serve — a deliberately slow backfill on a quiet instance.
 BATCH_TIMEOUT_ENV = "LOCATION_RESOLVE_BATCH_TIMEOUT_S"
 DEFAULT_BATCH_TIMEOUT_S = 30
-# The sweep is ONE `INSERT ... SELECT` over the whole claims corpus anti-joined against the
+# One sweep window is an `INSERT ... SELECT` over a 250k-id slice of `listings` joined to the
 # projection; minutes is normal for it and only for it.
 SWEEP_TIMEOUT_ENV = "LOCATION_RESOLVE_SWEEP_TIMEOUT_S"
 DEFAULT_SWEEP_TIMEOUT_S = 900
-# Listing-id width of one corpus-sweep window (see _FULL_SWEEP_SQL).
+# Listing-id width of one corpus-sweep window (see _SWEEP_SQL).
 DEFAULT_SWEEP_WINDOW = 250_000
 LOCK_TIMEOUT_S = 5
 
@@ -200,103 +200,44 @@ def _bounded(conn: psycopg.Connection, seconds: int) -> Iterator[psycopg.Cursor]
             yield cur
 
 
-# `location_resolve_sweep` — the daily reconcile backstop for lost enqueues. Everything
-# whose projection is missing or was built at a version tuple that is no longer current.
+# `location_resolve_sweep` — the daily reconcile backstop. ONE statement, driving off
+# `listings`: every ACTIVE listing whose projection row is missing, or was built at a version
+# tuple that is no longer current, is enqueued. Until 2026-09-11 this was three statements
+# (a claim-driven stale sweep, a kraj-scoped cousin, an orphan sweep off `listings`); the
+# claim-driven one had to DISTINCT a claim corpus growing ~150k rows an hour and could not
+# see a listing that had no claim at all. Driving off `listings` sees every listing there is,
+# the join to the projection is on its primary key, and the drain writes a `no_input` row for
+# a claimless listing — so coverage is `count(projection) = count(active)` by construction,
+# and a stale row is caught the same way as a missing one. Inactive listings keep whatever
+# row they have; the next sighting that reactivates one puts it back in this sweep's scope.
 #
-# Walked in LISTING-ID WINDOWS, never as one statement. This has to drive off the claim
-# corpus — a listing with NO projection exists nowhere else — and that corpus is what the
-# W2-13 archive sweeps grow by ~150k rows an hour, so the single-statement form stopped
-# fitting under the 900 s sweep ceiling on 2026-09-10 (the kraj-scoped cousin died first,
-# run 34459466027; #1384 inverted that one onto the projection, which this one cannot do).
-# A window bounds the work by id range: the claim index range-scans it, the anti-join
-# touches only that range's rows, and each window commits on its own, so an interrupted
-# sweep resumes by simply re-running (ON CONFLICT makes every window idempotent).
+# Walked in LISTING-ID WINDOWS, never as one statement, so each window commits on its own
+# and an interrupted sweep resumes by re-running (ON CONFLICT makes every window idempotent).
 #
-# Both statements pre-filter `NOT EXISTS (... dirty_locations ...)` rather than leaning on
-# ON CONFLICT alone. Since Decision 8b a drain slice is nearly always in flight (the Railway
-# lane), holding its 250 rows FOR UPDATE for the whole slice; an INSERT ... ON CONFLICT on
-# one of those keys must WAIT for that transaction to learn whether the row survives, and
-# the sweep's 5 s lock_timeout then kills the window. The NOT EXISTS is an MVCC read — it
-# sees the queued row and skips it without touching the lock. ON CONFLICT stays as the net
-# for the race between that read and the write; `_execute_window` retries that case.
-_FULL_SWEEP_SQL = """
-INSERT INTO dirty_locations (listing_id, reason)
-SELECT DISTINCT c.listing_id, 'full_sweep'
-  FROM location_claims_live c
-  LEFT JOIN listing_location_current p ON p.listing_id = c.listing_id
- WHERE (p.listing_id IS NULL
-        OR p.resolver_version <> %s
-        OR p.policy_version <> %s
-        OR p.registry_version_id <> %s)
-   AND c.listing_id > %s AND c.listing_id <= %s
-   AND NOT EXISTS (SELECT 1 FROM dirty_locations d WHERE d.listing_id = c.listing_id)
-ON CONFLICT (listing_id) DO NOTHING
-"""
-
-# `location_resolve_sweep`'s second statement: the listings the engine has NEVER LOOKED AT.
-# Every other enqueue presupposes a claim (intake, un-shadow, the stale sweep above drives
-# off `location_claims_live`), so a listing whose payload yielded no claim — a portal whose
-# page-reading entries only run on a manual sweep, a contract shadowed at intake time, an
-# intake refusal — had no projection row and nothing that would ever notice (10,679 active
-# rows on 2026-09-11). This drives off `listings` itself; the drain then writes a `no_input`
-# row for a claimless listing, so coverage becomes `count(projection) = count(active)`.
-_ORPHAN_SWEEP_SQL = """
+# The `NOT EXISTS (... dirty_locations ...)` pre-filter is deliberate, not a duplicate of ON
+# CONFLICT. Since Decision 8b a drain slice is nearly always in flight (the Railway lane),
+# holding its 250 rows FOR UPDATE for the whole slice; an INSERT ... ON CONFLICT on one of
+# those keys must WAIT for that transaction to learn whether the row survives, and the
+# sweep's 5 s lock_timeout then kills the window. The NOT EXISTS is an MVCC read — it sees
+# the queued row and skips it without touching the lock. ON CONFLICT stays as the net for
+# the race between that read and the write; `_execute_window` retries that case.
+_SWEEP_SQL = """
 INSERT INTO dirty_locations (listing_id, reason)
 SELECT l.id, 'full_sweep'
   FROM listings l
   LEFT JOIN listing_location_current p ON p.listing_id = l.id
  WHERE l.is_active
-   AND p.listing_id IS NULL
+   AND (p.listing_id IS NULL
+        OR p.resolver_version <> %s
+        OR p.policy_version <> %s
+        OR p.registry_version_id <> %s)
    AND l.id > %s AND l.id <= %s
    AND NOT EXISTS (SELECT 1 FROM dirty_locations d WHERE d.listing_id = l.id)
 ON CONFLICT (listing_id) DO NOTHING
 """
 
-# The window walk's upper bound. `listings.id` bounds every claim's listing_id and max()
-# over its primary key is an index probe — max() over the claims VIEW would be the very
-# corpus scan the windows exist to avoid.
+# The window walk's upper bound: max() over `listings`' primary key is an index probe.
 _SWEEP_UPPER_BOUND_SQL = "SELECT coalesce(max(id), 0) FROM listings"
-
-# The same stale set, restricted to a few kraje — a resolver bump can then be rolled out on
-# a real cohort before the corpus. A listing with NO projection has no `kraj_kod` to filter
-# on, so a kraj-scoped sweep cannot honestly claim it; those rows are the unscoped sweep's
-# job. This drives off the PROJECTION and probes the claims with a correlated EXISTS, which
-# is the whole point of the rewrite:
-#
-#   The first shape drove off `location_claims_live` and DISTINCT'd millions of claim rows
-#   down to a listing id set before the join could discard all but two kraje. That is work
-#   proportional to the CLAIM corpus for an answer proportional to the PROJECTION, and the
-#   claim corpus is the thing the W2-13 archive sweeps grow by ~150k rows an hour. It went
-#   from "minutes of honest work" to a `QueryCanceled` at the 900 s ceiling on 2026-09-10
-#   (run 34459466027, the resolver:v2 rollout for kraje 19+27), which is a sweep that can
-#   never run again rather than a sweep that is slow.
-#
-#   Inverted, the driving side is `listing_location_current` filtered to the kraje — and
-#   `listing_id` is its PRIMARY KEY, so the DISTINCT is not merely cheaper, it is
-#   unnecessary. The claim table's own `(listing_id, ...)` index serves the EXISTS probe.
-#
-# MATERIALIZED is an optimizer fence, deliberately: `location_claims_live` is a view over a
-# view (unretracted, minus shadowed contracts), so without the fence the planner is free to
-# flatten the EXISTS back into a hash semi-join over the whole claim corpus — reintroducing
-# exactly the plan this rewrite exists to prevent. There is no index on `kraj_kod`; the
-# filtered scan of the projection is the accepted cost and is bounded by the table, not by
-# the claims.
-_FULL_SWEEP_KRAJE_SQL = """
-WITH stale AS MATERIALIZED (
-  SELECT p.listing_id
-    FROM listing_location_current p
-   WHERE p.kraj_kod = ANY(%s::bigint[])
-     AND (p.resolver_version <> %s
-          OR p.policy_version <> %s
-          OR p.registry_version_id <> %s)
-)
-INSERT INTO dirty_locations (listing_id, reason)
-SELECT s.listing_id, 'full_sweep'
-  FROM stale s
- WHERE EXISTS (SELECT 1 FROM location_claims_live c WHERE c.listing_id = s.listing_id)
-   AND NOT EXISTS (SELECT 1 FROM dirty_locations d WHERE d.listing_id = s.listing_id)
-ON CONFLICT (listing_id) DO NOTHING
-"""
 
 
 @dataclass(slots=True)
@@ -640,7 +581,7 @@ def _compute_one(
         # was dropped from the queue and either kept a stale row (re-shadow, retraction) or
         # never got one at all — the 10,679 active orphans the audit measured. A `no_input`
         # resolution states "nothing to go on" (granularity unknown, no position), so
-        # coverage is measurable and the orphan sweep does not re-enqueue it every night.
+        # coverage is measurable and the nightly sweep does not re-enqueue it.
         LOG.info("RESOLVE no_input listing_id=%s reason=no_claims", listing_id)
     resolution = core.resolve(
         claims,
@@ -837,84 +778,33 @@ def enqueue_full_sweep(
     conn: psycopg.Connection,
     *,
     policy_version: str,
-    kraje: Sequence[int] | None = None,
     window: int = DEFAULT_SWEEP_WINDOW,
 ) -> int:
     """`location_resolve_sweep`: the backstop for lost enqueues. The incremental lane stays
-    the primary path — this only re-enqueues what a version bump or a dropped enqueue left
-    behind.
-
-    Every statement here gets the sweep budget rather than the batch ceiling — but never
-    the whole corpus in one statement; see `_FULL_SWEEP_SQL` for why it is windowed.
-
-    `kraje` scopes the stale set to those `kraj_kod`s, which is how a resolver bump gets a
-    side-by-side cohort before the corpus-wide run; that shape drives off the projection
-    and is one bounded statement.
-    """
+    the primary path — this re-enqueues what a version bump, a dropped enqueue or a
+    claimless listing left behind, in listing-id windows (see `_SWEEP_SQL`). Every window
+    gets the sweep budget rather than the batch ceiling."""
+    if window <= 0:
+        raise ValueError("sweep window must be positive")
     seconds = loader_db.env_timeout_s(SWEEP_TIMEOUT_ENV, DEFAULT_SWEEP_TIMEOUT_S)
     registry_version_id, _ = resolve_db.current_registry_version(conn)
-    if kraje:
-        with _bounded(conn, seconds) as cur:
-            cur.execute(
-                _FULL_SWEEP_KRAJE_SQL,
-                (list(kraje), RESOLVER_VERSION, policy_version, registry_version_id),
-            )
-            enqueued = cur.rowcount
-        LOG.info(
-            "SWEEP enqueued=%d timeout=%ds kraje=%s",
-            enqueued, seconds, ",".join(str(k) for k in kraje),
-        )
-        return enqueued
-    if window <= 0:
-        raise ValueError("sweep window must be positive")
-    with conn.cursor() as cur:
-        cur.execute(_SWEEP_UPPER_BOUND_SQL)
-        row = cur.fetchone()
-        upper = int(row[0]) if row else 0
-    enqueued = 0
-    after = 0
-    windows = 0
-    while after < upper:
-        hi = min(after + window, upper)
-        n = _execute_window(
-            conn, seconds, _FULL_SWEEP_SQL,
-            (RESOLVER_VERSION, policy_version, registry_version_id, after, hi),
-        )
-        enqueued += n
-        windows += 1
-        LOG.info("SWEEP window=(%d,%d] enqueued=%d", after, hi, n)
-        after = hi
-    LOG.info(
-        "SWEEP enqueued=%d windows=%d width=%d timeout=%ds kraje=all",
-        enqueued, windows, window, seconds,
-    )
-    return enqueued
-
-
-def enqueue_orphan_sweep(conn: psycopg.Connection, *, window: int = DEFAULT_SWEEP_WINDOW) -> int:
-    """Enqueue every ACTIVE listing with no projection row at all — see `_ORPHAN_SWEEP_SQL`.
-    Windowed and bounded exactly like the stale sweep; idempotent, so re-running is safe."""
-    if window <= 0:
-        raise ValueError("sweep window must be positive")
-    seconds = loader_db.env_timeout_s(SWEEP_TIMEOUT_ENV, DEFAULT_SWEEP_TIMEOUT_S)
-    with conn.cursor() as cur:
+    with _bounded(conn, seconds) as cur:
         cur.execute(_SWEEP_UPPER_BOUND_SQL)
         row = cur.fetchone()
         upper = int(row[0]) if row else 0
     enqueued = windows = after = 0
     while after < upper:
         hi = min(after + window, upper)
-        n = _execute_window(conn, seconds, _ORPHAN_SWEEP_SQL, (after, hi))
+        n = _execute_window(
+            conn, seconds, _SWEEP_SQL,
+            (RESOLVER_VERSION, policy_version, registry_version_id, after, hi),
+        )
         enqueued += n
         windows += 1
-        LOG.info("ORPHAN SWEEP window=(%d,%d] enqueued=%d", after, hi, n)
+        LOG.info("SWEEP window=(%d,%d] enqueued=%d", after, hi, n)
         after = hi
-    LOG.info("ORPHAN SWEEP enqueued=%d windows=%d width=%d timeout=%ds", enqueued, windows, window, seconds)
+    LOG.info("SWEEP enqueued=%d windows=%d width=%d timeout=%ds", enqueued, windows, window, seconds)
     return enqueued
-
-
-def _parse_kraje(raw: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in raw.replace(",", " ").split())
 
 
 def open_connection() -> psycopg.Connection:
@@ -936,17 +826,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-seconds", type=int, default=DEFAULT_MAX_SECONDS)
     parser.add_argument("--policy-version", default=POLICY_VERSION_DEFAULT)
     parser.add_argument("--listing-id", type=int, default=None)
-    parser.add_argument("--full-sweep", action="store_true", help="enqueue the stale set first")
     parser.add_argument(
-        "--orphan-sweep", action="store_true",
-        help="also enqueue every active listing that has no projection row at all",
-    )
-    parser.add_argument(
-        "--kraje", default="", help="full-sweep only: comma-separated kraj_kod scope"
+        "--full-sweep", action="store_true",
+        help="first enqueue every active listing whose projection row is missing or stale",
     )
     parser.add_argument(
         "--sweep-window", type=int, default=DEFAULT_SWEEP_WINDOW,
-        help="corpus-wide full-sweep only: listing-id width of one bounded window",
+        help="full-sweep only: listing-id width of one bounded window",
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -960,14 +846,7 @@ def main(argv: list[str] | None = None) -> int:
         # 2026-09-10 as a 20-second "DRAIN skipped" success that enqueued nothing (run
         # 34482389394). Enqueue first; then whoever holds the lease drains it.
         if args.full_sweep and not args.dry_run:
-            enqueue_full_sweep(
-                conn,
-                policy_version=args.policy_version,
-                kraje=_parse_kraje(args.kraje),
-                window=args.sweep_window,
-            )
-        if args.orphan_sweep and not args.dry_run:
-            enqueue_orphan_sweep(conn, window=args.sweep_window)
+            enqueue_full_sweep(conn, policy_version=args.policy_version, window=args.sweep_window)
         with lease.held(
             conn,
             JOB_NAME,

@@ -53,7 +53,6 @@
 
 portal: maxima
 contract_version: 2
-shadow: true
 extractor_runtime: ">=1.0"
 identity_ladder: [portal_precise_coord, text_geocode]
 
