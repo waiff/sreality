@@ -250,83 +250,20 @@ def test_shared_rate_limiter_rejects_non_bool_leaf():
     assert cfg.limits.shared_rate_limiter is False
 
 
-# --- payload_dual_write (location-data W2a-2 payload archive gate) ---
+# --- the payload archive is no longer a limit ---
 
-def test_payload_dual_write_defaults_off_everywhere():
-    # Enabling it is gated on the churn sign-off (02 section 2.3.2's storage
-    # question), so no portal may ship with the archive already writing.
-    assert PortalLimits().payload_dual_write is False
-    for source in ("sreality", "bazos", "idnes", "bezrealitky", "maxima",
-                   "mmreality", "remax", "ceskereality", "realitymix"):
-        assert default_config(source).limits.payload_dual_write is False
-
-
-def test_payload_dual_write_per_portal_override():
-    # Per portal on purpose: the storage cost of archiving mmreality's 245 KB
-    # pages is not bazos's 41 KB one, so the decision is taken per portal.
-    row = (True, [{"x": 1}], None, {"payload_dual_write": True})
-    cfg = load_portal_config(_Conn(row), "idnes")
-    assert cfg.limits.payload_dual_write is True
-
-
-def test_payload_dual_write_global_underlay():
-    portal_row = (True, [{"x": 1}], None, None)
-    global_row = ({"payload_dual_write": True},)
-    cfg = load_portal_config(_Conn(portal_row, global_row), "idnes")
-    assert cfg.limits.payload_dual_write is True
-    # ... and one portal can still be held back from a global enable.
-    portal_row = (True, [{"x": 1}], None, {"payload_dual_write": False})
-    cfg = load_portal_config(_Conn(portal_row, global_row), "idnes")
-    assert cfg.limits.payload_dual_write is False
-
-
-def test_payload_dual_write_rejects_non_bool_leaf():
-    row = (True, [{"x": 1}], None, {"payload_dual_write": "true"})
-    cfg = load_portal_config(_Conn(row), "idnes")
-    assert cfg.limits.payload_dual_write is False
-
-
-# --- payload_index_archive (location-data W2a-6 index-only second gate) ---
-
-def test_payload_index_archive_defaults_off_everywhere():
-    # Split from payload_dual_write because index pages are their own storage
-    # decision (02 section 2.3.2 P2: they re-order on every walk, and sreality
-    # walks them 24x/day), so it ships off on every portal for the same reason.
-    assert PortalLimits().payload_index_archive is False
-    for source in ("sreality", "bazos", "idnes", "bezrealitky", "maxima",
-                   "mmreality", "remax", "ceskereality", "realitymix"):
-        assert default_config(source).limits.payload_index_archive is False
-
-
-def test_payload_index_archive_is_independent_of_dual_write():
-    # Enabling the archive for a portal must not enable its index surface, and
-    # the two must be separately settable in one operator edit.
-    row = (True, [{"x": 1}], None, {"payload_dual_write": True})
-    cfg = load_portal_config(_Conn(row), "sreality")
-    assert cfg.limits.payload_dual_write is True
-    assert cfg.limits.payload_index_archive is False
-
+def test_the_payload_archive_is_not_a_per_portal_limit_any_more():
+    """Rule 25 W1-a: the stored detail body is the claim lane's SECOND SUBSTRATE, so
+    archiving it is not an opt-in experiment. `payload_dual_write` / `payload_index_archive`
+    are gone and `scraper.db._payload_archive_enabled` is one page_kind test — detail always,
+    every other surface never. A stale `operational_limits` row naming either is ignored the
+    way any unknown key is, rather than reviving a gate."""
+    assert not hasattr(PortalLimits(), "payload_dual_write")
+    assert not hasattr(PortalLimits(), "payload_index_archive")
     row = (True, [{"x": 1}], None,
            {"payload_dual_write": True, "payload_index_archive": True})
-    cfg = load_portal_config(_Conn(row), "sreality")
-    assert cfg.limits.payload_index_archive is True
-
-
-def test_payload_index_archive_global_underlay():
-    portal_row = (True, [{"x": 1}], None, None)
-    global_row = ({"payload_index_archive": True},)
-    cfg = load_portal_config(_Conn(portal_row, global_row), "sreality")
-    assert cfg.limits.payload_index_archive is True
-    # ... and one portal can still be held back from a global enable.
-    portal_row = (True, [{"x": 1}], None, {"payload_index_archive": False})
-    cfg = load_portal_config(_Conn(portal_row, global_row), "sreality")
-    assert cfg.limits.payload_index_archive is False
-
-
-def test_payload_index_archive_rejects_non_bool_leaf():
-    row = (True, [{"x": 1}], None, {"payload_index_archive": "true"})
-    cfg = load_portal_config(_Conn(row), "sreality")
-    assert cfg.limits.payload_index_archive is False
+    cfg = load_portal_config(_Conn(row), "idnes")
+    assert not hasattr(cfg.limits, "payload_dual_write")
 
 
 # --- price_changed (index-walk price-diff jitter tolerance) ---

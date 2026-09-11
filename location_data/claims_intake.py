@@ -1,110 +1,135 @@
-"""W1 claim intake — deterministic extraction of location claims from `listings.raw_json`.
+"""THE claim lane — one hourly pass that mines every substrate we hold for a listing.
 
-Design: 06-migration-backfill.md §6.2.1 (the raw_json substrate — cheapest, richest,
-first; all nine sources), §6.1.2 (the coordinate-provenance ladder, a filter on the INPUT
-applied before anything is written), §6.6 rules 1/3/6/7 (observation timestamps, legacy
-anchoring, no claim for a non-storable signal, blur written never defaulted),
-03-resolution-pipeline.md §3.2 (the S0 admission contract and the dirty_locations
-side effect), 02-portal-contracts.md §2.2 (what each portal publishes).
-
-WHAT THIS LANE IS
-  * Pure deterministic extraction. No model, no network, no re-fetch.
-  * The substrate is `listings.raw_json` PLUS the class-B legacy columns of 06 §6.1.3 —
-    `listings.geom` (ladder-gated) and `listings.locality` (the only surviving copy of the
-    locality string wherever the slim-dict payload carries the key with a NULL value).
-    §6.1.3 classes some of those columns per WRITER rather than per column, so a contract
-    entry may guard its read on a provenance stamp (`locator.require_column_equals`):
-    `listings.street` is class B where `street_source='parser'` and class D — quarantine,
-    never a claim — where it is `'resolver'` or NULL.
+WHAT THIS LANE IS (rule 25: one store, one lane, nine claim types, no flags)
+  * A keyset scan of `listings`, hourly, incremental off a `last_seen_at` watermark.
+  * Two substrates, ONE registry (`READERS`), one write:
+      - `listings.raw_json` plus the class-B legacy columns (`listings.locality`,
+        `listings.street` where `street_source='parser'`, `listings.geom` behind the
+        licence ladder) — the 10 payload readers below;
+      - the STORED PAGE BODY: the latest `portal_raw_payloads` detail row for the
+        listing's `(source, source_id_native)`, fetched from R2 and scoped by the
+        contract's exclusion zones — the 14 page readers in `location_data.page_readers`.
   * Contract-driven: every claim is stamped with the `portal_contract_entries` row that
     produced it, and the extractor executes exactly those entries whose `locator` names a
-    `reader` from the registry below. Entries declared for W2 surfaces (html_selector,
-    map_config, url_slug, og_meta, jsonld, description) carry no reader and are inert here.
-    What a given reader may be declared on — surfaces, extraction methods, the locator
-    keys it indexes, whether it consults `transform` / `guards` at all — is
-    `contracts.READER_CONTRACTS`, and the `TRANSFORMS` / `GUARDS` registries below are the
-    vocabularies an entry that DOES name a reader may draw on. All of it is enforced when
-    the contract is projected, so an entry cannot declare something this lane ignores.
-  * NO evidence-bearing method runs in W1. `regex_text` / `llm_text` claims need a span
-    into a retrievable document, and the content-addressed body store
-    (`portal_raw_payloads`) does not fill until W2a — a span into a latest-wins body is a
-    one-shot check (01 §4.2). Those entries ship in the contract and stay unexecuted.
+    reader from `READERS`. A name in NO registry is a hard refusal (a real deploy error).
+
+THE HASH GATE (why the hourly budget is bounded by page CHURN, not by corpus size)
+  `portal_raw_payloads` is append-on-change: a body is one row, immutable, content-
+  addressed. So a body only has to be mined ONCE per contract version, and
+  `portal_raw_payloads.contract_version` is the marker that says it was: the scan joins the
+  portal's ACTIVE contract and mines only where
+  `contract_version IS DISTINCT FROM portal_contracts.version`. A new body arrives NULL
+  there and is mined on the next run; a contract bump re-mines every latest body over the
+  runs that follow; a body already at the active version is never fetched. No new table —
+  the column existed (migration 403) and nothing ever populated it.
+
+R2 IS OPTIONAL TO THE LANE, NOT TO THE PAGE HALF
+  Bodies live in the bucket (99.7 % are spilled). If R2 is not configured the page half is
+  skipped with ONE warning per run and the payload half runs exactly as before — the hourly
+  lane must never go dark for all nine portals because a credential rotated.
 
 THE LICENCE LADDER RUNS FIRST (§6.1.2, and it is a filter, not an audit)
   * `geocode` / bazos `street` / `locality` / absent provenance  -> class E, NO coordinate
-    claim, ever. This lane can only ever emit `licence_class = 'portal'`.
+    claim, ever. The payload substrate can only ever emit `licence_class = 'portal'`; the
+    page substrate adds `'odbl'` for realitymix's Nominatim-fallback pin and nothing else.
   * `carry_forward` is provenance-laundering: admitted only when the listing is ABSENT
-    from `mapy_affected` (migration 385 — the C7.2 R2 inventory, a W1 INPUT).
-  * Stronger than that, and deliberately: §6.4's blocking W1 gate is
-    `claims JOIN <R2 inventory> USING (listing_id) WHERE claim_type='coordinate'` = 0,
-    so a listing present in the inventory gets NO coordinate claim on ANY substrate,
-    including the three portals whose coordinate is first-party payload.
+    from `mapy_affected` (migration 385 — the C7.2 R2 inventory, a lane INPUT).
   * If `mapy_affected` is missing or empty the lane REFUSES to run.
+
+WHAT IT WRITES, AND ONLY THAT
+  `location_claims` (append-only, deduped on `claim_fingerprint`), `dirty_locations`
+  (the resolver's queue, inside the same transaction), `location_claim_batches` (this
+  lane's run ledger and cursor), and the `contract_version` stamp on the bodies it mined.
+  Refusals — a withheld coordinate, an oversized value, a subject miss — are COUNTED and
+  logged once per reason per batch. `location_claim_observations`,
+  `location_claim_absences` and `location_enrichment_state` were written by every lane and
+  read by none; they are no longer written.
 
 CLI:
     python -m location_data.claims_intake --mode incremental
     python -m location_data.claims_intake --mode full --source sreality --max-seconds 3000
-Required: SUPABASE_DB_URL. Additionally requires migrations 380-387 and a projected,
+Required: SUPABASE_DB_URL. Additionally requires migrations 380-387 + 403 and a projected,
 active portal contract per source (`python -m location_data.contracts --load`).
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
-import re
 import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
 
-from location_data import loader_db
+from location_data import loader_db, page_readers, payloads
+from location_data.claims_common import (  # noqa: F401 - the lane's public vocabulary
+    ARCHIVED_COORDINATE_RULES,
+    COORDINATE_RULES,
+    DEFAULT_MAX_CLAIM_VALUE_BYTES,
+    EMITTABLE_LICENCE_CLASSES,
+    GUARD_CZ_BBOX,
+    GUARDS,
+    HISTORY_COMPLETENESS,
+    LEGACY_COLUMNS,
+    MAPY_COORDS_SOURCES,
+    MIRROR_UNSAFE_CHARS,
+    MAX_CLAIM_VALUE_BYTES_ENV,
+    SOURCES,
+    SUBSTRATE_ARCHIVED_HTML,
+    SUBSTRATE_PAYLOAD,
+    TRANSFORMS,
+    ArchivedCoordinateRule,
+    Claim,
+    CoordinateRule,
+    CoordinateVerdict,
+    Entry,
+    IntakeRefused,
+    IntakeResult,
+    ListingRow,
+    _base,
+    _number,
+    _text,
+    apply_transforms,
+    claim_value_bytes,
+    coordinate_verdict,
+    cz_bbox,
+    env_positive_int,
+    envelope_wkt,
+    guard_admits,
+    in_cz_bbox,
+    json_pointer,
+    mirror_is_faithful,
+    payload_hash,
+    point_wkt,
+    sreality_payload_shape,
+    value_norm_mirror,
+)
 from scraper import db, street
 
 LOG = logging.getLogger("location_data.claims_intake")
 
-# Bumped whenever the extraction SEMANTICS change. It rides in every claim's batch row and
-# in `location_claim_observations.extractor_version`; the per-claim `extractor_version` is
-# the contract's own `contract:<portal>@<version>` (02 §2.1.8).
-INTAKE_VERSION = "claims_intake@3"
+# Bumped whenever the extraction SEMANTICS change. It rides in every claim's batch row;
+# the per-claim `extractor_version` is the contract's own `contract:<portal>@<version>`
+# (02 §2.1.8). @4 is the one-lane fold: the page body became a substrate of this lane.
+INTAKE_VERSION = "claims_intake@4"
 LANE = "location_claims_intake"
 WAVE = "W1"
-
-SOURCES = (
-    "sreality", "bezrealitky", "bazos", "idnes", "mmreality", "remax", "ceskereality",
-    "realitymix", "maxima",
-)
-
-# The class-B legacy columns (06 §6.1.3), in the ORDER the two batch queries select them.
-# ONE list, because four things have to agree: the SELECT items of both queries, the
-# positional unpack in `_row_from_record`, and the `locator.legacy_source_column` /
-# `locator.require_column_equals` keys a contract entry is allowed to name. Adding a column
-# is one SELECT item + one line here + a contract entry — never a new reader.
-#
-# `listings.street_source` is here as a GUARD column: nothing reads it as a value, and it
-# is the reason `listings.street` can be read at all (06 §6.1.3 admits that column only for
-# `street_source='parser'`). `listings.geom` is NOT here — it has its own reader, because
-# the licence ladder gates it.
-LEGACY_COLUMNS: tuple[str, ...] = (
-    "listings.locality", "listings.street", "listings.street_source",
-)
 
 MIN_BATCH_SIZE = 10_000
 MAX_BATCH_SIZE = 30_000
 DEFAULT_BATCH_SIZE = 20_000
 # Incremental runs re-read a window behind the last successful batch: a listing written
 # while the previous run was mid-flight would otherwise fall between the two watermarks.
-# Re-reading is free — values dedupe on the fingerprint and a re-sight appends at most one
-# observation per (claim, observed_at).
+# Re-reading is free — values dedupe on the fingerprint, and a body already at the active
+# contract version is not fetched a second time.
 DEFAULT_OVERLAP_HOURS = 3
 
 # Per-batch statement ceiling (seconds), env-overridable so a lane can be widened without
@@ -122,9 +147,7 @@ _FAILURE_STAMP_TIMEOUT_S = 30
 # (ProgramLimitExceeded). A 20 000-listing batch crossed it in production (Actions run
 # 31482522487, the hourly incremental) — the incremental scan orders by `last_seen_at`, not
 # `id`, which concentrated the geometry-heavy sreality rows into one batch where the earlier
-# id-ordered full pass had diluted them across nine portals. There is nothing exotic about
-# the arithmetic: one post-cutover sreality listing yields 21 claims ~= 18.9 KB, so a
-# 20 000-listing all-sreality batch is ~378 MB in ONE array. The cap is a property of the
+# id-ordered full pass had diluted them across nine portals. The cap is a property of the
 # WRITE, not of the scan, so shrinking the batch would only move the cliff: the arrays are
 # flushed in chunks bounded by BOTH a row count and a cumulative serialized-byte budget,
 # whichever trips first, all inside the same batch transaction as before.
@@ -133,892 +156,49 @@ WRITE_CHUNK_BYTES_ENV = "LOCATION_INTAKE_CHUNK_BYTES"
 DEFAULT_WRITE_CHUNK_ROWS = 5_000
 DEFAULT_WRITE_CHUNK_BYTES = 32 * 1024 * 1024  # ~8x under the hard limit, per statement.
 
-# The second rail, and the one that survives a pathological single row: no chunk budget can
-# split ONE array element, so a claim whose value alone dwarfs the budget would still be
-# handed to Postgres verbatim. A value this large is not a location claim — it is a portal
-# geometry blob that landed in `raw_json` — so it is refused at extraction time and the
-# listing is routed to the refetch cohort instead (see `_refuse_oversized`).
-MAX_CLAIM_VALUE_BYTES_ENV = "LOCATION_INTAKE_MAX_VALUE_BYTES"
-DEFAULT_MAX_CLAIM_VALUE_BYTES = 2 * 1024 * 1024
+# ONE BODY FETCH PER BODY IS THE WHOLE COST OF THE PAGE HALF, and the fleet appends
+# ~8k bodies a day (~50-80 an hour), so a run's fan-out is bounded by churn. This ceiling
+# is the second rail: a contract bump makes every latest body eligible at once, and without
+# it one run would try to pull the whole corpus through the bucket.
+BODY_FETCH_CAP_ENV = "LOCATION_INTAKE_BODY_CAP"
+DEFAULT_BODY_FETCH_CAP = 4_000
 
-# 02 §2.1.9 + 06 §6.6 rule 6: a signal we may not store produces NO claim row. This lane
-# has exactly one storable lineage, and the guard is asserted at write time.
-EMITTABLE_LICENCE_CLASSES = frozenset({"portal"})
 
-# 06 §6.2.2, applied by the loader as a per-source constant: sreality is the only portal
-# whose location changes ever appended a snapshot; mmreality/bezrealitky have a payload
-# per snapshot but hash-excluded coordinates; the six slim-dict portals have locality-text
-# history only. Without the marker "a chart of locality-string changes reads as a chart of
-# coordinate changes".
-HISTORY_COMPLETENESS: dict[str, str] = {
-    "sreality": "full",
-    "mmreality": "payload_only",
-    "bezrealitky": "payload_only",
-    "bazos": "locality_text_only",
-    "idnes": "locality_text_only",
-    "ceskereality": "locality_text_only",
-    "realitymix": "locality_text_only",
-    "remax": "locality_text_only",
-    "maxima": "locality_text_only",
-}
-
-# 06 §6.1.2 rows 4-5: Mapy output under three different stamps ('street'/'locality' are
-# bazos' own in-parser geocoder). Kept identical to scripts/location_mapy_inventory.py's
-# arm 1 set minus carry_forward, which has its own inventory-conditional rung.
-MAPY_COORDS_SOURCES = frozenset({"geocode", "street", "locality"})
-
+# ------------------------------------------------------------------ THE registry
 
 @dataclass(frozen=True, slots=True)
-class CoordinateRule:
-    """Where a portal's coordinate legitimately comes from, as data (06 §6.2.1 + §6.1.2).
+class Reader:
+    """One row of THE reader registry: the substrate it takes, and the function.
 
-    `substrate`:
-      payload      - the portal published the coordinate in the body we still hold; the
-                     value is re-derived from `raw_json` and is first-party (class A).
-      geom_column  - the value survives ONLY in `listings.geom` (the six slim-dict portals
-                     never wrote lat/lon into raw_json), so it is migrated as a legacy
-                     column and ONLY when the provenance stamp names a first-party path.
-      none         - the portal ships no admissible coordinate at all.
+    ONE registry, not three. The lane used to carry `READERS` (raw_json) plus two
+    name-only mirrors — `ARCHIVE_ONLY_READERS` and `LLM_ONLY_READERS` — because the
+    other two lanes could not be imported here without a cycle. The cycle is gone
+    (`claims_common` holds the shared vocabulary), the LLM lane is gone, and a name that
+    lives in a mirror rather than in the registry is a name nothing executes.
     """
+    name: str
     substrate: str
-    first_party_sources: frozenset[str] = frozenset()
-    carry_forward_admissible: bool = False
+    fn: Any
 
 
-COORDINATE_RULES: dict[str, CoordinateRule] = {
-    # Post-cutover `locality.gps_lat/gps_lon`; the retired shape yields no coordinate.
-    "sreality": CoordinateRule("payload"),
-    # `advert.gps{lat,lng}` — 97.4% unique, the cleanest pin of the fleet [live-A §2.5].
-    "bezrealitky": CoordinateRule("payload"),
-    # The Vue prop's `point{latitude,longitude}` — first-party [06 §6.2.1].
-    "mmreality": CoordinateRule("payload"),
-    # Only `link` is first-party on bazos: the CZ-guarded maps anchor inside the ad.
-    "bazos": CoordinateRule("geom_column", frozenset({"link"}), carry_forward_admissible=True),
-    "idnes": CoordinateRule("geom_column", frozenset({"page"}), carry_forward_admissible=True),
-    "ceskereality": CoordinateRule("geom_column", frozenset({"page"}),
-                                   carry_forward_admissible=True),
-    "realitymix": CoordinateRule("geom_column", frozenset({"page"}),
-                                 carry_forward_admissible=True),
-    "maxima": CoordinateRule("geom_column", frozenset({"page"}),
-                             carry_forward_admissible=True),
-    # remax stamped NO `coords` key until 2026-09-11, so every stored remax coordinate read
-    # as unestablished provenance and the portal was the fleet's only `"none"` rule — while
-    # 7,932 of its 8,009 unstamped active rows were the page's own `#printMap[data-gps]`
-    # pin (audit 2026-09-11). `scraper.remax_parser` now stamps the subject-map pin `page`;
-    # rows drained before that carry no stamp and stay refused
-    # (`coordinate_provenance_unestablished`) until their next 6 h drain rewrites raw_json.
-    "remax": CoordinateRule("geom_column", frozenset({"page"}), carry_forward_admissible=True),
-}
-
-# The two substrates the ladder can be asked about. `COORDINATE_RULES` above describes the
-# first one ONLY — the payload we already hold plus the class-B `listings` columns — which
-# is every W1/W3 caller. W2's archived body is a different question with different answers
-# (remax publishes NO first-party coordinate in `raw_json` and DOES publish one in
-# `#printMap[data-gps]`), so it gets its own table rather than a substrate flag smuggled
-# into the existing rows.
-SUBSTRATE_PAYLOAD = "raw_json"
-SUBSTRATE_ARCHIVED_HTML = "archived_html"
+PayloadReaderFn = Callable[[Entry, ListingRow], list[Claim]]
+ReaderFn = PayloadReaderFn
+READERS: dict[str, Reader] = {}
 
 
-@dataclass(frozen=True, slots=True)
-class ArchivedCoordinateRule:
-    """Where a portal's coordinate legitimately comes from on the ARCHIVED body (C6).
-
-    `entry_id` is the ONE contract entry whose locator addresses the portal's own detail
-    map. Naming it — rather than admitting any coordinate-typed entry — is what stops a
-    later per-portal PR from licensing a second, unruled locator by simply declaring
-    `claim_type: coordinate`: an unrecognised entry gets no coordinate, and the PR that
-    wants one has to add a row here and argue for it.
-
-    `geocoded_licence_class` is realitymix's second branch, and it is the whole of C6:
-    `/build/maps.913b4199.js` falls back to `nominatim.openstreetmap.org` when `data-gps-*`
-    is absent and labels the pin *"Pozice na mapě je pouze orientační"* [live-C §2.3]. ODbL
-    follows the geometry, not the republisher (00 §6.2), so that branch is `'odbl'` — never
-    `'portal'`, and never the retired `portal_osm_derived` spelling. A portal with no such
-    branch leaves it None, and a coordinate recovered without the portal's own pin is
-    refused rather than guessed at.
-    """
-    entry_id: str
-    licence_class: str
-    geocoded_licence_class: str | None = None
-
-
-# The DOM readers implemented by `claims_remine_archive`, as NAMES only (W2-6).
-#
-# It lives here, in the module the archive lane imports, rather than the reverse: importing
-# `claims_remine_archive` from this module would be circular, and this lane is the hourly
-# one — it must not grow a dependency on a lane that needs R2 credentials to import cleanly.
-#
-# What it is FOR: a contract entry naming one of these is not a W1 entry. W1 must skip it,
-# because `listings.raw_json` carries no DOM for it to read — while a name in NEITHER
-# registry stays a hard refusal, since that is a real deploy error. `test_lane_identifiers`
-# and the contracts test assert this set equals `ARCHIVE_READERS` exactly, so a reader added
-# there without a line here fails CI rather than taking the hourly intake down for a portal.
-ARCHIVE_ONLY_READERS = frozenset({
-    "html_text", "html_own_text", "html_attr", "html_attr_regex", "html_regex",
-    "html_marker", "html_point_dms", "html_point_attrs",
-    "json_scalar", "json_regex", "json_bool", "json_point", "json_geometry",
-    "json_breadcrumb",
-})
-
-# The readers implemented by `claims_llm` (W2-10), as NAMES only — the same
-# name-mirror-not-import arrangement as `ARCHIVE_ONLY_READERS` above, and for the same two
-# reasons: importing `claims_llm` here would be circular, and the hourly W1 lane must not
-# grow an import that needs R2 credentials and a provider key to load.
-#
-# The registry is a THIRD one rather than an extension of either, because the three readers
-# take three different substrates: W1's take `(entry, row)` over `raw_json`, the archive
-# lane's take a scoped DOM, and these take a scoped DOM PLUS one structured answer from a
-# model. A name that resolved in the wrong registry would silently read the wrong thing.
-LLM_ONLY_READERS = frozenset({"llm_location_text"})
-
-ARCHIVED_COORDINATE_RULES: dict[str, ArchivedCoordinateRule] = {
-    # `#printMap[data-gps], #listingMap[data-gps]`, scoped by element id — never "the first
-    # data-gps in the document", which is the neighbour carousel [live-B §3.5.1].
-    "remax": ArchivedCoordinateRule("rx.det.gps", "portal"),
-    "realitymix": ArchivedCoordinateRule("rm.det.gps", "portal",
-                                         geocoded_licence_class="odbl"),
-    # A typed {coordinates,address} pair keyed by the listing id, inside the MapTiler blob.
-    "idnes": ArchivedCoordinateRule("id.det.subject_feature", "portal"),
-    # The same Vue `point{}` W1 reads out of raw_json, re-read from the archived body.
-    "mmreality": ArchivedCoordinateRule("mm.det.point", "portal"),
-    # The OpenLayers config's `/features/0`.
-    "maxima": ArchivedCoordinateRule("mx.det.map_features", "portal"),
-}
-
-# Same envelope as `location_constants.cz_bbox` (migration 380) and as
-# location_data/krovak.py, which is the module that owns it. The literal below is the
-# import fallback only — it exists so this module still imports while PR #1010 (the RÚIAN
-# loader, which adds krovak.py) is unmerged, and it is byte-identical to that constant.
-_CZ_BBOX_FALLBACK = (48.0, 51.5, 12.0, 19.0)
-
-
-def cz_bbox() -> tuple[float, float, float, float]:
-    """(lat_min, lat_max, lon_min, lon_max) — the ONE canonical CZ envelope."""
-    try:
-        from location_data.krovak import CZ_LAT_MAX, CZ_LAT_MIN, CZ_LON_MAX, CZ_LON_MIN
-    except ImportError:
-        return _CZ_BBOX_FALLBACK
-    return CZ_LAT_MIN, CZ_LAT_MAX, CZ_LON_MIN, CZ_LON_MAX
-
-
-def env_positive_int(name: str, default: int) -> int:
-    """A positive-integer knob, overridable per environment.
-
-    Re-exported from `loader_db`, which owns the budget helpers every location lane
-    shares: a typo or a non-positive value is the default, not a crash — and for these
-    knobs 0 would mean "no bound at all", which is exactly the state they exist to stop.
-    """
-    return loader_db.env_positive_int(name, default)
-
-
-class IntakeRefused(RuntimeError):
-    """A blocking precondition failed; nothing was written."""
-
-
-# ------------------------------------------------------------------ value objects
-
-@dataclass(frozen=True, slots=True)
-class Entry:
-    """One `portal_contract_entries` row, as the extractor reads it."""
-    id: int
-    source: str
-    contract_id: int
-    contract_version: int
-    entry_id: str
-    surface: str
-    page_kind: str
-    locator: dict[str, Any]
-    claim_type: str
-    extraction_method: str
-    subject_scope: dict[str, Any]
-    transform: tuple[str, ...]
-    precision_map: dict[str, Any]
-    default_blur_evidence: str
-    default_licence_class: str
-    cardinality: str
-    guards: tuple[str, ...]
-
-    @property
-    def reader(self) -> str | None:
-        value = self.locator.get("reader")
-        return str(value) if value else None
-
-    @property
-    def extractor_version(self) -> str:
-        return f"contract:{self.source}@{self.contract_version}"
-
-
-@dataclass(frozen=True, slots=True)
-class ListingRow:
-    listing_id: int
-    source: str
-    source_id_native: str
-    raw_json: dict[str, Any]
-    lat: float | None
-    lon: float | None
-    observed_at: datetime
-    in_mapy_inventory: bool
-    # `LEGACY_COLUMNS` -> value, keyed by the SAME string a contract entry puts in
-    # `locator.legacy_source_column` / `locator.require_column_equals`. Always ALL of
-    # them: a key that is absent is a scan/contract mismatch and is refused, not read as
-    # NULL (`_legacy_column`).
-    legacy_columns: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class Claim:
-    listing_id: int
-    source: str
-    source_id_native: str
-    claim_type: str
-    surface: str
-    page_kind: str
-    extraction_method: str
-    extractor_id: str
-    extractor_version: str
-    contract_entry_id: int
-    snapshot_anchor: str
-    first_observed_at: datetime
-    blur_evidence: str
-    licence_class: str
-    history_completeness: str
-    value_text: str | None = None
-    value_num: float | None = None
-    value_geom_wkt: str | None = None
-    value_shape_wkt: str | None = None
-    value_jsonb: Any | None = None
-    distance_m: int | None = None
-    travel_mode: str | None = None
-    target_text: str | None = None
-    declared_precision_label: str | None = None
-    declared_confidence: str | None = None
-    declared_radius_m: float | None = None
-    subject_scoped: bool | None = None
-    legacy_source_column: str | None = None
-    legacy_write_path_unknown: bool = False
-    # The EXTRACTOR's confidence in this claim (`match_confidence`), not the portal's
-    # declaration — that is `declared_confidence`. NULL on every payload-derived claim;
-    # 06 §6.1.1 caps a class-B legacy column at 'medium' and the contract entry says so.
-    claim_confidence: str | None = None
-    # D7 evidence (01 §4.2's `loc_claim_text_evidence` + `loc_claim_evidence_payload`).
-    # NULL on every W1 claim: that substrate is latest-wins JSON, and a span into a
-    # document nobody archived is a one-shot check. W2's archived-HTML lane
-    # (`location_data.claims_remine_archive`) is the first writer that fills them, and for
-    # an `llm_text`/`regex_text` claim the DB REQUIRES the whole set — quote, both offsets,
-    # `payload_scope_version`, `subject_scoped` — plus `payload_sha256` whenever there is a
-    # quote at all. `payload_sha256` is hex TEXT here, not `bytes`: the write path carries
-    # rows through `jsonb_to_recordset`, which has no bytea literal, so the SQL decodes it
-    # (the same `decode(..., 'hex')` shape `_ENRICHMENT_WRITE_SQL` already uses).
-    payload_id: int | None = None
-    payload_sha256: str | None = None
-    evidence_quote: str | None = None
-    span_start: int | None = None
-    span_end: int | None = None
-    payload_scope_version: str | None = None
-    # The SECOND CHECK an evidence-bearing claim has to satisfy, and it binds `llm_text`
-    # alone: `loc_claim_llm_model` forces both non-null there. They ship with the evidence
-    # set rather than with the LLM lane because a `Claim` that can be spelled but not
-    # written is a trap — the row would pass every Python guard and take the whole batch
-    # down at the constraint, once, in production, on whoever builds the lane.
-    model: str | None = None
-    prompt_version: str | None = None
-    # NULL on every W1 claim (the substrate is latest-wins `listings.raw_json`, which has
-    # no snapshot to anchor to). W3 (`location_data.claims_remine`) is the first writer
-    # that sets this: a claim mined from `listing_snapshots` carries its row's id here and
-    # `snapshot_anchor='snapshot'` (01 §4.2's `loc_claim_anchor` CHECK pairs the two — see
-    # 00 §3.3). Present here, not on a W3-only subclass, so `location_claims_intake` and
-    # `location_claims_remine` share one `Claim` shape, one `to_row()`, and one writer.
-    snapshot_id: int | None = None
-
-    def to_row(self) -> dict[str, Any]:
-        row = {
-            "listing_id": self.listing_id,
-            "source": self.source,
-            "source_id_native": self.source_id_native,
-            "snapshot_id": self.snapshot_id,
-            "snapshot_anchor": self.snapshot_anchor,
-            "first_observed_at": self.first_observed_at.isoformat(),
-            "claim_type": self.claim_type,
-            "surface": self.surface,
-            "page_kind": self.page_kind,
-            "extraction_method": self.extraction_method,
-            "extractor_id": self.extractor_id,
-            "extractor_version": self.extractor_version,
-            "contract_entry_id": self.contract_entry_id,
-            "value_text": self.value_text,
-            "value_num": self.value_num,
-            "value_geom_wkt": self.value_geom_wkt,
-            "value_shape_wkt": self.value_shape_wkt,
-            "value_jsonb": self.value_jsonb,
-            "distance_m": self.distance_m,
-            "travel_mode": self.travel_mode,
-            "target_text": self.target_text,
-            "declared_precision_label": self.declared_precision_label,
-            "declared_confidence": self.declared_confidence,
-            "declared_radius_m": self.declared_radius_m,
-            "claim_confidence": self.claim_confidence,
-            "blur_evidence": self.blur_evidence,
-            "licence_class": self.licence_class,
-            "legacy_source_column": self.legacy_source_column,
-            "legacy_write_path_unknown": self.legacy_write_path_unknown,
-            "history_completeness": self.history_completeness,
-            "subject_scoped": self.subject_scoped,
-            "payload_id": self.payload_id,
-            "payload_sha256": self.payload_sha256,
-            "evidence_quote": self.evidence_quote,
-            "span_start": self.span_start,
-            "span_end": self.span_end,
-            "payload_scope_version": self.payload_scope_version,
-            "model": self.model,
-            "prompt_version": self.prompt_version,
-        }
-        return row
-
-
-@dataclass(frozen=True, slots=True)
-class Absence:
-    """A negative assertion (03 §3.2: "tried and found nothing" must be distinguishable
-    from "never tried"). W1 records the two that would otherwise be invisible: a
-    coordinate withheld by the licence ladder, and a payload it could not read."""
-    listing_id: int
-    surface: str
-    field_: str
-    reason: str
-    extraction_method: str
-    detail: str
-    # NULL for W1 (no snapshot). W3 sets it: migration 382's absence key is
-    # `(listing_id, snapshot_key, surface, field, extractor_version)` with
-    # `snapshot_key = coalesce(snapshot_id, -1)` PRECISELY so a withheld coordinate at
-    # snapshot N and the same withholding at snapshot N+5 are two rows, not one collapsed
-    # by the unique index.
-    snapshot_id: int | None = None
-
-    def to_row(self, extractor_version: str) -> dict[str, Any]:
-        return {
-            "listing_id": self.listing_id,
-            "snapshot_id": self.snapshot_id,
-            "surface": self.surface,
-            "field": self.field_,
-            "reason": self.reason,
-            "extraction_method": self.extraction_method,
-            "extractor_version": extractor_version,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class EnrichmentTask:
-    """A row routed to a per-method refetch cohort (`location_enrichment_state`)."""
-    listing_id: int
-    method: str
-    lane: str
-    outcome: str
-    input_hash: str
-    error: str | None = None
-
-    def to_row(self, extractor_version: str) -> dict[str, Any]:
-        return {
-            "listing_id": self.listing_id,
-            "method": self.method,
-            "lane": self.lane,
-            "last_outcome": self.outcome,
-            "last_error": self.error,
-            "input_hash": self.input_hash,
-            "extractor_version": extractor_version,
-        }
-
-
-@dataclass(slots=True)
-class IntakeResult:
-    claims: list[Claim] = field(default_factory=list)
-    absences: list[Absence] = field(default_factory=list)
-    enrichment: list[EnrichmentTask] = field(default_factory=list)
-    # Claims refused by the value-size cap. Counted, never silently dropped: each one also
-    # produced an absence row and a refetch-cohort row (`_refuse_oversized`).
-    oversized: int = 0
-
-    def extend(self, other: IntakeResult) -> None:
-        self.claims.extend(other.claims)
-        self.absences.extend(other.absences)
-        self.enrichment.extend(other.enrichment)
-        self.oversized += other.oversized
-
-
-@dataclass(frozen=True, slots=True)
-class CoordinateVerdict:
-    admitted: bool
-    licence_class: str | None
-    reason: str
-
-
-# ------------------------------------------------------------------ the licence ladder
-
-def coordinate_verdict(
-    source: str, coords_source: str | None, *, in_mapy_inventory: bool,
-    substrate: str = SUBSTRATE_PAYLOAD, entry_id: str | None = None,
-    portal_pin_present: bool = True,
-) -> CoordinateVerdict:
-    """06 §6.1.2, applied to the INPUT. On the payload substrate it never returns a
-    non-`portal` licence class: a class-E coordinate produces no claim at all (§6.6 rule 6).
-
-    `substrate` defaults to the payload one, so every W1/W3 call site is unchanged.
-    `SUBSTRATE_ARCHIVED_HTML` asks the same ladder about a body W2 re-mines, and the two
-    arms deliberately share their FIRST rung: the `mapy_affected` veto sits above the
-    branch, because §6.4's gate is about the listing, not about which of our copies of its
-    coordinate we happened to read. `entry_id` / `portal_pin_present` are only consulted on
-    the archived arm.
-    """
-    if substrate == SUBSTRATE_ARCHIVED_HTML:
-        return _archived_coordinate_verdict(
-            source, in_mapy_inventory=in_mapy_inventory, entry_id=entry_id,
-            portal_pin_present=portal_pin_present)
-    rule = COORDINATE_RULES.get(source)
-    if rule is None:
-        return CoordinateVerdict(False, None, "unknown_source")
-    # The W1 blocking gate (§6.4) is `claims JOIN <R2 inventory> WHERE claim_type =
-    # 'coordinate'` = 0, so inventory membership vetoes every substrate, not just
-    # carry_forward: a listing can enter the inventory through arm 2 (a geocode was
-    # attempted) or arm 3 (its geom matches a cached Mapy coordinate) while its payload
-    # coordinate looks first-party.
-    if in_mapy_inventory:
-        return CoordinateVerdict(False, None, "listing_in_mapy_affected_inventory")
-    if rule.substrate == "none":
-        return CoordinateVerdict(False, None, "no_first_party_coordinate_on_this_portal")
-    if rule.substrate == "payload":
-        return CoordinateVerdict(True, "portal", "portal_published_payload_coordinate")
-    # geom_column: the provenance stamp is the only thing that can license the value.
-    if coords_source is None:
-        return CoordinateVerdict(False, None, "coordinate_provenance_unestablished")
-    if coords_source in MAPY_COORDS_SOURCES:
-        return CoordinateVerdict(False, None, "mapy_derived_coordinate")
-    if coords_source == "carry_forward":
-        if not rule.carry_forward_admissible:
-            return CoordinateVerdict(False, None, "carry_forward_not_admissible")
-        return CoordinateVerdict(True, "portal", "carry_forward_absent_from_mapy_inventory")
-    if coords_source in rule.first_party_sources:
-        return CoordinateVerdict(True, "portal", f"first_party_{coords_source}")
-    return CoordinateVerdict(False, None, "unrecognised_coordinate_provenance")
-
-
-def _archived_coordinate_verdict(
-    source: str, *, in_mapy_inventory: bool, entry_id: str | None,
-    portal_pin_present: bool,
-) -> CoordinateVerdict:
-    """The archived-body arm of the ladder. The Mapy veto is FIRST here too — the R2
-    inventory names a LISTING whose coordinate we may not hold, and re-reading the same
-    position out of an archived page is the same position (§6.4's gate joins on
-    `listing_id`, not on `surface`)."""
-    if in_mapy_inventory:
-        return CoordinateVerdict(False, None, "listing_in_mapy_affected_inventory")
-    rule = ARCHIVED_COORDINATE_RULES.get(source)
-    if rule is None:
-        return CoordinateVerdict(False, None, "no_archived_coordinate_locator_on_this_portal")
-    if entry_id != rule.entry_id:
-        return CoordinateVerdict(False, None, "unrecognised_archived_coordinate_locator")
-    if portal_pin_present:
-        return CoordinateVerdict(True, rule.licence_class, f"archived_{rule.entry_id}")
-    if rule.geocoded_licence_class is None:
-        return CoordinateVerdict(False, None, "coordinate_provenance_unestablished")
-    return CoordinateVerdict(
-        True, rule.geocoded_licence_class, f"archived_{rule.entry_id}_portal_geocoded")
-
-
-# ------------------------------------------------------------------ payload helpers
-
-def json_pointer(payload: Any, pointer: str) -> Any:
-    """RFC 6901 subset: `/a/b/0`. Returns None for any miss."""
-    if pointer in ("", "/"):
-        return payload
-    node = payload
-    for token in pointer.lstrip("/").split("/"):
-        token = token.replace("~1", "/").replace("~0", "~")
-        if isinstance(node, dict):
-            if token not in node:
-                return None
-            node = node[token]
-        elif isinstance(node, list):
-            try:
-                node = node[int(token)]
-            except (ValueError, IndexError):
-                return None
-        else:
-            return None
-    return node
-
-
-def _text(value: Any) -> str | None:
-    if value is None or isinstance(value, (dict, list, bool)):
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _number(value: Any) -> float | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-# ------------------------------------------------------------------ transforms
-
-# The ordered normalisers a contract entry may declare (02 §2.1.2), as a REGISTRY rather
-# than an if/elif chain: `contracts.IMPLEMENTED_TRANSFORMS` refuses an executable entry
-# naming a transform that is not here, and that gate needs a name it can enumerate.
-# A transform is `name[:arg]` and sees the value only when it is non-None.
-TransformFn = Callable[[str, str], str | None]
-TRANSFORMS: dict[str, TransformFn] = {}
-
-
-def transform(name: str) -> Callable[[TransformFn], TransformFn]:
-    def register(fn: TransformFn) -> TransformFn:
-        TRANSFORMS[name] = fn
+def reader(name: str) -> Callable[[PayloadReaderFn], PayloadReaderFn]:
+    """Register a `listings.raw_json` reader. The page readers fold in below."""
+    def register(fn: PayloadReaderFn) -> PayloadReaderFn:
+        READERS[name] = Reader(name, SUBSTRATE_PAYLOAD, fn)
         return fn
     return register
 
 
-@transform("sentinel_drop")
-def _sentinel_drop(value: str, arg: str) -> str | None:
-    return None if value == arg else value
-
-
-@transform("psc_normalise")
-def _psc_normalise(value: str, arg: str) -> str | None:
-    digits = "".join(ch for ch in value if ch.isdigit())
-    return digits if len(digits) == 5 else None
-
-
-@transform("split_cp_co")
-def _split_cp_co(value: str, arg: str) -> str | None:
-    """Czech `čp/čo` pairs arrive as "655/31"; the pair is not two alternatives."""
-    head, sep, tail = value.partition("/")
-    if arg == "cp":
-        return head.strip() or None
-    if arg == "co":
-        return (tail.strip() or None) if sep else None
-    return value
-
-
-@transform("strip_prefix")
-def _strip_prefix(value: str, arg: str) -> str | None:
-    return value[len(arg):].strip() if value.startswith(arg) else value
-
-
-# ---- W2: the comma-address vocabulary.
-#
-# Czech portals publish a whole address in ONE string — realitymix's
-# `data-address="Křimická, Plzeň 3, Plzeň, okres Plzeň-město"`, maxima's
-# `div.locality` "Praha 3, Žižkov, Jeseniova" — and the reader that lifts it is a plain
-# `html_text` / `html_attr` read. Selecting a typed part is therefore a NORMALISER on that
-# one value, not a family of per-portal readers: the reader states what the page said, the
-# transform states which part of it this entry claims, and both stay portal-agnostic.
-#
-# Every one of them REFUSES rather than guesses. A comma path whose meaning depends on how
-# many levels it has is the normal case ("Kostelec nad Černými Lesy" is one segment and its
-# only token is an obec), and a positional read with no arity condition types an obec as a
-# městský obvod on every short line. Emitting nothing is a miss; a wrong admin level is a
-# wrong answer that reads as a right one.
-# `okres X` and `okr. X`, and the boundary is spelled per spelling: after the dotted
-# form there is no word boundary to require (a `.` and a space are both non-word), so
-# `^okr(?:es|\.)\b` silently never matches the abbreviation.
-_OKRES_QUALIFIER_RE = re.compile(r"(?i)^okr(?:es\b|\.)")
-_TRAILING_HOUSE_NUMBER_RE = re.compile(r"\s+(\d{1,4}[a-z]?(?:/\d{1,4}[a-z]?)?)$", re.I)
-_COMMA_SEGMENT_RE = re.compile(r"^(?P<index>-?[1-9]\d*)@(?P<arity>\*|[1-9]\d*\+?)$")
-
-
-def _address_segments(value: str) -> list[str]:
-    return [part for part in (raw.strip() for raw in value.split(",")) if part]
-
-
-def _obec_index(segments: list[str]) -> int:
-    """Where the obec sits: last, or second-to-last behind an `okres …` qualifier."""
-    return len(segments) - 2 if _OKRES_QUALIFIER_RE.match(segments[-1]) else len(segments) - 1
-
-
-@transform("address_part_okres")
-def _address_part_okres(value: str, arg: str) -> str | None:
-    """The `okres X` tail of a comma address, without its qualifier word.
-
-    Keyed on the QUALIFIER, never on position: a line that does not end in `okres …` /
-    `okr. …` has no okres, and `strip_prefix:"okres "` on the same segment would silently
-    publish `okr. Karlovy Vary` as an okres name on the abbreviated spelling."""
-    segments = _address_segments(value)
-    if not segments or not _OKRES_QUALIFIER_RE.match(segments[-1]):
-        return None
-    return _OKRES_QUALIFIER_RE.sub("", segments[-1]).strip(" .,") or None
-
-
-@transform("address_part_obec")
-def _address_part_obec(value: str, arg: str) -> str | None:
-    segments = _address_segments(value)
-    if not segments:
-        return None
-    index = _obec_index(segments)
-    return segments[index] if index >= 0 else None
-
-
-@transform("address_part_street")
-def _address_part_street(value: str, arg: str) -> str | None:
-    """The LEADING segment, but only when it survives the street tests.
-
-    `data-address` segment[0] is not reliably a street — on realitymix's pinned archived
-    body it is `Stráň`, a část obce the same page also states as `data-form-address` and as
-    the breadcrumb tail — so typing it `street_name` blindly fabricates. The three gates are
-    the shared scraper ones (`clean_street`, `reject_as_town` against this line's OWN other
-    segments, `looks_like_czech_street`), not a second copy: the extractor and the live
-    parser must agree on what a Czech street looks like. `arg='loose'` drops only the
-    morphology test, for a portal whose leading segment is unambiguously a street."""
-    segments = _address_segments(value)
-    if len(segments) < 1:
-        return None
-    index = _obec_index(segments)
-    if index < 1:
-        return None
-    cleaned = street.clean_street(segments[0])
-    if cleaned is None:
-        return None
-    if street.reject_as_town(cleaned, geo_names=segments[1:]):
-        return None
-    if arg != "loose" and not street.looks_like_czech_street(cleaned):
-        return None
-    return cleaned
-
-
-@transform("address_part_house_number")
-def _address_part_house_number(value: str, arg: str) -> str | None:
-    """The house number glued to the street segment (`Křimická 655/31` -> `655/31`).
-
-    Gated on the SAME street tests as `address_part_street`, so a number can never be
-    claimed off a leading segment this vocabulary refuses to call a street. The čp/čo pair
-    is not split here — `split_cp_co:cp` / `:co` is the shared splitter that owns that, and
-    an entry chains it after this one."""
-    segments = _address_segments(value)
-    if _address_part_street(value, arg) is None:
-        return None
-    found = _TRAILING_HOUSE_NUMBER_RE.search(segments[0])
-    return found.group(1) if found else None
-
-
-@transform("split_paren_okres")
-def _split_paren_okres(value: str, arg: str) -> str | None:
-    """`Ostrov (okres Karlovy Vary)` — one string carrying an obec and its okres.
-
-    Keyed on the literal `(okres `, so a different parenthetical is left alone and visible
-    instead of being silently truncated. `arg` picks the half: the default is the obec,
-    `okres` is the qualifier's own value."""
-    head, separator, tail = value.partition("(okres ")
-    if arg == "okres":
-        return tail.rstrip().rstrip(")").strip() or None if separator else None
-    return head.strip() or None
-
-
-@transform("comma_segment")
-def _comma_segment(value: str, arg: str) -> str | None:
-    """`<index>@<arity>` — one segment of a comma address, under an arity condition.
-
-    The index is 1-based from the left or negative from the right; the arity is `k`
-    (exactly k segments), `k+` (at least k) or `*` (any). The arity is not decoration:
-    maxima's `div.locality` is `Praha 3, Žižkov, Jeseniova` on one row and
-    `Kostelec nad Černými Lesy` on the next, and taking segment 1 unconditionally types an
-    obec as a městský obvod on every village. A malformed arg yields no claim rather than
-    raising — `apply_transforms` is rollback-safe by design, and the rail that catches a
-    typo is `contracts._check_executable` plus the fixture gate."""
-    spec = _COMMA_SEGMENT_RE.match(arg)
-    if spec is None:
-        return None
-    segments = _address_segments(value)
-    arity = spec.group("arity")
-    if arity != "*":
-        want = int(arity.rstrip("+"))
-        if len(segments) < want or (not arity.endswith("+") and len(segments) != want):
-            return None
-    index = int(spec.group("index"))
-    position = index - 1 if index > 0 else len(segments) + index
-    if position < 0 or position >= len(segments):
-        return None
-    return segments[position] or None
-
-
-def apply_transforms(value: str | None, transforms: tuple[str, ...]) -> str | None:
-    """The ordered normalisers a contract entry declares (02 §2.1.2).
-
-    An unknown name is a no-op here rather than a refusal: the projection in the DB can be
-    older than this image (a rollback), and a whole batch must not die over a normaliser.
-    The gate that stops it reaching a live entry at all is `contracts._check_executable`.
-    """
-    for spec in transforms:
-        if value is None:
-            return None
-        name, _, arg = spec.partition(":")
-        fn = TRANSFORMS.get(name)
-        if fn is not None:
-            value = fn(value, arg)
-    return value.strip() if isinstance(value, str) and value.strip() else value or None
-
-
-def point_wkt(lat: float, lon: float) -> str:
-    return f"POINT({lon!r} {lat!r})"
-
-
-def envelope_wkt(lat_min: float, lon_min: float, lat_max: float, lon_max: float) -> str:
-    corners = (
-        (lon_min, lat_min), (lon_max, lat_min), (lon_max, lat_max),
-        (lon_min, lat_max), (lon_min, lat_min),
-    )
-    return "POLYGON((" + ", ".join(f"{x!r} {y!r}" for x, y in corners) + "))"
-
-
-def in_cz_bbox(lat: float, lon: float) -> bool:
-    lat_min, lat_max, lon_min, lon_max = cz_bbox()
-    return lat_min <= lat <= lat_max and lon_min <= lon <= lon_max
-
-
-# ------------------------------------------------------------------ guards
-
-# The reject rules a contract entry may declare (02 §2.1.2). W1 implements exactly one —
-# the rest of the vocabulary (`reject_if_in_excluded_zone`, `require_czech_street_morphology`,
-# `reject_empty_geometry`, …) needs substrates this lane does not have. A guard the runtime
-# does not implement rejects nothing, silently, so `contracts.IMPLEMENTED_GUARDS` mirrors
-# this registry and refuses one on an entry that actually executes. Only the three readers
-# below that CALL `guard_admits` consult them at all, which the same gate enforces
-# (`contracts.READER_CONTRACTS[...].consults_guards`) — being implemented is not enough.
-GuardFn = Callable[[float, float], bool]
-GUARD_CZ_BBOX = "reject_outside_cz_bbox"
-GUARDS: dict[str, GuardFn] = {GUARD_CZ_BBOX: in_cz_bbox}
-
-
-def guard_admits(entry: Entry, name: str, *points: tuple[float, float]) -> bool:
-    """False only when the entry declares guard `name` and a point fails it.
-
-    An unknown name admits, for the same reason `apply_transforms` no-ops one: the
-    projection in the DB can be older than this image (a rollback), and a whole batch must
-    not die over a guard. The gate that stops one reaching a live entry — implemented or
-    not, consulted by this reader or not — is `contracts._check_executable`.
-    """
-    if name not in entry.guards:
-        return True
-    predicate = GUARDS.get(name)
-    if predicate is None:
-        return True
-    return all(predicate(lat, lon) for lat, lon in points)
-
-
-def sreality_payload_shape(raw: dict[str, Any]) -> str:
-    """`post_cutover` | `legacy` | `absent`.
-
-    `absent` is the 80 KB-truncation cohort — one sreality row's raw_json was truncated by
-    a geometry blob and lost the whole `locality` object (06 §6.2.1 caveat 2). Both
-    non-post-cutover shapes route to the refetch cohort rather than emitting "no claim".
-    """
-    locality = raw.get("locality")
-    if not isinstance(locality, dict):
-        return "absent"
-    if {"gps_lat", "gps_lon", "entity_type", "inaccuracy_type", "city", "citypart"} & set(locality):
-        return "post_cutover"
-    if {"name", "value", "accuracy"} & set(locality):
-        return "legacy"
-    return "absent"
-
-
-def payload_hash(raw: dict[str, Any]) -> str:
-    return hashlib.sha256(
-        json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
-    ).hexdigest()
-
-
-# ------------------------------------------------------------------ value_norm mirror
-
-# Characters where PostgreSQL's `unaccent` DICTIONARY and Python's NFKD combining-mark
-# strip disagree: the dictionary expands or maps them (ß->ss, æ->ae, ø->o, đ->d, ł->l …)
-# while NFKD leaves them intact, so the Python mirror would fold them to a space instead.
-# They are rare in Czech and NOT rare in this corpus — the program exists partly to find
-# the German, Polish and Nordic addresses hiding in it (remax 442804 is in Poland; bazos
-# has an 835-row `Zahraničí` bucket). This set is why `claim_fingerprint` is computed in
-# SQL and never in Python: a mirror that drifts on exactly the foreign cohort would make
-# the unique index stop deduping, silently, in an append-only table.
-MIRROR_UNSAFE_CHARS = frozenset("ßæÆœŒøØđĐłŁðÐþÞħĦŧŦıĸŉ")
-
-
-def mirror_is_faithful(value: str | None) -> bool:
-    """True when the Python mirror provably agrees with `location_value_norm()`."""
-    return value is None or not (MIRROR_UNSAFE_CHARS & set(value))
-
-
-def value_norm_mirror(value: str | None) -> str | None:
-    """DIAGNOSTIC ONLY — never on the write path.
-
-    Mirrors migration 382's
-    `nullif(btrim(regexp_replace(lower(unaccent(p_value)), '[^a-z0-9]+', ' ', 'g')), '')`
-    so a dry run can show what a claim's `value_norm` will become and so the parity test
-    has something to compare. The authoritative definition is the SQL function; see
-    `_CLAIM_FINGERPRINT_SQL`.
-    """
-    if value is None:
-        return None
-    try:
-        from location_data.name_index import normalize_name
-    except ImportError:  # the RÚIAN loader (PR #1010) is not merged yet
-        import re
-        import unicodedata
-
-        def normalize_name(raw: str) -> str:
-            stripped = "".join(
-                ch for ch in unicodedata.normalize("NFKD", raw)
-                if not unicodedata.combining(ch))
-            return re.sub(r"[^0-9a-z]+", " ", stripped.lower()).strip()
-
-    return normalize_name(value) or None
-
-
-# ------------------------------------------------------------------ readers
-
-ReaderFn = Callable[[Entry, ListingRow], list[Claim]]
-READERS: dict[str, ReaderFn] = {}
-
-
-def reader(name: str) -> Callable[[ReaderFn], ReaderFn]:
-    def register(fn: ReaderFn) -> ReaderFn:
-        READERS[name] = fn
-        return fn
-    return register
-
-
-def _base(entry: Entry, row: ListingRow, **overrides: Any) -> Claim:
-    """Every claim is stamped identically: contract identity, anchor, blur, licence.
-
-    `blur_evidence` and `licence_class` are always passed explicitly — 06 §6.6 rule 7:
-    letting the column default fire stamps "no blur observed" onto the rows that carry a
-    portal blur flag, and in an append-only table that is unrecoverable.
-    """
-    anchor = "unanchored_legacy" if entry.surface == "legacy_column" else "unanchored_latest_fetch"
-    # 01 §4.2's `loc_claim_legacy` CHECK: a legacy claim must name its column. The contract
-    # validator requires the key, so this can only be missing if the projection is stale.
-    legacy_column = (str(entry.locator["legacy_source_column"])
-                     if entry.extraction_method == "legacy_column" else None)
-    fields: dict[str, Any] = {
-        "listing_id": row.listing_id,
-        "source": row.source,
-        "source_id_native": row.source_id_native,
-        "claim_type": entry.claim_type,
-        "surface": entry.surface,
-        "page_kind": entry.page_kind,
-        "extraction_method": entry.extraction_method,
-        "extractor_id": entry.entry_id,
-        "extractor_version": entry.extractor_version,
-        "contract_entry_id": entry.id,
-        "snapshot_anchor": anchor,
-        "first_observed_at": row.observed_at,
-        "blur_evidence": entry.default_blur_evidence,
-        "licence_class": entry.default_licence_class,
-        "history_completeness": HISTORY_COMPLETENESS[row.source],
-        "subject_scoped": entry.subject_scope.get("subject_scoped", True),
-        "legacy_source_column": legacy_column,
-    }
-    fields.update(overrides)
-    return Claim(**fields)
-
+def payload_entries(entries: list[Entry]) -> list[Entry]:
+    """The entries this lane executes against `listings.raw_json`."""
+    return [e for e in entries
+            if e.reader and READERS.get(e.reader) is not None
+            and READERS[e.reader].substrate == SUBSTRATE_PAYLOAD]
 
 @reader("scalar")
 def _read_scalar(entry: Entry, row: ListingRow) -> list[Claim]:
@@ -1266,149 +446,71 @@ def _read_coords_stamp_quality(entry: Entry, row: ListingRow) -> list[Claim]:
 
 # ------------------------------------------------------------------ the value-size cap
 
-def claim_value_bytes(claim: Claim) -> int:
-    """Serialized size of a claim's VALUE payload — the only unbounded part of a claim row.
 
-    Everything else on the row is identity and provenance: bounded by the contract. The
-    value is not: `raw_json` on the legacy-shape sreality cohort carries whole geometry
-    objects (the same blobs that truncated one row's payload at 80 KB — sreality.yaml
-    §caveats), and a reader that stores its node verbatim into `value_jsonb` inherits that
-    size. Measured with `default=str` for the same reason `payload_hash` uses it: the
-    payload can hold a Decimal or a datetime that plain `json.dumps` refuses.
-    """
-    total = 0
-    if claim.value_jsonb is not None:
-        total += len(json.dumps(claim.value_jsonb, ensure_ascii=False,
-                                default=str).encode("utf-8"))
-    for text in (claim.value_text, claim.value_geom_wkt, claim.value_shape_wkt,
-                 claim.target_text):
-        if text is not None:
-            total += len(text.encode("utf-8"))
-    return total
+# The 14 page readers fold into THE registry here, after the 10 above have registered.
+# Folded rather than mirrored by name: `location_data.page_readers` imports
+# `claims_common`, never this module, so there is no cycle left to work around.
+for _page_reader_name, _page_reader_fn in page_readers.PAGE_READERS.items():
+    READERS[_page_reader_name] = Reader(
+        _page_reader_name, SUBSTRATE_ARCHIVED_HTML, _page_reader_fn)
+del _page_reader_name, _page_reader_fn
 
+
+# ------------------------------------------------------------------ extraction
 
 def _refuse_oversized(
     row: ListingRow, claims: list[Claim], *, max_value_bytes: int,
-) -> tuple[list[Claim], list[Absence], list[EnrichmentTask]]:
-    """Partition off claims whose value exceeds the cap. NOTHING is silently dropped.
+) -> tuple[list[Claim], list[str]]:
+    """Partition off claims whose value exceeds the cap.
 
-    A dropped claim and a claim that was never produced are indistinguishable in an
-    append-only store, which is the exact failure 03 §3.2 forbids ("every attempt is
-    recorded, including negatives" — without it "recall and honesty are indistinguishable").
-    So a refusal writes the same two artefacts the truncated-payload path writes:
-
-      * `location_claim_absences` — reason `not_attempted`. The vocabulary is CHECK-
-        constrained to ('not_stated','stated_but_ambiguous','only_in_excluded_block',
-        'not_attempted') by migration 382 / 01 §4.4, so there is no `oversized_payload`
-        label to add without DDL, and the other three would misreport what happened:
-        the portal DID state the value (`not_stated` is false), the value is not
-        semantically ambiguous (01 §4.4 binds `stated_but_ambiguous` to the extraction
-        schema's `ambiguity_flags`), and no contract `exclusion_zone` was involved
-        (03 §3.2 rule 4 binds `only_in_excluded_block` to that mechanism). `not_attempted`
-        is this module's own precedent for "the substrate was there and this lane declined
-        to complete the extraction into a stored value" — it is what the licence ladder
-        already writes for a withheld coordinate.
-      * `location_enrichment_state` — the per-method refetch cohort (02 P6), exactly as the
-        truncated-locality path routes. `last_error` is the only free-text field persisted
-        anywhere on this path (`location_claim_absences` has no note column), so it carries
-        the detail the absence row cannot: which claim type, and how many bytes.
-    """
+    The rail that survives a pathological single row: no chunk budget can split ONE array
+    element, so a claim whose value alone dwarfs the budget would still be handed to
+    Postgres verbatim. A value this large is not a location claim — it is a portal geometry
+    blob that landed in `raw_json` — so it is refused at extraction time, counted, and
+    logged."""
     kept: list[Claim] = []
-    absences: list[Absence] = []
-    enrichment: list[EnrichmentTask] = []
+    refusals: list[str] = []
     for claim in claims:
         size = claim_value_bytes(claim)
         if size <= max_value_bytes:
             kept.append(claim)
             continue
-        detail = (f"{claim.claim_type} value from {claim.extractor_id} is {size} bytes "
-                  f"(cap {max_value_bytes}); refused so the claim array cannot exceed "
-                  f"Postgres's 256 MB jsonb limit")
         LOG.warning("INTAKE oversized value refused listing_id=%d source=%s claim_type=%s "
                     "extractor_id=%s bytes=%d cap=%d",
                     row.listing_id, row.source, claim.claim_type, claim.extractor_id,
                     size, max_value_bytes)
-        absences.append(Absence(
-            listing_id=row.listing_id, surface=claim.surface, field_=claim.claim_type,
-            reason="not_attempted", extraction_method=claim.extraction_method,
-            detail=detail))
-        enrichment.append(EnrichmentTask(
-            listing_id=row.listing_id, method=claim.extraction_method,
-            lane=f"{row.source}_detail_refetch", outcome="error",
-            input_hash=payload_hash(row.raw_json), error=detail))
-    return kept, absences, enrichment
+        refusals.append(f"oversized_value:{claim.claim_type}")
+    return kept, refusals
 
-
-# ------------------------------------------------------------------ extraction
 
 def extract_listing(
     row: ListingRow, entries: list[Entry], *, max_value_bytes: int | None = None,
-    route_legacy_shape_to_refetch: bool = True,
-    record_legacy_shape_absence: bool = False,
 ) -> IntakeResult:
-    """Everything this lane knows about one listing. Pure — no DB, no clock, no network.
-
-    `route_legacy_shape_to_refetch` gates the sreality-legacy-shape tail below. It defaults
-    True (unchanged W1 behaviour: a CURRENT listing whose payload is legacy-shape or
-    truncated is genuinely worth a live detail refetch). `location_data.claims_remine`
-    (W3) passes False: a SNAPSHOT's payload is whatever sreality's API actually returned at
-    that historical instant — legacy-shape there is an accurate historical fact, not a gap
-    a refetch could ever close, and routing it into `location_enrichment_state` would flood
-    the real refetch cohort with attempts against rows that were never wrong, only old.
-
-    `record_legacy_shape_absence` defaults False, preserving W1's exact shipped/gated
-    behaviour: the sreality D3-coverage gate (06 §6.4 W1) explicitly scopes the legacy-shape
-    cohort OUT ("gated in W4"), and W1 already surfaces it via the refetch-cohort
-    enrollment above, so adding an absence there too would be new, ungated surface on an
-    already-measured gate. `claims_remine` (W3) passes True: with the refetch routing
-    disabled (the flag above), a `shape == 'legacy'` snapshot would otherwise produce
-    NEITHER a coordinate claim (`_read_point_pair`'s own shape guard) NOR an absence — a
-    silent hole indistinguishable from "not yet re-mined", which is exactly the honesty
-    failure 03 §3.2 rule 4 exists to prevent. `shape == 'absent'` (truncated) already
-    always gets one, independent of this flag.
-    """
+    """Everything the PAYLOAD substrate knows about one listing. Pure — no DB, no clock,
+    no network. Page entries are this lane's too; they read a different substrate and are
+    executed by `extract_page` once the body is in hand."""
     if max_value_bytes is None:
         max_value_bytes = env_positive_int(MAX_CLAIM_VALUE_BYTES_ENV,
                                            DEFAULT_MAX_CLAIM_VALUE_BYTES)
     result = IntakeResult()
     coordinate_entry: Entry | None = None
 
-    for entry in entries:
-        name = entry.reader
-        if not name:
-            continue  # declared for a later wave, no reader at all; inert here.
-        if name in ARCHIVE_ONLY_READERS or name in LLM_ONLY_READERS:
-            # A reader belonging to another lane — `claims_remine_archive`'s DOM family or
-            # `claims_llm`'s free-text one. Skipped, not refused: this lane's substrate is
-            # `listings.raw_json`, which carries neither a DOM nor a scoped document, so
-            # there is nothing here for either to read. Refusing would take the HOURLY W1
-            # intake down for the whole portal the moment a W2 contract version loads —
-            # which is exactly what happened the first time remax@3 met this loop.
-            continue
-        fn = READERS.get(name)
-        if fn is None:
-            raise IntakeRefused(
-                f"{entry.source}:{entry.entry_id} declares unknown reader '{name}'")
+    for entry in payload_entries(entries):
+        spec = READERS[str(entry.reader)]
         if entry.claim_type == "coordinate":
             coordinate_entry = entry
-        for claim in fn(entry, row):
+        for claim in spec.fn(entry, row):
             if claim.licence_class not in EMITTABLE_LICENCE_CLASSES:
                 raise IntakeRefused(
                     f"{entry.entry_id} produced licence_class='{claim.licence_class}'; "
-                    f"this lane may only emit {sorted(EMITTABLE_LICENCE_CLASSES)} "
-                    f"(06 §6.6 rule 6)")
+                    f"the payload substrate may only emit "
+                    f"{sorted(EMITTABLE_LICENCE_CLASSES)} (06 §6.6 rule 6)")
             result.claims.append(claim)
 
-    # Before anything else reads `result.claims`: a value too large to write is not a claim
-    # this lane can make. Runs FIRST among the negative-artefact producers so that when a
-    # legacy-shape sreality row is BOTH oversized and refetch-worthy for its shape, the
-    # refusal's `last_error` is the enrichment row that survives `dedupe_enrichment_rows`
-    # (first-writer-wins on the same (listing, method, lane) key).
-    result.claims, refused_absences, refused_enrichment = _refuse_oversized(
+    result.claims, oversized = _refuse_oversized(
         row, result.claims, max_value_bytes=max_value_bytes)
-    result.absences.extend(refused_absences)
-    result.enrichment.extend(refused_enrichment)
-    result.oversized = len(refused_absences)
+    for reason in oversized:
+        result.refuse(reason)
 
     withheld = (row.lat is not None and row.lon is not None
                 and not any(c.claim_type == "coordinate" for c in result.claims))
@@ -1418,47 +520,28 @@ def extract_listing(
             in_mapy_inventory=row.in_mapy_inventory)
         if not verdict.admitted:
             # A coordinate the ladder refused must not read as "the portal published
-            # none". The class-E cohort is recorded as a negative assertion instead
-            # (06 §6.1.5's "same negative artefact with no value attached", 03 §3.2's
-            # "every attempt is recorded, including negatives") — identity and reason
-            # only, never the coordinate.
-            result.absences.append(Absence(
-                listing_id=row.listing_id, surface=coordinate_entry.surface,
-                field_="coordinate", reason="not_attempted",
-                extraction_method=coordinate_entry.extraction_method, detail=verdict.reason))
+            # none" — it is counted under its own reason so the class-E cohort stays
+            # visible in the run log.
+            result.refuse(f"coordinate_withheld:{verdict.reason}")
 
     if row.source == "sreality":
         shape = sreality_payload_shape(row.raw_json)
         if shape != "post_cutover":
             # 06 §6.2.1 caveat: a legacy-shape row can never yield
             # zip/housenumber/entity_type/inaccuracy_type and a truncated one lost the
-            # locality object outright. `route_legacy_shape_to_refetch` gates ONLY the
-            # refetch-cohort enrollment (meaningless for a snapshot — there is nothing left
-            # to refetch, the payload IS what sreality returned back then); the truncation
-            # absence stays unconditional either way, because it is a negative ASSERTION
-            # about this specific payload (03 §3.2 rule 4: every attempt is recorded,
-            # including negatives), not a request for future work.
-            if route_legacy_shape_to_refetch:
-                result.enrichment.append(EnrichmentTask(
-                    listing_id=row.listing_id,
-                    method="portal_structured_field",
-                    lane="sreality_detail_refetch",
-                    outcome="skipped" if shape == "legacy" else "error",
-                    input_hash=payload_hash(row.raw_json),
-                    error=None if shape == "legacy"
-                    else "locality object absent from raw_json (payload truncation)"))
-            if shape == "absent":
-                result.absences.append(Absence(
-                    listing_id=row.listing_id, surface="api_json", field_="coordinate",
-                    reason="not_attempted", extraction_method="portal_structured_field",
-                    detail="sreality locality object absent (payload truncation)"))
-            elif shape == "legacy" and record_legacy_shape_absence:
-                result.absences.append(Absence(
-                    listing_id=row.listing_id, surface="api_json", field_="coordinate",
-                    reason="not_attempted", extraction_method="portal_structured_field",
-                    detail="sreality pre-cutover legacy payload shape carries no "
-                           "gps_lat/gps_lon at the post-cutover locator (06 §6.2.1)"))
+            # locality object outright.
+            result.refuse(f"sreality_payload_shape:{shape}")
     return result
+
+
+def extract_page(
+    payload: page_readers.ArchivedPayload, row: ListingRow, entries: list[Entry], *,
+    register: page_readers.ScopeRegister, max_value_bytes: int | None = None,
+) -> IntakeResult:
+    """Everything the PAGE substrate knows about one stored body. Re-exported so the lane
+    has one extraction surface; the readers themselves live in `page_readers`."""
+    return page_readers.extract_page(
+        payload, row, entries, register=register, max_value_bytes=max_value_bytes)
 
 
 # ------------------------------------------------------------------ SQL
@@ -1466,15 +549,11 @@ def extract_listing(
 _REGCLASS_SQL = "SELECT to_regclass(%(name)s)"
 _MAPY_COUNT_SQL = "SELECT count(*) FROM mapy_affected"
 
-# The inventory is only a W1 INPUT once it is TERMINAL AND COMPLETE. `count(*) > 0` is
+# The inventory is only a lane INPUT once it is TERMINAL AND COMPLETE. `count(*) > 0` is
 # the wrong gate: the inventory job is batched and resumable, so a run that stopped at
 # its budget leaves a perfectly non-empty table describing a PREFIX of `listings` — and
 # every listing past that prefix would then be read as "absent from the inventory", which
-# is exactly the verdict that admits a carry_forward coordinate as first-party. The
-# question this asks is migration 385's own completeness contract, verbatim: inside the
-# CURRENT restart epoch (a `--restart` opens a new one and the older epoch's completion
-# says nothing about it), is there a run that finished the whole table without an
-# operator-chosen start anchor?
+# is exactly the verdict that admits a carry_forward coordinate as first-party.
 _INVENTORY_TERMINAL_SQL = """
     SELECT
       (SELECT count(*) FROM mapy_inventory_runs),
@@ -1490,10 +569,9 @@ _INVENTORY_TERMINAL_SQL = """
 """
 
 _RELATIONS = (
-    "location_claims", "location_claim_observations", "location_claim_absences",
-    "location_claim_batches", "location_enrichment_state", "dirty_locations",
-    "portal_contracts", "portal_contract_entries", "mapy_affected",
-    "mapy_inventory_runs",
+    "location_claims", "location_claim_batches", "dirty_locations",
+    "portal_contracts", "portal_contract_entries", "portal_raw_payloads",
+    "mapy_affected", "mapy_inventory_runs",
 )
 
 _TIMEOUT_GUARD_SQL = """
@@ -1535,29 +613,20 @@ _BATCH_FINISH_SQL = """
     WHERE id = %(batch_id)s
 """
 
-# `outcome = 'ok'` is now load-bearing and narrow: migration 387 splits the terminal
-# states so that 'ok' means "the scan ran out of rows", never "the scan ran out of
-# budget". A budget-stopped run stamps 'stopped' and is INVISIBLE here, so the
-# incremental floor stays where it was and the rows it never opened are still in the
-# next run's window. (The failure this closes: a 30k-row budgeted run over a 650k-row
-# table used to move the floor past 620k unscanned rows — permanently, for the ~270k
-# delisted ones whose `last_seen_at` will never move again.)
+# `outcome = 'ok'` is load-bearing and narrow (migration 387): 'ok' means "the scan ran out
+# of rows", never "the scan ran out of budget". A budget-stopped run stamps 'stopped' and is
+# INVISIBLE here, so the incremental floor stays where it was and the rows it never opened
+# are still in the next run's window.
 #
-# `coverage_since`, not `started_at`: for a chain of budgeted runs the completing run
-# began long after the scan did, and the claim the watermark makes — "everything written
-# before this instant has been mined" — is only true back to the FIRST run's start.
-# For an unresumed run the two are the same value.
+# `coverage_since`, not `started_at`: for a chain of budgeted runs the completing run began
+# long after the scan did, and the claim the watermark makes — "everything written before
+# this instant has been mined" — is only true back to the FIRST run's start.
 _WATERMARK_SQL = """
     SELECT max(coalesce(coverage_since, started_at))
     FROM location_claim_batches
     WHERE lane = %(lane)s AND outcome = 'ok' AND source IS NOT DISTINCT FROM %(source)s
 """
 
-# The resume point: the newest TERMINAL batch of this (lane, source, scan_mode) among the
-# resumable ones. `outcome` comes back with it rather than being filtered on, because
-# "the last full pass finished" and "there has never been a full pass" must not look the
-# same to the caller — only a 'stopped' row is resumed from, and an 'ok' row means the
-# next pass legitimately starts over at the beginning of the range.
 _RESUME_SQL = """
     SELECT outcome, cursor_after_id, cursor_after_ts, coverage_since
     FROM location_claim_batches
@@ -1570,26 +639,62 @@ _RESUME_SQL = """
     LIMIT 1
 """
 
-# Keyset over the whole table (active AND inactive: a delisted row's payload is exactly the
-# evidence the history waves need, and nothing is ever deleted).
-_LISTINGS_FULL_SQL = """
+# THE SECOND SUBSTRATE, JOINED ONTO THE FIRST.
+#
+# `portal_raw_payloads.listing_id` is nullable and nothing has ever populated it
+# (`scraper.db.append_payload_if_enabled` passes None), so the join is on the portal's own
+# key — `(source, source_id_native)`, the store's uniqueness key, UNIQUE on `listings` too
+# (`listings_source_native_uidx`, migration 091), so it stays 1:1.
+#
+# `page_kind = 'detail'` because that is the only kind stored: index bodies are never
+# archived. "Latest body" is `ORDER BY first_observed_at DESC, id DESC` rather than
+# `version_seq` — 403 added that counter with no backfill, so every older body is NULL
+# there and a `>` against NULL would rank the older row as the latest. Only OK bodies are
+# mined, matching `payloads._PRUNE_SQL`'s own ranking (403 cites idnes' 503 interstitial).
+#
+# `body_unmined` IS THE HASH GATE, computed in SQL against the portal's own ACTIVE contract
+# so a per-portal version can never be applied to the wrong portal's body. NULL (a body
+# nothing has mined) is DISTINCT FROM any version, so a new body is always eligible.
+#
+# The scan projects NO body bytes. One batch's applicable ids go to `page_readers.load_bodies`,
+# which is where the R2 round trips happen — materialising ~14 GB of archive to discover
+# most of it has nothing to mine is the exact cost this ordering avoids.
+_BODY_JOIN_SQL = """
+    LEFT JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active
+    LEFT JOIN LATERAL (
+        SELECT p.id, p.contract_version, p.page_kind::text AS page_kind,
+               encode(p.payload_sha256, 'hex') AS payload_sha256, p.first_observed_at
+        FROM portal_raw_payloads p
+        WHERE p.source = l.source
+          AND p.source_id_native = l.source_id_native
+          AND p.page_kind = 'detail'
+          AND (p.http_status IS NULL OR p.http_status BETWEEN 200 AND 299)
+        ORDER BY p.first_observed_at DESC, p.id DESC
+        LIMIT 1
+    ) pb ON TRUE
+"""
+
+_SELECT_COLUMNS_SQL = """
     SELECT l.id, l.source, l.source_id_native, l.raw_json, l.last_seen_at,
            ST_Y(l.geom::geometry), ST_X(l.geom::geometry),
-           (a.listing_id IS NOT NULL), l.locality, l.street, l.street_source
+           (a.listing_id IS NOT NULL),
+           pb.id, (pb.contract_version IS DISTINCT FROM pc.version), pb.page_kind,
+           pb.payload_sha256, pb.first_observed_at, pc.version,
+           l.locality, l.street, l.street_source
     FROM listings l
     LEFT JOIN mapy_affected a ON a.listing_id = l.id
+"""
+
+# Keyset over the whole table (active AND inactive: a delisted row's payload is exactly the
+# evidence the history waves need, and nothing is ever deleted).
+_LISTINGS_FULL_SQL = _SELECT_COLUMNS_SQL + _BODY_JOIN_SQL + """
     WHERE l.id > %(after_id)s
       AND (%(source)s::text IS NULL OR l.source = %(source)s)
     ORDER BY l.id
     LIMIT %(batch_size)s
 """
 
-_LISTINGS_INCREMENTAL_SQL = """
-    SELECT l.id, l.source, l.source_id_native, l.raw_json, l.last_seen_at,
-           ST_Y(l.geom::geometry), ST_X(l.geom::geometry),
-           (a.listing_id IS NOT NULL), l.locality, l.street, l.street_source
-    FROM listings l
-    LEFT JOIN mapy_affected a ON a.listing_id = l.id
+_LISTINGS_INCREMENTAL_SQL = _SELECT_COLUMNS_SQL + _BODY_JOIN_SQL + """
     WHERE l.last_seen_at >= %(watermark)s
       AND (l.last_seen_at, l.id) > (%(after_ts)s, %(after_id)s)
       AND (%(source)s::text IS NULL OR l.source = %(source)s)
@@ -1597,23 +702,26 @@ _LISTINGS_INCREMENTAL_SQL = """
     LIMIT %(batch_size)s
 """
 
-# One statement, so the claim insert, the re-sight observations and the dirty_locations
-# enqueue are atomic together (03 §3.2: the enqueue happens INSIDE the claim-insert
-# transaction; it is the only coupling between intake and resolution).
+# The mined-at stamp, in the SAME transaction as the claims it produced: a batch that rolls
+# back un-stamps its bodies too, so the next run mines them again rather than skipping
+# claims that were never written.
+_STAMP_MINED_SQL = """
+    UPDATE portal_raw_payloads p
+    SET contract_version = v.version
+    FROM jsonb_to_recordset(%(rows)s::jsonb) AS v(id bigint, version integer)
+    WHERE p.id = v.id
+"""
+
+# One statement, so the claim insert and the dirty_locations enqueue are atomic together
+# (03 §3.2: the enqueue happens INSIDE the claim-insert transaction; it is the only
+# coupling between intake and resolution).
 #
 # claim_fingerprint is computed in SQL, deliberately, and by a NAMED FUNCTION rather than
-# an expression pasted here. Two reasons, and both are about an append-only table whose
-# only dedup mechanism is a UNIQUE index over this value:
-#
-#   * Not Python. `value_norm` is written by `location_value_norm()` (migration 382),
-#     which is `lower(unaccent(...))` — and PostgreSQL's `unaccent` dictionary is NOT
-#     Python's NFKD combining-mark strip (it additionally expands ß→ss, ø→o, đ→d, ł→l …).
-#     A Python mirror would drift on exactly the foreign-address cohort this program
-#     exists to detect, and a drifted fingerprint does not conflict — it inserts.
-#   * Not inline. W1 intake is the FIRST claim producer; W2's HTML re-mine, W3's snapshot
-#     backfill and the LLM lane are the next three. A 22-element tuple transcribed four
-#     times is four chances to lose a byte. `location_claim_fingerprint()` (migration 386)
-#     is the one definition all of them call.
+# an expression pasted here, because `value_norm` is written by `location_value_norm()`
+# (migration 382) = `lower(unaccent(...))`, and PostgreSQL's `unaccent` dictionary is NOT
+# Python's NFKD combining-mark strip (it additionally expands ß→ss, ø→o, đ→d, ł→l …). A
+# Python mirror would drift on exactly the foreign-address cohort this program exists to
+# detect, and a drifted fingerprint does not conflict — it inserts.
 #
 # The tuple is 01 §4.2.1's, in its order, and is TIME-FREE.
 _CLAIM_FINGERPRINT_SQL = """
@@ -1686,95 +794,13 @@ _CLAIM_WRITE_SQL = f"""
         FROM deduped d
         ON CONFLICT (claim_fingerprint) DO NOTHING
         RETURNING id, listing_id
-    ), resighted AS (
-        -- The statement snapshot cannot see `ins`, so this join is exactly the set of
-        -- claims that already existed: the re-sight cohort. The evidence triple rides
-        -- along for the same reason it does one layer over (01 §4.3): when W2's
-        -- archived-HTML lane re-sights a value it already knows, the claim row keeps the
-        -- body it was FIRST mined from, so without this the observation series could not
-        -- name which archived body re-observed it — and 06 §6.6 Rule 2's "replayable,
-        -- because that non-null payload_sha256 addresses an immutable body" would hold
-        -- for the claim and not for its re-sightings. `snapshot_id` rides along for the
-        -- exact counterpart reason on W3's substrate: a re-sighting of an already-known
-        -- value still names WHICH snapshot re-observed it (lco_snapshot, migration 382).
-        -- Both are NULL for a W1 re-sighting, exactly as before.
-        SELECT c.id, d.first_observed_at, d.snapshot_id, d.payload_sha256, d.span_start,
-               d.span_end, d.extractor_version
-        FROM deduped d
-        JOIN location_claims c ON c.claim_fingerprint = d.claim_fingerprint
-    ), obs AS (
-        INSERT INTO location_claim_observations
-            (claim_id, observed_at, snapshot_id, payload_sha256, span_start, span_end,
-             extractor_version)
-        SELECT r.id, r.first_observed_at, r.snapshot_id,
-               decode(r.payload_sha256, 'hex'), r.span_start, r.span_end,
-               r.extractor_version
-        FROM resighted r
-        WHERE NOT EXISTS (
-            SELECT 1 FROM location_claim_observations o
-            WHERE o.claim_id = r.id AND o.observed_at = r.first_observed_at)
-        RETURNING claim_id
     ), enqueued AS (
         INSERT INTO dirty_locations (listing_id, reason)
         SELECT DISTINCT listing_id, 'claim_insert' FROM ins
         ON CONFLICT (listing_id) DO NOTHING
         RETURNING listing_id
     )
-    SELECT (SELECT count(*) FROM ins), (SELECT count(*) FROM obs),
-           (SELECT count(*) FROM enqueued)
-"""
-
-# snapshot_id is NULL in the W1 lane (the substrate is latest-wins `listings.raw_json`,
-# 00 §3.3), so its generated `snapshot_key` is -1. W3 (`location_data.claims_remine`) sets
-# it, so the SAME (listing, surface, field) withheld at two different snapshots is two
-# rows, not one collapsed by the unique index — it is named explicitly in the conflict
-# target because that is the column migration 382's unique key actually carries.
-#
-# ON CONFLICT, not NOT EXISTS, and the difference is a whole aborted run. A statement's
-# snapshot cannot see rows the SAME statement is inserting, so a NOT EXISTS anti-join
-# arbitrates against the table as it was BEFORE the insert and lets two identical rows in
-# one batch through to the unique index — where the second one raises and takes the entire
-# intake run with it. That is not hypothetical: one sreality listing that is in
-# `mapy_affected` AND has a truncated payload produces the withheld-coordinate absence and
-# the missing-locality absence with the same (listing_id, surface, field) key. The Python
-# dedupe in `write_result` collapses those; ON CONFLICT is the second rail, for the
-# cross-run case the anti-join used to cover.
-_ABSENCE_WRITE_SQL = """
-    INSERT INTO location_claim_absences
-        (listing_id, snapshot_id, surface, field, reason, extraction_method,
-         extractor_version, surfaces_seen)
-    SELECT i.listing_id, i.snapshot_id, i.surface::location_claim_surface,
-           i.field::location_claim_type, i.reason,
-           i.extraction_method::location_extraction_method, i.extractor_version,
-           '{}'::location_claim_surface[]
-    FROM jsonb_to_recordset(%(rows)s::jsonb) AS i(
-        listing_id bigint, snapshot_id bigint, surface text, field text, reason text,
-        extraction_method text, extractor_version text)
-    ON CONFLICT (listing_id, snapshot_key, surface, field, extractor_version)
-    DO NOTHING
-"""
-
-# `input_hash` is the cost gate (01 §9): attempts only advance when the payload actually
-# changed, so an hourly re-run over an unchanged legacy-shape cohort is a no-op.
-_ENRICHMENT_WRITE_SQL = """
-    INSERT INTO location_enrichment_state
-        (listing_id, method, lane, attempts, last_attempt_at, last_outcome, last_error,
-         input_hash, extractor_version, next_eligible_at)
-    SELECT i.listing_id, i.method::location_extraction_method, i.lane, 1, now(),
-           i.last_outcome, i.last_error, decode(i.input_hash, 'hex'), i.extractor_version,
-           now() + interval '6 hours'
-    FROM jsonb_to_recordset(%(rows)s::jsonb) AS i(
-        listing_id bigint, method text, lane text, last_outcome text, last_error text,
-        input_hash text, extractor_version text)
-    ON CONFLICT (listing_id, method, lane) DO UPDATE
-    SET attempts = location_enrichment_state.attempts + 1,
-        last_attempt_at = now(),
-        last_outcome = EXCLUDED.last_outcome,
-        last_error = EXCLUDED.last_error,
-        input_hash = EXCLUDED.input_hash,
-        extractor_version = EXCLUDED.extractor_version,
-        next_eligible_at = EXCLUDED.next_eligible_at
-    WHERE location_enrichment_state.input_hash IS DISTINCT FROM EXCLUDED.input_hash
+    SELECT (SELECT count(*) FROM ins), (SELECT count(*) FROM enqueued)
 """
 
 
@@ -1807,23 +833,18 @@ def missing_relations(conn: psycopg.Connection) -> list[str]:
 
 
 def assert_inventory_ready(conn: psycopg.Connection) -> int:
-    """06 §6.1.2: the C7.2 R2 inventory is a W1 INPUT. Without it, `carry_forward` cannot
-    be classified and the W1 licence gate cannot be met, so the lane refuses to run.
+    """06 §6.1.2: the C7.2 R2 inventory is a lane INPUT. Without it, `carry_forward` cannot
+    be classified and the licence gate cannot be met, so the lane refuses to run.
 
-    "Without it" means TERMINAL AND COMPLETE, not merely non-empty. The inventory job is
-    batched and resumable: a run that stopped at its `--limit`/`--max-seconds` budget
-    leaves a populated table that describes a PREFIX of `listings`, and absence from a
-    prefix is indistinguishable from absence from the inventory — which is the exact
-    verdict that admits a Mapy-derived `carry_forward` coordinate as first-party. So the
-    gate is migration 385's own completeness contract: in the CURRENT restart epoch, a
-    run with `status='completed'` that was not anchored at an operator-chosen listing_id
-    (`resumable`)."""
+    "Without it" means TERMINAL AND COMPLETE, not merely non-empty: absence from a PREFIX
+    is indistinguishable from absence from the inventory, and that is exactly the verdict
+    that admits a Mapy-derived `carry_forward` coordinate as first-party."""
     with conn.cursor() as cur:
         cur.execute(_REGCLASS_SQL, {"name": "mapy_affected"})
         if cur.fetchone()[0] is None:
             raise IntakeRefused(
                 "mapy_affected does not exist: migration 385 is not applied. The Mapy "
-                "affected-set inventory is a W1 INPUT (06 §6.1.2) — run "
+                "affected-set inventory is a lane INPUT (06 §6.1.2) — run "
                 "`python -m scripts.location_mapy_inventory` first.")
         cur.execute(_MAPY_COUNT_SQL)
         count = int(cur.fetchone()[0])
@@ -1833,13 +854,13 @@ def assert_inventory_ready(conn: psycopg.Connection) -> int:
         raise IntakeRefused(
             "mapy_affected is empty: the Mapy affected-set inventory has not been "
             "materialised. Every carry_forward coordinate would be admitted as "
-            "first-party and the W1 licence gate would fail (06 §6.1.2). Run "
+            "first-party and the licence gate would fail (06 §6.1.2). Run "
             "`python -m scripts.location_mapy_inventory` to completion first.")
     if not int(run_count or 0):
         raise IntakeRefused(
             "mapy_inventory_runs has no rows: mapy_affected holds data no run "
             "accounted for, so its completeness cannot be established. The inventory "
-            "is a W1 INPUT (06 §6.1.2) — run "
+            "is a lane INPUT (06 §6.1.2) — run "
             "`python -m scripts.location_mapy_inventory` to completion first.")
     if not complete:
         raise IntakeRefused(
@@ -1869,13 +890,20 @@ def load_entries(conn: psycopg.Connection) -> dict[str, list[Entry]]:
     return by_source
 
 
-def _row_from_record(record: tuple[Any, ...]) -> ListingRow:
-    # The legacy columns are unpacked as a TAIL and zipped `strict`, so a column added to
-    # the two batch queries but not to `LEGACY_COLUMNS` (or the reverse) raises here on the
-    # first row instead of shifting every value one position to the left.
+def _row_from_record(
+    record: tuple[Any, ...],
+) -> tuple[ListingRow, page_readers.ArchivedPayload | None, bool, int | None]:
+    """One scan row -> (listing, its latest stored detail body or None, unmined?, version).
+
+    The legacy columns are unpacked as a TAIL and zipped `strict`, so a column added to the
+    two batch queries but not to `LEGACY_COLUMNS` (or the reverse) raises here on the first
+    row instead of shifting every value one position to the left. The body columns sit
+    BEFORE that tail for the same reason.
+    """
     (listing_id, source, native, raw_json, last_seen_at, lat, lon, in_inventory,
-     *legacy) = record
-    return ListingRow(
+     body_id, body_unmined, body_page_kind, body_sha, body_first_observed,
+     contract_version, *legacy) = record
+    row = ListingRow(
         listing_id=int(listing_id),
         source=source,
         source_id_native=str(native) if native is not None else str(listing_id),
@@ -1887,56 +915,18 @@ def _row_from_record(record: tuple[Any, ...]) -> ListingRow:
         observed_at=last_seen_at,
         in_mapy_inventory=bool(in_inventory),
         legacy_columns=dict(zip(LEGACY_COLUMNS, legacy, strict=True)))
-
-
-def dedupe_absence_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Collapse absence rows onto migration 382's unique key, first-writer-wins.
-
-    `location_claim_absences` is UNIQUE on (listing_id, snapshot_key, surface, field,
-    extractor_version); `snapshot_id` is part of the key here (constant at NULL in this
-    lane, so `snapshot_key` is constant at -1) because W3 (`location_data.claims_remine`)
-    passes a real one and a batch there routinely holds several snapshots of ONE listing —
-    without it in the key, this Python-level pre-DB collapse would silently drop distinct
-    per-snapshot absence rows the unique index would have kept. Two absences for one
-    listing+snapshot on the same surface+field are still the same row: a sreality listing
-    that is in `mapy_affected` AND lost its `locality` object to the 80 KB truncation emits
-    the withheld-coordinate absence and the missing-locality absence, both
-    `(api_json, coordinate)`. `reason` is intentionally NOT in the key — the first
-    assertion made about a (listing, snapshot, surface, field) is the one kept, and keeping
-    both was never possible."""
-    seen: set[tuple[Any, ...]] = set()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        key = (row["listing_id"], row.get("snapshot_id"), row["surface"], row["field"],
-               row["extractor_version"])
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(row)
-    return out
-
-
-def dedupe_enrichment_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Collapse refetch-cohort rows onto migration 384's primary key, first-writer-wins.
-
-    `location_enrichment_state` is `PRIMARY KEY (listing_id, method, lane)` and the write is
-    `ON CONFLICT ... DO UPDATE`, which Postgres refuses to apply twice to the same row in
-    one statement ("cannot affect row a second time") — so two rows sharing that key inside
-    one array is not a duplicate, it is an aborted run. One listing produces them: a
-    legacy-shape sreality row routes to `sreality_detail_refetch` for its SHAPE and, if one
-    of its geometry values is over the cap, again for the REFUSAL — same method, same lane.
-    `_refuse_oversized` runs first precisely so the surviving row is the one whose
-    `last_error` names the refusal.
-    """
-    seen: set[tuple[Any, ...]] = set()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        key = (row["listing_id"], row["method"], row["lane"])
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(row)
-    return out
+    body: page_readers.ArchivedPayload | None = None
+    if body_id is not None:
+        body = page_readers.ArchivedPayload(
+            id=int(body_id), source=source,
+            source_id_native=row.source_id_native,
+            page_kind=body_page_kind,
+            payload_sha256=str(body_sha),
+            # 06 §6.6 Rule 1 + Rule 2: the BODY's own first observation, never now() and
+            # never `last_observed_at` (which an unchanged refetch moves).
+            first_observed_at=body_first_observed)
+    version = int(contract_version) if contract_version is not None else None
+    return row, body, bool(body_unmined), version
 
 
 def chunk_rows(
@@ -1946,19 +936,13 @@ def chunk_rows(
 
     Two bounds, whichever trips first — a row count (cheap, predictable) and a cumulative
     serialized-byte budget (the one that actually matters, because a batch's row count says
-    nothing about its bytes: legacy-shape sreality rows carry geometry an order of magnitude
-    larger than a street name).
+    nothing about its bytes).
 
     The listing boundary is what makes chunking SEMANTICS-PRESERVING, not merely smaller.
-    `claim_fingerprint` is computed in SQL and its tuple (01 §4.2.1) begins with
-    `listing_id, source, source_id_native`, so two fingerprint-equal claims are necessarily
-    the same listing's. Keeping a listing's rows in one array therefore keeps every
-    fingerprint-equal set inside ONE statement, where `DISTINCT ON (claim_fingerprint)`
-    still arbitrates it. Split them across two statements instead and the second copy stops
-    being a same-statement duplicate: the first chunk's INSERT is visible to the second
-    chunk's snapshot, so it would join the `resighted` cohort and append a spurious
-    "re-sighting" observation for a claim this batch had just created. `extract_listing`
-    appends per listing, so a listing's rows are contiguous and grouping is a single pass.
+    `claim_fingerprint`'s tuple (01 §4.2.1) begins with `listing_id, source,
+    source_id_native`, so two fingerprint-equal claims are necessarily the same listing's.
+    Keeping a listing's rows in one array therefore keeps every fingerprint-equal set inside
+    ONE statement, where `DISTINCT ON (claim_fingerprint)` still arbitrates it.
 
     A group that exceeds `max_bytes` on its own is still emitted (a budget cannot split an
     array element) — that case is what `_refuse_oversized` exists to keep out of reach.
@@ -1979,41 +963,34 @@ def chunk_rows(
 
 def write_result(
     cur: psycopg.Cursor, result: IntakeResult, *, batch_id: int,
-    extractor_version: str = INTAKE_VERSION,
-) -> tuple[int, int, int]:
-    """Write one scan batch. Same transaction as before; several statements per array.
+) -> tuple[int, int]:
+    """Write one scan batch's claims. Returns (inserted, enqueued).
 
-    The caller's transaction is unchanged — every chunk of every array is flushed inside it,
-    so the batch is still all-or-nothing and a failure still rolls the whole batch back.
-
-    `extractor_version` stamps the ABSENCE and ENRICHMENT rows only — a claim already
-    carries its own, from the contract entry that produced it (06 §6.6 Rule 3). It defaults
-    to this module's `INTAKE_VERSION`, so every W1 call site is unchanged; a second lane
-    sharing this writer passes its own, because `location_claim_absences` is UNIQUE on
-    (listing_id, snapshot_key, surface, field, extractor_version) and an absence attributed
-    to the lane that never looked at the substrate is both a misattribution and a key
-    collision waiting for the first lane whose surface overlaps W1's. Both other lanes do:
-    `claims_remine_archive` (W2) and `claims_remine` (W3).
+    The caller's transaction is unchanged — every chunk is flushed inside it, so the batch
+    is still all-or-nothing and a failure still rolls the whole batch back. Claims are the
+    only rows this lane writes; a refusal is a counter, not a row.
     """
     max_rows = env_positive_int(WRITE_CHUNK_ROWS_ENV, DEFAULT_WRITE_CHUNK_ROWS)
     max_bytes = env_positive_int(WRITE_CHUNK_BYTES_ENV, DEFAULT_WRITE_CHUNK_BYTES)
-    inserted = observed = enqueued = 0
+    inserted = enqueued = 0
     claim_rows = [c.to_row() for c in result.claims]
+    claim_rows.sort(key=lambda r: r["listing_id"])
     for chunk in chunk_rows(claim_rows, max_rows=max_rows, max_bytes=max_bytes):
         cur.execute(_CLAIM_WRITE_SQL, {"rows": Jsonb(chunk), "batch_id": batch_id})
-        chunk_inserted, chunk_observed, chunk_enqueued = (int(x) for x in cur.fetchone())
+        chunk_inserted, chunk_enqueued = (int(x) for x in cur.fetchone())
         inserted += chunk_inserted
-        observed += chunk_observed
         enqueued += chunk_enqueued
-    absence_rows = dedupe_absence_rows(
-        [a.to_row(extractor_version) for a in result.absences])
-    for chunk in chunk_rows(absence_rows, max_rows=max_rows, max_bytes=max_bytes):
-        cur.execute(_ABSENCE_WRITE_SQL, {"rows": Jsonb(chunk)})
-    enrichment_rows = dedupe_enrichment_rows(
-        [e.to_row(extractor_version) for e in result.enrichment])
-    for chunk in chunk_rows(enrichment_rows, max_rows=max_rows, max_bytes=max_bytes):
-        cur.execute(_ENRICHMENT_WRITE_SQL, {"rows": Jsonb(chunk)})
-    return inserted, observed, enqueued
+    return inserted, enqueued
+
+
+def stamp_mined_bodies(cur: psycopg.Cursor, stamps: list[dict[str, Any]]) -> None:
+    """Mark the bodies this batch mined as mined AT the contract version that mined them.
+
+    Inside the batch transaction on purpose: a rolled-back batch un-stamps its bodies, so
+    the next run mines them again rather than skipping claims that were never written.
+    """
+    if stamps:
+        cur.execute(_STAMP_MINED_SQL, {"rows": Jsonb(stamps)})
 
 
 def _resume_point(
@@ -2023,13 +1000,7 @@ def _resume_point(
 
     Only a 'stopped' predecessor is resumed from, and only one written by the SAME
     `scan_mode`: a full cursor is a bare `listings.id` and an incremental one is
-    `(last_seen_at, id)`, so crossing them would skip an arbitrary slice.
-
-    In incremental mode the stored `(after_ts, after_id)` is only usable when it sits at
-    or after the floor this run computed. It normally does — a stopped run does not move
-    the watermark, so the next run recomputes the SAME floor and the stopped run's cursor
-    is exactly how far into that identical window it got. `--overlap-hours` changing
-    between runs is the case where it doesn't, and there the floor wins."""
+    `(last_seen_at, id)`, so crossing them would skip an arbitrary slice."""
     with conn.cursor() as cur:
         cur.execute(_RESUME_SQL, {"lane": LANE, "source": source, "scan_mode": mode})
         row = cur.fetchone()
@@ -2057,20 +1028,36 @@ def _resume_point(
 def unknown_readers(
     entries_by_source: dict[str, list[Entry]], wanted: list[str],
 ) -> list[str]:
-    """`entry_id:reader` for every entry naming a reader NO lane implements.
+    """`entry_id:reader` for every entry naming a reader THE registry does not implement.
 
-    KNOWN is wider than what THIS lane implements, and the difference is the whole point:
-    an entry naming another lane's reader (`ARCHIVE_ONLY_READERS`, `LLM_ONLY_READERS`) is
-    SKIPPED by `extract_listing`, not refused, because `listings.raw_json` carries nothing
-    for it to read. Only a name in NO registry is a real deploy error. Leaving the two
-    other-lane sets out of the preflight is what took the hourly intake down for all nine
-    portals from 2026-09-06 (the W2-6..W2-12 activation): the runtime loop skipped them
-    correctly and never ran, because the preflight refused first.
+    One registry, so one question. While there were three lanes this had to know about two
+    name-only mirrors, and leaving them out of the preflight took the hourly intake down
+    for all nine portals on 2026-09-06 (the W2-6..W2-12 activation): the runtime loop
+    skipped the other lanes' readers correctly and never ran, because the preflight refused
+    first. There is nothing left to mirror.
     """
-    known = READERS.keys() | ARCHIVE_ONLY_READERS | LLM_ONLY_READERS
     return sorted(
         f"{e.entry_id}:{e.reader}"
-        for s in wanted for e in entries_by_source.get(s, ()) if e.reader and e.reader not in known)
+        for s in wanted for e in entries_by_source.get(s, ())
+        if e.reader and e.reader not in READERS)
+
+
+def _open_body_store(page_capable: bool) -> page_readers.BodyStore | None:
+    """The R2 client, or None with ONE warning. Never a refusal.
+
+    The page half is the half that needs a bucket; the payload half is the hourly ingest
+    for all nine portals. A rotated credential must cost us the first, never the second.
+    """
+    try:
+        store = payloads.open_store()
+    except Exception as exc:  # noqa: BLE001 - a bad env must not take the payload half down
+        LOG.warning("INTAKE could not open the R2 body store (%s); the page-body half of "
+                    "this run is SKIPPED and the payload half runs unchanged", exc)
+        return None
+    if store is None and page_capable:
+        LOG.warning("INTAKE R2 is not configured (R2_* env vars unset); the page-body half "
+                    "of this run is SKIPPED and the payload half runs unchanged")
+    return store
 
 
 def run(
@@ -2086,12 +1073,13 @@ def run(
     statement_timeout: int,
     dry_run: bool,
     note: str | None,
+    store: page_readers.BodyStore | None = None,
 ) -> dict[str, Any]:
     missing = missing_relations(conn)
     if missing:
         raise IntakeRefused(
             f"location schema not applied; missing {', '.join(missing)} "
-            f"(migrations 380-387)")
+            f"(migrations 380-387, 403)")
     inventory_rows = assert_inventory_ready(conn)
 
     entries_by_source = load_entries(conn)
@@ -2110,6 +1098,16 @@ def run(
         raise IntakeRefused(
             f"active contract declares readers no lane implements: "
             f"{', '.join(unknown)}")
+
+    page_capable = {
+        s for s in wanted
+        if any(e.reader in page_readers.PAGE_READERS
+               for e in entries_by_source.get(s, ()))
+    }
+    registers = page_readers.load_registers(conn) if page_capable else {}
+    if store is None:
+        store = _open_body_store(bool(page_capable))
+    body_cap = env_positive_int(BODY_FETCH_CAP_ENV, DEFAULT_BODY_FETCH_CAP)
 
     # The preflight reads are bounded too. They are small by construction, which is exactly
     # why an unbounded one is dangerous: under the IO pressure of a concurrent registry load
@@ -2161,18 +1159,23 @@ def run(
                 "coverage_since": (resumed_from or {}).get("coverage_since"),
             })
             batch_id = int(cur.fetchone()[0])
-    LOG.info("INTAKE start mode=%s source=%s batch=%d inventory_rows=%d batch_id=%s",
-             mode, source or "*", batch_size, inventory_rows, batch_id)
+    LOG.info("INTAKE start mode=%s source=%s batch=%d inventory_rows=%d batch_id=%s "
+             "page_sources=%s store=%s",
+             mode, source or "*", batch_size, inventory_rows, batch_id,
+             ",".join(sorted(page_capable)) or "-", "yes" if store else "no")
 
     started = time.monotonic()
     # Resolved once, not per listing: the extractor is called 20 000 times a batch.
     max_value_bytes = env_positive_int(MAX_CLAIM_VALUE_BYTES_ENV,
                                        DEFAULT_MAX_CLAIM_VALUE_BYTES)
-    stats = {
-        "listings": 0, "claims": 0, "claims_inserted": 0, "observations": 0,
-        "enqueued": 0, "absences": 0, "refetch_cohort": 0, "oversized_values": 0,
+    stats: dict[str, Any] = {
+        "listings": 0, "claims": 0, "claims_payload": 0, "claims_page": 0,
+        "claims_inserted": 0, "enqueued": 0, "refusals": 0,
+        "bodies_eligible": 0, "bodies_fetched": 0, "bodies_from_r2": 0,
+        "bodies_mined": 0, "body_fetch_seconds": 0.0,
         "stopped_early": False, "reached_end": False, "resumed_from_id": after_id,
     }
+    refusals: dict[str, int] = {}
     try:
         while True:
             if limit is not None and stats["listings"] >= limit:
@@ -2203,40 +1206,77 @@ def run(
                     break
 
                 result = IntakeResult()
+                candidates: list[tuple[ListingRow, page_readers.ArchivedPayload, int]] = []
                 for record in records:
-                    row = _row_from_record(record)
+                    row, body, unmined, version = _row_from_record(record)
                     entries = entries_by_source.get(row.source)
                     if not entries:
                         continue
                     result.extend(extract_listing(
                         row, entries, max_value_bytes=max_value_bytes))
+                    if (body is not None and unmined and version is not None
+                            and store is not None
+                            and page_readers.page_entries(entries, body.page_kind)):
+                        candidates.append((row, body, version))
+
+                payload_claims = len(result.claims)
+                stats["claims_payload"] += payload_claims
+                stats["bodies_eligible"] += len(candidates)
+                # THE BOUND ON THE PAGE HALF. Body churn is ~50-80/hour fleet-wide, so this
+                # only bites after a contract bump makes every latest body eligible at once
+                # — where the right answer is to drain it over several runs, not to pull the
+                # whole corpus through the bucket in one.
+                candidates = candidates[:body_cap]
+                stamps: list[dict[str, Any]] = []
+                if candidates:
+                    fetch_started = time.monotonic()
+                    bodies, from_r2 = page_readers.load_bodies(
+                        cur, [b.id for _, b, _ in candidates], store=store)
+                    stats["body_fetch_seconds"] += time.monotonic() - fetch_started
+                    stats["bodies_fetched"] += len(bodies)
+                    stats["bodies_from_r2"] += from_r2
+                    for row, body, version in candidates:
+                        raw = bodies.get(body.id)
+                        if raw is None:
+                            continue
+                        register = registers.get(row.source)
+                        if register is None:
+                            continue
+                        result.extend(page_readers.extract_page(
+                            replace(body, body=raw), row,
+                            entries_by_source[row.source], register=register,
+                            max_value_bytes=max_value_bytes))
+                        stamps.append({"id": body.id, "version": version})
+                    stats["bodies_mined"] += len(stamps)
 
                 after_id = int(records[-1][0])
                 if mode == "incremental":
                     after_ts = records[-1][4]
                 stats["listings"] += len(records)
                 stats["claims"] += len(result.claims)
-                stats["absences"] += len(result.absences)
-                stats["refetch_cohort"] += len(result.enrichment)
-                stats["oversized_values"] += result.oversized
+                stats["claims_page"] += len(result.claims) - payload_claims
+                for reason, count in result.refusals.items():
+                    refusals[reason] = refusals.get(reason, 0) + count
+                    stats["refusals"] += count
                 if not dry_run and batch_id is not None:
-                    inserted, observed, enqueued = write_result(
-                        cur, result, batch_id=batch_id)
+                    inserted, enqueued = write_result(cur, result, batch_id=batch_id)
+                    stamp_mined_bodies(cur, stamps)
                     stats["claims_inserted"] += inserted
-                    stats["observations"] += observed
                     stats["enqueued"] += enqueued
-            LOG.info("INTAKE progress listings=%d claims=%d inserted=%d observed=%d "
-                     "absences=%d refetch=%d oversized=%d through_id=%d",
-                     stats["listings"], stats["claims"], stats["claims_inserted"],
-                     stats["observations"], stats["absences"], stats["refetch_cohort"],
-                     stats["oversized_values"], after_id)
+            LOG.info("INTAKE progress listings=%d claims=%d payload=%d page=%d inserted=%d "
+                     "bodies eligible=%d fetched=%d from_r2=%d mined=%d in %.1fs "
+                     "refusals=%d through_id=%d",
+                     stats["listings"], stats["claims"], stats["claims_payload"],
+                     stats["claims_page"], stats["claims_inserted"],
+                     stats["bodies_eligible"], stats["bodies_fetched"],
+                     stats["bodies_from_r2"], stats["bodies_mined"],
+                     stats["body_fetch_seconds"], stats["refusals"], after_id)
     except Exception as exc:
         if batch_id is not None:
             # Guarded like every other write, and for a sharper reason: this is the
             # FAILURE path. Whatever broke the run may be the same pressure that would
             # hang this stamp, and a bookkeeping write that hangs replaces the exception
-            # you need with a wedge (the lesson `loader_db.record_discrepancy` already
-            # carries). A short ceiling here fails fast and re-raises the real cause.
+            # you need with a wedge. A short ceiling fails fast and re-raises the cause.
             try:
                 with guarded(conn, _FAILURE_STAMP_TIMEOUT_S) as cur:
                     cur.execute(_BATCH_FINISH_SQL, {
@@ -2249,11 +1289,17 @@ def run(
                 LOG.exception("INTAKE could not stamp batch %s as failed", batch_id)
         raise
 
+    # A refusal is a LINE PER REASON WITH A COUNT, which is what the operator reads. It is
+    # not a row: `location_claim_absences` held one per refused entry per listing, was
+    # written by every lane and read by none.
+    for reason in sorted(refusals):
+        LOG.info("INTAKE refused reason=%s count=%d", reason, refusals[reason])
+    stats["refusal_reasons"] = dict(sorted(refusals.items()))
+
     # 'ok' means ONE thing: the scan ran out of rows. A run that ran out of budget
     # instead stamps 'stopped', which `_WATERMARK_SQL` does not see — so the incremental
     # floor stays where it was and everything behind the cursor is still in the next
-    # run's window. The cursor rides on the row either way, so the next same-mode run
-    # picks up exactly where this one left off instead of re-walking the same prefix.
+    # run's window.
     outcome = "ok" if stats["reached_end"] else "stopped"
     stats["outcome"] = outcome
     if batch_id is not None:
@@ -2266,7 +1312,8 @@ def run(
                 "cursor_after_ts": after_ts if mode == "incremental" else None,
                 "note": f"listings={stats['listings']} stopped_early={stats['stopped_early']} "
                         f"reached_end={stats['reached_end']} through_id={after_id} "
-                        f"oversized_values={stats['oversized_values']}",
+                        f"bodies_mined={stats['bodies_mined']} "
+                        f"refusals={stats['refusals']}",
             })
     stats["batch_id"] = batch_id
     stats["mode"] = mode

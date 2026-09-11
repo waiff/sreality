@@ -43,9 +43,13 @@ class _Listing:
 
     def record(self) -> tuple[Any, ...]:
         # The batch queries' column order, verbatim: identity, payload, sighting, the two
-        # geom ordinates, inventory membership, then all of `LEGACY_COLUMNS`.
+        # geom ordinates, inventory membership, the latest stored detail body (id, is it
+        # unmined, page_kind, sha, first seen) and the portal's active contract version,
+        # then all of `LEGACY_COLUMNS`. This listing has no stored body.
         return (self.id, "sreality", f"n{self.id}", dict(SREALITY_POST_CUTOVER),
-                self.last_seen_at, None, None, False, *((None,) * len(LEGACY_COLUMNS)))
+                self.last_seen_at, None, None, False,
+                None, None, None, None, None, 1,
+                *((None,) * len(LEGACY_COLUMNS)))
 
 
 class _Cursor:
@@ -130,11 +134,9 @@ class _Conn:
             self.seen.extend(r[0] for r in cur._result)
             return
         if "INSERT INTO location_claims" in sql:
-            cur._result = [(0, 0, 0)]
+            cur._result = [(0, 0)]
             return
-        if sql.startswith("INSERT INTO location_claim_absences"):
-            return
-        if sql.startswith("INSERT INTO location_enrichment_state"):
+        if sql.startswith("UPDATE portal_raw_payloads"):
             return
         raise AssertionError(f"unhandled SQL: {sql[:120]}")
 

@@ -200,18 +200,6 @@ class CeskerealityPortal:
         fresh_keys: set[str] | None,
     ) -> None:
         """W0 item 0n: search pages carry index-only signals (map markers)."""
-        db.record_payload_churn_if_enabled(
-            conn,
-            source=SOURCE,
-            source_id_native=key,
-            page_kind="index",
-            body=lambda: html.encode("utf-8"),
-            content_type="text/html",
-        )
-        # KNOWN GAP (W2a-2): this skip guards upsert_portal_raw_page, so it
-        # also suppresses the payload dual-write for an index page that
-        # changed inside the freshness window. Deliberately unchanged here —
-        # W2a-6's index-coverage audit measures the gap before P2 reworks it.
         if fresh_keys is None or key not in fresh_keys:
             try:
                 db.upsert_portal_raw_page(
@@ -223,7 +211,6 @@ class CeskerealityPortal:
                     html=html,
                     http_status=status,
                     refresh_after_hours=db.INDEX_ARCHIVE_REFRESH_HOURS,
-                    record_churn=False,
                 )
                 if fresh_keys is not None:
                     fresh_keys.add(key)
@@ -868,7 +855,6 @@ class CeskerealityPortal:
                 # W2a-0 churn instrument: this whole write_details is replayed on
                 # a transient pooler drop, so the counter bump inside needs the
                 # item's per-fetch token to make the replay a no-op.
-                churn_observation=it.observation_id,
             )
             pk, result = db.ingest_scraped_listing(
                 conn, p["listing"], discovery_seq=it.discovery_seq,

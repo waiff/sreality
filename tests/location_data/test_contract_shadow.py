@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 
 from location_data import contracts
-from location_data.claims_remine_archive import ARCHIVE_READERS
+from location_data.page_readers import PAGE_READERS
 from location_data.contracts import ContractError
 
 _ROOT = Path(__file__).resolve().parents[2]

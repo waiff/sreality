@@ -115,18 +115,12 @@ def test_an_unconfigured_r2_reports_itself_rather_than_raising(
         payloads.reset_store_cache()
 
 
-def test_the_r2_default_puts_every_portals_body_in_the_bucket() -> None:
-    """The threshold is the whole storage decision, so it is asserted against the
-    corpus rather than left as a number in a comment: at 2 KB every portal's mean
-    body spills except bezrealitky's JSON, which is what `payload_budget`'s
-    Postgres-vs-R2 split models."""
-    from location_data import payload_budget
-
-    assert payloads.DEFAULT_R2_THRESHOLD_BYTES == payload_budget.INLINE_THRESHOLD_BYTES
-    spilling = [p.source for p in payload_budget.PORTAL_STORAGE
-                if p.stored_bytes_per_body > payloads.DEFAULT_R2_THRESHOLD_BYTES]
-
-    assert set(spilling) == {p.source for p in payload_budget.PORTAL_STORAGE} - {"bezrealitky"}
+def test_the_r2_default_is_postgres_own_toast_boundary() -> None:
+    """The threshold is the whole storage decision: at 2 KB — Postgres's own TOAST
+    boundary — every portal's mean detail body spills to the bucket except bezrealitky's
+    small JSON, so `body IS NULL AND body_r2_key IS NOT NULL` holds on essentially every
+    row and the database-resident archive never rebuilds itself."""
+    assert payloads.DEFAULT_R2_THRESHOLD_BYTES == 2 * 1024
 
 
 def test_a_body_that_needs_the_bucket_refuses_rather_than_falling_back_inline(

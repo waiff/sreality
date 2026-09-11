@@ -77,9 +77,7 @@
           "legacy_write_path_unknown": false
         }
       ],
-      "absences": [],
-      "enrichment": [],
-      "oversized": 0
+      "refusals": {}
     },
     {
       "listing": "3849899",
@@ -207,9 +205,7 @@
           "legacy_write_path_unknown": true
         }
       ],
-      "absences": [],
-      "enrichment": [],
-      "oversized": 0
+      "refusals": {}
     }
   ],
   "archived_claims": []

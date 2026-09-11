@@ -33,13 +33,13 @@ from selectolax.lexbor import LexborHTMLParser
 
 from location_data import contracts
 from location_data.claims_intake import Entry, ListingRow
-from location_data.claims_remine_archive import (
-    ARCHIVE_READERS,
+from location_data.page_readers import (
+    PAGE_READERS,
     ArchivedPayload,
     SubjectNotFound,
     _licensed_coordinate,
-    extract_payload,
-    stamp_archive_claim,
+    extract_page,
+    stamp_page_claim,
 )
 from location_data.html_scope import ScopeRegister, ScopedDocument, scope_html
 from tests.location_data import claim_intake_fixtures as fx
@@ -105,7 +105,7 @@ def scoped(body: bytes | str) -> ScopedDocument:
 
 def read(entry_id: str, document: ScopedDocument, *, native: str = NATIVE) -> list[Any]:
     item = entry(entry_id)
-    return ARCHIVE_READERS[str(item.reader)](
+    return PAGE_READERS[str(item.reader)](
         item, row(native), payload(b"", native), document)
 
 
@@ -164,7 +164,7 @@ def test_every_activated_entry_names_a_reader_this_lane_implements() -> None:
     that the archived lane does not register, and W1 would then skip it while nothing else ran
     it — a silent coverage hole with no error anywhere."""
     for entry_id in sorted(ACTIVATED):
-        assert str(entry(entry_id).reader) in ARCHIVE_READERS, entry_id
+        assert str(entry(entry_id).reader) in PAGE_READERS, entry_id
 
 
 # ------------------------------------------- the pinned body, entry by entry
@@ -351,7 +351,7 @@ def test_the_pin_branch_is_licensed_portal_by_the_ladder_not_by_the_reader() -> 
     document = scoped(_PINNED.read_bytes())
     reads = read("id.det.subject_feature", document)
     assert reads[0].position_branch == "portal_pin"
-    stamped = stamp_archive_claim(reads[0].claim, payload(_PINNED.read_bytes()),
+    stamped = stamp_page_claim(reads[0].claim, payload(_PINNED.read_bytes()),
                                   scope_version=document.scope_version)
     licensed, reason = _licensed_coordinate(
         stamped, row(), entry("id.det.subject_feature"), reads[0].position_branch)
@@ -362,42 +362,39 @@ def test_the_pin_branch_is_licensed_portal_by_the_ladder_not_by_the_reader() -> 
 
 def test_a_listing_in_the_mapy_inventory_gets_an_absence_and_no_coordinate() -> None:
     """The Mapy veto applies on the archived substrate exactly as it does on the payload one,
-    and it is RECORDED: a refused coordinate that left no absence would be indistinguishable
+    and it is COUNTED: a refused coordinate that left no trace would be indistinguishable
     from a page that carried no pin."""
-    result = extract_payload(
+    result = extract_page(
         payload(_PINNED.read_bytes()), row(in_mapy_inventory=True),
         [entry("id.det.subject_feature")], register=register())
     assert result.claims == []
-    assert [(a.field_, a.reason, a.detail) for a in result.absences] == [
-        ("coordinate", "not_attempted", "listing_in_mapy_affected_inventory")]
+    assert dict(result.refusals) == {"listing_in_mapy_affected_inventory": 1}
 
 
 def test_the_whole_contract_over_the_pinned_body_produces_the_five_claims() -> None:
-    """The lane's own entry point, not a per-reader call: `extract_payload` applies the page
+    """The lane's own entry point, not a per-reader call: `extract_page` applies the page
     kind filter, the scoper, the licence ladder and both evidence validators, so this is the
     only assertion here that proves the five claims survive everything between a reader and
     the INSERT."""
-    result = extract_payload(
+    result = extract_page(
         payload(_PINNED.read_bytes()), row(), fx.entries_for("idnes"),
         register=register())
     assert sorted(c.extractor_id for c in result.claims) == sorted(ACTIVATED)
-    assert result.absences == []
+    assert not result.refusals
     assert {c.surface for c in result.claims} == {"archived_html"}
     assert {c.page_kind for c in result.claims} == {"detail"}
 
 
-def test_a_subject_miss_becomes_one_absence_per_subject_scoped_entry() -> None:
+def test_a_subject_miss_becomes_one_refusal_per_subject_scoped_entry() -> None:
     """The lane's half of `on_miss: fail`: a per-row portal fact (a re-id, a redirect, an
     interstitial saved under the wrong key) must never roll back a batch of thousands, and it
     must never be silent. The three entries that do NOT select a subject still claim."""
-    result = extract_payload(
+    result = extract_page(
         payload(_PINNED.read_bytes(), native="999999"), row("999999"),
         fx.entries_for("idnes"), register=register())
     assert sorted(c.extractor_id for c in result.claims) == [
         "id.det.info_text", "id.det.no_exact_disclaimer", "id.det.zoom"]
-    assert sorted(a.field_ for a in result.absences) == [
-        "address_line_verbatim", "coordinate"]
-    assert all("on_miss=fail" in (a.detail or "") for a in result.absences)
+    assert dict(result.refusals) == {"subject_not_found": 2}
 
 
 # ------------------------------------ the real archived page: an unparseable blob
@@ -443,11 +440,11 @@ def test_the_real_pages_address_line_produces_no_street_claim() -> None:
     `.b-detail__info` is a whole address line, and no entry of idnes@2 claims it as a
     `street_name`."""
     document = scoped(_ARCHIVED.read_bytes())
-    # Non-vacuity: `extract_payload` returns nothing but absences on an incomplete scope, so
+    # Non-vacuity: `extract_page` returns nothing on an incomplete scope, so
     # a hole in the boundary would make the assertion below true for the wrong reason.
     assert document.is_complete
     assert document.css_first(".b-detail__info") is not None
-    result = extract_payload(payload(_ARCHIVED.read_bytes()), row(),
+    result = extract_page(payload(_ARCHIVED.read_bytes()), row(),
                              fx.entries_for("idnes"), register=register())
     assert [c for c in result.claims if c.claim_type == "street_name"] == []
 

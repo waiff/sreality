@@ -112,9 +112,7 @@
           "legacy_write_path_unknown": false
         }
       ],
-      "absences": [],
-      "enrichment": [],
-      "oversized": 0
+      "refusals": {}
     }
   ],
   "archived_claims": []

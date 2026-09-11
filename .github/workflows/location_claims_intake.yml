@@ -1,9 +1,21 @@
-name: "Jobs: Location claim intake (W1)"
+name: "Jobs: Location claim intake"
 
-# Deterministic extraction of location claims from `listings.raw_json`, all nine sources
-# (design 06-migration-backfill.md §6.2.1). No model, no network, no re-fetch: it reads the
-# payloads the scraper already persists and writes `location_claims` (+ observations,
-# absences, refetch cohort) with the §6.1.2 licence ladder applied at the INPUT.
+# THE claim lane (CLAUDE.md rule 25: one store, one lane). Deterministic extraction of
+# location claims from BOTH substrates we hold for a listing, all nine portals:
+#
+#   * `listings.raw_json` plus the class-B legacy columns — the ten payload readers;
+#   * the latest stored detail body in `portal_raw_payloads`, fetched from R2 and scoped by
+#     the contract's exclusion zones — the fourteen page readers.
+#
+# No model. The page half is HASH-GATED: a body is mined only while
+# `portal_raw_payloads.contract_version IS DISTINCT FROM` the portal's active contract
+# version, and the batch stamps the ones it mined — so the hourly cost is bounded by page
+# CHURN (~50-80 new bodies an hour fleet-wide), not by corpus size. If R2 is unconfigured
+# the page half is skipped with one warning and the payload half runs unchanged.
+#
+# It writes `location_claims`, `dirty_locations` and its own `location_claim_batches`
+# ledger, with the §6.1.2 licence ladder applied at the INPUT. Refusals are logged with a
+# count, never written as rows.
 #
 # Every run first re-projects the contracts from git into `portal_contracts` /
 # `portal_contract_entries` (02 §2.1.8: git is the store of record, the tables are its
@@ -22,8 +34,7 @@ name: "Jobs: Location claim intake (W1)"
 # next run resumes from the keyset cursor on the batch row (migration 387). 'ok' means one
 # thing: the scan ran out of rows.
 #
-# Shadow-only: nothing here is read by Browse, the API or the extension. Required secret:
-# SUPABASE_DB_URL.
+# Required secrets: SUPABASE_DB_URL, plus R2_* for the page half.
 
 on:
   workflow_dispatch:
@@ -120,6 +131,15 @@ jobs:
       - name: Run the claim intake
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # The page bodies' HOME, not an optional extra: 99.7 % of them are spilled to the
+          # bucket. Missing credentials do NOT fail the run — `_open_body_store` warns once
+          # and the payload half carries on for all nine portals — but a lane that mined no
+          # page body all week is a silent coverage hole, and this repo has shipped "flag
+          # on, credentials absent" twice already.
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
           SOURCE: ${{ inputs.source }}
           MODE: ${{ inputs.mode }}
           MAX_SECONDS: ${{ inputs.max_seconds }}

@@ -356,15 +356,6 @@ class BezrealitkyPortal:
             # derived image_urls, which is deterministic in the advert. The
             # serialisation is a thunk (nothing is dumped with the flag off) and
             # the observation token makes a replayed flush a no-op.
-            db.record_payload_churn_if_enabled(
-                conn,
-                source=SOURCE,
-                source_id_native=listing.source_id_native,
-                page_kind="detail",
-                body=lambda: json.dumps(listing.raw, ensure_ascii=False).encode("utf-8"),
-                content_type="application/json",
-                observation=it.observation_id,
-            )
             # W2a-2: the same gap on the archive side, with the body 02 section
             # 2.3.2 P3 specifies for a graphql portal — the response data plus
             # the exact query text and its sha256. `advert` is absent only for an

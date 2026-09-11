@@ -28,12 +28,12 @@ from location_data.claims_intake import (
     Entry,
     coordinate_verdict,
 )
-from location_data.claims_remine_archive import (
-    ARCHIVE_READERS,
+from location_data.page_readers import (
+    PAGE_READERS,
     ArchivedPayload,
     IntakeResult,
-    archive_entries,
-    extract_payload,
+    page_entries,
+    extract_page,
 )
 from location_data.html_scope import ScopeRegister, ScopedDocument, scope_html
 from tests.location_data import claim_intake_fixtures as fx
@@ -83,7 +83,7 @@ def mined(native: str, *, source_body: bytes | None = None) -> IntakeResult:
         id=1, source=SOURCE, source_id_native=native, page_kind="detail",
         payload_sha256="0" * 64, first_observed_at=OBSERVED_AT, body=raw)
     row = fx.listing(SOURCE, {}, native=native)
-    return extract_payload(payload, row, entries(), register=register())
+    return extract_page(payload, row, entries(), register=register())
 
 
 def by_id(result: IntakeResult) -> dict[str, object]:
@@ -100,7 +100,7 @@ def test_v5_turns_on_exactly_three_detail_entries_and_leaves_the_rest_inert() ->
     `cr.det.perex` is permanently typed `street_name` while its live value is a whole
     address line."""
     assert CONTRACT.version == 5
-    assert [e.entry_id for e in archive_entries(entries(), "detail")] == list(ACTIVATED)
+    assert [e.entry_id for e in page_entries(entries(), "detail")] == list(ACTIVATED)
     inert = {e.entry_id for e in CONTRACT.entries if e.reader is None}
     assert {"cr.det.perex", "cr.map.exact", "cr.map.coordinate", "cr.idx.locality",
             "cr.det.og_title", "cr.det.slug_street"} <= inert
@@ -117,7 +117,7 @@ def test_the_activated_entries_name_canonical_readers_and_the_shared_transform()
     assert declared["cr.det.data_city"].transform == ["split_paren_okres"]
     for entry_id in ACTIVATED:
         entry = declared[entry_id]
-        assert entry.locator["reader"] in ARCHIVE_READERS
+        assert entry.locator["reader"] in PAGE_READERS
         for name in entry.transform:
             assert name in contracts.IMPLEMENTED_TRANSFORMS, name
 
@@ -189,7 +189,7 @@ def test_a_real_body_records_no_absence_at_all(native: str) -> None:
     """Absences here would mean the scoper failed closed or an id-matched reader missed its
     subject. This portal declares neither: no entry is subject-matched, so a zero-claim
     entry (the street on a town-tier page) is silence, not a recorded miss."""
-    assert mined(native).absences == []
+    assert not mined(native).refusals
 
 
 # ------------------------------------------------------------------ the v5 exclusion zone
@@ -250,7 +250,7 @@ def test_the_pin_the_page_carries_is_never_claimed_off_the_archived_body() -> No
 
 @pytest.mark.parametrize("native", sorted(BODIES))
 def test_this_contract_bounds_a_real_body_without_a_hole(native: str) -> None:
-    """`extract_payload` fails CLOSED — an incomplete scope admits NOTHING and records one
+    """`extract_page` fails CLOSED — an incomplete scope admits NOTHING and records one
     `not_attempted` absence per entry — so every claim asserted above depends on this
     portal's five zones all being APPLICABLE, not merely well-spelled. A zone that compiled
     and matched nothing is not a hole (three of these match nothing on 2026 markup); a zone
@@ -265,7 +265,7 @@ def test_a_body_carrying_none_of_this_portals_locators_claims_nothing() -> None:
     without the `<title>` shape and without the driving-calculator input yields zero claims —
     which is what makes a zero-claim sweep a signal W2-13's tripwire can read."""
     result = mined("3861311", source_body=b"<html><head></head><body></body></html>")
-    assert result.claims == [] and result.absences == []
+    assert result.claims == [] and not result.refusals
 
 
 # ------------------------------------------------------------------ the pinned fixture
@@ -282,7 +282,7 @@ def test_the_pinned_fixture_still_yields_the_required_always_entry() -> None:
     payload = ArchivedPayload(
         id=1, source=SOURCE, source_id_native="fixture", page_kind="detail",
         payload_sha256="0" * 64, first_observed_at=OBSERVED_AT, body=pinned)
-    result = extract_payload(payload, fx.listing(SOURCE, {}, native="fixture"),
+    result = extract_page(payload, fx.listing(SOURCE, {}, native="fixture"),
                              entries(), register=register())
     claims = by_id(result)
     assert claims["cr.det.data_city"].value_text == "České Budějovice"

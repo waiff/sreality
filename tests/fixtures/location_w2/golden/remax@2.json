@@ -55,17 +55,7 @@
           "legacy_write_path_unknown": false
         }
       ],
-      "absences": [
-        {
-          "surface": "legacy_column",
-          "field": "coordinate",
-          "reason": "not_attempted",
-          "extraction_method": "legacy_column",
-          "detail": "no_first_party_coordinate_on_this_portal"
-        }
-      ],
-      "enrichment": [],
-      "oversized": 0
+      "refusals": {}
     },
     {
       "listing": "445781",
@@ -134,17 +124,7 @@
           "legacy_write_path_unknown": false
         }
       ],
-      "absences": [
-        {
-          "surface": "legacy_column",
-          "field": "coordinate",
-          "reason": "not_attempted",
-          "extraction_method": "legacy_column",
-          "detail": "no_first_party_coordinate_on_this_portal"
-        }
-      ],
-      "enrichment": [],
-      "oversized": 0
+      "refusals": {}
     }
   ],
   "archived_claims": []

@@ -20,13 +20,10 @@ from location_data.claims_intake import (
     MAX_CLAIM_VALUE_BYTES_ENV,
     WRITE_CHUNK_BYTES_ENV,
     WRITE_CHUNK_ROWS_ENV,
-    Absence,
     Claim,
-    EnrichmentTask,
     IntakeResult,
     chunk_rows,
     claim_value_bytes,
-    dedupe_enrichment_rows,
     extract_listing,
     write_result,
 )
@@ -38,14 +35,10 @@ from tests.location_data.claim_intake_fixtures import (
     listing,
 )
 
-# Migration 382's CHECK on `location_claim_absences.reason`, transcribed. A refusal must
-# pick from this set: there is no `oversized_payload` label and adding one is DDL.
-ABSENCE_REASONS = frozenset(
-    {"not_stated", "stated_but_ambiguous", "only_in_excluded_block", "not_attempted"})
 
 
 class _Cursor:
-    """Records what was executed. `fetchone` answers the claim write's three counters."""
+    """Records what was executed. `fetchone` answers the claim write's two counters."""
 
     def __init__(self) -> None:
         self.executed: list[tuple[str, dict]] = []
@@ -59,9 +52,9 @@ class _Cursor:
     def execute(self, sql: str, params: dict | None = None) -> None:
         self.executed.append((" ".join(sql.split()), params or {}))
 
-    def fetchone(self) -> tuple[int, int, int]:
+    def fetchone(self) -> tuple[int, int]:
         rows = self.executed[-1][1]["rows"].obj
-        return (len(rows), 1, 1)
+        return (len(rows), 1)
 
     def arrays(self, table: str) -> list[list[dict]]:
         return [p["rows"].obj for sql, p in self.executed if table in sql]
@@ -96,7 +89,7 @@ def test_a_batch_over_the_byte_budget_is_flushed_in_several_statements(monkeypat
         claims=[_claim(i, value_text="x" * 2000) for i in range(200)])
 
     cur = _Cursor()
-    inserted, observed, enqueued = write_result(cur, result, batch_id=7)
+    inserted, enqueued = write_result(cur, result, batch_id=7)
 
     arrays = cur.arrays("INSERT INTO location_claims")
     assert len(arrays) > 1
@@ -105,7 +98,7 @@ def test_a_batch_over_the_byte_budget_is_flushed_in_several_statements(monkeypat
     # Every chunk fits the budget, and the counters are the SUM over chunks - a chunked
     # write that reported only its last statement would silently under-count the batch row.
     assert all(_array_bytes(a) <= 64 * 1024 for a in arrays)
-    assert (inserted, observed, enqueued) == (200, len(arrays), len(arrays))
+    assert (inserted, enqueued) == (200, len(arrays))
     assert all(p["batch_id"] == 7 for _, p in cur.executed)
 
 
@@ -165,23 +158,6 @@ def test_a_group_larger_than_the_budget_is_emitted_whole():
     assert len(chunks) == 1 and len(chunks[0]) == 3
 
 
-def test_absences_and_enrichment_are_chunked_by_the_same_bounds(monkeypatch):
-    """Both share the `jsonb_to_recordset(%(rows)s::jsonb)` pattern, so both share the cap.
-    `location_claim_absences` is the table W2's HTML re-mine will write at listing grain."""
-    monkeypatch.setenv(WRITE_CHUNK_ROWS_ENV, "25")
-    result = IntakeResult(
-        absences=[Absence(i, "api_json", "street_name", "not_stated",
-                          "portal_structured_field", "d") for i in range(100)],
-        enrichment=[EnrichmentTask(i, "portal_structured_field", "sreality_detail_refetch",
-                                   "skipped", "ab" * 32) for i in range(100)])
-
-    cur = _Cursor()
-    write_result(cur, result, batch_id=1)
-
-    assert len(cur.arrays("location_claim_absences")) == 4
-    assert len(cur.arrays("location_enrichment_state")) == 4
-
-
 def test_the_chunk_bounds_are_env_overridable_and_reject_nonsense(monkeypatch):
     """0 would mean "no bound", which is the state the whole mechanism exists to stop."""
     monkeypatch.setenv(WRITE_CHUNK_ROWS_ENV, "0")
@@ -221,20 +197,10 @@ def test_an_oversized_value_is_refused_never_silently_dropped():
     assert not [c for c in result.claims if c.claim_type == "uncertainty_geometry"]
     # ... and nothing else was collateral damage.
     assert {c.claim_type for c in result.claims} >= {"street_name", "coordinate"}
-    assert result.oversized == 1
-    # 2. a negative assertion, in migration 382's vocabulary, at the refused claim's grain.
-    refusal = [a for a in result.absences if a.field_ == "uncertainty_geometry"]
-    assert len(refusal) == 1
-    assert refusal[0].reason in ABSENCE_REASONS
-    assert refusal[0].reason == "not_attempted"
-    assert refusal[0].listing_id == 42 and refusal[0].surface == "api_json"
-    assert "bytes" in refusal[0].detail
-    # 3. the listing is routed to the refetch cohort, like the truncated-locality path.
-    task = [e for e in result.enrichment if e.lane == "sreality_detail_refetch"]
-    assert len(task) == 1
-    assert task[0].outcome == "error" and task[0].listing_id == 42
-    assert task[0].error is not None and "uncertainty_geometry" in task[0].error
-    assert len(task[0].input_hash) == 64  # hex; `decode(input_hash,'hex')` on the write
+    # 2. counted under its own reason, at the refused claim's grain — and logged. A
+    # counter, not a row: `location_claim_absences` was written by every lane and read by
+    # none (rule 25), so what survives is the tally the operator actually reads.
+    assert result.refusals["oversized_value:uncertainty_geometry"] == 1
 
 
 def test_a_value_under_the_cap_is_untouched():
@@ -243,8 +209,7 @@ def test_a_value_under_the_cap_is_untouched():
     result = extract_listing(row, entries_for("sreality"))
 
     assert [c for c in result.claims if c.claim_type == "uncertainty_geometry"]
-    assert result.oversized == 0
-    assert not [a for a in result.absences if a.field_ == "uncertainty_geometry"]
+    assert not [r for r in result.refusals if r.startswith("oversized_value")]
 
 
 def test_the_cap_is_env_overridable(monkeypatch):
@@ -253,7 +218,8 @@ def test_the_cap_is_env_overridable(monkeypatch):
 
     result = extract_listing(row, entries_for("sreality"))
 
-    assert result.oversized >= 1
+    assert sum(c for r, c in result.refusals.items()
+               if r.startswith("oversized_value")) >= 1
     assert DEFAULT_MAX_CLAIM_VALUE_BYTES == 2 * 1024 * 1024
 
 
@@ -267,12 +233,10 @@ def test_claim_value_bytes_measures_only_the_unbounded_part():
     assert claim_value_bytes(_claim(1)) == 0
 
 
-def test_the_refusal_wins_the_refetch_row_over_the_shape_signal():
-    """A legacy-shape sreality row routes to `sreality_detail_refetch` for its SHAPE; an
-    oversized value on the SAME listing routes to the same (listing, method, lane). That is
-    not a duplicate, it is `ON CONFLICT ... DO UPDATE` "cannot affect row a second time" —
-    an aborted run. The refusal is written first so the surviving row is the one whose
-    `last_error` says why."""
+def test_a_legacy_shape_row_counts_both_refusals_separately():
+    """A legacy-shape sreality row with an oversized value used to collide on ONE
+    `location_enrichment_state` primary key — `ON CONFLICT … DO UPDATE` "cannot affect row a
+    second time", i.e. an aborted run. Two counters cannot collide."""
     payload = json.loads(json.dumps(SREALITY_LEGACY))
     payload["locality"] = dict(SREALITY_POST_CUTOVER["locality"])
     payload["locality"]["geometry"] = json.loads(
@@ -285,33 +249,5 @@ def test_the_refusal_wins_the_refetch_row_over_the_shape_signal():
 
     result = extract_listing(row, entries_for("sreality"), max_value_bytes=8 * 1024)
 
-    assert result.oversized == 1
-    rows = dedupe_enrichment_rows([e.to_row("claims_intake@2") for e in result.enrichment])
-    assert len(rows) == 1
-    assert rows[0]["last_outcome"] == "error"
-    assert "refused" in rows[0]["last_error"]
-
-
-def test_enrichment_rows_dedupe_on_the_conflict_target():
-    rows = [
-        {"listing_id": 1, "method": "portal_structured_field", "lane": "l", "n": "first"},
-        {"listing_id": 1, "method": "portal_structured_field", "lane": "l", "n": "second"},
-        {"listing_id": 1, "method": "legacy_column", "lane": "l", "n": "other-method"},
-        {"listing_id": 2, "method": "portal_structured_field", "lane": "l", "n": "other"},
-    ]
-
-    out = dedupe_enrichment_rows(rows)
-
-    assert [r["n"] for r in out] == ["first", "other-method", "other"]
-
-
-@pytest.mark.parametrize("reason", sorted(ABSENCE_REASONS))
-def test_the_absence_vocabulary_is_check_constrained(reason):
-    """Pins the fact the refusal design turns on: migration 382 CHECKs `reason` against
-    exactly these four, so 'oversized_payload' cannot be written without DDL and the detail
-    has to ride on the enrichment row's `last_error` instead (that table has no note
-    column)."""
-    absence = Absence(1, "api_json", "street_name", reason, "portal_structured_field", "d")
-
-    assert absence.to_row("v")["reason"] in ABSENCE_REASONS
-    assert "detail" not in absence.to_row("v")
+    assert result.refusals["oversized_value:uncertainty_geometry"] == 1
+    assert result.refusals["sreality_payload_shape:legacy"] == 1

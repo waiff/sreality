@@ -3670,296 +3670,28 @@ def fresh_index_page_keys(conn: psycopg.Connection, source: str, *, hours: float
         return {r[0] for r in cur.fetchall()}
 
 
-# The W2a-0 shadow-hash churn instrument (design 02 section 2.3.2 P1, 06 section
-# 6.9 OQ9): OFF by default, app_settings-backed so a flip reaches the always-on
-# worker without a redeploy.
-PAYLOAD_SHADOW_HASH_SETTING = "location_payload_shadow_hash"
-
-# The flag is read at most once per process per TTL, NOT once per item. The
-# Gate-2 precedent reads live, but it sits in ingest_scraped_listing — a per-item
-# write path that already round-trips several times. This instrument hangs off
-# write_detail_batch, whose whole design is ~4 round-trips per 100-listing batch;
-# a live read per item would make that ~104, i.e. 1-3 s of pure Frankfurt-pooler
-# RTT added to every flush inside the realtime worker's time-budgeted drain lane,
-# to read a flag that is off. The bound this buys back: a flip is picked up
-# within _FLAG_CACHE_TTL seconds by the always-on worker, and immediately by
-# every cron run (a fresh process starts with an empty cache).
-_FLAG_CACHE_TTL = 60.0
-_FLAG_CACHE: dict[str, tuple[float, bool]] = {}
-
-# Same TTL, keyed by SOURCE: the W2a-2 dual-write is a per-portal limit
-# (PortalLimits.payload_dual_write), not one global flag, because enabling the
-# archive is a per-portal storage decision. The whole resolved PortalLimits is
-# cached because both payload limits come from ONE load_portal_config read —
-# caching them separately would double a read that sits on a per-page path, and
-# caching them as a bare pair would make the two booleans swappable at the
-# unpack site with nothing to catch it.
-_LIMIT_CACHE: dict[str, tuple[float, Any]] = {}
-
-# `detail` is the ONLY page_kind the dual-write limit governs on its own, and the
-# set is spelled that way round on purpose. The invariant is about GRAIN, not
-# about the word "index": a detail body is one listing fetched when that listing
-# is enqueued, while every other `location_page_kind` label — index, map,
-# gazetteer, snapshot, archive, none — is a whole-SURFACE artefact refetched on a
-# walk cadence, so its churn is the storage question `payload_index_archive`
-# exists to gate. Two of those are already live and declare `archive: true`
-# (ceskereality's map, bezrealitky's gazetteer); an allowlist naming only 'index'
-# would have let both archive on every walk with the second gate off.
+# `detail` is the ONLY page_kind the payload archive stores, and the invariant is
+# about GRAIN, not about the word "index": a detail body is ONE listing fetched when
+# that listing is enqueued, while every other `location_page_kind` label — index, map,
+# gazetteer, snapshot, archive, none — is a whole-SURFACE artefact refetched on a walk
+# cadence (sreality walks its index 24x/day), so archiving one would store the same
+# re-ordered page over and over for no claim anyone can mine from it.
 DETAIL_PAGE_KIND = "detail"
 INDEX_PAGE_KIND = "index"
 
 
-def clear_app_settings_flag_cache() -> None:
-    """Drop every cached gate value — app_settings flags AND the per-portal
-    payload-archive limit (tests; a process that must re-read at once)."""
-    _FLAG_CACHE.clear()
-    _LIMIT_CACHE.clear()
+def _payload_archive_enabled(source: str, page_kind: str) -> bool:
+    """May this body be appended to the payload archive? Detail bodies, always.
 
-
-def _app_settings_flag_cached(
-    conn: psycopg.Connection, key: str, *, ttl: float = _FLAG_CACHE_TTL,
-) -> bool:
-    now = time.monotonic()
-    cached = _FLAG_CACHE.get(key)
-    if cached is not None and cached[0] > now:
-        return cached[1]
-    value = _app_settings_flag(conn, key)
-    _FLAG_CACHE[key] = (now + ttl, value)
-    return value
-
-
-_PAYLOAD_CHURN_UPSERT_SQL = """
-    INSERT INTO portal_payload_churn
-        (source, source_id_native, page_kind, normalizer_version,
-         first_seen_at, last_seen_at,
-         fetches, raw_changes, norm_changes,
-         last_raw_sha256, last_norm_sha256, last_byte_size, last_norm_byte_size,
-         last_observation)
-    VALUES (%s, %s, %s::location_page_kind, %s,
-            coalesce(%s::timestamptz, now()), coalesce(%s::timestamptz, now()),
-            1, 0, 0, %s, %s, %s, %s, %s)
-    ON CONFLICT (source, source_id_native, page_kind, normalizer_version)
-    DO UPDATE SET
-        last_seen_at        = greatest(portal_payload_churn.last_seen_at,
-                                       EXCLUDED.last_seen_at),
-        fetches             = portal_payload_churn.fetches + 1,
-        raw_changes         = portal_payload_churn.raw_changes
-                              + (portal_payload_churn.last_raw_sha256
-                                 IS DISTINCT FROM EXCLUDED.last_raw_sha256)::int,
-        norm_changes        = portal_payload_churn.norm_changes
-                              + (portal_payload_churn.last_norm_sha256
-                                 IS DISTINCT FROM EXCLUDED.last_norm_sha256)::int,
-        last_raw_sha256     = EXCLUDED.last_raw_sha256,
-        last_norm_sha256    = EXCLUDED.last_norm_sha256,
-        last_byte_size      = EXCLUDED.last_byte_size,
-        last_norm_byte_size = EXCLUDED.last_norm_byte_size,
-        last_observation    = EXCLUDED.last_observation
-    WHERE portal_payload_churn.last_observation
-          IS DISTINCT FROM EXCLUDED.last_observation
-"""
-
-
-def record_payload_churn(
-    conn: psycopg.Connection,
-    *,
-    source: str,
-    source_id_native: str,
-    page_kind: str,
-    body: bytes,
-    content_type: str,
-    observation: str,
-    fetched_at: datetime | None = None,
-    normalizer_version: str | None = None,
-) -> None:
-    """Bump this artefact's raw-vs-normalised churn counters. Stores NO body.
-
-    The measurement 02 section 2.3.2 makes a gate on P2 (index archiving): one
-    bounded row per (source, source_id_native, page_kind, normalizer_version)
-    carrying both hashes, both sizes and three counters, so the change RATE is a
-    number instead of the assumption the storage projection currently rests on.
-
-    `observation` identifies the FETCH, not the call: replaying it is a no-op
-    (migration 402's WHERE guard), which is what makes this safe to run inside
-    the drain's run_resilient-retried batch write.
-
-    `normalizer_version` overrides the cohort this fetch is counted in. The live
-    ingest never passes one — it takes the resolver's answer for this surface, which
-    is `payload_norm@N+profile@<digest>` where the portal's contract declares a
-    volatile profile and `payload_norm@N+base` where it does not. The confirmation
-    probe passes `payload_norm.probe_normalizer_version()` so its minutes-apart
-    cadence lands in its own cohort instead of contaminating the passive counters.
-
-    PRECONDITION: an autocommit connection (scraper.db.connect). The statement is
-    self-contained, so a caller already inside `with conn.transaction():` gets it
-    wrapped in a savepoint instead — a churn failure must never poison the
-    caller's transaction and take the ingest write down with it.
+    It used to be three gates — a per-portal `payload_dual_write` limit, a second
+    `payload_index_archive` limit for every other surface, and a "has this surface been
+    weighed" check against a frozen measurement corpus. All three are gone (rule 25: the
+    stored page body is the hourly lane's second substrate, so archiving it is not an
+    opt-in experiment any more). What is left is the grain rule: a detail body is one
+    listing's page and is mined for claims; every other page_kind is a surface artefact
+    that re-orders on every walk.
     """
-    # Deferred: location_data is not on the scraper's import path (and not in the
-    # API image before this wave), so the flag-off scrape never pays for it.
-    from location_data.payload_norm import normalise, resolve_normalisation
-
-    # By (source, page_kind), never by source alone: every shipped profile was
-    # derived by diffing DETAIL pages, and an index page is a LIST of properties,
-    # not a property. The resolution falls back to the generic base for a surface
-    # nobody has diffed and stamps that fallback into its own cohort, so the two
-    # instruments never average together — profile and cohort as ONE answer, so a
-    # counter can never be filed under a normaliser that was not the one applied.
-    resolved = resolve_normalisation(source, page_kind)
-    result = normalise(
-        body,
-        content_type=content_type,
-        volatile=resolved.profile,
-    )
-    params = (
-        source, source_id_native, page_kind,
-        normalizer_version or resolved.normalizer_version,
-        fetched_at, fetched_at,
-        result.raw_sha256, result.norm_sha256,
-        result.byte_size, result.norm_byte_size, observation,
-    )
-    if getattr(conn, "autocommit", True):
-        with conn.cursor() as cur:
-            cur.execute(_PAYLOAD_CHURN_UPSERT_SQL, params)
-        return
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(_PAYLOAD_CHURN_UPSERT_SQL, params)
-
-
-def record_payload_churn_if_enabled(
-    conn: psycopg.Connection,
-    *,
-    source: str,
-    source_id_native: str,
-    page_kind: str,
-    body: bytes | Callable[[], bytes],
-    content_type: str | None = None,
-    observation: str | None = None,
-    fetched_at: datetime | None = None,
-) -> None:
-    """Flag-gated, never-raising wrapper — the ONLY form callers should use.
-
-    An instrument that can break the thing it measures is worthless, so every
-    failure (flag read, normaliser, upsert) warns and returns. `content_type`
-    None sniffs the body, for the archive path that is handed both HTML and JSON
-    through one `html` parameter.
-
-    `body` should be a THUNK wherever producing the bytes costs anything: the
-    flag is read first and a disabled instrument must do no serialisation work at
-    all (sreality's index payload is multi-MB and this sits in the hourly walk).
-    Serialising inside the try/except is also what keeps a non-JSON-serialisable
-    value in a raw dict from killing a 100-item flush.
-
-    `observation` identifies the logical FETCH. Callers inside a retried op MUST
-    pass one that survives the replay (DrainItem.observation_id); anything else
-    gets a fresh token per call, which is the pre-existing count-every-call
-    behaviour.
-    """
-    try:
-        if not _app_settings_flag_cached(conn, PAYLOAD_SHADOW_HASH_SETTING):
-            return
-        payload = body() if callable(body) else body
-        if content_type is None:
-            from location_data.payload_norm import sniff_content_type
-            content_type = sniff_content_type(payload)
-        record_payload_churn(
-            conn,
-            source=source,
-            source_id_native=source_id_native,
-            page_kind=page_kind,
-            body=payload,
-            content_type=content_type,
-            observation=observation or uuid.uuid4().hex,
-            fetched_at=fetched_at,
-        )
-    except Exception as exc:  # noqa: BLE001 - instrumentation must not kill ingest
-        LOG.warning(
-            "payload churn record failed source=%s key=%s: %s",
-            source, source_id_native, exc,
-        )
-
-
-def _payload_limits(
-    conn: psycopg.Connection, source: str, *, ttl: float = _FLAG_CACHE_TTL,
-) -> Any:
-    """This portal's resolved `PortalLimits`, cached for the payload gates.
-
-    Resolved through the standard limit precedence (baked default < global
-    `app_settings.scraper_limits_global` < `portals.operational_limits`), so
-    enabling either needs no migration and no deploy — the `shared_rate_limiter`
-    precedent. Cached per source for the same reason the shadow-hash flag is:
-    the read is two SELECTs and this sits on a per-page path.
-
-    A failed read is cached as the BAKED defaults (every gate off) for the same
-    TTL. Off is the safe direction (the archive is an addition, never a
-    dependency of the scrape), and caching the failure is what keeps an
-    unreadable registry row from re-asking twice per fetched page for a walk.
-    """
-    now = time.monotonic()
-    cached = _LIMIT_CACHE.get(source)
-    if cached is not None and cached[0] > now:
-        return cached[1]
-    # `autocommit` is a PROXY for "not inside a transaction", exact for every
-    # caller today (the drain and the index archivers all hold an autocommit
-    # connection). It would under-protect only an autocommit connection read from
-    # inside an explicit `with conn.transaction():` — no such caller exists.
-    # Deferred import: scraper.portal must stay free to import scraper.db.
-    from scraper.portal import PortalLimits, load_portal_config
-
-    value = PortalLimits()
-    try:
-        if getattr(conn, "autocommit", True):
-            value = load_portal_config(conn, source).limits
-        else:
-            # A caller already inside a transaction gets the read wrapped in a
-            # savepoint: a gate this optional must never poison the ingest
-            # transaction it is riding in.
-            with conn.transaction():
-                value = load_portal_config(conn, source).limits
-    except Exception as exc:  # noqa: BLE001 - the gate must not kill ingest
-        LOG.warning("payload archive limit read failed source=%s: %s", source, exc)
-        value = PortalLimits()
-    _LIMIT_CACHE[source] = (now + ttl, value)
-    return value
-
-
-def _payload_archive_enabled(
-    conn: psycopg.Connection, source: str, page_kind: str, *, ttl: float = _FLAG_CACHE_TTL,
-) -> bool:
-    """May this body be appended to the payload archive?
-
-    One gate for a detail body, two in series for every other page_kind (W2a-6),
-    and a third that is not a flag at all: the surface has to have been WEIGHED.
-    The second gate is an AND on top of `payload_dual_write`, never an OR:
-    surface-grain bodies re-order on every walk and are refetched on the walk
-    cadence (sreality's index 24x/day), so a portal whose per-listing churn signs
-    off cheaply may still have surface churn that does not — but "the archive is
-    off for this portal" has to stay one switch that means it.
-
-    The third gate closes a hole the flags cannot: `location_data.payload_budget`
-    is the frozen corpus the storage ceiling is computed from, and it carries only
-    the surfaces someone has measured (today, every portal's `detail`). Archiving
-    an unmeasured surface would not break anything visibly — it would make the
-    number the operator signed silently wrong, which is worse. So an unmeasured
-    (source, page_kind) is refused here, which is also what forces whoever turns
-    on `payload_index_archive` to profile the index surface first instead of
-    discovering its cost on the storage bill.
-    """
-    limits = _payload_limits(conn, source, ttl=ttl)
-    if not limits.payload_dual_write:
-        return False
-    if page_kind != DETAIL_PAGE_KIND and not limits.payload_index_archive:
-        return False
-    from location_data import payload_budget
-
-    if not payload_budget.is_measured(source, page_kind):
-        LOG.warning(
-            "payload archive refuses unmeasured surface source=%s page_kind=%s — add it "
-            "to location_data/payload_budget.PORTAL_STORAGE (re-derive with "
-            "scripts/location_payload_storage_ceiling.py) before archiving it",
-            source, page_kind,
-        )
-        return False
-    return True
+    return page_kind == DETAIL_PAGE_KIND
 
 
 def append_payload_if_enabled(
@@ -3997,7 +3729,7 @@ def append_payload_if_enabled(
     of writing a second row.
     """
     try:
-        if not _payload_archive_enabled(conn, source, page_kind):
+        if not _payload_archive_enabled(source, page_kind):
             return
         payload = body() if callable(body) else body
         if content_type is None:
@@ -4047,8 +3779,6 @@ def upsert_portal_raw_page(
     html: str,
     http_status: int | None,
     refresh_after_hours: float | None = None,
-    record_churn: bool = True,
-    churn_observation: str | None = None,
 ) -> int | None:
     """Latest-wins upsert of one fetched HTML page into portal_raw_pages.
 
@@ -4058,22 +3788,12 @@ def upsert_portal_raw_page(
     younger than that is left untouched and None is returned — the write-cost
     guard for index-page archiving.
 
-    `record_churn=False` is for the callers that already recorded the fetch
-    themselves (the index archivers, which measure pages their client-side
-    freshness skip never hands to this function) — without it those surfaces
-    would double-count exactly the fetches that do get archived.
-    `churn_observation` is the caller's per-fetch idempotency token; the drain's
-    write_details MUST pass DrainItem.observation_id, because that whole call is
-    replayed on a transient pooler drop.
-
-    W2a-2's payload dual-write hangs off the END of this function, so ONE edit
+    The payload dual-write hangs off the END of this function, so ONE edit
     covers every HTML writer that stages through here — the seven detail writers
     and the three index archivers — with no per-portal branch (rule #21). It does
     NOT cover the two portals that stage no body (sreality's estate JSON,
-    bezrealitky's advert), which call `append_payload_if_enabled` directly, nor
-    does it decide the gate: W2a-6 gives every non-`detail` page_kind a second
-    limit, resolved inside that function. It is deliberately NOT gated on the
-    staging row: a
+    bezrealitky's advert), which call `append_payload_if_enabled` directly. It is
+    deliberately NOT gated on the staging row: a
     `refresh_after_hours` skip means portal_raw_pages already holds a body young
     enough, which says nothing about whether the CONTENT moved — and an
     append-on-change archive that drops a genuinely changed body is the one
@@ -4082,22 +3802,12 @@ def upsert_portal_raw_page(
     encoded: bytes | None = None
 
     def _body() -> bytes:
-        # Memoised: with both gates on, a multi-MB index payload is encoded once
-        # for the churn hook and the archive, not twice.
+        # Memoised: the archive asks for the bytes at most once per call.
         nonlocal encoded
         if encoded is None:
             encoded = html.encode("utf-8")
         return encoded
 
-    if record_churn:
-        record_payload_churn_if_enabled(
-            conn,
-            source=source,
-            source_id_native=source_id_native,
-            page_kind=page_kind,
-            body=_body,
-            observation=churn_observation,
-        )
     with conn.cursor() as cur:
         if refresh_after_hours is None:
             cur.execute(

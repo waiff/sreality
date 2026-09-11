@@ -85,17 +85,9 @@
           "legacy_write_path_unknown": true
         }
       ],
-      "absences": [
-        {
-          "surface": "legacy_column",
-          "field": "coordinate",
-          "reason": "not_attempted",
-          "extraction_method": "legacy_column",
-          "detail": "coordinate_provenance_unestablished"
-        }
-      ],
-      "enrichment": [],
-      "oversized": 0
+      "refusals": {
+        "coordinate_withheld:coordinate_provenance_unestablished": 1
+      }
     },
     {
       "listing": "445781",
@@ -137,17 +129,9 @@
           "legacy_write_path_unknown": false
         }
       ],
-      "absences": [
-        {
-          "surface": "legacy_column",
-          "field": "coordinate",
-          "reason": "not_attempted",
-          "extraction_method": "legacy_column",
-          "detail": "coordinate_provenance_unestablished"
-        }
-      ],
-      "enrichment": [],
-      "oversized": 0
+      "refusals": {
+        "coordinate_withheld:coordinate_provenance_unestablished": 1
+      }
     },
     {
       "listing": "445781",
@@ -216,17 +200,9 @@
           "legacy_write_path_unknown": false
         }
       ],
-      "absences": [
-        {
-          "surface": "legacy_column",
-          "field": "coordinate",
-          "reason": "not_attempted",
-          "extraction_method": "legacy_column",
-          "detail": "coordinate_provenance_unestablished"
-        }
-      ],
-      "enrichment": [],
-      "oversized": 0
+      "refusals": {
+        "coordinate_withheld:coordinate_provenance_unestablished": 1
+      }
     }
   ],
   "archived_claims": [

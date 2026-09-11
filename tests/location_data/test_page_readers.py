@@ -1,18 +1,19 @@
-"""W2 archived-HTML re-mining — the evidence discipline, the archived licence ladder, and
-the batch semantics the lane inherits from W1.
-
-The lane is INERT on merge (no portal declares an archived reader yet), so every test here
-either drives a synthetic contract entry through a fake reader, or asserts a property of
-the plumbing itself. Two families carry real weight:
+"""The page-reader half of the ONE claim lane — evidence discipline, the licence ladder
+on the stored body, the readers themselves, and the R2 fetch.
 
   * EVIDENCE. Migration 382's `loc_claim_text_evidence` / `loc_claim_evidence_payload` are
     the LAST line of defence. A batch is one transaction, so a single malformed claim rolls
     back every good claim beside it — and the DB's error names a constraint, not the entry.
     `assert_evidence_complete` must refuse first, and `test_the_python_validator_requires_
     exactly_what_the_db_check_requires` reads the applied DDL so the two cannot drift.
-  * THE LADDER. `mapy_affected` membership vetoes a coordinate on the archived substrate
+  * THE LADDER. `mapy_affected` membership vetoes a coordinate on the page substrate
     exactly as it does on `raw_json` (06 §6.4's gate joins on `listing_id`, not on
     `surface`), and C6's licence spellings are pinned against the enum.
+  * THE FETCH. Bodies live in R2; `load_bodies` is what a batch pays for, so its width, its
+    per-id routing and its all-or-nothing failure are pinned here.
+
+The lane that calls all of this is `location_data.claims_intake` (one lane, rule 25); its
+scan, hash gate and write are pinned in tests/location_data/test_claims_intake_run.py.
 """
 
 from __future__ import annotations
@@ -20,44 +21,45 @@ from __future__ import annotations
 import re
 import threading
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from location_data import claims_intake, claims_remine_archive, payloads
-from location_data.claims_intake import (
+from location_data import claims_intake, page_readers, payloads
+from location_data.claims_common import (
     ARCHIVED_COORDINATE_RULES,
-    DEFAULT_WRITE_CHUNK_BYTES,
-    DEFAULT_WRITE_CHUNK_ROWS,
     SUBSTRATE_ARCHIVED_HTML,
     Claim,
     Entry,
     IntakeRefused,
     ListingRow,
     _base,
-    chunk_rows,
     coordinate_verdict,
-    dedupe_absence_rows,
 )
-from location_data.claims_remine_archive import (
+from location_data.claims_intake import (
+    DEFAULT_WRITE_CHUNK_BYTES,
+    DEFAULT_WRITE_CHUNK_ROWS,
+    chunk_rows,
+)
+from location_data.html_scope import ScopeRegister, scope_html
+from location_data.page_readers import (
     ARCHIVE_ANCHOR,
     ARCHIVE_HISTORY_COMPLETENESS,
-    ARCHIVE_READERS,
     ARCHIVE_SURFACE,
+    PAGE_READERS,
     POSITION_BRANCH_PORTAL_GEOCODED,
     POSITION_BRANCH_PORTAL_PIN,
     ArchivedPayload,
-    ArchiveRead,
-    archive_entries,
+    PageRead,
     assert_evidence_complete,
     assert_stampable,
-    extract_payload,
-    run,
-    stamp_archive_claim,
+    extract_page,
+    page_entries,
+    stamp_page_claim,
 )
-from location_data.html_scope import ScopeRegister, scope_html
+
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 _MIGRATION_382 = (_ROOT / "migrations" / "382_location_w1_claims.sql").read_text("utf-8")
@@ -93,7 +95,7 @@ def listing_row(**overrides: Any) -> ListingRow:
         "listing_id": 4242, "source": "remax", "source_id_native": "445781",
         "raw_json": {}, "lat": None, "lon": None, "observed_at": FETCHED_AT,
         "in_mapy_inventory": False,
-        "legacy_columns": dict(claims_remine_archive._DUMMY_LEGACY_COLUMNS),
+        "legacy_columns": dict(page_readers._DUMMY_LEGACY_COLUMNS),
     }
     kwargs.update(overrides)
     return ListingRow(**kwargs)
@@ -110,67 +112,10 @@ def payload(**overrides: Any) -> ArchivedPayload:
 
 def raw_claim(entry: Entry | None = None, **overrides: Any) -> Claim:
     """What a reader hands back: `_base`'s stamping and nothing else. The archived
-    provenance is `stamp_archive_claim`'s job, which is exactly what the tests below
+    provenance is `stamp_page_claim`'s job, which is exactly what the tests below
     exercise."""
     entry = entry or archive_entry()
     return _base(entry, listing_row(), value_text="Krymská", **overrides)
-
-
-# ------------------------------------------------------- the disambiguated lane identity
-
-def test_this_lane_never_shares_an_identifier_with_the_snapshot_re_mine_lane():
-    """`location_claim_batches` resume/watermark is keyed on (lane, source, scan_mode). W3
-    re-mines `listing_snapshots`, this one re-mines archived bodies, and both design
-    documents independently named their module `claims_remine` with
-    LANE='location_claims_remine'. One shared lane string is not a crash — it is two
-    cursors silently overwriting each other's coverage. This lane therefore takes the
-    `_archive` spellings and leaves the short ones free for whenever W3 lands;
-    `tests/location_data/test_lane_identifiers.py` is the fleet-wide gate."""
-    for value in (claims_remine_archive.LANE, claims_remine_archive.JOB_NAME,
-                  claims_remine_archive.REMINE_VERSION,
-                  claims_remine_archive.CONCURRENCY_GROUP):
-        assert value not in ("location_claims_remine", "claims_remine@1",
-                             "location-remine")
-    assert claims_remine_archive.LANE == "location_claims_remine_archive"
-    assert claims_remine_archive.REMINE_VERSION == "claims_remine_archive@1"
-    assert claims_remine_archive.WAVE == "W2"
-
-
-def test_the_archive_reader_registry_is_separate_from_w1s():
-    """`mm.det.point` declares `reader: point_pair`, a W1 PAYLOAD reader. Sharing one
-    registry would make this lane re-run W1's raw_json reads under `surface='archived_html'`
-    on this lane's batch id."""
-    assert ARCHIVE_READERS is not claims_intake.READERS
-    assert not set(ARCHIVE_READERS) & set(claims_intake.READERS)
-
-
-def test_the_registered_archive_readers_are_the_declared_generic_set():
-    """W2-2 asserted `ARCHIVE_READERS == {}` — the lane was inert because nothing could read.
-    W2-6 lands the first readers, so that assertion is retired here DELIBERATELY (it was left
-    as the tripwire for exactly this moment) and replaced by the two properties that still
-    have to hold.
-
-    First: the set is closed. These readers are portal-AGNOSTIC — a selector, an attribute, a
-    DMS attribute — and every portal-specific fact belongs in contract data. A new name
-    appearing here is how "one portal needed something special" becomes a branch in shared
-    code (rule 21), so adding one is a reviewed act, not an import side effect.
-
-    W2's reader canon adds ten, deliberately and in ONE reviewed act rather than seven portal
-    PRs each inventing its own: the nine portal specs proposed 14 reader names with heavy
-    overlap (`html_url_slug` / `html_attr_regex`, `html_contains` / `html_declared_quality` /
-    `html_attr_presence`, four `html_json_*` beside three `script_json_*` and three
-    `embedded_json_*`), and every one of those pairs asks the SAME question of a different
-    portal's markup. The canon collapses them onto four DOM readers (own text, a pattern over
-    text, a pattern over an attribute, a presence marker), five over a JSON document the page
-    carries — sharing ONE acquisition layer and ONE subject-selection rule — and one over a
-    JSON-LD breadcrumb. Each name states a QUESTION, never a portal: which element, which
-    pointer, which pattern, which junk pins and which labels all stay contract data."""
-    assert set(ARCHIVE_READERS) == {
-        "html_text", "html_own_text", "html_attr", "html_attr_regex", "html_regex",
-        "html_marker", "html_point_dms", "html_point_attrs",
-        "json_scalar", "json_regex", "json_bool", "json_point", "json_geometry",
-        "json_breadcrumb",
-    }
 
 
 # ------------------------------------------------------------------ evidence discipline
@@ -291,7 +236,7 @@ def test_blur_evidence_is_clamped_to_the_two_values_a_migration_may_write():
 
 
 def test_only_portal_and_odbl_may_be_emitted():
-    assert claims_remine_archive.ARCHIVE_EMITTABLE_LICENCE_CLASSES == {"portal", "odbl"}
+    assert page_readers.ARCHIVE_EMITTABLE_LICENCE_CLASSES == {"portal", "odbl"}
     for value in ("ephemeral_display_only", "cc_by_ruian", "operator"):
         with pytest.raises(IntakeRefused, match="licence_class"):
             assert_stampable(raw_claim(archive_entry(licence_class=value)))
@@ -300,7 +245,7 @@ def test_only_portal_and_odbl_may_be_emitted():
 # ---------------------------------------------------------------- archived stamping (C9/C10/C4)
 
 def test_every_claim_is_stamped_archived_html_with_the_pages_own_page_kind():
-    stamped = stamp_archive_claim(raw_claim(), payload(page_kind="index"),
+    stamped = stamp_page_claim(raw_claim(), payload(page_kind="index"),
                                   scope_version="html_scope@1:remax:beef")
     assert stamped.surface == ARCHIVE_SURFACE == "archived_html"
     assert stamped.page_kind == "index", "C10: a body does not change what kind of page it is"
@@ -317,13 +262,13 @@ def test_the_entry_keeps_its_published_locator_kind():
     """C9's whole point: the runtime maps the SURFACE, the contract is not rewritten."""
     entry = archive_entry(surface="embedded_json")
     assert entry.surface == "embedded_json"
-    assert stamp_archive_claim(raw_claim(entry), payload(),
+    assert stamp_page_claim(raw_claim(entry), payload(),
                                scope_version="v").surface == "archived_html"
 
 
 def test_the_archive_page_kind_enum_member_stays_unused():
     with pytest.raises(IntakeRefused, match="archive"):
-        stamp_archive_claim(raw_claim(), payload(page_kind="archive"), scope_version="v")
+        stamp_page_claim(raw_claim(), payload(page_kind="archive"), scope_version="v")
 
 
 def test_the_anchor_is_the_only_one_the_check_allows_beside_a_null_snapshot():
@@ -341,7 +286,7 @@ def test_the_anchor_is_the_only_one_the_check_allows_beside_a_null_snapshot():
     assert "snapshot_anchor <> 'snapshot' and snapshot_id is null" in anchor_check.group(1)
     assert re.search(r"^\s*snapshot_id\s+bigint,\s*$", _MIGRATION_382, re.M), \
         "the column must be nullable for the write to legally omit it"
-    stamped = stamp_archive_claim(raw_claim(), payload(), scope_version="v")
+    stamped = stamp_page_claim(raw_claim(), payload(), scope_version="v")
     assert stamped.snapshot_anchor != "snapshot"
     assert stamped.to_row()["snapshot_id"] is None
     # The shared writer carries the column (W3 fills it); this lane's contribution to the
@@ -442,90 +387,25 @@ def test_the_payload_substrate_ladder_is_byte_for_byte_unchanged():
     assert not coordinate_verdict("idnes", "carry_forward", in_mapy_inventory=True).admitted
 
 
-# ------------------------------------------------------------------ absences
-
-def _snapshot_key_expression() -> str:
-    match = re.search(r"snapshot_key\s+bigint generated always as \((.*?)\) stored",
-                      _MIGRATION_382, re.I)
-    assert match
-    return " ".join(match.group(1).split())
-
-
-def test_an_archived_absence_carries_the_archived_surface_and_the_minus_one_sentinel():
-    """`location_claim_absences` is UNIQUE on (listing_id, snapshot_key, surface, field,
-    extractor_version) and `snapshot_key` is a GENERATED coalesce(snapshot_id, -1). This
-    lane never has a snapshot, so -1 is the sentinel — the same one W1 lands on."""
-    assert _snapshot_key_expression() == "coalesce(snapshot_id, -1)"
-
-    entry = archive_entry(claim_type="coordinate")
-    # No reader is registered, so nothing is attempted at all — the honest inert result.
-    inert = extract_payload(payload(), listing_row(), [entry], register=EMPTY_REGISTER)
-    assert inert.claims == [] and inert.absences == []
-
-    absences = _absences_from_a_broken_scoper(entry)
-    assert absences, "an incomplete scoper must still record the attempt"
-    for absence in absences:
-        assert absence.surface == ARCHIVE_SURFACE
-        row = absence.to_row("claims_remine_archive@1")
-        # NULL, not absent: W3 gave `Absence` a real `snapshot_id` and the shared write
-        # SQL now SELECTs it instead of a hardcoded NULL. This lane leaves it None, so
-        # coalesce(NULL, -1) still lands the same sentinel.
-        assert row["snapshot_id"] is None
-        assert "snapshot_id, surface" in claims_intake._ABSENCE_WRITE_SQL, \
-            "the writer names the column; this lane passes NULL, so snapshot_key lands on -1"
-        assert row["surface"] == "archived_html"
-        assert row["extractor_version"] == "claims_remine_archive@1"
-
-
-def _absences_from_a_broken_scoper(entry: Entry) -> list[Any]:
-    """A register whose selector will not compile makes `scope_html` fail CLOSED
-    (`is_complete=False`), which is the one path that produces absences without a reader."""
-    register = ScopeRegister.from_zones(
-        "remax", [{"locator_kind": "html_selector", "locator": {"css": ":::not-a-selector"},
-                   "reason": "test"}])
-    original = dict(ARCHIVE_READERS)
-    ARCHIVE_READERS["fake_html"] = lambda entry, row, payload, document: []
-    try:
-        return extract_payload(payload(), listing_row(), [entry], register=register).absences
-    finally:
-        ARCHIVE_READERS.clear()
-        ARCHIVE_READERS.update(original)
-
-
-def test_archived_absences_dedupe_on_the_key_the_unique_index_actually_carries():
-    rows = dedupe_absence_rows([
-        {"listing_id": 1, "surface": "archived_html",
-         "field": "coordinate", "reason": "not_attempted", "extractor_version": "v"},
-        {"listing_id": 1, "surface": "archived_html",
-         "field": "coordinate", "reason": "not_stated", "extractor_version": "v"},
-        {"listing_id": 1, "surface": "api_json",
-         "field": "coordinate", "reason": "not_attempted", "extractor_version": "v"},
-    ])
-    # "no coordinate in the JSON" and "no coordinate in the archived HTML" are different
-    # facts (`surface` is in the key); two reasons for the same surface are one row.
-    assert len(rows) == 2
-    assert {r["surface"] for r in rows} == {"archived_html", "api_json"}
-
-
-# ------------------------------------------------------- end to end through extract_payload
+# ------------------------------------------------------- end to end through extract_page
 
 def _with_reader(fn: Any, entries: list[Entry], *, max_value_bytes: int | None = None,
                  **kwargs: Any) -> Any:
-    original = dict(ARCHIVE_READERS)
-    ARCHIVE_READERS["fake_html"] = fn
+    original = dict(PAGE_READERS)
+    PAGE_READERS["fake_html"] = fn
     try:
-        return extract_payload(payload(), listing_row(**kwargs), entries,
+        return extract_page(payload(), listing_row(**kwargs), entries,
                                register=EMPTY_REGISTER,
                                max_value_bytes=max_value_bytes)
     finally:
-        ARCHIVE_READERS.clear()
-        ARCHIVE_READERS.update(original)
+        PAGE_READERS.clear()
+        PAGE_READERS.update(original)
 
 
 def test_a_readers_claim_comes_out_fully_archived_stamped():
     entry = archive_entry()
     result = _with_reader(
-        lambda entry, row, payload, document: [ArchiveRead(_base(entry, row, value_text="Krymská"))],
+        lambda entry, row, payload, document: [PageRead(_base(entry, row, value_text="Krymská"))],
         [entry])
     assert len(result.claims) == 1
     claim = result.claims[0]
@@ -543,7 +423,7 @@ def test_an_evidence_bearing_reader_that_forgets_its_span_takes_the_run_down():
     entry = archive_entry(extraction_method="regex_text")
     with pytest.raises(IntakeRefused, match="loc_claim_text_evidence|payload_scope_version"):
         _with_reader(
-            lambda entry, row, payload, document: [ArchiveRead(_base(entry, row, value_text="Krymská"))],
+            lambda entry, row, payload, document: [PageRead(_base(entry, row, value_text="Krymská"))],
             [entry])
 
 
@@ -551,40 +431,38 @@ def test_an_entry_declared_for_another_page_kind_never_runs():
     """A detail-page selector run over an index body is how a neighbour's address becomes
     the subject's."""
     result = _with_reader(
-        lambda entry, row, payload, document: [ArchiveRead(_base(entry, row, value_text="Krymská"))],
+        lambda entry, row, payload, document: [PageRead(_base(entry, row, value_text="Krymská"))],
         [archive_entry(page_kind="index")])
     assert result.claims == []
 
 
-def test_a_coordinate_from_a_listing_in_the_mapy_inventory_becomes_an_absence():
+def test_a_coordinate_from_a_listing_in_the_mapy_inventory_becomes_a_refusal():
     entry = archive_entry(entry_id="rx.det.gps", claim_type="coordinate")
     result = _with_reader(
         lambda entry, row, payload, document: [
-            ArchiveRead(_base(entry, row, value_geom_wkt="POINT(14.45 50.08)"),
+            PageRead(_base(entry, row, value_geom_wkt="POINT(14.45 50.08)"),
                         position_branch=POSITION_BRANCH_PORTAL_PIN)],
         [entry], in_mapy_inventory=True)
     assert result.claims == []
-    assert [(a.field_, a.surface, a.reason) for a in result.absences] == [
-        ("coordinate", "archived_html", "not_attempted")]
-    assert result.absences[0].detail == "listing_in_mapy_affected_inventory"
+    assert dict(result.refusals) == {"listing_in_mapy_affected_inventory": 1}
 
 
 def _realitymix_coordinate(branch: str | None, licence_class: str = "portal"):
     entry = archive_entry(entry_id="rm.det.gps", source="realitymix",
                           claim_type="coordinate")
-    original = dict(ARCHIVE_READERS)
-    ARCHIVE_READERS["fake_html"] = lambda entry, row, payload, document: [
-        ArchiveRead(_base(entry, row, value_geom_wkt="POINT(18.0 49.7)",
+    original = dict(PAGE_READERS)
+    PAGE_READERS["fake_html"] = lambda entry, row, payload, document: [
+        PageRead(_base(entry, row, value_geom_wkt="POINT(18.0 49.7)",
                           licence_class=licence_class),
                     position_branch=branch)]
     try:
-        return extract_payload(
+        return extract_page(
             payload(source="realitymix"),
             listing_row(source="realitymix"), [entry],
             register=ScopeRegister.from_zones("realitymix", ()))
     finally:
-        ARCHIVE_READERS.clear()
-        ARCHIVE_READERS.update(original)
+        PAGE_READERS.clear()
+        PAGE_READERS.update(original)
 
 
 def test_the_ladder_stamps_the_licence_class_and_the_reader_cannot_overrule_it():
@@ -621,7 +499,7 @@ def test_a_branch_declared_on_a_non_coordinate_read_is_refused():
     with pytest.raises(IntakeRefused, match="position_branch"):
         _with_reader(
             lambda entry, row, payload, document: [
-                ArchiveRead(_base(entry, row, value_text="Krymská"),
+                PageRead(_base(entry, row, value_text="Krymská"),
                             position_branch=POSITION_BRANCH_PORTAL_PIN)],
             [archive_entry()])
 
@@ -662,12 +540,8 @@ def test_the_insert_column_list_and_its_select_have_the_same_arity():
     assert insert
     assert len(_top_level_items(insert.group(1))) == len(_top_level_items(insert.group(2)))
 
-    observations = re.search(
-        r"INSERT INTO location_claim_observations\s*\((.*?)\)\s*SELECT (.*?)\s*FROM resighted",
-        claims_intake._CLAIM_WRITE_SQL, re.S)
-    assert observations
-    assert (len(_top_level_items(observations.group(1)))
-            == len(_top_level_items(observations.group(2))))
+    # The re-sight observation CTE went with its table (rule 25): 263 M rows nobody read.
+    assert "location_claim_observations" not in claims_intake._CLAIM_WRITE_SQL
 
 
 def test_every_evidence_column_reaches_the_insert():
@@ -676,7 +550,6 @@ def test_every_evidence_column_reaches_the_insert():
         assert column in claims_intake._CLAIM_WRITE_SQL, column
     # bytea cannot ride in a jsonb array, so the hash is hex text until the SQL decodes it.
     assert "decode(d.payload_sha256, 'hex')" in claims_intake._CLAIM_WRITE_SQL
-    assert "decode(r.payload_sha256, 'hex')" in claims_intake._CLAIM_WRITE_SQL
 
 
 def test_the_fingerprint_stays_time_free_and_evidence_free():
@@ -720,293 +593,6 @@ def test_the_byte_budget_still_trips_on_evidence_bearing_rows():
     assert len(chunks) == 2
 
 
-# ------------------------------------------------------------------ batch semantics
-
-class _Cursor:
-    def __init__(self, conn: "_Conn") -> None:
-        self._conn = conn
-        self._result: list[tuple[Any, ...]] = []
-
-    def __enter__(self) -> "_Cursor":
-        return self
-
-    def __exit__(self, *exc: Any) -> bool:
-        return False
-
-    def execute(self, sql: str, params: dict[str, Any] | None = None) -> None:
-        self._conn.dispatch(self, " ".join(sql.split()), params or {})
-
-    def fetchone(self) -> tuple[Any, ...] | None:
-        return self._result[0] if self._result else None
-
-    def fetchall(self) -> list[tuple[Any, ...]]:
-        return self._result
-
-
-class _Payload:
-    """One archived row, shaped like production: `listing_id` is NULL, because neither
-    writer sets it (`scraper.db.append_payload_if_enabled` passes None,
-    `payload_backfill._INSERT_SQL` selects NULL::bigint)."""
-
-    def __init__(self, id: int, source: str, native: str, page_kind: str = "detail",
-                 first_observed_at: datetime | None = None, http_status: int | None = 200,
-                 listing_id: int | None = None) -> None:
-        self.id = id
-        self.source = source
-        self.native = native
-        self.page_kind = page_kind
-        self.first_observed_at = first_observed_at or FETCHED_AT + timedelta(minutes=id)
-        self.http_status = http_status
-        self.listing_id = listing_id
-
-
-class _Conn:
-    """An in-memory `portal_raw_payloads` + `listings` + `location_claim_batches` set,
-    keyset arithmetic and all — the same shape `test_claims_intake_resume` uses, because
-    the invariant under test is the same one: every body seen exactly once across a chain
-    of budgeted runs.
-
-    The scan is EVALUATED, not canned: `_scan` reads the join clause, the `http_status`
-    filter and the latest-per-key anti-join out of the SQL it is handed and applies them to
-    these rows. A fake that answered every `FROM portal_raw_payloads` with a fixed list
-    would pass whatever the join said — which is exactly how a join on the never-populated
-    `listing_id` column reached review."""
-
-    def __init__(self, count: int, payloads: list[_Payload] | None = None) -> None:
-        self.payload_rows = payloads if payloads is not None else [
-            _Payload(i, "remax", f"n{i}") for i in range(1, count + 1)
-        ]
-        # `listings` really does hold these: (source, source_id_native) is UNIQUE on it
-        # (`listings_source_native_uidx`, migration 091), so the join is 1:1.
-        self.listings = {(p.source, p.native): 1000 + p.id for p in self.payload_rows}
-        self.batches: list[dict[str, Any]] = []
-        self.seen: list[int] = []
-        # Which payload ids the lane actually asked R2/Postgres for a body for. A body is
-        # fetched only for a row some entry applies to, and that is a measured property.
-        self.body_ids: list[int] = []
-        self.now = OBSERVED_AT
-        self.exclusion_sources = ["remax"]
-
-    def cursor(self) -> _Cursor:
-        return _Cursor(self)
-
-    def transaction(self) -> _Cursor:
-        return _Cursor(self)
-
-    def dispatch(self, cur: _Cursor, sql: str, params: dict[str, Any]) -> None:
-        cur._result = []
-        if "set_config" in sql:
-            return
-        if "FROM portal_contracts WHERE is_active" in sql:
-            cur._result = [(src, []) for src in self.exclusion_sources]
-            return
-        if "FROM portal_contracts WHERE source" in sql:
-            cur._result = [(1, 2)]
-            return
-        if sql.startswith("INSERT INTO location_claim_batches"):
-            self.now += timedelta(minutes=1)
-            batch = {
-                "id": len(self.batches) + 1, "started_at": self.now,
-                "source": params["source"], "scan_mode": params["scan_mode"],
-                "resumable": params["resumable"], "outcome": "running",
-                "cursor_after_id": None, "cursor_after_ts": None,
-                "coverage_since": params["coverage_since"] or self.now,
-            }
-            self.batches.append(batch)
-            cur._result = [(batch["id"], batch["coverage_since"])]
-            return
-        if sql.startswith("UPDATE location_claim_batches"):
-            batch = self.batches[params["batch_id"] - 1]
-            batch["outcome"] = params["outcome"]
-            batch["cursor_after_id"] = params["cursor_after_id"]
-            batch["cursor_after_ts"] = params["cursor_after_ts"]
-            batch["note"] = params.get("note")
-            return
-        if "SELECT max(coalesce(coverage_since, started_at))" in sql:
-            oks = [b["coverage_since"] for b in self.batches
-                   if b["outcome"] == "ok" and b["source"] == params["source"]]
-            cur._result = [(max(oks) if oks else None,)]
-            return
-        if "SELECT outcome, cursor_after_id, cursor_after_ts" in sql:
-            candidates = [b for b in self.batches
-                          if b["source"] == params["source"]
-                          and b["scan_mode"] == params["scan_mode"]
-                          and b["resumable"]
-                          and b["outcome"] in ("ok", "stopped", "failed")]
-            if candidates:
-                last = max(candidates, key=lambda b: (b["started_at"], b["id"]))
-                cur._result = [(last["outcome"], last["cursor_after_id"],
-                                last["cursor_after_ts"], last["coverage_since"])]
-            return
-        if "FROM portal_raw_payloads p" in sql:
-            cur._result = self._scan(sql, params)
-            self.seen.extend(r[0] for r in cur._result)
-            return
-        if sql.startswith("SELECT id, body, body_r2_key, content_encoding"):
-            self.body_ids.extend(params["ids"])
-            cur._result = [(pid, BODY, None, "identity") for pid in params["ids"]]
-            return
-        if "INSERT INTO location_claims" in sql:
-            cur._result = [(1, 0, 1)]
-            return
-        if sql.startswith("INSERT INTO location_claim_absences"):
-            return
-        if sql.startswith("INSERT INTO location_enrichment_state"):
-            return
-        raise AssertionError(f"unhandled SQL: {sql[:120]}")
-
-    def _scan(self, sql: str, params: dict[str, Any]) -> list[tuple[Any, ...]]:
-        rows = list(self.payload_rows)
-
-        # THE JOIN, evaluated. Joining on `p.listing_id` drops everything, because nothing
-        # populates that column — which is the whole point of reading it off the SQL.
-        if "l.id = p.listing_id" in sql:
-            joined = [(r, r.listing_id) for r in rows if r.listing_id is not None]
-        elif ("l.source = p.source AND l.source_id_native = p.source_id_native") in sql:
-            joined = [(r, self.listings.get((r.source, r.native))) for r in rows]
-            joined = [(r, lid) for r, lid in joined if lid is not None]
-        else:
-            raise AssertionError("the scan must join listings on a key someone populates")
-
-        if "p.source = %(source)s" in sql:
-            joined = [(r, lid) for r, lid in joined if r.source == params["source"]]
-        if "p.http_status IS NULL OR p.http_status BETWEEN 200 AND 299" in sql:
-            joined = [(r, lid) for r, lid in joined
-                      if r.http_status is None or 200 <= r.http_status <= 299]
-
-        # The latest-per-key anti-join, over the SAME filtered set the SQL restricts it to.
-        ok = {id(r) for r, _ in joined}
-        latest = [
-            (r, lid) for r, lid in joined
-            if not any(n.source == r.source and n.native == r.native
-                       and n.page_kind == r.page_kind and id(n) in ok
-                       and (n.first_observed_at, n.id) > (r.first_observed_at, r.id)
-                       for n in self.payload_rows)
-        ]
-
-        if "p.first_observed_at >= %(watermark)s" in sql:
-            latest.sort(key=lambda t: (t[0].first_observed_at, t[0].id))
-            latest = [(r, lid) for r, lid in latest
-                      if r.first_observed_at >= params["watermark"]
-                      and (r.first_observed_at, r.id) > (params["after_ts"],
-                                                         params["after_id"])]
-        else:
-            latest.sort(key=lambda t: t[0].id)
-            latest = [(r, lid) for r, lid in latest if r.id > params["after_id"]]
-
-        return [(r.id, r.source, r.native, r.page_kind, "ab" * 32, r.first_observed_at,
-                 lid, False)
-                for r, lid in latest[:params["batch_size"]]]
-
-
-@pytest.fixture
-def _wired(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The refusal gates have their own tests; these are about the scan. One synthetic
-    remax entry, one fake reader, so the lane has something to do at all."""
-    entry = archive_entry()
-    monkeypatch.setattr(claims_remine_archive, "missing_relations", lambda conn: [])
-    monkeypatch.setattr(claims_remine_archive, "assert_inventory_ready", lambda conn: 2201)
-    monkeypatch.setattr(claims_remine_archive, "load_entries", lambda conn: {"remax": [entry]})
-    monkeypatch.setitem(
-        ARCHIVE_READERS, "fake_html",
-        lambda entry, row, payload, document: [ArchiveRead(_base(entry, row, value_text="Krymská"))])
-
-
-def _run(conn: _Conn, **kwargs: Any) -> dict[str, Any]:
-    defaults: dict[str, Any] = {
-        "mode": "full", "source": "remax", "batch_size": 10, "max_seconds": None,
-        "limit": None, "start_after_id": 0, "overlap_hours": 3, "statement_timeout": 60,
-        "dry_run": False, "note": None,
-    }
-    defaults.update(kwargs)
-    return run(conn, **defaults)
-
-
-def test_a_run_with_no_registered_reader_opens_no_batch_at_all(monkeypatch):
-    """Inert must not mean 'ok'. A batch that reached the end of the scan is stamped 'ok',
-    and 'ok' is what the incremental watermark reads — so a lane with no readers would
-    claim it had mined the whole archive, and the first portal PR would start behind a
-    watermark covering bodies nothing ever looked at."""
-    monkeypatch.setattr(claims_remine_archive, "missing_relations", lambda conn: [])
-    monkeypatch.setattr(claims_remine_archive, "assert_inventory_ready", lambda conn: 2201)
-    monkeypatch.setattr(claims_remine_archive, "load_entries",
-                        lambda conn: {"remax": [archive_entry(reader="point_pair")]})
-    conn = _Conn(5)
-    stats = _run(conn)
-    assert stats["outcome"] == "inert"
-    assert conn.batches == []
-    assert conn.seen == []
-
-
-def test_a_budget_stopped_run_is_stamped_stopped_and_resumes_where_it_left_off(_wired):
-    conn = _Conn(25)
-
-    first = _run(conn, limit=10)
-    assert first["outcome"] == "stopped"
-    assert first["reached_end"] is False
-    assert conn.seen == list(range(1, 11))
-    assert conn.batches[0]["cursor_after_id"] == 10
-
-    second = _run(conn, limit=10)
-    assert second["resumed_from_id"] == 10
-    assert second["outcome"] == "stopped"
-
-    third = _run(conn, limit=10)
-    assert third["outcome"] == "ok"
-    assert third["reached_end"] is True
-    assert conn.seen == list(range(1, 26))
-
-    fourth = _run(conn, limit=10)
-    assert fourth["resumed_from_id"] == 0
-
-
-def test_ok_means_the_scan_exhausted_and_nothing_else(_wired):
-    conn = _Conn(3)
-    stats = _run(conn)
-    assert stats["outcome"] == "ok"
-    assert stats["payloads"] == 3
-    assert conn.batches[-1]["outcome"] == "ok"
-
-
-def test_the_incremental_watermark_never_passes_rows_a_stopped_run_never_opened(_wired):
-    conn = _Conn(25)
-    assert _run(conn, mode="full")["outcome"] == "ok"
-    conn.seen.clear()
-
-    stopped = _run(conn, mode="incremental", limit=10)
-    assert stopped["outcome"] == "stopped"
-    assert stopped["mode"] == "incremental"
-
-    resumed = _run(conn, mode="incremental")
-    assert resumed["outcome"] == "ok"
-    assert sorted(conn.seen) == list(range(1, 26))
-
-
-def test_an_operator_anchored_run_is_never_a_resume_point(_wired):
-    conn = _Conn(25)
-    anchored = _run(conn, start_after_id=20, limit=2)
-    assert anchored["outcome"] == "stopped"
-    assert conn.batches[0]["resumable"] is False
-    assert conn.seen == [21, 22]
-
-    conn.seen.clear()
-    assert _run(conn, limit=5)["resumed_from_id"] == 0
-
-
-def test_the_scan_reads_the_latest_body_per_key_and_never_projects_one(_wired):
-    """Two properties of the scan SQL that a fake connection cannot show. The body is
-    fetched separately, for the rows an entry applies to only: the archive is 14 GB of
-    TOASTed text and a scan that detoasts it to discover it has no reader is the failure
-    W2-0's denominator query exists to avoid."""
-    for sql in (claims_remine_archive._PAYLOAD_SCAN_FULL_SQL,
-                claims_remine_archive._PAYLOAD_SCAN_INCREMENTAL_SQL):
-        assert "p.body" not in sql and "raw_json" not in sql
-        assert "NOT EXISTS" in sql
-        assert "(n.first_observed_at, n.id) > (p.first_observed_at, p.id)" in sql
-        # `version_seq` was added with no backfill (403), so NULL there would rank an
-        # older row as the latest; `last_observed_at` moves on an unchanged refetch.
-        assert "version_seq" not in sql and "last_observed_at" not in sql
-
 
 # ------------------------------------------------------------------ where the bodies live
 
@@ -1027,7 +613,7 @@ class _BodyCursor:
         self.rows = rows
 
     def execute(self, sql: str, params: dict[str, Any] | None = None) -> None:
-        assert sql is claims_remine_archive._PAYLOAD_BODIES_SQL
+        assert sql is page_readers._PAYLOAD_BODIES_SQL
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         return self.rows
@@ -1045,7 +631,7 @@ def test_a_body_that_lives_in_r2_is_fetched_and_decoded_not_counted_and_skipped(
         (1, BODY, None, "identity"),
         (2, None, "payloads/remax/ab/abcd.gz", "gzip"),
     ])
-    bodies, from_r2 = claims_remine_archive.load_bodies(cursor, [1, 2], store=store)
+    bodies, from_r2 = page_readers.load_bodies(cursor, [1, 2], store=store)
     assert bodies == {1: BODY, 2: BODY * 200}
     assert from_r2 == 1
     assert store.gets == ["payloads/remax/ab/abcd.gz"]
@@ -1056,148 +642,23 @@ def test_a_spilled_body_with_no_object_store_takes_the_run_down():
     fail, not quietly cover a fraction of its corpus and report success."""
     cursor = _BodyCursor([(2, None, "payloads/remax/ab/abcd.gz", "gzip")])
     with pytest.raises(IntakeRefused, match="R2"):
-        claims_remine_archive.load_bodies(cursor, [2], store=None)
+        page_readers.load_bodies(cursor, [2], store=None)
 
 
-def test_the_lane_does_not_need_r2_to_establish_that_it_is_inert(monkeypatch):
-    """The store is opened PAST the inert return. A lane with no reader has no body to
-    fetch, so requiring credentials to discover it has nothing to do would make the
-    no-op case the one that pages someone."""
-    opened = []
-    monkeypatch.setattr(claims_remine_archive, "missing_relations", lambda conn: [])
-    monkeypatch.setattr(claims_remine_archive, "assert_inventory_ready", lambda conn: 2201)
-    monkeypatch.setattr(claims_remine_archive, "load_entries",
-                        lambda conn: {"remax": [archive_entry(reader="point_pair")]})
-    monkeypatch.setattr(payloads, "open_store", lambda: opened.append(1))
-    assert _run(_Conn(5))["outcome"] == "inert"
-    assert opened == []
+def test_an_unconfigured_bucket_skips_the_page_half_and_never_refuses(monkeypatch):
+    """R2 is where the bodies live, so the page half needs it — and the PAYLOAD half is the
+    hourly ingest for all nine portals. A rotated credential must cost us the first, never
+    the second: `_open_body_store` warns once and returns None, and the scan runs on."""
+    monkeypatch.setattr(payloads, "open_store", lambda: None)
+    assert claims_intake._open_body_store(page_capable=True) is None
 
 
-# --------------------------------------------------- what the scan actually selects
+def test_a_bucket_that_raises_on_open_still_leaves_the_payload_half_running(monkeypatch):
+    def boom() -> None:
+        raise RuntimeError("R2_ACCESS_KEY_ID is malformed")
 
-def test_the_scan_joins_listings_on_the_key_the_writers_actually_populate(_wired):
-    """`portal_raw_payloads.listing_id` is nullable and NOTHING sets it: the live writer
-    (`scraper.db.append_payload_if_enabled`) passes `listing_id=None` and the backfill
-    (`payload_backfill._INSERT_SQL`) selects `NULL::bigint` for all 445k migrated pages.
-    An inner join on it matches zero rows over the entire archive — and this lane would not
-    have raised: the first batch comes back empty, `reached_end` trips, the batch stamps
-    'ok', and the watermark claims coverage of a corpus never opened."""
-    for sql in (claims_remine_archive._PAYLOAD_SCAN_FULL_SQL,
-                claims_remine_archive._PAYLOAD_SCAN_INCREMENTAL_SQL):
-        assert "l.id = p.listing_id" not in sql
-        assert "l.source = p.source AND l.source_id_native = p.source_id_native" in sql
-
-    # And end to end: every fixture payload has listing_id NULL, as production does.
-    conn = _Conn(5)
-    assert all(p.listing_id is None for p in conn.payload_rows)
-    stats = _run(conn)
-    assert stats["outcome"] == "ok"
-    assert conn.seen == [1, 2, 3, 4, 5], "a join on listing_id would make this empty"
-    assert stats["payloads"] == 5
-
-
-def test_a_body_the_portal_served_as_an_error_is_never_mined(_wired):
-    """`payloads._PRUNE_SQL` ranks `http_status IS NULL OR BETWEEN 200 AND 299` first —
-    migration 403 cites idnes' 503 interstitial. A newer error body must not shadow the 200
-    underneath it, and a key whose only bodies are errors is out of scope rather than mined
-    for claims an interstitial cannot carry."""
-    conn = _Conn(0, payloads=[
-        # One key, a good body then a later 503: the 200 must win.
-        _Payload(1, "remax", "shadowed", http_status=200),
-        _Payload(2, "remax", "shadowed", http_status=503),
-        # One key that is nothing but an error page: skipped entirely.
-        _Payload(3, "remax", "only-errors", http_status=404),
-        # A pre-403 row with no status recorded is treated as servable, as the cap does.
-        _Payload(4, "remax", "unstamped", http_status=None),
-    ])
-    stats = _run(conn)
-    assert stats["outcome"] == "ok"
-    assert conn.seen == [1, 4]
-
-
-def test_only_the_latest_good_body_per_key_is_mined(_wired):
-    conn = _Conn(0, payloads=[
-        _Payload(1, "remax", "k"), _Payload(2, "remax", "k"), _Payload(3, "remax", "k"),
-    ])
-    _run(conn)
-    assert conn.seen == [3]
-
-
-# ------------------------------------------------- per-source coverage, per-source batch
-
-def _entries_with_readers_on(*readable: str) -> dict[str, list[Entry]]:
-    """Every source has an ACTIVE contract (the preflight demands it); only `readable` name
-    a reader this lane implements."""
-    return {
-        src: [archive_entry(source=src,
-                            reader="fake_html" if src in readable else "point_pair")]
-        for src in claims_intake.SOURCES
-    }
-
-
-def test_each_readable_source_gets_its_own_batch_and_its_own_watermark(monkeypatch):
-    """`location_claim_batches` resume/watermark is keyed on `(lane, source, scan_mode)`.
-    One pass over every portal under a NULL source would stamp 'ok' as a claim of coverage
-    over all nine — so the NEXT portal's first reader would start behind a watermark
-    covering bodies nothing ever mined."""
-    monkeypatch.setattr(claims_remine_archive, "missing_relations", lambda conn: [])
-    monkeypatch.setattr(claims_remine_archive, "assert_inventory_ready", lambda conn: 2201)
-    monkeypatch.setattr(claims_remine_archive, "load_entries",
-                        lambda conn: _entries_with_readers_on("remax", "idnes"))
-    monkeypatch.setitem(
-        ARCHIVE_READERS, "fake_html",
-        lambda entry, row, payload, document: [ArchiveRead(_base(entry, row, value_text="K"))])
-
-    conn = _Conn(0, payloads=[
-        _Payload(1, "remax", "r1"), _Payload(2, "idnes", "i1"),
-        _Payload(3, "maxima", "m1"),
-    ])
-    conn.exclusion_sources = ["remax", "idnes", "maxima"]
-    stats = _run(conn, source=None)
-
-    assert stats["readable_sources"] == ["idnes", "remax"]
-    assert sorted(b["source"] for b in conn.batches) == ["idnes", "remax"]
-    assert all(b["source"] is not None for b in conn.batches), \
-        "a NULL-source batch is a coverage claim over every portal"
-    assert set(stats["per_source"]) == {"idnes", "remax"}
-    assert stats["payloads"] == 2, "maxima has no reader, so its body is never scanned"
-    assert sorted(conn.seen) == [1, 2]
-    assert stats["outcome"] == "ok"
-
-
-def test_the_aggregate_is_only_ok_when_every_readable_source_reached_its_end(monkeypatch):
-    """A source the budget never reached has not been covered, and 'ok' is what the next
-    run's watermark reads."""
-    monkeypatch.setattr(claims_remine_archive, "missing_relations", lambda conn: [])
-    monkeypatch.setattr(claims_remine_archive, "assert_inventory_ready", lambda conn: 2201)
-    monkeypatch.setattr(claims_remine_archive, "load_entries",
-                        lambda conn: _entries_with_readers_on("remax", "idnes"))
-    monkeypatch.setitem(ARCHIVE_READERS, "fake_html",
-                        lambda entry, row, payload, document: [])
-    conn = _Conn(0, payloads=[_Payload(1, "remax", "r1"), _Payload(2, "idnes", "i1")])
-    conn.exclusion_sources = ["remax", "idnes"]
-
-    # The limit is spent on the first source, so the second never opens a batch at all.
-    stats = _run(conn, source=None, limit=1)
-    assert stats["outcome"] == "stopped"
-    assert set(stats["per_source"]) == {"idnes"}
-    assert [b["source"] for b in conn.batches] == ["idnes"]
-
-
-def test_an_operator_anchor_across_several_readable_sources_is_refused(monkeypatch):
-    """`--start-after-id` anchors ONE source's keyset; silently applying it to each in turn
-    would skip a different, arbitrary prefix of every other portal."""
-    monkeypatch.setattr(claims_remine_archive, "missing_relations", lambda conn: [])
-    monkeypatch.setattr(claims_remine_archive, "assert_inventory_ready", lambda conn: 2201)
-    monkeypatch.setattr(claims_remine_archive, "load_entries",
-                        lambda conn: _entries_with_readers_on("remax", "idnes"))
-    monkeypatch.setitem(ARCHIVE_READERS, "fake_html",
-                        lambda entry, row, payload, document: [])
-    conn = _Conn(0, payloads=[_Payload(1, "remax", "r1"), _Payload(2, "idnes", "i1")])
-    conn.exclusion_sources = ["remax", "idnes"]
-    with pytest.raises(IntakeRefused, match="start-after-id"):
-        _run(conn, source=None, start_after_id=5)
-    assert conn.batches == [], "the refusal must precede the batch row"
+    monkeypatch.setattr(payloads, "open_store", boom)
+    assert claims_intake._open_body_store(page_capable=True) is None
 
 
 # ------------------------------------------------------------------ the value-size bound
@@ -1208,18 +669,13 @@ def test_an_oversized_archived_value_is_refused_and_recorded_never_dropped():
     entry = archive_entry()
     result = _with_reader(
         lambda entry, row, payload, document: [
-            ArchiveRead(_base(entry, row, value_text="x" * 4096))],
+            PageRead(_base(entry, row, value_text="x" * 4096))],
         [entry], max_value_bytes=1024)
     assert result.claims == []
-    assert result.oversized == 1
-    assert len(result.absences) == 1
-    absence = result.absences[0]
-    assert absence.surface == "archived_html" and absence.reason == "not_attempted"
-    assert "cap 1024" in absence.detail
-    assert "refetch" in absence.detail, "an archived body is immutable; say what fixes it"
-    # No refetch-cohort row: re-reading a content-addressed body yields the same bytes
-    # forever, so enrolling it would be a permanently-failing attempt counter.
-    assert result.enrichment == []
+    assert dict(result.refusals) == {"oversized_value:street_name": 1}
+    # A counter and a log line, never a row: re-reading a content-addressed body yields the
+    # same bytes forever, so a refetch enrolment would be a permanently-failing counter and
+    # an absence row would be one more row in a table nothing reads (rule 25).
 
 
 def test_the_evidence_quote_counts_toward_the_bound():
@@ -1229,17 +685,17 @@ def test_the_evidence_quote_counts_toward_the_bound():
     claim = raw_claim(evidence_quote="q" * 500, span_start=0, span_end=500,
                       payload_sha256="ab" * 32)
     assert claims_intake.claim_value_bytes(claim) < 500
-    assert claims_remine_archive.archived_claim_value_bytes(claim) >= 500
-    assert (claims_remine_archive.archived_claim_value_bytes(claim)
+    assert page_readers.archived_claim_value_bytes(claim) >= 500
+    assert (page_readers.archived_claim_value_bytes(claim)
             == claims_intake.claim_value_bytes(claim) + 500)
 
 
 def test_a_value_inside_the_cap_is_kept():
     result = _with_reader(
         lambda entry, row, payload, document: [
-            ArchiveRead(_base(entry, row, value_text="Krymská"))],
+            PageRead(_base(entry, row, value_text="Krymská"))],
         [archive_entry()], max_value_bytes=1024)
-    assert len(result.claims) == 1 and result.oversized == 0
+    assert len(result.claims) == 1 and not result.refusals
 
 
 # --------------------------------------- the DOM readers, against the real remax fixture
@@ -1270,7 +726,7 @@ def dom_entry(reader: str, **locator: Any) -> Entry:
 def test_html_text_reads_the_subject_header_and_not_a_neighbour_card():
     document = remax_document()
     entry = dom_entry("html_text", css="h2.pd-header__address")
-    reads = ARCHIVE_READERS["html_text"](entry, listing_row(), payload(), document)
+    reads = PAGE_READERS["html_text"](entry, listing_row(), payload(), document)
 
     # W2-6 replaced this fixture's hand-written one-line header with the real archived
     # block, so the DEEP read now states what it really states on a live remax page: the
@@ -1290,7 +746,7 @@ def test_html_point_dms_reads_the_subject_map_and_converts_the_pair():
     document = remax_document()
     entry = dom_entry("html_point_dms", css="#printMap[data-gps], #listingMap[data-gps]",
                       attr="data-gps", position_branch=POSITION_BRANCH_PORTAL_PIN)
-    reads = ARCHIVE_READERS["html_point_dms"](entry, listing_row(), payload(), document)
+    reads = PAGE_READERS["html_point_dms"](entry, listing_row(), payload(), document)
 
     # 50°04'26.1"N,14°43'41.5"E — the SUBJECT's pin. The neighbour card's
     # 49°59'01.5"N,14°54'28.4"E is a different place entirely.
@@ -1306,7 +762,7 @@ def test_a_dom_read_carries_an_evidence_quote_and_a_span_that_contains_it():
     # between the two words — so it resolves to no span at all, which is the opposite of
     # what this test is about.
     entry = dom_entry("html_own_text", css="h2.pd-header__address")
-    claim = ARCHIVE_READERS["html_own_text"](
+    claim = PAGE_READERS["html_own_text"](
         entry, listing_row(), payload(), document)[0].claim
 
     assert claim.evidence_quote == "ulice Pod Slovany, Úvaly"
@@ -1319,14 +775,14 @@ def test_a_dom_read_carries_an_evidence_quote_and_a_span_that_contains_it():
 def test_a_selector_matching_nothing_yields_no_claim_rather_than_an_empty_one():
     document = remax_document()
     entry = dom_entry("html_text", css="div.no-such-node")
-    assert ARCHIVE_READERS["html_text"](entry, listing_row(), payload(), document) == []
+    assert PAGE_READERS["html_text"](entry, listing_row(), payload(), document) == []
 
 
 def test_a_dom_entry_without_a_selector_is_refused_and_names_itself():
     document = remax_document()
     entry = dom_entry("html_text")
     with pytest.raises(IntakeRefused, match="locator.css"):
-        ARCHIVE_READERS["html_text"](entry, listing_row(), payload(), document)
+        PAGE_READERS["html_text"](entry, listing_row(), payload(), document)
 
 
 def test_a_coordinate_read_without_a_position_branch_is_refused():
@@ -1335,7 +791,7 @@ def test_a_coordinate_read_without_a_position_branch_is_refused():
     document = remax_document()
     entry = dom_entry("html_point_dms", css="#printMap[data-gps]", attr="data-gps")
     with pytest.raises(IntakeRefused, match="position_branch"):
-        ARCHIVE_READERS["html_point_dms"](entry, listing_row(), payload(), document)
+        PAGE_READERS["html_point_dms"](entry, listing_row(), payload(), document)
 
 
 # ------------------------------- html_point_attrs, against the real realitymix fixture
@@ -1373,7 +829,7 @@ def test_html_point_attrs_reads_a_split_decimal_pair():
     """realitymix publishes `data-gps-lat` / `data-gps-lon` as SEPARATE decimal attributes,
     which is why `html_point_dms` cannot read it — that reader parses one DMS string. This
     is the case the W2-7 portal verification found."""
-    reads = ARCHIVE_READERS["html_point_attrs"](
+    reads = PAGE_READERS["html_point_attrs"](
         latlon_entry(), listing_row(source="realitymix"), payload(source="realitymix"),
         realitymix_document())
 
@@ -1398,7 +854,7 @@ def test_the_cz_bbox_guard_is_actually_EVALUATED_not_merely_declared():
     register = ScopeRegister.from_zones("realitymix", contract.exclusion_zones)
     document = scope_html(paris.encode("utf-8"), register=register)
 
-    reads = ARCHIVE_READERS["html_point_attrs"](
+    reads = PAGE_READERS["html_point_attrs"](
         latlon_entry(), listing_row(source="realitymix"), payload(source="realitymix"),
         document)
     assert reads == []          # outside the CZ envelope -> refused by the guard
@@ -1406,7 +862,7 @@ def test_the_cz_bbox_guard_is_actually_EVALUATED_not_merely_declared():
     # And with the guard NOT declared, the same point is admitted — which proves the
     # emptiness above came from the guard rather than from the parse failing.
     unguarded = replace(latlon_entry(), guards=())
-    assert len(ARCHIVE_READERS["html_point_attrs"](
+    assert len(PAGE_READERS["html_point_attrs"](
         unguarded, listing_row(source="realitymix"), payload(source="realitymix"),
         document)) == 1
 
@@ -1417,7 +873,7 @@ def test_the_evidence_quote_is_locatable_in_the_body():
     asserting evidence it cannot point at. The quote is therefore the node's own
     serialisation, which does contain both attributes."""
     document = realitymix_document()
-    claim = ARCHIVE_READERS["html_point_attrs"](
+    claim = PAGE_READERS["html_point_attrs"](
         latlon_entry(), listing_row(source="realitymix"), payload(source="realitymix"),
         document)[0].claim
 
@@ -1434,7 +890,7 @@ def test_a_malformed_attr_pair_is_refused_rather_than_guessed():
     document = realitymix_document()
     for bad in (["data-gps-lat"], ["a", "b", "c"], "data-gps-lat", []):
         with pytest.raises(IntakeRefused, match="ordered \\[lat_attr, lon_attr\\] pair"):
-            ARCHIVE_READERS["html_point_attrs"](
+            PAGE_READERS["html_point_attrs"](
                 latlon_entry(attr=bad), listing_row(source="realitymix"),
                 payload(source="realitymix"), document)
 
@@ -1447,7 +903,7 @@ def test_a_non_numeric_attribute_yields_no_claim_and_no_exception():
     contract = {c.source: c for c in contracts.load_all()}["realitymix"]
     register = ScopeRegister.from_zones("realitymix", contract.exclusion_zones)
     document = scope_html(html.encode("utf-8"), register=register)
-    assert ARCHIVE_READERS["html_point_attrs"](
+    assert PAGE_READERS["html_point_attrs"](
         latlon_entry(), listing_row(source="realitymix"), payload(source="realitymix"),
         document) == []
 
@@ -1470,93 +926,9 @@ def test_a_non_finite_coordinate_is_refused_even_with_no_guard_declared():
         html = base.replace('data-gps-lat="49.73561"', f'data-gps-lat="{bad}"')
         document = scope_html(html.encode("utf-8"), register=register)
         entry = replace(latlon_entry(), guards=())        # no guard declared at all
-        assert ARCHIVE_READERS["html_point_attrs"](
+        assert PAGE_READERS["html_point_attrs"](
             entry, listing_row(source="realitymix"), payload(source="realitymix"),
             document) == [], bad
-
-
-# ------------------------------------------------- W2-13: the lane's own batch bounds
-
-def test_the_batch_size_bounds_are_this_lanes_own_not_w1s():
-    """One iteration HERE is a single transaction spanning `batch_size` SEQUENTIAL R2 GETs
-    (one per body, no concurrency) with every decompressed body alive at once — where a W1
-    batch is a cheap keyset page over `listings`. Sharing W1's 10,000 floor would make every
-    dispatch a multi-gigabyte transaction holding thousands of round trips open."""
-    assert claims_remine_archive.ARCHIVE_MIN_BATCH_SIZE < claims_intake.MIN_BATCH_SIZE
-    assert claims_remine_archive.ARCHIVE_MAX_BATCH_SIZE < claims_intake.MAX_BATCH_SIZE
-    clamp = claims_remine_archive.clamp_batch_size
-    assert clamp(1) == claims_remine_archive.ARCHIVE_MIN_BATCH_SIZE
-    assert clamp(500) == 500
-    assert clamp(50_000) == claims_remine_archive.ARCHIVE_MAX_BATCH_SIZE
-    assert (claims_remine_archive.ARCHIVE_MIN_BATCH_SIZE
-            <= claims_remine_archive.ARCHIVE_DEFAULT_BATCH_SIZE
-            <= claims_remine_archive.ARCHIVE_MAX_BATCH_SIZE)
-
-
-def test_applicable_payloads_counts_only_bodies_an_entry_applied_to(monkeypatch):
-    """`payloads` counts a population a zero says nothing about: a detail-only contract
-    legitimately scans its `index` bodies and claims nothing from them. The tripwire needs
-    the population a zero IS a statement about — and no body is fetched for the rest."""
-    monkeypatch.setattr(claims_remine_archive, "missing_relations", lambda conn: [])
-    monkeypatch.setattr(claims_remine_archive, "assert_inventory_ready", lambda conn: 2201)
-    monkeypatch.setattr(claims_remine_archive, "load_entries",
-                        lambda conn: {"remax": [archive_entry()]})   # page_kind='detail'
-    monkeypatch.setitem(
-        ARCHIVE_READERS, "fake_html",
-        lambda entry, row, payload, document: [ArchiveRead(_base(entry, row, value_text="K"))])
-
-    conn = _Conn(0, payloads=[
-        _Payload(1, "remax", "r1", "detail"),
-        _Payload(2, "remax", "r2", "index"),
-        _Payload(3, "remax", "r3", "detail"),
-        _Payload(4, "remax", "r4", "index"),
-    ])
-    stats = _run(conn)
-
-    per_source = stats["per_source"]["remax"]
-    assert per_source["payloads"] == 4
-    assert per_source["applicable_payloads"] == 2
-    assert per_source["payloads"] > per_source["applicable_payloads"]
-    assert sorted(conn.body_ids) == [1, 3], "an index body was fetched for a detail entry"
-    assert stats["applicable_payloads"] == 2, "the run-level total carries it too"
-
-
-def test_the_batch_note_records_the_applicable_population(monkeypatch):
-    """Durable, because the batch row is the run's record once the runner is gone — and it
-    is what `scripts/location_w2_gate_report.py` reads back."""
-    monkeypatch.setattr(claims_remine_archive, "missing_relations", lambda conn: [])
-    monkeypatch.setattr(claims_remine_archive, "assert_inventory_ready", lambda conn: 2201)
-    monkeypatch.setattr(claims_remine_archive, "load_entries",
-                        lambda conn: {"remax": [archive_entry()]})
-    monkeypatch.setitem(ARCHIVE_READERS, "fake_html",
-                        lambda entry, row, payload, document: [])
-    conn = _Conn(3)
-    _run(conn)
-    assert "applicable=3" in conn.batches[0]["note"]
-
-
-def test_zero_claim_sources_ignores_a_trial_run():
-    """`--limit 10` and a first dispatch see too few bodies for a zero to mean anything."""
-    assert claims_remine_archive.zero_claim_sources(
-        {"per_source": {"remax": {"applicable_payloads": 10, "claims": 0}}}) == []
-
-
-def test_zero_claim_sources_names_a_source_that_mined_nothing():
-    """`outcome='ok'` means only "the scan ran out of rows". A portal whose selectors have
-    gone stale sweeps the whole archive, writes nothing, stamps 'ok' and MOVES the
-    incremental watermark — indistinguishable from success at every other surface."""
-    stats = {"per_source": {"remax": {"applicable_payloads": 5_000, "claims": 0}}}
-    assert claims_remine_archive.zero_claim_sources(stats) == ["remax"]
-    stats["per_source"]["remax"]["claims"] = 1
-    assert claims_remine_archive.zero_claim_sources(stats) == []
-
-
-def test_zero_claim_sources_ignores_a_page_kind_with_no_entry():
-    """50,000 bodies scanned and none of them applicable is a detail-only contract doing
-    exactly what it should; a tripwire on `payloads` would fire on every such run."""
-    assert claims_remine_archive.zero_claim_sources(
-        {"per_source": {"remax": {"applicable_payloads": 0, "payloads": 50_000,
-                                  "claims": 0}}}) == []
 
 
 # ------------------------------------------------------------------ the fetch runs wide
@@ -1598,7 +970,7 @@ def _spilled_rows(count: int) -> tuple[list[tuple[Any, ...]], dict[str, bytes]]:
 def test_a_batch_of_bodies_is_fetched_concurrently_not_one_at_a_time():
     rows, objects = _spilled_rows(4)
     store = _BarrierStore(objects, parties=4)
-    bodies, from_r2 = claims_remine_archive.load_bodies(
+    bodies, from_r2 = page_readers.load_bodies(
         _BodyCursor(rows), list(range(4)), store=store, workers=4)
     assert from_r2 == 4
     assert bodies == {i: objects[f"payloads/remax/{i:02d}/body.html"] for i in range(4)}
@@ -1626,7 +998,7 @@ def test_every_body_lands_on_its_own_payload_id_whatever_order_they_arrive_in():
             return objects[key]
 
     store = _ReverseStore()
-    bodies, from_r2 = claims_remine_archive.load_bodies(
+    bodies, from_r2 = page_readers.load_bodies(
         _BodyCursor(rows), list(range(6)), store=store, workers=6)
     assert from_r2 == 6
     for i in range(6):
@@ -1645,14 +1017,14 @@ def test_one_failed_download_aborts_the_batch_rather_than_writing_a_partial_page
             return objects[key]
 
     with pytest.raises(OSError, match="R2 timed out"):
-        claims_remine_archive.load_bodies(
+        page_readers.load_bodies(
             _BodyCursor(rows), list(range(5)), store=_FlakyStore(), workers=5)
 
 
 def test_the_width_is_bounded_by_the_batch_and_one_worker_stays_serial():
     rows, objects = _spilled_rows(3)
     store = _FakeStore(objects)
-    bodies, from_r2 = claims_remine_archive.load_bodies(
+    bodies, from_r2 = page_readers.load_bodies(
         _BodyCursor(rows), [0, 1, 2], store=store, workers=1)
     assert from_r2 == 3 and len(bodies) == 3
     # Serial: the gets keep the row order, which is what the single-worker path promises.
@@ -1661,7 +1033,7 @@ def test_the_width_is_bounded_by_the_batch_and_one_worker_stays_serial():
     # barrier below would deadlock if a second thread were started.
     single_rows, single_objects = _spilled_rows(1)
     solo = _BarrierStore(single_objects, parties=1)
-    bodies, from_r2 = claims_remine_archive.load_bodies(
+    bodies, from_r2 = page_readers.load_bodies(
         _BodyCursor(single_rows), [0], store=solo, workers=16)
     assert from_r2 == 1 and solo.peak == 1
 
@@ -1671,5 +1043,5 @@ def test_an_inline_body_needs_no_store_even_when_the_batch_is_wide(monkeypatch):
     so a fully inline batch still runs with no credentials at all."""
     monkeypatch.setenv(payloads.BODY_FETCH_WORKERS_ENV, "16")
     cursor = _BodyCursor([(1, BODY, None, "identity"), (2, BODY, None, "identity")])
-    bodies, from_r2 = claims_remine_archive.load_bodies(cursor, [1, 2], store=None)
+    bodies, from_r2 = page_readers.load_bodies(cursor, [1, 2], store=None)
     assert bodies == {1: BODY, 2: BODY} and from_r2 == 0

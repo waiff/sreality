@@ -44,7 +44,7 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[2]
 
 # `location_data/**` is the lane fleet; `scripts/location_*.py` is the rest of it (the
-# payload refetch probe holds a `location_jobs` lease from there). Both write to the same
+# Mapy inventory and the registry load run from there). Both write to the same
 # coordination tables, so scanning one and not the other would be a gate with a door in it.
 _SCAN_ROOTS: tuple[tuple[Path, str], ...] = (
     (_ROOT / "location_data", "**/*.py"),
@@ -62,13 +62,13 @@ _NAMESPACE_OF: dict[str, str] = {
     "JOB_NAME": "job_name",
     "CONCURRENCY_GROUP": "concurrency_group",
     "INTAKE_VERSION": "extractor_version",
+    # Kept as registered SPELLINGS of the same column even though rule 25 W1-a left one
+    # claim lane: this map is what `test_a_lane_also_declares_the_version_it_stamps_on_its_
+    # batches` forces a NEW lane to land in, and a name here costs nothing while a name
+    # missing from it is the silent collision the whole file exists to prevent.
     "REMINE_VERSION": "extractor_version",
     "PRUNER_VERSION": "extractor_version",
     "BACKFILL_VERSION": "extractor_version",
-    # W2-10's free-text lane. A fifth spelling of the SAME column
-    # (`location_claim_batches.extractor_version`), registered here rather than renamed,
-    # because `test_a_lane_also_declares_the_version_it_stamps_on_its_batches` is what
-    # forces a new lane to land in this map at all.
     "LLM_VERSION": "extractor_version",
 }
 
@@ -81,20 +81,14 @@ _VERSION_NAMES = frozenset(
 
 # A soft floor, not a pin: adding a lane must not break this file, but a parser that stops
 # finding anything must. Every value here is load-bearing in production today.
-_KNOWN_LANES = frozenset({
-    "location_claims_intake", "location_claims_remine_archive", "location_claims_llm",
-    "location_payload_prune", "location_payload_backfill",
-})
+# Re-pinned by rule 25 W1-a: four claim-producing lanes became one. What survives is the
+# hourly intake (which now reads BOTH substrates), the resolve drain, the epoch/collision
+# recompute and the registry load.
+_KNOWN_LANES = frozenset({"location_claims_intake"})
 _KNOWN_JOB_NAMES = frozenset({
-    "location_claims_remine_archive", "location_claims_llm",
-    "location_resolve_incremental",
-    "pin_collision_recompute", "location_payload_refetch_probe",
-    "payload_archive_prune", "location_payload_backfill",
+    "location_resolve_incremental", "pin_collision_recompute",
 })
-_KNOWN_VERSIONS = frozenset({
-    "claims_intake@3", "claims_remine_archive@1", "claims_llm@2",
-    "payload_prune@1", "payload_backfill@1",
-})
+_KNOWN_VERSIONS = frozenset({"claims_intake@4"})
 
 
 def _string_constants(path: Path) -> Iterator[tuple[str, str]]:
@@ -213,9 +207,9 @@ def test_a_leased_lane_declares_both_halves_of_its_lease():
 def test_the_detector_reports_two_modules_claiming_one_value():
     assert _collisions([
         ("lane", "LANE", "location_claims_remine", "location_data/claims_remine.py"),
-        ("lane", "LANE", "location_claims_remine", "location_data/claims_remine_archive.py"),
+        ("lane", "LANE", "location_claims_remine", "location_data/page_readers.py"),
     ]) == {("lane", "location_claims_remine"): [
-        "location_data/claims_remine.py", "location_data/claims_remine_archive.py"]}
+        "location_data/claims_remine.py", "location_data/page_readers.py"]}
 
 
 def test_the_detector_exempts_the_serialisation_group():
