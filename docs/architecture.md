@@ -1880,7 +1880,12 @@ no network, no randomness, enforced by an AST scan — so a resolution replays b
 its inputs and the five version ids stamped on it. `listing_location_current` +
 `property_location_current` are **rebuildable caches**, never a store of record: the
 `dirty_locations` drain rebuilds a row from its resolution, the full sweep anything built at a stale
-version tuple.
+version tuple. Since 2026-09-11 that sweep runs on a **daily cron** (`location_resolve.yml`,
+03:17 UTC, `mode=full-resolve`) and also enqueues every active listing that has **no projection
+row at all** (`--orphan-sweep`, driving off `listings`); a listing with no live claim then gets a
+`no_input` row (granularity `unknown`, no position) instead of no row, so coverage is
+`count(listing_location_current) = count(active listings)` by construction. The collision epoch
+is minted weekly by the same workflow (Sunday 04:41 UTC).
 
 **Four precision axes, mandatory next to every coordinate** (D3): `granularity` (ordinal enum,
 country → … → address_point), `position_source` (admin_centroid → carried_forward →

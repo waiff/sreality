@@ -4497,6 +4497,14 @@
         {
           "cron": "*/15 * * * *",
           "human": "Every 15 minutes"
+        },
+        {
+          "cron": "17 3 * * *",
+          "human": "Daily at 03:17 UTC"
+        },
+        {
+          "cron": "41 4 * * 0",
+          "human": "41 4 * * 0"
         }
       ],
       "onPush": false,
@@ -4560,7 +4568,7 @@
         "SUPABASE_DB_SESSION_URL",
         "SUPABASE_DB_URL"
       ],
-      "concurrencyGroup": "${{ github.event.inputs.mode == 'full-resolve' && 'location-batch' || 'location-resolve-lane' }}",
+      "concurrencyGroup": "${{ (github.event.inputs.mode == 'full-resolve' || github.event.schedule == '17 3 * * *') && 'location-batch' || 'location-resolve-lane' }}",
       "cancelInProgress": false,
       "timeoutMinutes": 60,
       "permissions": "contents: read",

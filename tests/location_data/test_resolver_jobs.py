@@ -848,3 +848,53 @@ def test_a_failed_warm_degrades_instead_of_ending_the_run():
     warm = body[body.index("warm_started"):body.index("_run_slice(")]
     assert "try:" in warm and "conn.transaction()" in warm
     assert "WARM failed" in warm
+
+
+# ------------------------------------------------ 2026-09-11 audit: every listing gets a row
+
+
+def test_the_orphan_sweep_drives_off_listings_and_walks_windows():
+    """Every other enqueue presupposes a claim, so a listing whose payload yielded none had
+    no projection row and nothing that would ever notice (10,679 active rows measured on
+    2026-09-11). This one drives off `listings` itself, windowed like the stale sweep."""
+    state = _state(max_listing_id=600_000)
+    drain.enqueue_orphan_sweep(_FakeConn(state), window=250_000)
+    windows = _sweep_windows(state)
+    assert [(p[0], p[1]) for _, p in windows] == [
+        (0, 250_000), (250_000, 500_000), (500_000, 600_000),
+    ]
+    flat = " ".join(drain._ORPHAN_SWEEP_SQL.split()).lower()
+    assert "from listings l" in flat and "left join listing_location_current p" in flat
+    assert "l.is_active" in flat and "p.listing_id is null" in flat
+    assert "not exists (select 1 from dirty_locations d where d.listing_id =" in flat
+    assert "on conflict (listing_id) do nothing" in flat
+    assert flat.count("%s") == 2
+    assert state["transactions"] == len(windows)
+
+
+def test_a_queued_listing_with_no_live_claims_gets_a_no_input_row_not_a_skip():
+    """Until 2026-09-11 `_compute_one` returned None here: the queue row was deleted and the
+    listing either kept a stale projection (re-shadow, retraction) or never got one. The
+    `no_input` resolution states "nothing to go on" so coverage can count it."""
+    slice_ = drain._Slice(claims={}, sources={4242: "remax"})
+    item = drain._compute_one(4242, mm.context(), 7, 11, "v1", slice_, dry_run=False)
+    assert item is not None
+    assert item.listing_id == 4242
+    assert item.resolution.status == "no_input"
+    assert item.resolution.source == "remax"
+    assert item.resolution.precision.granularity == "unknown"
+    assert item.resolution.position.position_source == "none"
+    assert item.resolution.input_claim_ids == ()
+
+
+def test_main_runs_the_orphan_sweep_next_to_the_stale_sweep_before_the_lease(monkeypatch):
+    import contextlib as _cl
+    state = _state(max_listing_id=300_000)
+    monkeypatch.setattr(drain, "open_connection", lambda: _cl.nullcontext(_FakeConn(state)))
+    assert drain.main(["--full-sweep", "--orphan-sweep", "--max-seconds", "1"]) == 0
+    executed = [t for t, _ in state["executed"]]
+    orphan = [i for i, t in enumerate(executed) if t.startswith("insert into dirty_locations") and "from listings l" in t]
+    stale = [i for i, t in enumerate(executed) if t.startswith("insert into dirty_locations") and "from location_claims_live c" in t]
+    acquires = [i for i, t in enumerate(executed) if "location_jobs" in t and "lease" in t]
+    assert stale and orphan and acquires
+    assert max(stale + orphan) < min(acquires)
