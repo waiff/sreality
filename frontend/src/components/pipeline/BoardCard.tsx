@@ -27,13 +27,24 @@ import CityIndexStrip from '@/components/CityIndexStrip';
 import type { CityQualityByObec } from '@/lib/useCityQuality';
 import { useCardHydration } from '@/lib/hydration';
 import type { PipelineBoardCard, PipelineCardBroker } from '@/lib/types';
+import {
+  PIPELINE_CARD_GEOMETRY,
+  type PipelineCardSize,
+} from '@/lib/pipelineCardSize';
 
 export const CARD_PREFIX = 'card:';
 export const STAGE_PREFIX = 'stage:';
 
-function CardThumb({ url, inactive }: { url: string | null; inactive: boolean }) {
-  const cls =
-    'h-12 w-12 shrink-0 rounded-[var(--radius-sm)] border border-[var(--color-rule)]';
+function CardThumb({
+  url,
+  inactive,
+  size,
+}: {
+  url: string | null;
+  inactive: boolean;
+  size: PipelineCardSize;
+}) {
+  const cls = `${PIPELINE_CARD_GEOMETRY[size].thumb} rounded-[var(--radius-sm)] border border-[var(--color-rule)]`;
   if (!url) return <div className={`${cls} bg-[var(--color-inset)]`} aria-hidden />;
   // Same gentle desaturation Browse's card photo gets when is_active=false —
   // the only signal left in the photo lane once the surface carries status.
@@ -65,9 +76,11 @@ export function brokerHoverTitle(b: PipelineCardBroker): string {
 export function CardFace({
   card,
   cityQuality,
+  size = 'sm',
 }: {
   card: PipelineBoardCard;
   cityQuality?: CityQualityByObec;
+  size?: PipelineCardSize;
 }) {
   /* Decorations come from context, not from `card` — see lib/hydration. The
    * board's structural read no longer carries them, and CardFace renders both
@@ -107,10 +120,16 @@ export function CardFace({
     .join(' · ');
   const quality = card.obec_id != null ? cityQuality?.get(card.obec_id) : undefined;
 
+  /* The whole lg card design is this one axis flip: the same tree, laid out as
+     a column so the photo sits above the text at full card width instead of
+     beside it. Keeping one tree means a field added to the card can never
+     appear at one size and not another. */
+  const { stacked } = PIPELINE_CARD_GEOMETRY[size];
+
   return (
     <div>
-      <div className="flex gap-2.5">
-        <CardThumb url={cover} inactive={inactive} />
+      <div className={stacked ? 'flex flex-col gap-2' : 'flex gap-2.5'}>
+        <CardThumb url={cover} inactive={inactive} size={size} />
         <div className="min-w-0 flex-1">
           {/* Price and its movement are one typographic unit — the delta sits on
               the price's own baseline rather than reading as a separate badge. */}
@@ -195,9 +214,11 @@ export default function BoardCard({
   card,
   cityQuality,
   onRemove,
+  size = 'sm',
 }: {
   card: PipelineBoardCard;
   cityQuality?: CityQualityByObec;
+  size?: PipelineCardSize;
   onRemove: (propertyId: number) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
@@ -232,7 +253,7 @@ export default function BoardCard({
           ⠿
         </button>
         <div className="min-w-0 flex-1">
-          <CardFace card={card} cityQuality={cityQuality} />
+          <CardFace card={card} cityQuality={cityQuality} size={size} />
         </div>
         <button
           type="button"

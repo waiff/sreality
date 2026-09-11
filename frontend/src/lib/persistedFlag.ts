@@ -58,3 +58,47 @@ export function usePersistedFlag(key: string, fallback: boolean): PersistedFlag 
   }, [key]);
   return { value, set, toggle };
 }
+
+/* The same preference, when the choice is one of N labelled steps rather than
+ * on/off (Pipeline's three card sizes). Stored as the literal member so the
+ * value is readable in devtools, and validated on read: a key left behind by an
+ * older build — or edited by hand — falls back instead of rendering a size the
+ * geometry table has no entry for. */
+export function readChoice<T extends string>(
+  key: string,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw != null && (allowed as readonly string[]).includes(raw)) return raw as T;
+  } catch {
+    /* localStorage may be unavailable (SSR, private mode lockdown) — fall through */
+  }
+  return fallback;
+}
+
+export interface PersistedChoice<T extends string> {
+  value: T;
+  set: (v: T) => void;
+}
+
+export function usePersistedChoice<T extends string>(
+  key: string,
+  allowed: readonly T[],
+  fallback: T,
+): PersistedChoice<T> {
+  const [value, setValue] = useState<T>(() => readChoice(key, allowed, fallback));
+  const set = useCallback(
+    (v: T) => {
+      setValue(v);
+      try {
+        localStorage.setItem(key, v);
+      } catch {
+        /* ignore */
+      }
+    },
+    [key],
+  );
+  return { value, set };
+}

@@ -347,6 +347,35 @@ to advance a deal without opening the listing page. It now opens a shared menu.
   header, and the stage editor rendered every set code as blank.
 - Rule #22 updated (CLAUDE.md + architecture).
 
+### Phase U-PIPE Phase 3j: Board geometry — reachable drop zones + card size (done)
+Two board-ergonomics fixes, measured in a real browser rather than eyeballed
+(jsdom lays nothing out, so a CSS change here is structurally untestable by
+vitest — the numbers below come from Playwright against live data).
+- **Every stage's drop zone is as tall as the tallest column** (#1399). It was
+  `min-h-24` plus its own cards: on a board with 37 cards in one stage, an empty
+  stage offered a 96px target pinned to the top of a column thousands of pixels
+  tall — scrolled down to the card you wanted to move, there was nothing to drop
+  onto. Columns now stretch (`items-stretch`, each column a flex column, the
+  card list `grow`), with a floor so a SHORT board keeps a real target. Live
+  measurement: 401/140/96/96/96/96/96 px → uniform 401; 96 → 288 with every
+  column empty.
+- **Three card sizes** (`lib/pipelineCardSize.ts`, one geometry table read by
+  the page — a size can never be half-applied). `sm` is the board as it was;
+  `md` is the SAME design with the thumbnail at exactly double (3rem → 6rem,
+  the doubling convention Browse's `--card-min` already follows); `lg` is a
+  DIFFERENT design — the photo leaves the text's row and spans the card 16:10,
+  the Browse-card idiom. The drop-zone floor, column width, drag ghost and
+  skeleton row all move with the size. Measured: column 288/384/416 px, photo
+  48/96/348 px wide, card 130/153/356 px tall.
+- The switch is the app's existing segmented control. `ImageSizeToggle`'s pill
+  chrome moved into `SizeToggle` (N steps) and `ImageSizeToggle` became a thin
+  boolean wrapper, so its five existing call sites (Browse cards, three NEW
+  DEDUP grids) are untouched and the board's three-step version cannot drift
+  into a second visual idiom for the same gesture.
+- Size is a per-browser workspace preference (`usePersistedChoice`, validated on
+  read), NOT part of the URL view state: a shared link carries which deals to
+  look at, not how this browser likes its photos.
+
 ### Phase U-ME: Manual rental estimates (next)
 
 Capture operator-judgement rent figures as first-class data and

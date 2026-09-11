@@ -1,13 +1,19 @@
-/* The small/large photo-size switch — one segmented control, shared by every
- * grid that offers the choice (Browse's listing cards, the NEW DEDUP labeling
- * review grid). Presentation only: the caller owns the flag (a persisted
- * workspace preference, see `@/lib/persistedFlag`) and what "large" does to
- * its own grid. Both grids express it the same way — one `--*-min` custom
- * property whose large value is exactly double the small one — so "small" and
- * "large" can never come to mean different things on different pages.
+/* The small/large photo-size switch — shared by every grid that offers the
+ * choice as a BOOLEAN (Browse's listing cards, the NEW DEDUP labeling review,
+ * training-set and ranking grids). Presentation only: the caller owns the flag
+ * (a persisted workspace preference, see `@/lib/persistedFlag`) and what
+ * "large" does to its own grid. Those grids all express it the same way — one
+ * `--*-min` custom property whose large value is exactly double the small one —
+ * so "small" and "large" can never come to mean different things on different
+ * pages.
  *
- * Same segmented-control idiom as Browse's MapViewToggle, which it sits
- * beside there. */
+ * The pill chrome itself lives in `SizeToggle`, which also serves the
+ * deal-pipeline board's three-step version. This wrapper exists because the
+ * four boolean callers read better as `large={…} onChange={…}` than as a
+ * two-member step list, and because the two glyphs are THIS switch's vocabulary
+ * (many frames vs one big frame). */
+
+import SizeToggle, { LargeImageGlyph, SmallImageGlyph } from '@/components/SizeToggle';
 
 interface Props {
   large: boolean;
@@ -28,85 +34,15 @@ export default function ImageSizeToggle({
   smallTitle = 'Smaller photos, more columns',
   largeTitle = 'Bigger photos, fewer columns',
 }: Props) {
-  const seg = (active: boolean) =>
-    [
-      'inline-flex items-center gap-1.5 px-2.5 py-1 text-[0.7rem] rounded-[var(--radius-xs)] transition-colors',
-      active
-        ? 'bg-[var(--color-copper)] text-white'
-        : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
-    ].join(' ');
   return (
-    <div
-      role="group"
-      aria-label={label}
-      className="inline-flex items-center gap-0.5 p-0.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-2)] border border-[var(--color-rule)]"
-    >
-      <button
-        type="button"
-        onClick={() => onChange(false)}
-        aria-pressed={!large}
-        title={smallTitle}
-        className={seg(!large)}
-      >
-        <SmallImageGlyph />
-        Small
-      </button>
-      <button
-        type="button"
-        onClick={() => onChange(true)}
-        aria-pressed={large}
-        title={largeTitle}
-        className={seg(large)}
-      >
-        <LargeImageGlyph />
-        Large
-      </button>
-    </div>
+    <SizeToggle
+      label={label}
+      value={large ? 'lg' : 'sm'}
+      onChange={(v) => onChange(v === 'lg')}
+      steps={[
+        { value: 'sm', label: 'Small', title: smallTitle, glyph: <SmallImageGlyph /> },
+        { value: 'lg', label: 'Large', title: largeTitle, glyph: <LargeImageGlyph /> },
+      ]}
+    />
   );
 }
-
-/* Many small photo frames — the "small" choice. */
-function SmallImageGlyph() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.3"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <rect x="1.5" y="2" width="3.5" height="2.8" rx="0.6" />
-      <rect x="6.5" y="2" width="3.5" height="2.8" rx="0.6" />
-      <rect x="11.5" y="2" width="3" height="2.8" rx="0.6" />
-      <rect x="1.5" y="6.4" width="3.5" height="2.8" rx="0.6" />
-      <rect x="6.5" y="6.4" width="3.5" height="2.8" rx="0.6" />
-      <rect x="11.5" y="6.4" width="3" height="2.8" rx="0.6" />
-      <rect x="1.5" y="10.8" width="3.5" height="2.8" rx="0.6" />
-      <rect x="6.5" y="10.8" width="3.5" height="2.8" rx="0.6" />
-      <rect x="11.5" y="10.8" width="3" height="2.8" rx="0.6" />
-    </svg>
-  );
-}
-
-/* One big photo frame — the "large" choice. */
-function LargeImageGlyph() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.3"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <rect x="1.5" y="2.5" width="13" height="8.5" rx="1.2" />
-      <path d="M1.5 8.5 L5.5 5.5 L8.5 8 L11 6 L14.5 9" />
-    </svg>
-  );
-}
-
