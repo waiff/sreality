@@ -16,7 +16,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Field } from '@/components/controls';
 import {
   fetchCorpusSummary, fetchInspector, fetchInspectorByNative, fetchSample,
-  fetchSampleScore, fetchSourceOverview, fetchW1vGate, saveMemberLabels,
+  fetchSampleScore, fetchSourceOverview, saveMemberLabels,
   submitCorrection,
   GRANULARITY_VALUES, LOCATION_SOURCES,
   type CorrectionResult, type Inspector, type MixRow, type SampleMember,
@@ -126,46 +126,6 @@ function ErrorBanner({ error }: { error: unknown }) {
     <div className="rounded-[var(--radius-sm)] border border-[var(--color-brick)] bg-[var(--color-brick-soft)] px-3 py-2 text-sm text-[var(--color-brick)]">
       {errText(error)}
     </div>
-  );
-}
-
-/* ---------- gate card ---------- */
-
-function GateCard() {
-  const { data, error } = useQuery({
-    queryKey: ['location', 'w1v-gate'],
-    queryFn: fetchW1vGate,
-    staleTime: 60_000,
-    refetchInterval: 5 * 60_000,
-  });
-  if (error) return <Card title="W1v gate — bezrealitky"><ErrorBanner error={error} /></Card>;
-  const g = data?.data;
-  if (!g) return null;
-  return (
-    <Card
-      title="W1v gate — bezrealitky (listing grain)"
-      accessory={
-        <div className="flex gap-2">
-          <PassPill pass={g.primary_pass} label="primary ≥95%" />
-          <PassPill pass={g.fallback_pass} label="fallback ≥90%" />
-        </div>
-      }
-    >
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-        <Stat label="Active rows" value={fmtCount(g.active_rows)} />
-        <Stat label="ruianId claim" value={fmtCount(g.with_ruian_claim)} />
-        <Stat
-          label="→ exactly 1 point" value={fmtCount(g.claim_matches_one_point)}
-          hint={g.primary_pct != null ? `${g.primary_pct}% of active` : undefined}
-          accent={g.primary_pass} danger={g.primary_pct != null && !g.primary_pass}
-        />
-        <Stat label="Projection R0" value={fmtCount(g.projection_r0)} hint="match_confidence = exact" />
-        <Stat
-          label="≥ building" value={fmtCount(g.projection_building_or_better)}
-          hint={g.fallback_pct != null ? `${g.fallback_pct}% of active` : undefined}
-        />
-      </div>
-    </Card>
   );
 }
 
@@ -608,7 +568,7 @@ function InspectorBody({ ins, onCorrected }: { ins: Inspector; onCorrected: () =
               <tr className="text-left text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)]">
                 <th className="py-1 pr-3 font-medium">Claim</th>
                 <th className="py-1 pr-3 font-medium">Value</th>
-                <th className="py-1 pr-3 font-medium">Extractor</th>
+                <th className="py-1 pr-3 font-medium">Method</th>
                 <th className="py-1 pr-3 font-medium">Licence</th>
                 <th className="py-1 font-medium">Observed</th>
               </tr>
@@ -618,7 +578,7 @@ function InspectorBody({ ins, onCorrected }: { ins: Inspector; onCorrected: () =
                 <tr key={c.id} className="border-t border-[var(--color-rule-soft)]">
                   <td className="py-1 pr-3">{c.claim_type}</td>
                   <td className="py-1 pr-3 font-mono text-[0.75rem]">{c.value_text ?? c.value_num ?? '—'}</td>
-                  <td className="py-1 pr-3 font-mono text-[0.75rem]">{c.extractor_id}</td>
+                  <td className="py-1 pr-3 font-mono text-[0.75rem]">{c.extraction_method}</td>
                   <td className="py-1 pr-3">{c.licence_class}</td>
                   <td className="py-1 text-[var(--color-ink-3)]">{fmtRelative(c.first_observed_at)}</td>
                 </tr>
@@ -743,7 +703,6 @@ export default function LocationQuality() {
       </header>
 
       <div className="mt-4 space-y-4">
-        {source === 'bezrealitky' ? <GateCard /> : null}
 
         {overview.error ? <ErrorBanner error={overview.error} /> : null}
         {overview.isLoading && !ov ? (

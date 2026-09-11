@@ -57,7 +57,6 @@ def test_every_location_route_403s_a_plain_user(client):
     for method, path in [
         ("GET", "/location/quality/summary"),
         ("GET", "/location/quality/source/bezrealitky"),
-        ("GET", "/location/quality/w1v-gate"),
         ("GET", "/location/listing/1"),
         ("GET", "/location/sample/bezrealitky"),
         ("POST", "/location/sample/bezrealitky/labels"),
@@ -87,12 +86,12 @@ def test_source_overview_passes_through(admin_client, monkeypatch):
     assert res.json()["data"]["source"] == "bezrealitky"
 
 
-def test_gate_endpoint_shape(admin_client, monkeypatch):
-    monkeypatch.setattr(
-        location_quality, "w1v_gate",
-        lambda conn: {"data": {"primary_pass": True}, "metadata": {}},
-    )
-    assert admin_client.get("/location/quality/w1v-gate").json()["data"]["primary_pass"] is True
+def test_the_deleted_gate_and_shadow_routes_are_gone(admin_client):
+    """W1-b: `/quality/w1v-gate` read `location_claims_live` + a dropped claim type, and
+    `/sample/{source}/score-shadow` scored a contract state that no longer exists. A route
+    that 404s for the admin is the only proof the surface is actually gone."""
+    for path in ("/location/quality/w1v-gate", "/location/sample/bezrealitky/score-shadow"):
+        assert admin_client.get(path).status_code == 404, path
 
 
 def test_inspector_404_maps_none(admin_client, monkeypatch):

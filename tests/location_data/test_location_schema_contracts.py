@@ -465,19 +465,14 @@ def test_level_granularity_seeds_every_ruian_level():
 
 
 def test_seed_literals_are_enum_members():
-    """A.2 #2 over the two remaining closed-vocabulary seeds that use bare
-    literals rather than casts: location_claim_type_meta's flag sets and
-    location_uncertainty_policy's (position_source, granularity, semantics)."""
+    """A.2 #2 over the one remaining closed-vocabulary seed that uses bare literals rather
+    than casts: location_uncertainty_policy's (position_source, granularity, semantics).
+
+    `location_claim_type_meta`'s flag sets were the other one. The table carried three
+    booleans per enum label that no code ever consulted, and migration 497 dropped it."""
     sql = _clean()
-    claim_types = set(CANONICAL_ENUMS["location_claim_type"])
     offenders: list[str] = []
-    for m in re.finditer(r"update location_claim_type_meta.*?where claim_type in\s*\(", sql, re.S):
-        for lit in re.findall(r"'([^']*)'", _balanced(sql, m.end() - 1)):
-            if lit not in claim_types:
-                offenders.append(f"location_claim_type_meta seed: '{lit}'")
-    for m in re.finditer(r"update location_claim_type_meta.*?where claim_type = '([^']*)'", sql, re.S):
-        if m.group(1) not in claim_types:
-            offenders.append(f"location_claim_type_meta seed: '{m.group(1)}'")
+    assert "drop table if exists location_claim_type_meta" in sql
 
     for row in _values_rows(sql, "location_uncertainty_policy"):
         checks = (
@@ -662,43 +657,33 @@ def _last_view_body(sql: str, name: str) -> str:
     return body[:body.index(";")]
 
 
-def test_the_contract_header_carries_the_shadow_gate():
-    """06 section 6.4.0(2): a contract that cannot meet its frozen-sample precision floors
-    ships in SHADOW — claims written, excluded from resolution. The flag is header state
-    (migration 404), and `location_claims_live` — the one relation 03 reads (A.2 check 9) —
-    is where it is enforced, so no resolver read can forget to ask."""
+def test_the_contract_shadow_mechanism_is_gone_whole():
+    """W1-b (migration 497). Shadow was "claims mined and stored, excluded from resolution
+    until a frozen labelled sample clears its floors": a header flag, three views and a
+    `dirty_locations` reason. The floors gate was never exercised end to end and every
+    contract is live, so the whole mechanism went — and it has to go WHOLE. A surviving
+    view over a dropped column is a replay failure; a surviving CHECK value is a vocabulary
+    entry nothing can produce, which is invisible until someone reads the constraint."""
     sql = _clean()
-    assert re.search(
-        r"alter table portal_contracts\s+add column (if not exists )?shadow\s+"
-        r"boolean not null default false", sql), (
-        "portal_contracts.shadow must be a NOT NULL DEFAULT false header column")
-    view = _last_view_body(sql, "location_claims_live")
-    assert "pc.shadow" in view, (
-        "location_claims_live must exclude shadowed contracts; enforcing shadow anywhere "
-        "else leaves every future resolver read to remember it")
-    # The retraction predicate composes with the shadow one rather than being replaced by
-    # it — reached through the relation that states it once, not restated per consumer.
-    assert "location_claims_unretracted" in view, (
-        "the shadow predicate must COMPOSE with the retraction predicate, not replace it")
-    assert "location_claim_retractions" in _last_view_body(
-        sql, "location_claims_unretracted")
+    assert "drop column if exists shadow" in sql
+    for view in ("location_claims_live", "location_claims_unretracted",
+                 "location_claims_shadow"):
+        assert f"drop view if exists {view}" in sql, view
+        # …and the drop is the LAST word on it: no later migration re-creates one.
+        assert sql.rindex(f"drop view if exists {view}") > sql.rindex(f"view {view} as"), view
+    reason_check = sql[sql.rindex("add constraint dirty_locations_reason_check"):]
+    assert "'contract_shadow'" not in reason_check
 
 
-def test_the_shadowed_claims_stay_readable_for_scoring():
-    """A contract is un-shadowed only once its frozen labelled sample clears the floors
-    (06 section 6.4.0(2)), so a shadowed contract that nothing can read is a one-way door.
-    `location_claims_shadow` is the exact complement of the live view's shadow predicate:
-    same source relation, same join, opposite quantifier."""
+def test_the_resolver_reads_the_claim_table_itself():
+    """01 §A.2 check 9 said section 03 must never select from `location_claims` directly,
+    only from `location_claims_live`, so a retraction could not be silently ignored. W1-b
+    inverted the premise: a retraction DELETES, so there is nothing left to subtract and a
+    view could only re-introduce a way to forget. The claim spine is the relation."""
     sql = _clean()
-    live = _last_view_body(sql, "location_claims_live")
-    shadow = _last_view_body(sql, "location_claims_shadow")
-    for body in (live, shadow):
-        assert "from location_claims_unretracted" in body
-        assert "pce.id = u.contract_entry_id and pc.shadow" in body
-    assert "where not exists" in live
-    assert "not exists" not in shadow, (
-        "location_claims_shadow must be the complement (EXISTS), or a claim can fall "
-        "through both relations and be invisible to the resolver AND the scorer")
+    assert "drop table if exists location_claim_retractions" in sql
+    body = _table_body(sql, "location_claims")
+    assert "claim_fingerprint" in body
 
 
 def _revoked_roles(sql: str, head: str) -> set[str] | None:

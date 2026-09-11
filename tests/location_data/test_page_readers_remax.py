@@ -149,8 +149,9 @@ def test_the_bump_activates_exactly_three_detail_entries():
 
 
 def test_the_contract_ships_live():
-    """Un-shadowed 2026-09-09 (operator ruling); the stale YAML line went 2026-09-11."""
-    assert CONTRACT.shadow is False
+    """Un-shadowed 2026-09-09 (operator ruling); W1-b deleted the flag, so a projected
+    contract has no dark state to ship in."""
+    assert not hasattr(CONTRACT, "shadow")
 
 
 def test_the_coordinate_entry_keeps_the_id_the_licence_ladder_names():

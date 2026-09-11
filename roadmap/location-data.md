@@ -46,7 +46,8 @@ component is slimmed twice — each wave rewrites one component and slims its st
   hourly intake reads the stored payload and the stored page body (hash-gated); the archive sweep,
   snapshot re-mine, LLM lane and their workflows go; each contract is rewritten to ≤ 10 entries, one
   per claim type, the town entry mandatory and live; the loader refuses any other shape; the claims
-  table slims to 8 columns and its side tables go. Done when the red line is zero for every portal.
+  table slims (to 19, not the planned 8 — see W1-b) and its side tables go. Done when the red line
+  is zero for every portal.
   - **W1-a shipped** (2026-09-11): the hourly intake is the only writer of `location_claims`. It
     joins the LATEST stored detail body per `(source, source_id_native)` and mines it with the 14
     page readers, hash-gated on `portal_raw_payloads.contract_version IS DISTINCT FROM` the portal's
@@ -60,8 +61,25 @@ component is slimmed twice — each wave rewrites one component and slims its st
     instrument (detail bodies are always archived now, index bodies never), and the intake's writes
     to `location_claim_observations` / `location_claim_absences` / `location_enrichment_state` — a
     refusal is a counter and one log line per reason. bazos@4 drops the 16 never-executed LLM
-    entries. 27,420 lines deleted / 2,559 added. **Next (W1-b):** drop those three tables, rewrite each contract
-    to <= 10 entries with the town entry mandatory, slim `location_claims`.
+    entries. 27,420 lines deleted / 2,559 added.
+  - **W1-b shipped** (2026-09-12): `location_claims` slims **45 columns → 19** (the 26 dropped are
+    the anchor/evidence/provenance/legacy blocks plus `value_norm`, `value_shape`, `batch_id` and
+    the distance trio), and **7 tables + 3 views + 1 header flag** go with them (migration **497**):
+    `location_claim_observations` (263 M rows / 50 GB, the single largest relation in the subsystem,
+    read by nothing), `location_claim_links` (zero code references, ever), `location_claim_absences`,
+    `location_claim_retractions`, `location_claim_type_meta`, `location_enrichment_state`,
+    `portal_payload_churn`; the views `location_claims_live` / `_unretracted` / `_shadow`; and
+    `portal_contracts.shadow` with its `dirty_locations.reason = 'contract_shadow'` value,
+    `set_shadow` / `--shadow` / `--unshadow`, `score_shadow_claims`, `/sample/{source}/score-shadow`,
+    `w1v_gate` and `/quality/w1v-gate`. **Retraction becomes delete + re-resolve**: one transaction
+    that DELETEs the contract version's claims, enqueues their listings (`claim_insert`) and retires
+    the header. The resolver reads `location_claims` directly and drops six columns nobody in the
+    pure core read; the payload pin predicate is two version edges (no claim join on every append).
+    The 23-argument `location_claim_fingerprint` is **untouched** — the readers still compute the
+    nine unstored inputs — so every fingerprint on disk stays valid and no corpus re-insert happens.
+    **The migration is applied AFTER the rollout**: the code runs against both schemas, and the
+    hourly intake + Railway must pick the merge up first.
+    **Next:** rewrite each contract to <= 10 entries with the town entry mandatory.
 - **W2 — the resolver at four steps, the answer table at 27 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and

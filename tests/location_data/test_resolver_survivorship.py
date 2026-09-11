@@ -119,9 +119,8 @@ def test_one_portal_read_two_ways_is_one_voice_not_independent_agreement():
     first sweep rather than after.
 
     `claim_fingerprint` (01 §4.2.1) hashes `surface`, so the SAME fact mined from a
-    portal's `raw_json` (W1) and re-mined from its archived body (W2,
-    `location_data.claims_remine_archive`) is two distinct fingerprints, two rows, and both
-    survive into `location_claims_live`. Counting `(source, extraction_method)` pairs — the
+    portal's `raw_json` and mined from its stored page body is two distinct fingerprints,
+    two rows, and both are resolver inputs. Counting `(source, extraction_method)` pairs — the
     old rule — read that as one portal independently corroborating itself, which is exactly
     the guard's failure mode: same publisher, same page, same mistake if it is one."""
     same_portal_two_substrates = [

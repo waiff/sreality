@@ -1,10 +1,10 @@
 """Append-on-change writer for the content-addressed payload archive (02 §2.3.2 P1/P4).
 
 `portal_raw_payloads` (migration 382, columns completed by 403) is the store
-`location_claims.payload_id` / `payload_sha256` resolve against: without it, a mined
-span points into "the page" and stops being verifiable the moment that page is
-re-fetched, and `01 §4.2`'s `loc_claim_evidence_payload` CHECK is unsatisfiable in
-practice. This module is the only sanctioned way to put a body in it.
+`location_claims` is mined from: without it the hourly lane has no substrate but
+`listings.raw_json`, which is latest-wins, so a re-read of "the page" answers a
+different question every time it is asked. This module is the only sanctioned way
+to put a body in it.
 
 Five properties define the write, and each one is load-bearing:
 
@@ -98,15 +98,13 @@ DEFAULT_WRITE_TIMEOUT_S = 60
 #     value that fit at all. With bodies in the bucket a unit of cap costs 0.48 GB of
 #     metadata rows and ~$0.14/month of object storage, and the archive fits the
 #     allowance up to cap 7. The budget no longer picks the number.
-#   * What still picks it is EVIDENTIARY. A body a claim references is PINNED by the
-#     claim FK regardless of the cap (`_REPIN_SQL`), so every body that produced a
-#     location fact is already exempt; the cap governs only bodies no claim points at,
-#     which by construction produced no fact. Under the 7-day floor below, cap 2 is
-#     "first, one prior era, current" — roughly three weeks of page history, not a
-#     snapshot — and no reader is named for the era before that. The re-mine reads the
-#     latest body, the verifier reads any body it is handed, and claim-span verification
-#     reads pinned bodies. Cheap storage is a reason not to PANIC about depth; it is not
-#     a reader.
+#   * What still picks it is READERS, and there are two: the hourly intake, which mines
+#     the LATEST body, and a verifier, which reads whatever body it is handed. Under the
+#     7-day floor below, cap 2 is "first, one prior era, current" — roughly three weeks of
+#     page history, not a snapshot — and no reader is named for the era before that. A
+#     claim no longer pins anything (W1-b: the claim spine carries no pointer back into
+#     the archive), so the cap governs the whole group except its first version. Cheap
+#     storage is a reason not to PANIC about depth; it is not a reader.
 #
 # So 2 survives its own re-derivation. Going deeper is a one-line change; the frozen
 # measurement corpus that priced it (`location_data/payload_budget.py`) went with the rest
@@ -624,32 +622,17 @@ SELECT pg_advisory_xact_lock(
 # only setting new pins: the row that was the latest before this append has to LOSE
 # its pin, or the cap never bites and the archive grows without bound.
 #
-# "Disputed" has no column of its own — `location_claims` carries no status, by
-# design (a claim is append-only evidence). A claim is disputed exactly when an OPEN
-# contradiction points at it, in any of the three roles the ledger records: the
-# served value, the claimed value, or the evidence behind the finding.
-#
-# The disputed lookup goes through the claim's payload_sha256 (the content address
-# 01 §4.2 keeps alongside payload_id precisely so a claim resolves by content) and is
-# scoped BOTH ways: to this group's hashes, so it reads through the partial index
-# `location_claims_payload` instead of scanning the claim store, and to this group's
-# (source, source_id_native), because a hash alone is not a listing — two listings
-# whose normalised bodies coincide would otherwise pin each other's history.
-#
-# The payload_id arm is not a policy choice, it is the FK: 382 declares
-# `location_claims.payload_id references portal_raw_payloads(id)` with NO ACTION, so a
-# referenced body CANNOT be deleted — the cap either pins it or the DELETE raises
-# ForeignKeyViolation and rolls back the whole bounded transaction, losing the body
-# just appended and every later append for that group with it. It is also the right
-# answer on the merits: an evidence span that indexes into a deleted body is exactly
-# the unverifiability this store exists to end. It costs nothing at read time because
-# 403 ships the partial index on payload_id that makes it an index probe rather than
-# the seq scan of the claim store an unindexed FK would have been. The pin set stays
-# small: claims dedupe on a TIME-FREE fingerprint (01 §4.2.1), so a listing has one
-# claim per distinct VALUE, not one per fetched version.
+# TWO EDGES, NOTHING ELSE (W1-b, migration 497). The predicate used to have two more arms,
+# both reaching into the claim store: a body a claim's `payload_id` FK pointed at, and a
+# body whose content address a DISPUTED claim named through `location_contradictions_open`.
+# Both columns are gone — the claim spine is 19 columns of value and provenance now, with
+# no pointer back into the archive — so the version cap alone decides what stays, and this
+# statement (which runs on EVERY scraper payload append) stops joining a 5 M-row table
+# twice. `pinned` itself stays: `_PRUNE_SQL` reads it, and the first-version exemption is
+# what keeps a portal outage from evicting a listing's entire real history.
 _REPIN_SQL = """
 WITH grp AS (
-    SELECT id, payload_sha256, version_seq
+    SELECT id, version_seq
       FROM portal_raw_payloads
      WHERE source = %(source)s
        AND source_id_native = %(source_id_native)s
@@ -658,26 +641,10 @@ WITH grp AS (
 edges AS (
     SELECT min(version_seq) AS first_seq, max(version_seq) AS latest_seq FROM grp
 ),
-disputed AS (
-    SELECT DISTINCT c.payload_sha256
-      FROM location_claims c
-     WHERE c.payload_sha256 IN (SELECT g.payload_sha256 FROM grp g)
-       AND c.source = %(source)s
-       AND c.source_id_native = %(source_id_native)s
-       AND EXISTS (
-           SELECT 1
-             FROM location_contradictions_open o
-            WHERE o.served_claim_id = c.id
-               OR o.claimed_claim_id = c.id
-               OR c.id = ANY (o.evidence_claim_ids))
-),
 want AS (
     SELECT g.id,
            (coalesce(g.version_seq = e.first_seq, false)
-            OR coalesce(g.version_seq = e.latest_seq, false)
-            OR EXISTS (SELECT 1 FROM location_claims c WHERE c.payload_id = g.id)
-            OR EXISTS (SELECT 1 FROM disputed d
-                        WHERE d.payload_sha256 = g.payload_sha256)) AS pinned
+            OR coalesce(g.version_seq = e.latest_seq, false)) AS pinned
       FROM grp g CROSS JOIN edges e
 )
 UPDATE portal_raw_payloads p
@@ -746,8 +713,7 @@ def repin_group(
 ) -> None:
     """Recompute `pinned` authoritatively across one (listing, page_kind) group.
 
-    * The ONE definition of pinned: first version, latest version, a body a claim
-      points at, a body a disputed claim's content address names.
+    * The ONE definition of pinned: first version, latest version.
     * Re-asserted on every append, which is the only moment the answer can move now
       that the scheduled prune sweep is gone.
     """
@@ -867,10 +833,9 @@ def append_payload(
     body keeps the time it was actually fetched instead of reading as having appeared
     on migration day.
 
-    `snapshot_id` anchors the body to the `listing_snapshots` row it belongs to, which
-    is what `location_claims.snapshot_anchor='snapshot'` — the default anchor — needs
-    on the other side of the join. None is the honest value for a fetch with no
-    snapshot yet; a later anchored fetch of the same body fills it in.
+    `snapshot_id` anchors the body to the `listing_snapshots` row it belongs to. None
+    is the honest value for a fetch with no snapshot yet; a later anchored fetch of the
+    same body fills it in.
 
     `volatile` None resolves the profile this portal's CONTRACT declares for this
     (source, page_kind) SURFACE — never for the source alone: `payload_sha256` is the
@@ -908,14 +873,14 @@ def append_payload(
     never suppressed, and an unchanged refetch is never suppressed (it writes no row).
     Where a fact needs its own timestamp, the platform already records it at row grain
     for free — `listing_snapshots` on every content change, `location_claims` on every
-    distinct mined value — and a claim PINS the body it was mined from. This archive is
-    the substrate those point at, not the change log.
+    distinct mined value. This archive is the substrate those are mined from, not the
+    change log.
 
     Retention (re-pin + cap) runs only when a row was actually appended: an unchanged
     refetch cannot have changed the group's membership, and paying two extra
     statements per fetch on the common path is exactly the cost this store exists to
-    avoid. The scheduled pruner (W2a-5) is what re-asserts pins after a contradiction
-    opens or closes without a new fetch.
+    avoid. An append is now the ONLY event that can move a pin: the predicate is two
+    version edges, and nothing outside this group can change either.
 
     `store` None resolves the platform's R2 client. WHERE A BODY NEEDS THE BUCKET AND
     THERE IS NONE, THIS RAISES. That is the whole degradation contract, and it is a

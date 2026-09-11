@@ -43,7 +43,7 @@ WHAT IT WRITES, AND ONLY THAT
   Refusals — a withheld coordinate, an oversized value, a subject miss — are COUNTED and
   logged once per reason per batch. `location_claim_observations`,
   `location_claim_absences` and `location_enrichment_state` were written by every lane and
-  read by none; they are no longer written.
+  read by none; W1-a stopped writing them and migration 497 dropped them.
 
 CLI:
     python -m location_data.claims_intake --mode incremental
@@ -742,6 +742,13 @@ _STAMP_MINED_SQL = """
 # detect, and a drifted fingerprint does not conflict — it inserts.
 #
 # The tuple is 01 §4.2.1's, in its order, and is TIME-FREE.
+#
+# IT IS ALSO WIDER THAN THE TABLE (W1-b, migration 497). Nine of its inputs — page_kind,
+# extractor_id, extractor_version, value_norm, distance_m, travel_mode, target_text,
+# declared_confidence, legacy_source_column — are no longer STORED, but the readers still
+# compute them and they still enter the hash. That is what keeps 5 M existing fingerprints
+# valid: narrowing the tuple would re-dialect every one of them, and a re-dialected
+# fingerprint does not conflict, it inserts.
 _CLAIM_FINGERPRINT_SQL = """
     location_claim_fingerprint(
         t.listing_id, t.source, t.source_id_native,
@@ -785,30 +792,19 @@ _CLAIM_WRITE_SQL = f"""
         SELECT DISTINCT ON (claim_fingerprint) * FROM fingerprinted ORDER BY claim_fingerprint
     ), ins AS (
         INSERT INTO location_claims (
-            listing_id, source, source_id_native, snapshot_id, snapshot_anchor,
-            first_observed_at, claim_type, surface, page_kind, extraction_method,
-            extractor_id, extractor_version, contract_entry_id, batch_id, value_text,
-            value_norm, value_num, value_geom, value_shape, value_jsonb, distance_m,
-            travel_mode, target_text, declared_precision_label, declared_confidence,
-            declared_radius_m, claim_confidence, blur_evidence, licence_class,
-            legacy_source_column, legacy_write_path_unknown, history_completeness,
-            subject_scoped, payload_id, payload_sha256, evidence_quote, span_start,
-            span_end, payload_scope_version, model, prompt_version, claim_fingerprint)
-        SELECT d.listing_id, d.source, d.source_id_native, d.snapshot_id,
-               d.snapshot_anchor, d.first_observed_at, d.claim_type::location_claim_type,
-               d.surface::location_claim_surface, d.page_kind::location_page_kind,
-               d.extraction_method::location_extraction_method, d.extractor_id,
-               d.extractor_version, d.contract_entry_id, %(batch_id)s, d.value_text,
-               d.value_norm, d.value_num, d.geom, d.shape, d.value_jsonb, d.distance_m,
-               d.travel_mode, d.target_text, d.declared_precision_label,
-               d.declared_confidence, d.declared_radius_m,
+            listing_id, source, first_observed_at, claim_type, surface,
+            extraction_method, contract_entry_id, value_text, value_num, value_geom,
+            value_jsonb, declared_precision_label, declared_radius_m, claim_confidence,
+            blur_evidence, licence_class, subject_scoped, claim_fingerprint)
+        SELECT d.listing_id, d.source, d.first_observed_at,
+               d.claim_type::location_claim_type,
+               d.surface::location_claim_surface,
+               d.extraction_method::location_extraction_method,
+               d.contract_entry_id, d.value_text, d.value_num, d.geom, d.value_jsonb,
+               d.declared_precision_label, d.declared_radius_m,
                d.claim_confidence::match_confidence,
                d.blur_evidence::blur_evidence, d.licence_class::licence_class,
-               d.legacy_source_column, d.legacy_write_path_unknown,
-               d.history_completeness, d.subject_scoped, d.payload_id,
-               decode(d.payload_sha256, 'hex'), d.evidence_quote, d.span_start,
-               d.span_end, d.payload_scope_version, d.model, d.prompt_version,
-               d.claim_fingerprint
+               d.subject_scoped, d.claim_fingerprint
         FROM deduped d
         ON CONFLICT (claim_fingerprint) DO NOTHING
         RETURNING id, listing_id
@@ -979,9 +975,7 @@ def chunk_rows(
         yield chunk
 
 
-def write_result(
-    cur: psycopg.Cursor, result: IntakeResult, *, batch_id: int,
-) -> tuple[int, int]:
+def write_result(cur: psycopg.Cursor, result: IntakeResult) -> tuple[int, int]:
     """Write one scan batch's claims. Returns (inserted, enqueued).
 
     The caller's transaction is unchanged — every chunk is flushed inside it, so the batch
@@ -994,7 +988,7 @@ def write_result(
     claim_rows = [c.to_row() for c in result.claims]
     claim_rows.sort(key=lambda r: r["listing_id"])
     for chunk in chunk_rows(claim_rows, max_rows=max_rows, max_bytes=max_bytes):
-        cur.execute(_CLAIM_WRITE_SQL, {"rows": Jsonb(chunk), "batch_id": batch_id})
+        cur.execute(_CLAIM_WRITE_SQL, {"rows": Jsonb(chunk)})
         chunk_inserted, chunk_enqueued = (int(x) for x in cur.fetchone())
         inserted += chunk_inserted
         enqueued += chunk_enqueued
@@ -1301,7 +1295,7 @@ def run(
                     refusals[reason] = refusals.get(reason, 0) + count
                     stats["refusals"] += count
                 if not dry_run and batch_id is not None:
-                    inserted, enqueued = write_result(cur, result, batch_id=batch_id)
+                    inserted, enqueued = write_result(cur, result)
                     stamp_mined_bodies(cur, stamps)
                     stats["claims_inserted"] += inserted
                     stats["enqueued"] += enqueued
@@ -1333,7 +1327,7 @@ def run(
 
     # A refusal is a LINE PER REASON WITH A COUNT, which is what the operator reads. It is
     # not a row: `location_claim_absences` held one per refused entry per listing, was
-    # written by every lane and read by none.
+    # written by every lane and read by none, and is gone (migration 497).
     for reason in sorted(refusals):
         LOG.info("INTAKE refused reason=%s count=%d", reason, refusals[reason])
     stats["refusal_reasons"] = dict(sorted(refusals.items()))

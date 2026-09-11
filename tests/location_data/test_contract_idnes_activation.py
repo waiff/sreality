@@ -155,8 +155,9 @@ def test_v2_activates_exactly_five_entries_and_leaves_the_line_parser_inert() ->
 
 
 def test_the_activation_ships_live() -> None:
-    """Un-shadowed 2026-09-09 (operator ruling); the stale YAML line went 2026-09-11."""
-    assert CONTRACT.shadow is False
+    """Un-shadowed 2026-09-09 (operator ruling); W1-b deleted the flag, so a projected
+    contract has no dark state to ship in."""
+    assert not hasattr(CONTRACT, "shadow")
 
 
 def test_every_activated_entry_names_a_reader_this_lane_implements() -> None:

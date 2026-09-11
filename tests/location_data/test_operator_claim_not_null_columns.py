@@ -16,24 +16,32 @@ import re
 from pathlib import Path
 
 from location_data import operator_corrections as oc
+from tests.location_data.test_claims_slim_migration import KEPT_COLUMNS
 
 DDL = (Path(__file__).resolve().parents[2]
        / "migrations" / "382_location_w1_claims.sql").read_text()
 
 
 def _claims_not_null_defaulted_columns() -> set[str]:
+    """NOT NULL DEFAULT columns 382 declares, narrowed to the ones migration 497 KEPT.
+
+    Without the intersection this reads the pre-W1-b table and guards columns the operator
+    SQL can no longer write (`legacy_write_path_unknown`, `extracted_at`, `page_kind`,
+    `snapshot_anchor`, `created_at`) while saying nothing about the ones it can.
+    """
     block = DDL.split("create table location_claims (")[1].split("\n);")[0]
     out: set[str] = set()
     for line in block.splitlines():
         m = re.match(r"\s+([a-z_0-9]+)\s+\w+.*not null default", line)
         if m:
             out.add(m.group(1))
-    return out
+    return out & KEPT_COLUMNS
 
 
 def test_operator_sql_never_nulls_a_defaulted_not_null_column():
     cols = _claims_not_null_defaulted_columns()
-    assert cols, "DDL parse failed - no NOT NULL DEFAULT columns found"
+    assert cols == {"blur_evidence"}, (
+        "the kept NOT NULL DEFAULT set moved; re-derive against the new DDL: " + str(cols))
     input_cte = oc._OPERATOR_CLAIM_SQL.split("), typed AS")[0]
     offenders = [
         c for c in cols
@@ -44,5 +52,11 @@ def test_operator_sql_never_nulls_a_defaulted_not_null_column():
     )
 
 
-def test_legacy_write_path_unknown_is_false_for_operator_claims():
+def test_legacy_write_path_unknown_is_computed_but_no_longer_stored():
+    """The column that caused the original NotNullViolation is gone (migration 497). Its
+    VALUE still has to be spelled — it is one of the 23 inputs to
+    `location_claim_fingerprint`, and a NULL there would fork every operator claim off the
+    fingerprints already on disk."""
     assert re.search(r"false\s+AS\s+legacy_write_path_unknown", oc._OPERATOR_CLAIM_SQL)
+    assert "legacy_write_path_unknown" not in oc._OPERATOR_CLAIM_SQL.split(
+        "INSERT INTO location_claims (")[1].split(")")[0]

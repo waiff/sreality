@@ -355,8 +355,9 @@ class IntakeResult:
 
     Refusals are COUNTED, not recorded. Rule 25 shrank the store to one answer table plus
     the append-only claims: `location_claim_absences` / `location_enrichment_state` were
-    written by every lane and read by none, so a refused coordinate is now one log line per
-    reason per batch with a count, which is what the operator actually looks at.
+    written by every lane and read by none (dropped by migration 497), so a refused
+    coordinate is one log line per reason per batch with a count, which is what the
+    operator actually looks at.
     """
     claims: list[Claim] = field(default_factory=list)
     refusals: Counter[str] = field(default_factory=Counter)

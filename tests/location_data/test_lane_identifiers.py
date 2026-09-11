@@ -15,8 +15,10 @@ The collision is not cosmetic. These strings are PRIMARY KEYS in the coordinatio
   * `JOB_NAME` keys `location_jobs`, whose lease is a CAS on that row: two lanes sharing one
     would lock each other out at random and each would log "another run holds the lease".
   * the extractor-version constants ride into `location_claim_batches.extractor_version`,
-    which is what `location_claim_retractions` scopes a rollback by — two lanes sharing one
-    makes "retract everything that version wrote" un-decidable.
+    which is what a run ledger's "what did this version write" question is answered by —
+    two lanes sharing one makes it un-decidable. (W1-b: rollback itself is no longer scoped
+    by that string. `contracts.retract` DELETEs by `contract_entry_id`, and
+    `location_claim_retractions` is gone with the rest of the append-only ledger.)
 
 `CONCURRENCY_GROUP` is deliberately NOT in that list. It is the serialisation group, so
 sharing one is the mechanism working: `payload_prune` and `payload_backfill` both declare

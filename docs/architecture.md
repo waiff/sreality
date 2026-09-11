@@ -1891,10 +1891,20 @@ tie-breaker (the `00 §…` / `03 §…` citations in the code are that corpus);
 sequencing live in `roadmap/location-data.md`.
 
 **Three layers, one direction.** `location_claims` is **append-only evidence** — what a payload
-asserted, with an extractor id, a surface, a licence class and a `claim_fingerprint` (migration 386's
-IMMUTABLE `location_claim_fingerprint()`, computed in SQL so W2's re-mine and W3's backfill reuse the
-definition instead of re-transcribing it). Nothing is corrected in place: a wrong claim is retracted
-and a new one inserted. `location_resolutions` + `location_resolution_candidates` are the output of a
+asserted, with a surface, an extraction method, a licence class and a `claim_fingerprint` (migration
+386's IMMUTABLE `location_claim_fingerprint()`, computed in SQL so no second transcription of the
+definition can drift). Nothing is corrected in place: a wrong VALUE is superseded by a newer claim,
+and a wrong CONTRACT is retracted — which since W1-b (migration 497) **deletes that version's rows
+and re-resolves their listings** rather than appending a ledger row that every reader then has to
+subtract. The table is **19 columns**: identity, the contract entry, the five typed value slots, the
+declared-precision trio and the fingerprint. Twenty-six went with the wave, and with them
+`location_claim_observations` (263 M rows / 50 GB, the occurrence series that made the time-free
+fingerprint "safe" and that nothing ever read), `location_claim_links`, `location_claim_absences`,
+`location_claim_retractions`, `location_claim_type_meta` and the three views
+(`location_claims_live` / `_unretracted` / `_shadow`) that layered retraction and shadow onto every
+read. The fingerprint FUNCTION is unchanged and still takes all 23 inputs — the readers compute
+page_kind, extractor id, value_norm and the rest, they are simply not stored — so every fingerprint
+on disk stayed valid and no corpus re-insert happened. `location_resolutions` + `location_resolution_candidates` are the output of a
 **pure function** — S1–S9 in `location_data/resolver/`, no wall clock (`as_of = max(observed_at)`),
 no network, no randomness, enforced by an AST scan — so a resolution replays byte-identically from
 its inputs and the five version ids stamped on it. `listing_location_current` +
@@ -1928,10 +1938,10 @@ a credential rotated. Four lanes preceded it and are **deleted** (2026-09-11): t
 re-mine, the archived-HTML sweep, the verify lane and the LLM free-text lane, with the refetch
 cohort and the payload backfill/prune/churn tooling. The lane writes `location_claims`,
 `dirty_locations` and its own `location_claim_batches` ledger and nothing else:
-`location_claim_observations` (263 M rows / 50 GB), `location_claim_absences` and
-`location_enrichment_state` were written by every lane and read by none, so a refusal — a
-withheld coordinate, an oversized value, a subject miss — is a COUNTER and one log line per
-reason per batch.
+`location_claim_observations`, `location_claim_absences` and `location_enrichment_state` were
+written by every lane and read by none (W1-a stopped writing them; migration 497 dropped them), so
+a refusal — a withheld coordinate, an oversized value, a subject miss — is a COUNTER and one log
+line per reason per batch.
 
 **Four precision axes, mandatory next to every coordinate** (D3): `granularity` (ordinal enum,
 country → … → address_point), `position_source` (admin_centroid → carried_forward →
@@ -1972,21 +1982,23 @@ top-level YAML key is a refusal, not a shrug — every key in this format fails 
 names the rule that produced it. Hence no per-portal branch in the intake: a new signal is a YAML
 entry, not code.
 
-The header carries **two mutable columns and no more**: `is_active` (which version the extractor runs)
-and `shadow` (whether what it mined is admissible to the resolver yet, migration 404). **Shadow is the
-activation gate**: a contract that cannot meet its frozen-sample precision floors merges dark — claims mined,
-stored and auditable, but excluded from `location_claims_live` — so a failing gate has somewhere to
-land that is not "revert the branch". Three relations, one predicate each: `location_claims_unretracted`
-states the retraction predicate once, and `location_claims_live` (resolver) and `location_claims_shadow`
-(scorer) partition it. The scorecard reads the shadow relation
-(`toolkit/location_labels.score_shadow_claims`, `/location/sample/{source}/score-shadow`) — without a
-read path the un-shadow gate would be unsatisfiable. Flipping the flag (`--shadow` / `--unshadow`)
-**enqueues the contract's listings into `dirty_locations`** in the same transaction: the view flips
-instantly but `listing_location_current` is rebuilt only by the drain, and neither the intake (new
-claims only) nor the daily sweep (version-tuple predicate) would ever re-queue them. The enqueue is
-unconditional, like the operator-correction lane, so a re-run after a failed drain is never a dead
-button. `shadow` is excluded from `contract_sha256` — it is operational state, so editing it in git is
-not a `contract_version` bump (and a bump would re-shadow the contract, discarding the passed sample).
+The header carries **one mutable extraction column**: `is_active`, which version the extractor runs.
+It carried a second, `shadow` (migration 404) — a contract that could not meet its frozen-sample
+precision floors merged dark, claims mined and stored but excluded from `location_claims_live`, so a
+failing gate had somewhere to land that was not "revert the branch". **W1-b deleted the mechanism
+whole** (migration 497): the flag, the two partitioning views, the `contract_shadow` queue reason,
+`score_shadow_claims` and `/location/sample/{source}/score-shadow`. All nine contracts were
+un-shadowed on 2026-09-09 and the floors gate was never once exercised end to end, while the price
+was a correlated `NOT EXISTS` on the resolver's hot read and one more state every reader had to know
+about. `fetch_config` is still refreshed in place on a re-load, because `persistence` is outside
+`contract_sha256` — an archive-config edit is deliberately not a `contract_version` bump, and a bump
+would re-stamp the claims corpus.
+
+**Retraction** (`python -m location_data.contracts --retract <portal>@<version> [--extractor-id X]`)
+is now one transaction: DELETE the entries' claims, INSERT their listings into `dirty_locations`
+(reason `claim_insert` — the drain rebuilds the whole projection row whatever the label says), stand
+the header down. Bounded by a `SET LOCAL statement_timeout`, because "the contract's claims" is every
+listing the portal has ever had.
 
 **Ops rules the incidents wrote.** The heavy lanes — registry load, claim intake, Mapy inventory —
 share the OUTER `location-batch` concurrency group so **at most one runs at a time** (each keeps its

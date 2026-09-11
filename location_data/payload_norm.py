@@ -120,8 +120,8 @@ def probe_normalizer_version(version: str = NORMALIZER_VERSION) -> str:
 
 
 # A surface no contract declares is hashed by a DIFFERENT instrument than one that
-# does — the shared base, not that portal's diffed rules — and `normalizer_version`
-# is what a reader of portal_payload_churn has to tell them apart with. Migration
+# does — the shared base, not that portal's diffed rules — and `normalizer_version` is
+# what a reader of `portal_raw_payloads` has to tell them apart with. Migration
 # 402's own header states the failure this avoids: relabelling a cohort in place
 # "would blend @1-era counters into the @2 readout and register one phantom change
 # per key on its first @2 fetch (the hash moved because the normaliser moved)".
@@ -147,20 +147,19 @@ BASE_PROFILE_SUFFIX = "+base"
 # have nothing to do with normalisation — a locator fix, a new extraction entry, a
 # closed coverage gap; ceskereality and realitymix each took two such bumps in the
 # fortnight before this shipped. Keyed on the version, every one of those would land
-# in portal_payload_churn's PK (migration 402), orphan that surface's accumulated
-# counters and restart the readout at `fetches=1` — while the projection those counters
-# measure had not moved a byte. That is exactly the waste NORMALIZER_VERSION's own
+# in the churn instrument's PK (migration 402, dropped by 497), orphan that surface's
+# accumulated counters and restart the readout at `fetches=1` — while the projection those
+# counters measured had not moved a byte. That is exactly the waste NORMALIZER_VERSION's own
 # comment above refuses on the engine axis ("bumping an engine whose output did not
 # move would discard the detail evidence accumulating under it for nothing"); this is
 # the same refusal on the profile axis. Digesting the profile makes the cohort break
 # IFF the projection actually moves, in either direction: an edit to volatile_paths
 # with no version bump still opens a clean cohort, which the version could not see.
 #
-# The portal is NOT in the label — `source` is already a column of both tables that
-# carry it (portal_payload_churn's PK, portal_raw_payloads), and a second copy of a key
-# is a thing that can disagree with the first. Two portals that declare the same rules
-# therefore share a digest, which is honest: it is one instrument, and their rows are
-# still told apart by `source`.
+# The portal is NOT in the label — `source` is already a column of the table that carries
+# it (`portal_raw_payloads`), and a second copy of a key is a thing that can disagree with
+# the first. Two portals that declare the same rules therefore share a digest, which is
+# honest: it is one instrument, and their rows are still told apart by `source`.
 PROFILE_DIGEST_SUFFIX = "+profile@"
 
 # 8 hex = 32 bits over a space of a few dozen profiles that will ever exist (nine
@@ -850,9 +849,9 @@ def resolve_normalisation(
                                    because the file around the declaration was edited
                                    (see `PROFILE_DIGEST_SUFFIX`). The portal is NOT
                                    repeated into the label — `source` is already a
-                                   column of both tables that carry it
-                                   (portal_payload_churn's PK, portal_raw_payloads),
-                                   and a second copy is a thing that can disagree.
+                                   column of the table that carries it
+                                   (`portal_raw_payloads`), and a second copy is a
+                                   thing that can disagree.
       `payload_norm@3+base`        the contract declares nothing for this surface, so
                                    BASE_PROFILE was applied. Unchanged by the move to
                                    contracts, and honestly so: the base is a property

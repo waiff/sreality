@@ -130,16 +130,24 @@ _CURRENT_REGISTRY_SQL = "SELECT id, label FROM registry_versions WHERE is_curren
 _CURRENT_EPOCH_SQL = "SELECT id FROM pin_cluster_epochs ORDER BY computed_at DESC, id DESC LIMIT 1"
 
 # ONE projection, two predicates — the row unpacking in `_claim` is positional, so a second
-# hand-written column list is a silent mis-mapping waiting to happen.
+# hand-written column list is a silent mis-mapping waiting to happen
+# (`test_resolver_jobs.test_claims_select_maps_onto_claim_positionally` pins the mapping).
+#
+# STRAIGHT OFF THE TABLE (W1-b, migration 497). `location_claims_live` subtracted retracted
+# and shadowed rows; retraction is a DELETE now and shadow is gone, so there is nothing left
+# for a view to subtract and every read is one fewer correlated NOT EXISTS.
+#
+# Six columns the pure core never reads are gone with the view: extractor_id,
+# declared_confidence, page_kind, snapshot_id, distance_m and target_text. `Claim` keeps the
+# field names (defaulted) so the offline suites and `mini_mirror` are untouched.
 _CLAIMS_SELECT = """
 SELECT id, listing_id, source, claim_type::text, surface::text, extraction_method::text,
-       extractor_id, licence_class::text, first_observed_at, value_text, value_num,
+       licence_class::text, first_observed_at, value_text, value_num,
        CASE WHEN value_geom IS NULL THEN NULL ELSE ST_Y(value_geom) END,
        CASE WHEN value_geom IS NULL THEN NULL ELSE ST_X(value_geom) END,
-       value_jsonb, declared_precision_label, declared_confidence, declared_radius_m,
-       blur_evidence::text, claim_confidence::text, subject_scoped, page_kind::text,
-       snapshot_id, distance_m, target_text
-  FROM location_claims_live
+       value_jsonb, declared_precision_label, declared_radius_m,
+       blur_evidence::text, claim_confidence::text, subject_scoped
+  FROM location_claims
 """
 
 _CLAIMS_SQL = _CLAIMS_SELECT + " WHERE listing_id = %s\n ORDER BY id"
@@ -556,16 +564,14 @@ def current_epoch(conn: psycopg.Connection) -> int | None:
 def _claim(row: Sequence[Any]) -> Claim:
     return Claim(
         id=row[0], listing_id=row[1], source=row[2], claim_type=row[3], surface=row[4],
-        extraction_method=row[5], extractor_id=row[6], licence_class=row[7],
-        observed_at=row[8], value_text=row[9],
-        value_num=None if row[10] is None else float(row[10]),
-        lat=None if row[11] is None else float(row[11]),
-        lon=None if row[12] is None else float(row[12]),
-        value_jsonb=row[13] or {}, declared_precision_label=row[14],
-        declared_confidence=row[15],
-        declared_radius_m=None if row[16] is None else float(row[16]),
-        blur_evidence=row[17], claim_confidence=row[18], subject_scoped=row[19],
-        page_kind=row[20], snapshot_id=row[21], distance_m=row[22], target_text=row[23],
+        extraction_method=row[5], licence_class=row[6],
+        observed_at=row[7], value_text=row[8],
+        value_num=None if row[9] is None else float(row[9]),
+        lat=None if row[10] is None else float(row[10]),
+        lon=None if row[11] is None else float(row[11]),
+        value_jsonb=row[12] or {}, declared_precision_label=row[13],
+        declared_radius_m=None if row[14] is None else float(row[14]),
+        blur_evidence=row[15], claim_confidence=row[16], subject_scoped=row[17],
     )
 
 

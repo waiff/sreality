@@ -90,8 +90,8 @@ def value(entry_id: str, doc: ScopedDocument | None = None) -> str | None:
 def test_the_activation_is_live_and_names_only_registered_readers():
     """A reader no registry carries takes the HOURLY intake down for this portal, so the
     membership is asserted per entry rather than fleet-wide. Un-shadowed 2026-09-09; the
-    stale YAML line went 2026-09-11; folded into the one lane 2026-09-11 (rule 25)."""
-    assert CONTRACT.version == 4 and CONTRACT.shadow is False
+    flag went in W1-b; folded into the one lane 2026-09-11 (rule 25)."""
+    assert CONTRACT.version == 4
     dom = [e for e in CONTRACT.entries if e.reader in PAGE_READERS]
     assert {e.entry_id for e in dom} == {
         "rm.det.gps", "rm.det.agency_gps_flag", "rm.det.agency_est_flag",

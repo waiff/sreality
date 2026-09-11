@@ -845,16 +845,35 @@ def test_projection_stands_the_incumbent_down_before_activating():
     assert "is_active = true" in statements[1]
 
 
-def test_retraction_is_an_append_and_names_a_reason():
+def test_retraction_deletes_the_versions_claims_and_enqueues_their_listings():
+    """W1-b: retraction stopped being an append. A contract version that misread the
+    portal produced no evidence, so its claims are DELETED and their listings go into
+    `dirty_locations` — one statement, so the delete and the re-resolve queue cannot
+    separate, and no ledger row survives for a view to subtract on every resolver read."""
     conn = _FakeConn(existing_sha="")
-    contracts.retract(conn, source="remax", version=1, reason="contract_misread",
-                      retracted_by="operator")
-    inserts = [s for s, _ in conn.executed if "location_claim_retractions" in s]
-    assert inserts
-    assert not any("delete" in s.lower() for s, _ in conn.executed)
-    with pytest.raises(ContractError, match="unknown retraction reason"):
-        contracts.retract(conn, source="remax", version=1, reason="because",
-                          retracted_by="operator")
+    done = contracts.retract(conn, source="remax", version=1)
+    assert (done.deleted, done.enqueued) == (3, 2)
+
+    statements = [s for s, _ in conn.executed]
+    assert not any("location_claim_retractions" in s for s in statements)
+    retraction = next(s for s in statements if "DELETE FROM location_claims" in s)
+    # One statement: the delete, the enqueue and the count all ride the same CTE chain.
+    assert "INSERT INTO dirty_locations" in retraction
+    # An EXISTING reason value — the drain rebuilds the projection whatever the label says.
+    assert "'claim_insert'" in retraction
+    # Bounded, for the same reason the shadow flip it replaces was: "the contract's
+    # claims" is every listing the portal has ever had.
+    assert any("statement_timeout" in s for s in statements)
+    # The whole version: the header is stood down so the next deploy activates a fix.
+    assert any("portal_contracts SET is_active = false" in s for s in statements)
+
+
+def test_retracting_one_entry_leaves_the_header_active():
+    conn = _FakeConn(existing_sha="")
+    contracts.retract(conn, source="remax", version=1, extractor_id="rx.det.street")
+    params = next(p for s, p in conn.executed if "DELETE FROM location_claims" in s)
+    assert params["extractor_id"] == "rx.det.street"
+    assert not any("retired_at = now()" in s for s, _ in conn.executed)
 
 
 class _FakeCursor:
@@ -876,6 +895,8 @@ class _FakeCursor:
         if "FROM portal_contracts WHERE source" in sql or "encode(contract_sha256" in sql:
             return ((7, self._conn.existing_sha, False, self._conn.fetch_config)
                     if self._conn.existing_sha else None)
+        if "DELETE FROM location_claims" in sql:
+            return (3, 2)
         return (7,)
 
     def fetchall(self):

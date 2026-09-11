@@ -483,9 +483,9 @@ that don't key on street.
   migrations 380–389) are service-role-only and shadow-only** — RLS on plus explicit
   `anon`/`authenticated` REVOKEs on every table, sequence and function, and nothing outside
   `location_data/` reads them before W6 (Browse/map/watchdog/dedup still use `listings.geom` and the
-  geo-derived admin columns). Three disciplines when you touch them: the claim layer is
-  **append-only** — a wrong claim is retracted and a new one inserted, never UPDATEd, and the Mapy
-  licence-evidence tables are trigger-immutable (42501 on UPDATE/DELETE/TRUNCATE); every heavy batch
+  geo-derived admin columns). Three disciplines when you touch them: `location_claims` (19 columns
+  since mig 497) is **never UPDATEd** — a wrong contract is RETRACTED, which DELETEs that version's
+  rows and re-resolves; Mapy licence-evidence tables are trigger-immutable (42501); every heavy batch
   lane shares the ONE `location-batch` Actions concurrency group and arms a `SET LOCAL
   statement_timeout` — **except the resolve DRAIN (2026-09-10, 8a+8b)**: latency-bound not
   instance-bound, it left the group and also runs from the Railway worker, serialized ONLY by the

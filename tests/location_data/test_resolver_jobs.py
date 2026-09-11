@@ -336,14 +336,73 @@ def test_the_per_listing_reads_are_prefetched_once_per_slice():
     state = _drained([[(101, 0), (102, 0), (103, 0)], [(104, 0), (105, 0)]])
     assert state["stats"].claimed == 5
     for needle in (
-        "from location_claims_live where listing_id = any(",
+        "from location_claims where listing_id = any(",
         "join location_resolutions r on r.id = p.resolution_id where p.listing_id = any(",
         "select id, property_id from listings where id = any(",
         "from location_contradictions_open c where c.listing_id = any(",
     ):
         assert _count(state, needle) == 2, needle
     # ...and never the single-listing forms the prefetch replaced.
-    assert _count(state, "from location_claims_live where listing_id = %s") == 0
+    assert _count(state, "from location_claims where listing_id = %s") == 0
+
+
+def test_the_claims_select_maps_onto_claim_positionally():
+    """`_claim` unpacks `_CLAIMS_SELECT`'s row BY INDEX, so a column added, removed or
+    reordered in one and not the other is a silent mis-mapping: every value still has the
+    right TYPE one slot over (three texts in a row, two floats, two nullable texts), so
+    nothing raises — the resolver just reads the surface as the extraction method.
+
+    W1-b narrowed the projection from 24 columns to 18, which is exactly the edit this
+    guards. Built from a row of sentinels in SELECT order, with no database.
+    """
+    select = resolve_db._CLAIMS_SELECT
+    body = select[select.index("SELECT") + len("SELECT"):select.index("FROM location_claims")]
+    names, depth, current = [], 0, []
+    for ch in body:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            names.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    names.append("".join(current).strip())
+    # A CASE expression has no name of its own; the two of them are the lat/lon pair.
+    labels = [n.split("::")[0].split()[0].lower() if not n.upper().startswith("CASE")
+              else ("st_y" if "ST_Y" in n else "st_x") for n in names]
+    assert labels == [
+        "id", "listing_id", "source", "claim_type", "surface", "extraction_method",
+        "licence_class", "first_observed_at", "value_text", "value_num", "st_y", "st_x",
+        "value_jsonb", "declared_precision_label", "declared_radius_m", "blur_evidence",
+        "claim_confidence", "subject_scoped",
+    ], labels
+
+    row = (11, 22, "sreality", "street_name", "api_json", "portal_structured_field",
+           "portal", mm._T0, "Dlouhá", 3.5, 50.1, 14.4, {"k": "v"}, "exact_address",
+           25.0, "declared", "high", True)
+    assert len(row) == len(labels)
+    claim = resolve_db._claim(row)
+
+    assert (claim.id, claim.listing_id, claim.source) == (11, 22, "sreality")
+    assert (claim.claim_type, claim.surface) == ("street_name", "api_json")
+    assert claim.extraction_method == "portal_structured_field"
+    assert claim.licence_class == "portal"
+    assert claim.observed_at == mm._T0
+    assert (claim.value_text, claim.value_num) == ("Dlouhá", 3.5)
+    assert (claim.lat, claim.lon) == (50.1, 14.4)          # ST_Y is lat, ST_X is lon
+    assert claim.value_jsonb == {"k": "v"}
+    assert claim.declared_precision_label == "exact_address"
+    assert claim.declared_radius_m == 25.0
+    assert (claim.blur_evidence, claim.claim_confidence) == ("declared", "high")
+    assert claim.subject_scoped is True
+    # The six the pure core never read keep their names and their defaults (W1-b).
+    assert (claim.extractor_id, claim.declared_confidence, claim.page_kind) == ("", None, "none")
+    assert (claim.snapshot_id, claim.distance_m, claim.target_text) == (None, None, None)
+
+    # A NULL geometry must not become 0.0 — the resolver's `has_position` reads both.
+    assert resolve_db._claim(row[:10] + (None, None) + row[12:]).has_position is False
 
 
 def test_location_disputed_is_read_after_the_run_writes_its_contradictions():

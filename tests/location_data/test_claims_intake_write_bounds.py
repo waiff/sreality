@@ -60,6 +60,9 @@ class _Cursor:
         return [p["rows"].obj for sql, p in self.executed if table in sql]
 
 
+# The fields below that migration 497 dropped from the TABLE (source_id_native, page_kind,
+# extractor_id, extractor_version, snapshot_anchor, history_completeness) are still spelled
+# here on purpose: the readers compute them and the fingerprint still hashes them.
 def _claim(listing_id: int, *, value_text: str | None = None,
            value_jsonb: object | None = None, claim_type: str = "street_name") -> Claim:
     return Claim(
@@ -89,7 +92,7 @@ def test_a_batch_over_the_byte_budget_is_flushed_in_several_statements(monkeypat
         claims=[_claim(i, value_text="x" * 2000) for i in range(200)])
 
     cur = _Cursor()
-    inserted, enqueued = write_result(cur, result, batch_id=7)
+    inserted, enqueued = write_result(cur, result)
 
     arrays = cur.arrays("INSERT INTO location_claims")
     assert len(arrays) > 1
@@ -99,7 +102,10 @@ def test_a_batch_over_the_byte_budget_is_flushed_in_several_statements(monkeypat
     # write that reported only its last statement would silently under-count the batch row.
     assert all(_array_bytes(a) <= 64 * 1024 for a in arrays)
     assert (inserted, enqueued) == (200, len(arrays))
-    assert all(p["batch_id"] == 7 for _, p in cur.executed)
+    # `rows` is the ONLY parameter now: W1-b dropped `location_claims.batch_id`, so the
+    # claim is no longer a child of the run ledger (`location_claim_batches` stays — it is
+    # the lane's cursor).
+    assert all(set(p) == {"rows"} for _, p in cur.executed)
 
 
 def test_the_row_count_is_the_second_bound(monkeypatch):
@@ -109,7 +115,7 @@ def test_the_row_count_is_the_second_bound(monkeypatch):
     result = IntakeResult(claims=[_claim(i, value_text="Dlouhá") for i in range(200)])
 
     cur = _Cursor()
-    write_result(cur, result, batch_id=1)
+    write_result(cur, result)
 
     arrays = cur.arrays("INSERT INTO location_claims")
     assert len(arrays) == 4 and all(len(a) == 50 for a in arrays)
@@ -120,7 +126,7 @@ def test_a_batch_inside_both_bounds_is_still_one_statement():
     result = IntakeResult(claims=[_claim(i, value_text="Dlouhá") for i in range(50)])
 
     cur = _Cursor()
-    write_result(cur, result, batch_id=1)
+    write_result(cur, result)
 
     assert len(cur.arrays("INSERT INTO location_claims")) == 1
 
@@ -165,7 +171,7 @@ def test_the_chunk_bounds_are_env_overridable_and_reject_nonsense(monkeypatch):
     result = IntakeResult(claims=[_claim(i, value_text="Dlouhá") for i in range(3)])
 
     cur = _Cursor()
-    write_result(cur, result, batch_id=1)
+    write_result(cur, result)
 
     assert len(cur.arrays("INSERT INTO location_claims")) == 1
     assert DEFAULT_WRITE_CHUNK_ROWS == 5_000
@@ -199,7 +205,8 @@ def test_an_oversized_value_is_refused_never_silently_dropped():
     assert {c.claim_type for c in result.claims} >= {"street_name", "coordinate"}
     # 2. counted under its own reason, at the refused claim's grain — and logged. A
     # counter, not a row: `location_claim_absences` was written by every lane and read by
-    # none (rule 25), so what survives is the tally the operator actually reads.
+    # none (rule 25) and is gone (migration 497), so what survives is the tally the
+    # operator actually reads.
     assert result.refusals["oversized_value:uncertainty_geometry"] == 1
 
 
@@ -236,7 +243,8 @@ def test_claim_value_bytes_measures_only_the_unbounded_part():
 def test_a_legacy_shape_row_counts_both_refusals_separately():
     """A legacy-shape sreality row with an oversized value used to collide on ONE
     `location_enrichment_state` primary key — `ON CONFLICT … DO UPDATE` "cannot affect row a
-    second time", i.e. an aborted run. Two counters cannot collide."""
+    second time", i.e. an aborted run. Two counters cannot collide (and that table is gone
+    as of migration 497)."""
     payload = json.loads(json.dumps(SREALITY_LEGACY))
     payload["locality"] = dict(SREALITY_POST_CUTOVER["locality"])
     payload["locality"]["geometry"] = json.loads(

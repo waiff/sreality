@@ -51,11 +51,6 @@ def quality_source(source: str, conn: Any = Depends(deps.get_db_conn)) -> dict[s
     return location_quality.source_overview(conn, _check_source(source))
 
 
-@router.get("/quality/w1v-gate")
-def quality_w1v_gate(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
-    return location_quality.w1v_gate(conn)
-
-
 @router.get("/listing/{listing_id}")
 def listing_inspector(listing_id: int, conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
     result = location_quality.listing_inspector(conn, listing_id=listing_id)
@@ -120,15 +115,6 @@ def save_labels(
 @router.get("/sample/{source}/score")
 def score_sample(source: str, conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
     return location_labels.score_sample(conn, _check_source(source))
-
-
-@router.get("/sample/{source}/score-shadow")
-def score_shadow(source: str, conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
-    """The same frozen sample scored against a SHADOWED contract's own claims (W2,
-    migration 404). `/score` measures what is served; a shadowed contract is excluded
-    from serving by construction, so this is the only surface that can decide whether
-    it may be un-shadowed."""
-    return location_labels.score_shadow_claims(conn, _check_source(source))
 
 
 class CorrectionIn(BaseModel):

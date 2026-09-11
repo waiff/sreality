@@ -14,12 +14,14 @@ Two deliberate choices, both learned from the intake lane:
   `claim_fingerprint` is time-free, so a correction that RESTATES an earlier
   operator value (A -> B -> A) collides with the original claim's fingerprint
   and inserts nothing - an `ins`-gated enqueue would never fire and the
-  operator would see a dead button. A restated claim still gets a re-sight
-  observation row, so the restatement is on the record either way.
+  operator would see a dead button. The enqueue is the whole record of the
+  restatement now - migration 497 dropped the observation series.
 * `value_norm` and the fingerprint are computed in SQL by the named migration
   functions (`location_value_norm`, `location_claim_fingerprint`), exactly as
   the intake does - a Python mirror drifts on the foreign-address cohort and a
-  drifted fingerprint does not conflict, it inserts.
+  drifted fingerprint does not conflict, it inserts. Both still take the FULL
+  01 4.2.1 tuple; migration 497 stopped STORING nine of its inputs, which is
+  what keeps every fingerprint already on disk valid.
 
 snapshot_anchor is 'unanchored_latest_fetch': an operator correction is a
 statement about the listing as currently served, not about a stored payload
@@ -121,26 +123,19 @@ _OPERATOR_CLAIM_SQL = """
         FROM typed t
     ), ins AS (
         INSERT INTO location_claims (
-            listing_id, source, source_id_native, snapshot_anchor, first_observed_at,
-            claim_type, surface, page_kind, extraction_method, extractor_id,
-            extractor_version, contract_entry_id, batch_id, value_text, value_norm,
-            value_num, value_geom, value_shape, value_jsonb, distance_m, travel_mode,
-            target_text, declared_precision_label, declared_confidence, declared_radius_m,
-            claim_confidence, blur_evidence, licence_class, legacy_source_column,
-            legacy_write_path_unknown, history_completeness, subject_scoped,
-            claim_fingerprint)
-        SELECT f.listing_id, f.source, f.source_id_native, f.snapshot_anchor,
-               f.first_observed_at, f.claim_type::location_claim_type,
-               f.surface::location_claim_surface, f.page_kind::location_page_kind,
-               f.extraction_method::location_extraction_method, f.extractor_id,
-               f.extractor_version, f.contract_entry_id, %(batch_id)s, f.value_text,
-               f.value_norm, f.value_num, f.geom, f.shape, f.value_jsonb, f.distance_m,
-               f.travel_mode, f.target_text, f.declared_precision_label,
-               f.declared_confidence, f.declared_radius_m,
+            listing_id, source, first_observed_at, claim_type, surface,
+            extraction_method, contract_entry_id, value_text, value_num, value_geom,
+            value_jsonb, declared_precision_label, declared_radius_m, claim_confidence,
+            blur_evidence, licence_class, subject_scoped, claim_fingerprint)
+        SELECT f.listing_id, f.source, f.first_observed_at,
+               f.claim_type::location_claim_type,
+               f.surface::location_claim_surface,
+               f.extraction_method::location_extraction_method,
+               f.contract_entry_id, f.value_text, f.value_num, f.geom, f.value_jsonb,
+               f.declared_precision_label, f.declared_radius_m,
                f.claim_confidence::match_confidence,
                f.blur_evidence::blur_evidence, f.licence_class::licence_class,
-               f.legacy_source_column, f.legacy_write_path_unknown,
-               f.history_completeness, f.subject_scoped, f.claim_fingerprint
+               f.subject_scoped, f.claim_fingerprint
         FROM fingerprinted f
         ON CONFLICT (claim_fingerprint) DO NOTHING
         RETURNING id
@@ -225,11 +220,9 @@ def submit_correction(
                 INSERT INTO location_claim_batches
                     (lane, source, extractor_version, finished_at, row_count, outcome, note)
                 VALUES ('operator_correction', %s, %s, now(), 1, 'ok', %s)
-                RETURNING id
                 """,
                 (listing["source"], EXTRACTOR_VERSION, note),
             )
-            batch_id = cur.fetchone()["id"]
             cur.execute(
                 _OPERATOR_CLAIM_SQL,
                 {
@@ -240,7 +233,6 @@ def submit_correction(
                     "value_text": value_text,
                     "extractor_id": EXTRACTOR_ID,
                     "extractor_version": EXTRACTOR_VERSION,
-                    "batch_id": batch_id,
                 },
             )
             counts = cur.fetchone()
