@@ -70,6 +70,10 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from location_data import loader_db, page_readers, payloads
+# The names re-exported here are the ones something OUTSIDE this module imports from it —
+# the contract validator's mirror gates (`TRANSFORMS`/`GUARDS`), the licence-ladder tables the
+# portal tests score against, and the value objects. Anything the lane neither uses nor
+# publishes is imported where it is needed instead; a re-export nobody reads is surface.
 from location_data.claims_common import (  # noqa: F401 - the lane's public vocabulary
     ARCHIVED_COORDINATE_RULES,
     COORDINATE_RULES,
@@ -77,7 +81,6 @@ from location_data.claims_common import (  # noqa: F401 - the lane's public voca
     EMITTABLE_LICENCE_CLASSES,
     GUARD_CZ_BBOX,
     GUARDS,
-    HISTORY_COMPLETENESS,
     LEGACY_COLUMNS,
     MAPY_COORDS_SOURCES,
     MIRROR_UNSAFE_CHARS,
@@ -86,10 +89,7 @@ from location_data.claims_common import (  # noqa: F401 - the lane's public voca
     SUBSTRATE_ARCHIVED_HTML,
     SUBSTRATE_PAYLOAD,
     TRANSFORMS,
-    ArchivedCoordinateRule,
     Claim,
-    CoordinateRule,
-    CoordinateVerdict,
     Entry,
     IntakeRefused,
     IntakeResult,
@@ -100,14 +100,11 @@ from location_data.claims_common import (  # noqa: F401 - the lane's public voca
     apply_transforms,
     claim_value_bytes,
     coordinate_verdict,
-    cz_bbox,
     env_positive_int,
     envelope_wkt,
     guard_admits,
-    in_cz_bbox,
     json_pointer,
     mirror_is_faithful,
-    payload_hash,
     point_wkt,
     sreality_payload_shape,
     value_norm_mirror,
