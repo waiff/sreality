@@ -484,8 +484,8 @@ that don't key on street.
   `anon`/`authenticated` REVOKEs on every table, sequence and function, and nothing outside
   `location_data/` reads them before W6 (Browse/map/watchdog/dedup still use `listings.geom` and the
   geo-derived admin columns). Three disciplines when you touch them: `location_claims` (19 columns
-  since mig 497) is **never UPDATEd** — a wrong contract is RETRACTED, which DELETEs that version's
-  rows and re-resolves; Mapy licence-evidence tables are trigger-immutable (42501); every heavy batch
+  since migs 497+498 — **relax before the deploy, drop after it**) is **never UPDATEd**; a wrong
+  contract is RETRACTED, which DELETEs its claims. Mapy evidence is trigger-immutable; every heavy batch
   lane shares the ONE `location-batch` Actions concurrency group and arms a `SET LOCAL
   statement_timeout` — **except the resolve DRAIN (2026-09-10, 8a+8b)**: latency-bound not
   instance-bound, it left the group and also runs from the Railway worker, serialized ONLY by the

@@ -64,7 +64,7 @@ component is slimmed twice — each wave rewrites one component and slims its st
     entries. 27,420 lines deleted / 2,559 added.
   - **W1-b shipped** (2026-09-12): `location_claims` slims **45 columns → 19** (the 26 dropped are
     the anchor/evidence/provenance/legacy blocks plus `value_norm`, `value_shape`, `batch_id` and
-    the distance trio), and **7 tables + 3 views + 1 header flag** go with them (migration **497**):
+    the distance trio), and **7 tables + 3 views + 1 header flag** go with them (migration **498**):
     `location_claim_observations` (263 M rows / 50 GB, the single largest relation in the subsystem,
     read by nothing), `location_claim_links` (zero code references, ever), `location_claim_absences`,
     `location_claim_retractions`, `location_claim_type_meta`, `location_enrichment_state`,
@@ -77,8 +77,16 @@ component is slimmed twice — each wave rewrites one component and slims its st
     pure core read; the payload pin predicate is two version edges (no claim join on every append).
     The 23-argument `location_claim_fingerprint` is **untouched** — the readers still compute the
     nine unstored inputs — so every fingerprint on disk stays valid and no corpus re-insert happens.
-    **The migration is applied AFTER the rollout**: the code runs against both schemas, and the
-    hourly intake + Railway must pick the merge up first.
+    **TWO migrations, and the order is the design.** A single after-the-rollout drop would have
+    taken the hourly intake down for the whole merge→apply window: on the old table the 19-column
+    INSERT hits 23502 on three NOT NULLs and 23514 on five CHECKs, and applying it first breaks
+    the OLD code instead (42703). So **497 RELAXES** (five CHECKs, three NOT NULLs, one default,
+    the `payload_id` FK — metadata only, legal for both versions of the code) and is applied
+    BEFORE the merge; **498 DROPS**, after Railway is green and one intake tick has run on the new
+    code. `--retract` must not be run in between (it DELETEs claims; three tables still FK to
+    `location_claims(id)` until 498). The window cannot be reintroduced:
+    `test_claims_relax_migration.py` derives the compulsory-column and CHECK lists from 382's own
+    DDL.
     **Next:** rewrite each contract to <= 10 entries with the town entry mandatory.
 - **W2 — the resolver at four steps, the answer table at 27 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,

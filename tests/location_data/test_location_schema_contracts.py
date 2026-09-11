@@ -469,7 +469,7 @@ def test_seed_literals_are_enum_members():
     than casts: location_uncertainty_policy's (position_source, granularity, semantics).
 
     `location_claim_type_meta`'s flag sets were the other one. The table carried three
-    booleans per enum label that no code ever consulted, and migration 497 dropped it."""
+    booleans per enum label that no code ever consulted, and migration 498 dropped it."""
     sql = _clean()
     offenders: list[str] = []
     assert "drop table if exists location_claim_type_meta" in sql
@@ -658,7 +658,7 @@ def _last_view_body(sql: str, name: str) -> str:
 
 
 def test_the_contract_shadow_mechanism_is_gone_whole():
-    """W1-b (migration 497). Shadow was "claims mined and stored, excluded from resolution
+    """W1-b (migration 498). Shadow was "claims mined and stored, excluded from resolution
     until a frozen labelled sample clears its floors": a header flag, three views and a
     `dirty_locations` reason. The floors gate was never exercised end to end and every
     contract is live, so the whole mechanism went — and it has to go WHOLE. A surviving

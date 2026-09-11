@@ -161,7 +161,7 @@ def test_the_lane_writes_claims_and_nothing_else():
     `location_claim_absences` and `location_enrichment_state` were written by every lane and
     read by none. No SQL constant in this module may name one of them again — a prose
     reference in a comment explaining WHY they are gone is fine, an INSERT is not.
-    W1-a stopped writing them; migration 497 dropped them."""
+    W1-a stopped writing them; migration 498 dropped them."""
     dead = ("location_claim_observations", "location_claim_absences",
             "location_enrichment_state")
     statements = [v for name, v in vars(claims_intake).items()

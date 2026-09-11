@@ -198,7 +198,7 @@ def test_a_regex_text_claim_needs_no_model():
 
 
 def test_the_model_columns_reach_the_row_dict_but_no_longer_the_table():
-    """W1-b dropped both columns (migration 497) — no lane emits an `llm_text` claim, so
+    """W1-b dropped both columns (migration 498) — no lane emits an `llm_text` claim, so
     the CHECK that forced them was guarding a shape nothing writes. They stay on the
     `Claim` and in the recordset that parses it, because the READERS still carry the
     evidence discipline in Python; they simply have nowhere to land."""
@@ -555,7 +555,7 @@ def test_the_insert_column_list_and_its_select_have_the_same_arity():
 
 def test_the_evidence_columns_reach_the_row_dict_but_no_longer_the_table():
     """Same shape as the model pair. The D7 span discipline is enforced in Python by
-    `assert_evidence_complete` (the tests above); migration 497 dropped the six columns it
+    `assert_evidence_complete` (the tests above); migration 498 dropped the six columns it
     used to land in, along with the two CHECKs that mirrored it — the archive the spans
     index into is `portal_raw_payloads`, which is untouched."""
     recordset = claims_intake._CLAIM_WRITE_SQL.split("), typed AS")[0]

@@ -622,7 +622,7 @@ SELECT pg_advisory_xact_lock(
 # only setting new pins: the row that was the latest before this append has to LOSE
 # its pin, or the cap never bites and the archive grows without bound.
 #
-# TWO EDGES, NOTHING ELSE (W1-b, migration 497). The predicate used to have two more arms,
+# TWO EDGES, NOTHING ELSE (W1-b, migration 498). The predicate used to have two more arms,
 # both reaching into the claim store: a body a claim's `payload_id` FK pointed at, and a
 # body whose content address a DISPUTED claim named through `location_contradictions_open`.
 # Both columns are gone — the claim spine is 19 columns of value and provenance now, with

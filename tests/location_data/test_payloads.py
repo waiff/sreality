@@ -586,7 +586,7 @@ def test_the_first_and_latest_versions_are_never_evicted(conn: psycopg.Connectio
 
 @requires_db
 def test_the_claim_store_no_longer_pins_anything(conn: psycopg.Connection) -> None:
-    """W1-b (migration 497). The pin predicate had two more arms, both reaching into the
+    """W1-b (migration 498). The pin predicate had two more arms, both reaching into the
     claim store: `location_claims.payload_id` (an FK with NO ACTION, so a referenced body
     could not be deleted) and the content address of a claim a `location_contradictions_open`
     row named. Both columns are gone — the claim spine is 19 columns of value and
@@ -832,7 +832,7 @@ def test_an_index_page_is_a_separate_group_from_the_detail_page(
 
 
 def _claim_on_listing(conn: psycopg.Connection, native: str) -> int:
-    """One ordinary mined claim — the 19 columns migration 497 leaves. It names no body:
+    """One ordinary mined claim — the 19 columns migration 498 leaves. It names no body:
     that is the point (the pin predicate cannot reach it)."""
     with conn.cursor() as cur:
         cur.execute(

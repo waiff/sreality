@@ -1,8 +1,10 @@
-"""W1-b: the claim spine is 19 columns, and NOTHING still names what migration 497 drops.
+"""W1-b: the claim spine is 19 columns, and NOTHING still names what migration 498 drops.
 
-Two gates, both offline.
+Three gates, all offline. The companion — that migration 497 relaxes the old table enough
+for the new write to be legal on it BEFORE 498 runs — is
+`test_claims_relax_migration.py`; these two would both pass with that window wide open.
 
-1. THE MIGRATION SAYS WHAT IT DOES. Migration 497 is the destructive half of the wave —
+1. THE MIGRATION SAYS WHAT IT DOES. Migration 498 is the destructive half of the wave —
    seven tables (one of them 263 M rows / 50 GB), three views, 26 columns, one header flag
    and one CHECK value. Parsed here against migration 382's own CREATE TABLE, so "kept" is
    derived rather than transcribed: a column silently left behind fails, and so does a
@@ -14,9 +16,9 @@ Two gates, both offline.
    This one runs in the normal pytest job, over the SAME corpus (`tests/sql_corpus`), and
    fails a PR in seconds.
 
-   It matters in BOTH directions, because the code ships before the migration is applied:
-   a statement that still reads a dropped column breaks after the apply, and a statement
-   that reads a column only the NEW schema has breaks before it.
+   One-directional on purpose: it catches a statement that still reads a DROPPED column
+   (broken after the apply). The other direction — a statement that needs the NEW schema
+   before it exists — is what 497 exists to make impossible.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from tests import sql_corpus
 
 _MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
 _CREATE = (_MIGRATIONS / "382_location_w1_claims.sql").read_text(encoding="utf-8")
-_SLIM = (_MIGRATIONS / "497_location_w1b_claims_slim.sql").read_text(encoding="utf-8")
+_SLIM = (_MIGRATIONS / "498_location_w1b_claims_slim.sql").read_text(encoding="utf-8")
 
 # The 19 the resolver, the scorecard and the inspector actually read. Transcribed because
 # this list IS the contract — everything else in this file is derived from the migrations.
@@ -93,7 +95,7 @@ def test_the_kept_and_dropped_columns_partition_the_table():
     dropped = _dropped_columns()
     assert declared, "DDL parse failed — migration 382 declared no columns"
     assert dropped & declared == dropped, (
-        f"497 drops column(s) 382 never declared: {sorted(dropped - declared)}")
+        f"498 drops column(s) 382 never declared: {sorted(dropped - declared)}")
     assert declared - dropped == set(KEPT_COLUMNS), (
         "the claim spine is not the 19 kept columns; left behind: "
         f"{sorted((declared - dropped) - KEPT_COLUMNS)}, over-dropped: "
@@ -163,7 +165,7 @@ def test_no_runtime_sql_names_a_dropped_relation():
             if re.search(rf"\b{name}\b", item.sql):
                 offenders.append(f"{item.origin} -> {name}")
     assert not offenders, (
-        "runtime SQL still names a relation migration 497 drops:\n  "
+        "runtime SQL still names a relation migration 498 drops:\n  "
         + "\n  ".join(sorted(set(offenders))))
 
 
@@ -192,7 +194,7 @@ def test_no_runtime_sql_names_a_dropped_claim_column():
             if re.search(rf"(?<!%\(){re.escape(column)}\b(?!\)s)", item.sql):
                 offenders.append(f"{item.origin} -> {column}")
     assert not offenders, (
-        "runtime SQL still reads/writes a column migration 497 drops:\n  "
+        "runtime SQL still reads/writes a column migration 498 drops:\n  "
         + "\n  ".join(sorted(set(offenders))))
 
 

@@ -147,7 +147,7 @@ BASE_PROFILE_SUFFIX = "+base"
 # have nothing to do with normalisation — a locator fix, a new extraction entry, a
 # closed coverage gap; ceskereality and realitymix each took two such bumps in the
 # fortnight before this shipped. Keyed on the version, every one of those would land
-# in the churn instrument's PK (migration 402, dropped by 497), orphan that surface's
+# in the churn instrument's PK (migration 402, dropped by 498), orphan that surface's
 # accumulated counters and restart the readout at `fetches=1` — while the projection those
 # counters measured had not moved a byte. That is exactly the waste NORMALIZER_VERSION's own
 # comment above refuses on the engine axis ("bumping an engine whose output did not

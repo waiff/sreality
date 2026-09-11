@@ -23,7 +23,7 @@ DDL = (Path(__file__).resolve().parents[2]
 
 
 def _claims_not_null_defaulted_columns() -> set[str]:
-    """NOT NULL DEFAULT columns 382 declares, narrowed to the ones migration 497 KEPT.
+    """NOT NULL DEFAULT columns 382 declares, narrowed to the ones migration 498 KEPT.
 
     Without the intersection this reads the pre-W1-b table and guards columns the operator
     SQL can no longer write (`legacy_write_path_unknown`, `extracted_at`, `page_kind`,
@@ -53,7 +53,7 @@ def test_operator_sql_never_nulls_a_defaulted_not_null_column():
 
 
 def test_legacy_write_path_unknown_is_computed_but_no_longer_stored():
-    """The column that caused the original NotNullViolation is gone (migration 497). Its
+    """The column that caused the original NotNullViolation is gone (migration 498). Its
     VALUE still has to be spelled — it is one of the 23 inputs to
     `location_claim_fingerprint`, and a NULL there would fork every operator claim off the
     fingerprints already on disk."""

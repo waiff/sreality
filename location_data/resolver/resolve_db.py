@@ -133,7 +133,7 @@ _CURRENT_EPOCH_SQL = "SELECT id FROM pin_cluster_epochs ORDER BY computed_at DES
 # hand-written column list is a silent mis-mapping waiting to happen
 # (`test_resolver_jobs.test_claims_select_maps_onto_claim_positionally` pins the mapping).
 #
-# STRAIGHT OFF THE TABLE (W1-b, migration 497). `location_claims_live` subtracted retracted
+# STRAIGHT OFF THE TABLE (W1-b, migration 498). `location_claims_live` subtracted retracted
 # and shadowed rows; retraction is a DELETE now and shadow is gone, so there is nothing left
 # for a view to subtract and every read is one fewer correlated NOT EXISTS.
 #

@@ -33,7 +33,7 @@ CLI:
     python -m location_data.contracts --load --git-ref <sha>      # project + activate
     python -m location_data.contracts --retract sreality@1 [--extractor-id sr.det.gps]
 
-RETRACTION IS A DELETE (W1-b, migration 497). A contract version that misread the portal
+RETRACTION IS A DELETE (W1-b, migration 498). A contract version that misread the portal
 produced no evidence, so its claims go and their listings are re-resolved from what
 survives — there is no append-only retraction ledger and no `location_claims_live` view
 subtracting rows on every read.
@@ -951,27 +951,46 @@ _ACTIVATE_SQL = """
     UPDATE portal_contracts SET is_active = true, retired_at = NULL WHERE id = %(id)s
 """
 
-# RETRACTION IS A DELETE (W1-b, migration 497). The append-only ledger + the
+# RETRACTION IS A DELETE (W1-b, migrations 497 + 498). The append-only ledger and the
 # `location_claims_live` view that subtracted its rows are gone: a contract version that
 # misread the portal produced no evidence, and teaching every present and future reader to
 # subtract it cost three views and a correlated NOT EXISTS on the resolver's hot read.
 #
-# ONE statement, so the delete and the re-resolve queue cannot separate. `claim_insert` is
-# reused deliberately: the queue's reason is a diagnostic label and the drain rebuilds the
-# whole projection row whatever it says, so a retraction-only value would be a vocabulary
-# entry nothing branches on.
+# THE TARGET IS RESOLVED FIRST, and an empty resolution is an ERROR. A typo'd portal, a
+# version that was never projected or an `--extractor-id` that names no entry used to be
+# indistinguishable from "that version had no claims": both printed `deleted=0` and exited 0,
+# which reads as "done". An operator retracting the wrong thing must be told so.
+_RETRACT_ENTRIES_SQL = """
+    SELECT pce.id
+      FROM portal_contract_entries pce
+      JOIN portal_contracts pc ON pc.id = pce.contract_id
+     WHERE pc.source = %(source)s AND pc.version = %(version)s
+       AND (%(extractor_id)s::text IS NULL OR pce.entry_id = %(extractor_id)s)
+"""
+
+# BOUNDED BATCHES, each its own transaction. "The contract's claims" is every listing the
+# portal has ever had — 5 M rows on sreality — and one atomic DELETE of that size is a
+# statement that spends its whole timeout and then rolls back, doing nothing, forever. A
+# partial retraction is the right failure mode here: the rows that went are gone, their
+# listings are queued, and re-running finishes the job (the predicate is the same).
 #
-# `extractor_id` NULL retracts the whole version; naming one retracts that entry alone.
-_RETRACT_SQL = """
-    WITH entries AS (
-        SELECT pce.id
-          FROM portal_contract_entries pce
-          JOIN portal_contracts pc ON pc.id = pce.contract_id
-         WHERE pc.source = %(source)s AND pc.version = %(version)s
-           AND (%(extractor_id)s::text IS NULL OR pce.entry_id = %(extractor_id)s)
+# `ctid` is the bound: LIMIT inside a DELETE needs a subquery, and the physical row id is the
+# cheapest key that survives one. Safe because nothing UPDATEs `location_claims` — the intake
+# only ever INSERTs — so a row's ctid cannot move under the statement.
+#
+# One statement per batch, so the delete and its re-resolve enqueue cannot separate.
+# `claim_insert` is reused deliberately: the queue's reason is a diagnostic label and the
+# drain rebuilds the whole projection row whatever it says, so a retraction-only value would
+# be a vocabulary entry nothing branches on.
+_RETRACT_BATCH_SQL = """
+    WITH victims AS (
+        SELECT ctid FROM location_claims
+         WHERE contract_entry_id = ANY(%(entry_ids)s)
+         LIMIT %(batch_size)s
     ), deleted AS (
         DELETE FROM location_claims c
-         WHERE c.contract_entry_id IN (SELECT id FROM entries)
+         USING victims v
+         WHERE c.ctid = v.ctid
         RETURNING c.listing_id
     ), enqueued AS (
         INSERT INTO dirty_locations (listing_id, reason)
@@ -982,10 +1001,11 @@ _RETRACT_SQL = """
     SELECT (SELECT count(*) FROM deleted), (SELECT count(*) FROM enqueued)
 """
 
-# "The contract's claims" is every listing the portal has ever had — bound it so a
-# retraction fails loudly instead of hanging a pooler backend, and so the delete and the
-# queue stay atomic either way. (Inherited from the shadow flip this replaces.)
+# Bounds ONE batch, not the retraction: the loop below may run for as long as the corpus
+# needs, but no single statement may hang a pooler backend.
 _RETRACT_TIMEOUT_SQL = "SET LOCAL statement_timeout = '300s'"
+
+RETRACT_BATCH_ROWS = 50_000
 
 _RETIRE_SQL = """
     UPDATE portal_contracts SET is_active = false, retired_at = now()
@@ -1104,12 +1124,13 @@ def project(
 
 @dataclass(frozen=True, slots=True)
 class Retraction:
-    """What `retract` did: how many claim rows it deleted, and how many listings that
-    newly queued for re-resolution (a listing the queue already holds is not counted
-    twice — it is going to be rebuilt either way)."""
+    """What `retract` did: claim rows deleted, listings that newly queued for
+    re-resolution (one the queue already holds is not counted twice — it is going to be
+    rebuilt either way), and how many bounded batches it took."""
 
     deleted: int
     enqueued: int
+    batches: int
 
 
 def retract(
@@ -1119,25 +1140,56 @@ def retract(
     version: int,
     extractor_id: str | None = None,
     retire_header: bool = True,
+    batch_size: int = RETRACT_BATCH_ROWS,
 ) -> Retraction:
     """02 §2.1.8 mechanism 2, as W1-b restates it — retraction DELETES the version's claims
-    and re-resolves their listings, in one transaction.
+    and re-resolves their listings.
 
     A contract version that misread the portal produced no evidence, so there is nothing to
     keep on disk and nothing for a view to subtract on every resolver read. The listings go
     into `dirty_locations` so the `*/15` drain mints their projections from what survives;
     the header is stood down so the next deploy activates a corrected version.
+
+    NOT one transaction, deliberately. The delete is BATCHED, each batch atomic with its own
+    enqueue: a version can hold millions of claims, and a single atomic DELETE of that size
+    burns its statement_timeout and rolls back, leaving the operator exactly where they
+    started with no way to make progress. Interrupted here, the batches that committed are
+    real and re-running resumes — the predicate does not move.
+
+    Raises if the target resolves to no contract entry: a typo'd portal, an unprojected
+    version and an `--extractor-id` that names nothing all used to be indistinguishable from
+    a version that simply had no claims.
     """
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(_RETRACT_TIMEOUT_SQL)
-            cur.execute(_RETRACT_SQL, {
-                "source": source, "version": version, "extractor_id": extractor_id,
-            })
-            deleted, enqueued = (int(x) for x in cur.fetchone())
-            if retire_header and extractor_id is None:
+    with conn.cursor() as cur:
+        cur.execute(_RETRACT_ENTRIES_SQL, {
+            "source": source, "version": version, "extractor_id": extractor_id,
+        })
+        entry_ids = [int(row[0]) for row in cur.fetchall()]
+    if not entry_ids:
+        target = f"{source}@{version}" + (f" entry {extractor_id}" if extractor_id else "")
+        raise ContractError(f"no such contract version: {target} matches no projected entry")
+
+    deleted = enqueued = batches = 0
+    while True:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(_RETRACT_TIMEOUT_SQL)
+                cur.execute(_RETRACT_BATCH_SQL,
+                            {"entry_ids": entry_ids, "batch_size": batch_size})
+                batch_deleted, batch_enqueued = (int(x) for x in cur.fetchone())
+        if batch_deleted == 0:
+            break
+        deleted += batch_deleted
+        enqueued += batch_enqueued
+        batches += 1
+        LOG.info("CONTRACT retract %s@%s batch=%d deleted=%d enqueued=%d",
+                 source, version, batches, batch_deleted, batch_enqueued)
+
+    if retire_header and extractor_id is None:
+        with conn.transaction():
+            with conn.cursor() as cur:
                 cur.execute(_RETIRE_SQL, {"source": source, "version": version})
-    return Retraction(deleted=deleted, enqueued=enqueued)
+    return Retraction(deleted=deleted, enqueued=enqueued, batches=batches)
 
 
 # ------------------------------------------------------------------ CLI
@@ -1196,10 +1248,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"ERROR: schema not applied; missing {', '.join(missing)}",
                       file=sys.stderr)
                 return 2
-            done = retract(conn, source=source, version=version,
-                           extractor_id=args.extractor_id)
-        LOG.info("CONTRACT retracted %s@%s entry=%s deleted=%d enqueued=%d",
-                 source, version, args.extractor_id or "*", done.deleted, done.enqueued)
+            try:
+                done = retract(conn, source=source, version=version,
+                               extractor_id=args.extractor_id)
+            except ContractError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 2
+        LOG.info("CONTRACT retracted %s@%s entry=%s deleted=%d enqueued=%d batches=%d",
+                 source, version, args.extractor_id or "*", done.deleted, done.enqueued,
+                 done.batches)
         return 0
 
     contracts = load_all(args.dir)

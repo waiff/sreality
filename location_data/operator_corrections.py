@@ -15,12 +15,12 @@ Two deliberate choices, both learned from the intake lane:
   operator value (A -> B -> A) collides with the original claim's fingerprint
   and inserts nothing - an `ins`-gated enqueue would never fire and the
   operator would see a dead button. The enqueue is the whole record of the
-  restatement now - migration 497 dropped the observation series.
+  restatement now - migration 498 dropped the observation series.
 * `value_norm` and the fingerprint are computed in SQL by the named migration
   functions (`location_value_norm`, `location_claim_fingerprint`), exactly as
   the intake does - a Python mirror drifts on the foreign-address cohort and a
   drifted fingerprint does not conflict, it inserts. Both still take the FULL
-  01 4.2.1 tuple; migration 497 stopped STORING nine of its inputs, which is
+  01 4.2.1 tuple; migration 498 stopped STORING nine of its inputs, which is
   what keeps every fingerprint already on disk valid.
 
 snapshot_anchor is 'unanchored_latest_fetch': an operator correction is a

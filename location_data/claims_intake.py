@@ -43,7 +43,7 @@ WHAT IT WRITES, AND ONLY THAT
   Refusals — a withheld coordinate, an oversized value, a subject miss — are COUNTED and
   logged once per reason per batch. `location_claim_observations`,
   `location_claim_absences` and `location_enrichment_state` were written by every lane and
-  read by none; W1-a stopped writing them and migration 497 dropped them.
+  read by none; W1-a stopped writing them and migration 498 dropped them.
 
 CLI:
     python -m location_data.claims_intake --mode incremental
@@ -743,7 +743,7 @@ _STAMP_MINED_SQL = """
 #
 # The tuple is 01 §4.2.1's, in its order, and is TIME-FREE.
 #
-# IT IS ALSO WIDER THAN THE TABLE (W1-b, migration 497). Nine of its inputs — page_kind,
+# IT IS ALSO WIDER THAN THE TABLE (W1-b, migration 498). Nine of its inputs — page_kind,
 # extractor_id, extractor_version, value_norm, distance_m, travel_mode, target_text,
 # declared_confidence, legacy_source_column — are no longer STORED, but the readers still
 # compute them and they still enter the hash. That is what keeps 5 M existing fingerprints
@@ -1327,7 +1327,7 @@ def run(
 
     # A refusal is a LINE PER REASON WITH A COUNT, which is what the operator reads. It is
     # not a row: `location_claim_absences` held one per refused entry per listing, was
-    # written by every lane and read by none, and is gone (migration 497).
+    # written by every lane and read by none, and is gone (migration 498).
     for reason in sorted(refusals):
         LOG.info("INTAKE refused reason=%s count=%d", reason, refusals[reason])
     stats["refusal_reasons"] = dict(sorted(refusals.items()))

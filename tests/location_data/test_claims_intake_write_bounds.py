@@ -60,7 +60,7 @@ class _Cursor:
         return [p["rows"].obj for sql, p in self.executed if table in sql]
 
 
-# The fields below that migration 497 dropped from the TABLE (source_id_native, page_kind,
+# The fields below that migration 498 dropped from the TABLE (source_id_native, page_kind,
 # extractor_id, extractor_version, snapshot_anchor, history_completeness) are still spelled
 # here on purpose: the readers compute them and the fingerprint still hashes them.
 def _claim(listing_id: int, *, value_text: str | None = None,
@@ -205,7 +205,7 @@ def test_an_oversized_value_is_refused_never_silently_dropped():
     assert {c.claim_type for c in result.claims} >= {"street_name", "coordinate"}
     # 2. counted under its own reason, at the refused claim's grain — and logged. A
     # counter, not a row: `location_claim_absences` was written by every lane and read by
-    # none (rule 25) and is gone (migration 497), so what survives is the tally the
+    # none (rule 25) and is gone (migration 498), so what survives is the tally the
     # operator actually reads.
     assert result.refusals["oversized_value:uncertainty_geometry"] == 1
 
@@ -244,7 +244,7 @@ def test_a_legacy_shape_row_counts_both_refusals_separately():
     """A legacy-shape sreality row with an oversized value used to collide on ONE
     `location_enrichment_state` primary key — `ON CONFLICT … DO UPDATE` "cannot affect row a
     second time", i.e. an aborted run. Two counters cannot collide (and that table is gone
-    as of migration 497)."""
+    as of migration 498)."""
     payload = json.loads(json.dumps(SREALITY_LEGACY))
     payload["locality"] = dict(SREALITY_POST_CUTOVER["locality"])
     payload["locality"]["geometry"] = json.loads(

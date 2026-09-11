@@ -1,9 +1,26 @@
--- 497_location_w1b_claims_slim.sql
+-- 498_location_w1b_claims_slim.sql
 --
--- Location simplification sprint, wave W1-b. Rule 25 ("one store, one lane, nine
--- claim types, no flags; every location PR deletes at least as much as it adds"):
--- the claim spine slims to the 19 columns the resolver actually reads, and every
--- side table, view and flag built around the old completeness-first shape goes.
+-- Location simplification sprint, wave W1-b, file 2 of 2. **APPLY THIS AFTER THE
+-- ROLLOUT.** Rule 25 ("one store, one lane, nine claim types, no flags; every
+-- location PR deletes at least as much as it adds"): the claim spine slims to the 19
+-- columns the resolver actually reads, and every side table, view and flag built
+-- around the old completeness-first shape goes.
+--
+-- THE ORDER, and it is not negotiable (497's header carries the full argument):
+--
+--     apply 497  ->  merge  ->  Railway green + one green intake tick  ->  apply 498
+--
+-- 497 RELAXES — five CHECKs, three NOT NULLs, one DEFAULT and the payload FK — so the
+-- new 19-column write is legal on the OLD table; this file DROPS, once the new code is
+-- the only code running. Splitting them is what makes both windows safe: between 497
+-- and 498 either version of the code writes correctly. Every drop below is `if exists`,
+-- so a replay from an empty database and the live order land on the same schema even
+-- where 497 got there first.
+--
+-- **`--retract` must not be run between the merge and this file.** `contracts.retract()`
+-- DELETEs claim rows, and three of the tables dropped below still FK to
+-- `location_claims(id)` until it runs. Nothing else in the code deletes a claim, so no
+-- scheduled lane is exposed.
 --
 -- WHAT THIS DELETES, AND WHY EACH IS DEAD
 --
@@ -41,10 +58,6 @@
 -- no longer STORED. So every fingerprint already on disk stays valid, the UNIQUE index keeps
 -- deduping an incremental re-walk against it, and no corpus re-insert happens in this wave.
 -- Dropping a column from the tuple would have re-dialected 5 M rows.
---
--- APPLY AFTER THE ROLLOUT. The code shipped with this migration runs against BOTH schemas:
--- it reads and writes only the 19 kept columns and names no dropped relation. Apply this
--- only once Railway and the hourly intake workflow have picked the merge up.
 --
 -- Nothing is created. The one `add constraint` below re-states an invariant that already
 -- existed, minus a column it names.
@@ -109,18 +122,27 @@ drop table if exists portal_payload_churn;
 --    value_jsonb, subject_scoped, declared_precision_label, declared_radius_m,
 --    blur_evidence, claim_confidence, licence_class, claim_fingerprint.
 --
---    `loc_claim_value_present` is dropped FIRST because it names value_shape and
---    is re-stated below without it; every other CHECK and index that names a
---    dropped column is dropped BY Postgres along with the column (a table
---    constraint or index "involving" a dropped column goes automatically), which
---    covers loc_claim_text_evidence, loc_claim_evidence_payload,
---    loc_claim_llm_model, loc_claim_legacy, loc_claim_anchor,
---    loc_claim_distance_shape, the travel_mode and history_completeness CHECKs,
---    location_claims_batch_fk, and the location_claims_snapshot / _payload /
---    _payload_id / _norm_trgm indexes.
+--    The named constraint drops below are the six 497 handled plus
+--    `loc_claim_value_present` (which 497 deliberately left standing — every claim
+--    the new write emits satisfies it, so it guarded the window rather than
+--    obstructing it, and it is re-stated afterwards minus value_shape). They are
+--    `if exists` no-ops on the live database and the real drops on a REPLAY FROM
+--    EMPTY, where 497 ran against a table 382 had just created carrying them.
+--
+--    Everything else that names a dropped column is dropped BY Postgres along with
+--    the column (a table constraint or index "involving" a dropped column goes
+--    automatically): loc_claim_evidence_payload, the travel_mode and
+--    history_completeness CHECKs, location_claims_batch_fk, and the
+--    location_claims_snapshot / _payload / _payload_id / _norm_trgm indexes.
 ------------------------------------------------------------------
 
 alter table location_claims drop constraint if exists loc_claim_value_present;
+alter table location_claims drop constraint if exists loc_claim_anchor;
+alter table location_claims drop constraint if exists loc_claim_text_evidence;
+alter table location_claims drop constraint if exists loc_claim_llm_model;
+alter table location_claims drop constraint if exists loc_claim_legacy;
+alter table location_claims drop constraint if exists loc_claim_distance_shape;
+alter table location_claims drop constraint if exists location_claims_payload_id_fkey;
 
 alter table location_claims
   drop column if exists source_id_native,

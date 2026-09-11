@@ -70,7 +70,7 @@ class GranularityRank:
 class Claim:
     """One `location_claims` row, as the resolver consumes it (01 §4.2).
 
-    The last six fields are no longer SELECTed (W1-b, migration 497: four of the columns
+    The last six fields are no longer SELECTed (W1-b, migration 498: four of the columns
     are dropped, and the pure core reads none of the six). They keep their names and
     defaults so a fixture or a policy rule can still spell them without a DB column.
     """
