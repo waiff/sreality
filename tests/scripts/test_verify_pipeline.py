@@ -7,6 +7,7 @@ isolation of run_checks.
 
 from __future__ import annotations
 
+import io
 import json
 from typing import Any
 
@@ -2100,3 +2101,179 @@ def test_outbound_url_coverage_clean_is_ok() -> None:
     r = check_outbound_url_coverage(_UrlCoverageConn([("bazos", 1, 0, 0), ("sreality", 1, 3, 0)]), T)
     assert r["status"] == "ok" and r["value"] == 3
     assert r["message"].startswith("Every active listing")
+
+
+# --- the sreality image template canary -------------------------------------
+#
+# The one check that leaves the database, so the one check whose tests must pin a
+# network seam: tests/conftest.py has no socket guard, and a real request here would
+# make the suite depend on sreality being up.
+
+
+def _jpeg_bytes(width: int, height: int) -> bytes:
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), (128, 128, 128)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+_PROBE_INDEX_BODY = json.dumps(
+    {"results": [{"advert_images": [{"url": "//d18-a.sdn.cz/d_18/c_img_QK_x/abc.jpeg",
+                                    "order": 0}]}]}
+).encode()
+
+
+def _probe_seam(
+    index: tuple[int, bytes] | Exception,
+    cdn: tuple[int, bytes] | Exception,
+    calls: list[str],
+) -> Any:
+    """A seam that answers the index call first and the CDN call second."""
+
+    def _fetch(url: str, timeout: Any, max_bytes: int, *, accept: str = "*/*") -> tuple[int, bytes]:
+        calls.append(url)
+        answer = index if len(calls) == 1 else cdn
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    return _fetch
+
+
+def test_sreality_image_template_is_registered_last() -> None:
+    """An unregistered check is dead code that never writes a row. It is registered
+    LAST on purpose: the only outbound check must be the one the lane budget drops."""
+    from scripts.verify_pipeline import _CHECKS, check_sreality_image_template
+
+    assert ("sreality_image_template", check_sreality_image_template) in _CHECKS
+    assert _CHECKS[-1] == ("sreality_image_template", check_sreality_image_template)
+
+
+def test_sreality_image_template_thresholds_have_code_defaults() -> None:
+    """load_thresholds merges app_settings OVER the defaults, so a key no seed
+    migration carries must still resolve — a KeyError here reds the check every run."""
+    for key in ("sreality_image_template_min_width", "sreality_image_template_timeout_s"):
+        assert key in DEFAULT_THRESHOLDS
+
+
+def test_sreality_image_template_ok_on_a_full_size_frame(monkeypatch: Any) -> None:
+    import scripts.verify_pipeline as vp
+
+    calls: list[str] = []
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
+        (200, _PROBE_INDEX_BODY), (200, _jpeg_bytes(1600, 1000)), calls))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["check_key"] == "sreality_image_template"
+    assert r["status"] == "ok" and r["value"] == 1600
+    assert r["details"]["width"] == 1600 and r["details"]["height"] == 1000
+    assert r["details"]["http_status"] == 200 and r["details"]["bytes"] > 0
+    assert "skipped" not in r["details"]
+
+
+def test_sreality_image_template_probes_the_deployed_transform(monkeypatch: Any) -> None:
+    """The probe must never carry a literal chain: a hard-coded copy would keep
+    reporting green the day IMAGE_TRANSFORM_OPS changed and the CDN did not."""
+    import scripts.verify_pipeline as vp
+    from scraper.image_storage import with_transform
+
+    calls: list[str] = []
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
+        (200, _PROBE_INDEX_BODY), (200, _jpeg_bytes(1600, 1000)), calls))
+    r = vp.check_sreality_image_template(None, T)
+    expected = with_transform("https://d18-a.sdn.cz/d_18/c_img_QK_x/abc.jpeg")
+    assert r["details"]["image_url"] == "https://d18-a.sdn.cz/d_18/c_img_QK_x/abc.jpeg"
+    assert r["details"]["transform"] == expected
+    assert calls[1] == expected
+    assert calls[0].startswith("https://www.sreality.cz/api/v1/estates/search?")
+    assert "limit=1" in calls[0] and "locality_country_id=112" in calls[0]
+
+
+def test_sreality_image_template_fails_on_the_superseded_749_rendition(monkeypatch: Any) -> None:
+    """A silent downgrade answers 200 with a smaller frame — invisible to any check
+    that only reads the HTTP status."""
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
+        (200, _PROBE_INDEX_BODY), (200, _jpeg_bytes(749, 562)), []))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["status"] == "fail" and r["value"] == 749
+    assert "749x562" in r["message"] and "IMAGE_TRANSFORM_OPS" in r["message"]
+
+
+def test_sreality_image_template_fails_on_a_non_image_body(monkeypatch: Any) -> None:
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
+        (200, _PROBE_INDEX_BODY), (200, b"<html>not an image at all</html>"), []))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["status"] == "fail" and r["value"] is None
+    assert "non-image body" in r["message"]
+    assert r["details"]["width"] is None
+
+
+def test_sreality_image_template_fails_when_the_cdn_refuses_the_template(monkeypatch: Any) -> None:
+    """400 is what an off-allowlist chain gets, and it is a verified verdict about OUR
+    transform — a fail, not the network-error warn."""
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
+        (200, _PROBE_INDEX_BODY), (400, b""), []))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["status"] == "fail" and r["details"]["http_status"] == 400
+    assert "REFUSED" in r["message"]
+
+
+def test_sreality_image_template_warns_when_the_index_is_unreachable(monkeypatch: Any) -> None:
+    """A network error verified nothing, so it can never be a fail — a flaky lane must
+    not read as 'sreality rejected our template'."""
+    import requests
+
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
+        requests.ConnectionError("boom"), (200, b""), []))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["status"] == "warn" and r["value"] is None
+    assert r["details"]["skipped"] is True
+    assert "verified NOTHING" in r["message"]
+
+
+def test_sreality_image_template_warns_when_the_cdn_is_unreachable(monkeypatch: Any) -> None:
+    import requests
+
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
+        (200, _PROBE_INDEX_BODY), requests.Timeout("slow"), []))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["status"] == "warn" and r["details"]["skipped"] is True
+    assert r["details"]["transform"].endswith("fl=res,1800,1800,1|shr,,20|jpg,80")
+
+
+def test_sreality_image_template_warns_on_an_empty_index(monkeypatch: Any) -> None:
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
+        (200, json.dumps({"results": []}).encode()), (200, b""), []))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["status"] == "warn" and r["details"]["skipped"] is True
+    assert "no estates" in r["details"]["reason"]
+
+
+def test_sreality_image_template_warns_on_an_estate_with_no_images(monkeypatch: Any) -> None:
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam(
+        (200, json.dumps({"results": [{"advert_images": []}]}).encode()), (200, b""), []))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["status"] == "warn" and r["details"]["skipped"] is True
+    assert "no images" in r["details"]["reason"]
+
+
+def test_sreality_image_template_warns_on_a_non_200_index(monkeypatch: Any) -> None:
+    import scripts.verify_pipeline as vp
+
+    monkeypatch.setattr(vp, "_fetch_sreality_probe", _probe_seam((503, b""), (200, b""), []))
+    r = vp.check_sreality_image_template(None, T)
+    assert r["status"] == "warn" and r["details"]["http_status"] == 503

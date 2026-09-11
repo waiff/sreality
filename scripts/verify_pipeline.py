@@ -45,9 +45,17 @@ import time as _time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlencode
+
+import requests
 
 from location_data.refetch_cohort import SREALITY_SHAPE_CASE_SQL
+from scraper import media as _media
 from scraper.db import QUEUE_PRIORITY_NEW, connect
+from scraper.image_storage import IMAGE_TRANSFORM_OPS, image_dimensions, with_transform
+from scraper.parser import parse_images
+from scraper.portal_base import _BASE_HEADERS as _PORTAL_HEADERS
+from scraper.sreality_client import CZ_COUNTRY_ID, INDEX_URL as _SREALITY_INDEX_URL
 from toolkit.listing_identity import R2_CARRIERS as _PARITY_CARRIERS
 from toolkit.system_alerts import (
     AlertPolicy,
@@ -278,6 +286,20 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # what a quiet week looks like. The cursor is the only thing that distinguishes them.
     "workflow_poller_stale_warn_hours": 6.0,
     "workflow_poller_stale_fail_hours": 12.0,
+    # Sreality image template canary. The CDN is an exact-template ALLOWLIST, not a
+    # transform language, and sreality has re-cut its catalogue once before with no
+    # notice: the day the deployed chain leaves the allowlist every request 400s,
+    # `_classify_image_failure` parks each one terminally, and the only symptom is a
+    # download lane that quietly stops storing bytes. The canary asks the live CDN,
+    # daily, whether the template we ACTUALLY ship still returns a full-size frame.
+    # 1000 px is the discriminator that matters: the superseded template served 749 px
+    # (and cropped), so a silent revert to it — the exact regression the master-template
+    # work undid — lands below the line, while the shipped 1800-fit template clears it
+    # with 800 px of headroom and a portrait photo scaled to 1800 on its long edge still
+    # measures ~1200 on the short one. Timeout is the read half of a (5, 8) connect/read
+    # pair; the lane's own budget is 45 s, so two calls at 8 s cannot threaten it.
+    "sreality_image_template_min_width": 1000,
+    "sreality_image_template_timeout_s": 8.0,
     # --- alert escalation policy (W3.4) -------------------------------------
     # Not per-check thresholds: these govern toolkit.system_alerts, so EVERY check
     # inherits one escalation policy instead of each one growing its own. Scalars, one
@@ -2527,6 +2549,151 @@ def check_outbound_url_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[s
     }
 
 
+# --- the sreality image template canary (daily probe of the DEPLOYED chain) --
+#
+# The one check in this harness that leaves the database. Everything else reads
+# our own tables, which can only tell us what we already stored; a CDN that
+# started refusing our transform stores nothing, so there is no row to read.
+
+_SREALITY_PROBE_MAX_BYTES = 6 * 1024 * 1024
+
+# byt / prodej / CZ, one row, newest page — the same v1 search the walk uses, at
+# limit 1. Any live category would do; byt-prodej is simply the slice that is
+# never empty.
+_SREALITY_PROBE_PARAMS: dict[str, Any] = {
+    "category_main_cb": 1,
+    "category_type_cb": 1,
+    "locality_country_id": CZ_COUNTRY_ID,
+    "limit": 1,
+    "offset": 0,
+}
+
+
+def _fetch_sreality_probe(
+    url: str, timeout: tuple[float, float], max_bytes: int, *, accept: str = "*/*"
+) -> tuple[int, bytes]:
+    """The canary's ONE network seam — the whole check is hermetic behind it.
+
+    Streams and stops at `max_bytes`: if the CDN ever answers an image URL with a
+    video, an unbounded read would burn the lane budget the statement_timeout
+    cannot bound (that only governs Postgres).
+    """
+    headers = {**_PORTAL_HEADERS, "Accept": accept}
+    with requests.get(url, timeout=timeout, headers=headers, stream=True) as response:
+        buf = bytearray()
+        for chunk in response.iter_content(chunk_size=65536):
+            buf += chunk
+            if len(buf) >= max_bytes:
+                break
+        return response.status_code, bytes(buf)
+
+
+def _probe_skipped(detail: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """warn, never fail: the canary could not REACH sreality, so it verified nothing
+    about our transform — and a flaky network must not manufacture a red that reads as
+    'the CDN rejected our template'."""
+    return {
+        "check_key": "sreality_image_template",
+        "status": "warn",
+        "value": None,
+        "details": {"skipped": True, "reason": detail, **(extra or {})},
+        "message": (
+            f"Sreality image template verified NOTHING this run — {detail}. The "
+            "deployed transform is UNKNOWN, not healthy; if this persists the probe "
+            "itself needs attention."
+        ),
+    }
+
+
+def check_sreality_image_template(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Does sreality's CDN still serve the transform template the download path ships?
+
+    Fetches one FRESH image URL from the live index (never a stored one — a stored URL
+    proves only that the template worked when we stored it) and requests it through
+    `image_storage.with_transform`, so the probe is the deployed chain by construction
+    and cannot drift from it. A frame narrower than the threshold is the failure mode
+    that matters: the CDN answers 200 with a smaller or cropped rendition rather than
+    an error, which no HTTP-status check would ever see.
+    """
+    min_width = int(thresholds["sreality_image_template_min_width"])
+    read_timeout = float(thresholds["sreality_image_template_timeout_s"])
+    timeout = (5.0, read_timeout)
+    index_url = f"{_SREALITY_INDEX_URL}?{urlencode(_SREALITY_PROBE_PARAMS)}"
+
+    try:
+        status_code, body = _fetch_sreality_probe(
+            index_url, timeout, _SREALITY_PROBE_MAX_BYTES, accept="application/json")
+    except requests.RequestException as exc:
+        return _probe_skipped(f"the sreality index is unreachable ({exc})")
+    if status_code != 200:
+        return _probe_skipped(f"the sreality index answered HTTP {status_code}",
+                              {"http_status": status_code})
+    try:
+        payload = json.loads(body)
+    except ValueError as exc:
+        return _probe_skipped(f"the sreality index body is not JSON ({exc})")
+    results = (payload or {}).get("results") or []
+    if not results or not isinstance(results[0], dict):
+        return _probe_skipped("the sreality index returned no estates")
+    images = parse_images(results[0])
+    if not images:
+        return _probe_skipped("the newest sreality estate carries no images")
+
+    image_url = images[0]["url"]
+    transform = with_transform(image_url)
+    started = _time.monotonic()
+    try:
+        cdn_status, data = _fetch_sreality_probe(
+            transform, timeout, _SREALITY_PROBE_MAX_BYTES, accept="image/*")
+    except requests.RequestException as exc:
+        return _probe_skipped(f"the sreality CDN is unreachable ({exc})",
+                              {"image_url": image_url, "transform": transform})
+    elapsed_ms = int((_time.monotonic() - started) * 1000)
+    size = image_dimensions(data) if _media.is_image_bytes(data) is not None else None
+    width, height = size if size else (None, None)
+    details: dict[str, Any] = {
+        "image_url": image_url, "transform": transform, "http_status": cdn_status,
+        "width": width, "height": height, "bytes": len(data), "elapsed_ms": elapsed_ms,
+        "min_width": min_width,
+    }
+
+    if cdn_status != 200:
+        message = (
+            f"Sreality REFUSED our image transform: HTTP {cdn_status} for "
+            f"`{IMAGE_TRANSFORM_OPS}`. Their CDN is an exact-template allowlist, so this "
+            "is a catalogue change — every image download is now parking terminally. "
+            "Re-derive the template from sreality's own frontend and update "
+            "scraper/image_storage.IMAGE_TRANSFORM_OPS."
+        )
+    elif width is None:
+        kind = "a non-image body" if _media.is_image_bytes(data) is None else "undecodable bytes"
+        message = (
+            f"Sreality answered HTTP 200 for our image transform but returned {kind} "
+            f"({len(data)} bytes) — the template is off their allowlist or the URL no "
+            "longer serves a photo. Check scraper/image_storage.IMAGE_TRANSFORM_OPS."
+        )
+    elif width < min_width:
+        message = (
+            f"Sreality's CDN served {width}x{height} px for our transform, under the "
+            f"{min_width} px floor — the template silently downgraded (the superseded "
+            "chain served 749 px and cropped). Downloads are storing small, possibly "
+            "cropped frames. Re-derive IMAGE_TRANSFORM_OPS."
+        )
+    else:
+        message = (
+            f"Sreality's image template is live: {width}x{height} px, {len(data)} bytes "
+            f"in {elapsed_ms} ms."
+        )
+    status = "ok" if cdn_status == 200 and width is not None and width >= min_width else "fail"
+    return {
+        "check_key": "sreality_image_template",
+        "status": status,
+        "value": width,
+        "details": details,
+        "message": message,
+    }
+
+
 _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("llm_errors", check_llm_errors),
     ("llm_liveness", check_llm_liveness),
@@ -2557,6 +2724,10 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     # Portal-URL contract: absolute count of active rows with no page URL. 6h lane +
     # in-app bell; not in the hourly --only list (ship, soak, then promote).
     ("outbound_url_coverage", check_outbound_url_coverage),
+    # LAST deliberately: the only check that makes an outbound request, so if the
+    # lane budget runs out it is the one that goes unrun, never a DB check. 6h lane
+    # + in-app bell; not in llm_health.yml's hourly --only list (ship, soak, promote).
+    ("sreality_image_template", check_sreality_image_template),
 ]
 # (the check body sits above this registry; the SQL it runs is
 # `_LOCATION_PAYLOAD_SHAPE_DRIFT_SQL`, built on the shape CASE the W4 gate shares)

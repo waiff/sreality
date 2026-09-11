@@ -431,3 +431,35 @@ the message names the remedy per source (sreality: update `sreality_payload_shap
 `payload_schema_detector`, re-extract; bezrealitky: restore `ruianId` in `_DETAIL_QUERY`, then refetch
 the rows fetched meanwhile). 6-hourly lane + in-app bell only; promotion into `llm_health.yml`'s
 hourly `--only` list is a deliberate step after a soak, like the ppm2 checks.
+
+`sreality_image_template` — the **only check in the harness that leaves the database**, and
+the reason it has to: every other check reads a table we wrote, and a CDN that started
+refusing our transform writes nothing, so there is no row to read. Sreality's image CDN is an
+exact-template **allowlist**, not a transform language — the download path ships
+`scraper/image_storage.IMAGE_TRANSFORM_OPS` (`res,1800,1800,1|shr,,20|jpg,80`, their
+SQUARE_1800_JPG whole-frame template) and anything off the list 400s. Sreality re-cut that
+catalogue once before with no notice; `_classify_image_failure` parks a 400 **terminally**
+(`source_unavailable`, never retried), so a catalogue change would park every image in flight
+and surface only as a download lane that quietly stopped storing bytes.
+The probe: GET the live v1 search (`INDEX_URL`, byt/prodej/CZ, `limit=1`) with the client's
+browser headers, take `results[0].advert_images[0].url` through `parse_images` semantics
+(`//` → `https:`), then request `image_storage.with_transform(url)` — the **deployed** chain by
+construction, never a literal copy, so the probe cannot drift from the code it guards — and
+measure the bytes with `image_storage.image_dimensions`. Both calls stream behind one seam,
+`_fetch_sreality_probe(url, timeout, max_bytes)`, at `timeout=(5, 8)` and a 6 MB read cap: the
+lane budget is enforced only as a Postgres `statement_timeout`, which cannot bound a hung
+socket. A FRESH index URL, never a stored one — a stored URL proves only that the template
+worked the day we stored it.
+`fail` on CDN non-200 (the allowlist rejected us), a non-image or undecodable body, or a width
+under `sreality_image_template_min_width` (1000). The width floor is the arm that matters: the
+silent downgrade answers **HTTP 200** with a smaller or cropped rendition, which no status check
+would ever see, and the superseded `res,749,562,3` chain — the exact regression the master-template
+work undid — served 749 px and cropped to 4:3. 1800-fit clears 1000 with 800 px of headroom even
+on a portrait photo. A network error or a non-200/empty/imageless index is `warn` with
+`details.skipped` ("verified NOTHING"), never `fail`: the canary reached nothing, and a flaky lane
+must not read as "sreality rejected our template". `value` is the measured width in px; `details`
+carries `image_url`, `transform`, `http_status`, `width`, `height`, `bytes`, `elapsed_ms`.
+Registered **last** in `_CHECKS` on purpose — the one outbound check is the one the lane budget
+should drop first. 6-hourly lane + in-app bell; promotion into `llm_health.yml`'s hourly `--only`
+list is a deliberate post-soak step, like the ppm2 checks. The remedy when it reds: re-derive the
+template from sreality's own frontend and update `IMAGE_TRANSFORM_OPS`.
