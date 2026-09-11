@@ -26,12 +26,14 @@ const IMG_CACHE_BUST = '2';
 
 // sreality's CDN 401s a BARE image URL and is an exact-template ALLOWLIST — only their
 // SQUARE_1800_JPG chain (whole frame, up to 1800px, no watermark) returns the master.
-// Mirrors scraper/image_storage.py `with_transform` (parity-tested): drop the serving
-// ops a stored chain carries (including the legacy 749 CROP), keep per-photo ops such as
-// `rot,<deg>,0` in front, append ours. Gated on the sdn.cz host.
+// Mirrors scraper/image_storage.py `with_transform`, and the mirror is parity-tested on
+// the constants AND on shared probe vectors (tests/fixtures/sreality_transform_probes.json):
+// keep only the per-photo ops below (`rot,<deg>,0`) in front, drop everything else a stored
+// chain carries (the legacy 749 CROP, and any op we don't recognise — carrying it through
+// would build a chain off the allowlist, which 400s). Gated on the sdn.cz host.
 const SREALITY_IMG_HOST = 'sdn.cz';
 const SREALITY_TRANSFORM_OPS = 'res,1800,1800,1|shr,,20|jpg,80';
-const SERVING_OP_HEADS = new Set(['res', 'shr', 'jpg', 'webp', 'wrm']);
+const PRESERVED_OP_HEADS = new Set(['rot']);
 
 const withSrealityTransform = (url: string): string => {
   if (!url.includes(SREALITY_IMG_HOST)) return url;
@@ -48,7 +50,7 @@ const withSrealityTransform = (url: string): string => {
       continue;
     }
     for (const op of param.slice(3).split('|')) {
-      if (op && !SERVING_OP_HEADS.has(op.split(',')[0])) preserved.push(op);
+      if (op && PRESERVED_OP_HEADS.has(op.split(',')[0])) preserved.push(op);
     }
   }
   const chain = [...preserved, SREALITY_TRANSFORM_OPS].join('|');

@@ -46,11 +46,18 @@ watermark. It replaced `res,749,562,3|shr,,20|jpg,90`, whose mode 3 CROPPED to 4
 photos lost their edges; a floor plan lost a whole floor) at a fraction of the master's resolution.
 `image_storage.with_transform` is the one definition: a stored `sreality_url` may be bare, carry the
 legacy chain, or carry a prefix chain (`?fl=rot,180,0|`), and all three are **normalised** onto the
-current template — serving ops (`res`/`shr`/`jpg`/`webp`/`wrm`) are dropped and replaced, per-photo
-facts (notably `rot,<deg>,0`, without which the CDN returns 200 and stores the photo unrotated) are
-kept in front. The chain is split by hand and never URL-encoded: the allowlist matches literally, so
-`%2C`/`%7C` are rejected. `frontend/src/lib/imageUrl.ts` mirrors it for the not-yet-downloaded
-fallback and `tests/test_image_transform_parity.py` fails if the two copies drift.
+current template. What survives from a stored chain is itself an **allowlist**, `_PRESERVED_OP_HEADS`
+= `{rot}`: `rot,<deg>,0` is a per-photo fact the template can't carry (without it the CDN returns 200
+and stores the photo unrotated) and is the one prefix verified accepted in front of the template.
+Everything else is dropped — the serving ops (`res`/`shr`/`jpg`/…) because they're ours to choose, an
+unrecognised op because carrying it through would build a chain off the allowlist, and a 400 is
+classified `source_unavailable`: terminal, out of the queue, never retried. Dropping costs at worst a
+cosmetic difference on one photo; keeping could park a cohort. The chain is split by hand and never
+URL-encoded: the allowlist matches literally, so `%2C`/`%7C` are rejected.
+`frontend/src/lib/imageUrl.ts` mirrors this for the not-yet-downloaded fallback, and the mirror is
+pinned on THREE things by `tests/test_image_transform_parity.py` + `imageUrl.test.ts` — the template
+string, the kept-op set, and shared probe vectors (`tests/fixtures/sreality_transform_probes.json`)
+that both suites run through their own normaliser, so a drift in the logic reds a suite too.
 
 **Data source (bazos.cz).** A separate HTML crawler (`scraper/bazos_client.py`,
 `bazos_parser.py`, `bazos_main.py`) lands bazos listings into the same
@@ -769,6 +776,22 @@ renumber.** Navigate by area:
    must go through `db.invalidate_derived_signals` — the one chokepoint that re-arms the phash +
    CLIP lanes by nulling their own predicates (`phash`, `clip_tagged_at`) and deletes no label,
    review or CLIP-cache row.
+   **Two consequences of the template switch, both live until the re-master lane finishes.**
+   (a) *The visual-signal corpus is MIXED-RENDITION.* dHash and CLIP are framing-sensitive, so the
+   same photo stored as the old 4:3 crop and as the whole frame yields materially different signals:
+   **phash/CLIP are comparable only WITHIN a rendition**, and any cross-row query (the duplicate
+   census, the new-dedup rebuild, a Hamming join) must group or filter on `images.rendition` — NULL
+   and `sreality-749-crop` are the crop cohort, `sreality-1800-fit` the master cohort. Newly
+   downloaded rows widen the split without passing through `invalidate_derived_signals`, which only
+   covers rows a re-master rewrites. `scripts/tagging_bakeoff_arms.py` calibrated its resolutions
+   against the old 749px stored width — re-read that comment against the rendition mix before
+   trusting a cross-era comparison. (b) *Stored objects get several times larger and there is no
+   thumbnail rendition yet*, so every surface (Browse cards, lightbox, comparables, the extension)
+   serves a master into a thumbnail-sized `<img>`: more R2 egress and page weight, the accepted
+   price of not having lost the photo's edges. A derived small rendition is sequenced on the scraper
+   track. Downstream, the image phase's bound is wall-clock (`--image-max-seconds`), not the count
+   cap — per-image cost moved, and a count cap calibrated against the old rate overruns the CI job
+   timeout into a SIGKILL that skips finalize.
 7. **No new dependencies without justification.** Each entry in `pyproject.toml` should
    have a clear reason. Prefer the stdlib.
 8. **Latest-wins data model with snapshot history.** The `listings` table always reflects

@@ -172,6 +172,17 @@ def test_with_transform_normalises_legacy_complete_chain():
     assert with_transform(legacy) == "https://d18-a.sdn.cz/x/y.jpeg?fl=" + IMAGE_TRANSFORM_OPS
 
 
+def test_with_transform_drops_an_unrecognised_op():
+    """The kept-ops list is an ALLOWLIST because the CDN is one. Carrying an op we
+    don't recognise in front of the template builds a chain the CDN 400s, and
+    `_classify_image_failure` parks a 400 terminally (source_unavailable, never
+    retried) — so an unknown op is dropped, costing at worst one odd-looking photo."""
+    from scraper.image_storage import IMAGE_TRANSFORM_OPS, with_transform
+
+    url = "https://d18-a.sdn.cz/x/y.jpeg?fl=crp,1,2|res,749,562,3|shr,,20|jpg,90"
+    assert with_transform(url) == "https://d18-a.sdn.cz/x/y.jpeg?fl=" + IMAGE_TRANSFORM_OPS
+
+
 def test_with_transform_is_idempotent():
     """Running it over its own output must be byte-identical — the URL is what the
     browser and the HTTP cache key on."""

@@ -14,6 +14,7 @@ Three concerns:
 from __future__ import annotations
 
 import threading
+import time
 from collections import deque
 from contextlib import contextmanager
 from typing import Any
@@ -664,7 +665,9 @@ def _fake_connect():
     yield object()
 
 
-def _drive_image_loop(monkeypatch, batches, fetch_result):
+def _drive_image_loop(
+    monkeypatch, batches, fetch_result, *, max_seconds=None, fetch_delay=0.0
+):
     """Run _run_image_downloads with a scripted pending queue + fake fetcher.
 
     `batches` is a list of row-lists (each row: image_id, listing_id, seq, url,
@@ -705,6 +708,8 @@ def _drive_image_loop(monkeypatch, batches, fetch_result):
     )
 
     def _fake_fetch(sid, seq, url, r2, semaphore=None):
+        if fetch_delay:
+            time.sleep(fetch_delay)
         err = fetch_result(url)
         phash = None if err is not None else 777
         return (
@@ -716,7 +721,9 @@ def _drive_image_loop(monkeypatch, batches, fetch_result):
 
     monkeypatch.setattr(scraper_main, "_fetch_one_image", _fake_fetch)
 
-    out = scraper_main._run_image_downloads(max_downloads=0, workers=4)
+    out = scraper_main._run_image_downloads(
+        max_downloads=0, workers=4, max_seconds=max_seconds
+    )
     out["_stored_phashes"] = stored_phashes
     return out, stored
 
@@ -772,6 +779,39 @@ def test_run_stops_suspicious_when_only_quarantined_host_remains(monkeypatch):
 
     assert len(stored) == 2  # only the good images
     assert out["stopped_suspicious"] is True
+
+
+def test_wall_clock_budget_stops_the_drain_between_batches(monkeypatch):
+    """The time budget — not the count cap — is what keeps a CI shard inside its
+    job timeout: per-image cost moves under a count cap (the ≤1800px sreality
+    master multiplied the bytes), and an overrun is SIGKILLed with no finalize.
+    The first batch finishes; the second is never claimed."""
+    good = "https://img.good.cz/x.jpg"
+    out, stored = _drive_image_loop(
+        monkeypatch,
+        [_rows(good, 0, 2, 1000), _rows(good, 100, 2, 2000)],
+        lambda url: None,
+        max_seconds=0.01,
+        fetch_delay=0.05,
+    )
+
+    assert len(stored) == 2
+    assert out["images_stored"] == 2
+    assert out["stopped_suspicious"] is False  # a spent budget is not a failure
+
+
+def test_no_budget_means_unbounded(monkeypatch):
+    """max_seconds unset keeps the old behaviour — drain until the queue empties."""
+    good = "https://img.good.cz/x.jpg"
+    out, stored = _drive_image_loop(
+        monkeypatch,
+        [_rows(good, 0, 2, 1000), _rows(good, 100, 2, 2000)],
+        lambda url: None,
+        fetch_delay=0.02,
+    )
+
+    assert len(stored) == 4
+    assert out["images_stored"] == 4
 
 
 # ---- rendition + stored size provenance (migration 496) ---------------------

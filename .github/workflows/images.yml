@@ -14,10 +14,13 @@ name: "Scraping: image backlog drain (sharded)"
 #
 #   * Default drains ALL pending images (active + inactive); the selection
 #     orders active listings first so what's left of the fresh gap drains first.
-#   * Per-shard --max-image-downloads is sized to EXIT CLEANLY inside the
-#     110-min timeout (so scrape_run finalize runs, no orphaned/stuck rows)
-#     rather than being SIGKILLed. Per-image commits mean progress is never lost;
-#     the next 2-hourly tick continues the drain. Override to 0 to drain-to-empty.
+#   * --image-max-seconds (wall clock, checked between batches) is what makes a
+#     shard EXIT CLEANLY inside the 110-min timeout (so scrape_run finalize runs,
+#     no orphaned/stuck rows) rather than being SIGKILLed — per-image cost moves
+#     under a count cap (the 1800px sreality master), wall clock doesn't.
+#     --max-image-downloads stays as a throughput target. Per-image commits mean
+#     progress is never lost; the next 2-hourly tick continues the drain.
+#     Override the cap to 0 to drain-to-empty (still inside the time budget).
 #   * Per-CDN-host politeness: a concurrency cap (default 8 simultaneous
 #     connections per image-URL host) keeps a small portal CDN from being
 #     dogpiled by the worker pool, and a PER-HOST suspicious-stop quarantines a
@@ -86,18 +89,26 @@ jobs:
         run: |
           MAX_IMG="${{ inputs.max_image_downloads }}"
           if [ -z "$MAX_IMG" ]; then
-            # Sized BELOW one shard's measured ~11k/hr × ~100 min so the run
-            # finishes the cap and exits cleanly (finalize runs) well before the
-            # 110-min timeout. 4 shards × 18000 ≈ 72k per 2h tick ≈ 36k/hr
-            # aggregate — comfortably above the ~14k/hr inflow, so the ~900k
-            # backlog drains over ~1.5-2 days, then stays cleared.
+            # THROUGHPUT TARGET, not the timeout guard. It was sized against one
+            # shard's ~11k/hr measured on the SUPERSEDED sreality chain
+            # (res,749,562,3|…|jpg,90); sreality now downloads the ≤1800px master
+            # (res,1800,1800,1|…|jpg,80), several times the bytes on BOTH the CDN
+            # and the R2 leg plus ~5x the dhash CPU, so that rate no longer holds
+            # and the cap alone could run past the 110-min timeout into a SIGKILL
+            # (no finalize, stranded scrape_runs row). --image-max-seconds below
+            # is the real bound now; the cap only keeps a FAST shard from hogging
+            # a runner. Re-measure at the new template (dispatch with
+            # max_image_downloads=500) and resize both numbers from the result.
             MAX_IMG="18000"
           fi
           WORKERS="${{ inputs.image_workers }}"
           if [ -z "$WORKERS" ]; then
             WORKERS="32"
           fi
-          ARGS="--images-only --max-image-downloads $MAX_IMG --image-workers $WORKERS --image-shard ${{ matrix.shard }}/4"
+          # 95 min of the 110-min timeout: the budget is checked BETWEEN batches,
+          # so the tail is one batch (plus the finalize), and the shard exits
+          # cleanly whatever a single image now costs.
+          ARGS="--images-only --max-image-downloads $MAX_IMG --image-max-seconds 5700 --image-workers $WORKERS --image-shard ${{ matrix.shard }}/4"
           if [ "${{ inputs.images_active_only }}" = "true" ]; then
             ARGS="$ARGS --images-active-only"
           fi

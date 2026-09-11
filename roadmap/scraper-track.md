@@ -5,6 +5,25 @@
 Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
+### sreality photos: the whole frame, and provenance on every stored row (2026-09-11, in progress)
+- **Shipped:** downloads moved off sreality's `res,749,562,3|shr,,20|jpg,90` (mode 3 = a 4:3 CROP;
+  ~85% of photos lost their edges, one floor plan lost a whole floor) onto their `SQUARE_1800_JPG`
+  template — whole frame, ≤1800px, no watermark. Their CDN is an exact-template ALLOWLIST, so a
+  stored legacy/`rot` chain is NORMALISED onto the template (only `rot` survives; an unrecognised op
+  is dropped rather than parked by a 400), and `frontend/src/lib/imageUrl.ts` mirrors it for the
+  not-yet-downloaded fallback — pinned by shared probe vectors both suites run. Migration 496's
+  provenance is now written on every download: `rendition` + decoded `stored_width`/`stored_height`.
+  The image phase gained a wall-clock bound (`--image-max-seconds`, both workflows) because the count
+  cap's throughput basis predates the bigger master.
+- **Next:** (1) the re-master lane over the ~1.5M legacy-crop rows (mig 496 + `mark_image_remastered`
+  + `invalidate_derived_signals` are in place, the driver is not) — until it finishes, phash/CLIP are
+  comparable only WITHIN a rendition; (2) a thumbnail rendition — the SPA/extension currently serve a
+  master into every grid tile; (3) re-measure one image shard at the new template and resize
+  `MAX_IMG` / the fresh lane's cap from the result; (4) one census of what stored chains actually
+  carry — `SELECT DISTINCT split_part(op, ',', 1) FROM (SELECT unnest(string_to_array(split_part(
+  sreality_url, 'fl=', 2), '|')) op FROM images WHERE sreality_url LIKE '%fl=%') t` — to confirm the
+  kept-op allowlist (`rot`) drops nothing that carried meaning.
+
 ### Portal listing URLs — one contract, nine portals (2026-09-11, in progress)
 - Operator-reported: the listing page's Sreality chip 404s (`rodinny-dum` vs sreality's `rodinny`).
   Root cause is ONE asymmetry — sreality was the only portal whose page URL was not a stored fact,

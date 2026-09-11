@@ -8,8 +8,9 @@ name: "Scraping: fresh-listing image fast lane"
 # prevents the image loss we already saw (~43k+ sreality images lost to expiry).
 #
 # Scope: --images-active-only orders by newest image id first, so new listings'
-# photos drain ahead of everything else. Small per-run cap sized to EXIT CLEANLY
-# inside the short timeout. The deep + inactive backlog stays with images.yml.
+# photos drain ahead of everything else. A small per-run cap targets throughput;
+# --image-max-seconds is what makes the unit EXIT CLEANLY inside the short
+# timeout. The deep + inactive backlog stays with images.yml.
 #
 # Near-continuous: on success WITH work remaining, the run re-dispatches itself
 # (the proven SCRAPE_CHAIN_TOKEN pattern from scrape.yml) so units run back to
@@ -67,7 +68,11 @@ jobs:
           if [ -z "$MAX_IMG" ]; then MAX_IMG="2500"; fi
           WORKERS="${{ inputs.image_workers }}"
           if [ -z "$WORKERS" ]; then WORKERS="32"; fi
-          ARGS="--images-only --images-active-only --max-image-downloads $MAX_IMG --image-workers $WORKERS"
+          # Wall-clock budget (not the count cap) is what keeps a unit inside the
+          # 20-min timeout: per-image cost moved when sreality went to the ≤1800px
+          # master, and a SIGKILLed unit skips finalize AND the self-chain. 14 min
+          # leaves room for the one in-flight batch plus the chain step.
+          ARGS="--images-only --images-active-only --max-image-downloads $MAX_IMG --image-max-seconds 840 --image-workers $WORKERS"
           echo "Running with: $ARGS"
           # Capture python's own exit code through the tee pipe. The image phase
           # now exits 0 even when a CDN is throttling us — a per-host quarantine

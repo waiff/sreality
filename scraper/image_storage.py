@@ -127,11 +127,16 @@ RENDITION_NATIVE = "native"
 # portal-agnostic now that non-sreality images flow through it (multi-portal).
 _SREALITY_IMAGE_HOST = "sdn.cz"
 
-# Ops that decide HOW the photo is served — ours to choose, so a stored chain's
-# copy of them is dropped and replaced. Everything else in a chain (notably
-# `rot,<deg>,0`) is a per-photo FACT: completing a chain without the rot op
-# returns 200 but stores the photo unrotated (curl-verified).
-_SERVING_OP_HEADS = frozenset({"res", "shr", "jpg", "webp", "wrm"})
+# The ops we may KEEP from a stored chain — an allowlist, mirroring the CDN's
+# own posture. `rot,<deg>,0` is a per-photo FACT the template can't carry
+# (completing a chain without it returns 200 but stores the photo unrotated,
+# curl-verified) and is the one prefix verified accepted in front of the
+# template. Everything else is dropped: the serving ops (res/shr/jpg/…) are ours
+# to choose, and an UNRECOGNISED op carried through would produce a chain off the
+# exact-template allowlist — that 400s, and `_classify_image_failure` parks a 400
+# terminally (`source_unavailable`, never retried). Dropping an unknown op costs
+# at worst a cosmetic difference on one photo; keeping it can park a whole cohort.
+_PRESERVED_OP_HEADS = frozenset({"rot"})
 
 
 def rendition_for(url: str) -> str:
@@ -142,7 +147,7 @@ def rendition_for(url: str) -> str:
 
 
 def with_transform(url: str, ops: str = IMAGE_TRANSFORM_OPS) -> str:
-    """Normalise a sreality CDN URL onto `ops`, preserving non-serving ops.
+    """Normalise a sreality CDN URL onto `ops`, keeping `_PRESERVED_OP_HEADS` ops.
 
     Stored `sreality_url`s come in three shapes: bare, a complete legacy chain
     ("?fl=res,749,562,3|shr,,20|jpg,90") and a prefix chain with a trailing pipe
@@ -164,7 +169,7 @@ def with_transform(url: str, ops: str = IMAGE_TRANSFORM_OPS) -> str:
                 others.append(param)
             continue
         for op in param[len("fl=") :].split("|"):
-            if op and op.split(",", 1)[0] not in _SERVING_OP_HEADS:
+            if op and op.split(",", 1)[0] in _PRESERVED_OP_HEADS:
                 preserved.append(op)
     chain = "|".join([*preserved, ops])
     rebuilt = "&".join([*others, f"fl={chain}"])
