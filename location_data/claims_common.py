@@ -278,33 +278,29 @@ class Claim:
     # 06 §6.1.1 caps a class-B legacy column at 'medium' and the contract entry says so.
     claim_confidence: str | None = None
     # D7 evidence (01 §4.2's `loc_claim_text_evidence` + `loc_claim_evidence_payload`).
-    # NULL on every W1 claim: that substrate is latest-wins JSON, and a span into a
-    # document nobody archived is a one-shot check. W2's archived-HTML lane
-    # (`location_data.claims_remine_archive`) is the first writer that fills them, and for
-    # an `llm_text`/`regex_text` claim the DB REQUIRES the whole set — quote, both offsets,
-    # `payload_scope_version`, `subject_scoped` — plus `payload_sha256` whenever there is a
+    # NULL on every claim mined from `listings.raw_json`: that substrate is latest-wins
+    # JSON, and a span into a document nobody archived is a one-shot check. The PAGE
+    # readers fill them — the stored body is content-addressed and immutable — and for a
+    # `regex_text` claim the DB REQUIRES the whole set: quote, both offsets,
+    # `payload_scope_version`, `subject_scoped`, plus `payload_sha256` whenever there is a
     # quote at all. `payload_sha256` is hex TEXT here, not `bytes`: the write path carries
-    # rows through `jsonb_to_recordset`, which has no bytea literal, so the SQL decodes it
-    # (the same `decode(..., 'hex')` shape `_ENRICHMENT_WRITE_SQL` already uses).
+    # rows through `jsonb_to_recordset`, which has no bytea literal, so the SQL decodes it.
     payload_id: int | None = None
     payload_sha256: str | None = None
     evidence_quote: str | None = None
     span_start: int | None = None
     span_end: int | None = None
     payload_scope_version: str | None = None
-    # The SECOND CHECK an evidence-bearing claim has to satisfy, and it binds `llm_text`
-    # alone: `loc_claim_llm_model` forces both non-null there. They ship with the evidence
-    # set rather than with the LLM lane because a `Claim` that can be spelled but not
-    # written is a trap — the row would pass every Python guard and take the whole batch
-    # down at the constraint, once, in production, on whoever builds the lane.
+    # `loc_claim_llm_model` forces both non-null on an `llm_text` claim. No lane emits
+    # one (rule 25: no model in the claim lane) and the columns stay, because the CHECK
+    # does: a `Claim` that can be spelled but not written is a trap that takes a whole
+    # batch down at the constraint, once, in production.
     model: str | None = None
     prompt_version: str | None = None
-    # NULL on every W1 claim (the substrate is latest-wins `listings.raw_json`, which has
-    # no snapshot to anchor to). W3 (`location_data.claims_remine`) is the first writer
-    # that sets this: a claim mined from `listing_snapshots` carries its row's id here and
-    # `snapshot_anchor='snapshot'` (01 §4.2's `loc_claim_anchor` CHECK pairs the two — see
-    # 00 §3.3). Present here, not on a W3-only subclass, so `location_claims_intake` and
-    # `location_claims_remine` share one `Claim` shape, one `to_row()`, and one writer.
+    # NULL on every claim the one lane writes: both its substrates are latest-wins (the
+    # listing's `raw_json`, the listing's newest stored body), so there is no snapshot to
+    # anchor to. The column stays because `loc_claim_anchor` (01 §4.2) pairs it with
+    # `snapshot_anchor` and rows written by the deleted snapshot re-mine still carry it.
     snapshot_id: int | None = None
 
     def to_row(self) -> dict[str, Any]:

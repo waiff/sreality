@@ -659,7 +659,11 @@ _RESUME_SQL = """
 # The scan projects NO body bytes. One batch's applicable ids go to `page_readers.load_bodies`,
 # which is where the R2 round trips happen — materialising ~14 GB of archive to discover
 # most of it has nothing to mine is the exact cost this ordering avoids.
-_BODY_JOIN_SQL = """
+# NOT `*_SQL`: these two are FRAGMENTS, not statements. `tests/sql_corpus.discover` treats
+# every module-level `*_SQL` constant as a statement and PREPAREs it against the replayed
+# schema, where a bare select list referencing `pb` reads as "missing FROM-clause entry".
+# The two composed queries below carry the `_SQL` suffix and are what the sweep checks.
+_BODY_JOIN = """
     LEFT JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active
     LEFT JOIN LATERAL (
         SELECT p.id, p.contract_version, p.page_kind::text AS page_kind,
@@ -674,7 +678,7 @@ _BODY_JOIN_SQL = """
     ) pb ON TRUE
 """
 
-_SELECT_COLUMNS_SQL = """
+_SELECT_COLUMNS = """
     SELECT l.id, l.source, l.source_id_native, l.raw_json, l.last_seen_at,
            ST_Y(l.geom::geometry), ST_X(l.geom::geometry),
            (a.listing_id IS NOT NULL),
@@ -687,14 +691,14 @@ _SELECT_COLUMNS_SQL = """
 
 # Keyset over the whole table (active AND inactive: a delisted row's payload is exactly the
 # evidence the history waves need, and nothing is ever deleted).
-_LISTINGS_FULL_SQL = _SELECT_COLUMNS_SQL + _BODY_JOIN_SQL + """
+_LISTINGS_FULL_SQL = _SELECT_COLUMNS + _BODY_JOIN + """
     WHERE l.id > %(after_id)s
       AND (%(source)s::text IS NULL OR l.source = %(source)s)
     ORDER BY l.id
     LIMIT %(batch_size)s
 """
 
-_LISTINGS_INCREMENTAL_SQL = _SELECT_COLUMNS_SQL + _BODY_JOIN_SQL + """
+_LISTINGS_INCREMENTAL_SQL = _SELECT_COLUMNS + _BODY_JOIN + """
     WHERE l.last_seen_at >= %(watermark)s
       AND (l.last_seen_at, l.id) > (%(after_ts)s, %(after_id)s)
       AND (%(source)s::text IS NULL OR l.source = %(source)s)

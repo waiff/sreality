@@ -12,10 +12,9 @@ Five properties define the write, and each one is load-bearing:
     sizes, version, pin state and the content-addressed key stay in the database; the
     bytes go to the bucket above `DEFAULT_R2_THRESHOLD_BYTES`, which is set at
     Postgres's own TOAST boundary so that only what Postgres stores for free stays
-    inline. That is what makes the archive affordable at all —
-    `location_data.payload_budget` measures a metadata row at 713 B against ~20 KB for
-    the same row with its body, and object storage at ~1/100th the price of database
-    storage. It is not a latency trade: nothing on a user-facing path reads a body.
+    inline. That is what makes the archive affordable at all: a metadata row is 713 B
+    against ~20 KB for the same row with its body, and object storage is ~1/100th the
+    price of database storage (W2a-7's measurement). It is not a latency trade: nothing on a user-facing path reads a body.
     An unconfigured store REFUSES the payload write (loudly, per fetch) rather than
     silently rebuilding the database-resident archive; see `append_payload`.
 
@@ -88,8 +87,7 @@ DEFAULT_WRITE_TIMEOUT_S = 60
 #
 # THE CAP IS THE CEILING; the churn rate only sets how fast the ceiling is reached. So
 # this number, not the quality of any volatile profile, is what the archive's worst case
-# costs — and `location_data.payload_budget` derives that cost from live production
-# measurements, in the two currencies the archive actually spends.
+# costs, in the two currencies the archive actually spends.
 #
 # 2, not the 20 this shipped with. 20 was inherited from the design document and never
 # chosen against a number. What the number means changed once bodies moved to R2, so it
@@ -110,13 +108,9 @@ DEFAULT_WRITE_TIMEOUT_S = 60
 #     reads pinned bodies. Cheap storage is a reason not to PANIC about depth; it is not
 #     a reader.
 #
-# So 2 survives its own re-derivation, and the headroom is the deliverable:
-# `payload_budget.largest_affordable_cap()` publishes how much deeper the operator may
-# go on a one-line change, and the CI gate re-checks it against the allowance.
-#
-# `tests/location_data/test_payload_budget.py` fails if this default's POSTGRES ceiling
-# leaves the archive's actual allowance — what is LEFT of the subsystem envelope, not the
-# whole of it — over the `ever` cohort, which is the one the archive converges on.
+# So 2 survives its own re-derivation. Going deeper is a one-line change; the frozen
+# measurement corpus that priced it (`location_data/payload_budget.py`) went with the rest
+# of the storage-gate machinery under rule 25 — re-measure before raising it.
 VERSION_CAP_ENV = "LOCATION_PAYLOAD_VERSION_CAP"
 DEFAULT_VERSION_CAP = 2
 
@@ -329,8 +323,8 @@ class EvictedBody(NamedTuple):
     * `byte_size` is the body as fetched; `stored_bytes` is the ENCODED size, wherever
       the bytes lived — `stored_byte_size` (migration 406) for a spilled body, and
       `octet_length(body)` for an inline one or a row written before 406.
-    * Both retention statements RETURN this column order — the cap here and the hot
-      window in `payload_prune` — so the two paths report one set of figures. The cap
+    * The retention statement RETURNS this column order, so the reclaimed-bytes figure
+      is one set of numbers wherever it is read. The cap
       used to return only (id, key), which silently left every capped row out of the
       bytes-reclaimed number the storage sign-off is read from; reading only
       `octet_length(body)` would have reintroduced exactly that hole the moment bodies
@@ -754,9 +748,8 @@ def repin_group(
 
     * The ONE definition of pinned: first version, latest version, a body a claim
       points at, a body a disputed claim's content address names.
-    * Shared with `payload_prune`, which re-asserts it on a cadence — a contradiction
-      that opens or closes without a new fetch changes the answer, and no append comes
-      along to notice.
+    * Re-asserted on every append, which is the only moment the answer can move now
+      that the scheduled prune sweep is gone.
     """
     cur.execute(_REPIN_SQL, {
         "source": source,
@@ -896,7 +889,7 @@ def append_payload(
     caller-supplied profile, it would assert "this contract version's declaration
     was applied" about a row hashed under something else, and no reader could tell.
     The requirement is what makes a caller profile SAFE to offer at all. Overriding
-    the stamp ALONE is allowed and is `record_payload_churn`'s established shape:
+    the stamp ALONE is allowed, and was the churn instrument's established shape:
     same profile, a caller-stated cohort (the confirmation probe's `+probe`).
 
     `min_append_interval_days` is the per-listing time floor (0 disables it, None reads
