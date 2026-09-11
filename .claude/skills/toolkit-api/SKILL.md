@@ -284,12 +284,11 @@ use `api/tenant_pool.py`'s `tenant_conn` dependency instead of the service-role
 `get_db_conn` — it opens an RLS-scoped transaction under the `tenant_pool` role. See the
 `database` skill's connection-modes + Multi-tenancy sections for the mechanics;
 `verify_jwt` is authentication, `tenant_conn` (via RLS) is authorization. Its
-`resolve_account_id(conn, claims)` helper picks the caller's own account; both this
-helper and `tenant_conn` still carry an internal `if claims.get("legacy")` branch (routes
-to the unscoped service-role connection / the legacy-backfill claim) that is now
-unreachable dead code, since `verify_jwt` can no longer produce a `legacy` claim — left in
-place rather than refactored in the same change that closed the `verify_jwt` gap, to keep
-that fix narrowly scoped; safe to remove in a follow-up.
+`resolve_account_id(conn, claims)` helper picks the caller's own account. The
+`if claims.get("legacy")` branches both carried (service-role fallback / legacy-backfill
+read) were DELETED 2026-09-11 — dead since PR #941 — so `tenant_conn` has no fallback
+connection and raises when `TENANT_POOL_DB_URL` is unset. The `legacy_backfill_claim`
+TABLE remains, as the signup CAS in `handle_new_user`.
 
 **Billing skeleton** (`api/routes/billing.py`, migration 298, PR #769 — Phase 1 increment
 5) adds a **fourth** auth class alongside the three above: `POST /billing/webhook` verifies
@@ -305,10 +304,9 @@ an already-bound one); `customer.subscription.*` upserts plan/status/period guar
 `tenant_conn` (RLS) and returns the caller's plan + agenda visibility.
 `require_entitlement(agenda)` is a dependency **factory** (not a single dependency like
 `require_admin`) — call it as `Depends(require_entitlement("watchdogs"))` to 403 unless the
-caller's plan has that agenda's visibility flag on; its bypass check is `claims.get("legacy")
-or is_admin` (the operator is never billing-gated) — the `legacy` half is now dead code
-(`verify_jwt` can't produce it, see "Identity, login, and admin gating" above), left as-is
-since it's harmless and this file wasn't touched by the 2026-08-04 `verify_jwt` fix. Wired
+caller's plan has that agenda's visibility flag on; its bypass check is `is_admin` alone
+(the operator is never billing-gated) — the dead `claims.get("legacy")` disjunct was
+deleted 2026-09-11. Wired
 to no *router* yet — the first real enforcement is **inline in `create_estimation_run`**
 (below), not via the dependency.
 
@@ -319,8 +317,8 @@ spends zero LLM cost. Meter = **per successful agent run, monthly** (operator de
 USD): free plan `plans.agent_estimations_monthly_quota` = 3, `trial_*` = 10 (used while
 `entitlements.status='trialing'` + unexpired). Only a real, non-admin tenant sending
 `mode:'agent'` is metered — admin/SYSTEM and all deterministic runs bypass, mirroring
-`require_entitlement` (`_is_privileged`'s `claims.get("legacy")` disjunct is dead code
-today, same note as `require_entitlement` above). ClickUp is named in the comments here as
+`require_entitlement` (`_is_privileged`'s dead `claims.get("legacy")` disjunct was deleted
+2026-09-11). ClickUp is named in the comments here as
 a bypass beneficiary via `claims is None` (an internal/direct-Python call path, not the
 `POST /estimations` HTTP route — that route's `Depends(deps.verify_jwt)` always yields a
 dict, never `None`), but ClickUp has zero historical rows in `estimation_runs`/
@@ -374,8 +372,8 @@ Database:
   This was mis-set from migration 293 until 2026-07-21 and stayed invisible the whole time:
   `tenant_conn`'s legacy branch routed static-`API_TOKEN` callers to the service-role
   connection, so until the Chrome extension's own JWT arrived, **no production request had
-  ever executed the tenant-pool path**. (That branch is dead code as of 2026-08-04 — see
-  "Identity, login, and admin gating" above — but the lesson stands.) When moving any
+  ever executed the tenant-pool path**. (That branch was DELETED 2026-09-11; `tenant_conn`
+  now raises on an unset DSN rather than absorbing it — the lesson stands.) When moving any
   further route onto `tenant_conn`, exercise it with a real user JWT — a green RLS test
   lane proves nothing about a DSN.
 

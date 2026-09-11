@@ -297,13 +297,12 @@ def _entitlement_view(conn: Any, account_id: Any) -> dict[str, Any]:
 def _agent_estimation_quota(conn: Any, claims: dict, account_id: Any) -> dict[str, Any]:
     """The caller's agent-estimation allowance, for the extension's '(X left)' UX.
 
-    `metered` mirrors create_estimation_run's bypass set (admin/legacy never
-    metered), so the panel hides the counter for the operator (unlimited).
+    `metered` mirrors create_estimation_run's bypass set (admin never metered),
+    so the panel hides the counter for the operator (unlimited).
     Lazy import breaks the estimation_runs <-> billing cycle."""
     meta = claims.get("app_metadata") or {}
     if (
         account_id is None
-        or claims.get("legacy")
         or claims.get("is_admin") is True
         or meta.get("is_admin") is True
     ):
@@ -331,7 +330,7 @@ def get_billing_me(
     conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, Any]:
     """The caller's plan + agenda visibility + agent-estimation quota
-    (legacy/no-account -> default plan, unmetered)."""
+    (no resolvable account -> default plan, unmetered)."""
     account_id = tenant_pool.resolve_account_id(conn, claims)
     view = _entitlement_view(conn, account_id)
     view["agent_estimations"] = _agent_estimation_quota(conn, claims, account_id)
@@ -341,7 +340,7 @@ def get_billing_me(
 def require_entitlement(agenda: str) -> Callable[..., dict]:
     """Dependency factory: 403 unless the caller's plan turns `agenda` on.
 
-    Admin + legacy claims always pass (the operator is never billing-gated).
+    Admin claims always pass (the operator is never billing-gated).
     Not wired to any route yet — Wave 1 attaches it per-agenda router.
     """
 
@@ -351,8 +350,7 @@ def require_entitlement(agenda: str) -> Callable[..., dict]:
     ) -> dict:
         meta = claims.get("app_metadata") or {}
         if (
-            claims.get("legacy")
-            or claims.get("is_admin") is True
+            claims.get("is_admin") is True
             or meta.get("is_admin") is True
         ):
             return claims

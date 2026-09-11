@@ -199,7 +199,7 @@ def client(monkeypatch, store):
     _AppSettingsConn.cursor = filter_aware_cursor
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: fake_conn
     api_main.app.dependency_overrides[deps.require_admin] = (
-        lambda: {"is_admin": True, "legacy": True}
+        lambda: {"sub": "00000000-0000-0000-0000-0000000000ad", "app_metadata": {"is_admin": True}}
     )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()

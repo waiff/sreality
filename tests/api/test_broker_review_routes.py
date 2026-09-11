@@ -18,7 +18,7 @@ from api.routes import broker_review as routes
 def client():
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
     api_main.app.dependency_overrides[deps.require_admin] = (
-        lambda: {"is_admin": True, "legacy": True}
+        lambda: {"sub": "00000000-0000-0000-0000-0000000000ad", "app_metadata": {"is_admin": True}}
     )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()

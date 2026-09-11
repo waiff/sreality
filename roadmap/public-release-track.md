@@ -51,6 +51,12 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
   property is carded in two accounts, five "1. For Review" cards removed 08-06/08-11 no longer
   exist (candidate two-click undos; operator's call to restore). W2–W5 follow as their own PRs:
   delete the dead legacy branch, RLS-only reads, `require_account_id`, the route-scope census.
+- **2026-09-11 W2** — legacy `claims.get("legacy")` bypass deleted (dead since #941, which
+  stopped `verify_jwt` emitting the claim). `tenant_conn`'s service-role fallback and
+  `resolve_account_id`'s `legacy_backfill_claim` read are gone, so an unset
+  `TENANT_POOL_DB_URL` now RAISES instead of silently degrading to an RLS-off connection —
+  the shape that hid the bad-DSN incident below. The `legacy_backfill_claim` TABLE stays
+  (the signup CAS in `handle_new_user`); no tenant-route test runs on the RLS-bypass path.
 - **Phase 1 (multi-tenant foundations)** — in progress.
   - Increment 1 ✅ — accounts/account_members/admins, `current_account_ids()` /
     `is_platform_admin()`, the on-signup handler, JWT verify (JWKS/ES256) (migrations

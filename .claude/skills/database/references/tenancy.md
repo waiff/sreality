@@ -108,4 +108,20 @@ stores it only in Railway as part of `TENANT_POOL_DB_URL`.
 `api/tenant_pool.py`'s `tenant_conn` FastAPI dependency is the runtime side — see the
 `database` skill body's connection-modes section for the request-transaction mechanics
 (`SET LOCAL ROLE` + `set_config('request.jwt.claims', ...)`, bind param not string
-interpolation, legacy-caller bypass).
+interpolation).
+
+**The legacy-caller bypass is gone (2026-09-11).** `tenant_conn` and `resolve_account_id`
+used to branch on a `claims.get("legacy")` key and route static-`API_TOKEN` callers onto
+the unscoped service-role connection (RLS off). `verify_jwt` (`api/dependencies.py`) has
+been the SOLE producer of a claims dict since PR #941 (2026-08-04) and returns the decoded
+Supabase JWT verbatim — it cannot emit a `legacy` key — so both branches were unreachable
+and have been deleted. Consequences worth knowing: `tenant_conn` now has **no fallback
+connection at all**, so an unset `TENANT_POOL_DB_URL` raises `RuntimeError` instead of
+silently degrading to an RLS-off connection (that silent degradation is exactly how the
+2026-07 bad-DSN incident stayed invisible for weeks); and `current_account_ids()` is the
+one definition of who the caller is, so a tenant-connection read is scoped by RLS alone.
+
+**`legacy_backfill_claim` the TABLE stays — do NOT propose a DROP.** Only the Python read
+of it was dead. The table is the atomic first-signup CAS inside `handle_new_user`
+(migrations 294/362, swept by 299): the first user to sign up claims the pre-tenancy
+backfill exactly once. That claim is made in SQL, not in `api/tenant_pool.py`.
