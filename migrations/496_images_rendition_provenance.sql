@@ -34,35 +34,21 @@
 -- at upload, so "did the re-master actually land bigger bytes?" is answerable
 -- in SQL without touching R2.
 --
--- The re-master lane's pending predicate, verbatim (the partial index below
--- serves exactly it):
+-- The re-master lane's pending predicate, verbatim:
 --   rendition IS NULL AND storage_path IS NOT NULL AND sreality_url LIKE '%sdn.cz%'
+-- It deliberately gets NO index: the lane walks sreality listings in id pages
+-- (listings.source, then images by listing_id through the existing
+-- (listing_id, sequence) unique index), so a corpus-wide pass costs a few
+-- hundred cheap lookups and no hot-table index build — "the queue is the
+-- cursor", with the rendition column as the queue.
 --
--- APPLY SHAPE. Prod applies this through the Supabase MCP (`apply_migration`),
--- which wraps its payload in ONE transaction — so `CREATE INDEX CONCURRENTLY`
--- cannot appear in this file (25001), exactly as migrations 429, 370 and 231
--- record. The index below is therefore written in the plain form, which is what
--- a fresh rebuild (CI's `psql -f` replay over an empty database) wants anyway;
--- on prod the real build is done OUT OF BAND as
---   CREATE INDEX CONCURRENTLY images_sreality_remaster_pending_idx
---     ON images (id)
---     WHERE rendition IS NULL AND storage_path IS NOT NULL
---       AND sreality_url LIKE '%sdn.cz%';
--- (no IF NOT EXISTS out of band, deliberately: a CONCURRENTLY build that is
--- killed leaves an INVALID index behind, and IF NOT EXISTS would then make every
--- repair attempt a silent no-op). Verify the build with
---   SELECT indisvalid FROM pg_index WHERE indexrelid =
---     'images_sreality_remaster_pending_idx'::regclass;
--- and if it reads false, `DROP INDEX CONCURRENTLY images_sreality_remaster_pending_idx;`
--- and rebuild. Once it exists on prod, this file's plain CREATE INDEX IF NOT
--- EXISTS is a no-op there.
---
--- Every statement here is written idempotently (IF NOT EXISTS / CREATE OR
--- REPLACE), so a re-apply after a mid-file failure is a no-op.
---
--- Purely additive: three new nullable columns, one new trailing view column, one
--- new index. No grants (images_public's ACL is authenticated-SELECT-only and
--- CREATE OR REPLACE VIEW preserves it).
+-- APPLY SHAPE. Purely additive and idempotent (IF NOT EXISTS / CREATE OR
+-- REPLACE): applies unchanged through the Supabase MCP (`apply_migration`) or
+-- through `.github/workflows/apply_migration.yml` (`psql -f`, statement
+-- autocommit). Nothing here needs a transaction and a re-apply is a no-op.
+-- No grants: images_public's ACL is authenticated-SELECT-only and CREATE OR
+-- REPLACE VIEW preserves it. Three new nullable columns, one trailing view
+-- column.
 
 SET lock_timeout = '5s';
 SET statement_timeout = '30min';
@@ -105,12 +91,3 @@ CREATE OR REPLACE VIEW images_public AS
           WHERE t.image_id = i.id
           ORDER BY t.tagged_at DESC
          LIMIT 1) ct ON true;
-
--- Serves the re-master lane's pending predicate exactly. Partial, so it shrinks
--- to nothing as the corpus is stamped — the same idiom as migration 232's
--- clip_tagged_at markers. Plain (not CONCURRENTLY) per the APPLY SHAPE note
--- above: this form is for fresh rebuilds and is a no-op on prod, where the index
--- is built concurrently out of band before this migration is applied.
-CREATE INDEX IF NOT EXISTS images_sreality_remaster_pending_idx
-  ON images (id)
-  WHERE rendition IS NULL AND storage_path IS NOT NULL AND sreality_url LIKE '%sdn.cz%';
