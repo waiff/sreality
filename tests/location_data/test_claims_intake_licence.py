@@ -60,9 +60,8 @@ def test_class_e_rows_never_produce_a_coordinate_claim(source, payload, why):
     row = listing(source, payload, lat=49.5, lon=15.5)
     result = extract_listing(row, entries_for(source))
     assert "coordinate" not in claims_by_type(result), why
-    # The withholding is recorded rather than silent: a negative artefact with no value.
-    assert any(a.field_ == "coordinate" and a.reason == "not_attempted"
-               for a in result.absences), why
+    # The withholding is counted rather than silent: one reason, one tally, one log line.
+    assert any(r.startswith("coordinate_withheld:") for r in result.refusals), why
 
 
 @pytest.mark.parametrize("source,payload,why", CLASS_E_CASES)

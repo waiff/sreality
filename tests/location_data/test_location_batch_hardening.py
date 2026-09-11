@@ -47,31 +47,11 @@ _WORKFLOWS = _ROOT / ".github" / "workflows"
 # Every heavy location batch lane. A new one belongs in this tuple AND in the group.
 LOCATION_BATCH_WORKFLOWS = (
     "location_registry_load.yml",
+    # THE claim lane (rule 25 W1-a): one hourly pass over `listings.raw_json` AND the
+    # stored page body, so it carries what the four deleted lanes carried — a corpus scan,
+    # an R2 fan-out and the claim writes in one transaction.
     "location_claims_intake.yml",
     "location_mapy_inventory.yml",
-    # W2a-3. Heavy in TIME rather than in rows — the probe holds one portal for ~10
-    # minutes per 200 listings and the readout aggregates the whole instrument — but the
-    # rails are the same ones, and a probe overlapping a claims intake would put the
-    # scrape's egress and a corpus-wide sweep on the instance at once.
-    "location_payload_churn.yml",
-    # W2a-4. The heaviest single read the program performs — 445,191 detoasted bodies out
-    # of a 14 GB table and back in gzipped — so it queues behind the other lanes rather
-    # than putting that IO on the instance alongside a registry COPY.
-    "location_payload_backfill.yml",
-    # W2a-5. The only member with a real `schedule`, so it is also the only one that can
-    # arrive unannounced: a weekly sweep of the whole payload archive landing on top of a
-    # monthly registry baseline is exactly the overlap the outer group exists to prevent.
-    "location_payload_prune.yml",
-    # W3. A one-pass backfill over 1,574,313 `listing_snapshots` rows sharing the SAME
-    # instance a claims intake or a registry load hits — exactly the corpus-wide-sweep
-    # collision the outer group exists to serialize away.
-    "location_claims_remine.yml",
-    # W2-13. The archived-HTML sweep: ~472k bodies, each pulled from R2 with its own GET,
-    # decompressed and scoped in the runner, with the batch's claim writes in the SAME
-    # transaction as those fetches. Heavy on egress, on runner memory and on the instance at
-    # once — and it writes into the very claim spine the hourly intake writes, so it is the
-    # one lane that must never overlap it.
-    "location_claims_remine_archive.yml",
 )
 OUTER_GROUP = "location-batch"
 
@@ -549,20 +529,16 @@ class _GuardAwareCursor(_Cursor):
             conn.first_in_transaction = len(conn.executed)
         super().execute(sql, params)
 
-
-def test_the_archive_sweep_chain_yields_to_a_waiting_group_member():
+def test_no_group_member_self_chains_any_more():
     """The one pending slot of `location-batch` is a trap for a self-chaining lane: GitHub
     supersedes the OLDER pending run, so a chain hop dispatched in the last seconds evicts
     whatever was waiting. 2026-09-10: the hourly intake (10:00Z) and the corpus-wide
-    full-resolve (12:15Z) were both cancelled that way. The chain step must check every
-    other member for a waiting run and END rather than re-dispatch."""
-    wf = _workflow("location_claims_remine_archive.yml")
-    steps = [s for job in wf["jobs"].values() for s in job.get("steps", [])]
-    chain = next(s for s in steps if s.get("name") == "Chain the next run")
-    script = chain["run"]
-    others = set(LOCATION_BATCH_WORKFLOWS) - {"location_claims_remine_archive.yml"}
-    for name in others | {"location_resolve.yml"}:
-        assert name in script, f"the chain step does not check {name} for a waiting run"
-    assert "chain yields" in script
-    # the yield must come BEFORE the self-dispatch
-    assert script.index("chain yields") < script.index("gh workflow run location_claims_remine_archive.yml")
+    full-resolve (12:15Z) were both cancelled that way, and the fix was a yield step in the
+    chaining lane. Rule 25 W1-a removed the only self-chaining member (the archived-HTML
+    sweep) outright, so the trap is closed by construction — and this is the rail that keeps
+    it closed if one is ever reintroduced."""
+    for name in LOCATION_BATCH_WORKFLOWS:
+        script = (_WORKFLOWS / name).read_text(encoding="utf-8")
+        assert f"gh workflow run {name}" not in script, (
+            f"{name} re-dispatches itself; a self-chaining member of {OUTER_GROUP!r} "
+            "evicts whatever else is waiting in the group's one pending slot")

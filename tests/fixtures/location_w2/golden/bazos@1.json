@@ -145,9 +145,7 @@
           "legacy_write_path_unknown": false
         }
       ],
-      "absences": [],
-      "enrichment": [],
-      "oversized": 0
+      "refusals": {}
     },
     {
       "listing": "220870847",
@@ -216,17 +214,7 @@
           "legacy_write_path_unknown": false
         }
       ],
-      "absences": [
-        {
-          "surface": "legacy_column",
-          "field": "coordinate",
-          "reason": "not_attempted",
-          "extraction_method": "legacy_column",
-          "detail": "mapy_derived_coordinate"
-        }
-      ],
-      "enrichment": [],
-      "oversized": 0
+      "refusals": {}
     }
   ],
   "archived_claims": []

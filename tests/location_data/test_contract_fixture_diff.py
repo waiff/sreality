@@ -30,19 +30,17 @@ import pytest
 from location_data import contracts
 from location_data.claims_intake import (
     DEFAULT_MAX_CLAIM_VALUE_BYTES,
-    Absence,
     Claim,
-    EnrichmentTask,
     IntakeResult,
     ListingRow,
     extract_listing,
     value_norm_mirror,
 )
-from location_data.claims_remine_archive import (
-    ARCHIVE_READERS,
+from location_data.page_readers import (
+    PAGE_READERS,
     ArchivedPayload,
     _licensed_coordinate,
-    stamp_archive_claim,
+    stamp_page_claim,
 )
 from location_data.html_scope import ScopeRegister, scope_html
 from tests.location_data import claim_intake_fixtures as fx
@@ -54,7 +52,7 @@ _BODY_DIR = _W2 / "regressions"
 
 BLESS_COMMAND = "python -m tests.location_data.test_contract_fixture_diff --bless"
 
-# The archived arm's fixed clock. `stamp_archive_claim` copies the payload's
+# The archived arm's fixed clock. `stamp_page_claim` copies the payload's
 # `first_observed_at` onto every claim (06 §6.6 rule 1), so a real timestamp here would put
 # wall-clock into the golden and make it re-bless itself on every run.
 _ARCHIVE_CLOCK = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -229,22 +227,13 @@ def project_claim(claim: Claim) -> dict[str, Any]:
     return projected
 
 
-def project_absence(absence: Absence) -> dict[str, Any]:
-    return {"surface": absence.surface, "field": absence.field_, "reason": absence.reason,
-            "extraction_method": absence.extraction_method, "detail": absence.detail}
-
-
-def project_enrichment(task: EnrichmentTask) -> dict[str, Any]:
-    return {"method": task.method, "lane": task.lane, "outcome": task.outcome,
-            "input_hash": task.input_hash, "error": task.error}
-
-
 def project_result(result: IntakeResult) -> dict[str, Any]:
+    """The golden records CLAIMS and refusal REASONS. It used to carry an `absences` and an
+    `enrichment` section too; both tables are gone (rule 25 W1-a — written by every lane,
+    read by none), so what a refusal leaves behind is its reason and a count."""
     return {
         "claims": [project_claim(c) for c in result.claims],
-        "absences": [project_absence(a) for a in result.absences],
-        "enrichment": [project_enrichment(e) for e in result.enrichment],
-        "oversized": result.oversized,
+        "refusals": dict(sorted(result.refusals.items())),
     }
 
 
@@ -259,9 +248,9 @@ def score(source: str, listing_id: str, body: Body) -> dict[str, Any]:
 
 # ------------------------------------------------- the ARCHIVED arm of the same gate
 #
-# W1's `extract_listing` reads `listings.raw_json` and SKIPS every DOM reader
-# (`ARCHIVE_ONLY_READERS`), so without this the golden could not see a single entry a W2
-# portal PR activates: remax@3 turned two entries on and the claim-level diff came out
+# `extract_listing` reads `listings.raw_json` and executes only the PAYLOAD readers, so
+# without this the golden could not see a single entry a portal PR activates on the page
+# substrate: remax@3 turned two entries on and the claim-level diff came out
 # EMPTY. A gate that shows "nothing changed" for the one change a PR makes is worse than
 # no gate, because it reads as a positive result.
 #
@@ -321,7 +310,7 @@ def score_archived(contract: contracts.PortalContract) -> list[dict[str, Any]]:
     """Every executable DOM entry of this contract, run over the pinned detail body."""
     path = archived_html_for(contract.source)
     entries = [e for e in fx.entries_for(contract.source)
-               if e.reader in ARCHIVE_READERS and e.page_kind == "detail"]
+               if e.reader in PAGE_READERS and e.page_kind == "detail"]
     if path is None or not entries:
         return []
     native = ARCHIVE_FIXTURE_NATIVE.get(contract.source, "fixture")
@@ -334,8 +323,8 @@ def score_archived(contract: contracts.PortalContract) -> list[dict[str, Any]]:
     row = fx.listing(contract.source, {}, native=native)
     out: list[dict[str, Any]] = []
     for entry in sorted(entries, key=lambda e: e.entry_id):
-        for read in ARCHIVE_READERS[entry.reader](entry, row, payload, document):
-            stamped = stamp_archive_claim(read.claim, payload,
+        for read in PAGE_READERS[entry.reader](entry, row, payload, document):
+            stamped = stamp_page_claim(read.claim, payload,
                                           scope_version=document.scope_version)
             # The C6 licence ladder, applied exactly as the real lane applies it. Without
             # this the gate would show a green claim for a coordinate the lane REFUSES —
@@ -493,13 +482,9 @@ def diff_golden(golden: dict[str, Any], actual: dict[str, Any]) -> list[str]:
     for key in sorted(old.keys() & new.keys()):
         body = _diff_section("claim", old[key]["claims"], new[key]["claims"],
                              "extractor_id", "claim_type")
-        body += _diff_section("absence", old[key]["absences"], new[key]["absences"],
-                              "field", "reason", "surface")
-        body += _diff_section("enrichment", old[key]["enrichment"],
-                              new[key]["enrichment"], "method", "lane")
-        if old[key]["oversized"] != new[key]["oversized"]:
-            body.append(f"    ~ oversized: {old[key]['oversized']} -> "
-                        f"{new[key]['oversized']}")
+        if old[key].get("refusals") != new[key].get("refusals"):
+            body.append(f"    ~ refusals: {old[key].get('refusals')} -> "
+                        f"{new[key].get('refusals')}")
         if old[key]["row"] != new[key]["row"]:
             body.append(f"    ~ input row: {_short(old[key]['row'])} -> "
                         f"{_short(new[key]['row'])}")
@@ -603,8 +588,7 @@ def _poi_golden(pois: list[tuple[str, int]]) -> dict[str, Any]:
         "portal": "sreality", "contract_version": 1, "regression_listing_ids": [],
         "listings_without_a_fixture_body": [],
         "fixtures": [{
-            "listing": "520268", "body": "synthetic", "row": {}, "oversized": 0,
-            "absences": [], "enrichment": [],
+            "listing": "520268", "body": "synthetic", "row": {}, "refusals": {},
             "claims": [{"extractor_id": "sr.idx.poi_distance", "claim_type": "poi_distance",
                         "target_text": name, "distance_m": metres}
                        for name, metres in pois],

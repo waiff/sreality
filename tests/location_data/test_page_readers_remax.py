@@ -1,6 +1,6 @@
-"""remax@3 — the W2-6 activation, entry by entry, over the REAL archived body.
+"""remax@3 — the W2-6 activation, entry by entry, over the REAL stored page body.
 
-The canon suite (`test_archive_reader_canon.py`) proves what each READER does; this file
+The canon suite (`test_page_reader_canon.py`) proves what each READER does; this file
 proves what remax's own CONTRACT says, by running the entries `contracts/portals/remax.yaml`
 actually ships — not hand-built lookalikes — through the real scoper and the real C6 licence
 ladder. The two are different questions, and the second is the one a selector typo, a dropped
@@ -31,18 +31,18 @@ from typing import Any
 
 import pytest
 
-from location_data import claims_remine_archive as archive
+from location_data import page_readers as archive
 from location_data import contracts
 from location_data.claims_intake import (
     ARCHIVED_COORDINATE_RULES,
     Entry,
     ListingRow,
 )
-from location_data.claims_remine_archive import (
-    ARCHIVE_READERS,
+from location_data.page_readers import (
+    PAGE_READERS,
     ArchivedPayload,
     _licensed_coordinate,
-    stamp_archive_claim,
+    stamp_page_claim,
 )
 from location_data.html_scope import ScopeRegister, ScopedDocument, scope_html
 from scraper.remax_parser import parse_dms_pair
@@ -110,12 +110,12 @@ def archived() -> ScopedDocument:
 
 def run_entry(
     entry: Entry, document: ScopedDocument, *, row: ListingRow | None = None,
-) -> list[archive.ArchiveRead]:
-    return ARCHIVE_READERS[str(entry.reader)](
+) -> list[archive.PageRead]:
+    return PAGE_READERS[str(entry.reader)](
         entry, row or listing_row(), payload(), document)
 
 
-def only(reads: list[archive.ArchiveRead]) -> archive.ArchiveRead:
+def only(reads: list[archive.PageRead]) -> archive.PageRead:
     assert len(reads) == 1, f"expected exactly one read, got {len(reads)}"
     return reads[0]
 
@@ -136,7 +136,7 @@ def test_the_bump_activates_exactly_three_detail_entries():
     the index page's key and can never join a listing."""
     assert CONTRACT.version == 3
     executable = {e.entry_id: e.locator.get("reader") for e in CONTRACT.entries
-                  if e.locator.get("reader") in ARCHIVE_READERS}
+                  if e.locator.get("reader") in PAGE_READERS}
     assert executable == {
         "rx.det.header_address": "html_own_text",
         "rx.det.gps": "html_point_dms",
@@ -196,7 +196,7 @@ def test_the_header_entry_beats_a_deep_read_of_its_own_selector():
     says the reader stopped being load-bearing, rather than the two silently agreeing."""
     document = archived()
     entry = entry_named("rx.det.header_address")
-    deep = only(ARCHIVE_READERS["html_text"](
+    deep = only(PAGE_READERS["html_text"](
         entry, listing_row(), payload(), document)).claim
     own = only(run_entry(entry, document)).claim
     assert "mapa" in deep.value_text and "mapa" not in own.value_text
@@ -238,7 +238,7 @@ def test_the_pin_entry_is_licensed_portal_from_its_own_declared_branch():
     entry = entry_named("rx.det.gps")
     read = only(run_entry(entry, document))
     assert read.position_branch == "portal_pin"
-    stamped = stamp_archive_claim(read.claim, payload(),
+    stamped = stamp_page_claim(read.claim, payload(),
                                   scope_version=document.scope_version)
     licensed, reason = _licensed_coordinate(stamped, listing_row(), entry,
                                             read.position_branch)
@@ -271,7 +271,7 @@ def test_the_mapy_inventory_veto_outranks_the_pin():
     entry = entry_named("rx.det.gps")
     read = only(run_entry(entry, document))
     row = listing_row(in_mapy_inventory=True)
-    stamped = stamp_archive_claim(read.claim, payload(),
+    stamped = stamp_page_claim(read.claim, payload(),
                                   scope_version=document.scope_version)
     licensed, reason = _licensed_coordinate(stamped, row, entry, read.position_branch)
     assert licensed is None
@@ -285,7 +285,7 @@ def test_an_index_coordinate_would_be_refused_by_the_ladder():
     entry = entry_named("rx.idx.gps")
     document = archived()
     read = only(run_entry(entry_named("rx.det.gps"), document))
-    stamped = stamp_archive_claim(read.claim, payload(),
+    stamped = stamp_page_claim(read.claim, payload(),
                                   scope_version=document.scope_version)
     licensed, reason = _licensed_coordinate(stamped, listing_row(), entry, "portal_pin")
     assert licensed is None

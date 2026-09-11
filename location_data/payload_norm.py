@@ -836,10 +836,8 @@ def resolve_normalisation(
 ) -> Resolution:
     """Profile AND cohort label for one surface. THE single resolution point.
 
-    `scraper.db.record_payload_churn` (the live instrument), `payloads.append_payload`
-    (the archive's content address) and `payload_backfill.encode_for_archive` (the
-    445k-row migration) all come through here, so the two can never be resolved from
-    two different surfaces — or from two different declarations.
+    `payloads.append_payload` (the archive's content address) comes through here, so a
+    surface and its declaration can never be resolved from two different places.
 
     The label, and why it is not the bare `payload_norm@N` any more:
 
@@ -868,11 +866,10 @@ def resolve_normalisation(
     normaliser bump opens a clean cohort" property is proved against real SQL) would
     be read here as the old value and the test would pass while measuring nothing.
 
-    RAISES `ProfileError` if the contracts cannot be read at all. Both live callers
-    are inside never-raising wrappers (`record_payload_churn_if_enabled`,
-    `append_payload_if_enabled`), so the instrument and the archive go quiet and warn
-    while the scrape is untouched; the backfill is a script and should die. That is
-    the whole degradation contract, and it is a refusal rather than a fallback
+    RAISES `ProfileError` if the contracts cannot be read at all. The live caller is
+    inside a never-raising wrapper (`append_payload_if_enabled`), so the archive goes
+    quiet and warns while the scrape is untouched. That is the whole degradation
+    contract, and it is a refusal rather than a fallback
     because the alternative — quietly normalising under the base and stamping
     `+base` — writes a PERMANENT content address under a projection nobody chose.
     """

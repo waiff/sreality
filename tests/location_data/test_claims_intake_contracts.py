@@ -14,10 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from location_data import claims_intake, claims_remine_archive, contracts
+from location_data import claims_intake, contracts, page_readers
 from location_data.claims_intake import GUARDS, LEGACY_COLUMNS, READERS, SOURCES, TRANSFORMS
-from location_data.claims_llm import LLM_READERS
-from location_data.claims_remine_archive import ARCHIVE_READERS
+from location_data.page_readers import PAGE_READERS
 from location_data.contracts import (
     CLAIM_TYPES,
     EXTRACTION_METHODS,
@@ -57,14 +56,14 @@ def _entry(**overrides):
 # ------------------------------------------------------------ the reader bodies, as data
 
 _INTAKE_AST = ast.parse(Path(claims_intake.__file__).read_text(encoding="utf-8"))
-# The ARCHIVE lane's readers live in their own module behind `@archive_reader`, so the
-# `_INTAKE_AST` scan below cannot see them. W2-6 registered three DOM readers in
-# READER_CONTRACTS that no body-vs-contract check introspected at all — an adversarial
-# review caught `html_point_dms` declaring `consults_guards=True` while never calling
-# `guard_admits`, i.e. exactly the misdeclaration this file's gate exists to make
-# impossible, surviving because the gate could not see the reader.
+# The PAGE readers live in their own module behind `@page_reader`, so the `_INTAKE_AST`
+# scan below cannot see them. W2-6 registered three DOM readers in READER_CONTRACTS that no
+# body-vs-contract check introspected at all — an adversarial review caught
+# `html_point_dms` declaring `consults_guards=True` while never calling `guard_admits`,
+# i.e. exactly the misdeclaration this file's gate exists to make impossible, surviving
+# because the gate could not see the reader.
 _ARCHIVE_AST = ast.parse(
-    Path(claims_remine_archive.__file__).read_text(encoding="utf-8"))
+    Path(page_readers.__file__).read_text(encoding="utf-8"))
 
 
 def _reader_bodies(
@@ -137,12 +136,10 @@ def test_every_reader_named_in_a_contract_exists_in_the_registry():
     for contract in ALL.values():
         for entry in contract.entries:
             if entry.reader:
-                # Any of the THREE registries: W1's payload readers, the archived lane's
-                # DOM readers, or W2-10's free-text ones. `_check_executable` already
-                # refuses a name in none of them.
-                assert entry.reader in (
-                    set(READERS) | set(ARCHIVE_READERS) | set(LLM_READERS)
-                ), entry.entry_id
+                # ONE registry (rule 25): the ten payload readers and the fourteen page
+                # readers, both executed by the same lane. `_check_executable` already
+                # refuses a name outside it.
+                assert entry.reader in READERS, entry.entry_id
 
 
 def test_every_executable_entry_matches_its_readers_contract():
@@ -174,21 +171,13 @@ def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
     the extractor — so a reader added to `claims_intake` without a record (or one left
     behind after a reader is deleted) is caught HERE, by the one test that imports both.
     Otherwise the projection would reject every entry naming the new reader."""
-    # The name-only mirror W1 uses to SKIP a DOM entry must equal the real archive registry.
-    # A reader added to `ARCHIVE_READERS` and not to `ARCHIVE_ONLY_READERS` stops being
-    # skipped by the hourly W1 intake and starts being REFUSED by it — taking that portal's
-    # intake down the moment a contract naming it loads. Pinned, not left to review.
-    assert claims_intake.ARCHIVE_ONLY_READERS == set(ARCHIVE_READERS)
-    # The same mirror, for the same reason, over W2-10's free-text registry.
-    assert claims_intake.LLM_ONLY_READERS == set(LLM_READERS)
-    # THREE runtime registries since W2-10, deliberately separate objects (a name in one
-    # must not silently resolve in another — the three take three different substrates)
-    # with ONE deploy-time record covering all of them.
-    assert set(READER_CONTRACTS) == (
-        set(READERS) | set(ARCHIVE_READERS) | set(LLM_READERS))
-    assert not set(READERS) & set(ARCHIVE_READERS)
-    assert not set(READERS) & set(LLM_READERS)
-    assert not set(ARCHIVE_READERS) & set(LLM_READERS)
+    # ONE runtime registry, folded at import from the page-reader module, with ONE
+    # deploy-time record. The three name-only mirrors are gone: a name that is not in
+    # `READERS` is a deploy error again, which is the question the preflight asks.
+    assert set(READER_CONTRACTS) == set(READERS)
+    assert set(PAGE_READERS) <= set(READERS)
+    assert {n for n, r in READERS.items()
+            if r.substrate == claims_intake.SUBSTRATE_ARCHIVED_HTML} == set(PAGE_READERS)
     assert READER_SUBSTRATES == {n: s.substrates for n, s in READER_CONTRACTS.items()}
     surfaces = {s for legal in READER_SUBSTRATES.values() for s in legal}
     assert surfaces <= contracts.CLAIM_SURFACES
@@ -200,10 +189,6 @@ def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
     assert surfaces == {
         "api_json", "graphql", "embedded_json", "legacy_column",
         "html_selector", "archived_html", "map_config", "url_slug", "jsonld",
-        # W2-10: `description` is the prose block the free-text lane reads. It has been an
-        # enum member since migration 380 and was minted for exactly this producer; the
-        # headline block reuses `html_selector`.
-        "description",
     }
     methods = {m for spec in READER_CONTRACTS.values() for m in spec.methods}
     assert methods <= EXTRACTION_METHODS
@@ -216,11 +201,6 @@ def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
         "portal_structured_field", "portal_declared_quality", "legacy_column",
         "html_selector_parse", "map_widget_parse", "url_slug_parse", "regex_text",
         "breadcrumb_parse",
-        # W2-10. `llm_text` is the second evidence-bearing method AND the only
-        # attribution-bearing one: `loc_claim_llm_model` additionally demands `model` and
-        # `prompt_version`. Like `regex_text` it is admissible only because W2a filled the
-        # content-addressed body store the span indexes into.
-        "llm_text",
     }
 
 
@@ -232,7 +212,8 @@ def test_the_reader_contracts_state_exactly_what_the_reader_bodies_do():
     asks for it is exactly the silent no-op this gate exists to stop. So every consulted
     axis is read back out of the reader bodies rather than asserted by hand."""
     bodies = _reader_bodies()
-    assert set(bodies) == set(READERS)
+    assert set(bodies) == {n for n, r in READERS.items()
+                           if r.substrate == claims_intake.SUBSTRATE_PAYLOAD}
     for name, fn in bodies.items():
         spec = READER_CONTRACTS[name]
         calls = _called_names(fn)
@@ -255,15 +236,15 @@ def test_the_archive_reader_contracts_state_exactly_what_those_bodies_do():
     """The same body-vs-contract gate, extended to the ARCHIVE lane's DOM readers.
 
     W2-6 put three readers into `READER_CONTRACTS` that the scan above cannot reach: they
-    are decorated `@archive_reader` and live in `claims_remine_archive`, while
-    `_reader_bodies()` reads `@reader` out of `claims_intake`. The consequence was not
+    are decorated `@page_reader` and live in `page_readers`, while `_reader_bodies()` reads
+    `@reader` out of `claims_intake`. The consequence was not
     hypothetical — `html_point_dms` shipped declaring `consults_guards=True` while never
     calling `guard_admits`, which would have let any entry naming it declare a guard the
     runtime silently ignored. Review caught it; this makes review unnecessary.
 
-    Kept as a SEPARATE test rather than folded into the one above because the two registries
-    are deliberately separate objects and a single test asserting over both would go green
-    if one of them vanished.
+    Kept as a SEPARATE test rather than folded into the one above because the two reader
+    FAMILIES live in two modules behind two decorators, and a single test asserting over
+    both would go green if one of them vanished.
 
     NARROWER than the W1 gate, deliberately and disclosed rather than implied: it checks the
     two `consults_*` flags but NOT `locator_keys`, because the DOM readers address their
@@ -272,8 +253,8 @@ def test_the_archive_reader_contracts_state_exactly_what_those_bodies_do():
     for. Asserting equality there would compare a set against an empty one. Closing it
     properly needs the scan to recognise the refusal helpers; until then this is a known
     half, not an assumed whole."""
-    bodies = _reader_bodies(_ARCHIVE_AST, "archive_reader")
-    assert set(bodies) == set(ARCHIVE_READERS)
+    bodies = _reader_bodies(_ARCHIVE_AST, "page_reader")
+    assert set(bodies) == set(PAGE_READERS)
     for name, fn in bodies.items():
         spec = READER_CONTRACTS[name]
         calls = _called_names(fn)
@@ -305,15 +286,18 @@ def test_the_executable_and_inert_split_is_exactly_what_w1_ran():
     activated seven portal contracts at once and moved it to 112 / 47 — the single largest
     census move the fleet has taken, and the reason it is restated here rather than
     relaxed: an entry that stops being executable is exactly as invisible as one that was
-    never declared. bazos@3 then added sixteen more (8 -> 24), all of them LLM-lane
-    entries. Note that `reader is not None` is NOT the same as "runs on the W1 lane": most
-    of the newly-executable entries name an ARCHIVE-ONLY or LLM-ONLY reader, which W1 skips
-    by construction (`test_w1_executes_no_evidence_bearing_method`)."""
+    never declared. bazos@3 then added sixteen LLM-lane entries (8 -> 24) and bazos@4
+    removed all sixteen again with the lane (rule 25 W1-a), back to 112 / 47.
+
+    Every executable entry now RUNS on the one lane: the payload readers off
+    `listings.raw_json`, the page readers off the stored body. There is no longer a
+    "declared and executable but skipped" state, which is what the three registries
+    created."""
     split = {source: (sum(1 for e in c.entries if e.reader),
                       sum(1 for e in c.entries if not e.reader))
              for source, c in ALL.items()}
     assert split == {
-        "bazos": (24, 5),
+        "bazos": (8, 5),
         "bezrealitky": (11, 6),
         "ceskereality": (8, 9),
         "idnes": (8, 6),
@@ -323,15 +307,16 @@ def test_the_executable_and_inert_split_is_exactly_what_w1_ran():
         "remax": (7, 7),
         "sreality": (23, 6),
     }
-    assert sum(e for e, _ in split.values()) == 128
+    assert sum(e for e, _ in split.values()) == 112
     assert sum(i for _, i in split.values()) == 47
-    # The same 128 entries seen down the other axis, so a swap could not preserve both.
-    # W1's ten readers are unmoved except `point_pair` 3 -> 2: mmreality's `mm.det.point`
-    # moved to the archived substrate's `json_point`, which is a re-read of the same fact
-    # out of a different document, not a lost signal.
+    # The same 112 entries seen down the other axis, so a swap could not preserve both.
+    # The ten payload readers are unmoved except `point_pair` 3 -> 2: mmreality's
+    # `mm.det.point` moved to the page substrate's `json_point`, which is a re-read of the
+    # same fact out of a different document, not a lost signal. EVERY line below is now a
+    # reader the one lane executes.
     per_reader = Counter(e.reader for c in ALL.values() for e in c.entries if e.reader)
     assert per_reader == Counter({
-        "scalar": 36, "llm_location_text": 16, "html_attr": 10,
+        "scalar": 36, "html_attr": 10,
         "namespaced_id": 9, "json_scalar": 8,
         "geom_column": 6, "coords_stamp_quality": 5, "legacy_text_column": 5,
         "html_marker": 4, "html_text": 4, "json_breadcrumb": 4, "html_attr_regex": 3,
@@ -342,22 +327,17 @@ def test_the_executable_and_inert_split_is_exactly_what_w1_ran():
     })
 
 
-def test_w1_executes_no_evidence_bearing_method():
-    """`regex_text` / `llm_text` need a span into a retrievable document, which W1's
-    substrate (`listings.raw_json`) is not (01 §4.2).
-
-    Re-scoped by W2-10, and the invariant it protects is unchanged: W1 NEVER EXECUTES an
-    evidence-bearing method. "No such entry has a reader" was only ever a proxy for that,
-    and it stopped being a true one the moment a reader belonged to a lane that is not W1
-    — the archived-HTML re-mine lane, and now the free-text one. Both registries are
-    SKIPPED by `claims_intake.extract_listing`, never run by it, so an entry naming one is
-    still invisible to the hourly intake."""
+def test_the_payload_half_executes_no_evidence_bearing_method():
+    """`regex_text` / `llm_text` need a span into a RETRIEVABLE document, and
+    `listings.raw_json` is latest-wins JSON nobody archived (01 §4.2). The stored page body
+    IS retrievable (content-addressed, immutable), so the page half may carry them — which
+    is the whole reason the two substrates stay distinguishable inside one registry."""
     for contract in ALL.values():
         for entry in contract.entries:
             if entry.extraction_method in ("regex_text", "llm_text"):
                 assert (entry.reader is None
-                        or entry.reader in claims_intake.ARCHIVE_ONLY_READERS
-                        or entry.reader in claims_intake.LLM_ONLY_READERS), entry.entry_id
+                        or READERS[entry.reader].substrate
+                        == claims_intake.SUBSTRATE_ARCHIVED_HTML), entry.entry_id
 
 
 def test_the_w2_surfaces_are_still_declared():
@@ -506,7 +486,7 @@ def test_the_bumped_contracts_appended_entries_and_kept_the_earlier_ones():
     # was for prose). Both facts are asserted below: what each version appended, and which
     # already-shipped ids the wave turned on rather than replaced.
     assert {s: c.version for s, c in ALL.items()} == {
-        "remax": 3, "ceskereality": 5, "realitymix": 4, "bazos": 3, "idnes": 2,
+        "remax": 3, "ceskereality": 5, "realitymix": 4, "bazos": 4, "idnes": 2,
         "mmreality": 2, "maxima": 2,
         "sreality": 1, "bezrealitky": 1,
     }
@@ -1005,19 +985,17 @@ def _bare_entry(reader: str | None) -> claims_intake.Entry:
     return claims_intake.Entry(**values)
 
 
-def test_the_preflight_knows_every_lanes_readers_not_just_its_own():
-    """W1's `run()` preflight refuses an ACTIVE contract naming a reader nothing
-    implements. The seven shadowed W2 activations put archive-only and llm-only readers
-    on every active contract; the runtime loop SKIPS those, but the preflight compared
-    against `READERS` alone and refused first — the hourly intake was dead for all nine
-    portals from 2026-09-06 until this pin. KNOWN must be the union of the three lanes."""
+def test_the_preflight_admits_both_substrates_of_the_one_registry():
+    """`run()`'s preflight refuses an ACTIVE contract naming a reader nothing implements.
+    The seven W2 activations put page readers on every active contract while the preflight
+    compared against the payload registry alone and refused first — the hourly intake was
+    dead for all nine portals from 2026-09-06. With one registry there is one answer."""
     by_source = {
-        "a": [_bare_entry("point_pair")],          # this lane's own
-        "b": [_bare_entry("html_own_text")],       # the archive lane's
-        "c": [_bare_entry("llm_location_text")],   # the free-text lane's
+        "a": [_bare_entry("point_pair")],          # the payload substrate
+        "b": [_bare_entry("html_own_text")],       # the page substrate
         "d": [_bare_entry(None)],                  # declared, no reader yet: inert
     }
-    assert claims_intake.unknown_readers(by_source, ["a", "b", "c", "d"]) == []
+    assert claims_intake.unknown_readers(by_source, ["a", "b", "d"]) == []
 
 
 def test_the_preflight_still_refuses_a_reader_no_lane_implements():
@@ -1027,12 +1005,14 @@ def test_the_preflight_still_refuses_a_reader_no_lane_implements():
 
 def test_every_shipped_contract_passes_the_intake_preflight():
     """The test that would have caught the outage: the exact production predicate over
-    the exact production contracts, off disk. Any future contract naming a reader that no
-    lane registers reds here instead of taking the hourly intake down an hour after merge."""
+    the exact production contracts, off disk. Any future contract naming a reader the
+    registry does not carry reds here instead of taking the hourly intake down an hour
+    after merge."""
     from tests.location_data.claim_intake_fixtures import entries_for
     by_source = {s: entries_for(s) for s in SOURCES}
     assert claims_intake.unknown_readers(by_source, list(SOURCES)) == []
-    # and the census this guards is not vacuous: the W2 wave put other-lane readers live
-    other_lane = {e.reader for es in by_source.values() for e in es
-                  if e.reader and e.reader not in READERS}
-    assert other_lane & (claims_intake.ARCHIVE_ONLY_READERS | claims_intake.LLM_ONLY_READERS)
+    # and the census this guards is not vacuous: the shipped contracts DO name page readers
+    page = {e.reader for es in by_source.values() for e in es
+            if e.reader and READERS[e.reader].substrate
+            == claims_intake.SUBSTRATE_ARCHIVED_HTML}
+    assert page

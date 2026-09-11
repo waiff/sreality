@@ -2091,7 +2091,7 @@ def test_location_payload_shape_drift_refuses_ok_when_nothing_reached_min_rows()
 
 
 def test_location_payload_shape_drift_sql_shares_the_gate_classifier_and_reads_the_fresh_arm() -> None:
-    from location_data.refetch_cohort import SREALITY_SHAPE_CASE_SQL
+    from scripts.verify_pipeline import SREALITY_SHAPE_CASE_SQL
     from scripts.verify_pipeline import _LOCATION_PAYLOAD_SHAPE_DRIFT_SQL as sql
 
     assert SREALITY_SHAPE_CASE_SQL.strip() in sql

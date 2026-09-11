@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 
 from location_data import contracts
-from location_data.claims_remine_archive import ARCHIVE_READERS
+from location_data.page_readers import PAGE_READERS
 from location_data.contracts import ContractError
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -202,62 +202,6 @@ def test_no_shipped_contract_carries_a_shadow_line():
     deleting it cost no version bump. The flag itself goes with the contract rewrite."""
     assert {c.source: c.shadow for c in contracts.load_all()} == {
         source: False for source in contracts.EXTRACTOR_PREFIXES}
-
-
-# The module name is the thing being searched for, spelled once. `claims_remine` (W3) is a
-# DIFFERENT lane on a different substrate and must NOT match, which is why the search is for
-# the full disambiguated name and not a prefix.
-_ARCHIVE_LANE = "claims_remine_archive"
-
-
-def archive_lane_dispatchers(*roots: Path) -> list[str]:
-    """Every file under `roots` that could put the archived re-mine lane on a runner.
-
-    Deliberately WIDER than `.github/workflows/*.yml`: the review that produced this rail
-    pointed out that a workflow calling `scripts/run_lane.sh`, or a `.yaml`-suffixed
-    workflow, would have walked straight past a `*.yml`-only glob. Any executable text file
-    naming the module counts, so the indirection has to be at least two hops to hide.
-
-    Substring matching accepts a false positive (a file merely MENTIONING the lane, e.g. in
-    a comment) and that asymmetry is deliberate: the cost of a false positive is a developer
-    adding `shadow: true` or rewording a comment, and the cost of a false negative is a
-    portal's unreviewed claims serving live."""
-    found: list[str] = []
-    for root in roots:
-        if not root.exists():
-            continue
-        for path in sorted(root.rglob("*")):
-            if not path.is_file() or path.suffix not in {".yml", ".yaml", ".sh", ".py"}:
-                continue
-            try:
-                text = path.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue
-            if _ARCHIVE_LANE in text:
-                found.append(path.name)
-    return sorted(set(found))
-
-
-def test_the_dispatcher_scan_sees_a_lane_however_it_is_spelled(tmp_path: Path):
-    """The rail's own negative control — WITHOUT this the guard below never executes its
-    assertion in CI (there is no dispatcher today, so it returns early) and would be a rail
-    nobody has ever seen fire.
-
-    Each case is a real way the previous `*.yml`-only glob would have missed a dispatcher."""
-    workflows = tmp_path / "workflows"
-    scripts = tmp_path / "scripts"
-    workflows.mkdir()
-    scripts.mkdir()
-    assert archive_lane_dispatchers(workflows, scripts) == []      # clean tree: silent
-
-    (workflows / "a.yml").write_text("run: python -m location_data.claims_remine_archive\n")
-    (workflows / "b.yaml").write_text("run: python -m location_data.claims_remine_archive\n")
-    (scripts / "run_lane.sh").write_text("#!/bin/sh\npython -m location_data.claims_remine_archive\n")
-    assert archive_lane_dispatchers(workflows, scripts) == ["a.yml", "b.yaml", "run_lane.sh"]
-
-    # W3's lane is a different module on a different substrate and must not trip the rail.
-    (workflows / "w3.yml").write_text("run: python -m location_data.claims_remine\n")
-    assert "w3.yml" not in archive_lane_dispatchers(workflows, scripts)
 
 
 def test_a_yaml_without_the_key_projects_as_live(tmp_path: Path):

@@ -24,15 +24,15 @@ import pytest
 
 from location_data import contracts
 from location_data.claims_intake import Entry, ListingRow
-from location_data.claims_remine_archive import (
-    ARCHIVE_READERS,
+from location_data.page_readers import (
+    PAGE_READERS,
     ARCHIVED_COORDINATE_RULES,
     ArchivedPayload,
     _licensed_coordinate,
-    extract_payload,
-    stamp_archive_claim,
+    extract_page,
+    stamp_page_claim,
 )
-from location_data.claims_intake import ARCHIVE_ONLY_READERS
+from location_data.claims_intake import READERS, SUBSTRATE_ARCHIVED_HTML
 from location_data.html_scope import ScopeRegister, ScopedDocument, scope_html
 from tests.location_data import claim_intake_fixtures as fx
 
@@ -75,7 +75,7 @@ def payload(body: bytes | None = None) -> ArchivedPayload:
 def read(entry_id: str, doc: ScopedDocument | None = None, *, listing: ListingRow | None = None):
     entry = ENTRIES[entry_id]
     doc = document() if doc is None else doc
-    return ARCHIVE_READERS[str(entry.reader)](
+    return PAGE_READERS[str(entry.reader)](
         entry, listing or row(), payload(), doc)
 
 
@@ -88,11 +88,11 @@ def value(entry_id: str, doc: ScopedDocument | None = None) -> str | None:
 # ------------------------------------------------------------------ the contract itself
 
 def test_the_activation_is_live_and_names_only_registered_readers():
-    """A reader in `ARCHIVE_READERS` but not in `ARCHIVE_ONLY_READERS` takes the HOURLY W1
-    intake down for this portal, so the pair is asserted per entry rather than fleet-wide.
-    Un-shadowed 2026-09-09; the stale YAML line went 2026-09-11."""
+    """A reader no registry carries takes the HOURLY intake down for this portal, so the
+    membership is asserted per entry rather than fleet-wide. Un-shadowed 2026-09-09; the
+    stale YAML line went 2026-09-11; folded into the one lane 2026-09-11 (rule 25)."""
     assert CONTRACT.version == 4 and CONTRACT.shadow is False
-    dom = [e for e in CONTRACT.entries if e.reader in ARCHIVE_READERS]
+    dom = [e for e in CONTRACT.entries if e.reader in PAGE_READERS]
     assert {e.entry_id for e in dom} == {
         "rm.det.gps", "rm.det.agency_gps_flag", "rm.det.agency_est_flag",
         "rm.det.address_all_segments", "rm.det.form_address", "rm.det.map_address",
@@ -101,7 +101,7 @@ def test_the_activation_is_live_and_names_only_registered_readers():
         "rm.det.breadcrumb_geo", "rm.det.breadcrumb_kraj", "rm.det.breadcrumb_obec",
         "rm.det.breadcrumb_quarter"}
     for entry in dom:
-        assert entry.reader in ARCHIVE_ONLY_READERS, entry.entry_id
+        assert READERS[entry.reader].substrate == SUBSTRATE_ARCHIVED_HTML, entry.entry_id
         assert entry.page_kind == "detail"
         for spec in entry.transform:
             assert spec.partition(":")[0] in contracts.IMPLEMENTED_TRANSFORMS, entry.entry_id
@@ -149,7 +149,7 @@ def test_the_subject_map_node_survives_the_zones():
 def test_the_gps_pair_is_a_portal_pin_through_the_real_licence_ladder():
     reads = read("rm.det.gps")
     assert len(reads) == 1 and reads[0].position_branch == "portal_pin"
-    claim = stamp_archive_claim(reads[0].claim, payload(),
+    claim = stamp_page_claim(reads[0].claim, payload(),
                                 scope_version=document().scope_version)
     licensed, reason = _licensed_coordinate(claim, row(), ENTRIES["rm.det.gps"],
                                             reads[0].position_branch)
@@ -163,7 +163,7 @@ def test_a_coordinate_from_any_other_entry_id_is_refused_by_the_ladder():
     so a future entry cannot license a position by declaring a branch."""
     assert ARCHIVED_COORDINATE_RULES["realitymix"].entry_id == "rm.det.gps"
     reads = read("rm.det.gps")
-    claim = stamp_archive_claim(reads[0].claim, payload(),
+    claim = stamp_page_claim(reads[0].claim, payload(),
                                 scope_version=document().scope_version)
     impostor = replace(ENTRIES["rm.det.gps"], entry_id="rm.det.not_the_rule")
     licensed, reason = _licensed_coordinate(claim, row(), impostor, "portal_pin")
@@ -173,7 +173,7 @@ def test_a_coordinate_from_any_other_entry_id_is_refused_by_the_ladder():
 def test_a_listing_in_the_mapy_inventory_yields_no_archived_coordinate():
     """The Mapy veto sits ABOVE the substrate branch, so it reaches the archived body too."""
     reads = read("rm.det.gps")
-    claim = stamp_archive_claim(reads[0].claim, payload(),
+    claim = stamp_page_claim(reads[0].claim, payload(),
                                 scope_version=document().scope_version)
     licensed, reason = _licensed_coordinate(
         claim, row(in_mapy_inventory=True), ENTRIES["rm.det.gps"], "portal_pin")
@@ -335,9 +335,9 @@ def test_an_unknown_kraj_slug_costs_coverage_and_never_correctness():
 # ------------------------------------------------------------------ the whole lane
 
 def test_the_lane_over_the_live_body_yields_exactly_these_claims():
-    """`extract_payload` end to end: the readers, the scoper, the ladder and the evidence
+    """`extract_page` end to end: the readers, the scoper, the ladder and the evidence
     assertions, on the page the contract pins."""
-    result = extract_payload(payload(), row(), list(ENTRIES.values()), register=REGISTER)
+    result = extract_page(payload(), row(), list(ENTRIES.values()), register=REGISTER)
     assert {(c.extractor_id, c.value_geom_wkt or c.value_text) for c in result.claims} == {
         ("rm.det.gps", "POINT(12.742544 50.427238)"),
         ("rm.det.agency_gps_flag", "gps"),
@@ -350,7 +350,7 @@ def test_the_lane_over_the_live_body_yields_exactly_these_claims():
         ("rm.det.breadcrumb_obec", "Potůčky"),
         ("rm.det.breadcrumb_quarter", "Stráň"),
     }
-    assert result.absences == [] and result.oversized == 0
+    assert not result.refusals
     assert all(c.surface == "archived_html" for c in result.claims)
     assert all(c.licence_class == "portal" for c in result.claims)
 
@@ -359,17 +359,17 @@ def test_every_archived_claim_carries_a_resolvable_evidence_span():
     """Migration 382's `loc_claim_text_evidence` refuses an evidence-bearing claim with no
     span, and a span that does not contain its quote is worse than none."""
     doc = document()
-    result = extract_payload(payload(), row(), list(ENTRIES.values()), register=REGISTER)
+    result = extract_page(payload(), row(), list(ENTRIES.values()), register=REGISTER)
     for claim in result.claims:
         assert claim.evidence_quote, claim.extractor_id
         assert claim.span_start is not None, claim.extractor_id
         assert doc.html[claim.span_start:claim.span_end] == claim.evidence_quote
 
 
-def test_a_listing_in_the_mapy_inventory_records_an_absence_not_a_silence():
-    result = extract_payload(payload(), row(in_mapy_inventory=True),
+def test_a_listing_in_the_mapy_inventory_counts_a_refusal_not_a_silence():
+    result = extract_page(payload(), row(in_mapy_inventory=True),
                              list(ENTRIES.values()), register=REGISTER)
-    assert [a.field_ for a in result.absences] == ["coordinate"]
+    assert dict(result.refusals) == {"listing_in_mapy_affected_inventory": 1}
     assert "rm.det.gps" not in {c.extractor_id for c in result.claims}
 
 
@@ -383,7 +383,7 @@ def test_an_incomplete_scope_admits_nothing_and_says_so():
                              "reason": "a selector html_scope cannot compile"}]))
     if broken.is_complete:  # pragma: no cover - the compiler accepted it after all
         pytest.skip("the scoper compiled the deliberately broken selector")
-    result = extract_payload(payload(), row(), list(ENTRIES.values()),
+    result = extract_page(payload(), row(), list(ENTRIES.values()),
                              register=broken.register)
     assert result.claims == [] and result.absences
 

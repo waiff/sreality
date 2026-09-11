@@ -476,7 +476,6 @@ class MaximaPortal:
                 # W2a-0 churn instrument: this whole write_details is replayed on
                 # a transient pooler drop, so the counter bump inside needs the
                 # item's per-fetch token to make the replay a no-op.
-                churn_observation=it.observation_id,
             )
             pk, result = db.ingest_scraped_listing(
                 conn, p["listing"], discovery_seq=it.discovery_seq,

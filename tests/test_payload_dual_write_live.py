@@ -1,4 +1,4 @@
-"""W2a-2's dual-write executed end to end, against the replayed schema.
+"""The payload dual-write executed end to end, against the replayed schema.
 
 tests/test_payload_dual_write.py proves the wiring with a fake connection: which
 fetches reach the archive, with which body, how often. A fake connection cannot
@@ -8,14 +8,12 @@ CHECK and UNIQUE constraints, and that a REPLAYED drain batch — `_flush_drain_
 retrying the whole write op after a transient pooler drop — collides instead of
 appending a second version. Both need real SQL.
 
-Gated on TEST_DATABASE_URL exactly like tests/test_payload_churn_live.py, so a
-normal local `pytest` skips it. Nothing here touches production: rows are keyed on
+Gated on TEST_DATABASE_URL, so a normal local `pytest` skips it. Nothing here touches production: rows are keyed on
 a per-test uuid in a throwaway container.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import uuid
 from collections.abc import Iterator
@@ -41,72 +39,6 @@ _PAGE = "<html><body><h1>Byt 3+1</h1><p>Dlouhá 1</p></body></html>"
 def conn() -> Iterator[psycopg.Connection]:
     with psycopg.connect(_DB_URL, autocommit=True) as c:
         yield c
-
-
-@pytest.fixture()
-def measured_surface(monkeypatch: pytest.MonkeyPatch):
-    """Register a (source, page_kind) in the frozen storage corpus for one test.
-
-    W2a-7 added a THIRD gate to the chokepoint that is not a flag: a surface whose
-    page weight nobody has measured is refused, because archiving it would make the
-    ceiling the operator signed silently wrong. The frozen corpus carries only
-    `detail` today, so a test about index/map PLUMBING has to say that the surface
-    was costed — which is the point, and is asserted directly in
-    `test_an_unmeasured_surface_is_refused_even_with_both_gates_on`.
-    """
-    from location_data import payload_budget
-
-    def _register(source: str, page_kind: str) -> None:
-        monkeypatch.setattr(payload_budget, "PORTAL_STORAGE", (
-            *payload_budget.PORTAL_STORAGE,
-            payload_budget.PortalStorage(source, page_kind, 8_000, 1_000, 1_000, "test"),
-        ))
-    return _register
-
-
-def _set_dual_write(
-    conn: psycopg.Connection, enabled: bool, *, index_archive: bool = False,
-) -> None:
-    """Flip the archive on through the GLOBAL limit layer.
-
-    * the global layer, not `portals.operational_limits`, so the test does not
-      depend on the registry carrying a row for this source in the replayed
-      schema; the per-portal layer and its precedence are unit-tested in
-      tests/scraper/test_portal.py;
-    * `index_archive` is W2a-6's second gate, which a `page_kind='index'` write
-      needs on TOP of this one — default off, so a detail-page test says nothing
-      about it either way.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO app_settings (key, value) VALUES "
-            "('scraper_limits_global', %s::jsonb) "
-            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-            (json.dumps({
-                "payload_dual_write": enabled,
-                "payload_index_archive": index_archive,
-            }),),
-        )
-    db.clear_app_settings_flag_cache()
-
-
-@pytest.fixture(autouse=True)
-def _restore_limits(conn: psycopg.Connection) -> Iterator[None]:
-    with conn.cursor() as cur:
-        cur.execute("SELECT value FROM app_settings WHERE key = 'scraper_limits_global'")
-        row = cur.fetchone()
-    db.clear_app_settings_flag_cache()
-    yield
-    with conn.cursor() as cur:
-        if row is None:
-            cur.execute("DELETE FROM app_settings WHERE key = 'scraper_limits_global'")
-        else:
-            cur.execute(
-                "UPDATE app_settings SET value = %s::jsonb "
-                "WHERE key = 'scraper_limits_global'",
-                (json.dumps(row[0]),),
-            )
-    db.clear_app_settings_flag_cache()
 
 
 def _archive(
@@ -157,30 +89,10 @@ def _stored_body(conn: psycopg.Connection, key: str) -> str:
     return payloads.decode_body(bytes(body), str(encoding)).decode("utf-8")
 
 
-def test_gate_off_writes_the_staging_row_and_no_payload(
-    conn: psycopg.Connection,
-) -> None:
-    key = f"live-{uuid.uuid4().hex}"
-    _set_dual_write(conn, False)
-
-    _archive(conn, key, _PAGE)
-
-    assert _payloads(conn, key) == []
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT count(*) FROM portal_raw_pages "
-            " WHERE source = %s AND source_id_native = %s",
-            (_SOURCE, key),
-        )
-        assert cur.fetchone()[0] == 1
-
-
-def test_gate_on_archives_one_body_the_store_accepts(conn: psycopg.Connection) -> None:
+def test_a_detail_page_archives_one_body_the_store_accepts(conn: psycopg.Connection) -> None:
     # Every column the chokepoint fills, read back: a fake connection cannot tell
     # you that 'detail' is a legal location_page_kind or that prp_body_present held.
     key = f"live-{uuid.uuid4().hex}"
-    _set_dual_write(conn, True)
-
     _archive(conn, key, _PAGE)
 
     rows = _payloads(conn, key)
@@ -203,8 +115,6 @@ def test_a_replayed_batch_appends_no_second_version(conn: psycopg.Connection) ->
     # The contract `_flush_drain_batch` needs: replaying a partially-committed
     # batch must not cost a version. Content addressing is what provides it.
     key = f"live-{uuid.uuid4().hex}"
-    _set_dual_write(conn, True)
-
     _archive(conn, key, _PAGE)
     _archive(conn, key, _PAGE)
 
@@ -223,8 +133,6 @@ def test_a_changed_body_appends_a_version(
     # genuinely new body satisfies the store's enum, CHECK and UNIQUE constraints.
     monkeypatch.setenv("LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS", "0")
     key = f"live-{uuid.uuid4().hex}"
-    _set_dual_write(conn, True)
-
     _archive(conn, key, _PAGE)
     _archive(conn, key, _PAGE.replace("Dlouhá 1", "Dlouhá 2"))
 
@@ -239,8 +147,6 @@ def test_the_time_floor_reaches_live_ingest_with_its_shipped_default(
     proves there is no plumbing gap between `payloads.append_payload`'s default and
     what live ingest actually gets, and the whole storage projection rests on it."""
     key = f"live-{uuid.uuid4().hex}"
-    _set_dual_write(conn, True)
-
     _archive(conn, key, _PAGE)
     _archive(conn, key, _PAGE.replace("Dlouhá 1", "Dlouhá 2"))
 
@@ -250,30 +156,13 @@ def test_the_time_floor_reaches_live_ingest_with_its_shipped_default(
     assert "Dlouhá 1" in _stored_body(conn, key)
 
 
-def test_an_index_page_archives_under_its_own_page_kind(
-    conn: psycopg.Connection, measured_surface,
+def test_a_non_detail_page_stages_and_archives_nothing(
+    conn: psycopg.Connection,
 ) -> None:
-    # The index archivers ride the same chokepoint; 'index' has to be a legal
-    # location_page_kind label, which only real SQL can answer. Needs BOTH gates
-    # since W2a-6 — an index body passes payload_index_archive as well — plus a
-    # measured page weight since W2a-7.
+    """The grain rule, executed. An index body is a whole-SURFACE artefact refetched on the
+    walk cadence, so no listing's claim can be mined from it and it never enters the
+    append-on-change store — while its latest-wins staging row is still written."""
     key = f"live-{uuid.uuid4().hex}/0/2026w33"
-    measured_surface(_SOURCE, "index")
-    _set_dual_write(conn, True, index_archive=True)
-
-    _archive(conn, key, '{"_embedded": {"estates": []}}', page_kind="index")
-
-    rows = _payloads(conn, key)
-    assert len(rows) == 1
-    assert rows[0]["page_kind"] == "index"
-    assert rows[0]["content_type"] == "application/json"
-
-
-def test_the_index_gate_alone_holds_an_index_body_back(conn: psycopg.Connection) -> None:
-    # The same write with only payload_dual_write on must reach portal_raw_pages
-    # and NOT the archive — the split flag's whole point, against the real schema.
-    key = f"live-{uuid.uuid4().hex}/0/2026w33"
-    _set_dual_write(conn, True, index_archive=False)
 
     _archive(conn, key, '{"_embedded": {"estates": []}}', page_kind="index")
 
@@ -285,53 +174,3 @@ def test_the_index_gate_alone_holds_an_index_body_back(conn: psycopg.Connection)
             (_SOURCE, key),
         )
         assert cur.fetchone()[0] == 1
-
-
-def test_a_map_body_is_held_back_by_the_index_gate_and_is_a_legal_page_kind(
-    conn: psycopg.Connection, measured_surface,
-) -> None:
-    # ceskereality's /mapa/ surface is SURFACE grain and declares `archive: true`,
-    # so W2a-6 puts it behind the second gate too. It can only reach the archive
-    # through the direct call: portal_raw_pages CHECKs page_kind in
-    # ('index','detail') (migration 099), so a map body has no staging row at all
-    # — and 'map' still has to satisfy the location_page_kind enum, which is the
-    # half only real SQL can answer.
-    key = f"live-map-{uuid.uuid4().hex}"
-    measured_surface(_SOURCE, "map")
-    _set_dual_write(conn, True, index_archive=False)
-
-    db.append_payload_if_enabled(
-        conn, source=_SOURCE, source_id_native=key, page_kind="map",
-        body=b'{"markers": []}', content_type="application/json",
-    )
-    assert _payloads(conn, key) == []
-
-    _set_dual_write(conn, True, index_archive=True)
-    db.clear_app_settings_flag_cache()
-    db.append_payload_if_enabled(
-        conn, source=_SOURCE, source_id_native=key, page_kind="map",
-        body=b'{"markers": []}', content_type="application/json",
-    )
-
-    rows = _payloads(conn, key)
-    assert len(rows) == 1
-    assert rows[0]["page_kind"] == "map"
-
-
-def test_an_unmeasured_surface_is_refused_even_with_both_gates_on(
-    conn: psycopg.Connection,
-) -> None:
-    """THE THIRD GATE, and the one that is not an operator switch. The frozen
-    storage corpus (`location_data.payload_budget.PORTAL_STORAGE`) carries every
-    portal's `detail` surface and nothing else, because nothing else has been
-    weighed — index surfaces are week-stamped, ~100 % churn and unprofiled. Letting
-    one through would not break anything visibly; it would make the ceiling the
-    operator signed wrong by an unknown amount, which is worse. So it is refused
-    here, which is also what forces whoever turns `payload_index_archive` on to
-    profile the surface first."""
-    key = f"live-unmeasured-{uuid.uuid4().hex}/0/2026w33"
-    _set_dual_write(conn, True, index_archive=True)
-
-    _archive(conn, key, '{"_embedded": {"estates": []}}', page_kind="index")
-
-    assert _payloads(conn, key) == []

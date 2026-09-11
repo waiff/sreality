@@ -116,25 +116,19 @@ when the archive exists to be re-mined by extractors not yet written. An UNCONFI
 REFUSES the payload write rather than falling back inline (which would rebuild the
 database-resident archive invisibly); the refusal is caught by `append_payload_if_enabled`, so
 the walk and the drain are unaffected, and the upload runs inside the write transaction so a
-failed PUT rolls the row back. A surface whose page weight is not in
-`location_data.payload_budget.PORTAL_STORAGE` is refused outright — archiving an uncosted
-surface would silently invalidate the storage ceiling the operator signed. It is gated per portal by `PortalLimits.payload_dual_write` (baked default
-**False**, overridable via `app_settings.scraper_limits_global` / `portals.operational_limits`
-— no migration), cached ~60 s per source, and every failure warns rather than touching the
-scrape. **Every `page_kind` except `detail`** passes a SECOND gate on top of it,
-`PortalLimits.payload_index_archive` (W2a-6, same precedence, also baked **False**). The split is
-by GRAIN: a `detail` body is one listing fetched when that listing is enqueued, while index, map,
-gazetteer, snapshot and archive bodies are whole-SURFACE artefacts refetched on the walk cadence
-(sreality's index 24×/day; ceskereality's `/mapa/` and bezrealitky's `Region.boundaryGeoJson`
-already declare `archive: true`), which is the churn 02 §2.3.2 P2 gates — so a gate naming only
-`'index'` would have let map and gazetteer bodies archive on every walk. It only ever narrows what
-`payload_dual_write` allows. **OFF everywhere until the operator signs off the churn measurement
-+ storage projection** (02 §2.3.2's gate; the numbers come from
-`scripts/location_payload_churn_report.py`). All three index archivers are additionally **gated
-by their own client-side freshness skip**, which returns before `upsert_portal_raw_page` and so
-suppresses the dual-write for an index page that genuinely changed inside the 22 h window — a
-KNOWN GAP commented at each call site, measured by `scripts/location_index_archive_audit.py`
-(W2a-6) and left for P2 to fix.
+failed PUT rolls the row back. **A `detail` body is ALWAYS archived and every other `page_kind` NEVER is** — one page-kind
+comparison in `scraper.db._payload_archive_enabled`, no flag, no per-portal limit, no
+measurement corpus. Three gates used to stand here (`PortalLimits.payload_dual_write`, a second
+`payload_index_archive` for non-detail surfaces, and a "has this surface been weighed" check
+against `location_data.payload_budget.PORTAL_STORAGE`); rule 25 removed all three with the
+modules that read them, because the stored detail body is now the claim lane's SECOND SUBSTRATE
+rather than an opt-in experiment. What survives is the reason the split existed, as an
+invariant about GRAIN: a `detail` body is ONE listing fetched when that listing is enqueued and
+is mined for that listing's claims, while index, map, gazetteer, snapshot and archive bodies
+are whole-SURFACE artefacts refetched on the walk cadence (sreality's index 24x/day) that no
+listing's claim can be mined from. All three index archivers still stage through their own
+client-side freshness skip; with index bodies out of the payload archive entirely, that skip
+now only guards a latest-wins `portal_raw_pages` row.
 **`portal_raw_pages` is preservation substrate, never pruned** (location-data
 program, W0 item 0o): migration 099's "safe to delete once parsed" header is superseded —
 the archive is the only surviving copy of delisted pages' location signal (portals don't
@@ -1914,6 +1908,31 @@ Until 2026-09-11 this was three statements (a claim-driven stale sweep that coul
 listing, a kraj-scoped cousin, an orphan sweep); they were folded into the one above under rule 25.
 The collision epoch is minted weekly by the same workflow (Sunday 04:41 UTC).
 
+**ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
+`35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a
+listing in one keyset pass: `listings.raw_json` plus the class-B legacy columns (ten payload
+readers), and the LATEST stored detail body in `portal_raw_payloads`, joined on
+`(source, source_id_native)` — `portal_raw_payloads.listing_id` is nullable and nothing has ever
+populated it — fetched from R2 and scoped by the contract's exclusion zones (fourteen page
+readers in `location_data/page_readers.py`, the vocabulary both halves share in
+`location_data/claims_common.py`). ONE registry, `claims_intake.READERS`, 24 entries keyed by
+substrate; a name outside it is a hard refusal. **The page half is hash-gated**: a body is mined
+only while `portal_raw_payloads.contract_version IS DISTINCT FROM` the portal's active contract
+version, and the batch stamps the bodies it mined in the same transaction as their claims — so
+a body is fetched once per contract version, the hourly cost is bounded by page CHURN (~50–80
+new bodies an hour fleet-wide) rather than by corpus size, and a contract bump re-mines every
+latest body over the runs that follow. No new table: migration 403 added the column and nothing
+populated it. If R2 is unconfigured the page half is skipped with ONE warning per run and the
+payload half runs unchanged — the hourly ingest for all nine portals must never go dark because
+a credential rotated. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
+re-mine, the archived-HTML sweep, the verify lane and the LLM free-text lane, with the refetch
+cohort and the payload backfill/prune/churn tooling. The lane writes `location_claims`,
+`dirty_locations` and its own `location_claim_batches` ledger and nothing else:
+`location_claim_observations` (263 M rows / 50 GB), `location_claim_absences` and
+`location_enrichment_state` were written by every lane and read by none, so a refusal — a
+withheld coordinate, an oversized value, a subject miss — is a COUNTER and one log line per
+reason per batch.
+
 **Four precision axes, mandatory next to every coordinate** (D3): `granularity` (ordinal enum,
 country → … → address_point), `position_source` (admin_centroid → carried_forward →
 portal_pin_blurred → portal_pin → registry_point), `match_confidence`, and `uncertainty_radius_m`
@@ -1955,7 +1974,7 @@ entry, not code.
 
 The header carries **two mutable columns and no more**: `is_active` (which version the extractor runs)
 and `shadow` (whether what it mined is admissible to the resolver yet, migration 404). **Shadow is the
-W2 gate**: a contract that cannot meet its frozen-sample precision floors merges dark — claims mined,
+activation gate**: a contract that cannot meet its frozen-sample precision floors merges dark — claims mined,
 stored and auditable, but excluded from `location_claims_live` — so a failing gate has somewhere to
 land that is not "revert the branch". Three relations, one predicate each: `location_claims_unretracted`
 states the retraction predicate once, and `location_claims_live` (resolver) and `location_claims_shadow`
@@ -1969,16 +1988,17 @@ unconditional, like the operator-correction lane, so a re-run after a failed dra
 button. `shadow` is excluded from `contract_sha256` — it is operational state, so editing it in git is
 not a `contract_version` bump (and a bump would re-shadow the contract, discarding the passed sample).
 
-**Ops rules the incidents wrote.** The heavy lanes — registry load, claim intake, Mapy inventory, the
-churn probe, the payload backfill/prune, both re-mine sweeps — share the OUTER `location-batch`
-concurrency group so **at most one runs at a time** (each keeps its own inner group at job level); a new
-heavy lane joins it. **The resolve drain left the group on 2026-09-10** (operator decision): it is the one
+**Ops rules the incidents wrote.** The heavy lanes — registry load, claim intake, Mapy inventory —
+share the OUTER `location-batch` concurrency group so **at most one runs at a time** (each keeps its
+own inner group at job level); a new heavy lane joins it. It was seven lanes until 2026-09-11; rule
+25 left three. **The resolve drain left the group on 2026-09-10** (operator decision): it is the one
 member that is latency-bound rather than instance-bound — 11 small indexed reads and one projection write
 per listing, no COPY, no corpus scan, no detoast — so it contributed least to the incident and lost most
 to the queueing. What forced the reversal: at a measured 0.7 listings/s, ~7 GitHub ticks a day and a queue
 above 100k, the self-chaining W2-13 archive sweeps (~55 min back to back) starved it to zero ticks in three
-hours, and "a skipped tick costs nothing" only holds when a later tick catches up. It READS the claim
-spine the intake and the archive sweep WRITE, so it never carried their must-never-overlap constraint. Its
+hours, and "a skipped tick costs nothing" only holds when a later tick catches up. (That sweep is itself
+gone now, and no group member self-chains any more.) It READS the claim spine the intake WRITES, so it
+never carried a must-never-overlap constraint. Its
 guards are now the job-level `location-resolve` group plus the `location_jobs` lease CAS, which is also
 what keeps it exclusive against the always-on Railway worker's resolve lane. On 2026-08-10 four concurrent
 lanes dropped backends across the fleet, degraded the live Browse rebuild to multi-minute

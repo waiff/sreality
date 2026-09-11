@@ -1,7 +1,7 @@
 """mmreality@2 — the SHIPPED contract, run over the REAL archived page.
 
 `test_archive_reader_canon` proves the readers; this proves the CONTRACT that names them.
-Every entry mmreality@2 activates is executed here through `extract_payload`, over
+Every entry mmreality@2 activates is executed here through `extract_page`, over
 `tests/fixtures/portal_html/mmreality_detail.html` (listing 951845, a genuinely archived
 body carrying three `:property` blobs) and over the pinned
 `tests/fixtures/location_w2/mmreality_detail.html` the fixture-diff gate scores.
@@ -24,11 +24,11 @@ import pytest
 
 from location_data import contracts
 from location_data.claims_intake import Entry, IntakeRefused, ListingRow
-from location_data.claims_remine_archive import (
-    ARCHIVE_READERS,
+from location_data.page_readers import (
+    PAGE_READERS,
     ArchivedPayload,
     _DUMMY_LEGACY_COLUMNS,
-    extract_payload,
+    extract_page,
 )
 from location_data.html_scope import ScopeRegister, scope_html
 
@@ -48,7 +48,7 @@ NEIGHBOUR = "950647"
 NEIGHBOUR_VALUES = ("Ludvíkov", "950647", "17.347457655", "50.113874456")
 
 CONTRACT = {c.source: c for c in contracts.load_all()}["mmreality"]
-ARCHIVE_ENTRIES = [e for e in CONTRACT.entries if e.reader in ARCHIVE_READERS]
+ARCHIVE_ENTRIES = [e for e in CONTRACT.entries if e.reader in PAGE_READERS]
 
 
 def entries() -> list[Entry]:
@@ -89,7 +89,7 @@ def register() -> ScopeRegister:
 def run(native: str, path: Path = _ARCHIVED_BODY, *, items: list[Entry] | None = None,
         in_mapy_inventory: bool = False):
     body = path.read_bytes()
-    return extract_payload(
+    return extract_page(
         payload(native, body), row(native, in_mapy_inventory=in_mapy_inventory),
         items if items is not None else entries(), register=register())
 
@@ -178,7 +178,7 @@ def test_the_subject_blob_is_read_and_the_larger_neighbour_blob_is_not():
         assert decoy not in body, decoy
 
 
-def test_the_two_street_signals_are_honest_absences_on_this_listing():
+def test_the_two_street_signals_are_honest_silences_on_this_listing():
     """951845 publishes no `/street` key and its `originalTitle` carries no `ul.` — the real
     `when_present` / `best_effort` misses this body was pinned for. A reader that invented a
     value here would be reading the neighbour's blob, which DOES carry a street."""
@@ -186,7 +186,7 @@ def test_the_two_street_signals_are_honest_absences_on_this_listing():
     assert "mm.det.blob_street" not in found
     assert "mm.det.original_title_street" not in found
     # A miss inside the subject's own blob is not a subject miss: nothing to record.
-    assert run(SUBJECT).absences == []
+    assert not run(SUBJECT).refusals
 
 
 def test_every_archived_claim_carries_a_span_into_the_entity_encoded_attribute():
@@ -222,19 +222,13 @@ def test_the_selector_is_id_driven_and_not_position_driven():
 
 # ------------------------------------------------------------ the refusals
 
-def test_a_subject_miss_is_one_absence_per_entry_and_never_a_silent_zero():
-    """`on_miss: fail`. Without the absences, "the portal changed its id scheme fleet-wide"
+def test_a_subject_miss_is_one_refusal_per_entry_and_never_a_silent_zero():
+    """`on_miss: fail`. Without the tally, "the portal changed its id scheme fleet-wide"
     and "this page genuinely carried no address" would be the same green zero-claim sweep,
     and the batch would still stamp 'ok' and move the watermark."""
     result = run("999999")
     assert result.claims == []
-    assert len(result.absences) == len(ARCHIVE_ENTRIES)
-    assert {a.reason for a in result.absences} == {"not_attempted"}
-    assert {a.surface for a in result.absences} == {"archived_html"}
-    assert {a.field_ for a in result.absences} == {
-        "coordinate", "street_name", "precision_declaration", "obec_name",
-        "cast_obce_name", "obec_code"}
-    assert all("on_miss=fail" in str(a.detail) for a in result.absences)
+    assert dict(result.refusals) == {"subject_not_found": len(ARCHIVE_ENTRIES)}
 
 
 def test_an_on_miss_other_than_fail_is_refused_rather_than_quietly_different():
@@ -255,8 +249,7 @@ def test_the_mapy_inventory_veto_still_reaches_the_archived_coordinate():
     archived lane must not have moved it out from under the veto."""
     result = run(SUBJECT, in_mapy_inventory=True)
     assert "mm.det.point" not in by_id(result)
-    refused = [a for a in result.absences if a.field_ == "coordinate"]
-    assert len(refused) == 1 and refused[0].reason == "not_attempted"
+    assert result.refusals["listing_in_mapy_affected_inventory"] == 1
     # The admin twins are unaffected: the veto is about a POSITION's provenance.
     assert "mm.det.blob_municipality_id" in by_id(result)
 

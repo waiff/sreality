@@ -1,4 +1,4 @@
-"""The W2 reader canon — the ten archived-HTML readers the seven portal activations share.
+"""The page-reader canon — the readers the seven portal activations share.
 
 Every test here runs a REAL reader over a REAL body through the REAL scoper. Where a portal
 has a genuinely archived page in `tests/fixtures/portal_html/` that is the substrate used,
@@ -28,21 +28,20 @@ from typing import Any
 
 import pytest
 
-from location_data import claims_remine_archive as archive
 from location_data import contracts
-from location_data.claims_intake import (
-    Absence,
+from location_data import page_readers as archive
+from location_data.claims_common import (
     Entry,
     IntakeRefused,
     ListingRow,
     TRANSFORMS,
     apply_transforms,
 )
-from location_data.claims_remine_archive import (
-    ARCHIVE_READERS,
+from location_data.page_readers import (
+    PAGE_READERS,
     ArchivedPayload,
     SubjectNotFound,
-    extract_payload,
+    extract_page,
 )
 from location_data.html_scope import ScopeRegister, ScopedDocument, scope_html
 
@@ -131,12 +130,12 @@ def pinned(source: str) -> ScopedDocument:
 
 def read(
     name: str, document: ScopedDocument, item: Entry, *, native: str = "fixture",
-) -> list[archive.ArchiveRead]:
-    return ARCHIVE_READERS[name](
+) -> list[archive.PageRead]:
+    return PAGE_READERS[name](
         item, listing_row(item.source, native), payload(item.source, native), document)
 
 
-def one(reads: list[archive.ArchiveRead]) -> Any:
+def one(reads: list[archive.PageRead]) -> Any:
     assert len(reads) == 1, f"expected exactly one read, got {len(reads)}"
     return reads[0].claim
 
@@ -1038,34 +1037,32 @@ def test_an_unparseable_blob_is_a_subject_miss_and_never_an_exception_out_of_the
         read("json_point", scoped("idnes", body), _geojson_entry(), native=IDNES_NATIVE)
 
 
-def test_extract_payload_turns_a_subject_miss_into_one_absence_and_no_claims():
+def test_extract_page_turns_a_subject_miss_into_one_refusal_and_no_claims():
     """The lane's half of `on_miss: fail`: a per-row portal fact (a re-id, a redirect, an
     interstitial saved under the wrong key) must never roll back a batch of thousands, and it
     must never be indistinguishable from "we looked and it was not there" (03 §3.2 rule 4)."""
     body = (_ARCHIVED / "mmreality_detail.html").read_bytes()
     item = _point_pair_entry()
     register = ScopeRegister.from_zones("mmreality", CONTRACTS["mmreality"].exclusion_zones)
-    result = extract_payload(
+    result = extract_page(
         payload("mmreality", "999999", body), listing_row("mmreality", "999999"), [item],
         register=register)
     assert result.claims == []
-    assert [(a.field_, a.reason) for a in result.absences] == [
-        ("coordinate", "not_attempted")]
-    assert "on_miss=fail" in (result.absences[0].detail or "")
+    assert dict(result.refusals) == {"subject_not_found": 1}
 
 
-def test_extract_payload_still_produces_the_claim_for_the_matching_subject():
+def test_extract_page_still_produces_the_claim_for_the_matching_subject():
     """The non-vacuity half: the same call over the same body under the SUBJECT's id has to
     produce the claim, or the test above would pass on a lane that reads nothing."""
     body = (_ARCHIVED / "mmreality_detail.html").read_bytes()
     register = ScopeRegister.from_zones("mmreality", CONTRACTS["mmreality"].exclusion_zones)
-    result = extract_payload(
+    result = extract_page(
         payload("mmreality", MMREALITY_NATIVE, body),
         listing_row("mmreality", MMREALITY_NATIVE),
         [_blob_entry("/municipality", claim_type="obec_name")],
         register=register)
     assert [c.value_text for c in result.claims] == ["Andělská Hora"]
-    assert result.absences == []
+    assert not result.refusals
     assert result.claims[0].surface == "archived_html"
     assert result.claims[0].payload_scope_version.startswith("html_scope@1:mmreality:")
 
@@ -1172,7 +1169,7 @@ def test_every_archive_reader_may_be_stamped_with_the_surface_the_lane_stamps():
     """C9: the entry keeps its published `locator_kind`, the lane STAMPS `archived_html`. A
     reader whose `ReaderContract` does not admit `archived_html` could never be executed by
     this lane at all — the projection would refuse every entry naming it."""
-    for name in ARCHIVE_READERS:
+    for name in PAGE_READERS:
         assert "archived_html" in contracts.READER_CONTRACTS[name].substrates, name
 
 
@@ -1180,7 +1177,7 @@ def test_no_archive_reader_claims_a_method_the_lane_cannot_evidence():
     """`llm_text` needs a model and a prompt version this lane has no way to supply, and
     `assert_evidence_complete` refuses such a claim before the write — so no DOM reader may
     declare it."""
-    for name in ARCHIVE_READERS:
+    for name in PAGE_READERS:
         assert "llm_text" not in contracts.READER_CONTRACTS[name].methods, name
 
 
@@ -1322,13 +1319,14 @@ def test_the_projection_still_refuses_a_canonical_reader_on_the_wrong_axis():
                               source="realitymix", index=0)
 
 
-def test_the_absence_a_subject_miss_writes_is_the_shape_the_writer_expects():
-    """`Absence.to_row` is what lands in `location_claim_absences`, whose reason vocabulary is
-    CHECK-constrained to four values; `not_attempted` is the one every declined-completion
-    case in this lane already uses."""
-    absence = Absence(
-        listing_id=1, surface=archive.ARCHIVE_SURFACE, field_="coordinate",
-        reason="not_attempted", extraction_method="map_widget_parse", detail="x")
-    row = absence.to_row(archive.REMINE_VERSION)
-    assert row["surface"] == "archived_html" and row["reason"] == "not_attempted"
-    assert row["extractor_version"] == "claims_remine_archive@1"
+def test_a_subject_miss_is_counted_under_its_own_reason_and_writes_no_row():
+    """Rule 25: `location_claim_absences` held one row per declined entry per listing, was
+    written by every lane and read by none. A refusal is a COUNTER on the result and one log
+    line per reason per batch — the shape an operator actually reads."""
+    from collections import Counter
+
+    result = archive.IntakeResult()
+    result.refuse("subject_not_found")
+    result.refuse("subject_not_found")
+    assert result.refusals == Counter({"subject_not_found": 2})
+    assert not hasattr(result, "absences")

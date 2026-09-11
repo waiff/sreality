@@ -314,16 +314,6 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_pipeline_checks_latest_per_key.py -q
 
-      # The W2a-0 churn counters are an INSTRUMENT whose numbers decide a
-      # tens-of-GB storage question, and their whole behaviour lives in one
-      # ON CONFLICT clause. PREPARE proves it compiles; only executing it proves
-      # the arithmetic (first fetch = 1/0, identical refetch = +1/+0, changed
-      # refetch = +1/+1, replayed observation = +0/+0, version bump = new cohort).
-      - name: Payload-churn counter arithmetic (executed, not just PREPAREd)
-        env:
-          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-        run: pytest tests/test_payload_churn_live.py -q
-
       # The W2 contract SHADOW gate is one predicate inside one view: a contract
       # that fails its frozen-sample floors writes claims that the resolver must
       # not see, and un-shadowing must bring the SAME rows back with no backfill.
@@ -345,10 +335,10 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/location_data/test_payloads.py -q
 
-      # W2a-2 wires that store into the scrape chokepoint. The hermetic suite
-      # proves WHICH fetches reach it; only real SQL proves the parameters it
-      # passes satisfy the enum + CHECK + UNIQUE constraints, and that a replayed
-      # drain batch collides instead of appending a second version.
+      # The scrape chokepoint writes into that store. The hermetic suite proves WHICH
+      # fetches reach it; only real SQL proves the parameters it passes satisfy the
+      # enum + CHECK + UNIQUE constraints, that a replayed drain batch collides instead
+      # of appending a second version, and that a non-detail page_kind archives nothing.
       - name: Payload dual-write through the scrape chokepoint (executed)
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
@@ -364,17 +354,6 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_detail_queue_fairness_live.py -q
-
-      # W2a-5's pruner sweeps the same store on a cadence, and every property that
-      # matters about it is a property of real constraints: that the cap re-asserts
-      # over a group no append is coming to fix, that the edge pins and the claim FK
-      # survive an age-based removal as well as a count-based one, and that the
-      # ops-calendar row is created DISABLED on a fresh schema. A fake connection can
-      # show the statement ran; only this can show the row is still there.
-      - name: Payload archive pruner semantics (executed, not just PREPAREd)
-        env:
-          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-        run: pytest tests/location_data/test_payload_prune.py -q
 
       # W3's whole claim is that ONE row backs the property-grain per-m2: the
       # representative child's price over that same child's area. That lives in

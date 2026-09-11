@@ -405,11 +405,11 @@ LLM + maps (FastAPI service + scoring jobs):
 - `GEMINI_API_KEY` — Google AI Studio key; required for the agent under `provider='gemini'`.
   A request selecting an unconfigured provider returns 502; missing at boot is not fatal.
 - `OPENAI_API_KEY` — any `gpt-*` / `o*` model id (`provider='openai'`): the bazos
-  description enrichment lane and the W2-10 location free-text lane / bake-off.
+  description enrichment lane. (Rule 25 deleted the location free-text lane; no claim
+  lane runs a model.)
 - `QWEN_API_KEY` — Alibaba DashScope, INTERNATIONAL (Singapore) endpoint; any `qwen*` model
-  id. Read lazily, so it is only needed by a lane the operator has pointed at a qwen model
-  (today: `scripts/location_llm_bakeoff.py`). Actions secret for those workflows; Railway
-  needs it only if the API service is expected to call qwen.
+  id. Read lazily: needed only by a lane the operator points at a qwen model. Actions
+  secret for those workflows; Railway needs it only to call qwen from the API service.
 - `MAPY_GEOCODE_ENABLED` — **the W0 Mapy kill switch (location-data program, remediation
   step R1), default OFF.** Mapy.com's terms prohibit storing/caching API results and every
   geocode path persisted them, so `scraper.geocoding.geocode()` raises and

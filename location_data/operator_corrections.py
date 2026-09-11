@@ -144,19 +144,6 @@ _OPERATOR_CLAIM_SQL = """
         FROM fingerprinted f
         ON CONFLICT (claim_fingerprint) DO NOTHING
         RETURNING id
-    ), resighted AS (
-        SELECT c.id, f.first_observed_at, f.extractor_version
-        FROM fingerprinted f
-        JOIN location_claims c ON c.claim_fingerprint = f.claim_fingerprint
-    ), obs AS (
-        INSERT INTO location_claim_observations
-            (claim_id, observed_at, extractor_version)
-        SELECT r.id, r.first_observed_at, r.extractor_version
-        FROM resighted r
-        WHERE NOT EXISTS (
-            SELECT 1 FROM location_claim_observations o
-            WHERE o.claim_id = r.id AND o.observed_at = r.first_observed_at)
-        RETURNING claim_id
     ), enqueued AS (
         INSERT INTO dirty_locations (listing_id, reason)
         VALUES (%(listing_id)s, 'operator_edit')
@@ -164,7 +151,6 @@ _OPERATOR_CLAIM_SQL = """
         RETURNING listing_id
     )
     SELECT (SELECT count(*) FROM ins)      AS inserted,
-           (SELECT count(*) FROM obs)      AS observations,
            (SELECT count(*) FROM enqueued) AS enqueued
 """
 

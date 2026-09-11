@@ -64,7 +64,7 @@ def test_sreality_post_cutover_yields_the_whole_locality_record():
     assert "sreality.municipality_id=3468" in admin_ids
     assert "sreality.country_id=112" in admin_ids
     assert by_type["portal_street_id"][0].value_text == "sreality.street_id=122964"
-    assert result.enrichment == []
+    assert not result.refusals
 
 
 def test_sreality_declared_precision_is_typed_on_the_blur_axis():
@@ -107,33 +107,27 @@ def test_sreality_premise_office_is_never_a_claim():
     assert all(c.value_geom_wkt != "POINT(14.4402 50.0781)" for c in result.claims)
 
 
-def test_sreality_legacy_shape_yields_no_coordinate_and_routes_to_refetch():
+def test_sreality_legacy_shape_yields_no_coordinate_and_is_counted():
     assert sreality_payload_shape(SREALITY_LEGACY) == "legacy"
     row = listing("sreality", SREALITY_LEGACY, lat=49.3955, lon=13.2951)
     result = extract_listing(row, entries_for("sreality"))
 
     assert "coordinate" not in claims_by_type(result)
-    # Not a silent no-claim: the display string survives AND the row joins the refetch
-    # cohort, because a legacy-shape row can never gain entity_type/zip/housenumber.
+    # Not a silent no-claim: the display string survives AND the shape is counted, because
+    # a legacy-shape row can never gain entity_type/zip/housenumber.
     assert claim_by_extractor(result, "sr.det.legacy_locality_value").value_text == (
         "Klatovy, okres Klatovy")
-    assert [(t.lane, t.outcome) for t in result.enrichment] == [
-        ("sreality_detail_refetch", "skipped")]
+    assert result.refusals["sreality_payload_shape:legacy"] == 1
 
 
-def test_sreality_truncated_payload_routes_to_refetch_with_an_absence():
+def test_sreality_truncated_payload_is_counted_under_its_own_reason():
     """The 80 KB-truncation cohort: the locality object is gone entirely."""
     assert sreality_payload_shape(SREALITY_TRUNCATED) == "absent"
     row = listing("sreality", SREALITY_TRUNCATED, lat=50.0, lon=14.0)
     result = extract_listing(row, entries_for("sreality"))
 
     assert result.claims == []
-    task = result.enrichment[0]
-    assert task.lane == "sreality_detail_refetch"
-    assert task.outcome == "error"
-    assert "truncation" in task.error
-    assert any(a.field_ == "coordinate" and a.reason == "not_attempted"
-               for a in result.absences)
+    assert dict(result.refusals) == {"sreality_payload_shape:absent": 1}
 
 
 # ------------------------------------------------------------------------ bezrealitky
@@ -220,16 +214,15 @@ def test_which_declared_bool_label_is_blurred_comes_from_the_contract():
         extract_listing(falsy, inverted), "mm.det.accurate").blur_evidence == "none"
 
 
-def test_mmreality_original_title_street_is_not_mined_in_w1():
+def test_mmreality_original_title_street_is_not_mined_off_raw_json():
     """`mm.det.original_title_street` is regex_text: evidence-bearing, so its span needs a
-    retrievable, content-addressed document. W2a filled that store, and mmreality@2 gives
-    the entry a reader — `json_regex`, one of `claims_remine_archive`'s. W1 SKIPS it
-    (`ARCHIVE_ONLY_READERS`), because `listings.raw_json` is not content-addressed and a
-    span into it can never be re-checked."""
+    retrievable, content-addressed document. The stored page body IS one and
+    `listings.raw_json` is not, so the entry names a PAGE reader (`json_regex`) and the
+    payload half of the lane never runs it."""
     entries = {e.entry_id: e for e in entries_for("mmreality")}
     assert entries["mm.det.original_title_street"].reader == "json_regex"
-    assert (entries["mm.det.original_title_street"].reader
-            in claims_intake.ARCHIVE_ONLY_READERS)
+    assert (claims_intake.READERS["json_regex"].substrate
+            == claims_intake.SUBSTRATE_ARCHIVED_HTML)
     row = listing("mmreality", MMREALITY_ACCURATE, lat=50.0, lon=15.0)
     result = extract_listing(row, entries_for("mmreality"))
     assert all(c.extraction_method not in ("regex_text", "llm_text") for c in result.claims)
@@ -287,7 +280,7 @@ def test_realitymix_and_ceskereality_and_maxima_page_coordinates():
         by_type = claims_by_type(result)
         assert by_type["coordinate"][0].licence_class == "portal", source
         assert by_type["address_line_verbatim"], source
-        assert result.absences == [], source
+        assert not result.refusals, source
 
 
 def test_remax_address_is_stored_only_as_a_conflict_signal():
@@ -458,7 +451,7 @@ def test_a_resolver_or_unattributed_street_is_never_a_claim():
                         street="Svatoplukova", street_source=stamp),
                 entries_for(source))
             assert result.claims == [], (source, stamp)
-            assert result.absences == [], (source, stamp)
+            assert not result.refusals, (source, stamp)
 
 
 def test_the_street_guard_is_the_only_thing_standing_between_the_two_verdicts():
@@ -538,7 +531,7 @@ def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
     # the whole fleet's projection until the version caught up with the bytes. Moving the
     # volatile profiles into these files (W2a-3e) bumped nothing: `persistence` is outside
     # `contract_sha256` (mig 408), so archive configuration cannot re-stamp a claim.
-    expected_version = {"remax": 3, "ceskereality": 5, "realitymix": 4, "bazos": 3,
+    expected_version = {"remax": 3, "ceskereality": 5, "realitymix": 4, "bazos": 4,
                         "idnes": 2, "maxima": 2, "mmreality": 2}
     for source, payload, lat, lon in cases:
         result = extract_listing(listing(source, payload, lat=lat, lon=lon),

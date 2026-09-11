@@ -49,7 +49,6 @@ from urllib.parse import urlencode
 
 import requests
 
-from location_data.refetch_cohort import SREALITY_SHAPE_CASE_SQL
 from scraper import media as _media
 from scraper.db import QUEUE_PRIORITY_NEW, connect
 from scraper.image_storage import IMAGE_TRANSFORM_OPS, image_dimensions, with_transform
@@ -68,6 +67,18 @@ from toolkit.system_alerts import (
     emit_transition_alerts,
     emit_weekly_heartbeat,
 )
+
+
+# The SQL mirror of `location_data.claims_common.sreality_payload_shape`, inlined here when
+# the refetch cohort was deleted (rule 25 W1-a) because this check is its only reader left.
+SREALITY_SHAPE_CASE_SQL = """
+    CASE
+      WHEN jsonb_typeof(raw_json->'locality') IS DISTINCT FROM 'object' THEN 'absent'
+      WHEN raw_json->'locality' ?| array['gps_lat','gps_lon','entity_type','inaccuracy_type','city','citypart'] THEN 'post_cutover'
+      WHEN raw_json->'locality' ?| array['name','value','accuracy'] THEN 'legacy'
+      ELSE 'absent'
+    END
+"""
 
 LOG = logging.getLogger("verify_pipeline")
 

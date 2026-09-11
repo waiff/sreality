@@ -1,7 +1,7 @@
 """maxima@2 — the activation, exercised through the SHIPPED contract rather than a mock.
 
 Every entry here is read off `contracts/portals/maxima.yaml` and run by the real archive
-lane (`extract_payload`, including the C6 licence ladder), so a locator edit that stops
+lane (`extract_page`, including the C6 licence ladder), so a locator edit that stops
 matching fails here rather than mining zero claims in production for a month.
 
 Two substrates, both real:
@@ -32,12 +32,12 @@ from pathlib import Path
 
 import pytest
 
-from location_data import claims_intake, contracts
+from location_data import claims_common, claims_intake, contracts
 from location_data.claims_intake import Entry, IntakeRefused
-from location_data.claims_remine_archive import (
-    ARCHIVE_READERS,
+from location_data.page_readers import (
+    PAGE_READERS,
     ArchivedPayload,
-    extract_payload,
+    extract_page,
 )
 from location_data.html_scope import ScopeRegister, scope_html
 from tests.location_data import claim_intake_fixtures as fx
@@ -91,7 +91,7 @@ def run(body: bytes, *, native: str = "fixture", in_mapy_inventory: bool = False
         id=1, source="maxima", source_id_native=native, page_kind="detail",
         payload_sha256="0" * 64, first_observed_at=FETCHED_AT, body=body)
     row = fx.listing("maxima", {}, native=native, in_mapy_inventory=in_mapy_inventory)
-    return extract_payload(payload, row, entries if entries is not None else ENTRIES,
+    return extract_page(payload, row, entries if entries is not None else ENTRIES,
                            register=REGISTER)
 
 
@@ -114,7 +114,7 @@ def test_the_activated_entry_set_is_exactly_the_six_this_version_switches_on():
     """`mx.det.view_centre` and `mx.desc.homonym` stay INERT at v2, and that is the point:
     the view centre is 130 m and 660 m from the circle centre on the two Circle rows and
     9.2 km out on the empty-features one, so this wave mints no claim for it."""
-    executable = {e.entry_id for e in ENTRIES if e.reader in ARCHIVE_READERS}
+    executable = {e.entry_id for e in ENTRIES if e.reader in PAGE_READERS}
     assert executable == {
         "mx.det.map_features", "mx.det.map_shape", "mx.det.zoom",
         "mx.det.locality", "mx.det.locality_quarter", "mx.det.locality_street",
@@ -136,7 +136,7 @@ def test_every_activated_entry_claims_on_the_pinned_body_with_a_resolvable_span(
         "mx.det.map_features", "mx.det.zoom", "mx.det.locality",
         "mx.det.locality_quarter", "mx.det.locality_street", "mx.det.title",
     }
-    assert not result.absences
+    assert not result.refusals
     # A span that does not resolve to its own quote is worse than no span (mig 382's CHECK
     # only tests substring-ness, so a span pointing at another occurrence still passes it).
     document = scope_html(_PINNED.read_bytes(), register=REGISTER)
@@ -253,7 +253,7 @@ def test_a_regional_zoom_refuses_the_coordinate_and_leaves_the_zoom_claim_standi
     assert found["mx.det.zoom"][0].value_num == pytest.approx(10.20)
 
 
-def test_an_empty_features_array_refuses_structurally_and_writes_no_absence():
+def test_an_empty_features_array_refuses_structurally_and_counts_nothing():
     """"features: [] emits no coordinate" is enforced by this entry's own `then` pointer
     missing, which is why v1's never-implemented `reject_empty_geometry` guard was dropped
     rather than written: a guard is `(lat, lon) -> bool` and there is no point to hand it."""
@@ -261,16 +261,16 @@ def test_an_empty_features_array_refuses_structurally_and_writes_no_absence():
     result = run(live_body("Kostelec nad Černými Lesy", "Prodej pozemku", config))
     found = claims_by_entry(result)
     assert not {"mx.det.map_features", "mx.det.map_shape"} & set(found)
-    assert [a.reason for a in result.absences] == []
+    assert not result.refusals
     assert "reject_empty_geometry" not in BY_ID["mx.det.map_features"].guards
 
 
 def test_a_listing_in_the_mapy_inventory_gets_no_archived_coordinate():
     """Rung (a) of the ladder sits ABOVE the substrate branch, so the licence veto reaches
-    the archived body too. The refusal is RECORDED as an absence, never swallowed."""
+    the stored body too. The refusal is COUNTED under its reason, never swallowed."""
     result = run(_PINNED.read_bytes(), in_mapy_inventory=True)
     assert "mx.det.map_features" not in claims_by_entry(result)
-    assert any(a.field_ == "coordinate" for a in result.absences)
+    assert result.refusals["listing_in_mapy_affected_inventory"] == 1
     # The rest of the contract is untouched by a coordinate veto.
     assert "mx.det.locality_street" in claims_by_entry(result)
 
@@ -323,7 +323,7 @@ def test_every_comma_segment_transform_arg_in_the_fleet_parses():
             for spec in entry.transform:
                 name, _, arg = spec.partition(":")
                 if name == "comma_segment":
-                    assert claims_intake._COMMA_SEGMENT_RE.match(arg), \
+                    assert claims_common._COMMA_SEGMENT_RE.match(arg), \
                         f"{entry.entry_id}: {spec!r}"
 
 

@@ -1,8 +1,9 @@
-"""The run loop: refusals, batch discipline, and the shape of what gets written.
+"""The run loop: refusals, batch discipline, the hash gate, and what gets written.
 
-No database. These assert the invariants that only the RUNNER can break — the W1-input
-refusal, the single-statement atomicity of claim + observation + `dirty_locations`, and the
-keyset/watermark contract of the two batch queries.
+No database. These assert the invariants that only the RUNNER can break — the lane-input
+refusal, the single-statement atomicity of claim + `dirty_locations`, the keyset/watermark
+contract of the two batch queries, and the `portal_raw_payloads.contract_version` gate that
+bounds the page half by page churn rather than by corpus size.
 """
 
 from __future__ import annotations
@@ -11,28 +12,25 @@ from datetime import UTC, datetime
 
 import pytest
 
+from location_data import claims_intake
 from location_data.claims_intake import (
-    _ABSENCE_WRITE_SQL,
     _BATCH_FINISH_SQL,
     _BATCH_INSERT_SQL,
     _CLAIM_WRITE_SQL,
-    _ENRICHMENT_WRITE_SQL,
     _INVENTORY_TERMINAL_SQL,
     _LISTINGS_FULL_SQL,
     _LISTINGS_INCREMENTAL_SQL,
     _RESUME_SQL,
+    _STAMP_MINED_SQL,
     _WATERMARK_SQL,
     LEGACY_COLUMNS,
     MAX_BATCH_SIZE,
     MIN_BATCH_SIZE,
-    Absence,
-    EnrichmentTask,
     IntakeRefused,
-    IntakeResult,
     _row_from_record,
     assert_inventory_ready,
-    dedupe_absence_rows,
     extract_listing,
+    stamp_mined_bodies,
     write_result,
 )
 from tests.location_data.claim_intake_fixtures import (
@@ -65,7 +63,7 @@ class _Cursor:
             return (self._conn.inventory_rows,)
         if "FROM mapy_inventory_runs" in self._sql:
             return self._conn.inventory_runs
-        return (1, 0, 1)
+        return (1, 1)
 
     def fetchall(self):
         return []
@@ -140,7 +138,7 @@ def test_only_a_completed_inventory_run_is_read_from_the_current_epoch():
     assert "r.restart_epoch = (SELECT max(restart_epoch) FROM mapy_inventory_runs)" in sql
 
 
-def test_claim_observation_and_dirty_enqueue_are_one_statement():
+def test_claim_and_dirty_enqueue_are_one_statement():
     """03 §3.2: the `dirty_locations` enqueue happens INSIDE the claim-insert transaction —
     it is the only coupling between intake and resolution."""
     conn = _Conn()
@@ -148,24 +146,29 @@ def test_claim_observation_and_dirty_enqueue_are_one_statement():
         listing("sreality", SREALITY_POST_CUTOVER, lat=50.078, lon=14.450),
         entries_for("sreality"))
     with conn.cursor() as cur:
-        inserted, observed, enqueued = write_result(cur, result, batch_id=42)
+        inserted, enqueued = write_result(cur, result, batch_id=42)
 
     claim_statements = [s for s, _ in conn.executed if "INSERT INTO location_claims" in s]
     assert len(claim_statements) == 1
     one = claim_statements[0]
-    assert "INSERT INTO location_claim_observations" in one
     assert "INSERT INTO dirty_locations" in one
     assert "'claim_insert'" in one
-    assert (inserted, observed, enqueued) == (1, 0, 1)
+    assert (inserted, enqueued) == (1, 1)
 
 
-def test_observations_are_appended_only_on_a_re_sight_and_never_duplicated():
-    """`location_claim_observations` is the highest-cardinality table in the design: the
-    claim row IS its own first observation, and a re-run must not append a second row for
-    an (already recorded) sighting."""
-    assert "FROM deduped d JOIN location_claims c" in " ".join(_CLAIM_WRITE_SQL.split())
-    assert "WHERE NOT EXISTS ( SELECT 1 FROM location_claim_observations o" in " ".join(
-        _CLAIM_WRITE_SQL.split())
+def test_the_lane_writes_claims_and_nothing_else():
+    """Rule 25. `location_claim_observations` (263 M rows / 50 GB),
+    `location_claim_absences` and `location_enrichment_state` were written by every lane and
+    read by none. No SQL constant in this module may name one of them again — a prose
+    reference in a comment explaining WHY they are gone is fine, an INSERT is not."""
+    dead = ("location_claim_observations", "location_claim_absences",
+            "location_enrichment_state")
+    statements = [v for name, v in vars(claims_intake).items()
+                  if name.endswith("_SQL") and isinstance(v, str)]
+    assert statements
+    for sql in statements:
+        for table in dead:
+            assert table not in sql, table
 
 
 def test_the_claim_write_dedupes_within_the_batch():
@@ -174,27 +177,21 @@ def test_the_claim_write_dedupes_within_the_batch():
     assert "DISTINCT ON (claim_fingerprint)" in _CLAIM_WRITE_SQL
 
 
-def test_absences_and_enrichment_are_idempotent():
+def test_a_licence_refusal_is_counted_not_recorded():
+    """A withheld coordinate used to be an absence ROW per listing. It is a counter on the
+    result and one log line per reason per batch now — the thing an operator reads."""
+    row = listing("sreality", SREALITY_TRUNCATED, lat=50.078, lon=14.450,
+                  in_mapy_inventory=True)
+    result = extract_listing(row, entries_for("sreality"))
+    assert result.claims == []
+    assert dict(result.refusals) == {
+        "coordinate_withheld:listing_in_mapy_affected_inventory": 1,
+        "sreality_payload_shape:absent": 1,
+    }
     conn = _Conn()
-    result = IntakeResult(
-        absences=[Absence(1, "legacy_column", "coordinate", "not_attempted",
-                          "legacy_column", "mapy_derived_coordinate")],
-        enrichment=[EnrichmentTask(1, "portal_structured_field", "sreality_detail_refetch",
-                                   "skipped", "ab" * 32)])
     with conn.cursor() as cur:
-        write_result(cur, result, batch_id=1)
-
-    absence_sql = [s for s, _ in conn.executed if "location_claim_absences" in s][0]
-    assert ("ON CONFLICT (listing_id, snapshot_key, surface, field, extractor_version) "
-            "DO NOTHING") in absence_sql
-    # An anti-join cannot arbitrate two identical rows inside ONE statement (a statement's
-    # snapshot cannot see its own inserts), so the unique index would raise and take the
-    # whole run down. ON CONFLICT is the only form that survives it.
-    assert "NOT EXISTS" not in absence_sql
-    enrichment_sql = [s for s, _ in conn.executed if "location_enrichment_state" in s][0]
-    assert "ON CONFLICT (listing_id, method, lane) DO UPDATE" in enrichment_sql
-    # `input_hash` is the cost gate: an unchanged payload must not advance `attempts`.
-    assert "input_hash IS DISTINCT FROM EXCLUDED.input_hash" in enrichment_sql
+        write_result(cur, result, batch_id=7)
+    assert [s for s, _ in conn.executed] == []
 
 
 def test_batch_queries_are_keyset_and_bounded():
@@ -203,9 +200,12 @@ def test_batch_queries_are_keyset_and_bounded():
     assert "l.id > %(after_id)s" in full and "ORDER BY l.id LIMIT" in full
     assert "(l.last_seen_at, l.id) > (%(after_ts)s, %(after_id)s)" in incremental
     assert "l.last_seen_at >= %(watermark)s" in incremental
-    # Both walk active AND inactive rows: a delisted listing's payload is still evidence,
-    # and nothing is ever deleted (CLAUDE.md rule 3).
-    assert "is_active" not in full and "is_active" not in incremental
+    # Both walk active AND inactive LISTINGS: a delisted listing's payload is still
+    # evidence, and nothing is ever deleted (CLAUDE.md rule 3). The only `is_active` in
+    # either query is `portal_contracts.is_active`, which picks the portal's live contract.
+    for one in (full, incremental):
+        assert "l.is_active" not in one
+        assert one.count("is_active") == 1 and "pc.is_active" in one
     assert MIN_BATCH_SIZE == 10_000 and MAX_BATCH_SIZE == 30_000
 
 
@@ -224,21 +224,19 @@ def test_the_batch_queries_select_the_legacy_columns_the_readers_consume():
         for column in LEGACY_COLUMNS:
             assert f"l.{column.removeprefix('listings.')}" in one, column
 
-    row = _row_from_record((7, "ceskereality", "3822640", {"id": "3822640"},
-                            datetime(2026, 8, 13, 6, 0, tzinfo=UTC), None, None,
-                            False, None, "Svatoplukova", "parser"))
+    row, body, unmined, version = _row_from_record(_RECORD)
     assert row.legacy_columns == {
         "listings.locality": None,
         "listings.street": "Svatoplukova",
         "listings.street_source": "parser",
     }
     assert row.lat is None and row.in_mapy_inventory is False
+    assert (body.id, body.page_kind, unmined, version) == (91, "detail", True, 5)
 
     # A record whose legacy tail has drifted from LEGACY_COLUMNS shifts every value one
     # position; `zip(strict=True)` is what turns that into a crash on the first row.
     with pytest.raises(ValueError):
-        _row_from_record((7, "ceskereality", "3822640", {}, None, None, None, False,
-                          None, "Svatoplukova"))
+        _row_from_record(_RECORD[:-1])
 
 
 def test_the_claim_write_carries_the_class_b_confidence_as_a_typed_enum():
@@ -248,46 +246,6 @@ def test_the_claim_write_carries_the_class_b_confidence_as_a_typed_enum():
     one = " ".join(_CLAIM_WRITE_SQL.split())
     assert "claim_confidence text" in one
     assert "d.claim_confidence::match_confidence" in one
-
-
-def test_one_listing_can_produce_two_absences_with_the_same_unique_key():
-    """The regression. A sreality listing that is in `mapy_affected` AND lost its
-    `locality` object to the 80 KB truncation emits BOTH the withheld-coordinate absence
-    (the licence ladder refused its `listings.geom`) and the truncated-payload absence —
-    same listing, same surface, same field, same extractor_version, i.e. one row as far as
-    migration 382's unique key is concerned. Before the dedupe they went to the database
-    as two rows in one statement and the second raised a unique violation, failing the
-    entire intake run on a data shape that occurs by construction."""
-    row = listing("sreality", SREALITY_TRUNCATED, lat=50.078, lon=14.450,
-                  in_mapy_inventory=True)
-    result = extract_listing(row, entries_for("sreality"))
-
-    keys = [(a.listing_id, a.surface, a.field_) for a in result.absences]
-    assert len(keys) == 2, keys
-    assert keys[0] == keys[1], keys
-
-    conn = _Conn()
-    with conn.cursor() as cur:
-        write_result(cur, result, batch_id=7)
-    absence_call = [p for s, p in conn.executed if "location_claim_absences" in s][0]
-    assert len(absence_call["rows"].obj) == 1
-
-
-def test_dedupe_absence_rows_keeps_the_first_assertion_per_unique_key():
-    rows = [
-        {"listing_id": 1, "surface": "api_json", "field": "coordinate",
-         "extractor_version": "v1", "reason": "not_attempted"},
-        {"listing_id": 1, "surface": "api_json", "field": "coordinate",
-         "extractor_version": "v1", "reason": "not_stated"},
-        # Different surface, different fact — 382 keeps `surface` in the key on purpose.
-        {"listing_id": 1, "surface": "archived_html", "field": "coordinate",
-         "extractor_version": "v1", "reason": "not_stated"},
-        {"listing_id": 2, "surface": "api_json", "field": "coordinate",
-         "extractor_version": "v1", "reason": "not_attempted"},
-    ]
-    kept = dedupe_absence_rows(rows)
-    assert [r["reason"] for r in kept] == ["not_attempted", "not_stated", "not_attempted"]
-    assert [r["surface"] for r in kept] == ["api_json", "archived_html", "api_json"]
 
 
 def test_the_watermark_is_per_source_and_only_advances_on_a_successful_batch():
@@ -327,12 +285,114 @@ def test_the_batch_row_carries_the_cursor_and_the_mode_that_wrote_it():
 
 
 def test_no_write_statement_touches_an_existing_production_table():
-    """W1 is additive and shadow-only: it reads `listings` and writes only location_* /
-    dirty_locations."""
-    for sql in (_CLAIM_WRITE_SQL, _ABSENCE_WRITE_SQL, _ENRICHMENT_WRITE_SQL,
-                _BATCH_INSERT_SQL):
+    """The lane reads `listings` and writes only location_* / dirty_locations — plus the
+    one mined-at stamp on `portal_raw_payloads`, which is the body store it just read."""
+    for sql in (_CLAIM_WRITE_SQL, _BATCH_INSERT_SQL, _STAMP_MINED_SQL):
         lowered = sql.lower()
         for verb in ("insert into", "update ", "delete from"):
             for fragment in lowered.split(verb)[1:]:
                 target = fragment.strip().split()[0].strip("(")
-                assert target.startswith(("location_", "dirty_locations")), target
+                assert target.startswith(
+                    ("location_", "dirty_locations", "portal_raw_payloads")), target
+
+
+# --------------------------------------------- the second substrate and its hash gate
+
+# One scan row, in the order both batch queries select: the listing, its Mapy-inventory
+# membership, its LATEST stored detail body (id, unmined?, page_kind, sha, first seen), the
+# portal's ACTIVE contract version, then the legacy-column TAIL.
+_RECORD = (7, "ceskereality", "3822640", {"id": "3822640"},
+           datetime(2026, 8, 13, 6, 0, tzinfo=UTC), None, None, False,
+           91, True, "detail", "ab" * 32, datetime(2026, 8, 13, 5, 0, tzinfo=UTC), 5,
+           None, "Svatoplukova", "parser")
+
+
+def test_the_scan_joins_the_latest_stored_detail_body_per_portal_key():
+    """`portal_raw_payloads.listing_id` is nullable and nothing has ever populated it
+    (`scraper.db.append_payload_if_enabled` passes None), so an inner join on it would match
+    ZERO rows over the whole archive — and the lane would not raise: the first batch would
+    come back empty and the batch would stamp 'ok'. The join is on `(source,
+    source_id_native)`, which both writers populate and which is UNIQUE on `listings` too."""
+    for sql in (_LISTINGS_FULL_SQL, _LISTINGS_INCREMENTAL_SQL):
+        one = " ".join(sql.split())
+        assert "LEFT JOIN LATERAL" in one
+        assert "p.source = l.source AND p.source_id_native = l.source_id_native" in one
+        assert "p.listing_id" not in one
+        # "LATEST" IS `last_observed_at`. The store is content-addressed and
+        # append-on-change, so a page that goes A -> B -> A appends no third row: it
+        # collides on A's sha and bumps A's `last_observed_at`. Ordering by FIRST
+        # observation would leave B permanently "latest" while the portal has served A for
+        # weeks — the lane would mine a body the page no longer has. Never `version_seq`
+        # either: 403 added that counter with no backfill, so every older body is NULL.
+        assert "ORDER BY p.last_observed_at DESC, p.id DESC LIMIT 1" in one
+        assert "p.first_observed_at DESC" not in one
+        assert "p.page_kind = 'detail'" in one
+        # Only OK bodies: idnes' 503 interstitial carries no claim anyone can mine.
+        assert "p.http_status IS NULL OR p.http_status BETWEEN 200 AND 299" in one
+
+
+def test_the_hash_gate_is_is_distinct_from_against_the_portals_own_active_contract():
+    """THE bound on the page half. A body is immutable and content-addressed, so it only has
+    to be mined once per contract version; `contract_version` (migration 403, never
+    populated) is the marker. NULL is DISTINCT FROM every version, so a NEW body is always
+    eligible and a contract bump re-mines every latest body over the runs that follow."""
+    for sql in (_LISTINGS_FULL_SQL, _LISTINGS_INCREMENTAL_SQL):
+        one = " ".join(sql.split())
+        assert "(pb.contract_version IS DISTINCT FROM pc.version)" in one
+        # Per PORTAL, resolved in SQL: one portal's version can never gate another's body.
+        assert "LEFT JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active" in one
+
+
+def test_a_body_already_at_the_active_version_is_not_a_candidate():
+    """The whole point of the gate: no R2 round trip for a body this contract already
+    mined. The SQL computes it; `_row_from_record` carries the verdict through."""
+    _, body, unmined, _ = _row_from_record(_RECORD)
+    assert body is not None and unmined is True
+    mined = (*_RECORD[:9], False, *_RECORD[10:])
+    _, body, unmined, _ = _row_from_record(mined)
+    assert body is not None and unmined is False
+
+
+def test_a_listing_with_no_stored_body_yields_no_candidate():
+    bodiless = (*_RECORD[:8], None, None, None, None, None, 5, *_RECORD[14:])
+    row, body, unmined, version = _row_from_record(bodiless)
+    assert body is None and unmined is False and version == 5
+    assert row.listing_id == 7
+
+
+def test_mining_a_body_stamps_it_at_the_version_that_mined_it_in_the_same_transaction():
+    """A rolled-back batch must un-stamp its bodies too, or the next run would skip claims
+    that were never written."""
+    conn = _Conn()
+    with conn.cursor() as cur:
+        stamp_mined_bodies(cur, [{"id": 91, "version": 5}])
+    sql, params = conn.executed[-1]
+    assert sql.startswith("UPDATE portal_raw_payloads")
+    assert "SET contract_version = v.version" in sql
+    assert params["rows"].obj == [{"id": 91, "version": 5}]
+    assert "portal_raw_payloads" in " ".join(_STAMP_MINED_SQL.split())
+
+
+def test_an_empty_stamp_list_runs_no_statement():
+    conn = _Conn()
+    with conn.cursor() as cur:
+        stamp_mined_bodies(cur, [])
+    assert conn.executed == []
+
+
+def test_the_registry_is_one_and_matches_the_contract_record_exactly():
+    """ONE registry, 24 readers: the 10 that read `listings.raw_json` and the 14 that read
+    the stored page body. `ARCHIVE_ONLY_READERS` / `LLM_ONLY_READERS` were name-only mirrors
+    of registries this module could not import; there is nothing left to mirror, so a name
+    that is not in `READERS` is a deploy error again — one question, one answer."""
+    from location_data import contracts, page_readers
+
+    assert len(claims_intake.READERS) == 24
+    assert set(claims_intake.READERS) == set(contracts.READER_CONTRACTS)
+    payload_readers = {n for n, r in claims_intake.READERS.items()
+                       if r.substrate == claims_intake.SUBSTRATE_PAYLOAD}
+    page = {n for n, r in claims_intake.READERS.items()
+            if r.substrate == claims_intake.SUBSTRATE_ARCHIVED_HTML}
+    assert len(payload_readers) == 10 and page == set(page_readers.PAGE_READERS)
+    assert not hasattr(claims_intake, "ARCHIVE_ONLY_READERS")
+    assert not hasattr(claims_intake, "LLM_ONLY_READERS")

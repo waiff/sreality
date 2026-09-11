@@ -1364,15 +1364,6 @@ def _record_detail_fetch(conn: Any, result: FetchResult, observation: str) -> No
             encoded = json.dumps(result.raw, ensure_ascii=False).encode("utf-8")
         return encoded
 
-    db.record_payload_churn_if_enabled(
-        conn,
-        source="sreality",
-        source_id_native=str(result.sid),
-        page_kind="detail",
-        body=_body,
-        content_type="application/json",
-        observation=observation,
-    )
     db.append_payload_if_enabled(
         conn,
         source="sreality",
@@ -1429,25 +1420,6 @@ def _index_page_archiver(
                 serialised = json.dumps(payload, ensure_ascii=False)
             return serialised
 
-        # Ahead of the freshness skip: the instrument counts FETCHES, and the
-        # index page — the highest-churn artefact in the system, and the whole
-        # reason 02 section 2.3.2 P2 is gated — is archived at most once a day
-        # while it is walked hourly. record_churn=False below keeps the archived
-        # fetch from being counted twice.
-        db.record_payload_churn_if_enabled(
-            conn,
-            source="sreality",
-            source_id_native=key,
-            page_kind="index",
-            body=lambda: _body().encode("utf-8"),
-            content_type="application/json",
-        )
-        # KNOWN GAP (W2a-2): this skip returns BEFORE upsert_portal_raw_page, so
-        # it also suppresses the payload dual-write for an index page that changed
-        # inside the freshness window — the one thing that function's own docstring
-        # says the archive must never do, on the highest-churn surface there is.
-        # Left as-is deliberately: reworking the skip is a P2 design question, and
-        # W2a-6's index-coverage audit is what measures the gap first.
         if key in fresh:
             return
         try:
@@ -1460,7 +1432,6 @@ def _index_page_archiver(
                 html=_body(),
                 http_status=200,
                 refresh_after_hours=db.INDEX_ARCHIVE_REFRESH_HOURS,
-                record_churn=False,
             )
             fresh.add(key)
         except Exception as exc:  # noqa: BLE001 - archiving must not kill ingest

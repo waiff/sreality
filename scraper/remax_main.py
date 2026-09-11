@@ -172,23 +172,6 @@ class RemaxPortal:
                 break
             html, status = client.fetch_index(sale=sale, stranka=page)
             key = f"{sale}/{page}/{week}"
-            # W2a-0: the instrument's denominator is FETCHES, never archive
-            # writes — ahead of the client-side freshness skip, exactly like
-            # sreality's archiver, so this portal's index rate is comparable
-            # instead of measured over a different denominator.
-            if archive_ok:
-                db.record_payload_churn_if_enabled(
-                    conn,
-                    source=SOURCE,
-                    source_id_native=key,
-                    page_kind="index",
-                    body=lambda: html.encode("utf-8"),
-                    content_type="text/html",
-                )
-            # KNOWN GAP (W2a-2): `key not in fresh` guards upsert_portal_raw_page, so
-            # it also suppresses the payload dual-write for an index page that changed
-            # inside the freshness window. Deliberately unchanged here — W2a-6's
-            # index-coverage audit measures the gap before P2 reworks it.
             if archive_ok and key not in fresh:
                 try:
                     db.upsert_portal_raw_page(
@@ -200,7 +183,6 @@ class RemaxPortal:
                         html=html,
                         http_status=status,
                         refresh_after_hours=db.INDEX_ARCHIVE_REFRESH_HOURS,
-                        record_churn=False,
                     )
                     fresh.add(key)
                 except Exception as exc:  # noqa: BLE001
@@ -473,7 +455,6 @@ class RemaxPortal:
                 # W2a-0 churn instrument: this whole write_details is replayed on
                 # a transient pooler drop, so the counter bump inside needs the
                 # item's per-fetch token to make the replay a no-op.
-                churn_observation=it.observation_id,
             )
             pk, result = db.ingest_scraped_listing(
                 conn, p["listing"], discovery_seq=it.discovery_seq,

@@ -25,18 +25,19 @@ from typing import Any
 
 import pytest
 
-from location_data import claims_remine_archive as archive
+from location_data import page_readers as archive
 from location_data import contracts
 from location_data.claims_intake import (
     ARCHIVED_COORDINATE_RULES,
-    ARCHIVE_ONLY_READERS,
+    READERS,
+    SUBSTRATE_ARCHIVED_HTML,
     DEFAULT_MAX_CLAIM_VALUE_BYTES,
     Entry,
     ListingRow,
     extract_listing,
 )
-from location_data.claims_remine_archive import (
-    ARCHIVE_READERS,
+from location_data.page_readers import (
+    PAGE_READERS,
     ArchivedPayload,
     _licensed_coordinate,
 )
@@ -93,9 +94,9 @@ def payload() -> ArchivedPayload:
         body=_ARCHIVED.read_bytes())
 
 
-def run(entry: Entry, doc: ScopedDocument | None = None) -> list[archive.ArchiveRead]:
+def run(entry: Entry, doc: ScopedDocument | None = None) -> list[archive.PageRead]:
     doc = document() if doc is None else doc
-    return ARCHIVE_READERS[entry.reader](entry, row(), payload(), doc)
+    return PAGE_READERS[entry.reader](entry, row(), payload(), doc)
 
 
 def claim_of(entry_id: str, doc: ScopedDocument | None = None) -> Any:
@@ -241,7 +242,7 @@ def test_an_unlisted_label_is_recorded_without_asserting_declared_blur():
     """Which label means "blurred" is `precision_cap.blurred_labels`, i.e. a contract version
     bump — never a code constant, and never a default."""
     entry = replace(ENTRIES["bzs.det.blur_hint"], precision_map={})
-    reads = ARCHIVE_READERS[entry.reader](entry, row(), payload(), document())
+    reads = PAGE_READERS[entry.reader](entry, row(), payload(), document())
     assert len(reads) == 1
     assert reads[0].claim.value_text == CONTRACT_LABEL
     assert reads[0].claim.blur_evidence == "none"
@@ -284,8 +285,9 @@ def test_an_archived_bazos_pin_is_unlicensable_by_construction():
 
 def test_bazos_ships_live():
     """Un-shadowed 2026-09-09 (operator ruling); the stale YAML line went 2026-09-11 so a
-    version bump can never ship the portal dark again."""
-    assert (CONTRACT.version, CONTRACT.shadow) == (3, False)
+    version bump can never ship the portal dark again. v4 (rule 25 W1-a) removed the
+    sixteen never-executed LLM entries with the lane that would have run them."""
+    assert (CONTRACT.version, CONTRACT.shadow) == (4, False)
 
 
 def test_the_activation_appended_one_id_and_edited_none():
@@ -293,8 +295,10 @@ def test_the_activation_appended_one_id_and_edited_none():
     (the only legal way an entry gains one) and mints exactly one new id."""
     ids = [e.entry_id for e in CONTRACT.entries]
     assert ids.index("bzs.det.psc") == ids.index("bzs.det.obec_slug") + 1
-    assert {e.entry_id for e in CONTRACT.entries if e.locator.get("reader")
-            in ARCHIVE_ONLY_READERS} == set(ACTIVATED)
+    assert {e.entry_id for e in CONTRACT.entries
+            if READERS.get(str(e.locator.get("reader"))) is not None
+            and READERS[str(e.locator["reader"])].substrate == SUBSTRATE_ARCHIVED_HTML
+            } == set(ACTIVATED)
 
 
 @pytest.mark.parametrize("entry_id", [
@@ -308,11 +312,13 @@ def test_the_entries_this_version_deliberately_left_alone_stay_inert(entry_id):
     assert "reader" not in ENTRIES[entry_id].locator
 
 
-def test_the_hourly_w1_lane_skips_every_entry_this_version_activated():
-    """The failure this prevents is not hypothetical: refusing an unknown reader here is what
-    took remax@3's hourly intake down. W1's substrate is `listings.raw_json`, which carries no
-    DOM, so these four are SKIPPED and bazos' live legacy claims are unaffected."""
-    assert {ENTRIES[e].reader for e in ACTIVATED} <= ARCHIVE_ONLY_READERS
+def test_the_payload_half_of_the_lane_skips_every_entry_this_version_activated():
+    """The failure this prevents is not hypothetical: refusing an unknown reader is what
+    took remax@3's hourly intake down. These entries read a DOM, which `listings.raw_json`
+    does not carry, so the payload half skips them and bazos' legacy claims are unaffected —
+    the SAME lane reads them off the stored page body."""
+    assert {READERS[str(ENTRIES[e].reader)].substrate for e in ACTIVATED} == {
+        SUBSTRATE_ARCHIVED_HTML}
     result = extract_listing(
         fx.listing("bazos", fx.BAZOS_LINK, native="220059906", lat=48.8489, lon=17.1325),
         fx.entries_for("bazos"), max_value_bytes=DEFAULT_MAX_CLAIM_VALUE_BYTES)
