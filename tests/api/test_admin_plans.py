@@ -78,7 +78,7 @@ def make_client():
     def _install(conn: _FakeConn) -> Any:
         api_main.app.dependency_overrides[deps.get_db_conn] = lambda: conn
         api_main.app.dependency_overrides[deps.require_admin] = (
-            lambda: {"is_admin": True, "legacy": True}
+            lambda: {"sub": "00000000-0000-0000-0000-0000000000ad", "app_metadata": {"is_admin": True}}
         )
         return TestClient(api_main.app)
 

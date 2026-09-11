@@ -20,19 +20,20 @@ from api import pipeline as pipeline_module
 from api import schemas as s
 from api import tenant_pool
 
+_SUB = "11111111-1111-1111-1111-111111111111"
+_ACCT = "22222222-2222-2222-2222-222222222222"
+
 
 @pytest.fixture()
 def client(monkeypatch):
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
-    # Pipeline routes run on the tenant pool since Phase 1; the route-level
-    # verify_jwt is overridden to a legacy identity and account resolution is
+    # Pipeline routes run on the tenant pool since Phase 1; verify_jwt is
+    # overridden to a production-shaped JWT identity and account resolution is
     # stubbed so no SQL hits the fake connection object.
     api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
-    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {
-        "sub": None, "legacy": True,
-    }
+    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {"sub": _SUB}
     monkeypatch.setattr(
-        tenant_pool, "resolve_account_id", lambda conn, claims: None,
+        tenant_pool, "resolve_account_id", lambda conn, claims: _ACCT,
     )
     monkeypatch.setattr(
         pipeline_module, "list_stages",

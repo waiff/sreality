@@ -73,7 +73,6 @@ def _agent_body(**kw: Any) -> s.CreateEstimationIn:
 
 def test_is_privileged() -> None:
     assert er._is_privileged(None) is True                       # internal caller
-    assert er._is_privileged({"legacy": True}) is True           # static token
     assert er._is_privileged({"is_admin": True}) is True
     assert er._is_privileged({"app_metadata": {"is_admin": True}}) is True
     assert er._is_privileged({"sub": "u1"}) is False             # real tenant

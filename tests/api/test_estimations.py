@@ -24,6 +24,11 @@ from scraper import source_dispatcher as sd
 from scraper import url_parser as scraper_url_parser
 
 SYSTEM_ACCOUNT = deps.SYSTEM_ACCOUNT_ID
+_ACCT = "22222222-2222-2222-2222-222222222222"
+_CLAIMS = {
+    "sub": "11111111-1111-1111-1111-111111111111",
+    "app_metadata": {"is_admin": True},
+}
 
 
 @pytest.fixture()
@@ -38,14 +43,12 @@ def client(monkeypatch):
     # POST /estimations stays on get_db_conn (Wave 1 W1-1: execution off the
     # request process is W1-3) but now also gates on verify_jwt to stamp
     # account_id; GET/PATCH moved fully onto the tenant pool. Both overridden
-    # to a legacy identity here — auth correctness itself lives in
-    # tests/api/test_auth.py.
+    # to a production-shaped admin JWT here (admin keeps these route tests off
+    # the metering SQL) — auth correctness itself lives in tests/api/test_auth.py.
     api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
-    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {
-        "sub": None, "legacy": True,
-    }
+    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: dict(_CLAIMS)
     monkeypatch.setattr(
-        tenant_pool, "resolve_account_id", lambda conn, claims: None,
+        tenant_pool, "resolve_account_id", lambda conn, claims: _ACCT,
     )
     # Run scheduled BackgroundTasks synchronously inside the handler so the
     # response payload reflects the post-task state. Without this, the
@@ -237,11 +240,9 @@ def test_post_returns_pending_when_background_deferred(monkeypatch):
         lambda: object()
     )
     api_main.app.dependency_overrides[deps.get_llm_client] = lambda: object()
-    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {
-        "sub": None, "legacy": True,
-    }
+    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: dict(_CLAIMS)
     monkeypatch.setattr(
-        tenant_pool, "resolve_account_id", lambda conn, claims: None,
+        tenant_pool, "resolve_account_id", lambda conn, claims: _ACCT,
     )
     try:
         state = _patch_persistence(monkeypatch)

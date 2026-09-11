@@ -236,10 +236,10 @@ skills_module.AGENT_TOOL_NAMES = set(AGENT_TOOLS.keys())
 skills_module.PROVIDER_NAMES = set(deps.get_providers().keys())
 
 # /admin/* is admin-gated — the router itself carries Depends(require_admin)
-# (see api/routes/admin.py): is_admin claim required; the legacy operator
-# token passes during the dual-auth window. The old "private Railway URL is
-# the perimeter" exemption gave no real protection: that URL ships inside
-# the public SPA bundle.
+# (see api/routes/admin.py): a real is_admin JWT claim is required and the
+# static operator token no longer passes (that dual-auth window is closed).
+# The old "private Railway URL is the perimeter" exemption gave no real
+# protection: that URL ships inside the public SPA bundle.
 app.include_router(admin_router)
 # /billing/* — the Stripe webhook is its OWN auth class (HMAC signature over the
 # raw body vs STRIPE_WEBHOOK_SECRET), distinct from bearer/JWT and token-exempt;

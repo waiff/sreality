@@ -35,8 +35,8 @@ def test_remaining_never_negative(monkeypatch):
     assert out["remaining"] == 0 and out["metered"] is True
 
 
-def test_legacy_token_is_unmetered():
-    out = billing._agent_estimation_quota(object(), {"legacy": True, "is_admin": True}, "acct-1")
+def test_top_level_admin_claim_is_unmetered():
+    out = billing._agent_estimation_quota(object(), {"sub": "u", "is_admin": True}, "acct-1")
     assert out == {"quota": 0, "used": 0, "remaining": 0, "is_trial": False, "metered": False}
 
 

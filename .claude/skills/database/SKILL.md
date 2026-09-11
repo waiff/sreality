@@ -95,11 +95,11 @@ tenant-scoped:
   BOTH the route's reads and writes — a `SET LOCAL` evaporates at transaction end, so a
   post-commit read-back on a fresh transaction would run claims-less and RLS would hide
   the row just written. `verify_jwt` is authentication; `tenant_conn` (via RLS) is
-  authorization — a route needing per-account isolation must use it, not `get_db_conn`. A
-  **legacy** caller (static `API_TOKEN` bearer, no Supabase `sub`) has no account
-  membership and would see zero rows under RLS, so it's routed to the unscoped
-  service-role connection instead (today's behavior, unchanged) until it re-auths with a
-  real JWT.
+  authorization — a route needing per-account isolation must use it, not `get_db_conn`. The
+  **legacy**-caller bypass (static `API_TOKEN` → the unscoped service-role connection) is
+  GONE (2026-09-11): `verify_jwt` is the sole claims producer and cannot emit a `legacy`
+  claim, so `tenant_conn` has NO fallback — an unset `TENANT_POOL_DB_URL` raises. The
+  `legacy_backfill_claim` TABLE stays (signup CAS); see `references/tenancy.md`.
 
 **Pooler-safe mutual exclusion: lease-row CAS, not session advisory locks (migration
 279, PR #717).** `pg_advisory_lock`/`unlock` are **session-scoped** — sound only on a

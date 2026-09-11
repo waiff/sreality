@@ -25,20 +25,21 @@ from api import dependencies as deps
 from api import main as api_main
 from api import tenant_pool
 
+_SUB = "11111111-1111-1111-1111-111111111111"
+_ACCT = "22222222-2222-2222-2222-222222222222"
+
 
 @pytest.fixture()
 def client(monkeypatch):
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
     # /collections list + /collections/{id}/properties + /properties/{id}/notes
-    # moved onto the tenant pool (Wave 1 W1-1) — overridden to a legacy
-    # identity here, same as tests/api/test_pipeline.py; auth correctness
-    # itself lives in tests/api/test_auth.py.
+    # moved onto the tenant pool (Wave 1 W1-1) — overridden to a production-
+    # shaped JWT identity here, same as tests/api/test_pipeline.py; auth
+    # correctness itself lives in tests/api/test_auth.py.
     api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
-    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {
-        "sub": None, "legacy": True,
-    }
+    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {"sub": _SUB}
     monkeypatch.setattr(
-        tenant_pool, "resolve_account_id", lambda conn, claims: None,
+        tenant_pool, "resolve_account_id", lambda conn, claims: _ACCT,
     )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()

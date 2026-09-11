@@ -540,3 +540,14 @@ def test_account_scope_missing_header_is_401(monkeypatch):
     with pytest.raises(fastapi.HTTPException) as exc:
         deps.account_scope(authorization=None, conn=object())
     assert exc.value.status_code == 401
+
+
+def test_tenant_conn_without_pool_dsn_raises(monkeypatch):
+    """No fallback connection exists any more: an unset TENANT_POOL_DB_URL must
+    fail loudly. The retired legacy branch used to absorb a bad/absent DSN into
+    a silently unscoped service-role connection, which is how the bad-DSN
+    incident stayed invisible (roadmap/public-release-track.md)."""
+    monkeypatch.delenv("TENANT_POOL_DB_URL", raising=False)
+    gen = tenant_pool.tenant_conn(claims={"sub": _ACCT})
+    with pytest.raises(RuntimeError, match="TENANT_POOL_DB_URL"):
+        next(gen)
