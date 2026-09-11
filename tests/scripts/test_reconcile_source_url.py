@@ -49,6 +49,32 @@ def test_an_already_canonical_row_is_unchanged() -> None:
     assert mod.decide(_row(source_url=CANON), clear=False).action == mod.UNCHANGED
 
 
+def test_a_locality_only_difference_never_overwrites_an_ingest_written_url() -> None:
+    # Ingest stored sreality's own seo-name locality; the column adapter would
+    # re-slugify display text. Same type/main/sub/id -> the same page -> UNCHANGED,
+    # and the stored (authoritative) value is what the decision carries.
+    ingest = "https://www.sreality.cz/detail/prodej/dum/rodinny/praha-michle-/1915215948"
+    d = mod.decide(_row(source_url=ingest), clear=False)
+    assert d.action == mod.UNCHANGED and d.url == ingest
+
+
+def test_a_critical_segment_difference_is_rewritten() -> None:
+    for stored in (
+        "https://www.sreality.cz/detail/prodej/dum/vila/praha-michle-pod-sychrovem-i/1915215948",
+        "https://www.sreality.cz/detail/pronajem/dum/rodinny/praha-michle-pod-sychrovem-i/1915215948",
+        "https://www.sreality.cz/detail/prodej/dum/rodinny/praha-michle-pod-sychrovem-i/1",
+        "https://www.sreality.cz/detail/prodej/dum/rodinny-dum/x/1915215948",
+    ):
+        assert mod.decide(_row(source_url=stored), clear=False).action == mod.WRITE, stored
+
+
+def test_critical_segments_parse_only_well_formed_sreality_urls() -> None:
+    assert mod.critical_segments(CANON) == ("prodej", "dum", "rodinny", "1915215948")
+    assert mod.critical_segments("https://reality.bazos.cz/inzerat/1/x.php") is None
+    assert mod.critical_segments("https://www.sreality.cz/detail/x/1") is None
+    assert mod.critical_segments(None) is None
+
+
 def test_the_stored_type_vocabulary_is_remapped() -> None:
     d = mod.decide(_row(category_type="drazba", category_main="komercni", category_sub_cb=31,
                         locality="Týček", street=None, street_source=None,

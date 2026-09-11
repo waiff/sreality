@@ -162,8 +162,27 @@ class Decision:
     reason: sreality_url.Declined | None
 
 
+def critical_segments(url: str | None) -> tuple[str, str, str, str] | None:
+    """(type, main, sub, id) of a sreality URL — the segments sreality 404s on. The
+    locality segment is deliberately NOT part of it: sreality 301s any locality to the
+    canonical, so two URLs differing only there name the same page."""
+    if not url or not url.startswith(sreality_url.BASE_URL + "/"):
+        return None
+    parts = url[len(sreality_url.BASE_URL) + 1:].split("/")
+    if len(parts) != 5:
+        return None
+    return parts[0], parts[1], parts[2], parts[4]
+
+
 def decide(row: Row, *, clear: bool) -> Decision:
-    """The pure decision for one row. Non-sreality rows are never touched."""
+    """The pure decision for one row. Non-sreality rows are never touched.
+
+    A stored URL that agrees with the derivation on every 404-critical segment is
+    UNCHANGED even when its locality differs: ingest wrote it from sreality's own
+    seo names (authoritative), the column adapter re-slugifies display text, and
+    the reconciler must never downgrade the former to the latter. Only a
+    404-critical disagreement is a disagreement.
+    """
     if row.source != SOURCE:
         return Decision(SKIP, None, None)
     url, reason = sreality_url.from_columns(
@@ -172,7 +191,10 @@ def decide(row: Row, *, clear: bool) -> Decision:
         street=row.street, street_source=row.street_source, sreality_id=row.sreality_id,
     )
     if url is not None:
-        return Decision(UNCHANGED if url == row.source_url else WRITE, url, None)
+        stored = critical_segments(row.source_url)
+        if stored is not None and stored == critical_segments(url):
+            return Decision(UNCHANGED, row.source_url, None)
+        return Decision(WRITE, url, None)
     stored_is_sreality = bool(row.source_url) and row.source_url.startswith(sreality_url.BASE_URL)
     if stored_is_sreality:
         return Decision(CLEAR if clear else WOULD_CLEAR, None, reason)
