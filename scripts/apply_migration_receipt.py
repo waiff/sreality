@@ -3,8 +3,8 @@ and — after the apply — whether every declared object exists in the LIVE cat
 
 Reuses the parser and the probe SQL of verify_pipeline's `migration_drift`
 check, so "applied" here means exactly what the 6-hourly alarm would accept.
-The `supabase_migrations.schema_migrations` ledger is printed for information
-only; it is not the oracle (see scripts/migration_objects.py).
+The `supabase_migrations.schema_migrations` ledger is deliberately not read:
+it is not the oracle (see scripts/migration_objects.py).
 """
 
 from __future__ import annotations
@@ -54,14 +54,6 @@ def verify(path: Path) -> int:
     objects = declared(path)
     with db.connect() as conn:
         results = probe(conn, objects)
-        try:
-            tail = conn.execute(
-                "select version, name from supabase_migrations.schema_migrations "
-                "order by version desc limit 3"
-            ).fetchall()
-            print("ledger tail (informational):", tail)
-        except Exception as exc:  # the ledger is optional and not an oracle
-            print("ledger unavailable:", exc)
     absent = [(k, i) for k, i, present in results if not present]
     for kind, ident, present in results:
         print(f"  {'PRESENT' if present else 'ABSENT '} {kind}:{ident}")
