@@ -86,6 +86,13 @@ import time
 from collections import Counter
 
 from scraper import db
+from scripts.backfill_support import (  # noqa: F401 — re-exported rails
+    _REBUILD_ACTIVE_SQL,
+    _REBUILD_LIKE,
+    _REBUILD_POLL_SECONDS,
+    _STATEMENT_TIMEOUT_SQL,
+    wait_for_rebuild_gap,
+)
 from scraper.area import LAND_CATEGORIES, derive_headline_area
 
 LOG = logging.getLogger("backfill_area_basis")
@@ -130,53 +137,6 @@ _UPDATE_SQL = """
     FROM (SELECT * FROM unnest(%(ids)s::bigint[], %(bases)s::text[]) AS t(id, basis)) AS v
     WHERE l.id = v.id
 """
-
-# rebuild_browse_list() holds AccessShareLock on these tables for 5-10 minutes
-# per run and is the heaviest reader of `listings`; starting a 460k-row sweep
-# underneath it just makes both slower.
-_REBUILD_ACTIVE_SQL = """
-    SELECT count(*) FROM pg_stat_activity
-    WHERE state = 'active' AND query LIKE %(pattern)s AND pid <> pg_backend_pid()
-"""
-
-# Bound as a VALUE, not spelled into the query: a literal `%` in an executed SQL
-# string is a psycopg placeholder hazard, and `tests/test_sql_placeholders.py`
-# guards against exactly that. `\_` escapes the underscore so this matches
-# `rebuild_browse_list` / `rebuild_properties_map_mv` and not `rebuildXlist`.
-_REBUILD_LIKE = r"%rebuild\_%"
-
-_STATEMENT_TIMEOUT_SQL = "SET statement_timeout = '600s'"
-
-_REBUILD_POLL_SECONDS = 30.0
-
-
-def wait_for_rebuild_gap(conn, budget_seconds: float) -> bool:
-    """Poll until no `rebuild_%` statement is running, up to a budget.
-
-    `rebuild_browse_list()` runs every 15 minutes and holds its locks for 5-10
-    of them, so refusing outright means colliding roughly half the time and
-    never running. Waiting is the right move — and if the budget expires this
-    proceeds anyway rather than failing, because the contention is I/O only:
-    this backfill takes no lock a rebuild can block on, so overlapping is slow,
-    never incorrect.
-    """
-    deadline = time.monotonic() + budget_seconds
-    while True:
-        with conn.cursor() as cur:
-            cur.execute(_REBUILD_ACTIVE_SQL, {"pattern": _REBUILD_LIKE})
-            active = int(cur.fetchone()[0])
-        if not active:
-            return True
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            LOG.warning("BACKFILL starting anyway: %d rebuild_%% statement(s) "
-                        "still active after %.0fs. This is I/O contention, not "
-                        "a lock conflict.", active, budget_seconds)
-            return False
-        LOG.info("BACKFILL waiting for a rebuild gap: %d active, %.0fs of "
-                 "budget left", active, remaining)
-        time.sleep(min(_REBUILD_POLL_SECONDS, remaining))
-
 
 def provable_basis(
     source: str | None,

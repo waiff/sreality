@@ -169,6 +169,7 @@ def test_the_selection_reaches_the_wrongly_stamped_land_rows():
 # half the time and never running.
 
 import scripts.backfill_area_basis as mod
+import scripts.backfill_support as support  # the lifted rails live here now
 
 
 class _FakeRebuildCursor:
@@ -201,26 +202,26 @@ class _FakeRebuildConn:
 
 def test_it_starts_immediately_when_no_rebuild_is_running():
     conn = _FakeRebuildConn([0])
-    assert mod.wait_for_rebuild_gap(conn, 900.0) is True
+    assert support.wait_for_rebuild_gap(conn, 900.0) is True
     assert conn.polls == 1
 
 
 def test_it_waits_for_the_gap_then_proceeds(monkeypatch):
     slept = []
-    monkeypatch.setattr(mod.time, "sleep", slept.append)
+    monkeypatch.setattr(support.time, "sleep", slept.append)
     conn = _FakeRebuildConn([1, 1, 0])
-    assert mod.wait_for_rebuild_gap(conn, 900.0) is True
+    assert support.wait_for_rebuild_gap(conn, 900.0) is True
     assert conn.polls == 3
-    assert slept == [mod._REBUILD_POLL_SECONDS] * 2
+    assert slept == [support._REBUILD_POLL_SECONDS] * 2
 
 
 def test_an_expired_budget_proceeds_anyway_rather_than_failing(monkeypatch, caplog):
     # The contention is I/O only — this backfill takes no lock a rebuild can
     # block on — so a busy cluster must not mean the work never happens.
-    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(support.time, "sleep", lambda _s: None)
     conn = _FakeRebuildConn([1] * 50)
     with caplog.at_level(logging.WARNING, logger=mod.LOG.name):
-        assert mod.wait_for_rebuild_gap(conn, 0.0) is False
+        assert support.wait_for_rebuild_gap(conn, 0.0) is False
     assert "starting anyway" in caplog.text
 
 

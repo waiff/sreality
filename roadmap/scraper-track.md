@@ -15,9 +15,16 @@ Independent of the analytical, UI, and map tracks.
   `LISTING_COLUMNS` preserve-if-null on both write paths; the crawler path's bespoke post-insert
   UPDATE is gone; `ScrapedListing` refuses an empty URL; `db.detail_ref` keeps sreality's page off
   every queue; both snapshot-diff sites skip the key.
-- **Next:** W1 `scripts/reconcile_source_url.py` (narrow-column fill of ~232k rows, counters gate
-  the write) → mig 494 (`listings_public.source_url`, from 425's body) → W2 SPA deletes the
-  reconstruction → W3 rails (coverage view row + check, weekly parity, weekly HEAD conformance).
+- **W1:** `scripts/reconcile_source_url.py` + `reconcile_source_url.yml` (dispatch, dry-run default):
+  a primary-key walk over NARROW typed columns (never `raw_json`), the same assembler as ingest,
+  canonical string or nothing; counters that gate the write (unknown-code histogram — a recent
+  unknown code suspends writes; structural id check; `would_clear` before `--clear`), a pre-flight
+  `--conformance N` HEAD gate, `--report-check` → `outbound_url_parity`. Rails lifted into
+  `scripts/backfill_support.py` (rebuild-gap wait + lock-fight retry) so `backfill_area_basis`
+  shares them.
+- **Next:** operator dispatch (dry-run → conformance=40 → write) → mig 494 (`listings_public
+  .source_url`, from 425's body) → W2 SPA deletes the reconstruction → W3 rails (coverage view row
+  + check, weekly parity, weekly HEAD conformance).
 
 ### The nomination gate went STRUCTURAL — counts stopped vetoing (2026-09-08, done)
 - The 5th element of `walk_category` now means **"the walk reached the portal's end"**

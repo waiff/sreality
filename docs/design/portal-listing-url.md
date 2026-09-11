@@ -1,8 +1,10 @@
 # Portal listing URLs — one contract, nine portals
 
-**Status:** proposal, 2026-09-11. Nothing below is built yet. Investigation + a five-lens
-adversarial verification + a three-angle design panel (Opus 5) sit behind every claim; the
-evidence trail is in the Appendix.
+**Status (2026-09-11):** W0 in PR #1400; W1 stacked on it. Operator rulings: the Supabase MCP is
+the DB access path; inactive rows DO get URLs; canonical string or nothing (never a placeholder);
+the weekly HEAD probe is approved; CLAUDE.md gets a rule-21 clause (not a new rule). Investigation
++ a five-lens adversarial verification + a three-angle design panel (Opus 5) sit behind every
+claim; the evidence trail is in the Appendix.
 
 ## 0. The report, and what it actually is
 

@@ -5138,6 +5138,119 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/recompute_property_stats.yml"
     },
     {
+      "filename": "reconcile_source_url.yml",
+      "name": "Reconcile source_url (sreality page URLs from typed columns)",
+      "description": "Dispatch-only reconciler for the portal-URL contract (docs/design/portal-listing-url.md). sreality was the only portal whose page URL was not a stored fact — the parser never emitted `listings.source_url` and the SPA rebuilt one from display labels that 404. W0 made every fresh detail fetch emit it; this job fills the ~232k rows written before that and, run weekly in dry-run with `report_check`, is the standing drift detector (`outbound_url_parity` in pipeline_check_results). It reads NO raw_json: every 404-critical segment is a typed column, and the locality is slugified through the same assembler ingest uses (`scraper.sreality_url`). Canonical string or nothing — never a placeholder. Writes only `listings.source_url`, which is out of every content hash (zero snapshots, no trigger). DML, not DDL; waits for a read-model rebuild gap and replays a batch that loses a lock fight with the hourly MF recompute. Two gates stop a write pass: an unknown category_sub_cb on a row seen in the last 7 days (the codebook moved), and `conformance` > 0 finding any 404 on a live sample. NOT a portal ingest workflow, so it carries no `# portal:` tag.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "write",
+          "description": "Actually write. Left false, this only reports what would change.",
+          "required": false,
+          "type": "choice",
+          "default": "false",
+          "options": [
+            "false",
+            "true"
+          ]
+        },
+        {
+          "name": "clear",
+          "description": "Also NULL a stored sreality URL whose derivation now declines (read would_clear first)",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        },
+        {
+          "name": "conformance",
+          "description": "Pre-flight HEAD-probe this many random active rows (0 = skip); any 404 blocks a write",
+          "required": false,
+          "type": "string",
+          "default": "0",
+          "options": null
+        },
+        {
+          "name": "report_check",
+          "description": "Persist one pipeline_check_results row (outbound_url_parity)",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        },
+        {
+          "name": "limit",
+          "description": "Max listings examined this run (blank = the whole table)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "after",
+          "description": "Resume from this listings.id cursor (exclusive)",
+          "required": false,
+          "type": "string",
+          "default": "0",
+          "options": null
+        },
+        {
+          "name": "batch_size",
+          "description": "Rows per keyset page",
+          "required": false,
+          "type": "string",
+          "default": "5000",
+          "options": null
+        },
+        {
+          "name": "max_seconds",
+          "description": "Wall-clock budget in seconds (blank = no budget)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "rebuild_wait_seconds",
+          "description": "How long to wait for a read-model rebuild gap before starting anyway",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "ignore_rebuild",
+          "description": "Start immediately, without waiting for a rebuild gap at all",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        },
+        {
+          "name": "verbose",
+          "description": "Log every individual write (DEBUG)",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "reconcile-source-url",
+      "cancelInProgress": false,
+      "timeoutMinutes": 120,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/reconcile_source_url.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/reconcile_source_url.yml"
+    },
+    {
       "filename": "reextract.yml",
       "name": "Data: re-extract a field from stored pages",
       "description": "Replays the CURRENT parser over already-stored `portal_raw_pages` HTML to recover a field a parser silently stopped extracting. No re-fetch, no LLM, no new secrets — and it repairs INACTIVE listings too, which a re-fetch structurally cannot.",
