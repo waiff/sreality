@@ -480,3 +480,11 @@ Registered **last** in `_CHECKS` on purpose — the one outbound check is the on
 should drop first. 6-hourly lane + in-app bell; promotion into `llm_health.yml`'s hourly `--only`
 list is a deliberate post-soak step, like the ppm2 checks. The remedy when it reds: re-derive the
 template from sreality's own frontend and update `IMAGE_TRANSFORM_OPS`.
+
+**Its own lane.** `.github/workflows/sreality_image_canary.yml` runs it daily
+(`--only sreality_image_template --exit-nonzero-on-fail`): it is registered LAST so a slow CDN
+can never starve a database check, and for the same reason the 6-hourly verify lane routinely
+exhausts its 120 s budget before reaching it (observed on its first run: `lane budget 120s
+exhausted; check sreality_image_template not run`). A CDN 403/429 (sreality's throttle) or a
+5xx is a `warn` that verified nothing — only a 4xx refusal, a non-image body or a downgraded
+frame is a `fail`.
