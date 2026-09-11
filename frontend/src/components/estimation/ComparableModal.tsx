@@ -12,7 +12,7 @@ import type { ImagePublic, ListingPublic, ListingSummaryBody } from '@/lib/types
 import { listingKindLabel } from '@/lib/enums';
 import { imageSrc } from '@/lib/imageUrl';
 import ImageTagBadge from '@/components/ImageTagBadge';
-import { portalListingUrl, portalShort } from '@/lib/portals';
+import { portalShort } from '@/lib/portals';
 import { listingPath } from '@/lib/listingUrl';
 import Dialog, { DialogClose } from '@/components/Dialog';
 
@@ -352,14 +352,9 @@ function Facts({ listing }: { listing: ListingPublic }) {
 }
 
 function Footer({ listing }: { listing: ListingPublic }) {
-  // Reconstruct the origin-portal link from the category triple (sreality stores
-  // no source_url); null → we can't reach a resolvable external page, so only the
-  // in-app "View in full" link shows rather than a sreality 404.
-  const external = portalListingUrl(listing.source, null, listing.sreality_id, {
-    categoryType: listing.category_type,
-    categoryMain: listing.category_main,
-    categorySubCb: listing.category_sub_cb,
-  });
+  // The origin-portal link is the row's stored `source_url` (migration 494) for
+  // every portal; null → only the in-app "View in full" link shows.
+  const external = listing.source_url;
   return (
     <div className="flex items-center justify-between">
       {/* listingPath needs a real sreality_id (never route the surrogate

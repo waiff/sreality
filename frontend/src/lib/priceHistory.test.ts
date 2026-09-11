@@ -79,18 +79,39 @@ describe('listingUrlRows', () => {
     expect(rows[0]).toMatchObject({ id: 100, source: 'sreality', url: null });
   });
 
-  it('reconstructs a sreality source URL from the property category triple', () => {
-    const withCategory = {
-      ...listing,
-      category_type: 'prodej',
-      category_main: 'byt',
-      category_sub_cb: 5, // 2+1
-    } as unknown as ListingPublic;
+  it('reads each row its OWN stored source_url — never a URL derived from the parent', () => {
+    // A merged property: two sreality siblings with different sub-types. The old
+    // reconstruction applied the parent's category triple to both and 404'd one.
     const rows = listingUrlRows(
-      [source({ id: 100, sreality_id: 100, source: 'sreality', source_url: null })],
-      withCategory,
+      [
+        source({
+          id: 100, sreality_id: 100, source: 'sreality',
+          source_url: 'https://www.sreality.cz/detail/prodej/byt/2+1/praha-zizkov-kristanova/100',
+          last_seen_at: '2026-02-01T00:00:00Z',
+        }),
+        source({
+          id: 101, sreality_id: 101, source: 'sreality',
+          source_url: 'https://www.sreality.cz/detail/prodej/byt/3+kk/praha-zizkov-kristanova/101',
+          last_seen_at: '2026-01-01T00:00:00Z',
+        }),
+        source({ id: 102, sreality_id: 102, source: 'sreality', source_url: null,
+                 last_seen_at: '2025-12-01T00:00:00Z' }),
+      ],
+      { ...listing, category_sub_cb: 5 } as unknown as ListingPublic,
     );
-    expect(rows[0].url).toBe('https://www.sreality.cz/detail/prodej/byt/2+1/x/100');
+    expect(rows.map((r) => r.url)).toEqual([
+      'https://www.sreality.cz/detail/prodej/byt/2+1/praha-zizkov-kristanova/100',
+      'https://www.sreality.cz/detail/prodej/byt/3+kk/praha-zizkov-kristanova/101',
+      null, // no stored fact → in-app view, never a guess
+    ]);
+  });
+
+  it('the no-sources fallback row reads the listing\'s own stored source_url', () => {
+    const rows = listingUrlRows(
+      [],
+      { ...listing, source_url: 'https://www.sreality.cz/detail/prodej/byt/2+1/x-x-/100' } as unknown as ListingPublic,
+    );
+    expect(rows[0].url).toBe('https://www.sreality.cz/detail/prodej/byt/2+1/x-x-/100');
   });
 
   it('keys rows on the surrogate id, not sreality_id, so two NULL-sreality sources never collide', () => {

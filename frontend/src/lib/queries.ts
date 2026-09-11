@@ -1566,7 +1566,7 @@ const DETAIL_COLS =
    * than re-deriving it, which is the point of the program. (No apostrophes in
    * here: a guardrail test parses these constants by quote pairing.) */
   'price_per_m2,price_per_m2_basis,' +
-  'description,mf_reference_rent_czk,mf_gross_yield_pct,mf_reference_rent';
+  'description,mf_reference_rent_czk,mf_gross_yield_pct,mf_reference_rent,source_url';
 
 /* Legacy /listing/{id} route: URL literally IS the sreality_id, one round trip,
  * unchanged forever — a listing only ever gets a legacy numeric URL when it HAS a
