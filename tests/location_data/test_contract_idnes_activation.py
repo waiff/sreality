@@ -395,7 +395,7 @@ def test_a_subject_miss_becomes_one_refusal_per_subject_scoped_entry() -> None:
         fx.entries_for("idnes"), register=register())
     assert sorted(c.extractor_id for c in result.claims) == [
         "id.det.info_text", "id.det.no_exact_disclaimer", "id.det.zoom"]
-    assert dict(result.refusals) == {"subject_not_found": 2}
+    assert dict(result.refusals) == {"subject_not_found:idnes": 2}
 
 
 # ------------------------------------ the real archived page: an unparseable blob

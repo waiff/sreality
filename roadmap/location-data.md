@@ -62,6 +62,25 @@ component is slimmed twice — each wave rewrites one component and slims its st
     to `location_claim_observations` / `location_claim_absences` / `location_enrichment_state` — a
     refusal is a counter and one log line per reason. bazos@4 drops the 16 never-executed LLM
     entries. 27,420 lines deleted / 2,559 added.
+  - **W1-a2 shipped** (2026-09-12): the intake selects CHANGED listings and drains unmined bodies
+    first. The first run on the new lane measured the problem — `last_seen_at >= watermark` opened
+    ~180,000 listings in 51 min (9 x 20k batches) to re-mine claims that already existed, because
+    the index walks re-sight every active listing within hours. The payload half now walks
+    `listing_snapshots.id` (a row is appended exactly on a content change, rule 2), deduped to one
+    row per listing, the `--source` filter inside the window. The page half got its own pass ahead
+    of it: unmined latest bodies of ACTIVE page-portal listings, 1,500 a batch in
+    `portal_raw_payloads.id` order on an in-run keyset, until the backlog empties or half the
+    budget is gone (~250,000 were unmined; on the listing scan that was ~170 runs). Two rails came
+    out of review: the snapshot window stands 15 min behind the clock (a bigserial id is visible at
+    COMMIT, so a concurrent `write_detail_batch` can land a row below an advanced cursor — a keyset
+    never looks back), and the bodies pass walks a keyset rather than trusting the stamp (three of
+    the four unstamped paths are deterministic per body, so they would park at the head of the
+    order and stall the backlog behind them). Cutover is lossless: a cold lane seeds at the old
+    lane's own `cursor_after_ts` anchor minus the 3h overlap, not at the head. Deleted: `_WATERMARK_SQL`, `--overlap-hours`, `coverage_since`, `cursor_after_ts`
+    writes and the incremental-degrades-to-full branch. `--max-seconds` defaults to 2400 in the CLI
+    (an unbudgeted dispatch was cancelled by the 55-min job timeout and stamped nothing), and a
+    batch does not start unless the previous one's measured duration fits. One summary line per run;
+    idnes' 1,398 "PAGE subject miss" INFO lines are DEBUG and counted per source.
   - **W1-b shipped** (2026-09-12): `location_claims` slims **45 columns → 19** (the 26 dropped are
     the anchor/evidence/provenance/legacy blocks plus `value_norm`, `value_shape`, `batch_id` and
     the distance trio), and **7 tables + 3 views + 1 header flag** go with them (migration **498**):

@@ -324,8 +324,19 @@ def test_the_intake_preflight_reads_are_bounded_too():
     """A run that hangs before its first batch row exists leaves nothing to diagnose.
     Each preflight read must be the FIRST statement of a guarded block, not a bare
     `conn.cursor()` on the autocommit connection."""
-    source = inspect.getsource(claims_intake.run)
-    for sql in ("_ACTIVE_CONTRACT_SQL", "_WATERMARK_SQL"):
+    sources = {
+        "_ACTIVE_CONTRACT_SQL": inspect.getsource(claims_intake.run),
+        # W1-a2 replaced the watermark read with the cutover seed, in its own helper —
+        # two reads, two guarded blocks, neither able to hang the run before its first
+        # batch row exists.
+        "_LEGACY_WATERMARK_SQL": inspect.getsource(claims_intake._snapshot_seed),
+        "_SNAPSHOT_SEED_SQL": inspect.getsource(claims_intake._snapshot_seed),
+        # ... and added one more: the drain's selection and its backlog readout.
+        "_UNMINED_BODIES_SQL": inspect.getsource(claims_intake.drain_unmined_bodies),
+        "_UNMINED_BODY_BACKLOG_SQL": inspect.getsource(
+            claims_intake._unmined_body_backlog),
+    }
+    for sql, source in sources.items():
         opener = source.split(f"cur.execute({sql}")[0].rstrip().splitlines()[-1].strip()
         assert opener == "with guarded(conn, statement_timeout) as cur:", (
             f"{sql} is not read inside a guarded transaction (opener was {opener!r})"
@@ -337,7 +348,7 @@ def test_the_intake_batch_budget_is_env_overridable(monkeypatch):
     without a deploy."""
     assert (
         "loader_db.env_timeout_s(STATEMENT_TIMEOUT_ENV, DEFAULT_STATEMENT_TIMEOUT_S)"
-        in " ".join(inspect.getsource(claims_intake.main).split())
+        in " ".join(inspect.getsource(claims_intake.build_parser).split())
     )
     monkeypatch.setenv(claims_intake.STATEMENT_TIMEOUT_ENV, "120")
     assert loader_db.env_timeout_s(

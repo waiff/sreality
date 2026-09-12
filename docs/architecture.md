@@ -1920,8 +1920,8 @@ fingerprint "safe" and that nothing ever read), `location_claim_links`, `locatio
 (`location_claims_live` / `_unretracted` / `_shadow`) that layered retraction and shadow onto every
 read. The fingerprint FUNCTION is unchanged and still takes all 23 inputs — the readers compute
 page_kind, extractor id, value_norm and the rest, they are simply not stored — so every fingerprint
-on disk stayed valid and no corpus re-insert happened. `location_resolutions` + `location_resolution_candidates` are the output of a
-**pure function** — S1–S9 in `location_data/resolver/`, no wall clock (`as_of = max(observed_at)`),
+on disk stayed valid and no corpus re-insert happened. `location_resolutions` +
+`location_resolution_candidates` are the output of a **pure function** — S1–S9 in `location_data/resolver/`, no wall clock (`as_of = max(observed_at)`),
 no network, no randomness, enforced by an AST scan — so a resolution replays byte-identically from
 its inputs and the five version ids stamped on it. `listing_location_current` +
 `property_location_current` are **rebuildable caches**, never a store of record: the
@@ -1936,21 +1936,67 @@ The collision epoch is minted weekly by the same workflow (Sunday 04:41 UTC).
 
 **ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
 `35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a
-listing in one keyset pass: `listings.raw_json` plus the class-B legacy columns (ten payload
-readers), and the LATEST stored detail body in `portal_raw_payloads`, joined on
-`(source, source_id_native)` — `portal_raw_payloads.listing_id` is nullable and nothing has ever
-populated it — fetched from R2 and scoped by the contract's exclusion zones (fourteen page
-readers in `location_data/page_readers.py`, the vocabulary both halves share in
+listing: `listings.raw_json` plus the class-B legacy columns (ten payload readers), and the
+LATEST stored detail body in `portal_raw_payloads`, joined on `(source, source_id_native)` —
+`portal_raw_payloads.listing_id` is nullable and nothing has ever populated it — fetched from R2
+and scoped by the contract's exclusion zones (fourteen page readers in
+`location_data/page_readers.py`, the vocabulary both halves share in
 `location_data/claims_common.py`). ONE registry, `claims_intake.READERS`, 24 entries keyed by
 substrate; a name outside it is a hard refusal. **The page half is hash-gated**: a body is mined
 only while `portal_raw_payloads.contract_version IS DISTINCT FROM` the portal's active contract
 version, and the batch stamps the bodies it mined in the same transaction as their claims — so
-a body is fetched once per contract version, the hourly cost is bounded by page CHURN (~50–80
-new bodies an hour fleet-wide) rather than by corpus size, and a contract bump re-mines every
-latest body over the runs that follow. No new table: migration 403 added the column and nothing
-populated it. If R2 is unconfigured the page half is skipped with ONE warning per run and the
-payload half runs unchanged — the hourly ingest for all nine portals must never go dark because
-a credential rotated. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
+a body is fetched once per contract version, the steady-state cost is bounded by page CHURN
+(~50–80 new bodies an hour fleet-wide) rather than by corpus size, and a contract bump re-mines
+every latest body over the runs that follow. No new table: migration 403 added the column and
+nothing populated it. If R2 is unconfigured the page half is skipped with ONE warning per run and
+the payload half runs unchanged — the hourly ingest for all nine portals must never go dark
+because a credential rotated.
+
+**The run is CHANGE-DRIVEN and BODIES-FIRST** (W1-a2), because the first production run showed
+what the alternative costs: selecting on `listings.last_seen_at >= watermark` opened ~180 000
+listings in 51 minutes (9 × 20 000 batches, ~59/s) to re-mine payloads whose claims already
+existed — every active listing is re-sighted within hours by the index walks, so an
+"incremental" hour was a scan of the live corpus. The payload half now walks
+`listing_snapshots.id`: a snapshot row is appended exactly when a listing's content hash moves
+(rule 2) and every write path into `listings` appends one for a brand-new row too, so
+"snapshots above my cursor" IS "the payloads whose claims can have changed". The window is a
+keyset slice of the snapshot log, deduped to one row per listing, with the `--source` filter
+INSIDE it (outside, a source-scoped run whose window held no row for that portal would read as
+"the log is exhausted" and stamp `ok` with its cursor stuck). **The window stands 15 minutes
+behind the wall clock**, and that is a correctness rail: `listing_snapshots.id` is a bigserial,
+allocated at INSERT and visible at COMMIT, and `write_detail_batch` writes N snapshots inside one
+multi-statement transaction concurrently across the per-portal drains and the realtime worker —
+so a row whose id is BELOW an already-advanced cursor can become visible after that cursor moved,
+and a keyset never looks back. The page half got its own pass AHEAD of that scan: the unmined
+latest bodies of ACTIVE page-portal listings, selected FROM `portal_raw_payloads` in `p.id` order,
+1 500 a batch, until the backlog empties or half the budget is gone — ~250 000 bodies were unmined
+after the first wave and riding them on the listing scan would have taken ~170 runs. Its cursor is
+an **in-run keyset** on `p.id` (reset to 0 each run, so the contract-version gate still decides
+what is eligible): four paths leave a body unstamped — a bucket miss, a missing scope register, a
+content-triggered refusal, a scoper that failed closed — and three are deterministic per body, so
+a stamp-only notion of progress would park them at the head of the order, re-fetch them every
+batch, and stall the entire backlog behind them once `cap` of them accumulated. The pass ends when
+a batch comes back short of `cap`.
+
+**The cursor is the lane's only memory, and every run has a budget.** The watermark is gone with
+`--overlap-hours` and `coverage_since`; `location_claim_batches.cursor_after_id` holds a
+`listings.id` in full mode and a `listing_snapshots.id` in incremental mode. Full mode still
+resumes only from a budget-`stopped` predecessor ('ok' means the table was walked, and the next
+full pass is the contract-bump re-walk from 0); incremental resumes from ANY terminal outcome,
+because its cursor is a position in an append-only log, not a coverage claim — and the cursor
+only advances past a batch whose transaction closed, which is what makes a `failed` run safe to
+resume. A pre-W1-a2 cursor is told apart by `cursor_after_ts IS NULL` (the lane writes no
+timestamp cursor any more); a lane with no cursor of its own seeds at the OLD lane's own anchor —
+the newest batch row still carrying a `cursor_after_ts`, else the last `ok` watermark, both minus
+the 3-hour overlap that cursor was always read with, else the head of the log. Seeding at the head
+would drop everything between the old lane's last position and the deploy, and the old lane's runs
+were being cancelled at the job timeout (no `outcome='ok'` row for days), so that window is hours
+wide. `--max-seconds` defaults to 2400 in the CLI, not only in the workflow: a dispatch without a
+budget ran until `timeout-minutes: 55` cancelled it and stamped nothing resumable, so the next run
+repeated it. A batch does not START unless the previous batch's measured duration fits in what is
+left, and the run's backlog readout (a `count(*)` under the 600 s ceiling, taken when the budget is
+already spent) runs AFTER the terminal stamp — ahead of it, it could push the job past the
+55-minute ceiling and lose the cursor of a run that had otherwise finished cleanly. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
 re-mine, the archived-HTML sweep, the verify lane and the LLM free-text lane, with the refetch
 cohort and the payload backfill/prune/churn tooling. The lane writes `location_claims`,
 `dirty_locations` and its own `location_claim_batches` ledger and nothing else:

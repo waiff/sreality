@@ -228,7 +228,7 @@ def test_a_subject_miss_is_one_refusal_per_entry_and_never_a_silent_zero():
     and the batch would still stamp 'ok' and move the watermark."""
     result = run("999999")
     assert result.claims == []
-    assert dict(result.refusals) == {"subject_not_found": len(ARCHIVE_ENTRIES)}
+    assert dict(result.refusals) == {"subject_not_found:mmreality": len(ARCHIVE_ENTRIES)}
 
 
 def test_an_on_miss_other_than_fail_is_refused_rather_than_quietly_different():
