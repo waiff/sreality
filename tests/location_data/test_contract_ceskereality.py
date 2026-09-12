@@ -13,9 +13,13 @@ The bodies:
     okres Trutnov. A TOWN-TIER page: the address line is a bare town, so the street and the
     house number are silent — the portal DECLARING granularity, not a parse failure.
   * `location_w2/ceskereality_detail.html` — the modelled body the golden gate scores.
-  * `location_w2/ceskereality_map.html` — a modelled `page_kind: map` body for the one
-    entry that reads the /mapa/ marker JSON. The repo holds no capture of that surface; the
-    fixture's own header records what is copied from the real bodies and what is modelled.
+
+There is no `page_kind: map` body and no entry that would read one. `cr.map.exact` — the
+/mapa/ marker set's own `exact` flag — was declared at v6 and cut before merge: the intake
+joins `portal_raw_payloads` on `page_kind = 'detail'` and no scraper stores any other kind,
+so the entry was unreachable by construction. The loader now refuses that shape outright
+(`contracts.STORED_PAGE_KIND`). This portal's precision therefore rides on what its town,
+okres and pin entries state, which is the settled headline rule (W1-c R10).
 """
 
 from __future__ import annotations
@@ -69,7 +73,6 @@ ENTRIES: dict[str, str] = {
     "cr.det.page_pin": "coordinate",
     "cr.det.address_street": "street_name",
     "cr.det.address_cp": "house_number_cp",
-    "cr.map.exact": "precision_declaration",
 }
 DETAIL_ENTRIES = tuple(k for k in ENTRIES if k.startswith("cr.det."))
 
@@ -79,7 +82,6 @@ BODIES: dict[str, tuple[Path, str]] = {
     "3680359-a2": (_REFETCH / "ceskereality_a2.html", "detail"),
     "fixture": (_PINNED / f"{SOURCE}_detail.html", "detail"),
 }
-MAP_BODY = _PINNED / f"{SOURCE}_map.html"
 
 
 def entries() -> list[Entry]:
@@ -112,22 +114,13 @@ def mined(key: str, *, source_body: bytes | None = None,
                         register=register())
 
 
-def mined_map(native: str) -> IntakeResult:
-    payload = ArchivedPayload(
-        id=2, source=SOURCE, source_id_native=native, page_kind="map",
-        payload_sha256="0" * 64, first_observed_at=OBSERVED_AT,
-        body=MAP_BODY.read_bytes())
-    return extract_page(payload, fx.listing(SOURCE, {}, native=native), entries(),
-                        register=register())
-
-
 def by_id(result: IntakeResult) -> dict[str, Claim]:
     return {claim.extractor_id: claim for claim in result.claims}
 
 
 # ------------------------------------------------------ the shape rule 25 asks for
 
-def test_the_contract_is_at_version_6_and_declares_exactly_these_six_entries() -> None:
+def test_the_contract_is_at_version_6_and_declares_exactly_these_five_entries() -> None:
     assert CONTRACT.version == VERSION
     assert {e.entry_id: e.claim_type for e in CONTRACT.entries} == ENTRIES
 
@@ -178,9 +171,13 @@ DATA_CITY_FORMS: tuple[tuple[str, str, str, bool], ...] = (
     # takes a shared transform or a gazetteer, both out of this wave.
     ("Praha Stodůlky (okres Hlavní město Praha)", "Praha Stodůlky",
      "claim_intake_fixtures.CESKEREALITY_PAGE, space-glued", False),
-    # The same gap on the hyphenated spelling, for the same reason.
-    ("Praha 5-Smíchov (okres Hlavní město Praha)", "Praha 5-Smíchov",
-     "modelled on the gap above", False),
+    # The hyphenated spelling is NO LONGER a gap: the ordinal arm carries an optional
+    # trailing name, so "Praha 5-Smíchov" and "Praha 10 - Vršovice" fold like the bare
+    # "Praha 13" above. Only the SPACE-glued form is left, and closing it needs a gazetteer.
+    ("Praha 5-Smíchov (okres Hlavní město Praha)", "Praha",
+     "the ordinal arm's optional trailing name", True),
+    ("Praha 10 - Vršovice (okres Hlavní město Praha)", "Praha",
+     "the same, spaced", True),
 )
 
 
@@ -222,7 +219,11 @@ def test_no_entry_is_readerless_and_none_reads_a_legacy_column() -> None:
         assert entry.extraction_method != "legacy_column", entry.entry_id
         assert "legacy_source_column" not in entry.locator, entry.entry_id
     assert [e.entry_id for e in page_entries(entries(), "detail")] == list(DETAIL_ENTRIES)
-    assert [e.entry_id for e in page_entries(entries(), "map")] == ["cr.map.exact"]
+    # And nothing is declared for a kind the lane never stores: `_BODY_JOIN` selects
+    # `page_kind = 'detail'`, so an entry on any other kind would be unreachable and no run
+    # would count the miss. The loader refuses one now; this is the per-portal rail.
+    for kind in ("map", "index", "archive", "snapshot", "gazetteer", "none"):
+        assert page_entries(entries(), kind) == [], kind
 
 
 def test_every_declared_transform_and_guard_is_one_the_extractor_implements() -> None:
@@ -325,69 +326,6 @@ def test_the_pin_is_licensed_as_this_portals_own_rather_than_stamped_by_its_read
     assert pin.locator["attr"] == ["data-coord-lat", "data-coord-lng"]
     assert pin.precision_map["precision_cap"]["granularity_max"] == "address_point"
     assert pin.guards == ["reject_outside_cz_bbox"]
-
-
-# --------------------------------------------------- the map surface's precision flag
-
-def test_the_map_marker_flag_is_read_per_branch_and_only_the_false_one_declares_blur() -> None:
-    """R5 + R10: the portal's own `exact` flag IS the precision declaration, and the LABEL is
-    the value — `stamp_page_claim` stamps `declared_precision_label` for this claim type
-    whatever the reader, so a boolean carries the signal without a bespoke reader. Which
-    label means blurred is contract calibration (`blurred_labels: [exact_false]`), never a
-    code constant: on one 500-marker request 436 markers were exact and 64 were not."""
-    exact = by_id(mined_map("3861311"))["cr.map.exact"]
-    assert exact.value_text == "exact_true" and exact.value_num == 1.0
-    assert exact.declared_precision_label == "exact_true"
-    assert exact.blur_evidence == "none"
-    assert exact.page_kind == "map"
-
-    blurred = by_id(mined_map("3680359"))["cr.map.exact"]
-    assert blurred.value_text == "exact_false" and blurred.value_num == 0.0
-    assert blurred.declared_precision_label == "exact_false"
-    assert blurred.blur_evidence == "declared"
-
-
-def test_a_marker_set_without_this_listing_is_a_counted_miss_not_a_neighbours_flag() -> None:
-    """`subject_scope: {kind: id_match, on_miss: fail}` over `nid == source_id_native`. One
-    /mapa/ response carries up to 500 markers, so "the first marker" would be another
-    listing's precision on 499 of them; a miss is counted instead."""
-    result = mined_map("9999999")
-    assert result.claims == []
-    assert dict(result.refusals) == {"subject_not_found:ceskereality": 1}
-
-
-def test_the_map_flags_evidence_is_broken_three_ways_and_every_way_is_pinned() -> None:
-    """A RECORDED DEFECT in full, pinned so each half fails the moment it is fixed — not a
-    sanctioned answer. `_json_quote` resolves `/exact` against the WHOLE captured document,
-    and this portal's document is a LIST of markers (mmreality, the reader's design case,
-    serves one subject per DOM node, where whole-document and subject coincide). Three
-    consequences, all measured on the modelled map body:
-
-      1. the quote is the FIRST marker's flag, not the matched subject's;
-      2. the span is byte-identical on both branches, so it does not distinguish the subject
-         at all — it cannot be read as "the neighbour's span" either;
-      3. the span does not slice back to the quote, because it lands in the HTML-escaped
-         attribute (`&quot;exact&quot;:true`) while the quote is the DECODED JSON text.
-
-    (3) is the invariant `test_every_claim_cites_a_span_that_slices_back_to_its_own_quote`
-    asserts for the detail entries; that test is parametrized over BODIES, all `page_kind:
-    detail`, so this entry is outside its reach and would otherwise ship unmeasured. The
-    claim's VALUE is the subject's and correct on both branches. Fixing it means `_json_quote`
-    handing back an HTML-SCOPED slice of the MATCHED marker — a shared-reader change, and an
-    integrator to-do on this contract; re-type this test with it."""
-    html = scope_html(MAP_BODY.read_bytes(), register=register()).html
-    exact = by_id(mined_map("3861311"))["cr.map.exact"]
-    blurred = by_id(mined_map("3680359"))["cr.map.exact"]
-
-    assert (exact.value_text, blurred.value_text) == ("exact_true", "exact_false")
-    # 1 — the false branch quotes the true branch's marker.
-    assert blurred.evidence_quote == exact.evidence_quote == '"exact":true'
-    # 2 — and cites the same bytes for both subjects.
-    assert (blurred.span_start, blurred.span_end) == (exact.span_start, exact.span_end)
-    # 3 — which are not the quote's bytes: the document is escaped, the quote is not.
-    for claim in (exact, blurred):
-        assert html[claim.span_start:claim.span_end] != claim.evidence_quote
-        assert html[claim.span_start:claim.span_end] == "&quot;exact&quot;:true"
 
 
 # ------------------------------------------------------------- evidence and spans

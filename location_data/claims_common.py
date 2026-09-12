@@ -580,11 +580,34 @@ def _address_part_okres(value: str, arg: str) -> str | None:
 # "Frýdek-Místek" into "Frýdek". The obvod itself is not lost: a portal that publishes one
 # claims it as `cast_obce_name`, which is the type the resolver binds momc / spravní obvod /
 # část obce names under.
+# The ordinal arm carries an OPTIONAL trailing name, because the portals write the obvod both
+# ways: "Praha 8" and "Praha 10 - Vršovice" are the same obvod, and "Liberec XXV-Vesec" is how
+# RÚIAN itself spells the Roman-numeral ones. Without the tail the longer spelling fell
+# through unchanged and published a town no gazetteer has.
 _STATUTORY_CITY_ORDINAL_RE = re.compile(
     r"^(Praha|Plzeň|Brno|Ostrava|Pardubice|Opava|Liberec|Ústí nad Labem)"
-    r"\s*[-–]?\s*(?:\d+|[IVX]+)$")
+    r"\s*[-–]?\s*(?:\d+|[IVX]+)(?:\s*[-–]\s*\S.*)?$")
 _STATUTORY_CITY_HYPHEN_RE = re.compile(
     r"^(Brno|Ostrava|Opava|Liberec|Ústí nad Labem)\s*[-–]\s*\S.*$")
+
+# Every OKRES whose RÚIAN name is a statutory city plus a hyphen. They are spelled exactly
+# like an obvod and they are not one: folding "Brno-venkov" to "Brno" claims the second-
+# largest city in the country as the town of any village in its hinterland, and the value
+# arrives here routinely because `address_part_obec` runs on lines that carry an okres
+# segment. An okres is never a town, so it is returned untouched and the okres entry — which
+# is what states this fact — keeps it.
+#
+# The list is closed because the Czech okres set is (76 + Praha, unchanged since 2007); these
+# are all of them containing a hyphen. Every other hyphenated name reaching this transform is
+# either an obvod of one of the five cities above or an ordinary two-part town
+# ("Frýdek-Místek", "Kostelec nad Černými Lesy"), and the arms already tell those apart.
+_HYPHENATED_OKRES_NAMES = frozenset({
+    "Brno-město", "Brno-venkov",
+    "Ostrava-město",
+    "Plzeň-město", "Plzeň-sever", "Plzeň-jih",
+    "Praha-východ", "Praha-západ",
+    "Frýdek-Místek",
+})
 
 
 @transform("statutory_city_obec")
@@ -597,8 +620,11 @@ def _statutory_city_obec(value: str, arg: str) -> str | None:
     an option here the way it is in `address_part_street`: the city IS stated, in the same
     string, by name.
     """
+    stripped = value.strip()
+    if stripped in _HYPHENATED_OKRES_NAMES:
+        return value
     for pattern in (_STATUTORY_CITY_ORDINAL_RE, _STATUTORY_CITY_HYPHEN_RE):
-        found = pattern.match(value.strip())
+        found = pattern.match(stripped)
         if found:
             return found.group(1)
     return value

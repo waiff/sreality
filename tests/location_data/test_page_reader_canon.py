@@ -1202,12 +1202,44 @@ def test_an_untransformed_read_still_quotes_its_own_value():
         # numbered, so `Plzeň-Bory` is a část obce a `cast_obce_name` entry claims.
         ("Plzeň-Bory", "Plzeň-Bory"),
         ("Praha-Řeporyje", "Praha-Řeporyje"),
+        # The ORDINAL arm carries an optional trailing name: the portals write the same
+        # obvod both ways, and before W1-c the longer spelling fell through unchanged and
+        # published a town no gazetteer has.
+        ("Praha 10 - Vršovice", "Praha"),
+        ("Praha 5 - Smíchov", "Praha"),
+        ("Praha 5-Smíchov", "Praha"),
+        ("Praha 13 - Stodůlky", "Praha"),
+        ("Liberec XXV-Vesec", "Liberec"),
+        ("Liberec XIV - Ruprechtice", "Liberec"),
+        ("Plzeň 3 – Bory", "Plzeň"),
+        # …and the SPACE-glued form is still the recorded gap: no number, no hyphen, so
+        # neither arm matches. Closing it needs a gazetteer, not a wider pattern.
+        ("Praha Stodůlky", "Praha Stodůlky"),
     ])
 def test_a_statutory_city_obvod_is_never_the_town(value, expected):
     """W1-c R4. RÚIAN has no obec called "Praha 8" — the obec is "Praha" and the obvod is a
     child of it — so a town claim carrying the obvod resolves to NOTHING, which is a
     town-coverage hole that reads exactly like a portal publishing no town at all."""
     assert apply_transforms(value, ("statutory_city_obec",)) == expected
+
+
+@pytest.mark.parametrize("okres", [
+    "Brno-město", "Brno-venkov", "Ostrava-město", "Plzeň-město", "Plzeň-sever",
+    "Plzeň-jih", "Praha-východ", "Praha-západ", "Frýdek-Místek",
+])
+def test_a_hyphenated_okres_name_is_never_folded_to_its_city(okres):
+    """Every okres whose RÚIAN name is a statutory city plus a hyphen is spelled EXACTLY
+    like an obvod and is not one. Folding "Brno-venkov" claims the second-largest city in
+    the country as the town of any village in its hinterland — and the value arrives here
+    routinely, because `address_part_obec` runs on lines that carry an okres segment and
+    bazos publishes these 76 labels as its town anchor's own TEXT.
+
+    The list is closed: the Czech okres set has not moved since 2007, and these are all of
+    its hyphenated members. An okres is never a town, so it is returned untouched and the
+    portal's okres entry — which is what states this fact — keeps it."""
+    assert apply_transforms(okres, ("statutory_city_obec",)) == okres
+    # …and it survives the implicit fold too, which is the route it actually arrives by.
+    assert apply_transforms(okres, ("address_part_obec",)) == okres
 
 
 def test_the_obec_part_of_an_address_folds_the_obvod_implicitly():

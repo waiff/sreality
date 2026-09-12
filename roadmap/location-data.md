@@ -126,7 +126,7 @@ component is slimmed twice — each wave rewrites one component and slims its st
     psc — without them the town the slim contracts mine off a `Lokalita` row is declined at S7).
     `location_town_coverage` also moves to the FRONT of `verify_pipeline`'s `_CHECKS`: on 2026-09-11
     the lane's 120 s budget left the last seven checks `not_run`, the coverage red line among them.
-  - **W1-c contracts landed** (2026-09-12): all nine YAMLs rewritten at once, **159 entries → 68**
+  - **W1-c contracts landed** (2026-09-12): all nine YAMLs rewritten at once, **159 entries → 67**
     (175 when the sprint opened; W1-a had already dropped bazos' 16 never-executed LLM entries),
     one per claim type, and the town entry is live on every portal — on the **hourly** lane, not on
     an archive sweep (there is none any more). What each portal reads the town off, and what it
@@ -136,7 +136,7 @@ component is slimmed twice — each wave rewrites one component and slims its st
     | --- | --- | --- | --- |
     | `bazos@5` | 4 | `bzs.det.obec_slug` — the town-listings anchor's `/inzeraty/<obec>/<psč>/` href | okres, část obce, kraj, country, street, čp, čo |
     | `bezrealitky@2` | 8 | `bzr.det.city` — `advert.city`, a typed payload field | precision declaration, okres, kraj |
-    | `ceskereality@6` | 6 | `cr.det.data_city` — `input#driving_calculator_from[data-city]`, split off the `(okres X)` half | country, kraj, část obce, psč, čo |
+    | `ceskereality@6` | 5 | `cr.det.data_city` — `input#driving_calculator_from[data-city]`, split off the `(okres X)` half | precision declaration, country, kraj, část obce, psč, čo |
     | `idnes@3` | 10 | `id.det.obec` — the dataLayer `viewDetail` block's `listing_localityCity`, id-matched | psč |
     | `maxima@3` | 6 | `mx.det.locality_obec` — segment 1 of `div.locality` | kraj, psč, čp, čo, country |
     | `mmreality@3` | 7 | `mm.det.municipality` — the Vue blob's `/municipality` | **psč**, kraj, čp, čo |
@@ -158,9 +158,56 @@ component is slimmed twice — each wave rewrites one component and slims its st
     `blur_hint` / `map_zoom` / `address_line_verbatim` / `uncertainty_geometry` arms of the retired
     vocabulary, and every entry no reader executed — an omission is now a line in the portal's report,
     never a placeholder entry.
+
+    **Review found two entries that could not fire, and both classes are now loader rails.**
+    `bzs.det.link_pin` declared a `locator.pattern` that `html_point_attrs` did not read, so the
+    reader `float()`-ed the raw href and returned silently — bazos had no pin at all while the same
+    wave deleted `geom_column`, its only other pin path. `cr.map.exact` read a `page_kind: map`
+    marker set, and the intake joins `portal_raw_payloads` on `page_kind = 'detail'` — no scraper
+    stores any other kind, so the entry was unreachable by construction and read as a live precision
+    signal for the portal. The reader learned the pattern (`lat`/`lon` named groups, one attribute
+    or two) and the ceskereality entry is gone; the portal's precision rides on its town, okres and
+    pin entries, which is the settled headline rule (R10). The rails: `ReaderContract` now records
+    each reader's WHOLE locator appetite — required plus optional, derived back out of the reader
+    bodies by a transitive AST scan — and a key outside it is refused; a page-reader entry declared
+    for any kind but `detail` is refused. The resolver also learned the four labels the nine
+    contracts emit and it did not know (`approximate_location`→obec, `linestring`→street,
+    `circle`→cast_obce_or_quarter, `accurate` as a precise label that ranks a pin without certifying
+    a granularity), and `statutory_city_obec` gained the two cases the review measured: the ordinal
+    arm now carries a trailing name ("Praha 10 - Vršovice", "Liberec XXV-Vesec") and every
+    hyphenated OKRES name is excluded, so "Brno-venkov" is no longer folded to Brno.
     **Next:** the coverage red line is the acceptance check, and it can only be read after deploy —
     every portal but sreality, bezrealitky and mmreality now mints its town from a STORED PAGE BODY,
     so a portal's number moves as the body-mining half works through its backlog, not at merge.
+  - **W1-a3 shipped** (2026-09-12): the page half extracts across PROCESSES,
+    `os.cpu_count()` wide. The bottleneck was one core — run 34666292569 spent 143-313 s per
+    1 500-body batch against ~48 s to fetch the same bodies from R2 on 16 threads, ~5 bodies/s
+    of lexbor parse + scope + readers, and the 249 000-body backlog is re-mined once more after
+    every contract bump. `extract_pages` returns one outcome per body IN ORDER — the
+    `IntakeResult` or the exception it raised — so the per-body isolation survives a process
+    boundary: a content-triggered `IntakeRefused` still costs one listing's page entries, a
+    body that yields `scope_incomplete` is still left unstamped, and a pool the OOM killer
+    takes finishes its batch on the main thread. `forkserver`, never `fork`: the lane holds an
+    open psycopg connection inside the batch transaction, and a forked child finalizing its
+    copy of that socket would terminate the parent's session. Batches under 16 bodies stay on
+    the main thread. Each batch logs its own `N bodies/s`; `scripts/bench_page_extraction.py`
+    takes the same number off the committed fixtures with no database (16 cores, 1 500 bodies:
+    317 → 512 b/s at 2 workers, 1 512 b/s at 16). No new flag, no `INTAKE_VERSION` bump — the
+    claims are identical; `LOCATION_INTAKE_WORKERS` exists only for a runner that misreports
+    its CPU count. The lane also **self-chains** now: GitHub fires the `35 * * * *` cron ~7
+    times a day (no tick at 02:35 or 03:35 on 2026-09-12), so a 250 000-body backlog drained at
+    ~6 000 bodies a fired tick however fast the extraction got. A run dispatches ONE successor
+    with the same budget and batch size when it reports an unfinished half THAT IT MOVED
+    (`bodies_pass_complete=false` with `bodies_mined>0`, or `reached_end=false` with
+    `listings>0`), and nothing otherwise (steady state is cron-only). The progress term plus
+    a `bodies_pass_complete=true` stamp on both of the drain's early returns is what stops a
+    run with no page-capable portal (`--source sreality`) or no R2 credential from chaining
+    clean short runs for ever. It YIELDS first: `location-batch` keeps one pending slot and GitHub
+    supersedes the OLDER entry, which is how a chain evicted the hourly intake and an
+    operator's full-resolve on 2026-09-10, so if any member of the group is already waiting the
+    chain ends and lets it through — `location_resolve.yml` counts, it joins the group through a mode-conditional expression. `test_location_batch_hardening.py`'s ban on self-chaining
+    members becomes the rail that the yield exists, plus seven tests that execute the chain
+    script itself against a stub `gh`.
 - **W2 — the resolver at four steps, the answer table at 26 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and

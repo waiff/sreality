@@ -2030,7 +2030,14 @@ what is eligible): four paths leave a body unstamped — a bucket miss, a missin
 content-triggered refusal, a scoper that failed closed — and three are deterministic per body, so
 a stamp-only notion of progress would park them at the head of the order, re-fetch them every
 batch, and stall the entire backlog behind them once `cap` of them accumulated. The pass ends when
-a batch comes back short of `cap`.
+a batch comes back short of `cap`. **A batch's bodies are extracted across PROCESSES** (W1-a3,
+`page_readers.extract_pages`, `os.cpu_count()` wide): the parse is pure CPU and threads cannot
+share it, so one core held a 1 500-body batch at 143–313 s against ~48 s to fetch the same bodies.
+The pool is an accelerator only — one outcome per body IN ORDER, the `IntakeResult` or the
+exception it raised, so a content-triggered refusal still costs one listing's page entries and a
+pool the OOM killer takes finishes its batch on the main thread. `forkserver`, never `fork`: the
+lane holds an open psycopg connection inside the batch transaction and a forked child finalizing
+its copy of that socket would terminate the parent's session.
 
 **The cursor is the lane's only memory, and every run has a budget.** The watermark is gone with
 `--overlap-hours` and `coverage_since`; `location_claim_batches.cursor_after_id` holds a
@@ -2050,7 +2057,19 @@ budget ran until `timeout-minutes: 55` cancelled it and stamped nothing resumabl
 repeated it. A batch does not START unless the previous batch's measured duration fits in what is
 left, and the run's backlog readout (a `count(*)` under the 600 s ceiling, taken when the budget is
 already spent) runs AFTER the terminal stamp — ahead of it, it could push the job past the
-55-minute ceiling and lose the cursor of a run that had otherwise finished cleanly. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
+55-minute ceiling and lose the cursor of a run that had otherwise finished cleanly. **The lane
+self-chains while it has a backlog** (W1-a3): GitHub fires the hourly cron ~7 times a day, so the
+250 000-body backlog every contract bump creates would drain at ~6 000 bodies a fired tick, and a
+run dispatches ONE successor with its own budget when its summary reports an unfinished half THAT
+IT MOVED — `bodies_pass_complete=false` with `bodies_mined>0`, or `reached_end=false` with
+`listings>0`. The progress term is the loop breaker: `bodies_pass_complete` is False until the
+drain sets it, so a run with no page-capable portal (`--source sreality`) or no R2 credential
+would otherwise chain clean short runs for ever, and both of the drain's early returns now stamp
+the pass complete for the same reason. It dispatches only after asking whether any member of
+`location-batch` is already waiting — `location_resolve.yml` included, which joins the group
+through a mode-conditional expression — because the group's single pending slot supersedes the
+OLDER entry, and an unyielding chain is what cancelled the hourly intake and an operator's
+full-resolve on 2026-09-10. Both halves complete is the steady state and chains nothing. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
 re-mine, the archived-HTML sweep, the verify lane and the LLM free-text lane, with the refetch
 cohort and the payload backfill/prune/churn tooling. The lane writes `location_claims`,
 `dirty_locations` and its own `location_claim_batches` ledger and nothing else:
@@ -2119,10 +2138,22 @@ contract that cannot state the town cannot satisfy the invariant the wave exists
 top-level keys are legal (`portal`, `contract_version`, `persistence`, `exclusion_zones`,
 `regressions`, `extractions`) and the unenforced per-entry ones (`required`, `cardinality`,
 `on_conflict`) are gone. All nine were rewritten to that shape on 2026-09-12 — **159 entries became
-68**, 4 to 11 apiece (175 when the sprint opened; W1-a dropped bazos' 16 never-executed LLM
+67**, 4 to 11 apiece (175 when the sprint opened; W1-a dropped bazos' 16 never-executed LLM
 entries ahead of it), and every portal's town entry runs on the **hourly** lane rather than on an
 archive sweep that no longer exists. What a portal does NOT publish is now an omission recorded in
 its report, not a placeholder entry: no contract carries an entry no reader executes.
+
+Two further rails, both written by an entry that shipped INERT. `ReaderContract` records each
+reader's whole `locator` appetite — the keys it requires plus the ones it merely reads — and a
+locator key outside that union is refused, because a declared key no reader consults is a rail
+that looks enforced and is not (bazos' pin entry named a `pattern` its reader ignored, so the
+portal had no coordinate while the contract read as though it published one). And a page-reader
+entry may only be declared for `page_kind: detail`: `_BODY_JOIN` selects that kind and nothing
+else — index bodies are never archived, and no scraper writes a map, archive, snapshot or
+gazetteer body at all — so any other kind is unreachable by construction, which is not a shape
+a contract may describe. The appetite record is derived back out of the reader bodies by an AST
+scan over each reader and, transitively, the helpers it delegates its locator to, so the table
+cannot drift from the call sites it describes.
 
 The header carries **one mutable extraction column**: `is_active`, which version the extractor runs.
 It carried a second, `shadow` (migration 404) — a contract that could not meet its frozen-sample
@@ -2167,7 +2198,8 @@ detoast — so it contributed least to the incident and lost most
 to the queueing. What forced the reversal: at a measured 0.7 listings/s, ~7 GitHub ticks a day and a queue
 above 100k, the self-chaining W2-13 archive sweeps (~55 min back to back) starved it to zero ticks in three
 hours, and "a skipped tick costs nothing" only holds when a later tick catches up. (That sweep is itself
-gone now, and no group member self-chains any more.) It READS the claim spine the intake WRITES, so it
+gone now; the intake self-chains again since W1-a3, but it YIELDS when any member of the group is
+already waiting, which is the property the old sweep lacked.) It READS the claim spine the intake WRITES, so it
 never carried a must-never-overlap constraint. Its
 guards are now the job-level `location-resolve` group plus the `location_jobs` lease CAS, which is also
 what keeps it exclusive against the always-on Railway worker's resolve lane. On 2026-08-10 four concurrent

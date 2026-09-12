@@ -57,6 +57,25 @@
       "evidence_span_len": 18
     },
     {
+      "extractor_id": "bzs.det.link_pin",
+      "claim_type": "coordinate",
+      "value_text": "50.0925,14.4505",
+      "value_num": null,
+      "value_geom_wkt": "POINT(14.4505 50.0925)",
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": "portal_pin",
+      "evidence_quote": "<a href=\"/place/50.0925,14.4505,15z\" title=\"Přibližná lokalita\">mapa</a>",
+      "evidence_span_len": 72
+    },
+    {
       "extractor_id": "bzs.det.obec_slug",
       "claim_type": "obec_name",
       "value_text": "praha",

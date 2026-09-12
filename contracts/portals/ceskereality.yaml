@@ -1,6 +1,6 @@
 # ceskereality — contract_version 6 (rule 25: eleven types, at most one entry each).
 # The detail page states this portal's whole location on ONE element, the driving-calculator
-# input; the /mapa/ marker JSON states the precision flag that caps its pin.
+# input: the town, its okres, the address line and the pin.
 
 portal: ceskereality
 contract_version: 6
@@ -80,21 +80,6 @@ extractions:
     licence_class: portal
     transform: [address_part_house_number, "split_cp_co:cp"]
     notes: "The number glued to that same street segment — the finest key RÚIAN can bind."
-
-  - id: cr.map.exact
-    locator_kind: map_config
-    extraction_method: portal_declared_quality
-    page_kind: map
-    locator: {reader: json_bool, css: "div#mapCanvas", attr: "data-markers",
-              then: "/data", json_pointer: "/exact",
-              labels: {"true": exact_true, "false": exact_false},
-              match: {json_pointer: "/nid", equals_row_field: source_id_native}}
-    subject_scope: {kind: id_match, on_miss: fail}
-    claim_type: precision_declaration
-    blur_evidence: declared
-    licence_class: portal
-    precision_cap: {blurred_labels: [exact_false]}
-    notes: "The /mapa/ marker's own flag, subject-matched on `nid` == source_id_native."
 
 persistence:
   # What this portal's body carries that changes without the listing changing —
