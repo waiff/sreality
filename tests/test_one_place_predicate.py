@@ -254,9 +254,8 @@ def test_the_two_filters_are_gone_from_the_api_schemas_and_predicates() -> None:
 
 
 def test_the_two_filters_are_gone_from_the_spa_filter_types() -> None:
-    """The listing-row COLUMNS survive (they are `listings` columns W4 deletes,
-    and an immutable estimation trace still renders them); what is gone is every
-    place they were a FILTER."""
+    """W3 S3 took them off every filter surface; W4-a (below) took them out of
+    the payloads too. The `listings` COLUMNS themselves survive until W4-c."""
     types_ts = (REPO / "frontend" / "src" / "lib" / "types.ts").read_text(encoding="utf-8")
     for block in ("export interface WatchdogFilterSpec", "export interface EstimationFilters"):
         at = types_ts.index(block)
@@ -267,3 +266,71 @@ def test_the_two_filters_are_gone_from_the_spa_filter_types() -> None:
     default = default[: default.index("\n};")]
     for gone in _DELETED:
         assert gone not in default
+
+
+def test_the_two_portal_ids_are_gone_from_every_payload() -> None:
+    """W4-a. They were SREALITY's portal ids, carried along in five projections
+    and rendered by nothing: the comparable row, the transit-corridor row, the
+    freshness snapshot, the URL-parse `listing` sidecar and the SPA's detail
+    select. A filter that no longer exists does not get to keep a column in every
+    payload on the way out. The `listings` columns themselves are W4-c's.
+
+    Rule 12 is intact: an estimation trace already written keeps its keys, and the
+    Timeline renderer simply has no row for them any more (absence renders as
+    nothing, not as a crash)."""
+    from toolkit.freshness import _LISTING_COLS
+
+    from api.estimation_runs import _LISTING_FIELDS
+
+    for gone in _DELETED:
+        assert gone not in _LISTING_COLS
+        assert gone not in _LISTING_FIELDS
+        for rel in (
+            "toolkit/comparables.py",
+            "toolkit/transit_axis.py",
+            "api/main.py",
+            "frontend/src/lib/queries.ts",
+            "frontend/src/components/estimation/Timeline.tsx",
+        ):
+            text = (REPO / rel).read_text(encoding="utf-8")
+            assert gone not in text, f"{rel} still carries {gone}"
+
+
+def test_every_spatial_reader_takes_its_point_from_listing_location() -> None:
+    """W4-a. One store answers "where is this listing": `listing_location`. A
+    reader that still selects `listings.geom` would be reading a column the
+    resolver does not write and W4-c drops.
+
+    The geography cast is checked with it, and it is the reason this test is
+    worth having: `listing_location.geom` is geometry(Point,4326), so an
+    UNCAST `ST_DWithin(ll.geom, point, 1000)` compiles, runs, and silently means
+    1000 DEGREES. Every moved call site casts."""
+    spatial = (
+        "toolkit/comparables.py",
+        "toolkit/velocity.py",
+        "toolkit/transit_axis.py",
+        "toolkit/neighborhoods.py",
+        "toolkit/brokers.py",
+        "api/notifications.py",
+        "api/estimation_runs.py",
+    )
+    bare_l_geom = re.compile(r"(?<![a-z])l\.geom")
+    for rel in spatial:
+        text = (REPO / rel).read_text(encoding="utf-8")
+        code = "\n".join(
+            line for line in text.splitlines() if not line.lstrip().startswith("#")
+        )
+        assert bare_l_geom.search(code) is None, f"{rel} still reads listings.geom"
+        assert "listings.geom" not in code, f"{rel} still reads listings.geom"
+        assert "COALESCE(p.geom" not in code, f"{rel} still reads properties.geom"
+        assert "listing_location" in code, f"{rel} does not join listing_location"
+
+    for rel, expected in (
+        ("toolkit/comparables.py", 2),
+        ("toolkit/neighborhoods.py", 1),
+        ("toolkit/transit_axis.py", 4),
+    ):
+        text = (REPO / rel).read_text(encoding="utf-8")
+        assert text.count("ll.geom::geography") == expected, (
+            f"{rel}: expected {expected} geography-cast uses of the resolved point"
+        )

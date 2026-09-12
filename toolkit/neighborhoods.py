@@ -73,9 +73,10 @@ WITH base AS (
     {ppm2_basis} AS price_per_m2_basis,
     EXTRACT(DAY FROM (now() - l.last_seen_at))::int AS data_age_days
   FROM listings l
-  WHERE l.geom IS NOT NULL
+  JOIN listing_location ll ON ll.listing_id = l.id
+  WHERE ll.geom IS NOT NULL
     AND ST_DWithin(
-      l.geom,
+      ll.geom::geography,
       ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography,
       %(radius_m)s
     )

@@ -92,8 +92,6 @@ export interface ListingPublic {
    * foreign listing, else NULL. No surface assembles a place out of parts any
    * more -- there are no parts on the wire to assemble. */
   display_label: string | null;
-  locality_district_id: number | null;
-  locality_region_id: number | null;
   lat: number | null;
   lng: number | null;
   floor: number | null;
@@ -825,8 +823,6 @@ export interface ParseListing {
   category_type: string | null;
   locality: string | null;
   district: string | null;
-  locality_district_id: number | null;
-  locality_region_id: number | null;
   total_floors: number | null;
   has_balcony: boolean | null;
   has_lift: boolean | null;
@@ -1644,8 +1640,10 @@ export interface MergedProperty {
   area_m2: number | null;
   estate_area: number | null;
   price_czk: number | null;
-  district: string | null;
-  street: string | null;
+  /* The one server-composed place label (location_display_label), same as every
+   * other surface. Replaced `district` + `street`, which came from two different
+   * children of the merge and were rendered by nothing. */
+  display_label: string | null;
   first_seen_at: string | null;
   last_seen_at: string | null;
 }
