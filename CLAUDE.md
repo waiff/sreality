@@ -245,19 +245,19 @@ incident history: `docs/architecture.md` § Architectural rules.
     (`tests/test_measure_registry_census.py` + `toolkit.measures.REGISTERED_SITES` — three arms over six
     source trees + every migration statement; it names its own blind spots, so read them before trusting
     a green run) and `FilterDef.basis`. Full rationale: `docs/architecture.md` § rule 23.
-24. **Two location paths coexist until W6 retires one; NEW location-reading code reads the PROJECTION**
-    (`listing_location_current` / `property_location_current`, migration 384 — precision axes NOT NULL,
-    RÚIAN codes, precomputed blocking keys, `geo_blockable`), never `listings.geom` + the geo-derived
-    columns (`obec_id`…`ku_id`, trigger 289, `street`/`street_name_key`), which stay populated and serve
-    every un-flipped feature. `location_v2.<feature>` (`serving_flags.py`, missing = OFF) picks the path;
-    `serving_contracts.py` declares the floor (05 §5.5.2; undeclared raises). Granularity compares by RANK.
-    Never back-port a projection value into `listings`. Contract: `docs/design/location-serving-contract.md`.
+24. **Two location paths coexist until W6 retires one; NEW location-reading code reads the ANSWER TABLE**
+    (`listing_location`, mig 501 — grade axes NOT NULL, RÚIAN codes, `disputed`), never `listings.geom` + the
+    geo-derived columns (`obec_id`…`ku_id`, trigger 289, `street`/`street_name_key`), which stay populated and
+    serve every un-flipped feature. The W1 `*_location_current` projections are FROZEN (readable, never written)
+    until W2-b drops them. `location_v2.<feature>` (`serving_flags.py`, missing = OFF) picks the path;
+    `serving_contracts.py` declares the floor. Granularity compares by RANK; never back-port into `listings`.
 25. **Location: one store, one lane, eleven claim types, no flags; every location PR deletes at least as much
-    as it adds.** One answer table (`listing_location_current`, 27 fields), one hourly intake lane over the
-    stored payload + page body, ≤ 1 contract entry per claim type + a reader, **town entry mandatory and live**.
-    Invariant: **every active listing has a row, every active Czech listing has a town** (`location_town_coverage`
-    is red until zero; foreign is a determination, never a default). Nothing is added "in case" — a field only
-    after a measured slowdown, only to `browse_list`. Supersedes rule 24 as the waves land. § rule 25 in `docs/architecture.md`.
+    as it adds.** One answer table (`listing_location`, 27 fields) by ONE four-step resolver (bind → fill →
+    grade → check), one hourly intake lane over the payload + page body, ≤ 1 contract entry per claim type + a
+    reader, **town entry mandatory and live**. Invariant: **every active listing has a row, every active Czech
+    listing has a town** (`location_town_coverage` red until zero; foreign is a determination, never a
+    default). Nothing is added "in case": a field only after a measured slowdown, only to `browse_list`.
+    Supersedes 24 as the waves land. § rule 25 in `docs/architecture.md`.
 
 Full rationale, edge cases, and incident history: read `docs/architecture.md` before modifying anything
 these rules touch.

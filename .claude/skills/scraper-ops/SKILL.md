@@ -364,11 +364,12 @@ Lanes shipped so far:
   `POST /estimations` route rows to the lane instead of an in-process BackgroundTask, so the
   cutover (and rollback) is one setting, no deploy.
 - **Location-resolve lane** (Decision 8b) — THE resolver drain from here, not only from the
-  `location_resolve.yml` cron (round-trip-bound: 0.7 listings/s from a US runner). Ships DARK;
-  enable via `realtime_location_resolve_enabled`. Live tuning:
+  `location_resolve.yml` cron (round-trip-bound: 0.7 listings/s from a US runner; W2-a cut the
+  per-listing registry reads from ~11 to ~4 and the writes from 7 to 1). Ships DARK; enable via
+  `realtime_location_resolve_enabled`. Live tuning:
   `realtime_location_resolve_{interval_seconds,max_seconds,batch_size}` (15/240/250), interval `0`
-  idles. **Idle it before an `epoch_job`** — a pass in flight when an epoch is minted resolves
-  against the outgoing one. Exclusion, budgets, lease/lock: `docs/design/realtime-scrapers.md`.
+  idles. Exclusion, budgets, lease/lock: `docs/design/realtime-scrapers.md`. (The `epoch_job` it
+  had to be idled before is gone with the pin-collision engine, W2-a.)
 
 ## Pipeline verification (migration 274)
 

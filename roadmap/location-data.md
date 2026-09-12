@@ -165,6 +165,27 @@ component is slimmed twice — each wave rewrites one component and slims its st
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and
   36 property columns dropped.
+  **W2-a shipped** (migration **501**, additive — creates `listing_location` and touches nothing
+  else). Nine stages → four: `bind.py` (the rungs, the homonym ladder, the pin election),
+  `fill.py` (the hierarchy as ONE `admin_chain` join off the bound entity — so `cast_obce` now
+  lands on every branch, not only on PIP), `grade.py` (agreement count → confidence, a per-level
+  radius dict carrying migration 383's own v1 numbers) and `check.py` (country + one `disputed`
+  word: `pin_outside_obec` / `pin_outside_cz` / `country_conflict`). **~3,700 lines deleted**:
+  survivorship, the uncertainty-policy resolver, the reconciler + its dispositions + auto-close,
+  the pin-collision engine + `epoch_job` + the Sunday cron + the `mode=epoch` workflow branch, the
+  parcel rung, `derived.py`, the property-grain projection builder and the drain's property
+  rebuild. The registry protocol is 15 query kinds → 8; the drain's prefetch 5 queries → 2, its
+  per-slice warm 5 → 2, its write path 7 statements → 1. The resolution identity is five version
+  inputs → **three** (`claim_set_hash`, `resolver_version`, `registry_version`), and the sweep
+  compares the last two on `listing_location`. The licence rail moved from three CHECK constraints
+  to the claim READ (`licence_class IN ('portal','operator')` in `_CLAIMS_SELECT`).
+  **Cutover:** apply 501 → merge → `resolver:v4` in `version.py` means the daily sweep (or a
+  `mode=full-resolve` dispatch) enqueues the whole corpus, and the Railway worker lane drains it in
+  **5–11 h**; the gate is `count(listing_location) = count(listings where is_active)`, which
+  `verify_pipeline.check_location_town_coverage` already measures (repointed in the same PR).
+  **W2-b** then cuts the five remaining readers of `listing_location_current` (the four `toolkit/`
+  modules + `refresh_location_compare_cohort()`) and drops the old tables. Nothing writes them from
+  this PR on; `--workers` on the drain is unblocked but not implemented.
 - **W3 — consumers, display first** (= plan S4): the 27 fields into `browse_list` and the public
   views; one label, one code predicate, one circle; `placeLabel.ts` assemblies, the five chip
   predicates, the sreality-only filters, `home_city_id` deleted rather than ported. Estimation last.

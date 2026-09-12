@@ -1674,16 +1674,15 @@ renumber.** Navigate by area:
 24. **Two location paths coexist until W6 retires one; new location-reading code reads the
     projection.** The location-data program (design `~/location-data-architecture-2026-08-10/`,
     track `roadmap/location-data.md`) did not edit the legacy columns in place — it built a second
-    path beside them: claims mined per portal contract → a resolver (S1–S9) → two projections,
-    `listing_location_current` and `property_location_current` (migration 384). The reason is the
+    path beside them: claims mined per portal contract → a resolver (four steps since W2-a) → one
+    answer table, `listing_location` (migration 501). The reason is the
     thing the legacy path cannot say: a `listings.geom` point carries no statement of how precisely
     or how trustworthily it is known, and the corpus made that fatal — remax disagreement is
     predicted on 54.3 % of raw addresses, bazos runs 5.56 listings per pin with 51.5 % in clusters
     of 20+, three of the five corpus `foreign_suspect` rows are Czech geocoder artifacts. So every
-    projection row carries the four precision axes (`granularity`, `position_source`,
-    `match_confidence`, `blur_evidence`, all NOT NULL), the registry codes it resolved to, the
-    collision class of its pin, and precomputed blocking keys with `geo_cell_key` written **only**
-    when `geo_blockable`. A consumer that reads the projection inherits all of that; one that
+    answer row carries its grade (`granularity`, `match_confidence`, `uncertainty_radius_m`, all
+    NOT NULL), the registry codes it resolved to, and one `disputed` word when the row disagrees
+    with itself. A consumer that reads the answer table inherits all of that; one that
     reads `listings.geom` inherits none of it, and a 75 m dedup circle around a town-centroid pin
     is exactly the false-merge class the axes exist to prevent. The cutover (W6) is per feature,
     in ascending blast-radius order (dashboards → dedup → filters and stats → map → estimation
@@ -1896,7 +1895,7 @@ any active suppression whose identities share a broker. It matters MORE now that
 allowlist gates the engine: remax contacts are email-only and ceskereality's phone-only, so one
 shared contact plus a name match is the entire case for those merges.
 
-## Location data (W1) — the greenfield location SSOT
+## Location data — the greenfield location SSOT
 
 W1 (migrations 380–389, PRs #1008–#1013 + fixes) shipped a **parallel** truth model for where a
 listing is — not a change to the existing one. It is **shadow-only**: `listings.geom`, the geo-derived
@@ -1920,19 +1919,55 @@ fingerprint "safe" and that nothing ever read), `location_claim_links`, `locatio
 (`location_claims_live` / `_unretracted` / `_shadow`) that layered retraction and shadow onto every
 read. The fingerprint FUNCTION is unchanged and still takes all 23 inputs — the readers compute
 page_kind, extractor id, value_norm and the rest, they are simply not stored — so every fingerprint
-on disk stayed valid and no corpus re-insert happened. `location_resolutions` +
-`location_resolution_candidates` are the output of a **pure function** — S1–S9 in `location_data/resolver/`, no wall clock (`as_of = max(observed_at)`),
-no network, no randomness, enforced by an AST scan — so a resolution replays byte-identically from
-its inputs and the five version ids stamped on it. `listing_location_current` +
-`property_location_current` are **rebuildable caches**, never a store of record: the
-`dirty_locations` drain rebuilds a row from its resolution; **one sweep** (`_SWEEP_SQL`, driving off
-`listings` in id windows) enqueues every active listing whose row is missing or built at a stale
-version tuple. It runs on a **daily cron** (`location_resolve.yml`, 03:17 UTC, `mode=full-resolve`);
-a listing with no live claim gets a `no_input` row (granularity `unknown`, no position) instead of
-no row, so coverage is `count(listing_location_current) = count(active listings)` by construction.
-Until 2026-09-11 this was three statements (a claim-driven stale sweep that could not see a claimless
-listing, a kraj-scoped cousin, an orphan sweep); they were folded into the one above under rule 25.
-The collision epoch is minted weekly by the same workflow (Sunday 04:41 UTC).
+on disk stayed valid and no corpus re-insert happened.
+
+**The resolver is FOUR STEPS and one answer table** (W2-a, migration 501). `listing_location`
+is a **rebuildable cache**, never a store of record — truncating it is always legal and the
+`dirty_locations` drain is its only writer — and it is **27 columns**: the listing, one `geom`,
+nine names (country, kraj, okres, obec, část obce, street, čp, čo, PSČ), six RÚIAN codes, three
+grade columns (`match_confidence`, `granularity`, `uncertainty_radius_m`, all NOT NULL), three
+status columns (`country_status` NOT NULL, `disputed`, `pin_shared_by_n`) and four housekeeping
+ones (`resolver_version`, `resolved_at`, `claim_set_hash`, `registry_version`). The steps:
+
+* **BIND** (`bind.py`) picks the finest RÚIAN entity the claims justify — a portal registry key,
+  obec + street + čp/čo, a street inside the constraining obec, an obec/část obce by name, a PSČ
+  set, or the pin's containing obec — resolving homonyms locally inside the constraining parent
+  (PSČ, okres/kraj, cadastral territory, qualifier, and only then the coordinate as a tie-break).
+  It also elects the pin, by DECLARED QUALITY and only then by claim id.
+* **FILL** (`fill.py`) joins the hierarchy off the bound ids: ONE `admin_chain` read returning the
+  unit itself ahead of its ancestors. Administrative names and codes are ALWAYS the registry's own
+  spelling; only street / čp / čo / PSČ may fall back to a claim, preserve-if-null, and only an
+  operator correction outranks the registry.
+* **GRADE** (`grade.py`) is two tables: `match_confidence` from how many INDEPENDENT fields agreed
+  with the bound entity (`exact` an address point the pin corroborates, `high` ≥ 2 fields, `medium`
+  one, `low` a tie-break or nothing), and `uncertainty_radius_m` from a per-level constant dict
+  carrying migration 383's own v1 numbers.
+* **CHECK** (`check.py`) decides the country and whether the row disagrees with itself. `disputed`
+  is ONE nullable text column whose value IS the reason: `pin_outside_obec` (the pin is kept, the
+  granularity drops to the admin level), `pin_outside_cz`, `country_conflict`. **Foreign is a
+  determination, never a default** — no Czech town and no foreign signal is `undetermined`.
+
+It is a **pure function**: no wall clock, no network, no randomness, enforced by an AST scan, so a
+row replays byte-identically from its inputs and the THREE version ids stamped on it —
+`claim_set_hash`, `resolver_version`, `registry_version`. **One sweep** (`_SWEEP_SQL`, driving off
+`listings` in id windows) enqueues every active listing whose row is missing or carries a stale
+pair of those last two, which is also how a `RESOLVER_VERSION` bump reaches the corpus. It runs on
+a **daily cron** (`location_resolve.yml`, 03:17 UTC, `mode=full-resolve`); a listing with no live
+claim gets an `undetermined` row (granularity `unknown`, no position) instead of no row, so
+coverage is `count(listing_location) = count(active listings)` by construction. Until 2026-09-11
+the sweep was three statements (a claim-driven stale sweep that could not see a claimless listing,
+a kraj-scoped cousin, an orphan sweep); they were folded into the one above under rule 25.
+
+W2-a **deleted ~3,700 lines** and nine tables' worth of producers: survivorship (policy is code),
+the uncertainty-policy resolver, the contradiction ledger + its disposition log + the auto-close
+engine, the pin-collision epoch and its weekly cron, the parcel rung, the derived-column twin of
+migration 384's SQL functions, and the property-grain projection — which was a verbatim copy of its
+winner's row (migration 493 measured `p.kraj_kod` and `w.kraj_kod` agreeing on 0 of 637,381 rows),
+nothing outside one pg_cron statement read it, and it was the drain's only cross-listing write and
+therefore the stated reason the lane could not run `--workers`. The registry protocol went from
+fifteen query kinds to eight and the drain's write path from seven statements per slice to one.
+`listing_location_current` and `property_location_current` are **frozen and readable** until W2-b
+cuts their five remaining readers and drops them; nothing writes them any more.
 
 **ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
 `35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a
@@ -2009,20 +2044,24 @@ written by every lane and read by none (W1-a stopped writing them; migration 498
 a refusal — a withheld coordinate, an oversized value, a subject miss — is a COUNTER and one log
 line per reason per batch.
 
-**Four precision axes, mandatory next to every coordinate** (D3): `granularity` (ordinal enum,
-country → … → address_point), `position_source` (admin_centroid → carried_forward →
-portal_pin_blurred → portal_pin → registry_point), `match_confidence`, and `uncertainty_radius_m`
-**paired with** `radius_semantics` — NOT NULL on the resolution, the candidate and both projections
-(at claim grain only a nullable `declared_radius_m`; most portals declare nothing). `blur_evidence`
-and `position_licence_class` ride alongside as separate NOT NULL facts: W6's consumers must know how
-much to trust a pin, not just where it is. Radii ship uncalibrated by design (never `r95_empirical`);
-calibrating writes a new `policy_version`, it never edits a row.
+**Two grade axes travel with every coordinate, and a NULL is not one of them.** W1 shipped four
+orthogonal precision axes plus `blur_evidence`, `radius_semantics` and `position_licence_class`;
+W2-a keeps the two a consumer actually asks — `granularity` (ordinal enum, country → … →
+address_point, compared by `location_granularity_rank.rank` and never by enum ordinality) and
+`uncertainty_radius_m` — alongside `match_confidence`, all three NOT NULL, because a NULL reads as
+"no gate" and fails open: a NULL radius makes both branches of the three-valued containment test
+evaluate NULL and the row drops out of `certain` AND `possible`. The radii ship uncalibrated by
+design and are geometric bounds, never `r95_empirical`; calibrating them is a `RESOLVER_VERSION`
+bump, which re-resolves the corpus through the ordinary lane.
 
-**Licence enforcement is structural.** `licence_class` is the program's single licence vocabulary and
-`ephemeral_display_only` (Mapy.cz-class) its poison value. Three CHECKs — `loc_res_licence` on
-`location_resolutions`, `llc_licence`/`plc_licence` on the projections — make such a position
-impossible to mint or to land in a store of record, and a partial index on `location_claims` keeps
-the remediation set one indexed predicate away. The claim lane's blocking gate is `claims JOIN
+**Licence enforcement is structural, and it moved UPSTREAM.** `licence_class` is the program's
+single licence vocabulary and `ephemeral_display_only` (Mapy.cz-class) its poison value. W1 spent
+three CHECKs on it — `loc_res_licence` on `location_resolutions`, `llc_licence`/`plc_licence` on the
+projections — so that such a position could not be minted or stored. `listing_location` carries no
+`position_licence_class` column because the guard is now in the resolver's own claim projection:
+`licence_class IN ('portal','operator')` is part of `_CLAIMS_SELECT`, so a Mapy-class coordinate is
+not refused at the winner, it is never READ. A partial index on `location_claims` still keeps the
+remediation set one indexed predicate away. The claim lane's blocking gate is `claims JOIN
 mapy_affected WHERE claim_type='coordinate'` = 0, and it refuses to start unless the Mapy affected-set
 inventory (migration 385 — five arms, identity and reason codes, **never** a coordinate, and
 trigger-immutable: 42501 on UPDATE/DELETE/TRUNCATE) is TERMINAL *and* COMPLETE. Half-built is worse
@@ -2096,8 +2135,9 @@ lists from 382's own DDL rather than transcribing them.
 share the OUTER `location-batch` concurrency group so **at most one runs at a time** (each keeps its
 own inner group at job level); a new heavy lane joins it. It was seven lanes until 2026-09-11; rule
 25 left three. **The resolve drain left the group on 2026-09-10** (operator decision): it is the one
-member that is latency-bound rather than instance-bound — 11 small indexed reads and one projection write
-per listing, no COPY, no corpus scan, no detoast — so it contributed least to the incident and lost most
+member that is latency-bound rather than instance-bound — a handful of small indexed reads and one
+answer-row write per listing (11 and 7 before W2-a; ~4 and 1 after), no COPY, no corpus scan, no
+detoast — so it contributed least to the incident and lost most
 to the queueing. What forced the reversal: at a measured 0.7 listings/s, ~7 GitHub ticks a day and a queue
 above 100k, the self-chaining W2-13 archive sweeps (~55 min back to back) starved it to zero ticks in three
 hours, and "a skipped tick costs nothing" only holds when a later tick catches up. (That sweep is itself

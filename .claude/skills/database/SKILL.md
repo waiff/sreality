@@ -479,20 +479,20 @@ that don't key on street.
   (derived from the old point → may be wrong → "wrong street worse than NULL"), and its existing
   tail block then re-opens the resolver for the new coords. Parser streets are untouched by the
   guard (the page re-derives them every fetch).
-- **Location-data W1 relations (`location_*`, `ruian_*`, `mapy_*`, `portal_contract*`, `pin_*`;
-  migrations 380–389) are service-role-only and shadow-only** — RLS on plus explicit
-  `anon`/`authenticated` REVOKEs on every table, sequence and function, and nothing outside
-  `location_data/` reads them before W6 (Browse/map/watchdog/dedup still use `listings.geom` and the
-  geo-derived admin columns). Three disciplines when you touch them: `location_claims` (19 columns
-  since migs 497+498 — **relax before the deploy, drop after it**) is **never UPDATEd**; a wrong
-  contract is RETRACTED, which DELETEs its claims. Mapy evidence is trigger-immutable; every heavy batch
-  lane shares the ONE `location-batch` Actions concurrency group and arms a `SET LOCAL
-  statement_timeout` — **except the resolve DRAIN (2026-09-10, 8a+8b)**: latency-bound not
-  instance-bound, it left the group and also runs from the Railway worker, serialized ONLY by the
-  `location_jobs` lease + the worker's pass lock — **idle it before a heavy batch**. The
-  `full-resolve` mode DOES stay in the group. RÚIAN loaders + drain run on **`connect_session()`**
-  (the loader refuses the fallback — a 3 M-row COPY needs session GUCs). Rationale:
-  `docs/architecture.md` § Location data (W1); sequencing: `roadmap/location-data.md`.
+- **Location-data relations (`location_*`, `ruian_*`, `mapy_*`, `portal_contract*`, `pin_*`; migs
+  380+) are service-role-only and shadow-only** — RLS on plus explicit `anon`/`authenticated`
+  REVOKEs on every table, sequence + function; nothing outside `location_data/` reads them before
+  W6. `location_claims` (19 cols since migs 497+498 — **relax before the deploy, drop after it**)
+  is **never UPDATEd**; a wrong contract is RETRACTED, which DELETEs its claims; Mapy evidence is
+  trigger-immutable. The resolver writes ONE table, `listing_location` (27 cols, mig 501); the two
+  `*_location_current` projections stay frozen until W2-b drops them with the resolution / policy /
+  pin-cluster / contradiction tables nothing writes. Every heavy batch lane shares the ONE
+  `location-batch` Actions group + arms `SET LOCAL statement_timeout` — **except the resolve DRAIN
+  (2026-09-10, 8a+8b)**: latency-bound not instance-bound, it left the group and runs from the
+  Railway worker too, serialized ONLY by the `location_jobs` lease + pass lock — **idle it before a
+  heavy batch**; `full-resolve` DOES stay in the group. RÚIAN loaders + drain run on
+  **`connect_session()`** (the loader refuses the fallback — a 3 M-row COPY needs session GUCs).
+  Rationale: `docs/architecture.md` § Location data.
 
 ## See also
 
