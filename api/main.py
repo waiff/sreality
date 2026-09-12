@@ -348,7 +348,37 @@ def post_maps_resolve(
         type_=body.type,
         regional_structure=body.regional_structure,
         raw=body.raw,
+        name=body.name,
     )
+
+
+@app.post("/maps/resolve-names")
+def post_maps_resolve_names(
+    body: s.ResolveChipNamesIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Resolve stored name-only chips to RÚIAN codes at read time (W3 S3).
+
+    The SPA calls this once when a URL / preset hands it a chip written before
+    codes existed; the Watchdog calls `maps.resolve_names` in-process for the
+    same reason. One resolution rule, so Browse and the matcher cannot read the
+    same saved filter differently (rule 16)."""
+    pairs = [(c.name, c.context) for c in body.chips]
+    resolved = maps.resolve_names(conn, pairs)
+    return {
+        "chips": [
+            {
+                "name": name,
+                "context": context,
+                "matches": [
+                    {"level": lvl, "id": code}
+                    for lvl, code in resolved.get((name, context), [])
+                ],
+            }
+            for name, context in pairs
+        ]
+    }
 
 
 @app.post("/tools/find_comparables")
@@ -504,8 +534,6 @@ def post_compute_market_velocity(
         max_price_czk=body.max_price_czk,
         category_main=body.category_main,
         category_type=body.category_type,
-        locality_district_id=body.locality_district_id,
-        locality_region_id=body.locality_region_id,
         include_unreliable=body.include_unreliable,
         category_sub_cb=body.category_sub_cb,
         furnished=body.furnished,
@@ -1239,8 +1267,6 @@ def post_estimate_yield(
         max_price_czk=body.max_price_czk,
         category_main=body.category_main,
         category_type=body.category_type,
-        locality_district_id=body.locality_district_id,
-        locality_region_id=body.locality_region_id,
         include_unreliable=body.include_unreliable,
         category_sub_cb=body.category_sub_cb,
         furnished=body.furnished,
@@ -1732,8 +1758,6 @@ def _build_comparables_inputs(
         max_price_czk=body.max_price_czk,
         category_main=body.category_main,
         category_type=body.category_type,
-        locality_district_id=body.locality_district_id,
-        locality_region_id=body.locality_region_id,
         include_unreliable=body.include_unreliable,
         category_sub_cb=body.category_sub_cb,
         furnished=body.furnished,

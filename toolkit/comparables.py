@@ -101,8 +101,6 @@ class ComparableFilters:
     category_main: str | None = None
     category_type: str | None = None
     category_sub_cb: int | None = None
-    locality_district_id: int | None = None
-    locality_region_id: int | None = None
     include_unreliable: bool = False
     # Multi-select enums. Each may carry the `__unknown__` sentinel meaning
     # "NULL or a non-canonical value" — see _enum_or_unknown_clause.
@@ -445,13 +443,6 @@ def _shared_filter_where(
         where.append("l.mf_gross_yield_pct <= %(max_mf_gross_yield_pct)s")
         params["max_mf_gross_yield_pct"] = filters.max_mf_gross_yield_pct
 
-    if filters.locality_district_id is not None:
-        where.append("l.locality_district_id = %(locality_district_id)s")
-        params["locality_district_id"] = filters.locality_district_id
-    if filters.locality_region_id is not None:
-        where.append("l.locality_region_id = %(locality_region_id)s")
-        params["locality_region_id"] = filters.locality_region_id
-
     if filters.category_sub_cb is not None:
         where.append("l.category_sub_cb = %(category_sub_cb)s")
         params["category_sub_cb"] = filters.category_sub_cb
@@ -760,8 +751,6 @@ def _filters_used(
         "category_main": filters.category_main,
         "category_type": filters.category_type,
         "category_sub_cb": filters.category_sub_cb,
-        "locality_district_id": filters.locality_district_id,
-        "locality_region_id": filters.locality_region_id,
         "include_unreliable": filters.include_unreliable,
         "furnished": list(filters.furnished) if filters.furnished else None,
         "ownership": list(filters.ownership) if filters.ownership else None,

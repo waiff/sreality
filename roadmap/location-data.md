@@ -296,8 +296,26 @@ component is slimmed twice — each wave rewrites one component and slims its st
     the extension's two-field fallback. NO shared-pin count (W3-2: the window function cannot be
     pushed below `sync_browse_list`'s qual). **Apply gate**: the same coverage invariant W2-b
     carries — an unresolved row's re-sourced codes and pin are NULL, so its map pin disappears
-    rather than lying. Next: S3 (one code predicate, `/maps/resolve` codes + a `cast_obce` level,
-    registry regen, the two RPC bodies) then S4 (drop the legacy text columns).
+    rather than lying.
+  - **W3 S3 shipped** (migration 504): ONE code predicate for every place filter. The five chip
+    predicates in their six copies (`districtsFilterClause` + `matchesDistrictChip` in queries.ts,
+    `district_where` for the Watchdog, and twice each inside `browse_stats_properties` and
+    `browse_map_cells`) collapse to `<level>_id = any(codes)` with plain equality at four levels —
+    `region_id` / `okres_id` / `obec_id` / `cast_obce_id` — compiled in exactly two modules
+    (`api/location_filter.py`, `frontend/src/lib/districtCodes.ts`) plus the two SQL bodies, all
+    four tested against ONE shared table (`tests/fixtures/district_chip_plan.json`, read by pytest
+    AND vitest). `/maps/resolve` reads the RÚIAN mirror instead of `admin_boundaries` and gains the
+    `cast_obce` level — resolved BY NAME inside the PIP'd obec, because RÚIAN draws no polygon for
+    `cast_obce`/`momc`, so a point can only ever place obec/okres/kraj. Deleted: the `locality`
+    ILIKE half, the legacy name fallback, the `context` narrow as SQL, and the two sreality-only
+    filters `locality_district_id`/`locality_region_id` (registry + regen, comparables, watchdog
+    spec, API schemas, SPA filter types, the estimation filter body). A chip with no code matches
+    NOTHING (`NO_MATCH_CODE = -1`, fail closed) and stored name-only chips are resolved once at
+    read time (`upgrade_district_chips` in the matcher, `POST /maps/resolve-names` +
+    `useLegacyChipUpgrade` in the SPA) — the stored blob is never rewritten. The chip UI now shows
+    its level, and chip identity is `(level, code)`. Next: S4 (drop the legacy text columns:
+    `place_search_text`, `district`/`locality`/`obec`/`okres`/`region`/`street` off the
+    projection, `home_city_id`, the bisect hatches).
 - **W4 — delete legacy** (= plan S5): Mapy purge, geocoder + cache, street extractor, the trigger
   and the 24 `listings` columns, the property-grain geography, the second page archive, the
   backfill scripts and workflows; rule 24 rewritten to the end state.

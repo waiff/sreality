@@ -43,8 +43,14 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, field_validator, model_validator
 
+from api import maps
 from api.cursor import decode_cursor, encode_cursor
-from api.location_filter import DistrictChip, district_where
+from api.location_filter import (
+    DistrictChip,
+    district_where,
+    needs_upgrade,
+    upgrade_district_chips,
+)
 from scraper import db as scraper_db
 
 if TYPE_CHECKING:
@@ -93,21 +99,13 @@ class WatchdogFilterSpec(BaseModel):
     lng: float | None = None
     radius_m: int | None = None
 
-    # Locality ids (cheap server-side filter — Browse exposes districts
-    # by name, but we store the id so renamed admin units don't break
-    # historical watchdogs).
-    locality_district_id: int | None = None
-    locality_region_id: int | None = None
-
-    # Optional district name match (for ergonomic "Praha 2"-style
-    # watchdogs without resolving the id first). Each chip is a
-    # `DistrictChip` — `{name, context}` — so the matcher's SQL
-    # mirrors the per-chip predicate Browse uses (migration 074):
-    # name match AND'd with an optional parent-municipality context
-    # narrow. Migration 075 lifted any pre-existing rows from
-    # `text[]` to the chip shape; the field_validator below also
-    # accepts plain `list[str]` request bodies for clients that
-    # haven't redeployed yet.
+    # Place. Each chip is a `DistrictChip` — a LEVEL plus a RÚIAN CODE
+    # (`api/location_filter.py`), the one predicate Browse, Stats, the map and
+    # this matcher share (rule 16). Migration 075 lifted any pre-existing rows
+    # from `text[]` to the chip shape; the field_validator below also accepts
+    # plain `list[str]` request bodies for clients that haven't redeployed yet,
+    # and a chip stored without a code is resolved by name at read time
+    # (`upgrade_district_chips`) rather than by rewriting the stored blob.
     districts: list["DistrictChip"] | None = None
 
     @field_validator("districts", mode="before")
@@ -245,6 +243,24 @@ class WatchdogFilterSpec(BaseModel):
         return self
 
 
+def _resolve_stored_chips(
+    conn: "psycopg.Connection", spec: WatchdogFilterSpec, origin: str
+) -> None:
+    """Upgrade a stored spec's name-only chips to codes, once, at read time.
+
+    A watchdog saved before migration 172 stores `{name, context}` and no code.
+    The blob is the operator's own text and is never rewritten; this resolves it
+    on the way into the predicate, through the same name index `/maps/resolve`
+    uses, so a saved filter means the same thing in Browse and here."""
+    if not needs_upgrade(spec.districts):
+        return
+    spec.districts = upgrade_district_chips(
+        spec.districts,
+        lambda pairs: maps.resolve_names(conn, list(pairs)),
+        origin=origin,
+    )
+
+
 def _build_match_clauses(
     spec: WatchdogFilterSpec,
 ) -> tuple[list[str], dict[str, Any]]:
@@ -296,18 +312,10 @@ def _build_match_clauses(
         params["lng"] = spec.lng
         params["radius_m"] = spec.radius_m
 
-    if spec.locality_district_id is not None:
-        where.append("l.locality_district_id = %(locality_district_id)s")
-        params["locality_district_id"] = spec.locality_district_id
-    if spec.locality_region_id is not None:
-        where.append("l.locality_region_id = %(locality_region_id)s")
-        params["locality_region_id"] = spec.locality_region_id
     if spec.districts:
         # Delegates to the shared builder (`api.location_filter`) so Browse,
-        # Watchdog, and the dedup Decision history / Queue filters can never
-        # disagree on what a district chip means. Single-alias here (`l`),
-        # so the emitted SQL/params are byte-identical to this matcher's
-        # previous inline implementation.
+        # Stats, the map and the Watchdog can never disagree on what a place
+        # chip means (rule 16): `<level>_id = any(codes)`, nothing else.
         d_where, d_params = district_where(spec.districts, alias="l")
         where.extend(d_where)
         params.update(d_params)
@@ -1386,6 +1394,7 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
     for sub_id, raw_spec, cursor_ts, channels in sub_rows:
         try:
             spec = WatchdogFilterSpec(**(raw_spec or {}))
+            _resolve_stored_chips(conn, spec, f"watchdog subscription {sub_id}")
         except Exception as exc:  # noqa: BLE001 — bad spec, skip but keep loop alive
             LOG.warning(
                 "matcher: subscription %s has invalid filter_spec: %s",
@@ -1601,6 +1610,7 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
     for sub_id, raw_spec, channels in sub_rows:
         try:
             spec = WatchdogFilterSpec(**(raw_spec or {}))
+            _resolve_stored_chips(conn, spec, f"watchdog subscription {sub_id}")
         except Exception as exc:  # noqa: BLE001 — bad spec, skip but keep loop alive
             LOG.warning(
                 "change matcher: subscription %s has invalid filter_spec: %s",

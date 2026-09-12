@@ -1042,6 +1042,35 @@ renumber.** Navigate by area:
     `api/notifications.py` builds its WHERE clauses from the **same** logic Browse uses
     (`toolkit/comparables._shared_filter_where` + the shared `_city_quality_clauses`
     helper), so the two surfaces can never disagree on what a filter means.
+    **PLACE is the same rule (W3 S3, migration 504): ONE code predicate,
+    `<level>_id = any(codes)`, plain equality per level.** A location chip is a LEVEL plus a
+    RÚIAN CODE at four levels — `region_id` / `okres_id` / `obec_id` / `cast_obce_id` — and
+    `api/location_filter.district_where` (the Watchdog), `frontend/src/lib/districtCodes.ts`
+    (Browse's PostgREST string and the pipeline board's in-memory twin) and the two RPC bodies
+    (`browse_stats_properties`, `browse_map_cells`) all compile the same plan; the shared table
+    `tests/fixtures/district_chip_plan.json` is read by BOTH `tests/test_one_place_predicate.py`
+    and `districtCodes.test.ts`, so a divergence is a red test rather than a support ticket.
+    What this replaced was **five** predicates in **six** copies: obec/okres/region equality, a
+    `locality` pair (obec equality AND `place_search_text ILIKE`), and a legacy name fallback
+    ILIKE-ing across `district` / `place_search_text` / `okres` / `region` AND-ed with an
+    optional parent-`context` narrow. Equality is enough because `listing_location`
+    (migration 501) answers every listing with RÚIAN codes and `browse_list.obec_id` /
+    `okres_id` / `region_id` already WERE those codes (`admin_boundaries.id` IS the RÚIAN code),
+    so the swap is value-identical for a resolved row. Two consequences worth knowing: a
+    street / POI / address chip now filters at its CONTAINING OBEC (there is no street-grain
+    code to narrow with, and no text column left to ILIKE), and **a chip that carries no code
+    matches NOTHING** — `NO_MATCH_CODE` (-1), which no positive RÚIAN code can equal. That is
+    deliberate and fail-CLOSED: an include chip we cannot resolve must not widen a saved
+    watchdog to the whole country. Chips saved before codes existed are resolved ONCE at read
+    time against the RÚIAN name index (`api/maps.resolve_names`, shared by the matcher in
+    process and by the SPA over `POST /maps/resolve-names`) — the stored blob is never
+    rewritten, because a preset stores the operator's own full blob. The chip producer
+    `/maps/resolve` PIPs the RÚIAN mirror for obec/okres/kraj; `cast_obce` has no polygon at
+    any registry version, so the point places the obec and the NAME places the part inside it.
+    Deleted with the ILIKE arms: the sreality-only `locality_district_id` /
+    `locality_region_id` filters (registry, comparables, watchdog spec, API schemas, SPA filter
+    types) — one portal out of nine could answer them, and `districts` at the obec / okres level
+    says the same thing for all nine.
     `notification_dispatches` is the **unified notification event table** (migration 206 —
     physical name kept; conceptually "notifications"): one source-generic, **property-grain**,
     append-only event row per `(source_kind ∈ {watchdog, collection_monitor, system_health},
@@ -2043,6 +2072,29 @@ rule 25's coverage invariant**: an unresolved row's re-sourced codes and pin are
 `lat` drops the row out of `properties_map_mv` — which is the intended posture (no pin the resolver
 would not stand behind), but only once `count(listing_location) = count(active listings)` and
 `location_town_coverage`'s `cz_no_town` arm are green.
+
+**W3 S3: one code predicate for every place filter** (migration 504). The chip predicate existed
+in SIX copies — `districtsFilterClause` and `matchesDistrictChip` in `frontend/src/lib/queries.ts`,
+`district_where` in `api/location_filter.py` (the Watchdog's, rule 16), and twice each inside
+`browse_stats_properties` and `browse_map_cells` (include arm + exclude arm) — each carrying the
+same five predicates. They are now ONE: `<level>_id = any(codes)`, plain equality, at four levels
+(`region_id` / `okres_id` / `obec_id` / `cast_obce_id`). The compilation lives in exactly two
+places — `api/location_filter.py` and `frontend/src/lib/districtCodes.ts` — plus the two SQL
+bodies, and all four are tested against ONE table, `tests/fixtures/district_chip_plan.json`.
+Gone with the ILIKE arms: `place_search_text` as a predicate, the `context` narrow (it survives as
+a disambiguator for the read-time name lookup, never as SQL), and the two sreality-only filters
+`locality_district_id` / `locality_region_id`. A street / POI / address chip filters at its
+CONTAINING OBEC; a chip with no code matches NOTHING (`NO_MATCH_CODE = -1`, fail closed), and
+chips saved before codes existed are resolved once at read time against `ruian_name_index` —
+in-process for the matcher, over `POST /maps/resolve-names` for the SPA — without ever rewriting
+the stored blob. `/maps/resolve` now reads the RÚIAN mirror rather than `admin_boundaries` and
+gains the `cast_obce` level; because RÚIAN draws no polygon for `cast_obce` or `momc`
+(`location_data/ruian_boundaries.LAYERS` loads ten levels, neither of those), a POINT can only ever
+resolve to obec / okres / kraj and the quarter is placed BY NAME inside the PIP'd obec. The
+Watchdog's relation, `properties_public`, gains `cast_obce_id` from `listing_location`; its
+`obec_id` / `okres_id` / `region_id` deliberately stay on the trigger-289 columns for this step
+(same numbers, and re-sourcing a matcher's cohort in the PR that changes its predicate is two
+changes at once) — W4 re-sources them.
 
 **ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
 `35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a

@@ -29,6 +29,7 @@ import pytest
 MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 
 W3 = "503_location_w3_serving_views.sql"
+W3_S3 = "504_location_w3_one_code_predicate.sql"
 
 # The six views migration 503 widens. The migration each one was defined by
 # BEFORE 503 is DERIVED, never listed: hard-coding it is how the first cut of
@@ -47,17 +48,21 @@ _WIDENED = [
 ]
 
 
-def _previous_definition(view: str) -> str:
-    """Filename of the highest-numbered migration below 503 that defines `view`."""
+def _num(name: str) -> int:
+    return int(name.split("_", 1)[0])
+
+
+def _previous_definition(view: str, below: str = W3) -> str:
+    """Filename of the highest-numbered migration below `below` that defines `view`."""
     pat = re.compile(
         rf"create\s+(or\s+replace\s+)?view\s+(public\.)?{re.escape(view)}\b", re.IGNORECASE
     )
     hits = [
         p for p in MIGRATIONS.glob("*.sql")
-        if p.name != W3 and pat.search(p.read_text(encoding="utf-8"))
+        if _num(p.name) < _num(below) and pat.search(p.read_text(encoding="utf-8"))
     ]
-    assert hits, f"no migration before {W3} defines {view}"
-    return max(hits, key=lambda p: int(p.name.split("_", 1)[0])).name
+    assert hits, f"no migration before {below} defines {view}"
+    return max(hits, key=lambda p: _num(p.name)).name
 
 # The seven inputs of the label, in the order W3-2 names them. The house number
 # pair is two columns because Czech addresses carry two numbers (popisné /
@@ -134,9 +139,18 @@ def _columns(sql: str, view: str) -> list[str]:
 # ------------------------------------------------------------------ append-only
 
 
-@pytest.mark.parametrize("view", _WIDENED)
-def test_view_only_appends(view: str) -> None:
-    before, after = _previous_definition(view), W3
+# Every (migration, view) pair in the W3 sprint that re-creates a serving view.
+# S3 (504) appends the fourth chip level, `cast_obce_id`, to the two views a
+# place-filtering surface reads.
+_WIDENING_STEPS = [(W3, v) for v in _WIDENED] + [
+    (W3_S3, "properties_public"),
+    (W3_S3, "pipeline_board_public"),
+]
+
+
+@pytest.mark.parametrize("after,view", _WIDENING_STEPS)
+def test_view_only_appends(after: str, view: str) -> None:
+    before = _previous_definition(view, below=after)
     old = _columns(_sql(before), view)
     new = _columns(_sql(after), view)
     assert new[: len(old)] == old, (

@@ -140,7 +140,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "district_chip_list",
       "pg_column": "district",
       "default": null,
-      "description": "Location chips. Each chip is an object `{name: str, context: str | null, level: 'obec' | 'okres' | 'kraj' | 'locality' | null, id: int | null, excluded: bool}`. A resolved chip (level + id set) matches by STABLE ADMIN ID at its level (`obec_id` / `okres_id` / `region_id`); a 'locality' chip (street / POI / address pick) matches its containing `obec_id` AND an ILIKE substring on `place_search_text` (street + locality combined, so portals that store the street outside `locality` match too). A legacy chip (no level/id) falls back to ILIKE-by-name across `district` / `place_search_text` / `okres` / `region`, narrowed by `context` (the parent municipality from Mapy.cz's `regionalStructure`) when set. INCLUDE chips OR together; chips with `excluded: true` are subtracted from the result.",
+      "description": "Location chips. Each chip is an object `{name: str, context: str | null, level: 'kraj' | 'okres' | 'obec' | 'cast_obce' | 'locality' | null, id: int | null, excluded: bool}`, where `id` is the RÚIAN CODE at that level. ONE predicate compiles them everywhere (Browse, Stats, the map, the Watchdog): `<level>_id = any(codes)` with plain equality — `region_id` / `okres_id` / `obec_id` / `cast_obce_id`. A 'locality' chip (street / POI / address pick) carries its containing obec code and filters at the obec level. A chip with no code — an old saved filter — is resolved by name once at read time; if the RÚIAN name index cannot place it, it matches nothing. `context` disambiguates that name lookup and is not a predicate. INCLUDE chips OR together; chips with `excluded: true` are subtracted from the result.",
       "category": "Spatial",
       "ui_control": "multiselect",
       "agendas": [
@@ -2083,48 +2083,6 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "step": 50
       },
       "unit": "m²",
-      "basis": null,
-      "enum_values": null,
-      "aliases": [],
-      "nullable": false
-    },
-    {
-      "id": "locality_district_id",
-      "type": "int",
-      "pg_column": "locality_district_id",
-      "default": null,
-      "description": "Sreality district id. Stable across district renames (unlike the human-readable `district` text). Useful for constraining a cohort to one municipality without geocoding.",
-      "category": "Spatial",
-      "ui_control": "number_input",
-      "agendas": [
-        "comparables",
-        "estimation",
-        "velocity",
-        "watchdog"
-      ],
-      "constraints": null,
-      "unit": null,
-      "basis": null,
-      "enum_values": null,
-      "aliases": [],
-      "nullable": false
-    },
-    {
-      "id": "locality_region_id",
-      "type": "int",
-      "pg_column": "locality_region_id",
-      "default": null,
-      "description": "Sreality region id. Broader than district.",
-      "category": "Spatial",
-      "ui_control": "number_input",
-      "agendas": [
-        "comparables",
-        "estimation",
-        "velocity",
-        "watchdog"
-      ],
-      "constraints": null,
-      "unit": null,
       "basis": null,
       "enum_values": null,
       "aliases": [],
