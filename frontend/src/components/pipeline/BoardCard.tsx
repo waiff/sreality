@@ -20,7 +20,6 @@ import { fmtArea, fmtCzk, fmtMeasuredPricePerM2 } from '@/lib/format';
 import { ppm2BasisFromToken } from '@/lib/measure';
 import { listingKindLabel } from '@/lib/enums';
 import { listingRowPath } from '@/lib/listingUrl';
-import { placePrimary } from '@/lib/placeLabel';
 import { TrashIcon } from '@/components/icons';
 import PriceDelta from '@/components/PriceDelta';
 import CityIndexStrip from '@/components/CityIndexStrip';
@@ -92,17 +91,11 @@ export function CardFace({
 
   const inactive = !card.is_active;
   const priceColor = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
-  /* placePrimary names the TOWN, not the okres — the shared resolver every
-     other surface uses. The board used to hand-roll `[street, district]`, which
-     rendered "okres Beroun" for a village and made the Město sort unverifiable
-     against what the card showed. Street is prefixed by the resolver itself. */
-  const place = placePrimary({
-    locality: card.locality,
-    district: card.district,
-    obec: card.obec,
-    okres: card.okres,
-    street: card.street,
-  });
+  /* ONE label, composed server-side from the property's display listing
+     (migration 503) — the same string Browse, the map and the extension print.
+     The board used to hand-roll `[street, district]`, then placePrimary(); both
+     could disagree with what every other surface showed for the same card. */
+  const place = card.display_label;
   /* The per-m² measure with the basis the server published beside it, so a
      rent card and a sale card in the same column are readable against each
      other. fmtMeasuredPricePerM2 renders an em-dash when either half is

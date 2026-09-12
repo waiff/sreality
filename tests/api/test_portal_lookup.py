@@ -46,7 +46,7 @@ def _mk_market_row(source: str, source_id: str, found: bool, **cols: Any) -> dic
         "area_m2": None, "area_basis": None,
         "price_czk": None, "price_per_m2": None, "price_per_m2_basis": None,
         "disposition": None, "subtype": None,
-        "district": None, "locality": None, "is_active": None,
+        "display_label": None, "is_active": None,
         "last_seen_at": None, "mf_reference_rent_czk": None,
         "mf_reference_rent_per_m2_czk": None,
         "mf_gross_yield_pct": None,
@@ -110,8 +110,8 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
                        listing_id=9001, property_id=501,
                        category_main="byt", category_type="prodej",
                        area_m2=Decimal("65.0"),
-                       price_czk=4_800_000, disposition="2+kk", district="Praha 5",
-                       locality="Praha 5 - Smíchov", is_active=True, last_seen_at=_TS,
+                       price_czk=4_800_000, disposition="2+kk",
+                       display_label="Plzeňská 12, Praha", is_active=True, last_seen_at=_TS,
                        mf_reference_rent_czk=21_840,
                        mf_gross_yield_pct=Decimal("5.46")),
         # bazos: found, NEGATIVE synthetic sreality_id, no MF;
@@ -120,7 +120,7 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
                        listing_id=9002, property_id=777,
                        category_main="komercni", category_type="prodej",
                        price_czk=7_700_000,
-                       subtype="ubytovani", district="okres Pardubice", is_active=True),
+                       subtype="ubytovani", display_label="Pardubice", is_active=True),
         # idnes: not found → sreality_id null
         _mk_market_row("idnes", "deadbeef", False),
     ]

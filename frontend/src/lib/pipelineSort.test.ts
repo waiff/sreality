@@ -21,7 +21,7 @@ const card = (over: Partial<PipelineBoardCard> = {}): PipelineBoardCard => ({
   category_type: 'prodej',
   price_per_m2: null,
   price_per_m2_basis: null,
-  street: null,
+  display_label: null,
   district: null,
   disposition: null,
   subtype: null,
@@ -123,21 +123,34 @@ describe('sorting', () => {
     expect(by(rows, { field: 'total_price_change_pct', direction: 'desc' })).toEqual([2, 3, 1]);
   });
 
-  it('orders by city using Czech collation on the label the card shows', () => {
-    // placePrimary prefers the free-text locality; 'Č' must sort after 'C'.
+  it('orders by city using Czech collation on the TOWN', () => {
+    // 'Č' must sort after 'C'.
     const rows = [
-      card({ property_id: 1, locality: 'Zlín', okres: 'Zlín-okres' }),
-      card({ property_id: 2, locality: 'Česká Lípa', okres: 'Česká Lípa-okres' }),
-      card({ property_id: 3, locality: 'Cheb', okres: 'Cheb-okres' }),
+      card({ property_id: 1, obec: 'Zlín' }),
+      card({ property_id: 2, obec: 'Česká Lípa' }),
+      card({ property_id: 3, obec: 'Cheb' }),
     ];
     expect(by(rows, { field: 'city', direction: 'asc' })).toEqual([2, 3, 1]);
   });
 
-  it('falls back to the geo obec when the locality is merely the okres name', () => {
-    // The Bazoš "Jihlava"-for-Telč case: the card shows Telč, so it sorts as Telč.
+  it('sorts by the town, not by the street the label leads with', () => {
+    // The one reason this key is not `display_label`: the label the card shows
+    // starts with the street when there is one, so sorting on it would order a
+    // column by house number and scatter one town across the alphabet.
     const rows = [
-      card({ property_id: 1, locality: 'Jihlava', okres: 'Jihlava', obec: 'Telč' }),
-      card({ property_id: 2, locality: 'Slaný', okres: 'Kladno' }),
+      card({ property_id: 1, obec: 'Brno', display_label: 'Zelný trh 4, Brno' }),
+      card({ property_id: 2, obec: 'Brno', display_label: 'Anenská 10, Brno' }),
+      card({ property_id: 3, obec: 'Adamov', display_label: 'Zborovská 2, Adamov' }),
+    ];
+    expect(by(rows, { field: 'city', direction: 'asc' })).toEqual([3, 1, 2]);
+  });
+
+  it('falls back to the shown label when the town is unknown', () => {
+    // A foreign listing has no obec; its label is the country, and it still has
+    // to land somewhere deterministic rather than at the end with the nulls.
+    const rows = [
+      card({ property_id: 1, obec: null, display_label: 'DE' }),
+      card({ property_id: 2, obec: 'Aš' }),
     ];
     expect(by(rows, { field: 'city', direction: 'asc' })).toEqual([2, 1]);
   });

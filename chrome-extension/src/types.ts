@@ -177,8 +177,12 @@ export interface PortalListing {
    * disposition (apartments). Computed server-side so the extension carries no
    * slug→label dictionary of its own. */
   kind_label: string | null;
-  district: string | null;
-  locality: string | null;
+  /* The ONE place string the whole product prints, composed server-side from
+   * the listing's resolved location (migration 503). It replaced a
+   * `district ?? locality` pair that this panel fell back through in one order
+   * while the SPA fell back through it in the other, so the same listing could
+   * be labelled two different ways on two surfaces. */
+  display_label: string | null;
   is_active: boolean | null;
   last_seen_at: string | null;
   mf_reference_rent_czk: number | null;

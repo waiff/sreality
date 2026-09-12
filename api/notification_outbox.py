@@ -66,7 +66,7 @@ def _fmt_price(czk: int | None, unit: str | None) -> str:
 
 
 def _identity_label(row: dict[str, Any]) -> str:
-    """Human-traceable handle for a listing with no locality, in preference
+    """Human-traceable handle for a listing with no place at all, in preference
     order: natural key, then the legacy id (NULL post-Gate-2), then nothing."""
     source, native = row.get("source"), row.get("source_id_native")
     if source and native:
@@ -91,12 +91,14 @@ def compose_message(row: dict[str, Any]) -> RenderedMessage:
         )
     kind = row.get("change_kind") or "new"
     disposition = row.get("disposition") or ""
-    # Subject fallback when the listing has no locality: prefer the natural key
-    # (stable + human-traceable to the portal) over the legacy id, which is NULL
-    # for post-Gate-2 rows and would render "id None" in a sent email.
-    locality = row.get("locality") or _identity_label(row)
+    # Subject fallback when the listing has no place at all: prefer the natural
+    # key (stable + human-traceable to the portal) over the legacy id, which is
+    # NULL for post-Gate-2 rows and would render "id None" in a sent email.
+    # `display_label` is the ONE label (migration 503) — an email and the in-app
+    # feed row for the same dispatch can no longer name two different places.
+    place = row.get("display_label") or _identity_label(row)
     label = _SUBJECTS.get(kind, "Změna inzerátu")
-    where = " ".join(p for p in (disposition, locality) if p).strip()
+    where = " ".join(p for p in (disposition, place) if p).strip()
     subject = f"{label}: {where}" if where else label
 
     lines = [subject]
@@ -148,7 +150,8 @@ _NEW_COLS = (
     "d.id::text, d.source_kind, d.change_kind, d.sreality_id, "
     "d.subscription_id::text, d.collection_id, "
     "d.trigger_price_czk, d.prev_price_czk, "
-    "l.locality, l.disposition, l.price_czk, l.price_unit, l.category_main, "
+    "location_display_label(ll.street_name, ll.house_number_cp, ll.house_number_co, ll.obec_name, ll.cast_obce_name, ll.country_code, ll.country_status) AS display_label, "
+    "l.disposition, l.price_czk, l.price_unit, l.category_main, "
     "l.source, l.source_id_native, d.message, ch"
 )
 
@@ -156,7 +159,8 @@ _RETRY_COLS = (
     "cs.id, cs.channel, cs.recipient, cs.consumer, "
     "d.source_kind, d.change_kind, d.sreality_id, "
     "d.trigger_price_czk, d.prev_price_czk, "
-    "l.locality, l.disposition, l.price_czk, l.price_unit, l.category_main, "
+    "location_display_label(ll.street_name, ll.house_number_cp, ll.house_number_co, ll.obec_name, ll.cast_obce_name, ll.country_code, ll.country_status) AS display_label, "
+    "l.disposition, l.price_czk, l.price_unit, l.category_main, "
     "l.source, l.source_id_native, d.message"
 )
 
@@ -185,6 +189,7 @@ def drain_once(
             "LEFT JOIN channel_sends cs "
             "  ON cs.dedupe_key = 'notif:' || d.id::text || ':' || ch "
             "LEFT JOIN listings l ON l.id = d.listing_id "
+            "LEFT JOIN listing_location ll ON ll.listing_id = l.id "
             "WHERE cs.id IS NULL "
             "  AND ch = ANY(%(channels)s) "
             "  AND d.dispatched_at > now() - %(win)s::interval "
@@ -196,7 +201,7 @@ def drain_once(
 
     for r in new_rows:
         (dispatch_id, source_kind, change_kind, sreality_id, subscription_id,
-         collection_id, trigger_price_czk, prev_price_czk, locality, disposition,
+         collection_id, trigger_price_czk, prev_price_czk, display_label, disposition,
          price_czk, price_unit, _category_main, source, source_id_native,
          message, ch) = r
         recipient = recipients.get(ch)
@@ -207,7 +212,7 @@ def drain_once(
             "source_kind": source_kind, "message": message,
             "change_kind": change_kind, "sreality_id": sreality_id,
             "source": source, "source_id_native": source_id_native,
-            "locality": locality, "disposition": disposition,
+            "display_label": display_label, "disposition": disposition,
             "price_czk": price_czk, "price_unit": price_unit,
             "trigger_price_czk": trigger_price_czk, "prev_price_czk": prev_price_czk,
         })
@@ -234,6 +239,7 @@ def drain_once(
             "FROM channel_sends cs "
             "JOIN notification_dispatches d ON d.id = cs.notification_id "
             "LEFT JOIN listings l ON l.id = d.listing_id "
+            "LEFT JOIN listing_location ll ON ll.listing_id = l.id "
             "WHERE cs.status = 'failed' AND cs.attempts < %(max_attempts)s "
             "  AND cs.channel = ANY(%(channels)s) "
             "  AND (cs.next_attempt_at IS NULL OR cs.next_attempt_at <= now()) "
@@ -252,7 +258,7 @@ def drain_once(
 
     for r in retry_rows:
         (send_id, ch, recipient, _consumer, source_kind, change_kind, sreality_id,
-         trigger_price_czk, prev_price_czk, locality, disposition,
+         trigger_price_czk, prev_price_czk, display_label, disposition,
          price_czk, price_unit, _category_main, source, source_id_native, message) = r
         if not recipient:
             continue
@@ -260,7 +266,7 @@ def drain_once(
             "source_kind": source_kind, "message": message,
             "change_kind": change_kind, "sreality_id": sreality_id,
             "source": source, "source_id_native": source_id_native,
-            "locality": locality, "disposition": disposition,
+            "display_label": display_label, "disposition": disposition,
             "price_czk": price_czk, "price_unit": price_unit,
             "trigger_price_czk": trigger_price_czk, "prev_price_czk": prev_price_czk,
         })

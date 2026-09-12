@@ -155,7 +155,7 @@ describe('<BrokerDetail> honest error states', () => {
 describe('<BrokerDetail> locality cell never fabricates a listing link', () => {
   it('renders inert text when the row has no resolvable destination', async () => {
     vi.mocked(brokers.fetchBrokerListings).mockResolvedValue([
-      listing({ listing_id: 1, sreality_id: null, property_id: null, locality: 'Bez cile' }),
+      listing({ listing_id: 1, sreality_id: null, property_id: null, display_label: 'Bez cile' }),
     ]);
     const { container } = renderPage();
 
@@ -166,7 +166,7 @@ describe('<BrokerDetail> locality cell never fabricates a listing link', () => {
 
   it('still links a row that carries a property id', async () => {
     vi.mocked(brokers.fetchBrokerListings).mockResolvedValue([
-      listing({ listing_id: 2, sreality_id: null, property_id: 42, locality: 'S cilem' }),
+      listing({ listing_id: 2, sreality_id: null, property_id: 42, display_label: 'S cilem' }),
     ]);
     renderPage();
 
@@ -176,7 +176,7 @@ describe('<BrokerDetail> locality cell never fabricates a listing link', () => {
 
   it('still links a row that carries a sreality id', async () => {
     vi.mocked(brokers.fetchBrokerListings).mockResolvedValue([
-      listing({ listing_id: 3, sreality_id: -284913, property_id: null, locality: 'Legacy' }),
+      listing({ listing_id: 3, sreality_id: -284913, property_id: null, display_label: 'Legacy' }),
     ]);
     renderPage();
 
