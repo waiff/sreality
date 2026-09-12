@@ -1494,7 +1494,7 @@ def test_broker_rollup_writes_cz_counts_from_the_domestic_predicate() -> None:
     from scripts.resolve_brokers import _BROKER_ROLLUP, _DOMESTIC
 
     sql = " ".join(_BROKER_ROLLUP.format(bscope="").split())
-    assert _DOMESTIC == "l.obec_id IS NOT NULL"
+    assert _DOMESTIC == "ll.obec_kod IS NOT NULL"
     # The predicate is bound at import, not left for the caller to remember.
     assert "{domestic}" not in sql
     for col in ("cz_listing_count", "cz_property_count",

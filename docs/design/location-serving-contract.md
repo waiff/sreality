@@ -6,10 +6,10 @@ W2-b dropped `listing_location_current`, `property_location_current` and every r
 relation the deleted engines wrote. This page is the contract a consumer codes against, written
 first for the NEW DEDUP program (rule 15), which is the first consumer after the admin dashboard.
 
-The one-sentence rule (CLAUDE.md rule 24): **location-reading code reads `listing_location`, never
-`listings.geom` or the geo-derived columns.** The legacy columns stay populated and stay the live
-path for every feature that has not flipped — they are not wrong, they are *unqualified*: a
-coordinate with no statement of how precisely or how trustworthily it is known.
+The one-sentence rule (CLAUDE.md rule 25): **a listing's location is `listing_location`.** There is
+no second store to read: W4-c (migration 508) dropped `listings.geom` and every geo-derived column
+with it. They were not wrong, they were *unqualified* — a coordinate with no statement of how
+precisely or how trustworthily it is known.
 
 ## 1. What to read
 
@@ -149,24 +149,17 @@ consumer is a code change gated by its own program (rule 15 for dedup), not a ru
 removed the last two runtime switches of any kind on this path — the SPA bisect hatches
 `?map=legacy` and `?cityQualityLegacy=1` — for the same reason.
 
-## 5. What NOT to read (the legacy path)
+## 5. There is no legacy path (W4-c)
 
-These are the columns the un-flipped features still serve from, and they will be retired only after
-their consumers flip (W4). New location-reading code must not touch:
-
-- `listings.geom`, and anything derived from it in the same table: `obec_id`, `okres_id`,
-  `region_id`, `ku_id`, `locality_district_id`, `locality_region_id`, `obec`, `okres`, `region`
-  (the BEFORE trigger `listings_set_admin_geo`, migration 289, writes these on every ingest);
-- `listings.street`, `listings.house_number`, `listings.street_name_key` (migration 256) —
-  `scraper/street.py`'s output; `listing_location.street_name` / `ulice_kod` replace them, and the
-  answer table's street is the RÚIAN canonical form;
-- `geocode_cache` and any Mapy-derived coordinate (licence class E; the R4 purge nulls them);
-- `browse_list` / `browse_projection` geo columns, and `properties.*` geography;
-- anything from the removed dedup engine (rule 15).
-
-If a new answer and a legacy answer disagree, **the answer table is the one with a stated
-precision**. Do not "correct" a `listing_location` row from `listings.geom`; open it as a
-location-program finding.
+Migration 508 dropped it. `listings` and `properties` carry NO place columns: no `geom`, no
+`obec_id`/`okres_id`/`region_id`/`ku_id`, no `obec`/`okres`/`region`, no
+`locality`/`district`/`street`/`house_number`/`zip`, no `street_name_key`/`geo_cell_key`/
+`street_source`, and none of the sreality `locality_*_id` portal ids. The trigger that wrote them
+(`listings_set_admin_geo`, migration 289), `geocode_cache`, the `mapy_affected` inventory and the
+`address_points` mirror are gone with them. One trap survives the deletion: `listings.geom` WAS
+`geography` and `listing_location.geom` IS `geometry(Point,4326)`, so every metre-based
+`ST_DWithin` / `ST_Distance` must cast `ll.geom::geography` (index `listing_location_geog_gist`,
+migration 507) or it silently measures degrees.
 
 ## 6. Coverage and freshness, dated (re-check before trusting a number)
 

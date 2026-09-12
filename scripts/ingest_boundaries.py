@@ -10,10 +10,7 @@ Phases:
     2. Extract     — unpack into a temp dir.
     3. Per-level   — load shapefile, reproject EPSG:5514 -> EPSG:4326,
                      simplify, INSERT.
-    4. Spatial join — for each level, set admin_boundaries.sreality_id
-                     to the most-common locality_*_id of listings whose
-                     point falls inside the polygon.
-    5. Areas       — UPDATE area_km2 once geometries are loaded.
+    4. Areas       — UPDATE area_km2 once geometries are loaded.
 
 Levels are loaded in hierarchy order (kraj -> okres -> obec -> ku) so
 parent_id FKs always resolve.
@@ -319,76 +316,7 @@ def _flush_batch(cur: psycopg.Cursor, batch: list[BoundaryRow]) -> None:
     )
 
 
-# ---------- phase 4: spatial join ----------
-
-
-# Mapping from admin_boundaries.level to the corresponding listings
-# sreality-id column. quarter has no admin_boundaries level (městská
-# části aren't part of the four ČÚZK shapefiles we ingest); aggregating
-# by quarter is intentionally out of scope for v1.
-LEVEL_TO_LISTING_COLUMN: dict[str, str] = {
-    "kraj": "locality_region_id",
-    "okres": "locality_district_id",
-    "obec": "locality_municipality_id",
-    "ku": "locality_ward_id",
-}
-
-
-def populate_sreality_ids(conn: psycopg.Connection, level: str) -> dict[str, int]:
-    """For each polygon at `level`, pick the most-common listing locality_*_id
-    of points inside it and write to admin_boundaries.sreality_id.
-
-    Returns counts: matched (polygons that got an id), empty (no listing
-    inside), conflicted (multiple listings disagreed; we picked the mode).
-    """
-    listing_col = LEVEL_TO_LISTING_COLUMN[level]
-    sql = f"""
-        WITH points_in_poly AS (
-            SELECT
-                ab.id AS ab_id,
-                l.{listing_col} AS sid,
-                COUNT(*) AS n
-            FROM admin_boundaries ab
-            JOIN listings l
-              ON ST_Covers(ab.geom, l.geom)
-            WHERE ab.level = %s
-              AND l.is_active
-              AND l.geom IS NOT NULL
-              AND l.{listing_col} IS NOT NULL
-            GROUP BY ab.id, l.{listing_col}
-        ),
-        ranked AS (
-            SELECT
-                ab_id, sid, n,
-                ROW_NUMBER() OVER (PARTITION BY ab_id ORDER BY n DESC, sid) AS rk,
-                COUNT(*)    OVER (PARTITION BY ab_id) AS n_distinct
-            FROM points_in_poly
-        ),
-        winners AS (
-            SELECT ab_id, sid, n_distinct FROM ranked WHERE rk = 1
-        ),
-        applied AS (
-            UPDATE admin_boundaries ab
-            SET sreality_id = w.sid
-            FROM winners w
-            WHERE ab.id = w.ab_id
-            RETURNING ab.id, w.n_distinct
-        )
-        SELECT
-            (SELECT COUNT(*) FROM applied) AS matched,
-            (SELECT COUNT(*) FROM applied WHERE n_distinct > 1) AS conflicted,
-            (SELECT COUNT(*) FROM admin_boundaries
-             WHERE level = %s AND sreality_id IS NULL)             AS empty
-    """
-    with conn.cursor() as cur:
-        cur.execute(sql, (level, level))
-        row = cur.fetchone()
-        if row is None:
-            return {"matched": 0, "conflicted": 0, "empty": 0}
-        return {"matched": row[0], "conflicted": row[1], "empty": row[2]}
-
-
-# ---------- phase 5: area_km2 ----------
+# ---------- phase 4: area_km2 ----------
 
 
 def compute_areas(conn: psycopg.Connection) -> int:
@@ -598,18 +526,6 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 parents['ku_linked'],    parents['ku_total'],
             )
 
-            if not args.skip_spatial_join:
-                for lvl in levels:
-                    LOG.info("JOIN level=%s starting", lvl)
-                    counts = populate_sreality_ids(conn, lvl)
-                    conn.commit()
-                    LOG.info(
-                        "JOIN level=%s matched=%d empty=%d conflicted=%d",
-                        lvl, counts["matched"], counts["empty"], counts["conflicted"],
-                    )
-            else:
-                LOG.info("JOIN skipped (--skip-spatial-join)")
-
             if "obec" in levels:
                 LOG.info("RELINK curated_cities starting")
                 relink = relink_curated_cities(conn)
@@ -634,8 +550,6 @@ def main(argv: list[str] | None = None) -> int:
                    help="TRUNCATE admin_boundaries before loading (default true)")
     p.add_argument("--no-truncate", dest="truncate", action="store_false",
                    help="Skip TRUNCATE; ON CONFLICT will still upsert")
-    p.add_argument("--skip-spatial-join", action="store_true",
-                   help="Skip the listings -> sreality_id population step")
     args = p.parse_args(argv)
 
     logging.basicConfig(

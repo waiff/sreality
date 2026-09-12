@@ -397,14 +397,6 @@ measurement of this gate exercises a different branch than production browser tr
 
 So: wrap a gate that sits alongside a column predicate; a standalone gate is already O(1).
 
-**Stored blocking keys**: `listings.street_name_key` (migration 256) and
-`listings.geo_cell_key` (migration 276, trigger-maintained, extended to the `byt` family
-by migration 296) follow the same shape — a single SQL/function definition, stamped at
-every write path, stored so the dirty-drain can scope its load in SQL instead of
-recomputing live for every row (rule #19). See the street-lifecycle entry below for
-`street_name_key`'s own history; `geo_cell_key` is its geo-blocking twin for families
-that don't key on street.
-
 ## Schema conventions
 
 - Sreality enum codes that we promote to typed columns are stored as Czech text labels without
@@ -418,62 +410,23 @@ that don't key on street.
   migration 022 (`terrace`, `garage`, `parking_lots`) are the correct fields for new analytical
   work. The legacy columns stay populated for backward compatibility with existing queries /
   RPCs.
-- The Czech admin hierarchy on a listing is **derived from `geom`, not parsed from the address**
-  (migration 140). `listings.obec` / `okres` / `region` (municipality / district / kraj) are set
-  by a BEFORE INSERT/UPDATE-OF-geom trigger (`listings_set_admin_geo`) that PIPs the coordinate
-  into `admin_boundaries` and walks `parent_id` — so they're populated **instantly at scrape time**
-  and **uniform across every source**. Rows near a boundary that miss every polygon by a sliver
-  now fall back to the **nearest obec/ku within 250m** (migration 289, PR #752) rather than
-  going unresolved — only truly-foreign points (~5%) still lack a CZ match. The trustworthy
-  anchor is the coordinate (~95% coverage, straight from each portal's map/GPS data); the
-  free-text `locality` is portal-specific display text and unreliable for grouping. The legacy
-  display `district` text column is filled from okres (or obec for Prague) only when NULL, so
-  sreality's richer "City - Quarter" labels are preserved. Don't re-derive hierarchy from `locality`;
-  read the normalized columns.
-- `listings.street` is **portal-uniform via one shared extractor, `scraper/street.py`** (migration
-  122 added the column). sreality + bezrealitky read a structured street (bezrealitky also fills
-  `house_number` / `zip`); the HTML portals mine it from a free-text locality (`street_from_locality`:
-  first segment for idnes/remax, last for maxima) or clean a regex capture (`clean_street` for bazos).
-  The ONE don't-fabricate guard (`reject_as_town`) lives here so it isn't reimplemented per portal —
-  it rejects foreign coords/countries, "Town - Quarter" forms, "okres X" qualifiers, and any candidate
-  equal to the row's own geo-derived obec/okres/region; a wrong street is worse than NULL (it poisons
-  the dedup street-key and Browse). Stored values are bare/human-readable for display; the SEPARATE
-  match-time grouping NAME key is **`scraper.street.street_name_key`** (the single home for street
-  string logic), stored on `listings.street_name_key` (migration 256) by every `street` write path
-  — don't confuse the human-readable `street` with the key. It is **obec-scoped**, so each town's
-  street is its own small group. The legacy dedup engine that consumed it was removed in the
-  2026-08 cutoff (rule #15), but the column, its trigger and its parity guards **stay**: the
-  rebuilt engine's Level 0 blocking reuses it (`docs/design/new-dedup/PROGRAM.md`), so a
-  normalizer edit still requires the `backfill_street_name_key.yml all=true` re-key and the weekly
-  `street_key_parity.yml` job is still the alarm for forgetting it.
-- **RÚIAN address-point resolver — AUTO-WRITE STOPPED (location-data W0 item 0a).** The
-  coord→street resolver (`scripts/backfill_address_point_streets.py`) no longer runs on a
-  weekly cron and a bare invocation/dispatch is a dry run; writes need the explicit
-  `--write` flag. An LLM mining experiment measured ~11 of ~21 text-checkable
-  resolver-derived streets wrong (2 fabricated street+number pairs on control rows).
-  Already-written `street_source='resolver'` rows stay until the location program's
-  migration wave quarantines them; the trigger rails below still govern them. Historical
-  coverage: mmreality/ceskereality/realitymix added by PR #750, gated by
-  `matched_type='regional.address'`; realitymix `locality_text` arm PR #756. The SEPARATE
-  text-derived backfill (`scripts/backfill_portal_streets.py`, parser-grain, dispatch-only)
-  is unaffected by 0a; it gained `--include-inactive` (PR #758) and fixed ID windows (PR #759).
-- **No geocode lifecycle any more** (W4-b): `CoordResolver`, `geocode_cache` and the
-  `mapy_affected` inventory are gone; `listings.geocode_attempted_at` and the rest of the legacy
-  geography columns drop in W4-c. A coordinate comes from the portal's own page or payload.
-- **Street lifecycle: resolver fills survive refetches (migration 263).** The RÚIAN coord→street
-  resolver fills `street`/`street_name_key`/`house_number` on rows whose portal page has no street —
-  so the row's next detail refetch re-parses NULL, and a plain `street = EXCLUDED.street` used to
-  CLOBBER the fill (measured: 40% of a resolver cohort lost in 2.5 days). Three rails now:
-  (1) both ingest upserts (`upsert_listing` + `_BATCH_UPSERT_SQL`) build their SET from the ONE
-  `_listing_update_set_sql()` builder, which makes the trio **preserve-if-null**
-  (`COALESCE(EXCLUDED.c, listings.c)`) — an incoming NULL never erases a stored value, a page-parsed
-  street still wins; (2) **`listings.street_source`** ('parser' | 'resolver') is durable provenance
-  (replacing the resolver's raw_json marker, which the refetch destroyed) — ingest stamps 'parser'
-  when the page yields a street, else preserves it, the resolver stamps 'resolver';
-  (3) the admin-geo trigger drops a **'resolver'** street when the listing's COORDINATES change
-  (derived from the old point → may be wrong → "wrong street worse than NULL"), and its existing
-  tail block then re-opens the resolver for the new coords. Parser streets are untouched by the
-  guard (the page re-derives them every fetch).
+- **A listing has ONE location and it lives in `listing_location`** (migration 501; W4-c
+  migration 508 dropped the rest). `listings` and `properties` carry NO place columns at all —
+  no `geom`, no `obec`/`okres`/`region`, no `*_id` admin codes, no `locality`/`district`/
+  `street`/`house_number`/`zip`, no `street_name_key`/`geo_cell_key`. The geo-derivation
+  trigger (`listings_set_admin_geo`), the geo-cell trigger, `geocode_cache`, the `mapy_affected`
+  inventory and the `address_points` mirror went with them. Read a listing's place by joining
+  `listing_location ll on ll.listing_id = l.id` (from `properties p`, join on
+  `p.repr_listing_ref_id`); a property's place is its representative listing's. Mapping from the
+  old names: `obec_id` → `ll.obec_kod`, `okres_id` → `ll.okres_kod`, `region_id` → `ll.kraj_kod`,
+  `locality` → `ll.obec_name`, `district` → `ll.okres_name`, `street` → `ll.street_name`. One
+  trap: `listings.geom` WAS `geography` and `ll.geom` IS `geometry(Point,4326)`, so a metre-based
+  `ST_DWithin`/`ST_Distance` must cast `ll.geom::geography` (index `listing_location_geog_gist`,
+  migration 507) or it silently measures degrees. The place STRING every surface renders is
+  `location_display_label(...)` (migration 503), never a hand-assembled `locality ?? district`.
+  `admin_boundaries` survives for price stats / the rent map / city proximity only — it is no
+  longer a location path. `scraper/street.py` still extracts a street from a portal page; that
+  extraction is now a CLAIM the resolver arbitrates, not a column.
 - **Location-data relations (`location_*`, `ruian_*`, `portal_contract*`; migs 380+) are
   service-role-only and shadow-only** — RLS on + explicit `anon`/`authenticated` REVOKEs on every
   table, sequence + function; nothing outside `location_data/` reads them before W6. `location_claims`

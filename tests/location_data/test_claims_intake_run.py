@@ -88,7 +88,7 @@ def test_claim_and_dirty_enqueue_are_one_statement():
     it is the only coupling between intake and resolution."""
     conn = _Conn()
     result = extract_listing(
-        listing("sreality", SREALITY_POST_CUTOVER, lat=50.078, lon=14.450),
+        listing("sreality", SREALITY_POST_CUTOVER),
         entries_for("sreality"))
     with conn.cursor() as cur:
         inserted, enqueued = write_result(cur, result)
@@ -109,7 +109,7 @@ def test_the_enqueue_bumps_a_row_that_is_already_queued():
     The statement the lane actually executes must carry the bump, not just the constant."""
     conn = _Conn()
     result = extract_listing(
-        listing("sreality", SREALITY_POST_CUTOVER, lat=50.078, lon=14.450),
+        listing("sreality", SREALITY_POST_CUTOVER),
         entries_for("sreality"))
     with conn.cursor() as cur:
         write_result(cur, result)
@@ -148,7 +148,7 @@ def test_the_claim_write_dedupes_within_the_batch():
 def test_a_refusal_is_counted_not_recorded():
     """A refusal used to be an absence ROW per listing. It is a counter on the result and
     one log line per reason per batch now — the thing an operator reads."""
-    row = listing("sreality", SREALITY_TRUNCATED, lat=50.078, lon=14.450)
+    row = listing("sreality", SREALITY_TRUNCATED)
     result = extract_listing(row, entries_for("sreality"))
     assert result.claims == []
     assert dict(result.refusals) == {"sreality_payload_shape:absent": 1}
@@ -211,12 +211,11 @@ def test_the_selections_carry_no_listings_column_the_lane_cannot_read():
     """
     for sql in (_LISTINGS_FULL_SQL, _LISTINGS_INCREMENTAL_SQL, _UNMINED_BODIES_SQL):
         one = " ".join(sql.split())
-        for column in ("l.locality", "l.street", "l.street_source"):
+        for column in ("l.locality", "l.street", "l.street_source", "l.geom"):
             assert column not in one, column
 
     scan = _row_from_record(_RECORD)
     assert not hasattr(scan.row, "legacy_columns")
-    assert scan.row.lat is None and scan.row.lon is None
     assert (scan.body.id, scan.body.page_kind) == (91, "detail")
     assert (scan.body_unmined, scan.contract_version) == (True, 5)
     assert scan.snapshot_cursor == 4242
@@ -341,7 +340,7 @@ def test_no_write_statement_touches_an_existing_production_table():
 # portal's ACTIVE contract version and the snapshot cursor (NULL outside incremental mode),
 # which is the LAST column since W1-c deleted the legacy-column tail that used to follow it.
 _RECORD = (7, "ceskereality", "3822640", {"id": "3822640"},
-           datetime(2026, 8, 13, 6, 0, tzinfo=UTC), None, None,
+           datetime(2026, 8, 13, 6, 0, tzinfo=UTC),
            91, True, "detail", "ab" * 32, datetime(2026, 8, 13, 5, 0, tzinfo=UTC), 5,
            4242)
 
@@ -435,7 +434,7 @@ def test_the_window_is_a_limit_subquery_that_never_touches_listings():
 
 
 def test_a_listing_with_no_stored_body_yields_no_candidate():
-    bodiless = (*_RECORD[:7], None, None, None, None, None, 5, None)
+    bodiless = (*_RECORD[:5], None, None, None, None, None, 5, None)
     scan = _row_from_record(bodiless)
     assert scan.body is None and scan.body_unmined is False
     assert scan.contract_version == 5 and scan.row.listing_id == 7

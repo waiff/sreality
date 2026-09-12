@@ -388,11 +388,15 @@ def _fetch_listing(
     conn: "psycopg.Connection",
     sreality_id: int,
 ) -> dict[str, Any]:
+    # W4-c: the "locality"/"district" KEYS stay (cached prompt shape); only their
+    # source moved -- `listings.locality` / `.district` are dropped.
     sql = (
-        "SELECT category_main, category_type, price_czk, price_unit, "
-        "area_m2, estate_area, usable_area, locality, district, "
-        "building_type, condition, energy_rating, ownership "
-        "FROM listings WHERE sreality_id = %s"
+        "SELECT l.category_main, l.category_type, l.price_czk, l.price_unit, "
+        "l.area_m2, l.estate_area, l.usable_area, ll.obec_name, ll.okres_name, "
+        "l.building_type, l.condition, l.energy_rating, l.ownership "
+        "FROM listings l "
+        "LEFT JOIN listing_location ll ON ll.listing_id = l.id "
+        "WHERE sreality_id = %s"
     )
     with conn.cursor() as cur:
         cur.execute(sql, (sreality_id,))

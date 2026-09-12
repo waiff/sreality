@@ -389,21 +389,19 @@ def test_parsed_listing_bridges_into_ingest_contract():
     assert row["category_type"] == "prodej"
     assert row["price_czk"] == 5_499_000
     assert row["area_m2"] == 65.0
-    assert row["lat"] == 49.863882
-    assert row["lon"] == 16.333580
 
 
-def test_parse_detail_street_survives_into_listing_row():
-    # The street extraction is text-only and must surface on
-    # ScrapedListing.street (cleaned to a bare name) and ride to_row into
-    # listings.street.
+def test_parse_detail_street_is_a_claim_not_a_column():
+    # The street extraction is text-only and surfaces on ScrapedListing.street
+    # (cleaned to a bare name) as the parser's READING of the page. W4-c dropped
+    # listings.street, so it deliberately does NOT ride to_row.
     listing = parse_detail(
         LIVE_LOKALITA_DETAIL_HTML,
         source_url="https://reality.bazos.cz/inzerat/219722150/x.php",
         category_main="byt", category_type="pronajem",
     )
     assert listing.street == "Koterovská"
-    assert listing.to_row(-9)["street"] == "Koterovská"
+    assert "street" not in listing.to_row(-9)
 
 
 def test_parse_detail_dohodou_price_is_none():

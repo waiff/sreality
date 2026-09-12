@@ -210,8 +210,6 @@ def test_parse_detail_content_hash_stable_and_bridges_to_ingest():
     assert row["category_main"] == "byt"
     assert row["price_czk"] == 18_878_000
     assert row["area_m2"] == 114.0
-    assert row["lat"] == 50.135296277954296
-    assert row["lon"] == 14.3808766436688
 
 
 def test_house_category_and_no_coords():

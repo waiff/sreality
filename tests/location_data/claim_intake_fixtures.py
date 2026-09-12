@@ -65,22 +65,19 @@ def listing(
     *,
     listing_id: int = 1,
     native: str = "n1",
-    lat: float | None = None,
-    lon: float | None = None,
 ) -> ListingRow:
     """One scan row, exactly as `_row_from_record` builds it.
 
-    The class-B `listings` columns (`locality` / `street` / `street_source`) were arguments
-    here until W1-c deleted the readers that mined them: the lane reads `raw_json` and the
-    stored page body, so a fixture cannot state a column the scan no longer selects.
+    No `listings` column is an argument here. W1-c deleted the readers that mined the
+    class-B text columns and W4-c dropped `listings.geom` with the rest of the legacy
+    store, so a fixture cannot state a column the scan no longer selects: the lane reads
+    `raw_json` and the stored page body.
     """
     return ListingRow(
         listing_id=listing_id,
         source=source,
         source_id_native=native,
         raw_json=raw_json,
-        lat=lat,
-        lon=lon,
         observed_at=OBSERVED_AT,
     )
 

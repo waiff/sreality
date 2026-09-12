@@ -50,7 +50,7 @@ class _Listing:
         # snapshot cursor — the LAST column since W1-c deleted the legacy-column tail. This
         # listing has no stored body.
         return (self.id, "sreality", f"n{self.id}", dict(SREALITY_POST_CUTOVER),
-                self.last_seen_at, None, None,
+                self.last_seen_at,
                 None, None, None, None, None, 1, snapshot_cursor)
 
 

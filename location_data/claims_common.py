@@ -63,13 +63,14 @@ class CoordinateRule:
     `substrate`:
       payload      - the portal published the coordinate in the body we still hold; the
                      value is re-derived from `raw_json` and is first-party (class A).
-      geom_column  - the value survives ONLY in `listings.geom` (the six slim-dict portals
-                     never wrote lat/lon into raw_json), and only where the provenance
-                     stamp names a first-party path. W1-c deleted the reader that mined
-                     that column, so on this arm the label now answers ONE question — was
-                     a coordinate this portal has WITHHELD, and why (the refusal counter in
-                     `extract_listing`). The value itself is re-read from the stored page
-                     body under `ARCHIVED_COORDINATE_RULES`.
+      geom_column  - the portal published no first-party coordinate in the payload we
+                     hold (the six slim-dict portals never wrote lat/lon into raw_json),
+                     so on this arm the label answers ONE question — was a coordinate
+                     this portal has WITHHELD, and why (the refusal counter in
+                     `extract_listing`) — and the value itself is re-read from the
+                     archived page body under `ARCHIVED_COORDINATE_RULES`. The literal is
+                     kept for the legacy column it was named after, `listings.geom`,
+                     which W1-c stopped reading and W4-c dropped.
       none         - the portal ships no admissible coordinate at all.
     """
     substrate: str
@@ -222,8 +223,6 @@ class ListingRow:
     source: str
     source_id_native: str
     raw_json: dict[str, Any]
-    lat: float | None
-    lon: float | None
     observed_at: datetime
 
 

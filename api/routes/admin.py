@@ -454,9 +454,15 @@ _CONDITION_REGIONS_SETTING = "condition_scoring_enabled_region_ids"
 # not-yet-scored condition, so the counts here equal what the batch submit
 # job would pick up for that kraj.
 _UNSCORED_ACTIVE_PREDICATE = (
-    "is_active AND last_seen_at > now() - interval '30 days' "
-    "AND building_condition_level IS NULL "
-    "AND apartment_condition_level IS NULL"
+    "l.is_active AND l.last_seen_at > now() - interval '30 days' "
+    "AND l.building_condition_level IS NULL "
+    "AND l.apartment_condition_level IS NULL"
+)
+# W4-c: the kraj comes from listing_location, not the dropped `listings.region_id`.
+# LEFT, so listings the resolver has not placed still land in the NULL bucket the
+# two payloads publish as `parked_no_geo`.
+_KRAJ_COUNT_FROM = (
+    "FROM listings l LEFT JOIN listing_location ll ON ll.listing_id = l.id"
 )
 
 
@@ -527,9 +533,9 @@ def _condition_regions_payload(conn: "psycopg.Connection") -> dict[str, Any]:
         # One GROUP BY covers both the per-kraj counts and the NULL-region
         # bucket (listings with no usable coordinates, parked for scoring).
         cur.execute(
-            "SELECT region_id, count(*) FROM listings "
+            f"SELECT ll.kraj_kod AS region_id, count(*) {_KRAJ_COUNT_FROM} "
             f"WHERE {_UNSCORED_ACTIVE_PREDICATE} "
-            "GROUP BY region_id"
+            "GROUP BY ll.kraj_kod"
         )
         counts = {r[0]: r[1] for r in cur.fetchall()}
     enabled = set(enabled_ids)
@@ -604,7 +610,8 @@ def _clip_regions_payload(conn: "psycopg.Connection") -> dict[str, Any]:
         # (Per-kraj tag COVERAGE would need a 5.2M-image aggregation; overall tagging
         # progress lives in the /dedup pipeline overview instead.)
         cur.execute(
-            "SELECT region_id, count(*) FROM listings WHERE is_active GROUP BY region_id"
+            f"SELECT ll.kraj_kod AS region_id, count(*) {_KRAJ_COUNT_FROM} "
+            "WHERE l.is_active GROUP BY ll.kraj_kod"
         )
         counts = {r[0]: int(r[1]) for r in cur.fetchall()}
     priority = set(priority_ids)
