@@ -344,8 +344,9 @@ def test_the_intake_preflight_reads_are_bounded_too():
         # batch row exists.
         "_LEGACY_WATERMARK_SQL": inspect.getsource(claims_intake._snapshot_seed),
         "_SNAPSHOT_SEED_SQL": inspect.getsource(claims_intake._snapshot_seed),
-        # ... and added one more: the drain's selection and its backlog readout.
-        "_UNMINED_BODIES_SQL": inspect.getsource(claims_intake.drain_unmined_bodies),
+        # ... and added one more: the drain's window and its backlog readout. (W1-a4 split
+        # the selection in two; the WINDOW is the statement that opens the block.)
+        "_UNMINED_WINDOW_SQL": inspect.getsource(claims_intake.drain_unmined_bodies),
         "_UNMINED_BODY_BACKLOG_SQL": inspect.getsource(
             claims_intake._unmined_body_backlog),
     }
@@ -354,6 +355,14 @@ def test_the_intake_preflight_reads_are_bounded_too():
         assert opener == "with guarded(conn, statement_timeout) as cur:", (
             f"{sql} is not read inside a guarded transaction (opener was {opener!r})"
         )
+    # And the drain's SECOND statement rides the SAME transaction — a window whose ids were
+    # resolved by a later, separate transaction could see a listing delisted in between.
+    drain = inspect.getsource(claims_intake.drain_unmined_bodies)
+    between = drain.split("cur.execute(_UNMINED_WINDOW_SQL")[1].split(
+        "cur.execute(_UNMINED_BODIES_SQL")[0]
+    assert "with guarded(" not in between, (
+        "the window and the join statement must share one guarded transaction"
+    )
 
 
 def test_the_intake_batch_budget_is_env_overridable(monkeypatch):
