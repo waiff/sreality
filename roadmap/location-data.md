@@ -548,6 +548,34 @@ component is slimmed twice — each wave rewrites one component and slims its st
     and it regenerates a frontend file, so it belongs with the doctrine PR. **+32 / −79 overall** (+3 / −4
     runtime code, the rest docs; net −47, rule 25 satisfied by a wave that only had residue left). Suites: pytest 7165 passed / 218 skipped.
 
+  - **W4-e shipped — the doctrine reads as the end state.** CLAUDE.md rule **24 is folded into 25**
+    (the number kept as a one-line pointer, because rules are cited by number and never renumbered);
+    25 now reads "one store, one lane, one label, one code predicate; every location PR deletes at
+    least as much as it adds". `docs/architecture.md` § Location data was rewritten from a
+    wave-by-wave running log into the END STATE — the store's 26 columns by role, the one lane's two
+    halves and their cursors, the eleven claim types and the contract rails, the resolver's four
+    stages, the served-listing predicate, the red line, what deliberately stays outside the store
+    (`admin_boundaries`, `portal_raw_pages`, the two views that keep their width, `ScrapedListing`'s
+    page-reading fields, `CoordinateRule`'s historical `"geom_column"` literal) and ONE lessons list,
+    one line each — **606 → 351 lines**; the rules 24+25 rationale went 74 → 29. The skills' location
+    sections describe the end state only. `toolkit/filter_registry.py`'s city-quality prose now names
+    `properties_public.obec_id` sourced from `listing_location` (the frontend registry regenerated
+    with it). The wave log lives here, in this ledger, and is not duplicated in architecture.md.
+
+**What is left of the sprint** (nothing further to build):
+  1. **The gate** — `check_location_town_coverage` red until every portal reports zero served
+     listings with no row and zero active Czech listings with no `obec_kod`. Everything downstream
+     (the map's NULL-lat drop, the browse re-source) is gated on it.
+  2. **Operator applies, in order**: migration **502** (W2-b drops), **506** (W3 S4 deletions —
+     DROP+CREATE views, so AFTER the deploy), **508** (W4-c, destructive — operator word + `pg_dump`,
+     05:20–05:30 UTC, AFTER the deploy).
+  3. **The later lock-free wave**: narrow `listings_public` + `portal_listing_counts` and re-point
+     their six dependent matviews at `listings` — held back only because narrowing them inside 508's
+     ACCESS EXCLUSIVE window would mean repopulating all six.
+  4. **Old-version claim cleanup** — superseded rows are filtered at READ (`_CLAIMS_SELECT`), so
+     deleting them is leisure work: `python -m location_data.contracts --retract <portal>@<version>`,
+     bounded batches, resumable. Not a correctness step.
+
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
 campaigns or schedules; foreign is a determination, never a default; a field is added only after a
