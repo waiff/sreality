@@ -1989,7 +1989,7 @@ driving predicate is what **Browse serves**, not what is active (W2-a4): `l.is_a
 `browse_projection` serves `properties.status = 'active'` — the merge lifecycle, not `is_active` —
 so a delisted property is still a Browse row rendered from its `is_active = false` display listing,
 and `check_location_town_coverage` counts that same cohort (`display_no_row`) on the same red line
-(migration 505 indexes the correlated EXISTS).
+(migration 505 indexes the correlated EXISTS — `CREATE INDEX CONCURRENTLY`, so it is applied through `apply_migration.yml`, never the MCP, which wraps every payload in a transaction).
 
 **The queue is re-entrant, and the sweep is the invariant's backstop** (W2-a2, 2026-09-12). Every
 evidence-producing enqueue — `claims_intake`'s `claim_insert`, `contracts.retract`'s batch,

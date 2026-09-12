@@ -943,20 +943,60 @@ def test_migration_505_indexes_the_correlated_exists_the_sweep_now_runs():
     the whole corpus — `properties` carried eleven indexes and not one led on
     `repr_listing_ref_id`. Additive, partial on the same predicate the sweep asks."""
     text = (MIGRATIONS / "505_location_w2a4_properties_repr_index.sql").read_text()
-    # The EXECUTABLE half only: the header documents a `DROP INDEX CONCURRENTLY` rollback,
-    # and a prose scan that counted it would be reading the comment, not the migration.
-    sql = " ".join(line for line in text.splitlines()
-                   if not line.strip().startswith("--")).lower()
-    sql = " ".join(sql.split())
-    assert ("create index if not exists properties_repr_listing_ref_active_idx on "
-            "public.properties (repr_listing_ref_id) where status = 'active'") in sql
+    # The EXECUTABLE half only: the header documents the rollback DROP and the invalid-index
+    # rationale, and a prose scan would be reading the comment, not the migration.
+    sql = " ".join(" ".join(line for line in text.splitlines()
+                            if not line.strip().startswith("--")).split()).lower()
+    assert ("create index concurrently if not exists properties_repr_listing_ref_active_idx "
+            "on public.properties (repr_listing_ref_id) where status = 'active'") in sql
     # Additive only: an index, never a column/constraint/data change.
-    for destructive in ("drop ", "alter table", "delete from", "update "):
+    for destructive in ("alter table", "delete from", "update ", "truncate"):
         assert destructive not in sql, destructive
-    # Bounded like migration 429's blocking build, and not CONCURRENTLY (the MCP wraps
-    # every payload in a transaction, where CONCURRENTLY raises 25001).
-    assert "set lock_timeout" in sql and "set statement_timeout" in sql
-    assert "create index concurrently" not in sql
-    # ...and nothing else claimed 505.
-    numbered = [f.name for f in MIGRATIONS.glob("505_*.sql")]
+    # The only DROP is the invalid-leftover guard, on this index and nothing else.
+    assert sql.count("drop index") == 1
+    assert "drop index if exists public.properties_repr_listing_ref_active_idx" in sql
+
+
+def test_migration_505_is_the_no_transaction_concurrently_shape_the_apply_lane_requires():
+    """`properties` is written every minute by the scrapers and property maintenance and the
+    instance is IO-bound, so a plain CREATE INDEX's SHARE lock would stall those writers for
+    the whole build. CONCURRENTLY takes only SHARE UPDATE EXCLUSIVE — but it cannot run inside
+    a transaction block (25001), which rules out every Supabase MCP path and dictates the
+    file's shape: no BEGIN/COMMIT, and plain SET rather than SET LOCAL (outside a transaction
+    SET LOCAL is a silent no-op)."""
+    text = (MIGRATIONS / "505_location_w2a4_properties_repr_index.sql").read_text()
+    sql = " ".join(" ".join(line for line in text.splitlines()
+                            if not line.strip().startswith("--")).split()).lower()
+    assert "create index concurrently" in sql
+    assert "begin;" not in sql and "commit;" not in sql
+    assert "set lock_timeout = '30s';" in sql and "set statement_timeout = '900s';" in sql
+    assert "set local" not in sql
+    # `do $$ begin ... end $$` is a PL/pgSQL block, not a transaction — but the CONCURRENTLY
+    # statement must sit OUTSIDE it, where a transaction block would be fatal.
+    assert sql.index("end $$;") < sql.index("create index concurrently")
+    # The header has to say all of this, or the next hand re-applies it through the MCP.
+    header = text.lower()
+    assert "apply_migration.yml" in header and "not the supabase mcp" in header
+    assert "--single-transaction" in header
+
+
+def test_both_apply_lanes_run_migration_files_statement_by_statement():
+    """The claim migration 505's shape rests on, pinned against the workflows themselves: a
+    file wrapped in one transaction would make CONCURRENTLY raise 25001, so neither lane may
+    grow a `--single-transaction`."""
+    root = MIGRATIONS.parent
+    for name in ("apply_migration.yml", "migrations.yml"):
+        body = (root / ".github" / "workflows" / name).read_text()
+        # Real invocations only — the workflow also `echo`s its own command line.
+        psql_lines = [ln for ln in body.splitlines()
+                      if "psql" in ln and " -f " in ln
+                      and not ln.strip().startswith(("#", "echo "))]
+        assert psql_lines, name
+        for line in psql_lines:
+            assert "--single-transaction" not in line, (name, line)
+            assert "ON_ERROR_STOP=1" in line, (name, line)
+
+
+def test_migration_505_does_not_collide_with_the_open_branches():
+    numbered = sorted(f.name for f in MIGRATIONS.glob("505_*.sql"))
     assert numbered == ["505_location_w2a4_properties_repr_index.sql"], numbered
