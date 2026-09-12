@@ -2102,7 +2102,13 @@ an UNFINISHED predecessor — `stopped` or `failed` (W1-a5) — because either c
 a batch whose transaction closed; run 34689928656 died in the bodies pass and its successor re-walked
 from id 0 for 765 s. They part on `ok`: full restarts at 0 (the table was walked; the next pass is the
 contract-bump re-walk), incremental carries on from the log's end, which is not a coverage claim. The
-full walk is also scoped to the SERVED set (`l.is_active` OR the row represents an `active` property)
+full walk is also **continued by an incremental run** (W1-a7): the chain re-dispatches a hop with
+the run's own mode and the cron is `incremental`, so a hop that yields to a waiting cron run
+(13:06Z, 2026-09-12) hands the successor `incremental` and a stopped full walk falls off the chain
+until somebody dispatches `full` by hand — so an incremental run that empties the change log with
+budget left carries that walk on in its own `full` batch row (it CONTINUES a stopped/failed cursor,
+it never STARTS one, and `--mode full` keeps its meaning). The full walk is also scoped to the
+SERVED set (`l.is_active` OR the row represents an `active` property)
 — the resolver sweep's own predicate, shared as `claims_common.SERVED_LISTING_PREDICATE` so the two
 walks cannot drift: ~830k listings serve ~376k, and the rest is history nobody resolves. Incremental
 stays unscoped — a delisting snapshot is a change worth reading. A pre-W1-a2 cursor is told apart by `cursor_after_ts IS NULL` (the lane writes no
