@@ -84,14 +84,13 @@ _AUTO_MERGE_ENABLED_KEY = "broker_auto_merge_enabled"
 _BROKER_SOURCES = BROKER_SOURCE_NAMES
 _ATTRIBUTION_SQL = attribution_statements()
 
-# Domestic = the listing resolved to a Czech obec. The admin hierarchy is derived
-# from `geom` by a BEFORE trigger, so a foreign pin lands outside every CZ boundary
-# and all three of region/okres/obec stay NULL (verified: 0 of the 38,197
-# obec-less attributed listings carry a region_id). Matches the split
-# docs/design/media-integrity-architecture.md §Q4 already committed the platform
-# to, and the guard broker_region_type_stats applies at refresh time — one
-# definition of "foreign", not three.
-_DOMESTIC = "l.obec_id IS NOT NULL"
+# Domestic = the listing resolved to a Czech obec. The resolver only ever writes a
+# RÚIAN obec, so a foreign pin lands outside every CZ boundary and `listing_location`
+# carries no obec for it (migration 501; the legacy geom-derived hierarchy went in
+# 508). Matches the split docs/design/media-integrity-architecture.md §Q4 already
+# committed the platform to, and the guard broker_region_type_stats applies at
+# refresh time — one definition of "foreign", not three.
+_DOMESTIC = "ll.obec_kod IS NOT NULL"
 
 # --- Firm resolution (global; %(free)s / %(franchise)s are text[] params). ---
 
@@ -206,6 +205,7 @@ lst AS (
       AND l.is_active AND l.last_seen_at > now() - interval '7 days') AS cz_apc,
     min(l.first_seen_at) AS fseen, max(l.last_seen_at) AS lseen
   FROM listings l JOIN broker_identities bi ON bi.id = l.broker_identity_id
+  LEFT JOIN listing_location ll ON ll.listing_id = l.id
   WHERE bi.broker_id IS NOT NULL {bscope}
   GROUP BY bi.broker_id
 ),

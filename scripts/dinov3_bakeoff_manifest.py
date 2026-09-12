@@ -159,10 +159,11 @@ _P1B_SAMPLE_SQL = """
 # ids). Positives only — a 'negative' cell says the image is not that tag, which
 # defines no population. The sealed exam is excluded through the shared anti-join.
 _LABELLED_IMAGES_SQL = f"""
-    SELECT l.image_id, l.tag_id, i.listing_id, li.obec_id
+    SELECT l.image_id, l.tag_id, i.listing_id, ll.obec_kod AS obec_id
     FROM image_tag_labels l
     JOIN images i ON i.id = l.image_id
     JOIN listings li ON li.id = i.listing_id
+    LEFT JOIN listing_location ll ON ll.listing_id = li.id
     WHERE l.state = 'positive'
       AND l.source = ANY(%(sources)s::text[])
       AND l.tag_id = ANY(%(tag_ids)s::bigint[])
@@ -193,10 +194,11 @@ _CANARY_SQL = """
 """
 
 _IMAGE_META_SQL = """
-    SELECT i.id, i.storage_path, i.phash, i.listing_id, li.obec_id, t.render_score,
-           t.logical_tag
+    SELECT i.id, i.storage_path, i.phash, i.listing_id, ll.obec_kod AS obec_id,
+           t.render_score, t.logical_tag
     FROM images i
     LEFT JOIN listings li ON li.id = i.listing_id
+    LEFT JOIN listing_location ll ON ll.listing_id = li.id
     LEFT JOIN image_clip_tags t ON t.image_id = i.id
     WHERE i.id = ANY(%(ids)s::bigint[])
 """

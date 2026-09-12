@@ -112,8 +112,7 @@ def raw_yaml() -> dict[str, Any]:
 
 @pytest.fixture(scope="module")
 def claims() -> dict[str, list[Claim]]:
-    return _by_id(fx.listing("bezrealitky", fx.BEZREALITKY, native="1037096",
-                             lat=50.1092, lon=14.4749))
+    return _by_id(fx.listing("bezrealitky", fx.BEZREALITKY, native="1037096"))
 
 
 def test_the_contract_version_is_pinned(contract: contracts.PortalContract) -> None:
@@ -227,10 +226,10 @@ def test_a_statutory_city_obvod_never_becomes_the_town() -> None:
     carrying the obvod resolves to nothing — a coverage hole that reads as a portal with no
     town. The fold is identity on every real town name."""
     obvod = _by_id(fx.listing("bezrealitky", _live_query_shape(city="Praha 8"),
-                              native="1037096", lat=50.1092, lon=14.4749))
+                              native="1037096"))
     assert obvod[TOWN_ENTRY_ID][0].value_text == "Praha"
     plain = _by_id(fx.listing("bezrealitky", _live_query_shape(city="Frýdek-Místek"),
-                              native="1037096", lat=49.68, lon=18.35))
+                              native="1037096"))
     assert plain[TOWN_ENTRY_ID][0].value_text == "Frýdek-Místek"
 
 
@@ -238,15 +237,14 @@ def test_the_country_is_the_tail_of_the_live_address_line() -> None:
     """The one entry the recon-era shared fixture cannot exercise: it carries the pre-W0
     key `addressUserInput`, while the live query asks for `addressInput`. The claim VALUE is
     the ISO code, never the portal's spelling."""
-    live = _by_id(fx.listing("bezrealitky", _live_query_shape(), native="989482",
-                             lat=50.1092, lon=14.4749))
+    live = _by_id(fx.listing("bezrealitky", _live_query_shape(), native="989482"))
     assert live["bzr.det.country"][0].value_text == "CZ"
     assert live["bzr.det.country"][0].claim_type == "country"
     # "foreign is a determination, never a default": a tail that is not a country at all
     # claims nothing rather than defaulting to CZ.
     czechless = _by_id(fx.listing(
         "bezrealitky", _live_query_shape(addressInput="Davídkova 655/31, Libeň, Praha"),
-        native="1037096", lat=50.1092, lon=14.4749))
+        native="1037096"))
     assert "bzr.det.country" not in czechless
     assert "addressInput" not in fx.BEZREALITKY, (
         "the shared fixture now carries the live key — re-bless bezrealitky@2.json")
@@ -279,8 +277,7 @@ def test_the_portals_own_pin_is_claimed_off_the_contracts_pointer() -> None:
     """§6.4's licence rail, on this portal's own pin. The Mapy inventory used to veto it
     row-by-row; with the geocoder gone, `advert.gps{lat,lng}` — the pointer the contract
     names — is first-party by construction and there is nothing left to veto."""
-    found = _by_id(fx.listing("bezrealitky", fx.BEZREALITKY, native="1037096",
-                              lat=50.1092, lon=14.4749))
+    found = _by_id(fx.listing("bezrealitky", fx.BEZREALITKY, native="1037096"))
     assert "bzr.det.gps" in found
     assert found[TOWN_ENTRY_ID][0].value_text == "Praha"
 

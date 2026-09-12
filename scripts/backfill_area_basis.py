@@ -47,8 +47,8 @@ different project. This is exactly why any land gate must keep OR-ing on
 
 Writes NOTHING but `listings.area_basis`. That column is in `_LISTING_FIELDS`
 and NOT in `_HASH_FIELDS`, so this appends ZERO `listing_snapshots` rows — and
-neither trigger on `listings` fires, both being `UPDATE OF geom` / `UPDATE OF
-geom, obec_id, category_main, category_type`. It also does not touch
+no trigger on `listings` fires, the two geo-derivation triggers having gone with
+the columns they wrote (migration 508). It also does not touch
 `dirty_properties`: the singleton rollup in `scraper/db.py` does not mirror
 `area_basis` onto `properties` at all (all 686,291 rows are NULL there), so
 there is nothing for a property recompute to pick up.

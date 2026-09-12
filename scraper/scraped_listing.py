@@ -41,11 +41,15 @@ _HASH_FIELDS: tuple[str, ...] = (
 )
 
 # The ScrapedListing fields that map 1:1 onto `listings` columns (a subset of
-# scraper.db.LISTING_COLUMNS — sreality-only locality ids are left NULL).
+# scraper.db.LISTING_COLUMNS). W4-c removed the place columns from that table, so
+# `locality`/`district`/`street`/`house_number`/`zip` are NOT here any more: they
+# survive on the contract below as parsed portal evidence (and, for locality and
+# district, as content-hash inputs — see _HASH_FIELDS), not as columns. A
+# listing's location is `listing_location`, resolved from the portal payload.
 _LISTING_FIELDS: tuple[str, ...] = (
     "category_main", "category_type", "price_czk", "price_unit", "area_m2",
     "area_basis",
-    "disposition", "locality", "district", "street", "house_number", "zip",
+    "disposition",
     "floor", "total_floors",
     "has_balcony", "has_parking", "has_lift", "building_type", "condition",
     "energy_rating", "estate_area", "usable_area", "garden_area",
@@ -75,13 +79,18 @@ class ScrapedListing:
     disposition: str | None = None
     locality: str | None = None
     district: str | None = None
-    # Best-effort street name (the dedup engine's street_key input); extracted,
-    # not portal-structured, so it stays out of the content hash. house_number
-    # / zip are structured where a portal carries them (bezrealitky today) — the
-    # DB columns + LISTING_COLUMNS already exist; the contract just gains a slot.
+    # Best-effort street name, extracted (not portal-structured), so it stays out
+    # of the content hash. house_number / zip are structured where a portal
+    # carries them (bezrealitky today). None of the three is a `listings` column
+    # after W4-c: they are the parser's reading of the page, kept on the contract
+    # as evidence beside raw_json, and the address a listing HAS is whatever the
+    # resolver wrote to listing_location.
     street: str | None = None
     house_number: str | None = None
     zip: str | None = None
+    # The portal's own pin, when its page publishes one. Not a column either
+    # (W4-c dropped listings.geom); it rides raw_json as the coordinate claim
+    # the resolver arbitrates under location_data.claims_common.
     lat: float | None = None
     lon: float | None = None
     floor: int | None = None
@@ -136,6 +145,4 @@ class ScrapedListing:
         first-sight non-sreality row — NULL, not a synthetic negative."""
         row: dict[str, Any] = {k: getattr(self, k) for k in _LISTING_FIELDS}
         row["sreality_id"] = sreality_id
-        row["lon"] = self.lon
-        row["lat"] = self.lat
         return row

@@ -80,10 +80,9 @@ BLURRED_LABEL = "regional"
 PRECISE_LABEL = "accurate"
 
 
-def claims(raw_json: dict, native: str, *, lat: float | None = None,
-           lon: float | None = None) -> dict:
+def claims(raw_json: dict, native: str) -> dict:
     """One payload row through the real hourly extractor, keyed by extractor id."""
-    row = fx.listing("mmreality", raw_json, native=native, lat=lat, lon=lon)
+    row = fx.listing("mmreality", raw_json, native=native)
     result = extract_listing(row, fx.entries_for("mmreality"),
                              max_value_bytes=DEFAULT_MAX_CLAIM_VALUE_BYTES)
     found: dict = {}
@@ -99,7 +98,7 @@ def from_body(path: Path, native: str) -> dict:
     blob = dict(extract_property(path.read_text(encoding="utf-8", errors="replace"),
                                  native))
     point = blob.get("point") or {}
-    return claims(blob, native, lat=point.get("latitude"), lon=point.get("longitude"))
+    return claims(blob, native)
 
 
 def regression_row() -> dict:
@@ -226,7 +225,7 @@ def test_the_pinned_regression_row_yields_six_of_the_seven_entries_including_the
     fixture-diff gate scores. Non-vacuity: everything but the street must fire, and 951845
     genuinely publishes no `/street` key."""
     doc = regression_row()
-    found = claims(doc["raw_json"], "951845", lat=doc["lat"], lon=doc["lon"])
+    found = claims(doc["raw_json"], "951845")
 
     assert set(found) == ENTRY_IDS - {"mm.det.street"}
 
@@ -246,7 +245,7 @@ def test_the_kolin_payload_row_fires_all_seven_and_separates_the_admin_names():
     """`claim_intake_fixtures.MMREALITY_ACCURATE` — the row where obec, okres and část
     obce genuinely differ, so a reader crossed onto the wrong pointer cannot pass, and the
     one committed payload that carries `/street`."""
-    found = claims(fx.MMREALITY_ACCURATE, "123456", lat=50.0296123456, lon=15.7712123456)
+    found = claims(fx.MMREALITY_ACCURATE, "123456")
 
     assert set(found) == ENTRY_IDS
     assert found[TOWN_ENTRY].value_text == "Kolín"
@@ -303,7 +302,7 @@ def test_the_town_extracts_from_every_committed_fixture(fixture: str, native: st
         found = claims(getattr(fx, fixture.split(".", 1)[1]), native)
     else:
         doc = json.loads((_ROOT / fixture).read_text(encoding="utf-8"))
-        found = claims(doc["raw_json"], native, lat=doc["lat"], lon=doc["lon"])
+        found = claims(doc["raw_json"], native)
     assert TOWN_ENTRY in found, f"{fixture}: the mandatory town entry claimed nothing"
     assert found[TOWN_ENTRY].value_text == town
 
@@ -317,7 +316,7 @@ def test_the_payload_pin_is_licensed_by_the_contracts_pointer_not_by_a_stamp():
     mmreality@2 had parked the entry on the archived lane, where the hourly pass emitted no
     coordinate at all; reading the pin off the payload is what put it back."""
     doc = regression_row()
-    found = claims(doc["raw_json"], "951845", lat=doc["lat"], lon=doc["lon"])
+    found = claims(doc["raw_json"], "951845")
     assert "mm.det.point" in found
     assert COORDINATE_RULES["mmreality"].substrate == "payload"
     assert coordinate_verdict("mmreality", "geocode").admitted is True

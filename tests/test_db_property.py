@@ -106,10 +106,15 @@ def test_new_listing_creates_singleton(monkeypatch):
     ins = _find(conn.executed, "INSERT INTO properties")
     assert ins is not None
     # The singleton must carry the FULL display payload at creation, not just
-    # structural columns — otherwise the Browse card has no city/condition until
-    # the next full recompute (portal inserts never enter the dirty drain, so
-    # that's up to ~24h). Guards against the column list being trimmed again.
-    assert "locality" in ins[0] and "condition" in ins[0]
+    # structural columns — otherwise the Browse card has no condition until the
+    # next full recompute (portal inserts never enter the dirty drain, so that's
+    # up to ~24h). Guards against the column list being trimmed again. PLACE is
+    # the one thing it does NOT carry: W4-c dropped every location column from
+    # `properties`, and a property's place is its representative listing's row in
+    # `listing_location`.
+    assert "condition" in ins[0]
+    for gone in ("locality", "district", "geom", "obec_id", "ku_id"):
+        assert gone not in ins[0], f"singleton insert still writes properties.{gone}"
     link = _find(conn.executed, "UPDATE listings SET property_id =")
     # Keyed on the surrogate (8001), NOT the sreality_id (555).
     assert link is not None and link[1] == (42, 8001)
@@ -133,8 +138,10 @@ def test_linked_listing_refreshes_via_rollup(monkeypatch):
     roll = _find(conn.executed, "UPDATE properties p SET")
     assert roll is not None
     # The singleton rollup keeps the display payload in sync on re-fetch, keyed on
-    # the surrogate (l.id = 8002).
-    assert "locality" in roll[0] and "condition" in roll[0]
+    # the surrogate (l.id = 8002) — and, since W4-c, mirrors no place column.
+    assert "condition" in roll[0]
+    for gone in ("locality", "district", "geom", "obec_id", "ku_id"):
+        assert gone not in roll[0], f"inline rollup still writes properties.{gone}"
     assert roll[1] == (8002,)
     assert _find(conn.executed, "INSERT INTO properties") is None
     assert _find(conn.executed, "SELECT p.id FROM properties p") is None
@@ -487,7 +494,8 @@ def test_scraped_listing_content_hash_is_stable_and_price_sensitive():
 def test_scraped_listing_to_row_maps_fields():
     row = _listing(disposition="2+kk", lat=50.0, lon=14.4).to_row(-7)
     assert row["sreality_id"] == -7
-    assert row["lat"] == 50.0 and row["lon"] == 14.4
+    # W4-c: the pin stays on the contract as parsed evidence, never as a column.
+    assert "lat" not in row and "lon" not in row
     assert row["disposition"] == "2+kk"
     assert row["price_czk"] == 20000
     # sreality-only locality ids aren't carried; upsert_listing defaults them.

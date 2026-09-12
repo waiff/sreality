@@ -215,51 +215,6 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_r2_constraints.yml"
     },
     {
-      "filename": "apply_r2_maintenance_indexes.yml",
-      "name": "Apply R2 maintenance-walker indexes",
-      "description": "R2 read cutover: rebuilds the five `listings` partial indexes the enrichment walkers page through (geocode candidates, street_name_key, both geo_cell_key arms, source+active+street) onto the surrogate `id`, then drops the legacy sreality_id-keyed twins. Post-Gate-2 a NULL sreality_id makes a listing invisible to every one of those walkers, so geocoding / street resolution / geo_cell keying would silently stop for exactly the new rows.",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "dry_run",
-          "description": "Report index state and exit",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        },
-        {
-          "name": "keep_legacy",
-          "description": "Build replacements but keep the legacy indexes",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_SESSION_URL",
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "apply-r2-maintenance-indexes",
-      "cancelInProgress": false,
-      "timeoutMinutes": 120,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/apply_r2_maintenance_indexes.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_r2_maintenance_indexes.yml"
-    },
-    {
       "filename": "apply_r2_phase_d_prep.yml",
       "name": "Apply R2 Phase D prep (NOT NULL relax, small PK swaps, listings indexes)",
       "description": "Phase D of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 5, steps 2-5). Drops NOT NULL on every R2_CARRIERS legacy column still enforcing it, swaps estimation_cohort_entries's PK onto (estimation_run_id, listing_id), and pre-builds the two indexes + id NOT NULL that Gate 1's PK swap on `listings` itself will need. All additive/reversible — no writer-deploy dependency (see scripts/apply_r2_phase_d_prep.py's docstring for why dirty_broker_listings is NOT included here).",
@@ -423,55 +378,6 @@
       "permissions": "contents: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_area_basis.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_area_basis.yml"
-    },
-    {
-      "filename": "backfill_bazos_street_locality.yml",
-      "name": "Backfill bazos street + locality",
-      "description": "One-off, dispatch-only backfill. Persists `street` + `locality` on active bazos listings that are missing either: re-parses each from its already-staged detail HTML (portal_raw_pages, NO re-fetch of bazos) with the current parser — the one that surfaces the extracted street on ScrapedListing and carries the PR #406 locality fix — and fills the columns in place. Runs the parser with NO geocoder, so there is zero Mapy.cz spend and geom is untouched. Populating `street` is what makes bazos rows eligible for the street+disposition dedup engine. Idempotent + resumable (each row stamped raw_json.street_locality_backfill); rerun until \"pending=0\". NOT a portal ingest workflow, so it carries no `# portal:` tag.",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "limit",
-          "description": "Max listings processed per run",
-          "required": false,
-          "type": "string",
-          "default": "40000",
-          "options": null
-        },
-        {
-          "name": "max_seconds",
-          "description": "Wall-clock budget in seconds (blank = no budget)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "dry_run",
-          "description": "Report the pending count and exit without writing",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "backfill-bazos-street-locality",
-      "cancelInProgress": false,
-      "timeoutMinutes": 90,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_bazos_street_locality.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_bazos_street_locality.yml"
     },
     {
       "filename": "backfill_child_listing_ids.yml",
@@ -691,80 +597,6 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_mmreality_areas.yml"
     },
     {
-      "filename": "backfill_portal_streets.yml",
-      "name": "Backfill portal streets",
-      "description": "One-off, dispatch-only backfill. Re-derives listings.street (+ house_number / zip for bezrealitky) on existing idnes / maxima / remax / bezrealitky / bazos rows from data ALREADY stored (locality, raw_json, or the existing street), via the shared scraper.street helper — NO re-fetch, NO LLM, NO Mapy spend. street/house_number/zip are out of the content hash so NO snapshot is written. Idempotent + resumable (each row stamped raw_json.portal_street_backfill); rerun until \"pending=0\". A changed-street row enqueues its property so the */5 recompute propagates the group-best street to properties.street. NOT a portal ingest workflow, so it carries no `# portal:` tag.",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "source",
-          "description": "Limit to one portal (blank = all)",
-          "required": false,
-          "type": "choice",
-          "default": "",
-          "options": [
-            "",
-            "sreality",
-            "idnes",
-            "maxima",
-            "remax",
-            "bezrealitky",
-            "bazos",
-            "realitymix"
-          ]
-        },
-        {
-          "name": "limit",
-          "description": "Max listings processed per source per run",
-          "required": false,
-          "type": "string",
-          "default": "40000",
-          "options": null
-        },
-        {
-          "name": "max_seconds",
-          "description": "Wall-clock budget in seconds (blank = no budget)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "include_inactive",
-          "description": "process INACTIVE rows too (the dedup street pass includes them)",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        },
-        {
-          "name": "dry_run",
-          "description": "Report the pending counts and exit without writing",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "backfill-portal-streets",
-      "cancelInProgress": false,
-      "timeoutMinutes": 90,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_portal_streets.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_portal_streets.yml"
-    },
-    {
       "filename": "backfill_render_score.yml",
       "name": "Backfill image render_score (one-shot, from stored embeddings)",
       "description": "One-shot corrective for migration 239: the clip_tag backfill skips already-tagged images, so images tagged before the render axis shipped have render_score NULL (the listing-detail render badge is hidden and the byt render exclusion is inert on them). This re-scores the render-vs-photo axis from each image's STORED CLIP embedding — no R2 download, no image re-inference — so it is fast (vector dot products). Horizontally sharded into 4 jobs (image_id %% 4). Resumable + idempotent (a scored row drops out of the render_score-IS-NULL partial index, migration 240). Dispatch-only. Secret: SUPABASE_DB_URL (no R2 needed). NOT a portal ingest (portal: null).",
@@ -801,66 +633,6 @@
       "permissions": "contents: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_render_score.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_render_score.yml"
-    },
-    {
-      "filename": "backfill_street_name_key.yml",
-      "name": "Backfill street_name_key",
-      "description": "One-off, dispatch-only backfill. Fills listings.street_name_key (migration 256 — the dedup street-group NAME key) on existing rows by re-deriving it from the stored `street` via the shared scraper.street.street_name_key helper — NO re-fetch, NO LLM, NO Mapy spend. street_name_key is out of the content hash so NO snapshot is written. Idempotent + resumable (keyset over the still-NULL tail, backed by the migration 256 partial index); rerun until \"pending=none\". Going forward the column is stamped at every street-write path (scraper.db), so this is the one-time fill for old rows. NOT a portal ingest workflow, so it carries no `# portal:` tag, and its OWN concurrency group (a shared group would let another job starve it).",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "all",
-          "description": "Re-derive every street-bearing row (default = only NULL keys)",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        },
-        {
-          "name": "limit",
-          "description": "Max rows processed this run (blank = all)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "max_seconds",
-          "description": "Wall-clock budget in seconds (blank = no budget)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "dry_run",
-          "description": "Report whether rows are pending and exit",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "backfill-street-name-key",
-      "cancelInProgress": false,
-      "timeoutMinutes": 90,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_street_name_key.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_street_name_key.yml"
     },
     {
       "filename": "backfill_unit_price_masquerade.yml",
@@ -1435,7 +1207,7 @@
         },
         {
           "name": "region_ids",
-          "description": "Comma-separated locality_region_id list (empty = all regions)",
+          "description": "Comma-separated kraj_kod list (empty = all regions)",
           "required": false,
           "type": "string",
           "default": "",
@@ -2891,52 +2663,6 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/index_walk.yml"
     },
     {
-      "filename": "ingest_address_points.yml",
-      "name": "Jobs - ingest RÚIAN address points",
-      "description": "Refreshes the local `address_points` mirror from the ČÚZK RÚIAN \"Adresní místa\" whole-country structured CSV (~3M points, monthly). Full replace each run. Feeds the coordinate->street resolver (resolve_coord_streets.yml). Implements docs/design/street-coverage-ruian.md. NOT a portal ingest workflow — no `# portal:` tag.",
-      "portal": null,
-      "manual": true,
-      "schedules": [
-        {
-          "cron": "30 3 3 * *",
-          "human": "30 3 3 * *"
-        }
-      ],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "date",
-          "description": "strukt_ADR file date YYYYMMDD (blank = latest month-end)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "dry_run",
-          "description": "Download + parse, report counts, write nothing",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "ingest-address-points",
-      "cancelInProgress": false,
-      "timeoutMinutes": 60,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/ingest_address_points.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/ingest_address_points.yml"
-    },
-    {
       "filename": "ingest_boundaries.yml",
       "name": "Data: ingest admin boundaries",
       "description": "Loads ČÚZK RÚIAN administrative-unit polygons (kraj / okres / obec / KÚ) into the admin_boundaries table. Manual-only; boundaries change rarely (a few municipal mergers / cadastral re-alignments per year), so there is no cron. Re-run when ČÚZK publishes a notable update or when the operator wants to bring in newly-created units.",
@@ -2966,14 +2692,6 @@
         {
           "name": "dry_run",
           "description": "Parse and validate only; do not write to DB.",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        },
-        {
-          "name": "skip_spatial_join",
-          "description": "Skip the listings -> sreality_id population step.",
           "required": false,
           "type": "boolean",
           "default": "false",
@@ -3995,124 +3713,6 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/recompute_property_stats.yml"
     },
     {
-      "filename": "reconcile_source_url.yml",
-      "name": "Reconcile source_url (sreality page URLs from typed columns)",
-      "description": "Dispatch-only reconciler for the portal-URL contract (docs/design/portal-listing-url.md). sreality was the only portal whose page URL was not a stored fact — the parser never emitted `listings.source_url` and the SPA rebuilt one from display labels that 404. W0 made every fresh detail fetch emit it; this job fills the ~232k rows written before that and, run weekly in dry-run with `report_check`, is the standing drift detector (`outbound_url_parity` in pipeline_check_results). It reads NO raw_json: every 404-critical segment is a typed column, and the locality is slugified through the same assembler ingest uses (`scraper.sreality_url`). Canonical string or nothing — never a placeholder. Writes only `listings.source_url`, which is out of every content hash (zero snapshots, no trigger). DML, not DDL; waits for a read-model rebuild gap and replays a batch that loses a lock fight with the hourly MF recompute. Two gates stop a write pass: an unknown category_sub_cb on a row seen in the last 7 days (the codebook moved), and `conformance` > 0 finding any 404 on a live sample. NOT a portal ingest workflow, so it carries no `# portal:` tag.",
-      "portal": null,
-      "manual": true,
-      "schedules": [
-        {
-          "cron": "41 5 * * 1",
-          "human": "41 5 * * 1"
-        }
-      ],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "write",
-          "description": "Actually write. Left false, this only reports what would change.",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        },
-        {
-          "name": "clear",
-          "description": "Also NULL a stored sreality URL whose derivation now declines (read would_clear first)",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        },
-        {
-          "name": "conformance",
-          "description": "Pre-flight HEAD-probe this many random active rows (0 = skip); any 404 blocks a write",
-          "required": false,
-          "type": "string",
-          "default": "0",
-          "options": null
-        },
-        {
-          "name": "report_check",
-          "description": "Persist one pipeline_check_results row (outbound_url_parity)",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        },
-        {
-          "name": "limit",
-          "description": "Max listings examined this run (blank = the whole table)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "after",
-          "description": "Resume from this listings.id cursor (exclusive)",
-          "required": false,
-          "type": "string",
-          "default": "0",
-          "options": null
-        },
-        {
-          "name": "batch_size",
-          "description": "Rows per keyset page",
-          "required": false,
-          "type": "string",
-          "default": "5000",
-          "options": null
-        },
-        {
-          "name": "max_seconds",
-          "description": "Wall-clock budget in seconds (blank = no budget)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "rebuild_wait_seconds",
-          "description": "How long to wait for a read-model rebuild gap before starting anyway",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "ignore_rebuild",
-          "description": "Start immediately, without waiting for a rebuild gap at all",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        },
-        {
-          "name": "verbose",
-          "description": "Log every individual write (DEBUG)",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "reconcile-source-url",
-      "cancelInProgress": false,
-      "timeoutMinutes": 120,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/reconcile_source_url.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/reconcile_source_url.yml"
-    },
-    {
       "filename": "reextract.yml",
       "name": "Data: re-extract a field from stored pages",
       "description": "Replays the CURRENT parser over already-stored `portal_raw_pages` HTML to recover a field a parser silently stopped extracting. No re-fetch, no LLM, no new secrets — and it repairs INACTIVE listings too, which a re-fetch structurally cannot.",
@@ -4328,106 +3928,6 @@
       "permissions": "contents: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/resolve_brokers_full.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/resolve_brokers_full.yml"
-    },
-    {
-      "filename": "resolve_coord_streets.yml",
-      "name": "Jobs - resolve streets from coordinates (RÚIAN)",
-      "description": "Resolves listings.street from a trustworthy per-listing coordinate via the RÚIAN address_points mirror — exact-match only, never a town-center geocode (docs/design/street-coverage-ruian.md). Run `-f calibrate=true` first to pick the tolerance from ground truth. NOT a portal ingest workflow — no `# portal:` tag.",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "write",
-          "description": "DANGER: actually write streets (default is dry-run; see W0 item 0a)",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        },
-        {
-          "name": "calibrate",
-          "description": "Report same-street distance distribution and exit",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        },
-        {
-          "name": "tolerance",
-          "description": "Max metres from coordinate to the RÚIAN point (15 = 99.2% precision, calibrated)",
-          "required": false,
-          "type": "string",
-          "default": "15",
-          "options": null
-        },
-        {
-          "name": "min_share",
-          "description": "Coord shared by >= N active listings is a town-center pin (rejected)",
-          "required": false,
-          "type": "string",
-          "default": "4",
-          "options": null
-        },
-        {
-          "name": "source",
-          "description": "Limit to one portal (blank = all eligible)",
-          "required": false,
-          "type": "choice",
-          "default": "",
-          "options": [
-            "",
-            "sreality",
-            "idnes",
-            "remax",
-            "bezrealitky",
-            "maxima",
-            "mmreality",
-            "ceskereality",
-            "realitymix"
-          ]
-        },
-        {
-          "name": "dry_run",
-          "description": "Match but write nothing",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        },
-        {
-          "name": "force_rescan",
-          "description": "Re-attempt rows already stamped at the current revision (recovery pass)",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "sreality-property-maintenance",
-      "cancelInProgress": false,
-      "timeoutMinutes": 60,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/resolve_coord_streets.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/resolve_coord_streets.yml"
     },
     {
       "filename": "resplit_mixed.yml",
@@ -5327,49 +4827,6 @@
       "permissions": "contents: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/sreality_image_remaster.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/sreality_image_remaster.yml"
-    },
-    {
-      "filename": "street_key_parity.yml",
-      "name": "Monitoring: street_name_key parity",
-      "description": "Weekly sampled drift check: stored listings.street_name_key == the Python normalizer (scraper.street.street_name_key). Guards the STALE-key class the migration-264 presence CHECK cannot see — a normalizer edit without the required backfill_street_name_key.yml all=true re-key, or a writer stamping a wrong value. Silent drift costs dedup recall (the --dirty scoped load matches peers by the STORED key). A mismatch FAILS the run, which monitor_workflow_failures records and the Health page lists — zero new alerting plumbing. NOT a portal ingest workflow, so no `# portal:` tag.",
-      "portal": null,
-      "manual": true,
-      "schedules": [
-        {
-          "cron": "40 4 * * 3",
-          "human": "40 4 * * 3"
-        }
-      ],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "recent",
-          "description": "Newest street-bearing rows to check",
-          "required": false,
-          "type": "string",
-          "default": "2500",
-          "options": null
-        },
-        {
-          "name": "random",
-          "description": "Block-random street-bearing rows to check",
-          "required": false,
-          "type": "string",
-          "default": "2500",
-          "options": null
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "street-key-parity",
-      "cancelInProgress": false,
-      "timeoutMinutes": 15,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/street_key_parity.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/street_key_parity.yml"
     },
     {
       "filename": "tag_model.yml",

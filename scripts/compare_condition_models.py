@@ -77,7 +77,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=40)
     parser.add_argument(
         "--region-ids", default="",
-        help="Comma-separated locality_region_id filter (empty = all).",
+        help="Comma-separated listing_location.kraj_kod filter (empty = all).",
     )
     parser.add_argument("--n-images", type=int, default=0)
     parser.add_argument(
@@ -289,10 +289,11 @@ def _select_baseline_scored(
         "  ON ls.sreality_id = cs.sreality_id "
         " AND ls.snapshot_id = cs.snapshot_id "
         "JOIN listings l ON l.sreality_id = cs.sreality_id "
+        "LEFT JOIN listing_location ll ON ll.listing_id = l.id "
         "WHERE ( cs.model = %s OR cs.model LIKE %s ) "
         "  AND l.is_active = true "
-        "  AND ( cardinality(%s::int[]) = 0 "
-        "        OR l.locality_region_id = ANY(%s::int[]) ) "
+        "  AND ( cardinality(%s::bigint[]) = 0 "
+        "        OR ll.kraj_kod = ANY(%s::bigint[]) ) "
         "ORDER BY cs.created_at DESC "
         "LIMIT %s"
     )

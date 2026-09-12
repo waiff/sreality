@@ -74,13 +74,13 @@ def test_only_the_three_payload_portals_lift_a_pin_out_of_raw_json():
 
 @pytest.mark.parametrize("source,payload,why", CLASS_E_CASES)
 def test_class_e_rows_never_produce_a_coordinate_claim(source, payload, why):
-    row = listing(source, payload, lat=49.5, lon=15.5)
+    row = listing(source, payload)
     assert "coordinate" not in claims_by_type(extract_listing(row, entries_for(source))), why
 
 
 @pytest.mark.parametrize("source,payload,why", CLASS_E_CASES)
 def test_class_e_rows_never_produce_an_ephemeral_claim(source, payload, why):
-    row = listing(source, payload, lat=49.5, lon=15.5)
+    row = listing(source, payload)
     result = extract_listing(row, entries_for(source))
     for claim in result.claims:
         assert claim.licence_class in EMITTABLE_LICENCE_CLASSES, (why, claim.extractor_id)
@@ -96,7 +96,7 @@ def test_no_payload_can_make_the_extractor_emit_ephemeral_display_only():
     hostile = dict(SREALITY_POST_CUTOVER)
     hostile["coords"] = {"source": "page", "licence_class": "ephemeral_display_only",
                          "confidence": "ephemeral_display_only"}
-    result = extract_listing(listing("sreality", hostile, lat=50.0, lon=14.0),
+    result = extract_listing(listing("sreality", hostile),
                              entries_for("sreality"))
     assert result.claims
     assert {c.licence_class for c in result.claims} == {"portal"}
@@ -138,7 +138,7 @@ def test_the_three_payload_portals_still_publish_their_own_pin(source, payload):
 
     These three name a `raw_json` pointer in their contract, so a first-party pin still
     becomes a coordinate claim — the ladder refuses class E, not everything."""
-    row = listing(source, payload, lat=50.0, lon=14.4)
+    row = listing(source, payload)
     assert "coordinate" in claims_by_type(extract_listing(row, entries_for(source)))
 
 
