@@ -416,6 +416,7 @@ def test_every_point_keyed_question_binds_one_array_shape():
     here is a runtime error on the first coordinate the drain resolves."""
     for sql, expected in (
         (resolve_db._CONTAINING_OBEC_SQL, 5),      # 3 arrays + a version per branch
+        (resolve_db._NEAREST_OBEC_SQL, 9),         # 3 arrays + (version, box, radius) x2
         (resolve_db._IN_CZ_SQL, 4),                # 3 arrays + a version
     ):
         assert sql.count("%s") == expected, _flat(sql)
@@ -424,13 +425,39 @@ def test_every_point_keyed_question_binds_one_array_shape():
         assert f"self.{name}_bulk([(lat, lon)]).get(0)" in single
 
 
-# `test_the_geography_predicates_carry_an_index_usable_bbox` and
-# `test_nearest_obec_prefers_the_subdivided_pieces_like_containment_does` went with W2-a:
-# `nearest_obec_within` and `cast_obce_for_point` were the only `ST_DWithin(geom::geography,
-# ...)` shapes in the resolver, and both questions are deleted (the sliver fallback and the
-# ČástObce point lookup — FILL takes the quarter off the bound entity's chain instead). The
-# `&&`-bbox lesson they carried is recorded in `resolve_db`'s header; the pip-preference half
-# of it survives above, on `_CONTAINING_OBEC_SQL`.
+def test_the_geography_predicate_carries_an_index_usable_bbox():
+    """`ST_DWithin(geom::geography, ...)` is a FILTER against a geometry GiST index, so the
+    unbounded form scanned everything: 6,752 ms/point for `nearest_obec_within`, every
+    boundary row cast to geography, the state polygon included. The `&&` box is the Index
+    Cond that bounds it; 60,000 under-estimates metres per degree at CZ latitudes, so the box
+    strictly CONTAINS the geodesic circle and cannot hide a row the exact `ST_DWithin` kept.
+
+    (`cast_obce_for_point` carried the same lesson and went with the question in W2-a — FILL
+    takes the quarter off the bound entity's own chain now.)"""
+    flat = _flat(resolve_db._NEAREST_OBEC_SQL)
+    assert "&& st_expand(" in flat, flat
+    assert "/ 60000.0)" in flat, flat
+    assert "st_dwithin(" in flat, flat
+
+
+def test_nearest_obec_prefers_the_subdivided_pieces_like_containment_does():
+    """The pip pieces TILE the authoritative polygon, so the minimum distance over them IS
+    the distance to the polygon — and they are small enough that the geography cast is cheap
+    (2.95 ms/point vs 6,752). The authoritative branch stays for a partially loaded boundary
+    pack, exactly as in `_CONTAINING_OBEC_SQL`."""
+    flat = _flat(resolve_db._NEAREST_OBEC_SQL)
+    assert "g.purpose = 'pip'" in flat
+    assert "g.purpose = 'authoritative'" in flat
+    assert flat.count("union all") == 1
+
+
+def test_the_sliver_fallback_is_asked_lazily_not_warmed():
+    """It is reached only when `containing_obec` missed — ~1 % of listings — so warming it
+    would run a two-branch geography lateral for all 250 of a slice's points to answer the
+    two or three that ask. The other two point-keyed questions ARE warmed."""
+    warm = inspect.getsource(resolve_db.warm_points)
+    assert "containing_obec_bulk" in warm and "in_czechia_polygon_bulk" in warm
+    assert "nearest_obec" not in warm
 
 
 def test_the_registry_lookup_index_migration_ships_as_a_file():

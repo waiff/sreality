@@ -86,7 +86,7 @@ def resolve(
 
     # ---- 4. CHECK.
     verdict = step_check.check(
-        ordered, normalized, filled, position, graded.granularity,
+        ordered, normalized, binding, filled, position, graded.granularity,
         registry=ctx.registry, rank=ctx.granularity_rank,
     )
     granularity = verdict.granularity or graded.granularity
@@ -117,10 +117,6 @@ def resolve(
         uncertainty_radius_m=step_grade.radius_m(granularity),
         country_status=verdict.country_status,
         disputed=verdict.disputed,
-        # The pin-collision epoch was deleted with the engine that classified it, so nothing
-        # measures pin sharing today. 0 is the honest reading of "not measured"; a producer
-        # comes back with the dedup rebuild or not at all.
-        pin_shared_by_n=0,
         resolver_version=resolver_version,
         claim_set_hash=serialize.claim_set_hash(ordered),
         registry_version=registry_version,

@@ -9,7 +9,10 @@ Three reasons ship:
 
 * `pin_outside_obec` — the published pin is not inside the town the row names. The pin is
   KEPT (throwing it away loses the only position we have) but the granularity drops to the
-  admin level, because the address identity is the half that is now in doubt.
+  admin level, because the address identity is the half that is now in doubt. It is asked
+  only when the town came from a CLAIM: on BIND's two pin-derived rungs (the reverse geocode
+  and the sliver fallback) the comparison is circular — the pin is where the town came from —
+  and a sliver is an edge case of the polygon, never a disagreement.
 * `pin_outside_cz` — the pin is outside the Czech state polygon while the row names a Czech
   town. Almost always a geocoder artifact; the town is the trustworthy half.
 * `country_conflict` — text says another country, the registry says Czech. 3 of the 5
@@ -34,6 +37,7 @@ from collections.abc import Sequence
 
 from location_data.resolver.normalize import normalize_match_key
 from location_data.resolver.types import (
+    Binding,
     Claim,
     Fill,
     GranularityRank,
@@ -184,6 +188,7 @@ def country_codes(
 def check(
     claims: Sequence[Claim],
     normalized: dict[int, NormalizedClaim],
+    binding: Binding,
     filled: Fill,
     position: Position,
     granularity: str,
@@ -224,7 +229,7 @@ def check(
         return Verdict("cz", "CZ", disputed="country_conflict", granularity=granularity)
     if in_cz is False:
         return Verdict("cz", "CZ", disputed="pin_outside_cz", granularity=granularity)
-    if pin is not None:
+    if pin is not None and not binding.pin_derived:
         covering = registry.containing_obec(*pin)
         if covering is None or covering.code != filled.obec_kod:
             # Keep the pin — it is the only position we have — but say so, and drop to the

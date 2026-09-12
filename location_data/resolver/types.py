@@ -6,7 +6,7 @@ polygon covers this point?") and the two implementations answer them from psycop
 (`resolve_db.SqlRegistryView`) or from fixtures (`tests/location_data/mini_mirror.py`).
 That is what keeps BIND → FILL → GRADE → CHECK runnable with no database.
 
-The protocol is EIGHT questions (W2-a, down from fifteen). Four went with the engines they
+The protocol is NINE questions (W2-a, down from fifteen). Four went with the engines they
 served — parcels (the rung was unreachable), the pin-collision clusters, the boundary
 distance and the ČástObce point lookup — and two folded into `admin_chain`, which now
 returns the unit itself ahead of its ancestors so "give me this unit" and "give me its
@@ -214,7 +214,14 @@ class RegistryView(Protocol):
 
     def containing_obec(self, lat: float, lon: float) -> AdminUnit | None:
         """`ST_Covers` against the AUTHORITATIVE polygon (never the simplified one). It does
-        double duty: BIND's last rung and CHECK's pin-inside-the-town comparison."""
+        double duty: BIND's reverse-geocode rung and CHECK's pin-inside-the-town test."""
+
+    def nearest_obec_within(
+        self, lat: float, lon: float, max_m: float
+    ) -> tuple[AdminUnit, float] | None:
+        """The sliver fallback: the obec whose polygon comes closest to a point that is
+        inside none of them, with its distance, or None past `max_m`. BIND's LAST rung — it
+        is what keeps a border pin from having no town at all."""
 
     def in_czechia_polygon(self, lat: float, lon: float) -> bool | None:
         """Containment in the RÚIAN state polygon. `None` = not loaded, so no signal."""
@@ -266,6 +273,13 @@ class Binding:
     @property
     def bound(self) -> bool:
         return self.target_kind != "none"
+
+    @property
+    def pin_derived(self) -> bool:
+        """The town came from the PIN (reverse geocode, or the sliver fallback) rather than
+        from a claim. CHECK's pin-inside-the-town comparison is circular on such a row — the
+        pin IS where the town came from — so it is not made."""
+        return self.rung in ("R7", "R8")
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,7 +374,6 @@ class Resolution:
     uncertainty_radius_m: float
     country_status: str
     disputed: str | None
-    pin_shared_by_n: int
     resolver_version: str
     claim_set_hash: str
     registry_version: str

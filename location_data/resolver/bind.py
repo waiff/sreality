@@ -64,7 +64,9 @@ AMBIGUITY_MARGIN = 5.0
 
 # Qualifiers that settle a tie by evidence weaker than a validated name: the answer is
 # served, but never above `low` confidence.
-LOW_CONFIDENCE_QUALIFIERS = frozenset({"coordinate_tiebreak_imprecise", "postal_town"})
+LOW_CONFIDENCE_QUALIFIERS = frozenset(
+    {"coordinate_tiebreak_imprecise", "postal_town", "pip_nearest_within_n_m"}
+)
 # Qualifiers that ARE independent fields agreeing with the entity, and therefore count
 # toward GRADE's agreement tally. A coordinate tie-break is deliberately not one of them.
 AGREEMENT_QUALIFIERS = frozenset(
@@ -72,7 +74,14 @@ AGREEMENT_QUALIFIERS = frozenset(
 )
 
 _RUNG_BASE_SCORE = {"R0": 100.0, "R1": 90.0, "R2": 70.0, "R3": 60.0, "R4": 45.0,
-                    "R6": 35.0, "R7": 25.0}
+                    "R6": 35.0, "R7": 25.0, "R8": 15.0}
+
+# The sliver tolerance, in metres. It was `location_constants.pip_sliver_tolerance_m` (250 m,
+# the value migration 289 had already chosen for the legacy admin-geo trigger) and moves here
+# as a code constant because W2-b drops that table. A pin this far outside every obec polygon
+# is a boundary artifact — a rounded coordinate, a simplified polygon edge, a river bank — not
+# a listing in the sea.
+PIP_SLIVER_TOLERANCE_M = 250.0
 
 # Beyond this the registry point and the portal pin are telling different stories: the
 # registry point stays the position and GRADE caps the confidence.
@@ -568,6 +577,13 @@ def bind(
 
     # ---- R7: coordinate only. DERIVED, never a claim (§3.6.3) — it can only produce an
     # admin-level candidate, never a street or house number.
+    #
+    # ---- R8: the SLIVER fallback, and the last rung there is. A pin inside no obec polygon
+    # at all but within `PIP_SLIVER_TOLERANCE_M` of one is a boundary artifact, not a listing
+    # with no town: the honest answer is that obec at LOW confidence. Rule 25's guarantee is a
+    # town for every Czech listing, and this is the rung that keeps a border pin from being
+    # the exception. It is NOT a dispute — `disputed` stays NULL, because nothing about the
+    # row contradicts anything else about it; the pin is simply at the edge.
     if not out and constraints.pin is not None:
         covering = registry.containing_obec(*constraints.pin)
         if covering is not None:
@@ -577,6 +593,18 @@ def bind(
                     claim_ids=_ids(constraints, "coordinate"), qualifiers=("reverse_derived",),
                 )
             )
+        else:
+            nearest = registry.nearest_obec_within(
+                *constraints.pin, PIP_SLIVER_TOLERANCE_M
+            )
+            if nearest is not None:
+                out.append(
+                    _admin_candidate(
+                        nearest[0], rung="R8", granularity="obec",
+                        claim_ids=_ids(constraints, "coordinate"),
+                        qualifiers=("pip_nearest_within_n_m",),
+                    )
+                )
 
     if not out:
         return Binding(target_kind="none", granularity="unknown", rung="none"), constraints
@@ -671,9 +699,10 @@ def _admin_candidate(
 ) -> _Candidate:
     agreed = ["obec"] if granularity == "obec" else ["cast_obce", "obec"]
     agreed.extend(q for q in qualifiers if q in AGREEMENT_QUALIFIERS)
-    if rung in ("R6", "R7"):
-        # PSČ alone or a bare reverse-geocode: the obec is an INFERENCE, not a field that
-        # agreed with anything, so it may not count toward the agreement tally.
+    if rung in ("R6", "R7", "R8"):
+        # PSČ alone, a bare reverse-geocode or the sliver fallback: the obec is an
+        # INFERENCE, not a field that agreed with anything, so it may not count toward the
+        # agreement tally.
         agreed = []
     return _Candidate(
         rung=rung, score=_RUNG_BASE_SCORE[rung] + 5.0 * len(qualifiers),

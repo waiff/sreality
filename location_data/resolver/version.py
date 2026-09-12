@@ -17,7 +17,7 @@ from __future__ import annotations
 #      portal's spelling.
 # v3 = 2026-09-11: the PSČ-only bind goes through the qualifier ladder; the imprecise
 #      coordinate tie-break and the post-town tie-break are served at `low`.
-# v4 = W2-a: nine stages become four (bind → fill → grade → check) writing the 27-column
+# v4 = W2-a: nine stages become four (bind → fill → grade → check) writing the 26-column
 #      `listing_location`. Survivorship, the uncertainty policy, the contradiction ledger,
 #      the pin-collision epoch and the parcel rung are gone; the hierarchy is a pure join
 #      off the bound entity, so `cast_obce` now lands on every branch and not only on PIP.

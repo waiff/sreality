@@ -166,7 +166,11 @@ component is slimmed twice — each wave rewrites one component and slims its st
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and
   36 property columns dropped.
   **W2-a shipped** (migration **501**, additive — creates `listing_location` and touches nothing
-  else). Nine stages → four: `bind.py` (the rungs, the homonym ladder, the pin election),
+  else). **26 columns, not 27**: `pin_shared_by_n` came out because its producer was the
+  pin-collision epoch this wave deletes, so it would have shipped writing 0 on every row — the
+  shared-pin count is a read-time aggregate (`count(*) over (partition by geom)`) W3 computes in
+  the `browse_list` rebuild. Nine stages → four: `bind.py` (the rungs, the homonym ladder, the
+  250 m sliver fallback as the last rung so a border pin still gets its town, the pin election),
   `fill.py` (the hierarchy as ONE `admin_chain` join off the bound entity — so `cast_obce` now
   lands on every branch, not only on PIP), `grade.py` (agreement count → confidence, a per-level
   radius dict carrying migration 383's own v1 numbers) and `check.py` (country + one `disputed`

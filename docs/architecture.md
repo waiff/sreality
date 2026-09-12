@@ -1923,17 +1923,24 @@ on disk stayed valid and no corpus re-insert happened.
 
 **The resolver is FOUR STEPS and one answer table** (W2-a, migration 501). `listing_location`
 is a **rebuildable cache**, never a store of record — truncating it is always legal and the
-`dirty_locations` drain is its only writer — and it is **27 columns**: the listing, one `geom`,
+`dirty_locations` drain is its only writer — and it is **26 columns**: the listing, one `geom`,
 nine names (country, kraj, okres, obec, část obce, street, čp, čo, PSČ), six RÚIAN codes, three
-grade columns (`match_confidence`, `granularity`, `uncertainty_radius_m`, all NOT NULL), three
-status columns (`country_status` NOT NULL, `disputed`, `pin_shared_by_n`) and four housekeeping
-ones (`resolver_version`, `resolved_at`, `claim_set_hash`, `registry_version`). The steps:
+grade columns (`match_confidence`, `granularity`, `uncertainty_radius_m`, all NOT NULL), two
+status columns (`country_status` NOT NULL, `disputed`) and four housekeeping ones
+(`resolver_version`, `resolved_at`, `claim_set_hash`, `registry_version`). `pin_shared_by_n` was
+the 27th and came out for the reason rule 25 exists: its producer was the pin-collision epoch,
+so the column would have shipped writing 0 on every row forever. The shared-pin count is a
+read-time aggregate (`count(*) over (partition by geom)`) and W3 computes it in the `browse_list`
+rebuild, where the map is the thing that needs it. The steps:
 
 * **BIND** (`bind.py`) picks the finest RÚIAN entity the claims justify — a portal registry key,
   obec + street + čp/čo, a street inside the constraining obec, an obec/část obce by name, a PSČ
-  set, or the pin's containing obec — resolving homonyms locally inside the constraining parent
-  (PSČ, okres/kraj, cadastral territory, qualifier, and only then the coordinate as a tie-break).
-  It also elects the pin, by DECLARED QUALITY and only then by claim id.
+  set, the pin's containing obec, and last the nearest obec within the 250 m sliver tolerance —
+  resolving homonyms locally inside the constraining parent (PSČ, okres/kraj, cadastral
+  territory, qualifier, and only then the coordinate as a tie-break). That last rung is what
+  keeps a border pin from having no town at all, which rule 25 does not allow: it answers at
+  `low` confidence and is NOT a dispute, because a polygon edge is not a disagreement. It also
+  elects the pin, by DECLARED QUALITY and only then by claim id.
 * **FILL** (`fill.py`) joins the hierarchy off the bound ids: ONE `admin_chain` read returning the
   unit itself ahead of its ancestors. Administrative names and codes are ALWAYS the registry's own
   spelling; only street / čp / čo / PSČ may fall back to a claim, preserve-if-null, and only an
@@ -1944,8 +1951,10 @@ ones (`resolver_version`, `resolved_at`, `claim_set_hash`, `registry_version`). 
   carrying migration 383's own v1 numbers.
 * **CHECK** (`check.py`) decides the country and whether the row disagrees with itself. `disputed`
   is ONE nullable text column whose value IS the reason: `pin_outside_obec` (the pin is kept, the
-  granularity drops to the admin level), `pin_outside_cz`, `country_conflict`. **Foreign is a
-  determination, never a default** — no Czech town and no foreign signal is `undetermined`.
+  granularity drops to the admin level; asked only when the town came from a CLAIM, since on
+  BIND's two pin-derived rungs the comparison is circular), `pin_outside_cz`, `country_conflict`.
+  **Foreign is a determination, never a default** — no Czech town and no foreign signal is
+  `undetermined`.
 
 It is a **pure function**: no wall clock, no network, no randomness, enforced by an AST scan, so a
 row replays byte-identically from its inputs and the THREE version ids stamped on it —
@@ -1965,7 +1974,7 @@ migration 384's SQL functions, and the property-grain projection — which was a
 winner's row (migration 493 measured `p.kraj_kod` and `w.kraj_kod` agreeing on 0 of 637,381 rows),
 nothing outside one pg_cron statement read it, and it was the drain's only cross-listing write and
 therefore the stated reason the lane could not run `--workers`. The registry protocol went from
-fifteen query kinds to eight and the drain's write path from seven statements per slice to one.
+fifteen query kinds to nine and the drain's write path from seven statements per slice to one.
 `listing_location_current` and `property_location_current` are **frozen and readable** until W2-b
 cuts their five remaining readers and drops them; nothing writes them any more.
 

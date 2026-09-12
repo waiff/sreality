@@ -159,16 +159,44 @@ def test_a_coordinate_only_listing_gets_its_town_from_point_in_polygon():
     assert resolution.granularity == "obec"
 
 
-def test_a_point_outside_every_polygon_keeps_its_coordinate_and_says_nothing_else():
-    """No sliver fallback any more (`nearest_obec_within` went with the boundary reads). The
-    honest answer for a pin in no obec is the pin and `unknown`, never a guessed town."""
+def test_a_pin_just_outside_a_polygon_still_gets_that_town_at_low_confidence():
+    """BIND's LAST rung. A pin 30 m outside every obec polygon is a boundary artifact — a
+    rounded coordinate, a simplified edge, a river bank — not a listing with no town, and
+    rule 25 does not allow a Czech listing to have none. `PIP_SLIVER_TOLERANCE_M` is 250 m,
+    the value `location_constants.pip_sliver_tolerance_m` carried before W2-b drops it.
+
+    It is NOT a dispute: nothing about the row contradicts anything else about it."""
     mirror = mm.default_mirror()
-    mirror.obec_polygons = {}
-    resolution = _resolve([mm.claim(1, "coordinate", lat=49.5000, lon=15.5000)], mirror=mirror)
-    assert (resolution.lat, resolution.lon) == (49.5000, 15.5000)
+    # Bořislav's circle, shrunk so the pin below sits ~30 m outside it.
+    mirror.obec_polygons = {567639: (50.5794, 13.9200, 100.0)}
+    resolution = _resolve([mm.claim(1, "coordinate", lat=50.58057, lon=13.92000)], mirror=mirror)
+    assert resolution.obec_kod == 567639
+    assert resolution.match_confidence == "low"
+    assert resolution.disputed is None
+    assert resolution.granularity == "obec"
+    assert (resolution.lat, resolution.lon) == (50.58057, 13.92000)
+
+
+def test_a_pin_far_outside_every_polygon_binds_nothing():
+    """The tolerance is a tolerance, not a nearest-neighbour search: 5 km out there is no
+    boundary artifact to forgive, and inventing a town would be worse than saying nothing."""
+    mirror = mm.default_mirror()
+    mirror.obec_polygons = {567639: (50.5794, 13.9200, 100.0)}
+    resolution = _resolve([mm.claim(1, "coordinate", lat=50.62450, lon=13.92000)], mirror=mirror)
     assert resolution.obec_kod is None
     assert resolution.granularity == "unknown"
-    assert resolution.country_status == "cz"  # inside the state polygon
+    assert (resolution.lat, resolution.lon) == (50.62450, 13.92000)
+    # The TOWN is undetermined; the COUNTRY is not, because the pin is demonstrably inside
+    # the state polygon and throwing that away would be inventing an absence.
+    assert resolution.country_status == "cz"
+    mirror.cz_polygon = None
+    mirror.obec_polygons = {}
+    away = _resolve([mm.claim(1, "coordinate", lat=41.9, lon=12.5)], mirror=mirror)
+    assert away.country_status == "undetermined"
+
+
+def test_the_sliver_tolerance_is_the_constant_migration_289_chose():
+    assert step_bind.PIP_SLIVER_TOLERANCE_M == 250.0
 
 
 # ------------------------------------------------------- čp / čo / PSČ: preserve-if-null

@@ -457,9 +457,11 @@ def test_the_cached_view_answers_every_question_the_protocol_declares():
     assert not missing, missing
 
 
-def test_the_protocol_is_eight_questions():
-    """Fifteen query kinds became eight. Four went with the engines they served, two folded
-    into `admin_chain`. A question added back is a round trip per listing."""
+def test_the_protocol_is_nine_questions():
+    """Fifteen query kinds became nine. Three went with the engines they served, one with an
+    unreachable rung, one with the epoch, and two folded into `admin_chain`. A question added
+    back is a round trip per listing — and `nearest_obec_within` earns its one because it is
+    BIND's last rung, the thing that keeps a border pin from having no town (rule 25)."""
     from location_data.resolver.types import RegistryView
 
     declared = {
@@ -470,8 +472,9 @@ def test_the_protocol_is_eight_questions():
         "address_point", "address_points_by_number", "streets_in_obec",
         "admin_units_by_name", "admin_chain", "admin_chain_by_code",
         "obec_codes_for_psc", "containing_obec", "in_czechia_polygon",
+        "nearest_obec_within",
     }
-    for gone in ("parcels", "nearest_obec_within", "distance_to_admin_boundary_m",
+    for gone in ("parcels", "distance_to_admin_boundary_m",
                  "cast_obce_for_point", "cast_obce_extent_m", "admin_unit",
                  "admin_unit_by_code"):
         assert gone not in declared, gone

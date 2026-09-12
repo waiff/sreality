@@ -257,6 +257,49 @@ SELECT p.idx, c.*
   ) c
 """
 
+# `ST_DWithin(g.geom::geography, ...)` cannot use `ruian_aug_geom_gist (geom)` — the cast is
+# not the indexed expression — so this used to read and cast EVERY boundary row whose bbox
+# reached the point, the state and kraj polygons included: 6,752 ms per point on the live
+# mirror. Two changes, both semantics-preserving:
+#
+# * `g.geom && ST_Expand(pt, %s / 60000.0)` is an Index Cond on that GiST index. 60,000 is a
+#   deliberate under-estimate of metres per degree of longitude (69,900 at CZ's northernmost
+#   51.1°), so the box strictly CONTAINS the geodesic circle and cannot hide a row the exact
+#   `ST_DWithin` would have kept.
+# * the subdivided `pip` pieces preferred over the raw polygon, same two-branch form and same
+#   reason as `containing_obec`: the pieces TILE the polygon, so the minimum distance over
+#   them is the distance to the polygon — and with the small pieces the geography cast is
+#   cheap. All 6,258 obce carry pip rows today, so the authoritative branch is the
+#   partially-loaded-pack fallback only. Measured: 2.95 ms/point.
+#
+# It is reached only when `containing_obec` misses (~1 % of listings), which is also why it is
+# NOT in `warm_points`: warming it would run this lateral for all 250 of a slice's points to
+# answer the two or three that ask.
+_NEAREST_OBEC_BRANCH = f"""
+    SELECT {_ADMIN_COLUMNS}, NULL::text, 1, NULL::char(5)[],
+           ST_Distance(g.geom::geography, {_PT}::geography) AS d
+      FROM ruian_admin_unit_geometries g
+      JOIN ruian_admin_units u ON u.id = g.unit_id
+     WHERE g.registry_version_id = %s
+       AND g.purpose = '{{purpose}}'
+       AND u.level = 'obec'
+       AND g.geom && ST_Expand({_PT}, %s / 60000.0)
+       AND ST_DWithin(g.geom::geography, {_PT}::geography, %s)
+     ORDER BY 13
+     LIMIT 1
+"""
+
+_NEAREST_OBEC_SQL = f"""
+SELECT p.idx, c.*
+  FROM {_POINTS}
+  CROSS JOIN LATERAL (
+    ({_NEAREST_OBEC_BRANCH.format(purpose="pip")})
+    UNION ALL
+    ({_NEAREST_OBEC_BRANCH.format(purpose="authoritative")})
+    LIMIT 1
+  ) c
+"""
+
 _IN_CZ_SQL = f"""
 SELECT p.idx, ST_Covers(cz.geom, {_PT})
   FROM {_POINTS}
@@ -276,7 +319,7 @@ INSERT INTO listing_location AS ll (
     street_name, house_number_cp, house_number_co, psc,
     kraj_kod, okres_kod, obec_kod, cast_obce_kod, ulice_kod, ruian_adm_kod,
     match_confidence, granularity, uncertainty_radius_m,
-    country_status, disputed, pin_shared_by_n,
+    country_status, disputed,
     resolver_version, resolved_at, claim_set_hash, registry_version)
 VALUES (
     %(listing_id)s,
@@ -288,7 +331,7 @@ VALUES (
     %(ruian_adm_kod)s,
     %(match_confidence)s::match_confidence, %(granularity)s::location_granularity,
     %(uncertainty_radius_m)s,
-    %(country_status)s::country_status, %(disputed)s, %(pin_shared_by_n)s,
+    %(country_status)s::country_status, %(disputed)s,
     %(resolver_version)s, now(), decode(%(claim_set_hash)s, 'hex'), %(registry_version)s)
 ON CONFLICT (listing_id) DO UPDATE SET
     geom = EXCLUDED.geom, country_code = EXCLUDED.country_code,
@@ -302,7 +345,6 @@ ON CONFLICT (listing_id) DO UPDATE SET
     match_confidence = EXCLUDED.match_confidence, granularity = EXCLUDED.granularity,
     uncertainty_radius_m = EXCLUDED.uncertainty_radius_m,
     country_status = EXCLUDED.country_status, disputed = EXCLUDED.disputed,
-    pin_shared_by_n = EXCLUDED.pin_shared_by_n,
     resolver_version = EXCLUDED.resolver_version, resolved_at = now(),
     claim_set_hash = EXCLUDED.claim_set_hash, registry_version = EXCLUDED.registry_version
 WHERE ll.listing_id = EXCLUDED.listing_id
@@ -510,6 +552,20 @@ class SqlRegistryView:
     def containing_obec(self, lat: float, lon: float) -> AdminUnit | None:
         return self.containing_obec_bulk([(lat, lon)]).get(0)
 
+    def nearest_obec_within(
+        self, lat: float, lon: float, max_m: float
+    ) -> tuple[AdminUnit, float] | None:
+        """BIND's last rung, asked per point rather than per slice: it is reached only when
+        `containing_obec` missed, which is ~1 % of listings."""
+        idx, lats, lons = _point_arrays([(lat, lon)])
+        rows = self._rows(
+            "nearest_obec_within", _NEAREST_OBEC_SQL,
+            (idx, lats, lons, self._version, max_m, max_m, self._version, max_m, max_m),
+        )
+        if not rows:
+            return None
+        return _admin_unit(rows[0][1:]), float(rows[0][13])
+
     def in_czechia_polygon_bulk(self, points: Sequence[tuple[float, float]]) -> dict[int, bool]:
         if not points:
             return {}
@@ -681,6 +737,14 @@ class CachedRegistryView:
     def containing_obec(self, lat: float, lon: float) -> AdminUnit | None:
         return self._cache.get(
             ("containing_obec", lat, lon), lambda: self._inner.containing_obec(lat, lon)
+        )
+
+    def nearest_obec_within(
+        self, lat: float, lon: float, max_m: float
+    ) -> tuple[AdminUnit, float] | None:
+        return self._cache.get(
+            ("nearest_obec_within", lat, lon, max_m),
+            lambda: self._inner.nearest_obec_within(lat, lon, max_m),
         )
 
     def in_czechia_polygon(self, lat: float, lon: float) -> bool | None:

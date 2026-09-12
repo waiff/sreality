@@ -1,4 +1,4 @@
-"""The answer row: 27 columns, and the list is the contract.
+"""The answer row: 26 columns, and the list is the contract.
 
 `listing_location` (migration 501) replaces `listing_location_current`'s 81. The test that
 matters is the one below: the builder's keys and the migration's columns are the SAME list,
@@ -22,7 +22,7 @@ MIGRATION = (
     / "501_location_w2a_listing_location.sql"
 )
 
-# The 27, spelled out. Transcribing them is the point: this list and the DDL are two
+# The 26, spelled out. Transcribing them is the point: this list and the DDL are two
 # independent statements of the same contract, and they are compared below.
 EXPECTED_COLUMNS = (
     "listing_id",
@@ -31,7 +31,7 @@ EXPECTED_COLUMNS = (
     "street_name", "house_number_cp", "house_number_co", "psc",
     "kraj_kod", "okres_kod", "obec_kod", "cast_obce_kod", "ulice_kod", "ruian_adm_kod",
     "match_confidence", "granularity", "uncertainty_radius_m",
-    "country_status", "disputed", "pin_shared_by_n",
+    "country_status", "disputed",
     "resolver_version", "resolved_at", "claim_set_hash", "registry_version",
 )
 
@@ -74,9 +74,9 @@ def _address_claims():
     ]
 
 
-def test_the_table_is_exactly_these_twenty_seven_columns():
+def test_the_table_is_exactly_these_twenty_six_columns():
     assert _ddl_columns() == list(EXPECTED_COLUMNS)
-    assert len(EXPECTED_COLUMNS) == 27
+    assert len(EXPECTED_COLUMNS) == 26
     assert list(projection.LISTING_LOCATION_COLUMNS) == list(EXPECTED_COLUMNS)
 
 
@@ -90,9 +90,15 @@ def test_the_builder_binds_every_column_the_statement_does_not_default():
 
 
 def test_no_column_the_wave_deleted_came_back():
-    """The 54 that went. Four classes: provably NULL on every row, reachable through a join,
-    derivable at read, or the output of an engine this wave deletes."""
+    """The 55 that went. Four classes: provably NULL on every row, reachable through a join,
+    derivable at read, or the output of an engine this wave deletes.
+
+    `pin_shared_by_n` is the one that came out LATE, and for the sharpest version of the
+    rule: its producer was the pin-collision epoch, so the column would have shipped writing
+    0 on every row forever. The shared-pin count is a read-time aggregate
+    (`count(*) over (partition by geom)`) and W3 computes it where the map needs it."""
     gone = {
+        "pin_shared_by_n",
         "source", "property_id", "resolution_id", "policy_version", "registry_version_id",
         "is_cz", "display_label", "display_path", "place_search_text", "admin_path",
         "position_source", "blur_evidence", "radius_semantics", "position_licence_class",
@@ -129,7 +135,7 @@ def test_the_grade_columns_are_never_null():
     for claims in (_address_claims(), []):
         row = _row(claims)
         for column in ("granularity", "match_confidence", "uncertainty_radius_m",
-                       "country_status", "pin_shared_by_n"):
+                       "country_status"):
             assert row[column] is not None, column
 
 

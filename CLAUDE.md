@@ -252,7 +252,7 @@ incident history: `docs/architecture.md` § Architectural rules.
     until W2-b drops them. `location_v2.<feature>` (`serving_flags.py`, missing = OFF) picks the path;
     `serving_contracts.py` declares the floor. Granularity compares by RANK; never back-port into `listings`.
 25. **Location: one store, one lane, eleven claim types, no flags; every location PR deletes at least as much
-    as it adds.** One answer table (`listing_location`, 27 fields) by ONE four-step resolver (bind → fill →
+    as it adds.** One answer table (`listing_location`, 26 fields) by ONE four-step resolver (bind → fill →
     grade → check), one hourly intake lane over the payload + page body, ≤ 1 contract entry per claim type + a
     reader, **town entry mandatory and live**. Invariant: **every active listing has a row, every active Czech
     listing has a town** (`location_town_coverage` red until zero; foreign is a determination, never a

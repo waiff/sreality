@@ -15,14 +15,14 @@
 -- beside it and swapping once is strictly cheaper and reversible until the
 -- drop.
 --
--- THE 27 COLUMNS, and why each is here:
+-- THE 26 COLUMNS, and why each is here:
 --   1  identity     listing_id
 --   1  position     geom (NULL when the listing has no usable coordinate)
 --   9  names        country_code, kraj/okres/obec/cast_obce name, street_name,
 --                   house_number_cp, house_number_co, psc
 --   6  registry ids kraj/okres/obec/cast_obce/ulice kod + ruian_adm_kod
 --   3  grade        match_confidence, granularity, uncertainty_radius_m
---   3  status       country_status, disputed, pin_shared_by_n
+--   2  status       country_status, disputed
 --   4  housekeeping resolver_version, resolved_at, claim_set_hash,
 --                   registry_version
 --
@@ -36,6 +36,12 @@
 --     `*_unit_id` surrogates / momc/ku/pou/orp - producers deleted with the
 --     policy tables, the collision epoch and the contradiction ledger, or
 --     provably NULL on every row.
+--   * `pin_shared_by_n`. It was in the 27 the wave opened with, and it came out
+--     for the reason rule 25 exists: its producer WAS the pin-collision epoch,
+--     which this wave deletes, so the column would have shipped writing 0 on
+--     every row forever. The shared-pin count is a read-time aggregate
+--     (`count(*) over (partition by geom)`), and W3 computes it in the
+--     `browse_list` rebuild, where the map is the thing that needs it.
 --   * the licence rail as a COLUMN. It moves to the claim read: the resolver
 --     selects only claims with `licence_class IN ('portal','operator')`, so a
 --     Mapy-class coordinate can never reach a position at all. Pinned by
@@ -93,7 +99,6 @@ create table listing_location (
   country_status        country_status not null,
   disputed              text constraint listing_location_disputed_word
                           check (disputed is null or disputed ~ '^[a-z][a-z0-9_]*$'),
-  pin_shared_by_n       integer not null default 0,
 
   -- housekeeping. The three version inputs are what the sweep compares to
   -- decide a row is stale, and `claim_set_hash` is what says the inputs

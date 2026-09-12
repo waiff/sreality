@@ -11,8 +11,9 @@ W2-a shrank this file by more than half, and the deletions say what the wave did
 CONFIG fixtures are gone (`location_field_policy`, `location_uncertainty_policy`,
 `location_collision_policy`, `location_constants` — policy is code now), and so are the
 registry answers whose questions went with them (parcels, the pin clusters, the boundary
-distance, the nearest-obec sliver, the ČástObce point lookup). What is left is the EIGHT
-questions the protocol still declares.
+distance, the ČástObce point lookup). What is left is the NINE questions the protocol still
+declares — the sliver fallback among them, because rule 25 does not allow a border pin to
+have no town.
 """
 
 from __future__ import annotations
@@ -100,6 +101,19 @@ class MiniMirror:
                     (u for u in self.units if u.level == "obec" and u.code == code), None
                 )
         return None
+
+    def nearest_obec_within(
+        self, lat: float, lon: float, max_m: float
+    ) -> tuple[AdminUnit, float] | None:
+        best: tuple[AdminUnit, float] | None = None
+        for code, (clat, clon, radius) in sorted(self.obec_polygons.items()):
+            distance = max(0.0, haversine_m(lat, lon, clat, clon) - radius)
+            unit = next((u for u in self.units if u.level == "obec" and u.code == code), None)
+            if unit is None or distance > max_m:
+                continue
+            if best is None or distance < best[1]:
+                best = (unit, distance)
+        return best
 
     def in_czechia_polygon(self, lat: float, lon: float) -> bool | None:
         if self.cz_polygon is None:

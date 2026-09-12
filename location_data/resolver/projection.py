@@ -1,7 +1,7 @@
 """The `listing_location` row, and the column list that IS its contract.
 
-27 columns, down from 81. What went and why is in migration 501's header; the short version
-is that 54 of them were provably NULL, reachable through a join, derivable at read, or the
+26 columns, down from 81. What went and why is in migration 501's header; the short version
+is that 55 of them were provably NULL, reachable through a join, derivable at read, or the
 output of an engine this wave deletes. There is no property-grain twin any more:
 `property_location_current` was a verbatim copy of its winner's row (migration 493 measured
 `p.kraj_kod` and `w.kraj_kod` agreeing on 0 of 637,381 rows because the rollup IS the copy),
@@ -27,7 +27,7 @@ LISTING_LOCATION_COLUMNS: tuple[str, ...] = (
     "street_name", "house_number_cp", "house_number_co", "psc",
     "kraj_kod", "okres_kod", "obec_kod", "cast_obce_kod", "ulice_kod", "ruian_adm_kod",
     "match_confidence", "granularity", "uncertainty_radius_m",
-    "country_status", "disputed", "pin_shared_by_n",
+    "country_status", "disputed",
     "resolver_version", "resolved_at", "claim_set_hash", "registry_version",
 )
 
