@@ -45,7 +45,12 @@ if TYPE_CHECKING:
 # Bump a path's version when the MEANING of its SQL changes (a predicate, a rung, an
 # availability definition). It is part of the fingerprint, so every pair generated under the
 # old meaning lands in a different key space from the new one — never silently mixed.
-GENERATOR_VERSION: dict[str, str] = {"C": "c2"}
+#
+# c2 -> c3 (W2-b): the block key moved off the W1 projection onto `listing_location`. Same
+# column NAME, different table, written by a different resolver — the town a listing is
+# assigned, and whether it has one at all, can differ row by row. Pairs from before and
+# after must not share an `inputs_id`.
+GENERATOR_VERSION: dict[str, str] = {"C": "c3"}
 
 
 @dataclass(frozen=True)

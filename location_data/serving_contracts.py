@@ -18,8 +18,18 @@ Two §5.5.2 rows are deliberately NOT floors and so are not in `FEATURE_FLOORS`:
 * "property-grain aggregate" declares "as the listing rule for its grain" — it resolves to
   whichever listing-grain row it is aggregating (§5.5.3 rule 4), so it has no floor of its own.
 
-Nothing reads this table yet. It exists so that the first consumer flip (W6, gated by
-`serving_flags`) has a declared floor to assert against instead of inventing one inline.
+One consumer reads it today: path C's candidate generation asserts `dedup_path_c`
+(`toolkit/dedup_candidates.py`). The rest are declarations the W3 consumer flips will assert
+against instead of inventing a floor inline.
+
+W2-b removed four rows with the columns under them. `property_map_pin` and
+`property_card_location` gated on `property_location_current`'s rollup columns
+(`disagreement_flags`, `member_spread_m`, `winner_rule`) and that table is dropped — a
+property's location is its members' rows aggregated, per the grain rule above.
+`dedup_rung_0b` and `dedup_rung_0c` keyed on `stavebni_objekt_kod` and `parcela_id`, which
+the answer table does not carry: the building key was never loaded and the parcel rung was
+unreachable, so W2-a deleted the rung itself. A floor whose gate column does not exist is a
+floor nothing can evaluate.
 """
 
 from __future__ import annotations
@@ -59,7 +69,8 @@ class FeatureFloor:
 FEATURE_FLOORS: dict[str, FeatureFloor] = {
     "map_pin": FeatureFloor(
         "listing", "building", "high",
-        "renderable_as_point (which already carries pin_collision_ok + not disputed)",
+        "geom present and `disputed IS NULL` (the two predicates renderable_as_point "
+        "precomputed, minus the deleted pin-collision arm)",
     ),
     "map_circle": FeatureFloor("listing", "obec", ANY_CONFIDENCE, "—"),
     "radius_search": FeatureFloor(
@@ -70,35 +81,24 @@ FEATURE_FLOORS: dict[str, FeatureFloor] = {
     ),
     "admin_filter": FeatureFloor(
         "listing", "obec", ANY_CONFIDENCE,
-        "obec/okres/kraj; membership by admin_assignment_method §5.3.3(A)",
+        "obec/okres/kraj; membership by the bound registry code, never a portal id",
     ),
     "cast_obce_filter": FeatureFloor(
         "listing", "cast_obce_or_quarter", "medium", "address-point-set membership",
     ),
     "street_filter": FeatureFloor("listing", "street", "medium", "ulice_kod present"),
     "dedup_rung_0a": FeatureFloor("listing", "address_point", "high", "kod_adm key present"),
-    "dedup_rung_0b": FeatureFloor(
-        "listing", "building", "high",
-        "stavební objekt key present + coverage denominator published (§5.4.3)",
-    ),
-    "dedup_rung_0c": FeatureFloor(
-        "listing", "parcel", "high", "parcela key present; pozemek/auction/cadastral",
-    ),
     "dedup_tier_1": FeatureFloor(
         "listing", "street", "medium", "textual; ≥1 side portal-claimed house number",
     ),
-    "dedup_tier_2": FeatureFloor("listing", "street_segment", "medium", "geo; geo_blockable"),
+    "dedup_tier_2": FeatureFloor(
+        "listing", "street_segment", "medium",
+        "geo; geom present and the uncertainty radius inside the rung's tolerance",
+    ),
     # Not one of 05 §5.5.2's rows: the "same town" rung the dedup program's operator ruled on
     # 2026-09-10 (PROGRAM.md ledger, path C). Town = obec_kod; any confidence, because the
     # town is the one grain the input data is trusted at and a `low` obec is still an obec.
     "dedup_path_c": FeatureFloor("listing", "obec", ANY_CONFIDENCE, "town; obec_kod present"),
-    "property_map_pin": FeatureFloor(
-        "property", "building", "high",
-        "disagreement_flags = '{}' and member_spread_m ≤ f(r,r)",
-    ),
-    "property_card_location": FeatureFloor(
-        "property", "obec", ANY_CONFIDENCE, "shows winner_rule + spread when flagged",
-    ),
     "comparables_estimation": FeatureFloor(
         "listing", "street", "medium", "precision recorded in the estimation trace",
     ),

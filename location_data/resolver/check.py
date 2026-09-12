@@ -48,7 +48,7 @@ from location_data.resolver.types import (
 )
 
 # The ONE Czech bounding box (lon_min, lat_min, lon_max, lat_max). It was the single row in
-# `location_constants` and is a code constant now that the table is going. It is a TRIGGER,
+# `location_constants` and is a code constant now that the table is gone. It is a TRIGGER,
 # never a determination: the Wisła hotel sits 0.008° outside it.
 CZ_BBOX: tuple[float, float, float, float] = (12.0, 48.0, 19.0, 51.5)
 

@@ -47,7 +47,6 @@ const settingsItems: ReadonlyArray<MenuItem> = [
   { to: ROUTES.health.build(),   label: 'Health' },
   { to: ROUTES.costs.build(),    label: 'LLM Costs' },
   { to: ROUTES.locationQuality.build(), label: 'Location Quality' },
-  { to: ROUTES.locationCompare.build(), label: 'Location compare' },
   { to: ROUTES.scrapers.build(), label: 'Scrapers' },
   { to: ROUTES.settings.build(), label: 'General Settings' },
 ];

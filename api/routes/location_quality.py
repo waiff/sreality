@@ -1,29 +1,33 @@
-"""Location-quality dashboard + labelled samples + operator corrections
-(location program W1v — the FIRST consumer of the location serving projection).
+"""Location-quality dashboard + operator corrections — the consumer of
+`listing_location`, the location program's one answer table.
 
 Mounted under `/location/*`, admin-gated at the router (single-operator
-diagnostic surface). Reads go through `toolkit/location_quality.py` /
-`toolkit/location_labels.py` on the service-role connection — the location
-tables are RLS-on with anon/authenticated revoked, so this API is the only
-path the SPA has.
+diagnostic surface). Reads go through `toolkit/location_quality.py` on the
+service-role connection — the location tables are RLS-on with anon/authenticated
+revoked, so this API is the only path the SPA has.
 
 The corrections POST is a WRITE EXCEPTION in the toolkit sense: it appends an
-operator claim (`location_data/operator_corrections.py`, S7 rank 1) and then
+operator claim (`location_data/operator_corrections.py`, rank 1) and then
 resolves the listing synchronously so the response already carries the
-refreshed projection — 05 5.5.5 read-your-writes. If the synchronous resolve
+refreshed answer row — 05 5.5.5 read-your-writes. If the synchronous resolve
 fails, the unconditional dirty enqueue guarantees the */15 drain converges;
 the response says which happened.
+
+W2-b deleted two route families with the tables under them: the frozen
+labelled samples (`/sample/*` — old-vs-new precision scoring, and "new" is now
+the only system) and the dark old-vs-new compare bench (`/compare/*`, whose
+pg_cron cohort joined both dropped projections).
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from api import dependencies as deps
-from toolkit import location_compare, location_labels, location_quality
+from toolkit import location_quality
 
 router = APIRouter(
     prefix="/location", tags=["location"], dependencies=[Depends(deps.require_admin)]
@@ -71,52 +75,6 @@ def listing_inspector_by_native(
     return result
 
 
-@router.get("/sample/{source}")
-def sample_status(
-    source: str,
-    unlabelled_only: bool = False,
-    limit: int = 200,
-    offset: int = 0,
-    conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    _check_source(source)
-    sample = location_labels.current_sample(conn, source)
-    if sample is None:
-        return {"data": {"sample": None, "members": []}}
-    members = location_labels.sample_members(
-        conn, source, unlabelled_only=unlabelled_only, limit=limit, offset=offset
-    )
-    return {"data": {"sample": sample, "members": members}}
-
-
-class LabelsIn(BaseModel):
-    listing_id: int
-    labels: dict[str, Any] = Field(default_factory=dict)
-
-
-@router.post("/sample/{source}/labels")
-def save_labels(
-    source: str, body: LabelsIn, conn: Any = Depends(deps.get_db_conn)
-) -> dict[str, Any]:
-    _check_source(source)
-    try:
-        updated = location_labels.save_labels(conn, source, body.listing_id, body.labels)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if not updated:
-        raise HTTPException(
-            status_code=404,
-            detail=f"listing {body.listing_id} is not a member of the current"
-                   f" {source} sample (membership is frozen)",
-        )
-    return {"data": {"saved": True, "listing_id": body.listing_id}}
-
-
-@router.get("/sample/{source}/score")
-def score_sample(source: str, conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
-    return location_labels.score_sample(conn, _check_source(source))
-
-
 class CorrectionIn(BaseModel):
     listing_id: int
     claim_type: str
@@ -149,111 +107,3 @@ def submit_correction(
     result["resolved"] = oc.resolve_now(conn, body.listing_id)
     result["projection"] = oc.read_projection(conn, body.listing_id)
     return {"data": result}
-
-
-# ---------------------------------------------------------------------------
-# compare — the DARK old-vs-new review surface (location W6).
-#
-# The filter + map cutover is built dark and the operator approves it from a
-# side-by-side page scoped to a set of kraje (default Praha + Středočeský).
-# Read-only: no route here writes anything. All logic + SQL is in
-# toolkit/location_compare.py; these handlers only validate and map errors.
-# ---------------------------------------------------------------------------
-
-
-def _kraje(raw: str | None) -> list[int]:
-    try:
-        return location_compare.parse_kraje(raw)
-    except location_compare.CompareInputError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.get("/compare/scope")
-def compare_scope(
-    kraje: str | None = None, conn: Any = Depends(deps.get_db_conn)
-) -> dict[str, Any]:
-    return location_compare.scope(conn, _kraje(kraje))
-
-
-@router.get("/compare/units")
-def compare_units(
-    level: str,
-    parent_kod: int,
-    kraje: str | None = None,
-    conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    codes = _kraje(kraje)
-    try:
-        return location_compare.units(
-            conn, level=level, parent_kod=parent_kod, kraje=codes
-        )
-    except location_compare.CompareInputError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.get("/compare/unit")
-def compare_unit(
-    level: str,
-    code: int,
-    kraje: str | None = None,
-    limit: int = Query(200, ge=1, le=2000),
-    conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    codes = _kraje(kraje)
-    try:
-        return location_compare.unit_detail(
-            conn, level=level, code=code, kraje=codes, limit=limit
-        )
-    except location_compare.CompareInputError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.get("/compare/streets")
-def compare_streets(
-    obec_kod: int,
-    q: str | None = None,
-    limit: int = Query(20, ge=1, le=200),
-    conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    return location_compare.streets(conn, obec_kod=obec_kod, q=q, limit=limit)
-
-
-@router.get("/compare/map")
-def compare_map(
-    west: float,
-    south: float,
-    east: float,
-    north: float,
-    kraje: str | None = None,
-    limit: int = Query(5000, ge=1, le=20000),
-    conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    if south >= north or west >= east:
-        raise HTTPException(status_code=400, detail="bbox must be south<north, west<east")
-    return location_compare.map_rows(
-        conn,
-        west=west,
-        south=south,
-        east=east,
-        north=north,
-        kraje=_kraje(kraje),
-        limit=limit,
-    )
-
-
-@router.get("/compare/radius")
-def compare_radius(
-    lat: float,
-    lng: float,
-    radius_m: float,
-    kraje: str | None = None,
-    limit: int = Query(100, ge=1, le=1000),
-    conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    codes = _kraje(kraje)
-    try:
-        return location_compare.radius(
-            conn, lat=lat, lng=lng, radius_m=radius_m, kraje=codes, limit=limit
-        )
-    except location_compare.CompareInputError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc

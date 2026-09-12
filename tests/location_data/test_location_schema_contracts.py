@@ -19,30 +19,37 @@ Which A.2 check each test covers:
           -> test_enum_types_carry_the_canonical_vocabulary
              test_enum_casts_reference_declared_members
              test_granularity_rank_seeds_every_label_in_declaration_order
-             test_level_granularity_seeds_every_ruian_level
-             test_seed_literals_are_enum_members
+             test_the_bare_literal_seed_tables_are_dropped
   A.2 #4  no source file emits the string `portal_json`
           -> test_no_source_emits_portal_json
   A.2 #6  a new location_granularity value also touches location_granularity_rank
           -> test_granularity_rank_seeds_every_label_in_declaration_order
              test_granularity_alter_type_always_seeds_a_rank_row
-  A.2 #8  `pin_collision_class IS [NOT] NULL` appears nowhere
-          -> test_pin_collision_class_is_never_null_tested
-             test_pin_collision_class_vocabulary_is_not_null_default_normal
+  A.2 #8  `pin_collision_class IS [NOT] NULL` appears nowhere — RETIRED in W2-b
+          with the column: `listing_location` never had it, and naming a column
+          no table declares is a 42703 the CI SQL sweep catches directly
   01 0.4  enum ordinality never enters an index predicate, a CHECK or a stored
           generated column
           -> test_no_enum_ordinality_in_ddl
-  D3/05 P5 every grade axis a table declares is NOT NULL (a NULL reads as "no
-          gate" and fails open). Per table: `listing_location` declares four,
-          the two frozen projections six.
-          -> test_projections_declare_every_axis_not_null
+  D3/05 P5 every grade axis the answer table declares is NOT NULL (a NULL reads
+          as "no gate" and fails open) — `listing_location` declares four
+          -> test_the_answer_table_declares_every_axis_not_null
              test_the_answer_table_does_not_re_declare_a_dropped_axis
-  00 6.1  the three-artifact licensing guard ships whole
-          -> test_licence_guard_ships_all_three_artifacts
-  00 10.3 collision_epoch_id is inside the resolution's unique key
-          -> test_collision_epoch_is_in_the_resolution_identity
-  00 8    dispositions key on the version-free dedupe_key, not contradiction_id
-          -> test_dispositions_key_on_dedupe_key
+  00 6.1  the licence guard, now ONE artifact rather than three: the CHECKs went
+          with their relations and the rail is the resolver's claim read
+          -> test_the_licence_rail_is_the_claim_side_index
+  rule 25 the W1 projection and every resolver-side relation is dropped WHOLE
+          -> test_w2b_drops_the_old_projection_and_the_resolver_side_relations
+
+W2-b deleted the assertions whose objects are gone: the two projections' NOT NULL
+axes, the pin-collision-class vocabulary and its IS NULL ban, the three licence
+CHECKs (the rail moved upstream into the resolver's claim read — see migration
+501's header), `location_resolutions`' six-column UNIQUE, the contradiction
+tables' keys, and `location_level_granularity`'s seed. A.2 #2's seed check
+survives as `test_the_bare_literal_seed_tables_are_dropped`: both tables that
+seeded a closed vocabulary with bare literals are gone, so what is left to assert
+is that neither came back. The one per-label seed that stays is
+`location_granularity_rank`'s: dedup reads that table.
 
 Plus the project's own rule, which the design assumes but does not state: this
 Supabase project auto-GRANTs anon/authenticated on new tables, sequences AND
@@ -453,40 +460,16 @@ def test_granularity_alter_type_always_seeds_a_rank_row():
     )
 
 
-def test_level_granularity_seeds_every_ruian_level():
+def test_the_bare_literal_seed_tables_are_dropped():
+    """A.2 #2 wanted every closed-vocabulary seed spelled with enum members rather than
+    bare literals. Both tables that did so are gone: `location_claim_type_meta` (three
+    booleans per enum label that nothing consulted — migration 498) and
+    `location_uncertainty_policy` (four derivations of a radius that is a per-level
+    constant dict in `grade.py` now — migration 502). Nothing seeds a closed vocabulary
+    with bare literals any more, so the check is that neither table came back."""
     sql = _clean()
-    rows = _values_rows(sql, "location_level_granularity")
-    levels = [_unquote(r[0]) for r in rows]
-    grains = [_unquote(r[1]) for r in rows]
-    assert sorted(levels) == sorted(CANONICAL_ENUMS["ruian_level"]), (
-        "location_level_granularity must map every ruian_level exactly once "
-        f"(ORP/POU/MOMC/ZSJ/katastr have no D3 slot of their own): got {levels}"
-    )
-    bad = [g for g in grains if g not in CANONICAL_ENUMS["location_granularity"]]
-    assert not bad, f"non-member location_granularity literal(s) in the seed: {bad}"
-
-
-def test_seed_literals_are_enum_members():
-    """A.2 #2 over the one remaining closed-vocabulary seed that uses bare literals rather
-    than casts: location_uncertainty_policy's (position_source, granularity, semantics).
-
-    `location_claim_type_meta`'s flag sets were the other one. The table carried three
-    booleans per enum label that no code ever consulted, and migration 498 dropped it."""
-    sql = _clean()
-    offenders: list[str] = []
-    assert "drop table if exists location_claim_type_meta" in sql
-
-    for row in _values_rows(sql, "location_uncertainty_policy"):
-        checks = (
-            (row[1], "position_source"),
-            (row[2], "location_granularity"),
-            (row[5], "radius_semantics"),
-        )
-        for token, enum_name in checks:
-            lit = _unquote(token)
-            if lit is None or lit not in CANONICAL_ENUMS[enum_name]:
-                offenders.append(f"location_uncertainty_policy seed: {token} is not a {enum_name}")
-    assert not offenders, "non-member enum literal(s) in a seed: " + "; ".join(sorted(set(offenders)))
+    for table in ("location_claim_type_meta", "location_uncertainty_policy"):
+        assert f"drop table if exists {table}" in sql, table
 
 
 def test_no_enum_ordinality_in_ddl():
@@ -522,27 +505,20 @@ def test_no_enum_ordinality_in_ddl():
 # open — a NULL uncertainty_radius_m makes both branches of the three-valued containment
 # test evaluate NULL, so the row silently drops out of `certain` AND `possible`.
 #
-# W2-a's answer table declares FOUR, not six: `position_source`, `blur_evidence` and
-# `radius_semantics` are not columns any more (the producers went with the policy tables
-# and the collision epoch), and `country_status` joins the list because "foreign is a
-# determination, never a default" is the same kind of rule — `undetermined` is a VALUE.
-# The two frozen projections keep their six until W2-b drops them.
+# W2-a's answer table declares FOUR, where W1's projections declared six:
+# `position_source`, `blur_evidence` and `radius_semantics` are not columns any more (the
+# producers went with the policy tables and the collision epoch), and `country_status`
+# joins the list because "foreign is a determination, never a default" is the same kind of
+# rule — `undetermined` is a VALUE. The two projections were dropped by W2-b, so this is
+# now one table's contract, not three.
 _NOT_NULL_AXES = {
     "listing_location": (
         "granularity", "match_confidence", "uncertainty_radius_m", "country_status",
     ),
-    "listing_location_current": (
-        "granularity", "position_source", "match_confidence",
-        "uncertainty_radius_m", "blur_evidence", "radius_semantics",
-    ),
-    "property_location_current": (
-        "granularity", "position_source", "match_confidence",
-        "uncertainty_radius_m", "blur_evidence", "radius_semantics",
-    ),
 }
 
 
-def test_projections_declare_every_axis_not_null():
+def test_the_answer_table_declares_every_axis_not_null():
     sql = _clean()
     offenders: list[str] = []
     for table, axes in _NOT_NULL_AXES.items():
@@ -555,7 +531,7 @@ def test_projections_declare_every_axis_not_null():
             elif "not null" not in col:
                 offenders.append(f"{table}.{axis} is nullable")
     assert not offenders, (
-        "serving projection axis column(s) not NOT NULL:\n  " + "\n  ".join(offenders)
+        "answer-table axis column(s) not NOT NULL:\n  " + "\n  ".join(offenders)
     )
 
 
@@ -570,46 +546,6 @@ def test_the_answer_table_does_not_re_declare_a_dropped_axis():
     } == set()
 
 
-def test_pin_collision_class_vocabulary_is_not_null_default_normal():
-    """00 section 10.2: ONE vocabulary, carried verbatim from
-    pin_clusters.classification, NOT NULL DEFAULT 'normal'. The producer-less
-    `agency_pin` is dropped."""
-    sql = _clean()
-    col = next(
-        (d for d in _column_defs(_table_body(sql, "listing_location_current"))
-         if d.startswith("pin_collision_class")),
-        None,
-    )
-    assert col, "listing_location_current has no pin_collision_class column"
-    assert "not null" in col and "default 'normal'" in col, (
-        "pin_collision_class must be NOT NULL DEFAULT 'normal' — an unclustered "
-        f"listing is 'normal', never NULL. got: {col}"
-    )
-    for table, column in (
-        ("listing_location_current", "pin_collision_class"),
-        ("pin_clusters", "classification"),
-    ):
-        defn = next(
-            (d for d in _column_defs(_table_body(sql, table)) if d.startswith(column)), "")
-        got = set(re.findall(r"'([a-z0-9_]+)'", defn))
-        assert got == set(PIN_COLLISION_CLASSES), (
-            f"{table}.{column} vocabulary drifted from the canonical six values: "
-            f"{sorted(got)}"
-        )
-
-
-def test_pin_collision_class_is_never_null_tested():
-    """A.2 #8: `pin_collision_class IS NULL` is ALWAYS the class-vocabulary bug —
-    the column has no NULL member, so the old geo_blockable predicate could never
-    fire. Scanned across the whole backend, not only these migrations."""
-    offenders = _scan_sources(re.compile(r"pin_collision_class\s+is\s+(not\s+)?null", re.I))
-    assert not offenders, (
-        "forbidden `pin_collision_class IS [NOT] NULL` test (01 section A.2 check 8). "
-        "Use the class-aware predicate: pin_collision_class IN "
-        "('normal','building_1_to_many'):\n  " + "\n  ".join(offenders)
-    )
-
-
 def test_no_source_emits_portal_json():
     """A.2 #4: `portal_json` is a member of no enum — the migration emits the
     specific surface (sreality -> api_json, bezrealitky -> graphql, mmreality ->
@@ -618,66 +554,22 @@ def test_no_source_emits_portal_json():
     assert not offenders, f"file(s) emit the non-member literal `portal_json`: {offenders}"
 
 
-def test_licence_guard_ships_all_three_artifacts():
-    """00 section 6.1: the structural guard is three artifacts, all required — a
-    CHECK on each projection, a CHECK on the resolution (so a non-storable
-    coordinate can never become a winner), and the partial index that makes the
-    affected set one indexed predicate away, permanently."""
+def test_the_licence_rail_is_the_claim_side_index():
+    """00 section 6.1 spent three CHECKs on `position_licence_class` so a Mapy-class
+    coordinate could not be minted or stored. W2-a moved the guard UPSTREAM — the
+    resolver's `_CLAIMS_SELECT` admits only `licence_class IN ('portal','operator')`, so
+    such a coordinate is never READ — and W2-b dropped the three relations that carried
+    the CHECKs. What must survive is the partial index that keeps the remediation set one
+    indexed predicate away, permanently."""
     sql = _clean()
-    for name, table in (
-        ("llc_licence", "listing_location_current"),
-        ("plc_licence", "property_location_current"),
-        ("loc_res_licence", "location_resolutions"),
-    ):
-        assert re.search(
-            rf"constraint {name} check \(\s*position_licence_class <> 'ephemeral_display_only'\s*\)",
-            sql,
-        ), f"missing or altered {name} CHECK on {table}"
     assert re.search(
         r"create index location_claims_ephemeral on location_claims \(source, first_observed_at\)\s*"
         r"where licence_class = 'ephemeral_display_only'",
         sql,
     ), "missing the location_claims_ephemeral partial index"
-
-
-def test_collision_epoch_is_in_the_resolution_identity():
-    """00 section 10.3: without the epoch id inside the unique key, a collision
-    recompute cannot invalidate the resolutions that consumed the old
-    classification."""
-    body = _table_body(_clean(), "location_resolutions")
-    uniques = [f for f in _split_top_level(body) if f.startswith("unique (")]
-    assert uniques, "location_resolutions declares no UNIQUE key"
-    key = _balanced(uniques[0], uniques[0].index("("))
-    cols = {c.strip() for c in key.split(",")}
-    assert cols == {
-        "listing_id", "claim_set_hash", "resolver_version", "registry_version_id",
-        "policy_version", "collision_epoch_id",
-    }, f"resolution identity must be the FIVE version inputs plus the listing, got {sorted(cols)}"
-    assert re.search(r"collision_epoch_id\s+bigint not null references pin_cluster_epochs\(id\)",
-                     _clean()), "collision_epoch_id must be NOT NULL and FK pin_cluster_epochs(id)"
-
-
-def test_dispositions_key_on_dedupe_key():
-    """00 section 8.2: bumping reconciler_version is routine and re-detects every
-    still-true finding as a NEW row; a disposition keyed on contradiction_id would
-    orphan on every bump. contradiction_id is demoted to a nullable FK."""
-    sql = _clean()
-    defs = _column_defs(_table_body(sql, "location_contradiction_dispositions"))
-    pk = next((d for d in defs if "primary key" in d), "")
-    assert pk.startswith("dedupe_key"), (
-        f"location_contradiction_dispositions must be keyed on dedupe_key, got: {pk!r}")
-    fk = next((d for d in defs if d.startswith("contradiction_id")), "")
-    assert "references location_contradictions(id)" in fk and "not null" not in fk, (
-        f"contradiction_id must stay a NULLABLE FK recording which detection prompted "
-        f"the decision, got: {fk!r}")
-    for column in ("status", "disposition"):
-        assert any(d.startswith(column + " ") for d in defs), (
-            f"status (lifecycle) and disposition (judgement) are TWO columns; {column} is missing")
-    # The detection UNIQUE keeps the version tuple (harmless, and it preserves
-    # "one detection row per finding per version tuple").
-    assert re.search(
-        r"unique \(dedupe_key, listing_id, reconciler_version, registry_version_id\)", sql
-    ), "location_contradictions must keep its version-tuple UNIQUE"
+    for name in ("llc_licence", "plc_licence", "loc_res_licence"):
+        assert f"constraint {name}" in sql, (
+            f"{name} must stay in the history — migrations are append-only")
 
 
 def _last_view_body(sql: str, name: str) -> str:
@@ -765,13 +657,38 @@ def test_every_created_object_is_revoked():
     )
 
 
-def test_serving_projections_have_no_generated_columns():
-    """01 section 7 rule (a): every derived value on a projection is written by
-    the builder from a named function. A stored generated column would be
-    silently stale the day an enum gains a value."""
+def test_the_answer_table_has_no_generated_columns():
+    """01 section 7 rule (a): every derived value is written by the resolver, never by a
+    stored generated column, which would be silently stale the day an enum gains a value."""
+    body = _table_body(_clean(), "listing_location")
+    assert "generated always as" not in body, (
+        "listing_location declares a generated column; the resolver owns every derived "
+        "value (01 section 0.4)")
+
+
+def test_w2b_drops_the_old_projection_and_the_resolver_side_relations():
+    """Rule 25's deletion, as a list. The W1 projection pair and every relation the
+    deleted engines wrote go WHOLE: a surviving table with no writer is a table the next
+    session reads as live, and a surviving view over a dropped column is a replay
+    failure. `location_granularity_rank` is deliberately absent — dedup joins it."""
     sql = _clean()
-    for table in ("listing_location_current", "property_location_current"):
-        body = _table_body(sql, table)
-        assert "generated always as" not in body, (
-            f"{table} declares a generated column; the projection builder owns every "
-            "derived value (01 section 0.4)")
+    for relation in (
+        "listing_location_current", "property_location_current",
+        "location_resolutions", "location_resolution_candidates",
+        "location_resolution_verifications",
+        "location_contradictions", "location_contradiction_dispositions",
+        "location_contradiction_disposition_log",
+        "pin_cluster_epochs", "pin_clusters", "pin_cluster_daily_summary",
+        "location_field_policy", "location_uncertainty_policy", "location_collision_policy",
+        "location_constants", "location_level_granularity", "location_metrics_rollup",
+        "location_labelled_samples", "location_labelled_sample_members",
+        "location_compare_cohort", "location_compare_cohort_state",
+    ):
+        assert f"drop table if exists {relation}" in sql, relation
+        assert sql.rindex(f"drop table if exists {relation}") > sql.rindex(
+            f"create table {relation}"), f"{relation} is re-created after its drop"
+    assert "drop view if exists location_contradictions_open" in sql
+    assert "drop function if exists refresh_location_compare_cohort()" in sql
+    assert "create table listing_location " in sql and (
+        "drop table if exists listing_location;" not in sql), (
+        "the answer table must survive the sweep")

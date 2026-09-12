@@ -8,10 +8,11 @@ migrated database — the SQL is compiled against the real schema on every push.
 
 How the rule of toolkit/dedup_candidates.py (the oracle) maps onto SQL, once:
 
-* `base` is the projection row joined to the listing's attributes — the ONE location read
-  (docs/design/location-serving-contract.md §7): `obec_kod` as the block key, the granularity
-  floor `dedup_path_c` applied by RANK through `location_granularity_rank` (never by enum
-  order). Nothing legacy — no `listings.geom`, `obec_id`, `street`.
+* `base` is the `listing_location` row (migration 501, the location program's one answer
+  table since W2-b) joined to the listing's attributes — the ONE location read: `obec_kod` as
+  the block key, the granularity floor `dedup_path_c` applied by RANK through
+  `location_granularity_rank` (never by enum order). Nothing legacy — no `listings.geom`,
+  `obec_id`, `street`.
 * "Not available": disposition = `nullif(btrim(disposition), '')`; area = the category's
   area column when > 0 (`estate_area` for pozemek, else `usable_area`), else NULL.
 * Rung C1 joins on equal disposition (both present, by construction of the join); rung C3
@@ -40,7 +41,7 @@ from toolkit import dedup_candidates as dc
 # --------------------------------------------------------------------------- fragments
 
 # Path C's floor (dedup_path_c: granularity ≥ obec, any confidence, obec_kod present),
-# compared by rank. `obec_kod` is a BIGINT on the projection (migration 384); the lane passes
+# compared by rank. `obec_kod` is a BIGINT on the answer table (migration 501); the lane passes
 # the block key as an int and the pair row stores it as text. `active_only` narrows to listings active on BOTH sides (scope 'active').
 _BASE_CTE = (
     "WITH base AS ("
@@ -49,12 +50,12 @@ _BASE_CTE = (
     " CASE WHEN x.category_main = 'pozemek'"
     "      THEN CASE WHEN x.estate_area > 0 THEN x.estate_area END"
     "      ELSE CASE WHEN x.usable_area > 0 THEN x.usable_area END END AS area,"
-    # The city district, but ONLY in a split town and ONLY when the projection knows it.
+    # The city district, but ONLY in a split town and ONLY when the answer table knows it.
     # NULL means "reaches the whole town": an unknown district cannot veto a pair, exactly
     # as an unknown floor cannot (operator ruling 2026-09-10).
     " CASE WHEN l.obec_kod = ANY(%(district_split_towns)s::bigint[])"
     "      THEN l.cast_obce_kod END AS district"
-    " FROM listing_location_current l"
+    " FROM listing_location l"
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " JOIN listings x ON x.id = l.listing_id"
     " WHERE l.obec_kod = %(block_key)s::bigint"
@@ -177,7 +178,7 @@ PAIR_COLUMN_NAMES: tuple[str, ...] = tuple(c.strip() for c in _PAIR_COLUMNS.spli
 BLOCK_ATTRS_SQL = (
     "SELECT x.id AS listing_id, x.category_type, x.category_main, x.disposition, x.floor,"
     " x.usable_area, x.estate_area, l.cast_obce_kod::text AS district_code"
-    " FROM listing_location_current l"
+    " FROM listing_location l"
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " JOIN listings x ON x.id = l.listing_id"
     " WHERE l.obec_kod = %(block_key)s::bigint"
@@ -189,7 +190,7 @@ BLOCK_ATTRS_SQL = (
 # The towns, in a fixed order, with how many listings path C sees in each.
 BLOCKS_SQL = (
     "SELECT l.obec_kod::text AS block_key, count(*) AS listings"
-    " FROM listing_location_current l"
+    " FROM listing_location l"
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " JOIN listings x ON x.id = l.listing_id"
     " WHERE l.obec_kod IS NOT NULL"
@@ -224,7 +225,7 @@ FUNNEL_SQL = (
     " (CASE WHEN x.category_main = 'pozemek' THEN x.estate_area ELSE x.usable_area END > 0) AS has_area,"
     " (x.floor IS NOT NULL) AS has_floor"
     " FROM listings x"
-    " LEFT JOIN listing_location_current l ON l.listing_id = x.id"
+    " LEFT JOIN listing_location l ON l.listing_id = x.id"
     " LEFT JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " WHERE (NOT %(active_only)s::boolean OR x.is_active))"
     " SELECT source, category_main, category_type,"
@@ -243,23 +244,12 @@ FUNNEL_SQL = (
     " ORDER BY source, category_main, category_type"
 )
 
-# How the town of each path-C-eligible listing was assigned (point-in-polygon, claimed,
-# centroid …) — a breakdown for the audit, never a gate.
-TOWN_ASSIGNMENT_SQL = (
-    "SELECT l.admin_assignment_method::text AS method, count(*) AS listings"
-    " FROM listing_location_current l"
-    " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
-    " WHERE l.obec_kod IS NOT NULL"
-    " AND gr.rank >= (SELECT r.rank FROM location_granularity_rank r WHERE r.granularity = 'obec')"
-    " GROUP BY 1 ORDER BY 2 DESC"
-)
-
 # The largest (town, disposition) buckets — the C1 "candidate storm" view, from the listing
 # side (cheap; no pair rows needed). The pin/clique analogue for a path with no pins.
 TOP_BUCKETS_SQL = (
     "SELECT l.obec_kod::text AS obec_kod, l.obec_name, NULLIF(BTRIM(x.disposition), '') AS disposition,"
     " count(*) AS listings, count(*) FILTER (WHERE x.is_active) AS active"
-    " FROM listing_location_current l"
+    " FROM listing_location l"
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " JOIN listings x ON x.id = l.listing_id"
     " WHERE l.obec_kod IS NOT NULL"
@@ -298,7 +288,7 @@ PAIRS_PER_BLOCK_SQL = (
 )
 
 BLOCK_NAMES_SQL = (
-    "SELECT obec_kod::text AS obec_kod, min(obec_name) AS obec_name FROM listing_location_current"
+    "SELECT obec_kod::text AS obec_kod, min(obec_name) AS obec_name FROM listing_location"
     " WHERE obec_kod = ANY(%(keys)s::bigint[]) GROUP BY obec_kod"
 )
 

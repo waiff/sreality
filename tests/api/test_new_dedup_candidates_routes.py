@@ -104,7 +104,6 @@ FULL_STATS: dict[str, Any] = {
             "active": 4_100,
         }
     ],
-    "town_assignment": [{"method": "projection", "listings": 512_000}],
     "partial": False,
     "only": [],
     "stale_deleted": 1_204,

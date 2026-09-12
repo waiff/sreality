@@ -1,8 +1,12 @@
-/* Location quality (location program W1v) — typed wrappers over the
- * admin-gated `/location/*` API. Every call is `jwt: true`: the location
- * tables are service-role-only, so the identity-gated API is the SPA's only
- * path to them. Envelope shape follows toolkit convention:
- * `{ data, metadata }`. */
+/* Location quality — typed wrappers over the admin-gated `/location/*` API.
+ * Every call is `jwt: true`: the location tables are service-role-only, so the
+ * identity-gated API is the SPA's only path to them. Envelope shape follows
+ * toolkit convention: `{ data, metadata }`.
+ *
+ * W2-b cut the page over to `listing_location` (the location program's one
+ * answer table) and deleted the frozen-labelled-sample family with its two
+ * tables — the samples existed to score old-vs-new precision, and "new" is the
+ * only system now. */
 
 import { apiGet, apiPost } from './api';
 
@@ -15,26 +19,15 @@ export type SourceOverview = {
     active_rows: number;
     street_or_better: number;
     building_or_better: number;
-    geo_blockable: number;
-    renderable_as_point: number;
-    low_precision: number;
-    disputed: number;
+    /* Rule 25's invariant, read per portal: every active Czech listing has a town. */
+    with_obec_kod: number;
     with_adm_kod: number;
-    with_stavebni_objekt: number;
     with_ulice_kod: number;
-    with_parcela: number;
+    disputed: number;
+    /* Rows still carrying an older registry label — drain lag, not data loss. */
+    stale_registry: number;
   };
   mixes: Record<string, MixRow[]>;
-  pin_histogram: { bucket: string; collision_class: string; n: number }[];
-  top_clusters: {
-    cell_key: string;
-    listing_count: number;
-    distinct_streets: number;
-    distinct_obec_kods: number;
-    classification: string;
-    declared_blur_share: number | null;
-    nearest_admin_unit: string | null;
-  }[];
   current_registry: { label: string; loaded_at: string } | null;
 };
 
@@ -43,7 +36,7 @@ export type CorpusSummaryRow = {
   active_rows: number;
   street_or_better: number;
   building_or_better: number;
-  geo_blockable: number;
+  with_obec_kod: number;
   disputed: number;
   with_adm_kod: number;
 };
@@ -62,82 +55,10 @@ export type InspectorClaim = {
   subject_scoped: boolean | null;
 };
 
-export type InspectorCandidate = {
-  rank: number;
-  score: number;
-  target_kind: string;
-  granularity: string;
-  position_source: string;
-  match_confidence: string;
-  component_match: Record<string, string> | null;
-  distance_to_pin_m: number | null;
-  rejected_reason: string | null;
-};
-
 export type Inspector = {
   listing_id: number;
   projection: Record<string, unknown> | null;
   claims: InspectorClaim[];
-  candidates: InspectorCandidate[];
-};
-
-export type SampleMember = {
-  listing_id: number;
-  source_id_native: string;
-  position: number;
-  label_street: string | null;
-  label_street_nd: boolean;
-  label_house_number: string | null;
-  label_house_number_nd: boolean;
-  label_obec: string | null;
-  label_obec_nd: boolean;
-  label_okres: string | null;
-  label_okres_nd: boolean;
-  label_precision_class: string | null;
-  label_precision_nd: boolean;
-  label_note: string | null;
-  labelled_at: string | null;
-  is_active: boolean | null;
-  source_url: string | null;
-};
-
-export type SampleStatus = {
-  sample: {
-    id: number;
-    source: string;
-    drawn_at: string;
-    method: string;
-    n: number;
-    note: string | null;
-    members: number;
-    labelled: number;
-  } | null;
-  members: SampleMember[];
-};
-
-export type ScoreSide = {
-  asserted: number;
-  matches: number;
-  precision_pct: number | null;
-  yield_pct: number | null;
-  floor_pass?: boolean;
-};
-
-export type ScoreBlock = {
-  determinable: number;
-  new: ScoreSide;
-  old?: ScoreSide;
-  floor_pct: number;
-};
-
-export type SampleScore = {
-  source: string;
-  grain: 'listing';
-  labelled: number;
-  street: ScoreBlock;
-  obec: ScoreBlock;
-  okres: ScoreBlock;
-  precision_class: ScoreBlock;
 };
 
 export type CorrectionResult = {
@@ -160,11 +81,6 @@ export const LOCATION_SOURCES = [
   'ceskereality', 'realitymix', 'maxima',
 ] as const;
 
-export const GRANULARITY_VALUES = [
-  'address_point', 'building', 'parcel', 'street_segment', 'street',
-  'cast_obce_or_quarter', 'obec', 'okres', 'kraj', 'country', 'unknown',
-] as const;
-
 export const fetchCorpusSummary = () =>
   apiGet<Envelope<{ grain: string; sources: CorpusSummaryRow[] }>>(
     '/location/quality/summary', undefined, undefined, true);
@@ -184,24 +100,6 @@ export const fetchInspectorByNative = (source: string, nativeId: string) =>
   apiGet<Envelope<Inspector>>(
     `/location/listing/by-native/${source}/${encodeURIComponent(nativeId.trim())}`,
     undefined, undefined, true);
-
-export const fetchSample = (source: string, unlabelledOnly: boolean) =>
-  apiGet<Envelope<SampleStatus>>(
-    `/location/sample/${source}`,
-    { unlabelled_only: unlabelledOnly, limit: 200 },
-    undefined, true);
-
-export const saveMemberLabels = (
-  source: string, listingId: number, labels: Record<string, unknown>,
-) =>
-  apiPost<Envelope<{ saved: boolean }>>(
-    `/location/sample/${source}/labels`,
-    { listing_id: listingId, labels },
-    undefined, true);
-
-export const fetchSampleScore = (source: string) =>
-  apiGet<Envelope<SampleScore>>(
-    `/location/sample/${source}/score`, undefined, undefined, true);
 
 export const submitCorrection = (input: {
   listing_id: number;
