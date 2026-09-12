@@ -169,7 +169,7 @@ export default function BrokerDetail() {
  * which built `/listing?property=0` — a link that type-checked and 404'd. The
  * Portál column still carries `source_url`, so the operator is never stranded. */
 function LocalityCell({ l }: { l: BrokerListing }) {
-  const label = l.locality ?? l.district ?? '—';
+  const label = l.display_label ?? '—';
   const dot = !l.is_active && (
     <span
       className="w-1.5 h-1.5 rounded-full bg-[var(--color-brick)] shrink-0"

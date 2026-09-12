@@ -17,7 +17,11 @@ import type { PipelineBoardCard } from '@/lib/types';
 export const PIPELINE_BOARD_COLS =
   'property_id, stage_id, board_position, entered_stage_at, added_at, ' +
   'sreality_id, source, source_id_native, listing_id, category_main, ' +
-  'street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, ' +
+  /* W3: `street` came out, `display_label` went in -- the board's place line is
+   * the one server-composed label (migration 503), not a locality/obec/street
+   * assembly the board did itself. The remaining place columns are the in-memory
+   * chip predicate's inputs (matchesDistricts), not display. */
+  'display_label, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, ' +
   'total_price_change_pct, price_change_count, obec_id, okres_id, region_id, ' +
   'place_search_text, obec, locality, okres, region, is_active, ' +
   /* Migration 425 widened the view for exactly this: the board is deal-agnostic
@@ -38,7 +42,7 @@ export interface PipelineBoardRow {
   source_id_native: string | null;
   listing_id: number | null;
   category_main: string | null;
-  street: string | null;
+  display_label: string | null;
   district: string | null;
   disposition: string | null;
   subtype: string | null;
@@ -76,7 +80,7 @@ export function composePipelineCards(
     source_id_native: r.source_id_native,
     listing_id: r.listing_id,
     category_main: r.category_main,
-    street: r.street,
+    display_label: r.display_label,
     district: r.district,
     disposition: r.disposition,
     subtype: r.subtype,

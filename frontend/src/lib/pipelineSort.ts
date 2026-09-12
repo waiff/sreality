@@ -35,7 +35,6 @@ import {
   type Sort,
   type SortOption,
 } from './cardSort';
-import { placePrimary } from './placeLabel';
 import type { PipelineBoardCard } from './types';
 
 export type PipelineSortField =
@@ -73,20 +72,19 @@ export const DEFAULT_PIPELINE_SORT: PipelineSort = {
   direction: 'asc',
 };
 
-/* The "city" key sorts on what the card actually SHOWS. placePrimary() is the
- * app's shared place resolver — it prefers a rich free-text locality, falls back
- * to the geo-derived municipality when that locality is merely the okres name
- * (the Bazoš "Jihlava"-for-Telč case), and only then to district. Sorting on a
- * field the operator cannot see is unverifiable, which is why this is the same
- * call the card's place line makes rather than a bare `obec`. */
-const cityKey = (c: PipelineBoardCard): string | null =>
-  placePrimary({
-    locality: c.locality,
-    district: c.district,
-    obec: c.obec,
-    okres: c.okres,
-    street: null, // street would sort by house number, not by town
-  });
+/* The "city" key sorts by the TOWN, which is deliberately NOT the card's whole
+ * place line. `display_label` leads with the street when there is one
+ * (migration 503), so sorting on it would order a column by house number and
+ * scatter one town's cards across the alphabet — exactly what the old
+ * `street: null` argument to placePrimary() was guarding against. The town is
+ * the tail of the label the card shows, so the order is still verifiable
+ * against the board. */
+const cityKey = (c: PipelineBoardCard): string | null => {
+  const town = c.obec?.trim();
+  if (town) return town;
+  const shown = c.display_label?.trim();
+  return shown ? shown : null;
+};
 
 /* Price movement sorts on the SIGNED percent, not its magnitude, and ASCENDING
  * is offered first: most-negative-first puts the deepest cut at the top. That
