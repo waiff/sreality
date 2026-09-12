@@ -507,6 +507,7 @@ _BATCH_FINISH_SQL = """
     UPDATE location_claim_batches
     SET finished_at = now(), outcome = %(outcome)s, row_count = %(row_count)s,
         cursor_after_id = %(cursor_after_id)s,
+        bodies_cursor_after_id = %(bodies_cursor_after_id)s,
         note = concat_ws(' | ', note, %(note)s::text)
     WHERE id = %(batch_id)s
 """
@@ -524,6 +525,21 @@ _RESUME_SQL = """
       AND scan_mode = %(scan_mode)s
       AND resumable
       AND cursor_after_id IS NOT NULL
+      AND outcome IN ('ok', 'stopped', 'failed')
+    ORDER BY started_at DESC, id DESC
+    LIMIT 1
+"""
+
+# THE BODIES PASS'S OWN MEMORY (W1-a6, migration 509). A third keyset —
+# `portal_raw_payloads.id` — so its own column, and NOT scan_mode-scoped: the pass runs
+# ahead of both modes. The NULL this can return is the ANSWER, not a miss (the pass
+# completed; start at 0), which is why it reads the newest FINISHED row rather than the
+# newest row that has a cursor: an older stopped position must not overtake a completed run.
+_BODIES_RESUME_SQL = """
+    SELECT bodies_cursor_after_id
+    FROM location_claim_batches
+    WHERE lane = %(lane)s
+      AND source IS NOT DISTINCT FROM %(source)s
       AND outcome IN ('ok', 'stopped', 'failed')
     ORDER BY started_at DESC, id DESC
     LIMIT 1
@@ -676,7 +692,7 @@ _LISTINGS_INCREMENTAL_SQL = ("""
 # scan of the payload primary key that stops after `cap` rows, and the outer statement pays
 # the joins for those ids only. THE CURSOR IS THE WINDOW'S MAX ID, never the surviving rows'
 # — a third of a window survives the joins, and advancing on the survivors would re-walk the
-# rest for ever. `after_body_id` still starts at 0 each run: poison costs one re-fetch a RUN.
+# rest for ever. It is PERSISTED, so poison costs one re-fetch per PASS (W1-a6).
 
 # The SAME record shape as the listing scan — ONE `_row_from_record` for all three
 # selections — projected off the payload row itself rather than through a lateral, and
@@ -1086,6 +1102,26 @@ def _resume_point(
     return None if after_ts is not None else int(after_id)
 
 
+def _bodies_resume_point(conn: psycopg.Connection, *, source: str | None) -> int:
+    """Where the bodies-first pass picks up: the stamp of the newest FINISHED run, or 0.
+
+    The listing scan's rule, on the payload keyset (W1-a6): a pass that stopped on budget
+    resumes, a pass that completed restarts at 0. A `failed` run's stamp counts like a
+    `stopped` one — the cursor only advances past a batch whose transaction closed.
+    """
+    with conn.cursor() as cur:
+        cur.execute(_BODIES_RESUME_SQL, {"lane": LANE, "source": source})
+        row = cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def _bodies_cursor_stamp(stats: dict[str, Any]) -> int | None:
+    """What the batch row records for the bodies pass: NULL once the pass completed."""
+    if stats["bodies_pass_complete"]:
+        return None
+    return int(stats["bodies_cursor_after_id"]) or None
+
+
 def _snapshot_seed(
     conn: psycopg.Connection, statement_timeout: int, *, source: str | None,
 ) -> tuple[int, Any]:
@@ -1298,26 +1334,34 @@ def drain_unmined_bodies(
     TWO STATEMENTS PER BATCH, in one transaction (W1-a4, see `_UNMINED_WINDOW_SQL`): a
     fenced WINDOW of the next `cap` eligible payload ids, then the joins over those ids. The
     cursor is the WINDOW's max — stamped or not, joined or not — so an unstampable body
-    costs one re-fetch per RUN and never stalls the backlog, and `after_body_id` starts at 0
-    every run so the contract-version gate still decides what is eligible. The other two
-    rails: half the run budget at most (the payload half is never starved), and a WINDOW
-    that comes back short of `cap` is the end of the keyset.
+    never stalls the backlog. It PERSISTS across runs (W1-a6): a pass that stopped on budget
+    resumes, one that COMPLETED restarts at 0 — the listing scan's own rule, so poison costs
+    one re-fetch per PASS. Run 34695468715 re-walked 187 dead windows (bodies of delisted
+    listings and superseded bodies, which the version gate can never exclude) before the
+    first mineable one: 468 s of a 1 169 s pass, every run. A contract bump makes rows below
+    the cursor eligible again and they wait for the next pass — at most one pass of delay.
+    The other two rails: half the run budget at most (the payload half is never starved),
+    and a WINDOW that comes back short of `cap` is the end of the keyset.
     """
-    # A PASS THAT COULD NEVER RUN IS A PASS THAT REACHED ITS END, and the distinction is
-    # not cosmetic: `bodies_pass_complete` starts False and is otherwise only set inside the
-    # loop, so leaving it False here would tell the run summary that a backlog is waiting
-    # when there is no store to read it from and no portal whose contract declares a page
-    # entry (`--source sreality`, or R2 unconfigured). The chain reads that field.
+    # A PASS THAT COULD NEVER RUN IS A PASS THAT REACHED ITS END: `bodies_pass_complete`
+    # is otherwise only set inside the loop, so leaving it False here would report a backlog
+    # nothing can read (no store, or no page-capable portal). The chain reads that field.
     if store is None or not page_sources:
         stats["bodies_pass_complete"] = True
         return
     started = time.monotonic()
     last_seconds = 0.0
-    after_body_id = 0
     sources = sorted(page_sources if source is None else page_sources & {source})
     if not sources:
         stats["bodies_pass_complete"] = True
         return
+    after_body_id = _bodies_resume_point(conn, source=source)
+    stats["bodies_resumed_from_id"] = after_body_id
+    stats["bodies_cursor_after_id"] = after_body_id
+    if after_body_id:
+        LOG.info("INTAKE bodies-first resuming from id=%d", after_body_id)
+    else:
+        LOG.info("INTAKE bodies-first starting a new pass")
     while True:
         if not budget.room_for(last_seconds, BODIES_BUDGET_SHARE):
             LOG.info("INTAKE bodies-first stopping: %.0fs of the half budget left, the "
@@ -1373,16 +1417,15 @@ def drain_unmined_bodies(
                 stats["claims_inserted"] += inserted
                 stats["enqueued"] += enqueued
         # Advanced only here, after the transaction closed — the same rule the payload
-        # half's cursor follows.
+        # half's cursor follows, and what makes a `failed` run's stamp safe to resume from.
         after_body_id = batch_cursor
+        stats["bodies_cursor_after_id"] = after_body_id
         last_seconds = time.monotonic() - batch_started
         stats["bodies_batches"] += 1
-        # THE RATE IS THE READOUT the parallel extraction is judged on — the one number
-        # that says whether a batch is bounded by the bucket, the pool or the database. The
-        # width printed beside it is the width `extract_pages` ACTUALLY used for this batch
-        # (`pool_width` is the one definition of that), never the configured one: a batch
-        # under the floor ran on the main thread and a rate labelled with 16 workers it
-        # never had is worse than no label at all.
+        # THE RATE IS THE READOUT the parallel extraction is judged on. The width beside it
+        # is the one `extract_pages` ACTUALLY used (`pool_width`), never the configured one:
+        # a batch under the floor ran on the main thread, and a rate labelled with 16
+        # workers it never had is worse than no label at all.
         extracted = stats["bodies_extracted"] - extracted_before
         extract_seconds = stats["body_extract_seconds"] - extract_before
         LOG.info("INTAKE bodies-first batch window=%d eligible=%d mined=%d claims=%d "
@@ -1393,15 +1436,11 @@ def drain_unmined_bodies(
                  extracted / extract_seconds if extract_seconds > 0 else 0.0,
                  page_readers.pool_width(extracted))
         if dry_run:
-            # A dry run is a shape check, not a drain: it writes no claims, so spending the
-            # bucket on the rest of the backlog would buy nothing.
-            #
-            # IT LEAVES `bodies_pass_complete` FALSE ON PURPOSE — it stopped one batch into
-            # a backlog it did not drain, and saying otherwise would make a dry run the one
-            # run that reports a clean corpus. What keeps that out of the chain is the
-            # workflow's own `if: inputs.dry_run != true`: a dry run never reaches the chain
-            # step, so its "work left" is never asked. Both halves of that are load-bearing
-            # — dropping the guard would give a dry run an endless successor.
+            # A shape check, not a drain: it writes no claims, so spending the bucket on the
+            # rest of the backlog buys nothing. It leaves `bodies_pass_complete` FALSE on
+            # purpose (it did not drain the backlog); what keeps that out of the chain is
+            # the workflow's `if: inputs.dry_run != true`, so a dry run is never asked what
+            # work it left — dropping that guard would give it an endless successor.
             LOG.info("INTAKE bodies-first: --dry-run takes one batch, not the backlog")
             break
         # The WINDOW is what ends the pass, never the survivors: a short window is the end
@@ -1525,6 +1564,7 @@ def run(
         "body_extract_seconds": 0.0, "bodies_batches": 0,
         "bodies_seconds": 0.0, "bodies_pass_complete": False,
         "bodies_backlog_remaining": None, "payload_seconds": 0.0,
+        "bodies_resumed_from_id": 0, "bodies_cursor_after_id": 0,
         "stopped_early": False, "reached_end": False, "resumed_from_id": after_id,
     }
     refusals: dict[str, int] = {}
@@ -1641,6 +1681,7 @@ def run(
                         "batch_id": batch_id, "outcome": "failed",
                         "row_count": stats["claims_inserted"],
                         "cursor_after_id": after_id,
+                        "bodies_cursor_after_id": _bodies_cursor_stamp(stats),
                         "note": f"{type(exc).__name__}: {exc}"[:500],
                     })
             except Exception:  # noqa: BLE001 - never mask the exception being reported
@@ -1666,6 +1707,7 @@ def run(
                 "outcome": outcome,
                 "row_count": stats["claims_inserted"],
                 "cursor_after_id": after_id,
+                "bodies_cursor_after_id": _bodies_cursor_stamp(stats),
                 "note": f"listings={stats['listings']} stopped_early={stats['stopped_early']} "
                         f"reached_end={stats['reached_end']} through_id={after_id} "
                         f"bodies_mined={stats['bodies_mined']} "

@@ -214,6 +214,13 @@ component is slimmed twice — each wave rewrites one component and slims its st
     ceiling, 186,546 bodies queued). R2 fetch width raised to the clamp ceiling of 32.
   - **W1-a5** (2026-09-12): the full walk resumes after a failed run and visits served listings
     only (run 34689928656 reset the walk to id 0 on 2026-09-12).
+  - **W1-a6 — the bodies cursor persists across runs** (187 of 203 windows were a re-walked
+    dead prefix, 2026-09-12): the bodies pass stamps its keyset position on the batch row
+    (`bodies_cursor_after_id`, migration 509) and resumes from it, restarting at 0 only once a
+    pass has COMPLETED. Run 34695468715 spent 468 s of a 1 169 s pass re-walking bodies of
+    delisted listings and superseded bodies — rows the contract-version gate can never exclude
+    — before the first mineable window (the 87th, id 215,621). Poison now costs one re-fetch
+    per PASS, not per run; a contract bump costs at most one pass of delay.
 - **W2 — the resolver at four steps, the answer table at 26 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and

@@ -78,8 +78,19 @@ class _Conn:
 
     def __init__(self, rows: list[tuple[int, int | None, bool]],
                  unmined_bodies: list[tuple[int, int | None, bool]] | None = None,
-                 orphans: set[int] | None = None) -> None:
+                 orphans: set[int] | None = None,
+                 bodies_cursor: int | None = None,
+                 fail_on_window: int | None = None) -> None:
         self.rows = rows
+        # What the NEWEST finished batch row of this lane/source stamped for the bodies
+        # pass (migration 509): a payload id if that pass stopped on budget, None if it
+        # completed. The pass reads it back instead of restarting at 0 (W1-a6).
+        self.bodies_cursor = bodies_cursor
+        # Every terminal `_BATCH_FINISH_SQL` stamp, in order.
+        self.finished: list[dict[str, Any]] = []
+        # The `after_body_id` each WINDOW was asked with, and the window the fake dies on.
+        self.window_starts: list[int] = []
+        self.fail_on_window = fail_on_window
         # What the bodies-first pass finds. A stamp removes a row from it, exactly as the
         # `contract_version IS DISTINCT FROM` predicate does in production.
         self.unmined_bodies = list(unmined_bodies or ())
@@ -102,7 +113,10 @@ class _Conn:
     def dispatch(self, cur: _Cursor, sql: str, params: dict[str, Any]) -> None:
         cur._result = []
         self.executed.append((sql, params))
-        if "set_config" in sql or sql.startswith("UPDATE location_claim_batches"):
+        if sql.startswith("UPDATE location_claim_batches"):
+            self.finished.append(dict(params))
+            return
+        if "set_config" in sql:
             return
         if "FROM portal_contracts WHERE source" in sql:
             cur._result = [(1, ACTIVE_VERSION)]
@@ -114,6 +128,9 @@ class _Conn:
             cur._result = [(0,)]
             return
         if "SELECT outcome, cursor_after_id" in sql:
+            return
+        if sql.startswith("SELECT bodies_cursor_after_id"):
+            cur._result = [(self.bodies_cursor,)]
             return
         if sql.startswith("SELECT count(*) FROM portal_raw_payloads p"):
             # The readout carries the joins too, so an orphan is not in the backlog.
@@ -128,8 +145,11 @@ class _Conn:
             # keyset keeps the pass off it.
             rows = [r for r in self.unmined_bodies
                     if r[1] is not None and r[1] > params["after_body_id"]]
+            if self.fail_on_window == len(self.body_selections) + 1:
+                raise RuntimeError("statement timeout")
             cur._result = [(r[1],) for r in rows[:params["cap"]]]
             self.body_selections.append(len(cur._result))
+            self.window_starts.append(params["after_body_id"])
             return
         if sql.startswith("SELECT l.id") and "%(ids)s::bigint[]" in sql:
             # The outer statement: the joins, over the window's ids ONLY.
@@ -581,3 +601,84 @@ def test_a_dry_run_takes_one_bodies_batch_and_stops(
     assert conn.body_selections == [3]
     assert conn.stamped == [] and conn.claim_writes == []
     assert stats["bodies_batches"] == 1
+
+
+# ------------------------------------------- the bodies cursor across runs (W1-a6)
+
+def test_a_pass_stopped_on_budget_stamps_its_cursor_and_the_next_run_starts_there(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """W1-a6, from run 34695468715. The keyset restarted at 0 EVERY run, so the pass re-paid
+    the same dead prefix — 187 of 203 windows returned `eligible=0`, bodies of delisted
+    listings and superseded bodies that the contract-version gate can never exclude, and the
+    first mineable window was the 87th (468 s of a 1 169 s pass). The listing scan's rule
+    applies here too: a pass that STOPPED resumes, so poison costs one re-fetch per PASS."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    clock = iter(range(0, 10_000, 40))
+    monkeypatch.setattr(claims_intake.time, "monotonic", lambda: float(next(clock)))
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG)
+
+    stats = _run(conn, _Store(), max_seconds=240.0)
+
+    assert stats["bodies_pass_complete"] is False, "it stopped inside the backlog"
+    reached = stats["bodies_cursor_after_id"]
+    assert reached < BACKLOG[-1][1], "short of the end of the keyset"
+    assert [s["id"] for s in conn.stamped] == [b[1] for b in BACKLOG if b[1] <= reached]
+    assert conn.finished[-1]["bodies_cursor_after_id"] == reached
+
+    # The NEXT run reads that stamp back and asks its first window above it.
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    nxt = _Conn([NO_BODY], unmined_bodies=BACKLOG, bodies_cursor=reached)
+    after = _run(nxt, _Store())
+
+    assert after["bodies_resumed_from_id"] == reached
+    assert nxt.window_starts[0] == reached, "no re-walk of the prefix"
+    assert [b[1] for b in BACKLOG if b[1] > reached] == [s["id"] for s in nxt.stamped]
+
+
+def test_a_completed_pass_stamps_null_so_the_next_one_restarts_at_zero(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """NULL is the whole contract of the column. A pass that reached the end of the keyset
+    has nothing to resume, and a CONTRACT BUMP makes rows below the cursor eligible again —
+    they are picked up by the pass that starts after this one, so a bump costs at most one
+    pass of delay rather than being skipped for ever."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG, bodies_cursor=202)
+
+    stats = _run(conn, _Store())
+
+    assert conn.window_starts[0] == 202, "this run resumed"
+    assert stats["bodies_pass_complete"] is True
+    assert conn.finished[-1]["bodies_cursor_after_id"] is None
+
+    nxt = _Conn([NO_BODY], unmined_bodies=BACKLOG, bodies_cursor=None)
+    after = _run(nxt, _Store())
+
+    assert after["bodies_resumed_from_id"] == 0
+    assert nxt.window_starts[0] == 0
+    assert [s["id"] for s in nxt.stamped] == [b[1] for b in BACKLOG]
+
+
+def test_a_failed_runs_cursor_is_stamped_and_resumed_from(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """The same rule `_resume_point` applies to the listing keyset (W1-a5): the cursor only
+    advances past a batch whose transaction CLOSED, so a run that died mid-pass — the 600 s
+    statement timeout is the measured way this happens — left a position as true as a
+    budgeted one's. Dropping it would send the successor back through the dead prefix, which
+    is the cost this wave exists to delete."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG, fail_on_window=2)
+
+    with pytest.raises(RuntimeError):
+        _run(conn, _Store())
+
+    assert conn.finished[-1]["outcome"] == "failed"
+    assert conn.finished[-1]["bodies_cursor_after_id"] == 202
+
+    nxt = _Conn([NO_BODY], unmined_bodies=BACKLOG, bodies_cursor=202)
+    _run(nxt, _Store())
+
+    assert nxt.window_starts[0] == 202
+    assert [s["id"] for s in nxt.stamped] == [203, 204, 205, 206]
