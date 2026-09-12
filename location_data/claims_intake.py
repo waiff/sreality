@@ -1232,7 +1232,10 @@ def mine_bodies(
     nothing else: a body the bucket could not serve, an `IntakeRefused` triggered by the
     body's CONTENT, and a scoper that failed closed. All three leave the body UNSTAMPED so
     the next run asks again. Letting any of them out would take down the payload claims
-    computed in the same transaction and hand the next run the same body to die on.
+    computed in the same transaction and hand the next run the same body to die on. The
+    extraction runs across processes (`extract_pages`), which is why the isolation is a
+    RETURNED outcome per body rather than a try/except around one call: an exception raised
+    in a worker arrives here as a value, and it is sorted into the same three buckets.
     """
     if not candidates:
         return []
@@ -1242,25 +1245,31 @@ def mine_bodies(
     stats["body_fetch_seconds"] += time.monotonic() - fetch_started
     stats["bodies_fetched"] += len(bodies)
     stats["bodies_from_r2"] += from_r2
+    minable = [
+        (row, replace(body, body=bodies[body.id]), version)
+        for row, body, version in candidates
+        if bodies.get(body.id) is not None and row.source in registers
+    ]
+    extract_started = time.monotonic()
+    outcomes = page_readers.extract_pages(
+        [(row, body) for row, body, _ in minable],
+        entries_by_source=entries_by_source, registers=registers,
+        max_value_bytes=max_value_bytes)
+    stats["body_extract_seconds"] += time.monotonic() - extract_started
     stamps: list[dict[str, Any]] = []
-    for row, body, version in candidates:
-        raw = bodies.get(body.id)
-        if raw is None:
-            continue
-        register = registers.get(row.source)
-        if register is None:
-            continue
-        try:
-            page_result = page_readers.extract_page(
-                replace(body, body=raw), row, entries_by_source[row.source],
-                register=register, max_value_bytes=max_value_bytes)
-        except IntakeRefused as refused:
+    for (row, body, version), outcome in zip(minable, outcomes, strict=True):
+        if isinstance(outcome, IntakeRefused):
             LOG.warning("PAGE extract refused listing_id=%d source=%s payload_id=%d: %s",
-                        row.listing_id, row.source, body.id, refused)
+                        row.listing_id, row.source, body.id, outcome)
             result.refuse(f"page_extract_refused:{row.source}")
             continue
-        result.extend(page_result)
-        if "scope_incomplete" in page_result.refusals:
+        if isinstance(outcome, Exception):
+            # NOT per body. An exception the readers do not classify is a lane bug, and the
+            # serial lane failed the batch on it — surfacing it here keeps that, rather than
+            # silently mining a corpus minus the rows nobody looked at.
+            raise outcome
+        result.extend(outcome)
+        if "scope_incomplete" in outcome.refusals:
             # A stamp would record the body as mined AT this contract version and hide the
             # miss until the next bump.
             continue
@@ -1318,6 +1327,7 @@ def drain_unmined_bodies(
     if store is None or not page_sources:
         return
     started = time.monotonic()
+    workers = page_readers.extraction_workers()
     last_seconds = 0.0
     after_body_id = 0
     sources = sorted(page_sources if source is None else page_sources & {source})
@@ -1330,6 +1340,8 @@ def drain_unmined_bodies(
                      last_seconds)
             break
         batch_started = time.monotonic()
+        extract_before = stats["body_extract_seconds"]
+        fetched_before = stats["bodies_fetched"]
         result = IntakeResult()
         stamps: list[dict[str, Any]] = []
         selected = 0
@@ -1378,9 +1390,16 @@ def drain_unmined_bodies(
         after_body_id = batch_cursor
         last_seconds = time.monotonic() - batch_started
         stats["bodies_batches"] += 1
+        # THE RATE IS THE READOUT the parallel extraction is judged on — the one number
+        # that says whether a batch is bounded by the bucket, the pool or the database.
+        extracted = stats["bodies_fetched"] - fetched_before
+        extract_seconds = stats["body_extract_seconds"] - extract_before
         LOG.info("INTAKE bodies-first batch selected=%d mined=%d claims=%d inserted=%d "
-                 "through_id=%d in %.1fs", selected, len(stamps), len(result.claims),
-                 stats["claims_inserted"], after_body_id, last_seconds)
+                 "through_id=%d in %.1fs extract=%.1fs %.1f bodies/s (workers=%d)",
+                 selected, len(stamps), len(result.claims),
+                 stats["claims_inserted"], after_body_id, last_seconds, extract_seconds,
+                 extracted / extract_seconds if extract_seconds > 0 else 0.0,
+                 workers if extracted >= page_readers.PARALLEL_MIN_BODIES else 1)
         if dry_run:
             # A dry run is a shape check, not a drain: it writes no claims, so spending the
             # bucket on the rest of the backlog would buy nothing.
@@ -1487,10 +1506,11 @@ def run(
             })
             batch_id = int(cur.fetchone()[0])
     LOG.info("INTAKE start mode=%s source=%s batch=%d inventory_rows=%d batch_id=%s "
-             "page_sources=%s store=%s budget=%s",
+             "page_sources=%s store=%s budget=%s extract_workers=%d",
              mode, source or "*", batch_size, inventory_rows, batch_id,
              ",".join(sorted(page_capable)) or "-", "yes" if store else "no",
-             f"{max_seconds:.0f}s" if max_seconds is not None else "none")
+             f"{max_seconds:.0f}s" if max_seconds is not None else "none",
+             page_readers.extraction_workers())
 
     budget = _Budget(max_seconds)
     # Resolved once, not per listing: the extractor is called 20 000 times a batch.
@@ -1500,7 +1520,8 @@ def run(
         "listings": 0, "claims": 0, "claims_payload": 0, "claims_page": 0,
         "claims_inserted": 0, "enqueued": 0, "refusals": 0,
         "bodies_eligible": 0, "bodies_fetched": 0, "bodies_from_r2": 0,
-        "bodies_mined": 0, "body_fetch_seconds": 0.0, "bodies_batches": 0,
+        "bodies_mined": 0, "body_fetch_seconds": 0.0, "body_extract_seconds": 0.0,
+        "bodies_batches": 0,
         "bodies_seconds": 0.0, "bodies_pass_complete": False,
         "bodies_backlog_remaining": None, "payload_seconds": 0.0,
         "stopped_early": False, "reached_end": False, "resumed_from_id": after_id,
@@ -1599,13 +1620,13 @@ def run(
             last_seconds = time.monotonic() - batch_started
             LOG.info("INTAKE progress listings=%d claims=%d payload=%d page=%d inserted=%d "
                      "bodies eligible=%d fetched=%d from_r2=%d mined=%d in %.1fs "
-                     "refusals=%d through_id=%d batch=%.1fs",
+                     "extract=%.1fs refusals=%d through_id=%d batch=%.1fs",
                      stats["listings"], stats["claims"], stats["claims_payload"],
                      stats["claims_page"], stats["claims_inserted"],
                      stats["bodies_eligible"], stats["bodies_fetched"],
                      stats["bodies_from_r2"], stats["bodies_mined"],
-                     stats["body_fetch_seconds"], stats["refusals"], after_id,
-                     last_seconds)
+                     stats["body_fetch_seconds"], stats["body_extract_seconds"],
+                     stats["refusals"], after_id, last_seconds)
         stats["payload_seconds"] = time.monotonic() - payload_started
     except Exception as exc:
         if batch_id is not None:
@@ -1667,13 +1688,14 @@ def run(
     # run was doing; this says what it achieved and what is left.
     LOG.info("INTAKE summary mode=%s source=%s outcome=%s listings=%d payload_claims=%d "
              "claims_inserted=%d bodies_mined=%d backlog_remaining=%s refusals=%s "
-             "bodies=%.0fs payload=%.0fs cursor=%d",
+             "bodies=%.0fs (fetch %.0fs extract %.0fs) payload=%.0fs cursor=%d",
              mode, source or "*", outcome, stats["listings"], stats["claims_payload"],
              stats["claims_inserted"], stats["bodies_mined"],
              stats["bodies_backlog_remaining"]
              if stats["bodies_backlog_remaining"] is not None else "?",
              ",".join(f"{r}={c}" for r, c in stats["refusal_reasons"].items()) or "none",
-             stats["bodies_seconds"], stats["payload_seconds"], after_id)
+             stats["bodies_seconds"], stats["body_fetch_seconds"],
+             stats["body_extract_seconds"], stats["payload_seconds"], after_id)
     return stats
 
 

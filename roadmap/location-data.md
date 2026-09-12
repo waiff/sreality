@@ -179,6 +179,22 @@ component is slimmed twice — each wave rewrites one component and slims its st
     **Next:** the coverage red line is the acceptance check, and it can only be read after deploy —
     every portal but sreality, bezrealitky and mmreality now mints its town from a STORED PAGE BODY,
     so a portal's number moves as the body-mining half works through its backlog, not at merge.
+  - **W1-a3 shipped** (2026-09-12): the page half extracts across PROCESSES,
+    `os.cpu_count()` wide. The bottleneck was one core — run 34666292569 spent 143-313 s per
+    1 500-body batch against ~48 s to fetch the same bodies from R2 on 16 threads, ~5 bodies/s
+    of lexbor parse + scope + readers, and the 249 000-body backlog is re-mined once more after
+    every contract bump. `extract_pages` returns one outcome per body IN ORDER — the
+    `IntakeResult` or the exception it raised — so the per-body isolation survives a process
+    boundary: a content-triggered `IntakeRefused` still costs one listing's page entries, a
+    body that yields `scope_incomplete` is still left unstamped, and a pool the OOM killer
+    takes finishes its batch on the main thread. `forkserver`, never `fork`: the lane holds an
+    open psycopg connection inside the batch transaction, and a forked child finalizing its
+    copy of that socket would terminate the parent's session. Batches under 16 bodies stay on
+    the main thread. Each batch logs its own `N bodies/s`; `scripts/bench_page_extraction.py`
+    takes the same number off the committed fixtures with no database (16 cores, 1 500 bodies:
+    317 → 512 b/s at 2 workers, 1 512 b/s at 16). No new flag, no `INTAKE_VERSION` bump — the
+    claims are identical; `LOCATION_INTAKE_WORKERS` exists only for a runner that misreports
+    its CPU count.
 - **W2 — the resolver at four steps, the answer table at 27 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and

@@ -22,6 +22,14 @@ name: "Jobs: Location claim intake"
 #     to re-sight: the `last_seen_at` watermark it replaces opened ~180 000 listings an
 #     hour to re-mine claims that already existed.
 #
+# A batch's page bodies are EXTRACTED ACROSS PROCESSES, `os.cpu_count()` wide (W1-a3):
+# the parse is pure CPU, threads cannot share it, and on one core a 1 500-body batch took
+# 143-313 s against ~48 s to fetch the same bodies. The pool is an accelerator only — same
+# claims, same order, a body's failure still costs that one listing's page entries, and a
+# pool that dies is finished on the main thread. Each batch logs its own `N bodies/s`.
+# `LOCATION_INTAKE_WORKERS` overrides the width and exists for ONE case: a runner whose CPU
+# count is misreported. Nothing sets it here.
+#
 # The page half is HASH-GATED: a body is mined only while
 # `portal_raw_payloads.contract_version IS DISTINCT FROM` the portal's active contract
 # version, and the batch stamps the ones it mined — so the steady-state cost is bounded by

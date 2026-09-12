@@ -303,6 +303,28 @@ def test_an_incomplete_scope_is_never_stamped_as_mined(
     assert stats["outcome"] == "ok"
 
 
+def test_an_unclassified_exception_still_fails_the_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The line between the three isolated failures and a lane BUG, now that extraction
+    hands its failures back as values (W1-a3). `IntakeRefused` is the readers' word for "the
+    body said something I may not write"; anything else is a defect in this lane, and mining
+    a corpus minus the rows nobody looked at would hide it behind a green run."""
+    def _bug(*_a: Any, **_k: Any) -> IntakeResult:
+        raise ValueError("a reader returned a tuple")
+
+    monkeypatch.setattr(page_readers, "extract_page", _bug)
+    conn = _Conn([UNMINED, ALREADY_MINED, NO_BODY])
+
+    with pytest.raises(ValueError, match="returned a tuple"):
+        _run(conn, _Store())
+
+    assert conn.stamped == []
+    failed = [params for sql, params in conn.executed
+              if sql.startswith("UPDATE location_claim_batches")]
+    assert failed and failed[-1]["outcome"] == "failed"
+
+
 def test_a_run_with_no_object_store_mines_nothing_and_still_writes_payload_claims(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
