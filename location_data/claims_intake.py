@@ -698,41 +698,27 @@ _LISTINGS_INCREMENTAL_SQL = ("""
     ORDER BY l.id
 """)
 
-# THE BODIES-FIRST BACKLOG (W1-a2), the page half's own pass.
+# THE BODIES-FIRST BACKLOG (W1-a2), drained in TWO statements (W1-a4).
 #
-# The listing scan mines the body of a listing it happens to visit; that is change-shaped,
-# and the page backlog is not. ~250 000 latest detail bodies of active listings sat unmined
-# after the first wave (`contract_version IS NULL` everywhere), and at 1 500 per 20 000-row
-# listing batch they would have drained over ~170 runs of pure side effect.
+# ~250 000 latest detail bodies of ACTIVE page-portal listings were unmined after the first
+# wave — ~170 runs on the listing scan — so this pass names them directly. A delisted row's
+# stored body is a page nobody will ever see again, so `is_active` gates the walk.
 #
-# DRIVEN FROM `portal_raw_payloads`, WITH AN IN-RUN KEYSET ON `p.id`. The first cut drove
-# off `listings` with no cursor at all, on the theory that the mined-at stamp is the
-# progress — and it is, for a body that CAN be stamped. Four paths leave one unstamped (the
-# bucket could not serve it, the portal has no scope register, `extract_page` refused on its
-# content, the scoper failed closed) and three of those are deterministic per body, so the
-# unstampable ones sit at the head of `ORDER BY p.id` forever: re-fetched every batch, and
-# once `cap` of them accumulate a batch stamps nothing at all, the no-progress rail ends the
-# pass, and the next run selects the identical rows. The whole backlog stalls behind a
-# handful of bad objects, silently. The keyset walks PAST them instead: `after_body_id`
-# starts at 0 each run and advances to the batch's `max(p.id)` after its transaction closes,
-# so poison costs one re-fetch per RUN, not one per batch, and the pass ends when a batch
-# comes back short of `cap` (the end of the keyset) rather than when it stamps nothing.
-#
-# The `p.id = (SELECT ... ORDER BY last_observed_at DESC, p2.id DESC LIMIT 1)` self-probe is
-# "the LATEST detail body of this key", the same definition `_BODY_JOIN`'s lateral applies
-# from the other direction — `last_observed_at`, never `first_observed_at` (a page that goes
-# A -> B -> A appends no third row, it bumps A) and never `version_seq` (403 added it with no
-# backfill, so every older body is NULL there).
-#
-# ACTIVE listings only, unlike the listing scan. A delisted row's PAYLOAD is evidence we
-# already hold; its stored page body is a fetch we would pay R2 for to mine a page nobody
-# will ever see again, ahead of ~250 000 live ones.
+# WHY TWO. With the keyset in one statement's WHERE, Postgres planned it from `listings`: a
+# bitmap scan of all ~250 000 active rows, a payload probe and the latest-body subquery PER
+# ROW, then a sort, with `p.id > after` applied as a POST-FILTER — so every batch paid the
+# whole corpus (~150 s of selection; run 34689928656 died on the 600 s statement timeout,
+# 2026-09-12). A LIMIT subquery is an optimizer FENCE: planned alone the WINDOW is an index
+# scan of the payload primary key that stops after `cap` rows, and the outer statement pays
+# the joins for those ids only. THE CURSOR IS THE WINDOW'S MAX ID, never the surviving rows'
+# — a third of a window survives the joins, and advancing on the survivors would re-walk the
+# rest for ever. `after_body_id` still starts at 0 each run: poison costs one re-fetch a RUN.
 
 # The SAME record shape as the listing scan — ONE `_row_from_record` for all three
 # selections — projected off the payload row itself rather than through a lateral, and
-# without `raw_json`: no page reader reads it (the substrate is the body), and 1 500 rows of
-# it is ~10 MB dragged over the wire to be thrown away. A `pb.` left in the result would be
-# a column this FROM clause does not have, so the test asserts none survives.
+# without `raw_json`: no page reader reads it, and 1 500 rows of it is ~10 MB dragged over
+# the wire to be thrown away. A `pb.` left in the result would be a column this FROM clause
+# does not have, so the test asserts none survives.
 _UNMINED_BODIES_SELECT = (
     _SELECT_COLUMNS
     .replace("l.raw_json", "NULL::jsonb")
@@ -745,41 +731,62 @@ _UNMINED_BODIES_SELECT = (
     + " NULL::bigint\n"
 )
 
-_UNMINED_BODIES_FROM = """
-    FROM portal_raw_payloads p
-    JOIN listings l ON l.source = p.source AND l.source_id_native = p.source_id_native
-    LEFT JOIN mapy_affected a ON a.listing_id = l.id
-    JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active
-"""
-
-_UNMINED_BODIES_WHERE = """
+# THE ELIGIBILITY GATE, and the only place the contract-version predicate lives. Every
+# column here is the payload row's, so the window is planned without touching `listings`.
+_UNMINED_WINDOW_WHERE = """
     WHERE p.id > %(after_body_id)s
       AND p.page_kind = 'detail'
       AND (p.http_status IS NULL OR p.http_status BETWEEN 200 AND 299)
+      AND p.source = ANY(%(page_sources)s::text[])
+      AND (%(source)s::text IS NULL OR p.source = %(source)s)
       AND p.contract_version IS DISTINCT FROM pc.version
-      AND l.is_active
-      AND l.source = ANY(%(page_sources)s::text[])
-      AND (%(source)s::text IS NULL OR l.source = %(source)s)
-      AND p.id = (
-        SELECT p2.id FROM portal_raw_payloads p2
+"""
+
+# "THE LATEST detail body of this key", as `_BODY_JOIN`'s lateral defines it from the other
+# direction: `last_observed_at`, never `first_observed_at` (A -> B -> A appends no third
+# row, it bumps A) and never `version_seq` (403 added it with no backfill). An ANTI-JOIN,
+# not a correlated `p.id = (...)` probe: one lookup per candidate id, not one per listing.
+_LATEST_BODY_ONLY = """
+      AND NOT EXISTS (
+        SELECT 1 FROM portal_raw_payloads p2
         WHERE p2.source = p.source
           AND p2.source_id_native = p.source_id_native
           AND p2.page_kind = 'detail'
           AND (p2.http_status IS NULL OR p2.http_status BETWEEN 200 AND 299)
-        ORDER BY p2.last_observed_at DESC, p2.id DESC
-        LIMIT 1)
+          AND (p2.last_observed_at, p2.id) > (p.last_observed_at, p.id))
 """
 
-_UNMINED_BODIES_SQL = (
-    _UNMINED_BODIES_SELECT + _UNMINED_BODIES_FROM + _UNMINED_BODIES_WHERE + """
+_UNMINED_WINDOW_SQL = ("""
+    SELECT p.id
+    FROM portal_raw_payloads p
+    JOIN portal_contracts pc ON pc.source = p.source AND pc.is_active
+"""
+    + _UNMINED_WINDOW_WHERE + """
     ORDER BY p.id
     LIMIT %(cap)s
 """)
 
-# One count per RUN (never per batch), so the summary can say how much of the backlog is
-# left rather than only how much this run took off it. Same predicate, read from id 0.
+_UNMINED_BODIES_FROM = """
+    FROM portal_raw_payloads p
+    JOIN listings l ON l.source = p.source AND l.source_id_native = p.source_id_native
+     AND l.is_active
+    LEFT JOIN mapy_affected a ON a.listing_id = l.id
+    JOIN portal_contracts pc ON pc.source = p.source AND pc.is_active
+"""
+
+_UNMINED_BODIES_SQL = (
+    _UNMINED_BODIES_SELECT + _UNMINED_BODIES_FROM + """
+    WHERE p.id = ANY(%(ids)s::bigint[])
+"""
+    + _LATEST_BODY_ONLY + """
+    ORDER BY p.id
+""")
+
+# One count per RUN (never per batch): the summary says how much of the backlog is left,
+# not only what this run took off it. Both statements' predicates rebuilt into one, read
+# from id 0.
 _UNMINED_BODY_BACKLOG_SQL = (
-    "SELECT count(*)" + _UNMINED_BODIES_FROM + _UNMINED_BODIES_WHERE)
+    "SELECT count(*)" + _UNMINED_BODIES_FROM + _UNMINED_WINDOW_WHERE + _LATEST_BODY_ONLY)
 
 
 # The mined-at stamp, in the SAME transaction as the claims it produced: a batch that rolls
@@ -792,6 +799,12 @@ _STAMP_MINED_SQL = """
     WHERE p.id = v.id
 """
 
+# THE ENQUEUE BUMPS, IT DOES NOT SKIP (W2-a2). `DO NOTHING` here was silent data loss: on
+# 2026-09-12 the nine contract bumps re-mined ~60k listings that were ALREADY queued from the
+# previous sweep, so every enqueue was a no-op, the drain resolved them from the OLD claims
+# and deleted the queue row. 384,500 answer rows, 135 with a town. Bumping `enqueued_at`
+# re-arms the row against an in-flight slice (the drain's delete is bounded by the
+# `enqueued_at` it claimed) and clears any backoff the previous attempt left behind.
 # One statement, so the claim insert and the dirty_locations enqueue are atomic together
 # (03 §3.2: the enqueue happens INSIDE the claim-insert transaction; it is the only
 # coupling between intake and resolution).
@@ -873,7 +886,9 @@ _CLAIM_WRITE_SQL = f"""
     ), enqueued AS (
         INSERT INTO dirty_locations (listing_id, reason)
         SELECT DISTINCT listing_id, 'claim_insert' FROM ins
-        ON CONFLICT (listing_id) DO NOTHING
+        ON CONFLICT (listing_id) DO UPDATE
+           SET enqueued_at = now(), reason = EXCLUDED.reason,
+               attempts = 0, next_eligible_at = now()
         RETURNING listing_id
     )
     SELECT (SELECT count(*) FROM ins), (SELECT count(*) FROM enqueued)
@@ -1324,17 +1339,13 @@ def drain_unmined_bodies(
 ) -> None:
     """The page half's OWN pass, ahead of the listing scan (W1-a2).
 
-    Bodies arrive on the portals' cadence, not on the listings' — and after the first wave
-    ~250 000 latest bodies of active listings were unmined at once. Riding them on the
-    listing scan capped the drain at `DEFAULT_BODY_FETCH_CAP` per 20 000-row batch: ~170
-    runs of walking listings to reach bodies the query could have named directly.
-
-    THE KEYSET IS IN-RUN and it is what keeps an unstampable body from stalling the whole
-    backlog (see `_UNMINED_BODIES_SQL`): `after_body_id` starts at 0 every run, so the
-    contract-version gate still decides WHAT is eligible, and advances past every row a
-    batch selected — stamped or not — so the pass walks on. The other two rails: half the
-    run budget at most (the payload half is never starved), and a batch that comes back
-    short of `cap` is the end of the keyset.
+    TWO STATEMENTS PER BATCH, in one transaction (W1-a4, see `_UNMINED_WINDOW_SQL`): a
+    fenced WINDOW of the next `cap` eligible payload ids, then the joins over those ids. The
+    cursor is the WINDOW's max — stamped or not, joined or not — so an unstampable body
+    costs one re-fetch per RUN and never stalls the backlog, and `after_body_id` starts at 0
+    every run so the contract-version gate still decides what is eligible. The other two
+    rails: half the run budget at most (the payload half is never starved), and a WINDOW
+    that comes back short of `cap` is the end of the keyset.
     """
     # A PASS THAT COULD NEVER RUN IS A PASS THAT REACHED ITS END, and the distinction is
     # not cosmetic: `bodies_pass_complete` starts False and is otherwise only set inside the
@@ -1363,32 +1374,34 @@ def drain_unmined_bodies(
         result = IntakeResult()
         stamps: list[dict[str, Any]] = []
         selected = 0
+        eligible = 0
         batch_cursor = after_body_id
         with guarded(conn, statement_timeout) as cur:
-            cur.execute(_UNMINED_BODIES_SQL, {
+            cur.execute(_UNMINED_WINDOW_SQL, {
                 "source": source, "page_sources": sources, "cap": cap,
                 "after_body_id": after_body_id})
-            records = cur.fetchall()
-            selected = len(records)
-            if not records:
+            window = [int(row[0]) for row in cur.fetchall()]
+            selected = len(window)
+            if not window:
                 stats["bodies_pass_complete"] = True
                 LOG.info("INTAKE bodies-first: no unmined bodies left above id=%d",
                          after_body_id)
                 break
+            # The cursor is the WINDOW's max, not the surviving rows': a window whose rows
+            # all belong to inactive listings or superseded bodies still moves the walk on.
+            batch_cursor = max(window)
+            cur.execute(_UNMINED_BODIES_SQL, {"ids": window})
             candidates: list[BodyCandidate] = []
-            for record in records:
+            for record in cur.fetchall():
                 scan = _row_from_record(record)
-                # The keyset advances past EVERY selected row, before any filter: a body
-                # this batch cannot mine must cost one re-fetch per run, not one per batch.
-                if scan.body is not None:
-                    batch_cursor = max(batch_cursor, scan.body.id)
                 entries = entries_by_source.get(scan.row.source)
                 if not entries:
                     continue
                 candidate = _body_candidate(scan, entries, store=store)
                 if candidate is not None:
                     candidates.append(candidate)
-            stats["bodies_eligible"] += len(candidates)
+            eligible = len(candidates)
+            stats["bodies_eligible"] += eligible
             stamps = mine_bodies(
                 cur, candidates, entries_by_source=entries_by_source,
                 registers=registers, store=store, result=result, stats=stats,
@@ -1416,9 +1429,10 @@ def drain_unmined_bodies(
         # never had is worse than no label at all.
         extracted = stats["bodies_extracted"] - extracted_before
         extract_seconds = stats["body_extract_seconds"] - extract_before
-        LOG.info("INTAKE bodies-first batch selected=%d mined=%d claims=%d inserted=%d "
-                 "through_id=%d in %.1fs extract=%.1fs %.1f bodies/s (workers=%d)",
-                 selected, len(stamps), len(result.claims),
+        LOG.info("INTAKE bodies-first batch window=%d eligible=%d mined=%d claims=%d "
+                 "inserted=%d through_id=%d in %.1fs extract=%.1fs %.1f bodies/s "
+                 "(workers=%d)",
+                 selected, eligible, len(stamps), len(result.claims),
                  stats["claims_inserted"], after_body_id, last_seconds, extract_seconds,
                  extracted / extract_seconds if extract_seconds > 0 else 0.0,
                  page_readers.pool_width(extracted))
@@ -1434,6 +1448,8 @@ def drain_unmined_bodies(
             # — dropping the guard would give a dry run an endless successor.
             LOG.info("INTAKE bodies-first: --dry-run takes one batch, not the backlog")
             break
+        # The WINDOW is what ends the pass, never the survivors: a short window is the end
+        # of the keyset, a window that lost every row to the joins is not.
         if selected < cap:
             stats["bodies_pass_complete"] = True
             LOG.info("INTAKE bodies-first: the keyset reached its end at id=%d",

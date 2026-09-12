@@ -15,7 +15,9 @@ Two deliberate choices, both learned from the intake lane:
   operator value (A -> B -> A) collides with the original claim's fingerprint
   and inserts nothing - an `ins`-gated enqueue would never fire and the
   operator would see a dead button. The enqueue is the whole record of the
-  restatement now - migration 498 dropped the observation series.
+  restatement now - migration 498 dropped the observation series. It also
+  BUMPS an existing queue row rather than skipping it (W2-a2), so a correction
+  to a listing the drain is resolving right now is not swallowed.
 * `value_norm` and the fingerprint are computed in SQL by the named migration
   functions (`location_value_norm`, `location_claim_fingerprint`), exactly as
   the intake does - a Python mirror drifts on the foreign-address cohort and a
@@ -81,6 +83,10 @@ class UnknownKodAdmError(CorrectionError):
 # the two lanes can diverge without hidden coupling; the fingerprint CALL is
 # what must never be re-transcribed, and both statements use the migration 386
 # function for it.
+#
+# The enqueue BUMPS (W2-a2), on top of being unconditional: an operator edit to a listing
+# whose row is already queued — or in a slice the drain is resolving right now — must not be
+# swallowed, and read-your-writes is the whole point of the correction button.
 _OPERATOR_CLAIM_SQL = """
     WITH input AS (
         SELECT %(listing_id)s::bigint AS listing_id, %(source)s::text AS source,
@@ -142,7 +148,9 @@ _OPERATOR_CLAIM_SQL = """
     ), enqueued AS (
         INSERT INTO dirty_locations (listing_id, reason)
         VALUES (%(listing_id)s, 'operator_edit')
-        ON CONFLICT (listing_id) DO NOTHING
+        ON CONFLICT (listing_id) DO UPDATE
+           SET enqueued_at = now(), reason = EXCLUDED.reason,
+               attempts = 0, next_eligible_at = now()
         RETURNING listing_id
     )
     SELECT (SELECT count(*) FROM ins)      AS inserted,

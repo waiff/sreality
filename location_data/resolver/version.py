@@ -21,4 +21,9 @@ from __future__ import annotations
 #      `listing_location`. Survivorship, the uncertainty policy, the contradiction ledger,
 #      the pin-collision epoch and the parcel rung are gone; the hierarchy is a pure join
 #      off the bound entity, so `cast_obce` now lands on every branch and not only on PIP.
-RESOLVER_VERSION = "resolver:v4"
+# v4.1 = W2-a3: a towned row always has a position. When no pin was admissible, FILL places
+#      the row at the finest bound unit's own registry point (the boundary's inscribed-circle
+#      centre, always inside the polygon) instead of leaving `geom` NULL on 29 % of towned
+#      rows. Grade, confidence and radius are untouched, so the bump exists to re-resolve the
+#      corpus once, not to re-grade it.
+RESOLVER_VERSION = "resolver:v4.1"

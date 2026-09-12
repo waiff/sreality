@@ -153,6 +153,23 @@ the heartbeat, logged on the transition only). The GH lane stays the backstop an
 `app_settings.realtime_location_resolve_enabled` is set; tuning keys
 `realtime_location_resolve_{interval_seconds,max_seconds,batch_size}` (15 s / 240 s / 250).
 Budget shape, and the two rails that make the shared lease actually exclusive:
+- **The pass drains `LOCATION_RESOLVE_WORKERS` slices CONCURRENTLY (env, default 4, clamped 1–8;
+  W2-a5).** An env var and not an `app_settings` row, because how many connections this process may
+  open is a property of the machine rather than an operator preference. One loop measured
+  **~8 listings/s** on 2026-09-12 against a 448k queue with every backend on the instance waiting on
+  `DataFileRead` — latency, which N loops overlap. Each worker is a thread with its OWN session-mode
+  connection (psycopg connections are not thread-safe) claiming through the same `FOR UPDATE SKIP
+  LOCKED` statement, so the slices are disjoint by construction; the lease, the budget and the
+  `RunCache` are shared (the cache under a lock that is never held across a registry question). A
+  batch that RAISES costs its slice and nothing else (W2-a6): the transaction rolls back, its
+  rows stay queued untouched, the loop backs off (2 s doubling to 30 s) and claims again, and
+  only five CONSECUTIVE failures — or a lost connection, reconnected once — stop a worker. The
+  prefetch runs on its own 90 s ceiling (`LOCATION_RESOLVE_PREFETCH_TIMEOUT_S`), because a
+  250-listing bulk claims read legitimately outruns the 30 s a per-listing statement gets. The
+  heartbeat's `workers` / `failed_batches` are how a degraded pass is told from a healthy one —
+  `failed_batches`, never `failed_passes`, which means "passes that raised" one level up. The lease TTL is
+  unchanged: every loop tests the budget between batches and they run concurrently, so N workers
+  still overrun by at most ONE batch.
 - `max_seconds` is clamped to ≤ 900 and `batch_size` to ≤ 1000, so a HEALTHY pass stays far below
   `check_worker_lane_stall`'s 1200 s `in_flight` warn and below `LANE_PASS_TIMEOUT_SECONDS`.
   Throughput does not need a long pass — the queue IS the cursor.
@@ -184,8 +201,10 @@ Two caveats this lane accepts rather than fixes:
 - **The `location-batch` Actions concurrency group does not reach Railway** (that is the point of
   Decision 8). The worker drain can now run concurrently with the registry load, claim intake and
   Mapy inventory, which the 2026-08-10 incident deliberately serialized. Mitigations already in
-  place: one connection, batch 250, `SET LOCAL statement_timeout`/`lock_timeout` on every batch
-  transaction, and `realtime_location_resolve_interval_seconds = 0` as the operator's instant idle
+  place: a bounded number of connections (`LOCATION_RESOLVE_WORKERS`, default 4 since W2-a5 — set it
+  to 1 to restore the single-connection posture), batch 250, `SET LOCAL
+  statement_timeout`/`lock_timeout` on every batch transaction, and
+  `realtime_location_resolve_interval_seconds = 0` as the operator's instant idle
   switch before a heavy lane. A cross-runner group is explicitly out of scope here.
 - **Epoch recompute overlap.** The inner `location-resolve` Actions group is what stopped
   `epoch_job` from overlapping a drain; the worker is outside it and the two lease rows do not

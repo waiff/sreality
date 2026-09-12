@@ -139,32 +139,49 @@ def _unit(unit_id, level, code, name, name_norm, path, parent=None, lat=None, lo
 
 
 def default_mirror() -> MiniMirror:
-    """One kraj/okres tree per regression case, plus a fully addressed obec."""
+    """One kraj/okres tree per regression case, plus a fully addressed obec.
+
+    Unit POINTS are modelled as the mirror actually has them (W2-a3): stát, kraj, okres and
+    obec carry one, a část obce or a městský obvod does NOT — `ruian_boundaries.LAYERS` draws
+    no polygon at those levels and `ruian_admin_units.definition_point` is a column the
+    loader has never written. A fixture that gave Vokovice a point would test a registry we
+    do not have.
+    """
     units = [
         # --- Liberecký kraj / okres Liberec / Krásný Les (the RIGHT one)
-        _unit(1, "kraj", 51, "Liberecký kraj", "liberecky kraj", "k51"),
-        _unit(2, "okres", 3506, "Liberec", "liberec", "k51.o3506", parent=1),
+        _unit(1, "kraj", 51, "Liberecký kraj", "liberecky kraj", "k51",
+              lat=50.6500, lon=14.9000),
+        _unit(2, "okres", 3506, "Liberec", "liberec", "k51.o3506", parent=1,
+              lat=50.7663, lon=15.0562),
         _unit(3, "obec", 563943, "Krásný Les", "krasny les", "k51.o3506.b563943", parent=2,
               lat=50.9330, lon=15.1500, psc_set=("46346",), homonym_count=2),
         _unit(4, "katastralni_uzemi", 673986, "Krásný Les u Frýdlantu",
               "krasny les u frydlantu", "k51.o3506.b563943", parent=3),
         # --- Ústecký kraj / okres Ústí nad Labem / Krásný Les (the WRONG one, ~100 km west)
-        _unit(5, "kraj", 42, "Ústecký kraj", "ustecky kraj", "k42"),
-        _unit(6, "okres", 3805, "Ústí nad Labem", "usti nad labem", "k42.o3805", parent=5),
+        _unit(5, "kraj", 42, "Ústecký kraj", "ustecky kraj", "k42",
+              lat=50.5000, lon=13.8000),
+        _unit(6, "okres", 3805, "Ústí nad Labem", "usti nad labem", "k42.o3805", parent=5,
+              lat=50.6607, lon=14.0328),
         _unit(7, "obec", 567931, "Krásný Les", "krasny les", "k42.o3805.b567931", parent=6,
               lat=50.7676, lon=13.9353, psc_set=("40302",), homonym_count=2),
         # --- Moravskoslezský kraj / okres Nový Jičín / Bílovec
-        _unit(8, "kraj", 80, "Moravskoslezský kraj", "moravskoslezsky kraj", "k80"),
-        _unit(9, "okres", 3804, "Nový Jičín", "novy jicin", "k80.o3804", parent=8),
+        _unit(8, "kraj", 80, "Moravskoslezský kraj", "moravskoslezsky kraj", "k80",
+              lat=49.7500, lon=18.0000),
+        _unit(9, "okres", 3804, "Nový Jičín", "novy jicin", "k80.o3804", parent=8,
+              lat=49.5944, lon=18.0103),
         _unit(10, "obec", 599212, "Bílovec", "bilovec", "k80.o3804.b599212", parent=9,
               lat=49.7573, lon=18.0158, psc_set=("74301",)),
         # --- Praha (street-name-contains-village trap) + Bořislav village
-        _unit(11, "kraj", 19, "Hlavní město Praha", "hlavni mesto praha", "k19"),
-        _unit(12, "okres", 3100, "Hlavní město Praha", "hlavni mesto praha", "k19.o3100", parent=11),
+        _unit(11, "kraj", 19, "Hlavní město Praha", "hlavni mesto praha", "k19",
+              lat=50.0755, lon=14.4378),
+        _unit(12, "okres", 3100, "Hlavní město Praha", "hlavni mesto praha", "k19.o3100",
+              parent=11, lat=50.0755, lon=14.4378),
         _unit(13, "obec", 554782, "Praha", "praha", "k19.o3100.b554782", parent=12,
               lat=50.0755, lon=14.4378, psc_set=("16000", "18000")),
+        # No point: RÚIAN draws no ČástObce polygon at all, so a quarter-bound row takes
+        # its town's point.
         _unit(14, "cast_obce", 490067, "Vokovice", "vokovice", "k19.o3100.b554782.c490067",
-              parent=13, lat=50.1010, lon=14.3480),
+              parent=13),
         _unit(15, "obec", 567639, "Bořislav", "borislav", "k42.o3805.b567639", parent=6,
               lat=50.5794, lon=13.9200, psc_set=("41502",)),
     ]

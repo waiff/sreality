@@ -368,7 +368,12 @@ Lanes shipped so far:
   per-listing registry reads from ~11 to ~4 and the writes from 7 to 1). Ships DARK; enable via
   `realtime_location_resolve_enabled`. Live tuning:
   `realtime_location_resolve_{interval_seconds,max_seconds,batch_size}` (15/240/250), interval `0`
-  idles. Exclusion, budgets, lease/lock: `docs/design/realtime-scrapers.md`. (The `epoch_job` it
+  idles. Since W2-a5 a pass drains **`LOCATION_RESOLVE_WORKERS`** slices concurrently (env on the
+  Railway service, default 4, clamped 1–8; one thread + one session connection each, disjoint by
+  SKIP LOCKED) — the heartbeat's `workers`/`failed_batches` say what actually ran. A failed
+  batch costs one slice (rolled back, rows stay queued, 2s→30s backoff); five consecutive, or a
+  lost connection after one reconnect, stop a worker. Prefetch ceiling 90 s
+  (`LOCATION_RESOLVE_PREFETCH_TIMEOUT_S`). The GH lane stays single-connection. Exclusion, budgets, lease/lock: `docs/design/realtime-scrapers.md`. (The `epoch_job` it
   had to be idled before is gone with the pin-collision engine, W2-a.)
 
 ## Pipeline verification (migration 274)

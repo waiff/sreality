@@ -747,11 +747,13 @@ def _admin_candidate(
         # The entity was INFERRED, not named — a PSČ lookup, a reverse geocode, the sliver
         # fallback, a bare region. Nothing agreed with it, so it contributes no field.
         agreed = []
+    # No lat/lon: a `_Candidate`'s position is the position of a POINT it bound, and a unit
+    # is not one. Where the unit sits is FILL's answer, off the chain (W2-a3).
     return _Candidate(
         rung=rung, score=_RUNG_BASE_SCORE[rung] + 5.0 * len(qualifiers),
         target_kind="admin_unit", granularity=granularity, admin_unit_id=unit.unit_id,
         obec_kod=unit.obec_kod if granularity != "obec" else unit.code,
-        lat=unit.lat, lon=unit.lon, agreed=tuple(dict.fromkeys(agreed)),
+        agreed=tuple(dict.fromkeys(agreed)),
         relaxations=qualifiers, source_claim_ids=claim_ids,
     )
 
@@ -830,12 +832,18 @@ def elect_pin(claims: Sequence[Claim]) -> Claim | None:
 
 
 def place(binding: Binding, pin_claim: Claim | None, *, declared: DeclaredPrecision) -> Position:
-    """Precedence: registry point > portal pin > admin centroid > none.
+    """Precedence: registry point > portal pin > (FILL's unit point).
 
     The registry-vs-pin cross-check FLAGS, it never silently picks: beyond
     `REGISTRY_PIN_CONFLICT_M` the registry point stays the position and GRADE caps the
     confidence. Reverse resolution (coordinate → street) is DERIVED, never a claim, so this
     function never invents an address from a pin.
+
+    BIND places what the CLAIMS place. A row left unplaced here is placed by `fill.position`
+    off the hierarchy chain (W2-a3) — the admin-centroid branch used to live here and read
+    `AdminUnit.lat`, which meant it read `ruian_admin_units.definition_point`, a column the
+    loader has never written: it looked like a fallback and was dead in production on every
+    one of the 8,706 towned rows that shipped `geom NULL`.
     """
     pin = (pin_claim.lat, pin_claim.lon) if pin_claim else None
     if binding.target_kind == "address_point" and binding.lat is not None:
@@ -848,10 +856,5 @@ def place(binding: Binding, pin_claim: Claim | None, *, declared: DeclaredPrecis
         return Position(
             lat=pin[0], lon=pin[1], origin="portal_pin", blurred=declared.blurred,
             source_claim_ids=(pin_claim.id,),
-        )
-    if binding.lat is not None and binding.lon is not None:
-        return Position(
-            lat=binding.lat, lon=binding.lon, origin="admin_centroid",
-            source_claim_ids=binding.source_claim_ids,
         )
     return Position(lat=None, lon=None, origin="none")

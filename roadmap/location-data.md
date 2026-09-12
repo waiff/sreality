@@ -208,6 +208,10 @@ component is slimmed twice — each wave rewrites one component and slims its st
     chain ends and lets it through — `location_resolve.yml` counts, it joins the group through a mode-conditional expression. `test_location_batch_hardening.py`'s ban on self-chaining
     members becomes the rail that the yield exists, plus seven tests that execute the chain
     script itself against a stub `gh`.
+  - **W1-a4** (2026-09-12): the bodies pass walks the payload table by PRIMARY KEY — a fenced
+    1,500-id window, then the joins over those ids, cursor = the window's max — after intake hop
+    34689928656 timed out on a selection Postgres planned from `listings` (~150 s a batch, 600 s
+    ceiling, 186,546 bodies queued). R2 fetch width raised to the clamp ceiling of 32.
 - **W2 — the resolver at four steps, the answer table at 26 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and
@@ -247,6 +251,71 @@ component is slimmed twice — each wave rewrites one component and slims its st
   re-mined) and fall as `claim_insert` re-enqueues each re-mined listing. No consumer reads
   `listing_location` yet, so the excursion is invisible to users — which is why it happens before W3
   and not after.
+  **W2-a2 shipped: the queue is re-entrant, and the sweep is the invariant's backstop.** The
+  paragraph above assumed "`claim_insert` re-enqueues each re-mined listing"; it did not.
+  **2026-09-12 07:13Z**: the queue already held ~540k rows from the previous sweep, the re-mine
+  inserted claims for ~60k listings, and every one of those enqueues hit `ON CONFLICT DO NOTHING`
+  because the row was already there — the drain then resolved them from the OLD claims and deleted
+  the queue row. **384,500 `listing_location` rows, 135 with a town**, and nothing that could ever
+  re-enqueue them: the sweep sees a current-version row and stops. Two rules close it. (1) Every
+  evidence-producing enqueue (`claims_intake`, `contracts.retract`, `operator_corrections`) is
+  `DO UPDATE SET enqueued_at = now(), reason = EXCLUDED.reason, attempts = 0, next_eligible_at =
+  now()`, and every statement that FINISHES a queue row — the batch delete, the per-listing delete,
+  the failure stamp — is bounded by the `enqueued_at` the slice claimed, so a bump that lands
+  mid-slice leaves the row queued and the next slice resolves it against the claims that arrived.
+  The sweep alone keeps `NOT EXISTS` + `DO NOTHING`: it carries no evidence, and bumping would reset
+  a poisoned row's backoff and push the queue's oldest row to the back. (2) `_SWEEP_SQL` gains a
+  fourth arm — `p.obec_kod IS NULL AND p.country_status <> 'foreign'` — so every active Czech
+  listing without a town is re-resolved by every daily sweep until it has one or is determined
+  foreign. No migration (501's `(obec_kod, granularity)` index serves it) and no new placeholder.
+  **W2-a3 shipped: a towned row always has a position.** 2026-09-12 08:05Z, live: 29,892
+  `listing_location` rows with a town, **8,706 of them (29 %) with no `geom`** — the four-step
+  resolver published a position only when a portal pin was admissible, and a row bound by NAME has
+  none. FILL now places those at the finest bound unit's own registry point (the boundary's stored
+  inscribed-circle centre — inside the polygon, which `ST_Centroid` is not for a concave obec),
+  walking the chain because RÚIAN draws no polygon for a část obce or a městský obvod and
+  `ruian_streets` carries no geometry at all, and refusing `stat`/`region soudržnosti` so nothing
+  lands at the centre of the country. Granularity, confidence and radius are untouched; foreign and
+  undetermined rows still carry none. It costs no tenth registry question — the point rides the
+  `admin_chain` read FILL already makes — and it DELETED the fallback it replaces: BIND's
+  admin-centroid branch read `ruian_admin_units.definition_point`, a column `ruian_load` has never
+  written, so the fallback that was supposed to cover this was dead on arrival. `RESOLVER_VERSION`
+  → `resolver:v4.1`, which re-resolves the corpus once through the ordinary lane (~1 h at the
+  worker's measured 120 listings/s; 5–11 h if the GitHub lane carries it). The gate is the same
+  `location_town_coverage` reading plus `geom IS NULL` among towned rows, which should go to ~0.
+  **W2-a5 shipped: the worker lane drains four slices concurrently.** Measured 2026-09-12 10:27Z the
+  Railway lane resolved **~8 listings/s** (5,000 rows per 10 minutes) against a **448k** queue — days
+  of drain — and the instance was the reason: every backend on it was waiting on `DataFileRead`, and a
+  listing costs ~4 registry round trips each of which is a disk wait. That is LATENCY, which N loops
+  overlap and one loop cannot. `drain.run(..., workers=N)` now runs N slice loops in N threads, each
+  with its OWN session-mode connection (psycopg connections are not thread-safe), each claiming with
+  the same `FOR UPDATE SKIP LOCKED` statement — which is what makes the slices disjoint — and each
+  running the unchanged per-slice pipeline. What is SHARED: the lease (one row CAS on the caller's
+  connection, taken once), the budget (one deadline; a worker finishes its slice and stops), and the
+  `RunCache`, now lock-guarded but never holding the lock across a registry question. A worker that
+  loses its connection logs, counts `failed_passes` and exits; the run continues with fewer.
+  **W2-a6 shipped: a failed batch costs one slice, never the worker.** The first live pass at
+  four workers read `failed_passes: 4` on a pass that resolved 1,000 of 1,000 with `failed: 0`
+  and no queue row past `attempts=0` — and the counters said where: `claimed=1000` over
+  `batches=8` at `batch_size=250` means four batches that were counted and never reached a
+  write, i.e. each worker completed ONE batch and died in the prefetch of its second. The
+  30 s per-listing `statement_timeout` was cancelling a 250-listing bulk claims read on an
+  IO-bound instance, and an unguarded `_prefetch` inside the batch transaction ended the loop
+  (pre-W2-a5 it ended the whole RUN — same bug, one loop to lose). Now: the batch body is
+  guarded, a raise rolls back and leaves the rows queued exactly as claimed (no backoff stamp
+  — that one is per LISTING and `_run_slice` never ran), the loop backs off 2 s doubling to
+  30 s and claims the next slice, and only five CONSECUTIVE failures stop it. A LOST
+  connection is told apart by SQLSTATE — `QueryCanceled` is an `OperationalError` subclass, so
+  an `isinstance` check would have read the timeout as a dead socket — and is reconnected once
+  by the thread that owns it. The prefetch gets its own 90 s ceiling
+  (`LOCATION_RESOLVE_PREFETCH_TIMEOUT_S`), restored before anything writes. `DrainStats` gains
+  `failed_batches`, and the heartbeat's `last` reports it under that name: `failed_passes`
+  already means "passes that raised" one level up, and a healthy pass reading four of them is
+  what sent an operator hunting failures that had not happened.
+  `LOCATION_RESOLVE_WORKERS` (env, default **4**, clamped 1–8) is the lane's knob and the heartbeat
+  reports `workers`; the GitHub lane keeps one connection (it is RTT-bound from a US runner, not
+  IO-bound beside the instance). Expect ~4x, bounded by the instance rather than by the loop — the
+  number to watch is the queue's OLDEST-ROW AGE, not the rate.
   **W2-b BUILT (migration 502), merged only after the corpus re-resolve — the readers cut over, the
   old projection and every resolver-side relation dropped.** There were SIX readers, not five: the
   map missed `location_data/operator_corrections.read_projection`, the corrections POST's
