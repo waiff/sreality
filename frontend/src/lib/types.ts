@@ -1413,6 +1413,12 @@ export interface WatchdogSubscription {
    * in_app is always implicit. */
   channels: string[];
   dispatch_count: number;
+  /* Place chips this watchdog matches NOTHING on, by name (W3 S3). A chip is a
+   * level plus a RÚIAN code; one saved before codes existed is resolved by name
+   * at read time, and whatever the RÚIAN name index still cannot place is named
+   * here. Empty for every healthy filter — non-empty means this watchdog's
+   * place filter is dead, which is otherwise invisible until it stops firing. */
+  unresolved_places: string[];
 }
 
 /* Saved Browse filter preset (filter_presets table, migration 151).

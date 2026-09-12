@@ -70,6 +70,39 @@ begin;
 set local lock_timeout = '5s';
 
 -- ---------------------------------------------------------------------------
+-- 0. The column this file's predicate reads must already be there.
+--
+--    A plpgsql function body is NOT validated at CREATE time (`check_function_
+--    bodies` is off for plpgsql's SQL statements), so `l.cast_obce_id` inside the
+--    two RPCs below would be accepted here and fail at the FIRST browser read of
+--    Browse's Stats tab or the map — as a 500 on a cohort read, which the SPA
+--    swallows into an empty result. Migration 503 appends the column to
+--    `browse_projection` and rebuilds both read models; assert it landed rather
+--    than discovering it from a user's empty map.
+-- ---------------------------------------------------------------------------
+
+do $$
+begin
+  if not exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'browse_list'
+       and column_name = 'cast_obce_id'
+  ) then
+    raise exception '504 needs browse_list.cast_obce_id — apply 503 (and let its '
+                    'rebuild finish) first';
+  end if;
+  if not exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'properties_map_mv'
+       and column_name = 'cast_obce_id'
+  ) then
+    raise exception '504 needs properties_map_mv.cast_obce_id — rerun '
+                    'rebuild_properties_map_mv() from 503';
+  end if;
+end
+$$;
+
+-- ---------------------------------------------------------------------------
 -- 1. properties_public -- migration 503's body plus `cast_obce_id`.
 --    The Watchdog matcher's relation; the fourth chip level has to exist here
 --    or a `cast_obce` chip would silently match nothing on that ONE surface.

@@ -110,6 +110,13 @@ def compiled_level(level: str | None) -> str | None:
     return LEVEL_ALIASES.get(level, level if level in LEVEL_COLUMN else None)
 
 
+def valid_code(code: int | None) -> bool:
+    """RÚIAN codes are positive. Anything else — a hand-typed `districts_id=-1`
+    in a URL, a stored 0 — is NOT a resolved chip, and must never be able to
+    spell the sentinel from outside."""
+    return code is not None and code > 0
+
+
 def district_code_plan(chips: Sequence[DistrictChip] | None) -> DistrictCodePlan:
     include: dict[str, list[int]] = {}
     exclude: dict[str, list[int]] = {}
@@ -117,7 +124,7 @@ def district_code_plan(chips: Sequence[DistrictChip] | None) -> DistrictCodePlan
     for chip in chips or []:
         level = compiled_level(chip.level)
         code = chip.id
-        if level is None or code is None:
+        if level is None or not valid_code(code):
             level, code = "obec", NO_MATCH_CODE
             unresolved.append(chip.name)
         bucket = exclude if chip.excluded else include
@@ -162,7 +169,14 @@ def district_where(
         where.append(f"({inc})")
     exc = _arms(plan.exclude, alias, "district_codes_excl", params)
     if exc:
-        where.append(f"NOT ({exc})")
+        # COALESCE, because an EXCLUDE must subtract only what it MATCHES. A row
+        # whose code at that level is NULL — an unresolved listing — makes the
+        # comparison NULL, and a bare `NOT (NULL)` is NULL, i.e. drops the row.
+        # That would make "not Prague" quietly mean "not Prague AND located",
+        # and it is the one place the four renderings of this predicate could
+        # still disagree: the RPC's `not exists(... case ...)` and the SPA's
+        # in-memory `!hits` both KEEP such a row. This makes SQL keep it too.
+        where.append(f"NOT COALESCE({exc}, false)")
     return where, params
 
 
@@ -178,7 +192,9 @@ ChipNameResolver = Callable[
 
 
 def needs_upgrade(chips: Iterable[DistrictChip] | None) -> bool:
-    return any(compiled_level(c.level) is None or c.id is None for c in chips or [])
+    return any(
+        compiled_level(c.level) is None or not valid_code(c.id) for c in chips or []
+    )
 
 
 def upgrade_district_chips(
@@ -204,7 +220,7 @@ def upgrade_district_chips(
     wanted = [
         (c.name, c.context)
         for c in chips
-        if compiled_level(c.level) is None or c.id is None
+        if compiled_level(c.level) is None or not valid_code(c.id)
     ]
     try:
         resolved = resolve(wanted)
@@ -214,7 +230,7 @@ def upgrade_district_chips(
     out: list[DistrictChip] = []
     dropped: list[str] = []
     for chip in chips:
-        if compiled_level(chip.level) is not None and chip.id is not None:
+        if compiled_level(chip.level) is not None and valid_code(chip.id):
             out.append(chip)
             continue
         matches = resolved.get((chip.name, chip.context)) or []
@@ -275,6 +291,9 @@ def parse_district_chips_csv(
         if lvl in CHIP_LEVELS:
             chip.level = lvl
             raw_id = ids[i] if i < len(ids) else None
-            chip.id = int(raw_id) if raw_id else None
+            code = int(raw_id) if raw_id and raw_id.lstrip("-").isdigit() else None
+            # A non-positive id is not a RÚIAN code — a URL must not be able to
+            # hand the predicate the no-match sentinel dressed as a real pick.
+            chip.id = code if valid_code(code) else None
         chips.append(chip)
     return chips

@@ -5,6 +5,9 @@ import {
   type WatchdogFilterSpec,
 } from './types';
 import { fmtArea } from './format';
+/* Value import, but not a runtime cycle: districtCodes imports only TYPES from
+ * this file, and "what a valid RÚIAN code is" must have ONE definition. */
+import { isValidCode } from './districtCodes';
 
 export type TriState = 'any' | 'yes' | 'no';
 export type ListingStatus = 'active' | 'inactive' | 'any';
@@ -492,7 +495,9 @@ export const parseDistrictChips = (
       chip.level = lvl as LocationLevel;
       const rawId = ids[i];
       const n = rawId == null || rawId === '' ? null : Number(rawId);
-      chip.id = n != null && Number.isFinite(n) ? n : null;
+      // RÚIAN codes are positive: a URL must not be able to hand the predicate
+      // the no-match sentinel (-1) dressed as a resolved pick.
+      chip.id = isValidCode(n) ? n : null;
     }
     return chip;
   });

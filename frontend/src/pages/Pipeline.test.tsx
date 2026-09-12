@@ -51,6 +51,14 @@ vi.mock('@/lib/brokers', async (importOriginal) => {
   };
 });
 
+/* The board shares Browse's stored-chip reader (W3 S3): a URL written before
+ * chips carried codes is resolved through this one call. */
+const resolveChipNames = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/maps', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/maps')>();
+  return { ...actual, resolveChipNames };
+});
+
 const CARDS: PipelineBoardCard[] = [
   {
     property_id: 42,
@@ -188,13 +196,13 @@ const STAGES: PipelineStage[] = [
   { id: 3, key: 'offer', label: 'Nabídka', position: 3, color: 'teal', is_terminal: false, is_entry: false, code: null },
 ];
 
-function renderBoard() {
+function renderBoard(entry = '/pipeline') {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[entry]}>
         <Pipeline />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -325,6 +333,28 @@ describe('<Pipeline> board', () => {
       expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument(),
     );
     expect(screen.getByText('Lesní, Brno')).toBeInTheDocument();
+  });
+
+  /* W3 S3. The board filters its cards in the BROWSER, so it needs the same
+     chip treatment Browse gets: under the one code predicate a chip with no
+     code matches nothing, and a URL written before chips carried codes would
+     empty the board while the very same link still shows a cohort on /browse. */
+  it('resolves a pre-code chip in the URL instead of emptying the board', async () => {
+    resolveChipNames.mockResolvedValue([[{ level: 'obec', id: 554782 }]]);
+    renderBoard('/pipeline?districts=Praha');
+    expect(await screen.findByText('Sadová, Praha')).toBeInTheDocument();
+    expect(resolveChipNames).toHaveBeenCalledWith([
+      { name: 'Praha', context: null },
+    ]);
+  });
+
+  it('filters the board on the resolved code, not on the name', async () => {
+    resolveChipNames.mockResolvedValue([[{ level: 'obec', id: 582786 }]]);
+    renderBoard('/pipeline?districts=Brno');
+    await waitFor(() => expect(resolveChipNames).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument(),
+    );
   });
 
   it('filters the board by active/inactive status', async () => {

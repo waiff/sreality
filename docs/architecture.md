@@ -1070,7 +1070,17 @@ renumber.** Navigate by area:
     Deleted with the ILIKE arms: the sreality-only `locality_district_id` /
     `locality_region_id` filters (registry, comparables, watchdog spec, API schemas, SPA filter
     types) — one portal out of nine could answer them, and `districts` at the obec / okres level
-    says the same thing for all nine.
+    says the same thing for all nine. **A stored spec that still carries one now WIDENS**: the
+    request models ignore unknown fields (Pydantic's default), so an old watchdog filtering on
+    `locality_district_id` silently loses that narrowing rather than erroring — deliberate (a 422
+    on every save of a pre-W3 watchdog is worse), and the reason `districts` is the one place
+    filter left to re-pick. Two smaller asymmetries are recorded rather than fixed here: the
+    Watchdog reads its four codes off `properties_public` (trigger-289-sourced) while Browse reads
+    them off `browse_list` (`listing_location`-sourced) — identical values by construction, but
+    **W4 owes a row-level parity measurement** before it re-sources the first; and an EXCLUDE chip
+    keeps rows whose code at that level is NULL (`NOT COALESCE(…, false)` in SQL,
+    `or(col.is.null,col.not.in.(…))` in PostgREST), because an exclude subtracts what it MATCHES
+    and the bare spelling made "not Prague" quietly mean "not Prague AND located".
     `notification_dispatches` is the **unified notification event table** (migration 206 —
     physical name kept; conceptually "notifications"): one source-generic, **property-grain**,
     append-only event row per `(source_kind ∈ {watchdog, collection_monitor, system_health},

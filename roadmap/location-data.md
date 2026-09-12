@@ -312,8 +312,16 @@ component is slimmed twice — each wave rewrites one component and slims its st
     spec, API schemas, SPA filter types, the estimation filter body). A chip with no code matches
     NOTHING (`NO_MATCH_CODE = -1`, fail closed) and stored name-only chips are resolved once at
     read time (`upgrade_district_chips` in the matcher, `POST /maps/resolve-names` +
-    `useLegacyChipUpgrade` in the SPA) — the stored blob is never rewritten. The chip UI now shows
-    its level, and chip identity is `(level, code)`. Next: S4 (drop the legacy text columns:
+    `useLegacyChipUpgrade` in the SPA — Browse AND the kanban, which filters its cards in the
+    browser) — the stored blob is never rewritten. A quarter pick that RÚIAN cannot place (a
+    `momc` like "Praha 2", a colloquial Mapy name) gets NO code rather than its town: falling
+    back to the obec would turn "this quarter" into "this whole city". The chip UI shows its
+    level, chip identity is `(level, code)`, and a watchdog whose place chips resolve to nothing
+    is badged in the list (`unresolved_places`) instead of just going quiet.
+    Carried into W4: a row-level parity measurement before `properties_public`'s codes are
+    re-sourced (the Watchdog reads trigger-289 columns, Browse reads `listing_location`), and the
+    fact that a stored spec still carrying `locality_district_id` now silently WIDENS (unknown
+    request fields are ignored, not rejected). Next: S4 (drop the legacy text columns:
     `place_search_text`, `district`/`locality`/`obec`/`okres`/`region`/`street` off the
     projection, `home_city_id`, the bisect hatches).
 - **W4 — delete legacy** (= plan S5): Mapy purge, geocoder + cache, street extractor, the trigger
