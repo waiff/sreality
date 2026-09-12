@@ -2512,7 +2512,7 @@ def check_location_payload_shape_drift(conn: Any, thresholds: dict[str, Any]) ->
 
 
 # The location programme's one invariant (CLAUDE.md rule 25, 2026-09-11): every active
-# listing has a projection row, and every active listing that is not foreign has a town
+# listing has an answer row, and every active listing that is not foreign has a town
 # (`obec_kod`). Per portal, absolute counts, red when either is not zero — this is the line
 # the S2 contract rewrites drive to zero portal by portal and the guard that keeps it there.
 # `country_status <> 'foreign'` deliberately counts `undetermined` and `disputed` as Czech:
@@ -2526,7 +2526,7 @@ _LOCATION_TOWN_COVERAGE_SQL = """
                               AND p.obec_kod IS NULL)                  AS cz_no_town_n,
            count(*) FILTER (WHERE p.obec_kod IS NOT NULL)              AS town_n
       FROM listings l
-      LEFT JOIN listing_location_current p ON p.listing_id = l.id
+      LEFT JOIN listing_location p ON p.listing_id = l.id
      WHERE l.is_active
      GROUP BY l.source
      ORDER BY l.source
@@ -2534,7 +2534,7 @@ _LOCATION_TOWN_COVERAGE_SQL = """
 
 
 def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    """Red when any active listing has no projection row, or any active non-foreign listing
+    """Red when any active listing has no answer row, or any active non-foreign listing
     has no town. Absolute counts, no threshold: the invariant is zero, and a number that is
     not zero names the portal whose contract has to change."""
     rows = _fetchall(conn, _LOCATION_TOWN_COVERAGE_SQL)
@@ -2555,10 +2555,10 @@ def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[
     status = "fail" if missing else "ok"
     message = (
         f"{missing:,} of {active:,} active listings have no town "
-        f"({no_row:,} without a projection row, {cz_no_town:,} Czech without obec_kod): "
+        f"({no_row:,} without an answer row, {cz_no_town:,} Czech without obec_kod): "
         + "; ".join(offenders)
         if missing
-        else f"Every one of {active:,} active listings has a projection row and every Czech one a town."
+        else f"Every one of {active:,} active listings has an answer row and every Czech one a town."
     )
     return {
         "check_key": "location_town_coverage",

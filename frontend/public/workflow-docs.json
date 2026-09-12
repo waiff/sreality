@@ -3588,7 +3588,7 @@
     {
       "filename": "location_resolve.yml",
       "name": "Location: resolve",
-      "description": "The steady-state resolution lane of the location subsystem (design 03 §3.14.1). Without it a newly scraped listing gets claims and never gets a resolution — no row in listing_location_current, invisible to Browse, map, watchdog and dedup.",
+      "description": "The steady-state resolution lane of the location subsystem. Without it a newly scraped listing gets claims and never gets an answer row in `listing_location` — invisible to every consumer of the location programme.",
       "portal": null,
       "manual": true,
       "schedules": [
@@ -3599,10 +3599,6 @@
         {
           "cron": "17 3 * * *",
           "human": "Daily at 03:17 UTC"
-        },
-        {
-          "cron": "41 4 * * 0",
-          "human": "41 4 * * 0"
         }
       ],
       "onPush": false,
@@ -3617,7 +3613,6 @@
           "default": "drain",
           "options": [
             "drain",
-            "epoch",
             "full-resolve"
           ]
         },
@@ -3635,14 +3630,6 @@
           "required": false,
           "type": "string",
           "default": "250",
-          "options": null
-        },
-        {
-          "name": "sources",
-          "description": "epoch mode: comma-separated portals; blank = every source",
-          "required": false,
-          "type": "string",
-          "default": "",
           "options": null
         },
         {
