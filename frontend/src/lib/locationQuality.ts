@@ -48,24 +48,11 @@ export type CorpusSummaryRow = {
   with_adm_kod: number;
 };
 
-export type W1vGate = {
-  active_rows: number;
-  with_ruian_claim: number;
-  claim_matches_one_point: number;
-  projection_r0: number;
-  projection_building_or_better: number;
-  primary_pct: number | null;
-  fallback_pct: number | null;
-  primary_pass: boolean;
-  fallback_pass: boolean;
-};
-
 export type InspectorClaim = {
   id: number;
   claim_type: string;
   surface: string;
   extraction_method: string;
-  extractor_id: string;
   value_text: string | null;
   value_num: number | null;
   licence_class: string;
@@ -185,9 +172,6 @@ export const fetchCorpusSummary = () =>
 export const fetchSourceOverview = (source: string) =>
   apiGet<Envelope<SourceOverview>>(
     `/location/quality/source/${source}`, undefined, undefined, true);
-
-export const fetchW1vGate = () =>
-  apiGet<Envelope<W1vGate>>('/location/quality/w1v-gate', undefined, undefined, true);
 
 export const fetchInspector = (listingId: string) => {
   const trimmed = listingId.trim();

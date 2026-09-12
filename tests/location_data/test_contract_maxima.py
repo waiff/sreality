@@ -122,7 +122,7 @@ def test_the_activated_entry_set_is_exactly_the_six_this_version_switches_on():
     }
     assert BY_ID["mx.det.view_centre"].reader is None
     assert BY_ID["mx.desc.homonym"].reader is None
-    assert CONTRACT.version == 2 and CONTRACT.shadow is False  # un-shadowed 09-09; line deleted 09-11
+    assert CONTRACT.version == 2
 
 
 def test_every_activated_entry_claims_on_the_pinned_body_with_a_resolvable_span():

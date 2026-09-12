@@ -13,10 +13,9 @@ Two tables, one header + its immutable entries (migration 382):
 `is_active` lives on the HEADER (the partial unique index is per source). A change to any
 ENTRY is a new `contract_version`, never an edit, and projecting a contract whose governed
 bytes changed under an already-loaded version is refused — that is the whole point of
-`contract_sha256`. Three header columns are mutable, none of them extraction: `is_active`
-says which version the extractor runs, `shadow` (migration 404) says whether what it mined
-is admissible to the resolver yet, and `fetch_config` carries the two blocks the hash does
-not govern (`contract_body_hash`), so its `persistence` copy tracks git rather than
+`contract_sha256`. Two header columns are mutable, neither of them extraction: `is_active`
+says which version the extractor runs, and `fetch_config` carries the two blocks the hash
+does not govern (`contract_body_hash`), so its `persistence` copy tracks git rather than
 freezing at whatever version first shipped it.
 
 This module is the deploy-time/CI lane and imports PyYAML lazily. The claims extractor
@@ -32,13 +31,12 @@ into the image and PyYAML is a runtime dependency. Everything else here stays de
 CLI:
     python -m location_data.contracts --check                     # validate only, no DB
     python -m location_data.contracts --load --git-ref <sha>      # project + activate
-    python -m location_data.contracts --retract sreality@1 --reason contract_misread \\
-        --by operator [--extractor-id sr.det.gps]
-    python -m location_data.contracts --shadow sreality@2        # take it out of serving
-    python -m location_data.contracts --unshadow sreality@2      # its sample passed
+    python -m location_data.contracts --retract sreality@1 [--extractor-id sr.det.gps]
 
-Exactly one lifecycle verb per invocation: `--retract`, `--shadow` and `--unshadow` are
-mutually exclusive, because two of them mean opposite things and one is irreversible.
+RETRACTION IS A DELETE (W1-b, migration 498). A contract version that misread the portal
+produced no evidence, so its claims go and their listings are re-resolved from what
+survives — there is no append-only retraction ledger and no `location_claims_live` view
+subtracting rows on every read.
 """
 
 from __future__ import annotations
@@ -134,10 +132,6 @@ CONTRACT_LICENCE_CLASSES = LICENCE_CLASSES - {"ephemeral_display_only"}
 
 CARDINALITIES = frozenset({"one", "many"})
 REQUIRED_MODES = frozenset({"always", "when_present", "best_effort"})
-RETRACTION_REASONS = frozenset({
-    "extractor_bug", "contract_misread", "fabrication", "licence_withdrawal",
-    "superseded_backfill", "operator_judgement",
-})
 
 # What each reader WILL DO with an entry, as data. The contract gate refuses an entry that
 # declares anything this record does not cover, because the runtime would ignore it in
@@ -461,12 +455,6 @@ class PortalContract:
     exclusion_zones: list[dict[str, Any]]
     precision_priors: dict[str, Any]
     fetch_config: dict[str, Any]
-    # 06 §6.4.0(2): a contract that cannot meet its frozen-sample precision floors
-    # ships in shadow — claims mined and stored, excluded from location_claims_live
-    # (migration 404) and therefore never a resolver input. The YAML key sets the
-    # value a FRESH projection lands with; clearing it afterwards is an operational
-    # UPDATE on the header, not a contract_version bump.
-    shadow: bool = False
     entries: list[ContractEntry] = field(default_factory=list)
     # `persistence.volatile_paths`, parsed: {page_kind: profile}. 02 §2.3.2 P1 —
     # `payload_sha256` addresses a NORMALISED body, and this is what normalises it, so
@@ -714,12 +702,11 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
 
 
 # Every top-level key `parse_contract` understands. An unknown key is a REFUSAL, not a
-# shrug: `shaddow: true` would ship a contract LIVE, which is exactly the state the shadow
-# mechanism exists to prevent, and every other key fails open the same way (a typo'd
-# `extractoins:` projects a header with no entries and a silent hash change). Adding a key
-# to the format means adding it here — CI's `--check` run is the gate.
+# shrug: every key fails open the same way (a typo'd `extractoins:` projects a header with
+# no entries and a silent hash change). Adding a key to the format means adding it here —
+# CI's `--check` run is the gate.
 _TOP_LEVEL_KEYS = frozenset({
-    "portal", "contract_version", "contract_sha256", "shadow",
+    "portal", "contract_version", "contract_sha256",
     "identity_ladder", "exclusion_zones", "precision_priors", "precision_caps",
     "extractions", "extractor_runtime", "fetch", "persistence", "regressions",
     "payload_schema_detector", "pin_collision_semantics",
@@ -728,14 +715,8 @@ _TOP_LEVEL_KEYS = frozenset({
 # A HASH COVERS WHAT IT GOVERNS. `contract_sha256` governs the EXTRACTION half of this
 # file — it is the immutability gate on `portal_contract_entries`, and `contract_version`,
 # the thing a mismatch demands you bump, is what `extractor_version` and every claim's
-# `contract_entry_id` name. Two top-level keys are not extraction and are therefore not
+# `contract_entry_id` name. One top-level key is not extraction and is therefore not
 # hashed:
-#
-# `shadow` is operational state (migration 404). Hashing it makes the flag a
-# version-bumping change in git while the migration calls it "an operational UPDATE, not a
-# contract_version bump": deleting the now-obsolete `shadow: true` line after a sample
-# passes would make `project()` refuse the contract with "bump contract_version" — and
-# bumping it would RE-SHADOW the contract and discard the passed sample.
 #
 # `persistence` is ARCHIVE configuration (W2a-3e): `volatile_paths` decides the projection
 # `payload_sha256` is taken over, and `version_cap` is retention. Neither reaches a claim.
@@ -747,24 +728,28 @@ _TOP_LEVEL_KEYS = frozenset({
 # allowance left — and once per future tweak. The profiles keep their own identity
 # instead: `payload_norm.profile_digest`, which moves iff the projection moves.
 #
-# A top-level key is never indented, so these anchored filters cannot reach a nested
-# `shadow:`/`persistence:` inside an extraction. The block filter takes the key's line
-# plus every line under it that is indented or blank, which is exactly YAML's own block
-# extent — the narrative comments live inside the block and travel with it.
+# A top-level key is never indented, so this anchored filter cannot reach a nested
+# `persistence:` inside an extraction. The block filter takes the key's line plus every
+# line under it that is indented or blank, which is exactly YAML's own block extent — the
+# narrative comments live inside the block and travel with it.
 #
 # CHANGING WHAT IS EXCLUDED RE-DIALECTS EVERY STORED HASH. Rows projected under the old
 # definition no longer match, and `project()` refuses them by design. Migration 408 is
 # that one-time restatement for the nine contracts live when `persistence` was excluded;
 # a further exclusion needs the same treatment.
-_SHADOW_LINE = re.compile(rb"^shadow[ \t]*:.*(?:\r?\n|$)", re.MULTILINE)
 _PERSISTENCE_BLOCK = re.compile(
     rb"^persistence[ \t]*:.*(?:\r?\n|$)(?:(?:[ \t][^\n]*)?(?:\r?\n|$))*", re.MULTILINE)
 
 
 def contract_body_hash(body: bytes) -> bytes:
-    """The bytes `contract_sha256` is taken over: the file, minus the two blocks that are
-    not extraction — its `shadow:` line and its `persistence:` block."""
-    governed = _PERSISTENCE_BLOCK.sub(b"", _SHADOW_LINE.sub(b"", body))
+    """The bytes `contract_sha256` is taken over: the file, minus the one block that is not
+    extraction — its `persistence:` block.
+
+    The `shadow:` line used to be subtracted here too (W1-b deleted the flag). No contract
+    file ever carried one, so the governed bytes — and every stored hash — are unchanged;
+    `contracts.lock.json` is the assertion of that.
+    """
+    governed = _PERSISTENCE_BLOCK.sub(b"", body)
     return hashlib.sha256(governed).digest()
 
 
@@ -879,7 +864,6 @@ def parse_contract(path: Path) -> PortalContract:
             "regressions": doc.get("regressions") or [],
             "extractor_runtime": doc.get("extractor_runtime"),
         },
-        shadow=bool(doc.get("shadow", False)),
         entries=entries,
         volatile_profiles=volatile_profiles,
         path=path,
@@ -935,10 +919,10 @@ _FETCH_CONFIG_UPDATE_SQL = """
 _HEADER_INSERT_SQL = """
     INSERT INTO portal_contracts
         (source, version, contract_sha256, git_ref, identity_ladder, exclusion_zones,
-         precision_priors, fetch_config, is_active, shadow)
+         precision_priors, fetch_config, is_active)
     VALUES (%(source)s, %(version)s, decode(%(sha256)s, 'hex'), %(git_ref)s,
             %(identity_ladder)s, %(exclusion_zones)s, %(precision_priors)s,
-            %(fetch_config)s, false, %(shadow)s)
+            %(fetch_config)s, false)
     RETURNING id
 """
 
@@ -967,58 +951,71 @@ _ACTIVATE_SQL = """
     UPDATE portal_contracts SET is_active = true, retired_at = NULL WHERE id = %(id)s
 """
 
-_RETRACT_SQL = """
-    INSERT INTO location_claim_retractions
-        (scope, contract_source, contract_version, extractor_id, reason, note, retracted_by)
-    VALUES (%(scope)s, %(source)s, %(version)s, %(extractor_id)s, %(reason)s, %(note)s,
-            %(retracted_by)s)
-    RETURNING id
+# RETRACTION IS A DELETE (W1-b, migrations 497 + 498). The append-only ledger and the
+# `location_claims_live` view that subtracted its rows are gone: a contract version that
+# misread the portal produced no evidence, and teaching every present and future reader to
+# subtract it cost three views and a correlated NOT EXISTS on the resolver's hot read.
+#
+# THE TARGET IS RESOLVED FIRST, and an empty resolution is an ERROR. A typo'd portal, a
+# version that was never projected or an `--extractor-id` that names no entry used to be
+# indistinguishable from "that version had no claims": both printed `deleted=0` and exited 0,
+# which reads as "done". An operator retracting the wrong thing must be told so.
+_RETRACT_ENTRIES_SQL = """
+    SELECT pce.id
+      FROM portal_contract_entries pce
+      JOIN portal_contracts pc ON pc.id = pce.contract_id
+     WHERE pc.source = %(source)s AND pc.version = %(version)s
+       AND (%(extractor_id)s::text IS NULL OR pce.entry_id = %(extractor_id)s)
 """
+
+# BOUNDED BATCHES, each its own transaction. "The contract's claims" is every listing the
+# portal has ever had — 5 M rows on sreality — and one atomic DELETE of that size is a
+# statement that spends its whole timeout and then rolls back, doing nothing, forever. A
+# partial retraction is the right failure mode here: the rows that went are gone, their
+# listings are queued, and re-running finishes the job (the predicate is the same).
+#
+# `ctid` is the bound: LIMIT inside a DELETE needs a subquery, and the physical row id is the
+# cheapest key that survives one. Safe because nothing UPDATEs `location_claims` — the intake
+# only ever INSERTs — so a row's ctid cannot move under the statement.
+#
+# One statement per batch, so the delete and its re-resolve enqueue cannot separate.
+# `claim_insert` is reused deliberately: the queue's reason is a diagnostic label and the
+# drain rebuilds the whole projection row whatever it says, so a retraction-only value would
+# be a vocabulary entry nothing branches on.
+_RETRACT_BATCH_SQL = """
+    WITH victims AS (
+        SELECT ctid FROM location_claims
+         WHERE contract_entry_id = ANY(%(entry_ids)s)
+         LIMIT %(batch_size)s
+    ), deleted AS (
+        DELETE FROM location_claims c
+         USING victims v
+         WHERE c.ctid = v.ctid
+        RETURNING c.listing_id
+    ), enqueued AS (
+        INSERT INTO dirty_locations (listing_id, reason)
+        SELECT DISTINCT listing_id, 'claim_insert' FROM deleted
+        ON CONFLICT (listing_id) DO NOTHING
+        RETURNING listing_id
+    )
+    SELECT (SELECT count(*) FROM deleted), (SELECT count(*) FROM enqueued)
+"""
+
+# Bounds ONE batch, not the retraction: the loop below may run for as long as the corpus
+# needs, but no single statement may hang a pooler backend.
+_RETRACT_TIMEOUT_SQL = "SET LOCAL statement_timeout = '300s'"
+
+RETRACT_BATCH_ROWS = 50_000
 
 _RETIRE_SQL = """
     UPDATE portal_contracts SET is_active = false, retired_at = now()
     WHERE source = %(source)s AND version = %(version)s
 """
 
-# RETURNING reports the NEW row, so the previous value is read from a FROM sub-select:
-# "already shadowed" and "no such contract version" are different operator answers and a
-# bare UPDATE cannot tell them apart.
-_SET_SHADOW_SQL = """
-    UPDATE portal_contracts c SET shadow = %(shadow)s
-    FROM (SELECT id, shadow FROM portal_contracts
-           WHERE source = %(source)s AND version = %(version)s) was
-    WHERE c.id = was.id
-    RETURNING was.id, was.shadow
-"""
-
-# The flip alone would change NOTHING a consumer can see. `location_claims_live` is a view,
-# so the claims appear or vanish instantly — but every consumer, the dashboard and the
-# frozen-sample scorecard read `listing_location_current`, and nothing would ever rebuild
-# it: the claim rows are untouched (claims_intake enqueues only NEWLY INSERTED claims) and
-# the daily backstop re-queues only a missing projection or a stale version tuple
-# (resolver/drain._FULL_SWEEP_SQL), neither of which a flag flip moves. So the flip queues
-# the contract's listings itself, inside the same transaction — the precedent is
-# operator_corrections._OPERATOR_CLAIM_SQL, and it is UNCONDITIONAL for the same
-# read-your-writes reason: an operator re-running `--unshadow` after a failed drain must
-# not get a dead button because the flag already held the target value.
-_SHADOW_ENQUEUE_SQL = """
-    INSERT INTO dirty_locations (listing_id, reason)
-    SELECT DISTINCT c.listing_id, 'contract_shadow'
-      FROM location_claims c
-      JOIN portal_contract_entries pce ON pce.id = c.contract_entry_id
-     WHERE pce.contract_id = %(contract_id)s
-    ON CONFLICT (listing_id) DO NOTHING
-"""
-
-# The enqueue is one indexed scan of the contract's claims, but "the contract's claims" is
-# every listing the portal has ever had — bound it so a flip fails loudly instead of
-# hanging a pooler backend, and so the flag and the queue stay atomic either way.
-_SHADOW_TIMEOUT_SQL = "SET LOCAL statement_timeout = '300s'"
-
-# `location_claims` + `dirty_locations` are here because `set_shadow` writes the second
-# from the first: a pre-flight that only checked the contract tables would let a flip fail
+# `location_claims` + `dirty_locations` are here because `retract` writes the second from
+# the first: a pre-flight that only checked the contract tables would let a retraction fail
 # halfway with a bare UndefinedTable instead of the schema-not-applied message.
-_RELATIONS = ("portal_contracts", "portal_contract_entries", "location_claim_retractions",
+_RELATIONS = ("portal_contracts", "portal_contract_entries",
               "location_claims", "dirty_locations")
 _REGCLASS_SQL = "SELECT to_regclass(%(name)s)"
 
@@ -1044,15 +1041,10 @@ def project(
 
     Re-running with the same bytes is a no-op; re-running with different GOVERNED bytes
     under the same version raises — entries are immutable and a change is a new version
-    (02 §2.1.8). Bytes outside the hash (`contract_body_hash`: `shadow:`, `persistence:`)
+    (02 §2.1.8). Bytes outside the hash (`contract_body_hash`: the `persistence:` block)
     are the exception by design: a `persistence` edit is not a version bump, so the row's
     `fetch_config` is refreshed in place to keep the psql-readable projection equal to the
     file the scrape is actually applying.
-
-    `contract.shadow` is an INITIAL value, written only on the header INSERT: an operator
-    who un-shadowed a version after its sample passed must not have that decision reverted
-    by the next deploy re-projecting the same unchanged YAML (06 §6.4.0(2)). Re-shadowing
-    goes through `set_shadow`.
     """
     sha_hex = contract.sha256.hex()
     inserted = 0
@@ -1071,7 +1063,6 @@ def project(
                     "exclusion_zones": psycopg.types.json.Jsonb(contract.exclusion_zones),
                     "precision_priors": psycopg.types.json.Jsonb(contract.precision_priors),
                     "fetch_config": psycopg.types.json.Jsonb(contract.fetch_config),
-                    "shadow": contract.shadow,
                 })
                 contract_id = int(cur.fetchone()[0])
             else:
@@ -1082,10 +1073,10 @@ def project(
                         f"{contract.source}@{contract.version} is already loaded with a "
                         f"different sha256 ({stored_sha} on record, {sha_hex} on disk). "
                         f"Contract entries are immutable: bump contract_version "
-                        f"(02 §2.1.8). NOTE: `persistence:` and `shadow:` are excluded "
-                        f"from this hash (W2a-3e), so an edit to either is NOT what "
-                        f"moved it — but a row projected before that exclusion holds a "
-                        f"hash over the whole file and needs migration 408's one-time "
+                        f"(02 §2.1.8). NOTE: the `persistence:` block is excluded from "
+                        f"this hash (W2a-3e), so an edit to it is NOT what moved it — "
+                        f"but a row projected before that exclusion holds a hash over "
+                        f"the whole file and needs migration 408's one-time "
                         f"restatement.")
                 if stored_config != contract.fetch_config:
                     cur.execute(_FETCH_CONFIG_UPDATE_SQL, {
@@ -1131,77 +1122,74 @@ def project(
     return contract_id, inserted
 
 
+@dataclass(frozen=True, slots=True)
+class Retraction:
+    """What `retract` did: claim rows deleted, listings that newly queued for
+    re-resolution (one the queue already holds is not counted twice — it is going to be
+    rebuilt either way), and how many bounded batches it took."""
+
+    deleted: int
+    enqueued: int
+    batches: int
+
+
 def retract(
     conn: psycopg.Connection,
     *,
     source: str,
     version: int,
-    reason: str,
-    retracted_by: str,
     extractor_id: str | None = None,
-    note: str | None = None,
     retire_header: bool = True,
-) -> int:
-    """02 §2.1.8 mechanism 2 — retraction is an append, never a delete.
+    batch_size: int = RETRACT_BATCH_ROWS,
+) -> Retraction:
+    """02 §2.1.8 mechanism 2, as W1-b restates it — retraction DELETES the version's claims
+    and re-resolves their listings.
 
-    Claims stay on disk and stop being resolver inputs (they drop out of
-    `location_claims_live`); the header is stood down so the next deploy activates a
-    corrected version.
+    A contract version that misread the portal produced no evidence, so there is nothing to
+    keep on disk and nothing for a view to subtract on every resolver read. The listings go
+    into `dirty_locations` so the `*/15` drain mints their projections from what survives;
+    the header is stood down so the next deploy activates a corrected version.
+
+    NOT one transaction, deliberately. The delete is BATCHED, each batch atomic with its own
+    enqueue: a version can hold millions of claims, and a single atomic DELETE of that size
+    burns its statement_timeout and rolls back, leaving the operator exactly where they
+    started with no way to make progress. Interrupted here, the batches that committed are
+    real and re-running resumes — the predicate does not move.
+
+    Raises if the target resolves to no contract entry: a typo'd portal, an unprojected
+    version and an `--extractor-id` that names nothing all used to be indistinguishable from
+    a version that simply had no claims.
     """
-    if reason not in RETRACTION_REASONS:
-        raise ContractError(f"unknown retraction reason '{reason}'")
-    scope = "extractor_entry" if extractor_id else "contract_version"
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(_RETRACT_SQL, {
-                "scope": scope, "source": source, "version": version,
-                "extractor_id": extractor_id, "reason": reason, "note": note,
-                "retracted_by": retracted_by,
-            })
-            retraction_id = int(cur.fetchone()[0])
-            if retire_header and extractor_id is None:
+    with conn.cursor() as cur:
+        cur.execute(_RETRACT_ENTRIES_SQL, {
+            "source": source, "version": version, "extractor_id": extractor_id,
+        })
+        entry_ids = [int(row[0]) for row in cur.fetchall()]
+    if not entry_ids:
+        target = f"{source}@{version}" + (f" entry {extractor_id}" if extractor_id else "")
+        raise ContractError(f"no such contract version: {target} matches no projected entry")
+
+    deleted = enqueued = batches = 0
+    while True:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(_RETRACT_TIMEOUT_SQL)
+                cur.execute(_RETRACT_BATCH_SQL,
+                            {"entry_ids": entry_ids, "batch_size": batch_size})
+                batch_deleted, batch_enqueued = (int(x) for x in cur.fetchone())
+        if batch_deleted == 0:
+            break
+        deleted += batch_deleted
+        enqueued += batch_enqueued
+        batches += 1
+        LOG.info("CONTRACT retract %s@%s batch=%d deleted=%d enqueued=%d",
+                 source, version, batches, batch_deleted, batch_enqueued)
+
+    if retire_header and extractor_id is None:
+        with conn.transaction():
+            with conn.cursor() as cur:
                 cur.execute(_RETIRE_SQL, {"source": source, "version": version})
-    return retraction_id
-
-
-@dataclass(frozen=True, slots=True)
-class ShadowFlip:
-    """What `set_shadow` did. `moved` is False when the flag already held the target value;
-    `enqueued` is how many listings this call newly queued for re-resolution (a listing the
-    queue already holds is not counted twice — it is already going to be rebuilt)."""
-
-    moved: bool
-    enqueued: int
-
-
-def set_shadow(
-    conn: psycopg.Connection,
-    *,
-    source: str,
-    version: int,
-    shadow: bool,
-) -> ShadowFlip:
-    """06 §6.4.0(2) — flip a contract version between shadow and live. Raises if that
-    version was never projected.
-
-    Un-shadowing REWRITES NO CLAIM: they have been in `location_claims` since the sweep
-    ran, and migration 404's view excludes them by joining the header, so clearing the flag
-    makes exactly those rows resolver inputs. But the *projection* those consumers read is
-    stale until something re-resolves the listings, and nothing else ever would — so the
-    same transaction queues them (`_SHADOW_ENQUEUE_SQL`) and the `*/15` drain rebuilds
-    them. Both directions: re-shadowing a live contract has to un-build them again.
-    """
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(_SHADOW_TIMEOUT_SQL)
-            cur.execute(_SET_SHADOW_SQL,
-                        {"source": source, "version": version, "shadow": shadow})
-            row = cur.fetchone()
-            if row is None:
-                raise ContractError(f"{source}@{version} is not projected — nothing to flip")
-            contract_id, was = int(row[0]), bool(row[1])
-            cur.execute(_SHADOW_ENQUEUE_SQL, {"contract_id": contract_id})
-            return ShadowFlip(moved=was != shadow, enqueued=max(cur.rowcount, 0))
+    return Retraction(deleted=deleted, enqueued=enqueued, batches=batches)
 
 
 # ------------------------------------------------------------------ CLI
@@ -1228,8 +1216,7 @@ def _summarise(contracts: Iterable[PortalContract]) -> str:
                         page_kind: payload_norm.profile_digest(profile)[
                             :payload_norm.PROFILE_DIGEST_CHARS]
                         for page_kind, profile in sorted(c.volatile_profiles.items())},
-                    "sha256": c.sha256.hex(),
-                    "shadow": c.shadow}
+                    "sha256": c.sha256.hex()}
          for c in contracts},
         ensure_ascii=False, sort_keys=True)
 
@@ -1243,30 +1230,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="Project the contracts into portal_contracts(+entries).")
     parser.add_argument("--git-ref", default=os.environ.get("GITHUB_SHA", "local"))
     parser.add_argument("--no-activate", action="store_true")
-    parser.add_argument("--retract", metavar="PORTAL@VERSION")
-    parser.add_argument("--shadow", metavar="PORTAL@VERSION",
-                        help="Exclude this version's claims from location_claims_live.")
-    parser.add_argument("--unshadow", metavar="PORTAL@VERSION",
-                        help="Its frozen sample passed: make its claims resolver inputs.")
+    parser.add_argument("--retract", metavar="PORTAL@VERSION",
+                        help="Delete this version's claims and re-resolve their listings.")
     parser.add_argument("--extractor-id", default=None)
-    parser.add_argument("--reason", default="operator_judgement")
-    parser.add_argument("--note", default=None)
-    parser.add_argument("--by", default=os.environ.get("GITHUB_ACTOR", "operator"))
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s")
-
-    # ONE lifecycle verb per invocation. `--retract` used to win silently over `--shadow`
-    # while `--shadow`+`--unshadow` was refused; retraction is the irreversible one, so
-    # guessing which the operator meant is the worst possible resolution.
-    verbs = [f"--{name}" for name in ("retract", "shadow", "unshadow")
-             if getattr(args, name)]
-    if len(verbs) > 1:
-        print(f"ERROR: {', '.join(verbs)} are mutually exclusive", file=sys.stderr)
-        return 2
 
     if args.retract:
         source, version = _parse_target(args.retract)
@@ -1276,25 +1248,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"ERROR: schema not applied; missing {', '.join(missing)}",
                       file=sys.stderr)
                 return 2
-            retraction_id = retract(
-                conn, source=source, version=version, reason=args.reason,
-                retracted_by=args.by, extractor_id=args.extractor_id, note=args.note)
-        LOG.info("CONTRACT retracted %s@%s entry=%s id=%d",
-                 source, version, args.extractor_id or "*", retraction_id)
-        return 0
-
-    if args.shadow or args.unshadow:
-        want = bool(args.shadow)
-        source, version = _parse_target(args.shadow or args.unshadow)
-        with db.connect() as conn:
-            missing = missing_relations(conn)
-            if missing:
-                print(f"ERROR: schema not applied; missing {', '.join(missing)}",
-                      file=sys.stderr)
+            try:
+                done = retract(conn, source=source, version=version,
+                               extractor_id=args.extractor_id)
+            except ContractError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
                 return 2
-            flip = set_shadow(conn, source=source, version=version, shadow=want)
-        LOG.info("CONTRACT shadow=%s %s@%s moved=%s enqueued=%d",
-                 want, source, version, flip.moved, flip.enqueued)
+        LOG.info("CONTRACT retracted %s@%s entry=%s deleted=%d enqueued=%d batches=%d",
+                 source, version, args.extractor_id or "*", done.deleted, done.enqueued,
+                 done.batches)
         return 0
 
     contracts = load_all(args.dir)

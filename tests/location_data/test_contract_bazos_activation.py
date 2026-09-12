@@ -284,10 +284,11 @@ def test_an_archived_bazos_pin_is_unlicensable_by_construction():
 # ------------------------------------------------------------------ the contract shape
 
 def test_bazos_ships_live():
-    """Un-shadowed 2026-09-09 (operator ruling); the stale YAML line went 2026-09-11 so a
+    """Un-shadowed 2026-09-09 (operator ruling); the flag itself went in W1-b, so a
     version bump can never ship the portal dark again. v4 (rule 25 W1-a) removed the
     sixteen never-executed LLM entries with the lane that would have run them."""
-    assert (CONTRACT.version, CONTRACT.shadow) == (4, False)
+    assert CONTRACT.version == 4
+    assert not hasattr(CONTRACT, "shadow")
 
 
 def test_the_activation_appended_one_id_and_edited_none():

@@ -845,16 +845,51 @@ def test_projection_stands_the_incumbent_down_before_activating():
     assert "is_active = true" in statements[1]
 
 
-def test_retraction_is_an_append_and_names_a_reason():
-    conn = _FakeConn(existing_sha="")
-    contracts.retract(conn, source="remax", version=1, reason="contract_misread",
-                      retracted_by="operator")
-    inserts = [s for s, _ in conn.executed if "location_claim_retractions" in s]
-    assert inserts
-    assert not any("delete" in s.lower() for s, _ in conn.executed)
-    with pytest.raises(ContractError, match="unknown retraction reason"):
-        contracts.retract(conn, source="remax", version=1, reason="because",
-                          retracted_by="operator")
+def test_retraction_deletes_the_versions_claims_and_enqueues_their_listings():
+    """W1-b: retraction stopped being an append. A contract version that misread the
+    portal produced no evidence, so its claims are DELETED and their listings go into
+    `dirty_locations` — one statement per batch, so the delete and the re-resolve queue
+    cannot separate, and no ledger row survives for a view to subtract on every read."""
+    conn = _FakeConn(existing_sha="", claim_batches=[7, 5, 0])
+    done = contracts.retract(conn, source="remax", version=1)
+    assert (done.deleted, done.enqueued, done.batches) == (12, 12, 2)
+
+    statements = [s for s, _ in conn.executed]
+    assert not any("location_claim_retractions" in s for s in statements)
+    # The target is RESOLVED first — an empty resolution is an error, not deleted=0.
+    assert any("FROM portal_contract_entries pce" in s for s in statements)
+    deletes = [s for s in statements if "DELETE FROM location_claims" in s]
+    # Batched: it drained until a batch came back empty, and each batch is one statement
+    # carrying its own enqueue (a version can hold millions of rows; one atomic DELETE of
+    # that size burns its timeout and rolls back, making no progress ever).
+    assert len(deletes) == 3
+    assert all("INSERT INTO dirty_locations" in d for d in deletes)
+    assert all("LIMIT %(batch_size)s" in d for d in deletes)
+    # An EXISTING reason value — the drain rebuilds the projection whatever the label says.
+    assert all("'claim_insert'" in d for d in deletes)
+    # Each batch is bounded on its own; the LOOP is not.
+    assert len([s for s in statements if "statement_timeout" in s]) == 3
+    # The whole version: the header is stood down so the next deploy activates a fix.
+    assert any("portal_contracts SET is_active = false" in s for s in statements)
+
+
+def test_retracting_one_entry_leaves_the_header_active():
+    conn = _FakeConn(existing_sha="", claim_batches=[4, 0])
+    contracts.retract(conn, source="remax", version=1, extractor_id="rx.det.street")
+    params = next(p for s, p in conn.executed if "FROM portal_contract_entries pce" in s)
+    assert params["extractor_id"] == "rx.det.street"
+    assert not any("retired_at = now()" in s for s, _ in conn.executed)
+
+
+def test_a_target_that_matches_no_contract_version_is_an_error_not_a_no_op():
+    """`deleted=0 enqueued=0` + exit 0 reads as "done". A typo'd portal, a version that was
+    never projected and an `--extractor-id` that names nothing are all the same shape as a
+    version that genuinely had no claims, and an operator retracting the WRONG thing has to
+    be told so — the right one is still live."""
+    conn = _FakeConn(existing_sha="", entry_ids=[])
+    with pytest.raises(ContractError, match="no such contract version"):
+        contracts.retract(conn, source="remax", version=99)
+    assert not [s for s, _ in conn.executed if "DELETE FROM location_claims" in s]
 
 
 class _FakeCursor:
@@ -876,9 +911,15 @@ class _FakeCursor:
         if "FROM portal_contracts WHERE source" in sql or "encode(contract_sha256" in sql:
             return ((7, self._conn.existing_sha, False, self._conn.fetch_config)
                     if self._conn.existing_sha else None)
+        if "DELETE FROM location_claims" in sql:
+            n = (self._conn.claim_batches.pop(0) if self._conn.claim_batches else 0)
+            return (n, n)
         return (7,)
 
     def fetchall(self):
+        sql = " ".join(self._sql.split())
+        if "FROM portal_contract_entries pce" in sql:
+            return [(i,) for i in self._conn.entry_ids]
         return []
 
 
@@ -886,9 +927,14 @@ class _FakeConn:
     """Enough psycopg surface to assert on statement ORDER. It cannot catch a CHECK or a
     UNIQUE violation — those belong to the migration's own tests."""
 
-    def __init__(self, existing_sha: str, fetch_config: object = None):
+    def __init__(self, existing_sha: str, fetch_config: object = None,
+                 claim_batches: list[int] | None = None,
+                 entry_ids: list[int] | None = None):
         self.existing_sha = existing_sha
         self.fetch_config = fetch_config
+        # Successive `deleted` counts the batched retraction loop sees, ending in 0.
+        self.claim_batches = list(claim_batches or [])
+        self.entry_ids = [1000, 1001] if entry_ids is None else list(entry_ids)
         self.executed: list[tuple[str, object]] = []
 
     def cursor(self):

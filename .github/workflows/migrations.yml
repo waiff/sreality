@@ -314,17 +314,6 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_pipeline_checks_latest_per_key.py -q
 
-      # The W2 contract SHADOW gate is one predicate inside one view: a contract
-      # that fails its frozen-sample floors writes claims that the resolver must
-      # not see, and un-shadowing must bring the SAME rows back with no backfill.
-      # PREPARE proves the view compiles; only executing it proves the predicate
-      # excludes what it should, composes with the retraction predicate, and
-      # leaves contract-less claims alone.
-      - name: Contract-shadow view predicate (executed, not just PREPAREd)
-        env:
-          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-        run: pytest tests/location_data/test_contract_shadow_live.py -q
-
       # 06 W2a gate (b) — "a deliberately changed page appends a second body; an
       # unchanged refetch appends none" — is a property of one ON CONFLICT clause
       # and two retention statements. PREPARE proves they compile; only executing

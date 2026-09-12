@@ -585,53 +585,35 @@ def test_the_first_and_latest_versions_are_never_evicted(conn: psycopg.Connectio
 
 
 @requires_db
-def test_a_body_referenced_by_an_open_contradiction_is_never_evicted(
-    conn: psycopg.Connection,
-) -> None:
-    # P4's third pin: a disputed body is the evidence an arbitration decision rests
-    # on, so the cap must not reclaim it while the finding is open.
-    #
-    # The control arm carries BYTE-IDENTICAL bodies under a different native id, so
-    # it also pins the bug the first cut of the pin predicate had: matching on the
-    # content address alone made one listing's dispute freeze another listing's
-    # history, because the hash is not a listing.
-    control, disputed = _key(), _key()
-    for native in (control, disputed):
-        for i in range(3):
-            _append(conn, native, f'{{"v": {i}}}'.encode(), version_cap=2)
+def test_the_claim_store_no_longer_pins_anything(conn: psycopg.Connection) -> None:
+    """W1-b (migration 498). The pin predicate had two more arms, both reaching into the
+    claim store: `location_claims.payload_id` (an FK with NO ACTION, so a referenced body
+    could not be deleted) and the content address of a claim a `location_contradictions_open`
+    row named. Both columns are gone — the claim spine is 19 columns of value and
+    provenance with no pointer back into the archive — so `_REPIN_SQL` is two version edges
+    and this statement, which runs on EVERY scraper payload append, joins nothing.
 
-    middle = _rows(conn, disputed)[1]
-    _open_contradiction(conn, disputed, bytes(middle["payload_sha256"]))
-    for native in (control, disputed):
-        _append(conn, native, b'{"v": 99}', version_cap=2)
-
-    assert [r["version_seq"] for r in _rows(conn, control)] == [1, 3, 4]
-    assert [r["version_seq"] for r in _rows(conn, disputed)] == [1, 2, 3, 4]
-    assert _rows(conn, disputed)[1]["pinned"] is True
-
-
-@requires_db
-def test_a_body_a_claim_points_at_is_never_evicted(conn: psycopg.Connection) -> None:
-    """The FK, not a policy: location_claims.payload_id references this table with NO
-    ACTION (382), so evicting a referenced body raises ForeignKeyViolation and rolls
-    back the whole bounded transaction — losing the body just appended, and every
-    later append for that listing, permanently.
-
-    The claim here carries NO contradiction: an ordinary mined claim is enough."""
+    Executed rather than grepped because the live consequence is the one that matters: an
+    ordinary mined claim on a middle version no longer keeps that version alive, and the
+    retention DELETE no longer has an FK that could raise ForeignKeyViolation and roll back
+    the whole bounded transaction.
+    """
     native = _key()
     for i in range(3):
         _append(conn, native, f'{{"v": {i}}}'.encode(), version_cap=2)
     middle = _rows(conn, native)[1]
-    _claim_on_payload(conn, native, int(middle["id"]))
+    _claim_on_listing(conn, native)
 
-    # Without the pin the FIRST of these raises ForeignKeyViolation and neither
-    # version 4 nor version 5 ever exists.
     _append(conn, native, b'{"v": 98}', version_cap=2)
     _append(conn, native, b'{"v": 99}', version_cap=2)
 
     rows = _rows(conn, native)
-    assert [r["version_seq"] for r in rows] == [1, 2, 4, 5]
-    assert rows[1]["pinned"] is True and rows[1]["id"] == middle["id"]
+    assert [r["version_seq"] for r in rows] == [1, 4, 5]
+    assert middle["id"] not in {r["id"] for r in rows}
+    assert [r["pinned"] for r in rows] == [True, False, True]
+
+    assert "location_claims" not in payloads._REPIN_SQL
+    assert "location_contradictions" not in payloads._REPIN_SQL
 
 
 @requires_db
@@ -849,65 +831,20 @@ def test_an_index_page_is_a_separate_group_from_the_detail_page(
     ]
 
 
-def _claim_on_payload(conn: psycopg.Connection, native: str, payload_id: int) -> int:
-    """One ordinary mined claim carrying the FK — no contradiction, nothing disputed.
-
-    This is what W3 writes for every listing it mines, and it is what the retention
-    DELETE has to survive."""
+def _claim_on_listing(conn: psycopg.Connection, native: str) -> int:
+    """One ordinary mined claim — the 19 columns migration 498 leaves. It names no body:
+    that is the point (the pin predicate cannot reach it)."""
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO location_claims "
-            "  (listing_id, source, source_id_native, snapshot_anchor, payload_id, "
-            "   payload_sha256, first_observed_at, claim_type, surface, page_kind, "
-            "   extraction_method, extractor_id, extractor_version, value_text, "
-            "   licence_class, claim_fingerprint) "
-            "SELECT 1, 'idnes', %s, 'unanchored_latest_fetch', p.id, p.payload_sha256, "
-            "       now(), 'street_name', 'html_selector', 'detail', "
-            "       'html_selector_parse', 'test', '1', 'Dlouha', 'portal', %s "
-            "  FROM portal_raw_payloads p WHERE p.id = %s "
+            "  (listing_id, source, first_observed_at, claim_type, surface, "
+            "   extraction_method, value_text, licence_class, claim_fingerprint) "
+            "VALUES (1, 'idnes', now(), 'street_name', 'html_selector', "
+            "        'html_selector_parse', 'Dlouha', 'portal', %s) "
             "RETURNING id",
-            (native, hashlib.sha256(f"{native}:{payload_id}".encode()).digest(), payload_id),
+            (hashlib.sha256(native.encode()).digest(),),
         )
         return int(cur.fetchone()[0])
-
-
-def _open_contradiction(
-    conn: psycopg.Connection, native: str, payload_sha256: bytes,
-) -> None:
-    """A claim carrying this body, and an open ledger row pointing at that claim.
-
-    `location_claims` has no `disputed` column by design (it is append-only
-    evidence); "disputed" means an OPEN `location_contradictions` row names the claim.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO registry_versions "
-            "  (label, kind, source_date, artifact_urls, proj_version, proj_pipeline) "
-            "VALUES (%s, 'baseline', current_date, '{}'::jsonb, 'test', 'test') "
-            "RETURNING id",
-            (f"payload-test-{native}",),
-        )
-        registry_version_id = cur.fetchone()[0]
-        cur.execute(
-            "INSERT INTO location_claims "
-            "  (listing_id, source, source_id_native, snapshot_anchor, payload_sha256, "
-            "   first_observed_at, claim_type, surface, page_kind, extraction_method, "
-            "   extractor_id, extractor_version, value_text, licence_class, "
-            "   claim_fingerprint) "
-            "VALUES (1, 'idnes', %s, 'unanchored_latest_fetch', %s, now(), 'street_name', "
-            "        'html_selector', 'detail', 'html_selector_parse', 'test', '1', "
-            "        'Dlouha', 'portal', %s) "
-            "RETURNING id",
-            (native, payload_sha256, hashlib.sha256(native.encode()).digest()),
-        )
-        claim_id = cur.fetchone()[0]
-        cur.execute(
-            "INSERT INTO location_contradictions "
-            "  (listing_id, reconciler_version, registry_version_id, field, rule, "
-            "   severity, served_claim_id, auto_action, dedupe_key) "
-            "VALUES (1, 'test', %s, 'street_name', 'test_rule', 'major', %s, 'none', %s)",
-            (registry_version_id, claim_id, payload_sha256),
-        )
 
 
 @requires_db

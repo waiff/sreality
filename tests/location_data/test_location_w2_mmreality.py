@@ -104,10 +104,11 @@ def by_id(result) -> dict[str, object]:
 
 # ------------------------------------------------- the contract, as shipped
 
-def test_mmreality_ships_at_version_two_in_shadow():
-    """Version 2 is the DOM contract; it ships live since the 2026-09-09 un-shadow."""
+def test_mmreality_ships_at_version_two_and_live():
+    """Version 2 is the DOM contract; it ships live since the 2026-09-09 un-shadow, and
+    W1-b deleted the flag it was un-shadowed by."""
     assert CONTRACT.version == 2
-    assert CONTRACT.shadow is False  # un-shadowed 2026-09-09; stale YAML line deleted 2026-09-11
+    assert not hasattr(CONTRACT, "shadow")
 
 
 def test_the_activated_entries_are_exactly_the_seven_this_wave_names():
@@ -128,8 +129,8 @@ def test_the_activated_entries_are_exactly_the_seven_this_wave_names():
 
 def test_the_w1_entries_the_twins_shadow_keep_their_own_readers():
     """The five new ids are TWINS, not replacements: `claim_fingerprint` hashes `surface`, so
-    the raw_json row and the archived row are two rows and both survive into
-    `location_claims_live`. Restating the W1 entries onto archive readers instead would take
+    the raw_json row and the page-body row are two rows and both are resolver inputs.
+    Restating the W1 entries onto archive readers instead would take
     mmreality's hourly admin claims dark for the sake of a corroboration."""
     readers = {e.entry_id: e.reader for e in CONTRACT.entries}
     assert readers["mm.det.accurate"] == "declared_bool_quality"

@@ -6,10 +6,9 @@
  * frozen-sample cells take their name from their column header, and the
  * inspector / correction / source-scope controls from their own caption.
  *
- * Hermetic: every `/location/*` wrapper is mocked. The two panels that need a
- * large fixture (source overview, W1v gate) are deliberately failed — their
- * error banner is a real render path and none of the named controls live in
- * them.
+ * Hermetic: every `/location/*` wrapper is mocked. The one panel that needs a
+ * large fixture (source overview) is deliberately failed — its error banner is
+ * a real render path and none of the named controls live in it.
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
@@ -26,7 +25,6 @@ vi.mock('../lib/locationQuality', async (importOriginal) => {
     ...actual,
     fetchCorpusSummary: vi.fn(),
     fetchSourceOverview: vi.fn(),
-    fetchW1vGate: vi.fn(),
     fetchSample: vi.fn(),
     fetchSampleScore: vi.fn(),
     fetchInspector: vi.fn(),
@@ -88,7 +86,6 @@ function renderPage() {
 beforeEach(() => {
   vi.mocked(lq.fetchCorpusSummary).mockResolvedValue({ data: { grain: 'listing', sources: [] } });
   vi.mocked(lq.fetchSourceOverview).mockRejectedValue(new Error('overview unavailable'));
-  vi.mocked(lq.fetchW1vGate).mockRejectedValue(new Error('gate unavailable'));
   vi.mocked(lq.fetchSample).mockResolvedValue({ data: sample });
   vi.mocked(lq.fetchSampleScore).mockResolvedValue({ data: score });
   vi.mocked(lq.fetchInspector).mockResolvedValue({ data: inspector });

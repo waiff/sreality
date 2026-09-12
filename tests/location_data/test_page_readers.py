@@ -197,9 +197,15 @@ def test_a_regex_text_claim_needs_no_model():
         payload_scope_version="v", payload_sha256="ab" * 32, subject_scoped=True))
 
 
-def test_the_model_columns_reach_the_insert():
+def test_the_model_columns_reach_the_row_dict_but_no_longer_the_table():
+    """W1-b dropped both columns (migration 498) — no lane emits an `llm_text` claim, so
+    the CHECK that forced them was guarding a shape nothing writes. They stay on the
+    `Claim` and in the recordset that parses it, because the READERS still carry the
+    evidence discipline in Python; they simply have nowhere to land."""
+    recordset = claims_intake._CLAIM_WRITE_SQL.split("), typed AS")[0]
     for column in ("model", "prompt_version"):
-        assert f"d.{column}" in claims_intake._CLAIM_WRITE_SQL, column
+        assert column in recordset, column
+        assert f"d.{column}" not in claims_intake._CLAIM_WRITE_SQL, column
 
 
 def test_a_degenerate_span_is_refused():
@@ -532,24 +538,31 @@ def _top_level_items(expression: str) -> list[str]:
 
 
 def test_the_insert_column_list_and_its_select_have_the_same_arity():
-    """Six columns were added to both halves of one INSERT … SELECT. A one-column skew
+    """The two halves of one INSERT … SELECT must stay the same length. A one-column skew
     would not be a syntax error at import time — it is a runtime `INSERT has more target
-    columns than expressions`, discovered by the first batch that ever ran."""
+    columns than expressions`, discovered by the first batch that ever ran. W1-b narrowed
+    both halves from 42 columns to 18 in one edit, which is exactly the shape this pins."""
     insert = re.search(r"INSERT INTO location_claims \((.*?)\)\s*SELECT (.*?)\s*FROM deduped",
                        claims_intake._CLAIM_WRITE_SQL, re.S)
     assert insert
     assert len(_top_level_items(insert.group(1))) == len(_top_level_items(insert.group(2)))
 
+    assert len(_top_level_items(insert.group(1))) == 18
+
     # The re-sight observation CTE went with its table (rule 25): 263 M rows nobody read.
     assert "location_claim_observations" not in claims_intake._CLAIM_WRITE_SQL
 
 
-def test_every_evidence_column_reaches_the_insert():
+def test_the_evidence_columns_reach_the_row_dict_but_no_longer_the_table():
+    """Same shape as the model pair. The D7 span discipline is enforced in Python by
+    `assert_evidence_complete` (the tests above); migration 498 dropped the six columns it
+    used to land in, along with the two CHECKs that mirrored it — the archive the spans
+    index into is `portal_raw_payloads`, which is untouched."""
+    recordset = claims_intake._CLAIM_WRITE_SQL.split("), typed AS")[0]
     for column in ("payload_id", "payload_sha256", "evidence_quote", "span_start",
                    "span_end", "payload_scope_version"):
-        assert column in claims_intake._CLAIM_WRITE_SQL, column
-    # bytea cannot ride in a jsonb array, so the hash is hex text until the SQL decodes it.
-    assert "decode(d.payload_sha256, 'hex')" in claims_intake._CLAIM_WRITE_SQL
+        assert column in recordset, column
+        assert f"d.{column}" not in claims_intake._CLAIM_WRITE_SQL, column
 
 
 def test_the_fingerprint_stays_time_free_and_evidence_free():

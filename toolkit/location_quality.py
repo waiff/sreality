@@ -2,7 +2,7 @@
 location serving projection.
 
 Everything here reads `listing_location_current` (+ `pin_clusters`,
-`registry_versions`, `location_claims_live`) and NOTHING else derives state:
+`registry_versions`, `location_claims`) and NOTHING else derives state:
 the dashboard is "built entirely from the projection (no new instrumentation)".
 Every payload states its grain ('listing') - a precision mix that silently
 mixed grains would be upward-biased (05 5.5.4).
@@ -181,80 +181,13 @@ def corpus_summary(conn: psycopg.Connection) -> dict[str, Any]:
     }
 
 
-def w1v_gate(conn: psycopg.Connection) -> dict[str, Any]:
-    """The W1v acceptance gate (06 6.4, wave W1v), measured live.
-
-    Primary: >= 95 % of active bezrealitky rows carry a ruianId claim that
-    resolves to exactly one current address point (kod_adm is the mirror PK,
-    so the join is 0-or-1 by construction). Fallback: >= 90 % at
-    address_point/building granularity through the matcher. Projection R0 is
-    identified by match_confidence='exact' - R0 is the only rung that emits it.
-    """
-    with conn.transaction():
-        conn.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT_S}s'")
-        with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                """
-                WITH active AS (
-                  SELECT id FROM listings WHERE source = 'bezrealitky' AND is_active
-                ), claim AS (
-                  SELECT c.listing_id,
-                         bool_or(ap.kod_adm IS NOT NULL) AS matched_one
-                  FROM location_claims_live c
-                  JOIN active a ON a.id = c.listing_id
-                  LEFT JOIN ruian_address_points ap
-                         ON ap.kod_adm = nullif(regexp_replace(c.value_text, '\\D', '', 'g'), '')::bigint
-                        AND ap.valid_to IS NULL
-                  WHERE c.source = 'bezrealitky' AND c.claim_type = 'address_point_id'
-                  GROUP BY c.listing_id
-                )
-                SELECT
-                  (SELECT count(*) FROM active) AS active_rows,
-                  (SELECT count(*) FROM claim) AS with_ruian_claim,
-                  (SELECT count(*) FROM claim WHERE matched_one) AS claim_matches_one_point,
-                  (SELECT count(*)
-                     FROM listing_location_current p JOIN active a ON a.id = p.listing_id
-                    WHERE p.source = 'bezrealitky'
-                      AND p.granularity = 'address_point'
-                      AND p.position_source = 'registry_point'
-                      AND p.match_confidence = 'exact') AS projection_r0,
-                  (SELECT count(*)
-                     FROM listing_location_current p JOIN active a ON a.id = p.listing_id
-                    WHERE p.source = 'bezrealitky'
-                      AND p.granularity IN ('address_point','building'))
-                      AS projection_building_or_better
-                """
-            )
-            row = cur.fetchone()
-
-    active = row["active_rows"] or 0
-    pct = lambda n: round(100.0 * n / active, 2) if active else None  # noqa: E731
-    primary_pct = pct(row["claim_matches_one_point"])
-    fallback_pct = pct(row["projection_building_or_better"])
-    return {
-        "data": {
-            **row,
-            "primary_pct": primary_pct,
-            "fallback_pct": fallback_pct,
-            "primary_pass": primary_pct is not None and primary_pct >= 95.0,
-            "fallback_pass": fallback_pct is not None and fallback_pct >= 90.0,
-            "grain": "listing",
-        },
-        "metadata": {
-            "tool": "location_quality.w1v_gate",
-            "queried_at": _utcnow(),
-            "grain": "listing",
-        },
-    }
-
-
 def listing_inspector(
     conn: psycopg.Connection,
     listing_id: int | None = None,
     source: str | None = None,
     native_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """One listing through the stack: projection row + live claims + the current
+    """One listing through the stack: projection row + its claims + the current
     resolution's candidate ladder. The read-your-writes surface (05 5.5.5)."""
     with conn.cursor(row_factory=dict_row) as cur:
         if listing_id is None:
@@ -289,10 +222,10 @@ def listing_inspector(
         cur.execute(
             """
             SELECT id, claim_type::text, surface::text, extraction_method::text,
-                   extractor_id, value_text, value_num, licence_class::text,
+                   value_text, value_num, licence_class::text,
                    claim_confidence::text, blur_evidence::text,
                    first_observed_at, subject_scoped
-            FROM location_claims_live
+            FROM location_claims
             WHERE listing_id = %s
             ORDER BY claim_type, first_observed_at DESC, id DESC
             LIMIT 200

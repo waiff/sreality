@@ -154,7 +154,7 @@ def test_claim_and_dirty_enqueue_are_one_statement():
         listing("sreality", SREALITY_POST_CUTOVER, lat=50.078, lon=14.450),
         entries_for("sreality"))
     with conn.cursor() as cur:
-        inserted, enqueued = write_result(cur, result, batch_id=42)
+        inserted, enqueued = write_result(cur, result)
 
     claim_statements = [s for s, _ in conn.executed if "INSERT INTO location_claims" in s]
     assert len(claim_statements) == 1
@@ -168,7 +168,8 @@ def test_the_lane_writes_claims_and_nothing_else():
     """Rule 25. `location_claim_observations` (263 M rows / 50 GB),
     `location_claim_absences` and `location_enrichment_state` were written by every lane and
     read by none. No SQL constant in this module may name one of them again — a prose
-    reference in a comment explaining WHY they are gone is fine, an INSERT is not."""
+    reference in a comment explaining WHY they are gone is fine, an INSERT is not.
+    W1-a stopped writing them; migration 498 dropped them."""
     dead = ("location_claim_observations", "location_claim_absences",
             "location_enrichment_state")
     statements = [v for name, v in vars(claims_intake).items()
@@ -198,7 +199,7 @@ def test_a_licence_refusal_is_counted_not_recorded():
     }
     conn = _Conn()
     with conn.cursor() as cur:
-        write_result(cur, result, batch_id=7)
+        write_result(cur, result)
     assert [s for s, _ in conn.executed] == []
 
 

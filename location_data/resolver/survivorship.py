@@ -311,9 +311,9 @@ def _independently_agreed(scored, value: object) -> bool:
     This used to count `(source, extraction_method)` pairs, and that was safe only while a
     portal could be read exactly one way. It stopped being safe the moment a second
     substrate opened: `claim_fingerprint` (01 §4.2.1) hashes `surface`, so the SAME fact
-    mined from a portal's `raw_json` (W1) and re-mined from its archived body (W2,
-    `location_data.claims_remine_archive`) is two distinct fingerprints, two rows, and both
-    survive into `location_claims_live`. Under the old rule, `html_selector_parse` over the
+    mined from a portal's `raw_json` and mined from its stored page body is two distinct
+    fingerprints and two rows, both of them resolver inputs. Under the old rule,
+    `html_selector_parse` over the
     archived page "independently corroborated" `portal_structured_field` over the JSON —
     one portal agreeing with itself, admitted as the D7 guard's second voice, which is
     exactly the guard's failure mode. Same page, same publisher, same mistake if it is one.
