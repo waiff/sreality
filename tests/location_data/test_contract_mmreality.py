@@ -31,7 +31,10 @@ from location_data.claims_intake import (
     extract_listing,
 )
 from location_data.claims_common import SUBSTRATE_PAYLOAD
-from location_data.resolver.position import BLURRED_DECLARED_LABELS
+from location_data.resolver.position import (
+    BLURRED_DECLARED_LABELS,
+    PRECISE_DECLARED_LABELS,
+)
 from location_data.resolver.precision import DECLARED_CAP
 from scraper.mmreality_parser import PropertyMismatch, extract_property
 from tests.location_data import claim_intake_fixtures as fx
@@ -162,11 +165,14 @@ def test_the_blurred_label_is_a_key_the_resolver_actually_caps_on():
     exactly this ceiling, so the declaration and the resolver now say the same thing."""
     assert DECLARED_CAP[BLURRED_LABEL] == "obec"
     assert BLURRED_LABEL in BLURRED_DECLARED_LABELS
-    # The `true` arm is deliberately NOT a precise label: `accurate` does not predict
-    # correctness on this portal, and a mapped precise label would CERTIFY the pin
-    # (`precision.assess` raises the radius rung for one) instead of capping it. Unmapped
-    # is identical to the `address_point` ceiling the entry documents — address_point is
-    # the finest rung, so capping at it coarsens nothing.
+    # The `true` arm names the pin PRECISE without CAPPING it, and the two are different
+    # questions. `PRECISE_DECLARED_LABELS` decides which of two sibling declarations wins
+    # (`declared_for_coordinate` ranks it 0), which is exactly what a portal flag is for;
+    # a `DECLARED_CAP` row would additionally certify a granularity, and `accurate` does
+    # not predict correctness on this portal well enough to certify one. Unmapped there is
+    # identical to the `address_point` ceiling the entry documents — address_point is the
+    # finest rung, so capping at it coarsens nothing.
+    assert PRECISE_LABEL in PRECISE_DECLARED_LABELS
     assert PRECISE_LABEL not in DECLARED_CAP
     assert PRECISE_LABEL not in BLURRED_DECLARED_LABELS
 
