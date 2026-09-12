@@ -145,6 +145,10 @@ class AdminUnit:
     name_norm: str
     path: str
     parent_id: int | None = None
+    # The unit's own point, and ONLY `admin_chain` answers it: it is the boundary's stored
+    # inscribed-circle centre (inside the polygon by construction), which the other three
+    # unit-shaped questions have no need of and would pay a join for. NULL at a level RÚIAN
+    # draws no polygon for — `cast_obce` and `momc` — where FILL walks up to the town.
     lat: float | None = None
     lon: float | None = None
     okres_kod: int | None = None
@@ -204,7 +208,8 @@ class RegistryView(Protocol):
     ) -> Sequence[AdminUnit]: ...
 
     def admin_chain(self, unit_id: int) -> Sequence[AdminUnit]:
-        """The unit ITSELF, then its ancestors coarsest-last. Empty = no such unit."""
+        """The unit ITSELF, then its ancestors coarsest-last, each with its own point.
+        Empty = no such unit."""
 
     def admin_chain_by_code(self, level: str, code: int) -> Sequence[AdminUnit]:
         """`admin_chain` addressed by (level, code) — the shape a portal's own obec code
@@ -294,6 +299,8 @@ class Position:
 
     lat: float | None
     lon: float | None
+    # `admin_centroid` is FILL's (W2-a3): BIND elects the pin, FILL places what the pin did
+    # not. A row keeps `none` only when nothing Czech bound at all.
     origin: str  # registry_point | portal_pin | admin_centroid | none
     blurred: bool = False
     registry_pin_distance_m: float | None = None
@@ -306,8 +313,14 @@ class Position:
 
 @dataclass(frozen=True, slots=True)
 class Fill:
-    """FILL's answer: the hierarchy, joined off the bound ids. Names are ALWAYS the
-    registry's own spelling; only čp/čo/PSČ/street may fall back to a claim."""
+    """FILL's answer: the hierarchy, joined off the bound ids, and the position that
+    hierarchy implies. Names are ALWAYS the registry's own spelling; only čp/čo/PSČ/street
+    may fall back to a claim.
+
+    `lat`/`lon` are the REGISTRY's point for the finest bound entity — never a claim's, and
+    used only when no pin was admissible (W2-a3). They come off the same chain read as the
+    codes, which is why they are FILL's answer and not BIND's.
+    """
 
     kraj_kod: int | None = None
     okres_kod: int | None = None
@@ -323,6 +336,8 @@ class Fill:
     house_number_cp: str | None = None
     house_number_co: str | None = None
     psc: str | None = None
+    lat: float | None = None
+    lon: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

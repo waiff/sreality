@@ -23,6 +23,9 @@ query kinds become nine:
 * `pin_clusters` went with the collision epoch;
 * `admin_unit_by_code` and `admin_unit` FOLDED into `admin_chain`, which now returns the
   unit itself ahead of its ancestors, so "this unit and its chain" is one trip and not three.
+  W2-a3 folds the unit's POSITION into the same answer rather than adding a tenth question:
+  FILL places a row whose pin was inadmissible at the finest bound unit's own point, and the
+  chain is the read it already makes.
 
 `nearest_obec_within` stays: it is BIND's sliver rung and the thing that keeps a border pin
 from having no town at all, which rule 25 does not allow.
@@ -165,11 +168,31 @@ SELECT s.code, s.name, s.name_norm, u.code
  ORDER BY s.code
 """
 
-# The unit column list `_admin_unit` unpacks positionally.
-_ADMIN_COLUMNS = """
+# The unit column list `_admin_unit` unpacks positionally, over ONE point expression: the
+# unit's own position is the last two columns of the projection, and only where the query
+# can answer it.
+def _admin_columns(point: str) -> str:
+    return f"""
        u.id, u.level::text, u.code, u.name, u.name_norm, u.path::text, u.parent_id,
-       CASE WHEN u.definition_point IS NULL THEN NULL ELSE ST_Y(u.definition_point) END,
-       CASE WHEN u.definition_point IS NULL THEN NULL ELSE ST_X(u.definition_point) END"""
+       CASE WHEN {point} IS NULL THEN NULL ELSE ST_Y({point}) END,
+       CASE WHEN {point} IS NULL THEN NULL ELSE ST_X({point}) END"""
+
+
+_ADMIN_COLUMNS = _admin_columns("u.definition_point")
+
+# The CHAIN also answers "where is this unit?" (W2-a3), because FILL places a row with no
+# admissible pin at the finest bound unit's point and the chain is the read it already
+# makes. `definition_point` is RÚIAN's own definiční bod and would be the better answer, but
+# `ruian_load` has never written that column — every unit point in the mirror is the
+# polygon's, so the coalesce is a preference, not a fallback that fires.
+#
+# `representative_point` is the boundary loader's stored ST_MaximumInscribedCircle CENTRE:
+# always INSIDE the polygon, which `ST_Centroid` is not for a concave unit (a C-shaped obec
+# centroids into its own notch, i.e. into a neighbouring town). It is the stored equivalent
+# of `ST_PointOnSurface`, better centred and — the reason it is read instead of computed —
+# free of the multipolygon detoast that made the containment query 194 ms before it was
+# split.
+_ADMIN_CHAIN_COLUMNS = _admin_columns("coalesce(u.definition_point, gp.pt)")
 
 _ADMIN_BY_NAME_SQL = f"""
 SELECT {_ADMIN_COLUMNS}, n.qualifier, n.homonym_count, n.psc_set
@@ -185,10 +208,29 @@ SELECT {_ADMIN_COLUMNS}, n.qualifier, n.homonym_count, n.psc_set
 # The chain INCLUDING the unit itself, coarsest last. `depth` is what orders it, and it is
 # what lets `admin_unit(id)` and `admin_chain(id)` be the same round trip: FILL reads the
 # bound entity's own level off row 0 and its ancestors off the rest.
+#
+# The lateral is a POINT read, not a geometry read: one index lookup per chain row on
+# `ruian_aug_unique_nonpip (unit_id, registry_version_id, purpose) WHERE purpose <> 'pip'`,
+# which is unique for a non-pip purpose, so the `LIMIT 1` picks a row rather than one of
+# several. No extra round trip — and round trips are this file's cost model — so folding the
+# unit point in here is what keeps the protocol at NINE questions instead of ten.
+#
+# It runs for EVERY chain row rather than for the bound unit alone because the two levels a
+# listing most often binds, `cast_obce` and `momc`, have no polygon in RÚIAN at all — the
+# loader's layer list (`ruian_boundaries.LAYERS`) is stát → kraj → okres → ORP → POU → obec
+# → KÚ — so FILL walks up to the first ancestor that HAS a point, and it can only walk what
+# this answer carries.
 _ADMIN_CHAIN_TAIL = f"""
-SELECT {_ADMIN_COLUMNS}, NULL::text, 1, NULL::char(5)[]
+SELECT {_ADMIN_CHAIN_COLUMNS}, NULL::text, 1, NULL::char(5)[]
   FROM chain c
   JOIN ruian_admin_units u ON u.id = c.id
+  LEFT JOIN LATERAL (
+    SELECT g.representative_point AS pt
+      FROM ruian_admin_unit_geometries g
+     WHERE g.unit_id = u.id
+       AND g.registry_version_id = %s
+       AND g.purpose = 'authoritative'
+     LIMIT 1) gp ON true
  ORDER BY c.depth
 """
 
@@ -526,13 +568,16 @@ class SqlRegistryView:
 
     def admin_chain(self, unit_id: int) -> list[AdminUnit]:
         return [
-            _admin_unit(r) for r in self._rows("admin_chain", _ADMIN_CHAIN_SQL, (unit_id,))
+            _admin_unit(r)
+            for r in self._rows("admin_chain", _ADMIN_CHAIN_SQL, (unit_id, self._version))
         ]
 
     def admin_chain_by_code(self, level: str, code: int) -> list[AdminUnit]:
         return [
             _admin_unit(r)
-            for r in self._rows("admin_chain_by_code", _ADMIN_CHAIN_BY_CODE_SQL, (level, code))
+            for r in self._rows(
+                "admin_chain_by_code", _ADMIN_CHAIN_BY_CODE_SQL, (level, code, self._version)
+            )
         ]
 
     def obec_codes_for_psc(self, psc: str) -> list[int]:

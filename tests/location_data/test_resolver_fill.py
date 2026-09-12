@@ -1,5 +1,6 @@
 """FILL — step 2 of 4: the hierarchy, joined off the bound ids, plus the pin election that
-decides which coordinate the row publishes.
+decides which coordinate the row publishes and the registry point that places the rows the
+pin election cannot (W2-a3, the last section).
 
 The rule FILL exists to state: **administrative names and codes come from the RÚIAN chain,
 never from a claim.** Before W2-a this was S5, 295 lines with a registry branch, a
@@ -11,8 +12,11 @@ resolver-v4: a street match lost its quarter).
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from location_data.resolver import bind as step_bind
 from location_data.resolver import core
+from location_data.resolver import grade as step_grade
 from location_data.resolver.version import RESOLVER_VERSION
 from tests.location_data import mini_mirror as mm
 
@@ -224,3 +228,148 @@ def test_the_orientation_number_keeps_its_letter():
         mm.claim(2, "house_number_co", value_text="487/40a"),
     ])
     assert resolution.house_number_co == "40a"
+
+
+# ------------------------------------------- the position: a towned row always has one
+#
+# W2-a3. 8,706 of 29,892 towned rows (29 %, 2026-09-12 08:05Z) carried `geom NULL`, because
+# the only position the resolver published was a portal pin and a row bound by NAME has
+# none. The rule: the pin when one was admissible, else the finest bound unit's own registry
+# point. The SIX cases below are the contract.
+
+
+def test_a_town_bound_by_name_alone_is_placed_at_the_towns_own_point():
+    """Case 1. The point is the boundary's inscribed-circle centre — inside the polygon by
+    construction, which `ST_Centroid` is not for a concave obec. Nothing else moves: the
+    granularity still says `obec` and the radius is still the obec constant, because the
+    LEVEL is what tells a reader how coarse a position is."""
+    resolution = _resolve([mm.claim(1, "obec_name", value_text="Bílovec")])
+    assert (resolution.lat, resolution.lon) == (49.7573, 18.0158)
+    assert resolution.granularity == "obec"
+    assert resolution.uncertainty_radius_m == step_grade.RADIUS_M["obec"]
+    assert resolution.disputed is None
+
+
+def test_a_street_with_no_pin_falls_back_to_its_towns_point():
+    """Case 2. `ruian_streets` carries no geometry in the mirror, so there is no street point
+    to fall back TO — the town's is the finest thing that exists. The row still grades
+    `street`: the address identity is what BIND matched, and the position is the half that is
+    coarser than the level, not the other way round."""
+    resolution = _resolve([
+        mm.claim(1, "obec_name", value_text="Bílovec"),
+        mm.claim(2, "street_name", value_text="Slunečná"),
+    ])
+    assert resolution.ulice_kod == 103
+    assert resolution.granularity == "street"
+    assert (resolution.lat, resolution.lon) == (49.7573, 18.0158)
+
+
+def test_an_address_point_with_no_pin_publishes_the_address_points_own_point():
+    """Case 3, and the one rung that was never broken: a bound address point has always been
+    its own position. It is here so a future refactor cannot quietly coarsen it to the town."""
+    resolution = _resolve([
+        mm.claim(1, "obec_name", value_text="Praha"),
+        mm.claim(2, "street_name", value_text="Nad Bořislavkou 487/40"),
+    ])
+    assert resolution.ruian_adm_kod == 21690278
+    assert (resolution.lat, resolution.lon) == (50.10100, 14.34800)
+    assert resolution.granularity == "address_point"
+
+
+def test_a_foreign_row_keeps_no_position():
+    """Case 4. Nothing Czech bound, so there is no registry point to place it at — and a
+    foreign listing placed at a Czech unit would be worse than an unplaced one."""
+    resolution = _resolve([
+        mm.claim(1, "obec_name", value_text="Benahavís"),
+        mm.claim(2, "country", value_text="Španělsko"),
+    ])
+    assert resolution.country_status == "foreign"
+    assert (resolution.lat, resolution.lon) == (None, None)
+
+
+def test_an_undetermined_row_keeps_no_position():
+    """Case 5. `undetermined` is the state that says "we have nothing"; inventing a position
+    for it would be the one thing it must never mean."""
+    resolution = _resolve([mm.claim(1, "obec_name", value_text="Nikdejov")])
+    assert resolution.country_status == "undetermined"
+    assert resolution.granularity == "unknown"
+    assert (resolution.lat, resolution.lon) == (None, None)
+
+
+def test_an_admissible_pin_still_wins_over_the_unit_point():
+    """Case 6. FILL places what BIND did not place — it never re-places. A portal pin is a
+    statement about THIS listing; a unit point is a statement about its town."""
+    resolution = _resolve([
+        mm.claim(1, "obec_name", value_text="Bílovec"),
+        mm.claim(2, "coordinate", lat=49.7600, lon=18.0200),
+    ])
+    assert (resolution.lat, resolution.lon) == (49.7600, 18.0200)
+
+
+def test_a_quarter_takes_its_towns_point_because_ruian_draws_no_quarter_polygon():
+    """The walk, and why it is a walk and not `chain[0]`: `cast_obce` and `momc` are the two
+    levels a Czech listing most often names by hand, and RÚIAN has no polygon for either —
+    so the finest bound unit is precisely the one with no point of its own."""
+    resolution = _resolve([
+        mm.claim(1, "obec_name", value_text="Praha"),
+        mm.claim(2, "cast_obce_name", value_text="Vokovice"),
+    ])
+    assert resolution.cast_obce_kod == 490067
+    assert resolution.granularity == "cast_obce_or_quarter"
+    assert (resolution.lat, resolution.lon) == (50.0755, 14.4378)
+
+
+def test_a_region_only_listing_is_placed_at_the_region_it_named():
+    """BIND's last rung (R9) publishes a position too — an okres-grade point with a 25 km
+    radius is a worse answer than a town and a better one than no answer at all."""
+    resolution = _resolve([mm.claim(1, "okres_name", value_text="Nový Jičín")])
+    assert resolution.granularity == "okres"
+    assert (resolution.lat, resolution.lon) == (49.5944, 18.0103)
+    assert resolution.uncertainty_radius_m == step_grade.RADIUS_M["okres"]
+
+
+def test_the_unit_point_comes_from_the_registry_and_never_from_a_claim():
+    """The purity half of the rule: FILL reads the point off the chain the REGISTRY answers.
+    A mirror whose boundaries were never loaded has no point to give, and the row keeps
+    `geom NULL` — the same answer it had before W2-a3 — rather than a guessed one."""
+    mirror = mm.default_mirror()
+    mirror.units = [replace(u, lat=None, lon=None) for u in mirror.units]
+    resolution = _resolve([mm.claim(1, "obec_name", value_text="Bílovec")], mirror=mirror)
+    assert resolution.obec_kod == 599212
+    assert (resolution.lat, resolution.lon) == (None, None)
+
+
+def test_an_obec_with_no_point_climbs_to_its_okres_rather_than_publishing_nothing():
+    """The same walk the quarter takes, one level up. It is bounded at the kraj: `stat` is on
+    every chain and placing a listing at the centre of the country would be an answer about
+    nothing."""
+    mirror = mm.default_mirror()
+    mirror.units = [
+        replace(u, lat=None, lon=None) if u.level == "obec" else u for u in mirror.units
+    ]
+    resolution = _resolve([mm.claim(1, "obec_name", value_text="Bílovec")], mirror=mirror)
+    assert resolution.granularity == "obec"
+    assert (resolution.lat, resolution.lon) == (49.5944, 18.0103)  # okres Nový Jičín
+
+
+def test_the_walk_stops_above_the_kraj():
+    """The state polygon IS on every chain in the live mirror — `ruian_load` wires obec → POU
+    → ORP → okres → kraj → region soudržnosti → stát, and the boundary loader draws all of
+    them — so the walk has to REFUSE the last two rather than run out of rows. A listing at
+    the centre of the Czech Republic carrying an obec's 1 km radius is a worse answer than no
+    position."""
+    mirror = mm.default_mirror()
+    mirror.units = [
+        replace(u, lat=None, lon=None) if u.level in ("obec", "okres", "kraj") else u
+        for u in mirror.units
+    ] + [
+        mm._unit(90, "region_soudrznosti", 80, "Moravskoslezsko", "moravskoslezsko", "t1.r80",
+                parent=91, lat=49.5, lon=17.5),
+        mm._unit(91, "stat", 1, "Česko", "cesko", "t1", lat=49.8, lon=15.5),
+    ]
+    mirror.units = [
+        replace(u, parent_id=90) if u.unit_id == 8 else u for u in mirror.units
+    ]
+    resolution = _resolve([mm.claim(1, "obec_name", value_text="Bílovec")], mirror=mirror)
+    assert resolution.obec_kod == 599212
+    assert (resolution.lat, resolution.lon) == (None, None)

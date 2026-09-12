@@ -1949,7 +1949,19 @@ rebuild, where the map is the thing that needs it. The steps:
 * **FILL** (`fill.py`) joins the hierarchy off the bound ids: ONE `admin_chain` read returning the
   unit itself ahead of its ancestors. Administrative names and codes are ALWAYS the registry's own
   spelling; only street / čp / čo / PSČ may fall back to a claim, preserve-if-null, and only an
-  operator correction outranks the registry.
+  operator correction outranks the registry. It also fills **the position: the portal pin when
+  admissible, else the finest bound unit's point on surface** — the boundary's stored
+  inscribed-circle centre, inside the polygon where `ST_Centroid` need not be, read off the same
+  chain rather than as a tenth registry question. It WALKS that chain, because RÚIAN draws no
+  polygon for a část obce or a městský obvod and `ruian_streets` carries no geometry at all, so the
+  finest bound unit is often precisely the one with no point of its own; it refuses `stat` and
+  `region soudržnosti`, whose point would place a listing at the centre of the country. Grade,
+  confidence and radius are untouched — the LEVEL is what says how coarse a position is — and
+  `disputed` is never set by this path. Foreign and undetermined rows bind no Czech unit, so they
+  keep `geom NULL` by construction. Before W2-a3 (2026-09-12) the fallback lived in BIND and read
+  `ruian_admin_units.definition_point`, a column the loader has never written: **29 % of towned
+  rows (8,706 of 29,892) shipped with no position**, which W3's map — which re-sources lat/lng from
+  `listing_location` with no fallback of its own — would have dropped.
 * **GRADE** (`grade.py`) is two tables: `match_confidence` from how many INDEPENDENT fields agreed
   with the bound entity (`exact` an address point the pin corroborates, `high` ≥ 2 fields, `medium`
   one, `low` a tie-break or nothing), and `uncertainty_radius_m` from a per-level constant dict
@@ -1996,7 +2008,9 @@ migration 384's SQL functions, and the property-grain projection — which was a
 winner's row (migration 493 measured `p.kraj_kod` and `w.kraj_kod` agreeing on 0 of 637,381 rows),
 nothing outside one pg_cron statement read it, and it was the drain's only cross-listing write and
 therefore the stated reason the lane could not run `--workers`. The registry protocol went from
-fifteen query kinds to nine and the drain's write path from seven statements per slice to one.
+fifteen query kinds to nine — still nine after W2-a3, which folded the unit's own point into the
+chain answer rather than asking a tenth question — and the drain's write path from seven statements
+per slice to one.
 `listing_location_current` and `property_location_current` are **frozen and readable** until W2-b
 cuts their five remaining readers and drops them; nothing writes them any more.
 
