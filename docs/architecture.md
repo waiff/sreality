@@ -2289,6 +2289,15 @@ content-hash inputs, so removing them would churn a snapshot for every listing i
 (rule 2), and all five are the parser's reading of the page, which is the CLAIM the resolver
 arbitrates. They are simply no longer columns.
 
+**W4-d: nothing left to delete.** The wave was scoped to twelve legacy location scripts and ten
+workflows; W4-b took the Mapy pair and W4-c took the other eight scripts and eight workflows in the
+PR that dropped the columns they wrote, so the only residue W4-d found was
+`docs/design/location-resolution.md` — the shipped-status design doc for `scraper/location.py`,
+`geocode_cache` and `backfill_geocode_coords.py`, every mechanism in it deleted — and one parser
+docstring still pointing at `scraper.location.CoordResolver`. `frontend/src/lib/useLegacyChipUpgrade.ts`
+is the one §6 item that STAYS: Browse and the pipeline board both call it, and a name-only chip saved
+before codes existed still needs resolving at read time.
+
 **ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
 `35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a
 listing: `listings.raw_json` (seven payload readers), and the LATEST stored detail body in
