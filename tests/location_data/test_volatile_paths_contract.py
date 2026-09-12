@@ -296,7 +296,7 @@ def test_persistence_is_outside_contract_sha256(tmp_path: Path) -> None:
     assert _profile_of("idnes", tmp_path) != volatile_profile("idnes", PAGE_KIND_DETAIL)
 
     # An extraction byte is still governed, or the gate would be decorative.
-    entry_edit = body.replace(b"id.det.legacy_pin", b"id.det.legacy_pin_2", 1)
+    entry_edit = body.replace(b"id.det.subject_feature", b"id.det.subject_feature_2", 1)
     assert entry_edit != body
     assert contracts.contract_body_hash(entry_edit) != shipped
 

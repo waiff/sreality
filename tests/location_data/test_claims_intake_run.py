@@ -30,7 +30,6 @@ from location_data.claims_intake import (
     _UNMINED_BODY_BACKLOG_SQL,
     BODIES_BUDGET_SHARE,
     DEFAULT_MAX_SECONDS,
-    LEGACY_COLUMNS,
     MAX_BATCH_SIZE,
     MIN_BATCH_SIZE,
     IntakeRefused,
@@ -244,34 +243,30 @@ def test_the_source_filter_is_inside_the_snapshot_window():
            "f.source = %(source)s)" in window
 
 
-def test_the_batch_queries_select_the_legacy_columns_the_readers_consume():
-    """06 §6.1.3's class-B columns are a second substrate beside `raw_json`, so they ride
-    on the SAME keyset query — one extra SELECT item, never a per-row lookup. The record
-    unpack is positional, so a column added to one query and not to `LEGACY_COLUMNS` (or to
-    only one of the two queries) has to fail here rather than mid-run.
+def test_the_selections_carry_no_listings_column_the_lane_cannot_read():
+    """W1-c deleted the class-B legacy columns from all THREE selections. The lane's
+    substrates are `raw_json` and the stored page body, so a `listings` TEXT column in the
+    select list would be bytes fetched for every row of a keyset scan that no reader can
+    consume — 1 500 of them a batch on the bodies pass, which does not even project
+    `raw_json`.
 
-    `listings.street_source` is selected even though nothing reads it as a value: it is the
-    guard column that decides whether `listings.street` is class B or class D, and a guard
-    whose column the scan never fetched is a refusal (`_legacy_column`), not a claim.
+    The record unpack is positional and FIXED-WIDTH, so a column added to one selection and
+    not the others (or to none of `_row_from_record`) has to fail here rather than mid-run.
     """
     for sql in (_LISTINGS_FULL_SQL, _LISTINGS_INCREMENTAL_SQL, _UNMINED_BODIES_SQL):
         one = " ".join(sql.split())
-        for column in LEGACY_COLUMNS:
-            assert f"l.{column.removeprefix('listings.')}" in one, column
+        for column in ("l.locality", "l.street", "l.street_source"):
+            assert column not in one, column
 
     scan = _row_from_record(_RECORD)
-    assert scan.row.legacy_columns == {
-        "listings.locality": None,
-        "listings.street": "Svatoplukova",
-        "listings.street_source": "parser",
-    }
+    assert not hasattr(scan.row, "legacy_columns")
     assert scan.row.lat is None and scan.row.in_mapy_inventory is False
     assert (scan.body.id, scan.body.page_kind) == (91, "detail")
     assert (scan.body_unmined, scan.contract_version) == (True, 5)
     assert scan.snapshot_cursor == 4242
 
-    # A record whose legacy tail has drifted from LEGACY_COLUMNS shifts every value one
-    # position; `zip(strict=True)` is what turns that into a crash on the first row.
+    # A record of the wrong width shifts every value one position; the fixed-width unpack
+    # is what turns that into a crash on the first row.
     with pytest.raises(ValueError):
         _row_from_record(_RECORD[:-1])
 
@@ -387,13 +382,12 @@ def test_no_write_statement_touches_an_existing_production_table():
 
 # One scan row, in the order all THREE selections project: the listing, its Mapy-inventory
 # membership, its LATEST stored detail body (id, unmined?, page_kind, sha, first seen), the
-# portal's ACTIVE contract version, the snapshot cursor (NULL outside incremental mode),
-# then the legacy-column TAIL.
+# portal's ACTIVE contract version and the snapshot cursor (NULL outside incremental mode),
+# which is the LAST column since W1-c deleted the legacy-column tail that used to follow it.
 _RECORD = (7, "ceskereality", "3822640", {"id": "3822640"},
            datetime(2026, 8, 13, 6, 0, tzinfo=UTC), None, None, False,
            91, True, "detail", "ab" * 32, datetime(2026, 8, 13, 5, 0, tzinfo=UTC), 5,
-           4242,
-           None, "Svatoplukova", "parser")
+           4242)
 
 
 def test_the_scan_joins_the_latest_stored_detail_body_per_portal_key():
@@ -454,6 +448,13 @@ def test_the_bodies_first_pass_walks_the_payload_table_on_an_in_run_keyset():
     # A `pb.` would be a column this FROM clause does not have: the select list is derived
     # from the listing scan's by replacement, so drift has to fail here.
     assert "pb." not in selection
+
+
+def test_a_listing_with_no_stored_body_yields_no_candidate():
+    bodiless = (*_RECORD[:8], None, None, None, None, None, 5, None)
+    scan = _row_from_record(bodiless)
+    assert scan.body is None and scan.body_unmined is False
+    assert scan.contract_version == 5 and scan.row.listing_id == 7
 
 
 def test_the_bodies_first_pass_selects_the_latest_body_of_an_active_listing_only():
@@ -524,18 +525,21 @@ def test_a_run_always_has_a_budget_even_when_the_caller_forgets_one():
 
 
 def test_the_registry_is_one_and_matches_the_contract_record_exactly():
-    """ONE registry, 24 readers: the 10 that read `listings.raw_json` and the 14 that read
+    """ONE registry, 21 readers: the 7 that read `listings.raw_json` and the 14 that read
     the stored page body. `ARCHIVE_ONLY_READERS` / `LLM_ONLY_READERS` were name-only mirrors
     of registries this module could not import; there is nothing left to mirror, so a name
-    that is not in `READERS` is a deploy error again — one question, one answer."""
+    that is not in `READERS` is a deploy error again — one question, one answer.
+
+    Three readers went in W1-c with the `legacy_column` surface they were the only users of
+    (`legacy_text_column`, `geom_column`, `coords_stamp_quality`)."""
     from location_data import contracts, page_readers
 
-    assert len(claims_intake.READERS) == 24
+    assert len(claims_intake.READERS) == 21
     assert set(claims_intake.READERS) == set(contracts.READER_CONTRACTS)
     payload_readers = {n for n, r in claims_intake.READERS.items()
                        if r.substrate == claims_intake.SUBSTRATE_PAYLOAD}
     page = {n for n, r in claims_intake.READERS.items()
             if r.substrate == claims_intake.SUBSTRATE_ARCHIVED_HTML}
-    assert len(payload_readers) == 10 and page == set(page_readers.PAGE_READERS)
+    assert len(payload_readers) == 7 and page == set(page_readers.PAGE_READERS)
     assert not hasattr(claims_intake, "ARCHIVE_ONLY_READERS")
     assert not hasattr(claims_intake, "LLM_ONLY_READERS")

@@ -1,6 +1,6 @@
 """THE claim lane — one hourly pass that mines every substrate we hold for a listing.
 
-WHAT THIS LANE IS (rule 25: one store, one lane, nine claim types, no flags)
+WHAT THIS LANE IS (rule 25: one store, one lane, eleven claim types, no flags)
   * TWO HALVES, both bounded by the run budget, in this order every hour:
       - BODIES FIRST: the unmined latest detail bodies of active page-portal listings,
         drained straight out of `portal_raw_payloads` in 1 500-row batches on an in-run
@@ -10,9 +10,8 @@ WHAT THIS LANE IS (rule 25: one store, one lane, nine claim types, no flags)
         minutes behind the clock. What a run opens is an hour's CHANGE, not every
         listing the index walks re-sighted.
   * Two substrates, ONE registry (`READERS`), one write:
-      - `listings.raw_json` plus the class-B legacy columns (`listings.locality`,
-        `listings.street` where `street_source='parser'`, `listings.geom` behind the
-        licence ladder) — the 10 payload readers below;
+      - `listings.raw_json`, the portal's own payload as we stored it — the payload
+        readers below;
       - the STORED PAGE BODY: the latest `portal_raw_payloads` detail row for the
         listing's `(source, source_id_native)`, fetched from R2 and scoped by the
         contract's exclusion zones — the 14 page readers in `location_data.page_readers`.
@@ -98,7 +97,6 @@ from location_data.claims_common import (  # noqa: F401 - the lane's public voca
     EMITTABLE_LICENCE_CLASSES,
     GUARD_CZ_BBOX,
     GUARDS,
-    LEGACY_COLUMNS,
     MAPY_COORDS_SOURCES,
     MIRROR_UNSAFE_CHARS,
     MAX_CLAIM_VALUE_BYTES_ENV,
@@ -241,85 +239,6 @@ def _read_scalar(entry: Entry, row: ListingRow) -> list[Claim]:
     return [_base(entry, row, value_text=value, value_num=number)]
 
 
-def _legacy_column(entry: Entry, row: ListingRow, column: str) -> Any:
-    """One legacy column's value for this row, refusing a column the scan never selected.
-
-    `.get()` would be wrong here and silently so: a contract naming a column that is not in
-    `LEGACY_COLUMNS` would read as NULL on every row forever — no claim, no absence, no
-    error, and a coverage gap whose cause is invisible. That is a projection/scan mismatch,
-    i.e. a deploy error, so it is refused exactly like an unknown reader is.
-    """
-    if column not in row.legacy_columns:
-        raise IntakeRefused(
-            f"{entry.source}:{entry.entry_id} names legacy column '{column}', which the "
-            f"batch query does not select (LEGACY_COLUMNS = "
-            f"{', '.join(LEGACY_COLUMNS)})")
-    return row.legacy_columns[column]
-
-
-def legacy_guard_passes(entry: Entry, row: ListingRow) -> bool:
-    """`locator.require_column_equals` — a legacy column admitted for ONE writer only.
-
-    06 §6.1.3 does not class `listings.street` as a column, it classes it per writer:
-    class B where `street_source='parser'` (portal-derived text, capped at `medium` with
-    mandatory gazetteer revalidation), class D where it is `'resolver'` (a RÚIAN
-    address-point inference — ~11 of ~21 text-checkable ones are wrong) or NULL (the
-    unattributable legacy-write cohort; two live backfill scripts write the column and
-    stamp nothing). A class-D value is quarantine and is never read by the resolver, so it
-    must never become a claim in the first place.
-
-    The predicate is contract DATA — `{column: required_value}`, keyed exactly like
-    `legacy_columns` — so a portal that needs a different split is a version bump and never
-    a branch in this module. It is one equality against a provenance stamp, deliberately:
-    a NULL stamp equals nothing, which is the refusal §6.1.3 asks for.
-    """
-    required = entry.locator.get("require_column_equals")
-    if not required:
-        return True
-    for column, expected in dict(required).items():
-        actual = _legacy_column(entry, row, str(column))
-        if actual is None or str(actual) != str(expected):
-            return False
-    return True
-
-
-@reader("legacy_text_column")
-def _read_legacy_text_column(entry: Entry, row: ListingRow) -> list[Claim]:
-    """A class-B `listings` TEXT column, migrated as a claim (06 §6.1.1, §6.1.3).
-
-    The payload is not always the substrate: `listings.locality` is populated on rows whose
-    slim-dict payload carries the locality key with a NULL value (a parse that found
-    nothing, a portal that never published the string at all — remax has no locality key),
-    and for those rows the column is the only surviving copy. Class B is exactly that case:
-    `extraction_method='legacy_column'`, `surface='legacy_column'`,
-    `snapshot_anchor='unanchored_legacy'` (all three from `_base`), `licence_class='portal'`,
-    `blur_evidence='none'` written explicitly (§6.6 rule 7) and confidence capped at
-    `medium` by the CONTRACT (`locator.claim_confidence`), never by this function.
-
-    `legacy_write_path_unknown` is the entry's own declaration (§6.6 rule 3): these columns
-    have no provenance stamp, and on realitymix the geocode backfill synthesised some of
-    them ('Hranicka, Prerov' where the payload's own `locality_text` is null), so a claim
-    that cannot name its writer says so rather than passing as portal-published. A column
-    that DOES carry a stamp is guarded on it instead (`legacy_guard_passes`), and then the
-    writer is named rather than unknown.
-
-    A blocked guard produces nothing — no claim AND no absence. W1 records exactly the two
-    negatives of 06 §6.1.5, and a class-D value is not "tried and found nothing": the
-    portal stated no such thing, our own resolver did, and §6.1.5 puts that in quarantine,
-    not in the claims layer.
-    """
-    if not legacy_guard_passes(entry, row):
-        return []
-    column = str(entry.locator["legacy_source_column"])
-    value = apply_transforms(_text(_legacy_column(entry, row, column)), entry.transform)
-    if value is None:
-        return []
-    return [_base(entry, row, value_text=value,
-                  claim_confidence=entry.locator.get("claim_confidence"),
-                  legacy_write_path_unknown=bool(
-                      entry.locator.get("write_path_unknown", False)))]
-
-
 @reader("conflict_signal")
 def _read_conflict_signal(entry: Entry, row: ListingRow) -> list[Claim]:
     """A value the contract BANS as a subject source but keeps as contradiction evidence.
@@ -369,59 +288,33 @@ def _read_point_pair(entry: Entry, row: ListingRow) -> list[Claim]:
                   licence_class=verdict.licence_class or "portal")]
 
 
-@reader("geom_column")
-def _read_geom_column(entry: Entry, row: ListingRow) -> list[Claim]:
-    """The six slim-dict portals never wrote lat/lon into `raw_json` — only the provenance
-    stamp — so `listings.geom` is the only copy of the value (06 §6.1.3). It is migrated as
-    a legacy column, and only after the ladder has licensed it."""
-    if row.lat is None or row.lon is None:
-        return []
-    coords_source = _text(json_pointer(row.raw_json, "/coords/source"))
-    verdict = coordinate_verdict(row.source, coords_source,
-                                 in_mapy_inventory=row.in_mapy_inventory)
-    if not verdict.admitted:
-        return []
-    if not guard_admits(entry, GUARD_CZ_BBOX, (row.lat, row.lon)):
-        return []
-    return [_base(entry, row, value_geom_wkt=point_wkt(row.lat, row.lon),
-                  licence_class=verdict.licence_class or "portal",
-                  legacy_source_column="listings.geom",
-                  value_jsonb={"coords_source": coords_source, "ladder": verdict.reason})]
-
-
 @reader("declared_quality")
 def _read_declared_quality(entry: Entry, row: ListingRow) -> list[Claim]:
     """A portal's own precision label -> `precision_declaration`, with the blur axis typed
-    rather than flattened into the coordinate (06 §6.2.1). The blurred-label set is data on
-    the contract entry (`precision_map.blurred_labels`), so re-calibrating it is a contract
-    version bump, not a code change."""
+    rather than flattened into the coordinate (06 §6.2.1). The reader states the LABEL;
+    `_base` derives the blur axis from `precision_cap.blurred_labels` (W1-c R5), so
+    re-calibrating it is a contract version bump, not a code change."""
     label = _text(json_pointer(row.raw_json, str(entry.locator["json_pointer"])))
     if label is None:
         return []
-    blurred = {str(x) for x in (entry.precision_map.get("blurred_labels") or [])}
-    blur = "declared" if label in blurred else "none"
-    return [_base(entry, row, value_text=label, declared_precision_label=label,
-                  blur_evidence=blur)]
+    return [_base(entry, row, value_text=label, declared_precision_label=label)]
 
 
 @reader("declared_bool_quality")
 def _read_declared_bool_quality(entry: Entry, row: ListingRow) -> list[Claim]:
     """mmreality `accurate` — present on 100% of rows, `false` on 37.2%, and stored
-    nowhere today. The boolean is mapped to a LABEL by the contract (`locator.labels`) and
-    the blur axis is then decided the same way `declared_quality` decides it: membership
-    in the contract's `precision_map.blurred_labels`. Which of the two labels is blurred
-    is a portal fact, so it is data on the entry — re-calibrating it is a contract version
-    bump, not a code change. Either way the axis is written EXPLICITLY, never defaulted
-    (06 §6.6 rule 7)."""
+    nowhere today. The boolean is mapped to a LABEL by the contract (`locator.labels`);
+    `_base` then derives the blur axis from that label's membership in the contract's
+    `precision_cap.blurred_labels` (W1-c R5). Which of the two labels is blurred is a portal
+    fact, so it is data on the entry — re-calibrating it is a contract version bump, not a
+    code change, and the axis is written EXPLICITLY, never defaulted (06 §6.6 rule 7)."""
     raw = json_pointer(row.raw_json, str(entry.locator["json_pointer"]))
     if raw is None or not isinstance(raw, bool):
         return []
     labels = entry.locator.get("labels") or {"true": "accurate", "false": "not_accurate"}
     label = str(labels["true" if raw else "false"])
-    blurred = {str(x) for x in (entry.precision_map.get("blurred_labels") or [])}
-    blur = "declared" if label in blurred else "none"
     return [_base(entry, row, value_text=label, declared_precision_label=label,
-                  value_num=1.0 if raw else 0.0, blur_evidence=blur)]
+                  value_num=1.0 if raw else 0.0)]
 
 
 @reader("bbox_envelope")
@@ -452,33 +345,11 @@ def _read_bbox_envelope(entry: Entry, row: ListingRow) -> list[Claim]:
                                                              "/locality/geometry/geometry_type")})]
 
 
-@reader("coords_stamp_quality")
-def _read_coords_stamp_quality(entry: Entry, row: ListingRow) -> list[Claim]:
-    """`raw_json.coords{}` is a scraper-authored provenance record grading OUR OWN
-    geocoder [db-raw §3.4]. It is emitted as a `precision_declaration` (there is no
-    `geocode_quality_declared` claim type — 00 §2.2) and ONLY when the coordinate it
-    describes was itself admitted: grading a coordinate the licence ladder refused to store
-    would assert a precision for a value that does not exist (06 §6.2.1)."""
-    coords = json_pointer(row.raw_json, "/coords")
-    if not isinstance(coords, dict):
-        return []
-    coords_source = _text(coords.get("source"))
-    verdict = coordinate_verdict(row.source, coords_source,
-                                 in_mapy_inventory=row.in_mapy_inventory)
-    if not verdict.admitted:
-        return []
-    confidence = _text(coords.get("confidence")) or _text(coords.get("locality_confidence"))
-    stamp = {k: v for k, v in coords.items() if k not in ("lat", "lng", "lon", "latitude",
-                                                          "longitude")}
-    return [_base(entry, row, value_text=coords_source,
-                  declared_confidence=confidence, value_jsonb=stamp,
-                  legacy_source_column="raw_json.coords")]
-
-
 # ------------------------------------------------------------------ the value-size cap
 
 
-# The 14 page readers fold into THE registry here, after the 10 above have registered.
+# The 14 page readers fold into THE registry here, after the payload ones above have
+# registered.
 # Folded rather than mirrored by name: `location_data.page_readers` imports
 # `claims_common`, never this module, so there is no cycle left to work around.
 for _page_reader_name, _page_reader_fn in page_readers.PAGE_READERS.items():
@@ -615,7 +486,7 @@ _ENTRIES_SQL = """
            pce.page_kind::text, pce.locator, pce.claim_type::text,
            pce.extraction_method::text, pce.subject_scope, pce.transform,
            pce.precision_map, pce.default_blur_evidence::text,
-           pce.default_licence_class::text, pce.cardinality, pce.guards
+           pce.default_licence_class::text, pce.guards
     FROM portal_contract_entries pce
     JOIN portal_contracts pc ON pc.id = pce.contract_id
     WHERE pc.is_active
@@ -755,10 +626,12 @@ _BODY_JOIN = """
     ) pb ON TRUE
 """
 
-# `%(snapshot_cursor)s` is a COLUMN of the scan, positioned before the legacy tail for the
-# same reason the body columns are: `_row_from_record` unpacks that tail with `*legacy`, so
-# anything appended after it is swallowed silently. Full mode has no snapshot keyset and
-# selects NULL there.
+# The snapshot cursor is a COLUMN of the scan and the LAST one: `_row_from_record` unpacks
+# the record positionally, so the three selections and that unpack are one contract and a
+# column appended past the end would be swallowed silently. Full mode and the bodies pass
+# have no snapshot keyset and select NULL there. (W1-c deleted the class-B legacy tail that
+# used to sit after it — the lane reads `raw_json` and the stored body, and a `listings`
+# TEXT column is neither.)
 _SELECT_COLUMNS = """
     SELECT l.id, l.source, l.source_id_native, l.raw_json, l.last_seen_at,
            ST_Y(l.geom::geometry), ST_X(l.geom::geometry),
@@ -772,13 +645,11 @@ _FROM_LISTINGS = """
     LEFT JOIN mapy_affected a ON a.listing_id = l.id
 """
 
-_LEGACY_COLUMNS_SELECT = " l.locality, l.street, l.street_source\n"
-
 # Keyset over the whole table (active AND inactive: a delisted row's payload is exactly the
 # evidence the history waves need, and nothing is ever deleted). Full mode is the
 # contract-bump path: it re-walks every listing by id and carries no snapshot cursor.
 _LISTINGS_FULL_SQL = (
-    _SELECT_COLUMNS + " NULL::bigint," + _LEGACY_COLUMNS_SELECT
+    _SELECT_COLUMNS + " NULL::bigint\n"
     + _FROM_LISTINGS + _BODY_JOIN + """
     WHERE l.id > %(after_id)s
       AND (%(source)s::text IS NULL OR l.source = %(source)s)
@@ -818,7 +689,7 @@ _LISTINGS_INCREMENTAL_SQL = ("""
         SELECT listing_id, max(id) AS snapshot_cursor FROM win GROUP BY listing_id
     )
 """
-    + _SELECT_COLUMNS + " c.snapshot_cursor," + _LEGACY_COLUMNS_SELECT + """
+    + _SELECT_COLUMNS + " c.snapshot_cursor\n" + """
     FROM changed c
     JOIN listings l ON l.id = c.listing_id
     LEFT JOIN mapy_affected a ON a.listing_id = l.id
@@ -870,8 +741,8 @@ _UNMINED_BODIES_SELECT = (
     .replace("pb.id", "p.id")
     .replace("pb.contract_version", "p.contract_version")
     .replace("pb.first_observed_at", "p.first_observed_at")
-    # No snapshot keyset here (this pass walks payload ids), then the legacy TAIL.
-    + " NULL::bigint," + _LEGACY_COLUMNS_SELECT
+    # No snapshot keyset here: this pass walks payload ids.
+    + " NULL::bigint\n"
 )
 
 _UNMINED_BODIES_FROM = """
@@ -1090,7 +961,7 @@ def load_entries(conn: psycopg.Connection) -> dict[str, list[Entry]]:
                 extraction_method=row[9], subject_scope=row[10] or {},
                 transform=tuple(row[11] or ()), precision_map=row[12] or {},
                 default_blur_evidence=row[13], default_licence_class=row[14],
-                cardinality=row[15], guards=tuple(row[16] or ()))
+                guards=tuple(row[15] or ()))
             by_source.setdefault(entry.source, []).append(entry)
     return by_source
 
@@ -1110,14 +981,15 @@ class ScanRow:
 def _row_from_record(record: tuple[Any, ...]) -> ScanRow:
     """One scan row -> the listing, its latest stored detail body or None, and the cursor.
 
-    The legacy columns are unpacked as a TAIL and zipped `strict`, so a column added to the
-    three selections but not to `LEGACY_COLUMNS` (or the reverse) raises here on the first
-    row instead of shifting every value one position to the left. The body columns and the
-    snapshot cursor sit BEFORE that tail for the same reason.
+    A FIXED-WIDTH unpack: W1-c deleted the class-B legacy-column tail, so the three
+    selections project exactly the columns this function names and a drift between them is a
+    TypeError here on the first row rather than every value shifted one position to the
+    left. The snapshot cursor is the last column for the same reason it used to sit before
+    the tail — a column appended after it would be swallowed silently.
     """
     (listing_id, source, native, raw_json, last_seen_at, lat, lon, in_inventory,
      body_id, body_unmined, body_page_kind, body_sha, body_first_observed,
-     contract_version, snapshot_cursor, *legacy) = record
+     contract_version, snapshot_cursor) = record
     row = ListingRow(
         listing_id=int(listing_id),
         source=source,
@@ -1128,8 +1000,7 @@ def _row_from_record(record: tuple[Any, ...]) -> ScanRow:
         # 06 §6.6 rule 1: a claim mined from `listings.raw_json` keeps the payload's own
         # observation time — the listing's last sighting — never the migration date.
         observed_at=last_seen_at,
-        in_mapy_inventory=bool(in_inventory),
-        legacy_columns=dict(zip(LEGACY_COLUMNS, legacy, strict=True)))
+        in_mapy_inventory=bool(in_inventory))
     body: page_readers.ArchivedPayload | None = None
     if body_id is not None:
         body = page_readers.ArchivedPayload(

@@ -77,11 +77,17 @@ EXTRACTOR_PREFIXES: dict[str, str] = {
     "maxima": "mx.",
 }
 
-# Migration 380's enums, verbatim. A literal that is not a member fails validation here
-# rather than at INSERT time (01 §A.2 check 2).
+# Migration 380's enums, MINUS what rule 25 retired. A Postgres enum cannot shrink in
+# place, so `location_claim_surface` / `location_extraction_method` / `location_claim_type`
+# keep every label they were declared with and these three sets are SUBSETS of them until
+# W4 drops the rest (`test_location_schema_contracts` pins the subset relation). A literal
+# that is not a member fails validation here rather than at INSERT time (01 §A.2 check 2).
+#
+# `legacy_column` is the one retired surface (W1-c): the lane reads `raw_json` and the
+# stored page body, and a `listings` column is neither.
 CLAIM_SURFACES = frozenset({
     "api_json", "graphql", "embedded_json", "html_selector", "map_config", "og_meta",
-    "jsonld", "url_slug", "description", "archived_html", "legacy_column", "registry",
+    "jsonld", "url_slug", "description", "archived_html", "registry",
     "operator_input",
 })
 # Defined in `payload_norm` and re-exported here, not copied: both this gate and the
@@ -93,21 +99,24 @@ PAGE_KINDS = payload_norm.PAGE_KINDS
 EXTRACTION_METHODS = frozenset({
     "portal_structured_field", "portal_declared_quality", "html_selector_parse",
     "url_slug_parse", "breadcrumb_parse", "jsonld_parse", "map_widget_parse", "regex_text",
-    "llm_text", "legacy_column", "registry_derived", "operator_manual",
+    "llm_text", "registry_derived", "operator_manual",
 })
+# ELEVEN, and that is the whole vocabulary a contract may claim (rule 25 / W1-c R1).
+# Ten after W2: `precision_declaration` folds onto the pin claim when the resolver is
+# rewritten. The other 29 enum labels are not "declared ahead for a later wave" — they were
+# entries nothing resolved, which is the state this wave exists to end. The ones with a
+# live reader but no resolver (`uncertainty_geometry`, `map_zoom`, `blur_hint`,
+# `obec_code`, `portal_admin_id`, `postal_town`, …) go with them; a portal fact worth
+# claiming re-enters through one of the eleven.
 CLAIM_TYPES = frozenset({
-    "coordinate", "uncertainty_geometry", "precision_declaration", "blur_hint", "map_zoom",
-    "geohash", "admin_polygon",
-    "address_point_id", "building_id", "obec_code", "portal_admin_id", "portal_street_id",
-    "osm_relation_id", "cadastral_territory_name", "cadastral_territory_code",
-    "parcel_number",
-    "street_name", "house_number_cp", "house_number_co", "evidencni", "house_unit", "psc",
-    "postal_town", "obec_name", "cast_obce_name", "quarter_name", "mestsky_obvod_name",
-    "okres_name", "orp_name", "kraj_name", "country", "homonym_qualifier",
-    "address_line_verbatim",
-    "development_name", "landmark", "relative_distance", "poi_distance", "micro_position",
-    "neighbour_listing_ref", "foreign_indicator",
+    "coordinate", "precision_declaration", "country",
+    "kraj_name", "okres_name", "obec_name", "cast_obce_name",
+    "street_name", "house_number_cp", "house_number_co", "psc",
 })
+# The one type every contract must claim, with a reader. "Every active Czech listing has a
+# town" is rule 25's invariant and `location_town_coverage` is red until it holds, so a
+# contract that cannot state a town is not a contract this fleet can ship.
+MANDATORY_CLAIM_TYPE = "obec_name"
 GRANULARITIES = frozenset({
     "unknown", "country", "kraj", "okres", "obec", "cast_obce_or_quarter", "street",
     "street_segment", "parcel", "building", "address_point",
@@ -130,24 +139,25 @@ LICENCE_CLASSES = frozenset({
 # is NEVER emitted by a contract.
 CONTRACT_LICENCE_CLASSES = LICENCE_CLASSES - {"ephemeral_display_only"}
 
-CARDINALITIES = frozenset({"one", "many"})
-REQUIRED_MODES = frozenset({"always", "when_present", "best_effort"})
+# `cardinality` / `required` / `on_conflict` were entry keys nothing enforced: the
+# extractor emits whatever the reader finds, `required: always` never made a missing value
+# an error anywhere, and no writer branches on `on_conflict`. They are REFUSED now rather
+# than tolerated — a key that reads like a rail and is not one is worse than no key (W1-c
+# R3). The `portal_contract_entries` columns keep their NOT NULL defaults until W4 drops
+# them; this loader simply stops writing them.
+RETIRED_ENTRY_KEYS = ("cardinality", "required", "on_conflict")
 
 # What each reader WILL DO with an entry, as data. The contract gate refuses an entry that
 # declares anything this record does not cover, because the runtime would ignore it in
 # silence — a contract entry may not state something the claim never carries.
 #
-# W1 gated readers fleet-wide: any reader was legal on any raw_json-reachable surface
-# (api_json / graphql / embedded_json / legacy_column) and illegal everywhere else. That
-# gate is one wave wide — it says nothing once W2's HTML readers land — and it checked one
-# axis of five. `legacy_text_column` on `api_json` passed validation and then KeyError'd on
-# `locator.legacy_source_column`; a `namespaced_id` entry without `locator.namespace` did
-# the same; a `scalar` entry could declare `guards: [reject_outside_cz_bbox]` that
-# `_read_scalar` never evaluates; a `point_pair` entry could declare a `transform` no
-# coordinate reader applies; a `geom_column` entry could declare a `legacy_source_column`
-# the reader overwrites with `listings.geom`. Each reader mines exactly ONE substrate by
-# ONE method, addresses it through a fixed set of locator keys, and consults `transform` /
-# `guards` or does not — so all five are properties of the READER.
+# W1 gated readers fleet-wide: any reader was legal on any raw_json-reachable surface and
+# illegal everywhere else. That gate checked one axis of five: a `namespaced_id` entry
+# without `locator.namespace` KeyError'd mid-batch; a `scalar` entry could declare
+# `guards: [reject_outside_cz_bbox]` that `_read_scalar` never evaluates; a `point_pair`
+# entry could declare a `transform` no coordinate reader applies. Each reader mines exactly
+# ONE substrate by ONE method, addresses it through a fixed set of locator keys, and
+# consults `transform` / `guards` or does not — so all four are properties of the READER.
 #
 # Pure DATA on purpose: this module is the deploy-time/CI lane and must not import
 # `location_data.claims_intake` (the runtime extractor, which pulls in the loader and the
@@ -155,9 +165,7 @@ REQUIRED_MODES = frozenset({"always", "when_present", "best_effort"})
 # tests/location_data/test_claims_intake_contracts, so the record cannot drift from the
 # call sites it describes.
 _PAYLOAD_SURFACES = frozenset({"api_json", "graphql", "embedded_json"})
-_LEGACY_SURFACE = frozenset({"legacy_column"})
 _STRUCTURED = frozenset({"portal_structured_field"})
-_LEGACY_METHOD = frozenset({"legacy_column"})
 _DECLARED_QUALITY = frozenset({"portal_declared_quality"})
 # The DOM readers of `location_data.page_readers`. `html_selector` is the surface a
 # contract DECLARES; `archived_html` is what the claim is STAMPED with when the lane runs
@@ -192,38 +200,48 @@ class ReaderContract:
     """One `claims_intake` reader's appetite: what it reads, and what it consults.
 
     `substrates` and `methods` are 00 §3's two separate provenance axes — a reader that
-    mines a `listings` column while the entry stamps `portal_structured_field` records a
+    mines one document while the entry stamps `portal_structured_field` records a
     provenance the value never had. `locator_keys` are the keys the reader indexes
     UNGUARDED (a missing one is a mid-batch `KeyError` that takes the whole intake down,
-    not a no-op). `stamps_legacy_column` is a provenance the reader writes itself, which an
-    entry may not contradict. The two `consults_*` flags say whether the reader ever asks
-    about `transform` / `guards`; a declaration on a reader that does not is inert.
+    not a no-op); `optional_keys` are the rest of what it reads. Together they are the
+    reader's WHOLE appetite, and a locator key outside the union is refused — a declared
+    key no reader consults is a rail that looks enforced and is not (`bzs.det.link_pin`
+    shipped a `pattern` its reader ignored, so the pin was silently inert while the
+    contract read as if it published one). The two `consults_*` flags say whether the
+    reader ever asks about `transform` / `guards`; a declaration on a reader that does not
+    is inert.
     """
 
     substrates: frozenset[str]
     methods: frozenset[str]
     locator_keys: frozenset[str] = frozenset()
+    optional_keys: frozenset[str] = frozenset()
     consults_transforms: bool = False
     consults_guards: bool = False
-    stamps_legacy_column: str | None = None
+    # Which HALF of the lane runs it. Data rather than a substrate test, because
+    # `embedded_json` and `archived_html` are both legal on readers of either half — it is
+    # the registry a reader is REGISTERED in (`PAGE_READERS` vs `READERS`) that decides, and
+    # `test_claims_intake_contracts` derives this back out of those two registries.
+    reads_stored_body: bool = False
+
+    @property
+    def appetite(self) -> frozenset[str]:
+        """Every `locator` key this reader reads. `reader` is the locator's own
+        discriminator rather than a value looked up, so it is always legal."""
+        return self.locator_keys | self.optional_keys | frozenset({"reader"})
 
 
-# One row per `location_data.claims_intake` reader.
-#   * payload readers address `raw_json` by JSON pointer -> the three surfaces whose bytes
-#     ARE the payload. `scalar` and `conflict_signal` additionally run on `legacy_column`,
-#     where the pointer addresses a key OUR OWN scraper wrote into the payload (bazos
-#     `raw_json.locality_text`, the remax carousel address) — 06 §6.1.3's class-B mirrors
-#     that happen to live inside the JSON rather than in a column.
-#   * `coords_stamp_quality` grades our own geocoder's provenance block
-#     (`raw_json.coords`), which is never portal payload -> `legacy_column` only.
-#   * `geom_column` (reads `listings.geom`) and `legacy_text_column` (reads a class-B
-#     `listings` TEXT column) touch no payload at all -> `legacy_column` only.
+# One row per `location_data.claims_intake` reader. Payload readers address `raw_json` by
+# JSON pointer -> the three surfaces whose bytes ARE the payload; the rest read the stored
+# page body. W1-c deleted the three that read a `listings` column instead
+# (`legacy_text_column`, `geom_column`, `coords_stamp_quality`): the `legacy_column`
+# surface is gone, so an entry naming one could not be declared at all.
 READER_CONTRACTS: dict[str, ReaderContract] = {
     "scalar": ReaderContract(
-        substrates=_PAYLOAD_SURFACES | _LEGACY_SURFACE,
-        methods=_STRUCTURED | _LEGACY_METHOD,
+        substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
         locator_keys=frozenset({"json_pointer"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        optional_keys=frozenset({"value_kind"})),
     "namespaced_id": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
         locator_keys=frozenset({"json_pointer", "namespace"}),
@@ -241,24 +259,24 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
         locator_keys=frozenset({"json_pointer"})),
     "declared_bool_quality": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_DECLARED_QUALITY,
-        locator_keys=frozenset({"json_pointer"})),
+        locator_keys=frozenset({"json_pointer"}),
+        optional_keys=frozenset({"labels"})),
     "conflict_signal": ReaderContract(
-        substrates=_PAYLOAD_SURFACES | _LEGACY_SURFACE,
-        methods=_STRUCTURED | _LEGACY_METHOD,
-        locator_keys=frozenset({"json_pointer"})),
-    "coords_stamp_quality": ReaderContract(
-        substrates=_LEGACY_SURFACE, methods=_LEGACY_METHOD,
-        stamps_legacy_column="raw_json.coords"),
+        substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
+        locator_keys=frozenset({"json_pointer"}),
+        optional_keys=frozenset({"legacy_source_column"})),
     # --- W2-6: DOM readers. `css` is required on all three, so a selector-less entry fails
     # CI rather than matching nothing forever in production.
     "html_text": ReaderContract(
         substrates=_DOM_SURFACES, methods=_DOM_METHOD,
         locator_keys=frozenset({"css"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        reads_stored_body=True),
     "html_attr": ReaderContract(
         substrates=_DOM_SURFACES, methods=_DOM_METHOD,
         locator_keys=frozenset({"css", "attr"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        reads_stored_body=True),
     # `position_branch` is a REQUIRED locator key, not an optional hint: it decides the
     # coordinate's licence class (C6) and the archived ladder refuses a read without one, so
     # an entry omitting it would fail per-row at runtime instead of once at projection time.
@@ -270,7 +288,8 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     # implemented in the reader body first, and this flag flipped with it.
     "html_point_dms": ReaderContract(
         substrates=_DOM_SURFACES, methods=_DOM_METHOD | _MAP_METHOD,
-        locator_keys=frozenset({"css", "attr", "position_branch"})),
+        locator_keys=frozenset({"css", "attr", "position_branch"}),
+        reads_stored_body=True),
     # A coordinate from an ordered [lat_attr, lon_attr] pair of DECIMAL attributes
     # (realitymix's `div#print-map[data-gps-lat][data-gps-lon]`). `consults_guards` is TRUE
     # here and FALSE on `html_point_dms`, and the difference is real rather than an
@@ -281,7 +300,9 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     "html_point_attrs": ReaderContract(
         substrates=_DOM_SURFACES, methods=_DOM_METHOD | _MAP_METHOD,
         locator_keys=frozenset({"css", "attr", "position_branch"}),
-        consults_guards=True),
+        consults_guards=True,
+        optional_keys=frozenset({"pattern"}),
+        reads_stored_body=True),
     # --- W2 reader canon, DOM family. Each one answers a DIFFERENT question about the same
     # node, and every portal-specific fact (which element, which pattern, which label) stays
     # contract data — that is the property that keeps these shared rather than nine forks.
@@ -293,14 +314,16 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     "html_own_text": ReaderContract(
         substrates=_DOM_SURFACES, methods=_DOM_METHOD,
         locator_keys=frozenset({"css"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        reads_stored_body=True),
     # `group` is REQUIRED and never defaulted to "group 0" or "the only group": a pattern
     # may carry several (bazos' slug carries the obec and the PSČ), and picking one by
     # position would make the claim's meaning depend on the order the groups were written.
     "html_regex": ReaderContract(
         substrates=_DOM_SURFACES, methods=_REGEX_METHOD,
         locator_keys=frozenset({"css", "pattern", "group"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        reads_stored_body=True),
     # The same read over an ATTRIBUTE, and the reader that carries a fact published only in
     # a link. It scans EVERY matching node and lets the PATTERN discriminate, because "the
     # first node matching the selector" is the wrong node about as often as the right one
@@ -308,14 +331,18 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     "html_attr_regex": ReaderContract(
         substrates=_SLUG_SURFACES, methods=_SLUG_METHOD | _REGEX_METHOD,
         locator_keys=frozenset({"css", "attr", "pattern", "group"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        optional_keys=frozenset({"decode"}),
+        reads_stored_body=True),
     # A presence detector: the claim's VALUE is the label the CONTRACT gives the marker and
     # its EVIDENCE is the portal's own text or attribute. `consults_transforms` is FALSE
     # deliberately — normalising a label the contract itself wrote is a no-op with a failure
     # mode, since blur is decided by that label's membership of `precision_cap.blurred_labels`.
     "html_marker": ReaderContract(
         substrates=_DOM_SURFACES, methods=_DECLARED_QUALITY,
-        locator_keys=frozenset({"css", "value_label"})),
+        locator_keys=frozenset({"css", "value_label"}),
+        optional_keys=frozenset({"attr", "contains"}),
+        reads_stored_body=True),
     # --- W2 reader canon, embedded-JSON family: ONE acquisition layer (css + optional attr
     # + optional decode + optional subject match) and five extractors over it. `css` is
     # required on all of them, so a selector-less entry fails CI rather than matching nothing
@@ -327,21 +354,33 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
         substrates=_EMBEDDED_JSON_SURFACES,
         methods=_STRUCTURED | _MAP_METHOD | _DECLARED_QUALITY,
         locator_keys=frozenset({"css", "json_pointer"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        optional_keys=frozenset(
+            {"attr", "decode", "exclude_where", "match", "script_match", "then", "value_kind"}),
+        reads_stored_body=True),
     "json_regex": ReaderContract(
         substrates=_EMBEDDED_JSON_SURFACES, methods=_REGEX_METHOD,
         locator_keys=frozenset({"css", "json_pointer", "pattern", "group"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        optional_keys=frozenset(
+            {"attr", "decode", "exclude_where", "match", "script_match", "then"}),
+        reads_stored_body=True),
     "json_bool": ReaderContract(
         substrates=_EMBEDDED_JSON_SURFACES, methods=_DECLARED_QUALITY,
-        locator_keys=frozenset({"css", "json_pointer", "labels"})),
+        locator_keys=frozenset({"css", "json_pointer", "labels"}),
+        optional_keys=frozenset(
+            {"attr", "decode", "exclude_where", "match", "script_match", "then"}),
+        reads_stored_body=True),
     # `position_branch` is a required key for the same reason it is on `html_point_dms`: it
     # decides the coordinate's licence class (C6) and the archived ladder refuses a read
     # without one, so an entry omitting it must fail at projection time rather than per row.
     "json_point": ReaderContract(
         substrates=_EMBEDDED_JSON_SURFACES, methods=_STRUCTURED | _MAP_METHOD,
         locator_keys=frozenset({"css", "position_branch"}),
-        consults_guards=True),
+        consults_guards=True,
+        optional_keys=frozenset(
+            {"attr", "decode", "exclude_where", "feature", "lat_pointer", "lon_pointer", "match", "reject_points", "script_match", "then"}),
+        reads_stored_body=True),
     # The feature TYPE is the declared precision (Point -> a pin, LineString -> a segment,
     # Circle -> a centre plus a declared radius), so ONE reader serves the coordinate entry
     # and the uncertainty-geometry entry over the same feature; `position_branch` is checked
@@ -350,21 +389,19 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     "json_geometry": ReaderContract(
         substrates=_EMBEDDED_JSON_SURFACES, methods=_MAP_METHOD,
         locator_keys=frozenset({"css", "then"}),
-        consults_guards=True),
+        consults_guards=True,
+        optional_keys=frozenset(
+            {"attr", "decode", "exclude_where", "geometry_reader", "match", "position_branch", "reject_zoom_at_or_below", "script_match", "zoom_pointer"}),
+        reads_stored_body=True),
     # One level of a schema.org BreadcrumbList geo chain, anchored on a contract-declared
     # kraj slug rather than an absolute position — the offset moves with the category path,
     # so `positions: [5,6,7,8]` is wrong on any two-level category.
     "json_breadcrumb": ReaderContract(
         substrates=_JSONLD_SURFACES, methods=_BREADCRUMB_METHOD,
         locator_keys=frozenset({"css", "type", "anchor_slugs", "level"}),
-        consults_transforms=True),
-    "geom_column": ReaderContract(
-        substrates=_LEGACY_SURFACE, methods=_LEGACY_METHOD,
-        consults_guards=True, stamps_legacy_column="listings.geom"),
-    "legacy_text_column": ReaderContract(
-        substrates=_LEGACY_SURFACE, methods=_LEGACY_METHOD,
-        locator_keys=frozenset({"legacy_source_column"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        optional_keys=frozenset({"attr", "decode", "script_match"}),
+        reads_stored_body=True),
 }
 
 # The substrate axis on its own — what `claims_intake`'s module docstring points at, and
@@ -395,24 +432,11 @@ IMPLEMENTED_TRANSFORMS = frozenset({
     # per admin level would be nine forks of the same act.
     "address_part_street", "address_part_obec", "address_part_okres",
     "address_part_house_number", "split_paren_okres", "comma_segment",
+    # W1-c: a numbered/hyphenated městský obvod is never the town (R4), and the trailing
+    # segment of an address is sometimes a country rather than an obec (R1's `country`).
+    "statutory_city_obec", "address_part_country",
 })
 IMPLEMENTED_GUARDS = frozenset({"reject_outside_cz_bbox"})
-
-# The two executable entries that named a guard from before the check existed. Neither is
-# "pending": each sits on a reader that never evaluates guards at all (`declared_quality`
-# and `scalar`), so implementing the name in `claims_intake.GUARDS` would not make either
-# one run. They are inert, permanently, and both are inert-by-accident rather than wrong:
-# `reject_sentinel` duplicates sr.det.zip's own `sentinel_drop:-1` transform, and
-# `reject_if_in_excluded_zone` asks a question about HTML/description blocks that a
-# `/locality/inaccuracy_type` read cannot answer. Entries are immutable (02 §2.1.8), so
-# clearing them is a contract version bump, not an edit — until then they are named HERE
-# rather than silently tolerated. SHRINK-ONLY, and it shrinks by version bump only: a NEW
-# executable entry naming a guard its reader ignores (or one the runtime does not
-# implement) is a CI failure.
-GRANDFATHERED_INERT_GUARDS: dict[str, frozenset[str]] = {
-    "sr.det.inaccuracy_type": frozenset({"reject_if_in_excluded_zone"}),
-    "sr.det.zip": frozenset({"reject_sentinel"}),
-}
 
 
 class ContractError(RuntimeError):
@@ -434,16 +458,12 @@ class ContractEntry:
     default_position_source: str | None
     default_blur_evidence: str
     default_licence_class: str
-    cardinality: str
-    required: str
-    on_conflict: str
     guards: list[str]
     notes: str | None
 
     @property
-    def reader(self) -> str | None:
-        value = self.locator.get("reader")
-        return str(value) if value else None
+    def reader(self) -> str:
+        return str(self.locator["reader"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -451,9 +471,10 @@ class PortalContract:
     source: str
     version: int
     sha256: bytes
-    identity_ladder: list[str]
     exclusion_zones: list[dict[str, Any]]
-    precision_priors: dict[str, Any]
+    # The `portal_contracts.fetch_config` projection: the two unhashed blocks, verbatim, so
+    # an operator reads in psql exactly what the deployed file says. The column keeps its
+    # name until W4 renames or drops it.
     fetch_config: dict[str, Any]
     entries: list[ContractEntry] = field(default_factory=list)
     # `persistence.volatile_paths`, parsed: {page_kind: profile}. 02 §2.3.2 P1 —
@@ -483,25 +504,34 @@ def _member(value: Any, allowed: frozenset[str], where: str, key: str) -> str:
     return text
 
 
+# The ONE page kind whose bodies are stored. `claims_intake._BODY_JOIN` selects
+# `p.page_kind = 'detail'` and nothing else: index bodies are never archived (their keys are
+# week-stamped, so the storage cap bounds detail and not index — the 2026-08-16 operator
+# decision), and no scraper writes a map, archive, snapshot or gazetteer body at all. A page
+# entry declared for any other kind is therefore unreachable by construction, which is not a
+# shape a contract may describe: `ceskereality@6` shipped a `page_kind: map` entry reading a
+# `/mapa/` marker set that exists in no payload row and in no scraper, and it read as a live
+# precision signal for the portal. Widen this the day a lane stores that kind, never before.
+STORED_PAGE_KIND = "detail"
+
+
 def _check_executable(
     reader: str,
     *,
     surface: str,
     method: str,
+    page_kind: str,
     locator: dict[str, Any],
     transforms: list[str],
     guards: list[str],
-    entry_id: str,
     where: str,
 ) -> None:
-    """What an entry that NAMES A READER may say — checked at projection time.
+    """What an entry may say — checked at projection time.
 
-    An entry with a reader is executed by `claims_intake` on every listing of its portal;
-    one without a reader is declared ahead for a later wave and executes nowhere. So this
-    is the whole difference between "a name the runtime does not know is a silent no-op"
-    and "a name the runtime does not know fails CI". Every clause below is one thing the
-    reader in `READER_CONTRACTS` actually does with the entry: declaring past it is either
-    a silent no-op or a provenance the claim will not carry.
+    Every entry names a reader now (W1-c), so every entry is executed by `claims_intake` on
+    every listing of its portal and every clause below is load-bearing rather than advisory.
+    Each one is one thing the reader in `READER_CONTRACTS` actually does with the entry:
+    declaring past it is either a silent no-op or a provenance the claim will not carry.
     """
     spec = READER_CONTRACTS.get(reader)
     if spec is None:
@@ -517,20 +547,31 @@ def _check_executable(
             f"{where}: reader '{reader}' extracts by {', '.join(sorted(spec.methods))}; "
             f"extraction_method='{method}' would stamp every claim with a provenance the "
             f"reader does not perform (00 §3)")
+    if spec.reads_stored_body and page_kind != STORED_PAGE_KIND:
+        raise ContractError(
+            f"{where}: reader '{reader}' reads a STORED PAGE BODY and the lane stores only "
+            f"page_kind='{STORED_PAGE_KIND}' bodies, so page_kind='{page_kind}' can never "
+            f"be executed — `page_entries` would never select it and no run would count "
+            f"the miss")
     for key in sorted(spec.locator_keys):
         if not locator.get(key):
             raise ContractError(
                 f"{where}: reader '{reader}' addresses its value through "
                 f"locator.{key}, which this entry does not name; the extractor indexes it "
                 f"unguarded and would KeyError on the first row of this portal")
-    if spec.stamps_legacy_column is not None:
-        declared = locator.get("legacy_source_column")
-        if declared is not None and str(declared) != spec.stamps_legacy_column:
-            raise ContractError(
-                f"{where}: reader '{reader}' stamps "
-                f"legacy_source_column='{spec.stamps_legacy_column}' on every claim it "
-                f"emits; declaring '{declared}' would record a provenance the claim never "
-                f"carries")
+    # The other direction, and it is the one that shipped a defect: a key the reader never
+    # looks up reads as a declared rail and is a no-op. `bzs.det.link_pin` named a
+    # `pattern` that `html_point_attrs` did not consult, so the entry described a pin the
+    # lane could not mint and nothing said so — the contract, the projection and the tests
+    # all agreed it was live. A reader's appetite is data on `READER_CONTRACTS`; a locator
+    # that says more than the reader hears is refused here, before it can be believed.
+    unread = sorted(set(locator) - spec.appetite)
+    if unread:
+        raise ContractError(
+            f"{where}: reader '{reader}' never reads locator."
+            f"{', locator.'.join(unread)}; it consults "
+            f"{', '.join(sorted(spec.appetite))}, so the declaration is inert — either the "
+            f"reader widens or the key goes")
 
     for transform_spec in transforms:
         name = transform_spec.partition(":")[0]
@@ -543,10 +584,7 @@ def _check_executable(
                 f"{where}: transform '{name}' is not implemented by the extractor "
                 f"({', '.join(sorted(IMPLEMENTED_TRANSFORMS))}); an executable entry may "
                 f"not declare a normaliser that would silently not run")
-    inert = GRANDFATHERED_INERT_GUARDS.get(entry_id, frozenset())
     for guard in guards:
-        if guard in inert:
-            continue
         if not spec.consults_guards:
             raise ContractError(
                 f"{where}: reader '{reader}' never evaluates guards, so '{guard}' would "
@@ -567,6 +605,16 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
             f"{where}: extractor id '{entry_id}' must carry this portal's permanent "
             f"prefix '{prefix}' (02 §2.2 preamble)")
     where = f"{source}:{entry_id}"
+
+    retired = [key for key in RETIRED_ENTRY_KEYS if key in raw]
+    if retired:
+        raise ContractError(
+            f"{where}: {', '.join(retired)} — nothing enforces these, so the entry states a "
+            f"rail the runtime does not run; delete the key (W1-c R3)")
+    if "legacy_column" in (raw.get("locator_kind"), raw.get("extraction_method")):
+        raise ContractError(
+            f"{where}: the legacy_column surface is retired — the intake reads raw_json and "
+            f"the stored page body, and a `listings` column is neither (rule 25)")
 
     # 02 §2.1.2 rule 4: locator_kind IS the surface; extraction_method is a separate,
     # mandatory axis and is never derived from it.
@@ -615,53 +663,21 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
         _member(locator["claim_confidence"], MATCH_CONFIDENCES, where,
                 "locator.claim_confidence")
 
-    cardinality = _member(raw.get("cardinality", "one"), CARDINALITIES, where, "cardinality")
-    required = _member(raw.get("required", "when_present"), REQUIRED_MODES, where, "required")
-
-    # 01 §4.2's `loc_claim_legacy` CHECK forces `legacy_source_column` non-null whenever
-    # extraction_method='legacy_column' — "an anonymous legacy claim is rejected by the
-    # database rather than by convention" (06 §6.6 rule 3). Required here too, so the
-    # rejection lands in CI instead of mid-batch.
-    if method == "legacy_column" and not locator.get("legacy_source_column"):
-        raise ContractError(
-            f"{where}: a legacy_column entry must name its column in "
-            f"locator.legacy_source_column (01 §4.2 loc_claim_legacy)")
-
-    # 06 §6.1.3 classes some legacy columns per WRITER: `listings.street` is class B where
-    # `street_source='parser'` and class D (quarantine, never a claim) otherwise. The split
-    # is contract data — one equality against a provenance stamp — so the shape is
-    # validated here rather than discovered as "this entry silently claims nothing".
-    guard = locator.get("require_column_equals")
-    if guard is not None:
-        if method != "legacy_column":
-            raise ContractError(
-                f"{where}: locator.require_column_equals guards a legacy COLUMN read and "
-                f"is only legal on extraction_method='legacy_column' (06 §6.1.3)")
-        if not isinstance(guard, dict) or not guard:
-            raise ContractError(
-                f"{where}: locator.require_column_equals must be a non-empty "
-                f"{{column: value}} mapping (06 §6.1.3)")
-        for column, expected in guard.items():
-            if not str(column).startswith("listings."):
-                raise ContractError(
-                    f"{where}: locator.require_column_equals names '{column}'; a guard "
-                    f"column is spelled exactly like locator.legacy_source_column "
-                    f"('listings.<column>'), because the extractor looks both up in the "
-                    f"same per-row dict")
-            if expected is None or isinstance(expected, (dict, list)):
-                raise ContractError(
-                    f"{where}: locator.require_column_equals['{column}'] must be a "
-                    f"scalar — the guard is one equality against a provenance stamp, not "
-                    f"a predicate language")
-
     transforms = [str(t) for t in (raw.get("transform") or [])]
     guards = [str(g) for g in (raw.get("guards") or [])]
 
+    # EVERY entry names a reader (W1-c R1). "Declared ahead of the wave that will run it"
+    # was how a contract grew entries nothing executed — projected, counted in every census,
+    # extracting nothing — so the ahead-declaration is gone and with it the two-tier
+    # validation it forced: an entry the runtime cannot execute is refused here.
     reader = locator.get("reader")
-    if reader:
-        _check_executable(str(reader), surface=surface, method=method, locator=locator,
-                          transforms=transforms, guards=guards, entry_id=entry_id,
-                          where=where)
+    if not reader:
+        raise ContractError(
+            f"{where}: entry names no locator.reader; every entry is executed, so an entry "
+            f"nothing can run is refused rather than projected "
+            f"({', '.join(sorted(READER_CONTRACTS))})")
+    _check_executable(str(reader), surface=surface, method=method, page_kind=page_kind,
+                      locator=locator, transforms=transforms, guards=guards, where=where)
 
     precision_map: dict[str, Any] = {}
     if precision_cap:
@@ -673,10 +689,10 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
     # collision detector (00 §1.3), so it is data on the contract, never a code constant.
     if precision_cap.get("blurred_labels"):
         labels = [str(x) for x in precision_cap["blurred_labels"]]
-        if claim_type not in ("precision_declaration", "blur_hint"):
+        if claim_type != "precision_declaration":
             raise ContractError(
-                f"{where}: blurred_labels only belongs on a precision_declaration or "
-                f"blur_hint entry (00 §2.2)")
+                f"{where}: blurred_labels only belongs on a precision_declaration entry "
+                f"(00 §2.2) — `blur_hint` went with the eleven-type vocabulary")
         precision_map["blurred_labels"] = labels
 
     return ContractEntry(
@@ -693,9 +709,6 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
         default_position_source=position_source,
         default_blur_evidence=blur,
         default_licence_class=licence,
-        cardinality=cardinality,
-        required=required,
-        on_conflict=str(raw.get("on_conflict", "emit_both")),
         guards=guards,
         notes=raw.get("notes"),
     )
@@ -705,11 +718,19 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
 # shrug: every key fails open the same way (a typo'd `extractoins:` projects a header with
 # no entries and a silent hash change). Adding a key to the format means adding it here —
 # CI's `--check` run is the gate.
+#
+# SIX KEYS (W1-c R2). The eight that went — identity_ladder, precision_caps,
+# precision_priors, extractor_runtime, fetch, payload_schema_detector,
+# pin_collision_semantics, contract_sha256 — were read by nothing: a ladder no resolver
+# consulted, caps and priors superseded by `location_field_policy` + the entry's own
+# `prior:`, a fetch block only a deleted audit script read, a self-declared hash
+# (`contract_body_hash` is taken over the bytes, so a file can never carry its own), and
+# two blocks that were documentation. `portal_contracts.identity_ladder` /
+# `.precision_priors` keep their NOT NULL defaults until W4 drops the columns; this loader
+# stops writing them.
 _TOP_LEVEL_KEYS = frozenset({
-    "portal", "contract_version", "contract_sha256",
-    "identity_ladder", "exclusion_zones", "precision_priors", "precision_caps",
-    "extractions", "extractor_runtime", "fetch", "persistence", "regressions",
-    "payload_schema_detector", "pin_collision_semantics",
+    "portal", "contract_version", "persistence", "exclusion_zones", "regressions",
+    "extractions",
 })
 
 # A HASH COVERS WHAT IT GOVERNS. `contract_sha256` governs the EXTRACTION half of this
@@ -789,6 +810,32 @@ def _refuse_unindented_comment_in_persistence(path: Path, body: bytes) -> None:
                 break
 
 
+def _check_shape(source: str, entries: list[ContractEntry], *, where: str) -> None:
+    """ONE entry per claim type, and a town entry among them (rule 25, W1-c R1).
+
+    Both rails are about the RESOLVER, not about tidiness. Two entries of one type make the
+    contract a vote the survivorship policy never asked for: the two claims reach S7 with
+    the same (source, extraction_method), so which one wins is the order the DB happened to
+    return them in — "the portal says X" becomes "one of the portal's two readers says X".
+    A contract with no town entry cannot satisfy the invariant the whole programme is
+    measured by, and a contract whose town entry names no reader satisfies it on paper only
+    — which is how nine portals shipped with a town-coverage hole nobody could see.
+    """
+    by_type: dict[str, list[str]] = {}
+    for entry in entries:
+        by_type.setdefault(entry.claim_type, []).append(entry.entry_id)
+    duplicated = {t: ids for t, ids in by_type.items() if len(ids) > 1}
+    if duplicated:
+        detail = "; ".join(f"{t}: {', '.join(ids)}" for t, ids in sorted(duplicated.items()))
+        raise ContractError(
+            f"{where}: {source} declares more than one entry per claim type ({detail}); "
+            f"a claim type has exactly one carrier per portal")
+    if MANDATORY_CLAIM_TYPE not in by_type:
+        raise ContractError(
+            f"{where}: {source} declares no {MANDATORY_CLAIM_TYPE} entry; every contract "
+            f"states the town (rule 25 — every active Czech listing has one)")
+
+
 def parse_contract(path: Path) -> PortalContract:
     import yaml  # dev/CI-only dependency; see the module docstring.
 
@@ -837,6 +884,7 @@ def parse_contract(path: Path) -> PortalContract:
         if entry.entry_id in seen:
             raise ContractError(f"{path}: duplicate extractor id '{entry.entry_id}'")
         seen.add(entry.entry_id)
+    _check_shape(source, entries, where=str(path))
 
     return PortalContract(
         source=source,
@@ -846,11 +894,8 @@ def parse_contract(path: Path) -> PortalContract:
         # git artefact and the DB row provably identical (02 §2.1.8 mechanism 1) — minus
         # the two blocks that are not extraction (`contract_body_hash`).
         sha256=contract_body_hash(body),
-        identity_ladder=[str(x) for x in (doc.get("identity_ladder") or [])],
         exclusion_zones=list(doc.get("exclusion_zones") or []),
-        precision_priors=dict(doc.get("precision_priors") or {}),
         fetch_config={
-            "fetch": doc.get("fetch") or {},
             # Projected VERBATIM, as the file writes it: the DB pair is a projection of
             # the git artefact (02 §2.1.8), so a normalised-on-the-way-in copy would be a
             # second dialect of the same fact. What the runtime applies is
@@ -860,9 +905,7 @@ def parse_contract(path: Path) -> PortalContract:
             # projection is refreshed in place by `project()` rather than being pinned to
             # the version that first carried it.
             "persistence": persistence,
-            "precision_caps": doc.get("precision_caps") or {},
             "regressions": doc.get("regressions") or [],
-            "extractor_runtime": doc.get("extractor_runtime"),
         },
         entries=entries,
         volatile_profiles=volatile_profiles,
@@ -916,27 +959,31 @@ _FETCH_CONFIG_UPDATE_SQL = """
     UPDATE portal_contracts SET fetch_config = %(fetch_config)s WHERE id = %(id)s
 """
 
+# `identity_ladder` / `precision_priors` are omitted deliberately: both columns are
+# `not null default '{}'`, nothing reads them, and W1-c stopped parsing the keys. W4 drops
+# the columns; until then the defaults write the empty value the rows would carry anyway.
 _HEADER_INSERT_SQL = """
     INSERT INTO portal_contracts
-        (source, version, contract_sha256, git_ref, identity_ladder, exclusion_zones,
-         precision_priors, fetch_config, is_active)
+        (source, version, contract_sha256, git_ref, exclusion_zones, fetch_config,
+         is_active)
     VALUES (%(source)s, %(version)s, decode(%(sha256)s, 'hex'), %(git_ref)s,
-            %(identity_ladder)s, %(exclusion_zones)s, %(precision_priors)s,
-            %(fetch_config)s, false)
+            %(exclusion_zones)s, %(fetch_config)s, false)
     RETURNING id
 """
 
+# `cardinality` / `required` / `on_conflict` are omitted for the same reason the header
+# omits two of its own columns: `not null default`, read by nothing, key refused since
+# W1-c. W4 drops them.
 _ENTRY_INSERT_SQL = """
     INSERT INTO portal_contract_entries
         (contract_id, entry_id, surface, page_kind, locator, claim_type, extraction_method,
          subject_scope, transform, precision_map, default_granularity,
          default_position_source, default_blur_evidence, default_licence_class,
-         cardinality, required, on_conflict, guards, notes)
+         guards, notes)
     VALUES (%(contract_id)s, %(entry_id)s, %(surface)s, %(page_kind)s, %(locator)s,
             %(claim_type)s, %(extraction_method)s, %(subject_scope)s, %(transform)s,
             %(precision_map)s, %(default_granularity)s, %(default_position_source)s,
-            %(default_blur_evidence)s, %(default_licence_class)s, %(cardinality)s,
-            %(required)s, %(on_conflict)s, %(guards)s, %(notes)s)
+            %(default_blur_evidence)s, %(default_licence_class)s, %(guards)s, %(notes)s)
     ON CONFLICT (contract_id, entry_id) DO NOTHING
 """
 
@@ -1059,9 +1106,7 @@ def project(
                     "version": contract.version,
                     "sha256": sha_hex,
                     "git_ref": git_ref,
-                    "identity_ladder": contract.identity_ladder,
                     "exclusion_zones": psycopg.types.json.Jsonb(contract.exclusion_zones),
-                    "precision_priors": psycopg.types.json.Jsonb(contract.precision_priors),
                     "fetch_config": psycopg.types.json.Jsonb(contract.fetch_config),
                 })
                 contract_id = int(cur.fetchone()[0])
@@ -1106,9 +1151,6 @@ def project(
                     "default_position_source": entry.default_position_source,
                     "default_blur_evidence": entry.default_blur_evidence,
                     "default_licence_class": entry.default_licence_class,
-                    "cardinality": entry.cardinality,
-                    "required": entry.required,
-                    "on_conflict": entry.on_conflict,
                     "guards": entry.guards,
                     "notes": entry.notes,
                 })
@@ -1210,7 +1252,7 @@ def _summarise(contracts: Iterable[PortalContract]) -> str:
     # reads the value the code will actually compare.
     return json.dumps(
         {c.source: {"version": c.version, "entries": len(c.entries),
-                    "w1_readers": sum(1 for e in c.entries if e.reader),
+                    "claim_types": sorted({e.claim_type for e in c.entries}),
                     "volatile_surfaces": sorted(c.volatile_profiles),
                     "profile_digests": {
                         page_kind: payload_norm.profile_digest(profile)[

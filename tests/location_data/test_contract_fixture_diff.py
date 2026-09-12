@@ -111,10 +111,13 @@ class Body:
     street_source: str | None = None
 
     def row(self, source: str, listing_id: str) -> ListingRow:
+        # W1-c deleted `locality` / `street` / `street_source` from `fx.listing`: the
+        # lane reads raw_json and the stored body, so a fixture cannot state a `listings`
+        # column the scan no longer selects. They stay on `Body` (and in `as_json`) as the
+        # captured provenance of the row, and are no longer passed to the extractor.
         return fx.listing(
             source, self.raw_json, native=listing_id, lat=self.lat, lon=self.lon,
-            in_mapy_inventory=self.in_mapy_inventory, locality=self.locality,
-            street=self.street, street_source=self.street_source)
+            in_mapy_inventory=self.in_mapy_inventory)
 
     def as_json(self) -> dict[str, Any]:
         return {

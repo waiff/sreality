@@ -42,9 +42,9 @@ component is slimmed twice — each wave rewrites one component and slims its st
   active Czech listings without `obec_kod` — red until both are zero. Wave A's #1420 (resolver v3
   tie-break), #1421 (remax pin stamped `page`), #1422 (no_input rows + daily/weekly crons) merged the
   same day.
-- **W1 — one lane, ten claim types, nine-entry contracts** (= plan S2 + the claims half of S1): the
-  hourly intake reads the stored payload and the stored page body (hash-gated); the archive sweep,
-  snapshot re-mine, LLM lane and their workflows go; each contract is rewritten to ≤ 10 entries, one
+- **W1 — one lane, eleven claim types, eleven-entry contracts** (= plan S2 + the claims half of S1):
+  the hourly intake reads the stored payload and the stored page body (hash-gated); the archive sweep,
+  snapshot re-mine, LLM lane and their workflows go; each contract is rewritten to ≤ 11 entries, one
   per claim type, the town entry mandatory and live; the loader refuses any other shape; the claims
   table slims (to 19, not the planned 8 — see W1-b) and its side tables go. Done when the red line
   is zero for every portal.
@@ -106,7 +106,79 @@ component is slimmed twice — each wave rewrites one component and slims its st
     `location_claims(id)` until 498). The window cannot be reintroduced:
     `test_claims_relax_migration.py` derives the compulsory-column and CHECK lists from 382's own
     DDL.
-    **Next:** rewrite each contract to <= 10 entries with the town entry mandatory.
+  - **W1-c code shipped** (2026-09-12): the loader's vocabulary and shape rules, ahead of the nine
+    YAML rewrites that land on top of it. `CLAIM_TYPES` becomes the **eleven** (coordinate,
+    precision_declaration, country, kraj/okres/obec/cast_obce names, street_name, house_number_cp/_co,
+    psc — ten after W2 folds the precision flag onto the pin claim); `parse_contract` refuses a second
+    entry of any claim type, a contract with no `obec_name` entry, an entry naming no reader, a
+    `legacy_column` surface or method, the retired per-entry keys (`required` / `cardinality` /
+    `on_conflict`) and any top-level key outside the six (`portal`, `contract_version`, `persistence`,
+    `exclusion_zones`, `regressions`, `extractions`). Deleted with them: the three `listings`-column
+    readers (`legacy_text_column`, `geom_column`, `coords_stamp_quality`), `LEGACY_COLUMNS` and the
+    legacy tail of the intake's scan, `GRANDFATHERED_INERT_GUARDS`, and the projection of eight
+    top-level keys (the DB columns keep their defaults until W4). Added, because the slim contracts
+    need them: the `statutory_city_obec` transform (a numbered or hyphenated městský obvod is never
+    the town — "Praha 8" → "Praha", applied implicitly by `address_part_obec`), `address_part_country`
+    (a trailing comma segment → an ISO-3166 alpha-2 code, from a closed table), the R5 rule that a
+    `precision_declaration` claim's label IS its value whatever reader produced it, the bazos row in
+    `ARCHIVED_COORDINATE_RULES` (the ad's own maps anchor is a first-party pin), and migration **499**
+    (five `regex_text` × field policy rungs: obec_name, cast_obce_name, kraj_name, house_number_cp,
+    psc — without them the town the slim contracts mine off a `Lokalita` row is declined at S7).
+    `location_town_coverage` also moves to the FRONT of `verify_pipeline`'s `_CHECKS`: on 2026-09-11
+    the lane's 120 s budget left the last seven checks `not_run`, the coverage red line among them.
+  - **W1-c contracts landed** (2026-09-12): all nine YAMLs rewritten at once, **159 entries → 67**
+    (175 when the sprint opened; W1-a had already dropped bazos' 16 never-executed LLM entries),
+    one per claim type, and the town entry is live on every portal — on the **hourly** lane, not on
+    an archive sweep (there is none any more). What each portal reads the town off, and what it
+    still does not publish:
+
+    | contract | entries | the town entry | not published |
+    | --- | --- | --- | --- |
+    | `bazos@5` | 4 | `bzs.det.obec_slug` — the town-listings anchor's `/inzeraty/<obec>/<psč>/` href | okres, část obce, kraj, country, street, čp, čo |
+    | `bezrealitky@2` | 8 | `bzr.det.city` — `advert.city`, a typed payload field | precision declaration, okres, kraj |
+    | `ceskereality@6` | 5 | `cr.det.data_city` — `input#driving_calculator_from[data-city]`, split off the `(okres X)` half | precision declaration, country, kraj, část obce, psč, čo |
+    | `idnes@3` | 10 | `id.det.obec` — the dataLayer `viewDetail` block's `listing_localityCity`, id-matched | psč |
+    | `maxima@3` | 6 | `mx.det.locality_obec` — segment 1 of `div.locality` | kraj, psč, čp, čo, country |
+    | `mmreality@3` | 7 | `mm.det.municipality` — the Vue blob's `/municipality` | **psč**, kraj, čp, čo |
+    | `realitymix@5` | 10 | `rm.det.slug` — the canonical link's `/detail/{obec}/` segment | country |
+    | `remax@4` | 6 | `rx.det.header_obec` — the head of `h2.pd-header__address` | precision declaration, country, psč, čp, čo |
+    | `sreality@2` | 11 | `sr.det.name_city` — `/locality/city` | *nothing — all eleven types* |
+
+    Four rulings did the work. A numbered or hyphenated městský obvod is never the town (R4,
+    `statutory_city_obec`); where the portal publishes it, it is claimed as `cast_obce_name` rather
+    than discarded. On a `precision_declaration` the portal's value IS the label and the entry's
+    `blurred_labels` — not the reader, not an entry default — decides the blur axis (R5); that moved
+    into `claims_common._base`, the one funnel both substrates build a claim through, after maxima's
+    hard-coded `blur_evidence: declared` made a PRECISE Point resolve as portal-declared-blurred on
+    every Point listing. bazos' own maps anchor is a first-party pin (R6) and remax's street comes
+    only from the subject map's `data-address`, never the header (R8). Migration **500** adds the one
+    `(regex_text, house_number_co)` policy rung 499 missed — realitymix reads čp and čo out of the
+    same `og:title` capture, and without it the čo half is declined at S7 while its pair wins.
+    Deleted with the rewrite: 6 whole test files superseded by the per-portal ones (R14), the
+    `blur_hint` / `map_zoom` / `address_line_verbatim` / `uncertainty_geometry` arms of the retired
+    vocabulary, and every entry no reader executed — an omission is now a line in the portal's report,
+    never a placeholder entry.
+
+    **Review found two entries that could not fire, and both classes are now loader rails.**
+    `bzs.det.link_pin` declared a `locator.pattern` that `html_point_attrs` did not read, so the
+    reader `float()`-ed the raw href and returned silently — bazos had no pin at all while the same
+    wave deleted `geom_column`, its only other pin path. `cr.map.exact` read a `page_kind: map`
+    marker set, and the intake joins `portal_raw_payloads` on `page_kind = 'detail'` — no scraper
+    stores any other kind, so the entry was unreachable by construction and read as a live precision
+    signal for the portal. The reader learned the pattern (`lat`/`lon` named groups, one attribute
+    or two) and the ceskereality entry is gone; the portal's precision rides on its town, okres and
+    pin entries, which is the settled headline rule (R10). The rails: `ReaderContract` now records
+    each reader's WHOLE locator appetite — required plus optional, derived back out of the reader
+    bodies by a transitive AST scan — and a key outside it is refused; a page-reader entry declared
+    for any kind but `detail` is refused. The resolver also learned the four labels the nine
+    contracts emit and it did not know (`approximate_location`→obec, `linestring`→street,
+    `circle`→cast_obce_or_quarter, `accurate` as a precise label that ranks a pin without certifying
+    a granularity), and `statutory_city_obec` gained the two cases the review measured: the ordinal
+    arm now carries a trailing name ("Praha 10 - Vršovice", "Liberec XXV-Vesec") and every
+    hyphenated OKRES name is excluded, so "Brno-venkov" is no longer folded to Brno.
+    **Next:** the coverage red line is the acceptance check, and it can only be read after deploy —
+    every portal but sreality, bezrealitky and mmreality now mints its town from a STORED PAGE BODY,
+    so a portal's number moves as the body-mining half works through its backlog, not at merge.
 - **W2 — the resolver at four steps, the answer table at 27 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and
@@ -242,9 +314,12 @@ re-scan bloat — a same-day observation dedup guard is queued follow-up work).
   exactly the foreign-address cohort — drift there means the unique index stops deduping,
   silently, in an append-only table. A diagnostic mirror + a parity battery keep it documented.
 - **Legacy entries never burn a permanent extractor id.** 02 §2.2.3's ids are fixed on the W2
-  *HTML* parses; the raw_json / `listings.geom` mirrors of the same facts ship as
+  *HTML* parses; the raw_json / `listings.geom` mirrors of the same facts shipped as
   `bzs.det.legacy_psc` / `bzs.det.legacy_link_pin` / `id.det.legacy_pin`, so the two provenances
-  stay distinguishable in `location_claims.extractor_id` when W2 lands.
+  stayed distinguishable in `location_claims.extractor_id`. (**All three entries are gone at
+  W1-c** — the `listings`-column readers went with rule 25 and one-entry-per-type leaves no room
+  for a mirror of a fact the page already states. The decision stands for its own sake: the ids
+  are permanent and none of them is ever reused.)
 - **Withheld coordinates and unreadable payloads are recorded, never silent** — a class-E row gets
   a `location_claim_absences` row; sreality's legacy-shape / truncated rows are routed to the
   refetch lane above.
@@ -1067,7 +1142,11 @@ portals' contracts.
 variable count per row. The run was investigated rather than accepted, by probing the classifier
 against the committed fixtures: legacy-shape sreality yields exactly 1 claim
 (`sr.det.legacy_locality_value` → `address_line_verbatim`) plus 1 coordinate absence, while
-post-cutover yields 21 claims and 0 absences. So snapshot ids 1–90,000 are *entirely* pre-cutover
+post-cutover yields 21 claims and 0 absences. (**Both halves are sreality@1 readings, kept as the
+2026-08-13 record.** At sreality@2 the legacy body yields 0 claims and one counted refusal,
+`sreality_payload_shape:legacy` — R11 accepts that: those rows never had a town, and the recovery
+is a detail refetch — and the post-cutover body yields 11. Absences went with
+`location_claim_absences` in W1-b.) So snapshot ids 1–90,000 are *entirely* pre-cutover
 legacy-shape sreality — the oldest rows in the table, all predating the June-2026 payload change.
 Uniform cohort, not a defect.
 

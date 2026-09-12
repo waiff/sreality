@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import dataclasses
 
+import pytest
+
 from location_data.resolver import core
 from location_data.resolver import position as s4
+from location_data.resolver.precision import DECLARED_CAP
 from location_data.resolver.version import RESOLVER_VERSION
 from tests.location_data import mini_mirror as mm
 
@@ -89,6 +92,97 @@ def test_a_declared_blurred_pin_becomes_portal_pin_blurred():
     assert resolution.position.position_source == "portal_pin_blurred"
     assert resolution.precision.blur_evidence in ("declared", "both")
     assert resolution.precision.granularity == "obec"
+
+
+# The four labels W1-c's nine contracts added to the resolver's vocabulary. Each is one
+# portal's own word, and an unknown label is NOT silently blurred ("cap, never certify"), so
+# before these rows each of them resolved as a portal that declared nothing — bazos'
+# `Přibližná lokalita` and maxima's drawn shapes among them.
+#   (label, the portal and entry that emits it, the granularity it caps at, is it blurred?)
+# Coarse -> fine, for the ceiling assertion below.
+_GRANULARITY = ("country", "kraj", "okres", "obec", "cast_obce_or_quarter", "street",
+                "street_segment", "building", "address_point")
+_W1C_DECLARED_LABELS = (
+    ("approximate_location", "bazos/bzs.det.blur_hint", "obec", True),
+    ("linestring", "maxima/mx.det.map_geometry", "street", True),
+    ("circle", "maxima/mx.det.map_geometry", "cast_obce_or_quarter", True),
+)
+
+
+@pytest.mark.parametrize(("label", "who", "capped", "blurred"), _W1C_DECLARED_LABELS)
+def test_a_w1c_declared_label_caps_the_pin_at_the_rung_its_contract_documents(
+        label: str, who: str, capped: str, blurred: bool) -> None:
+    """Both halves, through the real S4 read and the real S6 assessment: the label is KNOWN
+    (so `read_declared_precision` returns it rather than dropping it on the floor) and it
+    caps at the rung the entry's own `precision_cap` documents. A label the ladder does not
+    map takes the generic `blur_hint->street` fallback, which on bazos is LOOSER than the
+    obec ceiling its contract declares and on maxima's circle TIGHTER than the quarter."""
+    assert label in s4.KNOWN_DECLARED_LABELS, who
+    assert (label in s4.BLURRED_DECLARED_LABELS) is blurred, who
+    assert DECLARED_CAP[label] == capped, who
+
+    claims = [
+        mm.claim(1, "obec_name", value_text="Praha"),
+        mm.claim(2, "coordinate", lat=50.0755, lon=14.4378),
+        mm.claim(3, "precision_declaration", declared_precision_label=label,
+                 value_text=label, blur_evidence="declared" if blurred else "none"),
+    ]
+    resolution = _resolve(claims)
+    declared = s4.read_declared_precision(claims)
+    assert declared.label == label, who
+    assert declared.blurred is blurred, who
+    # The cap is RECORDED by name, which is what proves the ladder mapped the label rather
+    # than falling through: an unmapped blurred label is stamped `(unmapped)->street`.
+    assert f"declared:{label}->{capped}" in resolution.precision.declared_caps, who
+    assert "(unmapped)" not in " ".join(resolution.precision.declared_caps), who
+    # A cap is a CEILING, never a floor. These claims state only a town, so the address
+    # evidence already resolves at `obec` and a finer cap coarsens nothing — asserting the
+    # granularity IS the cap would be asserting that a declaration can promote a pin.
+    assert _GRANULARITY.index(resolution.precision.granularity) <= _GRANULARITY.index(capped)
+    assert resolution.precision.granularity == "obec", who
+
+
+def test_mmrealitys_accurate_ranks_the_pin_without_certifying_a_granularity():
+    """`accurate` is the ONE W1-c label that is precise rather than blurred, and it is
+    deliberately absent from `DECLARED_CAP`: membership in `PRECISE_DECLARED_LABELS` decides
+    which of two sibling declarations wins the pin (`declared_for_coordinate` ranks it 0),
+    while a cap row would additionally CERTIFY a granularity the portal's own flag does not
+    predict. Being unmapped costs nothing — the entry documents an `address_point` ceiling,
+    which is the finest rung, so capping at it would coarsen nothing anyway."""
+    assert "accurate" in s4.PRECISE_DECLARED_LABELS
+    assert "accurate" in s4.KNOWN_DECLARED_LABELS
+    assert "accurate" not in s4.BLURRED_DECLARED_LABELS
+    assert "accurate" not in DECLARED_CAP
+
+    precise = mm.claim(2, "coordinate", lat=50.0755, lon=14.4378,
+                       declared_precision_label="accurate")
+    blurred = mm.claim(3, "coordinate", lat=50.1, lon=14.5,
+                       declared_precision_label="regional", blur_evidence="declared")
+    assert s4.declared_for_coordinate(precise).rank == 0
+    assert s4.declared_for_coordinate(blurred).rank == 2
+    resolution = _resolve([mm.claim(1, "obec_name", value_text="Praha"), precise, blurred])
+    assert resolution.precision.blur_evidence == "none"
+    # Nothing certified either: the granularity is whatever the ADDRESS evidence supports.
+    assert not any(c.startswith("declared:accurate") for c in resolution.precision.declared_caps)
+
+
+def test_maximas_point_is_deliberately_unmapped_and_certifies_nothing():
+    """The shape the portal draws for "here" rather than for an area. It is not blurred (its
+    entry's `blurred_labels` names only LineString and Circle, W1-c R5), and it is not
+    precise either — a marker is not a measurement — so it caps nothing and must not reach
+    the unmapped-blurred fallback, which would coarsen every maxima Point pin to `street`."""
+    assert "point" not in s4.KNOWN_DECLARED_LABELS
+    claims = [
+        mm.claim(1, "obec_name", value_text="Praha"),
+        mm.claim(2, "coordinate", lat=50.0755, lon=14.4378),
+        mm.claim(3, "precision_declaration", declared_precision_label="point",
+                 value_text="Point", blur_evidence="none"),
+    ]
+    declared = s4.read_declared_precision(claims)
+    assert declared.blurred is False and declared.blur_evidence == "none"
+    resolution = _resolve(claims)
+    assert resolution.precision.blur_evidence == "none"
+    assert not any("unmapped" in c for c in resolution.precision.declared_caps)
 
 
 def test_a_bare_blur_hint_is_a_distinct_claim_type_with_no_declared_value():

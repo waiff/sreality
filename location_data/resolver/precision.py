@@ -62,6 +62,16 @@ DECLARED_CAP: dict[str, str] = {
     # idnes' "Na mapě nezobrazujeme přesnou adresu" disclaimer: the contract declares
     # `granularity_max: cast_obce_or_quarter` for it (idnes.yaml, id.det.no_exact_disclaimer).
     "no_exact_address": "cast_obce_or_quarter",
+    # --- W1-c: the rest of what the nine slim contracts emit.
+    # bazos' maps anchor says "Přibližná lokalita" on every ad; the contract caps that pin at
+    # `granularity_max: obec` (bazos.yaml, bzs.det.blur_hint), which is the rung here.
+    "approximate_location": "obec",
+    # maxima draws its own imprecision as a SHAPE (maxima.yaml, mx.det.map_geometry): a line
+    # is a street's worth of it, a circle a quarter's. `point` is deliberately absent — an
+    # unmapped label certifies nothing, and a drawn point is the one shape whose grade the
+    # portal does not state (it is a marker, not a measurement).
+    "linestring": "street",
+    "circle": "cast_obce_or_quarter",
 }
 
 PRECISE_SOURCES = frozenset({"registry_point", "portal_pin"})

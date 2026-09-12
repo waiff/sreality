@@ -56,9 +56,19 @@ BLURRED_DECLARED_LABELS = frozenset(
     {
         "municipality", "obec", "ward", "quarter", "citypart", "street",
         "approximate", "priblizna", "estimated", "regional", "area", "polygon",
+        # W1-c: the labels the nine slim contracts actually emit. bazos' maps-anchor title
+        # ("Přibližná lokalita" -> `approximate_location`) and maxima's two non-point feature
+        # geometries, which ARE the portal drawing its own imprecision.
+        "approximate_location", "linestring", "circle",
     }
 )
-PRECISE_DECLARED_LABELS = frozenset({"gps", "address", "exact", "presna", "rooftop", "ruian"})
+# `accurate` is mmreality's `/accurate: true` branch — the portal asserting the pin IS the
+# address, the counterpart of its `regional` label above. It is deliberately NOT in
+# `precision.DECLARED_CAP`: membership here RANKS the pin against a blurred sibling, which is
+# what the flag is for, while a cap row would CERTIFY a granularity the portal's own
+# `accurate` does not predict (mmreality.yaml records the measurement).
+PRECISE_DECLARED_LABELS = frozenset(
+    {"gps", "address", "exact", "presna", "rooftop", "ruian", "accurate"})
 # A `precision_declaration` with no `declared_precision_label` may still carry the portal's
 # vocabulary in `value_text` (sreality's `inaccuracy_type`). Anything else in `value_text` —
 # our own `coords.source` stamp ('page', 'carry_forward'), a map-legend sentence — is NOT a

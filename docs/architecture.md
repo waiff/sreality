@@ -1697,17 +1697,18 @@ renumber.** Navigate by area:
     `docs/design/location-serving-contract.md`.
 
 
-25. **Location: one store, one lane, nine claim types, no flags; every location PR deletes at least as
+25. **Location: one store, one lane, eleven claim types, no flags; every location PR deletes at least as
     much as it adds.** Written 2026-09-11 from the full-programme audit ("Where the Town Lives"). The
     programme had built a completeness-first engine wave after wave — 62 tables, 81 projection columns,
     40 claim types, 5 claim-producing lanes, 19 workflows, 5 policy tables — and never flipped a
     consumer, so nothing exercised it end to end and nothing was ever deleted; 733 verified findings
     came out of that shape, not out of any one bug. The rule is the corrective: the answer table shrinks
     to 27 fields (pin, the eight names plus psč, six registry ids, confidence/level/radius, statuses,
-    housekeeping), the claim vocabulary to ten types (the portal's precision flag rides on the pin
-    claim), each contract to at most one entry per type with the **town entry mandatory and on the
-    hourly lane** (the loader refuses any other shape), the lanes to one (the hourly intake reads the
-    stored payload and the stored page body, hash-gated), the resolver to four steps (bind the finest
+    housekeeping), the claim vocabulary to **eleven types until W2 and ten after** (the portal's
+    precision flag is its own `precision_declaration` claim until the resolver rewrite folds it onto
+    the pin claim), each contract to at most one entry per type with the **town entry mandatory and on
+    the hourly lane**, the lanes to one (the hourly intake reads the stored payload and the stored page
+    body, hash-gated), the resolver to four steps (bind the finest
     registry entity → fill the hierarchy from the registry → grade: one confidence, one radius from a
     per-level table in code → check: the pin must fall inside the resolved town, else `disputed`).
     Everything the resolver needs later derives from three kept things: the stored page body, the
@@ -1722,6 +1723,21 @@ renumber.** Navigate by area:
     field is added only after a measured slowdown and only there. The one step that adds work — the
     intake parsing changed page bodies — is bounded by page churn, and moves to the Railway worker if
     the hourly budget is ever exceeded.
+
+    **The contract shape, as the loader enforces it (W1-c, `location_data/contracts.py`).** Six
+    top-level keys (`portal`, `contract_version`, `persistence`, `exclusion_zones`, `regressions`,
+    `extractions`) and nothing else; the eight that went — `identity_ladder`, `precision_caps`,
+    `precision_priors`, `extractor_runtime`, `fetch`, `payload_schema_detector`,
+    `pin_collision_semantics`, `contract_sha256` — were read by nothing. Per contract: **at most one
+    entry per claim type**, an `obec_name` entry **present and naming a reader**, and **every** entry
+    naming a reader (the "declared ahead for a later wave" state is gone — it is how the fleet grew 47
+    entries that extracted nothing). Per entry: no `required` / `cardinality` / `on_conflict` (nothing
+    enforced them) and no `legacy_column` surface or method — the lane reads `raw_json` and the stored
+    page body, so the three readers that mined a `listings` column (`legacy_text_column`, `geom_column`,
+    `coords_stamp_quality`) went with it. Each refusal is one `ContractError` naming the portal and the
+    entry. The Postgres enums keep their retired labels (an enum cannot shrink in place) and the
+    `portal_contracts` / `portal_contract_entries` columns keep their defaults; W4 drops both, and until
+    then the loader's vocabulary is a strict subset of the enum's.
 
 ## Broker identity merges — auto-merge and the suppression rail
 
@@ -1920,13 +1936,17 @@ The collision epoch is minted weekly by the same workflow (Sunday 04:41 UTC).
 
 **ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
 `35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a
-listing: `listings.raw_json` plus the class-B legacy columns (ten payload readers), and the
-LATEST stored detail body in `portal_raw_payloads`, joined on `(source, source_id_native)` —
+listing: `listings.raw_json` (seven payload readers), and the LATEST stored detail body in
+`portal_raw_payloads`, joined on `(source, source_id_native)` —
 `portal_raw_payloads.listing_id` is nullable and nothing has ever populated it — fetched from R2
 and scoped by the contract's exclusion zones (fourteen page readers in
 `location_data/page_readers.py`, the vocabulary both halves share in
-`location_data/claims_common.py`). ONE registry, `claims_intake.READERS`, 24 entries keyed by
-substrate; a name outside it is a hard refusal. **The page half is hash-gated**: a body is mined
+`location_data/claims_common.py`). ONE registry, `claims_intake.READERS`, 21 entries keyed by
+substrate; a name outside it is a hard refusal. It was 24 and read a THIRD substrate — the
+class-B `listings` columns (`locality`, `street`, `street_source`) — until W1-c deleted
+`legacy_text_column`, `geom_column` and `coords_stamp_quality`: a column the scraper writes is
+not evidence a portal published, and every claim they minted carried the surface
+`legacy_column`, which is precisely what rule 25's "one store" forbids. **The page half is hash-gated**: a body is mined
 only while `portal_raw_payloads.contract_version IS DISTINCT FROM` the portal's active contract
 version, and the batch stamps the bodies it mined in the same transaction as their claims — so
 a body is fetched once per contract version, the steady-state cost is bounded by page CHURN
@@ -2027,6 +2047,29 @@ top-level YAML key is a refusal, not a shrug — every key in this format fails 
 **Entries are immutable** — a fix is a version bump, never an edit, so a claim's `extractor_id` always
 names the rule that produced it. Hence no per-portal branch in the intake: a new signal is a YAML
 entry, not code.
+
+**The SHAPE of a contract is enforced by the loader** (rule 25, W1-c). At most **one entry per claim
+type**, out of the eleven; an `obec_name` entry is **mandatory and must name a reader**, because a
+contract that cannot state the town cannot satisfy the invariant the wave exists for; only six
+top-level keys are legal (`portal`, `contract_version`, `persistence`, `exclusion_zones`,
+`regressions`, `extractions`) and the unenforced per-entry ones (`required`, `cardinality`,
+`on_conflict`) are gone. All nine were rewritten to that shape on 2026-09-12 — **159 entries became
+67**, 4 to 11 apiece (175 when the sprint opened; W1-a dropped bazos' 16 never-executed LLM
+entries ahead of it), and every portal's town entry runs on the **hourly** lane rather than on an
+archive sweep that no longer exists. What a portal does NOT publish is now an omission recorded in
+its report, not a placeholder entry: no contract carries an entry no reader executes.
+
+Two further rails, both written by an entry that shipped INERT. `ReaderContract` records each
+reader's whole `locator` appetite — the keys it requires plus the ones it merely reads — and a
+locator key outside that union is refused, because a declared key no reader consults is a rail
+that looks enforced and is not (bazos' pin entry named a `pattern` its reader ignored, so the
+portal had no coordinate while the contract read as though it published one). And a page-reader
+entry may only be declared for `page_kind: detail`: `_BODY_JOIN` selects that kind and nothing
+else — index bodies are never archived, and no scraper writes a map, archive, snapshot or
+gazetteer body at all — so any other kind is unreachable by construction, which is not a shape
+a contract may describe. The appetite record is derived back out of the reader bodies by an AST
+scan over each reader and, transitively, the helpers it delegates its locator to, so the table
+cannot drift from the call sites it describes.
 
 The header carries **one mutable extraction column**: `is_active`, which version the extractor runs.
 It carried a second, `shadow` (migration 404) — a contract that could not meet its frozen-sample

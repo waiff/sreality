@@ -1,20 +1,51 @@
 <!DOCTYPE html>
-<!-- Modelled on contracts/portals/maxima.yaml. Subject nodes are mx.det.title,
-     mx.det.locality and the OpenLayers config mx.det.map_features reads; the
-     decoy is that file's single exclusion zone. [mine-maxima]: "Podobné
-     nemovitosti v naší nabídce" is the only extra content in detail_page_text,
-     it "yielded 0 unique subject facts" and is "an active mis-attribution
-     hazard". -->
+<!-- Modelled on contracts/portals/maxima.yaml, in the LIVE serialisation: a `<script>`
+     carrying `JSON.parse('…')` whose quotes are BACKSLASH-ESCAPED (that is what
+     `decode: js_string` on the two map entries exists for) and a BARE geometry object
+     inside `features` — no GeoJSON `Feature` wrapper, which no maxima page serves (live
+     capture 2026-09-05: a Circle is `{"type":"Circle","center":[lon,lat],"radius":<deg>}`).
+     The map's view centre is deliberately a DIFFERENT point from the drawn feature, so a
+     reader that took `/center` would be visible here. Subject nodes are div.locality, the
+     map config, and #collapse-inzerat-text — the description selector
+     scraper/maxima_parser.py:416 already reads.
+
+     The locality line is recon §3.2's THREE-SEGMENT shape — "městský obvod, katastrální
+     území/čtvrť, street", as in the live `Praha 3, Žižkov, Jeseniova` — with real Brno
+     names: Brno-střed is a statutory obvod (so the town claim has to fold it, W1-c R4),
+     Veveří is its katastrální území, Grohova a street in Veveří. That ordering matters:
+     mx.det.locality_street types the TAIL of a three-segment line without a morphology
+     test, on scraper/street.py:285-289's doctrine that the tail of a 3+-segment locality
+     is reliably a street — so the page this gate is scored on must be a page where that
+     holds. The earlier draft put `Brno, Brno-střed, Veveří` here and claimed `Veveří`
+     (a katastrální území, which looks_like_czech_street rejects) as the street.
+
+     The description sentence is the mining corpus's own shape ("…, katastrální území X,
+     obec Y, okres Z, <Kraj> kraj." — verbatim from f60012522 / d40026367 / f60012682)
+     with this page's own names substituted, and it now AGREES with the claims: Veveří is
+     the katastrální území the quarter entry claims, not the street.
+
+     The decoy is the contract's single exclusion zone. [mine-maxima]: "Podobné
+     nemovitosti v naší nabídce" is the only extra content in detail_page_text, it
+     "yielded 0 unique subject facts" and is "an active mis-attribution hazard". A Point
+     is the minority live shape; the Circle and LineString arms are pinned by the live
+     captures in tests/location_data/test_contract_maxima.py, because score_archived
+     scores exactly one body per portal. -->
 <html lang="cs">
-<head><title>Prodej bytu 2+kk 48 m2, Veveří, Brno-střed | MAXIMA REALITY</title></head>
+<head><title>Prodej bytu 2+kk 48 m2 Brno-střed, Veveří, Grohova | MAXIMA REALITY</title></head>
 <body>
 
 <h1>Prodej bytu 2+kk 48 m2</h1>
-<div class="locality">Brno, Brno-střed, Veveří</div>
+<div class="locality">Brno-střed, Veveří, Grohova</div>
 
-<script>
-  var mapConfig = JSON.parse('{"center":[16.6000,49.2000],"zoom":15,"features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[16.60411,49.20256]},"properties":{"id":"f60012522"}}]}');
+<script type="module">
+  const mapdata = JSON.parse('{\"center\":[16.5980,49.1990],\"zoom\":15,\"features\":[{\"type\":\"Point\",\"coordinates\":[16.60411,49.20256]}]}');
 </script>
+
+<div id="collapse-inzerat-text">
+  Nabízíme k prodeji byt 2+kk o výměře 48 m2 v klidné části města, v ulici Grohova,
+  katastrální území Veveří, obec Brno, okres Brno-město, Jihomoravský kraj. Byt se
+  nachází ve 3. patře.
+</div>
 
 <div class="podobne">
   <h3>Podobné nemovitosti v naší nabídce</h3>

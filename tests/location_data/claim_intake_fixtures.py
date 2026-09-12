@@ -11,11 +11,22 @@ from datetime import UTC, datetime
 from typing import Any
 
 from location_data import contracts
-from location_data.claims_intake import LEGACY_COLUMNS, Entry, ListingRow
+from location_data.claims_intake import Entry, ListingRow
 
 OBSERVED_AT = datetime(2026, 8, 10, 6, 30, tzinfo=UTC)
 
-_CONTRACTS = {c.source: c for c in contracts.load_all()}
+_CONTRACTS: dict[str, contracts.PortalContract] = {}
+
+
+def _contract(source: str) -> contracts.PortalContract:
+    """Loaded on FIRST USE, not at import. The loader refuses a contract that breaks the
+    shape rules, and at import time that refusal takes down every test in every module that
+    imports this one — including the ones that build their own synthetic entries and never
+    look at git. A file this many modules depend on fails only the tests that actually read
+    a contract."""
+    if not _CONTRACTS:
+        _CONTRACTS.update({c.source: c for c in contracts.load_all()})
+    return _CONTRACTS[source]
 
 
 def entries_for(source: str) -> list[Entry]:
@@ -24,7 +35,7 @@ def entries_for(source: str) -> list[Entry]:
     Entry ids are assigned in file order, which is exactly what the deploy projection does
     (`bigserial`), so a test can assert on `contract_entry_id` stability.
     """
-    contract = _CONTRACTS[source]
+    contract = _contract(source)
     return [
         Entry(
             id=1000 + index,
@@ -42,7 +53,6 @@ def entries_for(source: str) -> list[Entry]:
             precision_map=entry.precision_map,
             default_blur_evidence=entry.default_blur_evidence,
             default_licence_class=entry.default_licence_class,
-            cardinality=entry.cardinality,
             guards=tuple(entry.guards),
         )
         for index, entry in enumerate(contract.entries)
@@ -58,16 +68,12 @@ def listing(
     lat: float | None = None,
     lon: float | None = None,
     in_mapy_inventory: bool = False,
-    locality: str | None = None,
-    street: str | None = None,
-    street_source: str | None = None,
 ) -> ListingRow:
-    """`locality` / `street` / `street_source` are the class-B `listings` columns of
-    06 §6.1.3 that the batch query selects alongside `raw_json` — NOT payload keys.
+    """One scan row, exactly as `_row_from_record` builds it.
 
-    Every one of `LEGACY_COLUMNS` is always populated, exactly as `_row_from_record`
-    populates it, and zipped `strict` for the same reason: a column added to the scan but
-    not here would leave the fixtures testing a row shape production never produces.
+    The class-B `listings` columns (`locality` / `street` / `street_source`) were arguments
+    here until W1-c deleted the readers that mined them: the lane reads `raw_json` and the
+    stored page body, so a fixture cannot state a column the scan no longer selects.
     """
     return ListingRow(
         listing_id=listing_id,
@@ -78,8 +84,6 @@ def listing(
         lon=lon,
         observed_at=OBSERVED_AT,
         in_mapy_inventory=in_mapy_inventory,
-        legacy_columns=dict(zip(
-            LEGACY_COLUMNS, (locality, street, street_source), strict=True)),
     )
 
 

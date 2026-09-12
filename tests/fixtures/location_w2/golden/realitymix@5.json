@@ -1,0 +1,140 @@
+{
+  "portal": "realitymix",
+  "contract_version": 5,
+  "regression_listing_ids": [
+    "8375963",
+    "8375983",
+    "8595551"
+  ],
+  "listings_without_a_fixture_body": [
+    "8375983",
+    "8595551"
+  ],
+  "fixtures": [
+    {
+      "listing": "8375963",
+      "body": "claim_intake_fixtures.REALITYMIX_GEOCODE",
+      "row": {
+        "lat": 48.37498,
+        "lon": 17.00147,
+        "in_mapy_inventory": false,
+        "listings.locality": null,
+        "listings.street": null,
+        "listings.street_source": null
+      },
+      "claims": [],
+      "refusals": {}
+    },
+    {
+      "listing": "8662169",
+      "body": "tests/fixtures/location_w2/regressions/realitymix/8662169.json",
+      "row": {
+        "lat": 50.427238,
+        "lon": 12.742544,
+        "in_mapy_inventory": false,
+        "listings.locality": "Stráň, Potůčky, okres Karlovy Vary",
+        "listings.street": null,
+        "listings.street_source": null
+      },
+      "claims": [],
+      "refusals": {}
+    }
+  ],
+  "archived_claims": [
+    {
+      "extractor_id": "rm.det.gps",
+      "claim_type": "coordinate",
+      "value_text": "49.73561,13.39051",
+      "value_num": null,
+      "value_geom_wkt": "POINT(13.39051 49.73561)",
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": "portal_pin",
+      "evidence_quote": "<div id=\"print-map\" data-gps-lat=\"49.73561\" data-gps-lon=\"13.39051\" data-address=\"Slovanská alej, Plzeň 2-Slovany, Plzeň, okres Plzeň-město\"></div>",
+      "evidence_span_len": 147
+    },
+    {
+      "extractor_id": "rm.det.map_okres",
+      "claim_type": "okres_name",
+      "value_text": "Plzeň-město",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "Slovanská alej, Plzeň 2-Slovany, Plzeň, okres Plzeň-město",
+      "evidence_span_len": 57
+    },
+    {
+      "extractor_id": "rm.det.map_street",
+      "claim_type": "street_name",
+      "value_text": "Slovanská alej",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "Slovanská alej, Plzeň 2-Slovany, Plzeň, okres Plzeň-město",
+      "evidence_span_len": 57
+    },
+    {
+      "extractor_id": "rm.det.og_psc",
+      "claim_type": "psc",
+      "value_text": "32600",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "<meta property=\"og:title\" content=\"Prodej bytu 3+1 82 m2, Slovanská alej, 326 00 Plzeň 2-Slovany\">",
+      "evidence_span_len": 98
+    },
+    {
+      "extractor_id": "rm.det.slug",
+      "claim_type": "obec_name",
+      "value_text": "plzen",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "<link rel=\"canonical\" href=\"https://realitymix.cz/detail/plzen/prodej-bytu-3-1-82-m2-slovanska-alej.html\">",
+      "evidence_span_len": 106
+    }
+  ]
+}

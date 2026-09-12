@@ -27,20 +27,6 @@ SOURCES = (
     "realitymix", "maxima",
 )
 
-# The class-B legacy columns (06 §6.1.3), in the ORDER the two batch queries select them.
-# ONE list, because four things have to agree: the SELECT items of both queries, the
-# positional unpack in `_row_from_record`, and the `locator.legacy_source_column` /
-# `locator.require_column_equals` keys a contract entry is allowed to name. Adding a column
-# is one SELECT item + one line here + a contract entry — never a new reader.
-#
-# `listings.street_source` is here as a GUARD column: nothing reads it as a value, and it
-# is the reason `listings.street` can be read at all (06 §6.1.3 admits that column only for
-# `street_source='parser'`). `listings.geom` is NOT here — it has its own reader, because
-# the licence ladder gates it.
-LEGACY_COLUMNS: tuple[str, ...] = (
-    "listings.locality", "listings.street", "listings.street_source",
-)
-
 # The second rail, and the one that survives a pathological single row: no chunk budget can
 # split ONE array element, so a claim whose value alone dwarfs the budget would still be
 # handed to Postgres verbatim. A value this large is not a location claim — it is a portal
@@ -83,8 +69,12 @@ class CoordinateRule:
       payload      - the portal published the coordinate in the body we still hold; the
                      value is re-derived from `raw_json` and is first-party (class A).
       geom_column  - the value survives ONLY in `listings.geom` (the six slim-dict portals
-                     never wrote lat/lon into raw_json), so it is migrated as a legacy
-                     column and ONLY when the provenance stamp names a first-party path.
+                     never wrote lat/lon into raw_json), and only where the provenance
+                     stamp names a first-party path. W1-c deleted the reader that mined
+                     that column, so on this arm the label now answers ONE question — was
+                     a coordinate this portal has WITHHELD, and why (the refusal counter in
+                     `extract_listing`). The value itself is re-read from the stored page
+                     body under `ARCHIVED_COORDINATE_RULES`.
       none         - the portal ships no admissible coordinate at all.
     """
     substrate: str
@@ -152,6 +142,13 @@ ARCHIVED_COORDINATE_RULES: dict[str, ArchivedCoordinateRule] = {
     # `#printMap[data-gps], #listingMap[data-gps]`, scoped by element id — never "the first
     # data-gps in the document", which is the neighbour carousel [live-B §3.5.1].
     "remax": ArchivedCoordinateRule("rx.det.gps", "portal"),
+    # The ad's own `google.com/maps/place/<lat>,<lon>` anchor, titled "Přibližná lokalita"
+    # (W1-c R6). Same shape as remax's row and for the same reason: the PAGE publishes the
+    # pin, so it is first-party, and the Mapy veto above still decides first. The pin is
+    # permanently approximate — the entry's `precision_cap` is what says so, not a missing
+    # row here, which only ever said "bazos has no coordinate at all".
+    # `bzs.det.link_pin` is 02 §2.2.3's reserved id for exactly this act.
+    "bazos": ArchivedCoordinateRule("bzs.det.link_pin", "portal"),
     "realitymix": ArchivedCoordinateRule("rm.det.gps", "portal",
                                          geocoded_licence_class="odbl"),
     # A typed {coordinates,address} pair keyed by the listing id, inside the MapTiler blob.
@@ -160,6 +157,10 @@ ARCHIVED_COORDINATE_RULES: dict[str, ArchivedCoordinateRule] = {
     "mmreality": ArchivedCoordinateRule("mm.det.point", "portal"),
     # The OpenLayers config's `/features/0`.
     "maxima": ArchivedCoordinateRule("mx.det.map_features", "portal"),
+    # The decimal pair `input#driving_calculator_from` stamps, which the page's own
+    # Google embed echoes as `q=lat,lng` — first-party, and since rule 25 deletes the
+    # `listings.geom` reader it is the ONLY pin this portal has (W1-c R10).
+    "ceskereality": ArchivedCoordinateRule("cr.det.page_pin", "portal"),
 }
 
 # Same envelope as `location_constants.cz_bbox` (migration 380) and as
@@ -212,7 +213,6 @@ class Entry:
     precision_map: dict[str, Any]
     default_blur_evidence: str
     default_licence_class: str
-    cardinality: str
     guards: tuple[str, ...]
 
     @property
@@ -235,11 +235,6 @@ class ListingRow:
     lon: float | None
     observed_at: datetime
     in_mapy_inventory: bool
-    # `LEGACY_COLUMNS` -> value, keyed by the SAME string a contract entry puts in
-    # `locator.legacy_source_column` / `locator.require_column_equals`. Always ALL of
-    # them: a key that is absent is a scan/contract mismatch and is refused, not read as
-    # NULL (`_legacy_column`).
-    legacy_columns: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -577,13 +572,78 @@ def _address_part_okres(value: str, arg: str) -> str | None:
     return _OKRES_QUALIFIER_RE.sub("", segments[-1]).strip(" .,") or None
 
 
+# The eight statutory cities whose OBVOD names are published where a town name belongs.
+# Two shapes, and the split is the portals' own: a NUMBER or a Roman numeral is always an
+# obvod ("Praha 8", "Plzeň 3", "Pardubice II"), while a hyphenated name is an obvod only in
+# the five cities whose obvody are named that way — "Brno-Židenice" is a Brno obvod,
+# "Kostelec nad Černými Lesy" is a town, and stripping after a hyphen everywhere would turn
+# "Frýdek-Místek" into "Frýdek". The obvod itself is not lost: a portal that publishes one
+# claims it as `cast_obce_name`, which is the type the resolver binds momc / spravní obvod /
+# část obce names under.
+# The ordinal arm carries an OPTIONAL trailing name, because the portals write the obvod both
+# ways: "Praha 8" and "Praha 10 - Vršovice" are the same obvod, and "Liberec XXV-Vesec" is how
+# RÚIAN itself spells the Roman-numeral ones. Without the tail the longer spelling fell
+# through unchanged and published a town no gazetteer has.
+_STATUTORY_CITY_ORDINAL_RE = re.compile(
+    r"^(Praha|Plzeň|Brno|Ostrava|Pardubice|Opava|Liberec|Ústí nad Labem)"
+    r"\s*[-–]?\s*(?:\d+|[IVX]+)(?:\s*[-–]\s*\S.*)?$")
+_STATUTORY_CITY_HYPHEN_RE = re.compile(
+    r"^(Brno|Ostrava|Opava|Liberec|Ústí nad Labem)\s*[-–]\s*\S.*$")
+
+# Every OKRES whose RÚIAN name is a statutory city plus a hyphen. They are spelled exactly
+# like an obvod and they are not one: folding "Brno-venkov" to "Brno" claims the second-
+# largest city in the country as the town of any village in its hinterland, and the value
+# arrives here routinely because `address_part_obec` runs on lines that carry an okres
+# segment. An okres is never a town, so it is returned untouched and the okres entry — which
+# is what states this fact — keeps it.
+#
+# The list is closed because the Czech okres set is (76 + Praha, unchanged since 2007); these
+# are all of them containing a hyphen. Every other hyphenated name reaching this transform is
+# either an obvod of one of the five cities above or an ordinary two-part town
+# ("Frýdek-Místek", "Kostelec nad Černými Lesy"), and the arms already tell those apart.
+_HYPHENATED_OKRES_NAMES = frozenset({
+    "Brno-město", "Brno-venkov",
+    "Ostrava-město",
+    "Plzeň-město", "Plzeň-sever", "Plzeň-jih",
+    "Praha-východ", "Praha-západ",
+    "Frýdek-Místek",
+})
+
+
+@transform("statutory_city_obec")
+def _statutory_city_obec(value: str, arg: str) -> str | None:
+    """A městský obvod -> its city; anything else unchanged.
+
+    RÚIAN has no obec called "Praha 8" — the obec is "Praha" and the obvod is a child of it
+    — so a town claim carrying the obvod resolves to nothing at all, which is a town-coverage
+    hole (rule 25) that looks like a portal that publishes no town. Refusing to guess is not
+    an option here the way it is in `address_part_street`: the city IS stated, in the same
+    string, by name.
+    """
+    stripped = value.strip()
+    if stripped in _HYPHENATED_OKRES_NAMES:
+        return value
+    for pattern in (_STATUTORY_CITY_ORDINAL_RE, _STATUTORY_CITY_HYPHEN_RE):
+        found = pattern.match(stripped)
+        if found:
+            return found.group(1)
+    return value
+
+
 @transform("address_part_obec")
 def _address_part_obec(value: str, arg: str) -> str | None:
+    """The obec segment of a comma address, with a statutory-city obvod folded to its city.
+
+    The fold is implicit rather than a transform the entry has to remember to chain: every
+    portal that states an address states it the same way, and an entry that forgot the chain
+    would publish "Praha 4" as a town on the biggest city in the corpus."""
     segments = _address_segments(value)
     if not segments:
         return None
     index = _obec_index(segments)
-    return segments[index] if index >= 0 else None
+    if index < 0:
+        return None
+    return _statutory_city_obec(segments[index], "")
 
 
 @transform("address_part_street")
@@ -626,6 +686,73 @@ def _address_part_house_number(value: str, arg: str) -> str | None:
         return None
     found = _TRAILING_HOUSE_NUMBER_RE.search(segments[0])
     return found.group(1) if found else None
+
+
+# ISO-3166 alpha-2 for the countries this corpus actually contains, keyed by every
+# spelling a Czech portal writes them in (Czech, English, the country's own). A CLOSED
+# table on purpose: the trailing segment of an address is an obec far more often than it is
+# a country, so "looks like a country" has to mean "is one of these" — anything else is
+# left to the obec claim rather than typed as a country on a guess. The claim VALUE is the
+# code, never the spelling: `country` is the one claim type the resolver compares across
+# portals, and "Slovensko" / "Slovakia" / "Slovenská republika" are one country.
+_COUNTRY_CODES: dict[str, str] = {}
+for _code, _names in {
+    "CZ": ("Česká republika", "Česko", "Czech Republic", "Czechia"),
+    "SK": ("Slovensko", "Slovenská republika", "Slovakia"),
+    "DE": ("Německo", "Deutschland", "Germany"),
+    "AT": ("Rakousko", "Österreich", "Austria"),
+    "PL": ("Polsko", "Polska", "Poland"),
+    "HR": ("Chorvatsko", "Hrvatska", "Croatia"),
+    "IT": ("Itálie", "Italia", "Italy"),
+    "ES": ("Španělsko", "España", "Spain"),
+    "BG": ("Bulharsko", "Bulgaria"),
+    "GR": ("Řecko", "Greece"),
+    "CY": ("Kypr", "Cyprus"),
+    "TR": ("Turecko", "Türkiye", "Turkey"),
+    "AE": ("Spojené arabské emiráty", "United Arab Emirates"),
+    "FR": ("Francie", "France"),
+    "PT": ("Portugalsko", "Portugal"),
+    "SI": ("Slovinsko", "Slovenija", "Slovenia"),
+    "ME": ("Černá Hora", "Crna Gora", "Montenegro"),
+    "HU": ("Maďarsko", "Magyarország", "Hungary"),
+    "CH": ("Švýcarsko", "Schweiz", "Suisse", "Switzerland"),
+    "AL": ("Albánie", "Albania"),
+    "RS": ("Srbsko", "Serbia"),
+    "US": ("Spojené státy americké", "United States"),
+    "GB": ("Velká Británie", "United Kingdom"),
+}.items():
+    for _name in _names:
+        _COUNTRY_CODES[_name] = _code
+del _code, _names, _name
+
+
+def _fold(value: str) -> str:
+    """Diacritic- and case-free key. The portals are inconsistent about both (`SLOVENSKO`,
+    `Nemecko`), and a table keyed on one exact spelling silently matches nothing."""
+    import unicodedata
+
+    stripped = "".join(ch for ch in unicodedata.normalize("NFKD", value)
+                       if not unicodedata.combining(ch))
+    return " ".join(stripped.lower().split())
+
+
+_COUNTRY_BY_FOLDED: dict[str, str] = {_fold(name): code
+                                      for name, code in _COUNTRY_CODES.items()}
+
+
+@transform("address_part_country")
+def _address_part_country(value: str, arg: str) -> str | None:
+    """The trailing segment as an ISO-3166 alpha-2 code, or nothing.
+
+    "foreign is a determination, never a default" (rule 25): the country claim exists so a
+    listing outside CZ is STATED to be outside CZ rather than inferred from a Czech obec
+    that did not resolve. So this answers only where the portal named a country, and a
+    trailing segment that is not in `_COUNTRY_CODES` yields no claim at all.
+    """
+    segments = _address_segments(value)
+    if not segments:
+        return None
+    return _COUNTRY_BY_FOLDED.get(_fold(segments[-1]))
 
 
 @transform("split_paren_okres")
@@ -808,11 +935,6 @@ def _base(entry: Entry, row: ListingRow, **overrides: Any) -> Claim:
     letting the column default fire stamps "no blur observed" onto the rows that carry a
     portal blur flag, and in an append-only table that is unrecoverable.
     """
-    anchor = "unanchored_legacy" if entry.surface == "legacy_column" else "unanchored_latest_fetch"
-    # 01 §4.2's `loc_claim_legacy` CHECK: a legacy claim must name its column. The contract
-    # validator requires the key, so this can only be missing if the projection is stale.
-    legacy_column = (str(entry.locator["legacy_source_column"])
-                     if entry.extraction_method == "legacy_column" else None)
     fields: dict[str, Any] = {
         "listing_id": row.listing_id,
         "source": row.source,
@@ -824,15 +946,35 @@ def _base(entry: Entry, row: ListingRow, **overrides: Any) -> Claim:
         "extractor_id": entry.entry_id,
         "extractor_version": entry.extractor_version,
         "contract_entry_id": entry.id,
-        "snapshot_anchor": anchor,
+        # Both substrates are latest-wins, so there is one anchor. `unanchored_legacy` went
+        # with the `listings`-column readers (W1-c).
+        "snapshot_anchor": "unanchored_latest_fetch",
         "first_observed_at": row.observed_at,
         "blur_evidence": entry.default_blur_evidence,
         "licence_class": entry.default_licence_class,
         "history_completeness": HISTORY_COMPLETENESS[row.source],
         "subject_scoped": entry.subject_scope.get("subject_scoped", True),
-        "legacy_source_column": legacy_column,
     }
     fields.update(overrides)
+    if entry.claim_type == "precision_declaration":
+        # W1-c R5, once for every reader on both substrates, because this is the only place
+        # every claim passes through. Two halves, and they are owned by different parties:
+        #
+        #  * the LABEL is the reader's. A reader that already decided it keeps it
+        #    (`json_bool` maps a boolean to the label the CONTRACT names, `json_geometry`
+        #    types a Circle); one that did not gets the portal's own value, so a
+        #    `json_scalar` / `json_regex` / `html_regex` / `scalar` entry carries a portal's
+        #    exact/approximate signal instead of NULL.
+        #  * the BLUR AXIS is the CONTRACT's, never the reader's or the entry default's.
+        #    `blur_evidence` on a declaration means exactly "this label is one of the ones
+        #    `precision_cap.blurred_labels` calls blurred" — a pure function of the label,
+        #    so a reader (or a hard-coded entry default) that answers it separately can only
+        #    disagree with the calibration. maxima@2 did: `blur_evidence: declared` on the
+        #    feature-type entry made a PRECISE Point resolve as portal-declared-blurred.
+        label = fields.get("declared_precision_label") or fields.get("value_text")
+        blurred = {str(x) for x in (entry.precision_map.get("blurred_labels") or [])}
+        fields["declared_precision_label"] = label
+        fields["blur_evidence"] = "declared" if label in blurred else "none"
     return Claim(**fields)
 
 

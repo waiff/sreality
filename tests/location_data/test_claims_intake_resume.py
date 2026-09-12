@@ -29,7 +29,7 @@ from typing import Any
 import pytest
 
 from location_data import claims_intake
-from location_data.claims_intake import LEGACY_COLUMNS, run
+from location_data.claims_intake import run
 from tests.location_data.claim_intake_fixtures import (
     SREALITY_POST_CUTOVER,
     entries_for,
@@ -46,12 +46,12 @@ class _Listing:
     def record(self, snapshot_cursor: int | None) -> tuple[Any, ...]:
         # The selections' column order, verbatim: identity, payload, sighting, the two geom
         # ordinates, inventory membership, the latest stored detail body (id, is it
-        # unmined, page_kind, sha, first seen), the portal's active contract version, the
-        # snapshot cursor, then all of `LEGACY_COLUMNS`. This listing has no stored body.
+        # unmined, page_kind, sha, first seen), the portal's active contract version and the
+        # snapshot cursor — the LAST column since W1-c deleted the legacy-column tail. This
+        # listing has no stored body.
         return (self.id, "sreality", f"n{self.id}", dict(SREALITY_POST_CUTOVER),
                 self.last_seen_at, None, None, False,
-                None, None, None, None, None, 1, snapshot_cursor,
-                *((None,) * len(LEGACY_COLUMNS)))
+                None, None, None, None, None, 1, snapshot_cursor)
 
 
 class _Cursor:

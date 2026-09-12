@@ -2455,8 +2455,8 @@ _LOCATION_PAYLOAD_SHAPE_DRIFT_SQL = f"""
 _LOCATION_SHAPE_REMEDY = {
     "sreality": ("the v1 API changed the shape of `locality`; W1 intake is enrolling every "
                  "new row into the refetch cohort, where a refetch cannot fix a NEW shape — "
-                 "update claims_intake.sreality_payload_shape + contracts/portals/sreality.yaml's "
-                 "payload_schema_detector and re-extract"),
+                 "update the sreality payload shape check in claims_intake.py "
+                 "(`sreality_payload_shape`) and re-extract"),
     "bezrealitky": ("new rows arrive without the `ruianId` key; the GraphQL detail query lost "
                     "the field W0 item 0m added — restore it in "
                     "scraper/bezrealitky_client._DETAIL_QUERY (adding it back has no "
@@ -2896,6 +2896,11 @@ def check_sreality_image_template(conn: Any, thresholds: dict[str, Any]) -> dict
 
 
 _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
+    # FIRST, and the position is the point: the lane runs _CHECKS in order under a 120 s
+    # budget and stamps whatever it did not reach `not_run` (2026-09-11 21:02 lost the last
+    # seven, this one among them). The invariant the location programme is measured by must
+    # never be the measurement a slower check starves — and it is one indexed join.
+    ("location_town_coverage", check_location_town_coverage),
     ("llm_errors", check_llm_errors),
     ("llm_liveness", check_llm_liveness),
     ("llm_burn_rate", check_llm_burn_rate),
@@ -2922,9 +2927,6 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     # W4's standing P6 check. 6h lane + in-app bell; NOT in llm_health.yml's hourly
     # --only list yet — ship, soak, then promote (the same ladder as the ppm2 checks).
     ("location_payload_shape_drift", check_location_payload_shape_drift),
-    # The location programme's coverage invariant (rule 25): absolute counts per portal,
-    # red until they are zero. 6h lane + in-app bell; not in the hourly e-mail list.
-    ("location_town_coverage", check_location_town_coverage),
     # Portal-URL contract: absolute count of active rows with no page URL. 6h lane +
     # in-app bell; not in the hourly --only list (ship, soak, then promote).
     ("outbound_url_coverage", check_outbound_url_coverage),

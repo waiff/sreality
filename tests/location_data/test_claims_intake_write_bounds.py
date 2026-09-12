@@ -15,6 +15,7 @@ import pytest
 
 from location_data.claims_intake import (
     DEFAULT_MAX_CLAIM_VALUE_BYTES,
+    Entry,
     DEFAULT_WRITE_CHUNK_BYTES,
     DEFAULT_WRITE_CHUNK_ROWS,
     MAX_CLAIM_VALUE_BYTES_ENV,
@@ -31,7 +32,6 @@ from tests.location_data.claim_intake_fixtures import (
     OBSERVED_AT,
     SREALITY_LEGACY,
     SREALITY_POST_CUTOVER,
-    entries_for,
     listing,
 )
 
@@ -182,51 +182,60 @@ def test_the_chunk_bounds_are_env_overridable_and_reject_nonsense(monkeypatch):
 
 # ------------------------------------------------------------------ layer 2: the value cap
 
-def _fat_sreality_payload(padding_bytes: int) -> dict:
-    """A post-cutover payload whose `locality.geometry.bounding_box` node carries a blob.
+# The cap is a property of the LANE, not of any portal's contract. It used to be exercised
+# through sreality's `sr.det.geometry` entry, whose `bbox_envelope` reader stored a portal
+# node verbatim into `value_jsonb` — a real oversized value, and a dependency on one
+# contract entry surviving every future rewrite of that contract. It did not (W1-c). The
+# synthetic entry below states the same thing the shipped one did — a reader that copies a
+# portal value into a claim — and states it in this file, where the rail lives.
+_FAT_ENTRY = Entry(
+    id=9001, source="sreality", contract_id=1, contract_version=1,
+    entry_id="sr.det.fat", surface="api_json", page_kind="detail",
+    locator={"reader": "scalar", "json_pointer": "/blob"}, claim_type="street_name",
+    extraction_method="portal_structured_field", subject_scope={}, transform=(),
+    precision_map={}, default_blur_evidence="none", default_licence_class="portal",
+    guards=())
 
-    `bbox_envelope` stores that node VERBATIM into `value_jsonb`, so a reader inherits
-    whatever size the portal put there — the same mechanism that once truncated listing
-    1588965452's `raw_json` with an 80 KB geometry blob (sreality.yaml §caveats)."""
-    payload = json.loads(json.dumps(SREALITY_POST_CUTOVER))
-    payload["locality"]["geometry"]["bounding_box"]["encoded"] = "9hETFxX9" * padding_bytes
+
+def _fat_payload(padding_bytes: int, base: dict | None = None) -> dict:
+    """A payload carrying one value too large to be a location claim — the shape of the
+    80 KB geometry blob that truncated listing 1588965452's `raw_json` (sreality.yaml
+    §caveats), which is the incident this cap exists for."""
+    payload = json.loads(json.dumps(base if base is not None else SREALITY_POST_CUTOVER))
+    payload["blob"] = "9hETFxX9" * padding_bytes
     return payload
 
 
 def test_an_oversized_value_is_refused_never_silently_dropped():
-    row = listing("sreality", _fat_sreality_payload(4000),
-                  listing_id=42, lat=50.0784977, lon=14.4501973)
+    row = listing("sreality", _fat_payload(4000), listing_id=42)
 
-    result = extract_listing(row, entries_for("sreality"), max_value_bytes=8 * 1024)
+    result = extract_listing(row, [_FAT_ENTRY], max_value_bytes=8 * 1024)
 
     # 1. no claim row for the monster ...
-    assert not [c for c in result.claims if c.claim_type == "uncertainty_geometry"]
-    # ... and nothing else was collateral damage.
-    assert {c.claim_type for c in result.claims} >= {"street_name", "coordinate"}
+    assert result.claims == []
     # 2. counted under its own reason, at the refused claim's grain — and logged. A
     # counter, not a row: `location_claim_absences` was written by every lane and read by
     # none (rule 25) and is gone (migration 498), so what survives is the tally the
     # operator actually reads.
-    assert result.refusals["oversized_value:uncertainty_geometry"] == 1
+    assert result.refusals["oversized_value:street_name"] == 1
 
 
 def test_a_value_under_the_cap_is_untouched():
-    row = listing("sreality", SREALITY_POST_CUTOVER, lat=50.0784977, lon=14.4501973)
+    row = listing("sreality", _fat_payload(4), listing_id=42)
 
-    result = extract_listing(row, entries_for("sreality"))
+    result = extract_listing(row, [_FAT_ENTRY])
 
-    assert [c for c in result.claims if c.claim_type == "uncertainty_geometry"]
+    assert [c.claim_type for c in result.claims] == ["street_name"]
     assert not [r for r in result.refusals if r.startswith("oversized_value")]
 
 
 def test_the_cap_is_env_overridable(monkeypatch):
     monkeypatch.setenv(MAX_CLAIM_VALUE_BYTES_ENV, "64")
-    row = listing("sreality", SREALITY_POST_CUTOVER, lat=50.0784977, lon=14.4501973)
+    row = listing("sreality", _fat_payload(100), listing_id=42)
 
-    result = extract_listing(row, entries_for("sreality"))
+    result = extract_listing(row, [_FAT_ENTRY])
 
-    assert sum(c for r, c in result.refusals.items()
-               if r.startswith("oversized_value")) >= 1
+    assert result.refusals["oversized_value:street_name"] == 1
     assert DEFAULT_MAX_CLAIM_VALUE_BYTES == 2 * 1024 * 1024
 
 
@@ -245,17 +254,9 @@ def test_a_legacy_shape_row_counts_both_refusals_separately():
     `location_enrichment_state` primary key — `ON CONFLICT … DO UPDATE` "cannot affect row a
     second time", i.e. an aborted run. Two counters cannot collide (and that table is gone
     as of migration 498)."""
-    payload = json.loads(json.dumps(SREALITY_LEGACY))
-    payload["locality"] = dict(SREALITY_POST_CUTOVER["locality"])
-    payload["locality"]["geometry"] = json.loads(
-        json.dumps(SREALITY_POST_CUTOVER["locality"]["geometry"]))
-    payload["locality"]["geometry"]["bounding_box"]["encoded"] = "x" * 40000
-    payload["locality"] = {k: v for k, v in payload["locality"].items()
-                           if k in ("geometry", "name", "value", "accuracy")}
-    payload["locality"].update({"name": "Adresa", "value": "Klatovy", "accuracy": "x"})
-    row = listing("sreality", payload, listing_id=9)
+    row = listing("sreality", _fat_payload(5000, base=SREALITY_LEGACY), listing_id=9)
 
-    result = extract_listing(row, entries_for("sreality"), max_value_bytes=8 * 1024)
+    result = extract_listing(row, [_FAT_ENTRY], max_value_bytes=8 * 1024)
 
-    assert result.refusals["oversized_value:uncertainty_geometry"] == 1
+    assert result.refusals["oversized_value:street_name"] == 1
     assert result.refusals["sreality_payload_shape:legacy"] == 1

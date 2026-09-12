@@ -1,144 +1,9 @@
-# bazos — html_selector + url_slug; one anchor is the whole coordinate signal (02 §2.2.3).
-#
-# Verified absences on the detail page: 0 application/ld+json, 0 __NEXT, 0 mapy.cz,
-# 0 <iframe>, 0 data-lat — no embedded JSON state, no schema.org, no map widget
-# [live-A §3.1]. Every realistic gain is a PARSING gain from the page already fetched.
-#
-# LICENCE, and it is the whole story on this portal: bazos runs its OWN in-parser
-# geocoder, so `coords.source` ∈ {street, locality} is Mapy output and is class E — only
-# `link` (the CZ-guarded maps anchor inside the ad itself) is first-party (06 §6.1.2
-# row 5). Distribution over a 20-day window: link 12,457 · null 396 · street 159 ·
-# locality 114 [db-raw §3.4].
-#
-# W1 reaches raw_json only, which on this portal is {id, psc, title, views, coords,
-# price_text, posted_date, locality_text, image_urls} — no description, no coordinates
-# [db-raw §3.4]. The street/quarter/country entries below are the W2 HTML wave.
-#
-# VERSION 2 (2026-09-05) — four archived-HTML entries turned on, one new id minted, no v1
-# entry edited (02 §2.1.8): v1's rows stay on record and v2 RESTATES three of them with a
-# reader (`bzs.det.obec_slug`, `bzs.det.zoom`, `bzs.det.blur_hint`), which is the only legal
-# way an entry gains one. Measured cause: 29,546 ACTIVE bazos rows share just 90 distinct
-# `locality` values (76 okresy + 22 Praha + "Zahraničí") because the parser reads the town
-# anchor's TEXT and never its href, where the true municipality sits — and 0 of 29,546 carry
-# a `zip` although the PSČ is on the page twice [live-A §3.3, §3.5, db-cov §7.2]. The live
-# capture committed as `tests/fixtures/portal_html/bazos_detail.html` (ad 222916664, fetched
-# 2026-09-05) shows the defect verbatim: the anchor's href is
-# `/inzeraty/fren%C5%A1t%C3%A1t-pod-radho%C5%A1t%C4%9Bm/74401/` and its text is "Nový Jičín",
-# the OKRES. `bzs.det.psc` mints 02 §2.2.3's reserved permanent id for the PSČ fact on the
-# HTML page (the raw_json mirror keeps its own id, `bzs.det.legacy_psc`).
-#
-# WHAT THIS VERSION DELIBERATELY DOES NOT DO, per the operator's ruling of 2026-09-05:
-#   * NO coordinate entry. `bzs.det.link_pin` stays a RESERVED, unminted id and bazos stays
-#     absent from `claims_intake.ARCHIVED_COORDINATE_RULES`, so an archived bazos pin is
-#     refused `no_archived_coordinate_locator_on_this_portal` by construction rather than by
-#     policy. The maps pin is permanently approximate, town-tier, and is never converted to
-#     an address: the pin-derived obec is wrong too (Zbinohy stored as Větrný Jeníkov;
-#     Moravany/Platěnice as Dašice). What v2 captures instead is the pin's DECLARED
-#     precision — the anchor's "Přibližná lokalita" title and its `12z` zoom.
-#   * NO deterministic street entry. Regex-mined streets on this portal are junk-prone
-#     ("třída", inflected case forms), so the approved LLM lane supersedes the regex path for
-#     claims; `bzs.det.street_text` and `bzs.det.mm_trailer` stay inert, and with them the two
-#     phantom-street guards, which remain unimplemented on purpose.
-#   * NO okres entry. `bzs.det.okres_text` stays inert: its `nth: 2` is honoured by no shipped
-#     reader (activating it with `html_text` would claim the FIRST `table td a` on the page),
-#     and okres is not on the ruling's deterministic list.
-# Location priority on this portal is free text > headline/title > town-anchor slug + PSČ >
-# pin; v2 ships the third rung only. The first two are the LLM lane's (bazos@3).
-#
-# SHADOWED ON MERGE (06 §6.4.0(2) + the W2 sequencing ruling): `shadow` is HEADER-grain, so
-# this also takes bazos' four already-live W1 legacy entries dark until an operator runs
-# `python -m location_data.contracts --unshadow bazos@2`. That is a freeze, not a blackout —
-# claims already written under bazos@1's entry ids stay in `location_claims_live` — and it is
-# the accepted price of activating the seven DOM contracts in one wave.
-#
-# VERSION 3 (2026-09-05) — sixteen entries added for the free-text LLM lane.
-#
-# VERSION 4 (2026-09-11, rule 25 W1-a) — those sixteen entries REMOVED, unexecuted. The LLM
-# lane (`location_data/claims_llm.py`) is deleted: rule 25 leaves one claim-producing lane,
-# the hourly intake over the stored payload and the stored page body, and `llm_location_text`
-# was the only reader no substrate of that lane can carry. Nothing was ever mined through
-# them (the lane never ran in production), so nothing in `location_claims` is orphaned. The
-# town this portal owes comes from its structured town anchor, not from a model.
-#
-# MEASURED CAUSE, unchanged from v2's own note: bazos `raw_json` carries no description at
-# all [db-raw §3.4], so every street, část obce and house number an ad states in prose is
-# invisible to W1; the deterministic regex path is junk-prone (regression 220870847 mined
-# street='Nový' out of "Nový 2 pokojový byt" and geocoded ~130 km off, which is why
-# `bzs.det.street_text` and `bzs.det.mm_trailer` stay inert and their two phantom-street
-# guards stay unimplemented); and the maps pin cannot stand in for the text, because the
-# pin-derived obec is itself wrong (Zbinohy stored as Větrný Jeníkov, Moravany/Platěnice as
-# Dašice). 29,546 active rows share only 90 distinct `locality` values.
-#
-# THE SHAPE, and it is the operator's option (b), not the two-family design the spec drafted:
-# ONE structured call per archived body asks the model for `from_description` and
-# `from_title` SEPARATELY, and `claims_llm` then emits exactly ONE claim per output field per
-# listing, DESCRIPTION-FIRST — the title is a FALLBACK rung, consulted only where the
-# description says nothing about that field. So the two entry families below are not two
-# claim families and never race: they are the two RUNGS of one ladder, and the ladder is
-# walked in the LANE (`claims_llm.BLOCK_ORDER`), which is the only place it is expressible.
-# `location_field_policy` matches on (source, extraction_method) alone — never on `surface` —
-# so two `llm_text` claims from one portal cannot be ranked against each other as data, and
-# stamping the title family a grade lower would have been a rank game rather than a rule.
-# Both families are declared because a rung the contract does not declare is a rung the lane
-# skips: with no title entry the headline is never read at all, and `bzs.det.title_country`'s
-# own note records that the title alone carries the whole location on some ads (222359425 —
-# Bulharsko/Kosharitsa in the TITLE only).
-#
-# ONE ENTRY PER (BLOCK × OUTPUT FIELD), and the output field is `(claim_type, transform)`,
-# not the model's field name: one stated "1216/46" is one answer that legitimately produces a
-# `house_number_cp` claim and a `house_number_co` one, which is why `split_cp_co:cp` and
-# `:co` are two entries over one `llm_field: house_number`. `claims_llm._validated_groups`
-# refuses a contract that declares the same (block, claim_type, transform) twice, or one
-# block with two different selectors — one block is one node, and one call reads it once.
-#
-# WHAT GATES THESE CLAIMS, so the entries can stay short. The lane refuses before the reader
-# ever runs: a value the model did not state, a model confidence of 'low', a quote that is
-# not locatable INSIDE the declared node (the hallucination guard — an unlocatable quote is a
-# claim with no evidence and `loc_claim_text_evidence` would refuse it at the constraint),
-# and, for every admin-bearing field, a RÚIAN membership test (`obec_name`/`cast_obce_name`
-# must name a real admin unit; `street_name` must be a `ruian_streets.name_norm` inside the
-# candidate obec; a house number must resolve to a real `ruian_address_points` row). Each
-# refusal is written as an absence with its reason, never as a silent skip. `landmark` and
-# `address_line_verbatim` are `is_admin_bearing = FALSE` permanently and are stored un-gated.
-#
-# STILL SHADOWED. `shadow: true` carries forward unchanged — the header-grain freeze v2
-# introduced stays in force, and un-shadowing bazos is one operator command
-# (`python -m location_data.contracts --unshadow bazos@3`) taken deliberately, not a side
-# effect of this bump. The lane is separately gated by `location_jobs.enabled` and is
-# dispatch-only.
-#
-# COST OF THE BUMP, budgeted rather than discovered: `location_claim_fingerprint` (migration
-# 386) hashes `extractor_version` AND `contract_entry_id`, and both move for every bazos
-# entry, so every claim the W1 and archived lanes re-walk after this bump INSERTS again
-# rather than deduping and enqueues its listing into `dirty_locations`. That is the standing
-# price of any bump on this portal and the corpus is small (~29.5k active rows plus the
-# delisted tail).
+# bazos — contract v5 (W1-c slim).
+# The detail page's Lokalita row: the town and the PSČ off the town anchor's href (its
+# visible text is the OKRES), plus the ad's own maps link beside it — blur marker and pin.
 
 portal: bazos
-contract_version: 4
-extractor_runtime: ">=1.0"
-identity_ladder: [text_geocode]
-
-fetch:
-  surfaces:
-    - page_kind: detail
-      method: GET
-      url_template: "https://reality.bazos.cz/inzerat/{native_id}/{slug}.php"
-      headers: {Accept-Language: cs}
-      min_interval_s: 5
-      archive: true
-      cadence: "6h detail drain"
-      robots_note: >
-        robots.txt disallows /*hlokalita= and /*humkreis — exactly the parameters the
-        current client builds for locality-filtered walks [live-A §3.5]. Dropping them is
-        a WALK-TOPOLOGY change gated on the delisting rail (02 §2.6), not a config edit.
-    - page_kind: index
-      method: GET
-      url_template: "https://reality.bazos.cz/prodam/{category}/"
-      min_interval_s: 5
-      archive: false
-      cadence: "6h index walk"
-      robots_note: "category-only URLs; no hlokalita/humkreis"
+contract_version: 5
 
 persistence:
   # What this portal's body carries that changes without the listing changing —
@@ -172,102 +37,40 @@ exclusion_zones:
     locator: {css: "footer, .hlavicka"}
     reason: "Site chrome/footer."
 
-precision_caps:
-  declared_blur: {granularity_max: obec, position_source_max: portal_pin_blurred}
-  link_text_distance_km_gt_0_5: {granularity_max: obec}
-
-precision_priors:
-  granularity: obec
-  position_source: portal_pin_blurred
-  match_confidence: low
-  uncertainty_radius_m: kilometre_scale
-  excluded_from_gates: [same_building, same_address]
-  note: >
-    Only 18.0% of 28,867 active bazos coordinates are unique (vs 79.5% sreality, 97.4%
-    bezrealitky) [live-A §3.4]. This portal is excluded from metric same-building /
-    same-address gates unless independently upgraded.
-
 regressions:
   - "220870847 — street='Nový' hallucinated from 'Nový 2 pokojový byt'; the phantom street
-     drove the geocode ~130 km away (the phantom-street guard's regression)"
+     drove the geocode ~130 km away"
   - "220059906 — '28. října' stated 3× and still stored NULL (numeric-leading street name)"
-  - "222359425 — Bulharsko/Kosharitsa/38 500 EUR in the TITLE alone"
 
 extractions:
-  - id: bzs.det.legacy_psc
-    locator_kind: legacy_column
-    extraction_method: legacy_column
-    page_kind: none
-    locator: {reader: scalar, json_pointer: /psc, legacy_source_column: raw_json.psc}
+  - id: bzs.det.obec_slug
+    locator_kind: url_slug
+    extraction_method: url_slug_parse
+    page_kind: detail
+    locator: {reader: html_attr_regex, css: "a[href*='/inzeraty/']", attr: href,
+              pattern: "/inzeraty/(?P<obec>[^/]+?)(?:-\\d+)?/(?P<psc>\\d{5})/",
+              group: obec, decode: percent}
+    claim_type: obec_name
+    licence_class: portal
+    blur_evidence: none
+    transform: ["statutory_city_obec"]
+    prior: {granularity: obec}
+    subject_scope: {subject_scoped: true}
+    notes: "The town anchor's HREF — its visible TEXT is the okres; a `-8`/`-26` tail is postal."
+
+  - id: bzs.det.psc
+    locator_kind: url_slug
+    extraction_method: url_slug_parse
+    page_kind: detail
+    locator: {reader: html_attr_regex, css: "a[href*='/inzeraty/']", attr: href,
+              pattern: "/inzeraty/(?P<obec>[^/]+?)(?:-\\d+)?/(?P<psc>\\d{5})/",
+              group: psc, decode: percent}
     claim_type: psc
     licence_class: portal
     blur_evidence: none
     transform: ["psc_normalise"]
-    required: when_present
-    notes: >
-      Parsed into raw_json.psc today and NEVER written to `zip`: 0 of 29,546 active rows
-      have a zip while psc is present on 29,538/29,543 payloads [live-A §3.3, db-cov §7.2].
-      A pure write-path gap, recoverable with no re-fetch.
-      ID: `bzs.det.psc` is 02 §2.2.3's PERMANENT id for the Lokalita-cell HTML parse and
-      is reserved for the W2 html_selector entry. This is the legacy raw_json mirror of
-      the same fact and takes its own id, so the two can coexist and be told apart in
-      `location_claims.extractor_id` (the pattern `id.det.legacy_pin` sets on idnes).
-
-  - id: bzs.det.locality_text
-    locator_kind: legacy_column
-    extraction_method: legacy_column
-    page_kind: none
-    locator: {reader: scalar, json_pointer: /locality_text,
-              legacy_source_column: raw_json.locality_text}
-    claim_type: postal_town
-    licence_class: portal
-    blur_evidence: none
-    required: when_present
-    notes: >
-      Typed `postal_town`, NOT obec_name, and that is normative: bazos `locality` is the
-      post-office town from the PSČ and disagrees with the geo-derived obec on 57.0% of
-      rows ("696 81 Hodonín" -> Hodonín while the obec is Bzenec) [db-cov §6].
-      `postal_town` is is_admin_bearing = FALSE permanently (00 §2.1). Some values are
-      okres names or the literal "Zahraničí" — the resolver, not the extractor, decides.
-
-  - id: bzs.det.legacy_link_pin
-    locator_kind: legacy_column
-    extraction_method: legacy_column
-    page_kind: none
-    locator: {reader: geom_column, legacy_source_column: listings.geom}
-    claim_type: coordinate
-    licence_class: portal
-    blur_evidence: none
-    precision_cap: {granularity_max: obec, position_source_max: portal_pin_blurred}
-    prior: {granularity: obec, position_source: portal_pin_blurred, match_confidence: low}
-    guards: [reject_outside_cz_bbox]
-    required: when_present
-    notes: >
-      The maps-anchor coordinate never reached raw_json — only its provenance did — so
-      `listings.geom` is the only copy of the VALUE (06 §6.1.3), migrated as a legacy
-      column and ONLY when coords.source='link' (or a carry_forward absent from the
-      Mapy affected-set inventory). Never address-level [live-A §3.4].
-      ID: `bzs.det.link_pin` is 02 §2.2.3's PERMANENT id for re-parsing the maps anchor
-      out of the archived HTML (html_selector_parse) and is reserved for W2. This entry
-      reads the already-migrated value off `listings.geom`, which is a different act with
-      a different provenance, so it takes its own id.
-
-  - id: bzs.det.geocode_quality
-    locator_kind: legacy_column
-    extraction_method: legacy_column
-    page_kind: none
-    locator: {reader: coords_stamp_quality, legacy_source_column: raw_json.coords}
-    claim_type: precision_declaration
-    licence_class: portal
-    blur_evidence: none
-    required: when_present
-    notes: >
-      `locality_confidence`, `link_text_distance_km` (1.797 / 1.445 on the two measured
-      pin-collapse rows) and a notes[] array of quality verdicts — "the pipeline ALREADY
-      KNOWS its coordinate is bad and stores it anyway" [mine-syn §2b]. Emitted only when
-      the coordinate it grades was itself admitted (06 §6.2.1).
-
-  # ---- W2 HTML surfaces: declared, no reader, not executed by the W1 lane ----
+    subject_scope: {subject_scoped: true}
+    notes: "The same href's five-digit tail — five digits by construction, unlike the text."
 
   - id: bzs.det.blur_hint
     locator_kind: html_selector
@@ -275,163 +78,28 @@ extractions:
     page_kind: detail
     locator: {reader: html_marker, css: "a[href*='/place/']", attr: title,
               contains: "Přibližná lokalita", value_label: approximate_location}
-    claim_type: blur_hint
-    blur_evidence: declared
+    claim_type: precision_declaration
     licence_class: portal
+    blur_evidence: declared
     precision_cap:
       granularity_max: obec
       position_source_max: portal_pin_blurred
       blurred_labels: [approximate_location]
     subject_scope: {subject_scoped: true}
-    required: when_present
-    notes: >
-      The anchor title "Přibližná lokalita" — "the portal TELLS YOU the pin is approximate
-      and this is ignored" [live-A §3.2]. A binary presence signal with no declared value,
-      which is exactly why it is a distinct claim type and not a precision_declaration
-      (00 §2.2).
-      V2: gains `html_marker`. The claim's VALUE is this contract's own label
-      (`approximate_location`) and its EVIDENCE is the portal's words, which is why
-      `contains:` restates them: reword the title and the marker stops matching instead of
-      silently restating a different fact under the same label. `blurred_labels` is the
-      calibration set membership of which sets `blur_evidence`, so re-deciding what "blurred"
-      means is a contract version bump and never a code change. The cap now names
-      `granularity_max: obec` as well, mirroring this file's own `precision_caps.declared_blur`
-      — the ruling that this pin is permanently town-tier and never convertible to an address.
-      The pin's VALUE is not claimed here and is claimed nowhere on the archived substrate:
-      `bzs.det.link_pin` stays reserved and unminted.
+    notes: "The maps link's title — bazos declaring its own pin approximate."
 
-  - id: bzs.det.zoom
-    locator_kind: url_slug
-    extraction_method: url_slug_parse
-    page_kind: detail
-    locator: {reader: html_attr_regex, css: "a[href*='/place/']", attr: href,
-              pattern: ",(?P<zoom>\\d+)z", group: zoom}
-    claim_type: map_zoom
-    licence_class: portal
-    blur_evidence: none
-    subject_scope: {subject_scoped: true}
-    required: best_effort
-    notes: >
-      Constant at 12z across 2 live ads and both repo fixtures ≈ town/PSČ scale.
-      V2: gains `html_attr_regex` plus the `css`, `attr` and `group` that reader requires.
-      The zoom token sits inside the maps anchor's `@lat,lon,12z` segment, so this entry
-      addresses the same node as bzs.det.blur_hint; together they ARE the portal's declared
-      marker. No `decode`, because a zoom token carries nothing to percent-decode. Records a
-      signal and caps nothing — the cap is on the blur_hint entry.
-
-  - id: bzs.det.obec_slug
-    locator_kind: url_slug
-    extraction_method: url_slug_parse
-    page_kind: detail
-    locator: {reader: html_attr_regex, css: "a[href*='/inzeraty/']", attr: href,
-              pattern: "/inzeraty/(?P<obec_slug>[^/]+)/(?P<psc>\\d{5})/",
-              group: obec_slug, decode: percent}
-    claim_type: obec_name
-    licence_class: portal
-    blur_evidence: none
-    prior: {granularity: obec}
-    subject_scope: {subject_scoped: true}
-    required: when_present
-    notes: >
-      The single highest-value fix on this portal [live-A §3.5].
-      V2: gains `html_attr_regex`. The reader scans EVERY `a[href*='/inzeraty/']` in document
-      order and takes the first whose href MATCHES — the `/<5 digits>/` tail is the
-      discriminator, so the category link the live capture also carries
-      (`/inzeraty/prodej-byt/`) is skipped rather than claimed. `decode: percent` is what
-      makes the value join: `fren%C5%A1t%C3%A1t-pod-radho%C5%A1t%C4%9Bm` normalises through
-      `location_value_norm` to a run of hex bytes that matches no gazetteer row, the decoded
-      form to `frenstat pod radhostem`, which does. No slug→text transform:
-      `location_value_norm` already collapses hyphens and case, so one would be cosmetic.
-      KNOWN SHAPE, recorded not fixed: on large cities the slug carries a postal-district
-      suffix (`plzen-26`, captured live). The claim states what the portal published;
-      resolving "Plzeň 26" to obec Plzeň is the resolver's job, not the extractor's.
-
-  - id: bzs.det.psc
-    locator_kind: url_slug
-    extraction_method: url_slug_parse
-    page_kind: detail
-    locator: {reader: html_attr_regex, css: "a[href*='/inzeraty/']", attr: href,
-              pattern: "/inzeraty/(?P<obec_slug>[^/]+)/(?P<psc>\\d{5})/",
-              group: psc, decode: percent}
-    claim_type: psc
-    licence_class: portal
-    blur_evidence: none
-    transform: ["psc_normalise"]
-    subject_scope: {subject_scoped: true}
-    required: when_present
-    notes: >
-      02 §2.2.3's PERMANENT id for the PSČ fact on the HTML page, minted here for the first
-      time; `bzs.det.legacy_psc` remains the raw_json mirror of the same fact and keeps its
-      own id, so the two are told apart in `location_claims.extractor_id` (the
-      `id.det.legacy_pin` pattern). 0 of 29,546 active rows carry a `zip` while the PSČ is on
-      the page twice [db-cov §7.2].
-      Read from the town anchor's href rather than the maps anchor's TEXT, deliberately: the
-      slug's `\d{5}` group is exactly five digits by construction, whereas the anchor text is
-      a display string whose shape varies by ad ("744 01" on the 3-cell layout, "Letovice
-      679 61" on the 2-cell one), and `psc_normalise` — which keeps a digit run only when it
-      is exactly five long — silently yields nothing on any text carrying a second number.
-      `psc_normalise` is kept here as a rail, not a change: it makes this value byte-identical
-      in shape to bzs.det.legacy_psc's ("69681"), so W1 and W2 agree on `value_norm`.
-
-  - id: bzs.det.okres_text
+  - id: bzs.det.link_pin
     locator_kind: html_selector
     extraction_method: html_selector_parse
     page_kind: detail
-    locator: {css: "table td a", nth: 2, text: true}
-    claim_type: okres_name
+    locator: {reader: html_point_attrs, css: "a[href*='/place/']", attr: [href, href],
+              pattern: "/place/(?P<lat>-?\\d{1,2}\\.\\d+),(?P<lon>-?\\d{1,3}\\.\\d+)",
+              position_branch: portal_pin}
+    claim_type: coordinate
     licence_class: portal
     blur_evidence: none
-    required: when_present
-    notes: "29,546 active rows share only 90 distinct `locality` values (76 okresy + 22
-      Praha + 'Zahraničí') — the okres is being stored as if it were the town [live-A §3.3]."
-
-  - id: bzs.det.street_text
-    locator_kind: description
-    extraction_method: regex_text
-    page_kind: detail
-    locator: {scope: "title + div.popisdetail"}
-    claim_type: street_name
-    licence_class: portal
-    blur_evidence: none
-    guards: [require_czech_street_morphology, reject_leading_adjective_before_room_count]
-    required: best_effort
-    notes: "Must handle numeric-leading names ('28. října'). The phantom-street guard is
-      mandatory here [mine-syn §2a]."
-
-  - id: bzs.det.mm_trailer
-    locator_kind: description
-    extraction_method: regex_text
-    page_kind: detail
-    locator: {pattern: "Lokalita:\\s*(?P<street>[^,]+),\\s*(?P<quarter>.+)$"}
-    claim_type: street_name
-    licence_class: portal
-    blur_evidence: none
-    required: best_effort
-    notes: "The M&M reality trailer — 'the single highest-yield pattern on the portal',
-      currently unparsed [mine-bazos finding 5]."
-
-  - id: bzs.det.psc_sentinel
-    locator_kind: legacy_column
-    extraction_method: regex_text
-    page_kind: none
-    locator: {json_pointer: /psc, pattern: "^987 ?6[56]$"}
-    claim_type: foreign_indicator
-    licence_class: portal
-    blur_evidence: none
-    required: best_effort
-    notes: >
-      Portal bucket sentinels: 987 65 = Slovensko, 987 66 = Zahraničí [mine-bazos metrics].
-      Evidence-bearing method (regex_text), so it waits for W2a's retrievable payload —
-      the reader is deliberately absent.
-
-  - id: bzs.det.title_country
-    locator_kind: description
-    extraction_method: llm_text
-    page_kind: detail
-    locator: {scope: scoped_payload}
-    claim_type: country
-    licence_class: portal
-    blur_evidence: none
-    required: best_effort
-    notes: "835 active rows sit in the literal 'Zahraničí' bucket with NULL geom;
-      title-only classifier ≈ $0.12 for the whole bucket [mine-syn §4.4]."
+    precision_cap: {granularity_max: obec, position_source_max: portal_pin_blurred}
+    prior: {granularity: obec, position_source: portal_pin_blurred, match_confidence: low}
+    guards: [reject_outside_cz_bbox]
+    subject_scope: {subject_scoped: true}
+    notes: "The ad's own pin; both decimals sit in ONE attribute — silent until the reader widens."

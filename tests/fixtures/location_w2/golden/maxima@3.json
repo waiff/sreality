@@ -1,0 +1,184 @@
+{
+  "portal": "maxima",
+  "contract_version": 3,
+  "regression_listing_ids": [
+    "d40026367",
+    "f60012522",
+    "f60012682"
+  ],
+  "listings_without_a_fixture_body": [],
+  "fixtures": [
+    {
+      "listing": "d40026367",
+      "body": "tests/fixtures/location_w2/regressions/maxima/d40026367.json",
+      "row": {
+        "lat": 50.36339611563554,
+        "lon": 15.259603745235422,
+        "in_mapy_inventory": false,
+        "listings.locality": "Údrnice, Únětice",
+        "listings.street": null,
+        "listings.street_source": null
+      },
+      "claims": [],
+      "refusals": {}
+    },
+    {
+      "listing": "d40031686",
+      "body": "claim_intake_fixtures.MAXIMA_PAGE",
+      "row": {
+        "lat": 50.7663,
+        "lon": 15.0562,
+        "in_mapy_inventory": false,
+        "listings.locality": null,
+        "listings.street": null,
+        "listings.street_source": null
+      },
+      "claims": [],
+      "refusals": {}
+    },
+    {
+      "listing": "f60012522",
+      "body": "tests/fixtures/location_w2/regressions/maxima/f60012522.json",
+      "row": {
+        "lat": null,
+        "lon": null,
+        "in_mapy_inventory": false,
+        "listings.locality": "Krásný Les",
+        "listings.street": null,
+        "listings.street_source": null
+      },
+      "claims": [],
+      "refusals": {}
+    },
+    {
+      "listing": "f60012682",
+      "body": "tests/fixtures/location_w2/regressions/maxima/f60012682.json",
+      "row": {
+        "lat": 50.35640416157747,
+        "lon": 15.266305699712364,
+        "in_mapy_inventory": false,
+        "listings.locality": "Údrnice, Únětice",
+        "listings.street": null,
+        "listings.street_source": null
+      },
+      "claims": [],
+      "refusals": {}
+    }
+  ],
+  "archived_claims": [
+    {
+      "extractor_id": "mx.det.description_okres",
+      "claim_type": "okres_name",
+      "value_text": "Brno-město",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "okres Brno-město",
+      "evidence_span_len": 16
+    },
+    {
+      "extractor_id": "mx.det.locality_obec",
+      "claim_type": "obec_name",
+      "value_text": "Brno",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "Brno-střed, Veveří, Grohova",
+      "evidence_span_len": 27
+    },
+    {
+      "extractor_id": "mx.det.locality_quarter",
+      "claim_type": "cast_obce_name",
+      "value_text": "Veveří",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "Brno-střed, Veveří, Grohova",
+      "evidence_span_len": 27
+    },
+    {
+      "extractor_id": "mx.det.locality_street",
+      "claim_type": "street_name",
+      "value_text": "Grohova",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "Brno-střed, Veveří, Grohova",
+      "evidence_span_len": 27
+    },
+    {
+      "extractor_id": "mx.det.map_features",
+      "claim_type": "coordinate",
+      "value_text": "49.20256,16.60411",
+      "value_num": null,
+      "value_geom_wkt": "POINT(16.60411 49.20256)",
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": "point",
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": "portal_pin",
+      "evidence_quote": "{\\\"center\\\":[16.5980,49.1990],\\\"zoom\\\":15,\\\"features\\\":[{\\\"type\\\":\\\"Point\\\",\\\"coordinates\\\":[16.60411,49.20256]}]}",
+      "evidence_span_len": 114
+    },
+    {
+      "extractor_id": "mx.det.map_geometry",
+      "claim_type": "precision_declaration",
+      "value_text": "Point",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": "Point",
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "{\\\"center\\\":[16.5980,49.1990],\\\"zoom\\\":15,\\\"features\\\":[{\\\"type\\\":\\\"Point\\\",\\\"coordinates\\\":[16.60411,49.20256]}]}",
+      "evidence_span_len": 114
+    }
+  ]
+}

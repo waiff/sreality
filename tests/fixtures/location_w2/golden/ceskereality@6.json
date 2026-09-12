@@ -1,0 +1,133 @@
+{
+  "portal": "ceskereality",
+  "contract_version": 6,
+  "regression_listing_ids": [],
+  "listings_without_a_fixture_body": [],
+  "fixtures": [
+    {
+      "listing": "3180041",
+      "body": "claim_intake_fixtures.CESKEREALITY_NULL_LOCALITY",
+      "row": {
+        "lat": null,
+        "lon": null,
+        "in_mapy_inventory": false,
+        "listings.locality": "České Budějovice 4, U Smaltovny",
+        "listings.street": "U Smaltovny",
+        "listings.street_source": "parser"
+      },
+      "claims": [],
+      "refusals": {}
+    },
+    {
+      "listing": "3849899",
+      "body": "claim_intake_fixtures.CESKEREALITY_PAGE",
+      "row": {
+        "lat": 50.0446,
+        "lon": 14.3204,
+        "in_mapy_inventory": false,
+        "listings.locality": "Praha Stodůlky",
+        "listings.street": null,
+        "listings.street_source": null
+      },
+      "claims": [],
+      "refusals": {}
+    }
+  ],
+  "archived_claims": [
+    {
+      "extractor_id": "cr.det.address_cp",
+      "claim_type": "house_number_cp",
+      "value_text": "1067",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "Nádražní 1067, České Budějovice",
+      "evidence_span_len": 31
+    },
+    {
+      "extractor_id": "cr.det.address_street",
+      "claim_type": "street_name",
+      "value_text": "Nádražní",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "Nádražní 1067, České Budějovice",
+      "evidence_span_len": 31
+    },
+    {
+      "extractor_id": "cr.det.city_okres",
+      "claim_type": "okres_name",
+      "value_text": "České Budějovice",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "České Budějovice (okres České Budějovice)",
+      "evidence_span_len": 41
+    },
+    {
+      "extractor_id": "cr.det.data_city",
+      "claim_type": "obec_name",
+      "value_text": "České Budějovice",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "České Budějovice (okres České Budějovice)",
+      "evidence_span_len": 41
+    },
+    {
+      "extractor_id": "cr.det.page_pin",
+      "claim_type": "coordinate",
+      "value_text": "48.9745,14.4744",
+      "value_num": null,
+      "value_geom_wkt": "POINT(14.4744 48.9745)",
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": "portal_pin",
+      "evidence_quote": "<input class=\"f-base\" type=\"text\" id=\"driving_calculator_from\" value=\"Nádražní 1067, České Budějovice\" readonly=\"\" data-coord-lat=\"48.9745\" data-coord-lng=\"14.4744\" data-city=\"České Budějovice (okres České Budějovice)\">",
+      "evidence_span_len": 219
+    }
+  ]
+}
