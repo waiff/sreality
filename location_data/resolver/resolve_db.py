@@ -45,6 +45,7 @@ degrades to the authoritative polygon when the boundary loader has not populated
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -645,14 +646,20 @@ class RunCache:
 
     `max_entries` is a memory rail, not a hit-rate policy: at the cap the whole memo is
     dropped and refills. Correctness cannot depend on what is resident.
+
+    SHARED BY THE DRAIN'S WORKER THREADS (W2-a5), so the dict is under a lock — but the lock
+    is NEVER held across `compute()`. Holding it there would serialize the very round trips
+    the workers exist to overlap; two threads racing the same key simply both ask the mirror
+    and store the same immutable answer, which costs one extra trip and changes nothing.
     """
 
-    __slots__ = ("_values", "_max", "hits", "misses", "seconds", "asked_by_kind",
+    __slots__ = ("_values", "_max", "_lock", "hits", "misses", "seconds", "asked_by_kind",
                  "missed_by_kind")
 
     def __init__(self, max_entries: int = 250_000) -> None:
         self._values: dict[Any, Any] = {}
         self._max = max_entries
+        self._lock = threading.Lock()
         self.hits = 0
         self.misses = 0
         self.seconds = 0.0
@@ -668,25 +675,33 @@ class RunCache:
             self.missed_by_kind[kind] = self.missed_by_kind.get(kind, 0) + 1
 
     def get(self, key: Any, compute: Callable[[], Any]) -> Any:
-        try:
-            value = self._values[key]
-        except KeyError:
-            pass
-        else:
-            self.hits += 1
-            self._count(key, missed=False)
-            return value
-        self.misses += 1
-        self._count(key, missed=True)
+        with self._lock:
+            try:
+                value = self._values[key]
+            except KeyError:
+                pass
+            else:
+                self.hits += 1
+                self._count(key, missed=False)
+                return value
+            self.misses += 1
+            self._count(key, missed=True)
         started = time.perf_counter()
         value = compute()
-        self.seconds += time.perf_counter() - started
-        self.put(key, value)
+        elapsed = time.perf_counter() - started
+        with self._lock:
+            self.seconds += elapsed
+            self._store(key, value)
         return value
 
     def put(self, key: Any, value: Any) -> None:
         """Pre-seed an answer (`warm_points`). Identical to what `get` would have stored, so
         a warmed run and a cold one hand the core the same bytes."""
+        with self._lock:
+            self._store(key, value)
+
+    def _store(self, key: Any, value: Any) -> None:
+        """Caller holds the lock."""
         if len(self._values) >= self._max:
             self._values.clear()
         self._values[key] = value

@@ -279,11 +279,26 @@ component is slimmed twice — each wave rewrites one component and slims its st
   → `resolver:v4.1`, which re-resolves the corpus once through the ordinary lane (~1 h at the
   worker's measured 120 listings/s; 5–11 h if the GitHub lane carries it). The gate is the same
   `location_town_coverage` reading plus `geom IS NULL` among towned rows, which should go to ~0.
+  **W2-a5 shipped: the worker lane drains four slices concurrently.** Measured 2026-09-12 10:27Z the
+  Railway lane resolved **~8 listings/s** (5,000 rows per 10 minutes) against a **448k** queue — days
+  of drain — and the instance was the reason: every backend on it was waiting on `DataFileRead`, and a
+  listing costs ~4 registry round trips each of which is a disk wait. That is LATENCY, which N loops
+  overlap and one loop cannot. `drain.run(..., workers=N)` now runs N slice loops in N threads, each
+  with its OWN session-mode connection (psycopg connections are not thread-safe), each claiming with
+  the same `FOR UPDATE SKIP LOCKED` statement — which is what makes the slices disjoint — and each
+  running the unchanged per-slice pipeline. What is SHARED: the lease (one row CAS on the caller's
+  connection, taken once), the budget (one deadline; a worker finishes its slice and stops), and the
+  `RunCache`, now lock-guarded but never holding the lock across a registry question. A worker that
+  loses its connection logs, counts `failed_passes` and exits; the run continues with fewer.
+  `LOCATION_RESOLVE_WORKERS` (env, default **4**, clamped 1–8) is the lane's knob and the heartbeat
+  reports `workers`; the GitHub lane keeps one connection (it is RTT-bound from a US runner, not
+  IO-bound beside the instance). Expect ~4x, bounded by the instance rather than by the loop — the
+  number to watch is the queue's OLDEST-ROW AGE, not the rate.
   **W2-b** then cuts the five remaining readers of `listing_location_current` (the four `toolkit/`
   modules + `refresh_location_compare_cohort()`), deletes the inactive-entry claims and drops the
-  old tables. Nothing writes them from this PR on; `--workers` on the drain is unblocked but not
-  implemented. One reader goes writer-less meanwhile: `toolkit/location_quality.py:244` reads
-  `location_resolution_candidates`, so that admin panel goes EMPTY rather than wrong.
+  old tables. Nothing writes them from this PR on. One reader goes writer-less meanwhile:
+  `toolkit/location_quality.py:244` reads `location_resolution_candidates`, so that admin panel goes
+  EMPTY rather than wrong.
 - **W3 — consumers, display first** (= plan S4): the 26 fields into `browse_list` and the public
   views; one label, one code predicate, one circle; `placeLabel.ts` assemblies, the five chip
   predicates, the sreality-only filters, `home_city_id` deleted rather than ported. Estimation last.

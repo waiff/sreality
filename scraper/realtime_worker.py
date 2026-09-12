@@ -51,8 +51,11 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              (location_data.resolver.drain.run — the same code
              location_resolve.yml runs), budget
              `realtime_location_resolve_max_seconds` (default 240, clamped) over
-             `realtime_location_resolve_batch_size` rows (default 250, clamped).
-             DARK until `realtime_location_resolve_enabled` is set. Safe beside
+             `realtime_location_resolve_batch_size` rows (default 250, clamped),
+             draining `LOCATION_RESOLVE_WORKERS` slices CONCURRENTLY (env var,
+             default 4, clamped — a throughput knob, not a flag; see the
+             constant block below). DARK until
+             `realtime_location_resolve_enabled` is set. Safe beside
              location_resolve.yml: both take the SAME location_jobs lease row.
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
              worker_heartbeats (migration 269) — the Health-page liveness hook.
@@ -178,6 +181,25 @@ LOCATION_RESOLVE_BATCH_CEILING = 1000
 # tunable: a flat 120 s was only ever right for one batch size.
 LOCATION_RESOLVE_LEASE_SECONDS_PER_LISTING = 2
 LOCATION_RESOLVE_LEASE_HEADROOM_MIN_SECONDS = 120
+# How many slice loops one pass runs CONCURRENTLY (W2-a5). An ENV VAR, not an
+# app_settings row and not a flag: it is a throughput parameter of the machine
+# this process runs on (connections it may open, cores it has), and it belongs
+# with the service's other Railway env vars rather than in the operator settings
+# table the lane's cadence knobs live in.
+#
+# Why 4. Measured 2026-09-12 10:27Z: one loop drained ~8 listings/s (5,000 rows
+# per 10 minutes) against a 448k queue, and every backend on the instance was
+# waiting on DataFileRead — ~4 registry round trips per listing, each of them a
+# disk wait. That is latency, not work, so the loops overlap almost perfectly
+# until the instance itself saturates; 4 is the number that leaves the pooler
+# and the disk headroom for the other seven lanes.
+#
+# The CEILING is about CONNECTIONS: every worker opens its own SESSION-mode
+# connection (psycopg connections are not thread-safe) and the session pooler's
+# slots are shared with every other consumer of the database.
+LOCATION_RESOLVE_WORKERS_ENV = "LOCATION_RESOLVE_WORKERS"
+LOCATION_RESOLVE_WORKERS_DEFAULT = 4
+LOCATION_RESOLVE_WORKERS_CEILING = 8
 
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
 # param, so its own probe (added Phase 4 of portal-order-fidelity) can only
@@ -367,9 +389,27 @@ def _read_location_resolve_batch_size() -> int:
     return max(1, min(value, LOCATION_RESOLVE_BATCH_CEILING))
 
 
+def _read_location_resolve_workers() -> int:
+    """How many slice loops one pass runs concurrently. Env, clamped, never 0 —
+    an unparseable value is a typo, and the lane must keep draining."""
+    raw = os.environ.get(LOCATION_RESOLVE_WORKERS_ENV, "").strip()
+    try:
+        value = int(raw) if raw else LOCATION_RESOLVE_WORKERS_DEFAULT
+    except ValueError:
+        LOG.warning(
+            "%s=%r is not an integer; draining with %d workers",
+            LOCATION_RESOLVE_WORKERS_ENV, raw, LOCATION_RESOLVE_WORKERS_DEFAULT)
+        value = LOCATION_RESOLVE_WORKERS_DEFAULT
+    return max(1, min(value, LOCATION_RESOLVE_WORKERS_CEILING))
+
+
 def _location_resolve_lease_ttl(max_seconds: int, batch_size: int) -> int:
     """Lease TTL for one pass: the budget plus the one batch that can start just
-    under it. Both inputs are clamped, so the TTL is bounded too."""
+    under it. Both inputs are clamped, so the TTL is bounded too.
+
+    Unchanged by the worker count: drain.run tests the budget between batches in
+    EVERY loop, and the loops run concurrently, so N workers still overrun by at
+    most ONE batch's wall clock — not N."""
     headroom = max(
         LOCATION_RESOLVE_LEASE_HEADROOM_MIN_SECONDS,
         batch_size * LOCATION_RESOLVE_LEASE_SECONDS_PER_LISTING,
@@ -1090,7 +1130,8 @@ def _location_resolve_sync() -> dict[str, Any]:
                     return {"acquired": False, "session_pooler": session_pooler}
                 _RESOLVE_LEASE_BUSY_LOGGED = False
                 stats = drain.run(
-                    conn, batch_size=batch_size, max_seconds=max_seconds)
+                    conn, batch_size=batch_size, max_seconds=max_seconds,
+                    workers=_read_location_resolve_workers())
             _RESOLVE_LAST_IDLE = stats.claimed == 0
             return {
                 "acquired": True,
@@ -1100,6 +1141,12 @@ def _location_resolve_sync() -> dict[str, Any]:
                 "failed": stats.failed,
                 "batches": stats.batches,
                 "fallbacks": stats.fallbacks,
+                # What the pass actually ran with, never what it was configured
+                # with: a worker whose connection died leaves `failed_passes`
+                # behind, and `rate` divided by `workers` is the per-loop number
+                # the next tuning decision needs.
+                "workers": stats.workers,
+                "failed_passes": stats.failed_passes,
                 "seconds": round(stats.seconds, 1),
                 "rate": round(stats.rate, 2),
             }
@@ -1121,9 +1168,10 @@ async def _location_resolve_pass(
     # records every pass either way.
     if last.get("claimed"):
         LOG.info(
-            "LOCATION_RESOLVE lane claimed=%d resolved=%d failed=%d %.1fs rate=%.2f/s",
+            "LOCATION_RESOLVE lane claimed=%d resolved=%d failed=%d %.1fs rate=%.2f/s "
+            "workers=%d",
             last["claimed"], last["resolved"], last["failed"],
-            last["seconds"], last["rate"],
+            last["seconds"], last["rate"], last["workers"],
         )
     _record_pass(state, "location_resolve", last)
 

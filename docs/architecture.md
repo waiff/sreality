@@ -2007,7 +2007,7 @@ engine, the pin-collision epoch and its weekly cron, the parcel rung, the derive
 migration 384's SQL functions, and the property-grain projection — which was a verbatim copy of its
 winner's row (migration 493 measured `p.kraj_kod` and `w.kraj_kod` agreeing on 0 of 637,381 rows),
 nothing outside one pg_cron statement read it, and it was the drain's only cross-listing write and
-therefore the stated reason the lane could not run `--workers`. The registry protocol went from
+therefore the stated reason the lane could not run concurrent workers (W2-a5 spent that). The registry protocol went from
 fifteen query kinds to nine — still nine after W2-a3, which folded the unit's own point into the
 chain answer rather than asking a tenth question — and the drain's write path from seven statements
 per slice to one.
@@ -2245,7 +2245,14 @@ nothing else; per-unit and per-batch work arms `SET LOCAL statement_timeout` in 
 `tests/location_data/test_location_batch_hardening.py`). And the drain's cost is **round trips, not
 work**: from Actions it is network-RTT-bound at ~5–17 listings/s (~75 ms per GitHub↔`eu-west-1` trip
 against 0.02–0.5 ms of server-side work), so the slice-batching, memoization and prefetching that got
-it there compound if the lane ever moves onto the always-on Railway worker (~1–2 ms RTT).
+it there compound if the lane ever moves onto the always-on Railway worker (~1–2 ms RTT). **Since
+W2-a5 the worker lane drains `LOCATION_RESOLVE_WORKERS` slices CONCURRENTLY** (env var, default 4,
+`workers=` on `drain.run`; the GitHub lane stays at one connection) — one thread and one session-mode
+connection each, disjoint by `FOR UPDATE SKIP LOCKED`, sharing one lock-guarded `RunCache` and one
+lease on the caller's connection — which W2-a made safe by deleting the property rollup, the drain's
+only cross-listing write: every write left is keyed on a listing the slice already holds. It is the
+right lever because the loop waits rather than works — measured 2026-09-12 10:27Z, one loop drained
+~8 listings/s against a 448k queue while every backend on the instance sat in `DataFileRead`.
 
 ## Cross-reference map
 
