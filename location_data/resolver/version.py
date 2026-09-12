@@ -1,29 +1,24 @@
-"""The resolver's version constants — code constants, bumped per shipped rule.
+"""The resolver's version constant — a code constant, bumped per shipped rule.
 
-`resolver_version` is one of the FIVE version inputs in the resolution's unique key
-(01 §6.1 + 00 §10.3: claim_set_hash, resolver_version, registry_version_id,
-policy_version, collision_epoch_id). Bumping it does not rewrite anything: it mints new
-rows through the campaign runner and leaves the old ones intact (03 §3.14.2).
+`resolver_version` is one of the THREE version inputs stamped on a `listing_location` row
+(with `claim_set_hash` and `registry_version`). Bumping it does not rewrite anything: the
+drain's sweep sees every row whose stamp is not the current one and enqueues it, so the
+corpus re-resolves through the ordinary lane.
 
-Bump `RESOLVER_VERSION` whenever a rule that can change an output changes — a new rung, a
-different score, a changed cap, a changed normalization. `normalizer_version` is part of
-`resolver_version` by construction (03 §3.3), so there is deliberately no second knob.
-
-`RECONCILER_VERSION` is bumped once per shipped contradiction rule (03 §3.16); that is
-routine, and it is exactly why dispositions key on the version-free `dedupe_key`
-(00 §8.2) rather than on a detection id.
+Bump it whenever a rule that can change an output changes — a new rung, a different score,
+a changed cap, a changed normalization. `normalizer_version` is part of `resolver_version`
+by construction, so there is deliberately no second knob.
 """
 
 from __future__ import annotations
 
-# v1 = S1-S7 as specified in 03 §3.3-§3.9, first shipped implementation.
+# v1 = the first shipped S1-S7 implementation.
 # v2 = 2026-09-10: on a registry-bound row the official RÚIAN `street_name` overwrites the
-#      portal's spelling (`core._override_street_name`, rule `registry:street`).
-RESOLVER_VERSION = "resolver:v3"
-
-# v1 = the cheap structural rule set of 03 §3.11.1 (no LLM, no geometry beyond distances).
-RECONCILER_VERSION = "reconciler:v1"
-
-# The policy rows seeded by migration 383. Passed in explicitly everywhere; this constant
-# only names the default the jobs use when the operator does not choose one.
-POLICY_VERSION_DEFAULT = "v1"
+#      portal's spelling.
+# v3 = 2026-09-11: the PSČ-only bind goes through the qualifier ladder; the imprecise
+#      coordinate tie-break and the post-town tie-break are served at `low`.
+# v4 = W2-a: nine stages become four (bind → fill → grade → check) writing the 27-column
+#      `listing_location`. Survivorship, the uncertainty policy, the contradiction ledger,
+#      the pin-collision epoch and the parcel rung are gone; the hierarchy is a pure join
+#      off the bound entity, so `cast_obce` now lands on every branch and not only on PIP.
+RESOLVER_VERSION = "resolver:v4"
