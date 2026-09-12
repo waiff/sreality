@@ -179,6 +179,35 @@ component is slimmed twice — each wave rewrites one component and slims its st
     **Next:** the coverage red line is the acceptance check, and it can only be read after deploy —
     every portal but sreality, bezrealitky and mmreality now mints its town from a STORED PAGE BODY,
     so a portal's number moves as the body-mining half works through its backlog, not at merge.
+  - **W1-a3 shipped** (2026-09-12): the page half extracts across PROCESSES,
+    `os.cpu_count()` wide. The bottleneck was one core — run 34666292569 spent 143-313 s per
+    1 500-body batch against ~48 s to fetch the same bodies from R2 on 16 threads, ~5 bodies/s
+    of lexbor parse + scope + readers, and the 249 000-body backlog is re-mined once more after
+    every contract bump. `extract_pages` returns one outcome per body IN ORDER — the
+    `IntakeResult` or the exception it raised — so the per-body isolation survives a process
+    boundary: a content-triggered `IntakeRefused` still costs one listing's page entries, a
+    body that yields `scope_incomplete` is still left unstamped, and a pool the OOM killer
+    takes finishes its batch on the main thread. `forkserver`, never `fork`: the lane holds an
+    open psycopg connection inside the batch transaction, and a forked child finalizing its
+    copy of that socket would terminate the parent's session. Batches under 16 bodies stay on
+    the main thread. Each batch logs its own `N bodies/s`; `scripts/bench_page_extraction.py`
+    takes the same number off the committed fixtures with no database (16 cores, 1 500 bodies:
+    317 → 512 b/s at 2 workers, 1 512 b/s at 16). No new flag, no `INTAKE_VERSION` bump — the
+    claims are identical; `LOCATION_INTAKE_WORKERS` exists only for a runner that misreports
+    its CPU count. The lane also **self-chains** now: GitHub fires the `35 * * * *` cron ~7
+    times a day (no tick at 02:35 or 03:35 on 2026-09-12), so a 250 000-body backlog drained at
+    ~6 000 bodies a fired tick however fast the extraction got. A run dispatches ONE successor
+    with the same budget and batch size when it reports an unfinished half THAT IT MOVED
+    (`bodies_pass_complete=false` with `bodies_mined>0`, or `reached_end=false` with
+    `listings>0`), and nothing otherwise (steady state is cron-only). The progress term plus
+    a `bodies_pass_complete=true` stamp on both of the drain's early returns is what stops a
+    run with no page-capable portal (`--source sreality`) or no R2 credential from chaining
+    clean short runs for ever. It YIELDS first: `location-batch` keeps one pending slot and GitHub
+    supersedes the OLDER entry, which is how a chain evicted the hourly intake and an
+    operator's full-resolve on 2026-09-10, so if any member of the group is already waiting the
+    chain ends and lets it through — `location_resolve.yml` counts, it joins the group through a mode-conditional expression. `test_location_batch_hardening.py`'s ban on self-chaining
+    members becomes the rail that the yield EXISTS, plus eleven tests that execute the chain
+    script itself against a stub `gh` — the two `gh run list` filters included.
 - **W2 — the resolver at four steps, the answer table at 27 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and

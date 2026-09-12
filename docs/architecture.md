@@ -1980,7 +1980,14 @@ what is eligible): four paths leave a body unstamped — a bucket miss, a missin
 content-triggered refusal, a scoper that failed closed — and three are deterministic per body, so
 a stamp-only notion of progress would park them at the head of the order, re-fetch them every
 batch, and stall the entire backlog behind them once `cap` of them accumulated. The pass ends when
-a batch comes back short of `cap`.
+a batch comes back short of `cap`. **A batch's bodies are extracted across PROCESSES** (W1-a3,
+`page_readers.extract_pages`, `os.cpu_count()` wide): the parse is pure CPU and threads cannot
+share it, so one core held a 1 500-body batch at 143–313 s against ~48 s to fetch the same bodies.
+The pool is an accelerator only — one outcome per body IN ORDER, the `IntakeResult` or the
+exception it raised, so a content-triggered refusal still costs one listing's page entries and a
+pool the OOM killer takes finishes its batch on the main thread. `forkserver`, never `fork`: the
+lane holds an open psycopg connection inside the batch transaction and a forked child finalizing
+its copy of that socket would terminate the parent's session.
 
 **The cursor is the lane's only memory, and every run has a budget.** The watermark is gone with
 `--overlap-hours` and `coverage_since`; `location_claim_batches.cursor_after_id` holds a
@@ -2000,7 +2007,19 @@ budget ran until `timeout-minutes: 55` cancelled it and stamped nothing resumabl
 repeated it. A batch does not START unless the previous batch's measured duration fits in what is
 left, and the run's backlog readout (a `count(*)` under the 600 s ceiling, taken when the budget is
 already spent) runs AFTER the terminal stamp — ahead of it, it could push the job past the
-55-minute ceiling and lose the cursor of a run that had otherwise finished cleanly. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
+55-minute ceiling and lose the cursor of a run that had otherwise finished cleanly. **The lane
+self-chains while it has a backlog** (W1-a3): GitHub fires the hourly cron ~7 times a day, so the
+250 000-body backlog every contract bump creates would drain at ~6 000 bodies a fired tick, and a
+run dispatches ONE successor with its own budget when its summary reports an unfinished half THAT
+IT MOVED — `bodies_pass_complete=false` with `bodies_mined>0`, or `reached_end=false` with
+`listings>0`. The progress term is the loop breaker: `bodies_pass_complete` is False until the
+drain sets it, so a run with no page-capable portal (`--source sreality`) or no R2 credential
+would otherwise chain clean short runs for ever, and both of the drain's early returns now stamp
+the pass complete for the same reason. It dispatches only after asking whether any member of
+`location-batch` is already waiting — `location_resolve.yml` included, which joins the group
+through a mode-conditional expression — because the group's single pending slot supersedes the
+OLDER entry, and an unyielding chain is what cancelled the hourly intake and an operator's
+full-resolve on 2026-09-10. Both halves complete is the steady state and chains nothing. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
 re-mine, the archived-HTML sweep, the verify lane and the LLM free-text lane, with the refetch
 cohort and the payload backfill/prune/churn tooling. The lane writes `location_claims`,
 `dirty_locations` and its own `location_claim_batches` ledger and nothing else:

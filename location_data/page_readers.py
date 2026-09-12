@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing
+import os
 import re
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
 from datetime import datetime
 from math import cos, hypot, isfinite, radians
+from multiprocessing.context import BaseContext
 from typing import Any, Protocol
 from urllib.parse import unquote
 
@@ -1787,6 +1791,182 @@ def extract_page(
                 continue
             result.claims.append(claim)
     return result
+
+
+# ------------------------------------------------------------- parallel extraction
+
+# THE LANE'S BOTTLENECK IS ONE CORE. `extract_page` is pure CPU — a lexbor parse of a
+# 41-245 KB body, the exclusion-zone scope, then the entries' readers — and it ran once per
+# body on the main thread: 1 500-body batches took 143-313 s against ~48 s for the R2 fetch
+# of the same bodies (run 34666292569), and the 249 000-body backlog is re-mined once more
+# on every contract bump. Threads cannot help (the GIL holds for the whole parse), so the
+# bodies go to PROCESSES.
+EXTRACTION_WORKERS_ENV = "LOCATION_INTAKE_WORKERS"
+
+# Below this a batch stays on the main thread. Spinning up a pool costs a fresh interpreter
+# per worker, which is worth it for a 1 500-body drain batch and never for the handful of
+# bodies a --limit run or a test drives through the same code path.
+PARALLEL_MIN_BODIES = 16
+
+# ONE BODY MAY NOT HOLD THE BATCH TRANSACTION OPEN. The parse is a C extension and the
+# readers run regexes over whole documents, so a pathological body can sit in a worker for
+# longer than the job's own ceiling — and the parent is inside an open transaction while it
+# waits. 120 s is ~600x the measured per-body cost and ~1/20th of a bodies-first half
+# budget: a body that has not finished by then is this run's loss, not the batch's.
+EXTRACTION_TIMEOUT_S = 120.0
+
+# What a worker needs that is the same for every body: the contract entries, the per-portal
+# exclusion-zone registers and the claim-size cap. Sent ONCE per worker through the
+# initializer rather than per task — per task it would ride 1 500 times a batch.
+_WORKER: dict[str, Any] = {}
+
+
+def extraction_workers() -> int:
+    """How many extraction processes. `os.cpu_count()`, overridable.
+
+    The override exists for ONE case: a runner whose CPU count is misreported (a container
+    with a cgroup quota below the host's core count). It is not a tuning knob and nothing
+    sets it in the workflow."""
+    override = os.environ.get(EXTRACTION_WORKERS_ENV)
+    if override:
+        return env_positive_int(EXTRACTION_WORKERS_ENV, 1)
+    return os.cpu_count() or 1
+
+
+def pool_width(tasks: int) -> int:
+    """The width `extract_pages` will actually use for a batch of this size — 1 is the main
+    thread. ONE definition, because the lane logs this number beside its bodies/s and a log
+    line that guessed it would be the only evidence anyone reads."""
+    workers = extraction_workers()
+    return workers if workers >= 2 and tasks >= PARALLEL_MIN_BODIES else 1
+
+
+def _mp_context() -> BaseContext:
+    """NEVER `fork`. The lane forks nothing: it holds an OPEN psycopg connection, in an
+    open transaction, at the moment `mine_bodies` runs — and a forked child inherits the
+    libpq socket. When that child exits, finalizing its copy of the `PGconn` sends libpq's
+    terminate packet down the shared socket and kills the PARENT's session, rolling back
+    the batch the fork was meant to speed up.
+
+    `forkserver` is the fast safe one: its server process is exec'd (a fresh interpreter,
+    no inherited fds, no inherited heap) ONCE and every later worker forks from that, so
+    only the first pool of a run pays an import. Preloading this module means the forks
+    inherit the readers already imported instead of each re-importing them."""
+    if "forkserver" in multiprocessing.get_all_start_methods():
+        context = multiprocessing.get_context("forkserver")
+        context.set_forkserver_preload(["location_data.page_readers"])
+        return context
+    return multiprocessing.get_context("spawn")
+
+
+def _worker_init(
+    entries_by_source: dict[str, list[Entry]],
+    registers: dict[str, ScopeRegister],
+    max_value_bytes: int,
+    log_level: int,
+) -> None:
+    _WORKER.update(entries=entries_by_source, registers=registers,
+                   max_value_bytes=max_value_bytes)
+    # A worker is a fresh interpreter with no logging configuration, so `LOG.warning` would
+    # reach stderr through the handler of last resort — unprefixed, and the DEBUG a
+    # `--verbose` run asked for would be dropped. The run's format, carried across.
+    logging.basicConfig(
+        level=log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+
+def _worker_extract(task: tuple[ListingRow, ArchivedPayload]) -> IntakeResult:
+    row, payload = task
+    return extract_page(
+        payload, row, _WORKER["entries"][row.source],
+        register=_WORKER["registers"][row.source],
+        max_value_bytes=_WORKER["max_value_bytes"])
+
+
+def _extract_serially(
+    tasks: list[tuple[ListingRow, ArchivedPayload]], *,
+    entries_by_source: dict[str, list[Entry]],
+    registers: dict[str, ScopeRegister], max_value_bytes: int,
+) -> list[IntakeResult | Exception]:
+    outcomes: list[IntakeResult | Exception] = []
+    for row, payload in tasks:
+        try:
+            outcomes.append(extract_page(
+                payload, row, entries_by_source[row.source],
+                register=registers[row.source], max_value_bytes=max_value_bytes))
+        except Exception as exc:  # noqa: BLE001 - the caller decides per body
+            outcomes.append(exc)
+    return outcomes
+
+
+def extract_pages(
+    tasks: list[tuple[ListingRow, ArchivedPayload]], *,
+    entries_by_source: dict[str, list[Entry]],
+    registers: dict[str, ScopeRegister], max_value_bytes: int,
+) -> list[IntakeResult | Exception]:
+    """One outcome per task, IN TASK ORDER: the `IntakeResult`, or the exception it raised.
+
+    RETURNED, NOT RAISED, because the caller's isolation rule is per body: an `IntakeRefused`
+    triggered by one body's CONTENT costs that listing's page entries and nothing else, and
+    a batch is one transaction carrying every portal's payload claims. The pool is a pure
+    accelerator — same outcomes, same order, whether it was used or not.
+
+    TWO WAYS THE POOL ITSELF FAILS, and neither is a failed batch. A pool that BREAKS (a
+    worker killed by the OOM killer, a segfault in the parser) leaves its unfinished bodies
+    to the main thread — exactly the code this lane ran before it had a pool. A worker that
+    HANGS on one body is given `EXTRACTION_TIMEOUT_S` and then killed, because the parent is
+    holding an open batch transaction while it waits: that one body comes back as its own
+    `TimeoutError` outcome and the rest of the batch finishes on the main thread.
+
+    Every task gets EXACTLY ONE outcome down every path: a timed-out body is recorded before
+    the fallback starts (it is not re-run — it would hang again), a broken one is not (it
+    never produced an outcome, so the main thread owes it one)."""
+    def main_thread(
+        remaining: list[tuple[ListingRow, ArchivedPayload]],
+    ) -> list[IntakeResult | Exception]:
+        return _extract_serially(
+            remaining, entries_by_source=entries_by_source, registers=registers,
+            max_value_bytes=max_value_bytes)
+
+    width = pool_width(len(tasks))
+    if width == 1:
+        return main_thread(tasks)
+
+    outcomes: list[IntakeResult | Exception] = []
+    hung = False
+    pool = ProcessPoolExecutor(
+        max_workers=width, mp_context=_mp_context(), initializer=_worker_init,
+        initargs=(entries_by_source, registers, max_value_bytes,
+                  LOG.getEffectiveLevel()))
+    try:
+        futures = [pool.submit(_worker_extract, task) for task in tasks]
+        for future in futures:
+            try:
+                outcomes.append(future.result(timeout=EXTRACTION_TIMEOUT_S))
+            except TimeoutError as timeout:
+                hung = True
+                LOG.warning("PAGE a worker did not return body %d/%d within %.0fs; killing "
+                            "the pool and finishing this batch on the main thread",
+                            len(outcomes) + 1, len(tasks), EXTRACTION_TIMEOUT_S)
+                outcomes.append(timeout)
+                break
+            except BrokenProcessPool as broken:
+                LOG.warning("PAGE the extraction pool broke after %d/%d bodies (%s); the "
+                            "rest of this batch is extracted on the main thread",
+                            len(outcomes), len(tasks), broken)
+                break
+            except Exception as exc:  # noqa: BLE001 - one body's failure, carried back
+                outcomes.append(exc)
+    finally:
+        if hung:
+            # The private `_processes` is the only handle on a worker stuck inside a C
+            # parse, and without it the `shutdown()` below joins it — which is the wedge
+            # this timeout exists to prevent, moved four lines down.
+            for worker in list((pool._processes or {}).values()):  # noqa: SLF001
+                worker.kill()
+        pool.shutdown(wait=not hung, cancel_futures=True)
+    if len(outcomes) < len(tasks):
+        outcomes.extend(main_thread(tasks[len(outcomes):]))
+    return outcomes
 
 
 # ------------------------------------------------------------------ body fetch

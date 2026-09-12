@@ -282,6 +282,28 @@ def test_a_content_triggered_refusal_costs_one_listing_not_the_batch(
     assert set(written) == {1, 2, 3}
 
 
+def test_a_worker_that_timed_out_costs_one_body_and_commits_the_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fourth way a page can fail, introduced with the pool (W1-a3): the extractor never
+    came back for this body. Sorted with the bucket miss, not with the lane bugs — the body
+    is immutable, so failing the batch would fail it again every hour, while this way the
+    batch commits and the unstamped body is asked for again."""
+    def _hang(*_a: Any, **_k: Any) -> IntakeResult:
+        raise TimeoutError("a worker did not return body 1/1 within 120s")
+
+    monkeypatch.setattr(page_readers, "extract_page", _hang)
+    conn = _Conn([UNMINED, ALREADY_MINED, NO_BODY])
+
+    stats = _run(conn, _Store())
+
+    assert conn.stamped == []
+    assert stats["outcome"] == "ok"
+    assert stats["refusal_reasons"]["page_extract_timeout:sreality"] == 1
+    written = [row["listing_id"] for chunk in conn.claim_writes for row in chunk]
+    assert set(written) == {1, 2, 3}
+
+
 def test_an_incomplete_scope_is_never_stamped_as_mined(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -303,6 +325,28 @@ def test_an_incomplete_scope_is_never_stamped_as_mined(
     assert stats["outcome"] == "ok"
 
 
+def test_an_unclassified_exception_still_fails_the_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The line between the three isolated failures and a lane BUG, now that extraction
+    hands its failures back as values (W1-a3). `IntakeRefused` is the readers' word for "the
+    body said something I may not write"; anything else is a defect in this lane, and mining
+    a corpus minus the rows nobody looked at would hide it behind a green run."""
+    def _bug(*_a: Any, **_k: Any) -> IntakeResult:
+        raise ValueError("a reader returned a tuple")
+
+    monkeypatch.setattr(page_readers, "extract_page", _bug)
+    conn = _Conn([UNMINED, ALREADY_MINED, NO_BODY])
+
+    with pytest.raises(ValueError, match="returned a tuple"):
+        _run(conn, _Store())
+
+    assert conn.stamped == []
+    failed = [params for sql, params in conn.executed
+              if sql.startswith("UPDATE location_claim_batches")]
+    assert failed and failed[-1]["outcome"] == "failed"
+
+
 def test_a_run_with_no_object_store_mines_nothing_and_still_writes_payload_claims(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -320,6 +364,33 @@ def test_a_run_with_no_object_store_mines_nothing_and_still_writes_payload_claim
     assert stats["bodies_eligible"] == 0 and conn.stamped == []
     written = [row["listing_id"] for chunk in conn.claim_writes for row in chunk]
     assert set(written) == {1, 2, 3}
+    # AND IT REPORTS A COMPLETE PASS. There is no store to read a backlog from, so there is
+    # no backlog this run can claim to be behind on — see the chain rail below.
+    assert stats["bodies_pass_complete"] is True
+
+
+@pytest.mark.parametrize("page_sources,source", [
+    (set(), None),          # no portal's contract declares a page entry at all
+    ({"remax"}, "sreality"),  # --source names a portal with no page entry of its own
+])
+def test_a_pass_that_could_never_run_reports_itself_complete(
+    page_sources: set[str], source: str | None,
+) -> None:
+    """`bodies_pass_complete` starts False and is otherwise only set inside the drain loop,
+    so both of the pass's early returns used to leave a run reporting a backlog it had never
+    looked at. The workflow's chain reads that field: a `--source sreality` run (sreality's
+    contract is API-JSON and declares no page entry) would have dispatched a successor, which
+    would have reported the same, for ever — each hop holding `location-batch` on its way
+    through. Nothing could be drained IS the pass reaching its end."""
+    stats = {"bodies_pass_complete": False}
+
+    claims_intake.drain_unmined_bodies(
+        None, source=source, page_sources=page_sources, entries_by_source={},
+        registers={}, store=_Store(), cap=1500, statement_timeout=60,
+        budget=claims_intake._Budget(None), batch_id=1, dry_run=False,
+        max_value_bytes=1024, stats=stats, refusals={})
+
+    assert stats["bodies_pass_complete"] is True
 
 
 # ------------------------------------------------------- the bodies-first backlog pass
