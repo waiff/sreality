@@ -528,6 +528,26 @@ component is slimmed twice — each wave rewrites one component and slims its st
     migration** (the views/functions exception; 105 files, 2,439 / −5,151 overall). Suites:
     pytest 7165 passed / 219 skipped, vitest 123 files / 1497 tests, tsc clean.
 
+  - **W4-d shipped — and found nothing left to delete.** The wave was scoped to the twelve legacy
+    location scripts and ten workflows of the map's §6; every one of them was already gone —
+    `location_mapy_inventory` + `backfill_geocode_coords` and their two workflows in W4-b, the five
+    street backfills + `check_street_key_parity` + `ingest_address_points` + `apply_r2_maintenance_indexes`
+    and their eight workflows in W4-c, `recompute_home_city` in W3 S4 — as were all nine §8 tests.
+    Cross-checks that came back clean: no workflow invokes a missing module, no orphan module in
+    `scraper/` / `toolkit/` / `location_data/` / `scripts/`, `workflow-docs.json` already in sync, no
+    `derived_artifacts` row and no `filter_registry` row named a deleted producer, and no
+    `verify_pipeline` check names a dropped relation. Residue actually deleted:
+    `docs/design/location-resolution.md` (75 lines — "Status: shipped" for `scraper/location.py`,
+    `CoordResolver`, `geocode_cache`, `listings.geocode_attempted_at`, `backfill_geocode_coords.py`,
+    every one dropped; zero inbound links) and `ceskereality_parser._resolve_coords`' docstring, which
+    still routed the reader to `scraper.location.CoordResolver`. **Kept, with its readers:**
+    `frontend/src/lib/useLegacyChipUpgrade.ts` + its test — `BrowseExperience.tsx:173` and
+    `Pipeline.tsx:114` call it, so the chip-upgrade bake §6 made its precondition is not done.
+    **Left for W4-e:** `toolkit/filter_registry.py:1522` still describes city-quality membership as
+    `listings.obec_id`, a column 508 dropped (the predicate is `properties_public.obec_id`) — prose,
+    and it regenerates a frontend file, so it belongs with the doctrine PR. **+32 / −79 overall** (+3 / −4
+    runtime code, the rest docs; net −47, rule 25 satisfied by a wave that only had residue left). Suites: pytest 7165 passed / 218 skipped.
+
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
 campaigns or schedules; foreign is a determination, never a default; a field is added only after a
