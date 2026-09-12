@@ -224,12 +224,28 @@ def _bounded(conn: psycopg.Connection, seconds: int) -> Iterator[psycopg.Cursor]
 # fourth arm re-resolves them nightly until each one has a town or is determined `foreign`
 # (never a default — `undetermined` is still red and still swept). It is bounded by the red
 # count, not the corpus, and served by `listing_location (obec_kod, granularity)` from 501.
+#
+# THE DRIVING PREDICATE IS "WHAT BROWSE SERVES", NOT "WHAT IS ACTIVE" (W2-a4). `l.is_active`
+# alone was the wrong scope: `browse_projection` serves `properties WHERE status = 'active'`
+# — the MERGE lifecycle, not `is_active` — so a DELISTED property is still a Browse row, and
+# the row it renders is its `repr_listing_ref_id` DISPLAY LISTING, which is `is_active =
+# false`. Under the old predicate that listing could never be swept, never get a
+# `listing_location` row, and after W3 would show no place and vanish from the map. The
+# second arm brings exactly those display listings in and nothing else.
+#
+# The EXISTS is CORRELATED and sits under an OR, which blocks the semi-join transform, so
+# Postgres evaluates it as a per-row subplan: one index probe per inactive listing WITH an
+# index, one seq scan of `properties` per inactive listing WITHOUT one. Migration 505 adds
+# `properties (repr_listing_ref_id) WHERE status = 'active'` — `properties` carried eleven
+# indexes and not one led on the column every read model joins `listings` on.
 _SWEEP_SQL = """
 INSERT INTO dirty_locations (listing_id, reason)
 SELECT l.id, 'full_sweep'
   FROM listings l
   LEFT JOIN listing_location p ON p.listing_id = l.id
- WHERE l.is_active
+ WHERE (l.is_active
+        OR EXISTS (SELECT 1 FROM properties pr
+                    WHERE pr.repr_listing_ref_id = l.id AND pr.status = 'active'))
    AND (p.listing_id IS NULL
         OR p.resolver_version <> %s
         OR p.registry_version <> %s
@@ -751,7 +767,8 @@ def enqueue_full_sweep(
     bump rides. The incremental lane stays the primary path — this re-enqueues what a
     `resolver_version` bump, a registry reload, a dropped enqueue or a claimless listing left
     behind, plus every active Czech listing still without a town, in listing-id windows (see
-    `_SWEEP_SQL`)."""
+    `_SWEEP_SQL`). Its scope is what BROWSE SERVES — active listings plus the display listing
+    of every active property, delisted ones included."""
     if window <= 0:
         raise ValueError("sweep window must be positive")
     seconds = loader_db.env_timeout_s(SWEEP_TIMEOUT_ENV, DEFAULT_SWEEP_TIMEOUT_S)

@@ -159,7 +159,7 @@ def test_the_sweep_revisits_every_active_czech_listing_without_a_town():
     assert "or (p.obec_kod is null and p.country_status <> 'foreign')" in flat
     assert flat.count("%s") == 4
     # ...and it is one arm of the SAME disjunction, not a second statement.
-    where = flat[flat.index("where l.is_active"):]
+    where = flat[flat.index("where (l.is_active"):]
     assert where.index("p.obec_kod is null") < where.index("and l.id > %s")
     # Served by migration 501's index, so the arm costs the red count, not the corpus.
     ddl = (MIGRATIONS / "501_location_w2a_listing_location.sql").read_text().lower()
@@ -1199,3 +1199,112 @@ def test_the_run_cache_never_holds_its_lock_across_a_registry_question():
         blocked.set()
         slow.join(10)
     assert cache.get(("admin_chain", 1), lambda: "recomputed") == "slow"
+
+
+# ------------------------------------------- W2-a4: the sweep's scope is what Browse serves
+
+
+def test_the_sweep_drives_off_what_browse_serves_not_off_is_active():
+    """`browse_projection` is `from properties p where status = 'active'` — the MERGE
+    lifecycle ('active' vs 'merged_away'), NOT `is_active`. So a DELISTED property is still a
+    Browse row, and the row it renders is its `repr_listing_ref_id` DISPLAY LISTING, which is
+    `is_active = false`. Driving off `l.is_active` alone meant that listing could never be
+    swept, never get a `listing_location` row, and after W3 would show no place and drop off
+    the map."""
+    flat = " ".join(drain._SWEEP_SQL.split()).lower()
+    assert ("where (l.is_active or exists (select 1 from properties pr where "
+            "pr.repr_listing_ref_id = l.id and pr.status = 'active'))") in flat
+    # p.status would read the LEFT JOINed listing_location alias; the properties alias is pr.
+    assert "pr.status = 'active'" in flat and "p.status" not in flat
+    # The merge lifecycle, never the delisting flag: `pr.is_active` here would re-lose exactly
+    # the cohort this arm exists for.
+    assert "pr.is_active" not in flat
+
+
+def test_the_widened_scope_keeps_every_other_arm_and_the_placeholder_count():
+    """The new predicate is the DRIVING one — which listings are candidates. The staleness
+    disjunction (missing row / resolver_version / registry_version / Czech row without a town)
+    and the NOT EXISTS lock-avoiding pre-filter are untouched, and `'active'` is a literal so
+    `enqueue_full_sweep` still binds exactly four values."""
+    flat = " ".join(drain._SWEEP_SQL.split()).lower()
+    for arm in ("p.listing_id is null",
+                "or p.resolver_version <> %s",
+                "or p.registry_version <> %s",
+                "or (p.obec_kod is null and p.country_status <> 'foreign')"):
+        assert arm in flat, arm
+    assert "not exists (select 1 from dirty_locations d where d.listing_id = l.id)" in flat
+    assert "on conflict (listing_id) do nothing" in flat and "do update" not in flat
+    assert flat.count("%s") == 4
+    state = _state(max_listing_id=100_000)
+    drain.enqueue_full_sweep(_FakeConn(state), window=250_000)
+    (_, params), = _sweep_windows(state)
+    assert params == (RESOLVER_VERSION, REGISTRY, 0, 100_000)
+    # The driving predicate gates the staleness arms, not the other way round.
+    where = flat[flat.index("where ("):]
+    assert where.index("pr.status = 'active'") < where.index("p.resolver_version")
+
+
+def test_migration_505_indexes_the_correlated_exists_the_sweep_now_runs():
+    """The EXISTS is correlated (`pr.repr_listing_ref_id = l.id`) and sits under an OR, which
+    blocks the semi-join transform: Postgres evaluates it as a per-row subplan. Without an
+    index that is one SEQ SCAN of `properties` per inactive listing, on a statement that walks
+    the whole corpus — `properties` carried eleven indexes and not one led on
+    `repr_listing_ref_id`. Additive, partial on the same predicate the sweep asks."""
+    text = (MIGRATIONS / "505_location_w2a4_properties_repr_index.sql").read_text()
+    # The EXECUTABLE half only: the header documents the rollback DROP and the invalid-index
+    # rationale, and a prose scan would be reading the comment, not the migration.
+    sql = " ".join(" ".join(line for line in text.splitlines()
+                            if not line.strip().startswith("--")).split()).lower()
+    assert ("create index concurrently if not exists properties_repr_listing_ref_active_idx "
+            "on public.properties (repr_listing_ref_id) where status = 'active'") in sql
+    # Additive only: an index, never a column/constraint/data change.
+    for destructive in ("alter table", "delete from", "update ", "truncate"):
+        assert destructive not in sql, destructive
+    # The only DROP is the invalid-leftover guard, on this index and nothing else.
+    assert sql.count("drop index") == 1
+    assert "drop index if exists public.properties_repr_listing_ref_active_idx" in sql
+
+
+def test_migration_505_is_the_no_transaction_concurrently_shape_the_apply_lane_requires():
+    """`properties` is written every minute by the scrapers and property maintenance and the
+    instance is IO-bound, so a plain CREATE INDEX's SHARE lock would stall those writers for
+    the whole build. CONCURRENTLY takes only SHARE UPDATE EXCLUSIVE — but it cannot run inside
+    a transaction block (25001), which rules out every Supabase MCP path and dictates the
+    file's shape: no BEGIN/COMMIT, and plain SET rather than SET LOCAL (outside a transaction
+    SET LOCAL is a silent no-op)."""
+    text = (MIGRATIONS / "505_location_w2a4_properties_repr_index.sql").read_text()
+    sql = " ".join(" ".join(line for line in text.splitlines()
+                            if not line.strip().startswith("--")).split()).lower()
+    assert "create index concurrently" in sql
+    assert "begin;" not in sql and "commit;" not in sql
+    assert "set lock_timeout = '30s';" in sql and "set statement_timeout = '900s';" in sql
+    assert "set local" not in sql
+    # `do $$ begin ... end $$` is a PL/pgSQL block, not a transaction — but the CONCURRENTLY
+    # statement must sit OUTSIDE it, where a transaction block would be fatal.
+    assert sql.index("end $$;") < sql.index("create index concurrently")
+    # The header has to say all of this, or the next hand re-applies it through the MCP.
+    header = text.lower()
+    assert "apply_migration.yml" in header and "not the supabase mcp" in header
+    assert "--single-transaction" in header
+
+
+def test_both_apply_lanes_run_migration_files_statement_by_statement():
+    """The claim migration 505's shape rests on, pinned against the workflows themselves: a
+    file wrapped in one transaction would make CONCURRENTLY raise 25001, so neither lane may
+    grow a `--single-transaction`."""
+    root = MIGRATIONS.parent
+    for name in ("apply_migration.yml", "migrations.yml"):
+        body = (root / ".github" / "workflows" / name).read_text()
+        # Real invocations only — the workflow also `echo`s its own command line.
+        psql_lines = [ln for ln in body.splitlines()
+                      if "psql" in ln and " -f " in ln
+                      and not ln.strip().startswith(("#", "echo "))]
+        assert psql_lines, name
+        for line in psql_lines:
+            assert "--single-transaction" not in line, (name, line)
+            assert "ON_ERROR_STOP=1" in line, (name, line)
+
+
+def test_migration_505_does_not_collide_with_the_open_branches():
+    numbered = sorted(f.name for f in MIGRATIONS.glob("505_*.sql"))
+    assert numbered == ["505_location_w2a4_properties_repr_index.sql"], numbered
