@@ -1029,6 +1029,9 @@ _RETRACT_ENTRIES_SQL = """
 # `claim_insert` is reused deliberately: the queue's reason is a diagnostic label and the
 # drain rebuilds the whole projection row whatever it says, so a retraction-only value would
 # be a vocabulary entry nothing branches on.
+# The enqueue BUMPS (W2-a2): a retraction is evidence changing under a listing that may
+# already be queued, and the drain's delete is bounded by the `enqueued_at` its slice
+# claimed, so a bump is what keeps the row queued until it is resolved WITHOUT these claims.
 _RETRACT_BATCH_SQL = """
     WITH victims AS (
         SELECT ctid FROM location_claims
@@ -1042,7 +1045,9 @@ _RETRACT_BATCH_SQL = """
     ), enqueued AS (
         INSERT INTO dirty_locations (listing_id, reason)
         SELECT DISTINCT listing_id, 'claim_insert' FROM deleted
-        ON CONFLICT (listing_id) DO NOTHING
+        ON CONFLICT (listing_id) DO UPDATE
+           SET enqueued_at = now(), reason = EXCLUDED.reason,
+               attempts = 0, next_eligible_at = now()
         RETURNING listing_id
     )
     SELECT (SELECT count(*) FROM deleted), (SELECT count(*) FROM enqueued)

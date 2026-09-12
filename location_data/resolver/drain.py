@@ -18,6 +18,9 @@ Batch discipline (learned three times):
 * **judge the queue by OLDEST-ROW AGE, not by length** (the repo's standing rule);
 * the slice is ordered `(enqueued_at, listing_id)` — a bare timestamp sort reshuffles on
   every call, because a batch enqueue shares one `now()` and the tie order is arbitrary;
+* the queue is RE-ENTRANT: a producer's enqueue BUMPS `enqueued_at`, and every statement that
+  finishes a row is bounded by the `enqueued_at` the slice claimed, so evidence that arrives
+  mid-slice leaves the row queued instead of being deleted unresolved (see `_CLAIM_SLICE_SQL`);
 * resumable by construction: the queue IS the cursor, and a failed row comes back with a
   backoff rather than blocking the slice.
 
@@ -76,8 +79,20 @@ DEFAULT_BATCH = 250
 DEFAULT_MAX_SECONDS = 600
 BACKOFF_SECONDS = (60, 300, 900, 3600, 21600)
 
+# THE QUEUE IS RE-ENTRANT (W2-a2). The slice carries each row's `enqueued_at` and every
+# statement that finishes a row is bounded by the value the slice CLAIMED. A producer that
+# learns something new about a listing bumps `enqueued_at` to now() (see `claims_intake`,
+# `contracts.retract` and `operator_corrections`), so a bump that lands after the slice read
+# its claims leaves `enqueued_at` NEWER than the claimed value and the row is NOT finished —
+# it stays queued and the next slice resolves it against the claims that arrived.
+#
+# Without the bound this is silent, total data loss: on 2026-09-12 the nine contract bumps
+# re-mined ~60k listings whose rows were already queued from the previous sweep, every
+# `claim_insert` enqueue hit ON CONFLICT DO NOTHING, and the drain deleted the queue row
+# after resolving them from the OLD claims. 384,500 answer rows, 135 with a town, and nothing
+# left to re-enqueue them — the sweep sees a current-version row and stops.
 _CLAIM_SLICE_SQL = """
-SELECT listing_id, attempts
+SELECT listing_id, attempts, enqueued_at
   FROM dirty_locations
  WHERE next_eligible_at <= now()
  ORDER BY enqueued_at, listing_id
@@ -85,15 +100,30 @@ SELECT listing_id, attempts
  LIMIT %s
 """
 
-_DELETE_ROW_SQL = "DELETE FROM dirty_locations WHERE listing_id = %s"
-_DELETE_ROWS_SQL = "DELETE FROM dirty_locations WHERE listing_id = ANY(%s::bigint[])"
+_DELETE_ROW_SQL = """
+DELETE FROM dirty_locations
+ WHERE listing_id = %s AND enqueued_at <= %s
+"""
 
+# `unnest` of two parallel arrays rather than `jsonb_to_recordset`: psycopg adapts a list of
+# datetimes to `timestamptz[]` natively, where the jsonb form would need every timestamp
+# round-tripped through a string and re-parsed.
+_DELETE_ROWS_SQL = """
+DELETE FROM dirty_locations d
+ USING unnest(%s::bigint[], %s::timestamptz[]) AS claimed(listing_id, enqueued_at)
+ WHERE d.listing_id = claimed.listing_id
+   AND d.enqueued_at <= claimed.enqueued_at
+"""
+
+# Same bound on the failure stamp: a backoff written over a NEWER enqueue would push a row
+# that just gained evidence behind up to six hours of `next_eligible_at`, and reset nothing
+# when it finally ran.
 _FAIL_ROW_SQL = """
 UPDATE dirty_locations
    SET attempts = attempts + 1,
        last_error = %s,
        next_eligible_at = now() + make_interval(secs => %s)
- WHERE listing_id = %s
+ WHERE listing_id = %s AND enqueued_at <= %s
 """
 
 _QUEUE_HEALTH_SQL = """
@@ -166,6 +196,20 @@ def _bounded(conn: psycopg.Connection, seconds: int) -> Iterator[psycopg.Cursor]
 # INSERT ... ON CONFLICT on one of those keys must WAIT for that transaction — the sweep's
 # 5 s lock_timeout then kills the window. The NOT EXISTS is an MVCC read: it sees the queued
 # row and skips it without touching the lock.
+#
+# THE SWEEP IS THE ONE PRODUCER THAT DOES NOT BUMP (W2-a2). Every other enqueue is evidence
+# arriving — new claims, a retraction, an operator edit — and bumps `enqueued_at` so an
+# in-flight slice cannot finish the row. The sweep carries no evidence: bumping a queued row
+# would reset a poisoned row's `attempts` backoff and move the oldest row in the queue to the
+# back of it, on a statement that walks the whole corpus. NOT EXISTS + DO NOTHING, deliberately.
+#
+# THE RED-LINE ARM (W2-a2). Rule 25's invariant is "every active Czech listing has a town".
+# The three version arms cannot express it: a row resolved without an `obec_kod` is stamped at
+# the CURRENT version tuple, so the sweep sees a fresh row and walks past it for ever — which
+# is exactly how 2026-09-12 left 384,365 rows red with nothing able to re-enqueue them. The
+# fourth arm re-resolves them nightly until each one has a town or is determined `foreign`
+# (never a default — `undetermined` is still red and still swept). It is bounded by the red
+# count, not the corpus, and served by `listing_location (obec_kod, granularity)` from 501.
 _SWEEP_SQL = """
 INSERT INTO dirty_locations (listing_id, reason)
 SELECT l.id, 'full_sweep'
@@ -174,7 +218,8 @@ SELECT l.id, 'full_sweep'
  WHERE l.is_active
    AND (p.listing_id IS NULL
         OR p.resolver_version <> %s
-        OR p.registry_version <> %s)
+        OR p.registry_version <> %s
+        OR (p.obec_kod IS NULL AND p.country_status <> 'foreign'))
    AND l.id > %s AND l.id <= %s
    AND NOT EXISTS (SELECT 1 FROM dirty_locations d WHERE d.listing_id = l.id)
 ON CONFLICT (listing_id) DO NOTHING
@@ -289,7 +334,7 @@ def run(
                 break
             stats.batches += 1
             prefetch_started = time.monotonic()
-            slice_ = _prefetch(conn, [int(listing_id) for listing_id, _ in rows])
+            slice_ = _prefetch(conn, [int(row[0]) for row in rows])
             stats.prefetch_seconds += time.monotonic() - prefetch_started
             warm_started = time.monotonic()
             try:
@@ -322,7 +367,7 @@ def run(
 
 def _run_slice(
     conn: psycopg.Connection,
-    rows: list[tuple[Any, Any]],
+    rows: list[tuple[Any, Any, Any]],
     ctx: ResolverContext,
     registry_label: str,
     slice_: _Slice,
@@ -336,7 +381,10 @@ def _run_slice(
     row and not the batch. The run that motivated this measured 1 failure in 2,750 listings,
     so the optimistic path is the one that matters and the fallback is the safety net."""
     stats.claimed += len(rows)
-    listing_ids = [int(listing_id) for listing_id, _ in rows]
+    listing_ids = [int(row[0]) for row in rows]
+    # The `enqueued_at` each row was CLAIMED at — the bound on every statement that finishes
+    # it, so a producer's bump mid-slice keeps the row queued.
+    claimed_at = [row[2] for row in rows]
     try:
         with conn.transaction():  # SAVEPOINT for the WHOLE slice
             core_started = time.monotonic()
@@ -352,7 +400,7 @@ def _run_slice(
                 write_started = time.monotonic()
                 _write_slice(conn, resolutions)
                 with conn.cursor() as cur:
-                    cur.execute(_DELETE_ROWS_SQL, (listing_ids,))
+                    cur.execute(_DELETE_ROWS_SQL, (listing_ids, claimed_at))
                 stats.write_seconds += time.monotonic() - write_started
         stats.resolved += len(rows)
         return
@@ -363,7 +411,7 @@ def _run_slice(
             len(rows), exc,
         )
 
-    for listing_id, attempts in rows:
+    for listing_id, attempts, enqueued_at in rows:
         try:
             with conn.transaction():  # SAVEPOINT: one bad row, one bad row
                 _resolve_one(
@@ -372,14 +420,14 @@ def _run_slice(
                 )
                 if not dry_run:
                     with conn.cursor() as cur:
-                        cur.execute(_DELETE_ROW_SQL, (listing_id,))
+                        cur.execute(_DELETE_ROW_SQL, (listing_id, enqueued_at))
             stats.resolved += 1
         except Exception as exc:  # noqa: BLE001 - the row must not poison the batch
             stats.failed += 1
             LOG.warning("RESOLVE failed listing_id=%s: %s", listing_id, exc)
             backoff = BACKOFF_SECONDS[min(int(attempts), len(BACKOFF_SECONDS) - 1)]
             with conn.cursor() as cur:
-                cur.execute(_FAIL_ROW_SQL, (str(exc)[:500], backoff, listing_id))
+                cur.execute(_FAIL_ROW_SQL, (str(exc)[:500], backoff, listing_id, enqueued_at))
 
 
 def _query_stats(ctx: ResolverContext) -> resolve_db.QueryStats:
@@ -534,7 +582,8 @@ def enqueue_full_sweep(
     """`location_resolve_sweep`: the backstop for lost enqueues, and the mechanism a version
     bump rides. The incremental lane stays the primary path — this re-enqueues what a
     `resolver_version` bump, a registry reload, a dropped enqueue or a claimless listing left
-    behind, in listing-id windows (see `_SWEEP_SQL`)."""
+    behind, plus every active Czech listing still without a town, in listing-id windows (see
+    `_SWEEP_SQL`)."""
     if window <= 0:
         raise ValueError("sweep window must be positive")
     seconds = loader_db.env_timeout_s(SWEEP_TIMEOUT_ENV, DEFAULT_SWEEP_TIMEOUT_S)

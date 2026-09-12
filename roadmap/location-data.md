@@ -247,6 +247,23 @@ component is slimmed twice — each wave rewrites one component and slims its st
   re-mined) and fall as `claim_insert` re-enqueues each re-mined listing. No consumer reads
   `listing_location` yet, so the excursion is invisible to users — which is why it happens before W3
   and not after.
+  **W2-a2 shipped: the queue is re-entrant, and the sweep is the invariant's backstop.** The
+  paragraph above assumed "`claim_insert` re-enqueues each re-mined listing"; it did not.
+  **2026-09-12 07:13Z**: the queue already held ~540k rows from the previous sweep, the re-mine
+  inserted claims for ~60k listings, and every one of those enqueues hit `ON CONFLICT DO NOTHING`
+  because the row was already there — the drain then resolved them from the OLD claims and deleted
+  the queue row. **384,500 `listing_location` rows, 135 with a town**, and nothing that could ever
+  re-enqueue them: the sweep sees a current-version row and stops. Two rules close it. (1) Every
+  evidence-producing enqueue (`claims_intake`, `contracts.retract`, `operator_corrections`) is
+  `DO UPDATE SET enqueued_at = now(), reason = EXCLUDED.reason, attempts = 0, next_eligible_at =
+  now()`, and every statement that FINISHES a queue row — the batch delete, the per-listing delete,
+  the failure stamp — is bounded by the `enqueued_at` the slice claimed, so a bump that lands
+  mid-slice leaves the row queued and the next slice resolves it against the claims that arrived.
+  The sweep alone keeps `NOT EXISTS` + `DO NOTHING`: it carries no evidence, and bumping would reset
+  a poisoned row's backoff and push the queue's oldest row to the back. (2) `_SWEEP_SQL` gains a
+  fourth arm — `p.obec_kod IS NULL AND p.country_status <> 'foreign'` — so every active Czech
+  listing without a town is re-resolved by every daily sweep until it has one or is determined
+  foreign. No migration (501's `(obec_kod, granularity)` index serves it) and no new placeholder.
   **W2-b** then cuts the five remaining readers of `listing_location_current` (the four `toolkit/`
   modules + `refresh_location_compare_cohort()`), deletes the inactive-entry claims and drops the
   old tables. Nothing writes them from this PR on; `--workers` on the drain is unblocked but not
