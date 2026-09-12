@@ -212,6 +212,8 @@ component is slimmed twice — each wave rewrites one component and slims its st
     1,500-id window, then the joins over those ids, cursor = the window's max — after intake hop
     34689928656 timed out on a selection Postgres planned from `listings` (~150 s a batch, 600 s
     ceiling, 186,546 bodies queued). R2 fetch width raised to the clamp ceiling of 32.
+  - **W1-a5** (2026-09-12): the full walk resumes after a failed run and visits served listings
+    only (run 34689928656 reset the walk to id 0 on 2026-09-12).
 - **W2 — the resolver at four steps, the answer table at 26 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and

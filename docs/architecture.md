@@ -2086,12 +2086,15 @@ its copy of that socket would terminate the parent's session.
 
 **The cursor is the lane's only memory, and every run has a budget.** The watermark is gone with
 `--overlap-hours` and `coverage_since`; `location_claim_batches.cursor_after_id` holds a
-`listings.id` in full mode and a `listing_snapshots.id` in incremental mode. Full mode still
-resumes only from a budget-`stopped` predecessor ('ok' means the table was walked, and the next
-full pass is the contract-bump re-walk from 0); incremental resumes from ANY terminal outcome,
-because its cursor is a position in an append-only log, not a coverage claim — and the cursor
-only advances past a batch whose transaction closed, which is what makes a `failed` run safe to
-resume. A pre-W1-a2 cursor is told apart by `cursor_after_ts IS NULL` (the lane writes no
+`listings.id` in full mode and a `listing_snapshots.id` in incremental mode. BOTH modes resume from
+an UNFINISHED predecessor — `stopped` or `failed` (W1-a5) — because either cursor only advances past
+a batch whose transaction closed; run 34689928656 died in the bodies pass and its successor re-walked
+from id 0 for 765 s. They part on `ok`: full restarts at 0 (the table was walked; the next pass is the
+contract-bump re-walk), incremental carries on from the log's end, which is not a coverage claim. The
+full walk is also scoped to the SERVED set (`l.is_active` OR the row represents an `active` property)
+— the resolver sweep's own predicate, shared as `claims_common.SERVED_LISTING_PREDICATE` so the two
+walks cannot drift: ~830k listings serve ~376k, and the rest is history nobody resolves. Incremental
+stays unscoped — a delisting snapshot is a change worth reading. A pre-W1-a2 cursor is told apart by `cursor_after_ts IS NULL` (the lane writes no
 timestamp cursor any more); a lane with no cursor of its own seeds at the OLD lane's own anchor —
 the newest batch row still carrying a `cursor_after_ts`, else the last `ok` watermark, both minus
 the 3-hour overlap that cursor was always read with, else the head of the log. Seeding at the head

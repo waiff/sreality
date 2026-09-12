@@ -1,24 +1,23 @@
 """The scan must never leave rows behind a cursor that has already moved past them.
 
-`location_claim_batches` is the lane's only memory, and since W1-a2 the cursor is ALL of
-that memory: there is no watermark left to cross-check it against. This module drives the
-real `run()` loop against an in-memory `listings` + `listing_snapshots` pair to pin what
-that costs and what it buys.
+`location_claim_batches` is the lane's only memory, and since W1-a2 the cursor is ALL of it:
+no watermark is left to cross-check against. This module drives the real `run()` loop over an
+in-memory `listings` + `listing_snapshots` pair to pin what that costs and what it buys.
 
   * INCREMENTAL walks `listing_snapshots.id`, the append-on-content-change log. Its cursor
     survives EVERY terminal outcome — a completed run resumes from the end of the log, not
     from zero — because the cursor is a position in an append-only sequence, not a claim
     about coverage. A run that re-read the log from 0 each hour would re-insert claims that
     exist; one that dropped its cursor on 'ok' would do exactly that.
-  * FULL keeps migration 387's rule: only a budget-'stopped' predecessor is resumed from,
-    because 'ok' there means the whole table was walked and the next full pass is the
-    contract-bump re-walk from id 0.
+  * FULL resumes from an UNFINISHED predecessor — 'stopped' (out of budget) or 'failed'
+    (W1-a5) — because its cursor is a keyset position that only advances past a batch whose
+    transaction closed. Only 'ok' restarts at id 0: the whole table was walked, and the next
+    full pass is the contract-bump re-walk.
   * A pre-W1-a2 incremental cursor is a LISTING id and is refused: reading it back as a
     snapshot id would silently skip every snapshot below it.
 
-The fake connection here is a real (small) query engine over a list of rows, not an
-assertion recorder: the invariant under test is "every change is seen exactly once across
-the sequence of runs", and only executing the keyset arithmetic can show that.
+The fake connection is a real (small) query engine over a list of rows, not an assertion
+recorder: the invariant is "every change is seen exactly once across the sequence of runs".
 """
 
 from __future__ import annotations
@@ -239,6 +238,21 @@ def test_a_budget_stopped_full_run_is_stamped_stopped_and_resumes_where_it_left_
     fourth = _run(conn, limit=10)
     assert fourth["resumed_from_id"] == 0
     assert conn.seen[-10:] == list(range(1, 11))
+
+
+def test_a_failed_full_run_is_resumed_from_and_never_resets_the_walk_to_zero():
+    """W1-a5, from run 34689928656: it died in the bodies pass, was stamped 'failed' with the
+    position it had reached, and its successor restarted at id 0 — 765 s re-walking the oldest
+    rows. The cursor advances only past a batch whose transaction closed."""
+    conn = _Conn([_Listing(i, BASE_TS) for i in range(1, 26)])
+
+    _run(conn, limit=10)
+    conn.batches[-1]["outcome"] = "failed"       # as the run() wrapper stamps a crash
+    conn.seen.clear()
+
+    after = _run(conn, limit=10)
+    assert after["resumed_from_id"] == 10
+    assert conn.seen == list(range(11, 21)), "carries on, never re-walks the prefix"
 
 
 def test_an_operator_anchored_run_neither_resumes_nor_becomes_a_resume_point():

@@ -27,6 +27,14 @@ SOURCES = (
     "realitymix", "maxima",
 )
 
+# THE SERVED SET, spelled once so the two lanes that walk `listings` cannot drift (the
+# resolver's corpus sweep and the claim lane's full walk): a listing is served if it is live
+# or is the representative row of a live property. The rest is history nobody resolves. Both
+# call sites must alias `listings` as `l` — the alias is part of the contract.
+SERVED_LISTING_PREDICATE = """(l.is_active
+        OR EXISTS (SELECT 1 FROM properties pr
+                    WHERE pr.repr_listing_ref_id = l.id AND pr.status = 'active'))"""
+
 # The second rail, and the one that survives a pathological single row: no chunk budget can
 # split ONE array element, so a claim whose value alone dwarfs the budget would still be
 # handed to Postgres verbatim. A value this large is not a location claim — it is a portal
