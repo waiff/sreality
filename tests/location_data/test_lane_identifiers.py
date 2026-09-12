@@ -88,7 +88,7 @@ _KNOWN_LANES = frozenset({"location_claims_intake"})
 _KNOWN_JOB_NAMES = frozenset({
     "location_resolve_incremental", "pin_collision_recompute",
 })
-_KNOWN_VERSIONS = frozenset({"claims_intake@4"})
+_KNOWN_VERSIONS = frozenset({"claims_intake@5"})
 
 
 def _string_constants(path: Path) -> Iterator[tuple[str, str]]:

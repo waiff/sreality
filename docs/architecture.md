@@ -1910,21 +1910,52 @@ The collision epoch is minted weekly by the same workflow (Sunday 04:41 UTC).
 
 **ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
 `35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a
-listing in one keyset pass: `listings.raw_json` plus the class-B legacy columns (ten payload
-readers), and the LATEST stored detail body in `portal_raw_payloads`, joined on
-`(source, source_id_native)` — `portal_raw_payloads.listing_id` is nullable and nothing has ever
-populated it — fetched from R2 and scoped by the contract's exclusion zones (fourteen page
-readers in `location_data/page_readers.py`, the vocabulary both halves share in
+listing: `listings.raw_json` plus the class-B legacy columns (ten payload readers), and the
+LATEST stored detail body in `portal_raw_payloads`, joined on `(source, source_id_native)` —
+`portal_raw_payloads.listing_id` is nullable and nothing has ever populated it — fetched from R2
+and scoped by the contract's exclusion zones (fourteen page readers in
+`location_data/page_readers.py`, the vocabulary both halves share in
 `location_data/claims_common.py`). ONE registry, `claims_intake.READERS`, 24 entries keyed by
 substrate; a name outside it is a hard refusal. **The page half is hash-gated**: a body is mined
 only while `portal_raw_payloads.contract_version IS DISTINCT FROM` the portal's active contract
 version, and the batch stamps the bodies it mined in the same transaction as their claims — so
-a body is fetched once per contract version, the hourly cost is bounded by page CHURN (~50–80
-new bodies an hour fleet-wide) rather than by corpus size, and a contract bump re-mines every
-latest body over the runs that follow. No new table: migration 403 added the column and nothing
-populated it. If R2 is unconfigured the page half is skipped with ONE warning per run and the
-payload half runs unchanged — the hourly ingest for all nine portals must never go dark because
-a credential rotated. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
+a body is fetched once per contract version, the steady-state cost is bounded by page CHURN
+(~50–80 new bodies an hour fleet-wide) rather than by corpus size, and a contract bump re-mines
+every latest body over the runs that follow. No new table: migration 403 added the column and
+nothing populated it. If R2 is unconfigured the page half is skipped with ONE warning per run and
+the payload half runs unchanged — the hourly ingest for all nine portals must never go dark
+because a credential rotated.
+
+**The run is CHANGE-DRIVEN and BODIES-FIRST** (W1-a2), because the first production run showed
+what the alternative costs: selecting on `listings.last_seen_at >= watermark` opened ~180 000
+listings in 51 minutes (9 × 20 000 batches, ~59/s) to re-mine payloads whose claims already
+existed — every active listing is re-sighted within hours by the index walks, so an
+"incremental" hour was a scan of the live corpus. The payload half now walks
+`listing_snapshots.id`: a snapshot row is appended exactly when a listing's content hash moves
+(rule 2) and every write path into `listings` appends one for a brand-new row too, so
+"snapshots above my cursor" IS "the payloads whose claims can have changed". The window is a
+keyset slice of the snapshot log, deduped to one row per listing, with the `--source` filter
+INSIDE it (outside, a source-scoped run whose window held no row for that portal would read as
+"the log is exhausted" and stamp `ok` with its cursor stuck). The page half got its own pass
+AHEAD of that scan: the unmined latest bodies of ACTIVE page-portal listings, selected directly
+in `portal_raw_payloads.id` order, 1 500 a batch, until the backlog empties or half the budget
+is gone — ~250 000 bodies were unmined after the first wave and riding them on the listing scan
+would have taken ~170 runs. It needs no cursor (the mined-at stamp is the progress) and stops if
+a batch stamps nothing, since the next batch would select the same rows.
+
+**The cursor is the lane's only memory, and every run has a budget.** The watermark is gone with
+`--overlap-hours` and `coverage_since`; `location_claim_batches.cursor_after_id` holds a
+`listings.id` in full mode and a `listing_snapshots.id` in incremental mode. Full mode still
+resumes only from a budget-`stopped` predecessor ('ok' means the table was walked, and the next
+full pass is the contract-bump re-walk from 0); incremental resumes from ANY terminal outcome,
+because its cursor is a position in an append-only log, not a coverage claim — and the cursor
+only advances past a batch whose transaction closed, which is what makes a `failed` run safe to
+resume. A pre-W1-a2 cursor is told apart by `cursor_after_ts IS NULL` (the lane writes no
+timestamp cursor any more); a lane with no cursor of its own seeds at the newest snapshot rather
+than at 0. `--max-seconds` defaults to 2400 in the CLI, not only in the workflow: a dispatch
+without a budget ran until `timeout-minutes: 55` cancelled it and stamped nothing resumable, so
+the next run repeated it. A batch does not START unless the previous batch's measured duration
+fits in what is left. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
 re-mine, the archived-HTML sweep, the verify lane and the LLM free-text lane, with the refetch
 cohort and the payload backfill/prune/churn tooling. The lane writes `location_claims`,
 `dirty_locations` and its own `location_claim_batches` ledger and nothing else:

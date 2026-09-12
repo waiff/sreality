@@ -1715,9 +1715,16 @@ def extract_page(
             # `on_miss: fail` — an id-matched reader looked and found no object that is this
             # listing's. Counted, not swallowed: without the tally, "the portal changed its
             # id scheme" and "this page carried no address" are the same green zero.
-            LOG.info("PAGE subject miss listing_id=%d source=%s entry=%s %s",
-                     row.listing_id, row.source, entry.entry_id, miss)
-            result.refuse("subject_not_found")
+            #
+            # DEBUG, not INFO, and counted PER SOURCE. idnes' two subject-scoped entries
+            # logged 1 398 INFO lines in one run — a per-listing line for a per-portal
+            # fact, which buries everything else the run said. The batch summary prints one
+            # line per reason per batch, so `subject_not_found:<source>` is the readout and
+            # the per-listing detail is there under `--verbose` when a portal's id scheme
+            # actually moves.
+            LOG.debug("PAGE subject miss listing_id=%d source=%s entry=%s %s",
+                      row.listing_id, row.source, entry.entry_id, miss)
+            result.refuse(f"subject_not_found:{row.source}")
             continue
         for read in reads:
             claim = stamp_page_claim(

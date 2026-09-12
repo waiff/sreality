@@ -42,12 +42,13 @@ def _key(body_id: int) -> str:
 
 
 def _record(listing_id: int, body_id: int | None, unmined: bool) -> tuple[Any, ...]:
-    """One scan row in the two batch queries' column order."""
+    """One scan row in the three selections' column order."""
     return (
         listing_id, "sreality", f"n{listing_id}", dict(SREALITY_POST_CUTOVER),
         BASE_TS + timedelta(minutes=listing_id), None, None, False,
         body_id, unmined, "detail" if body_id else None,
         "ab" * 32 if body_id else None, BASE_TS if body_id else None, ACTIVE_VERSION,
+        None,
         None, None, None,
     )
 
@@ -76,11 +77,16 @@ class _Cursor:
 class _Conn:
     """`listings` + its joined bodies + the batch ledger, as an in-memory dispatcher."""
 
-    def __init__(self, rows: list[tuple[int, int | None, bool]]) -> None:
+    def __init__(self, rows: list[tuple[int, int | None, bool]],
+                 unmined_bodies: list[tuple[int, int | None, bool]] | None = None) -> None:
         self.rows = rows
+        # What the bodies-first pass finds. A stamp removes a row from it, exactly as the
+        # `contract_version IS DISTINCT FROM` predicate does in production.
+        self.unmined_bodies = list(unmined_bodies or ())
         self.executed: list[tuple[str, dict[str, Any]]] = []
         self.stamped: list[dict[str, Any]] = []
         self.claim_writes: list[list[dict[str, Any]]] = []
+        self.body_selections: list[int] = []
         self._scanned = False
 
     def cursor(self) -> _Cursor:
@@ -98,14 +104,23 @@ class _Conn:
             cur._result = [(1, ACTIVE_VERSION)]
             return
         if sql.startswith("INSERT INTO location_claim_batches"):
-            cur._result = [(7, BASE_TS)]
+            cur._result = [(7,)]
             return
-        if "SELECT max(coalesce(coverage_since, started_at))" in sql:
-            cur._result = [(None,)]
+        if "coalesce(max(id), 0) FROM listing_snapshots" in sql:
+            cur._result = [(0,)]
             return
         if "SELECT outcome, cursor_after_id" in sql:
             return
-        if "FROM listings l" in sql:
+        if sql.startswith("SELECT count(*) FROM listings l"):
+            cur._result = [(len(self.unmined_bodies),)]
+            return
+        if "WHERE l.is_active" in sql:
+            # The bodies-first pass. Every row it hands back is stamped by the loop, so
+            # the backlog shrinks exactly as `contract_version` does in production.
+            cur._result = [_record(*r) for r in self.unmined_bodies[:params["cap"]]]
+            self.body_selections.append(len(cur._result))
+            return
+        if "FROM listings l" in sql or "FROM listing_snapshots s" in sql:
             # One page of rows, then empty — so the scan reaches its end and stamps 'ok'.
             if not self._scanned:
                 self._scanned = True
@@ -123,6 +138,8 @@ class _Conn:
             return
         if sql.startswith("UPDATE portal_raw_payloads"):
             self.stamped.extend(params["rows"].obj)
+            stamped = {row["id"] for row in params["rows"].obj}
+            self.unmined_bodies = [r for r in self.unmined_bodies if r[1] not in stamped]
             return
         raise AssertionError(f"unhandled SQL: {sql[:120]}")
 
@@ -162,11 +179,14 @@ def _stub_preconditions(monkeypatch: pytest.MonkeyPatch) -> None:
         page_readers, "page_entries", lambda entries, page_kind: list(entries)[:1])
 
 
-def _run(conn: _Conn, store: Any) -> dict[str, Any]:
-    return claims_intake.run(
-        conn, mode="full", source="sreality", batch_size=10, max_seconds=None,
-        limit=None, start_after_id=0, overlap_hours=3, statement_timeout=60,
-        dry_run=False, note=None, store=store)
+def _run(conn: _Conn, store: Any, **kwargs: Any) -> dict[str, Any]:
+    defaults: dict[str, Any] = {
+        "mode": "full", "source": "sreality", "batch_size": 10, "max_seconds": None,
+        "limit": None, "start_after_id": 0, "statement_timeout": 60,
+        "dry_run": False, "note": None, "store": store,
+    }
+    defaults.update(kwargs)
+    return claims_intake.run(conn, **defaults)
 
 
 def _page_claim(*_a: Any, **_k: Any) -> IntakeResult:
@@ -288,9 +308,115 @@ def test_a_run_with_no_object_store_mines_nothing_and_still_writes_payload_claim
 
     stats = claims_intake.run(
         conn, mode="full", source="sreality", batch_size=10, max_seconds=None,
-        limit=None, start_after_id=0, overlap_hours=3, statement_timeout=60,
+        limit=None, start_after_id=0, statement_timeout=60,
         dry_run=False, note=None)
 
     assert stats["bodies_eligible"] == 0 and conn.stamped == []
     written = [row["listing_id"] for chunk in conn.claim_writes for row in chunk]
     assert set(written) == {1, 2, 3}
+
+
+# ------------------------------------------------------- the bodies-first backlog pass
+
+BACKLOG = [(10 + i, 200 + i, True) for i in range(7)]
+
+
+@pytest.fixture
+def small_body_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Three bodies a batch instead of 1 500, so a seven-row backlog takes three of them."""
+    monkeypatch.setenv(claims_intake.BODY_FETCH_CAP_ENV, "3")
+
+
+def test_the_bodies_first_pass_drains_the_backlog_before_the_listing_scan(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """W1-a2's point. The backlog is bounded by the CORPUS (~250 000 unmined bodies after
+    the first wave), the listing scan by the hour's change — so riding the bodies on the
+    scan capped the drain at one `body_cap` per 20 000-row batch and would have taken ~170
+    runs. The pass asks for them directly, and the STAMP is its only cursor: each batch
+    re-asks the same question and gets the remainder."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG)
+    store = _Store()
+
+    stats = _run(conn, store)
+
+    assert conn.body_selections == [3, 3, 1, 0], "three-row batches until the backlog is out"
+    assert [s["id"] for s in conn.stamped] == [b[1] for b in BACKLOG]
+    assert stats["bodies_mined"] == 7 and stats["bodies_batches"] == 3
+    assert stats["bodies_backlog_drained"] is True
+    assert stats["bodies_backlog_remaining"] == 0
+    assert stats["outcome"] == "ok"
+
+
+def test_the_bodies_first_pass_stops_at_half_the_run_budget(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """The payload half is never starved. A batch must not START unless the last one's
+    measured duration fits in what is left of the HALF budget — the clock is checked
+    against the next batch's expected cost, not merely against zero."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    clock = iter(range(0, 10_000, 40))          # every reading 40 s later than the last
+    monkeypatch.setattr(claims_intake.time, "monotonic", lambda: float(next(clock)))
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG)
+
+    stats = _run(conn, _Store(), max_seconds=240.0)
+
+    assert stats["bodies_backlog_drained"] is False
+    assert stats["bodies_mined"] < len(BACKLOG), "it stopped inside the backlog"
+    assert stats["bodies_batches"] >= 1
+    # Whatever it mined IS stamped: the half budget ends the pass, it never rolls it back.
+    assert len(conn.stamped) == stats["bodies_mined"]
+
+
+def test_a_bodies_batch_that_stamps_nothing_ends_the_pass(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """The stamp is the cursor, so a batch that stamps nothing would hand the next batch
+    exactly the same rows — a bucket-spending spin for as long as the budget allows. Every
+    GET here fails, which is also the case the rail is most likely to meet."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG)
+    store = _Store(failing={_key(200 + i) for i in range(7)})
+
+    stats = _run(conn, store)
+
+    assert conn.body_selections == [3], "one batch, then it stopped"
+    assert conn.stamped == []
+    assert stats["bodies_mined"] == 0
+    assert stats["bodies_backlog_drained"] is False
+    assert stats["bodies_backlog_remaining"] == 7
+
+
+def test_the_bodies_first_pass_is_skipped_without_an_object_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same rule as the rest of the page half: a rotated credential costs the bodies, never
+    the hourly payload ingest for all nine portals."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    monkeypatch.setattr(claims_intake, "_open_body_store", lambda page_capable: None)
+    conn = _Conn([UNMINED, NO_BODY], unmined_bodies=BACKLOG)
+
+    stats = claims_intake.run(
+        conn, mode="full", source="sreality", batch_size=10, max_seconds=None,
+        limit=None, start_after_id=0, statement_timeout=60, dry_run=False, note=None)
+
+    assert conn.body_selections == [] and conn.stamped == []
+    assert stats["bodies_backlog_remaining"] is None
+    written = [row["listing_id"] for chunk in conn.claim_writes for row in chunk]
+    assert set(written) == {1, 3}
+
+
+def test_a_dry_run_takes_one_bodies_batch_and_stops(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """--dry-run writes no stamp, and the stamp is this pass's only cursor: a second batch
+    would select the same rows forever."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG)
+
+    stats = _run(conn, _Store(), dry_run=True)
+
+    assert conn.body_selections == [3]
+    assert conn.stamped == [] and conn.claim_writes == []
+    assert stats["bodies_batches"] == 1

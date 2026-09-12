@@ -21,8 +21,13 @@ from location_data.claims_intake import (
     _LISTINGS_FULL_SQL,
     _LISTINGS_INCREMENTAL_SQL,
     _RESUME_SQL,
+    _SNAPSHOT_SEED_SQL,
     _STAMP_MINED_SQL,
-    _WATERMARK_SQL,
+    _UNMINED_BODIES_SQL,
+    _UNMINED_BODIES_WHERE,
+    _UNMINED_BODY_BACKLOG_SQL,
+    BODIES_BUDGET_SHARE,
+    DEFAULT_MAX_SECONDS,
     LEGACY_COLUMNS,
     MAX_BATCH_SIZE,
     MIN_BATCH_SIZE,
@@ -30,6 +35,7 @@ from location_data.claims_intake import (
     _row_from_record,
     assert_inventory_ready,
     extract_listing,
+    main,
     stamp_mined_bodies,
     write_result,
 )
@@ -198,8 +204,14 @@ def test_batch_queries_are_keyset_and_bounded():
     full = " ".join(_LISTINGS_FULL_SQL.split())
     incremental = " ".join(_LISTINGS_INCREMENTAL_SQL.split())
     assert "l.id > %(after_id)s" in full and "ORDER BY l.id LIMIT" in full
-    assert "(l.last_seen_at, l.id) > (%(after_ts)s, %(after_id)s)" in incremental
-    assert "l.last_seen_at >= %(watermark)s" in incremental
+    # W1-a2: the incremental keyset walks the SNAPSHOT LOG, not `listings`.
+    assert "FROM listing_snapshots s" in incremental
+    assert "WHERE s.id > %(after_id)s" in incremental
+    assert "ORDER BY s.id LIMIT %(batch_size)s" in incremental
+    # The deleted watermark. `last_seen_at` moves for every active listing every few hours
+    # (the index walks touch it), so selecting on it re-opened ~180 000 listings an hour.
+    assert "last_seen_at >=" not in incremental
+    assert "%(watermark)s" not in incremental and "%(after_ts)s" not in incremental
     # Both walk active AND inactive LISTINGS: a delisted listing's payload is still
     # evidence, and nothing is ever deleted (CLAUDE.md rule 3). The only `is_active` in
     # either query is `portal_contracts.is_active`, which picks the portal's live contract.
@@ -207,6 +219,26 @@ def test_batch_queries_are_keyset_and_bounded():
         assert "l.is_active" not in one
         assert one.count("is_active") == 1 and "pc.is_active" in one
     assert MIN_BATCH_SIZE == 10_000 and MAX_BATCH_SIZE == 30_000
+
+
+def test_the_incremental_scan_dedupes_a_listing_that_changed_twice_in_one_window():
+    """The window is a slice of the snapshot log; a listing with five snapshots in it is
+    ONE row. The readers read `listings.raw_json` — the CURRENT payload — so extracting it
+    once per snapshot would produce five identical fingerprints and four wasted reads."""
+    one = " ".join(_LISTINGS_INCREMENTAL_SQL.split())
+    assert "SELECT listing_id, max(id) AS snapshot_cursor FROM win GROUP BY listing_id" in one
+    assert "JOIN listings l ON l.id = c.listing_id" in one
+
+
+def test_the_source_filter_is_inside_the_snapshot_window():
+    """Outside it, a source-scoped run whose window held no row for that portal would
+    return zero listings — indistinguishable from "the log is exhausted" — and stamp `ok`
+    with its cursor stuck. Inside it, every window row belongs to a returned listing, so
+    `max(snapshot_cursor)` over the result IS the window's own high-water mark."""
+    one = " ".join(_LISTINGS_INCREMENTAL_SQL.split())
+    window = one.split("), changed AS")[0]
+    assert "JOIN listings f ON f.id = s.listing_id AND (%(source)s::text IS NULL OR " \
+           "f.source = %(source)s)" in window
 
 
 def test_the_batch_queries_select_the_legacy_columns_the_readers_consume():
@@ -219,19 +251,21 @@ def test_the_batch_queries_select_the_legacy_columns_the_readers_consume():
     guard column that decides whether `listings.street` is class B or class D, and a guard
     whose column the scan never fetched is a refusal (`_legacy_column`), not a claim.
     """
-    for sql in (_LISTINGS_FULL_SQL, _LISTINGS_INCREMENTAL_SQL):
+    for sql in (_LISTINGS_FULL_SQL, _LISTINGS_INCREMENTAL_SQL, _UNMINED_BODIES_SQL):
         one = " ".join(sql.split())
         for column in LEGACY_COLUMNS:
             assert f"l.{column.removeprefix('listings.')}" in one, column
 
-    row, body, unmined, version = _row_from_record(_RECORD)
-    assert row.legacy_columns == {
+    scan = _row_from_record(_RECORD)
+    assert scan.row.legacy_columns == {
         "listings.locality": None,
         "listings.street": "Svatoplukova",
         "listings.street_source": "parser",
     }
-    assert row.lat is None and row.in_mapy_inventory is False
-    assert (body.id, body.page_kind, unmined, version) == (91, "detail", True, 5)
+    assert scan.row.lat is None and scan.row.in_mapy_inventory is False
+    assert (scan.body.id, scan.body.page_kind) == (91, "detail")
+    assert (scan.body_unmined, scan.contract_version) == (True, 5)
+    assert scan.snapshot_cursor == 4242
 
     # A record whose legacy tail has drifted from LEGACY_COLUMNS shifts every value one
     # position; `zip(strict=True)` is what turns that into a crash on the first row.
@@ -248,31 +282,54 @@ def test_the_claim_write_carries_the_class_b_confidence_as_a_typed_enum():
     assert "d.claim_confidence::match_confidence" in one
 
 
-def test_the_watermark_is_per_source_and_only_advances_on_a_successful_batch():
-    sql = " ".join(_WATERMARK_SQL.split())
-    assert "outcome = 'ok'" in sql
-    assert "source IS NOT DISTINCT FROM %(source)s" in sql
+def test_the_lane_has_no_watermark_left_to_read():
+    """W1-a2 deleted the time-based floor outright. No SQL constant in this module may ask
+    a `location_claim_batches` timestamp where the scan should start — the cursor is the
+    lane's only memory, and a second answer to "where do I begin" is how the two would
+    drift."""
+    statements = {name: v for name, v in vars(claims_intake).items()
+                  if name.endswith("_SQL") and isinstance(v, str)}
+    assert "_WATERMARK_SQL" not in statements
+    for name, sql in statements.items():
+        assert "coverage_since" not in sql, name
+    assert not hasattr(claims_intake, "DEFAULT_OVERLAP_HOURS")
     assert "'running'" in " ".join(_BATCH_INSERT_SQL.split())
 
 
-def test_a_budget_stopped_run_is_invisible_to_the_watermark():
-    """The critical one. `outcome='ok'` now means "the scan ran out of rows", and the
-    watermark reads nothing else — so a run that scanned 30k of 650k listings and stopped
-    leaves the incremental floor exactly where it found it. Stamping it 'ok' moved the
-    floor past 620k rows that were never opened, and for the ~270k delisted ones (whose
-    `last_seen_at` will never move again) that is permanent."""
-    assert "outcome = 'ok'" in " ".join(_WATERMARK_SQL.split())
-    for terminal in ("'stopped'", "'failed'", "'running'"):
-        assert terminal not in _WATERMARK_SQL
+def test_the_resume_lookup_is_per_source_per_mode_and_needs_a_cursor():
+    sql = " ".join(_RESUME_SQL.split())
+    assert "source IS NOT DISTINCT FROM %(source)s" in sql
+    assert "scan_mode = %(scan_mode)s" in sql
+    assert "cursor_after_id IS NOT NULL" in sql
+    # A completed incremental run is resumed from too: its cursor is a position in an
+    # append-only log, not a coverage claim, so restarting at 0 would re-walk the log.
+    assert "outcome IN ('ok', 'stopped', 'failed')" in sql
+
+
+def test_the_lane_writes_no_timestamp_cursor_and_that_is_the_epoch_marker():
+    """Before W1-a2 an incremental cursor was `(last_seen_at, id)`; it is a bare
+    `listing_snapshots.id` now. Reading an old LISTING id back as a SNAPSHOT id would skip
+    every snapshot below it, so `cursor_after_ts IS NULL` is what tells the two apart — and
+    it only works because nothing in this lane populates the column any more."""
+    assert "cursor_after_ts" not in " ".join(_BATCH_FINISH_SQL.split())
+    assert "cursor_after_ts" not in " ".join(_BATCH_INSERT_SQL.split())
+
+
+def test_the_cold_start_seeds_at_the_newest_snapshot():
+    """A lane with no cursor of its own starts at the head of the log, not at 0: every
+    listing's payload has already been mined many times over by the watermark-driven lane
+    this replaces, and walking the whole log to re-insert existing claims is the waste
+    W1-a2 exists to delete. The exhaustive pass is `--mode full`."""
+    assert " ".join(_SNAPSHOT_SEED_SQL.split()) == \
+        "SELECT coalesce(max(id), 0) FROM listing_snapshots"
 
 
 def test_the_batch_row_carries_the_cursor_and_the_mode_that_wrote_it():
-    """A full cursor is a bare `listings.id`; an incremental one is `(last_seen_at, id)`.
-    Resuming one from the other would skip an arbitrary slice, so `scan_mode` rides on the
-    row and the resume lookup filters on it."""
+    """A full cursor is a bare `listings.id`; an incremental one is a
+    `listing_snapshots.id`. Resuming one from the other would skip an arbitrary slice, so
+    `scan_mode` rides on the row and the resume lookup filters on it."""
     finish = " ".join(_BATCH_FINISH_SQL.split())
     assert "cursor_after_id = %(cursor_after_id)s" in finish
-    assert "cursor_after_ts = %(cursor_after_ts)s" in finish
     insert = " ".join(_BATCH_INSERT_SQL.split())
     assert "scan_mode" in insert and "resumable" in insert
 
@@ -298,12 +355,14 @@ def test_no_write_statement_touches_an_existing_production_table():
 
 # --------------------------------------------- the second substrate and its hash gate
 
-# One scan row, in the order both batch queries select: the listing, its Mapy-inventory
+# One scan row, in the order all THREE selections project: the listing, its Mapy-inventory
 # membership, its LATEST stored detail body (id, unmined?, page_kind, sha, first seen), the
-# portal's ACTIVE contract version, then the legacy-column TAIL.
+# portal's ACTIVE contract version, the snapshot cursor (NULL outside incremental mode),
+# then the legacy-column TAIL.
 _RECORD = (7, "ceskereality", "3822640", {"id": "3822640"},
            datetime(2026, 8, 13, 6, 0, tzinfo=UTC), None, None, False,
            91, True, "detail", "ab" * 32, datetime(2026, 8, 13, 5, 0, tzinfo=UTC), 5,
+           4242,
            None, "Svatoplukova", "parser")
 
 
@@ -313,7 +372,7 @@ def test_the_scan_joins_the_latest_stored_detail_body_per_portal_key():
     ZERO rows over the whole archive — and the lane would not raise: the first batch would
     come back empty and the batch would stamp 'ok'. The join is on `(source,
     source_id_native)`, which both writers populate and which is UNIQUE on `listings` too."""
-    for sql in (_LISTINGS_FULL_SQL, _LISTINGS_INCREMENTAL_SQL):
+    for sql in (_LISTINGS_FULL_SQL, _LISTINGS_INCREMENTAL_SQL, _UNMINED_BODIES_SQL):
         one = " ".join(sql.split())
         assert "LEFT JOIN LATERAL" in one
         assert "p.source = l.source AND p.source_id_native = l.source_id_native" in one
@@ -341,43 +400,69 @@ def test_the_hash_gate_is_is_distinct_from_against_the_portals_own_active_contra
         assert "(pb.contract_version IS DISTINCT FROM pc.version)" in one
         # Per PORTAL, resolved in SQL: one portal's version can never gate another's body.
         assert "LEFT JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active" in one
+    # The bodies-first pass asks the same question as a PREDICATE rather than as a
+    # projected verdict — it selects only what the gate admits.
+    for sql in (_UNMINED_BODIES_SQL, _UNMINED_BODY_BACKLOG_SQL):
+        one = " ".join(sql.split())
+        assert "AND pb.contract_version IS DISTINCT FROM pc.version" in one
+        assert "LEFT JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active" in one
 
 
-def test_a_body_already_at_the_active_version_is_not_a_candidate():
-    """The whole point of the gate: no R2 round trip for a body this contract already
-    mined. The SQL computes it; `_row_from_record` carries the verdict through."""
-    _, body, unmined, _ = _row_from_record(_RECORD)
-    assert body is not None and unmined is True
-    mined = (*_RECORD[:9], False, *_RECORD[10:])
-    _, body, unmined, _ = _row_from_record(mined)
-    assert body is not None and unmined is False
+def test_the_bodies_first_pass_selects_the_latest_body_of_an_active_listing_only():
+    """ACTIVE, unlike the listing scan. A delisted row's PAYLOAD is evidence we already
+    hold; paying R2 for its stored page body ahead of ~250 000 live ones is not. The
+    portals are a parameter, not a literal: only the sources whose contract declares a page
+    entry have bodies worth fetching, and that set lives in the reader registry."""
+    for sql in (_UNMINED_BODIES_SQL, _UNMINED_BODY_BACKLOG_SQL):
+        one = " ".join(sql.split())
+        assert "WHERE l.is_active" in one
+        assert "l.source = ANY(%(page_sources)s::text[])" in one
+        assert "(%(source)s::text IS NULL OR l.source = %(source)s)" in one
+        # ONE definition of "the latest detail body", shared with the listing scan.
+        assert "ORDER BY p.last_observed_at DESC, p.id DESC LIMIT 1" in one
+        assert "p.page_kind = 'detail'" in one
+    selection = " ".join(_UNMINED_BODIES_SQL.split())
+    # Ordered by the body's own id and bounded by the fetch cap. No cursor: the stamp is
+    # the progress, so the next batch's `IS DISTINCT FROM` no longer matches this one.
+    assert "ORDER BY pb.id LIMIT %(cap)s" in selection
+    assert "%(after_id)s" not in selection
+    # No `raw_json`: the page substrate is the BODY, and a 1 500-row batch would otherwise
+    # drag ~10 MB of payload over the wire to throw it away.
+    assert "l.raw_json" not in selection
+    assert "NULL::jsonb" in selection
 
 
-def test_a_listing_with_no_stored_body_yields_no_candidate():
-    bodiless = (*_RECORD[:8], None, None, None, None, None, 5, *_RECORD[14:])
-    row, body, unmined, version = _row_from_record(bodiless)
-    assert body is None and unmined is False and version == 5
-    assert row.listing_id == 7
+def test_the_backlog_count_is_the_selection_without_its_bound():
+    """The summary's "backlog remaining" must be the same question the drain asks, or the
+    operator reads a number that never reaches zero."""
+    count = " ".join(_UNMINED_BODY_BACKLOG_SQL.split())
+    selection = " ".join(_UNMINED_BODIES_SQL.split())
+    assert count.startswith("SELECT count(*) FROM listings l")
+    # Same predicate, no bound of its own: the drain's `ORDER BY pb.id LIMIT %(cap)s` is
+    # the only difference between the two (the `LIMIT 1` inside the lateral is shared).
+    where = " ".join(_UNMINED_BODIES_WHERE.split())
+    assert where in count and where in selection
+    assert count.endswith(where)
 
 
-def test_mining_a_body_stamps_it_at_the_version_that_mined_it_in_the_same_transaction():
-    """A rolled-back batch must un-stamp its bodies too, or the next run would skip claims
-    that were never written."""
-    conn = _Conn()
-    with conn.cursor() as cur:
-        stamp_mined_bodies(cur, [{"id": 91, "version": 5}])
-    sql, params = conn.executed[-1]
-    assert sql.startswith("UPDATE portal_raw_payloads")
-    assert "SET contract_version = v.version" in sql
-    assert params["rows"].obj == [{"id": 91, "version": 5}]
-    assert "portal_raw_payloads" in " ".join(_STAMP_MINED_SQL.split())
+def test_the_page_half_may_take_at_most_half_the_run_budget():
+    """The backlog is bounded by the CORPUS and the payload half by the hour's change, so
+    an undivided budget would let ~170 runs of body drain starve the claims the operator is
+    actually waiting on."""
+    assert BODIES_BUDGET_SHARE == 0.5
 
 
-def test_an_empty_stamp_list_runs_no_statement():
-    conn = _Conn()
-    with conn.cursor() as cur:
-        stamp_mined_bodies(cur, [])
-    assert conn.executed == []
+def test_a_run_always_has_a_budget_even_when_the_caller_forgets_one():
+    """A `workflow_dispatch` without `max_seconds` ran unbounded, hit `timeout-minutes: 55`,
+    was CANCELLED, and stamped nothing — so the next run restarted from the same cursor and
+    the lane made no progress at all. The default lives in the CLI, not only in the
+    workflow, because the workflow is not the only caller."""
+    parser = claims_intake.build_parser()
+    assert parser.parse_args([]).max_seconds == DEFAULT_MAX_SECONDS == 2400.0
+    assert parser.parse_args(["--max-seconds", "600"]).max_seconds == 600.0
+    # And the flag that made "incremental" mean "re-read the live corpus" is gone.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--overlap-hours", "3"])
 
 
 def test_the_registry_is_one_and_matches_the_contract_record_exactly():
