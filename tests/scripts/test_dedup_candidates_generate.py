@@ -141,8 +141,6 @@ class _Conn:
             return [("sreality", "byt", "prodej", 10, 5, 9, 8, 7, 8, 10, 6, 7, 1, 0)], cols, -1
         if s == sql.TOP_BUCKETS_SQL:
             return [("554782", "Praha", "2+kk", 3, 2)], ["obec_kod", "obec_name", "disposition", "listings", "active"], -1
-        if s == sql.TOWN_ASSIGNMENT_SQL:
-            return [("point_in_polygon", 9)], ["method", "listings"], -1
         if s == sql.BLOCK_NAMES_SQL:
             assert all(isinstance(k, int) for k in p["keys"])
             return [(str(k), "Town " + str(k)) for k in p["keys"]], ["obec_kod", "obec_name"], -1
@@ -324,9 +322,11 @@ def test_estimate_counts_every_town_for_every_scope_and_writes_nothing() -> None
     assert s["pairs"] == {"C1": 4, "C3": 4, "total": 8}
     assert s["top_towns"][0]["block_key"] == "500001" and s["top_towns"][0]["obec_name"] == "Town 500001"
     assert s["funnel"][0]["source"] == "sreality" and s["top_buckets"][0]["obec_name"] == "Praha"
-    assert report["town_assignment"] == [{"method": "point_in_polygon", "listings": 9}]
+    # W2-b deleted the town-assignment readout: it keyed on `admin_assignment_method`,
+    # which the answer table does not carry.
+    assert "town_assignment" not in report
     md = lane.estimate_markdown(report)
-    assert "| all |" in md and "| active |" in md and "Town 500001" in md and "point_in_polygon" in md
+    assert "| all |" in md and "| active |" in md and "Town 500001" in md
 
 
 # ------------------------------------------------------------------ verify

@@ -9,8 +9,8 @@ path C" and the `2026-09-10 (a)` ledger entry.
 Three words do the work below:
 
 - a **path** is one way of looking for pairs. **Path C**, the first and so far only one built,
-  blocks on the **town** — `listing_location_current.obec_kod`, the new location engine's
-  projection (CLAUDE.md rule 24), never the legacy `listings.obec_id` / `geom` / `street` —
+  blocks on the **town** — `listing_location.obec_kod`, the location program's one answer
+  table (CLAUDE.md rule 24), never the legacy `listings.obec_id` / `geom` / `street` —
   and compares attributes. Path A (street / geo / radius) is a second `PathDef` in
   `toolkit/dedup_candidates.py`, not built; path B (image similarity) is Wave 3.
 - a **rung** is which attributes were compared: **C1** = town + disposition + area (both sides

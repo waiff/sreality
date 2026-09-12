@@ -233,7 +233,7 @@ component is slimmed twice — each wave rewrites one component and slims its st
   predicate now admits only claims whose `contract_entry_id` belongs to an ACTIVE contract (plus
   operator claims, which carry none) — W1-c bumped all nine contract versions and the fingerprint
   hashes `extractor_version`, so the superseded rows sit beside the new ones with LOWER ids and
-  would win every first-claim tie. W2-b's migration deletes them as a cleanup.
+  would win every first-claim tie. `--retract` deletes them as a cleanup after W2-b applies.
   **Cutover — the precondition is the RE-MINE, not the migration.** The active-contract rail plus
   W1-c's nine version bumps mean every claim mined under the old versions is invisible until its
   body is re-mined: the three payload portals (sreality, bezrealitky, mmreality) on the next
@@ -247,11 +247,35 @@ component is slimmed twice — each wave rewrites one component and slims its st
   re-mined) and fall as `claim_insert` re-enqueues each re-mined listing. No consumer reads
   `listing_location` yet, so the excursion is invisible to users — which is why it happens before W3
   and not after.
-  **W2-b** then cuts the five remaining readers of `listing_location_current` (the four `toolkit/`
-  modules + `refresh_location_compare_cohort()`), deletes the inactive-entry claims and drops the
-  old tables. Nothing writes them from this PR on; `--workers` on the drain is unblocked but not
-  implemented. One reader goes writer-less meanwhile: `toolkit/location_quality.py:244` reads
-  `location_resolution_candidates`, so that admin panel goes EMPTY rather than wrong.
+  **W2-b BUILT (migration 502), merged only after the corpus re-resolve — the readers cut over, the
+  old projection and every resolver-side relation dropped.** There were SIX readers, not five: the
+  map missed `location_data/operator_corrections.read_projection`, the corrections POST's
+  read-your-writes echo. Three were repointed at `listing_location` — `location_quality` (rewritten:
+  the pin-sharing histogram, the collision-class list and the `position_source` /
+  `admin_assignment_method` mixes went with their producers, leaving `granularity` +
+  `match_confidence` over a totals row centred on rule 25's invariant, plus a `stale_registry`
+  count that replaces the registry-version mix with the one number it was asked for),
+  `dedup_candidates_sql` (table repointed; `TOWN_ASSIGNMENT_SQL` deleted — it keyed on
+  `admin_assignment_method`, and with it the SPA's "how the town was decided" panel) and
+  `operator_corrections`. `verify_pipeline`'s town-coverage check was already repointed in W2-a.
+  **Two surfaces were deleted whole**: the frozen labelled samples (`toolkit/location_labels.py`,
+  four API routes, the SPA section, two tables — they scored old-vs-new precision and "new" is the
+  only system now) and the dark compare bench (`toolkit/location_compare.py` at 1,142 lines, seven
+  API routes, `/location-compare` + `CompareMapPair.tsx` + `lib/locationCompare.ts`, the cohort
+  pair and `refresh_location_compare_cohort()`). `serving_flags.py` went too — no consumer ever
+  read a `location_v2` flag and none was ever seeded, so the switch only ever documented an intent.
+  **Migration 502 drops 21 relations, 1 view, 5 functions, 4 enum types, one pg_cron job and one
+  `derived_artifacts` row**, statement-autocommit with `lock_timeout = '600s'` and every statement
+  `if exists` (498's one-transaction form deadlocked against the continuous lanes, and the apply
+  workflow's retry re-runs the whole file). **The cron job is unscheduled IN the migration, before
+  its tables are touched**: a column drop under a live schedule does not raise, it breaks the job
+  silently on a later tick, and the only trace is a `cron.job_run_details` row nobody reads. The
+  inactive-entry claim cleanup is deliberately NOT in the migration: a `DO` block cannot COMMIT, so
+  batching ~5 M sreality rows inside one would be a single long transaction that makes no progress
+  if it is killed — `python -m location_data.contracts --retract <portal>@<version>` already does
+  it in bounded, committed, resumable batches, and it runs after the apply.
+  **Merge gate**: `count(listing_location) = count(active listings)` AND each portal's `cz_no_town`
+  line back at or below its pre-W2 level. `--workers` on the drain is unblocked but not implemented.
 - **W3 — consumers, display first** (= plan S4): the 26 fields into `browse_list` and the public
   views; one label, one code predicate, one circle; `placeLabel.ts` assemblies, the five chip
   predicates, the sreality-only filters, `home_city_id` deleted rather than ported. Estimation last.

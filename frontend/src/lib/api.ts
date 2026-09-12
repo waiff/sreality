@@ -825,11 +825,6 @@ export interface NewDedupCandidateDistributionRow {
   towns: number;
 }
 
-export interface NewDedupCandidateTownAssignmentRow {
-  method: string | null;
-  listings: number;
-}
-
 export interface NewDedupCandidateTypeCount {
   category_main: string | null;
   listings: number;
@@ -844,7 +839,6 @@ export interface NewDedupCandidateStats {
   distribution: NewDedupCandidateDistributionRow[];
   funnel: NewDedupCandidateFunnelRow[];
   top_buckets: NewDedupCandidateBucketRow[];
-  town_assignment: NewDedupCandidateTownAssignmentRow[];
   /* Stamped onto the stats after the statistics step, so a run that predates a
    * field (or failed early) simply has none. */
   partial?: boolean;

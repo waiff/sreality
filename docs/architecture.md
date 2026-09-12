@@ -1684,15 +1684,16 @@ renumber.** Navigate by area:
     NOT NULL), the registry codes it resolved to, and one `disputed` word when the row disagrees
     with itself. A consumer that reads the answer table inherits all of that; one that
     reads `listings.geom` inherits none of it, and a 75 m dedup circle around a town-centroid pin
-    is exactly the false-merge class the axes exist to prevent. The cutover (W6) is per feature,
+    is exactly the false-merge class the axes exist to prevent. The cutover (W3) is per feature,
     in ascending blast-radius order (dashboards → dedup → filters and stats → map → estimation
-    last), each behind a `location_v2.<feature>` `app_settings` flag so it reverts without a
-    deploy (design risk R12), each preceded by a ≥ 7-day shadow compare and the operator's review
-    of the clustered disagreements; the legacy columns stay populated and read-only for a full
-    registry cycle after their consumer flips, then a forward migration prunes them. Until a
-    feature flips, its legacy read is correct — the rule is about *new* code and about never
-    back-porting a projection value into `listings`. The engine is readable now (un-shadowed
-    2026-09-09); the consumer contract, including the dedup floors and the one query, is
+    last), each preceded by the operator's review of the clustered disagreements; the legacy
+    columns stay populated and read-only until W4 prunes them in a forward migration. **There is
+    no flag**: W2-b deleted `location_data/serving_flags.py`, whose `location_v2.<feature>`
+    `app_settings` keys were never seeded and which no consumer ever read — a per-feature switch
+    that only ever documented an intent is a rail that looks enforced and is not, and flipping a
+    reader is a PR, reversible the way every other deploy is. Until a feature flips, its legacy
+    read is correct — the rule is about *new* code and about never back-porting an answer-table
+    value into `listings`. The consumer contract, including the dedup floors and the one query, is
     `docs/design/location-serving-contract.md`.
 
 
@@ -1921,9 +1922,9 @@ read. The fingerprint FUNCTION is unchanged and still takes all 23 inputs — th
 page_kind, extractor id, value_norm and the rest, they are simply not stored — so every fingerprint
 on disk stayed valid and no corpus re-insert happened.
 
-**The resolver is FOUR STEPS and one answer table** (W2-a, migration 501). `listing_location`
-is a **rebuildable cache**, never a store of record — truncating it is always legal and the
-`dirty_locations` drain is its only writer — and it is **26 columns**: the listing, one `geom`,
+**The resolver is FOUR STEPS and one answer table** (W2-a migration 501, W2-b migration 502).
+`listing_location` is a **rebuildable cache**, never a store of record — truncating it is always
+legal and the `dirty_locations` drain is its only writer — and it is **26 columns**: the listing, one `geom`,
 nine names (country, kraj, okres, obec, část obce, street, čp, čo, PSČ), six RÚIAN codes, three
 grade columns (`match_confidence`, `granularity`, `uncertainty_radius_m`, all NOT NULL), two
 status columns (`country_status` NOT NULL, `disputed`) and four housekeeping ones
@@ -1976,13 +1977,37 @@ a kraj-scoped cousin, an orphan sweep); they were folded into the one above unde
 W2-a **deleted ~3,700 lines** and nine tables' worth of producers: survivorship (policy is code),
 the uncertainty-policy resolver, the contradiction ledger + its disposition log + the auto-close
 engine, the pin-collision epoch and its weekly cron, the parcel rung, the derived-column twin of
-migration 384's SQL functions, and the property-grain projection — which was a verbatim copy of its
-winner's row (migration 493 measured `p.kraj_kod` and `w.kraj_kod` agreeing on 0 of 637,381 rows),
-nothing outside one pg_cron statement read it, and it was the drain's only cross-listing write and
-therefore the stated reason the lane could not run `--workers`. The registry protocol went from
-fifteen query kinds to nine and the drain's write path from seven statements per slice to one.
-`listing_location_current` and `property_location_current` are **frozen and readable** until W2-b
-cuts their five remaining readers and drops them; nothing writes them any more.
+migration 384's SQL functions, and the property-grain projection's builder. The registry protocol
+went from fifteen query kinds to nine and the drain's write path from seven statements per slice to
+one.
+
+**W2-b then cut the readers and dropped the tables** (migration 502). Six modules read the W1
+projection: `location_quality` (the admin dashboard, rewritten onto the answer table — the
+pin-sharing histogram, the collision-class list and the `position_source` /
+`admin_assignment_method` mixes went with their producers, leaving the two axes a consumer asks),
+`dedup_candidates_sql` (repointed; its town-assignment audit keyed on `admin_assignment_method` and
+was deleted), `verify_pipeline`'s town-coverage check (repointed in W2-a),
+`operator_corrections`' read-your-writes echo, and two surfaces deleted whole — the frozen labelled
+samples (`toolkit/location_labels.py`, four API routes, an SPA section; they scored old-vs-new
+precision and "new" is the only system now) and the dark compare bench
+(`toolkit/location_compare.py` at 1,142 lines, seven API routes, the `/location-compare` SPA page
+and its map component). **What went with them: 21 relations, one view, five functions, four enum
+types and a pg_cron job** — both `*_location_current` projections, the resolution trace + candidate
+ladder + verifications, the three policy tables, `location_constants` /
+`location_level_granularity` / `location_metrics_rollup`, the pin-cluster trio, the contradiction
+trio, the two labelled-sample tables, and the compare cohort with
+`refresh_location_compare_cohort()` (unscheduled IN the migration, before its tables are dropped: a
+column drop under a live schedule does not raise, it breaks the job silently on a later tick).
+`property_location_current` was a verbatim copy of its winner's row (migration 493 measured
+`p.kraj_kod` and `w.kraj_kod` agreeing on 0 of 637,381 rows), nothing outside one pg_cron statement
+read it, and it was the drain's only cross-listing write and therefore the stated reason the lane
+could not run `--workers`. Everything dropped is a **rebuildable cache or observability**, never
+history: the answer table is a pure function of `location_claims` + the RÚIAN mirror, and the
+resolution/contradiction tables were the trace of an engine that no longer exists. The migration is
+statement-autocommit with a long `lock_timeout` and every statement `if exists`, for the reason
+498's one-transaction form had to be rewritten: one long transaction holding ACCESS EXCLUSIVE on
+twenty relations is a lock queue every reader parks behind, and the apply workflow's retry re-runs
+the whole file.
 
 **ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
 `35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a
@@ -2091,7 +2116,8 @@ bump, which re-resolves the corpus through the ordinary lane.
 **Licence enforcement is structural, and it moved UPSTREAM.** `licence_class` is the program's
 single licence vocabulary and `ephemeral_display_only` (Mapy.cz-class) its poison value. W1 spent
 three CHECKs on it — `loc_res_licence` on `location_resolutions`, `llc_licence`/`plc_licence` on the
-projections — so that such a position could not be minted or stored. `listing_location` carries no
+projections, all three dropped with their relations in W2-b — so that such a position could not be
+minted or stored. `listing_location` carries no
 `position_licence_class` column because the guard is now in the resolver's own claim projection:
 `licence_class IN ('portal','operator')` is part of `_CLAIMS_SELECT`, so a Mapy-class coordinate is
 not refused at the winner, it is never READ. A partial index on `location_claims` still keeps the
@@ -2105,8 +2131,13 @@ that is the normal case on any listing whose body has not changed since. `_CLAIM
 admits a claim only when its `contract_entry_id` belongs to a contract whose header is `is_active`,
 plus operator claims, which carry no entry by construction (`contract_entry_id IS NULL` +
 `licence_class = 'operator'` — named explicitly, so a portal claim that lost its entry id is NOT
-let through). Filtering at READ is what makes deleting the superseded rows a cleanup W2-b's
-migration can take at its leisure rather than a correctness step the resolver depends on. The claim lane's blocking gate is `claims JOIN
+let through). Filtering at READ is what makes deleting the superseded rows a cleanup that can be taken
+at leisure rather than a correctness step the resolver depends on — and W2-b's migration
+deliberately does NOT take it. "The contract's claims" is every listing a portal has ever had
+(~5 M rows on sreality); a `DO` block cannot COMMIT, so batching inside one would still be ONE
+transaction that holds locks for its whole run and makes no progress at all if it is killed. The
+cleanup is `python -m location_data.contracts --retract <portal>@<version>`, which already deletes
+in bounded, individually-committed batches and resumes after an interruption. The claim lane's blocking gate is `claims JOIN
 mapy_affected WHERE claim_type='coordinate'` = 0, and it refuses to start unless the Mapy affected-set
 inventory (migration 385 — five arms, identity and reason codes, **never** a coordinate, and
 trigger-immutable: 42501 on UPDATE/DELETE/TRUNCATE) is TERMINAL *and* COMPLETE. Half-built is worse

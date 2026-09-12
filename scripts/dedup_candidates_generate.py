@@ -159,7 +159,6 @@ def estimate(conn: Any, inputs: dict[str, Any], *, scopes: list[str], only: Sequ
         report["scopes"][scope]["funnel"] = fetch_funnel(conn, active_only=params["active_only"])
         report["scopes"][scope]["top_buckets"] = fetch_top_buckets(
             conn, active_only=params["active_only"], limit=top)
-    report["town_assignment"] = fetch_town_assignment(conn)
     return report
 
 
@@ -287,10 +286,6 @@ def fetch_funnel(conn: Any, *, active_only: bool) -> list[dict[str, Any]]:
     return _rows(conn, sql.FUNNEL_SQL, {"active_only": active_only})
 
 
-def fetch_town_assignment(conn: Any) -> list[dict[str, Any]]:
-    return _rows(conn, sql.TOWN_ASSIGNMENT_SQL)
-
-
 def fetch_top_buckets(conn: Any, *, active_only: bool, limit: int) -> list[dict[str, Any]]:
     return _rows(conn, sql.TOP_BUCKETS_SQL, {"active_only": active_only, "limit": limit})
 
@@ -333,7 +328,6 @@ def generation_stats(conn: Any, gen: dc.Generation, *, top: int) -> dict[str, An
         "distribution": _distribution(ranked),
         "funnel": fetch_funnel(conn, active_only=params["active_only"]),
         "top_buckets": fetch_top_buckets(conn, active_only=params["active_only"], limit=top),
-        "town_assignment": fetch_town_assignment(conn),
     }
 
 
@@ -490,9 +484,6 @@ def estimate_markdown(report: dict[str, Any]) -> str:
                          f"{_fmt(r['listings'])} | {_fmt(r['with_town'])} | {_fmt(r['with_disposition'])} | "
                          f"{_fmt(r['with_area'])} | {_fmt(r['c1_eligible'])} | {_fmt(r['c3_eligible'])} | "
                          f"{_fmt(r['town_no_attribute'])} |")
-    lines += ["", "### how the town was assigned (path C population)", "", "| method | listings |", "| --- | ---: |"]
-    for r in report["town_assignment"]:
-        lines.append(f"| {r['method']} | {_fmt(r['listings'])} |")
     return "\n".join(lines) + "\n"
 
 

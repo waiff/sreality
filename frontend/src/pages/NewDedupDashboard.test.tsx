@@ -66,7 +66,6 @@ const STATS: NewDedupCandidateStats = {
     },
   ],
   top_buckets: [],
-  town_assignment: [],
   scope: 'all',
   partial: false,
 };

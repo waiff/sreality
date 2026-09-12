@@ -301,11 +301,12 @@ app.include_router(new_dedup_tags_router)
 # come from the generation lane (scripts/dedup_candidates_generate.py). See
 # toolkit/dedup_candidates.py and docs/design/new-dedup/PROGRAM.md (Wave 2).
 app.include_router(new_dedup_candidates_router)
-# /location/* (location-quality dashboard, frozen labelled samples, operator
-# corrections) — the FIRST consumer of the location serving projection
-# (location program W1v), admin-gated (require_admin). Reads via
-# toolkit/location_quality.py + toolkit/location_labels.py; the corrections
-# POST appends an operator claim and resolves synchronously (05 5.5.5).
+# /location/* (location-quality dashboard + operator corrections) — the consumer
+# of `listing_location`, the location program's one answer table (mig 501),
+# admin-gated (require_admin). Reads via toolkit/location_quality.py; the
+# corrections POST appends an operator claim and resolves synchronously
+# (05 5.5.5). W2-b deleted the /sample/* and /compare/* families with their
+# tables.
 app.include_router(location_quality_router)
 
 

@@ -56,7 +56,7 @@ def test_placeholders_are_all_named_and_cast_where_their_type_is_not_implied() -
     corpus = [s for stmts in sql.RUNG_SQL.values() for s in stmts.values()] + [
         sql.BLOCKS_SQL, sql.BLOCK_IDS_SQL, sql.STALE_SWEEP_SQL, sql.FUNNEL_SQL, sql.TOP_BUCKETS_SQL,
         sql.PAIR_MATRIX_SQL, sql.LISTINGS_WITH_CANDIDATES_SQL, sql.PAIRS_PER_BLOCK_SQL,
-        sql.BLOCK_NAMES_SQL, sql.BLOCK_ATTRS_SQL, sql.TOWN_ASSIGNMENT_SQL,
+        sql.BLOCK_NAMES_SQL, sql.BLOCK_ATTRS_SQL,
     ]
     for statement in corpus:
         assert "%s" not in statement.replace("%(", ""), "positional placeholder"
@@ -84,16 +84,18 @@ def test_every_statement_the_lane_runs_is_covered_by_the_full_parameter_set() ->
         assert not missing, f"{name} names {missing}, which no call site supplies"
 
 
-def test_the_location_read_stays_on_the_projection_never_the_legacy_columns() -> None:
+def test_the_location_read_stays_on_the_answer_table_never_the_legacy_columns() -> None:
     corpus = "\n".join(
         [s for stmts in sql.RUNG_SQL.values() for s in stmts.values()]
         + [sql.BLOCKS_SQL, sql.BLOCK_IDS_SQL, sql.FUNNEL_SQL, sql.TOP_BUCKETS_SQL, sql.BLOCK_ATTRS_SQL,
-           sql.TOWN_ASSIGNMENT_SQL, sql.BLOCK_NAMES_SQL]
+           sql.BLOCK_NAMES_SQL]
     ).lower()
     for legacy in ("x.geom", "x.obec_id", "x.okres_id", "x.region_id", "x.ku_id", "x.obec ", "x.street",
                    "street_name_key", "geocode_cache", "browse_list", "locality_district_id"):
         assert legacy not in corpus, legacy
-    assert "listing_location_current" in corpus
+    # W2-b: the one answer table, and the frozen W1 projection is gone from the tree.
+    assert "listing_location" in corpus
+    assert "listing_location_current" not in corpus
     # the granularity floor is applied by RANK, never by enum order
     assert "location_granularity_rank" in corpus
     assert "granularity >=" not in corpus and "granularity > " not in corpus

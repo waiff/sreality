@@ -164,13 +164,16 @@ _KOD_ADM_SQL = """
     WHERE ap.kod_adm = %s AND ap.valid_to IS NULL
 """
 
+# The read-your-writes echo (05 5.5.5), off `listing_location` since W2-b. The
+# axes it names are the answer table's own: no display label (derived at read),
+# no position_source / admin_assignment_method (the four-step resolver emits
+# neither), and `disputed` is the reason word itself, NULL when clean.
 _PROJECTION_SQL = """
-    SELECT listing_id, granularity::text, position_source::text,
-           match_confidence::text, admin_assignment_method::text,
+    SELECT listing_id, granularity::text, match_confidence::text,
            uncertainty_radius_m, ruian_adm_kod, street_name,
            house_number_cp, house_number_co, psc, obec_name, okres_name,
-           display_label, location_disputed, resolver_version, built_at
-    FROM listing_location_current WHERE listing_id = %s
+           disputed, resolver_version, resolved_at
+    FROM listing_location WHERE listing_id = %s
 """
 
 
@@ -270,6 +273,6 @@ def read_projection(conn: psycopg.Connection, listing_id: int) -> dict[str, Any]
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_PROJECTION_SQL, (listing_id,))
         row = cur.fetchone()
-    if row is not None and row.get("built_at") is not None:
-        row["built_at"] = row["built_at"].isoformat()
+    if row is not None and row.get("resolved_at") is not None:
+        row["resolved_at"] = row["resolved_at"].isoformat()
     return row

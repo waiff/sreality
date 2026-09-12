@@ -163,7 +163,7 @@ def test_a_pin_just_outside_a_polygon_still_gets_that_town_at_low_confidence():
     """BIND's LAST rung. A pin 30 m outside every obec polygon is a boundary artifact — a
     rounded coordinate, a simplified edge, a river bank — not a listing with no town, and
     rule 25 does not allow a Czech listing to have none. `PIP_SLIVER_TOLERANCE_M` is 250 m,
-    the value `location_constants.pip_sliver_tolerance_m` carried before W2-b drops it.
+    the value `location_constants.pip_sliver_tolerance_m` carried before W2-b dropped it.
 
     It is NOT a dispute: nothing about the row contradicts anything else about it."""
     mirror = mm.default_mirror()
