@@ -2071,15 +2071,21 @@ and `lat` / `lng` from `ST_Y/ST_X(ll.geom)` (value-identical for a resolved row 
 `granularity_rank`. The last two are what the map DRAWS: a pin the resolver placed **below building
 level** (rank < 90, `location_granularity_rank`) gets a true-metre translucent circle of its own
 uncertainty radius under it, so "middle of the village" and "this front door" stop looking
-identical; at or above building level the pin stands alone. Clusters and server-side grid cells
-carry no per-pin radius, so the circle exists only in point mode. Appending is the only legal edit
+identical; at or above building level the pin stands alone. The drawn radius is capped at 2 km
+(display only — the true radius stays on the feature), because an okres- or kraj-grain radius is a
+different order of magnitude and would wash the map out. Clusters and server-side grid cells carry
+no per-pin radius, so the circle exists only in point mode. Appending is the only legal edit
 here — `browse_list` and `properties_map_mv` materialize `select * from browse_projection` and
 `toolkit/browse_read_model.sync_browse_list` re-inserts POSITIONALLY, so anything computed outside
 the view, or any reordering, writes NULLs into the wrong columns silently. **The apply is gated on
 rule 25's coverage invariant**: an unresolved row's re-sourced codes and pin are NULL, and a NULL
 `lat` drops the row out of `properties_map_mv` — which is the intended posture (no pin the resolver
-would not stand behind), but only once `count(listing_location) = count(active listings)` and
-`location_town_coverage`'s `cz_no_town` arm are green.
+would not stand behind), but only once `count(listing_location) = count(active listings)`,
+`location_town_coverage`'s `cz_no_town` arm is green, and every active property's DISPLAY listing
+has a row (Browse serves delisted properties too, so the coverage invariant's "active listings" is
+not by itself the same set). The migration measures that last arm itself: section 0 compares
+today's `properties_map_mv` count with the count the new definition would produce and **aborts
+before any DDL** if the map would lose more than 5 % of its pins.
 
 **ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
 `35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a

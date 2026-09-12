@@ -85,7 +85,11 @@ publish `granularity_rank` (the INT from `location_granularity_rank` — the SPA
 never enum text) and `uncertainty_radius_m`. In point mode the Browse map draws a translucent
 true-metre circle of that radius under any pin **below building level** (rank < 90); at or above it
 the pin is the building and stands alone. Clusters and server-side grid cells carry no per-pin
-identity or radius, so there is no per-pin circle above the point budget.
+identity or radius, so there is no per-pin circle above the point budget. The DRAWN radius is
+capped at **2 km** (`MAX_DRAWN_CIRCLE_RADIUS_M`, `frontend/src/lib/uncertaintyCircle.ts`) — the
+coarse rungs carry radii of a different order (okres ~25 km, kraj ~60 km, unknown ~250 km) and a
+screen of 25 km discs is a wash of colour with a moving clipped arc on pan. The cap is display
+only: the true radius rides on every feature and is what any measurement reads.
 
 **Country and self-disagreement.** `country_status` (NOT NULL: `cz` | `foreign` | `disputed` |
 `undetermined`) — foreign is a DETERMINATION the resolver makes, never a default for "no town

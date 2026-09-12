@@ -379,9 +379,12 @@ component is slimmed twice — each wave rewrites one component and slims its st
     the eleven `placePrimary()` sites, five place columns off `TABLE_COLS`/`CARD_COLS`, `district`
     off `MAP_COLS`, `street` off `DETAIL_COLS` and the board, the feed's `locality, district` pair,
     the extension's two-field fallback. NO shared-pin count (W3-2: the window function cannot be
-    pushed below `sync_browse_list`'s qual). **Apply gate**: the same coverage invariant W2-b
-    carries — an unresolved row's re-sourced codes and pin are NULL, so its map pin disappears
-    rather than lying. Next: S3 (one code predicate, `/maps/resolve` codes + a `cast_obce` level,
+    pushed below `sync_browse_list`'s qual). **Apply gate**: three arms measured BEFORE the apply — full
+    `listing_location` coverage of active listings, per-portal `cz_no_town` at or below its pre-W2
+    level, and every active property's DISPLAY listing resolved (Browse serves delisted properties,
+    so the display listing of an active property is not always an active listing). Migration 503
+    measures the map side itself and aborts before any DDL if `properties_map_mv` would lose more
+    than 5 % of its pins. Next: S3 (one code predicate, `/maps/resolve` codes + a `cast_obce` level,
     registry regen, the two RPC bodies) then S4 (drop the legacy text columns).
 - **W4 — delete legacy** (= plan S5): Mapy purge, geocoder + cache, street extractor, the trigger
   and the 24 `listings` columns, the property-grain geography, the second page archive, the

@@ -76,10 +76,85 @@
 -- `authenticated`'s 8 s statement_timeout rather than merely queue), then the
 -- assertions. The apply path re-runs the WHOLE file on a lock timeout, and every
 -- statement here is idempotent.
+--
+-- TWO GUARDS, AND WHAT EACH FAILURE MEANS FOR THE DEPLOY.
+--
+--   * SECTION 0 runs BEFORE any DDL: it compares today's `properties_map_mv`
+--     row count with the count the new definition WOULD produce, and aborts the
+--     whole file if the map would lose more than 5 % of its pins. A pin collapse
+--     is what an incomplete `listing_location` looks like from the map's side,
+--     and it must fail loudly here rather than ship a half-empty map. Nothing has
+--     been applied when it fires — fix the coverage, then re-run.
+--
+--   * SECTION 9 runs AFTER the forced rebuilds and asserts both read models are
+--     actually WIDE. Both rebuilds SKIP (notice, not error) when a cron tick
+--     already holds their advisory lock, and a skip leaves this file aborting
+--     with **the views wide and the read models narrow** — a state in which
+--     `select=display_label` against browse_list / properties_map_mv is a
+--     PostgREST 400. That is recoverable and not corrupting: the next */15 and
+--     7,37 cron ticks rebuild both, or re-run this file. **Never merge the SPA
+--     until both read models are confirmed wide** (section 9 passing IS that
+--     confirmation).
 
 begin;
 
 set local lock_timeout = '5s';
+
+-- ---------------------------------------------------------------------------
+-- 0. PIN-COLLAPSE GUARD -- runs before a single line of DDL.
+--
+--    `lat`/`lng` stop coming from the `properties_set_latlng` trigger and start
+--    coming from `ST_Y/ST_X(ll.geom)`, and `properties_map_mv` is defined as
+--    `where lat is not null`. So a property whose display listing has no
+--    `listing_location` row, or whose row has a NULL geom, LOSES ITS PIN. That
+--    is the correct posture for a resolved corpus (no pin the resolver will not
+--    stand behind) and a silent disaster for an unresolved one.
+--
+--    Both numbers are measured HERE, before the replace, so this is a pure
+--    prediction and an abort costs nothing: the transaction rolls back with the
+--    schema untouched. 5 % is the tolerance, not 0 %, because the legacy pin
+--    includes coordinates the resolver deliberately refuses (a Mapy-class
+--    licence, migration 501's claim projection) — a small honest loss is the
+--    point of the wave; a large one means the coverage gate was not green.
+-- ---------------------------------------------------------------------------
+
+do $guard$
+declare
+  v_before bigint;
+  v_after  bigint;
+  v_lost   numeric;
+begin
+  if to_regclass('public.properties_map_mv') is null then
+    raise notice 'properties_map_mv absent (fresh replay); pin guard skipped';
+    return;
+  end if;
+
+  execute 'select count(*) from properties_map_mv' into v_before;
+
+  select count(*) into v_after
+    from properties p
+    left join listing_location ll on ll.listing_id = p.repr_listing_ref_id
+   where p.status = 'active'
+     and ll.geom is not null;
+
+  raise notice 'W3 pin guard: properties_map_mv has % pins today, % after the swap',
+    v_before, v_after;
+
+  if v_before > 0 and v_after < (v_before * 0.95) then
+    -- plpgsql RAISE takes bare `%` placeholders, never printf conversions, so the
+    -- percentage is rounded here rather than formatted in the message.
+    v_lost := round(100.0 * (v_before - v_after) / v_before, 1);
+    raise exception
+      'W3 pin collapse: the map would drop from % pins to % -- % %% lost, cap 5 %%. '
+      'This migration is gated on rule 25 coverage: every ACTIVE listing has a '
+      'listing_location row, and the display listing of every active property is '
+      'among them. Check verify_pipeline''s location_town_coverage and the count '
+      'of active properties whose repr_listing_ref_id has no row, then re-run. '
+      'Nothing has been applied.',
+      v_before, v_after, v_lost;
+  end if;
+end
+$guard$;
 
 -- ---------------------------------------------------------------------------
 -- 1. location_display_label -- the ONE definition of a place string.

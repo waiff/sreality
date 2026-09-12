@@ -128,7 +128,11 @@ def get_collection(
         "JOIN properties p ON p.id = cp.property_id "
         # Surrogate join, not the legacy handle — same pre-Gate-2 hardening as
         # #873's Browse fix (a non-sreality repr would otherwise blank `source`).
-        "LEFT JOIN listings rl ON rl.id = p.repr_listing_ref_id "
+        # The VIEW, not the table: this route runs under `SET LOCAL ROLE
+        # authenticated` and `listings` carries RLS with no policy, so the bare
+        # table matched nothing and `source` came back NULL for every row.
+        # listings_public is the same rows through owner rights (migration 494).
+        "LEFT JOIN listings_public rl ON rl.id = p.repr_listing_ref_id "
         "LEFT JOIN properties_public pp ON pp.property_id = cp.property_id "
         "WHERE cp.collection_id = %s "
         "ORDER BY cp.added_at DESC"

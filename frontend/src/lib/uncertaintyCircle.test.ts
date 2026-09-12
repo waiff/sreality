@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   BUILDING_GRANULARITY_RANK,
+  MAX_DRAWN_CIRCLE_RADIUS_M,
+  drawnUncertaintyRadiusM,
   uncertaintyCircleRadiusM,
   uncertaintyPixelsAtZoom0,
 } from './uncertaintyCircle';
@@ -72,6 +74,43 @@ describe('uncertaintyCircleRadiusM', () => {
         uncertainty_radius_m: '750' as unknown as number,
       }),
     ).toBe(750);
+  });
+});
+
+describe('drawnUncertaintyRadiusM', () => {
+  it('draws the true radius when it is inside the display cap', () => {
+    expect(drawnUncertaintyRadiusM({ granularity_rank: RANK.street, uncertainty_radius_m: 120 }))
+      .toBe(120);
+    expect(
+      drawnUncertaintyRadiusM({
+        granularity_rank: RANK.cast_obce_or_quarter,
+        uncertainty_radius_m: MAX_DRAWN_CIRCLE_RADIUS_M,
+      }),
+    ).toBe(MAX_DRAWN_CIRCLE_RADIUS_M);
+  });
+
+  it('clamps a coarse rung instead of washing the map out', () => {
+    // okres ~25 km, kraj ~60 km, unknown ~250 km: drawn true, one pin covers the
+    // viewport and clips into a moving arc on pan.
+    expect(drawnUncertaintyRadiusM({ granularity_rank: 30, uncertainty_radius_m: 25_000 }))
+      .toBe(MAX_DRAWN_CIRCLE_RADIUS_M);
+    expect(drawnUncertaintyRadiusM({ granularity_rank: 20, uncertainty_radius_m: 60_000 }))
+      .toBe(MAX_DRAWN_CIRCLE_RADIUS_M);
+    expect(drawnUncertaintyRadiusM({ granularity_rank: 0, uncertainty_radius_m: 250_000 }))
+      .toBe(MAX_DRAWN_CIRCLE_RADIUS_M);
+  });
+
+  it('clamps the DRAWING only -- the rule still reports the true radius', () => {
+    const pin = { granularity_rank: RANK.obec, uncertainty_radius_m: 25_000 };
+    expect(uncertaintyCircleRadiusM(pin)).toBe(25_000);
+    expect(drawnUncertaintyRadiusM(pin)).toBe(MAX_DRAWN_CIRCLE_RADIUS_M);
+  });
+
+  it('still draws nothing where the rule says nothing', () => {
+    expect(drawnUncertaintyRadiusM({ granularity_rank: RANK.building, uncertainty_radius_m: 15 }))
+      .toBeNull();
+    expect(drawnUncertaintyRadiusM({ granularity_rank: null, uncertainty_radius_m: null }))
+      .toBeNull();
   });
 });
 
