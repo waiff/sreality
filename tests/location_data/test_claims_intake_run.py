@@ -163,6 +163,28 @@ def test_claim_and_dirty_enqueue_are_one_statement():
     assert (inserted, enqueued) == (1, 1)
 
 
+def test_the_enqueue_bumps_a_row_that_is_already_queued():
+    """W2-a2. `DO NOTHING` here was total, silent loss of the re-mine: on 2026-09-12 the nine
+    contract bumps re-mined ~60k listings whose rows were already queued from the previous
+    sweep, so the enqueue was a no-op, the drain resolved them from the OLD claims and deleted
+    the queue row — 384,500 answer rows, 135 with a town, and nothing left to re-enqueue them.
+    The statement the lane actually executes must carry the bump, not just the constant."""
+    conn = _Conn()
+    result = extract_listing(
+        listing("sreality", SREALITY_POST_CUTOVER, lat=50.078, lon=14.450),
+        entries_for("sreality"))
+    with conn.cursor() as cur:
+        write_result(cur, result)
+
+    one = next(s for s, _ in conn.executed if "INSERT INTO dirty_locations" in s)
+    enqueue = " ".join(one.split()).lower().split("insert into dirty_locations")[1]
+    assert "on conflict (listing_id) do nothing" not in enqueue
+    assert "on conflict (listing_id) do update" in enqueue
+    for fragment in ("set enqueued_at = now()", "reason = excluded.reason",
+                     "attempts = 0", "next_eligible_at = now()"):
+        assert fragment in enqueue, fragment
+
+
 def test_the_lane_writes_claims_and_nothing_else():
     """Rule 25. `location_claim_observations` (263 M rows / 50 GB),
     `location_claim_absences` and `location_enrichment_state` were written by every lane and

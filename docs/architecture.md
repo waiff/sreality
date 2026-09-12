@@ -1973,6 +1973,22 @@ coverage is `count(listing_location) = count(active listings)` by construction. 
 the sweep was three statements (a claim-driven stale sweep that could not see a claimless listing,
 a kraj-scoped cousin, an orphan sweep); they were folded into the one above under rule 25.
 
+**The queue is re-entrant, and the sweep is the invariant's backstop** (W2-a2, 2026-09-12). Every
+evidence-producing enqueue — `claims_intake`'s `claim_insert`, `contracts.retract`'s batch,
+`operator_corrections`' `operator_edit` — is `ON CONFLICT (listing_id) DO UPDATE SET enqueued_at =
+now(), reason = EXCLUDED.reason, attempts = 0, next_eligible_at = now()`, and every statement that
+FINISHES a queue row (both deletes and the failure stamp) is bounded by the `enqueued_at` the slice
+claimed, so evidence arriving mid-slice leaves the row queued instead of deleted-unresolved; the
+sweep alone still uses `NOT EXISTS` + `DO NOTHING`, because it carries no evidence and a bump there
+would reset a poisoned row's backoff and push the queue's oldest row to the back. And `_SWEEP_SQL`
+has a fourth arm, `p.obec_kod IS NULL AND p.country_status <> 'foreign'`, so every active Czech
+listing without a town is re-resolved nightly until it has one or is determined foreign — the three
+version arms could not express it, because a townless row is stamped at the CURRENT version tuple.
+Both rules exist because the 2026-09-12 07:13Z contract bump re-mined ~60k listings whose rows were
+already queued from the previous ~540k-row sweep: every enqueue no-opped, the drain resolved them
+from the old claims and deleted the rows, and 384,500 answer rows with 135 towns had nothing left
+that could ever re-enqueue them.
+
 W2-a **deleted ~3,700 lines** and nine tables' worth of producers: survivorship (policy is code),
 the uncertainty-policy resolver, the contradiction ledger + its disposition log + the auto-close
 engine, the pin-collision epoch and its weekly cron, the parcel rung, the derived-column twin of

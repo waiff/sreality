@@ -14,6 +14,8 @@ from __future__ import annotations
 import inspect
 import re
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from location_data.resolver import core, drain, projection, resolve_db
@@ -21,6 +23,10 @@ from location_data.resolver.version import RESOLVER_VERSION
 from tests.location_data import mini_mirror as mm
 
 REGISTRY = "2026-07"
+MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
+# The `enqueued_at` the fake queue hands back on a slice — the value every statement that
+# finishes one of those rows is bounded by.
+CLAIMED_AT = datetime(2026, 9, 12, 7, 13, tzinfo=timezone.utc)
 
 
 class _FakeCursor:
@@ -126,10 +132,42 @@ def test_the_sweep_walks_listing_id_windows_each_in_its_own_transaction():
 def test_the_sweep_skips_rows_already_queued_without_touching_their_locks():
     """A drain slice is almost always in flight, holding its rows FOR UPDATE; an INSERT ...
     ON CONFLICT on one of those keys waits for that transaction and the 5 s lock_timeout kills
-    the window. The NOT EXISTS is an MVCC read: skip, never wait."""
+    the window. The NOT EXISTS is an MVCC read: skip, never wait.
+
+    It is also the ONE producer that must not bump (W2-a2): every other enqueue is evidence
+    arriving, the sweep carries none, and bumping a queued row would reset a poisoned row's
+    `attempts` backoff and move the oldest row in the queue to the back of it."""
     flat = " ".join(drain._SWEEP_SQL.split()).lower()
     assert "not exists (select 1 from dirty_locations d where d.listing_id = l.id)" in flat
     assert "on conflict (listing_id) do nothing" in flat
+    assert "do update" not in flat
+
+
+def test_the_sweep_revisits_every_active_czech_listing_without_a_town():
+    """Rule 2 / rule 25's invariant, made mechanical. A row resolved WITHOUT an `obec_kod` is
+    stamped at the current version tuple, so the three version arms see a fresh row and walk
+    past it for ever: on 2026-09-12 that left 384,365 rows red with nothing able to re-enqueue
+    them. The fourth arm re-resolves them nightly until each has a town or is determined
+    `foreign` — a determination, never a default, so `undetermined` stays in scope.
+
+    No new placeholder: `'foreign'` is a literal, and `enqueue_full_sweep` still binds exactly
+    (RESOLVER_VERSION, registry_label, after, hi)."""
+    flat = " ".join(drain._SWEEP_SQL.split()).lower()
+    assert "or (p.obec_kod is null and p.country_status <> 'foreign')" in flat
+    assert flat.count("%s") == 4
+    # ...and it is one arm of the SAME disjunction, not a second statement.
+    where = flat[flat.index("where l.is_active"):]
+    assert where.index("p.obec_kod is null") < where.index("and l.id > %s")
+    # Served by migration 501's index, so the arm costs the red count, not the corpus.
+    ddl = (MIGRATIONS / "501_location_w2a_listing_location.sql").read_text().lower()
+    assert "on listing_location (obec_kod, granularity)" in " ".join(ddl.split())
+
+
+def test_the_sweep_binds_its_placeholders_in_the_order_the_statement_reads_them():
+    state = _state(max_listing_id=100_000)
+    drain.enqueue_full_sweep(_FakeConn(state), window=250_000)
+    (_, params), = _sweep_windows(state)
+    assert params == (RESOLVER_VERSION, REGISTRY, 0, 100_000)
 
 
 def test_a_window_retries_a_lock_wait_then_gives_up_loudly(monkeypatch):
@@ -217,7 +255,7 @@ class _DrainCursor:
         self._result = []
         if text.startswith("select id, label from registry_versions"):
             self._result = [(7, REGISTRY)]
-        elif text.startswith("select listing_id, attempts from dirty_locations"):
+        elif text.startswith("select listing_id, attempts, enqueued_at from dirty_locations"):
             self._result = self.state["slices"].pop(0) if self.state["slices"] else []
         elif text.startswith("select count(*)") and "dirty_locations" in text:
             self._result = [(len(self.state["slices"]), 0)]
@@ -246,7 +284,10 @@ class _DrainConn:
 
 
 def _drained(slices: list[list[tuple[int, int]]]) -> dict[str, Any]:
-    state: dict[str, Any] = {"executed": [], "transactions": 0, "slices": list(slices)}
+    state: dict[str, Any] = {
+        "executed": [], "transactions": 0,
+        "slices": [[(lid, att, CLAIMED_AT) for lid, att in s] for s in slices],
+    }
     state["stats"] = drain.run(_DrainConn(state), batch_size=10, max_seconds=30)
     return state
 
@@ -301,7 +342,7 @@ def test_the_only_projection_write_is_listing_location():
               if t.startswith(("insert into", "update ", "delete from"))]
     assert [w[:36] for w in writes] == [
         "insert into listing_location as ll (",
-        "delete from dirty_locations where li",
+        "delete from dirty_locations d using ",
     ], writes
     for gone in ("listing_location_current", "property_location_current",
                  "location_resolutions", "location_resolution_candidates",
@@ -701,3 +742,152 @@ def test_the_transaction_pooler_fallback_is_announced(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         drain.open_connection()
     assert "SUPABASE_DB_SESSION_URL" in caplog.text
+
+
+# ------------------------------------------------- W2-a2: the queue is re-entrant
+#
+# 2026-09-12 07:13Z. The nine contract bumps re-mined ~60k listings whose rows were ALREADY
+# queued from the previous sweep (~540k rows), so every `claim_insert` enqueue hit ON CONFLICT
+# DO NOTHING; the drain resolved them from the OLD claims and deleted the queue row. Result:
+# 384,500 `listing_location` rows, 135 with a town, and nothing able to re-enqueue them — the
+# sweep saw a current-version row and walked past. Two rules close it, and these pin both.
+
+
+def _enqueue_ctes() -> dict[str, str]:
+    """Every evidence-producing `INSERT INTO dirty_locations` in the programme.
+
+    The sweep is deliberately NOT here (see the test below): it carries no evidence.
+    """
+    from location_data import claims_intake, contracts, operator_corrections
+    return {
+        "claims_intake._CLAIM_WRITE_SQL": claims_intake._CLAIM_WRITE_SQL,
+        "contracts._RETRACT_BATCH_SQL": contracts._RETRACT_BATCH_SQL,
+        "operator_corrections._OPERATOR_CLAIM_SQL": operator_corrections._OPERATOR_CLAIM_SQL,
+    }
+
+
+def test_every_evidence_producer_bumps_the_queue_row_instead_of_skipping_it():
+    """Rule 1. A producer that learns something new about a listing already in the queue must
+    move `enqueued_at` forward — that is what re-arms the row against an in-flight slice (the
+    drain's delete is bounded by the `enqueued_at` it claimed) and clears a stale backoff.
+    `DO NOTHING` made the new evidence invisible for ever."""
+    for name, sql in _enqueue_ctes().items():
+        flat = " ".join(sql.split()).lower()
+        assert "insert into dirty_locations" in flat, name
+        assert "on conflict (listing_id) do nothing" not in flat, name
+        assert "on conflict (listing_id) do update" in flat, name
+        clause = flat.split("on conflict (listing_id) do update")[1]
+        clause = clause[:clause.index("returning")]
+        for fragment in ("set enqueued_at = now()", "reason = excluded.reason",
+                         "attempts = 0", "next_eligible_at = now()"):
+            assert fragment in clause, (name, fragment)
+
+
+def test_the_bump_only_touches_columns_dirty_locations_actually_has():
+    """`next_eligible_at` is `not null default now()` (migration 384), so the bump re-arms it
+    with `now()` — writing NULL would violate the constraint and abort the producer's whole
+    claim-insert transaction. The five columns are 384's, unchanged by 404 and 498 (both only
+    re-state the `reason` CHECK)."""
+    import re as _re
+    ddl = (MIGRATIONS / "384_location_w1_serving.sql").read_text()
+    body = ddl.split("create table dirty_locations (")[1].split(");")[0]
+    columns = {m.group(1) for m in _re.finditer(r"^\s{2}(\w+)\s", body, _re.M)}
+    assert columns == {"listing_id", "enqueued_at", "reason", "attempts",
+                       "last_error", "next_eligible_at"}, columns
+    assert "next_eligible_at timestamptz not null" in " ".join(body.split())
+    for sql in _enqueue_ctes().values():
+        clause = " ".join(sql.split()).lower().split("do update")[1]
+        assert "next_eligible_at = null" not in clause
+
+
+def test_the_slice_carries_the_enqueued_at_every_finishing_statement_is_bounded_by():
+    """Rule 1's other half. Deleting on `listing_id` alone throws away a bump that landed
+    while the slice was in flight; the row is gone and its new claims are never resolved."""
+    slice_sql = " ".join(drain._CLAIM_SLICE_SQL.split()).lower()
+    assert slice_sql.startswith("select listing_id, attempts, enqueued_at from dirty_locations")
+    batch = " ".join(drain._DELETE_ROWS_SQL.split()).lower()
+    assert "unnest(%s::bigint[], %s::timestamptz[])" in batch
+    assert "d.enqueued_at <= claimed.enqueued_at" in batch
+    one = " ".join(drain._DELETE_ROW_SQL.split()).lower()
+    assert one == "delete from dirty_locations where listing_id = %s and enqueued_at <= %s"
+    fail = " ".join(drain._FAIL_ROW_SQL.split()).lower()
+    assert fail.endswith("where listing_id = %s and enqueued_at <= %s")
+
+
+def test_the_batch_delete_is_bounded_by_the_timestamps_the_slice_claimed():
+    state = _drained([[(101, 0), (102, 0)]])
+    deletes = [(t, p) for t, p in state["executed"] if t.startswith("delete from dirty_locations")]
+    assert len(deletes) == 1
+    _, params = deletes[0]
+    assert params == ([101, 102], [CLAIMED_AT, CLAIMED_AT])
+
+
+class _QueueCursor(_DrainCursor):
+    """`_DrainCursor` plus a real (tiny) model of the two queue statements: the slice reads
+    `state["queue"]`, and the bounded delete removes only rows whose STORED `enqueued_at` is
+    still the one the slice claimed. Nothing else about SQL is modelled — this exists so the
+    surviving-row assertion is about the drain's behaviour, not about its SQL text."""
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        text = " ".join(sql.split()).lower()
+        if text.startswith("select listing_id, attempts, enqueued_at from dirty_locations"):
+            self.state["executed"].append((text, params))
+            queue = self.state["queue"]
+            self._result = sorted((lid, 0, at) for lid, at in queue.items())
+            self.state["claimed"].append([row[0] for row in self._result])
+            # ...and a producer bumps one of the claimed rows while the slice is in flight.
+            for listing_id in self.state.pop("bump", []):
+                queue[listing_id] = queue[listing_id] + timedelta(minutes=1)
+            return
+        if text.startswith("delete from dirty_locations d using"):
+            self.state["executed"].append((text, params))
+            listing_ids, bounds = params
+            gone = [lid for lid, bound in zip(listing_ids, bounds)
+                    if self.state["queue"].get(lid) is not None
+                    and self.state["queue"][lid] <= bound]
+            for listing_id in gone:
+                del self.state["queue"][listing_id]
+            self.state["deleted"].append(gone)
+            return
+        super().execute(sql, params)
+
+
+class _QueueConn(_DrainConn):
+    def cursor(self) -> _QueueCursor:
+        return _QueueCursor(self.state)
+
+
+def test_a_row_bumped_mid_slice_is_resolved_again_instead_of_being_deleted():
+    """THE regression, end to end. Listing 202 gains new claims after the slice read its OLD
+    ones, so the write the drain is about to make is stale for it. The bounded delete leaves
+    202 queued, the next slice claims it again and resolves it against the claims that
+    arrived, and only then is it finished. 201 changed under nobody and finishes first time.
+
+    On `DELETE ... WHERE listing_id = ANY(...)` the first delete takes BOTH rows and 202's new
+    claims are never read — 384,365 rows' worth of that on 2026-09-12."""
+    state: dict[str, Any] = {
+        "executed": [], "transactions": 0,
+        "slices": [],  # _DrainCursor's queue-health branch reads it; the queue is below
+        "queue": {201: CLAIMED_AT, 202: CLAIMED_AT},
+        "claimed": [], "deleted": [], "bump": [202],
+    }
+    drain.run(_QueueConn(state), batch_size=10, max_seconds=30)
+    assert state["claimed"] == [[201, 202], [202], []]
+    assert state["deleted"] == [[201], [202]]
+    assert state["queue"] == {}
+
+
+def test_the_failure_stamp_does_not_clobber_a_newer_enqueue(monkeypatch):
+    """A backoff written over a bumped row would push a listing that JUST gained evidence
+    behind up to six hours of `next_eligible_at` — and reset `attempts` to a count the new
+    evidence never earned."""
+    def _boom(*a: Any, **k: Any) -> None:
+        raise RuntimeError("poisoned")
+    monkeypatch.setattr(drain, "_write_slice", _boom)
+    state = _drained([[(303, 2)]])
+    stamps = [(t, p) for t, p in state["executed"] if t.startswith("update dirty_locations")]
+    assert len(stamps) == 1
+    text, params = stamps[0]
+    assert text.endswith("where listing_id = %s and enqueued_at <= %s")
+    assert params[1] == drain.BACKOFF_SECONDS[2]
+    assert params[2:] == (303, CLAIMED_AT)

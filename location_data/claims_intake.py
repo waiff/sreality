@@ -792,6 +792,12 @@ _STAMP_MINED_SQL = """
     WHERE p.id = v.id
 """
 
+# THE ENQUEUE BUMPS, IT DOES NOT SKIP (W2-a2). `DO NOTHING` here was silent data loss: on
+# 2026-09-12 the nine contract bumps re-mined ~60k listings that were ALREADY queued from the
+# previous sweep, so every enqueue was a no-op, the drain resolved them from the OLD claims
+# and deleted the queue row. 384,500 answer rows, 135 with a town. Bumping `enqueued_at`
+# re-arms the row against an in-flight slice (the drain's delete is bounded by the
+# `enqueued_at` it claimed) and clears any backoff the previous attempt left behind.
 # One statement, so the claim insert and the dirty_locations enqueue are atomic together
 # (03 §3.2: the enqueue happens INSIDE the claim-insert transaction; it is the only
 # coupling between intake and resolution).
@@ -873,7 +879,9 @@ _CLAIM_WRITE_SQL = f"""
     ), enqueued AS (
         INSERT INTO dirty_locations (listing_id, reason)
         SELECT DISTINCT listing_id, 'claim_insert' FROM ins
-        ON CONFLICT (listing_id) DO NOTHING
+        ON CONFLICT (listing_id) DO UPDATE
+           SET enqueued_at = now(), reason = EXCLUDED.reason,
+               attempts = 0, next_eligible_at = now()
         RETURNING listing_id
     )
     SELECT (SELECT count(*) FROM ins), (SELECT count(*) FROM enqueued)
