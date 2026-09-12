@@ -74,11 +74,17 @@ def resolve(
     )
     position = step_bind.place(binding, pin_claim, declared=declared)
 
-    # ---- 2. FILL.
+    # ---- 2. FILL. It answers the hierarchy AND the position the hierarchy implies: a row
+    # the claims could not place is placed at the finest bound unit's own registry point, so
+    # a listing that knows its town always has one (W2-a3). It cannot move a grade or a
+    # verdict — GRADE reads a position only to ask whether a PIN corroborates an address
+    # point, CHECK only to ask where a PIN is.
     filled = step_fill.fill(
         binding, constraints, ctx.registry,
         operator=step_bind.operator_fields(admissible),
     )
+    if not position.has_position:
+        position = step_fill.position(filled, binding)
 
     # ---- 3. GRADE.
     graded = step_grade.grade(

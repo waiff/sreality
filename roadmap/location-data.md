@@ -264,6 +264,21 @@ component is slimmed twice — each wave rewrites one component and slims its st
   fourth arm — `p.obec_kod IS NULL AND p.country_status <> 'foreign'` — so every active Czech
   listing without a town is re-resolved by every daily sweep until it has one or is determined
   foreign. No migration (501's `(obec_kod, granularity)` index serves it) and no new placeholder.
+  **W2-a3 shipped: a towned row always has a position.** 2026-09-12 08:05Z, live: 29,892
+  `listing_location` rows with a town, **8,706 of them (29 %) with no `geom`** — the four-step
+  resolver published a position only when a portal pin was admissible, and a row bound by NAME has
+  none. FILL now places those at the finest bound unit's own registry point (the boundary's stored
+  inscribed-circle centre — inside the polygon, which `ST_Centroid` is not for a concave obec),
+  walking the chain because RÚIAN draws no polygon for a část obce or a městský obvod and
+  `ruian_streets` carries no geometry at all, and refusing `stat`/`region soudržnosti` so nothing
+  lands at the centre of the country. Granularity, confidence and radius are untouched; foreign and
+  undetermined rows still carry none. It costs no tenth registry question — the point rides the
+  `admin_chain` read FILL already makes — and it DELETED the fallback it replaces: BIND's
+  admin-centroid branch read `ruian_admin_units.definition_point`, a column `ruian_load` has never
+  written, so the fallback that was supposed to cover this was dead on arrival. `RESOLVER_VERSION`
+  → `resolver:v4.1`, which re-resolves the corpus once through the ordinary lane (~1 h at the
+  worker's measured 120 listings/s; 5–11 h if the GitHub lane carries it). The gate is the same
+  `location_town_coverage` reading plus `geom IS NULL` among towned rows, which should go to ~0.
   **W2-b** then cuts the five remaining readers of `listing_location_current` (the four `toolkit/`
   modules + `refresh_location_compare_cohort()`), deletes the inactive-entry claims and drops the
   old tables. Nothing writes them from this PR on; `--workers` on the drain is unblocked but not
