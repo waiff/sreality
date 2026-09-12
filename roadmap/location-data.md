@@ -206,8 +206,8 @@ component is slimmed twice — each wave rewrites one component and slims its st
     supersedes the OLDER entry, which is how a chain evicted the hourly intake and an
     operator's full-resolve on 2026-09-10, so if any member of the group is already waiting the
     chain ends and lets it through — `location_resolve.yml` counts, it joins the group through a mode-conditional expression. `test_location_batch_hardening.py`'s ban on self-chaining
-    members becomes the rail that the yield exists, plus seven tests that execute the chain
-    script itself against a stub `gh`.
+    members becomes the rail that the yield EXISTS, plus eleven tests that execute the chain
+    script itself against a stub `gh` — the two `gh run list` filters included.
 - **W2 — the resolver at four steps, the answer table at 27 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and
