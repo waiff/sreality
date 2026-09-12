@@ -35,8 +35,11 @@ name: "Jobs: Location claim intake"
 # so a 250 000-body backlog — which is what EVERY contract bump creates, since a bump makes
 # the whole corpus unmined again — drains at ~6 000 bodies a fired tick and takes weeks. The
 # last step therefore dispatches ONE successor when the run's own summary says work is left
-# (`bodies_pass_complete=false`, or the listing scan did not reach its end), and NOTHING when
-# both reached their end: the steady state is cron-only. A failed run does not chain either.
+# AND that this run moved it: `bodies_pass_complete=false` with `bodies_mined>0`, or a
+# listing scan short of its end with `listings>0`. NOTHING otherwise — the steady state is
+# cron-only, a failed run does not chain, and a run that achieved nothing does not hand the
+# next one the same nothing (the progress term is what stops a lane with no page-capable
+# portal or no R2 credential from chaining clean short runs for ever).
 #
 # The chain YIELDS before it dispatches. `location-batch` keeps one pending slot and GitHub
 # supersedes the OLDER pending run, so a hop dispatched in a run's last seconds evicts
@@ -252,14 +255,24 @@ jobs:
         if: (github.event_name == 'schedule' || inputs.chain) && inputs.dry_run != true
         env:
           GH_TOKEN: ${{ github.token }}
-          GROUP_WORKFLOWS: "location_registry_load.yml location_claims_intake.yml location_mapy_inventory.yml"
+          # EVERY workflow that can hold `location-batch`, `location_resolve.yml` included:
+          # its group is a mode-conditional expression, so it joins whenever a full-resolve
+          # is dispatched or its own cron fires — and a full-resolve is exactly what a chain
+          # hop evicted on 2026-09-10. `test_location_batch_hardening.py` derives this list
+          # from the workflows' own concurrency blocks, so a new member cannot be missed.
+          GROUP_WORKFLOWS: "location_claims_intake.yml location_mapy_inventory.yml location_registry_load.yml location_resolve.yml"
           WORKFLOW: location_claims_intake.yml
         run: |
           summary=$(grep -o 'INTAKE done {.*' intake.log | tail -1 | sed 's/^INTAKE done //')
-          left=$(printf '%s' "$summary" | python3 -c "import json,sys; s=json.load(sys.stdin); print('yes' if not s.get('bodies_pass_complete') or not s.get('reached_end') else 'no')" 2>/dev/null || echo "unknown")
+          left=$(printf '%s' "$summary" | python3 -c "import json,sys; s=json.load(sys.stdin); print('yes' if (not s.get('bodies_pass_complete') and s.get('bodies_mined', 0) > 0) or (not s.get('reached_end') and s.get('listings', 0) > 0) else 'no')" 2>/dev/null || echo "unknown")
           echo "work left: $left"
           if [ "$left" != "yes" ]; then
-            echo "chain ends: the bodies keyset and the listing scan both reached their end"
+            # WORK LEFT IS NOT ENOUGH; THIS RUN MUST HAVE MADE PROGRESS ON IT. A successor is
+            # only worth a slot if its predecessor moved a cursor: a run that mined no body
+            # and opened no listing would hand the next one the same nothing, for ever, and
+            # hold `location-batch` while doing it. The unfinished half must also be the half
+            # that moved — `bodies_mined` for the drain, `listings` for the scan.
+            echo "chain ends: nothing left that this run made progress on"
             exit 0
           fi
           # YIELD FIRST. `location-batch` keeps ONE pending slot and GitHub supersedes the

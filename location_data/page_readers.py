@@ -1808,6 +1808,13 @@ EXTRACTION_WORKERS_ENV = "LOCATION_INTAKE_WORKERS"
 # bodies a --limit run or a test drives through the same code path.
 PARALLEL_MIN_BODIES = 16
 
+# ONE BODY MAY NOT HOLD THE BATCH TRANSACTION OPEN. The parse is a C extension and the
+# readers run regexes over whole documents, so a pathological body can sit in a worker for
+# longer than the job's own ceiling — and the parent is inside an open transaction while it
+# waits. 120 s is ~600x the measured per-body cost and ~1/20th of a bodies-first half
+# budget: a body that has not finished by then is this run's loss, not the batch's.
+EXTRACTION_TIMEOUT_S = 120.0
+
 # What a worker needs that is the same for every body: the contract entries, the per-portal
 # exclusion-zone registers and the claim-size cap. Sent ONCE per worker through the
 # initializer rather than per task — per task it would ride 1 500 times a batch.
@@ -1824,6 +1831,14 @@ def extraction_workers() -> int:
     if override:
         return env_positive_int(EXTRACTION_WORKERS_ENV, 1)
     return os.cpu_count() or 1
+
+
+def pool_width(tasks: int) -> int:
+    """The width `extract_pages` will actually use for a batch of this size — 1 is the main
+    thread. ONE definition, because the lane logs this number beside its bodies/s and a log
+    line that guessed it would be the only evidence anyone reads."""
+    workers = extraction_workers()
+    return workers if workers >= 2 and tasks >= PARALLEL_MIN_BODIES else 1
 
 
 def _mp_context() -> BaseContext:
@@ -1895,9 +1910,16 @@ def extract_pages(
     a batch is one transaction carrying every portal's payload claims. The pool is a pure
     accelerator — same outcomes, same order, whether it was used or not.
 
-    A pool that BREAKS (a worker killed by the OOM killer, a segfault in the parser) is not
-    a failed batch either: the bodies it had not finished are re-extracted on the main
-    thread, which is exactly the code this lane ran before it had a pool."""
+    TWO WAYS THE POOL ITSELF FAILS, and neither is a failed batch. A pool that BREAKS (a
+    worker killed by the OOM killer, a segfault in the parser) leaves its unfinished bodies
+    to the main thread — exactly the code this lane ran before it had a pool. A worker that
+    HANGS on one body is given `EXTRACTION_TIMEOUT_S` and then killed, because the parent is
+    holding an open batch transaction while it waits: that one body comes back as its own
+    `TimeoutError` outcome and the rest of the batch finishes on the main thread.
+
+    Every task gets EXACTLY ONE outcome down every path: a timed-out body is recorded before
+    the fallback starts (it is not re-run — it would hang again), a broken one is not (it
+    never produced an outcome, so the main thread owes it one)."""
     def main_thread(
         remaining: list[tuple[ListingRow, ArchivedPayload]],
     ) -> list[IntakeResult | Exception]:
@@ -1905,28 +1927,44 @@ def extract_pages(
             remaining, entries_by_source=entries_by_source, registers=registers,
             max_value_bytes=max_value_bytes)
 
-    workers = extraction_workers()
-    if workers < 2 or len(tasks) < PARALLEL_MIN_BODIES:
+    width = pool_width(len(tasks))
+    if width == 1:
         return main_thread(tasks)
 
     outcomes: list[IntakeResult | Exception] = []
+    hung = False
+    pool = ProcessPoolExecutor(
+        max_workers=width, mp_context=_mp_context(), initializer=_worker_init,
+        initargs=(entries_by_source, registers, max_value_bytes,
+                  LOG.getEffectiveLevel()))
     try:
-        with ProcessPoolExecutor(
-                max_workers=workers, mp_context=_mp_context(), initializer=_worker_init,
-                initargs=(entries_by_source, registers, max_value_bytes,
-                          LOG.getEffectiveLevel())) as pool:
-            futures = [pool.submit(_worker_extract, task) for task in tasks]
-            for future in futures:
-                try:
-                    outcomes.append(future.result())
-                except BrokenProcessPool:
-                    raise
-                except Exception as exc:  # noqa: BLE001 - one body's failure, carried back
-                    outcomes.append(exc)
-    except BrokenProcessPool as broken:
-        LOG.warning("PAGE the extraction pool broke after %d/%d bodies (%s); the rest of "
-                    "this batch is extracted on the main thread",
-                    len(outcomes), len(tasks), broken)
+        futures = [pool.submit(_worker_extract, task) for task in tasks]
+        for future in futures:
+            try:
+                outcomes.append(future.result(timeout=EXTRACTION_TIMEOUT_S))
+            except TimeoutError as timeout:
+                hung = True
+                LOG.warning("PAGE a worker did not return body %d/%d within %.0fs; killing "
+                            "the pool and finishing this batch on the main thread",
+                            len(outcomes) + 1, len(tasks), EXTRACTION_TIMEOUT_S)
+                outcomes.append(timeout)
+                break
+            except BrokenProcessPool as broken:
+                LOG.warning("PAGE the extraction pool broke after %d/%d bodies (%s); the "
+                            "rest of this batch is extracted on the main thread",
+                            len(outcomes), len(tasks), broken)
+                break
+            except Exception as exc:  # noqa: BLE001 - one body's failure, carried back
+                outcomes.append(exc)
+    finally:
+        if hung:
+            # The private `_processes` is the only handle on a worker stuck inside a C
+            # parse, and without it the `shutdown()` below joins it — which is the wedge
+            # this timeout exists to prevent, moved four lines down.
+            for worker in list((pool._processes or {}).values()):  # noqa: SLF001
+                worker.kill()
+        pool.shutdown(wait=not hung, cancel_futures=True)
+    if len(outcomes) < len(tasks):
         outcomes.extend(main_thread(tasks[len(outcomes):]))
     return outcomes
 

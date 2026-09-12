@@ -186,33 +186,49 @@ def test_one_worker_is_the_main_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _pages(tasks) == _serial(tasks)
 
 
+class _FakePool:
+    """A pool whose futures the test decides. `extract_pages` owns the executor's lifecycle
+    now (it kills a hung worker before shutting down, which a `with` block cannot), so a
+    stand-in has to answer `submit`, `shutdown` and `_processes`."""
+
+    def __init__(self, **_kwargs: Any) -> None:
+        self.submitted = 0
+        self.shutdowns: list[tuple[bool, bool]] = []
+        self._processes = {1: _FakeWorker()}
+
+    def _serial_result(self, task: Any) -> IntakeResult:
+        return page_readers._extract_serially(
+            [task], entries_by_source=ENTRIES, registers=REGISTERS,
+            max_value_bytes=2 * 1024 * 1024)[0]
+
+    def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
+        self.shutdowns.append((wait, cancel_futures))
+
+
+class _FakeWorker:
+    def __init__(self) -> None:
+        self.killed = False
+
+    def kill(self) -> None:
+        self.killed = True
+
+
 def test_a_pool_that_breaks_mid_batch_finishes_the_rest_on_the_main_thread(
     pooled: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The OOM killer takes a worker and every pending future raises — including the ones
     whose bodies were fine. A batch is one transaction carrying nine portals' payload
     claims, so it must not be the pool's death that fails it: the two bodies already
-    returned are kept and the rest are re-extracted by the code the lane ran before it had
-    a pool."""
-    class _HalfBrokenPool:
-        def __init__(self, **_kwargs: Any) -> None:
-            self.submitted = 0
-
-        def __enter__(self) -> _HalfBrokenPool:
-            return self
-
-        def __exit__(self, *_exc: Any) -> bool:
-            return False
-
+    returned are kept and the body the broken future never answered for is re-extracted by
+    the code the lane ran before it had a pool."""
+    class _HalfBrokenPool(_FakePool):
         def submit(self, fn: Any, task: Any) -> Future[IntakeResult]:
             future: Future[IntakeResult] = Future()
             self.submitted += 1
             if self.submitted > 2:
                 future.set_exception(BrokenProcessPool("A process in the pool died"))
             else:
-                future.set_result(page_readers._extract_serially(
-                    [task], entries_by_source=ENTRIES, registers=REGISTERS,
-                    max_value_bytes=2 * 1024 * 1024)[0])
+                future.set_result(self._serial_result(task))
             return future
 
     monkeypatch.setattr(page_readers, "ProcessPoolExecutor", _HalfBrokenPool)
@@ -223,3 +239,97 @@ def test_a_pool_that_breaks_mid_batch_finishes_the_rest_on_the_main_thread(
     assert outcomes == _serial(tasks)
     assert all(isinstance(outcome, IntakeResult) for outcome in outcomes)
     assert "the extraction pool broke after 2/10 bodies" in caplog.text
+
+
+def test_a_worker_that_hangs_costs_one_body_and_never_the_batch(
+    pooled: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A body the parser will not let go of, while the parent sits in an OPEN batch
+    transaction. Waiting it out means the 55-minute job kill takes the batch — every portal's
+    payload claims with it — and the next run gets the same immutable body to hang on.
+
+    So the wait is bounded, the pool's processes are KILLED (a `shutdown(wait=True)` would
+    join the hung one and become the same wedge four lines later), that body comes back as
+    its own `TimeoutError`, and the rest of the batch finishes on the main thread."""
+    monkeypatch.setattr(page_readers, "EXTRACTION_TIMEOUT_S", 0.05)
+    pools: list[_FakePool] = []
+
+    class _HangingPool(_FakePool):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            pools.append(self)
+
+        def submit(self, fn: Any, task: Any) -> Future[IntakeResult]:
+            future: Future[IntakeResult] = Future()
+            self.submitted += 1
+            # The third body's worker never answers. Nothing sets this future.
+            if self.submitted != 3:
+                future.set_result(self._serial_result(task))
+            return future
+
+    monkeypatch.setattr(page_readers, "ProcessPoolExecutor", _HangingPool)
+    tasks = _corpus(10)
+
+    outcomes = _pages(tasks)
+
+    assert len(outcomes) == len(tasks), "every body still gets exactly one outcome"
+    assert isinstance(outcomes[2], TimeoutError)
+    assert [o for i, o in enumerate(outcomes) if i != 2] == [
+        o for i, o in enumerate(_serial(tasks)) if i != 2]
+    assert pools[0]._processes[1].killed, "the hung worker was left running"
+    assert pools[0].shutdowns == [(False, True)], "shutdown would have joined the hung worker"
+    assert "did not return body 3/10 within 0s" in caplog.text
+
+
+def test_the_timed_out_body_is_not_retried_on_the_main_thread(
+    pooled: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exactly-once, on the path where it is easiest to lose: the timed-out body already has
+    an outcome, so the fallback must start AFTER it. Re-running it in-process would hang the
+    lane itself — the same body, the same parser, no pool to kill this time."""
+    monkeypatch.setattr(page_readers, "EXTRACTION_TIMEOUT_S", 0.05)
+    extracted: list[int] = []
+    real = page_readers.extract_page
+
+    def _record(payload: Any, row: Any, *a: Any, **k: Any) -> IntakeResult:
+        extracted.append(row.listing_id)
+        return real(payload, row, *a, **k)
+
+    class _HangingPool(_FakePool):
+        def submit(self, fn: Any, task: Any) -> Future[IntakeResult]:
+            future: Future[IntakeResult] = Future()
+            self.submitted += 1
+            if self.submitted != 1:
+                future.set_result(self._serial_result(task))
+            return future
+
+    monkeypatch.setattr(page_readers, "ProcessPoolExecutor", _HangingPool)
+    monkeypatch.setattr(page_readers, "extract_page", _record)
+
+    outcomes = _pages(_corpus(5))
+
+    assert isinstance(outcomes[0], TimeoutError)
+    assert 0 not in extracted, "the hung body was handed back to the main thread"
+    # The four behind it ARE re-extracted, and that is not a double-count: their futures
+    # were never awaited, so nothing consumed a result from the pool that was killed under
+    # them. What has to hold is one outcome per body, and the first of those is the timeout.
+    assert extracted[-4:] == [1, 2, 3, 4]
+    assert len(outcomes) == 5
+    assert all(isinstance(outcome, IntakeResult) for outcome in outcomes[1:])
+
+
+# ------------------------------------------------------------------ the logged width
+
+def test_pool_width_is_what_extract_pages_will_actually_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lane logs this beside its bodies/s. A batch under the floor ran on the main
+    thread, and a rate labelled with workers it never had is worse than no label."""
+    monkeypatch.setenv(page_readers.EXTRACTION_WORKERS_ENV, "4")
+
+    assert page_readers.pool_width(page_readers.PARALLEL_MIN_BODIES) == 4
+    assert page_readers.pool_width(page_readers.PARALLEL_MIN_BODIES - 1) == 1
+    assert page_readers.pool_width(0) == 1
+
+    monkeypatch.setenv(page_readers.EXTRACTION_WORKERS_ENV, "1")
+    assert page_readers.pool_width(10_000) == 1

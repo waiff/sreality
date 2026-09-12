@@ -2010,11 +2010,16 @@ already spent) runs AFTER the terminal stamp — ahead of it, it could push the 
 55-minute ceiling and lose the cursor of a run that had otherwise finished cleanly. **The lane
 self-chains while it has a backlog** (W1-a3): GitHub fires the hourly cron ~7 times a day, so the
 250 000-body backlog every contract bump creates would drain at ~6 000 bodies a fired tick, and a
-run whose summary reports `bodies_pass_complete=false` (or a listing scan that did not reach its
-end) dispatches ONE successor with its own budget — but only after asking whether any member of
-`location-batch` is already waiting, because the group's single pending slot supersedes the OLDER
-entry and an unyielding chain is what cancelled the hourly intake and an operator's full-resolve
-on 2026-09-10. Both halves complete is the steady state and chains nothing. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
+run dispatches ONE successor with its own budget when its summary reports an unfinished half THAT
+IT MOVED — `bodies_pass_complete=false` with `bodies_mined>0`, or `reached_end=false` with
+`listings>0`. The progress term is the loop breaker: `bodies_pass_complete` is False until the
+drain sets it, so a run with no page-capable portal (`--source sreality`) or no R2 credential
+would otherwise chain clean short runs for ever, and both of the drain's early returns now stamp
+the pass complete for the same reason. It dispatches only after asking whether any member of
+`location-batch` is already waiting — `location_resolve.yml` included, which joins the group
+through a mode-conditional expression — because the group's single pending slot supersedes the
+OLDER entry, and an unyielding chain is what cancelled the hourly intake and an operator's
+full-resolve on 2026-09-10. Both halves complete is the steady state and chains nothing. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
 re-mine, the archived-HTML sweep, the verify lane and the LLM free-text lane, with the refetch
 cohort and the payload backfill/prune/churn tooling. The lane writes `location_claims`,
 `dirty_locations` and its own `location_claim_batches` ledger and nothing else:

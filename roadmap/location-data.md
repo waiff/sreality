@@ -196,13 +196,16 @@ component is slimmed twice — each wave rewrites one component and slims its st
     claims are identical; `LOCATION_INTAKE_WORKERS` exists only for a runner that misreports
     its CPU count. The lane also **self-chains** now: GitHub fires the `35 * * * *` cron ~7
     times a day (no tick at 02:35 or 03:35 on 2026-09-12), so a 250 000-body backlog drained at
-    ~6 000 bodies a fired tick however fast the extraction got. A run whose summary reports
-    `bodies_pass_complete=false` — or a listing scan short of its end — dispatches ONE successor
-    with the same budget and batch size, and nothing when both reached their end (steady state
-    is cron-only). It YIELDS first: `location-batch` keeps one pending slot and GitHub
+    ~6 000 bodies a fired tick however fast the extraction got. A run dispatches ONE successor
+    with the same budget and batch size when it reports an unfinished half THAT IT MOVED
+    (`bodies_pass_complete=false` with `bodies_mined>0`, or `reached_end=false` with
+    `listings>0`), and nothing otherwise (steady state is cron-only). The progress term plus
+    a `bodies_pass_complete=true` stamp on both of the drain's early returns is what stops a
+    run with no page-capable portal (`--source sreality`) or no R2 credential from chaining
+    clean short runs for ever. It YIELDS first: `location-batch` keeps one pending slot and GitHub
     supersedes the OLDER entry, which is how a chain evicted the hourly intake and an
     operator's full-resolve on 2026-09-10, so if any member of the group is already waiting the
-    chain ends and lets it through. `test_location_batch_hardening.py`'s ban on self-chaining
+    chain ends and lets it through — `location_resolve.yml` counts, it joins the group through a mode-conditional expression. `test_location_batch_hardening.py`'s ban on self-chaining
     members becomes the rail that the yield exists, plus seven tests that execute the chain
     script itself against a stub `gh`.
 - **W2 — the resolver at four steps, the answer table at 27 fields** (= plan S3 + the projection

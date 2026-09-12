@@ -1256,12 +1256,24 @@ def mine_bodies(
         entries_by_source=entries_by_source, registers=registers,
         max_value_bytes=max_value_bytes)
     stats["body_extract_seconds"] += time.monotonic() - extract_started
+    # The rate's numerator: bodies that reached the extractor, not bodies the bucket served.
+    # A fetched body with no register never cost a parse and would flatter the rate.
+    stats["bodies_extracted"] += len(minable)
     stamps: list[dict[str, Any]] = []
     for (row, body, version), outcome in zip(minable, outcomes, strict=True):
         if isinstance(outcome, IntakeRefused):
             LOG.warning("PAGE extract refused listing_id=%d source=%s payload_id=%d: %s",
                         row.listing_id, row.source, body.id, outcome)
             result.refuse(f"page_extract_refused:{row.source}")
+            continue
+        if isinstance(outcome, TimeoutError):
+            # A worker stuck inside ONE body's parse, sitting on an open batch transaction.
+            # Counted like a bucket miss rather than raised: the body is immutable, so a
+            # batch that failed on it would fail on it again every hour — this way the
+            # batch commits, the body stays unstamped, and the next run asks for it again.
+            LOG.warning("PAGE extract timed out listing_id=%d source=%s payload_id=%d: %s",
+                        row.listing_id, row.source, body.id, outcome)
+            result.refuse(f"page_extract_timeout:{row.source}")
             continue
         if isinstance(outcome, Exception):
             # NOT per body. An exception the readers do not classify is a lane bug, and the
@@ -1324,14 +1336,20 @@ def drain_unmined_bodies(
     run budget at most (the payload half is never starved), and a batch that comes back
     short of `cap` is the end of the keyset.
     """
+    # A PASS THAT COULD NEVER RUN IS A PASS THAT REACHED ITS END, and the distinction is
+    # not cosmetic: `bodies_pass_complete` starts False and is otherwise only set inside the
+    # loop, so leaving it False here would tell the run summary that a backlog is waiting
+    # when there is no store to read it from and no portal whose contract declares a page
+    # entry (`--source sreality`, or R2 unconfigured). The chain reads that field.
     if store is None or not page_sources:
+        stats["bodies_pass_complete"] = True
         return
     started = time.monotonic()
-    workers = page_readers.extraction_workers()
     last_seconds = 0.0
     after_body_id = 0
     sources = sorted(page_sources if source is None else page_sources & {source})
     if not sources:
+        stats["bodies_pass_complete"] = True
         return
     while True:
         if not budget.room_for(last_seconds, BODIES_BUDGET_SHARE):
@@ -1341,7 +1359,7 @@ def drain_unmined_bodies(
             break
         batch_started = time.monotonic()
         extract_before = stats["body_extract_seconds"]
-        fetched_before = stats["bodies_fetched"]
+        extracted_before = stats["bodies_extracted"]
         result = IntakeResult()
         stamps: list[dict[str, Any]] = []
         selected = 0
@@ -1391,18 +1409,29 @@ def drain_unmined_bodies(
         last_seconds = time.monotonic() - batch_started
         stats["bodies_batches"] += 1
         # THE RATE IS THE READOUT the parallel extraction is judged on — the one number
-        # that says whether a batch is bounded by the bucket, the pool or the database.
-        extracted = stats["bodies_fetched"] - fetched_before
+        # that says whether a batch is bounded by the bucket, the pool or the database. The
+        # width printed beside it is the width `extract_pages` ACTUALLY used for this batch
+        # (`pool_width` is the one definition of that), never the configured one: a batch
+        # under the floor ran on the main thread and a rate labelled with 16 workers it
+        # never had is worse than no label at all.
+        extracted = stats["bodies_extracted"] - extracted_before
         extract_seconds = stats["body_extract_seconds"] - extract_before
         LOG.info("INTAKE bodies-first batch selected=%d mined=%d claims=%d inserted=%d "
                  "through_id=%d in %.1fs extract=%.1fs %.1f bodies/s (workers=%d)",
                  selected, len(stamps), len(result.claims),
                  stats["claims_inserted"], after_body_id, last_seconds, extract_seconds,
                  extracted / extract_seconds if extract_seconds > 0 else 0.0,
-                 workers if extracted >= page_readers.PARALLEL_MIN_BODIES else 1)
+                 page_readers.pool_width(extracted))
         if dry_run:
             # A dry run is a shape check, not a drain: it writes no claims, so spending the
             # bucket on the rest of the backlog would buy nothing.
+            #
+            # IT LEAVES `bodies_pass_complete` FALSE ON PURPOSE — it stopped one batch into
+            # a backlog it did not drain, and saying otherwise would make a dry run the one
+            # run that reports a clean corpus. What keeps that out of the chain is the
+            # workflow's own `if: inputs.dry_run != true`: a dry run never reaches the chain
+            # step, so its "work left" is never asked. Both halves of that are load-bearing
+            # — dropping the guard would give a dry run an endless successor.
             LOG.info("INTAKE bodies-first: --dry-run takes one batch, not the backlog")
             break
         if selected < cap:
@@ -1520,8 +1549,8 @@ def run(
         "listings": 0, "claims": 0, "claims_payload": 0, "claims_page": 0,
         "claims_inserted": 0, "enqueued": 0, "refusals": 0,
         "bodies_eligible": 0, "bodies_fetched": 0, "bodies_from_r2": 0,
-        "bodies_mined": 0, "body_fetch_seconds": 0.0, "body_extract_seconds": 0.0,
-        "bodies_batches": 0,
+        "bodies_mined": 0, "bodies_extracted": 0, "body_fetch_seconds": 0.0,
+        "body_extract_seconds": 0.0, "bodies_batches": 0,
         "bodies_seconds": 0.0, "bodies_pass_complete": False,
         "bodies_backlog_remaining": None, "payload_seconds": 0.0,
         "stopped_early": False, "reached_end": False, "resumed_from_id": after_id,
