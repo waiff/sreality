@@ -129,8 +129,8 @@ function Header({ listing, titleId }: { listing: ListingPublic; titleId: string 
           </>
         )}
       </p>
-      {listing.locality && (
-        <p className="mt-1.5 text-sm text-[var(--color-ink-2)]">{listing.locality}</p>
+      {listing.display_label && (
+        <p className="mt-1.5 text-sm text-[var(--color-ink-2)]">{listing.display_label}</p>
       )}
       <p
         className="mt-2 text-[0.7rem] tracking-wide text-[var(--color-ink-3)] cursor-help"
@@ -312,7 +312,7 @@ function SummaryRow({ label, text }: { label: string; text?: string | null }) {
 
 function Facts({ listing }: { listing: ListingPublic }) {
   const facts: Array<[string, string | null]> = [
-    ['District', listing.district],
+    ['Location', listing.display_label],
     ['Floor', listing.floor != null
       ? listing.total_floors != null
         ? `${listing.floor} / ${listing.total_floors}`

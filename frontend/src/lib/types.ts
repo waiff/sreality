@@ -86,11 +86,12 @@ export interface ListingPublic {
   /* Portal-agnostic property sub-type (migration 152): the meaningful "kind"
    * for commercial/houses where disposition is NULL. NULL for apartments. */
   subtype: string | null;
-  locality: string | null;
-  district: string | null;
-  obec: string | null;
-  okres: string | null;
-  street: string | null;
+  /* The ONE place string, composed server-side by location_display_label from
+   * the listing's `listing_location` row (migration 503): street + house number
+   * + town, else part-of-town + town, else the town, else the country for a
+   * foreign listing, else NULL. No surface assembles a place out of parts any
+   * more -- there are no parts on the wire to assemble. */
+  display_label: string | null;
   locality_district_id: number | null;
   locality_region_id: number | null;
   lat: number | null;
@@ -979,7 +980,9 @@ export interface PipelineBoardCard {
    * post-Gate-2 non-sreality representative. */
   listing_id: number | null;
   category_main: string | null;
-  street: string | null;
+  /* One label -- see ListingPublic.display_label. It replaced `street`, which
+   * the board carried only to feed the deleted placePrimary(). */
+  display_label: string | null;
   district: string | null;
   disposition: string | null;
   subtype: string | null;
@@ -1001,8 +1004,10 @@ export interface PipelineBoardCard {
    * `obec_id` doubles as the join key to the curated-city index strip
    * (= curated_cities.admin_boundary_id; see lib/useCityQuality). */
   obec_id: number | null;
-  /* Municipality + free-text locality — feed placePrimary() so the card's place
-   * line names the TOWN, and so the "Město" sort orders by something visible. */
+  /* Municipality + free-text locality. The card's place line is `display_label`
+   * now; `obec` stays because the "Město A–Ž" sort orders by the TOWN, which is
+   * the tail of the label rather than its head (a label that starts with a
+   * street would sort by house number). */
   obec: string | null;
   locality: string | null;
   okres_id: number | null;
@@ -1039,7 +1044,8 @@ export interface CollectionPropertyRow {
   /** Source portal of the representative listing; null if none joined. Drives
    * whether sreality_id is shown as a meaningful "ID" (sreality only). */
   source: string | null;
-  district: string | null;
+  /* One label -- see ListingPublic.display_label. */
+  display_label: string | null;
   disposition: string | null;
   subtype: string | null;
   area_m2: number | null;
@@ -1487,8 +1493,10 @@ export interface WatchdogDispatch {
   /* Portal-agnostic property sub-type (migration 152): the meaningful "kind"
    * for commercial/houses where disposition is NULL. NULL for apartments. */
   subtype: string | null;
-  locality: string | null;
-  district: string | null;
+  /* One label, composed by the API from the dispatch's listing (migration 503).
+   * It replaced a `locality ?? district` pair that the SPA fell back through in
+   * one order and the extension in the other. */
+  display_label: string | null;
   is_active: boolean | null;
   first_seen_at: string | null;
   last_seen_at: string | null;

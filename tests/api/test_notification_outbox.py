@@ -20,7 +20,7 @@ def test_compose_new_subject_and_deep_link(monkeypatch: Any) -> None:
     monkeypatch.setenv("SPA_BASE_URL", "https://app.example/")
     msg = ob.compose_message({
         "change_kind": "new", "sreality_id": 123,
-        "locality": "Praha 2", "disposition": "2+kk",
+        "display_label": "Praha 2", "disposition": "2+kk",
         "price_czk": 6_900_000, "price_unit": None,
     })
     assert isinstance(msg, RenderedMessage)
@@ -36,7 +36,7 @@ def test_compose_deep_link_prefers_natural_key(monkeypatch: Any) -> None:
     msg = ob.compose_message({
         "change_kind": "new", "sreality_id": -284913,
         "source": "bazos", "source_id_native": "218865547",
-        "locality": "Praha 2", "disposition": "2+kk",
+        "display_label": "Praha 2", "disposition": "2+kk",
         "price_czk": 6_900_000, "price_unit": None,
     })
     assert msg.deep_link == "https://app.example/listing/bazos/218865547"
@@ -50,7 +50,7 @@ def test_compose_deep_link_falls_back_to_legacy_without_natural_key(monkeypatch:
     msg = ob.compose_message({
         "change_kind": "new", "sreality_id": 123,
         "source": "sreality", "source_id_native": None,
-        "locality": "Praha 2", "disposition": "2+kk",
+        "display_label": "Praha 2", "disposition": "2+kk",
         "price_czk": 6_900_000, "price_unit": None,
     })
     assert msg.deep_link == "https://app.example/listing/123"
@@ -70,7 +70,7 @@ def test_compose_system_health_uses_verbatim_message(monkeypatch: Any) -> None:
 def test_compose_price_drop_shows_prev_to_new(monkeypatch: Any) -> None:
     monkeypatch.setenv("SPA_BASE_URL", "https://app.example")
     msg = ob.compose_message({
-        "change_kind": "price_drop", "sreality_id": 9, "locality": "Brno",
+        "change_kind": "price_drop", "sreality_id": 9, "display_label": "Brno",
         "disposition": "3+1", "price_czk": 4_500_000, "price_unit": None,
         "prev_price_czk": 5_000_000, "trigger_price_czk": 4_500_000,
     })
@@ -142,7 +142,7 @@ class _FakeClient:
 
 def _new_row(ch: str = "email") -> tuple:
     # (dispatch_id, source_kind, change_kind, sreality_id, subscription_id,
-    #  collection_id, trigger_price, prev_price, locality, disposition,
+    #  collection_id, trigger_price, prev_price, display_label, disposition,
     #  price_czk, price_unit, category_main, source, source_id_native, message, ch)
     return ("dab-1", "watchdog", "new", 123, "sub-1", None,
             None, None, "Praha 2", "2+kk", 6_900_000, None, "byt",
@@ -196,7 +196,7 @@ def test_drain_collection_monitor_routes_collection_id_as_source() -> None:
 def test_drain_retries_failed_due_rows() -> None:
     client = _FakeClient(configured={"email"})
     # (send_id, channel, recipient, consumer, source_kind, change_kind, sreality_id,
-    #  trigger_price, prev_price, locality, disposition, price_czk, price_unit,
+    #  trigger_price, prev_price, display_label, disposition, price_czk, price_unit,
     #  category_main, source, source_id_native, message)
     retry_row = (42, "email", "op@example.cz", "watchdog", "watchdog", "new", 5,
                  None, None, "Ostrava", "2+1", 3_000_000, None, "byt",

@@ -1938,9 +1938,12 @@ grade columns (`match_confidence`, `granularity`, `uncertainty_radius_m`, all NO
 status columns (`country_status` NOT NULL, `disputed`) and four housekeeping ones
 (`resolver_version`, `resolved_at`, `claim_set_hash`, `registry_version`). `pin_shared_by_n` was
 the 27th and came out for the reason rule 25 exists: its producer was the pin-collision epoch,
-so the column would have shipped writing 0 on every row forever. The shared-pin count is a
-read-time aggregate (`count(*) over (partition by geom)`) and W3 computes it in the `browse_list`
-rebuild, where the map is the thing that needs it. The steps:
+so the column would have shipped writing 0 on every row forever. The shared-pin count was parked
+for W3 as a read-time aggregate (`count(*) over (partition by geom)`) and **W3 then refused it**
+(decision W3-2): `sync_browse_list` patches `browse_list` with `WHERE property_id = ANY(…)`, and
+that qual cannot be pushed below a window function, so every merge would have aggregated the whole
+corpus. It has no producer and no measured need — the map expresses precision with the
+granularity-only circle below. The steps:
 
 * **BIND** (`bind.py`) picks the finest RÚIAN entity the claims justify — a portal registry key,
   obec + street + čp/čo, a street inside the constraining obec, an obec/část obce by name, a PSČ
@@ -2051,6 +2054,44 @@ statement-autocommit with a long `lock_timeout` and every statement `if exists`,
 498's one-transaction form had to be rewritten: one long transaction holding ACCESS EXCLUSIVE on
 twenty relations is a lock queue every reader parks behind, and the apply workflow's retry re-runs
 the whole file.
+
+**W3 S1+S2: one label and one set of codes, read through the serving views** (migration 503).
+Browse (both lanes), the map, the kanban, the listing detail page, the broker inventory, the
+collections route, the Chrome extension and the notification composer all used to compose a place
+string themselves, out of five legacy columns, in five different assemblies — `placeLabel.ts`'s
+`placePrimary()` at eleven sites plus inline variants, with the extension falling back
+`district ?? locality` while the SPA fell back the other way, so one listing could be labelled two
+different ways on two surfaces at once. Migration 503 joins `listing_location` into
+`browse_projection` (on `properties.repr_listing_ref_id`, the property's DISPLAY listing — so place,
+price and area finally come from ONE child, where `recompute_property_stats.py`'s `best_geo` /
+`best_street` pickers used to let them come from three), into `listing_feed_public`,
+`listings_public` and `broker_listings_public` (on `listings.id`), and into `properties_public`;
+`pipeline_board_public` reads the label back off `properties_public` because it is
+`security_invoker` and `listing_location` is revoked from `authenticated`. Every one of them
+publishes **`display_label`**, computed by ONE immutable SQL function, `location_display_label` —
+foreign country code, else street + `čp/čo` + obec, else část obce + obec, else obec, else NULL —
+which the API's four raw-SQL surfaces call with the same seven columns. `browse_projection` also
+**re-sources** `obec_id` / `okres_id` / `region_id` from `ll.obec_kod` / `okres_kod` / `kraj_kod`
+and `lat` / `lng` from `ST_Y/ST_X(ll.geom)` (value-identical for a resolved row —
+`admin_boundaries.id` IS the RÚIAN code), and appends `cast_obce_id`, `uncertainty_radius_m` and
+`granularity_rank`. The last two are what the map DRAWS: a pin the resolver placed **below building
+level** (rank < 90, `location_granularity_rank`) gets a true-metre translucent circle of its own
+uncertainty radius under it, so "middle of the village" and "this front door" stop looking
+identical; at or above building level the pin stands alone. The drawn radius is capped at 2 km
+(display only — the true radius stays on the feature), because an okres- or kraj-grain radius is a
+different order of magnitude and would wash the map out. Clusters and server-side grid cells carry
+no per-pin radius, so the circle exists only in point mode. Appending is the only legal edit
+here — `browse_list` and `properties_map_mv` materialize `select * from browse_projection` and
+`toolkit/browse_read_model.sync_browse_list` re-inserts POSITIONALLY, so anything computed outside
+the view, or any reordering, writes NULLs into the wrong columns silently. **The apply is gated on
+rule 25's coverage invariant**: an unresolved row's re-sourced codes and pin are NULL, and a NULL
+`lat` drops the row out of `properties_map_mv` — which is the intended posture (no pin the resolver
+would not stand behind), but only once `count(listing_location) = count(active listings)`,
+`location_town_coverage`'s `cz_no_town` arm is green, and every active property's DISPLAY listing
+has a row (Browse serves delisted properties too, so the coverage invariant's "active listings" is
+not by itself the same set). The migration measures that last arm itself: section 0 compares
+today's `properties_map_mv` count with the count the new definition would produce and **aborts
+before any DDL** if the map would lose more than 5 % of its pins.
 
 **ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
 `35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a

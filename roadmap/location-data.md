@@ -364,6 +364,28 @@ component is slimmed twice — each wave rewrites one component and slims its st
 - **W3 — consumers, display first** (= plan S4): the 26 fields into `browse_list` and the public
   views; one label, one code predicate, one circle; `placeLabel.ts` assemblies, the five chip
   predicates, the sreality-only filters, `home_city_id` deleted rather than ported. Estimation last.
+  - **W3 S1+S2 shipped** (migration 503): the serving views read `listing_location`, and every place
+    display reads ONE `display_label`. `browse_projection` joins on `properties.repr_listing_ref_id`
+    (the DISPLAY listing — place, price and area now come from one child instead of `best_geo` /
+    `best_street` / `repr` separately) and APPENDS `display_label`, `cast_obce_id`,
+    `uncertainty_radius_m`, `granularity_rank` while RE-SOURCING `obec_id`/`okres_id`/`region_id`
+    and `lat`/`lng` from the answer table; `listing_feed_public` gets the same on `listings.id`;
+    `listings_public`, `properties_public`, `broker_listings_public` and `pipeline_board_public`
+    get the label. ONE immutable `location_display_label()` is the only definition (foreign code →
+    street + čp/čo + obec → část obce + obec → obec → NULL), called by the views and by the four
+    raw-SQL API surfaces (extension lookup, notification composer + outbox, dispatch feed,
+    collections). **The map draws precision**: a pin below building level (rank < 90) gets a
+    true-metre translucent circle of `uncertainty_radius_m`. Deleted: `placeLabel.ts` + its test,
+    the eleven `placePrimary()` sites, five place columns off `TABLE_COLS`/`CARD_COLS`, `district`
+    off `MAP_COLS`, `street` off `DETAIL_COLS` and the board, the feed's `locality, district` pair,
+    the extension's two-field fallback. NO shared-pin count (W3-2: the window function cannot be
+    pushed below `sync_browse_list`'s qual). **Apply gate**: three arms measured BEFORE the apply — full
+    `listing_location` coverage of active listings, per-portal `cz_no_town` at or below its pre-W2
+    level, and every active property's DISPLAY listing resolved (Browse serves delisted properties,
+    so the display listing of an active property is not always an active listing). Migration 503
+    measures the map side itself and aborts before any DDL if `properties_map_mv` would lose more
+    than 5 % of its pins. Next: S3 (one code predicate, `/maps/resolve` codes + a `cast_obce` level,
+    registry regen, the two RPC bodies) then S4 (drop the legacy text columns).
 - **W4 — delete legacy** (= plan S5): Mapy purge, geocoder + cache, street extractor, the trigger
   and the 24 `listings` columns, the property-grain geography, the second page archive, the
   backfill scripts and workflows; rule 24 rewritten to the end state.
