@@ -1,0 +1,53 @@
+{
+  "_note": "SYNTHESISED, not captured: a byte copy of tests/location_data/claim_intake_fixtures.SREALITY_POST_CUTOVER (itself synthesised from recon/db-raw-samples.md §3.1), keyed by payload SHAPE because no real sreality listing id in this repo is tied to committed bytes. The two copies are bound by tests/location_data/test_contract_sreality.py so they cannot drift. lat/lon are the payload's own /locality/gps_lat|gps_lon, as the W1 portal suite commits them.",
+  "raw_json": {
+    "advert_description": "Prodej bytu 3+kk …",
+    "locality": {
+      "zip": 13000,
+      "city": "Praha",
+      "ward": null,
+      "region": "Hlavní město Praha",
+      "street": "náměstí Jiřího z Poděbrad",
+      "gps_lat": 50.0784977,
+      "gps_lon": 14.4501973,
+      "quarter": "Praha 3",
+      "ward_id": 14967,
+      "citypart": "Vinohrady",
+      "district": "Praha 3",
+      "geometry": {
+        "geometry": [
+          "9hETFxX9bEJjg6xKjViOSNSY"
+        ],
+        "bounding_box": {
+          "rightTopLatitude": 50.0786306,
+          "rightTopLongitude": 14.4522815,
+          "leftBottomLatitude": 50.077147,
+          "leftBottomLongitude": 14.4485223
+        },
+        "geometry_type": "linestring"
+      },
+      "region_id": 10,
+      "street_id": 122964,
+      "country_id": 112,
+      "quarter_id": 89,
+      "district_id": 5003,
+      "entity_type": "address",
+      "housenumber": "1558",
+      "streetnumber": "7",
+      "inaccuracy_type": "street",
+      "municipality_id": 3468,
+      "country": "Česká republika"
+    },
+    "premise": {
+      "locality": {
+        "city": "Praha",
+        "street": "Vinohradská",
+        "housenumber": "12",
+        "gps_lat": 50.0781,
+        "gps_lon": 14.4402
+      }
+    }
+  },
+  "lat": 50.0784977,
+  "lon": 14.4501973
+}

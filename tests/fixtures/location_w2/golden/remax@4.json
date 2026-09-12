@@ -1,0 +1,90 @@
+{
+  "portal": "remax",
+  "contract_version": 4,
+  "regression_listing_ids": [],
+  "listings_without_a_fixture_body": [],
+  "fixtures": [
+    {
+      "listing": "437234",
+      "body": "tests/fixtures/location_w2/regressions/remax/437234.json",
+      "row": {
+        "lat": 50.053749999999994,
+        "lon": 17.05588888888889,
+        "in_mapy_inventory": false,
+        "listings.locality": "Velké Losiny",
+        "listings.street": "Bukovická",
+        "listings.street_source": "parser"
+      },
+      "claims": [],
+      "refusals": {}
+    },
+    {
+      "listing": "445781",
+      "body": "claim_intake_fixtures.REMAX",
+      "row": {
+        "lat": 50.081,
+        "lon": 14.4508,
+        "in_mapy_inventory": false,
+        "listings.locality": null,
+        "listings.street": null,
+        "listings.street_source": null
+      },
+      "claims": [],
+      "refusals": {}
+    },
+    {
+      "listing": "445781",
+      "body": "claim_intake_fixtures.REMAX_BOTH_ADDRESS_KEYS",
+      "row": {
+        "lat": 50.081,
+        "lon": 14.4508,
+        "in_mapy_inventory": false,
+        "listings.locality": null,
+        "listings.street": null,
+        "listings.street_source": null
+      },
+      "claims": [],
+      "refusals": {}
+    }
+  ],
+  "archived_claims": [
+    {
+      "extractor_id": "rx.det.gps",
+      "claim_type": "coordinate",
+      "value_text": "50°04'26.1\"N,14°43'41.5\"E",
+      "value_num": null,
+      "value_geom_wkt": "POINT(14.728194444444444 50.07391666666667)",
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": "portal_pin",
+      "evidence_quote": "50°04'26.1\"N,14°43'41.5\"E",
+      "evidence_span_len": 35
+    },
+    {
+      "extractor_id": "rx.det.header_obec",
+      "claim_type": "obec_name",
+      "value_text": "Úvaly",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "\n\t\t\t\t\t\tulice Pod Slovany,\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\tÚvaly",
+      "evidence_span_len": 46
+    }
+  ]
+}

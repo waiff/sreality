@@ -24,10 +24,22 @@
      The breadcrumb block deliberately still states names with NO @id: that is the
      fail-closed case tests/location_data/test_archive_reader_canon.py pins, so the
      four rm.det.breadcrumb_* entries are exercised against the real archived body
-     (tests/fixtures/portal_html/realitymix_detail.html), not against this page. -->
+     (tests/fixtures/portal_html/realitymix_detail.html), not against this page.
+
+     V5 adds the ONE element this model omitted and every captured realitymix body
+     carries: <link rel="canonical">. Its /detail/{obec}/ slug is v5's town carrier
+     (rm.det.slug). No claim VALUE is introduced — the town was already Plzeň here,
+     stated by the title, og:title, data-address and the breadcrumb.
+     The trailing `-<id>` segment a real canonical carries is deliberately OMITTED:
+     the archived arm scores this page under the default native "fixture"
+     (ARCHIVE_FIXTURE_NATIVE has no realitymix row), so this model names no listing,
+     and any number here would fabricate one. The first v5 draft borrowed 8460367,
+     which claim_intake_fixtures.REALITYMIX_PAGE binds to Staňkovice, okres Louny —
+     two artefacts disagreeing about one id. Only the OBEC segment is read. -->
 <html lang="cs">
 <head>
   <title>Prodej bytu 3+1, Slovanská alej, 326 00 Plzeň | RealityMix</title>
+  <link rel="canonical" href="https://realitymix.cz/detail/plzen/prodej-bytu-3-1-82-m2-slovanska-alej.html">
   <meta property="og:title" content="Prodej bytu 3+1 82 m2, Slovanská alej, 326 00 Plzeň 2-Slovany">
   <script type="application/ld+json">
   {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[

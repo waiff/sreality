@@ -5,7 +5,16 @@
      scoping — it carries id.det.subject_feature, the first-party replacement for
      the 6,314-row unstamped coordinate cohort [live-B §1.4.1]. The 20 neighbour
      addresses per page are [live-B §1.2]; the verbatim disclaimer is
-     [mine-syn §4.0 fix #9] and is the portal's own blur declaration. -->
+     [mine-syn §4.0 fix #9] and is the portal's own blur declaration.
+
+     The trailing dataLayer viewDetail push block is COPIED VERBATIM
+     from tests/fixtures/portal_html/idnes_detail.html, which is the real archived page of
+     THIS SAME listing (6a71888887e5da33ca081ad8, Tanvald / Šumburk nad Desnou). It is the
+     surface idnes@3 reads the town, the část obce and the kraj from: the address line
+     states 'Tanvald - Šumburk nad Desnou' glued into one token that binds to no RÚIAN
+     obec, this block states them split. The second, NESTED push (the GAEvent handler) is
+     kept exactly as the real page carries it: it is what a `script_match` anchored on
+     "viewDetail" has to leave alone. -->
 <html lang="cs">
 <head><title>Prodej domu 210 m², Tanvald - Šumburk nad Desnou | reality.iDNES.cz</title></head>
 <body>
@@ -52,6 +61,44 @@
 <div class="broker">
   M&amp;M Reality Holding a.s., Krakovská 1675/2, 110 00 Praha 1
 </div>
+
+<script type="text/javascript">
+			if (typeof dataLayer == 'object') {
+				dataLayer.push({
+					"event": "viewDetail",
+					"listing_id":"6a71888887e5da33ca081ad8",
+					"listing_name":"Řadový dům po kompletní rekonstrukci s garáží, fotovoltaikou a krásným výhledem",
+					"listing_price":7900000,
+					"listing_type": "Nemovitost",
+					"listing_brand":"Realitní kancelář CENTRUM s.r.o.",
+					"listing_category":"Dům/Rodinný dům",
+					"listing_variant":"Prodej",
+					"listing_labels":null,
+					"listing_novostavba":false,
+					"listing_localityRegion":"Liberecký kraj",
+					"listing_localityDistrict":"Jablonec nad Nisou",
+					"listing_localityCity":"Tanvald",
+					"listing_localityCityArea":"Šumburk nad Desnou",
+					"listing_localityState":"CZ",
+					"listing_area":210,
+					"listing_landArea":80,
+					"listing_rooms":null,
+					"listing_lat":50.74437214,
+					"listing_lon":15.31331632,
+					"listing_image": "https://sta-reality2.1gr.cz/sta/compile/thumbs/8/7/e/5666d5f735a70791eeffd34a89e97.webp",
+					"listing_visibility": "visible"
+				});
+
+				$(".b-detail__mortgage").on("click", function () {
+					dataLayer.push({
+						"event": "GAEvent",
+						"eventCategory": "Hypoteka",
+						"eventAction": "Kliknutí",
+						"eventLabel": $(this).attr("data-hypobrand")
+					});
+				});
+			}
+		</script>
 
 </body>
 </html>

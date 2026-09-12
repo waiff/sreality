@@ -75,11 +75,11 @@ _DETAIL_DIGESTS: dict[tuple[str, str], str] = {
     ("bazos", "location_w2/bazos_detail.html"):
         "3260342567e793274f496d789d1bb4edf42bec6c6e54119347ea3d586afe252a",
     ("ceskereality", "location_w2/ceskereality_detail.html"):
-        "835c64054ed413a1dea2aed988a39b70d797fe7d884fbf0359c3126b9e2b66de",
+        "28d988eb7f224a2310fc7c6606a2728d4898951b0ee4d95305680f584226966e",
     ("idnes", "location_w2/idnes_detail.html"):
-        "279fb3024d238ba2c1927b271b642019f9a647f0e605d35591a6ad8d02d4a8a1",
+        "c212524063f9841526115ea0788c8f32d1c4bbc199e0f4c49ff6f23da96c8c90",
     ("maxima", "location_w2/maxima_detail.html"):
-        "e0ea3cac396f989e62012b15a840fd843013b3b469dd5c05f3ca5360c2e639e8",
+        "b37cb00c8fdaef6445e0081245b8c2a7c34907df374eb8c9ae9f2ca411f6595d",
     # Moved once, in the mmreality@2 activation: the pinned fixture was re-authored so its
     # `:property` attribute is HTML-entity-encoded and its accented values `\uXXXX`-escaped,
     # exactly as production serves them, and so the subject blob carries the id the
@@ -87,12 +87,15 @@ _DETAIL_DIGESTS: dict[tuple[str, str], str] = {
     # profile are untouched — this is new BYTES, not a new normalisation.
     ("mmreality", "location_w2/mmreality_detail.html"):
         "58ad159d133699cd22b8e752c8c839044463898eac90d37c0302cb8324cc818d",
-    # Moved by contract realitymix@4 (W2-8): the modelled page's `data-address` was
-    # restated to the comma shape the portal serves and its `data-form-address` moved to
-    # the div that really carries it. The PROFILE is untouched, which is the property this
-    # table exists to pin — a fixture edit moves the body's digest, never the cohort key.
+    # Moved by contract realitymix@5 (W1-c), for the same reason it moved at @4 (W2-8):
+    # the modelled page gained the one element every captured realitymix body carries and
+    # this model omitted, <link rel="canonical">, whose `/detail/{obec}/` slug is @5's
+    # mandatory town carrier. The PROFILE is untouched, which is the property this table
+    # exists to pin — a fixture edit moves the body's digest, never the cohort key. It
+    # lands with the fixture and the golden (realitymix@5.json) in one commit, or the
+    # fixture-diff gate and this pin disagree about the same bytes.
     ("realitymix", "location_w2/realitymix_detail.html"):
-        "34f9c30bc9dfe34c17ae1d213e53b449055561c1af8844508133d80ef2534a64",
+        "53836c6ee03bb83b55f790128edbc7484b74f463ea56f568f8593e4f4960fffa",
     # W2-6 re-pinned: the FIXTURE moved, not the normaliser. remax's pinned body carried a
     # hand-written one-line `h2.pd-header__address`, which hid the nested `mapa` jump-link
     # every real remax page carries; the block is now copied verbatim from the archived
