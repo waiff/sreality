@@ -369,15 +369,17 @@ def test_a_portal_with_no_archived_detail_map_gets_no_archived_coordinate(source
     assert not verdict.admitted
 
 
-def test_the_archived_rules_name_the_six_entries_and_only_current_licence_spellings():
+def test_the_archived_rules_name_the_seven_entries_and_only_current_licence_spellings():
     """bazos joined on 2026-09-12 (W1-c R6): the ad's own
     `google.com/maps/place/<lat>,<lon>` anchor is the PAGE publishing a pin, so it is
     first-party exactly as remax's `#printMap[data-gps]` is. That the pin is permanently
     approximate is the entry's `precision_cap`, not a missing row here — a missing row says
-    "this portal publishes no coordinate at all", which was never true."""
+    "this portal publishes no coordinate at all", which was never true. ceskereality joined
+    with it (W1-c R10): `input#driving_calculator_from`'s decimal pair is the portal's own,
+    and once rule 25 deleted the `listings.geom` reader it is the only pin it has."""
     assert {r.entry_id for r in ARCHIVED_COORDINATE_RULES.values()} == {
         "rx.det.gps", "rm.det.gps", "id.det.subject_feature", "mm.det.point",
-        "mx.det.map_features", "bzs.det.link_pin"}
+        "mx.det.map_features", "bzs.det.link_pin", "cr.det.page_pin"}
     declared = {r.licence_class for r in ARCHIVED_COORDINATE_RULES.values()}
     declared |= {r.geocoded_licence_class for r in ARCHIVED_COORDINATE_RULES.values()
                  if r.geocoded_licence_class}

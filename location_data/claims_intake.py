@@ -291,36 +291,30 @@ def _read_point_pair(entry: Entry, row: ListingRow) -> list[Claim]:
 @reader("declared_quality")
 def _read_declared_quality(entry: Entry, row: ListingRow) -> list[Claim]:
     """A portal's own precision label -> `precision_declaration`, with the blur axis typed
-    rather than flattened into the coordinate (06 §6.2.1). The blurred-label set is data on
-    the contract entry (`precision_map.blurred_labels`), so re-calibrating it is a contract
-    version bump, not a code change."""
+    rather than flattened into the coordinate (06 §6.2.1). The reader states the LABEL;
+    `_base` derives the blur axis from `precision_cap.blurred_labels` (W1-c R5), so
+    re-calibrating it is a contract version bump, not a code change."""
     label = _text(json_pointer(row.raw_json, str(entry.locator["json_pointer"])))
     if label is None:
         return []
-    blurred = {str(x) for x in (entry.precision_map.get("blurred_labels") or [])}
-    blur = "declared" if label in blurred else "none"
-    return [_base(entry, row, value_text=label, declared_precision_label=label,
-                  blur_evidence=blur)]
+    return [_base(entry, row, value_text=label, declared_precision_label=label)]
 
 
 @reader("declared_bool_quality")
 def _read_declared_bool_quality(entry: Entry, row: ListingRow) -> list[Claim]:
     """mmreality `accurate` — present on 100% of rows, `false` on 37.2%, and stored
-    nowhere today. The boolean is mapped to a LABEL by the contract (`locator.labels`) and
-    the blur axis is then decided the same way `declared_quality` decides it: membership
-    in the contract's `precision_map.blurred_labels`. Which of the two labels is blurred
-    is a portal fact, so it is data on the entry — re-calibrating it is a contract version
-    bump, not a code change. Either way the axis is written EXPLICITLY, never defaulted
-    (06 §6.6 rule 7)."""
+    nowhere today. The boolean is mapped to a LABEL by the contract (`locator.labels`);
+    `_base` then derives the blur axis from that label's membership in the contract's
+    `precision_cap.blurred_labels` (W1-c R5). Which of the two labels is blurred is a portal
+    fact, so it is data on the entry — re-calibrating it is a contract version bump, not a
+    code change, and the axis is written EXPLICITLY, never defaulted (06 §6.6 rule 7)."""
     raw = json_pointer(row.raw_json, str(entry.locator["json_pointer"]))
     if raw is None or not isinstance(raw, bool):
         return []
     labels = entry.locator.get("labels") or {"true": "accurate", "false": "not_accurate"}
     label = str(labels["true" if raw else "false"])
-    blurred = {str(x) for x in (entry.precision_map.get("blurred_labels") or [])}
-    blur = "declared" if label in blurred else "none"
     return [_base(entry, row, value_text=label, declared_precision_label=label,
-                  value_num=1.0 if raw else 0.0, blur_evidence=blur)]
+                  value_num=1.0 if raw else 0.0)]
 
 
 @reader("bbox_envelope")

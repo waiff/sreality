@@ -157,6 +157,10 @@ ARCHIVED_COORDINATE_RULES: dict[str, ArchivedCoordinateRule] = {
     "mmreality": ArchivedCoordinateRule("mm.det.point", "portal"),
     # The OpenLayers config's `/features/0`.
     "maxima": ArchivedCoordinateRule("mx.det.map_features", "portal"),
+    # The decimal pair `input#driving_calculator_from` stamps, which the page's own
+    # Google embed echoes as `q=lat,lng` — first-party, and since rule 25 deletes the
+    # `listings.geom` reader it is the ONLY pin this portal has (W1-c R10).
+    "ceskereality": ArchivedCoordinateRule("cr.det.page_pin", "portal"),
 }
 
 # Same envelope as `location_constants.cz_bbox` (migration 380) and as
@@ -926,6 +930,25 @@ def _base(entry: Entry, row: ListingRow, **overrides: Any) -> Claim:
         "subject_scoped": entry.subject_scope.get("subject_scoped", True),
     }
     fields.update(overrides)
+    if entry.claim_type == "precision_declaration":
+        # W1-c R5, once for every reader on both substrates, because this is the only place
+        # every claim passes through. Two halves, and they are owned by different parties:
+        #
+        #  * the LABEL is the reader's. A reader that already decided it keeps it
+        #    (`json_bool` maps a boolean to the label the CONTRACT names, `json_geometry`
+        #    types a Circle); one that did not gets the portal's own value, so a
+        #    `json_scalar` / `json_regex` / `html_regex` / `scalar` entry carries a portal's
+        #    exact/approximate signal instead of NULL.
+        #  * the BLUR AXIS is the CONTRACT's, never the reader's or the entry default's.
+        #    `blur_evidence` on a declaration means exactly "this label is one of the ones
+        #    `precision_cap.blurred_labels` calls blurred" — a pure function of the label,
+        #    so a reader (or a hard-coded entry default) that answers it separately can only
+        #    disagree with the calibration. maxima@2 did: `blur_evidence: declared` on the
+        #    feature-type entry made a PRECISE Point resolve as portal-declared-blurred.
+        label = fields.get("declared_precision_label") or fields.get("value_text")
+        blurred = {str(x) for x in (entry.precision_map.get("blurred_labels") or [])}
+        fields["declared_precision_label"] = label
+        fields["blur_evidence"] = "declared" if label in blurred else "none"
     return Claim(**fields)
 
 

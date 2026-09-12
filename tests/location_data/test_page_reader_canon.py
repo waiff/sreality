@@ -380,7 +380,8 @@ def test_html_attr_regex_reads_the_zoom_token_from_the_maps_anchor():
 
 def _marker_entry(source: str, locator: dict[str, Any], blurred: list[str]) -> Entry:
     return entry(source, dict(locator, reader="html_marker"),
-                 claim_type="blur_hint", extraction_method="portal_declared_quality",
+                 claim_type="precision_declaration",
+                 extraction_method="portal_declared_quality",
                  precision_map={"blurred_labels": blurred})
 
 
@@ -474,7 +475,8 @@ def test_html_marker_refuses_an_entry_with_no_value_label():
     with pytest.raises(IntakeRefused) as excinfo:
         read("html_marker", pinned("bazos"),
              entry("bazos", {"reader": "html_marker", "css": "a[href*='/place/']"},
-                   claim_type="blur_hint", extraction_method="portal_declared_quality"))
+                   claim_type="precision_declaration",
+                   extraction_method="portal_declared_quality"))
     assert "value_label" in str(excinfo.value)
 
 
@@ -535,9 +537,12 @@ def test_json_scalar_reads_a_plain_pointer_with_no_subject_match_at_all():
                           extraction_method="portal_declared_quality",
                           surface="embedded_json"), native=IDNES_NATIVE))
     assert info.value_text.startswith("Nemovitost nemá přesnou adresu")
-    # A generic scalar reader must NOT invent a label: idnes writes two different Czech
-    # SENTENCES here, and mapping a sentence onto a label is contract calibration.
-    assert info.declared_precision_label is None
+    # W1-c R5 inverted the old rule here. A generic scalar reader still invents nothing —
+    # it echoes the portal's own words — but on a `precision_declaration` that value IS the
+    # label, stamped in `_base` for every reader, and the BLUR axis stays contract
+    # calibration: this entry names no `blurred_labels`, so it declares no blur.
+    assert info.declared_precision_label == info.value_text
+    assert info.blur_evidence == "none"
 
 
 def test_json_scalar_reads_the_subject_features_address_and_not_a_neighbours():

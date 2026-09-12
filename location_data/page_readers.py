@@ -464,10 +464,10 @@ def _read_html_marker(
     The claim's VALUE is the contract's canonical label and its EVIDENCE is the portal's own
     text or attribute — two different fields for exactly this case, so a portal that rewords
     its sentence stops matching instead of silently restating a different fact under the same
-    label. Blur is decided the way `declared_quality` decides it, by membership of that label
-    in the entry's `precision_map.blurred_labels`, so recalibrating which label means
-    "blurred" is a contract version bump and never a code change (06 §6.6 rule 7 — the axis
-    is written explicitly, never defaulted).
+    label. This reader states the label only; `_base` derives the blur axis from that
+    label's membership in the entry's `precision_cap.blurred_labels` (W1-c R5), so
+    recalibrating which label means "blurred" is a contract version bump and never a code
+    change (06 §6.6 rule 7 — the axis is written explicitly, never defaulted).
 
     No transform: normalising a label the contract itself wrote would break the membership
     test that decides the blur axis."""
@@ -509,11 +509,9 @@ def _read_html_marker(
         if collapse_ws(contains) not in collapse_ws(haystack):
             return []
         evidence = contains
-    blurred = {str(x) for x in (entry.precision_map.get("blurred_labels") or [])}
     claim = _evidenced(
         entry, row, document, value=str(label), within=node, quote=evidence,
-        declared_precision_label=str(label),
-        blur_evidence="declared" if label in blurred else "none")
+        declared_precision_label=str(label))
     return [PageRead(claim)]
 
 
@@ -1065,11 +1063,10 @@ def _read_json_scalar(
 
     Two shapes, one reader, because the difference is contract data and not code: a plain
     pointer (`json_pointer: /mtMapOptions/zoom`, `/infoText`, `/zoom`), or a subject-matched
-    one (`then: /geojson/features` + `match` + `json_pointer: /properties/address`). It does
-    NOT stamp `declared_precision_label` on any claim type: idnes' `infoText` is a two-valued
-    Czech SENTENCE, not a label, and mapping a sentence to a label is contract calibration
-    (`html_marker` plus `blurred_labels`), not something a generic scalar reader may
-    invent."""
+    one (`then: /geojson/features` + `match` + `json_pointer: /properties/address`). It
+    invents no label of its own: on a `precision_declaration` the portal's own value IS the
+    label (W1-c R5, stamped in `_base` for every reader), and whether that label means
+    blurred stays contract calibration (`precision_cap.blurred_labels`)."""
     subject = _subject_object(entry, row, embedded_documents(entry, document))
     if subject is None:
         return []
@@ -1139,10 +1136,10 @@ def _read_json_bool(
     and a cap read off a different blob than the coordinate it caps is not a cap — which is
     why this reads the SUBJECT's document through the same selector the coordinate does.
 
-    The blur axis is decided identically to `declared_quality`: membership of the mapped
-    label in the contract's `precision_map.blurred_labels`. Which label means blurred is a
-    portal fact, so re-calibrating it is a version bump, not a code change, and the axis is
-    written EXPLICITLY rather than defaulted (06 §6.6 rule 7)."""
+    This reader states the mapped LABEL; `_base` derives the blur axis from that label's
+    membership in the contract's `precision_cap.blurred_labels` (W1-c R5). Which label means
+    blurred is a portal fact, so re-calibrating it is a version bump, not a code change, and
+    the axis is written EXPLICITLY rather than defaulted (06 §6.6 rule 7)."""
     labels = entry.locator.get("labels")
     if not isinstance(labels, Mapping) or not labels.get("true") or not labels.get("false"):
         raise IntakeRefused(
@@ -1158,12 +1155,10 @@ def _read_json_bool(
     if not isinstance(found, bool):
         return []
     label = str(labels["true" if found else "false"])
-    blurred = {str(x) for x in (entry.precision_map.get("blurred_labels") or [])}
     claim = _evidenced_optional(
         entry, row, document, value=label, within=found_document.node,
         quote=_json_quote(found_document, pointer, found),
-        declared_precision_label=label, value_num=1.0 if found else 0.0,
-        blur_evidence="declared" if label in blurred else "none")
+        declared_precision_label=label, value_num=1.0 if found else 0.0)
     return [PageRead(claim)]
 
 
@@ -1599,20 +1594,11 @@ def stamp_page_claim(
         raise IntakeRefused(
             f"payload {payload.id} carries page_kind='{FORBIDDEN_PAGE_KIND}'; C10 keeps the "
             f"page's own kind on the claim and leaves that enum member unused")
-    # W1-c R5: on a `precision_declaration` the LABEL IS THE VALUE. Stamped here, once, for
-    # every reader rather than in each of them, because which reader lifted the portal's
-    # signal is not a fact about the signal: a `json_scalar` over maxima's geometry type and
-    # an `html_regex` over ceskereality's "přesná poloha" both state a precision, and the
-    # resolver reads it off `declared_precision_label` (`precision_cap.blurred_labels` is
-    # then the contract's own calibration of which labels mean blurred). A reader that
-    # already decided the label — `json_geometry` types a Circle rather than echoing it —
-    # keeps it.
-    label = claim.declared_precision_label
-    if claim.claim_type == "precision_declaration" and label is None:
-        label = claim.value_text
+    # W1-c R5 (the `precision_declaration` label + blur axis) is stamped in
+    # `claims_common._base`, the one funnel BOTH substrates' readers build a claim through,
+    # so a page reader and a payload reader cannot answer it differently.
     return replace(
         claim,
-        declared_precision_label=label,
         surface=ARCHIVE_SURFACE,
         page_kind=payload.page_kind,
         snapshot_anchor=ARCHIVE_ANCHOR,
