@@ -101,12 +101,11 @@ def live_body(locality: str, config: str | None, description: str | None = None)
     ).encode("utf-8")
 
 
-def run(body: bytes, *, native: str = "fixture", in_mapy_inventory: bool = False,
-        entries: list[Entry] | None = None):
+def run(body: bytes, *, native: str = "fixture", entries: list[Entry] | None = None):
     payload = ArchivedPayload(
         id=1, source="maxima", source_id_native=native, page_kind="detail",
         payload_sha256="0" * 64, first_observed_at=FETCHED_AT, body=body)
-    row = fx.listing("maxima", {}, native=native, in_mapy_inventory=in_mapy_inventory)
+    row = fx.listing("maxima", {}, native=native)
     return extract_page(payload, row, entries if entries is not None else ENTRIES,
                         register=REGISTER)
 
@@ -365,14 +364,16 @@ def test_an_empty_features_array_refuses_structurally_and_counts_nothing():
     assert "reject_empty_geometry" not in BY_ID["mx.det.map_features"].guards
 
 
-def test_a_listing_in_the_mapy_inventory_gets_no_archived_coordinate():
-    """Rung (a) of the ladder sits ABOVE the substrate branch, so the licence veto reaches
-    the stored body too. The refusal is COUNTED under its reason, never swallowed."""
-    result = run(_PINNED.read_bytes(), in_mapy_inventory=True)
-    assert "mx.det.map_features" not in claims_by_entry(result)
-    assert result.refusals["listing_in_mapy_affected_inventory"] == 1
-    # The rest of the contract is untouched by a coordinate veto.
-    assert "mx.det.locality_obec" in claims_by_entry(result)
+def test_only_the_rules_own_entry_id_licenses_this_portals_archived_pin():
+    """The Mapy inventory used to veto above the substrate branch; with the geocoder gone
+    the entry id `ARCHIVED_COORDINATE_RULES` names IS the licence, and a refusal is COUNTED
+    under its reason rather than swallowed."""
+    impostor = replace(BY_ID["mx.det.map_features"], entry_id="mx.det.not_the_rule")
+    result = run(_PINNED.read_bytes(), entries=[impostor])
+    assert result.claims == []
+    assert result.refusals["unrecognised_archived_coordinate_locator"] == 1
+    # The rest of the contract is untouched by a coordinate refusal.
+    assert "mx.det.locality_obec" in claims_by_entry(run(_PINNED.read_bytes()))
 
 
 def test_a_coordinate_entry_with_no_position_branch_is_refused_by_name():

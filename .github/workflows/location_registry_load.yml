@@ -78,8 +78,8 @@ on:
     - cron: "0 2 2 * *"
 
 concurrency:
-  # OUTER, cross-lane: every heavy location batch lane (registry load, claim intake, Mapy
-  # inventory, the churn probe, the payload backfill/prune and both re-mine sweeps) shares
+  # OUTER, cross-lane: every heavy location batch lane (registry load, claim intake, the
+  # churn probe, the payload backfill/prune and both re-mine sweeps) shares
   # ONE group so at most one of them runs at a time. The RESOLVE DRAIN left the group on
   # 2026-09-10: it is latency-bound rather than instance-bound (11 small indexed reads and
   # one projection write per listing, no COPY, no scan, no detoast), so it contributed

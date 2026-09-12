@@ -110,7 +110,7 @@ def entry(
 def listing_row(source: str, native: str) -> ListingRow:
     return ListingRow(
         listing_id=4242, source=source, source_id_native=native, raw_json={},
-        lat=None, lon=None, observed_at=FETCHED_AT, in_mapy_inventory=False,
+        lat=None, lon=None, observed_at=FETCHED_AT,
     )
 
 

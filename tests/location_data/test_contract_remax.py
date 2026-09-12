@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from html import unescape
 from pathlib import Path
@@ -96,7 +97,7 @@ def entry_named(entry_id: str) -> Entry:
 def listing_row(native: str = "fixture", **overrides: Any) -> ListingRow:
     kwargs: dict[str, Any] = {
         "listing_id": 4242, "source": "remax", "source_id_native": native, "raw_json": {},
-        "lat": None, "lon": None, "observed_at": FETCHED_AT, "in_mapy_inventory": False,
+        "lat": None, "lon": None, "observed_at": FETCHED_AT,
     }
     kwargs.update(overrides)
     return ListingRow(**kwargs)
@@ -388,18 +389,21 @@ def test_the_pin_is_scoped_by_element_id_so_a_neighbour_card_can_never_win_it():
         assert node is not None and unescape(node.attributes["data-gps"]) == subject
 
 
-def test_the_mapy_inventory_veto_outranks_the_pin():
-    """§6.4's gate joins on `listing_id`, not on `surface` — re-reading the same position out
-    of an archived page is the same position."""
+def test_only_the_rules_own_entry_id_can_license_this_portals_pin():
+    """The licence ladder names ONE locator per portal (`ARCHIVED_COORDINATE_RULES`). The
+    Mapy inventory used to veto above this rung; with the geocoder gone the entry id IS the
+    whole gate, so a second locator declaring `claim_type: coordinate` licenses nothing
+    until someone adds a row to that table and argues for it."""
     document = scoped(ARCHIVED_BODY.read_bytes())
     entry = entry_named("rx.det.gps")
     read = only(run_entry(entry, document))
     stamped = stamp_page_claim(read.claim, payload(),
                                scope_version=document.scope_version)
+    impostor = replace(entry, entry_id="rx.det.not_the_rule")
     licensed, reason = _licensed_coordinate(
-        stamped, listing_row(in_mapy_inventory=True), entry, read.position_branch)
+        stamped, listing_row(), impostor, read.position_branch)
     assert licensed is None
-    assert reason == "listing_in_mapy_affected_inventory"
+    assert reason == "unrecognised_archived_coordinate_locator"
 
 
 def test_a_pin_outside_the_cz_envelope_is_dropped_by_the_reader_itself():

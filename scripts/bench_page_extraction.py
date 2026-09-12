@@ -69,7 +69,7 @@ def corpus(bodies: int) -> tuple[list[tuple[ListingRow, page_readers.ArchivedPay
         source, body = seeds[index % len(seeds)]
         row = ListingRow(listing_id=index, source=source,
                          source_id_native=str(100000 + index), raw_json={}, lat=None,
-                         lon=None, observed_at=FETCHED_AT, in_mapy_inventory=False)
+                         lon=None, observed_at=FETCHED_AT)
         tasks.append((row, page_readers.ArchivedPayload(
             id=index, source=source, source_id_native=row.source_id_native,
             page_kind="detail", payload_sha256=f"{index:064d}",

@@ -29,7 +29,6 @@
   },
   "lat": 50.053749999999994,
   "lon": 17.05588888888889,
-  "in_mapy_inventory": false,
   "listings.locality": "Velké Losiny",
   "listings.street": "Bukovická",
   "listings.street_source": "parser"

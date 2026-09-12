@@ -49,7 +49,7 @@ class _Listing:
         # snapshot cursor — the LAST column since W1-c deleted the legacy-column tail. This
         # listing has no stored body.
         return (self.id, "sreality", f"n{self.id}", dict(SREALITY_POST_CUTOVER),
-                self.last_seen_at, None, None, False,
+                self.last_seen_at, None, None,
                 None, None, None, None, None, 1, snapshot_cursor)
 
 
@@ -194,7 +194,6 @@ class _Conn:
 def _stub_preconditions(monkeypatch: pytest.MonkeyPatch) -> None:
     """The refusal gates have their own tests; this module is about the scan."""
     monkeypatch.setattr(claims_intake, "missing_relations", lambda conn: [])
-    monkeypatch.setattr(claims_intake, "assert_inventory_ready", lambda conn: 2201)
     monkeypatch.setattr(
         claims_intake, "load_entries", lambda conn: {"sreality": entries_for("sreality")})
 
@@ -257,8 +256,8 @@ def test_a_failed_full_run_is_resumed_from_and_never_resets_the_walk_to_zero():
 
 def test_an_operator_anchored_run_neither_resumes_nor_becomes_a_resume_point():
     """`--start-after-id` says "start here", not "everything below is done", so its cursor
-    must be invisible to the next run (the guard migration 385 puts on
-    `mapy_inventory_runs.resumable`, for the same reason)."""
+    must be invisible to the next run (the same guard migration 385 put on the
+    inventory runs W4-b deleted)."""
     conn = _Conn([_Listing(i, BASE_TS) for i in range(1, 26)])
 
     anchored = _run(conn, start_after_id=20, limit=2)

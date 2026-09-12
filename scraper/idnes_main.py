@@ -19,12 +19,8 @@ count is evidence beside it, not a veto. The detail URL
 carries the category (`/detail/{sale}/{cat}/…`), so the drain derives each
 listing's category from its own URL — one config walks many categories without
 the queue-encodes-category limitation that constrains bazos. Coordinates come
-straight from the page's embedded map config when present; when the page omits
-it (~a third of listings) the drain carries an already-stored coordinate
-forward, and only a never-placed listing falls back to geocoding the locality
-via Mapy.cz (the shared `scraper.location.CoordResolver`) so those listings
-still appear on the map and in radius/location filters instead of being
-silently dropped.
+straight from the page's embedded map config when present; a page that omits it
+(~a third of listings) carries none.
 """
 
 from __future__ import annotations
@@ -60,7 +56,6 @@ from scraper.portal import (
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
-from scraper.location import CoordResolver
 from scraper.rate_limit import RateLimiter
 
 LOG = logging.getLogger(__name__)
@@ -146,9 +141,6 @@ class IdnesPortal:
             price_change_min_pct if price_change_min_pct is not None
             else config.limits.price_change_min_pct
         )
-        # page > carry-forward > geocode; preloaded once in connect_drain (the
-        # 2026-06 Mapy-credit incident guard — see scraper.location).
-        self._coords = CoordResolver(SOURCE)
         # Read once in connect_index, before the runner asks for categories.
         # Empty = every slice sorts as never-walked, which is the safe default:
         # it walks everything rather than skipping on stale bookkeeping.
@@ -204,10 +196,6 @@ class IdnesPortal:
         # Single-row ingest (ingest_scraped_listing), not batched prepared writes,
         # so the transaction pooler is fine — no session pooler needed.
         conn = db.connect()
-        # Preload (once, on the main thread) the stored coords so the worker-pool
-        # fetch_detail carries them forward instead of re-geocoding (the 2026-06
-        # Mapy-credit incident guard — rationale in scraper.location).
-        self._coords.preload(conn)
         return conn
 
     # --- the sliced walk ---
@@ -755,7 +743,6 @@ class IdnesPortal:
             )
         except Exception as exc:  # noqa: BLE001
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
-        listing = self._coords.fill(native_id, listing)
         return DrainItem(
             native_id=native_id, kind="ok",
             payload={"listing": listing, "html": html, "status": status, "url": url},
