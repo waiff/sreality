@@ -79,7 +79,13 @@ walk + presence nomination + enqueue) feeds the bounded `bazos_detail_drain.yml`
 pozemek/zahrada/garaz/ostatni — a 130-minute job timeout with a 110-minute budget — which eats
 the window, starving the drain); narrow ad-hoc runs go through the split
 workflows' dispatch inputs (`-f sale_type=… -f category=…`, or locality + radius) or
-`scraper.bazos_main` locally. **Detail-page** raw HTML is staged in `portal_raw_pages`
+`scraper.bazos_main` locally. **A REMOVED ad answers HTTP 200 with the CATEGORY INDEX page** —
+bazos lands `/inzerat/<id>/…` on `/inzeraty/<slug>/`, titled `… inzerce - Reality | Bazoš.cz`,
+carrying an "Inzerát byl vymazán" banner — so, like mmreality/ceskereality/remax,
+`bazos_client.fetch_detail` reads all three as `ListingGoneError` (2026-09-12; it previously
+matched only an unused "smazán" spelling, so 4,374 removed ads stayed active — rule #3's page
+check can only decide gone if the fetcher says so). Detail-path only: an INDEX fetch returns
+that same page by design, and a gone verdict there would truncate the walk. **Detail-page** raw HTML is staged in `portal_raw_pages`
 (migration 099) before parsing (the parsed-state ledger + reparse-without-refetch capability); INDEX/search-page
 staging was removed repo-wide in June 2026 (per-page TOAST writes dominated slow HTML walks) and is
 selectively RE-ENABLED (location-data W0 item 0n) for the three portals whose index pages carry
