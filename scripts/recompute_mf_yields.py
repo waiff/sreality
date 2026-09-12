@@ -1,12 +1,15 @@
 """Recompute listings.mf_gross_yield_pct for every sale apartment.
 
 Thin wrapper over the set-based `recompute_mf_gross_yields()` SQL function
-(migrations 133/134/222): joins each sale apartment's precomputed MF rent-map
-territory (listings.ku_id / obec_id, filled at write time by the admin-geo
-trigger -- NO per-run point-in-polygon since migration 222), divides annual
-reference rent by asking price, and writes the derived columns. Idempotent
-(only changed rows are written via an `is distinct from` guard), so it runs on
-a schedule AND after each rent-map ingest.
+(migrations 133/134/222/257/507): resolves each sale apartment's MF rent-map
+territory from `listing_location` -- the obec straight off `obec_kod`, the
+katastr by point-in-polygon against the RUIAN mirror (`ruian_katastr_code`,
+migration 507) -- divides annual reference rent by asking price, and writes the
+derived columns. W4-a moved that key off `listings.ku_id` / `obec_id`, the
+admin-geo trigger columns dropped in W4-c; the PIP runs over sale FLATS that
+pass the eligibility gate, not over the corpus. Idempotent (only changed rows
+are written via an `is distinct from` guard), so it runs on a schedule AND
+after each rent-map ingest.
 
     python -m scripts.recompute_mf_yields
 """

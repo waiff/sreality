@@ -818,8 +818,6 @@ def get_estimation_preview(
             "category_type":        spec.get("category_type"),
             "locality":             spec.get("locality"),
             "district":             spec.get("district"),
-            "locality_district_id": spec.get("locality_district_id"),
-            "locality_region_id":   spec.get("locality_region_id"),
             "total_floors":         spec.get("total_floors"),
             "has_balcony":          spec.get("has_balcony"),
             "has_lift":             spec.get("has_lift"),

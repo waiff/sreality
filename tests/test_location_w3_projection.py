@@ -31,6 +31,7 @@ MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 W3 = "503_location_w3_serving_views.sql"
 W3_S3 = "504_location_w3_one_code_predicate.sql"
 W3_S4 = "506_location_w3_s4_deletions.sql"
+W4A = "507_location_w4a_readers.sql"
 
 # What S4 removes from each view it re-creates. `obec` SURVIVES on the two views
 # the pipeline board reads: the board's town sort orders by the TOWN, which is
@@ -362,3 +363,78 @@ def test_every_serving_view_calls_the_one_label(view: str) -> None:
             f"{view} calls the label with {args} — it must pass exactly the seven "
             f"listing_location columns W3-2 names, in order"
         )
+
+
+# ------------------------------------------------------------------ W4-a rails
+
+# The two views W4-a re-sources. It appends NOTHING: the reader census behind
+# that PR found no consumer left for the legacy place TEXT on either view except
+# `properties_public.obec` (the kanban town sort), which is re-sourced IN PLACE
+# from `ll.obec_name`. A new `obec_name` column beside a legacy `obec` would have
+# left the legacy reader alive, which is the opposite of the wave.
+_W4A_VIEWS = ["properties_public", "listings_public"]
+
+
+@pytest.mark.parametrize("view", _W4A_VIEWS)
+def test_w4a_changes_no_column_list(view: str) -> None:
+    """A re-source is invisible in the column list, and it must be: `create or
+    replace view` cannot rename, retype or reposition an existing column, and
+    every reader (PostgREST select lists, `sync_browse_list`'s positional
+    INSERT) is written against the list as it stands."""
+    before = _previous_definition(view, below=W4A)
+    old = _columns(_sql(before), view)
+    new = _columns(_sql(W4A), view)
+    assert new == old, (
+        f"{view}: migration {W4A} changed its column list "
+        f"(added {sorted(set(new) - set(old))}, removed {sorted(set(old) - set(new))}). "
+        f"W4-a moves WHERE a value comes from, never what is published."
+    )
+
+
+def test_w4a_resources_the_watchdogs_relation() -> None:
+    """`properties_public` is what the Watchdog matches on: `ST_DWithin` rebuilt
+    from lat/lng (api/notifications.py) and `district_where`'s codes. Until W4-a
+    all five came from `properties` columns picked by `best_geo` -- a DIFFERENT
+    child than the one the label comes from. RED by: re-pointing any one of them
+    back at `p.`."""
+    body = " ".join(_view_select_list(_sql(W4A), "properties_public").split())
+    for frag in (
+        "st_y(ll.geom) as lat",
+        "st_x(ll.geom) as lng",
+        "ll.obec_kod as obec_id",
+        "ll.okres_kod as okres_id",
+        "ll.kraj_kod as region_id",
+        "ll.obec_name as obec",
+    ):
+        assert frag in body, f"properties_public does not re-source `{frag}`"
+    for legacy in ("p.lat,", "p.lng,", "p.obec_id,", "p.okres_id,", "p.region_id,", "p.obec,"):
+        assert legacy not in body, f"properties_public still serves `{legacy}`"
+
+
+def test_w4a_resources_the_detail_relation() -> None:
+    """`listings_public` is the listing detail + the extension + the dispatch
+    feed. Its legacy place TEXT survives (those are `listings` columns, and
+    removing a view column needs a DROP + CREATE -- W4-c); its PIN and its three
+    chip codes do not."""
+    body = " ".join(_view_select_list(_sql(W4A), "listings_public").split())
+    for frag in (
+        "st_y(ll.geom) as lat",
+        "st_x(ll.geom) as lng",
+        "ll.obec_kod as obec_id",
+        "ll.okres_kod as okres_id",
+        "ll.kraj_kod as region_id",
+    ):
+        assert frag in body, f"listings_public does not re-source `{frag}`"
+    assert "listings.geom" not in body
+
+
+def test_w4a_builds_the_geography_index_before_the_readers_flip() -> None:
+    """`listing_location.geom` is geometry; every moved reader casts it to
+    geography so its radius stays in METRES. `listing_location_geom_gist` (501)
+    is a geometry index and cannot serve that expression, so without this one the
+    cast turns each radius search into a seq scan of the corpus. CONCURRENTLY,
+    therefore outside any transaction -- so this file must carry no begin/commit."""
+    sql = _sql(W4A).lower()
+    assert "create index concurrently if not exists listing_location_geog_gist" in sql
+    assert "using gist ((geom::geography))" in sql
+    assert "begin;" not in sql and "commit;" not in sql

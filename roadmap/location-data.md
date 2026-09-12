@@ -382,6 +382,25 @@ component is slimmed twice — each wave rewrites one component and slims its st
 - **W4 — delete legacy** (= plan S5): Mapy purge, geocoder + cache, street extractor, the trigger
   and the 24 `listings` columns, the property-grain geography, the second page archive, the
   backfill scripts and workflows; rule 24 rewritten to the end state.
+  - **W4-a shipped** (migration 507, additive — apply BEFORE the deploy): every remaining reader
+    takes its location from `listing_location`. `properties_public` + `listings_public` re-source
+    `lat`/`lng` and `obec_id`/`okres_id`/`region_id` (property grain via `repr_listing_ref_id`,
+    listing grain via `listing_id`), and `properties_public.obec` from `ll.obec_name` — re-sourced
+    in place, so the column lists do not move and the kanban town sort needed no SPA change.
+    Nothing appended: the census found no other reader of the legacy place text on either view.
+    In code, `_shared_filter_where` (Browse + Watchdog, rule 16) and every other `listings.geom`
+    reader — comparables, velocity, transit corridor, neighbourhoods, broker map ids, both
+    estimation subject resolvers, the watchdog estimate kickoff — join `listing_location` and read
+    `ll.geom::geography`, served by the new `listing_location_geog_gist` (CONCURRENTLY; the cast
+    is mandatory — uncast, `ST_DWithin` measures DEGREES). The MF rent map re-keys on RÚIAN katastr
+    by PIP (`ruian_katastr_code()`) + `ll.obec_kod`, which let `best_geo` + `best_street` be
+    DELETED from `scripts/recompute_property_stats.py` (a property's place is now the same child
+    as its price); `/properties/merge-candidates` swaps `district` + `street` for one
+    `display_label`; the `locality_district_id` / `locality_region_id` payload fields go end to
+    end. **+124 / −133 runtime code** (net-negative, rule 25), +152 net in the rails
+    (`test_location_w3_projection` W4-a block, `test_one_place_predicate` reader + payload
+    ledgers), +719 the migration (the views/functions exception). Suites: pytest 7267 passed /
+    216 skipped, vitest 123 files / 1497 tests, tsc clean.
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM

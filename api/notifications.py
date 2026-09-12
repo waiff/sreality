@@ -949,13 +949,19 @@ def _resolve_listing_for_estimate(
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id AS listing_id, sreality_id, "
-            "  ST_Y(geom::geometry) AS lat, "
-            "  ST_X(geom::geometry) AS lng, "
-            "  area_m2, disposition, floor, "
-            "  category_main, category_type, "
-            "  price_czk, price_unit "
-            "FROM listings WHERE id = %s",
+            "SELECT l.id AS listing_id, l.sreality_id, "
+            # W4-a: the point is the resolver's, not the trigger-filled
+            # listings.geom (dropped in W4-c). A listing with no
+            # listing_location row surfaces as "no geom" below, which is the
+            # same refusal the estimator already had for an unplaced listing.
+            "  ST_Y(ll.geom) AS lat, "
+            "  ST_X(ll.geom) AS lng, "
+            "  l.area_m2, l.disposition, l.floor, "
+            "  l.category_main, l.category_type, "
+            "  l.price_czk, l.price_unit "
+            "FROM listings l "
+            "LEFT JOIN listing_location ll ON ll.listing_id = l.id "
+            "WHERE l.id = %s",
             (listing_id,),
         )
         row = cur.fetchone()

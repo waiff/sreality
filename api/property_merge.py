@@ -143,10 +143,19 @@ def list_merged_properties(
             SELECT
               p.id, p.repr_listing_id, p.source_count, p.distinct_site_count,
               p.category_main, p.category_type, p.disposition, p.area_m2,
-              p.estate_area, p.current_price_czk, p.district, p.street,
+              p.estate_area, p.current_price_czk,
+              -- W4-a: ONE place string, the same server-composed label every
+              -- serving view publishes -- not `p.district` + `p.street`, two
+              -- legacy columns filled by two DIFFERENT children (best_geo and
+              -- best_street) and rendered by nothing.
+              location_display_label(ll.street_name, ll.house_number_cp,
+                                     ll.house_number_co, ll.obec_name,
+                                     ll.cast_obce_name, ll.country_code,
+                                     ll.country_status) AS display_label,
               p.first_seen_at, p.last_seen_at,
               agg.sources, agg.active_count
             FROM properties p
+            LEFT JOIN listing_location ll ON ll.listing_id = p.repr_listing_ref_id
             LEFT JOIN LATERAL (
               SELECT array_agg(DISTINCT l.source ORDER BY l.source) AS sources,
                      count(*) FILTER (WHERE l.is_active)            AS active_count
@@ -172,12 +181,11 @@ def list_merged_properties(
             "area_m2": float(r[7]) if r[7] is not None else None,
             "estate_area": float(r[8]) if r[8] is not None else None,
             "price_czk": r[9],
-            "district": r[10],
-            "street": r[11],
-            "first_seen_at": r[12],
-            "last_seen_at": r[13],
-            "sources": list(r[14]) if r[14] is not None else [],
-            "active_count": r[15],
+            "display_label": r[10],
+            "first_seen_at": r[11],
+            "last_seen_at": r[12],
+            "sources": list(r[13]) if r[13] is not None else [],
+            "active_count": r[14],
         }
         for r in rows
     ]

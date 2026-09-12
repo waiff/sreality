@@ -350,6 +350,13 @@ def _shared_filter_where(
     Does NOT include the lifecycle / max_age_days clauses — those are
     operational rather than attribute filters. Each caller appends them
     via the shared `_lifecycle_where` helper.
+
+    The spatial pair reads `ll` — every caller's FROM must carry
+    `JOIN listing_location ll ON ll.listing_id = l.id` (W4-a). The `::geography`
+    cast is not optional: `listing_location.geom` is geometry(Point,4326), and
+    `ST_DWithin(geometry, geometry, n)` measures n in DEGREES, so an uncast call
+    would silently return a ~111 km cohort for a 1 km radius. The cast is served
+    by `listing_location_geog_gist` (migration 507).
     """
     params: dict[str, Any] = {
         "lat": target.lat,
@@ -357,10 +364,10 @@ def _shared_filter_where(
         "radius_m": filters.radius_m,
     }
     where: list[str] = [
-        "l.geom IS NOT NULL",
+        "ll.geom IS NOT NULL",
         (
             "ST_DWithin("
-            "l.geom, "
+            "ll.geom::geography, "
             "ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography, "
             "%(radius_m)s)"
         ),
@@ -633,7 +640,6 @@ def build_query(
         f"  {per_m2_basis_sql('l')} AS price_per_m2_basis,\n"
         "  l.category_main, l.category_type, l.price_unit, l.area_basis,\n"
         "  l.disposition, l.district,\n"
-        "  l.locality_district_id, l.locality_region_id,\n"
         "  l.floor, l.total_floors,\n"
         "  l.building_type, l.condition, l.energy_rating,\n"
         "  l.has_balcony, l.has_lift, l.has_parking,\n"
@@ -642,7 +648,7 @@ def build_query(
         "  l.furnished, l.terrace, l.cellar, l.garage,\n"
         "  l.parking_lots, l.ownership,\n"
         "  ST_Distance(\n"
-        "    l.geom,\n"
+        "    ll.geom::geography,\n"
         "    ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography\n"
         "  ) AS distance_m,\n"
         "  l.first_seen_at, l.last_seen_at,\n"
@@ -651,6 +657,10 @@ def build_query(
         "  latest_snap.scraped_at AS latest_snapshot_at,\n"
         "  latest_check.checked_at AS last_freshness_check_at\n"
         "FROM listings l\n"
+        # W4-a: the listing's place. INNER, because `_shared_filter_where` always
+        # requires a non-NULL point anyway — an unresolved listing can never be a
+        # comparable, and an inner join says so to the planner.
+        "JOIN listing_location ll ON ll.listing_id = l.id\n"
         "LEFT JOIN LATERAL (\n"
         "  SELECT id, scraped_at FROM listing_snapshots\n"
         # Re-keyed onto the surrogate: post-Gate-2 `sreality_id = l.sreality_id`
