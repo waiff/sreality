@@ -245,12 +245,12 @@ incident history: `docs/architecture.md` § Architectural rules.
     (`tests/test_measure_registry_census.py` + `toolkit.measures.REGISTERED_SITES` — three arms over six
     source trees + every migration statement; it names its own blind spots, so read them before trusting
     a green run) and `FilterDef.basis`. Full rationale: `docs/architecture.md` § rule 23.
-24. **ONE location path: `listing_location` (mig 501 — grade axes NOT NULL, RÚIAN codes, `disputed`), read by
-    the resolver's consumers.** W2-b (mig 502) dropped the W1 `*_location_current` projections + every
-    resolver-side relation, and deleted `serving_flags.py` — there is no `location_v2` flag; flipping a reader is
-    a PR. The legacy `listings` columns (`geom`, `obec_id`…`ku_id` from trigger 289, `street`/`street_name_key`)
-    survive until W4 and still serve every un-flipped feature; NEW location-reading code never reads them.
-    `serving_contracts.py` declares each consumer's floor; granularity compares by RANK, never back-ported.
+24. **ONE location path: `listing_location` (mig 501 — grade axes NOT NULL, RÚIAN codes, `disputed`), read by the
+    resolver's consumers.** W2-b (mig 502) dropped the W1 `*_location_current` projections + every resolver-side
+    relation and deleted `serving_flags.py` — no `location_v2` flag; flipping a reader is a PR. The legacy `listings`
+    columns (`geom`, `obec_id`…`ku_id` from trigger 289, `street`/`street_name_key`) survive until the sprint's
+    legacy-deletion wave (`roadmap/location-data.md` § The simplification sprint, W4 — NOT the older location W4,
+    closed 09-10); NEW code never reads them, `serving_contracts.py` declares the floor, granularity compares by RANK.
 25. **Location: one store, one lane, eleven claim types, no flags; every location PR deletes at least as much
     as it adds.** One answer table (`listing_location`, 26 fields) by ONE four-step resolver (bind → fill →
     grade → check), one hourly intake lane over the payload + page body, ≤ 1 contract entry per claim type + a

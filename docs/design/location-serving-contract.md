@@ -113,7 +113,9 @@ a runtime flag.
 ## 5. What NOT to read (the legacy path)
 
 These are the columns the un-flipped features still serve from, and they will be retired only after
-their consumers flip (W4). New location-reading code must not touch:
+their consumers flip, in the simplification sprint's legacy-deletion wave (`roadmap/location-data.md`
+§ The simplification sprint, W4 — not the older, closed location W4). New location-reading code must
+not touch:
 
 - `listings.geom`, and anything derived from it in the same table: `obec_id`, `okres_id`,
   `region_id`, `ku_id`, `locality_district_id`, `locality_region_id`, `obec`, `okres`, `region`

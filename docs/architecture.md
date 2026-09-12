@@ -1687,7 +1687,9 @@ renumber.** Navigate by area:
     is exactly the false-merge class the axes exist to prevent. The cutover (W3) is per feature,
     in ascending blast-radius order (dashboards → dedup → filters and stats → map → estimation
     last), each preceded by the operator's review of the clustered disagreements; the legacy
-    columns stay populated and read-only until W4 prunes them in a forward migration. **There is
+    columns stay populated and read-only until the simplification sprint's legacy-deletion wave
+    prunes them in a forward migration (`roadmap/location-data.md` § The simplification sprint,
+    W4 — the location track also has an OLDER, closed W4, the targeted refetch cohorts). **There is
     no flag**: W2-b deleted `location_data/serving_flags.py`, whose `location_v2.<feature>`
     `app_settings` keys were never seeded and which no consumer ever read — a per-feature switch
     that only ever documented an intent is a rail that looks enforced and is not, and flipping a

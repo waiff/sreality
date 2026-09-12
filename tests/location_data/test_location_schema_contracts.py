@@ -19,14 +19,15 @@ Which A.2 check each test covers:
           -> test_enum_types_carry_the_canonical_vocabulary
              test_enum_casts_reference_declared_members
              test_granularity_rank_seeds_every_label_in_declaration_order
-             test_level_granularity_seeds_every_ruian_level
-             test_seed_literals_are_enum_members
+             test_the_bare_literal_seed_tables_are_dropped
   A.2 #4  no source file emits the string `portal_json`
           -> test_no_source_emits_portal_json
   A.2 #6  a new location_granularity value also touches location_granularity_rank
           -> test_granularity_rank_seeds_every_label_in_declaration_order
              test_granularity_alter_type_always_seeds_a_rank_row
-  A.2 #8  `pin_collision_class IS [NOT] NULL` appears nowhere
+  A.2 #8  `pin_collision_class IS [NOT] NULL` appears nowhere — RETIRED in W2-b
+          with the column: `listing_location` never had it, and naming a column
+          no table declares is a 42703 the CI SQL sweep catches directly
   01 0.4  enum ordinality never enters an index predicate, a CHECK or a stored
           generated column
           -> test_no_enum_ordinality_in_ddl
@@ -34,6 +35,9 @@ Which A.2 check each test covers:
           as "no gate" and fails open) — `listing_location` declares four
           -> test_the_answer_table_declares_every_axis_not_null
              test_the_answer_table_does_not_re_declare_a_dropped_axis
+  00 6.1  the licence guard, now ONE artifact rather than three: the CHECKs went
+          with their relations and the rail is the resolver's claim read
+          -> test_the_licence_rail_is_the_claim_side_index
   rule 25 the W1 projection and every resolver-side relation is dropped WHOLE
           -> test_w2b_drops_the_old_projection_and_the_resolver_side_relations
 
@@ -41,8 +45,11 @@ W2-b deleted the assertions whose objects are gone: the two projections' NOT NUL
 axes, the pin-collision-class vocabulary and its IS NULL ban, the three licence
 CHECKs (the rail moved upstream into the resolver's claim read — see migration
 501's header), `location_resolutions`' six-column UNIQUE, the contradiction
-tables' keys, and `location_level_granularity`'s seed. The one that stays is
-`location_granularity_rank`'s per-label seed: dedup reads that table.
+tables' keys, and `location_level_granularity`'s seed. A.2 #2's seed check
+survives as `test_the_bare_literal_seed_tables_are_dropped`: both tables that
+seeded a closed vocabulary with bare literals are gone, so what is left to assert
+is that neither came back. The one per-label seed that stays is
+`location_granularity_rank`'s: dedup reads that table.
 
 Plus the project's own rule, which the design assumes but does not state: this
 Supabase project auto-GRANTs anon/authenticated on new tables, sequences AND

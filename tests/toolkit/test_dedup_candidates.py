@@ -16,7 +16,7 @@ from toolkit import dedup_sim_settings as dss
 
 INPUTS: dict[str, Any] = {
     "path": "C",
-    "generator_version": "c2",
+    "generator_version": "c3",
     "l0_path_c_town_key": "obec_kod",
     "l0_path_c_district_key": "cast_obce_kod",
     "l0_path_c_district_split_towns": "554782,582786,554821",
@@ -103,8 +103,9 @@ def test_fingerprint_pins_the_ruled_defaults() -> None:
     # The literal hash of the ruled parameter set. A changed default or generator version
     # MUST move it — pairs generated under different inputs live in different key spaces —
     # and whoever changes it must say so in the ledger. Moved 2026-09-10 by the district
-    # split + the C1 area check (generator version c1 -> c2).
-    assert dc.fingerprint(INPUTS) == "240e8a20612db357"
+    # split + the C1 area check (generator version c1 -> c2), and 2026-09-12 by W2-b moving
+    # the block key onto `listing_location` (c2 -> c3).
+    assert dc.fingerprint(INPUTS) == "992cc57488111635"
 
 
 def test_fingerprint_is_canonical_over_how_a_number_was_typed() -> None:
