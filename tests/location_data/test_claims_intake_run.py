@@ -23,7 +23,6 @@ from location_data.claims_intake import (
     _RESUME_SQL,
     _STAMP_MINED_SQL,
     _WATERMARK_SQL,
-    LEGACY_COLUMNS,
     MAX_BATCH_SIZE,
     MIN_BATCH_SIZE,
     IntakeRefused,
@@ -210,32 +209,25 @@ def test_batch_queries_are_keyset_and_bounded():
     assert MIN_BATCH_SIZE == 10_000 and MAX_BATCH_SIZE == 30_000
 
 
-def test_the_batch_queries_select_the_legacy_columns_the_readers_consume():
-    """06 §6.1.3's class-B columns are a second substrate beside `raw_json`, so they ride
-    on the SAME keyset query — one extra SELECT item, never a per-row lookup. The record
-    unpack is positional, so a column added to one query and not to `LEGACY_COLUMNS` (or to
-    only one of the two queries) has to fail here rather than mid-run.
+def test_the_batch_queries_select_no_listings_column_the_lane_cannot_read():
+    """W1-c deleted the class-B legacy columns from the scan. The lane's substrates are
+    `raw_json` and the stored page body, so a `listings` TEXT column in the SELECT would be
+    bytes fetched for every row of a 5 M-row keyset scan that no reader can consume.
 
-    `listings.street_source` is selected even though nothing reads it as a value: it is the
-    guard column that decides whether `listings.street` is class B or class D, and a guard
-    whose column the scan never fetched is a refusal (`_legacy_column`), not a claim.
-    """
+    The record unpack is positional and fixed-width, so a column added to one query and not
+    the other (or to neither `_row_from_record`) has to fail here rather than mid-run."""
     for sql in (_LISTINGS_FULL_SQL, _LISTINGS_INCREMENTAL_SQL):
         one = " ".join(sql.split())
-        for column in LEGACY_COLUMNS:
-            assert f"l.{column.removeprefix('listings.')}" in one, column
+        for column in ("l.locality", "l.street", "l.street_source"):
+            assert column not in one, column
 
     row, body, unmined, version = _row_from_record(_RECORD)
-    assert row.legacy_columns == {
-        "listings.locality": None,
-        "listings.street": "Svatoplukova",
-        "listings.street_source": "parser",
-    }
+    assert not hasattr(row, "legacy_columns")
     assert row.lat is None and row.in_mapy_inventory is False
     assert (body.id, body.page_kind, unmined, version) == (91, "detail", True, 5)
 
-    # A record whose legacy tail has drifted from LEGACY_COLUMNS shifts every value one
-    # position; `zip(strict=True)` is what turns that into a crash on the first row.
+    # A record of the wrong width shifts every value one position; the fixed-width unpack
+    # is what turns that into a crash on the first row.
     with pytest.raises(ValueError):
         _row_from_record(_RECORD[:-1])
 
@@ -304,8 +296,7 @@ def test_no_write_statement_touches_an_existing_production_table():
 # portal's ACTIVE contract version, then the legacy-column TAIL.
 _RECORD = (7, "ceskereality", "3822640", {"id": "3822640"},
            datetime(2026, 8, 13, 6, 0, tzinfo=UTC), None, None, False,
-           91, True, "detail", "ab" * 32, datetime(2026, 8, 13, 5, 0, tzinfo=UTC), 5,
-           None, "Svatoplukova", "parser")
+           91, True, "detail", "ab" * 32, datetime(2026, 8, 13, 5, 0, tzinfo=UTC), 5)
 
 
 def test_the_scan_joins_the_latest_stored_detail_body_per_portal_key():
@@ -355,7 +346,7 @@ def test_a_body_already_at_the_active_version_is_not_a_candidate():
 
 
 def test_a_listing_with_no_stored_body_yields_no_candidate():
-    bodiless = (*_RECORD[:8], None, None, None, None, None, 5, *_RECORD[14:])
+    bodiless = (*_RECORD[:8], None, None, None, None, None, 5)
     row, body, unmined, version = _row_from_record(bodiless)
     assert body is None and unmined is False and version == 5
     assert row.listing_id == 7
@@ -382,18 +373,21 @@ def test_an_empty_stamp_list_runs_no_statement():
 
 
 def test_the_registry_is_one_and_matches_the_contract_record_exactly():
-    """ONE registry, 24 readers: the 10 that read `listings.raw_json` and the 14 that read
+    """ONE registry, 21 readers: the 7 that read `listings.raw_json` and the 14 that read
     the stored page body. `ARCHIVE_ONLY_READERS` / `LLM_ONLY_READERS` were name-only mirrors
     of registries this module could not import; there is nothing left to mirror, so a name
-    that is not in `READERS` is a deploy error again — one question, one answer."""
+    that is not in `READERS` is a deploy error again — one question, one answer.
+
+    Three readers went in W1-c with the `legacy_column` surface they were the only users of
+    (`legacy_text_column`, `geom_column`, `coords_stamp_quality`)."""
     from location_data import contracts, page_readers
 
-    assert len(claims_intake.READERS) == 24
+    assert len(claims_intake.READERS) == 21
     assert set(claims_intake.READERS) == set(contracts.READER_CONTRACTS)
     payload_readers = {n for n, r in claims_intake.READERS.items()
                        if r.substrate == claims_intake.SUBSTRATE_PAYLOAD}
     page = {n for n, r in claims_intake.READERS.items()
             if r.substrate == claims_intake.SUBSTRATE_ARCHIVED_HTML}
-    assert len(payload_readers) == 10 and page == set(page_readers.PAGE_READERS)
+    assert len(payload_readers) == 7 and page == set(page_readers.PAGE_READERS)
     assert not hasattr(claims_intake, "ARCHIVE_ONLY_READERS")
     assert not hasattr(claims_intake, "LLM_ONLY_READERS")

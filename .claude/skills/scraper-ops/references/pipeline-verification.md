@@ -427,8 +427,9 @@ crosses fail; the same tick into a 7-day window reads 3.6% and the bell would wa
 exists: an unknown sreality shape classifies `absent` and the claim lane simply counts it — nobody is
 told (the refetch cohort that used to chase it went with rule 25's one-lane fold). warn 3% / fail 10% / min 30 rows
 (`location_payload_shape_drift_*` thresholds); `warn` with null value when no source reached min rows;
-the message names the remedy per source (sreality: update `sreality_payload_shape` + the contract's
-`payload_schema_detector`, re-extract; bezrealitky: restore `ruianId` in `_DETAIL_QUERY`, then refetch
+the message names the remedy per source (sreality: update `sreality_payload_shape` in
+`claims_intake.py`, re-extract — the contract's `payload_schema_detector` block went with W1-c's
+six-key contract shape; bezrealitky: restore `ruianId` in `_DETAIL_QUERY`, then refetch
 the rows fetched meanwhile). 6-hourly lane + in-app bell only; promotion into `llm_health.yml`'s
 hourly `--only` list is a deliberate step after a soak, like the ppm2 checks.
 

@@ -15,29 +15,43 @@ from pathlib import Path
 import pytest
 
 from location_data import claims_intake, contracts, page_readers
-from location_data.claims_intake import GUARDS, LEGACY_COLUMNS, READERS, SOURCES, TRANSFORMS
+from location_data.claims_intake import GUARDS, READERS, SOURCES, TRANSFORMS
 from location_data.page_readers import PAGE_READERS
 from location_data.contracts import (
     CLAIM_TYPES,
     EXTRACTION_METHODS,
     EXTRACTOR_PREFIXES,
-    GRANDFATHERED_INERT_GUARDS,
     IMPLEMENTED_GUARDS,
     IMPLEMENTED_TRANSFORMS,
+    MANDATORY_CLAIM_TYPE,
     READER_CONTRACTS,
     READER_SUBSTRATES,
+    RETIRED_ENTRY_KEYS,
     ContractError,
+    parse_contract,
     parse_entry,
 )
 
-ALL = {c.source: c for c in contracts.load_all()}
+_ALL: dict[str, contracts.PortalContract] = {}
+
+
+def _all() -> dict[str, contracts.PortalContract]:
+    """The shipped contracts, loaded on FIRST USE rather than at import.
+
+    The loader refuses a contract that breaks the shape rules, and at import time that
+    refusal is a COLLECTION error: the whole module — including the refusal tests that
+    prove the rules — goes unrun, and the one thing CI reports is that it could not look.
+    A census reds; a unit test of the parser does not."""
+    if not _ALL:
+        _ALL.update({c.source: c for c in contracts.load_all()})
+    return _ALL
 
 MINIMAL = {
     "id": "sr.det.thing",
     "locator_kind": "api_json",
     "extraction_method": "portal_structured_field",
     "page_kind": "detail",
-    "locator": {"json_pointer": "/locality/street"},
+    "locator": {"reader": "scalar", "json_pointer": "/locality/street"},
     "claim_type": "street_name",
 }
 COORDINATE = {
@@ -95,18 +109,10 @@ def _indexed_locator_keys(fn: ast.FunctionDef) -> set[str]:
             and isinstance(node.value, ast.Attribute) and node.value.attr == "locator"}
 
 
-def _constant_legacy_stamps(fn: ast.FunctionDef) -> set[str]:
-    """`legacy_source_column="…"` passed as a literal, i.e. a provenance the READER fixes
-    rather than one the entry supplies."""
-    return {str(kw.value.value) for node in ast.walk(fn) if isinstance(node, ast.Call)
-            for kw in node.keywords
-            if kw.arg == "legacy_source_column" and isinstance(kw.value, ast.Constant)}
-
-
 # ------------------------------------------------------------------ the nine contracts
 
 def test_every_portal_has_exactly_one_contract_file():
-    assert set(ALL) == set(SOURCES)
+    assert set(_all()) == set(SOURCES)
     assert len(list((Path(contracts.CONTRACT_DIR)).glob("*.yaml"))) == 9
 
 
@@ -116,7 +122,7 @@ def test_extractor_id_prefixes_are_portal_unique_and_permanent():
     assert EXTRACTOR_PREFIXES["bezrealitky"] == "bzr."
     assert EXTRACTOR_PREFIXES["bazos"] == "bzs."
     assert len(set(EXTRACTOR_PREFIXES.values())) == 9
-    for source, contract in ALL.items():
+    for source, contract in _all().items():
         for entry in contract.entries:
             assert entry.entry_id.startswith(EXTRACTOR_PREFIXES[source])
 
@@ -124,45 +130,65 @@ def test_extractor_id_prefixes_are_portal_unique_and_permanent():
 def test_every_entry_states_both_axes_and_a_canonical_claim_type():
     """00 §3.2: `locator_kind` IS the surface and `extraction_method` is a separate,
     mandatory field — an html_selector locator can be html_selector_parse, breadcrumb_parse
-    or map_widget_parse."""
-    for contract in ALL.values():
+    or map_widget_parse. The claim type is one of the ELEVEN (rule 25 / W1-c): a type
+    outside them is a claim no resolver reads."""
+    assert len(CLAIM_TYPES) == 11
+    for contract in _all().values():
         for entry in contract.entries:
-            assert entry.claim_type in CLAIM_TYPES
-            assert entry.extraction_method in EXTRACTION_METHODS
+            assert entry.claim_type in CLAIM_TYPES, entry.entry_id
+            assert entry.extraction_method in EXTRACTION_METHODS, entry.entry_id
             assert entry.surface != "portal_json"
+            assert entry.surface != "legacy_column", entry.entry_id
+
+
+def test_every_contract_states_one_carrier_per_type_and_a_town():
+    """The three rule-25 shape rails, asserted over the shipped fleet rather than only in
+    the parser's unit tests: one entry per claim type, every entry executable, and a town
+    entry on every portal. A portal that cannot state a town cannot satisfy the invariant
+    the programme is measured by (`location_town_coverage`)."""
+    for source, contract in _all().items():
+        types = [e.claim_type for e in contract.entries]
+        assert len(types) == len(set(types)), (
+            source, sorted(t for t in types if types.count(t) > 1))
+        assert MANDATORY_CLAIM_TYPE in types, source
+        town = next(e for e in contract.entries if e.claim_type == MANDATORY_CLAIM_TYPE)
+        assert town.reader in READERS, source
+
+
+def test_the_contract_files_carry_only_the_allowed_top_level_keys():
+    """SIX keys (W1-c R2). Read off the FILES rather than off the parsed object: the parser
+    drops what it does not model, so a key it silently ignored would be invisible to every
+    assertion made on a `PortalContract`."""
+    import yaml
+
+    for path in sorted(Path(contracts.CONTRACT_DIR).glob("*.yaml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert set(doc) <= contracts._TOP_LEVEL_KEYS, (path.name, sorted(doc))
+        assert {"portal", "contract_version", "extractions"} <= set(doc), path.name
 
 
 def test_every_reader_named_in_a_contract_exists_in_the_registry():
-    for contract in ALL.values():
+    for contract in _all().values():
         for entry in contract.entries:
-            if entry.reader:
-                # ONE registry (rule 25): the ten payload readers and the fourteen page
-                # readers, both executed by the same lane. `_check_executable` already
-                # refuses a name outside it.
-                assert entry.reader in READERS, entry.entry_id
+            # ONE registry (rule 25): the payload readers and the fourteen page readers,
+            # both executed by the same lane. `_check_executable` already refuses a name
+            # outside it — and refuses an entry that names none at all.
+            assert entry.reader in READERS, entry.entry_id
 
 
 def test_every_executable_entry_matches_its_readers_contract():
-    """Legality is per READER on every axis, not fleet-wide: `geom_column` reads
-    `listings.geom` and `legacy_text_column` reads a class-B `listings` column, so neither
-    can sit on a payload surface or claim a portal extraction method even though the old
-    W1 gate allowed both; and every locator key its reader indexes must be there, because
-    the extractor indexes them unguarded."""
-    for contract in ALL.values():
+    """Legality is per READER on every axis, not fleet-wide: a reader mines one substrate
+    by one method, and every locator key it indexes must be there, because the extractor
+    indexes them unguarded."""
+    for contract in _all().values():
         for entry in contract.entries:
-            if not entry.reader:
-                continue
             spec = READER_CONTRACTS[entry.reader]
             assert entry.surface in spec.substrates, entry.entry_id
             assert entry.extraction_method in spec.methods, entry.entry_id
             assert spec.locator_keys <= set(entry.locator), entry.entry_id
-            if spec.stamps_legacy_column is not None:
-                declared = entry.locator.get("legacy_source_column")
-                assert declared in (None, spec.stamps_legacy_column), entry.entry_id
             if entry.transform:
                 assert spec.consults_transforms, entry.entry_id
-            inert = GRANDFATHERED_INERT_GUARDS.get(entry.entry_id, frozenset())
-            if set(entry.guards) - inert:
+            if entry.guards:
                 assert spec.consults_guards, entry.entry_id
 
 
@@ -187,7 +213,7 @@ def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
     # a W2 surface until W2 gives it one" and updated here deliberately — still an exact set,
     # so a further surface cannot arrive unreviewed.
     assert surfaces == {
-        "api_json", "graphql", "embedded_json", "legacy_column",
+        "api_json", "graphql", "embedded_json",
         "html_selector", "archived_html", "map_config", "url_slug", "jsonld",
     }
     methods = {m for spec in READER_CONTRACTS.values() for m in spec.methods}
@@ -198,7 +224,7 @@ def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
     # content-addressed body store the span indexes into — W1's `listings.raw_json` is not
     # retrievable, which is why `test_w1_executes_no_evidence_bearing_method` still holds.
     assert methods == {
-        "portal_structured_field", "portal_declared_quality", "legacy_column",
+        "portal_structured_field", "portal_declared_quality",
         "html_selector_parse", "map_widget_parse", "url_slug_parse", "regex_text",
         "breadcrumb_parse",
     }
@@ -220,9 +246,6 @@ def test_the_reader_contracts_state_exactly_what_the_reader_bodies_do():
         assert spec.consults_transforms == ("apply_transforms" in calls), name
         assert spec.consults_guards == ("guard_admits" in calls), name
         assert spec.locator_keys == _indexed_locator_keys(fn), name
-        stamped = _constant_legacy_stamps(fn)
-        assert stamped == ({spec.stamps_legacy_column} if spec.stamps_legacy_column
-                           else set()), name
     # The scan reads each reader's OWN body, so a helper that applied transforms or
     # evaluated guards on a reader's behalf would let the table lie about it. There is no
     # such helper: the two entry points are called from reader bodies and nowhere else.
@@ -278,276 +301,20 @@ def test_the_transform_and_guard_vocabularies_stay_in_sync_with_the_runtime():
     assert IMPLEMENTED_GUARDS == frozenset(GUARDS)
 
 
-def test_the_executable_and_inert_split_is_exactly_what_w1_ran():
-    """Per-reader substrates replaced a fleet-wide gate, and a refactor of a validator is
-    only safe if the set of entries the extractor RUNS does not move.
-
-    Was 69 executable / 70 declared-ahead at the W1 gate outcomes. The W2-6…W2-12 wave
-    activated seven portal contracts at once and moved it to 112 / 47 — the single largest
-    census move the fleet has taken, and the reason it is restated here rather than
-    relaxed: an entry that stops being executable is exactly as invisible as one that was
-    never declared. bazos@3 then added sixteen LLM-lane entries (8 -> 24) and bazos@4
-    removed all sixteen again with the lane (rule 25 W1-a), back to 112 / 47.
-
-    Every executable entry now RUNS on the one lane: the payload readers off
-    `listings.raw_json`, the page readers off the stored body. There is no longer a
-    "declared and executable but skipped" state, which is what the three registries
-    created."""
-    split = {source: (sum(1 for e in c.entries if e.reader),
-                      sum(1 for e in c.entries if not e.reader))
-             for source, c in ALL.items()}
-    assert split == {
-        "bazos": (8, 5),
-        "bezrealitky": (11, 6),
-        "ceskereality": (8, 9),
-        "idnes": (8, 6),
-        "maxima": (10, 2),
-        "mmreality": (17, 3),
-        "realitymix": (20, 3),
-        "remax": (7, 7),
-        "sreality": (23, 6),
-    }
-    assert sum(e for e, _ in split.values()) == 112
-    assert sum(i for _, i in split.values()) == 47
-    # The same 112 entries seen down the other axis, so a swap could not preserve both.
-    # The ten payload readers are unmoved except `point_pair` 3 -> 2: mmreality's
-    # `mm.det.point` moved to the page substrate's `json_point`, which is a re-read of the
-    # same fact out of a different document, not a lost signal. EVERY line below is now a
-    # reader the one lane executes.
-    per_reader = Counter(e.reader for c in ALL.values() for e in c.entries if e.reader)
-    assert per_reader == Counter({
-        "scalar": 36, "html_attr": 10,
-        "namespaced_id": 9, "json_scalar": 8,
-        "geom_column": 6, "coords_stamp_quality": 5, "legacy_text_column": 5,
-        "html_marker": 4, "html_text": 4, "json_breadcrumb": 4, "html_attr_regex": 3,
-        "declared_quality": 2, "html_regex": 2, "json_geometry": 2, "json_point": 2,
-        "point_pair": 2, "bbox_envelope": 1, "conflict_signal": 1,
-        "declared_bool_quality": 1, "html_own_text": 1, "html_point_attrs": 1,
-        "html_point_dms": 1, "json_bool": 1, "json_regex": 1,
-    })
-
-
 def test_the_payload_half_executes_no_evidence_bearing_method():
     """`regex_text` / `llm_text` need a span into a RETRIEVABLE document, and
     `listings.raw_json` is latest-wins JSON nobody archived (01 §4.2). The stored page body
     IS retrievable (content-addressed, immutable), so the page half may carry them — which
     is the whole reason the two substrates stay distinguishable inside one registry."""
-    for contract in ALL.values():
+    for contract in _all().values():
         for entry in contract.entries:
             if entry.extraction_method in ("regex_text", "llm_text"):
-                assert (entry.reader is None
-                        or READERS[entry.reader].substrate
+                assert (READERS[entry.reader].substrate
                         == claims_intake.SUBSTRATE_ARCHIVED_HTML), entry.entry_id
 
 
-def test_the_w2_surfaces_are_still_declared():
-    """02 §2.2 declares the full contract, not just what W1 can run — "a signal that exists
-    on the wire and has no contract entry is a diff, not an archaeology project"."""
-    declared = {e.surface for c in ALL.values() for e in c.entries}
-    assert {"html_selector", "map_config", "url_slug", "og_meta", "jsonld",
-            "description"} <= declared
-    # The named misses of 02 §2.2 that production still drops.
-    ids = {e.entry_id for c in ALL.values() for e in c.entries}
-    for missing_today in ("sr.idx.geohash", "bzr.det.ruian_id", "mm.det.municipality_id",
-                          "rx.idx.display_address", "cr.map.exact",
-                          "rm.det.breadcrumb_geo", "mx.det.map_features",
-                          "bzs.det.obec_slug", "id.det.subject_feature"):
-        assert missing_today in ids
-
-
-def test_every_legacy_column_entry_names_its_column():
-    """01 §4.2's `loc_claim_legacy` CHECK — "an anonymous legacy claim is rejected by the
-    database rather than by convention" (06 §6.6 rule 3). Caught in CI, not mid-batch."""
-    legacy = [e for c in ALL.values() for e in c.entries
-              if e.extraction_method == "legacy_column"]
-    assert len(legacy) >= 15
-    for entry in legacy:
-        assert entry.locator.get("legacy_source_column"), entry.entry_id
-    with pytest.raises(ContractError, match="loc_claim_legacy"):
-        _entry(locator_kind="legacy_column", extraction_method="legacy_column",
-               page_kind="none", locator={"reader": "scalar", "json_pointer": "/x"})
-
-
-def test_a_legacy_entry_never_burns_a_permanent_html_extractor_id():
-    """02 §2.2.3 fixes an id per portal SURFACE, permanently — `bzs.det.psc` is the
-    Lokalita-cell HTML parse and `bzs.det.link_pin` is the maps-anchor HTML parse, both
-    W2 work. Spending those ids on the W1 legacy mirrors of the same facts would mean
-    either that W2 cannot ship its own entry or that one extractor_id names two different
-    acts of extraction with two different provenances — and `location_claims.extractor_id`
-    is how a claim's origin is read back forever. The legacy mirrors take `legacy_`-marked
-    ids of their own (the pattern idnes set with `id.det.legacy_pin`)."""
-    legacy_ids = {e.entry_id for c in ALL.values() for e in c.entries
-                  if e.extraction_method == "legacy_column"}
-    for reserved in ("bzs.det.psc", "bzs.det.link_pin", "id.det.pin", "sr.det.pin",
-                     # 02 §2.2.6 fixes both of these on remax HTML surfaces: the detail
-                     # header parse and the index card's data-display-address. The W1
-                     # raw_json mirror of the same string is a different act.
-                     "rx.det.header_address", "rx.idx.display_address"):
-        assert reserved not in legacy_ids, (
-            f"{reserved} is 02 §2.2.3's permanent id for an HTML surface; the legacy "
-            f"entry must mint its own")
-    assert {"bzs.det.legacy_psc", "bzs.det.legacy_link_pin", "id.det.legacy_pin",
-            "rx.det.legacy_display_address"} <= legacy_ids
-    # The W2 entries whose ids the legacy mirrors deliberately did not spend are still
-    # declared — a mirror that quietly replaced its HTML counterpart would be a regression.
-    html_ids = {e.entry_id for c in ALL.values() for e in c.entries
-                if e.surface == "html_selector"}
-    assert {"rx.det.header_address", "rx.idx.display_address"} <= html_ids
-
-
-def test_the_class_b_legacy_columns_are_capped_and_flagged():
-    """06 §6.1.1: a class-B column becomes a claim with `extraction_method='legacy_column'`,
-    `licence_class='portal'`, blur written explicitly and confidence capped at `medium`.
-    The cap is CONTRACT data — `legacy_text_column` stamps whatever the entry declares —
-    so a future entry that forgets it would silently mint a full-confidence claim out of a
-    column with no provenance at all."""
-    entries = [(c.source, e) for c in ALL.values() for e in c.entries
-               if e.reader == "legacy_text_column"]
-    assert {source for source, _ in entries} == {"remax", "ceskereality", "realitymix"}
-    for source, entry in entries:
-        assert entry.locator["legacy_source_column"].startswith("listings."), entry.entry_id
-        assert entry.extraction_method == "legacy_column", entry.entry_id
-        assert entry.surface == "legacy_column", entry.entry_id
-        assert entry.page_kind == "none", entry.entry_id
-        assert entry.default_licence_class == "portal", entry.entry_id
-        assert entry.default_blur_evidence == "none", entry.entry_id
-        assert entry.locator["claim_confidence"] == "medium", entry.entry_id
-        assert entry.precision_map["prior"]["match_confidence"] == "medium", entry.entry_id
-        # §6.6 rule 3 is about whether the WRITER can be named, and a provenance guard is
-        # how it gets named: an unguarded legacy column cannot say who wrote it, a guarded
-        # one admits only the writer it names. So the two flags are each other's inverse,
-        # and an entry that guards AND claims the write path is unknown is incoherent.
-        assert entry.locator["write_path_unknown"] is (
-            entry.locator.get("require_column_equals") is None), entry.entry_id
-
-
-def test_the_street_entries_are_guarded_onto_the_class_b_provenance_only():
-    """06 §6.1.3 classes `listings.street` per WRITER, not per column: `parser` is class B
-    (portal-derived text), while `resolver` (a RÚIAN address-point inference) and NULL (the
-    unattributable legacy writes) are class D — quarantine, never a claim. The split is the
-    entry's own predicate, so a portal that needs a different one is a version bump and
-    never a branch in the extractor."""
-    guarded = {e.entry_id: e for c in ALL.values() for e in c.entries
-               if e.locator.get("require_column_equals")}
-    assert set(guarded) == {"cr.det.legacy_street", "rm.det.legacy_street"}
-    for entry_id, entry in guarded.items():
-        assert entry.locator["legacy_source_column"] == "listings.street", entry_id
-        assert entry.locator["require_column_equals"] == {
-            "listings.street_source": "parser"}, entry_id
-        assert entry.claim_type == "street_name", entry_id
-        assert entry.extraction_method == "legacy_column", entry_id
-        assert entry.default_licence_class == "portal", entry_id
-
-
-def test_every_legacy_column_a_contract_names_is_one_the_intake_scan_selects():
-    """The columns are read positionally off the batch queries, and a name the scan does
-    not select is refused at extraction time — so a contract naming one would take a whole
-    run down. Both spellings count: the column a legacy entry READS and the column its
-    guard TESTS."""
-    named = {
-        str(e.locator["legacy_source_column"])
-        for c in ALL.values() for e in c.entries if e.reader == "legacy_text_column"
-    } | {
-        str(column)
-        for c in ALL.values() for e in c.entries
-        for column in (e.locator.get("require_column_equals") or {})
-    }
-    assert named <= set(LEGACY_COLUMNS), sorted(named - set(LEGACY_COLUMNS))
-    assert "listings.street_source" in LEGACY_COLUMNS
-
-
-def test_the_bumped_contracts_appended_entries_and_kept_the_earlier_ones():
-    """02 §2.1.8: entries are immutable per `contract_version`, so closing a measured
-    coverage gap is a VERSION BUMP that appends. Every earlier id must still be there — an
-    entry that disappeared would orphan every claim already stamped with it."""
-    # Untouched by W2a-3e, which is the point of that change: moving every portal's
-    # `persistence.volatile_paths` into these files bumped nothing, because
-    # `contract_sha256` no longer covers `persistence` (mig 408). A version bump here
-    # re-stamps extractor_version and contract_entry_id on every claim the next
-    # incremental scan re-walks, and archive configuration must not be able to spend
-    # that. What versions these ARE is the record of extraction changes only.
-    #
-    # ceskereality@4 is the ONE bump in this census that appended nothing, and it is not
-    # an exception to the rule above — it is the rest of it. The governed hash is the file
-    # minus `persistence:` and `shadow:`, so PROSE is hashed exactly like a selector: PR
-    # #1209 rewrote `fetch.robots_note` and one entry's `notes:` without a bump, v3's hash
-    # moved under a row already on record, and `project()` refused the fleet's whole
-    # projection for 14 consecutive hourly runs. The prose was the accurate one, entries
-    # are immutable, so the bump is the remedy doctrine names. Its claim set is
-    # byte-identical to v3's (`golden/ceskereality@{3,4}.json` differ in one field), and
-    # `test_contract_immutability` is what now catches the unbumped edit before merge.
-    #
-    # The W2-6…W2-12 activation wave bumped seven contracts in one merge. What the bump
-    # BUYS is different from every earlier one in this census: those appended entries,
-    # these mostly attach a `locator.reader` to entries that were already DECLARED and
-    # inert, so the archived-HTML lane can execute them. Attaching a reader rewrites the
-    # governed bytes, and entries are immutable per version, so it is a bump either way —
-    # `idnes@2` appends NOTHING and is a bump purely for that reason (as `ceskereality@4`
-    # was for prose). Both facts are asserted below: what each version appended, and which
-    # already-shipped ids the wave turned on rather than replaced.
-    assert {s: c.version for s, c in ALL.items()} == {
-        "remax": 3, "ceskereality": 5, "realitymix": 4, "bazos": 4, "idnes": 2,
-        "mmreality": 2, "maxima": 2,
-        "sreality": 1, "bezrealitky": 1,
-    }
-    for source, new_ids, earlier_ids in (
-        ("remax", {"rx.det.legacy_display_address", "rx.det.legacy_locality"},
-         {"rx.det.raw_address_conflict", "rx.det.legacy_pin"}),
-        ("ceskereality", {"cr.det.legacy_street"},
-         {"cr.det.locality_text", "cr.det.legacy_pin", "cr.det.coords_stamp",
-          "cr.det.legacy_locality"}),
-        ("realitymix", {"rm.det.legacy_street"},
-         {"rm.det.locality_text", "rm.det.legacy_pin", "rm.det.coords_block",
-          "rm.det.legacy_locality"}),
-    ):
-        ids = {e.entry_id for e in ALL[source].entries}
-        assert new_ids <= ids, source
-        assert earlier_ids <= ids, source
-
-    # W2-6…W2-12, per portal: (what the bump APPENDED, exactly) and (the already-shipped
-    # ids it ACTIVATED in place — the set most at risk of being quietly renamed, because
-    # renaming one looks like a working selector while orphaning every claim stamped with
-    # the old id).
-    wave: dict[str, tuple[set[str], set[str]]] = {
-        "bazos": ({"bzs.det.psc"},
-                  {"bzs.det.obec_slug", "bzs.det.zoom", "bzs.det.blur_hint",
-                   "bzs.det.legacy_psc"}),
-        "ceskereality": ({"cr.det.title_okres"},
-                         {"cr.det.title_line", "cr.det.data_city"}),
-        # Appends nothing: v2 is five inert entries given readers.
-        "idnes": (set(),
-                  {"id.det.subject_feature", "id.det.subject_address", "id.det.info_text",
-                   "id.det.no_exact_disclaimer", "id.det.zoom"}),
-        "maxima": ({"mx.det.locality_quarter", "mx.det.locality_street"},
-                   {"mx.det.map_features", "mx.det.map_shape", "mx.det.zoom",
-                    "mx.det.locality", "mx.det.title"}),
-        "mmreality": ({"mm.det.blob_accurate", "mm.det.blob_municipality",
-                       "mm.det.blob_municipality_id", "mm.det.blob_municipality_part",
-                       "mm.det.blob_street"},
-                      {"mm.det.point", "mm.det.original_title_street"}),
-        "realitymix": ({"rm.det.agency_est_flag", "rm.det.breadcrumb_kraj",
-                        "rm.det.breadcrumb_obec", "rm.det.breadcrumb_quarter",
-                        "rm.det.map_address", "rm.det.map_house_number_co",
-                        "rm.det.map_house_number_cp", "rm.det.map_obec",
-                        "rm.det.map_okres", "rm.det.map_street"},
-                       {"rm.det.gps", "rm.det.agency_gps_flag", "rm.det.form_address",
-                        "rm.det.address_all_segments", "rm.det.breadcrumb_geo"}),
-        "remax": ({"rx.det.map_address"},
-                  {"rx.det.gps", "rx.det.header_address"}),
-    }
-    for source, (appended, activated) in wave.items():
-        ids = {e.entry_id for e in ALL[source].entries}
-        executable = {e.entry_id for e in ALL[source].entries if e.reader}
-        assert appended <= ids, source
-        assert activated <= ids, source
-        # The activated ids must actually be executable — an id that lost its reader on
-        # the way through the merge would read as a silent de-activation, and the wave's
-        # whole purpose is that these entries RUN.
-        assert activated <= executable, source
-
-
 def test_coordinate_entries_carry_a_cap_and_a_licence_class():
-    for contract in ALL.values():
+    for contract in _all().values():
         for entry in contract.entries:
             if entry.claim_type == "coordinate":
                 assert entry.precision_map.get("precision_cap"), entry.entry_id
@@ -555,28 +322,33 @@ def test_coordinate_entries_carry_a_cap_and_a_licence_class():
 
 
 def test_blurred_label_sets_ride_on_the_contract_not_in_code():
+    """WHICH labels mean "this pin is blurred" is a portal fact, so it is data on the entry
+    — re-calibrating it is a version bump, never a code change. Which portals declare which
+    labels is asserted in the per-portal contract tests; the fleet rail is that a set only
+    ever rides on the entry that carries the portal's own precision signal."""
     blurred = {
-        e.entry_id: e.precision_map["blurred_labels"]
-        for c in ALL.values() for e in c.entries if e.precision_map.get("blurred_labels")
+        e.entry_id: (e.claim_type, e.precision_map["blurred_labels"])
+        for c in _all().values() for e in c.entries if e.precision_map.get("blurred_labels")
     }
-    assert blurred["sr.det.inaccuracy_type"] == ["street", "ward", "quarter", "municipality"]
-    assert blurred["mm.det.accurate"] == ["not_accurate"]
-    assert blurred["cr.map.exact"] == ["exact_false"]
+    assert blurred, "no portal declares a blurred-label set — the calibration is in code"
+    for entry_id, (claim_type, labels) in blurred.items():
+        assert claim_type == "precision_declaration", entry_id
+        assert labels and all(isinstance(x, str) and x for x in labels), entry_id
 
 
 def test_exclusion_zones_name_every_portals_decoy():
     """Every portal ships at least one fully-formed address-shaped decoy (02 §2.5)."""
-    for source, contract in ALL.items():
+    for source, contract in _all().items():
         assert contract.exclusion_zones, source
-    sreality_zones = str(ALL["sreality"].exclusion_zones)
+    sreality_zones = str(_all()["sreality"].exclusion_zones)
     assert "/premise" in sreality_zones
-    assert "area-listings__item" in str(ALL["remax"].exclusion_zones)
+    assert "area-listings__item" in str(_all()["remax"].exclusion_zones)
 
 
 def test_contract_sha256_is_taken_from_the_governed_bytes_on_disk():
     """The bytes on disk minus the two blocks that are not extraction (mig 404, 408) —
     so the hash covers exactly what a bump of `contract_version` would re-stamp."""
-    contract = ALL["maxima"]
+    contract = _all()["maxima"]
     assert contract.path is not None
     import hashlib
     body = contract.path.read_bytes()
@@ -584,7 +356,7 @@ def test_contract_sha256_is_taken_from_the_governed_bytes_on_disk():
     assert contract.sha256 != hashlib.sha256(body).digest(), (
         "maxima declares persistence.volatile_paths, so the governed hash must differ "
         "from a whole-file hash — otherwise this test proves nothing")
-    assert contracts.extractor_version(contract) == "contract:maxima@2"
+    assert contracts.extractor_version(contract) == f"contract:maxima@{contract.version}"
 
 
 # ------------------------------------------------------------------ format validation
@@ -623,56 +395,21 @@ def test_a_non_enum_confidence_is_rejected_on_both_of_its_spellings():
                         "claim_confidence": "very-high"})
 
 
-def test_a_malformed_provenance_guard_is_rejected():
-    """The guard decides whether a class-D value becomes a claim, so every way of writing
-    it wrong fails in CI: on a non-legacy method (where nothing would ever read it), with a
-    column spelled differently from `legacy_source_column` (the extractor looks both up in
-    one dict, so an unqualified name would just never match), and with a non-scalar
-    right-hand side (one equality against a provenance stamp, not a predicate language)."""
-    legacy = {
-        "locator_kind": "legacy_column",
-        "extraction_method": "legacy_column",
-        "page_kind": "none",
-    }
-    with pytest.raises(ContractError, match="require_column_equals"):
-        _entry(locator={"reader": "scalar", "json_pointer": "/x",
-                        "require_column_equals": {"listings.street_source": "parser"}})
-    with pytest.raises(ContractError, match="non-empty"):
-        _entry(**legacy, locator={"reader": "legacy_text_column",
-                                  "legacy_source_column": "listings.street",
-                                  "require_column_equals": {}})
-    with pytest.raises(ContractError, match="listings.<column>"):
-        _entry(**legacy, locator={"reader": "legacy_text_column",
-                                  "legacy_source_column": "listings.street",
-                                  "require_column_equals": {"street_source": "parser"}})
-    with pytest.raises(ContractError, match="scalar"):
-        _entry(**legacy, locator={"reader": "legacy_text_column",
-                                  "legacy_source_column": "listings.street",
-                                  "require_column_equals": {
-                                      "listings.street_source": ["parser", "resolver"]}})
-
-
 def test_a_wrong_prefix_is_rejected():
     with pytest.raises(ContractError, match="permanent"):
         parse_entry(dict(MINIMAL, id="bz.det.thing"), source="sreality", index=0)
 
 
 def test_a_reader_outside_its_registered_substrates_is_rejected():
-    """The reader IS the substrate declaration. An HTML surface has no reader at all yet;
-    a payload reader on a legacy column (or the reverse) reads the wrong thing while
-    stamping the claim's provenance as the other one."""
+    """The reader IS the substrate declaration: a payload reader on a DOM surface (or the
+    reverse) reads the wrong document while stamping the claim's provenance as the other
+    one."""
     with pytest.raises(ContractError, match="not one of its substrates"):
         _entry(locator_kind="html_selector", extraction_method="html_selector_parse",
                locator={"reader": "scalar", "css": "h1"})
-    # `legacy_text_column` reads `row.legacy_columns`, never the payload — the old
-    # fleet-wide gate accepted this and the extractor would KeyError on the first row.
+    # ... and a page reader on the payload surface, which has no document to scope at all.
     with pytest.raises(ContractError, match="not one of its substrates"):
-        _entry(locator={"reader": "legacy_text_column",
-                        "legacy_source_column": "listings.locality"})
-    # `geom_column` reads `listings.geom` whatever the entry says its surface is.
-    with pytest.raises(ContractError, match="not one of its substrates"):
-        _entry(claim_type="coordinate", precision_cap={"granularity_max": {"_default": "obec"}},
-               locator={"reader": "geom_column"})
+        _entry(locator={"reader": "html_text", "css": "h1"})
     # And a payload reader stays legal on the payload surfaces it is registered for.
     assert _entry(locator={"reader": "scalar", "json_pointer": "/x"}).reader == "scalar"
 
@@ -718,15 +455,12 @@ def test_an_executable_entry_may_not_declare_what_its_own_reader_never_consults(
 
 def test_a_reader_may_not_be_declared_with_an_extraction_method_it_does_not_perform():
     """Surface and method are separate axes (00 §3) and the entry states both, but a reader
-    performs exactly one act: `legacy_text_column` reads a `listings` column whatever the
-    entry says, and `extraction_method='portal_structured_field'` would stamp every one of
-    its claims as portal-published — while `_base` keys `legacy_source_column` off the
-    METHOD and would leave the column NULL, so 01 §4.2's CHECK never sees it either."""
-    with pytest.raises(ContractError, match="reader 'legacy_text_column' extracts by"):
-        _entry(locator_kind="legacy_column", extraction_method="portal_structured_field",
-               page_kind="none",
-               locator={"reader": "legacy_text_column",
-                        "legacy_source_column": "listings.locality"})
+    performs exactly one act. `regex_text` is the one that matters most: 01 §4.2 makes it
+    evidence-bearing, so declaring it on a reader that lifts a whole node would stamp a
+    provenance whose mandatory quote-plus-span the claim does not carry."""
+    with pytest.raises(ContractError, match="reader 'scalar' extracts by"):
+        _entry(extraction_method="regex_text",
+               locator={"reader": "scalar", "json_pointer": "/x"})
     with pytest.raises(ContractError, match="reader 'declared_quality' extracts by"):
         _entry(claim_type="precision_declaration",
                locator={"reader": "declared_quality", "json_pointer": "/x"})
@@ -744,64 +478,109 @@ def test_an_executable_entry_must_name_every_locator_key_its_reader_indexes():
         _entry(locator={"reader": "scalar"})
 
 
-def test_a_reader_that_stamps_its_own_provenance_refuses_a_contradicting_entry():
-    """`_read_geom_column` overrides `legacy_source_column` with `listings.geom` and
-    `_read_coords_stamp_quality` with `raw_json.coords`, so an entry naming a different
-    column states one provenance while the claim rows record another."""
-    legacy = {"locator_kind": "legacy_column", "extraction_method": "legacy_column",
-              "page_kind": "none"}
-    with pytest.raises(ContractError, match="stamps legacy_source_column='listings.geom'"):
-        _entry(**legacy, **COORDINATE,
-               locator={"reader": "geom_column", "legacy_source_column": "listings.locality"})
-    with pytest.raises(ContractError, match="stamps legacy_source_column='raw_json.coords'"):
-        _entry(**legacy, claim_type="precision_declaration",
-               locator={"reader": "coords_stamp_quality",
-                        "legacy_source_column": "listings.geom"})
-    assert _entry(**legacy, **COORDINATE,
-                  locator={"reader": "geom_column",
-                           "legacy_source_column": "listings.geom"}).reader == "geom_column"
+def test_an_entry_that_names_no_reader_is_refused():
+    """The ahead-declaration is gone (W1-c R1). "Declared for the wave that will run it" is
+    how a contract grows entries nothing executes: projected, counted in every census,
+    extracting nothing — and the fleet carried 47 of them. A contract states what it reads
+    today; the next wave's entry arrives with the wave, in a version bump."""
+    with pytest.raises(ContractError, match="names no locator.reader"):
+        _entry(locator_kind="html_selector", extraction_method="html_selector_parse",
+               locator={"css": ".lokalita"})
 
 
-def test_a_declared_ahead_entry_may_name_a_guard_the_runtime_has_not_implemented():
-    """02 §2.2 declares the full contract, not just what today's wave can run — "a signal
-    that exists on the wire and has no contract entry is a diff, not an archaeology
-    project". An entry with no reader executes nowhere, so its transforms and guards are a
-    specification for the wave that will implement them, not a silent no-op."""
-    entry = _entry(locator_kind="html_selector", extraction_method="html_selector_parse",
-                   locator={"css": ".lokalita"},
-                   transform=["dms_to_decimal"],
-                   guards=["require_czech_street_morphology", "reject_empty_geometry"])
-    assert entry.reader is None
-    assert entry.transform == ["dms_to_decimal"]
-    assert entry.guards == ["require_czech_street_morphology", "reject_empty_geometry"]
+def test_a_retired_entry_key_is_refused():
+    """`cardinality` / `required` / `on_conflict` read like rails and were enforced by
+    nothing — `required: always` never made a missing value an error anywhere (W1-c R3)."""
+    for key, value in (("cardinality", "many"), ("required", "always"),
+                       ("on_conflict", "emit_both")):
+        assert key in RETIRED_ENTRY_KEYS
+        with pytest.raises(ContractError, match=key):
+            _entry(**{key: value})
 
 
-def test_the_grandfathered_guards_are_inert_by_reader_and_shrink_only():
-    """Two live entries named a guard from before the check existed. Neither is "pending":
-    each sits on a reader that never evaluates guards at all, so implementing the name
-    would not make it run — the exemption is enumerated against THAT property, not against
-    implementedness. (Keying it on implementedness would force the row out the day someone
-    adds `reject_sentinel` to `GUARDS`, certifying as resolved a guard that still never
-    executes.) The table may only shrink, and only by a contract version bump."""
-    assert set(GRANDFATHERED_INERT_GUARDS) == {"sr.det.inaccuracy_type", "sr.det.zip"}
-    by_id = {e.entry_id: e for c in ALL.values() for e in c.entries}
-    for entry_id, inert in GRANDFATHERED_INERT_GUARDS.items():
-        entry = by_id[entry_id]
-        assert entry.reader, entry_id          # an inert entry needs no exemption
-        assert inert <= set(entry.guards), entry_id
-        assert not READER_CONTRACTS[entry.reader].consults_guards, entry_id
-    # Why tolerating them is safe: sr.det.zip's `reject_sentinel` duplicates its own
-    # transform, and sr.det.inaccuracy_type's `reject_if_in_excluded_zone` asks about
-    # HTML/description blocks that a `/locality/inaccuracy_type` read never touches.
-    assert "sentinel_drop:-1" in by_id["sr.det.zip"].transform
-    assert by_id["sr.det.inaccuracy_type"].surface == "api_json"
+def test_a_legacy_column_entry_is_refused_on_either_axis():
+    """The lane reads `raw_json` and the stored page body. A `listings` column is neither,
+    and the three readers that mined one went with the surface."""
+    with pytest.raises(ContractError, match="legacy_column surface is retired"):
+        _entry(locator_kind="legacy_column", extraction_method="legacy_column",
+               page_kind="none", locator={"reader": "scalar", "json_pointer": "/x"})
+    with pytest.raises(ContractError, match="legacy_column surface is retired"):
+        _entry(extraction_method="legacy_column")
+    for gone in ("legacy_text_column", "geom_column", "coords_stamp_quality"):
+        assert gone not in READER_CONTRACTS
+        assert gone not in READERS
+
+
+def test_a_claim_type_outside_the_eleven_is_refused():
+    """The other 29 `location_claim_type` labels are still enum members — a Postgres enum
+    cannot shrink in place — and the loader is what keeps them out of a contract until W4
+    drops them."""
+    for retired in ("uncertainty_geometry", "map_zoom", "blur_hint", "postal_town",
+                    "obec_code", "address_line_verbatim"):
+        with pytest.raises(ContractError, match="claim_type"):
+            _entry(claim_type=retired)
+
+
+# ------------------------------------------------------- the per-CONTRACT shape rules
+
+def _contract_file(tmp_path, *, extractions, portal="sreality", version=1, **extra):
+    import yaml
+
+    doc = {"portal": portal, "contract_version": version,
+           "exclusion_zones": [{"locator_kind": "description",
+                                "locator": {"pattern": "x"}, "reason": "decoy"}],
+           "extractions": extractions, **extra}
+    path = tmp_path / f"{portal}.yaml"
+    path.write_text(yaml.safe_dump(doc, allow_unicode=True), encoding="utf-8")
+    return path
+
+
+_TOWN = {
+    "id": "sr.det.city", "locator_kind": "api_json",
+    "extraction_method": "portal_structured_field", "page_kind": "detail",
+    "locator": {"reader": "scalar", "json_pointer": "/locality/city"},
+    "claim_type": "obec_name",
+}
+_STREET = dict(MINIMAL)
+
+
+def test_a_contract_with_a_town_entry_parses(tmp_path):
+    contract = parse_contract(_contract_file(tmp_path, extractions=[_TOWN, _STREET]))
+    assert [e.claim_type for e in contract.entries] == ["obec_name", "street_name"]
+    assert contract.fetch_config == {"persistence": {}, "regressions": []}
+
+
+def test_a_second_entry_of_one_claim_type_is_refused(tmp_path):
+    """Two entries of a type make the contract a vote the survivorship policy never asked
+    for: both claims reach S7 with the same (source, extraction_method), so which one wins
+    is the order the DB happened to return them in."""
+    twin = dict(_STREET, id="sr.det.street2",
+                locator={"reader": "scalar", "json_pointer": "/locality/street2"})
+    with pytest.raises(ContractError, match="more than one entry per claim type"):
+        parse_contract(_contract_file(tmp_path, extractions=[_TOWN, _STREET, twin]))
+
+
+def test_a_contract_with_no_town_entry_is_refused(tmp_path):
+    """Rule 25's invariant is measured per portal, so the portal is where it is enforced."""
+    with pytest.raises(ContractError, match="declares no obec_name entry"):
+        parse_contract(_contract_file(tmp_path, extractions=[_STREET]))
+
+
+def test_a_retired_top_level_key_is_refused(tmp_path):
+    """The eight keys W1-c dropped were read by nothing, and an unknown key has always
+    failed open the same way: a typo'd `extractoins:` projects a header with no entries."""
+    for key in ("identity_ladder", "precision_caps", "precision_priors",
+                "extractor_runtime", "fetch", "payload_schema_detector",
+                "pin_collision_semantics", "contract_sha256"):
+        with pytest.raises(ContractError, match="unknown top-level key"):
+            parse_contract(_contract_file(tmp_path, extractions=[_TOWN], **{key: {}}))
 
 
 # ------------------------------------------------------------------ the projection SQL
 
 def test_projection_is_idempotent_per_version_and_refuses_a_changed_body():
     """Entries are IMMUTABLE once loaded; a change is a new contract_version (02 §2.1.8)."""
-    contract = ALL["maxima"]
+    contract = _all()["maxima"]
     conn = _FakeConn(existing_sha="00" * 32)
     with pytest.raises(ContractError, match="bump contract_version"):
         contracts.project(conn, contract, git_ref="deadbeef")
@@ -814,7 +593,7 @@ def test_a_persistence_edit_refreshes_the_row_instead_of_demanding_a_version_bum
     would freeze at whatever the version first shipped while the scrape applied the file.
     Nothing else in `fetch_config` can ride along: the rest IS hashed, so on this path it
     is byte-identical by construction."""
-    contract = ALL["maxima"]
+    contract = _all()["maxima"]
     import copy
 
     stale = copy.deepcopy(contract.fetch_config)
@@ -836,7 +615,7 @@ def test_a_persistence_edit_refreshes_the_row_instead_of_demanding_a_version_bum
 def test_projection_stands_the_incumbent_down_before_activating():
     """The partial unique index allows exactly one active header per source, so the order
     of the two UPDATEs is load-bearing."""
-    contract = ALL["maxima"]
+    contract = _all()["maxima"]
     conn = _FakeConn(existing_sha=contract.sha256.hex(),
                      fetch_config=contract.fetch_config)
     contracts.project(conn, contract, git_ref="deadbeef")
@@ -970,14 +749,14 @@ def test_every_jsonb_column_param_is_bound_as_jsonb():
     invalid input syntax for a jsonb column. The first production projection crashed on
     exactly this: portal_contract_entries.transform (list[str]) reached jsonb unwrapped
     (run 31428625090, Token "psc_normalise"). Assert every param bound to a jsonb column
-    is a psycopg Jsonb wrapper, and every text[] column gets a plain list, across ALL
+    is a psycopg Jsonb wrapper, and every text[] column gets a plain list, across _all()
     nine real contracts."""
     import psycopg.types.json
 
     types = _column_types_from_382()
     checked_jsonb = 0
     saw_nonempty_transform = False
-    for contract in ALL.values():
+    for contract in _all().values():
         conn = _FakeConn(existing_sha="")
         contracts.project(conn, contract, git_ref="deadbeef")
         for sql, params in conn.executed:

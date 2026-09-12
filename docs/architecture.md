@@ -1697,17 +1697,18 @@ renumber.** Navigate by area:
     `docs/design/location-serving-contract.md`.
 
 
-25. **Location: one store, one lane, nine claim types, no flags; every location PR deletes at least as
+25. **Location: one store, one lane, eleven claim types, no flags; every location PR deletes at least as
     much as it adds.** Written 2026-09-11 from the full-programme audit ("Where the Town Lives"). The
     programme had built a completeness-first engine wave after wave — 62 tables, 81 projection columns,
     40 claim types, 5 claim-producing lanes, 19 workflows, 5 policy tables — and never flipped a
     consumer, so nothing exercised it end to end and nothing was ever deleted; 733 verified findings
     came out of that shape, not out of any one bug. The rule is the corrective: the answer table shrinks
     to 27 fields (pin, the eight names plus psč, six registry ids, confidence/level/radius, statuses,
-    housekeeping), the claim vocabulary to ten types (the portal's precision flag rides on the pin
-    claim), each contract to at most one entry per type with the **town entry mandatory and on the
-    hourly lane** (the loader refuses any other shape), the lanes to one (the hourly intake reads the
-    stored payload and the stored page body, hash-gated), the resolver to four steps (bind the finest
+    housekeeping), the claim vocabulary to **eleven types until W2 and ten after** (the portal's
+    precision flag is its own `precision_declaration` claim until the resolver rewrite folds it onto
+    the pin claim), each contract to at most one entry per type with the **town entry mandatory and on
+    the hourly lane**, the lanes to one (the hourly intake reads the stored payload and the stored page
+    body, hash-gated), the resolver to four steps (bind the finest
     registry entity → fill the hierarchy from the registry → grade: one confidence, one radius from a
     per-level table in code → check: the pin must fall inside the resolved town, else `disputed`).
     Everything the resolver needs later derives from three kept things: the stored page body, the
@@ -1722,6 +1723,21 @@ renumber.** Navigate by area:
     field is added only after a measured slowdown and only there. The one step that adds work — the
     intake parsing changed page bodies — is bounded by page churn, and moves to the Railway worker if
     the hourly budget is ever exceeded.
+
+    **The contract shape, as the loader enforces it (W1-c, `location_data/contracts.py`).** Six
+    top-level keys (`portal`, `contract_version`, `persistence`, `exclusion_zones`, `regressions`,
+    `extractions`) and nothing else; the eight that went — `identity_ladder`, `precision_caps`,
+    `precision_priors`, `extractor_runtime`, `fetch`, `payload_schema_detector`,
+    `pin_collision_semantics`, `contract_sha256` — were read by nothing. Per contract: **at most one
+    entry per claim type**, an `obec_name` entry **present and naming a reader**, and **every** entry
+    naming a reader (the "declared ahead for a later wave" state is gone — it is how the fleet grew 47
+    entries that extracted nothing). Per entry: no `required` / `cardinality` / `on_conflict` (nothing
+    enforced them) and no `legacy_column` surface or method — the lane reads `raw_json` and the stored
+    page body, so the three readers that mined a `listings` column (`legacy_text_column`, `geom_column`,
+    `coords_stamp_quality`) went with it. Each refusal is one `ContractError` naming the portal and the
+    entry. The Postgres enums keep their retired labels (an enum cannot shrink in place) and the
+    `portal_contracts` / `portal_contract_entries` columns keep their defaults; W4 drops both, and until
+    then the loader's vocabulary is a strict subset of the enum's.
 
 ## Broker identity merges — auto-merge and the suppression rail
 

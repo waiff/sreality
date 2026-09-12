@@ -1955,10 +1955,17 @@ def test_worker_lane_stall_does_not_double_alarm_a_dead_worker() -> None:
 # --- location_town_coverage (rule 25's invariant, 2026-09-11) --------------------
 
 
-def test_location_town_coverage_is_registered() -> None:
+def test_location_town_coverage_is_registered_and_runs_first() -> None:
+    """Registration is not enough, and 2026-09-11 21:02 is why: the lane runs `_CHECKS` in
+    order under a 120 s budget and stamped the last seven `not_run`, this one among them.
+    The invariant the location programme is measured by cannot be the measurement that gets
+    starved — it is one indexed join, so it goes first."""
     from scripts.verify_pipeline import _CHECKS, check_location_town_coverage
 
     assert ("location_town_coverage", check_location_town_coverage) in _CHECKS
+    keys = [key for key, _ in _CHECKS]
+    assert keys.count("location_town_coverage") == 1
+    assert keys[0] == "location_town_coverage"
 
 
 def test_location_town_coverage_is_red_while_any_czech_listing_lacks_a_town() -> None:

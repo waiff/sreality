@@ -31,7 +31,6 @@ from location_data.claims_common import (
     DEFAULT_MAX_CLAIM_VALUE_BYTES,
     EMITTABLE_LICENCE_CLASSES,
     GUARD_CZ_BBOX,
-    LEGACY_COLUMNS,
     MAX_CLAIM_VALUE_BYTES_ENV,
     SUBSTRATE_ARCHIVED_HTML,
     Claim,
@@ -109,12 +108,6 @@ POSITION_BRANCHES = frozenset({POSITION_BRANCH_PORTAL_PIN, POSITION_BRANCH_PORTA
 # per-source `HISTORY_COMPLETENESS` answers a question about a different substrate, and the
 # claim's own re-sighting series is gone (rule 25: nobody read it).
 ARCHIVE_HISTORY_COMPLETENESS = "none"
-
-# Every `LEGACY_COLUMNS` key present, every value NULL. `_legacy_column` REFUSES a key the
-# scan never selected (a scan/contract mismatch must not read as NULL), so the mapping has
-# to be complete even though no archived entry can name a legacy column: `page_entries`
-# already excludes the `legacy_column` surface, and this is the second rail.
-_DUMMY_LEGACY_COLUMNS: dict[str, Any] = dict.fromkeys(LEGACY_COLUMNS, None)
 
 
 class BodyStore(Protocol):
@@ -1525,16 +1518,13 @@ def _read_json_breadcrumb(
 def page_entries(entries: list[Entry], page_kind: str) -> list[Entry]:
     """The entries this lane may execute against ONE archived body.
 
-    Three conditions, and each excludes a different failure: the entry must name a reader
-    this lane implements (not W1's registry — see the docstring), it must be declared for
-    the page kind the body actually is (a detail-page selector run over an index body is
-    how a neighbour's address becomes the subject's), and it must not be a `legacy_column`
-    entry (those read a `listings` column, which no archived body carries)."""
+    Two conditions, and each excludes a different failure: the entry must name a reader
+    this lane implements (not the payload half's — see the docstring), and it must be
+    declared for the page kind the body actually is (a detail-page selector run over an
+    index body is how a neighbour's address becomes the subject's)."""
     return [
         entry for entry in entries
-        if entry.reader in PAGE_READERS
-        and entry.page_kind == page_kind
-        and entry.surface != "legacy_column"
+        if entry.reader in PAGE_READERS and entry.page_kind == page_kind
     ]
 
 
@@ -1609,8 +1599,20 @@ def stamp_page_claim(
         raise IntakeRefused(
             f"payload {payload.id} carries page_kind='{FORBIDDEN_PAGE_KIND}'; C10 keeps the "
             f"page's own kind on the claim and leaves that enum member unused")
+    # W1-c R5: on a `precision_declaration` the LABEL IS THE VALUE. Stamped here, once, for
+    # every reader rather than in each of them, because which reader lifted the portal's
+    # signal is not a fact about the signal: a `json_scalar` over maxima's geometry type and
+    # an `html_regex` over ceskereality's "přesná poloha" both state a precision, and the
+    # resolver reads it off `declared_precision_label` (`precision_cap.blurred_labels` is
+    # then the contract's own calibration of which labels mean blurred). A reader that
+    # already decided the label — `json_geometry` types a Circle rather than echoing it —
+    # keeps it.
+    label = claim.declared_precision_label
+    if claim.claim_type == "precision_declaration" and label is None:
+        label = claim.value_text
     return replace(
         claim,
+        declared_precision_label=label,
         surface=ARCHIVE_SURFACE,
         page_kind=payload.page_kind,
         snapshot_anchor=ARCHIVE_ANCHOR,

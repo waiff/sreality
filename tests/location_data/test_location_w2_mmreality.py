@@ -27,7 +27,6 @@ from location_data.claims_intake import Entry, IntakeRefused, ListingRow
 from location_data.page_readers import (
     PAGE_READERS,
     ArchivedPayload,
-    _DUMMY_LEGACY_COLUMNS,
     extract_page,
 )
 from location_data.html_scope import ScopeRegister, scope_html
@@ -62,7 +61,7 @@ def entries() -> list[Entry]:
             extraction_method=e.extraction_method, subject_scope=e.subject_scope,
             transform=tuple(e.transform), precision_map=e.precision_map,
             default_blur_evidence=e.default_blur_evidence,
-            default_licence_class=e.default_licence_class, cardinality=e.cardinality,
+            default_licence_class=e.default_licence_class,
             guards=tuple(e.guards))
         for index, e in enumerate(ARCHIVE_ENTRIES)
     ]
@@ -73,7 +72,7 @@ def row(native: str, *, in_mapy_inventory: bool = False) -> ListingRow:
         listing_id=951845, source="mmreality", source_id_native=native, raw_json={},
         lat=None, lon=None, observed_at=FETCHED_AT,
         in_mapy_inventory=in_mapy_inventory,
-        legacy_columns=dict(_DUMMY_LEGACY_COLUMNS))
+    )
 
 
 def payload(native: str, body: bytes) -> ArchivedPayload:

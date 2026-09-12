@@ -51,7 +51,16 @@ _PINNED = _ROOT / "tests" / "fixtures" / "location_w2"
 _REFETCH = _ROOT / "tests" / "fixtures" / "location_w2a_refetch"
 
 FETCHED_AT = datetime(2026, 8, 13, 4, 30, tzinfo=UTC)
-CONTRACTS = {c.source: c for c in contracts.load_all()}
+_CONTRACTS: dict[str, contracts.PortalContract] = {}
+
+
+def contract(source: str) -> contracts.PortalContract:
+    """The shipped contract, loaded on FIRST USE. At import time a loader refusal is a
+    COLLECTION error that takes every test in the module with it — including the reader and
+    transform tests that touch no contract at all."""
+    if not _CONTRACTS:
+        _CONTRACTS.update({c.source: c for c in contracts.load_all()})
+    return _CONTRACTS[source]
 
 # The subject ids the two archived bodies are keyed by. An id-matched reader picks its object
 # by this value, so a test that scored them under a synthetic native id would go green empty —
@@ -95,14 +104,14 @@ def entry(
         locator=locator, claim_type=claim_type, extraction_method=extraction_method,
         subject_scope=subject_scope or {}, transform=transform,
         precision_map=precision_map or {}, default_blur_evidence=blur_evidence,
-        default_licence_class="portal", cardinality="one", guards=guards)
+        default_licence_class="portal", guards=guards)
 
 
 def listing_row(source: str, native: str) -> ListingRow:
     return ListingRow(
         listing_id=4242, source=source, source_id_native=native, raw_json={},
         lat=None, lon=None, observed_at=FETCHED_AT, in_mapy_inventory=False,
-        legacy_columns=dict(archive._DUMMY_LEGACY_COLUMNS))
+    )
 
 
 def payload(source: str, native: str, body: bytes | None = None) -> ArchivedPayload:
@@ -116,7 +125,7 @@ def scoped(source: str, body: bytes | str) -> ScopedDocument:
     must not be able to reach are the ones the contract declares, not ones a test invents."""
     if isinstance(body, str):
         body = body.encode("utf-8")
-    register = ScopeRegister.from_zones(source, CONTRACTS[source].exclusion_zones)
+    register = ScopeRegister.from_zones(source, contract(source).exclusion_zones)
     return scope_html(body, register=register)
 
 
@@ -1043,7 +1052,7 @@ def test_extract_page_turns_a_subject_miss_into_one_refusal_and_no_claims():
     must never be indistinguishable from "we looked and it was not there" (03 §3.2 rule 4)."""
     body = (_ARCHIVED / "mmreality_detail.html").read_bytes()
     item = _point_pair_entry()
-    register = ScopeRegister.from_zones("mmreality", CONTRACTS["mmreality"].exclusion_zones)
+    register = ScopeRegister.from_zones("mmreality", contract("mmreality").exclusion_zones)
     result = extract_page(
         payload("mmreality", "999999", body), listing_row("mmreality", "999999"), [item],
         register=register)
@@ -1055,7 +1064,7 @@ def test_extract_page_still_produces_the_claim_for_the_matching_subject():
     """The non-vacuity half: the same call over the same body under the SUBJECT's id has to
     produce the claim, or the test above would pass on a lane that reads nothing."""
     body = (_ARCHIVED / "mmreality_detail.html").read_bytes()
-    register = ScopeRegister.from_zones("mmreality", CONTRACTS["mmreality"].exclusion_zones)
+    register = ScopeRegister.from_zones("mmreality", contract("mmreality").exclusion_zones)
     result = extract_page(
         payload("mmreality", MMREALITY_NATIVE, body),
         listing_row("mmreality", MMREALITY_NATIVE),
@@ -1154,11 +1163,89 @@ def test_an_untransformed_read_still_quotes_its_own_value():
     assert claim.value_text == claim.evidence_quote == "Ostrov (okres Karlovy Vary)"
 
 
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        # The numbered form: Praha's 22 obvody, Plzeň's 4, Pardubice's Roman numerals.
+        ("Praha 8", "Praha"),
+        ("Praha 10", "Praha"),
+        ("Plzeň 3", "Plzeň"),
+        ("Pardubice IV", "Pardubice"),
+        ("Ostrava 1", "Ostrava"),
+        ("Ústí nad Labem 2", "Ústí nad Labem"),
+        # The hyphenated form, only in the five cities whose obvody are NAMED.
+        ("Brno-střed", "Brno"),
+        ("Brno-Židenice", "Brno"),
+        ("Ostrava-Poruba", "Ostrava"),
+        ("Opava-Kateřinky", "Opava"),
+        ("Liberec - Vratislavice nad Nisou", "Liberec"),
+        ("Ústí nad Labem-město", "Ústí nad Labem"),
+        # An en dash is the same separator; portals use both.
+        ("Brno–Bystrc", "Brno"),
+        # NEGATIVES. The city itself is a town, and so is every town whose name merely
+        # contains a hyphen or a number — "Frýdek-Místek" is not a Frýdek obvod, and
+        # stripping after any hyphen is how a town becomes half a town.
+        ("Praha", "Praha"),
+        ("Ostrava", "Ostrava"),
+        ("Nové Město na Moravě", "Nové Město na Moravě"),
+        ("Frýdek-Místek", "Frýdek-Místek"),
+        ("Havlíčkův Brod", "Havlíčkův Brod"),
+        ("Rožnov pod Radhoštěm", "Rožnov pod Radhoštěm"),
+        # A city NOT on the hyphen list keeps its hyphenated value: Plzeň's obvody are
+        # numbered, so `Plzeň-Bory` is a část obce a `cast_obce_name` entry claims.
+        ("Plzeň-Bory", "Plzeň-Bory"),
+        ("Praha-Řeporyje", "Praha-Řeporyje"),
+    ])
+def test_a_statutory_city_obvod_is_never_the_town(value, expected):
+    """W1-c R4. RÚIAN has no obec called "Praha 8" — the obec is "Praha" and the obvod is a
+    child of it — so a town claim carrying the obvod resolves to NOTHING, which is a
+    town-coverage hole that reads exactly like a portal publishing no town at all."""
+    assert apply_transforms(value, ("statutory_city_obec",)) == expected
+
+
+def test_the_obec_part_of_an_address_folds_the_obvod_implicitly():
+    """Chaining is not optional and therefore not the entry's job: an entry that forgot
+    `statutory_city_obec` would publish "Praha 4" as a town on the biggest city in the
+    corpus, and nothing downstream would say so."""
+    assert apply_transforms("Křimická, Plzeň 3, Plzeň, okres Plzeň-město",
+                            ("address_part_obec",)) == "Plzeň"
+    assert apply_transforms("Jeseniova, Praha 3", ("address_part_obec",)) == "Praha"
+    assert apply_transforms("Kostelec nad Černými Lesy",
+                            ("address_part_obec",)) == "Kostelec nad Černými Lesy"
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("Bratislava, Slovensko", "SK"),
+        ("Wien, Österreich", "AT"),
+        ("Dresden, Germany", "DE"),
+        ("Praha, Česká republika", "CZ"),
+        ("Brno, Česko", "CZ"),
+        ("SLOVENSKO", "SK"),
+        ("Split, Hrvatska", "HR"),
+        ("Dubai, Spojené arabské emiráty", "AE"),
+        # NEGATIVES: a trailing segment is an obec far more often than a country, so
+        # anything outside the table yields NO claim rather than a guessed one.
+        ("Křimická, Plzeň 3, Plzeň, okres Plzeň-město", None),
+        ("Kostelec nad Černými Lesy", None),
+        ("Zahraničí", None),
+        ("", None),
+    ])
+def test_address_part_country_answers_only_where_a_country_is_named(value, expected):
+    """W1-c R1's `country` type. "Foreign is a determination, never a default" (rule 25):
+    the claim exists so a listing outside CZ is STATED to be outside CZ, rather than
+    inferred from a Czech obec that failed to resolve. The value is the ISO-3166 alpha-2
+    code, never the spelling — `country` is the one type compared across portals."""
+    assert apply_transforms(value, ("address_part_country",)) == expected
+
+
 def test_every_new_transform_is_registered_under_the_name_the_contract_gate_enumerates():
     """`contracts.IMPLEMENTED_TRANSFORMS` is pure data and the runtime registry is the truth;
     a name in one and not the other is either a refused entry or a silent no-op."""
     for name in ("address_part_street", "address_part_obec", "address_part_okres",
-                 "address_part_house_number", "split_paren_okres", "comma_segment"):
+                 "address_part_house_number", "split_paren_okres", "comma_segment",
+                 "statutory_city_obec", "address_part_country"):
         assert name in TRANSFORMS
         assert name in contracts.IMPLEMENTED_TRANSFORMS
 
@@ -1186,9 +1273,14 @@ def test_no_archive_reader_claims_a_method_the_lane_cannot_evidence():
 # the keys `_check_executable` demands have to agree HERE — a mismatch discovered in an
 # activation PR is discovered inside a nine-portal, one-transaction projection.
 CANONICAL_ENTRIES: dict[str, dict[str, Any]] = {
+    # The subject header, claimed as the TOWN it states (W1-c R8 + R1): the
+    # `address_line_verbatim` type it used to carry is not one of the eleven — nothing
+    # resolved a whole address line — and `address_part_obec` is the normaliser that
+    # selects the part this entry claims (statutory-city obvody folded to their city).
     "html_own_text": {
         "source": "remax", "id": "rx.det.header_address", "locator_kind": "html_selector",
-        "extraction_method": "html_selector_parse", "claim_type": "address_line_verbatim",
+        "extraction_method": "html_selector_parse", "claim_type": "obec_name",
+        "transform": ["address_part_obec"],
         "locator": {"reader": "html_own_text", "css": "h2.pd-header__address"},
     },
     "html_regex": {
@@ -1205,9 +1297,13 @@ CANONICAL_ENTRIES: dict[str, dict[str, Any]] = {
                     "pattern": "/inzeraty/(?P<obec_slug>[^/]+)/(?P<psc>\\d{5})/",
                     "group": "obec_slug"},
     },
+    # `blur_hint` went with the eleven-type vocabulary: a portal's own "this pin is
+    # approximate" marker IS its precision declaration, and `blurred_labels` is what says
+    # the label means blurred.
     "html_marker": {
         "source": "bazos", "id": "bzs.det.blur_hint", "locator_kind": "html_selector",
-        "extraction_method": "portal_declared_quality", "claim_type": "blur_hint",
+        "extraction_method": "portal_declared_quality",
+        "claim_type": "precision_declaration",
         "blur_evidence": "declared",
         "precision_cap": {"granularity_max": {"_default": "obec"},
                           "blurred_labels": ["approximate_location"]},

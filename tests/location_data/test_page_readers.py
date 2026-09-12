@@ -87,7 +87,7 @@ def archive_entry(
         surface=surface, page_kind=page_kind, locator={"reader": reader, "css": "#subject"},
         claim_type=claim_type, extraction_method=extraction_method, subject_scope={},
         transform=(), precision_map={}, default_blur_evidence=blur_evidence,
-        default_licence_class=licence_class, cardinality="one", guards=())
+        default_licence_class=licence_class, guards=())
 
 
 def listing_row(**overrides: Any) -> ListingRow:
@@ -95,7 +95,6 @@ def listing_row(**overrides: Any) -> ListingRow:
         "listing_id": 4242, "source": "remax", "source_id_native": "445781",
         "raw_json": {}, "lat": None, "lon": None, "observed_at": FETCHED_AT,
         "in_mapy_inventory": False,
-        "legacy_columns": dict(page_readers._DUMMY_LEGACY_COLUMNS),
     }
     kwargs.update(overrides)
     return ListingRow(**kwargs)
@@ -362,7 +361,7 @@ def test_an_unruled_locator_gets_no_coordinate():
     assert verdict.reason == "unrecognised_archived_coordinate_locator"
 
 
-@pytest.mark.parametrize("source", ["sreality", "bezrealitky", "bazos", "ceskereality"])
+@pytest.mark.parametrize("source", ["sreality", "bezrealitky", "ceskereality"])
 def test_a_portal_with_no_archived_detail_map_gets_no_archived_coordinate(source):
     verdict = coordinate_verdict(
         source, None, in_mapy_inventory=False, substrate=SUBSTRATE_ARCHIVED_HTML,
@@ -370,10 +369,15 @@ def test_a_portal_with_no_archived_detail_map_gets_no_archived_coordinate(source
     assert not verdict.admitted
 
 
-def test_the_archived_rules_name_the_five_entries_and_only_current_licence_spellings():
+def test_the_archived_rules_name_the_six_entries_and_only_current_licence_spellings():
+    """bazos joined on 2026-09-12 (W1-c R6): the ad's own
+    `google.com/maps/place/<lat>,<lon>` anchor is the PAGE publishing a pin, so it is
+    first-party exactly as remax's `#printMap[data-gps]` is. That the pin is permanently
+    approximate is the entry's `precision_cap`, not a missing row here — a missing row says
+    "this portal publishes no coordinate at all", which was never true."""
     assert {r.entry_id for r in ARCHIVED_COORDINATE_RULES.values()} == {
         "rx.det.gps", "rm.det.gps", "id.det.subject_feature", "mm.det.point",
-        "mx.det.map_features"}
+        "mx.det.map_features", "bzs.det.link_pin"}
     declared = {r.licence_class for r in ARCHIVED_COORDINATE_RULES.values()}
     declared |= {r.geocoded_licence_class for r in ARCHIVED_COORDINATE_RULES.values()
                  if r.geocoded_licence_class}
@@ -1083,3 +1087,68 @@ def test_an_inline_body_needs_no_store_even_when_the_batch_is_wide(monkeypatch):
     cursor = _BodyCursor([(1, BODY, None, "identity"), (2, BODY, None, "identity")])
     bodies, from_r2 = page_readers.load_bodies(cursor, [1, 2], store=None)
     assert bodies == {1: BODY, 2: BODY} and from_r2 == 0
+
+
+# ------------------------------------------- the precision label (W1-c R5, 2026-09-12)
+
+_PRECISION_BODY = (
+    '<html><body>'
+    '<div id="subject">Poloha na mapě je přibližná</div>'
+    '<script id="cfg" type="application/json">{"geometry": {"type": "Circle"}}</script>'
+    "</body></html>"
+).encode("utf-8")
+
+
+def _precision_claim(reader: str, method: str = "portal_declared_quality",
+                     **locator: Any) -> Claim:
+    """One reader hit on `_PRECISION_BODY`, stamped the way the lane stamps it."""
+    document = scope_html(_PRECISION_BODY, register=EMPTY_REGISTER)
+    entry = replace(
+        archive_entry(claim_type="precision_declaration", reader=reader,
+                      extraction_method=method),
+        locator={"reader": reader, **locator})
+    reads = PAGE_READERS[reader](entry, listing_row(), payload(body=_PRECISION_BODY),
+                                 document)
+    assert len(reads) == 1, reader
+    return stamp_page_claim(reads[0].claim, payload(body=_PRECISION_BODY),
+                            scope_version=document.scope_version)
+
+
+def test_a_precision_declarations_label_is_its_value_whatever_reader_produced_it():
+    """W1-c R5. The portal's precision signal is a different STRING on every portal and is
+    lifted by a different reader — a JSON field here, a regex over a sentence there — and
+    the resolver reads exactly one column for it. Stamping the label in each reader is how
+    six of them ended up not stamping it at all: a claim that says "přibližná" in
+    `value_text` and NULL in `declared_precision_label` reads as a portal that declares
+    nothing, and `precision_cap.blurred_labels` (the contract's own calibration) then
+    matches nothing either."""
+    from_json = _precision_claim("json_scalar", css="#cfg", json_pointer="/geometry/type")
+    assert from_json.value_text == "Circle"
+    assert from_json.declared_precision_label == "Circle"
+
+    from_regex = _precision_claim(
+        "html_regex", "regex_text", css="#subject", pattern=r"je\s+(\w+)", group=1)
+    assert from_regex.value_text == "přibližná"
+    assert from_regex.declared_precision_label == "přibližná"
+
+
+def test_a_reader_that_decided_the_label_itself_keeps_it():
+    """`json_geometry` types a Circle as `circle` rather than echoing the portal's spelling,
+    and `json_bool` maps a boolean to the label the CONTRACT names. Neither is overwritten:
+    the rule fills a hole, it does not relitigate a reader's answer."""
+    document = scope_html(_PRECISION_BODY, register=EMPTY_REGISTER)
+    claim = replace(
+        raw_claim(archive_entry(claim_type="precision_declaration"),
+                  declared_precision_label="accurate"),
+        value_text="true")
+    stamped = stamp_page_claim(claim, payload(body=_PRECISION_BODY),
+                               scope_version=document.scope_version)
+    assert stamped.declared_precision_label == "accurate"
+
+
+def test_a_claim_of_any_other_type_gets_no_label():
+    document = scope_html(_PRECISION_BODY, register=EMPTY_REGISTER)
+    stamped = stamp_page_claim(raw_claim(), payload(body=_PRECISION_BODY),
+                               scope_version=document.scope_version)
+    assert stamped.claim_type == "street_name"
+    assert stamped.declared_precision_label is None

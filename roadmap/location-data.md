@@ -42,9 +42,9 @@ component is slimmed twice — each wave rewrites one component and slims its st
   active Czech listings without `obec_kod` — red until both are zero. Wave A's #1420 (resolver v3
   tie-break), #1421 (remax pin stamped `page`), #1422 (no_input rows + daily/weekly crons) merged the
   same day.
-- **W1 — one lane, ten claim types, nine-entry contracts** (= plan S2 + the claims half of S1): the
-  hourly intake reads the stored payload and the stored page body (hash-gated); the archive sweep,
-  snapshot re-mine, LLM lane and their workflows go; each contract is rewritten to ≤ 10 entries, one
+- **W1 — one lane, eleven claim types, eleven-entry contracts** (= plan S2 + the claims half of S1):
+  the hourly intake reads the stored payload and the stored page body (hash-gated); the archive sweep,
+  snapshot re-mine, LLM lane and their workflows go; each contract is rewritten to ≤ 11 entries, one
   per claim type, the town entry mandatory and live; the loader refuses any other shape; the claims
   table slims (to 19, not the planned 8 — see W1-b) and its side tables go. Done when the red line
   is zero for every portal.
@@ -87,7 +87,28 @@ component is slimmed twice — each wave rewrites one component and slims its st
     `location_claims(id)` until 498). The window cannot be reintroduced:
     `test_claims_relax_migration.py` derives the compulsory-column and CHECK lists from 382's own
     DDL.
-    **Next:** rewrite each contract to <= 10 entries with the town entry mandatory.
+  - **W1-c code shipped** (2026-09-12): the loader's vocabulary and shape rules, ahead of the nine
+    YAML rewrites that land on top of it. `CLAIM_TYPES` becomes the **eleven** (coordinate,
+    precision_declaration, country, kraj/okres/obec/cast_obce names, street_name, house_number_cp/_co,
+    psc — ten after W2 folds the precision flag onto the pin claim); `parse_contract` refuses a second
+    entry of any claim type, a contract with no `obec_name` entry, an entry naming no reader, a
+    `legacy_column` surface or method, the retired per-entry keys (`required` / `cardinality` /
+    `on_conflict`) and any top-level key outside the six (`portal`, `contract_version`, `persistence`,
+    `exclusion_zones`, `regressions`, `extractions`). Deleted with them: the three `listings`-column
+    readers (`legacy_text_column`, `geom_column`, `coords_stamp_quality`), `LEGACY_COLUMNS` and the
+    legacy tail of the intake's scan, `GRANDFATHERED_INERT_GUARDS`, and the projection of eight
+    top-level keys (the DB columns keep their defaults until W4). Added, because the slim contracts
+    need them: the `statutory_city_obec` transform (a numbered or hyphenated městský obvod is never
+    the town — "Praha 8" → "Praha", applied implicitly by `address_part_obec`), `address_part_country`
+    (a trailing comma segment → an ISO-3166 alpha-2 code, from a closed table), the R5 rule that a
+    `precision_declaration` claim's label IS its value whatever reader produced it, the bazos row in
+    `ARCHIVED_COORDINATE_RULES` (the ad's own maps anchor is a first-party pin), and migration **499**
+    (five `regex_text` × field policy rungs: obec_name, cast_obce_name, kraj_name, house_number_cp,
+    psc — without them the town the slim contracts mine off a `Lokalita` row is declined at S7).
+    `location_town_coverage` also moves to the FRONT of `verify_pipeline`'s `_CHECKS`: on 2026-09-11
+    the lane's 120 s budget left the last seven checks `not_run`, the coverage red line among them.
+    **Next:** rewrite each contract to <= 11 entries with the town entry mandatory (the nine YAML
+    rewrites; the loader refuses today's files until they land).
 - **W2 — the resolver at four steps, the answer table at 27 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and

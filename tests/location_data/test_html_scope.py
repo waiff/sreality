@@ -93,12 +93,14 @@ def test_every_portal_register_classifies_and_every_dom_selector_compiles() -> N
         assert scoped.is_complete
 
 
-def test_the_guard_name_is_the_one_the_contracts_already_spell() -> None:
-    """sreality's grandfathered-inert entry names it; the re-mine lane implements it."""
-    assert GUARD_EXCLUDED_ZONE in contracts.GRANDFATHERED_INERT_GUARDS["sr.det.inaccuracy_type"]
-    assert GUARD_EXCLUDED_ZONE not in contracts.IMPLEMENTED_GUARDS, (
-        "`contracts.IMPLEMENTED_GUARDS` mirrors `claims_intake.GUARDS`, whose members "
-        "are coordinate predicates; the document guard is wired by the re-mine lane")
+def test_the_document_guard_is_the_lanes_and_never_a_contract_entrys() -> None:
+    """`reject_if_in_excluded_zone` sat on two sreality entries whose readers never
+    evaluated a guard at all — inert, and tolerated by name in `GRANDFATHERED_INERT_GUARDS`.
+    W1-c R3 deleted both the declarations and the tolerance list, so the name is the SCOPER's
+    and an entry that declares it is refused: `contracts.IMPLEMENTED_GUARDS` mirrors
+    `claims_intake.GUARDS`, whose members are coordinate predicates."""
+    assert GUARD_EXCLUDED_ZONE not in contracts.IMPLEMENTED_GUARDS
+    assert not hasattr(contracts, "GRANDFATHERED_INERT_GUARDS")
 
 
 def test_an_uncompilable_or_addressless_zone_is_classified_not_raised() -> None:

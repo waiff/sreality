@@ -84,7 +84,7 @@ def row() -> ListingRow:
     return ListingRow(
         listing_id=4242, source="bazos", source_id_native=NATIVE, raw_json={},
         lat=None, lon=None, observed_at=FETCHED_AT, in_mapy_inventory=False,
-        legacy_columns=dict(archive._DUMMY_LEGACY_COLUMNS))
+    )
 
 
 def payload() -> ArchivedPayload:

@@ -83,7 +83,6 @@ def listing_row(native: str = "fixture", **overrides: Any) -> ListingRow:
     kwargs: dict[str, Any] = {
         "listing_id": 4242, "source": "remax", "source_id_native": native, "raw_json": {},
         "lat": None, "lon": None, "observed_at": FETCHED_AT, "in_mapy_inventory": False,
-        "legacy_columns": dict(archive._DUMMY_LEGACY_COLUMNS),
     }
     kwargs.update(overrides)
     return ListingRow(**kwargs)

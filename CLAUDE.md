@@ -252,9 +252,9 @@ incident history: `docs/architecture.md` § Architectural rules.
     every un-flipped feature. `location_v2.<feature>` (`serving_flags.py`, missing = OFF) picks the path;
     `serving_contracts.py` declares the floor (05 §5.5.2; undeclared raises). Granularity compares by RANK.
     Never back-port a projection value into `listings`. Contract: `docs/design/location-serving-contract.md`.
-25. **Location: one store, one lane, nine claim types, no flags; every location PR deletes at least as much
+25. **Location: one store, one lane, eleven claim types, no flags; every location PR deletes at least as much
     as it adds.** One answer table (`listing_location_current`, 27 fields), one hourly intake lane over the
-    stored payload + page body, ≤ 1 contract entry per claim type, the **town entry mandatory and live**.
+    stored payload + page body, ≤ 1 contract entry per claim type + a reader, **town entry mandatory and live**.
     Invariant: **every active listing has a row, every active Czech listing has a town** (`location_town_coverage`
     is red until zero; foreign is a determination, never a default). Nothing is added "in case" — a field only
     after a measured slowdown, only to `browse_list`. Supersedes rule 24 as the waves land. § rule 25 in `docs/architecture.md`.
