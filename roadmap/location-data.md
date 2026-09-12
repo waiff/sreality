@@ -126,7 +126,7 @@ component is slimmed twice — each wave rewrites one component and slims its st
     psc — without them the town the slim contracts mine off a `Lokalita` row is declined at S7).
     `location_town_coverage` also moves to the FRONT of `verify_pipeline`'s `_CHECKS`: on 2026-09-11
     the lane's 120 s budget left the last seven checks `not_run`, the coverage red line among them.
-  - **W1-c contracts landed** (2026-09-12): all nine YAMLs rewritten at once, **159 entries → 68**
+  - **W1-c contracts landed** (2026-09-12): all nine YAMLs rewritten at once, **159 entries → 67**
     (175 when the sprint opened; W1-a had already dropped bazos' 16 never-executed LLM entries),
     one per claim type, and the town entry is live on every portal — on the **hourly** lane, not on
     an archive sweep (there is none any more). What each portal reads the town off, and what it
@@ -136,7 +136,7 @@ component is slimmed twice — each wave rewrites one component and slims its st
     | --- | --- | --- | --- |
     | `bazos@5` | 4 | `bzs.det.obec_slug` — the town-listings anchor's `/inzeraty/<obec>/<psč>/` href | okres, část obce, kraj, country, street, čp, čo |
     | `bezrealitky@2` | 8 | `bzr.det.city` — `advert.city`, a typed payload field | precision declaration, okres, kraj |
-    | `ceskereality@6` | 6 | `cr.det.data_city` — `input#driving_calculator_from[data-city]`, split off the `(okres X)` half | country, kraj, část obce, psč, čo |
+    | `ceskereality@6` | 5 | `cr.det.data_city` — `input#driving_calculator_from[data-city]`, split off the `(okres X)` half | precision declaration, country, kraj, část obce, psč, čo |
     | `idnes@3` | 10 | `id.det.obec` — the dataLayer `viewDetail` block's `listing_localityCity`, id-matched | psč |
     | `maxima@3` | 6 | `mx.det.locality_obec` — segment 1 of `div.locality` | kraj, psč, čp, čo, country |
     | `mmreality@3` | 7 | `mm.det.municipality` — the Vue blob's `/municipality` | **psč**, kraj, čp, čo |
@@ -158,6 +158,24 @@ component is slimmed twice — each wave rewrites one component and slims its st
     `blur_hint` / `map_zoom` / `address_line_verbatim` / `uncertainty_geometry` arms of the retired
     vocabulary, and every entry no reader executed — an omission is now a line in the portal's report,
     never a placeholder entry.
+
+    **Review found two entries that could not fire, and both classes are now loader rails.**
+    `bzs.det.link_pin` declared a `locator.pattern` that `html_point_attrs` did not read, so the
+    reader `float()`-ed the raw href and returned silently — bazos had no pin at all while the same
+    wave deleted `geom_column`, its only other pin path. `cr.map.exact` read a `page_kind: map`
+    marker set, and the intake joins `portal_raw_payloads` on `page_kind = 'detail'` — no scraper
+    stores any other kind, so the entry was unreachable by construction and read as a live precision
+    signal for the portal. The reader learned the pattern (`lat`/`lon` named groups, one attribute
+    or two) and the ceskereality entry is gone; the portal's precision rides on its town, okres and
+    pin entries, which is the settled headline rule (R10). The rails: `ReaderContract` now records
+    each reader's WHOLE locator appetite — required plus optional, derived back out of the reader
+    bodies by a transitive AST scan — and a key outside it is refused; a page-reader entry declared
+    for any kind but `detail` is refused. The resolver also learned the four labels the nine
+    contracts emit and it did not know (`approximate_location`→obec, `linestring`→street,
+    `circle`→cast_obce_or_quarter, `accurate` as a precise label that ranks a pin without certifying
+    a granularity), and `statutory_city_obec` gained the two cases the review measured: the ordinal
+    arm now carries a trailing name ("Praha 10 - Vršovice", "Liberec XXV-Vesec") and every
+    hyphenated OKRES name is excluded, so "Brno-venkov" is no longer folded to Brno.
     **Next:** the coverage red line is the acceptance check, and it can only be read after deploy —
     every portal but sreality, bezrealitky and mmreality now mints its town from a STORED PAGE BODY,
     so a portal's number moves as the body-mining half works through its backlog, not at merge.

@@ -2054,10 +2054,22 @@ contract that cannot state the town cannot satisfy the invariant the wave exists
 top-level keys are legal (`portal`, `contract_version`, `persistence`, `exclusion_zones`,
 `regressions`, `extractions`) and the unenforced per-entry ones (`required`, `cardinality`,
 `on_conflict`) are gone. All nine were rewritten to that shape on 2026-09-12 — **159 entries became
-68**, 4 to 11 apiece (175 when the sprint opened; W1-a dropped bazos' 16 never-executed LLM
+67**, 4 to 11 apiece (175 when the sprint opened; W1-a dropped bazos' 16 never-executed LLM
 entries ahead of it), and every portal's town entry runs on the **hourly** lane rather than on an
 archive sweep that no longer exists. What a portal does NOT publish is now an omission recorded in
 its report, not a placeholder entry: no contract carries an entry no reader executes.
+
+Two further rails, both written by an entry that shipped INERT. `ReaderContract` records each
+reader's whole `locator` appetite — the keys it requires plus the ones it merely reads — and a
+locator key outside that union is refused, because a declared key no reader consults is a rail
+that looks enforced and is not (bazos' pin entry named a `pattern` its reader ignored, so the
+portal had no coordinate while the contract read as though it published one). And a page-reader
+entry may only be declared for `page_kind: detail`: `_BODY_JOIN` selects that kind and nothing
+else — index bodies are never archived, and no scraper writes a map, archive, snapshot or
+gazetteer body at all — so any other kind is unreachable by construction, which is not a shape
+a contract may describe. The appetite record is derived back out of the reader bodies by an AST
+scan over each reader and, transitively, the helpers it delegates its locator to, so the table
+cannot drift from the call sites it describes.
 
 The header carries **one mutable extraction column**: `is_active`, which version the extractor runs.
 It carried a second, `shadow` (migration 404) — a contract that could not meet its frozen-sample
