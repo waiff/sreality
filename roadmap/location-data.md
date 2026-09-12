@@ -228,6 +228,8 @@ component is slimmed twice — each wave rewrites one component and slims its st
     off the chain until someone dispatched `full` by hand. An incremental run that empties the
     change log with budget left now carries that walk on, in its own `full`-stamped batch row so
     the next resume can see it. It CONTINUES, it never STARTS one, and `--mode full` is unchanged.
+  - **W1-a8 — the bodies pass mines the served set, not only active listings** (503's map
+    guard measured 23 % loss on delisted display listings, 2026-09-12).
 - **W2 — the resolver at four steps, the answer table at 26 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and

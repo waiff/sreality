@@ -2092,7 +2092,9 @@ so a row whose id is BELOW an already-advanced cursor can become visible after t
 and a keyset never looks back. The page half got its own pass AHEAD of that scan: the unmined
 latest bodies of ACTIVE page-portal listings, selected FROM `portal_raw_payloads` in `p.id` order,
 1 500 a batch, until the backlog empties or half the budget is gone — ~250 000 bodies were unmined
-after the first wave and riding them on the listing scan would have taken ~170 runs. Its cursor is
+after the first wave and riding them on the listing scan would have taken ~170 runs. It mines the SERVED
+set, not `is_active` (W1-a8): a delisted display listing is shown by Browse and the map, and gating
+it out held those rows on old-contract claims — 503's guard measured a 23.2 % map loss (2026-09-12). Its cursor is
 a keyset on `p.id`: four paths leave a body unstamped — a bucket miss, a missing scope register, a
 content-triggered refusal, a scoper that failed closed — and three are deterministic per body, so
 a stamp-only notion of progress would park them at the head of the order, re-fetch them every
