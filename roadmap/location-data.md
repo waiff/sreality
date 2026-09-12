@@ -208,6 +208,10 @@ component is slimmed twice — each wave rewrites one component and slims its st
     chain ends and lets it through — `location_resolve.yml` counts, it joins the group through a mode-conditional expression. `test_location_batch_hardening.py`'s ban on self-chaining
     members becomes the rail that the yield exists, plus seven tests that execute the chain
     script itself against a stub `gh`.
+  - **W1-a4** (2026-09-12): the bodies pass walks the payload table by PRIMARY KEY — a fenced
+    1,500-id window, then the joins over those ids, cursor = the window's max — after intake hop
+    34689928656 timed out on a selection Postgres planned from `listings` (~150 s a batch, 600 s
+    ceiling, 186,546 bodies queued). R2 fetch width raised to the clamp ceiling of 32.
 - **W2 — the resolver at four steps, the answer table at 26 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and

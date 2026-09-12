@@ -10,10 +10,10 @@ name: "Jobs: Location claim intake"
 # No model. TWO HALVES, in this order, both inside one budget (W1-a2):
 #
 #   * BODIES FIRST — the unmined latest detail bodies of ACTIVE page-portal listings,
-#     drained directly in 1 500-row batches on an in-run keyset over
-#     `portal_raw_payloads.id`, until the backlog is empty or half the budget is gone. The
-#     keyset (not the mined-at stamp) is what carries the pass past a body it can never
-#     stamp, so a handful of bad objects cannot stall the whole backlog behind them.
+#     drained in 1 500-id WINDOWS of `portal_raw_payloads`' primary key, until the backlog
+#     is empty or half the budget is gone. The keyset (not the mined-at stamp) is what
+#     carries the pass past a body it can never stamp, so a handful of bad objects cannot
+#     stall the whole backlog behind them, and the cursor is the WINDOW's max id (W1-a4).
 #   * THEN THE CHANGED LISTINGS — a keyset walk of `listing_snapshots.id`, the
 #     append-on-content-change log, standing 15 MINUTES BEHIND THE CLOCK: a bigserial id is
 #     allocated at INSERT and visible at COMMIT, so a concurrent `write_detail_batch`
@@ -207,6 +207,11 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          # THE CLAMP CEILING (W1-a4). At the default 16 the bucket answered a 1 500-body
+          # batch in ~35 s wall (23 ms/body effective from a GitHub runner) — the largest
+          # per-batch cost now that the selection is a keyset walk. 32 is the maximum
+          # `page_readers.body_fetch_workers` will honour.
+          LOCATION_BODY_FETCH_WORKERS: "32"
           SOURCE: ${{ inputs.source }}
           MODE: ${{ inputs.mode }}
           MAX_SECONDS: ${{ inputs.max_seconds }}

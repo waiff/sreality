@@ -77,11 +77,16 @@ class _Conn:
     """`listings` + its joined bodies + the batch ledger, as an in-memory dispatcher."""
 
     def __init__(self, rows: list[tuple[int, int | None, bool]],
-                 unmined_bodies: list[tuple[int, int | None, bool]] | None = None) -> None:
+                 unmined_bodies: list[tuple[int, int | None, bool]] | None = None,
+                 orphans: set[int] | None = None) -> None:
         self.rows = rows
         # What the bodies-first pass finds. A stamp removes a row from it, exactly as the
         # `contract_version IS DISTINCT FROM` predicate does in production.
         self.unmined_bodies = list(unmined_bodies or ())
+        # Payload ids the WINDOW names and the outer statement's joins then drop — an
+        # inactive listing, or a body some later row has superseded. They never reach the
+        # drain and they are not in the backlog, but the cursor must still walk past them.
+        self.orphans = set(orphans or ())
         self.executed: list[tuple[str, dict[str, Any]]] = []
         self.stamped: list[dict[str, Any]] = []
         self.claim_writes: list[list[dict[str, Any]]] = []
@@ -111,17 +116,26 @@ class _Conn:
         if "SELECT outcome, cursor_after_id" in sql:
             return
         if sql.startswith("SELECT count(*) FROM portal_raw_payloads p"):
-            cur._result = [(len(self.unmined_bodies),)]
+            # The readout carries the joins too, so an orphan is not in the backlog.
+            cur._result = [(len([r for r in self.unmined_bodies
+                                 if r[1] not in self.orphans]),)]
             return
         if "FROM portal_raw_payloads p" in sql and "%(cap)s" in sql:
-            # The bodies-first pass: the in-run keyset over payload ids, then the cap.
+            # THE WINDOW: the in-run keyset over payload ids, then the cap. It knows
+            # nothing about `listings`, so an orphan is in it like any other row.
             # A stamped row leaves `unmined_bodies` exactly as `contract_version` moves it
             # out of the predicate in production; an unstamped one stays, and only the
             # keyset keeps the pass off it.
             rows = [r for r in self.unmined_bodies
                     if r[1] is not None and r[1] > params["after_body_id"]]
-            cur._result = [_record(*r) for r in rows[:params["cap"]]]
+            cur._result = [(r[1],) for r in rows[:params["cap"]]]
             self.body_selections.append(len(cur._result))
+            return
+        if sql.startswith("SELECT l.id") and "%(ids)s::bigint[]" in sql:
+            # The outer statement: the joins, over the window's ids ONLY.
+            by_id = {r[1]: r for r in self.unmined_bodies}
+            cur._result = [_record(*by_id[i]) for i in params["ids"]
+                           if i in by_id and i not in self.orphans]
             return
         if "cursor_after_ts IS NOT NULL" in sql:
             cur._result = [(None,)]
@@ -487,6 +501,52 @@ def test_a_pass_that_stamps_nothing_still_walks_its_keyset_to_the_end(
     assert stats["bodies_mined"] == 0
     assert stats["bodies_pass_complete"] is True
     assert stats["bodies_backlog_remaining"] == 7
+
+
+def test_a_window_the_joins_empty_still_moves_the_cursor(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """W1-a4's cursor rule. The WINDOW is planned off `portal_raw_payloads` alone, so it
+    names rows the outer statement's joins then drop — an inactive listing, a superseded
+    body — and roughly two thirds of a production window are exactly that. If the cursor
+    advanced on the SURVIVORS, a window that lost every row would leave `after_body_id`
+    where it was and the next batch would ask the identical question: the pass would spin on
+    the same three ids until the budget ended it, having mined nothing."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG, orphans={200, 201, 202})
+    store = _Store()
+
+    stats = _run(conn, store)
+
+    # Three windows, the same sizes a healthy run measures: the first joined to nothing and
+    # the walk carried on regardless.
+    assert conn.body_selections == [3, 3, 1]
+    assert [s["id"] for s in conn.stamped] == [203, 204, 205, 206]
+    assert stats["bodies_mined"] == 4
+    assert stats["bodies_pass_complete"] is True
+    # An orphan is never fetched from R2 — it never reached the drain at all — and it is
+    # not in the backlog either, since the readout carries the same joins.
+    assert sorted(store.asked) == [_key(203 + i) for i in range(4)]
+    assert stats["bodies_backlog_remaining"] == 0
+
+
+def test_a_window_short_of_the_cap_ends_the_pass(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """THE WINDOW ends the pass, never the survivors. `cap` is a bound on the keyset slice,
+    so a window shorter than `cap` means the payload table has no eligible row left above
+    the cursor — whereas a FULL window that joined to nothing means the opposite, that the
+    walk has more to do. Reading the end off the joined rows would stop the pass on the
+    first all-orphan window and leave the backlog untouched behind it."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG[:2], orphans={200, 201})
+
+    stats = _run(conn, _Store())
+
+    assert conn.body_selections == [2], "one window, short of the cap of 3"
+    assert conn.stamped == [] and stats["bodies_mined"] == 0
+    assert stats["bodies_pass_complete"] is True
+    assert stats["bodies_backlog_remaining"] == 0
 
 
 def test_the_bodies_first_pass_is_skipped_without_an_object_store(

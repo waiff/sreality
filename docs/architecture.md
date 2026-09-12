@@ -2065,8 +2065,17 @@ an **in-run keyset** on `p.id` (reset to 0 each run, so the contract-version gat
 what is eligible): four paths leave a body unstamped — a bucket miss, a missing scope register, a
 content-triggered refusal, a scoper that failed closed — and three are deterministic per body, so
 a stamp-only notion of progress would park them at the head of the order, re-fetch them every
-batch, and stall the entire backlog behind them once `cap` of them accumulated. The pass ends when
-a batch comes back short of `cap`. **A batch's bodies are extracted across PROCESSES** (W1-a3,
+batch, and stall the entire backlog behind them once `cap` of them accumulated. **Each batch is two
+statements in one transaction** (W1-a4): a fenced WINDOW — `ORDER BY p.id LIMIT %(cap)s` over
+payload columns ALONE — then the `listings` join and the latest-body anti-join over the ids it
+named. With the keyset in one statement's WHERE, Postgres planned the selection from `listings`
+instead — a bitmap scan of every active page-portal row, a payload probe and the latest-body
+subquery per row, then a sort, with `p.id > after` applied as a POST-FILTER — so every batch paid
+the whole corpus (~150 s of selection; the 11:23Z run on 2026-09-12 died on the 600 s statement
+timeout with 186,546 bodies queued). A LIMIT subquery is an optimizer FENCE: planned alone it is an
+index scan of `portal_raw_payloads_pkey` that stops after `cap` rows. **The cursor is the window's
+max id, not the surviving rows'** (a third of a window survives the joins, and advancing on the
+survivors would re-walk the rest for ever), and the pass ends when the WINDOW comes back short. **A batch's bodies are extracted across PROCESSES** (W1-a3,
 `page_readers.extract_pages`, `os.cpu_count()` wide): the parse is pure CPU and threads cannot
 share it, so one core held a 1 500-body batch at 143–313 s against ~48 s to fetch the same bodies.
 The pool is an accelerator only — one outcome per body IN ORDER, the `IntakeResult` or the
