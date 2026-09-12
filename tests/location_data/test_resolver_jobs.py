@@ -11,8 +11,11 @@ ONE statement, and the sweep's version tuple is TWO columns.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
+import itertools
 import re
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -232,6 +235,17 @@ def test_the_cli_has_one_sweep_flag_and_no_policy_knob():
         assert gone not in parser_source
 
 
+def test_the_github_lane_keeps_one_connection():
+    """W2-a5 is a WORKER-LANE change. The CLI gets no `--workers` and `main` passes none, so
+    `location_resolve.yml` keeps draining on one connection: it is RTT-bound against a US
+    runner rather than IO-bound beside the instance, and N runner connections into the
+    session pooler is the wrong place to spend them."""
+    main_source = inspect.getsource(drain.main)
+    assert "--workers" not in main_source
+    assert "workers=" not in main_source
+    assert inspect.signature(drain.run).parameters["workers"].default == 1
+
+
 # --------------------------------------------------------- the drain's round-trip budget
 
 
@@ -359,7 +373,8 @@ def test_the_drain_no_longer_rebuilds_properties():
     body = inspect.getsource(drain._write_slice)
     code = body.split('"""')[-1]  # the statements, not the prose that explains the deletion
     assert "property" not in code.lower()
-    assert "--workers" in drain.__doc__
+    # ...and W2-a5 spent the unblocking: the drain takes a worker count.
+    assert "workers" in inspect.signature(drain.run).parameters
 
 
 def test_a_poisoned_slice_falls_back_to_per_listing_savepoints():
@@ -385,10 +400,10 @@ def test_a_failed_warm_degrades_instead_of_ending_the_run():
     """The warm runs INSIDE the batch transaction, so an unguarded statement timeout there
     would abort the batch and take the whole run with it. Rolled back, every point falls
     through to its own lazy query."""
-    body = inspect.getsource(drain.run)
+    body = inspect.getsource(drain._drain_loop)
     warm = body[body.index("warm_started"):body.index("_run_slice(")]
     assert "try:" in warm and "conn.transaction()" in warm
-    assert "WARM failed" in warm
+    assert "WARM %sfailed" in warm
 
 
 def test_a_queued_listing_with_no_live_claims_gets_a_row_not_a_skip():
@@ -891,6 +906,299 @@ def test_the_failure_stamp_does_not_clobber_a_newer_enqueue(monkeypatch):
     assert text.endswith("where listing_id = %s and enqueued_at <= %s")
     assert params[1] == drain.BACKOFF_SECONDS[2]
     assert params[2:] == (303, CLAIMED_AT)
+
+
+# ------------------------------------------- W2-a5: N slice loops, N connections, one run
+
+
+class _SharedQueue:
+    """The fake queue the worker connections claim from, with `SKIP LOCKED`'s one guarantee
+    modelled and nothing else: a listing handed to one claimer is never handed to another.
+
+    `parties`, when set, holds the first round open: every worker's FIRST claim waits for all
+    of them to arrive, and no worker gets a SECOND slice until all of them have had one. The
+    fake work is instant, so without that the first thread scheduled would drain the queue
+    before the others ran a statement — and the test would be about the scheduler."""
+
+    def __init__(self, listing_ids: list[int], *, parties: int | None = None) -> None:
+        self._lock = threading.Lock()
+        self._pending = list(listing_ids)
+        self._parties = parties
+        self._barrier = threading.Barrier(parties, timeout=10) if parties else None
+        self._arrived: set[int] = set()
+        self._round_done = threading.Event()
+        self.claimed_by: dict[int, list[int]] = {}
+
+    @property
+    def depth(self) -> int:
+        with self._lock:
+            return len(self._pending)
+
+    def claim(self, worker: int, limit: int) -> list[int]:
+        if self._barrier is not None:
+            if worker in self._arrived:
+                self._round_done.wait(10)
+            else:
+                self._arrived.add(worker)
+                with contextlib.suppress(threading.BrokenBarrierError):
+                    self._barrier.wait()
+        with self._lock:
+            taken, self._pending = self._pending[:limit], self._pending[limit:]
+            self.claimed_by.setdefault(worker, []).extend(taken)
+            if self._parties is not None and len(self.claimed_by) >= self._parties:
+                self._round_done.set()
+        return taken
+
+
+class _WorkerCursor(_DrainCursor):
+    """`_DrainCursor` with the two queue statements answered from the SHARED queue instead of
+    from a per-connection script."""
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        text = " ".join(sql.split()).lower()
+        if text.startswith("select listing_id, attempts, enqueued_at from dirty_locations"):
+            self.state["executed"].append((text, params))
+            claimed = self.state["queue"].claim(self.state["worker"], params[0])
+            self._result = [(listing_id, 0, CLAIMED_AT) for listing_id in claimed]
+            return
+        if text.startswith("select count(*)") and "dirty_locations" in text:
+            self.state["executed"].append((text, params))
+            self._result = [(self.state["queue"].depth, 0)]
+            return
+        super().execute(sql, params)
+
+
+class _WorkerConn(_DrainConn):
+    def __init__(self, queue: _SharedQueue, worker: int) -> None:
+        super().__init__({"executed": [], "transactions": 0, "slices": [],
+                          "queue": queue, "worker": worker})
+        self.closed = False
+
+    def cursor(self) -> _WorkerCursor:
+        return _WorkerCursor(self.state)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _texts(conn: _WorkerConn) -> list[str]:
+    return [text for text, _ in conn.state["executed"]]
+
+
+def _drain_with_workers(
+    listing_ids: list[int],
+    *,
+    workers: int,
+    batch_size: int,
+    monkeypatch: Any,
+    parties: int | None = None,
+    dying: frozenset[int] = frozenset(),
+    max_seconds: int = 30,
+) -> tuple[Any, _WorkerConn, list[_WorkerConn], _SharedQueue]:
+    queue = _SharedQueue(listing_ids, parties=parties)
+    opened: list[_WorkerConn] = []
+    counter = itertools.count(1)
+    lock = threading.Lock()
+
+    def _open() -> _WorkerConn:
+        with lock:
+            index = next(counter)
+            if index in dying:
+                raise RuntimeError(f"worker {index} could not open a connection")
+            conn = _WorkerConn(queue, index)
+            opened.append(conn)
+            return conn
+
+    monkeypatch.setattr(drain, "_worker_connection", _open)
+    caller = _WorkerConn(queue, 0)
+    stats = drain.run(
+        caller, batch_size=batch_size, max_seconds=max_seconds, workers=workers)
+    return stats, caller, opened, queue
+
+
+def test_n_workers_claim_n_disjoint_slices_and_the_run_aggregates_them(monkeypatch):
+    """THE wave. Four loops, four connections, one queue: `FOR UPDATE SKIP LOCKED` is what
+    makes the slices disjoint, and it is the same statement the single loop always ran."""
+    ids = list(range(101, 113))
+    stats, _, opened, queue = _drain_with_workers(
+        ids, workers=4, batch_size=3, parties=4, monkeypatch=monkeypatch)
+
+    assert len(opened) == 4, "one connection per worker — psycopg is not thread-safe"
+    assert all(conn.closed for conn in opened)
+    assert sorted(queue.claimed_by) == [1, 2, 3, 4], "every worker claimed a slice"
+    claimed = [frozenset(v) for v in queue.claimed_by.values()]
+    assert sorted(len(c) for c in claimed) == [3, 3, 3, 3]
+    assert frozenset().union(*claimed) == frozenset(ids)
+    for a, b in itertools.combinations(claimed, 2):
+        assert not (a & b), "two workers held the same queue row"
+    assert (stats.claimed, stats.resolved, stats.failed) == (12, 12, 0)
+    assert (stats.batches, stats.workers, stats.failed_passes) == (4, 4, 0)
+
+
+def test_every_worker_writes_its_own_slice_and_deletes_its_own_queue_rows(monkeypatch):
+    """Each loop runs the UNCHANGED per-slice pipeline — prefetch, warm, compute, then the
+    one upsert and the enqueued_at-bounded delete in its own transaction."""
+    ids = list(range(201, 207))
+    _, _, opened, _ = _drain_with_workers(
+        ids, workers=2, batch_size=3, parties=2, monkeypatch=monkeypatch)
+
+    for conn in opened:
+        writes = [t[:36] for t in _texts(conn)
+                  if t.startswith(("insert into", "update ", "delete from"))]
+        assert writes == ["insert into listing_location as ll (",
+                          "delete from dirty_locations d using "], writes
+        assert sum(1 for t in _texts(conn) if "from location_claims c" in t) == 1
+
+
+def test_the_lease_stays_on_the_callers_connection_and_no_worker_touches_it(monkeypatch):
+    """The lease is ONE row CAS taken by the caller (drain.main, the worker lane) before the
+    run. Four workers are still one run: a worker that acquired it would either fail (it is
+    held) or hand a second drainer the lane."""
+    stats, caller, opened, _ = _drain_with_workers(
+        list(range(301, 307)), workers=3, batch_size=2, parties=3, monkeypatch=monkeypatch)
+
+    for conn in [caller, *opened]:
+        assert not [t for t in _texts(conn) if "location_jobs" in t]
+    for fn in (drain.run, drain._run_workers):
+        assert "lease.held" not in inspect.getsource(fn)
+    # ...and the caller's own connection runs the ONE corpus constant and nothing else: it
+    # is the lease's connection, and a thread must never share it.
+    assert [t for t in _texts(caller) if not t.startswith("set local")] == [
+        " ".join(resolve_db._CURRENT_REGISTRY_SQL.split()).lower()
+    ]
+    assert stats.claimed == 6
+
+
+def test_a_worker_that_loses_its_connection_leaves_the_others_draining(monkeypatch):
+    """A pooler that refuses one connection is not a failed run. The dead loop counts one
+    `failed_passes`, the survivors finish the queue, and the stats say the run ran degraded
+    rather than reporting four healthy workers."""
+    ids = list(range(401, 413))
+    stats, _, opened, queue = _drain_with_workers(
+        ids, workers=4, batch_size=3, dying=frozenset({2}), monkeypatch=monkeypatch)
+
+    assert len(opened) == 3
+    assert 2 not in queue.claimed_by
+    assert stats.failed_passes == 1
+    assert stats.workers == 4, "what was ASKED for; failed_passes says what happened"
+    assert stats.claimed == 12 and queue.depth == 0
+
+
+def test_the_budget_is_one_deadline_and_it_stops_every_worker(monkeypatch):
+    """`max_seconds` is the RUN's, computed once on the main thread and shared: every loop
+    tests it between batches, so an exhausted budget stops all four at the same moment and
+    the queue rows they did not claim simply stay queued."""
+    ids = list(range(501, 513))
+    stats, _, opened, queue = _drain_with_workers(
+        ids, workers=4, batch_size=3, max_seconds=0, monkeypatch=monkeypatch)
+
+    assert len(opened) == 4 and all(conn.closed for conn in opened)
+    assert (stats.claimed, stats.batches) == (0, 0)
+    assert queue.depth == 12
+    assert "deadline = started + max_seconds" in inspect.getsource(drain.run)
+    assert "while time.monotonic() < deadline" in inspect.getsource(drain._drain_loop)
+
+
+def test_workers_1_is_the_single_connection_path_statement_for_statement(monkeypatch):
+    """The default is the loop the drain has always had, on the CALLER's connection: no
+    thread, no second connection, and the same statements in the same order."""
+    def _never() -> Any:
+        raise AssertionError("workers=1 must not open a second connection")
+
+    monkeypatch.setattr(drain, "_worker_connection", _never)
+    queue = _SharedQueue([601, 602])
+    caller = _WorkerConn(queue, 0)
+    stats = drain.run(caller, batch_size=10, max_seconds=30, workers=1)
+
+    assert [t[:25] for t in _texts(caller)] == [
+        "set local statement_timeo", "set local lock_timeout = ",
+        "select id, label from reg",
+        "set local statement_timeo", "set local lock_timeout = ",
+        "select count(*), coalesce",
+        "set local statement_timeo", "set local lock_timeout = ",
+        "select listing_id, attemp",
+        "select id, listing_id, so", "select id, source from li",
+        "insert into listing_locat", "delete from dirty_locatio",
+        "set local statement_timeo", "set local lock_timeout = ",
+        "select count(*), coalesce",
+        "set local statement_timeo", "set local lock_timeout = ",
+        "select listing_id, attemp",
+    ]
+    assert (stats.workers, stats.claimed, stats.failed_passes) == (1, 2, 0)
+
+
+def test_only_the_first_loop_counts_the_queue(monkeypatch):
+    """The health read is a `count(*)` over the whole of `dirty_locations`. Four copies of it
+    per batch buy four sequential scans of a 400k-row table and one number."""
+    _, _, opened, _ = _drain_with_workers(
+        list(range(701, 709)), workers=4, batch_size=2, parties=4, monkeypatch=monkeypatch)
+
+    counted = {conn.state["worker"] for conn in opened
+               if any(t.startswith("select count(*)") for t in _texts(conn))}
+    assert counted == {1}
+
+
+def test_the_stats_merge_keeps_wall_clock_and_sums_the_phases():
+    """A worker's `seconds` is not the run's: four overlapping loops would report four times
+    the elapsed time and a quarter of the real rate."""
+    total = drain.DrainStats(workers=4)
+    for _ in range(4):
+        total.absorb(drain.DrainStats(
+            claimed=10, resolved=9, failed=1, batches=2, fallbacks=1, failed_passes=1,
+            core_seconds=5.0, seconds=100.0))
+    assert (total.claimed, total.resolved, total.failed) == (40, 36, 4)
+    assert (total.batches, total.fallbacks, total.failed_passes) == (8, 4, 4)
+    assert total.core_seconds == 20.0
+    assert total.seconds == 0.0, "wall clock belongs to the run, never to a worker"
+    assert total.workers == 4
+    total.seconds = 10.0
+    assert total.rate == 4.0
+
+
+# ------------------------------------------------- W2-a5: the run cache under four threads
+
+
+def test_the_run_cache_counters_survive_concurrent_asks():
+    """`hits += 1` is a read-modify-write. Without the lock the workers lose counts, and the
+    hit rate — the number that says whether a key is too narrow — quietly under-reports."""
+    cache = resolve_db.RunCache()
+    asks = 400
+
+    def _ask() -> None:
+        for _ in range(asks):
+            assert cache.get(("streets_in_obec", 554782), lambda: "answer") == "answer"
+
+    threads = [threading.Thread(target=_ask) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert cache.hits + cache.misses == 4 * asks
+    assert cache.asked_by_kind["streets_in_obec"] == 4 * asks
+
+
+def test_the_run_cache_never_holds_its_lock_across_a_registry_question():
+    """The whole point of the workers is to overlap the round trips. A lock held across
+    `compute()` would serialize them back into one loop — with four connections open."""
+    cache = resolve_db.RunCache()
+    blocked = threading.Event()
+    asking = threading.Event()
+
+    def _slow() -> str:
+        asking.set()
+        blocked.wait(10)
+        return "slow"
+
+    slow = threading.Thread(target=lambda: cache.get(("admin_chain", 1), _slow))
+    slow.start()
+    try:
+        assert asking.wait(10), "the blocking ask never reached its compute"
+        # The other worker asks a DIFFERENT question while the first is still waiting.
+        assert cache.get(("admin_chain", 2), lambda: "fast") == "fast"
+    finally:
+        blocked.set()
+        slow.join(10)
+    assert cache.get(("admin_chain", 1), lambda: "recomputed") == "slow"
 
 
 # ------------------------------------------- W2-a4: the sweep's scope is what Browse serves

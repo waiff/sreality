@@ -39,16 +39,29 @@ dispositions, a read-your-writes `location_disputed` read, the listing projectio
 property rebuild — and is now ONE upsert. The prefetch was five queries and is two. The
 registry warm was five point-keyed questions and is two.
 
-**`--workers` is unblocked by this wave, though not yet implemented.** The stated reason the
-drain stayed single-connection was `_rebuild_properties`: two workers holding two listings of
-the SAME property would both read the member set and both write `property_location_current`,
-and a stale read could publish the wrong winner. That was the drain's ONE cross-listing
-write and it is gone with the table. Every remaining write is keyed on the listing the slice
-already holds `FOR UPDATE`, so a second connection claiming a disjoint slice is safe by
-construction.
+**`workers` shipped with W2-a5**, and W2-a is what unblocked it. The stated reason the drain
+stayed single-connection was `_rebuild_properties`: two workers holding two listings of the
+SAME property would both read the member set and both write `property_location_current`, and
+a stale read could publish the wrong winner. That was the drain's ONE cross-listing write and
+it is gone with the table. Every remaining write is keyed on the listing the slice already
+holds `FOR UPDATE`, so a second connection claiming a disjoint slice is safe by construction
+— `SKIP LOCKED` is what makes the slices disjoint, and it is the same statement either way.
+
+Concurrency is the right lever because the loop is LATENCY-bound, not CPU-bound: measured
+2026-09-12 10:27Z the Railway worker drained ~8 listings/s (5,000 rows per 10 minutes)
+against a 448k queue while every backend on the instance sat in `DataFileRead`. ~4 registry
+round trips per listing, each waiting on a disk the drain does not own, is time N loops can
+overlap and one loop cannot. What is NOT shared between them is the connection (psycopg
+connections are not thread-safe — one per thread) and what IS shared is the `RunCache`, under
+a lock, because name- and code-keyed answers repeat across listings and across workers.
+The lease stays on the CALLER's connection and is taken exactly once: workers are one run.
 
 CLI:  python -m location_data.resolver.drain [--max-seconds N] [--batch-size N]
                                              [--listing-id N] [--dry-run]
+
+The CLI has no `--workers`: the GitHub lane is the backstop, it is RTT-bound against a US
+runner rather than IO-bound beside the instance, and N runner connections into the session
+pooler is the wrong place to spend them. The Railway worker lane passes `workers=` instead.
 """
 
 from __future__ import annotations
@@ -58,6 +71,7 @@ import contextlib
 import logging
 import os
 import sys
+import threading
 import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
@@ -252,6 +266,11 @@ class DrainStats:
     failed: int = 0
     batches: int = 0
     fallbacks: int = 0
+    # How many slice loops the run used, and how many of them ENDED EARLY (W2-a5) — a dead
+    # connection, a failed queue-health read. The run continues with fewer, so the number of
+    # workers alone cannot tell you what actually drained.
+    workers: int = 1
+    failed_passes: int = 0
     # Phase timings, so the NEXT production run measures itself instead of being re-diagnosed.
     prefetch_seconds: float = 0.0
     warm_seconds: float = 0.0
@@ -262,6 +281,25 @@ class DrainStats:
     @property
     def rate(self) -> float:
         return 0.0 if self.seconds <= 0 else self.claimed / self.seconds
+
+    def absorb(self, other: "DrainStats") -> None:
+        """Fold one worker's counters into the run's.
+
+        `seconds` is deliberately NOT summed: it is the run's WALL CLOCK, and four overlapping
+        loops would report four times the elapsed time and therefore a quarter of the real
+        rate. The PHASE seconds are summed and can exceed the wall clock on purpose — they say
+        where the workers' time went, not how long the run took. `workers` is the run's, not a
+        worker's, so it is not summed either."""
+        self.claimed += other.claimed
+        self.resolved += other.resolved
+        self.failed += other.failed
+        self.batches += other.batches
+        self.fallbacks += other.fallbacks
+        self.failed_passes += other.failed_passes
+        self.prefetch_seconds += other.prefetch_seconds
+        self.warm_seconds += other.warm_seconds
+        self.core_seconds += other.core_seconds
+        self.write_seconds += other.write_seconds
 
 
 @dataclass(slots=True)
@@ -304,7 +342,16 @@ def run(
     max_seconds: int = DEFAULT_MAX_SECONDS,
     dry_run: bool = False,
     only_listing_id: int | None = None,
+    workers: int = 1,
 ) -> DrainStats:
+    """One drain run. `workers > 1` runs that many slice loops concurrently (W2-a5).
+
+    The caller's connection stays THE run's connection: it reads the one corpus constant, it
+    is where the lease the caller took lives, and it is never handed to a thread. With
+    `workers=1` the loop runs on it, exactly as it always has. Above 1 it stays idle while N
+    threads each open their own session-mode connection and run the SAME loop against the
+    same queue — `FOR UPDATE SKIP LOCKED` hands each of them a disjoint slice."""
+    workers = max(1, int(workers))
     batch_timeout_s = _batch_timeout_s()
     # The run's ONE corpus constant, read once: which registry version is current. It is
     # pinned for the run's lifetime by definition — a mirror load mints a NEW version rather
@@ -314,11 +361,12 @@ def run(
         registry_version_id, registry_label = resolve_db.current_registry_version(conn)
     cache = resolve_db.RunCache()
     ctx_base = _context(conn, registry_version_id, cache)
-    stats = DrainStats()
+    stats = DrainStats(workers=workers)
     started = time.monotonic()
     LOG.info(
-        "DRAIN start batch_size=%d max_seconds=%d statement_timeout=%ds registry_version=%s",
-        batch_size, max_seconds, batch_timeout_s, registry_label,
+        "DRAIN start batch_size=%d max_seconds=%d statement_timeout=%ds registry_version=%s "
+        "workers=%d",
+        batch_size, max_seconds, batch_timeout_s, registry_label, workers,
     )
 
     if only_listing_id is not None:
@@ -334,9 +382,68 @@ def run(
         stats.seconds = time.monotonic() - started
         return stats
 
-    while time.monotonic() - started < max_seconds:
-        depth, oldest = _queue_health(conn, batch_timeout_s)
-        LOG.info("QUEUE depth=%d oldest_age_s=%.0f", depth, oldest)
+    deadline = started + max_seconds
+    if workers == 1:
+        _drain_loop(
+            conn, ctx_base, cache, stats, registry_label=registry_label,
+            batch_size=batch_size, batch_timeout_s=batch_timeout_s, deadline=deadline,
+            dry_run=dry_run,
+        )
+    else:
+        _run_workers(
+            workers=workers, registry_version_id=registry_version_id,
+            registry_label=registry_label, cache=cache, stats=stats, batch_size=batch_size,
+            batch_timeout_s=batch_timeout_s, deadline=deadline, dry_run=dry_run,
+        )
+    stats.seconds = time.monotonic() - started
+    LOG.info(
+        "DRAIN done batches=%d claimed=%d resolved=%d failed=%d fallbacks=%d %.1fs "
+        "rate=%.1f/s prefetch=%.1fs warm=%.1fs core=%.1fs write=%.1fs registry_q=%d "
+        "registry_hit=%.0f%% workers=%d dead_workers=%d",
+        stats.batches, stats.claimed, stats.resolved, stats.failed, stats.fallbacks,
+        stats.seconds, stats.rate, stats.prefetch_seconds, stats.warm_seconds,
+        stats.core_seconds, stats.write_seconds, cache.misses, 100.0 * cache.hit_rate,
+        stats.workers, stats.failed_passes,
+    )
+    if workers == 1:
+        # Above 1 the base context asked nothing — each worker logs its OWN query report as
+        # its loop ends, because a merged one hides the worker that was slow.
+        LOG.info("DRAIN queries %s", _query_stats(ctx_base).report())
+    LOG.info("DRAIN cache misses %s", cache.report())
+    return stats
+
+
+def _drain_loop(
+    conn: psycopg.Connection,
+    ctx: ResolverContext,
+    cache: resolve_db.RunCache,
+    stats: DrainStats,
+    *,
+    registry_label: str,
+    batch_size: int,
+    batch_timeout_s: int,
+    deadline: float,
+    dry_run: bool,
+    worker: int = 0,
+) -> None:
+    """ONE slice loop on ONE connection: claim, prefetch, warm, compute, write, repeat until
+    the budget ends or the queue comes back empty.
+
+    `worker` is 0 for the single-connection run — the loop the drain has always had, statement
+    for statement and log line for log line — and 1..N inside a thread. It changes two things
+    and nothing else: the log tag, and WHO counts the queue. The health read is a `count(*)`
+    over the whole of `dirty_locations`; N copies of it per batch buy N sequential scans of a
+    400k-row table and one number, so only the first loop asks.
+
+    The budget is tested BETWEEN batches, here as everywhere: a worker finishes the slice it
+    holds and stops, so the run overruns by at most one batch however many workers it has (the
+    slices run concurrently, so it is one batch, not N).
+    """
+    tag = "" if worker == 0 else f"w{worker} "
+    while time.monotonic() < deadline:
+        if worker <= 1:
+            depth, oldest = _queue_health(conn, batch_timeout_s)
+            LOG.info("QUEUE %sdepth=%d oldest_age_s=%.0f", tag, depth, oldest)
         batch_started = time.monotonic()
         batch_before = (stats.resolved, stats.failed)
         with conn.transaction():
@@ -346,7 +453,10 @@ def run(
                 cur.execute(_CLAIM_SLICE_SQL, (batch_size,))
                 rows = cur.fetchall()
             if not rows:
-                LOG.info("QUEUE empty")
+                # SKIP LOCKED means "nothing I can have", which on a busy queue can also mean
+                # "my siblings hold it all". Ending this loop is right either way: the queue
+                # is the cursor and the next pass is 15 seconds away.
+                LOG.info("QUEUE %sempty", tag)
                 break
             stats.batches += 1
             prefetch_started = time.monotonic()
@@ -358,27 +468,82 @@ def run(
                 # inside it would otherwise abort the batch transaction and end the run.
                 # Rolled back, every point simply falls through to its own lazy query.
                 with conn.transaction():
-                    _warm(slice_, ctx_base, cache)
+                    _warm(slice_, ctx, cache)
             except Exception as exc:  # noqa: BLE001 - degrade to the lazy path, never die
-                LOG.warning("WARM failed, resolving with per-point lookups: %s", exc)
+                LOG.warning("WARM %sfailed, resolving with per-point lookups: %s", tag, exc)
             stats.warm_seconds += time.monotonic() - warm_started
             _run_slice(
-                conn, rows, ctx_base, registry_label, slice_, stats, dry_run=dry_run,
+                conn, rows, ctx, registry_label, slice_, stats, dry_run=dry_run,
             )
-        _log_batch(stats, cache, ctx_base, len(rows), batch_before,
-                   time.monotonic() - batch_started)
-    stats.seconds = time.monotonic() - started
-    LOG.info(
-        "DRAIN done batches=%d claimed=%d resolved=%d failed=%d fallbacks=%d %.1fs "
-        "rate=%.1f/s prefetch=%.1fs warm=%.1fs core=%.1fs write=%.1fs registry_q=%d "
-        "registry_hit=%.0f%%",
-        stats.batches, stats.claimed, stats.resolved, stats.failed, stats.fallbacks,
-        stats.seconds, stats.rate, stats.prefetch_seconds, stats.warm_seconds,
-        stats.core_seconds, stats.write_seconds, cache.misses, 100.0 * cache.hit_rate,
-    )
-    LOG.info("DRAIN queries %s", _query_stats(ctx_base).report())
-    LOG.info("DRAIN cache misses %s", cache.report())
-    return stats
+        _log_batch(stats, cache, ctx, len(rows), batch_before,
+                   time.monotonic() - batch_started, tag)
+
+
+def _run_workers(
+    *,
+    workers: int,
+    registry_version_id: int,
+    registry_label: str,
+    cache: resolve_db.RunCache,
+    stats: DrainStats,
+    batch_size: int,
+    batch_timeout_s: int,
+    deadline: float,
+    dry_run: bool,
+) -> None:
+    """N slice loops, N connections, ONE run cache and ONE lease (the caller's).
+
+    Isolation is by construction, not by coordination: the slice is claimed `FOR UPDATE SKIP
+    LOCKED`, so no two loops ever hold the same queue row, and since W2-a every write the
+    drain makes is keyed on a listing its own slice already holds.
+
+    A worker that raises — a dropped connection, a pooler that refused a new one — logs,
+    counts one `failed_passes` and EXITS; the others keep draining and the run reports what
+    actually ran. Threads are daemons: a pass abandoned by the lane loop must not be able to
+    keep the worker process alive at shutdown."""
+    per_worker = [DrainStats() for _ in range(workers)]
+
+    def _loop(index: int) -> None:
+        mine = per_worker[index - 1]
+        conn: psycopg.Connection | None = None
+        try:
+            conn = _worker_connection()
+            ctx = _context(conn, registry_version_id, cache)
+            _drain_loop(
+                conn, ctx, cache, mine, registry_label=registry_label,
+                batch_size=batch_size, batch_timeout_s=batch_timeout_s, deadline=deadline,
+                dry_run=dry_run, worker=index,
+            )
+            LOG.info("DRAIN w%d queries %s", index, _query_stats(ctx).report())
+        except Exception as exc:  # noqa: BLE001 - one worker's death is not the run's
+            mine.failed_passes += 1
+            LOG.warning(
+                "DRAIN w%d ended early after claimed=%d: %s", index, mine.claimed, exc)
+        finally:
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
+
+    threads = [
+        threading.Thread(
+            target=_loop, args=(i,), name=f"location-drain-w{i}", daemon=True)
+        for i in range(1, workers + 1)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    for mine in per_worker:
+        stats.absorb(mine)
+
+
+def _worker_connection() -> psycopg.Connection:
+    """A worker thread's OWN connection — psycopg connections are not thread-safe.
+
+    `db.connect_session()` rather than `open_connection()`: the run's first connection (the
+    caller's, the one holding the lease) has already announced the pooler mode, and one
+    warning per thread per pass is the same sentence four times every fifteen seconds."""
+    return db.connect_session()
 
 
 def _run_slice(
@@ -459,18 +624,21 @@ def _log_batch(
     n: int,
     before: tuple[int, int],
     elapsed: float,
+    tag: str = "",
 ) -> None:
     """Per-batch self-measurement: the run reports its own listings/s and where the time
-    went — including WHICH query kind."""
+    went — including WHICH query kind. `tag` names the worker (empty on the single loop, so
+    the line a single-connection run writes is unchanged); the per-batch rate is that
+    worker's, the cumulative phase numbers are its own too."""
     LOG.info(
-        "BATCH n=%d ok=%d fail=%d %.1fs rate=%.1f/s cum(prefetch=%.1fs warm=%.1fs "
+        "BATCH %sn=%d ok=%d fail=%d %.1fs rate=%.1f/s cum(prefetch=%.1fs warm=%.1fs "
         "core=%.1fs write=%.1fs) registry_q=%d registry_hit=%.0f%% registry_wait=%.1fs",
-        n, stats.resolved - before[0], stats.failed - before[1], elapsed,
+        tag, n, stats.resolved - before[0], stats.failed - before[1], elapsed,
         0.0 if elapsed <= 0 else n / elapsed, stats.prefetch_seconds, stats.warm_seconds,
         stats.core_seconds, stats.write_seconds, cache.misses, 100.0 * cache.hit_rate,
         cache.seconds,
     )
-    LOG.info("BATCH queries %s", _query_stats(ctx).report())
+    LOG.info("BATCH %squeries %s", tag, _query_stats(ctx).report())
 
 
 def _context(

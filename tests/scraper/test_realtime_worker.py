@@ -897,11 +897,13 @@ def _patch_resolver(
         captured.update(kwargs)
         yield acquired
 
-    def default_run(c: Any, *, batch_size: int, max_seconds: int) -> Any:
+    def default_run(
+            c: Any, *, batch_size: int, max_seconds: int, workers: int) -> Any:
         captured["run_conn"] = c
         captured["batch_size"] = batch_size
         captured["max_seconds"] = max_seconds
-        return _stub_stats()
+        captured["workers"] = workers
+        return _stub_stats(workers=workers)
 
     monkeypatch.setattr(rw.db, "connect_session", lambda *a, **k: conn)
     monkeypatch.setattr("location_data.resolver.lease.held", fake_held)
@@ -967,6 +969,45 @@ def test_location_resolve_lease_ttl_covers_the_budget_plus_one_batch() -> None:
     # A tiny batch still gets a floor.
     assert (rw._location_resolve_lease_ttl(240, 1)
             == 240 + rw.LOCATION_RESOLVE_LEASE_HEADROOM_MIN_SECONDS)
+
+
+def test_location_resolve_workers_defaults_to_four_and_is_clamped(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # An ENV VAR, not an app_settings row: how many connections this process may
+    # open is a property of the machine, not an operator preference. It is a
+    # THROUGHPUT knob, so its default is 4 and not "off" — the drain's ~8/s pass
+    # is latency-bound (every backend on the instance waits on DataFileRead),
+    # which is exactly the cost concurrent loops overlap.
+    monkeypatch.delenv(rw.LOCATION_RESOLVE_WORKERS_ENV, raising=False)
+    assert rw._read_location_resolve_workers() == 4
+    assert rw.LOCATION_RESOLVE_WORKERS_DEFAULT == 4
+
+    monkeypatch.setenv(rw.LOCATION_RESOLVE_WORKERS_ENV, "2")
+    assert rw._read_location_resolve_workers() == 2
+    # Clamped at both ends: every worker holds its OWN session-mode connection,
+    # and 0 would idle a lane that is not flagged off.
+    monkeypatch.setenv(rw.LOCATION_RESOLVE_WORKERS_ENV, "999")
+    assert rw._read_location_resolve_workers() == rw.LOCATION_RESOLVE_WORKERS_CEILING
+    monkeypatch.setenv(rw.LOCATION_RESOLVE_WORKERS_ENV, "0")
+    assert rw._read_location_resolve_workers() == 1
+    # A typo must not stop the lane draining.
+    monkeypatch.setenv(rw.LOCATION_RESOLVE_WORKERS_ENV, "four")
+    assert rw._read_location_resolve_workers() == 4
+
+
+def test_location_resolve_sync_drains_with_the_configured_worker_count(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    _, captured = _patch_resolver(monkeypatch)
+    monkeypatch.setenv(rw.LOCATION_RESOLVE_WORKERS_ENV, "3")
+
+    out = rw._location_resolve_sync()
+
+    assert captured["workers"] == 3
+    # The heartbeat reports what the pass RAN with (drain.run's own count), plus
+    # the workers that died with their connection — "4 configured, 2 alive" is
+    # the shape of a degraded lane, and the lane's rate alone cannot show it.
+    assert out["workers"] == 3
+    assert out["failed_passes"] == 0
 
 
 def test_location_resolve_sync_takes_the_shared_resolver_lease(monkeypatch):
@@ -1065,7 +1106,8 @@ def test_location_resolve_pass_records_counters(monkeypatch):
     monkeypatch.setattr(
         rw, "_location_resolve_sync",
         lambda: {"acquired": True, "claimed": 40, "resolved": 38, "failed": 2,
-                 "seconds": 12.3, "rate": 3.24, "session_pooler": True})
+                 "seconds": 12.3, "rate": 3.24, "session_pooler": True,
+                 "workers": 4})
     state = rw._new_state()
     asyncio.run(rw._location_resolve_pass(asyncio.Event(), state))
     lane = state["lanes"]["location_resolve"]
@@ -1129,7 +1171,8 @@ def test_location_resolve_quiets_the_drain_log_only_once_the_queue_is_empty(
     drain_log = logging.getLogger("location_data.resolver.drain")
     original = drain_log.level
     try:
-        def idle_run(c: Any, *, batch_size: int, max_seconds: int) -> Any:
+        def idle_run(
+                c: Any, *, batch_size: int, max_seconds: int, workers: int) -> Any:
             return _stub_stats(claimed=0, resolved=0, failed=0, batches=0)
 
         _patch_resolver(monkeypatch, run=idle_run)
