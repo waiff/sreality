@@ -1819,7 +1819,17 @@ def load_bodies(
     for payload_id, body, body_r2_key, content_encoding in cur.fetchall():
         encoding = content_encoding or "identity"
         if body is not None:
-            bodies[int(payload_id)] = payloads.decode_body(bytes(body), encoding)
+            try:
+                bodies[int(payload_id)] = payloads.decode_body(bytes(body), encoding)
+            except Exception as exc:  # noqa: BLE001 - one bad body, never the batch
+                # The SAME rule the R2 path below follows, and it was missing here: a
+                # truncated gzip member or a mis-stamped `content_encoding` on ONE
+                # database-resident row would raise out of the fan-out, roll back every
+                # portal's payload claims computed beside it, and hand the next run the
+                # same immutable row to die on. Dropped from the result, so the caller
+                # finds no body, leaves it UNSTAMPED, and retries it next run.
+                LOG.warning("PAGE inline body decode failed payload_id=%s encoding=%s: %s",
+                            payload_id, encoding, exc)
             continue
         if not body_r2_key:
             # `prp_body_present` (382) forbids this: exactly one of the two is always set.

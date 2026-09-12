@@ -8,6 +8,7 @@ bounds the page half by page churn rather than by corpus size.
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime
 
 import pytest
@@ -21,6 +22,7 @@ from location_data.claims_intake import (
     _LISTINGS_FULL_SQL,
     _LISTINGS_INCREMENTAL_SQL,
     _RESUME_SQL,
+    _LEGACY_WATERMARK_SQL,
     _SNAPSHOT_SEED_SQL,
     _STAMP_MINED_SQL,
     _UNMINED_BODIES_SQL,
@@ -290,7 +292,11 @@ def test_the_lane_has_no_watermark_left_to_read():
     statements = {name: v for name, v in vars(claims_intake).items()
                   if name.endswith("_SQL") and isinstance(v, str)}
     assert "_WATERMARK_SQL" not in statements
+    # `coverage_since` survives in exactly one place: the CUTOVER seed, read once by a lane
+    # that has no cursor of its own. Nothing writes it, and no run reads it twice.
     for name, sql in statements.items():
+        if name == "_LEGACY_WATERMARK_SQL":
+            continue
         assert "coverage_since" not in sql, name
     assert not hasattr(claims_intake, "DEFAULT_OVERLAP_HOURS")
     assert "'running'" in " ".join(_BATCH_INSERT_SQL.split())
@@ -315,13 +321,36 @@ def test_the_lane_writes_no_timestamp_cursor_and_that_is_the_epoch_marker():
     assert "cursor_after_ts" not in " ".join(_BATCH_INSERT_SQL.split())
 
 
-def test_the_cold_start_seeds_at_the_newest_snapshot():
-    """A lane with no cursor of its own starts at the head of the log, not at 0: every
-    listing's payload has already been mined many times over by the watermark-driven lane
-    this replaces, and walking the whole log to re-insert existing claims is the waste
-    W1-a2 exists to delete. The exhaustive pass is `--mode full`."""
-    assert " ".join(_SNAPSHOT_SEED_SQL.split()) == \
-        "SELECT coalesce(max(id), 0) FROM listing_snapshots"
+def test_the_snapshot_window_stands_behind_the_wall_clock():
+    """THE RACE. `listing_snapshots.id` is a bigserial: the id is allocated at INSERT and
+    becomes visible at COMMIT, and `write_detail_batch` writes N snapshots inside one
+    multi-statement transaction, concurrently across the per-portal drains and the realtime
+    worker. A row whose id is BELOW an already-advanced cursor can therefore become visible
+    after that cursor moved — and `s.id > after_id` never looks back, so that listing's
+    content change is skipped PERMANENTLY. The window stands 15 minutes behind the clock;
+    the seed takes the same predicate, or a cold start would jump over the in-flight ids
+    instead of stopping short of them."""
+    lag = "scraped_at < now() - interval '15 minutes'"
+    assert f"s.{lag}" in " ".join(_LISTINGS_INCREMENTAL_SQL.split())
+    assert lag in " ".join(_SNAPSHOT_SEED_SQL.split())
+
+
+def test_the_cold_start_seeds_at_the_old_lane_s_own_anchor():
+    """Seeding at the HEAD of the log would drop every change between the old lane's last
+    position and this deploy — and the old lane's runs were being cancelled at the job
+    timeout, so it has no `outcome='ok'` row for days and that window is hours wide. First
+    arm: the newest batch row that still carries a `cursor_after_ts` (the pre-W1-a2 keyset's
+    timestamp half). Second: the last `ok` watermark. Both minus the 3-hour overlap that
+    cursor was always read with. Neither: the head."""
+    sql = " ".join(_LEGACY_WATERMARK_SQL.split())
+    assert sql.startswith("SELECT coalesce(")
+    assert "b.cursor_after_ts IS NOT NULL" in sql
+    assert "ORDER BY b.started_at DESC, b.id DESC LIMIT 1" in sql
+    assert "max(coalesce(b.coverage_since, b.started_at))" in sql and "b.outcome = 'ok'" in sql
+    assert sql.endswith("- interval '3 hours'")
+    seed = " ".join(_SNAPSHOT_SEED_SQL.split())
+    assert "coalesce(max(id), 0) FROM listing_snapshots" in seed
+    assert "(%(watermark)s::timestamptz IS NULL OR scraped_at <= %(watermark)s)" in seed
 
 
 def test_the_batch_row_carries_the_cursor_and_the_mode_that_wrote_it():
@@ -372,7 +401,7 @@ def test_the_scan_joins_the_latest_stored_detail_body_per_portal_key():
     ZERO rows over the whole archive — and the lane would not raise: the first batch would
     come back empty and the batch would stamp 'ok'. The join is on `(source,
     source_id_native)`, which both writers populate and which is UNIQUE on `listings` too."""
-    for sql in (_LISTINGS_FULL_SQL, _LISTINGS_INCREMENTAL_SQL, _UNMINED_BODIES_SQL):
+    for sql in (_LISTINGS_FULL_SQL, _LISTINGS_INCREMENTAL_SQL):
         one = " ".join(sql.split())
         assert "LEFT JOIN LATERAL" in one
         assert "p.source = l.source AND p.source_id_native = l.source_id_native" in one
@@ -404,8 +433,26 @@ def test_the_hash_gate_is_is_distinct_from_against_the_portals_own_active_contra
     # projected verdict — it selects only what the gate admits.
     for sql in (_UNMINED_BODIES_SQL, _UNMINED_BODY_BACKLOG_SQL):
         one = " ".join(sql.split())
-        assert "AND pb.contract_version IS DISTINCT FROM pc.version" in one
-        assert "LEFT JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active" in one
+        assert "AND p.contract_version IS DISTINCT FROM pc.version" in one
+        assert "JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active" in one
+
+
+def test_the_bodies_first_pass_walks_the_payload_table_on_an_in_run_keyset():
+    """WHY NOT "no cursor, the stamp is the progress": four paths leave a body UNSTAMPED (a
+    bucket miss, a missing scope register, a content-triggered refusal, a scoper that failed
+    closed) and three are deterministic per body. Ordered by id with no cursor, those sit at
+    the head forever — re-fetched every batch, and once `cap` of them accumulate the batch
+    stamps nothing and the whole backlog stalls behind them, silently. The keyset walks
+    past: `after_body_id` starts at 0 each run (so the contract-version gate still decides
+    what is eligible) and advances past every row a batch selected."""
+    selection = " ".join(_UNMINED_BODIES_SQL.split())
+    assert selection.split("SELECT")[0].strip() == ""
+    assert "FROM portal_raw_payloads p" in selection
+    assert "WHERE p.id > %(after_body_id)s" in selection
+    assert "ORDER BY p.id LIMIT %(cap)s" in selection
+    # A `pb.` would be a column this FROM clause does not have: the select list is derived
+    # from the listing scan's by replacement, so drift has to fail here.
+    assert "pb." not in selection
 
 
 def test_the_bodies_first_pass_selects_the_latest_body_of_an_active_listing_only():
@@ -415,17 +462,17 @@ def test_the_bodies_first_pass_selects_the_latest_body_of_an_active_listing_only
     entry have bodies worth fetching, and that set lives in the reader registry."""
     for sql in (_UNMINED_BODIES_SQL, _UNMINED_BODY_BACKLOG_SQL):
         one = " ".join(sql.split())
-        assert "WHERE l.is_active" in one
+        assert "AND l.is_active" in one
         assert "l.source = ANY(%(page_sources)s::text[])" in one
         assert "(%(source)s::text IS NULL OR l.source = %(source)s)" in one
-        # ONE definition of "the latest detail body", shared with the listing scan.
-        assert "ORDER BY p.last_observed_at DESC, p.id DESC LIMIT 1" in one
+        # THE SAME definition of "the latest detail body" the listing scan's lateral
+        # applies, asked from the other direction: `last_observed_at`, never
+        # `first_observed_at` (a page that goes A -> B -> A appends no third row, it bumps
+        # A) and never `version_seq` (403 added it with no backfill).
+        assert "ORDER BY p2.last_observed_at DESC, p2.id DESC LIMIT 1" in one
         assert "p.page_kind = 'detail'" in one
+        assert "p2.page_kind = 'detail'" in one
     selection = " ".join(_UNMINED_BODIES_SQL.split())
-    # Ordered by the body's own id and bounded by the fetch cap. No cursor: the stamp is
-    # the progress, so the next batch's `IS DISTINCT FROM` no longer matches this one.
-    assert "ORDER BY pb.id LIMIT %(cap)s" in selection
-    assert "%(after_id)s" not in selection
     # No `raw_json`: the page substrate is the BODY, and a 1 500-row batch would otherwise
     # drag ~10 MB of payload over the wire to throw it away.
     assert "l.raw_json" not in selection
@@ -437,12 +484,22 @@ def test_the_backlog_count_is_the_selection_without_its_bound():
     operator reads a number that never reaches zero."""
     count = " ".join(_UNMINED_BODY_BACKLOG_SQL.split())
     selection = " ".join(_UNMINED_BODIES_SQL.split())
-    assert count.startswith("SELECT count(*) FROM listings l")
-    # Same predicate, no bound of its own: the drain's `ORDER BY pb.id LIMIT %(cap)s` is
-    # the only difference between the two (the `LIMIT 1` inside the lateral is shared).
+    assert count.startswith("SELECT count(*) FROM portal_raw_payloads p")
+    # Same predicate, no bound of its own: the drain's `ORDER BY p.id LIMIT %(cap)s` is the
+    # only difference (the `LIMIT 1` inside the latest-body probe is shared). The readout
+    # passes `after_body_id = 0`, so it counts the backlog rather than the run's remainder.
     where = " ".join(_UNMINED_BODIES_WHERE.split())
     assert where in count and where in selection
     assert count.endswith(where)
+
+
+def test_the_backlog_readout_runs_after_the_terminal_stamp():
+    """It is a `count(*)` under the 600 s ceiling, run when the budget is already spent.
+    Ahead of the stamp it could push the job past `timeout-minutes: 55` and lose the cursor
+    of a run that had otherwise finished cleanly — the exact failure this wave closes."""
+    source = inspect.getsource(claims_intake.run)
+    # rindex: the FIRST `_BATCH_FINISH_SQL` is the failure path inside the try.
+    assert source.rindex("_BATCH_FINISH_SQL") < source.index("_unmined_body_backlog(")
 
 
 def test_the_page_half_may_take_at_most_half_the_run_budget():

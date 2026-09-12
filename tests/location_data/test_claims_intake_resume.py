@@ -79,19 +79,24 @@ class _Conn:
     """`listings` + `listing_snapshots` + the batch ledger, keyset arithmetic and all."""
 
     def __init__(self, listings: list[_Listing],
-                 snapshots: list[tuple[int, int]] | None = None) -> None:
+                 snapshots: list[tuple[int, int, datetime]] | None = None) -> None:
         self.listings = listings
-        # (snapshot id, listing id), ascending — the append-only content-change log.
+        # (snapshot id, listing id, scraped_at), ascending — the append-only change log.
         self.snapshots = snapshots if snapshots is not None else []
         self.batches: list[dict[str, Any]] = []
         self.seen: list[int] = []
         self.now = BASE_TS
 
-    def change(self, listing_ids: list[int]) -> None:
-        """Append one snapshot per listing, as a content change does (rule 2)."""
+    def change(self, listing_ids: list[int], *, age_minutes: int = 30) -> None:
+        """Append one snapshot per listing, as a content change does (rule 2).
+
+        `age_minutes` is how long ago the change committed. The default clears the lane's
+        15-minute lag; a smaller one is a change still inside the window where a concurrent
+        `write_detail_batch` transaction could still be allocating ids."""
         next_id = (self.snapshots[-1][0] if self.snapshots else 0) + 1
+        at = self.now - timedelta(minutes=age_minutes)
         for offset, listing_id in enumerate(listing_ids):
-            self.snapshots.append((next_id + offset, listing_id))
+            self.snapshots.append((next_id + offset, listing_id, at))
 
     def cursor(self) -> _Cursor:
         return _Cursor(self)
@@ -122,8 +127,26 @@ class _Conn:
             batch["outcome"] = params["outcome"]
             batch["cursor_after_id"] = params["cursor_after_id"]
             return
+        if "cursor_after_ts IS NOT NULL" in sql:
+            # The cutover anchor: the newest row that still carries a pre-W1-a2 timestamp
+            # cursor, else the last `ok` watermark, both minus the old 3-hour overlap.
+            timestamped = [b for b in self.batches
+                           if b["source"] == params["source"]
+                           and b.get("cursor_after_ts") is not None]
+            anchor = None
+            if timestamped:
+                anchor = max(timestamped,
+                             key=lambda b: (b["started_at"], b["id"]))["cursor_after_ts"]
+            else:
+                oks = [b.get("coverage_since") or b["started_at"] for b in self.batches
+                       if b["source"] == params["source"] and b["outcome"] == "ok"]
+                anchor = max(oks) if oks else None
+            cur._result = [(anchor - timedelta(hours=3) if anchor else None,)]
+            return
         if "coalesce(max(id), 0) FROM listing_snapshots" in sql:
-            cur._result = [(self.snapshots[-1][0] if self.snapshots else 0,)]
+            visible = [row for row in self._visible_snapshots()
+                       if params["watermark"] is None or row[2] <= params["watermark"]]
+            cur._result = [(visible[-1][0] if visible else 0,)]
             return
         if "SELECT outcome, cursor_after_id, cursor_after_ts" in sql:
             candidates = [b for b in self.batches
@@ -148,9 +171,14 @@ class _Conn:
             return
         raise AssertionError(f"unhandled SQL: {sql[:120]}")
 
+    def _visible_snapshots(self) -> list[tuple[int, int, datetime]]:
+        """`scraped_at < now() - interval '15 minutes'` — the lag, as the SQL applies it."""
+        return [row for row in self.snapshots
+                if row[2] < self.now - timedelta(minutes=15)]
+
     def _scan(self, sql: str, params: dict[str, Any]) -> list[tuple[Any, ...]]:
         if "FROM listing_snapshots s" in sql:
-            window = [(sid, lid) for sid, lid in self.snapshots
+            window = [(sid, lid) for sid, lid, _ in self._visible_snapshots()
                       if sid > params["after_id"]][:params["batch_size"]]
             newest: dict[int, int] = {}
             for sid, lid in window:
@@ -321,8 +349,56 @@ def test_a_pre_w1a2_incremental_cursor_is_never_read_as_a_snapshot_id():
     })
 
     stats = _run(conn, mode="incremental")
-    # Seeded at the head of the log (2), not resumed at 500 000.
-    assert stats["resumed_from_id"] == 2
+    # Seeded from that row's TIMESTAMP (the cutover anchor, minus the old 3-hour overlap),
+    # never from its listing id: below every snapshot in the log, so both changes are
+    # re-walked rather than skipped.
+    assert stats["resumed_from_id"] == 0
+    assert conn.seen == [7, 8]
+
+
+def test_the_cutover_anchor_prefers_the_old_lane_s_stopped_cursor_over_its_ok_watermark():
+    """The old lane's runs were being CANCELLED at the job timeout: 12 `stopped` rows and no
+    `ok` in three days, so the ok watermark is stale by days and re-walking from it would be
+    heavy. The newest `cursor_after_ts` is where the old lane actually got to."""
+    conn = _Conn([_Listing(i, BASE_TS) for i in range(1, 26)])
+    stale_ok = BASE_TS - timedelta(days=3)
+    conn.batches.append({
+        "id": 1, "started_at": stale_ok, "source": "sreality", "scan_mode": "incremental",
+        "resumable": True, "outcome": "ok", "cursor_after_id": None,
+        "cursor_after_ts": None, "coverage_since": stale_ok,
+    })
+    conn.batches.append({
+        "id": 2, "started_at": BASE_TS - timedelta(hours=1), "source": "sreality",
+        "scan_mode": "incremental", "resumable": True, "outcome": "stopped",
+        "cursor_after_id": 500_000, "cursor_after_ts": BASE_TS - timedelta(hours=4),
+    })
+    # Either side of the stopped cursor's anchor: 4h ago MINUS the 3h overlap = 7h ago.
+    conn.change([3], age_minutes=480)      # 8h ago: below the anchor, already mined
+    conn.change([4], age_minutes=100)      # 1h40 ago: above it, must be re-walked
+
+    stats = _run(conn, mode="incremental")
+
+    assert stats["resumed_from_id"] == 1, "the id of the snapshot at/below the anchor"
+    assert conn.seen == [4]
+
+
+def test_a_change_still_inside_the_lag_window_is_left_for_the_next_run():
+    """THE RACE the lag closes. `listing_snapshots.id` is a bigserial — allocated at INSERT,
+    visible at COMMIT — and `write_detail_batch` writes N of them in one transaction
+    concurrently across the drains, so a row with an id BELOW an advanced cursor can appear
+    after the cursor moved. `s.id > after_id` never looks back, so that change would be
+    skipped permanently. Standing 15 minutes back costs one run of latency instead."""
+    conn = _Conn([_Listing(i, BASE_TS) for i in range(1, 26)])
+    _run(conn, mode="incremental")              # seeds
+    conn.change([11], age_minutes=2)            # still in flight
+    conn.seen.clear()
+
+    assert _run(conn, mode="incremental")["outcome"] == "ok"
+    assert conn.seen == [], "inside the lag window"
+
+    conn.now += timedelta(minutes=30)
+    assert _run(conn, mode="incremental")["outcome"] == "ok"
+    assert conn.seen == [11], "and picked up whole on the next run"
 
 
 def test_a_full_cursor_is_never_resumed_by_an_incremental_scan():

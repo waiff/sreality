@@ -326,7 +326,10 @@ def test_the_intake_preflight_reads_are_bounded_too():
     `conn.cursor()` on the autocommit connection."""
     sources = {
         "_ACTIVE_CONTRACT_SQL": inspect.getsource(claims_intake.run),
-        # W1-a2 replaced the watermark read with the cold-start seed, in its own helper.
+        # W1-a2 replaced the watermark read with the cutover seed, in its own helper —
+        # two reads, two guarded blocks, neither able to hang the run before its first
+        # batch row exists.
+        "_LEGACY_WATERMARK_SQL": inspect.getsource(claims_intake._snapshot_seed),
         "_SNAPSHOT_SEED_SQL": inspect.getsource(claims_intake._snapshot_seed),
         # ... and added one more: the drain's selection and its backlog readout.
         "_UNMINED_BODIES_SQL": inspect.getsource(claims_intake.drain_unmined_bodies),

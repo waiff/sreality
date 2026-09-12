@@ -3,12 +3,12 @@
 WHAT THIS LANE IS (rule 25: one store, one lane, nine claim types, no flags)
   * TWO HALVES, both bounded by the run budget, in this order every hour:
       - BODIES FIRST: the unmined latest detail bodies of active page-portal listings,
-        drained straight out of `portal_raw_payloads` in 1 500-row batches until the
-        backlog is empty or half the budget is gone. No cursor — the mined-at stamp IS
-        the progress.
+        drained straight out of `portal_raw_payloads` in 1 500-row batches on an in-run
+        keyset over `p.id`, until the backlog is empty or half the budget is gone.
       - THEN THE CHANGED LISTINGS: a keyset scan of `listing_snapshots.id`, the
-        append-on-content-change log (rule 2), joined back to `listings`. What a run
-        opens is an hour's CHANGE, not every listing the index walks re-sighted.
+        append-on-content-change log (rule 2), joined back to `listings`, standing 15
+        minutes behind the clock. What a run opens is an hour's CHANGE, not every
+        listing the index walks re-sighted.
   * Two substrates, ONE registry (`READERS`), one write:
       - `listings.raw_json` plus the class-B legacy columns (`listings.locality`,
         `listings.street` where `street_source='parser'`, `listings.geom` behind the
@@ -670,14 +670,42 @@ _RESUME_SQL = """
     LIMIT 1
 """
 
-# The cold start, and the one place a cursor is invented rather than inherited. A lane with
-# no incremental cursor of its own starts at the NEWEST snapshot: the payload half's job is
-# change from here forward, every listing's payload has already been mined many times over
-# by the watermark-driven lane this replaces, and the alternative — starting at 0 — walks
-# the entire append-only snapshot log to re-insert claims that exist. The exhaustive pass
-# is `--mode full` (the contract-bump path), and `--start-after-id <snapshot id>` seeds a
-# lower anchor by hand.
-_SNAPSHOT_SEED_SQL = "SELECT coalesce(max(id), 0) FROM listing_snapshots"
+# THE CUTOVER SEED, read ONCE by a lane that has no incremental cursor of its own.
+#
+# Seeding at the head of the log would drop every change between the old lane's last
+# position and this deploy — and the old lane's runs were being CANCELLED at the job
+# timeout, so it has no `outcome='ok'` row for days and that window is hours wide. Seed at
+# the old lane's own resume point instead: the newest batch row that still carries a
+# `cursor_after_ts` (the pre-W1-a2 `(last_seen_at, id)` keyset's timestamp half — on
+# 2026-09-11 that was 17:16Z), minus the 3-hour overlap that cursor was always read with.
+# Second arm: the last `ok` watermark, same overlap. Neither: the head, and the lag below
+# is then the only floor. The few hours between the anchor and now are re-walked once,
+# which is cheap and lossless; the exhaustive pass is still `--mode full`.
+_LEGACY_WATERMARK_SQL = """
+    SELECT coalesce(
+      (SELECT b.cursor_after_ts FROM location_claim_batches b
+        WHERE b.lane = %(lane)s AND b.source IS NOT DISTINCT FROM %(source)s
+          AND b.cursor_after_ts IS NOT NULL
+        ORDER BY b.started_at DESC, b.id DESC LIMIT 1),
+      (SELECT max(coalesce(b.coverage_since, b.started_at)) FROM location_claim_batches b
+        WHERE b.lane = %(lane)s AND b.source IS NOT DISTINCT FROM %(source)s
+          AND b.outcome = 'ok')
+    ) - interval '3 hours'
+"""
+
+# THE LAG, and it is a correctness rail, not a politeness one. `listing_snapshots.id` is a
+# bigserial: the id is allocated at INSERT and becomes VISIBLE at COMMIT. `write_detail_batch`
+# writes N snapshots inside one multi-statement transaction, concurrently across the
+# per-portal drains and the realtime worker — so a row carrying an id BELOW a cursor this
+# lane has already advanced past can appear after that cursor moved, and `s.id > after_id`
+# never looks back. Standing 15 minutes behind the wall clock keeps the window below every
+# transaction that could still be in flight. The seed takes the same predicate, or a cold
+# start would jump straight over the in-flight ids instead of stopping short of them.
+_SNAPSHOT_SEED_SQL = """
+    SELECT coalesce(max(id), 0) FROM listing_snapshots
+    WHERE scraped_at < now() - interval '15 minutes'
+      AND (%(watermark)s::timestamptz IS NULL OR scraped_at <= %(watermark)s)
+"""
 
 # THE SECOND SUBSTRATE, JOINED ONTO THE FIRST.
 #
@@ -760,6 +788,11 @@ _LISTINGS_FULL_SQL = (
 
 # THE CHANGE-DRIVEN SELECTION (W1-a2; the measurement is in the module docstring).
 #
+# THE WINDOW STANDS 15 MINUTES BEHIND THE CLOCK — see `_SNAPSHOT_SEED_SQL` for why: a
+# bigserial id is allocated at INSERT and visible at COMMIT, so a concurrent
+# `write_detail_batch` transaction can land a row BELOW a cursor that has already moved, and
+# a keyset never looks back. The lag costs one run of latency and closes the hole.
+#
 # The WINDOW is a keyset slice of the snapshot LOG, not of `listings`: `s.id > cursor ORDER
 # BY s.id LIMIT n` is one walk of the primary key. It is deduped to one row per listing
 # afterwards, so a listing that changed five times in the window is extracted once — the
@@ -778,6 +811,7 @@ _LISTINGS_INCREMENTAL_SQL = ("""
         JOIN listings f ON f.id = s.listing_id
          AND (%(source)s::text IS NULL OR f.source = %(source)s)
         WHERE s.id > %(after_id)s
+          AND s.scraped_at < now() - interval '15 minutes'
         ORDER BY s.id
         LIMIT %(batch_size)s
     ), changed AS (
@@ -798,39 +832,84 @@ _LISTINGS_INCREMENTAL_SQL = ("""
 # The listing scan mines the body of a listing it happens to visit; that is change-shaped,
 # and the page backlog is not. ~250 000 latest detail bodies of active listings sat unmined
 # after the first wave (`contract_version IS NULL` everywhere), and at 1 500 per 20 000-row
-# listing batch they would have drained over ~170 runs of pure side effect. This selects
-# them directly, in `portal_raw_payloads.id` order, and needs NO cursor: the mined-at stamp
-# is the progress, so the next batch's `IS DISTINCT FROM` no longer matches what this one
-# wrote. Same `_BODY_JOIN`, so "the latest detail body" is defined once for both halves.
+# listing batch they would have drained over ~170 runs of pure side effect.
+#
+# DRIVEN FROM `portal_raw_payloads`, WITH AN IN-RUN KEYSET ON `p.id`. The first cut drove
+# off `listings` with no cursor at all, on the theory that the mined-at stamp is the
+# progress — and it is, for a body that CAN be stamped. Four paths leave one unstamped (the
+# bucket could not serve it, the portal has no scope register, `extract_page` refused on its
+# content, the scoper failed closed) and three of those are deterministic per body, so the
+# unstampable ones sit at the head of `ORDER BY p.id` forever: re-fetched every batch, and
+# once `cap` of them accumulate a batch stamps nothing at all, the no-progress rail ends the
+# pass, and the next run selects the identical rows. The whole backlog stalls behind a
+# handful of bad objects, silently. The keyset walks PAST them instead: `after_body_id`
+# starts at 0 each run and advances to the batch's `max(p.id)` after its transaction closes,
+# so poison costs one re-fetch per RUN, not one per batch, and the pass ends when a batch
+# comes back short of `cap` (the end of the keyset) rather than when it stamps nothing.
+#
+# The `p.id = (SELECT ... ORDER BY last_observed_at DESC, p2.id DESC LIMIT 1)` self-probe is
+# "the LATEST detail body of this key", the same definition `_BODY_JOIN`'s lateral applies
+# from the other direction — `last_observed_at`, never `first_observed_at` (a page that goes
+# A -> B -> A appends no third row, it bumps A) and never `version_seq` (403 added it with no
+# backfill, so every older body is NULL there).
 #
 # ACTIVE listings only, unlike the listing scan. A delisted row's PAYLOAD is evidence we
 # already hold; its stored page body is a fetch we would pay R2 for to mine a page nobody
 # will ever see again, ahead of ~250 000 live ones.
-_UNMINED_BODIES_WHERE = """
-    WHERE l.is_active
-      AND l.source = ANY(%(page_sources)s::text[])
-      AND (%(source)s::text IS NULL OR l.source = %(source)s)
-      AND pb.id IS NOT NULL
-      AND pc.version IS NOT NULL
-      AND pb.contract_version IS DISTINCT FROM pc.version
+
+# The SAME record shape as the listing scan — ONE `_row_from_record` for all three
+# selections — projected off the payload row itself rather than through a lateral, and
+# without `raw_json`: no page reader reads it (the substrate is the body), and 1 500 rows of
+# it is ~10 MB dragged over the wire to be thrown away. A `pb.` left in the result would be
+# a column this FROM clause does not have, so the test asserts none survives.
+_UNMINED_BODIES_SELECT = (
+    _SELECT_COLUMNS
+    .replace("l.raw_json", "NULL::jsonb")
+    .replace("pb.payload_sha256", "encode(p.payload_sha256, 'hex')")
+    .replace("pb.page_kind", "p.page_kind::text")
+    .replace("pb.id", "p.id")
+    .replace("pb.contract_version", "p.contract_version")
+    .replace("pb.first_observed_at", "p.first_observed_at")
+    # No snapshot keyset here (this pass walks payload ids), then the legacy TAIL.
+    + " NULL::bigint," + _LEGACY_COLUMNS_SELECT
+)
+
+_UNMINED_BODIES_FROM = """
+    FROM portal_raw_payloads p
+    JOIN listings l ON l.source = p.source AND l.source_id_native = p.source_id_native
+    LEFT JOIN mapy_affected a ON a.listing_id = l.id
+    JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active
 """
 
-# The SAME record shape as the listing scan (one `_row_from_record`, one unpack to keep in
-# step) with `raw_json` projected away: no page reader reads it — the substrate is the body
-# — and a 1 500-row batch would otherwise drag ~10 MB of payload through the wire to be
-# thrown away. `_row_from_record` already reads a non-dict as `{}`.
+_UNMINED_BODIES_WHERE = """
+    WHERE p.id > %(after_body_id)s
+      AND p.page_kind = 'detail'
+      AND (p.http_status IS NULL OR p.http_status BETWEEN 200 AND 299)
+      AND p.contract_version IS DISTINCT FROM pc.version
+      AND l.is_active
+      AND l.source = ANY(%(page_sources)s::text[])
+      AND (%(source)s::text IS NULL OR l.source = %(source)s)
+      AND p.id = (
+        SELECT p2.id FROM portal_raw_payloads p2
+        WHERE p2.source = p.source
+          AND p2.source_id_native = p.source_id_native
+          AND p2.page_kind = 'detail'
+          AND (p2.http_status IS NULL OR p2.http_status BETWEEN 200 AND 299)
+        ORDER BY p2.last_observed_at DESC, p2.id DESC
+        LIMIT 1)
+"""
+
 _UNMINED_BODIES_SQL = (
-    _SELECT_COLUMNS.replace("l.raw_json", "NULL::jsonb") + " NULL::bigint,"
-    + _LEGACY_COLUMNS_SELECT
-    + _FROM_LISTINGS + _BODY_JOIN + _UNMINED_BODIES_WHERE + """
-    ORDER BY pb.id
+    _UNMINED_BODIES_SELECT + _UNMINED_BODIES_FROM + _UNMINED_BODIES_WHERE + """
+    ORDER BY p.id
     LIMIT %(cap)s
 """)
 
-# One cheap-ish count per RUN (never per batch), so the summary line can say how much of
-# the backlog is left rather than only how much this run took off it.
+# One count per RUN (never per batch), so the summary can say how much of the backlog is
+# left rather than only how much this run took off it. Same predicate, read from id 0.
 _UNMINED_BODY_BACKLOG_SQL = (
-    "SELECT count(*) FROM listings l" + _BODY_JOIN + _UNMINED_BODIES_WHERE)
+    "SELECT count(*)" + _UNMINED_BODIES_FROM + _UNMINED_BODIES_WHERE)
+
 
 # The mined-at stamp, in the SAME transaction as the claims it produced: a batch that rolls
 # back un-stamps its bodies too, so the next run mines them again rather than skipping
@@ -1171,12 +1250,21 @@ def _resume_point(
     return None if after_ts is not None else int(after_id)
 
 
-def _snapshot_seed(conn: psycopg.Connection, statement_timeout: int) -> int:
-    """The cold-start cursor: the newest snapshot id. See `_SNAPSHOT_SEED_SQL`."""
+def _snapshot_seed(
+    conn: psycopg.Connection, statement_timeout: int, *, source: str | None,
+) -> tuple[int, Any]:
+    """The cutover cursor and the anchor it was derived from. See `_SNAPSHOT_SEED_SQL`.
+
+    Two statements, two guarded blocks: they are separate reads, and each one is bounded on
+    its own so neither can hang the run before its first batch row exists."""
     with guarded(conn, statement_timeout) as cur:
-        cur.execute(_SNAPSHOT_SEED_SQL)
+        cur.execute(_LEGACY_WATERMARK_SQL, {"lane": LANE, "source": source})
         row = cur.fetchone()
-    return int(row[0]) if row and row[0] is not None else 0
+        watermark = row[0] if row else None
+    with guarded(conn, statement_timeout) as cur:
+        cur.execute(_SNAPSHOT_SEED_SQL, {"watermark": watermark})
+        row = cur.fetchone()
+    return (int(row[0]) if row and row[0] is not None else 0), watermark
 
 
 @dataclass
@@ -1331,7 +1419,8 @@ def _unmined_body_backlog(
     try:
         with guarded(conn, statement_timeout) as cur:
             cur.execute(_UNMINED_BODY_BACKLOG_SQL,
-                        {"source": source, "page_sources": sources})
+                        {"source": source, "page_sources": sources,
+                         "after_body_id": 0})
             row = cur.fetchone()
         return int(row[0]) if row else None
     except Exception as exc:  # noqa: BLE001 - a readout must not fail a finished run
@@ -1354,15 +1443,18 @@ def drain_unmined_bodies(
     listing scan capped the drain at `DEFAULT_BODY_FETCH_CAP` per 20 000-row batch: ~170
     runs of walking listings to reach bodies the query could have named directly.
 
-    NO CURSOR: the mined-at stamp is the progress, so every batch re-asks the same question
-    and gets the remainder. Two rails keep that from spinning — half the run budget at most
-    (the payload half is never starved), and a batch that stamps NOTHING ends the pass,
-    because the next one would select exactly the same rows.
+    THE KEYSET IS IN-RUN and it is what keeps an unstampable body from stalling the whole
+    backlog (see `_UNMINED_BODIES_SQL`): `after_body_id` starts at 0 every run, so the
+    contract-version gate still decides WHAT is eligible, and advances past every row a
+    batch selected — stamped or not — so the pass walks on. The other two rails: half the
+    run budget at most (the payload half is never starved), and a batch that comes back
+    short of `cap` is the end of the keyset.
     """
     if store is None or not page_sources:
         return
     started = time.monotonic()
     last_seconds = 0.0
+    after_body_id = 0
     sources = sorted(page_sources if source is None else page_sources & {source})
     if not sources:
         return
@@ -1376,18 +1468,25 @@ def drain_unmined_bodies(
         result = IntakeResult()
         stamps: list[dict[str, Any]] = []
         selected = 0
+        batch_cursor = after_body_id
         with guarded(conn, statement_timeout) as cur:
             cur.execute(_UNMINED_BODIES_SQL, {
-                "source": source, "page_sources": sources, "cap": cap})
+                "source": source, "page_sources": sources, "cap": cap,
+                "after_body_id": after_body_id})
             records = cur.fetchall()
             selected = len(records)
             if not records:
-                stats["bodies_backlog_drained"] = True
-                LOG.info("INTAKE bodies-first: no unmined bodies left")
+                stats["bodies_pass_complete"] = True
+                LOG.info("INTAKE bodies-first: no unmined bodies left above id=%d",
+                         after_body_id)
                 break
             candidates: list[BodyCandidate] = []
             for record in records:
                 scan = _row_from_record(record)
+                # The keyset advances past EVERY selected row, before any filter: a body
+                # this batch cannot mine must cost one re-fetch per run, not one per batch.
+                if scan.body is not None:
+                    batch_cursor = max(batch_cursor, scan.body.id)
                 entries = entries_by_source.get(scan.row.source)
                 if not entries:
                     continue
@@ -1409,19 +1508,23 @@ def drain_unmined_bodies(
                 stamp_mined_bodies(cur, stamps)
                 stats["claims_inserted"] += inserted
                 stats["enqueued"] += enqueued
+        # Advanced only here, after the transaction closed — the same rule the payload
+        # half's cursor follows.
+        after_body_id = batch_cursor
         last_seconds = time.monotonic() - batch_started
         stats["bodies_batches"] += 1
         LOG.info("INTAKE bodies-first batch selected=%d mined=%d claims=%d inserted=%d "
-                 "in %.1fs", selected, len(stamps), len(result.claims),
-                 stats["claims_inserted"], last_seconds)
+                 "through_id=%d in %.1fs", selected, len(stamps), len(result.claims),
+                 stats["claims_inserted"], after_body_id, last_seconds)
         if dry_run:
-            LOG.info("INTAKE bodies-first: --dry-run stamps nothing, so one batch is the "
-                     "whole pass (the stamp is this half's only cursor)")
+            # A dry run is a shape check, not a drain: it writes no claims, so spending the
+            # bucket on the rest of the backlog would buy nothing.
+            LOG.info("INTAKE bodies-first: --dry-run takes one batch, not the backlog")
             break
-        if not stamps:
-            LOG.warning("INTAKE bodies-first stopping: a batch of %d selected bodies "
-                        "stamped none, so the next batch would select the same rows",
-                        selected)
+        if selected < cap:
+            stats["bodies_pass_complete"] = True
+            LOG.info("INTAKE bodies-first: the keyset reached its end at id=%d",
+                     after_body_id)
             break
     stats["bodies_seconds"] = time.monotonic() - started
 
@@ -1503,10 +1606,10 @@ def run(
             LOG.info("INTAKE resuming the %s scan for source=%s from after_id=%d",
                      mode, source or "*", after_id)
         elif mode == "incremental":
-            after_id = _snapshot_seed(conn, statement_timeout)
-            LOG.info("INTAKE no incremental cursor for source=%s; seeding at the newest "
-                     "snapshot id=%d (the exhaustive pass is --mode full)",
-                     source or "*", after_id)
+            after_id, anchor = _snapshot_seed(conn, statement_timeout, source=source)
+            LOG.info("INTAKE no incremental cursor for source=%s; seeding at snapshot "
+                     "id=%d from the pre-W1-a2 anchor %s (the exhaustive pass is "
+                     "--mode full)", source or "*", after_id, anchor or "none (log head)")
 
     batch_id: int | None = None
     if not dry_run:
@@ -1533,7 +1636,7 @@ def run(
         "claims_inserted": 0, "enqueued": 0, "refusals": 0,
         "bodies_eligible": 0, "bodies_fetched": 0, "bodies_from_r2": 0,
         "bodies_mined": 0, "body_fetch_seconds": 0.0, "bodies_batches": 0,
-        "bodies_seconds": 0.0, "bodies_backlog_drained": False,
+        "bodies_seconds": 0.0, "bodies_pass_complete": False,
         "bodies_backlog_remaining": None, "payload_seconds": 0.0,
         "stopped_early": False, "reached_end": False, "resumed_from_id": after_id,
     }
@@ -1664,11 +1767,6 @@ def run(
         LOG.info("INTAKE refused reason=%s count=%d", reason, refusals[reason])
     stats["refusal_reasons"] = dict(sorted(refusals.items()))
 
-    if page_capable and store is not None:
-        stats["bodies_backlog_remaining"] = _unmined_body_backlog(
-            conn, source=source, page_sources=page_capable,
-            statement_timeout=statement_timeout)
-
     # 'ok' means ONE thing: the scan ran out of rows. A run that ran out of budget instead
     # stamps 'stopped'. Both keep their cursor: in incremental mode the cursor is a
     # position in an append-only log, so the next run picks it up either way.
@@ -1689,6 +1787,16 @@ def run(
     stats["batch_id"] = batch_id
     stats["mode"] = mode
     stats["cursor_after_id"] = after_id
+
+    # THE READOUT COMES AFTER THE TERMINAL STAMP, deliberately. It is a `count(*)` under the
+    # 600 s statement ceiling, run at the moment the budget is already spent — ahead of the
+    # stamp it could push the job past `timeout-minutes: 55` and lose the cursor of a run
+    # that had otherwise finished cleanly, which is the exact failure this wave exists to
+    # close. Nothing below this line is allowed to decide whether the run is resumable.
+    if page_capable and store is not None:
+        stats["bodies_backlog_remaining"] = _unmined_body_backlog(
+            conn, source=source, page_sources=page_capable,
+            statement_timeout=statement_timeout)
 
     # ONE LINE THE OPERATOR CAN READ A RUN OFF. The per-batch progress lines say what the
     # run was doing; this says what it achieved and what is left.

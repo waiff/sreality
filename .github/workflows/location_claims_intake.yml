@@ -10,12 +10,17 @@ name: "Jobs: Location claim intake"
 # No model. TWO HALVES, in this order, both inside one budget (W1-a2):
 #
 #   * BODIES FIRST — the unmined latest detail bodies of ACTIVE page-portal listings,
-#     drained directly in 1 500-row batches until the backlog is empty or half the budget
-#     is gone. No cursor: the mined-at stamp IS the progress.
+#     drained directly in 1 500-row batches on an in-run keyset over
+#     `portal_raw_payloads.id`, until the backlog is empty or half the budget is gone. The
+#     keyset (not the mined-at stamp) is what carries the pass past a body it can never
+#     stamp, so a handful of bad objects cannot stall the whole backlog behind them.
 #   * THEN THE CHANGED LISTINGS — a keyset walk of `listing_snapshots.id`, the
-#     append-on-content-change log. A run opens an hour's CHANGE, not every listing the
-#     index walks happened to re-sight: the `last_seen_at` watermark it replaces opened
-#     ~180 000 listings an hour to re-mine claims that already existed.
+#     append-on-content-change log, standing 15 MINUTES BEHIND THE CLOCK: a bigserial id is
+#     allocated at INSERT and visible at COMMIT, so a concurrent `write_detail_batch`
+#     transaction can land a row below a cursor that has already moved, and a keyset never
+#     looks back. A run opens an hour's CHANGE, not every listing the index walks happened
+#     to re-sight: the `last_seen_at` watermark it replaces opened ~180 000 listings an
+#     hour to re-mine claims that already existed.
 #
 # The page half is HASH-GATED: a body is mined only while
 # `portal_raw_payloads.contract_version IS DISTINCT FROM` the portal's active contract

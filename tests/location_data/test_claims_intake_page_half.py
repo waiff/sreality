@@ -111,14 +111,21 @@ class _Conn:
             return
         if "SELECT outcome, cursor_after_id" in sql:
             return
-        if sql.startswith("SELECT count(*) FROM listings l"):
+        if sql.startswith("SELECT count(*) FROM portal_raw_payloads p"):
             cur._result = [(len(self.unmined_bodies),)]
             return
-        if "WHERE l.is_active" in sql:
-            # The bodies-first pass. Every row it hands back is stamped by the loop, so
-            # the backlog shrinks exactly as `contract_version` does in production.
-            cur._result = [_record(*r) for r in self.unmined_bodies[:params["cap"]]]
+        if "FROM portal_raw_payloads p" in sql and "%(cap)s" in sql:
+            # The bodies-first pass: the in-run keyset over payload ids, then the cap.
+            # A stamped row leaves `unmined_bodies` exactly as `contract_version` moves it
+            # out of the predicate in production; an unstamped one stays, and only the
+            # keyset keeps the pass off it.
+            rows = [r for r in self.unmined_bodies
+                    if r[1] is not None and r[1] > params["after_body_id"]]
+            cur._result = [_record(*r) for r in rows[:params["cap"]]]
             self.body_selections.append(len(cur._result))
+            return
+        if "cursor_after_ts IS NOT NULL" in sql:
+            cur._result = [(None,)]
             return
         if "FROM listings l" in sql or "FROM listing_snapshots s" in sql:
             # One page of rows, then empty — so the scan reaches its end and stamps 'ok'.
@@ -341,12 +348,36 @@ def test_the_bodies_first_pass_drains_the_backlog_before_the_listing_scan(
 
     stats = _run(conn, store)
 
-    assert conn.body_selections == [3, 3, 1, 0], "three-row batches until the backlog is out"
+    assert conn.body_selections == [3, 3, 1], "three-row batches until one comes back short"
     assert [s["id"] for s in conn.stamped] == [b[1] for b in BACKLOG]
     assert stats["bodies_mined"] == 7 and stats["bodies_batches"] == 3
-    assert stats["bodies_backlog_drained"] is True
+    assert stats["bodies_pass_complete"] is True
     assert stats["bodies_backlog_remaining"] == 0
     assert stats["outcome"] == "ok"
+
+
+def test_bodies_the_pass_can_never_stamp_do_not_stall_the_backlog_behind_them(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """B2, the defect this keyset exists for. The three lowest payload ids are ungettable —
+    a bucket 404, a scoper that fails closed and a content refusal all land here — and with
+    no cursor they would be re-selected at the head of every batch, stamp nothing once `cap`
+    of them accumulate, and stall the ENTIRE backlog silently. The keyset walks past them:
+    the other four drain in the SAME run, and the poison costs one re-fetch per run."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG)
+    poisoned = {_key(200), _key(201), _key(202)}
+    store = _Store(failing=poisoned)
+
+    stats = _run(conn, store)
+
+    assert conn.body_selections == [3, 3, 1]
+    assert [s["id"] for s in conn.stamped] == [203, 204, 205, 206]
+    assert stats["bodies_mined"] == 4
+    assert stats["bodies_pass_complete"] is True
+    # The three stay in the backlog and are asked for again NEXT run, not next batch.
+    assert stats["bodies_backlog_remaining"] == 3
+    assert sorted(store.asked) == sorted(_key(200 + i) for i in range(7))
 
 
 def test_the_bodies_first_pass_stops_at_half_the_run_budget(
@@ -362,29 +393,29 @@ def test_the_bodies_first_pass_stops_at_half_the_run_budget(
 
     stats = _run(conn, _Store(), max_seconds=240.0)
 
-    assert stats["bodies_backlog_drained"] is False
+    assert stats["bodies_pass_complete"] is False
     assert stats["bodies_mined"] < len(BACKLOG), "it stopped inside the backlog"
     assert stats["bodies_batches"] >= 1
     # Whatever it mined IS stamped: the half budget ends the pass, it never rolls it back.
     assert len(conn.stamped) == stats["bodies_mined"]
 
 
-def test_a_bodies_batch_that_stamps_nothing_ends_the_pass(
+def test_a_pass_that_stamps_nothing_still_walks_its_keyset_to_the_end(
     monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
 ) -> None:
-    """The stamp is the cursor, so a batch that stamps nothing would hand the next batch
-    exactly the same rows — a bucket-spending spin for as long as the budget allows. Every
-    GET here fails, which is also the case the rail is most likely to meet."""
+    """Every GET fails. The pass must still reach the end of the keyset — its cursor is the
+    payload id, not the stamp — so the run ends on the same terminal condition as a healthy
+    one and the operator reads a backlog of 7 rather than a lane that quietly stopped."""
     monkeypatch.setattr(page_readers, "extract_page", _page_claim)
     conn = _Conn([NO_BODY], unmined_bodies=BACKLOG)
     store = _Store(failing={_key(200 + i) for i in range(7)})
 
     stats = _run(conn, store)
 
-    assert conn.body_selections == [3], "one batch, then it stopped"
+    assert conn.body_selections == [3, 3, 1]
     assert conn.stamped == []
     assert stats["bodies_mined"] == 0
-    assert stats["bodies_backlog_drained"] is False
+    assert stats["bodies_pass_complete"] is True
     assert stats["bodies_backlog_remaining"] == 7
 
 
@@ -410,8 +441,8 @@ def test_the_bodies_first_pass_is_skipped_without_an_object_store(
 def test_a_dry_run_takes_one_bodies_batch_and_stops(
     monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
 ) -> None:
-    """--dry-run writes no stamp, and the stamp is this pass's only cursor: a second batch
-    would select the same rows forever."""
+    """A dry run is a shape check, not a drain: it writes no claims, so spending the bucket
+    on the rest of the backlog would buy nothing."""
     monkeypatch.setattr(page_readers, "extract_page", _page_claim)
     conn = _Conn([NO_BODY], unmined_bodies=BACKLOG)
 

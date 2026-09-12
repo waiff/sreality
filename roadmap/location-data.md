@@ -68,9 +68,14 @@ component is slimmed twice — each wave rewrites one component and slims its st
     `listing_snapshots.id` (a row is appended exactly on a content change, rule 2), deduped to one
     row per listing, the `--source` filter inside the window. The page half got its own pass ahead
     of it: unmined latest bodies of ACTIVE page-portal listings, 1,500 a batch in
-    `portal_raw_payloads.id` order, until the backlog empties or half the budget is gone (~250,000
-    were unmined; on the listing scan that was ~170 runs). No cursor there — the stamp is the
-    progress. Deleted: `_WATERMARK_SQL`, `--overlap-hours`, `coverage_since`, `cursor_after_ts`
+    `portal_raw_payloads.id` order on an in-run keyset, until the backlog empties or half the
+    budget is gone (~250,000 were unmined; on the listing scan that was ~170 runs). Two rails came
+    out of review: the snapshot window stands 15 min behind the clock (a bigserial id is visible at
+    COMMIT, so a concurrent `write_detail_batch` can land a row below an advanced cursor — a keyset
+    never looks back), and the bodies pass walks a keyset rather than trusting the stamp (three of
+    the four unstamped paths are deterministic per body, so they would park at the head of the
+    order and stall the backlog behind them). Cutover is lossless: a cold lane seeds at the old
+    lane's own `cursor_after_ts` anchor minus the 3h overlap, not at the head. Deleted: `_WATERMARK_SQL`, `--overlap-hours`, `coverage_since`, `cursor_after_ts`
     writes and the incremental-degrades-to-full branch. `--max-seconds` defaults to 2400 in the CLI
     (an unbudgeted dispatch was cancelled by the 55-min job timeout and stamped nothing), and a
     batch does not start unless the previous one's measured duration fits. One summary line per run;
