@@ -83,6 +83,7 @@ from typing import Any
 import psycopg
 
 from location_data import loader_db
+from location_data.claims_common import SERVED_LISTING_PREDICATE
 from location_data.resolver import core, lease, projection, resolve_db
 from location_data.resolver.types import Claim, ResolverContext
 from location_data.resolver.version import RESOLVER_VERSION
@@ -305,9 +306,7 @@ INSERT INTO dirty_locations (listing_id, reason)
 SELECT l.id, 'full_sweep'
   FROM listings l
   LEFT JOIN listing_location p ON p.listing_id = l.id
- WHERE (l.is_active
-        OR EXISTS (SELECT 1 FROM properties pr
-                    WHERE pr.repr_listing_ref_id = l.id AND pr.status = 'active'))
+ WHERE """ + SERVED_LISTING_PREDICATE + """
    AND (p.listing_id IS NULL
         OR p.resolver_version <> %s
         OR p.registry_version <> %s

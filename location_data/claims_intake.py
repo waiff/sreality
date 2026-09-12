@@ -10,11 +10,10 @@ WHAT THIS LANE IS (rule 25: one store, one lane, eleven claim types, no flags)
         minutes behind the clock. What a run opens is an hour's CHANGE, not every
         listing the index walks re-sighted.
   * Two substrates, ONE registry (`READERS`), one write:
-      - `listings.raw_json`, the portal's own payload as we stored it — the payload
-        readers below;
-      - the STORED PAGE BODY: the latest `portal_raw_payloads` detail row for the
-        listing's `(source, source_id_native)`, fetched from R2 and scoped by the
-        contract's exclusion zones — the 14 page readers in `location_data.page_readers`.
+      - `listings.raw_json`, the portal's own payload as we stored it — the readers below;
+      - the STORED PAGE BODY: the latest `portal_raw_payloads` detail row for the listing's
+        `(source, source_id_native)`, fetched from R2 and scoped by the contract's exclusion
+        zones — the 14 page readers in `location_data.page_readers`.
   * Contract-driven: every claim is stamped with the `portal_contract_entries` row that
     produced it, and the extractor executes exactly those entries whose `locator` names a
     reader from `READERS`. A name in NO registry is a hard refusal (a real deploy error).
@@ -23,27 +22,22 @@ WHY CHANGE-DRIVEN (W1-a2, measured on run 34658123746)
   The first production run selected on `listings.last_seen_at >= watermark`. Every active
   listing is re-sighted within hours by the index walks, so an "incremental" hour opened
   ~180 000 listings (9 batches x 20 000 in 51 min) and re-mined payloads whose claims
-  already existed — `ON CONFLICT DO NOTHING` all the way down. A `listing_snapshots` row
-  is appended exactly when a listing's CONTENT changes, and every write path into
-  `listings` appends one (a brand-new row included: `scraper.db.upsert_listing` and
-  `_BATCH_SNAPSHOT_SQL` both compare against a NULL latest hash), so the snapshot log is
-  the exact set of payloads whose claims could have moved. The cursor is therefore a
-  `listing_snapshots.id`, kept where the batch row already keeps its keyset position.
+  already existed. A `listing_snapshots` row is appended exactly when a listing's CONTENT
+  changes, and EVERY write path into `listings` appends one (a brand-new row included), so
+  the log is the exact set of payloads whose claims could have moved — hence the cursor.
 
 THE HASH GATE (why the hourly budget is bounded by page CHURN, not by corpus size)
-  `portal_raw_payloads` is append-on-change: a body is one row, immutable, content-
-  addressed. So a body only has to be mined ONCE per contract version, and
-  `portal_raw_payloads.contract_version` is the marker that says it was: the scan joins the
-  portal's ACTIVE contract and mines only where
-  `contract_version IS DISTINCT FROM portal_contracts.version`. A new body arrives NULL
-  there and is mined on the next run; a contract bump re-mines every latest body over the
-  runs that follow; a body already at the active version is never fetched. No new table —
-  the column existed (migration 403) and nothing ever populated it.
+  `portal_raw_payloads` is append-on-change: a body is one immutable, content-addressed row,
+  so it has to be mined ONCE per contract version and `contract_version` is the marker that
+  says it was — the scan joins the portal's ACTIVE contract and mines only where
+  `contract_version IS DISTINCT FROM portal_contracts.version`. A new body arrives NULL and
+  is mined next run; a contract bump re-mines every latest body over the runs that follow.
+  No new table: the column existed (migration 403) and nothing ever populated it.
 
 R2 IS OPTIONAL TO THE LANE, NOT TO THE PAGE HALF
-  Bodies live in the bucket (99.7 % are spilled). If R2 is not configured the page half is
-  skipped with ONE warning per run and the payload half runs exactly as before — the hourly
-  lane must never go dark for all nine portals because a credential rotated.
+  Bodies live in the bucket (99.7 % are spilled). Unconfigured, the page half is skipped with
+  ONE warning per run and the payload half runs as before — the hourly lane must never go
+  dark for all nine portals because a credential rotated.
 
 THE LICENCE LADDER RUNS FIRST (§6.1.2, and it is a filter, not an audit)
   * `geocode` / bazos `street` / `locality` / absent provenance  -> class E, NO coordinate
@@ -58,9 +52,8 @@ WHAT IT WRITES, AND ONLY THAT
   (the resolver's queue, inside the same transaction), `location_claim_batches` (this
   lane's run ledger and cursor), and the `contract_version` stamp on the bodies it mined.
   Refusals — a withheld coordinate, an oversized value, a subject miss — are COUNTED and
-  logged once per reason per batch. `location_claim_observations`,
-  `location_claim_absences` and `location_enrichment_state` were written by every lane and
-  read by none; W1-a stopped writing them and migration 498 dropped them.
+  logged once per reason per batch. (`location_claim_observations`, `location_claim_absences`
+  and `location_enrichment_state` were written by every lane and read by none: dropped, 498.)
 
 CLI:
     python -m location_data.claims_intake --mode incremental
@@ -100,6 +93,7 @@ from location_data.claims_common import (  # noqa: F401 - the lane's public voca
     MAPY_COORDS_SOURCES,
     MIRROR_UNSAFE_CHARS,
     MAX_CLAIM_VALUE_BYTES_ENV,
+    SERVED_LISTING_PREDICATE,
     SOURCES,
     SUBSTRATE_ARCHIVED_HTML,
     SUBSTRATE_PAYLOAD,
@@ -506,10 +500,9 @@ _BATCH_INSERT_SQL = """
     RETURNING id
 """
 
-# `cursor_after_ts` is NOT written any more — by either mode. It was the timestamp half of
-# the deleted `(last_seen_at, id)` incremental keyset, and leaving it NULL on every row this
-# lane writes is what lets `_RESUME_SQL` tell a W1-a2 snapshot cursor from a pre-W1-a2
-# listing-id one (see `_resume_point`). The column stays; nothing populates it.
+# `cursor_after_ts` is NOT written any more, by either mode: leaving it NULL on every row this
+# lane writes is what lets `_resume_point` tell a W1-a2 snapshot cursor from a pre-W1-a2
+# listing-id one. The column stays; nothing populates it.
 _BATCH_FINISH_SQL = """
     UPDATE location_claim_batches
     SET finished_at = now(), outcome = %(outcome)s, row_count = %(row_count)s,
@@ -518,16 +511,11 @@ _BATCH_FINISH_SQL = """
     WHERE id = %(batch_id)s
 """
 
-# THE CURSOR IS THE LANE'S ONLY MEMORY NOW. There is no watermark: `_WATERMARK_SQL`
-# (`max(coverage_since) WHERE outcome='ok'`, minus `--overlap-hours`) selected on
-# `listings.last_seen_at`, which the index walks move for every active listing every few
-# hours — so "incremental" meant "re-mine the whole live corpus". Deleted with its time
-# arm, its overlap and `coverage_since`, which nothing else reads.
-#
-# `outcome` is still load-bearing and narrow (migration 387): 'ok' means "the scan ran out
-# of rows", never "the scan ran out of budget". It no longer gates the resume, because the
-# incremental cursor must survive a completed run — a scan that reached the end of the
-# snapshot log resumes from exactly where it ended, not from zero.
+# THE CURSOR IS THE LANE'S ONLY MEMORY: no watermark survives. The deleted `_WATERMARK_SQL`
+# selected on `listings.last_seen_at`, which the index walks move for every active listing
+# every few hours, so "incremental" meant "re-mine the whole live corpus". `outcome` stays
+# narrow (migration 387): 'ok' means the scan ran out of ROWS, never out of budget. It does
+# not gate the resume — `_resume_point` owns that rule for both modes.
 _RESUME_SQL = """
     SELECT outcome, cursor_after_id, cursor_after_ts
     FROM location_claim_batches
@@ -541,17 +529,13 @@ _RESUME_SQL = """
     LIMIT 1
 """
 
-# THE CUTOVER SEED, read ONCE by a lane that has no incremental cursor of its own.
-#
-# Seeding at the head of the log would drop every change between the old lane's last
-# position and this deploy — and the old lane's runs were being CANCELLED at the job
-# timeout, so it has no `outcome='ok'` row for days and that window is hours wide. Seed at
-# the old lane's own resume point instead: the newest batch row that still carries a
-# `cursor_after_ts` (the pre-W1-a2 `(last_seen_at, id)` keyset's timestamp half — on
-# 2026-09-11 that was 17:16Z), minus the 3-hour overlap that cursor was always read with.
-# Second arm: the last `ok` watermark, same overlap. Neither: the head, and the lag below
-# is then the only floor. The few hours between the anchor and now are re-walked once,
-# which is cheap and lossless; the exhaustive pass is still `--mode full`.
+# THE CUTOVER SEED, read ONCE by a lane that has no incremental cursor of its own. Seeding
+# at the head would drop every change since the old lane's last position, and that lane was
+# being CANCELLED at the job timeout (no `outcome='ok'` row for days), so the window is
+# hours wide. Seed at its own resume point: the newest row still carrying a
+# `cursor_after_ts` (the pre-W1-a2 keyset's timestamp half), else the last `ok` watermark,
+# both minus the 3-hour overlap that cursor was read with; else the head. The few re-walked
+# hours are cheap and lossless, and the exhaustive pass is still `--mode full`.
 _LEGACY_WATERMARK_SQL = """
     SELECT coalesce(
       (SELECT b.cursor_after_ts FROM location_claim_batches b
@@ -564,53 +548,39 @@ _LEGACY_WATERMARK_SQL = """
     ) - interval '3 hours'
 """
 
-# THE LAG, and it is a correctness rail, not a politeness one. `listing_snapshots.id` is a
-# bigserial: the id is allocated at INSERT and becomes VISIBLE at COMMIT. `write_detail_batch`
-# writes N snapshots inside one multi-statement transaction, concurrently across the
-# per-portal drains and the realtime worker — so a row carrying an id BELOW a cursor this
-# lane has already advanced past can appear after that cursor moved, and `s.id > after_id`
-# never looks back. Standing 15 minutes behind the wall clock keeps the window below every
-# transaction that could still be in flight. The seed takes the same predicate, or a cold
-# start would jump straight over the in-flight ids instead of stopping short of them.
+# THE LAG, a correctness rail. `listing_snapshots.id` is a bigserial — allocated at INSERT,
+# visible at COMMIT — and `write_detail_batch` writes N of them in one transaction across
+# the drains, so a row can appear BELOW a cursor that already moved, and `s.id > after_id`
+# never looks back. Standing 15 minutes back keeps the window below every in-flight
+# transaction. The seed takes the same predicate, or a cold start would jump over them.
 _SNAPSHOT_SEED_SQL = """
     SELECT coalesce(max(id), 0) FROM listing_snapshots
     WHERE scraped_at < now() - interval '15 minutes'
       AND (%(watermark)s::timestamptz IS NULL OR scraped_at <= %(watermark)s)
 """
 
-# THE SECOND SUBSTRATE, JOINED ONTO THE FIRST.
-#
-# `portal_raw_payloads.listing_id` is nullable and nothing has ever populated it
-# (`scraper.db.append_payload_if_enabled` passes None), so the join is on the portal's own
-# key — `(source, source_id_native)`, the store's uniqueness key, UNIQUE on `listings` too
+# THE SECOND SUBSTRATE, JOINED ONTO THE FIRST. `portal_raw_payloads.listing_id` is nullable
+# and nothing populates it, so the join is on the portal's own key — `(source,
+# source_id_native)`, the store's uniqueness key and UNIQUE on `listings` too
 # (`listings_source_native_uidx`, migration 091), so it stays 1:1.
 #
-# `page_kind = 'detail'` because that is the only kind stored: index bodies are never
-# archived. Only OK bodies are mined, matching `payloads._PRUNE_SQL`'s own ranking (403
-# cites idnes' 503 interstitial).
+# `page_kind = 'detail'` is the only kind stored (index bodies are never archived); only OK
+# bodies are mined, matching `payloads._PRUNE_SQL`'s ranking (403 cites idnes' 503 page).
 #
 # "LATEST BODY" IS `last_observed_at`, NOT `first_observed_at`. The store is
-# content-addressed and append-on-change, so a page that goes A -> B -> A does not append a
-# third row: it collides on A's `payload_sha256` and bumps A's `last_observed_at`. Ordering
-# by FIRST observation would then leave B permanently "latest" while the portal has been
-# serving A for weeks, and the lane would mine a body the page no longer has. Not
-# `version_seq` either — 403 added that counter with no backfill, so every older body is
-# NULL there and a comparison against NULL ranks the older row as the latest.
-# `prp_native (source, source_id_native, page_kind, first_observed_at desc)` still drives
-# the equality lookup; the ordering is a sort over the handful of rows the version cap
-# (2) allows per key, not a scan.
+# content-addressed and append-on-change, so A -> B -> A collides on A's hash and bumps A's
+# `last_observed_at`; ordering by FIRST observation would leave B permanently "latest" and
+# mine a body the page no longer has. Not `version_seq` either — 403 added it with no
+# backfill, so every older row is NULL there and ranks as the latest. `prp_native` still
+# drives the equality lookup; the ordering sorts the ≤2 rows the version cap allows.
 #
-# `body_unmined` IS THE HASH GATE, computed in SQL against the portal's own ACTIVE contract
-# so a per-portal version can never be applied to the wrong portal's body. NULL (a body
-# nothing has mined) is DISTINCT FROM any version, so a new body is always eligible.
+# `body_unmined` IS THE HASH GATE, computed against the portal's own ACTIVE contract so a
+# version can never be applied to the wrong portal's body; NULL is DISTINCT FROM any version.
 #
-# The scan projects NO body bytes. One batch's applicable ids go to `page_readers.load_bodies`,
-# which is where the R2 round trips happen — materialising ~14 GB of archive to discover
-# most of it has nothing to mine is the exact cost this ordering avoids.
-# NOT `*_SQL`: these two are FRAGMENTS, not statements. `tests/sql_corpus.discover` treats
-# every module-level `*_SQL` constant as a statement and PREPAREs it against the replayed
-# schema, where a bare select list referencing `pb` reads as "missing FROM-clause entry".
-# The two composed queries below carry the `_SQL` suffix and are what the sweep checks.
+# The scan projects NO body bytes: a batch's applicable ids go to `page_readers.load_bodies`,
+# where the R2 round trips happen — materialising ~14 GB of archive to find most of it has
+# nothing to mine is the cost this ordering avoids. NOT `*_SQL`: these are FRAGMENTS, and
+# `tests/sql_corpus.discover` PREPAREs every module-level `*_SQL` as a whole statement.
 _BODY_JOIN = """
     LEFT JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active
     LEFT JOIN LATERAL (
@@ -626,12 +596,9 @@ _BODY_JOIN = """
     ) pb ON TRUE
 """
 
-# The snapshot cursor is a COLUMN of the scan and the LAST one: `_row_from_record` unpacks
-# the record positionally, so the three selections and that unpack are one contract and a
-# column appended past the end would be swallowed silently. Full mode and the bodies pass
-# have no snapshot keyset and select NULL there. (W1-c deleted the class-B legacy tail that
-# used to sit after it — the lane reads `raw_json` and the stored body, and a `listings`
-# TEXT column is neither.)
+# The snapshot cursor is a COLUMN of the scan and the LAST one: `_row_from_record` unpacks the
+# record positionally, so the selections and that unpack are one contract and a column appended
+# past the end would be swallowed silently. Full mode and the bodies pass select NULL there.
 _SELECT_COLUMNS = """
     SELECT l.id, l.source, l.source_id_native, l.raw_json, l.last_seen_at,
            ST_Y(l.geom::geometry), ST_X(l.geom::geometry),
@@ -645,36 +612,33 @@ _FROM_LISTINGS = """
     LEFT JOIN mapy_affected a ON a.listing_id = l.id
 """
 
-# Keyset over the whole table (active AND inactive: a delisted row's payload is exactly the
-# evidence the history waves need, and nothing is ever deleted). Full mode is the
-# contract-bump path: it re-walks every listing by id and carries no snapshot cursor.
+# THE WALK VISITS WHAT THE RESOLVER SERVES; A FAILED RUN RESUMES (W1-a5). Keyset over
+# `listings.id` filtered to the served set — the resolver sweep's own predicate, shared so
+# the two lanes cannot drift. ~830k rows, ~376k served: walking the rest spent the payload
+# half of every hop on delisted rows nobody resolves. Full mode carries no snapshot cursor.
 _LISTINGS_FULL_SQL = (
     _SELECT_COLUMNS + " NULL::bigint\n"
     + _FROM_LISTINGS + _BODY_JOIN + """
     WHERE l.id > %(after_id)s
       AND (%(source)s::text IS NULL OR l.source = %(source)s)
+      AND """ + SERVED_LISTING_PREDICATE + """
     ORDER BY l.id
     LIMIT %(batch_size)s
 """)
 
 # THE CHANGE-DRIVEN SELECTION (W1-a2; the measurement is in the module docstring).
 #
-# THE WINDOW STANDS 15 MINUTES BEHIND THE CLOCK — see `_SNAPSHOT_SEED_SQL` for why: a
-# bigserial id is allocated at INSERT and visible at COMMIT, so a concurrent
-# `write_detail_batch` transaction can land a row BELOW a cursor that has already moved, and
-# a keyset never looks back. The lag costs one run of latency and closes the hole.
+# THE WINDOW STANDS 15 MINUTES BEHIND THE CLOCK — `_SNAPSHOT_SEED_SQL` has the why. The lag
+# costs one run of latency and closes the hole.
 #
-# The WINDOW is a keyset slice of the snapshot LOG, not of `listings`: `s.id > cursor ORDER
-# BY s.id LIMIT n` is one walk of the primary key. It is deduped to one row per listing
-# afterwards, so a listing that changed five times in the window is extracted once — the
-# readers read `listings.raw_json`, the CURRENT payload, so re-reading it per snapshot
-# would produce five identical fingerprints.
+# The WINDOW is a keyset slice of the snapshot LOG, not of `listings`, deduped to one row per
+# listing afterwards: the readers read `listings.raw_json`, the CURRENT payload, so a listing
+# that changed five times would otherwise yield five identical fingerprints.
 #
-# THE SOURCE FILTER LIVES INSIDE THE WINDOW, not outside it. Outside, a source-scoped run
-# whose window held no row for that portal would return zero listings — indistinguishable
-# from "the log is exhausted" — and the run would stamp `ok` with its cursor stuck. Inside,
-# every window row belongs to a listing the scan returns, so `max(snapshot_cursor)` over
-# the returned rows IS the window's own high-water mark.
+# THE SOURCE FILTER LIVES INSIDE THE WINDOW. Outside, a source-scoped run whose window held
+# no row for that portal would return zero listings — indistinguishable from "the log is
+# exhausted" — and stamp `ok` with its cursor stuck. Inside, every window row belongs to a
+# returned listing, so `max(snapshot_cursor)` IS the window's own high-water mark.
 _LISTINGS_INCREMENTAL_SQL = ("""
     WITH win AS (
         SELECT s.id, s.listing_id
@@ -1099,23 +1063,15 @@ def _resume_point(
 ) -> int | None:
     """Where this scan picks up, or None to start at the beginning of its range.
 
-    THE TWO MODES ANSWER DIFFERENTLY, because their cursors claim different things.
+    BOTH MODES resume from an UNFINISHED predecessor — 'stopped' (out of budget) or 'failed'
+    (W1-a5): either cursor only advances past a batch whose transaction closed, so a crashed
+    run's position is as true as a budgeted one's (dropping it reset run 34689928656's
+    successor to id 0). They part on 'ok': full restarts at 0 (the table was walked; the next
+    pass is the contract-bump re-walk), incremental carries on from the log's end.
 
-    FULL keeps migration 387's rule: only a budget-'stopped' predecessor is resumed from.
-    'ok' there means the whole table was walked, and the next full pass is the contract-bump
-    re-walk — it must start at id 0.
-
-    INCREMENTAL resumes from ANY terminal outcome, because its cursor is a POSITION IN AN
-    APPEND-ONLY LOG, not a claim about coverage. A scan that reached the end of
-    `listing_snapshots` has to carry on from that end (restarting at 0 would re-walk the
-    whole log), and a 'failed' one is safe to resume because the cursor only ever advances
-    past a batch whose transaction closed.
-
-    THE EPOCH GUARD IS `cursor_after_ts IS NULL`. Before W1-a2 an incremental cursor was a
-    `(last_seen_at, id)` keyset and always carried a timestamp; it is a bare
-    `listing_snapshots.id` now and this lane writes no timestamp cursor at all. Reading an
-    old LISTING id back as a SNAPSHOT id would silently skip every snapshot below it, so a
-    row that still carries a timestamp is not ours to resume from.
+    THE EPOCH GUARD IS `cursor_after_ts IS NULL`: a pre-W1-a2 cursor was a `(last_seen_at,
+    id)` keyset carrying a timestamp, and reading its LISTING id back as a SNAPSHOT id would
+    silently skip every snapshot below it. This lane writes no timestamp cursor at all.
     """
     with conn.cursor() as cur:
         cur.execute(_RESUME_SQL, {"lane": LANE, "source": source, "scan_mode": mode})
@@ -1126,7 +1082,7 @@ def _resume_point(
     if after_id is None:
         return None
     if mode == "full":
-        return int(after_id) if outcome == "stopped" else None
+        return int(after_id) if outcome in ("stopped", "failed") else None
     return None if after_ts is not None else int(after_id)
 
 

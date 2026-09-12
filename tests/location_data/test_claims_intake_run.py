@@ -14,10 +14,14 @@ from datetime import UTC, datetime
 import pytest
 
 from location_data import claims_intake
+from location_data.claims_common import SERVED_LISTING_PREDICATE
+from location_data.resolver import drain
 from location_data.claims_intake import (
     _BATCH_FINISH_SQL,
     _BATCH_INSERT_SQL,
+    _BODY_JOIN,
     _CLAIM_WRITE_SQL,
+    _FROM_LISTINGS,
     _INVENTORY_TERMINAL_SQL,
     _LISTINGS_FULL_SQL,
     _LISTINGS_INCREMENTAL_SQL,
@@ -237,12 +241,25 @@ def test_batch_queries_are_keyset_and_bounded():
     # (the index walks touch it), so selecting on it re-opened ~180 000 listings an hour.
     assert "last_seen_at >=" not in incremental
     assert "%(watermark)s" not in incremental and "%(after_ts)s" not in incremental
-    # Both walk active AND inactive LISTINGS: a delisted listing's payload is still
-    # evidence, and nothing is ever deleted (CLAUDE.md rule 3). The only `is_active` in
-    # either query is `portal_contracts.is_active`, which picks the portal's live contract.
-    for one in (full, incremental):
-        assert "l.is_active" not in one
-        assert one.count("is_active") == 1 and "pc.is_active" in one
+    # INCREMENTAL is change-driven and walks active AND inactive listings: a delisting
+    # snapshot is a change we want to see, and nothing is ever deleted (CLAUDE.md rule 3).
+    # Its only `is_active` is `portal_contracts.is_active`, which picks the live contract.
+    assert "l.is_active" not in incremental
+    assert incremental.count("is_active") == 1 and "pc.is_active" in incremental
+
+
+def test_the_full_walk_visits_only_what_the_resolver_serves():
+    """W1-a5. `listings` holds ~830k rows and the platform serves ~376k of them, so an
+    unfiltered walk spent the payload half of every hop on delisted rows nobody resolves.
+    The predicate is the resolver sweep's own, imported — the two walks cannot drift — and
+    it is a filter on the primary-key walk, not a join."""
+    predicate = " ".join(SERVED_LISTING_PREDICATE.split())
+    flat = " ".join(_LISTINGS_FULL_SQL.split())
+    assert predicate in " ".join(drain._SWEEP_SQL.split())
+    # In the WHERE of the keyset walk, not anywhere else in the statement.
+    assert predicate in flat.split("WHERE l.id > %(after_id)s", 1)[1]
+    # Filter only: every JOIN in the walk still comes from the shared FROM/body blocks.
+    assert flat.count("JOIN") == " ".join((_FROM_LISTINGS + _BODY_JOIN).split()).count("JOIN")
     assert MIN_BATCH_SIZE == 10_000 and MAX_BATCH_SIZE == 30_000
 
 
