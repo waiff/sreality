@@ -121,7 +121,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "location",
       "pg_column": null,
       "default": null,
-      "description": "Where the listing must be. Composite filter with three complementary sub-fields: a district name list (matched against l.district), a map bounding box (west/south/east/north on l.geom), and a center+radius pair (ST_DWithin around (lat,lng) within radius_m). Districts is an independent AND-clause; the map vs center+radius pair are mutually exclusive — when both are set, center+radius wins. Leave everything null for no spatial restriction.",
+      "description": "Where the listing must be. Composite filter with three complementary sub-fields: a location chip list (see the `districts` filter — RÚIAN code equality per level), a map bounding box (west/south/east/north on l.geom), and a center+radius pair (ST_DWithin around (lat,lng) within radius_m). Districts is an independent AND-clause; the map vs center+radius pair are mutually exclusive — when both are set, center+radius wins. Leave everything null for no spatial restriction.",
       "category": "Spatial",
       "ui_control": "location",
       "agendas": [
@@ -138,7 +138,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
     {
       "id": "districts",
       "type": "district_chip_list",
-      "pg_column": "district",
+      "pg_column": null,
       "default": null,
       "description": "Location chips. Each chip is an object `{name: str, context: str | null, level: 'kraj' | 'okres' | 'obec' | 'cast_obce' | 'locality' | null, id: int | null, excluded: bool}`, where `id` is the RÚIAN CODE at that level. ONE predicate compiles them everywhere (Browse, Stats, the map, the Watchdog): `<level>_id = any(codes)` with plain equality — `region_id` / `okres_id` / `obec_id` / `cast_obce_id`. A 'locality' chip (street / POI / address pick) carries its containing obec code and filters at the obec level. A chip with no code — an old saved filter — is resolved by name once at read time; if the RÚIAN name index cannot place it, it matches nothing. `context` disambiguates that name lookup and is not a predicate. INCLUDE chips OR together; chips with `excluded: true` are subtracted from the result.",
       "category": "Spatial",

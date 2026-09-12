@@ -62,7 +62,6 @@ class PathDef:
     label: str
     block_key: str
     district_key: str
-    floor_feature: str
     settings_keys: tuple[str, ...]
     rungs: tuple[RungDef, ...]
     explanation: str
@@ -74,7 +73,6 @@ PATHS: dict[str, PathDef] = {
         label="town + attributes",
         block_key="obec_kod",
         district_key="cast_obce_kod",
-        floor_feature="dedup_path_c",
         settings_keys=(
             "l0_path_c_town_key",
             "l0_path_c_district_key",

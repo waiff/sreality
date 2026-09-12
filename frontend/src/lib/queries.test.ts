@@ -55,7 +55,7 @@ describe('priceNullTolerantOr', () => {
  * Map/Table/Cards/Count while browse_stats still counts it), and — worse — the
  * id-spaces overlap by ~435, so a sreality_id passed into an `IN listing_id`
  * predicate would match a DIFFERENT listing. Pin the filter column here. */
-describe('applyPrefilters (city-quality id-space)', () => {
+describe('applyPrefilters (prefilter id-spaces)', () => {
   const record = () => {
     const calls: Array<{ col: string; vals: readonly unknown[] }> = [];
     const q = {
@@ -67,44 +67,39 @@ describe('applyPrefilters (city-quality id-space)', () => {
     return { q, calls };
   };
   const base: BrowsePrefilters = {
-    listingIds: null,
     obecIds: null,
     propertyIds: null,
     brokerListingIds: null,
     empty: false,
   };
 
-  it('filters the city-quality allowlist on listing_id, never sreality_id', () => {
-    const { q, calls } = record();
-    applyPrefilters(q, { ...base, listingIds: [10, 20, 30] });
-    expect(calls).toContainEqual({ col: 'listing_id', vals: [10, 20, 30] });
-    expect(calls.some((c) => c.col === 'sreality_id')).toBe(false);
-  });
-
-  it('leaves the other prefilter grains on their own columns', () => {
+  /* W3 S4 deleted the legacy city-quality listing-id allowlist together with
+   * the `?cityQualityLegacy=1` hatch that was its only producer; city-quality
+   * has resolved to an OBEC allowlist since W5 (migration 436). What remains is
+   * that every surviving grain lands on its own column, in order. */
+  it('leaves each prefilter grain on its own column', () => {
     const { q, calls } = record();
     applyPrefilters(q, {
       ...base,
-      listingIds: [1],
       obecIds: [500],
       propertyIds: [7],
     });
     expect(calls).toEqual([
-      { col: 'listing_id', vals: [1] },
       { col: 'obec_id', vals: [500] },
       { col: 'property_id', vals: [7] },
     ]);
+    expect(calls.some((c) => c.col === 'sreality_id')).toBe(false);
   });
 
-  it('applies no id filter when city-quality is inactive (null)', () => {
+  it('applies no id filter when every prefilter is inactive (null)', () => {
     const { q, calls } = record();
     applyPrefilters(q, base);
     expect(calls).toEqual([]);
   });
 
   /* The broker scope is listing-grain by construction (see isBrokerScoped), so
-   * its allowlist ANDs onto the cohort on `listing_id` — its OWN field, not the
-   * legacy city-quality `listingIds` slot that W7 is deleting. */
+   * its allowlist ANDs onto the cohort on `listing_id` — the only listing-grain
+   * `.in()` left once the legacy city-quality slot went (W3 S4). */
   it('filters the broker allowlist on listing_id, on its own field', () => {
     const { q, calls } = record();
     applyPrefilters(q, { ...base, brokerListingIds: [40, 41] });

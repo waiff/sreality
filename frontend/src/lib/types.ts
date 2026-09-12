@@ -981,7 +981,6 @@ export interface PipelineBoardCard {
   /* One label -- see ListingPublic.display_label. It replaced `street`, which
    * the board carried only to feed the deleted placePrimary(). */
   display_label: string | null;
-  district: string | null;
   disposition: string | null;
   subtype: string | null;
   area_m2: number | null;
@@ -1004,17 +1003,15 @@ export interface PipelineBoardCard {
    * (= curated_cities.admin_boundary_id; see lib/useCityQuality). */
   obec_id: number | null;
   cast_obce_id: number | null;
-  /* Municipality + free-text locality. The card's place line is `display_label`
-   * now; `obec` stays because the "Město A–Ž" sort orders by the TOWN, which is
-   * the tail of the label rather than its head (a label that starts with a
-   * street would sort by house number). */
-  obec: string | null;
-  locality: string | null;
   okres_id: number | null;
   region_id: number | null;
-  place_search_text: string | null;
-  okres: string | null;
-  region: string | null;
+  /* The municipality NAME, and the only place text left on a card (W3 S4,
+   * migration 506 dropped `district`, `locality`, `okres`, `region` and
+   * `place_search_text` from pipeline_board_public). The card's place line is
+   * `display_label`; `obec` stays because the "Město A–Ž" sort orders by the
+   * TOWN, which is the tail of the label rather than its head (a label that
+   * starts with a street would sort by house number). */
+  obec: string | null;
   /* properties.is_active rollup (bool_or over child listings, rule #15/#20) —
    * the same property-grain liveness signal Browse filters on. */
   is_active: boolean;

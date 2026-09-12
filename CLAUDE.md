@@ -247,10 +247,10 @@ incident history: `docs/architecture.md` § Architectural rules.
     a green run) and `FilterDef.basis`. Full rationale: `docs/architecture.md` § rule 23.
 24. **ONE location path: `listing_location` (mig 501 — grade axes NOT NULL, RÚIAN codes, `disputed`), read by
     the resolver's consumers.** W2-b (mig 502) dropped the W1 `*_location_current` projections + every
-    resolver-side relation, and deleted `serving_flags.py` — there is no `location_v2` flag; flipping a reader is
+    resolver-side relation, and deleted `serving_flags.py` — there is no serving flag; flipping a reader is
     a PR. The legacy `listings` columns (`geom`, `obec_id`…`ku_id` from trigger 289, `street`/`street_name_key`)
     survive until W4 and still serve every un-flipped feature; NEW location-reading code never reads them.
-    `serving_contracts.py` declares each consumer's floor; granularity compares by RANK, never back-ported.
+    W3 S4 (mig 506) deleted `serving_contracts.py` too; granularity compares by RANK, never back-ported.
 25. **Location: one store, one lane, eleven claim types, no flags; every location PR deletes at least as much
     as it adds.** One answer table (`listing_location`, 26 fields) by ONE four-step resolver (bind → fill →
     grade → check), one hourly intake lane over the payload + page body, ≤ 1 contract entry per claim type + a
