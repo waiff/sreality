@@ -64,7 +64,7 @@ _LISTING_COLS: tuple[str, ...] = (
     "category_main", "category_type", "area_m2", "area_basis",
     "price_czk", "price_per_m2", "price_per_m2_basis",
     "disposition", "subtype",
-    "district", "locality", "is_active", "last_seen_at",
+    "display_label", "is_active", "last_seen_at",
     "mf_reference_rent_czk", "mf_reference_rent_per_m2_czk", "mf_gross_yield_pct",
 )
 
@@ -76,7 +76,14 @@ SELECT
     (l.source_id_native IS NOT NULL) AS found,
     l.sreality_id, l.id AS listing_id, l.property_id, l.source_url,
     l.category_main, l.category_type, l.area_m2, l.price_czk, l.disposition, l.subtype,
-    l.district, l.locality, l.is_active, l.last_seen_at,
+    -- ONE place string (migration 503), the same one Browse, the map and the
+    -- notifications print. The panel used to fall back `district ?? locality`
+    -- while the SPA fell back the other way, so one listing could be labelled
+    -- two different ways on two surfaces.
+    location_display_label(ll.street_name, ll.house_number_cp, ll.house_number_co,
+                           ll.obec_name, ll.cast_obce_name, ll.country_code,
+                           ll.country_status) AS display_label,
+    l.is_active, l.last_seen_at,
     -- THE measure and its label (migration 425), listing-grain: the panel is
     -- overlaid on ONE portal advert, so the number must be that advert's.
     -- `area_basis` (migration 423) rides along because the denominator is
@@ -110,6 +117,7 @@ FROM req
 LEFT JOIN listings l
     ON l.source = req.source AND l.source_id_native = req.source_id
 LEFT JOIN properties pr ON pr.id = l.property_id
+LEFT JOIN listing_location ll ON ll.listing_id = l.id
 """
 
 # RLS alone scopes every join here: `current_account_ids()` is the ONE definition

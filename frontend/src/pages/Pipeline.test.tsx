@@ -66,7 +66,7 @@ const CARDS: PipelineBoardCard[] = [
     category_type: 'prodej',
     price_per_m2: 90_909,
     price_per_m2_basis: 'sale_capital_czk_m2',
-    street: 'Sadová',
+    display_label: 'Sadová, Praha',
     district: 'Praha',
     disposition: '2+kk',
     subtype: null,
@@ -117,7 +117,7 @@ const CARD_DUM: PipelineBoardCard = {
   category_type: 'prodej',
   price_per_m2: 64_286,
   price_per_m2_basis: 'sale_capital_czk_m2',
-  street: 'Lesní',
+  display_label: 'Lesní, Brno',
   district: 'Brno',
   disposition: '4+1',
   subtype: null,
@@ -143,12 +143,12 @@ const CARD_INACTIVE: PipelineBoardCard = {
   property_id: 44,
   sreality_id: 333,
   listing_id: 333,
-  street: 'Polní',
+  display_label: 'Polní, Ostrava',
   district: 'Ostrava',
   place_search_text: 'Polní, Ostrava',
-  // The card's place line is placePrimary(), which prefers the free-text
-  // locality — so a fixture that overrides street/district must override these
-  // too or it silently keeps the base card's town.
+  // The card's place line is display_label alone now, but the remaining place
+  // columns still feed the in-memory chip predicate, so an overriding fixture
+  // must move them together or the card filters as if it were still in Brno.
   obec: 'Ostrava',
   locality: 'Polní, Ostrava',
   okres: 'Ostrava-město',

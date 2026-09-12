@@ -1147,7 +1147,7 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
           area_m2: l.area_m2,
           disposition: l.disposition,
           subtype: l.subtype,
-          district: l.district,
+          display_label: l.display_label,
         };
       })
       .filter((p): p is NonNullable<typeof p> => p !== null);

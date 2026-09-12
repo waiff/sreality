@@ -1282,7 +1282,7 @@ function mountPanel(): {
     }
     if (line.childElementCount > 0) subject.appendChild(line);
 
-    const place = l.district ?? l.locality;
+    const place = l.display_label;
     if (place) {
       const p = document.createElement('p');
       p.className = 'subject-place';

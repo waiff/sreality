@@ -117,8 +117,8 @@ export interface BrokerListing {
   listing_id: number;
   source: string;
   source_url: string | null;
-  locality: string | null;
-  district: string | null;
+  /* One server-composed label (migration 503) -- see types.ListingPublic. */
+  display_label: string | null;
   category_main: string | null;
   category_type: string | null;
   disposition: string | null;

@@ -621,9 +621,21 @@ def delete_subscription(
 # --- dispatches (the notification feed) -----------------------------------
 
 
+# `display_label` is the ONE place string (migration 503). It replaced the
+# `locality, district` pair the feed used to ship, which the SPA fell back
+# through as `locality ?? district` while the extension fell back the other way
+# — two surfaces naming the same listing two different places.
+#
+# It comes off `listings_public`, NOT off a `listing_location` join: this feed
+# runs on the tenant pool, i.e. under `SET LOCAL ROLE authenticated`, and
+# migration 501 revoked `listing_location` from that role outright. An
+# owner-rights `_public` view is how a browser-role query reaches the answer
+# table at all — the same reason pipeline_board_public reads its label off
+# properties_public.
 _LISTING_PROJECTION = (
     "l.sreality_id, l.category_main, l.category_type, l.price_czk, "
-    "l.price_unit, l.area_m2, l.disposition, l.subtype, l.locality, l.district, "
+    "l.price_unit, l.area_m2, l.disposition, l.subtype, "
+    "lp.display_label, "
     "l.is_active, l.first_seen_at, l.last_seen_at, l.mf_gross_yield_pct, "
     "l.source, l.source_url"
 )
@@ -658,6 +670,11 @@ _DISPATCH_FROM = (
     # rows, so no historical dispatch loses its listing fields here. A plain
     # equality keeps this an index lookup; a COALESCE/OR fallback would not.
     "LEFT JOIN listings l ON l.id = d.listing_id "
+    # Second join to the same row, deliberately: `l` is left exactly as it was
+    # (this PR does not touch what the existing projection returns) and `lp` is
+    # the owner-rights view that can see the resolved location. Same primary key,
+    # so it is one extra index lookup per dispatch.
+    "LEFT JOIN listings_public lp ON lp.id = d.listing_id "
     "LEFT JOIN estimation_runs er ON er.id = d.estimation_run_id "
 )
 

@@ -468,7 +468,7 @@ function PropertyRowView({
         </Link>
       </td>
       <td className="px-3 py-2.5 align-middle text-[var(--color-ink-2)]">
-        {row.district ?? <span className="text-[var(--color-ink-4)]">—</span>}
+        {row.display_label ?? <span className="text-[var(--color-ink-4)]">—</span>}
       </td>
       <td className="px-3 py-2.5 align-middle font-mono tabular-nums text-[var(--color-ink-2)]">
         {listingKindLabel(row) ?? <span className="text-[var(--color-ink-4)]">—</span>}

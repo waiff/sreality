@@ -11,7 +11,6 @@ import { fmtCzk, fmtArea, fmtMeasuredPricePerM2, fmtAbsolute } from '@/lib/forma
 import { areaKindOf, ppm2BasisFromToken } from '@/lib/measure';
 import type { ImagePublic, ListingPublic } from '@/lib/types';
 import { listingKindParts } from '@/lib/enums';
-import { placePrimary } from '@/lib/placeLabel';
 import {
   buildFacts,
   buildAmenities,
@@ -164,7 +163,7 @@ function Header({
           </span>
         </h1>
         <p className="mt-2 text-sm text-[var(--color-ink-2)]">
-          {placePrimary(listing) ?? '—'}
+          {listing.display_label ?? '—'}
         </p>
         {(hasId || ppm !== '—') && (
           <p className="text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)] mt-2">

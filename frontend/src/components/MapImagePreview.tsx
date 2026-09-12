@@ -11,7 +11,7 @@ interface Props {
   urls: string[];
   price: string;
   meta: string;
-  district?: string | null;
+  place?: string | null;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
 }
@@ -20,7 +20,7 @@ export default function MapImagePreview({
   urls,
   price,
   meta,
-  district,
+  place,
   onMouseEnter,
   onMouseLeave,
 }: Props) {
@@ -39,8 +39,8 @@ export default function MapImagePreview({
         <p className="mt-0.5 font-mono tabular-nums text-[0.78rem] text-[var(--color-ink-2)]">
           {meta}
         </p>
-        {district && (
-          <p className="mt-0.5 truncate text-[0.72rem] text-[var(--color-ink-3)]">{district}</p>
+        {place && (
+          <p className="mt-0.5 truncate text-[0.72rem] text-[var(--color-ink-3)]">{place}</p>
         )}
       </div>
     </div>

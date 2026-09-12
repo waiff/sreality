@@ -38,7 +38,6 @@ import {
 import { ppm2BasisFromToken } from '@/lib/measure';
 import { listingTypeLabel } from '@/lib/enums';
 import { portalLabel } from '@/lib/portals';
-import { placePrimary } from '@/lib/placeLabel';
 import type { ListingEstimate } from '@/lib/types';
 import { runSurfaceUrl } from '@/lib/runLinks';
 import { listingRowPath } from '@/lib/listingUrl';
@@ -508,10 +507,10 @@ function Card({
   const title = formatTitle(r);
   /* Ties the merge-mode checkbox to the card-wide <label> below it. */
   const selectId = useId();
-  /* Precise place first (geo town when the free-text locality is just the okres
-   * — the Bazoš "Jihlava"-for-Telč case), then the district/okres for context,
-   * de-duped so we never render "Telč, Telč". */
-  const place = [...new Set([placePrimary(r), r.district].filter(Boolean) as string[])].join(', ');
+  /* ONE server-composed label (migration 503). It used to be placePrimary()
+   * plus the district, de-duped in the browser; the resolver now says street,
+   * town or country once, so there is nothing left to de-dupe. */
+  const place = r.display_label ?? '';
   const isRent = r.category_type === 'pronajem';
   const priceSuffix = isRent && r.price_czk != null ? ' /měs' : '';
   const inactive = !r.is_active;

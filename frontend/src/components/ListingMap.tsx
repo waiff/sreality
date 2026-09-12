@@ -33,6 +33,7 @@ import {
 } from '@/lib/growthChoropleth';
 import HoverChart from '@/components/HoverChart';
 import { listingRowPath } from '@/lib/listingUrl';
+import { uncertaintyCircleRadiusM, uncertaintyPixelsAtZoom0 } from '@/lib/uncertaintyCircle';
 
 const psgLayerId = (m: GrowthMetric) => `psg-${m}`;
 
@@ -145,22 +146,35 @@ const formatPriceLabel = (r: MapRow, metric: PriceMetric): string => {
   return `${czPriceCompact.format(r.price_per_m2)}\u00a0${PPM2_UNIT[basis]}`;
 };
 
-type MapFeatureProps = MapRow & { price_label: string };
+/* `uncertainty_px_z0` is PRESENT only on a pin that draws an uncertainty circle
+ * (uncertaintyCircleRadiusM decides — below building level, with a radius), which
+ * is what the `point-uncertainty` layer filters on. Absent, not null: `['has']`
+ * is the one filter that reads the same on both. */
+type MapFeatureProps = MapRow & { price_label: string; uncertainty_px_z0?: number };
 type FC = GeoJSON.FeatureCollection<GeoJSON.Point, MapFeatureProps>;
 
 const toFeatureCollection = (rows: MapRow[], metric: PriceMetric): FC => ({
   type: 'FeatureCollection',
-  features: rows.map((r) => ({
-    type: 'Feature',
-    /* Stable feature id lets maplibre's setFeatureState target this
-     * point even after the source data is replaced — that's what
-     * powers the cross-source hover highlight (cards / table → map).
-     * The surrogate listing_id (never null), NOT sreality_id — a null
-     * feature id would make setFeatureState a no-op post-Gate-2. */
-    id: r.listing_id,
-    geometry: { type: 'Point', coordinates: [r.lng, r.lat] },
-    properties: { ...r, price_label: formatPriceLabel(r, metric) },
-  })),
+  features: rows.map((r) => {
+    const radiusM = uncertaintyCircleRadiusM(r);
+    return {
+      type: 'Feature' as const,
+      /* Stable feature id lets maplibre's setFeatureState target this
+       * point even after the source data is replaced — that's what
+       * powers the cross-source hover highlight (cards / table → map).
+       * The surrogate listing_id (never null), NOT sreality_id — a null
+       * feature id would make setFeatureState a no-op post-Gate-2. */
+      id: r.listing_id,
+      geometry: { type: 'Point' as const, coordinates: [r.lng, r.lat] },
+      properties: {
+        ...r,
+        price_label: formatPriceLabel(r, metric),
+        ...(radiusM == null
+          ? {}
+          : { uncertainty_px_z0: uncertaintyPixelsAtZoom0(radiusM, r.lat) }),
+      },
+    };
+  }),
 });
 
 /* W6b — SERVER-side grid cells (migration 439), used instead of `rows` when the
@@ -1023,6 +1037,36 @@ export default function ListingMap({
       });
       map.on('mouseleave', 'cells', () => {
         map.getCanvas().style.cursor = '';
+      });
+
+      /* HOW PRECISE THIS PIN IS. A true-metre-radius circle under every pin the
+       * resolver placed below building level (W3-3). It is a `circle` layer, not
+       * a polygon ring like `center-circle`: the radius interpolates on zoom with
+       * an exponential base of exactly 2, which is EXACT (web-Mercator metres per
+       * pixel halve per zoom level) and costs one point per pin instead of 96.
+       * Added before `point` so the dot always sits on top of its own circle. */
+      map.addLayer({
+        id: 'point-uncertainty',
+        type: 'circle',
+        source: 'listings',
+        filter: ['all', ['!', ['has', 'point_count']], ['has', 'uncertainty_px_z0']],
+        paint: {
+          'circle-radius': [
+            'interpolate', ['exponential', 2], ['zoom'],
+            0, ['get', 'uncertainty_px_z0'],
+            20, ['*', ['get', 'uncertainty_px_z0'], 2 ** 20],
+          ],
+          'circle-color': '#3c6e63',
+          'circle-opacity': 0.10,
+          'circle-stroke-color': '#3c6e63',
+          'circle-stroke-width': 0.75,
+          'circle-stroke-opacity': 0.35,
+          /* A footprint on the ground, so it stays a circle around the pin when
+             the map is pitched rather than a disc facing the camera. It is never
+             a hit target: no handler binds to this layer, and listingUnderCursor
+             queries ['point','clusters','cells'] by name. */
+          'circle-pitch-alignment': 'map',
+        },
       });
 
       map.addLayer({
@@ -2206,7 +2250,9 @@ function popupHtml(r: MapRow): string {
     ppm2BasisFromToken(r.price_per_m2_basis),
   );
   const disposition = listingKindLabel(r) ?? '—';
-  const district = r.district ?? '';
+  /* The ONE label (migration 503). `lp-district` stays the style hook -- it is a
+   * class name in globals.css, not a claim about what the string is. */
+  const place = r.display_label ?? '';
   const seen = fmtRelative(r.last_seen_at);
   const seenAbs = fmtAbsolute(r.last_seen_at);
   const inactive = !r.is_active;
@@ -2222,7 +2268,7 @@ function popupHtml(r: MapRow): string {
         <span class="lp-mono">${escape(area)}</span>
         ${ppm === '—' ? '' : `<span class="lp-sep">·</span><span class="lp-mono">${escape(ppm)}</span>`}
       </p>
-      ${district ? `<p class="lp-district">${escape(district)}</p>` : ''}
+      ${place ? `<p class="lp-district">${escape(place)}</p>` : ''}
       <p class="lp-seen" title="${escape(seenAbs)}">last seen ${escape(seen)}</p>
       <a href="${listingRowPath(r)}" class="lp-link">View details →</a>
     </div>
