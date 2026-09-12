@@ -2259,6 +2259,12 @@ lease on the caller's connection — which W2-a made safe by deleting the proper
 only cross-listing write: every write left is keyed on a listing the slice already holds. It is the
 right lever because the loop waits rather than works — measured 2026-09-12 10:27Z, one loop drained
 ~8 listings/s against a 448k queue while every backend on the instance sat in `DataFileRead`.
+**A failed BATCH costs one slice, never the worker** (W2-a6): the batch transaction rolls back, its
+rows stay queued exactly as claimed, the loop backs off (2 s doubling to 30 s) and claims again, and
+only five consecutive failures — or a lost connection, told apart by SQLSTATE because
+`QueryCanceled` is an `OperationalError` subclass, and reconnected once — stop a worker. The
+prefetch runs on its own 90 s ceiling, because a 250-listing bulk claims read legitimately outruns
+the 30 s a per-listing statement gets and cancelling it threw the whole batch away.
 
 ## Cross-reference map
 

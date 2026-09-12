@@ -161,8 +161,13 @@ Budget shape, and the two rails that make the shared lease actually exclusive:
   connection (psycopg connections are not thread-safe) claiming through the same `FOR UPDATE SKIP
   LOCKED` statement, so the slices are disjoint by construction; the lease, the budget and the
   `RunCache` are shared (the cache under a lock that is never held across a registry question). A
-  worker that loses its connection counts one `failed_passes` and exits — the heartbeat's
-  `workers` / `failed_passes` are how a degraded pass is told from a healthy one. The lease TTL is
+  batch that RAISES costs its slice and nothing else (W2-a6): the transaction rolls back, its
+  rows stay queued untouched, the loop backs off (2 s doubling to 30 s) and claims again, and
+  only five CONSECUTIVE failures — or a lost connection, reconnected once — stop a worker. The
+  prefetch runs on its own 90 s ceiling (`LOCATION_RESOLVE_PREFETCH_TIMEOUT_S`), because a
+  250-listing bulk claims read legitimately outruns the 30 s a per-listing statement gets. The
+  heartbeat's `workers` / `failed_batches` are how a degraded pass is told from a healthy one —
+  `failed_batches`, never `failed_passes`, which means "passes that raised" one level up. The lease TTL is
   unchanged: every loop tests the budget between batches and they run concurrently, so N workers
   still overrun by at most ONE batch.
 - `max_seconds` is clamped to ≤ 900 and `batch_size` to ≤ 1000, so a HEALTHY pass stays far below

@@ -16,10 +16,14 @@ import inspect
 import itertools
 import re
 import threading
+import time
 from contextlib import contextmanager
+from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import psycopg
 
 from location_data.resolver import core, drain, projection, resolve_db
 from location_data.resolver.version import RESOLVER_VERSION
@@ -400,7 +404,7 @@ def test_a_failed_warm_degrades_instead_of_ending_the_run():
     """The warm runs INSIDE the batch transaction, so an unguarded statement timeout there
     would abort the batch and take the whole run with it. Rolled back, every point falls
     through to its own lazy query."""
-    body = inspect.getsource(drain._drain_loop)
+    body = inspect.getsource(drain._run_batch)
     warm = body[body.index("warm_started"):body.index("_run_slice(")]
     assert "try:" in warm and "conn.transaction()" in warm
     assert "WARM %sfailed" in warm
@@ -1110,20 +1114,25 @@ def test_workers_1_is_the_single_connection_path_statement_for_statement(monkeyp
     caller = _WorkerConn(queue, 0)
     stats = drain.run(caller, batch_size=10, max_seconds=30, workers=1)
 
-    assert [t[:25] for t in _texts(caller)] == [
-        "set local statement_timeo", "set local lock_timeout = ",
+    # SET LOCALs are kept whole: which budget is armed where is the point of the sequence.
+    shape = [t if t.startswith("set local") else t[:25] for t in _texts(caller)]
+    assert shape == [
+        "set local statement_timeout = '30s'", "set local lock_timeout = '5s'",
         "select id, label from reg",
-        "set local statement_timeo", "set local lock_timeout = ",
+        "set local statement_timeout = '30s'", "set local lock_timeout = '5s'",
         "select count(*), coalesce",
-        "set local statement_timeo", "set local lock_timeout = ",
+        "set local statement_timeout = '30s'", "set local lock_timeout = '5s'",
         "select listing_id, attemp",
+        # the prefetch on its own budget, restored before anything writes (W2-a6)
+        "set local statement_timeout = '90s'",
         "select id, listing_id, so", "select id, source from li",
+        "set local statement_timeout = '30s'",
         "insert into listing_locat", "delete from dirty_locatio",
-        "set local statement_timeo", "set local lock_timeout = ",
+        "set local statement_timeout = '30s'", "set local lock_timeout = '5s'",
         "select count(*), coalesce",
-        "set local statement_timeo", "set local lock_timeout = ",
+        "set local statement_timeout = '30s'", "set local lock_timeout = '5s'",
         "select listing_id, attemp",
-    ]
+    ], shape
     assert (stats.workers, stats.claimed, stats.failed_passes) == (1, 2, 0)
 
 
@@ -1308,3 +1317,221 @@ def test_both_apply_lanes_run_migration_files_statement_by_statement():
 def test_migration_505_does_not_collide_with_the_open_branches():
     numbered = sorted(f.name for f in MIGRATIONS.glob("505_*.sql"))
     assert numbered == ["505_location_w2a4_properties_repr_index.sql"], numbered
+
+
+# --------------------------------- W2-a6: a failed batch costs one slice, never the worker
+
+
+def _retry_state(listing_ids: list[int], *, failures: int, error: Any = None) -> dict[str, Any]:
+    """A queue that models the ONE property the fix is about: a batch that raises ROLLS BACK,
+    so the rows it claimed are still queued and the next claim sees them again."""
+    return {
+        "executed": [], "transactions": 0, "slices": [], "depth": 0,
+        "pending": list(listing_ids), "in_flight": [], "claims": [], "deleted": [],
+        "failures": failures,
+        "error": error or (lambda: psycopg.errors.QueryCanceled(
+            "canceling statement due to statement timeout")),
+    }
+
+
+class _RetryCursor(_DrainCursor):
+    """`_DrainCursor` plus a model of the queue, and a prefetch that raises on demand — the
+    production failure was a statement timeout on the claims read (2026-09-12)."""
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        text = " ".join(sql.split()).lower()
+        st = self.state
+        if text.startswith("select listing_id, attempts, enqueued_at from dirty_locations"):
+            st["executed"].append((text, params))
+            taken, st["pending"] = st["pending"][:params[0]], st["pending"][params[0]:]
+            st["in_flight"] = list(taken)
+            st["claims"].append(list(taken))
+            self._result = [(listing_id, 0, CLAIMED_AT) for listing_id in taken]
+            return
+        if "from location_claims c" in text and st["failures"] > 0:
+            st["failures"] -= 1
+            raise st["error"]()
+        if text.startswith("delete from dirty_locations d using"):
+            st["executed"].append((text, params))
+            st["deleted"].append(list(st["in_flight"]))
+            st["in_flight"] = []
+            self._result = []
+            return
+        if text.startswith("select count(*)") and "dirty_locations" in text:
+            self._result = [(len(st["pending"]) + len(st["in_flight"]), 0)]
+            return
+        super().execute(sql, params)
+
+
+class _RetryConn(_DrainConn):
+    def __init__(self, state: dict[str, Any]) -> None:
+        super().__init__(state)
+        self.closed = False
+
+    def cursor(self) -> _RetryCursor:
+        return _RetryCursor(self.state)
+
+    def close(self) -> None:
+        self.closed = True
+
+    @contextmanager
+    def transaction(self):
+        self.state["transactions"] += 1
+        self.state["depth"] += 1
+        depth = self.state["depth"]
+        try:
+            yield
+        except Exception:
+            # Only the BATCH transaction rolls the claim back; the inner one is the warm's
+            # savepoint, and the drain swallows that by design.
+            if depth == 1:
+                self.state["pending"] = self.state["in_flight"] + self.state["pending"]
+                self.state["in_flight"] = []
+            raise
+        finally:
+            self.state["depth"] -= 1
+
+
+def test_a_failed_batch_leaves_its_rows_queued_and_the_loop_takes_the_next_slice(monkeypatch):
+    """THE fix. A statement timeout in the prefetch used to end the worker for the rest of
+    the pass (four of them per pass, measured 2026-09-12). Now it costs its slice: the
+    transaction rolls back, the rows are queued exactly as they were — same `enqueued_at`,
+    no backoff stamp, because `_run_slice` never ran — and the loop claims again."""
+    monkeypatch.setattr(drain, "BATCH_RETRY_BACKOFF_S", 0.0)
+    state = _retry_state([901, 902], failures=1)
+    stats = drain.run(_RetryConn(state), batch_size=1, max_seconds=30)
+
+    assert state["claims"] == [[901], [901], [902], []], state["claims"]
+    assert state["deleted"] == [[901], [902]]
+    assert (state["pending"], state["in_flight"]) == ([], [])
+    assert (stats.claimed, stats.resolved, stats.failed) == (2, 2, 0)
+    assert stats.failed_batches == 1
+    assert stats.failed_passes == 0, "the loop survived; nothing died"
+    # ...and the failed batch wrote NO per-listing backoff: the stamp is `_run_slice`'s.
+    assert not [t for t, _ in state["executed"] if t.startswith("update dirty_locations")]
+
+
+def test_five_consecutive_failures_stop_the_loop(monkeypatch):
+    """Retrying for ever is its own failure mode: five in a row is a condition, not a blip,
+    and the pass ends instead of spending its whole budget on one poisoned connection."""
+    monkeypatch.setattr(drain, "BATCH_RETRY_BACKOFF_S", 0.0)
+    assert drain.MAX_CONSECUTIVE_BATCH_FAILURES == 5
+    state = _retry_state([903], failures=99)
+    stats = drain.run(_RetryConn(state), batch_size=1, max_seconds=30)
+
+    assert len(state["claims"]) == 5, state["claims"]
+    assert stats.failed_batches == 5
+    assert (stats.claimed, stats.resolved) == (0, 0)
+    assert state["pending"] == [903], "the listing is still queued for the next pass"
+    assert stats.failed_passes == 0, "giving up cleanly is not a crash"
+
+
+def test_the_failure_counter_resets_on_any_batch_that_lands(monkeypatch):
+    """An instance that fails one batch in three must never accumulate its way to a stop."""
+    monkeypatch.setattr(drain, "BATCH_RETRY_BACKOFF_S", 0.0)
+    state = _retry_state([911, 912, 913], failures=0)
+    state["failures"] = 0
+    calls = {"n": 0}
+    original = _RetryCursor.execute
+
+    def flaky(self: Any, sql: str, params: Any = None) -> None:
+        text = " ".join(sql.split()).lower()
+        if "from location_claims c" in text:
+            calls["n"] += 1
+            if calls["n"] in (1, 3, 5):  # fail, land, fail, land, fail, land
+                raise psycopg.errors.QueryCanceled("canceling statement")
+        original(self, sql, params)
+
+    monkeypatch.setattr(_RetryCursor, "execute", flaky)
+    stats = drain.run(_RetryConn(state), batch_size=1, max_seconds=30)
+
+    assert stats.failed_batches == 3
+    assert (stats.claimed, stats.resolved) == (3, 3)
+    assert state["pending"] == []
+
+
+def test_a_statement_timeout_is_never_mistaken_for_a_dead_connection():
+    """`QueryCanceled` and `LockNotAvailable` are `OperationalError` SUBCLASSES, so an
+    `isinstance` check would read the very timeout this wave survives as a dead socket and
+    stop the worker on its first occurrence. The SQLSTATE is what separates them."""
+    conn = _RetryConn(_retry_state([], failures=0))
+    for alive in (psycopg.errors.QueryCanceled("57014"),
+                  psycopg.errors.LockNotAvailable("55P03")):
+        assert isinstance(alive, psycopg.OperationalError)
+        assert drain._connection_lost(conn, alive) is False
+    for gone in (psycopg.errors.ConnectionFailure("08006"),
+                 psycopg.errors.AdminShutdown("57P01")):
+        assert drain._connection_lost(conn, gone) is True
+    # A psycopg OperationalError with NO sqlstate never reached the server at all.
+    assert drain._connection_lost(conn, psycopg.OperationalError("socket closed")) is True
+    assert drain._connection_lost(conn, RuntimeError("a bug in our code")) is False
+    # ...and a connection psycopg has already marked closed is gone whatever raised.
+    conn.closed = True
+    assert drain._connection_lost(conn, RuntimeError("anything")) is True
+
+
+def test_the_worker_reconnects_once_and_then_stops(monkeypatch):
+    """A dead connection is not a failed statement — every batch on it fails the same way, so
+    the loop must not retry on it. The reconnect lives with whoever OWNS the connection."""
+    monkeypatch.setattr(drain, "BATCH_RETRY_BACKOFF_S", 0.0)
+    opened: list[_RetryConn] = []
+
+    def _open() -> _RetryConn:
+        # Every connection dies on its first prefetch: the first attempt reconnects, the
+        # second gives up.
+        conn = _RetryConn(_retry_state([921, 922], failures=99,
+                                       error=lambda: psycopg.errors.ConnectionFailure("08006")))
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(drain, "_worker_connection", _open)
+    caller = _RetryConn(_retry_state([], failures=0))
+    stats = drain.run(caller, batch_size=1, max_seconds=30, workers=1 + 1)
+
+    # Two workers, each opening two connections: the original and its ONE replacement.
+    assert len(opened) == 4, [c.state["claims"] for c in opened]
+    assert all(conn.closed for conn in opened)
+    assert drain.MAX_WORKER_RECONNECTS == 1
+    assert stats.failed_passes == 2, "both workers stopped on the second lost connection"
+    assert stats.failed_batches == 4, "one failed batch per connection"
+
+
+def test_the_prefetch_gets_a_budget_of_its_own():
+    """A 250-listing `= ANY(...)` over `location_claims` legitimately runs past the 30 s a
+    PER-LISTING statement is allowed, and cancelling it throws the whole batch away."""
+    assert drain.DEFAULT_PREFETCH_TIMEOUT_S == 90
+    assert drain.DEFAULT_PREFETCH_TIMEOUT_S > drain.DEFAULT_BATCH_TIMEOUT_S
+    assert drain._prefetch_timeout_s() == drain.DEFAULT_PREFETCH_TIMEOUT_S
+    source = inspect.getsource(drain._prefetch)
+    assert "_statement_timeout_guc(timeout_s)" in source
+    assert "finally" in source and "_statement_timeout_guc(restore_s)" in source
+
+
+def test_the_prefetch_budget_is_env_overridable(monkeypatch):
+    monkeypatch.setenv(drain.PREFETCH_TIMEOUT_ENV, "150")
+    assert drain._prefetch_timeout_s() == 150
+    assert drain.PREFETCH_TIMEOUT_ENV == "LOCATION_RESOLVE_PREFETCH_TIMEOUT_S"
+
+
+def test_the_backoff_doubles_to_a_ceiling_and_never_sleeps_past_the_budget(monkeypatch):
+    assert drain.BATCH_RETRY_BACKOFF_S == 2.0
+    assert drain.BATCH_RETRY_BACKOFF_MAX_S == 30.0
+    body = inspect.getsource(drain._drain_loop)
+    assert "min(backoff * 2, BATCH_RETRY_BACKOFF_MAX_S)" in body
+    slept: list[float] = []
+    monkeypatch.setattr(drain.time, "sleep", slept.append)
+    drain._backoff_sleep(10.0, time.monotonic() - 1)   # budget already gone
+    assert slept == []
+    drain._backoff_sleep(10.0, time.monotonic() + 100)
+    assert slept == [10.0]
+
+
+def test_the_stats_carry_failed_batches_separately_from_dead_workers():
+    """Two different failures with two different meanings: a batch that raised and was
+    retried, and a worker that stopped. Collapsing them is what made a healthy pass read as
+    four failures."""
+    total = drain.DrainStats(workers=4)
+    for _ in range(4):
+        total.absorb(drain.DrainStats(failed_batches=2, failed_passes=1, claimed=10))
+    assert (total.failed_batches, total.failed_passes) == (8, 4)
+    assert {"failed_batches", "failed_passes"} <= {f.name for f in fields(drain.DrainStats)}

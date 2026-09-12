@@ -22,7 +22,10 @@ Batch discipline (learned three times):
   finishes a row is bounded by the `enqueued_at` the slice claimed, so evidence that arrives
   mid-slice leaves the row queued instead of being deleted unresolved (see `_CLAIM_SLICE_SQL`);
 * resumable by construction: the queue IS the cursor, and a failed row comes back with a
-  backoff rather than blocking the slice.
+  backoff rather than blocking the slice;
+* a failed BATCH costs one slice and not the worker (W2-a6): the transaction rolls back, the
+  rows it claimed are still queued with their `enqueued_at` untouched, and the loop backs off
+  and claims again — five CONSECUTIVE failures, or a lost connection, are what stop a loop.
 
 Throughput discipline (measured, never assumed). The cost is POOLER ROUND TRIPS, not CPU:
 production run 31480587021 spent 225 ms per listing on three statements with NO server-side
@@ -159,6 +162,16 @@ SELECT count(*), coalesce(extract(epoch from now() - min(enqueued_at)), 0)
 # SAVEPOINT and costs one row, not the batch. Overridable for a deliberately slow backfill.
 BATCH_TIMEOUT_ENV = "LOCATION_RESOLVE_BATCH_TIMEOUT_S"
 DEFAULT_BATCH_TIMEOUT_S = 30
+# The PREFETCH gets its own, much larger budget (W2-a6). 30 s is right for a per-listing
+# statement and wrong for this one: the claims read is a 250-listing `= ANY(...)` over
+# `location_claims`, and on an IO-bound instance it legitimately runs past 30 s — where the
+# cancel threw away the whole batch's work and the rows went back to the queue to cost the
+# same again. Measured 2026-09-12: four workers each completed ONE batch and then died in the
+# prefetch of their second (claimed=1000 over batches=8, i.e. four batches counted that never
+# reached a write). Same `SET LOCAL` discipline, inside the batch transaction, restored to the
+# per-listing budget before anything writes.
+PREFETCH_TIMEOUT_ENV = "LOCATION_RESOLVE_PREFETCH_TIMEOUT_S"
+DEFAULT_PREFETCH_TIMEOUT_S = 90
 # One sweep window is an `INSERT ... SELECT` over a 250k-id slice of `listings` joined to the
 # answer table; minutes is normal for it and only for it.
 SWEEP_TIMEOUT_ENV = "LOCATION_RESOLVE_SWEEP_TIMEOUT_S"
@@ -167,16 +180,65 @@ DEFAULT_SWEEP_TIMEOUT_S = 900
 DEFAULT_SWEEP_WINDOW = 250_000
 LOCK_TIMEOUT_S = 5
 
+# A FAILED BATCH COSTS ONE SLICE, NEVER THE WORKER (W2-a6). The batch transaction rolls back
+# on the way out, so its rows are still queued with their `enqueued_at` untouched and the next
+# slice — this worker's or a sibling's — simply claims them again. What the loop must not do
+# is retry instantly: the failures that happen here are pressure (a statement timeout, a
+# pooler hiccup), and a hot retry loop is more of exactly what caused them.
+BATCH_RETRY_BACKOFF_S = 2.0
+BATCH_RETRY_BACKOFF_MAX_S = 30.0
+# ...and it must not retry for ever either: five consecutive failures is no longer a blip, it
+# is a condition, and the pass ends rather than spending its budget on it. The counter resets
+# on any batch that lands, so an intermittent instance never accumulates its way to a stop.
+MAX_CONSECUTIVE_BATCH_FAILURES = 5
+# A DEAD connection is not a failed statement — every batch on it fails the same way. The
+# worker reconnects ONCE (a pooler that dropped one client usually takes the next) and stops
+# if that one dies too.
+MAX_WORKER_RECONNECTS = 1
+# sqlstates that mean THE CONNECTION rather than the statement: class 08 (connection
+# exception) and the server announcing it is going away. Asked as a SQLSTATE and never as
+# `isinstance(exc, OperationalError)`, because `QueryCanceled` (57014) and `LockNotAvailable`
+# (55P03) are OperationalError subclasses too — the statement timeout this wave exists to
+# survive would otherwise read as a dead socket and stop the worker on its first occurrence.
+_CONNECTION_GONE_SQLSTATES = frozenset({"57P01", "57P02", "57P03"})
+
+
+class _ConnectionLost(Exception):
+    """The batch failed because the CONNECTION is gone, not because a statement was.
+
+    Raised out of the loop so the RECONNECT POLICY lives with whoever owns the connection —
+    `_run_workers` opened it and will close it — rather than in the loop that only borrows it.
+    """
+
+
+def _connection_lost(conn: psycopg.Connection, exc: BaseException) -> bool:
+    if getattr(conn, "closed", False):
+        return True
+    sqlstate = getattr(exc, "sqlstate", None)
+    if sqlstate is None:
+        # A psycopg OperationalError carrying no sqlstate came from the CLIENT side: the
+        # socket closed, the pooler refused, the handshake failed. The server answered nothing.
+        return isinstance(exc, psycopg.OperationalError)
+    return sqlstate.startswith("08") or sqlstate in _CONNECTION_GONE_SQLSTATES
+
+
+def _statement_timeout_guc(seconds: int) -> str:
+    return f"SET LOCAL statement_timeout = '{int(seconds)}s'"
+
 
 def _batch_guc(seconds: int) -> tuple[str, ...]:
     return (
-        f"SET LOCAL statement_timeout = '{int(seconds)}s'",
+        _statement_timeout_guc(seconds),
         f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT_S}s'",
     )
 
 
 def _batch_timeout_s() -> int:
     return loader_db.env_timeout_s(BATCH_TIMEOUT_ENV, DEFAULT_BATCH_TIMEOUT_S)
+
+
+def _prefetch_timeout_s() -> int:
+    return loader_db.env_timeout_s(PREFETCH_TIMEOUT_ENV, DEFAULT_PREFETCH_TIMEOUT_S)
 
 
 @contextlib.contextmanager
@@ -271,6 +333,9 @@ class DrainStats:
     # workers alone cannot tell you what actually drained.
     workers: int = 1
     failed_passes: int = 0
+    # Batches that RAISED and were retried (W2-a6) — the number that used to end the worker.
+    # A batch here costs its slice and nothing else: the rows are still queued.
+    failed_batches: int = 0
     # Phase timings, so the NEXT production run measures itself instead of being re-diagnosed.
     prefetch_seconds: float = 0.0
     warm_seconds: float = 0.0
@@ -296,6 +361,7 @@ class DrainStats:
         self.batches += other.batches
         self.fallbacks += other.fallbacks
         self.failed_passes += other.failed_passes
+        self.failed_batches += other.failed_batches
         self.prefetch_seconds += other.prefetch_seconds
         self.warm_seconds += other.warm_seconds
         self.core_seconds += other.core_seconds
@@ -310,11 +376,30 @@ class _Slice:
     sources: dict[int, str] = field(default_factory=dict)
 
 
-def _prefetch(conn: psycopg.Connection, listing_ids: list[int]) -> _Slice:
-    return _Slice(
-        claims=resolve_db.load_claims_bulk(conn, listing_ids),
-        sources=resolve_db.sources_bulk(conn, listing_ids),
-    )
+def _prefetch(
+    conn: psycopg.Connection,
+    listing_ids: list[int],
+    *,
+    timeout_s: int,
+    restore_s: int,
+) -> _Slice:
+    """The slice's two bulk reads, on a budget of THEIR OWN (W2-a6, see PREFETCH_TIMEOUT_ENV).
+
+    `SET LOCAL` inside the batch transaction the caller already opened, and restored to the
+    per-listing budget in a `finally` — nothing downstream of here may write under a 90 s
+    ceiling. The restore is best-effort on purpose: if it fails the transaction is already
+    aborted, and the batch is about to roll back anyway."""
+    with conn.cursor() as cur:
+        cur.execute(_statement_timeout_guc(timeout_s))
+    try:
+        return _Slice(
+            claims=resolve_db.load_claims_bulk(conn, listing_ids),
+            sources=resolve_db.sources_bulk(conn, listing_ids),
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            with conn.cursor() as cur:
+                cur.execute(_statement_timeout_guc(restore_s))
 
 
 def _warm(slice_: _Slice, ctx: ResolverContext, cache: resolve_db.RunCache) -> None:
@@ -376,7 +461,11 @@ def run(
                     cur.execute(statement)
             _resolve_one(
                 conn, only_listing_id, ctx_base, registry_label,
-                _prefetch(conn, [only_listing_id]), stats, dry_run=dry_run,
+                _prefetch(
+                    conn, [only_listing_id],
+                    timeout_s=_prefetch_timeout_s(), restore_s=batch_timeout_s,
+                ),
+                stats, dry_run=dry_run,
             )
             stats.claimed = stats.resolved = 1
         stats.seconds = time.monotonic() - started
@@ -399,11 +488,11 @@ def run(
     LOG.info(
         "DRAIN done batches=%d claimed=%d resolved=%d failed=%d fallbacks=%d %.1fs "
         "rate=%.1f/s prefetch=%.1fs warm=%.1fs core=%.1fs write=%.1fs registry_q=%d "
-        "registry_hit=%.0f%% workers=%d dead_workers=%d",
+        "registry_hit=%.0f%% workers=%d dead_workers=%d failed_batches=%d",
         stats.batches, stats.claimed, stats.resolved, stats.failed, stats.fallbacks,
         stats.seconds, stats.rate, stats.prefetch_seconds, stats.warm_seconds,
         stats.core_seconds, stats.write_seconds, cache.misses, 100.0 * cache.hit_rate,
-        stats.workers, stats.failed_passes,
+        stats.workers, stats.failed_passes, stats.failed_batches,
     )
     if workers == 1:
         # Above 1 the base context asked nothing — each worker logs its OWN query report as
@@ -440,43 +529,104 @@ def _drain_loop(
     slices run concurrently, so it is one batch, not N).
     """
     tag = "" if worker == 0 else f"w{worker} "
+    consecutive = 0
+    backoff = BATCH_RETRY_BACKOFF_S
     while time.monotonic() < deadline:
-        if worker <= 1:
-            depth, oldest = _queue_health(conn, batch_timeout_s)
-            LOG.info("QUEUE %sdepth=%d oldest_age_s=%.0f", tag, depth, oldest)
-        batch_started = time.monotonic()
-        batch_before = (stats.resolved, stats.failed)
-        with conn.transaction():
-            with conn.cursor() as cur:
-                for statement in _batch_guc(batch_timeout_s):
-                    cur.execute(statement)
-                cur.execute(_CLAIM_SLICE_SQL, (batch_size,))
-                rows = cur.fetchall()
-            if not rows:
-                # SKIP LOCKED means "nothing I can have", which on a busy queue can also mean
-                # "my siblings hold it all". Ending this loop is right either way: the queue
-                # is the cursor and the next pass is 15 seconds away.
-                LOG.info("QUEUE %sempty", tag)
-                break
-            stats.batches += 1
-            prefetch_started = time.monotonic()
-            slice_ = _prefetch(conn, [int(row[0]) for row in rows])
-            stats.prefetch_seconds += time.monotonic() - prefetch_started
-            warm_started = time.monotonic()
-            try:
-                # Its own SAVEPOINT: the warm is an OPTIMISATION, and a statement timeout
-                # inside it would otherwise abort the batch transaction and end the run.
-                # Rolled back, every point simply falls through to its own lazy query.
-                with conn.transaction():
-                    _warm(slice_, ctx, cache)
-            except Exception as exc:  # noqa: BLE001 - degrade to the lazy path, never die
-                LOG.warning("WARM %sfailed, resolving with per-point lookups: %s", tag, exc)
-            stats.warm_seconds += time.monotonic() - warm_started
-            _run_slice(
-                conn, rows, ctx, registry_label, slice_, stats, dry_run=dry_run,
+        try:
+            claimed = _run_batch(
+                conn, ctx, cache, stats, registry_label=registry_label,
+                batch_size=batch_size, batch_timeout_s=batch_timeout_s, dry_run=dry_run,
+                tag=tag, worker=worker,
             )
-        _log_batch(stats, cache, ctx, len(rows), batch_before,
-                   time.monotonic() - batch_started, tag)
+        except Exception as exc:  # noqa: BLE001 - one slice, not the worker
+            # The batch transaction has already rolled back on the way out of the `with`, so
+            # this slice's rows are queued exactly as they were — same `enqueued_at`, same
+            # `attempts`, no backoff stamp (that one is per LISTING and is written by
+            # `_run_slice`, which never ran). Nothing to undo, nothing to re-enqueue.
+            stats.failed_batches += 1
+            consecutive += 1
+            LOG.warning(
+                "BATCH %sfailed (%s: %s) — %d consecutive; its rows stay queued",
+                tag, type(exc).__name__, exc, consecutive,
+            )
+            if _connection_lost(conn, exc):
+                raise _ConnectionLost(f"{type(exc).__name__}: {exc}") from exc
+            if consecutive >= MAX_CONSECUTIVE_BATCH_FAILURES:
+                LOG.warning(
+                    "DRAIN %sstopping after %d consecutive failed batches", tag, consecutive)
+                return
+            _backoff_sleep(backoff, deadline)
+            backoff = min(backoff * 2, BATCH_RETRY_BACKOFF_MAX_S)
+            continue
+        if claimed is None:
+            break
+        consecutive = 0
+        backoff = BATCH_RETRY_BACKOFF_S
+
+
+def _run_batch(
+    conn: psycopg.Connection,
+    ctx: ResolverContext,
+    cache: resolve_db.RunCache,
+    stats: DrainStats,
+    *,
+    registry_label: str,
+    batch_size: int,
+    batch_timeout_s: int,
+    dry_run: bool,
+    tag: str,
+    worker: int,
+) -> int | None:
+    """ONE batch, in ONE transaction. Returns how many rows it claimed, or None when the queue
+    handed this loop nothing — the one outcome that ends the loop rather than repeating it."""
+    if worker <= 1:
+        depth, oldest = _queue_health(conn, batch_timeout_s)
+        LOG.info("QUEUE %sdepth=%d oldest_age_s=%.0f", tag, depth, oldest)
+    batch_started = time.monotonic()
+    batch_before = (stats.resolved, stats.failed)
+    with conn.transaction():
+        with conn.cursor() as cur:
+            for statement in _batch_guc(batch_timeout_s):
+                cur.execute(statement)
+            cur.execute(_CLAIM_SLICE_SQL, (batch_size,))
+            rows = cur.fetchall()
+        if not rows:
+            # SKIP LOCKED means "nothing I can have", which on a busy queue can also mean
+            # "my siblings hold it all". Ending this loop is right either way: the queue
+            # is the cursor and the next pass is 15 seconds away.
+            LOG.info("QUEUE %sempty", tag)
+            return None
+        stats.batches += 1
+        prefetch_started = time.monotonic()
+        slice_ = _prefetch(
+            conn, [int(row[0]) for row in rows],
+            timeout_s=_prefetch_timeout_s(), restore_s=batch_timeout_s,
+        )
+        stats.prefetch_seconds += time.monotonic() - prefetch_started
+        warm_started = time.monotonic()
+        try:
+            # Its own SAVEPOINT: the warm is an OPTIMISATION, and a statement timeout
+            # inside it would otherwise abort the batch transaction and end the run.
+            # Rolled back, every point simply falls through to its own lazy query.
+            with conn.transaction():
+                _warm(slice_, ctx, cache)
+        except Exception as exc:  # noqa: BLE001 - degrade to the lazy path, never die
+            LOG.warning("WARM %sfailed, resolving with per-point lookups: %s", tag, exc)
+        stats.warm_seconds += time.monotonic() - warm_started
+        _run_slice(
+            conn, rows, ctx, registry_label, slice_, stats, dry_run=dry_run,
+        )
+    _log_batch(stats, cache, ctx, len(rows), batch_before,
+               time.monotonic() - batch_started, tag)
+    return len(rows)
+
+
+def _backoff_sleep(seconds: float, deadline: float) -> None:
+    """Never past the budget: a worker asleep through the deadline holds its connection doing
+    nothing while the pass waits for it to join."""
+    remaining = deadline - time.monotonic()
+    if remaining > 0:
+        time.sleep(min(seconds, remaining))
 
 
 def _run_workers(
@@ -497,32 +647,51 @@ def _run_workers(
     LOCKED`, so no two loops ever hold the same queue row, and since W2-a every write the
     drain makes is keyed on a listing its own slice already holds.
 
-    A worker that raises — a dropped connection, a pooler that refused a new one — logs,
-    counts one `failed_passes` and EXITS; the others keep draining and the run reports what
-    actually ran. Threads are daemons: a pass abandoned by the lane loop must not be able to
-    keep the worker process alive at shutdown."""
+    A FAILED BATCH is not a failed worker (W2-a6): the loop counts it, backs off and claims
+    the next slice. What ends a worker early is a LOST CONNECTION — reconnected once here,
+    because this is what owns the connection, and stopped if the replacement dies too — or
+    anything else escaping the loop, which counts one `failed_passes`. The others keep
+    draining either way and the run reports what actually ran. Threads are daemons: a pass
+    abandoned by the lane loop must not be able to keep the worker process alive at shutdown."""
     per_worker = [DrainStats() for _ in range(workers)]
 
     def _loop(index: int) -> None:
         mine = per_worker[index - 1]
-        conn: psycopg.Connection | None = None
-        try:
-            conn = _worker_connection()
-            ctx = _context(conn, registry_version_id, cache)
-            _drain_loop(
-                conn, ctx, cache, mine, registry_label=registry_label,
-                batch_size=batch_size, batch_timeout_s=batch_timeout_s, deadline=deadline,
-                dry_run=dry_run, worker=index,
-            )
-            LOG.info("DRAIN w%d queries %s", index, _query_stats(ctx).report())
-        except Exception as exc:  # noqa: BLE001 - one worker's death is not the run's
-            mine.failed_passes += 1
-            LOG.warning(
-                "DRAIN w%d ended early after claimed=%d: %s", index, mine.claimed, exc)
-        finally:
-            if conn is not None:
-                with contextlib.suppress(Exception):
-                    conn.close()
+        reconnects = 0
+        while True:
+            conn: psycopg.Connection | None = None
+            try:
+                conn = _worker_connection()
+                ctx = _context(conn, registry_version_id, cache)
+                _drain_loop(
+                    conn, ctx, cache, mine, registry_label=registry_label,
+                    batch_size=batch_size, batch_timeout_s=batch_timeout_s,
+                    deadline=deadline, dry_run=dry_run, worker=index,
+                )
+                LOG.info("DRAIN w%d queries %s", index, _query_stats(ctx).report())
+                return
+            except _ConnectionLost as exc:
+                reconnects += 1
+                if reconnects > MAX_WORKER_RECONNECTS or time.monotonic() >= deadline:
+                    mine.failed_passes += 1
+                    LOG.warning(
+                        "DRAIN w%d stopping after claimed=%d: connection lost (%s)",
+                        index, mine.claimed, exc)
+                    return
+                LOG.warning(
+                    "DRAIN w%d lost its connection (%s) after claimed=%d; reconnecting once",
+                    index, exc, mine.claimed)
+            except Exception as exc:  # noqa: BLE001 - one worker's death is not the run's
+                mine.failed_passes += 1
+                LOG.warning(
+                    "DRAIN w%d ended early after claimed=%d: %s", index, mine.claimed, exc)
+                return
+            finally:
+                # Runs on every exit INCLUDING the reconnect turn, so the dead connection is
+                # released before a new one is opened.
+                if conn is not None:
+                    with contextlib.suppress(Exception):
+                        conn.close()
 
     threads = [
         threading.Thread(
