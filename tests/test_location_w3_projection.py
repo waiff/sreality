@@ -454,10 +454,6 @@ _W4C_DROPS: dict[str, set[str]] = {
     "listing_feed_public": {
         "locality", "district", "obec", "okres", "region", "street", "house_number",
     },
-    "listings_public": {
-        "locality", "district", "locality_district_id", "locality_region_id",
-        "street", "house_number", "obec", "okres", "region",
-    },
     "properties_public": {"district", "locality_district_id", "locality_region_id"},
     "broker_listings_public": {"locality", "district"},
     # Re-created VERBATIM: it only DEPENDS on properties_public, which had to be
@@ -500,6 +496,9 @@ def test_w4c_leaves_no_legacy_place_column_on_any_serving_view() -> None:
     sql = _sql(W4C)
     for view in ("browse_projection", "listing_feed_public", "listings_public",
                  "broker_listings_public"):
+        # listings_public KEEPS its nine legacy place columns as output names
+        # (five matviews depend on the view); what it must not do is read them
+        # off `listings` -- they are re-sourced from `ll`.
         body = " ".join(_view_select_list(sql, view).split()).lower()
         for col in sorted(gone):
             # A bare "l.<col>" would also match the "ll.<col>" this wave moved TO.
@@ -512,6 +511,29 @@ def test_w4c_leaves_no_legacy_place_column_on_any_serving_view() -> None:
         assert not re.search(r"(?<![a-z_])p\." + col + r"\b", body), (
             f"properties_public still reads properties.{col}"
         )
+
+
+def test_w4c_keeps_listings_public_width_and_resources_it_in_place() -> None:
+    """The one compatibility surface of the wave, and the reason it exists.
+    FIVE matviews hold an object-level dependency on `listings_public`
+    (image_storage_overview_mv / scraper_health_checks_mv / health_summary_mv,
+    portal_health_mv, category_trends_mv), so a DROP + CREATE would mean
+    re-creating and REPOPULATING all five inside the window that holds ACCESS
+    EXCLUSIVE on `listings`. Instead it takes an in-place `create or replace`:
+    every output column survives, seven are re-sourced from listing_location and
+    the two sreality portal ids -- which have no twin and were never a query
+    dimension -- become typed NULL."""
+    sql = _sql(W4C)
+    assert "drop view if exists listings_public" not in sql.lower()
+    cols = _columns(sql, "listings_public")
+    for kept in ("locality", "district", "street", "house_number", "obec",
+                 "okres", "region", "locality_district_id", "locality_region_id"):
+        assert kept in cols, f"listings_public lost `{kept}` -- that needs the five matviews"
+    body = " ".join(_view_select_list(sql, "listings_public").split())
+    for frag in ("ll.obec_name  as locality", "ll.okres_name as district",
+                 "ll.street_name      as street", "ll.kraj_name  as region",
+                 "null::integer as locality_district_id"):
+        assert " ".join(frag.split()) in body, f"listings_public does not re-source `{frag}`"
 
 
 def test_w4c_drops_the_two_region_functions_that_held_district() -> None:

@@ -2242,13 +2242,11 @@ last live reader was a column this file drops (`region_stats`, `region_active_by
 migration 083's `browse_stats`, which 425 had already commented "intended end state is DROP, held
 back only for want of operator sign-off").
 
-Ten views and matviews had to be DROPped and re-created to let the columns go, because
-`create or replace view` can only append. Four lose columns (`browse_projection`,
-`listing_feed_public`, `listings_public`, `properties_public` — `district` finally leaves the last
-of these, freed by dropping the two region functions); four are re-created verbatim because they
-merely DEPEND on one that did (`pipeline_board_public`, `broker_geo_options`, and the three health
-matviews of migration 354, which read only `source`/`sreality_id`/`category_*` off
-`listings_public` but hold an object-level dependency on it); and two are re-sourced onto
+Seven views and matviews had to be DROPped and re-created to let the columns go, because
+`create or replace view` can only append. Three lose columns (`browse_projection`,
+`listing_feed_public`, `properties_public` — `district` finally leaves the last of these, freed by
+dropping the two region functions); two are re-created verbatim because they merely DEPEND on one
+that did (`pipeline_board_public`, `broker_geo_options`); and two are re-sourced onto
 `listing_location` because they were the last DB-side readers of the columns —
 `broker_region_type_stats`, the one matview that blocked the drop outright, and
 `broker_leaderboard()`'s price/subtype branch. `recompute_city_proximity()` is re-sourced the same
@@ -2256,6 +2254,17 @@ way (it keeps `home_obec_pop` / `near_*_{5,15}km`, which Browse filters read) an
 `data_quality_by_source` swaps seven legacy field probes for three read off `listing_location` —
 keeping the NAMES `geom`/`locality`, because `scraper_health_checks_mv` alarms on exactly those
 five field-population rates.
+
+**Two views deliberately keep their width**, and they are the wave's one compatibility surface.
+`listings_public` has FIVE matview dependents (`image_storage_overview_mv`,
+`scraper_health_checks_mv`, `health_summary_mv`, `portal_health_mv`, `category_trends_mv`) and
+`portal_listing_counts` has one (`portal_health_mv`). None of the six reads a place column — a
+matview's dependency is on the VIEW, not on its columns — but narrowing either would mean
+re-creating and REPOPULATING all of them inside the ten-minute window that holds ACCESS EXCLUSIVE
+on `listings`. So both take an in-place `create or replace` instead: the place columns are
+re-sourced from `listing_location`, and `listings_public`'s two sreality portal ids, which have no
+twin and were never a query dimension, become typed NULL. Re-pointing those matviews at `listings`
+and narrowing the two views is a later, lock-free wave.
 
 **What stays, and why.** `admin_boundaries` — price stats, the rent map and city proximity still
 read its geometry and population; its LOCATION role died with trigger 289, and re-keying those

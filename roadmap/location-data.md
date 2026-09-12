@@ -499,15 +499,18 @@ component is slimmed twice — each wave rewrites one component and slims its st
     the whole geo-derivation epoch), the two CHECKs, 25 indexes; and three unreferenced RPCs
     whose last live reader was a column this file drops — `region_stats()`,
     `region_active_by_day()` and migration 083's `browse_stats()` (425's own header: "the
-    intended end state is DROP, held back only for want of operator sign-off"). Ten views /
-    matviews DROP+CREATE because `create or replace` can only append: four lose columns
-    (`browse_projection`, `listing_feed_public`, `listings_public`, `properties_public` —
-    `district` freed at last), four are verbatim re-creates of dependents
-    (`pipeline_board_public`, `broker_geo_options`, and the three health matviews of
-    migration 354, which read only `source`/`sreality_id`/`category_*` off `listings_public`
-    but hold an object dependency on it), and two are re-sourced onto `listing_location`
-    because they were the last DB-side readers — `broker_region_type_stats` (the one matview
-    that blocked the drop outright) and `broker_leaderboard()`'s price/subtype branch.
+    intended end state is DROP, held back only for want of operator sign-off"). Seven views /
+    matviews DROP+CREATE because `create or replace` can only append: three lose columns
+    (`browse_projection`, `listing_feed_public`, `properties_public` — `district` freed at
+    last), two are verbatim re-creates of dependents (`pipeline_board_public`,
+    `broker_geo_options`), and two are re-sourced onto `listing_location` because they were
+    the last DB-side readers — `broker_region_type_stats` (the one matview that blocked the
+    drop outright) and `broker_leaderboard()`'s price/subtype branch. **`listings_public` and
+    `portal_listing_counts` deliberately KEEP their width** — five matviews and one hold an
+    object dependency on them, so narrowing would mean re-creating and repopulating all six
+    inside the ACCESS EXCLUSIVE window; both take an in-place `create or replace` that
+    re-sources their place columns from `listing_location` (the two sreality portal ids, which
+    have no twin, become typed NULL). That narrowing is a later, lock-free wave.
     `recompute_city_proximity()` re-sourced the same way (it keeps `home_obec_pop` /
     `near_*`, which Browse filters read); `data_quality_by_source` swaps seven legacy field
     probes for three off `listing_location`, keeping the NAMES `geom`/`locality` because

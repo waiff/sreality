@@ -393,7 +393,7 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
         "definition; every other consumer calls this function.",
     ),
     RegisteredSite(
-        path="migrations/508_location_w4c_legacy_drops.sql"
+        path="migrations/354_health_image_matviews_on_listing_id.sql"
         "::materialized view:scraper_health_checks_mv",
         arm="division",
         hits=1,
