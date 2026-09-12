@@ -1,12 +1,18 @@
-"""An in-memory RÚIAN mini-mirror + policy fixtures for the resolver tests.
+"""An in-memory RÚIAN mini-mirror for the resolver tests.
 
-No database, no network: the pure core (S1-S7), the projection builders and the reconciler
-all run against this. That is the whole point of `types.RegistryView` being a protocol —
-the deterministic replay gate (06 §6.4 W1) has to be runnable in the normal pytest job.
+No database, no network: the four steps all run against this. That is the whole point of
+`types.RegistryView` being a protocol.
 
 The gazetteer content is the design's own named regression material: two Krásný Les obce
 ~100 km apart, Bílovec vs its de-accented form, and a Prague street whose name merely
 CONTAINS a village name (the Bořislav 40 case).
+
+W2-a shrank this file by more than half, and the deletions say what the wave did: the four
+CONFIG fixtures are gone (`location_field_policy`, `location_uncertainty_policy`,
+`location_collision_policy`, `location_constants` — policy is code now), and so are the
+registry answers whose questions went with them (parcels, the pin clusters, the boundary
+distance, the nearest-obec sliver, the ČástObce point lookup). What is left is the EIGHT
+questions the protocol still declares.
 """
 
 from __future__ import annotations
@@ -14,24 +20,17 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 
 from location_data.resolver.geo import haversine_m
 from location_data.resolver.types import (
     AddressPoint,
     AdminUnit,
     Claim,
-    ClusterEvidence,
-    CollisionPolicyRow,
-    FieldPolicyRow,
-    LocationConstants,
-    Parcel,
     ResolverContext,
     Street,
-    UncertaintyPolicyRow,
 )
 
-# The seeded `location_constants.cz_bbox` row, as `load_constants` would return it.
+# The Czech bounding box the resolver carries as a code constant (`check.CZ_BBOX`).
 CZ_BBOX = (12.0, 48.0, 19.0, 51.5)
 
 
@@ -42,7 +41,6 @@ class MiniMirror:
     units: list[AdminUnit] = field(default_factory=list)
     streets: list[Street] = field(default_factory=list)
     points: list[AddressPoint] = field(default_factory=list)
-    parcels_: list[Parcel] = field(default_factory=list)
     # obec_kod -> (lat, lon, radius_m) polygon stand-in: a circle around the centre.
     obec_polygons: dict[int, tuple[float, float, float]] = field(default_factory=dict)
     cz_polygon: tuple[float, float, float] | None = (49.8, 15.5, 300_000.0)
@@ -74,77 +72,33 @@ class MiniMirror:
             if u.name_norm == name_norm and (not levels or u.level in levels)
         ]
 
-    def admin_unit_by_code(self, level: str, code: int) -> AdminUnit | None:
-        return next((u for u in self.units if u.level == level and u.code == code), None)
-
-    def admin_unit(self, unit_id: int) -> AdminUnit | None:
-        return next((u for u in self.units if u.unit_id == unit_id), None)
-
     def admin_chain(self, unit_id: int) -> list[AdminUnit]:
-        chain: list[AdminUnit] = []
-        unit = self.admin_unit(unit_id)
+        """The unit ITSELF first, then its ancestors — the shape `_ADMIN_CHAIN_SQL` returns
+        now that `admin_unit` and `admin_unit_by_code` are folded into it."""
+        unit = self._unit_by_id(unit_id)
+        if unit is None:
+            return []
+        chain = [unit]
         while unit is not None and unit.parent_id is not None:
-            unit = self.admin_unit(unit.parent_id)
+            unit = self._unit_by_id(unit.parent_id)
             if unit is None:
                 break
             chain.append(unit)
         return chain
 
+    def admin_chain_by_code(self, level: str, code: int) -> list[AdminUnit]:
+        unit = next((u for u in self.units if u.level == level and u.code == code), None)
+        return [] if unit is None else self.admin_chain(unit.unit_id)
+
     def obec_codes_for_psc(self, psc: str) -> list[int]:
         return sorted({p.obec_kod for p in self.points if p.psc == psc})
-
-    def parcels(self, *, katuz_name_norm: str, parcel_label_norm: str) -> list[Parcel]:
-        katuz_ids = {
-            u.unit_id
-            for u in self.units
-            if u.level == "katastralni_uzemi" and u.name_norm == katuz_name_norm
-        }
-        return [
-            p
-            for p in self.parcels_
-            if p.katuz_unit_id in katuz_ids and p.parcel_label_norm == parcel_label_norm
-        ]
 
     def containing_obec(self, lat: float, lon: float) -> AdminUnit | None:
         for code, (clat, clon, radius) in sorted(self.obec_polygons.items()):
             if haversine_m(lat, lon, clat, clon) <= radius:
-                return self.admin_unit_by_code("obec", code)
-        return None
-
-    def nearest_obec_within(
-        self, lat: float, lon: float, max_m: float
-    ) -> tuple[AdminUnit, float] | None:
-        best: tuple[AdminUnit, float] | None = None
-        for code, (clat, clon, radius) in sorted(self.obec_polygons.items()):
-            distance = max(0.0, haversine_m(lat, lon, clat, clon) - radius)
-            unit = self.admin_unit_by_code("obec", code)
-            if unit is None or distance > max_m:
-                continue
-            if best is None or distance < best[1]:
-                best = (unit, distance)
-        return best
-
-    def distance_to_admin_boundary_m(self, unit_id: int, lat: float, lon: float) -> float | None:
-        unit = self.admin_unit(unit_id)
-        if unit is None or unit.code not in self.obec_polygons:
-            return None
-        clat, clon, radius = self.obec_polygons[unit.code]
-        return abs(radius - haversine_m(lat, lon, clat, clon))
-
-    def cast_obce_for_point(self, lat: float, lon: float) -> AdminUnit | None:
-        nearest: tuple[float, AdminUnit] | None = None
-        for point in self.points:
-            if point.cast_obce_unit_id is None or point.lat is None or point.lon is None:
-                continue
-            distance = haversine_m(lat, lon, point.lat, point.lon)
-            if distance > 250.0:
-                continue
-            unit = self.admin_unit(point.cast_obce_unit_id)
-            if unit is not None and (nearest is None or distance < nearest[0]):
-                nearest = (distance, unit)
-        return None if nearest is None else nearest[1]
-
-    def cast_obce_extent_m(self, cast_obce_kod: int) -> float | None:
+                return next(
+                    (u for u in self.units if u.level == "obec" and u.code == code), None
+                )
         return None
 
     def in_czechia_polygon(self, lat: float, lon: float) -> bool | None:
@@ -153,87 +107,20 @@ class MiniMirror:
         clat, clon, radius = self.cz_polygon
         return haversine_m(lat, lon, clat, clon) <= radius
 
-
-class StaticCollision:
-    """A `CollisionEvidenceView` keyed on the 4-dp cell, as one stamped epoch would be."""
-
-    def __init__(self, clusters: dict[tuple[str, str], ClusterEvidence] | None = None) -> None:
-        self._clusters = clusters or {}
-
-    def for_point(self, source: str, lat: float, lon: float) -> ClusterEvidence | None:
-        from location_data.resolver.collision import cell_of
-
-        return self._clusters.get((source, cell_of(lat, lon)))
-
-
-# --------------------------------------------------------------------------- policies
-
-FIELD_POLICY: tuple[FieldPolicyRow, ...] = tuple(
-    FieldPolicyRow(
-        policy_version="v1", field=f, source_pattern=sp, method_pattern=mp, rank=rank,
-        min_confidence=min_conf, may_fill_null=True, may_overwrite_non_null=overwrite,
-        requires_independent_agreement=agree,
-    )
-    for f in (
-        "coordinate", "address_point_id", "street_name", "house_number_cp", "house_number_co",
-        "psc", "obec_name", "cast_obce_name", "okres_name", "kraj_name", "postal_town",
-        "evidencni", "development_name", "cadastral_territory_name", "parcel_number",
-    )
-    for sp, mp, rank, min_conf, overwrite, agree in (
-        ("ruian", "registry_derived", 100, None, True, False),
-        ("portal:*", "portal_structured_field", 300, None, True, False),
-        ("portal:*", "html_selector_parse", 400, None, True, False),
-        ("portal:*", "url_slug_parse", 450, None, True, False),
-        ("portal:*", "breadcrumb_parse", 450, None, True, False),
-        ("llm_text", "llm_text", 900, "high", False, True),
-    )
-)
-
-UNCERTAINTY_POLICY: tuple[UncertaintyPolicyRow, ...] = (
-    UncertaintyPolicyRow("v1", "registry_point", "address_point", "*", 10, "geometric_bound", "constant"),
-    UncertaintyPolicyRow("v1", "registry_point", "building", "*", 15, "geometric_bound", "constant"),
-    UncertaintyPolicyRow("v1", "registry_point", "parcel", "*", 25, "geometric_bound", "constant"),
-    UncertaintyPolicyRow("v1", "portal_pin", "address_point", "*", 15, "geometric_bound", "constant"),
-    UncertaintyPolicyRow("v1", "portal_pin", "building", "*", 30, "geometric_bound", "constant"),
-    UncertaintyPolicyRow("v1", "portal_pin", "street_segment", "*", 100, "geometric_bound", "constant"),
-    UncertaintyPolicyRow("v1", "portal_pin", "street", "*", 300, "geometric_bound", "constant"),
-    UncertaintyPolicyRow("v1", "portal_pin", "obec", "*", 1000, "geometric_bound", "constant"),
-    UncertaintyPolicyRow("v1", "portal_pin", "cast_obce_or_quarter", "*", 750, "geometric_bound", "constant"),
-    UncertaintyPolicyRow("v1", "portal_pin", "unknown", "*", 5000, "geometric_bound", "constant"),
-    UncertaintyPolicyRow("v1", "portal_pin_blurred", "obec", "*", 1000, "declared", "declared_shape"),
-    UncertaintyPolicyRow("v1", "portal_pin_blurred", "cast_obce_or_quarter", "*", 750, "declared", "declared_shape"),
-    UncertaintyPolicyRow("v1", "portal_pin_blurred", "street", "*", 500, "declared", "declared_shape"),
-    UncertaintyPolicyRow("v1", "portal_pin_blurred", "unknown", "*", 5000, "declared", "declared_shape"),
-    UncertaintyPolicyRow("v1", "portal_pin_blurred", "building", "*", 300, "declared", "declared_shape"),
-    UncertaintyPolicyRow("v1", "portal_pin_blurred", "street_segment", "*", 400, "declared", "declared_shape"),
-    UncertaintyPolicyRow("v1", "admin_centroid", "obec", "*", None, "geometric_bound", "admin_containment_radius"),
-    UncertaintyPolicyRow("v1", "admin_centroid", "cast_obce_or_quarter", "*", None, "geometric_bound", "admin_containment_radius"),
-    UncertaintyPolicyRow("v1", "admin_centroid", "okres", "*", None, "geometric_bound", "admin_containment_radius"),
-    UncertaintyPolicyRow("v1", "admin_centroid", "kraj", "*", None, "geometric_bound", "admin_containment_radius"),
-    UncertaintyPolicyRow("v1", "carried_forward", "address_point", "*", None, "geometric_bound", "max_of_inputs"),
-    UncertaintyPolicyRow("v1", "carried_forward", "building", "*", None, "geometric_bound", "max_of_inputs"),
-    UncertaintyPolicyRow("v1", "carried_forward", "obec", "*", None, "geometric_bound", "max_of_inputs"),
-    UncertaintyPolicyRow("v1", "carried_forward", "unknown", "*", None, "geometric_bound", "max_of_inputs"),
-    UncertaintyPolicyRow("v1", "none", "unknown", "*", 250000, "geometric_bound", "constant"),
-)
-
-COLLISION_POLICY: tuple[CollisionPolicyRow, ...] = (
-    CollisionPolicyRow("v1", "*", None, 4, 0, 2, "suspect"),
-    CollisionPolicyRow("v1", "bezrealitky", None, 12, 0, 2, "legitimate_multiunit"),
-)
-
-CONSTANTS = LocationConstants(cz_bbox=CZ_BBOX)
+    # ---- fixture helper, not part of the protocol
+    def _unit_by_id(self, unit_id: int) -> AdminUnit | None:
+        return next((u for u in self.units if u.unit_id == unit_id), None)
 
 
 # --------------------------------------------------------------------------- fixtures
 
 
 def _unit(unit_id, level, code, name, name_norm, path, parent=None, lat=None, lon=None,
-          psc_set=(), qualifier=None, homonym_count=1, radius=None) -> AdminUnit:
+          psc_set=(), qualifier=None, homonym_count=1) -> AdminUnit:
     return AdminUnit(
         unit_id=unit_id, level=level, code=code, name=name, name_norm=name_norm, path=path,
-        display_path=name, parent_id=parent, lat=lat, lon=lon, psc_set=tuple(psc_set),
-        qualifier=qualifier, homonym_count=homonym_count, containment_radius_m=radius,
+        parent_id=parent, lat=lat, lon=lon, psc_set=tuple(psc_set),
+        qualifier=qualifier, homonym_count=homonym_count,
     )
 
 
@@ -244,67 +131,62 @@ def default_mirror() -> MiniMirror:
         _unit(1, "kraj", 51, "Liberecký kraj", "liberecky kraj", "k51"),
         _unit(2, "okres", 3506, "Liberec", "liberec", "k51.o3506", parent=1),
         _unit(3, "obec", 563943, "Krásný Les", "krasny les", "k51.o3506.b563943", parent=2,
-              lat=50.9330, lon=15.1500, psc_set=("46346",), homonym_count=2, radius=3000.0),
+              lat=50.9330, lon=15.1500, psc_set=("46346",), homonym_count=2),
         _unit(4, "katastralni_uzemi", 673986, "Krásný Les u Frýdlantu",
               "krasny les u frydlantu", "k51.o3506.b563943", parent=3),
         # --- Ústecký kraj / okres Ústí nad Labem / Krásný Les (the WRONG one, ~100 km west)
         _unit(5, "kraj", 42, "Ústecký kraj", "ustecky kraj", "k42"),
         _unit(6, "okres", 3805, "Ústí nad Labem", "usti nad labem", "k42.o3805", parent=5),
         _unit(7, "obec", 567931, "Krásný Les", "krasny les", "k42.o3805.b567931", parent=6,
-              lat=50.7676, lon=13.9353, psc_set=("40302",), homonym_count=2, radius=3000.0),
+              lat=50.7676, lon=13.9353, psc_set=("40302",), homonym_count=2),
         # --- Moravskoslezský kraj / okres Nový Jičín / Bílovec
         _unit(8, "kraj", 80, "Moravskoslezský kraj", "moravskoslezsky kraj", "k80"),
         _unit(9, "okres", 3804, "Nový Jičín", "novy jicin", "k80.o3804", parent=8),
         _unit(10, "obec", 599212, "Bílovec", "bilovec", "k80.o3804.b599212", parent=9,
-              lat=49.7573, lon=18.0158, psc_set=("74301",), radius=4000.0),
+              lat=49.7573, lon=18.0158, psc_set=("74301",)),
         # --- Praha (street-name-contains-village trap) + Bořislav village
         _unit(11, "kraj", 19, "Hlavní město Praha", "hlavni mesto praha", "k19"),
         _unit(12, "okres", 3100, "Hlavní město Praha", "hlavni mesto praha", "k19.o3100", parent=11),
         _unit(13, "obec", 554782, "Praha", "praha", "k19.o3100.b554782", parent=12,
-              lat=50.0755, lon=14.4378, psc_set=("16000", "18000"), radius=12000.0),
+              lat=50.0755, lon=14.4378, psc_set=("16000", "18000")),
         _unit(14, "cast_obce", 490067, "Vokovice", "vokovice", "k19.o3100.b554782.c490067",
               parent=13, lat=50.1010, lon=14.3480),
         _unit(15, "obec", 567639, "Bořislav", "borislav", "k42.o3805.b567639", parent=6,
-              lat=50.5794, lon=13.9200, psc_set=("41502",), radius=2000.0),
+              lat=50.5794, lon=13.9200, psc_set=("41502",)),
     ]
     streets = [
-        Street(street_id=1, code=101, name="Nad Bořislavkou", name_norm="nad borislavkou",
-               obec_unit_id=13, obec_kod=554782),
-        Street(street_id=2, code=102, name="28. října", name_norm="28 rijna",
-               obec_unit_id=13, obec_kod=554782),
-        Street(street_id=3, code=103, name="Slunečná", name_norm="slunecna",
-               obec_unit_id=10, obec_kod=599212),
+        Street(code=101, name="Nad Bořislavkou", name_norm="nad borislavkou", obec_kod=554782),
+        Street(code=102, name="28. října", name_norm="28 rijna", obec_kod=554782),
+        Street(code=103, name="Slunečná", name_norm="slunecna", obec_kod=599212),
         # The dropped-prefix class: the portal says `Budovatelů`, RÚIAN says `nám.
         # Budovatelů` — same street, and `name_norm` keeps the type word RÚIAN spells.
-        Street(street_id=4, code=104, name="nám. Budovatelů", name_norm="nam budovatelu",
-               obec_unit_id=10, obec_kod=599212),
+        Street(code=104, name="nám. Budovatelů", name_norm="nam budovatelu", obec_kod=599212),
     ]
     points = [
         AddressPoint(
             kod_adm=21690278, obec_unit_id=13, obec_kod=554782, psc="16000",
-            lat=50.10100, lon=14.34800, street_id=1, ulice_kod=101,
+            lat=50.10100, lon=14.34800, ulice_kod=101,
             street_name_norm="nad borislavkou", street_name="Nad Bořislavkou",
             cislo_domovni=487, cislo_orientacni=40,
-            stavebni_objekt_code=555001, cast_obce_unit_id=14, cast_obce_kod=490067,
+            cast_obce_unit_id=14, cast_obce_kod=490067,
         ),
         AddressPoint(
             kod_adm=21690279, obec_unit_id=13, obec_kod=554782, psc="16000",
-            lat=50.10110, lon=14.34810, street_id=1, ulice_kod=101,
+            lat=50.10110, lon=14.34810, ulice_kod=101,
             street_name_norm="nad borislavkou", street_name="Nad Bořislavkou",
             cislo_domovni=488, cislo_orientacni=41,
-            stavebni_objekt_code=555002, cast_obce_unit_id=14, cast_obce_kod=490067,
+            cast_obce_unit_id=14, cast_obce_kod=490067,
         ),
         AddressPoint(
             kod_adm=33000001, obec_unit_id=10, obec_kod=599212, psc="74301",
-            lat=49.75740, lon=18.01590, street_id=3, ulice_kod=103,
+            lat=49.75740, lon=18.01590, ulice_kod=103,
             street_name_norm="slunecna", street_name="Slunečná", cislo_domovni=12,
-            stavebni_objekt_code=556001,
         ),
         AddressPoint(
             kod_adm=33000002, obec_unit_id=10, obec_kod=599212, psc="74301",
-            lat=49.75750, lon=18.01600, street_id=4, ulice_kod=104,
+            lat=49.75750, lon=18.01600, ulice_kod=104,
             street_name_norm="nam budovatelu", street_name="nám. Budovatelů",
-            cislo_domovni=5, stavebni_objekt_code=556002,
+            cislo_domovni=5,
         ),
     ]
     return MiniMirror(
@@ -321,22 +203,8 @@ def default_mirror() -> MiniMirror:
     )
 
 
-def context(
-    mirror: MiniMirror | None = None,
-    *,
-    collision=None,
-    constants: LocationConstants | None = None,
-    previous_position=None,
-) -> ResolverContext:
-    return ResolverContext(
-        registry=mirror or default_mirror(),
-        constants=constants or CONSTANTS,
-        field_policy=FIELD_POLICY,
-        uncertainty_policy=UNCERTAINTY_POLICY,
-        collision_policy=COLLISION_POLICY,
-        collision=collision,
-        previous_position=previous_position,
-    )
+def context(mirror: MiniMirror | None = None) -> ResolverContext:
+    return ResolverContext(registry=mirror or default_mirror())
 
 
 _T0 = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
@@ -371,110 +239,3 @@ def claim(
         declared_radius_m=declared_radius_m, blur_evidence=blur_evidence,
         claim_confidence=claim_confidence,
     )
-
-
-# ------------------------------------------------------- the SHIPPED v1 policy seeds
-#
-# `UNCERTAINTY_POLICY` above is a hand-written fixture, and that is exactly why the
-# shipped seed's sreality/maxima `declared_shape` rows — the ones with r95_m NULL —
-# were never exercised: the fixture has no per-source rows at all. Anything that
-# claims to test "the v1 policy" reads the migration instead.
-
-_MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
-
-
-# Every migration that seeds `location_uncertainty_policy` v1 rows, in apply order — the
-# resolver meets the UNION of them, so the test seed must too.
-UNCERTAINTY_SEED_MIGRATIONS = (
-    "383_location_w1_resolutions.sql",
-    "491_location_uncertainty_policy_street_rungs.sql",
-)
-
-
-def v1_uncertainty_policy() -> tuple[UncertaintyPolicyRow, ...]:
-    """`location_uncertainty_policy`'s v1 seed, parsed out of the seeding migrations."""
-    from tests.location_data.test_location_schema_contracts import _unquote, _values_rows
-    from tests.test_migration_rls_grants import _strip_comments
-
-    rows: list[tuple[str, ...]] = []
-    for name in UNCERTAINTY_SEED_MIGRATIONS:
-        sql = _strip_comments((_MIGRATIONS / name).read_text(encoding="utf-8"))
-        rows.extend(_values_rows(sql, "location_uncertainty_policy"))
-    out: list[UncertaintyPolicyRow] = []
-    for row in rows:
-        r95 = row[4].strip()
-        out.append(
-            UncertaintyPolicyRow(
-                policy_version=_unquote(row[0]) or "v1",
-                position_source=_unquote(row[1]) or "",
-                granularity=_unquote(row[2]) or "",
-                source=_unquote(row[3]) or "*",
-                r95_m=None if r95 == "null" else float(r95),
-                radius_semantics=_unquote(row[5]) or "",
-                derivation=_unquote(row[6]) or "constant",
-            )
-        )
-    assert out, "the seeding migrations seed no location_uncertainty_policy rows"
-    return tuple(out)
-
-
-def v1_field_policy_fields() -> set[str]:
-    """Every `location_claim_type` that HAS a `location_field_policy` v1 row, read out of
-    the migrations (383 seeds ten; 388 adds the five S7 arbitrates but never had)."""
-    import re
-
-    from tests.test_migration_rls_grants import _statements, _strip_comments
-
-    fields: set[str] = set()
-    for path in sorted(_MIGRATIONS.glob("38*_location_w1_*.sql")):
-        sql = _strip_comments(path.read_text(encoding="utf-8")).lower()
-        for stmt in _statements(sql):
-            if not re.match(r"\s*insert into location_field_policy\b", stmt.lower()):
-                continue
-            for block in re.findall(r"array\[(.*?)\]::location_claim_type\[\]", stmt, re.S):
-                fields.update(re.findall(r"'([a-z0-9_]+)'", block))
-    return fields
-
-
-# `location_extraction_method` verbatim (migration 380). Spelled out rather than read from
-# the enum's DDL because this list is the thing being checked AGAINST: a method that
-# vanished from the enum should red the parse, not silently shrink the answer.
-EXTRACTION_METHODS: frozenset[str] = frozenset({
-    "portal_structured_field", "portal_declared_quality", "html_selector_parse",
-    "url_slug_parse", "breadcrumb_parse", "jsonld_parse", "map_widget_parse",
-    "regex_text", "llm_text", "legacy_column", "registry_derived", "operator_manual",
-})
-
-
-def v1_field_policy_pairs() -> set[tuple[str, str]]:
-    """Every `(extraction_method, location_claim_type)` pair a `location_field_policy` v1
-    row can govern, read out of the migrations.
-
-    A companion to `v1_field_policy_fields`, and a WIDER glob on purpose: that one answers
-    "which field has any row at all" and only ever needed 383/388, while this one answers
-    "which PRODUCER can win this field", which is the question the seven-portal W2
-    activation turned into a live one and which migration 470 answers. Missing a migration
-    here reads as a missing policy row, i.e. it fails safe.
-
-    Every seeding statement in this table's history has one shape — an `unnest(array[…])`
-    of fields crossed with one or more (source_pattern, method_pattern, rank) rungs — so
-    the pairs are the product of the fields it names and the method labels it names. That
-    over-reads only if a statement ever names a method it does not actually pair with
-    every field it lists, which no migration does and which would be worth failing on."""
-    import re
-
-    from tests.test_migration_rls_grants import _statements, _strip_comments
-
-    pairs: set[tuple[str, str]] = set()
-    for path in sorted(_MIGRATIONS.glob("*_location_*.sql")):
-        sql = _strip_comments(path.read_text(encoding="utf-8")).lower()
-        for stmt in _statements(sql):
-            if not re.match(r"\s*insert into location_field_policy\b", stmt.lower()):
-                continue
-            fields: set[str] = set()
-            for block in re.findall(r"array\[(.*?)\]::location_claim_type\[\]", stmt, re.S):
-                fields.update(re.findall(r"'([a-z0-9_]+)'", block))
-            methods = {t for t in re.findall(r"'([a-z0-9_]+)'", stmt)
-                       if t in EXTRACTION_METHODS}
-            pairs.update((m, f) for m in methods for f in fields)
-    return pairs
