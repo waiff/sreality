@@ -55,11 +55,6 @@ HISTORY_COMPLETENESS: dict[str, str] = {
     "maxima": "locality_text_only",
 }
 
-# 06 §6.1.2 rows 4-5: Mapy output under three different stamps ('street'/'locality' are
-# bazos' own in-parser geocoder). Kept identical to scripts/location_mapy_inventory.py's
-# arm 1 set minus carry_forward, which has its own inventory-conditional rung.
-MAPY_COORDS_SOURCES = frozenset({"geocode", "street", "locality"})
-
 
 @dataclass(frozen=True, slots=True)
 class CoordinateRule:
@@ -79,7 +74,6 @@ class CoordinateRule:
     """
     substrate: str
     first_party_sources: frozenset[str] = frozenset()
-    carry_forward_admissible: bool = False
 
 
 COORDINATE_RULES: dict[str, CoordinateRule] = {
@@ -90,21 +84,18 @@ COORDINATE_RULES: dict[str, CoordinateRule] = {
     # The Vue prop's `point{latitude,longitude}` — first-party [06 §6.2.1].
     "mmreality": CoordinateRule("payload"),
     # Only `link` is first-party on bazos: the CZ-guarded maps anchor inside the ad.
-    "bazos": CoordinateRule("geom_column", frozenset({"link"}), carry_forward_admissible=True),
-    "idnes": CoordinateRule("geom_column", frozenset({"page"}), carry_forward_admissible=True),
-    "ceskereality": CoordinateRule("geom_column", frozenset({"page"}),
-                                   carry_forward_admissible=True),
-    "realitymix": CoordinateRule("geom_column", frozenset({"page"}),
-                                 carry_forward_admissible=True),
-    "maxima": CoordinateRule("geom_column", frozenset({"page"}),
-                             carry_forward_admissible=True),
+    "bazos": CoordinateRule("geom_column", frozenset({"link"})),
+    "idnes": CoordinateRule("geom_column", frozenset({"page"})),
+    "ceskereality": CoordinateRule("geom_column", frozenset({"page"})),
+    "realitymix": CoordinateRule("geom_column", frozenset({"page"})),
+    "maxima": CoordinateRule("geom_column", frozenset({"page"})),
     # remax stamped NO `coords` key until 2026-09-11, so every stored remax coordinate read
     # as unestablished provenance and the portal was the fleet's only `"none"` rule — while
     # 7,932 of its 8,009 unstamped active rows were the page's own `#printMap[data-gps]`
     # pin (audit 2026-09-11). `scraper.remax_parser` now stamps the subject-map pin `page`;
     # rows drained before that carry no stamp and stay refused
     # (`coordinate_provenance_unestablished`) until their next 6 h drain rewrites raw_json.
-    "remax": CoordinateRule("geom_column", frozenset({"page"}), carry_forward_admissible=True),
+    "remax": CoordinateRule("geom_column", frozenset({"page"})),
 }
 
 # The two substrates the ladder can be asked about. `COORDINATE_RULES` above describes the
@@ -144,8 +135,8 @@ ARCHIVED_COORDINATE_RULES: dict[str, ArchivedCoordinateRule] = {
     "remax": ArchivedCoordinateRule("rx.det.gps", "portal"),
     # The ad's own `google.com/maps/place/<lat>,<lon>` anchor, titled "Přibližná lokalita"
     # (W1-c R6). Same shape as remax's row and for the same reason: the PAGE publishes the
-    # pin, so it is first-party, and the Mapy veto above still decides first. The pin is
-    # permanently approximate — the entry's `precision_cap` is what says so, not a missing
+    # pin, so it is first-party. The pin is permanently approximate — the entry's
+    # `precision_cap` is what says so, not a missing
     # row here, which only ever said "bazos has no coordinate at all".
     # `bzs.det.link_pin` is 02 §2.2.3's reserved id for exactly this act.
     "bazos": ArchivedCoordinateRule("bzs.det.link_pin", "portal"),
@@ -234,7 +225,6 @@ class ListingRow:
     lat: float | None
     lon: float | None
     observed_at: datetime
-    in_mapy_inventory: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,34 +366,28 @@ class CoordinateVerdict:
 # ------------------------------------------------------------------ the licence ladder
 
 def coordinate_verdict(
-    source: str, coords_source: str | None, *, in_mapy_inventory: bool,
+    source: str, coords_source: str | None, *,
     substrate: str = SUBSTRATE_PAYLOAD, entry_id: str | None = None,
     portal_pin_present: bool = True,
 ) -> CoordinateVerdict:
     """06 §6.1.2, applied to the INPUT. On the payload substrate it never returns a
     non-`portal` licence class: a class-E coordinate produces no claim at all (§6.6 rule 6).
 
-    `substrate` defaults to the payload one, so every W1/W3 call site is unchanged.
-    `SUBSTRATE_ARCHIVED_HTML` asks the same ladder about a body W2 re-mines, and the two
-    arms deliberately share their FIRST rung: the `mapy_affected` veto sits above the
-    branch, because §6.4's gate is about the listing, not about which of our copies of its
-    coordinate we happened to read. `entry_id` / `portal_pin_present` are only consulted on
-    the archived arm.
+    A coordinate is admissible only when the portal itself published it — in the payload we
+    hold, or at the one archived locator its rule names. There is no third source: the
+    geocoder that made the others is gone (W4-b), so `geocode`/`street`/`locality` and the
+    `carry_forward` stamp it laundered through refetches license nothing.
+
+    `substrate` defaults to the payload one; `SUBSTRATE_ARCHIVED_HTML` asks the same ladder
+    about a body W2 re-mines. `entry_id` / `portal_pin_present` are only consulted on the
+    archived arm.
     """
     if substrate == SUBSTRATE_ARCHIVED_HTML:
         return _archived_coordinate_verdict(
-            source, in_mapy_inventory=in_mapy_inventory, entry_id=entry_id,
-            portal_pin_present=portal_pin_present)
+            source, entry_id=entry_id, portal_pin_present=portal_pin_present)
     rule = COORDINATE_RULES.get(source)
     if rule is None:
         return CoordinateVerdict(False, None, "unknown_source")
-    # The W1 blocking gate (§6.4) is `claims JOIN <R2 inventory> WHERE claim_type =
-    # 'coordinate'` = 0, so inventory membership vetoes every substrate, not just
-    # carry_forward: a listing can enter the inventory through arm 2 (a geocode was
-    # attempted) or arm 3 (its geom matches a cached Mapy coordinate) while its payload
-    # coordinate looks first-party.
-    if in_mapy_inventory:
-        return CoordinateVerdict(False, None, "listing_in_mapy_affected_inventory")
     if rule.substrate == "none":
         return CoordinateVerdict(False, None, "no_first_party_coordinate_on_this_portal")
     if rule.substrate == "payload":
@@ -411,27 +395,16 @@ def coordinate_verdict(
     # geom_column: the provenance stamp is the only thing that can license the value.
     if coords_source is None:
         return CoordinateVerdict(False, None, "coordinate_provenance_unestablished")
-    if coords_source in MAPY_COORDS_SOURCES:
-        return CoordinateVerdict(False, None, "mapy_derived_coordinate")
-    if coords_source == "carry_forward":
-        if not rule.carry_forward_admissible:
-            return CoordinateVerdict(False, None, "carry_forward_not_admissible")
-        return CoordinateVerdict(True, "portal", "carry_forward_absent_from_mapy_inventory")
     if coords_source in rule.first_party_sources:
         return CoordinateVerdict(True, "portal", f"first_party_{coords_source}")
     return CoordinateVerdict(False, None, "unrecognised_coordinate_provenance")
 
 
 def _archived_coordinate_verdict(
-    source: str, *, in_mapy_inventory: bool, entry_id: str | None,
-    portal_pin_present: bool,
+    source: str, *, entry_id: str | None, portal_pin_present: bool,
 ) -> CoordinateVerdict:
-    """The archived-body arm of the ladder. The Mapy veto is FIRST here too — the R2
-    inventory names a LISTING whose coordinate we may not hold, and re-reading the same
-    position out of an archived page is the same position (§6.4's gate joins on
-    `listing_id`, not on `surface`)."""
-    if in_mapy_inventory:
-        return CoordinateVerdict(False, None, "listing_in_mapy_affected_inventory")
+    """The archived-body arm of the ladder: the ONE locator the portal's rule names, and
+    nothing else."""
     rule = ARCHIVED_COORDINATE_RULES.get(source)
     if rule is None:
         return CoordinateVerdict(False, None, "no_archived_coordinate_locator_on_this_portal")

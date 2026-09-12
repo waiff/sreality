@@ -12,7 +12,7 @@ error at all:
 
 Two rails answer that, and this file is the gate on both:
 
-  1. the four lanes share ONE outer concurrency group, so they queue instead of competing;
+  1. the lanes share ONE outer concurrency group, so they queue instead of competing;
   2. no batch statement runs without a ceiling — a wedge has to become an error that the
      existing per-row / per-unit resilience already knows how to handle.
 
@@ -62,7 +62,6 @@ LOCATION_BATCH_WORKFLOWS = (
     # stored page body, so it carries what the four deleted lanes carried — a corpus scan,
     # an R2 fan-out and the claim writes in one transaction.
     "location_claims_intake.yml",
-    "location_mapy_inventory.yml",
 )
 OUTER_GROUP = "location-batch"
 
@@ -76,7 +75,7 @@ def _workflow(name: str) -> dict:
 
 @pytest.mark.parametrize("name", LOCATION_BATCH_WORKFLOWS)
 def test_every_location_batch_lane_is_in_the_shared_outer_group(name: str):
-    """One group across all four, so at most one heavy lane runs at a time."""
+    """One group across every lane, so at most one heavy lane runs at a time."""
     wf = _workflow(name)
     concurrency = wf.get("concurrency")
     assert concurrency, f"{name}: no workflow-level concurrency block"

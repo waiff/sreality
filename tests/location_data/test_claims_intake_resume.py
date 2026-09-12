@@ -50,7 +50,7 @@ class _Listing:
         # snapshot cursor — the LAST column since W1-c deleted the legacy-column tail. This
         # listing has no stored body.
         return (self.id, "sreality", f"n{self.id}", dict(SREALITY_POST_CUTOVER),
-                self.last_seen_at, None, None, False,
+                self.last_seen_at, None, None,
                 None, None, None, None, None, 1, snapshot_cursor)
 
 
@@ -195,7 +195,6 @@ class _Conn:
 def _stub_preconditions(monkeypatch: pytest.MonkeyPatch) -> None:
     """The refusal gates have their own tests; this module is about the scan."""
     monkeypatch.setattr(claims_intake, "missing_relations", lambda conn: [])
-    monkeypatch.setattr(claims_intake, "assert_inventory_ready", lambda conn: 2201)
     monkeypatch.setattr(
         claims_intake, "load_entries", lambda conn: {"sreality": entries_for("sreality")})
 

@@ -72,13 +72,6 @@ name: "Jobs: Location claim intake"
 # deploy-time projection). That is idempotent per (portal, contract_version) and fails
 # loudly if a contract file changed without a version bump — which is the point.
 #
-# The lane REFUSES to run unless the Mapy affected-set inventory (migration 385) is
-# TERMINAL AND COMPLETE — a resumable run with status='completed' in the current restart
-# epoch, not merely a non-empty `mapy_affected`. A half-built inventory describes a prefix
-# of `listings`, and absence from a prefix is exactly the verdict that admits a
-# Mapy-derived `carry_forward` coordinate as first-party (06 §6.1.2). It is a W1 INPUT,
-# not an output.
-#
 # EVERY run has a budget, dispatches included. An unbudgeted run walks until
 # `timeout-minutes` kills it, is CANCELLED before it can stamp anything, and leaves the
 # next run to repeat it from the same cursor — which is what the first production run of
@@ -148,7 +141,7 @@ on:
     - cron: "35 * * * *"
 
 concurrency:
-  # OUTER, cross-lane: shared with the registry load and the Mapy inventory so at most ONE
+  # OUTER, cross-lane: shared with the registry load so at most ONE
   # heavy location lane runs at a time (2026-08-10 incident: four of
   # them concurrently dropped backends across the shared production instance and killed
   # this lane's 21:47 run plus both hourly crons with "SSL connection has been closed
@@ -273,7 +266,7 @@ jobs:
           # is dispatched or its own cron fires — and a full-resolve is exactly what a chain
           # hop evicted on 2026-09-10. `test_location_batch_hardening.py` derives this list
           # from the workflows' own concurrency blocks, so a new member cannot be missed.
-          GROUP_WORKFLOWS: "location_claims_intake.yml location_mapy_inventory.yml location_registry_load.yml location_resolve.yml"
+          GROUP_WORKFLOWS: "location_claims_intake.yml location_registry_load.yml location_resolve.yml"
           # …but for the resolve lane, only a DISPATCHED run counts. Its group is decided by
           # the run's own mode and `gh run list` cannot report a group, so "a queued resolve
           # run" and "a queued resolve run that will hold location-batch" are not the same

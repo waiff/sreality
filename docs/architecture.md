@@ -2360,12 +2360,11 @@ deliberately does NOT take it. "The contract's claims" is every listing a portal
 (~5 M rows on sreality); a `DO` block cannot COMMIT, so batching inside one would still be ONE
 transaction that holds locks for its whole run and makes no progress at all if it is killed. The
 cleanup is `python -m location_data.contracts --retract <portal>@<version>`, which already deletes
-in bounded, individually-committed batches and resumes after an interruption. The claim lane's blocking gate is `claims JOIN
-mapy_affected WHERE claim_type='coordinate'` = 0, and it refuses to start unless the Mapy affected-set
-inventory (migration 385 — five arms, identity and reason codes, **never** a coordinate, and
-trigger-immutable: 42501 on UPDATE/DELETE/TRUNCATE) is TERMINAL *and* COMPLETE. Half-built is worse
-than none, because every listing past its high-water mark reads as absent — the verdict that admits a
-Mapy coordinate as first-party.
+in bounded, individually-committed batches and resumes after an interruption. **W4-b deleted the
+Mapy geocoder and the `mapy_affected` veto that policed it**: nothing mints a `geocode`/`street`/
+`locality`/`carry_forward` coordinate any more, so the ladder needs no row-by-row inventory to tell a
+laundered geocode from a portal's own pin — a coordinate claim comes only from the portal's payload
+or its own page, and every other stamp is class E outright.
 
 **The RÚIAN mirror is versioned, not mutated.** `ruian_*` (migration 381) holds ČÚZK's address points,
 streets, parcels, building objects, admin units and a typo-tolerant gazetteer. Every load stamps one
@@ -2442,10 +2441,10 @@ it DELETEs claims, and three tables still FK to `location_claims(id)` until 498.
 `tests/location_data/test_claims_relax_migration.py`, which derives the compulsory-column and CHECK
 lists from 382's own DDL rather than transcribing them.
 
-**Ops rules the incidents wrote.** The heavy lanes — registry load, claim intake, Mapy inventory —
-share the OUTER `location-batch` concurrency group so **at most one runs at a time** (each keeps its
-own inner group at job level); a new heavy lane joins it. It was seven lanes until 2026-09-11; rule
-25 left three. **The resolve drain left the group on 2026-09-10** (operator decision): it is the one
+**Ops rules the incidents wrote.** The heavy lanes — registry load and claim intake — share the
+OUTER `location-batch` concurrency group so **at most one runs at a time** (each keeps its own inner
+group at job level); a new heavy lane joins it. It was seven lanes until 2026-09-11; rule 25 left
+three, and W4-b's Mapy purge left two. **The resolve drain left the group on 2026-09-10** (operator decision): it is the one
 member that is latency-bound rather than instance-bound — a handful of small indexed reads and one
 answer-row write per listing (11 and 7 before W2-a; ~4 and 1 after), no COPY, no corpus scan, no
 detoast — so it contributed least to the incident and lost most

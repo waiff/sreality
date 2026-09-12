@@ -49,19 +49,17 @@ CLIENT_CLASSES: dict[str, tuple[str, str]] = {
 def build_portal(source: str, config: PortalConfig) -> Any:
     """A Portal instance for `source`, configured from `config`."""
     if source == "bazos":
-        # Bazos predates the config-taking constructor: it takes scopes +
-        # geocoder and reads its limits off attributes (the bazos_main.main
-        # wiring, reproduced here).
-        from scraper import bazos_main, location
+        # Bazos predates the config-taking constructor: it takes scopes and
+        # reads its limits off attributes (the bazos_main.main wiring,
+        # reproduced here).
+        from scraper import bazos_main
 
         scopes = [
             c for c in config.categories
             if bazos_main.SALE_TYPE.get(c.get("sale_type"))
             and bazos_main.CATEGORY_MAIN.get(c.get("category"))
         ]
-        portal = bazos_main.BazosPortal(
-            categories=scopes, geocoder=location.build_geocoder(),
-        )
+        portal = bazos_main.BazosPortal(categories=scopes)
         portal.index_rate = config.limits.index_rate
         portal.shared_rate_limiter = config.limits.shared_rate_limiter
         portal.supports_complete_walk = config.supports_complete_walk

@@ -46,18 +46,17 @@ R2 IS OPTIONAL TO THE LANE, NOT TO THE PAGE HALF
   lane must never go dark for all nine portals because a credential rotated.
 
 THE LICENCE LADDER RUNS FIRST (§6.1.2, and it is a filter, not an audit)
-  * `geocode` / bazos `street` / `locality` / absent provenance  -> class E, NO coordinate
+  * Only the portal's OWN pin licenses a coordinate — the payload path its rule names, or
+    the one archived locator. Every other stamp (`geocode`, bazos `street`/`locality`, the
+    `carry_forward` a refetch laundered, absent provenance) -> class E, NO coordinate
     claim, ever. The payload substrate can only ever emit `licence_class = 'portal'`; the
     page substrate adds `'odbl'` for realitymix's Nominatim-fallback pin and nothing else.
-  * `carry_forward` is provenance-laundering: admitted only when the listing is ABSENT
-    from `mapy_affected` (migration 385 — the C7.2 R2 inventory, a lane INPUT).
-  * If `mapy_affected` is missing or empty the lane REFUSES to run.
 
 WHAT IT WRITES, AND ONLY THAT
   `location_claims` (append-only, deduped on `claim_fingerprint`), `dirty_locations`
   (the resolver's queue, inside the same transaction), `location_claim_batches` (this
   lane's run ledger and cursor), and the `contract_version` stamp on the bodies it mined.
-  Refusals — a withheld coordinate, an oversized value, a subject miss — are COUNTED and
+  Refusals — a class-E page pin, an oversized value, a subject miss — are COUNTED and
   logged once per reason per batch. `location_claim_observations`,
   `location_claim_absences` and `location_enrichment_state` were written by every lane and
   read by none; W1-a stopped writing them and migration 498 dropped them.
@@ -97,7 +96,6 @@ from location_data.claims_common import (  # noqa: F401 - the lane's public voca
     EMITTABLE_LICENCE_CLASSES,
     GUARD_CZ_BBOX,
     GUARDS,
-    MAPY_COORDS_SOURCES,
     MIRROR_UNSAFE_CHARS,
     MAX_CLAIM_VALUE_BYTES_ENV,
     SOURCES,
@@ -279,7 +277,7 @@ def _read_point_pair(entry: Entry, row: ListingRow) -> list[Claim]:
     lon = _number(json_pointer(row.raw_json, str(entry.locator["lon_pointer"])))
     if lat is None or lon is None:
         return []
-    verdict = coordinate_verdict(row.source, None, in_mapy_inventory=row.in_mapy_inventory)
+    verdict = coordinate_verdict(row.source, None)
     if not verdict.admitted:
         return []
     if not guard_admits(entry, GUARD_CZ_BBOX, (lat, lon)):
@@ -395,12 +393,9 @@ def extract_listing(
         max_value_bytes = env_positive_int(MAX_CLAIM_VALUE_BYTES_ENV,
                                            DEFAULT_MAX_CLAIM_VALUE_BYTES)
     result = IntakeResult()
-    coordinate_entry: Entry | None = None
 
     for entry in payload_entries(entries):
         spec = READERS[str(entry.reader)]
-        if entry.claim_type == "coordinate":
-            coordinate_entry = entry
         for claim in spec.fn(entry, row):
             if claim.licence_class not in EMITTABLE_LICENCE_CLASSES:
                 raise IntakeRefused(
@@ -413,18 +408,6 @@ def extract_listing(
         row, result.claims, max_value_bytes=max_value_bytes)
     for reason in oversized:
         result.refuse(reason)
-
-    withheld = (row.lat is not None and row.lon is not None
-                and not any(c.claim_type == "coordinate" for c in result.claims))
-    if coordinate_entry is not None and withheld:
-        verdict = coordinate_verdict(
-            row.source, _text(json_pointer(row.raw_json, "/coords/source")),
-            in_mapy_inventory=row.in_mapy_inventory)
-        if not verdict.admitted:
-            # A coordinate the ladder refused must not read as "the portal published
-            # none" — it is counted under its own reason so the class-E cohort stays
-            # visible in the run log.
-            result.refuse(f"coordinate_withheld:{verdict.reason}")
 
     if row.source == "sreality":
         shape = sreality_payload_shape(row.raw_json)
@@ -449,31 +432,10 @@ def extract_page(
 # ------------------------------------------------------------------ SQL
 
 _REGCLASS_SQL = "SELECT to_regclass(%(name)s)"
-_MAPY_COUNT_SQL = "SELECT count(*) FROM mapy_affected"
-
-# The inventory is only a lane INPUT once it is TERMINAL AND COMPLETE. `count(*) > 0` is
-# the wrong gate: the inventory job is batched and resumable, so a run that stopped at
-# its budget leaves a perfectly non-empty table describing a PREFIX of `listings` — and
-# every listing past that prefix would then be read as "absent from the inventory", which
-# is exactly the verdict that admits a carry_forward coordinate as first-party.
-_INVENTORY_TERMINAL_SQL = """
-    SELECT
-      (SELECT count(*) FROM mapy_inventory_runs),
-      (SELECT coalesce(max(restart_epoch), 0) FROM mapy_inventory_runs),
-      EXISTS (
-        SELECT 1 FROM mapy_inventory_runs r
-        WHERE r.restart_epoch = (SELECT max(restart_epoch) FROM mapy_inventory_runs)
-          AND r.status = 'completed'
-          AND r.resumable),
-      (SELECT string_agg(DISTINCT r.status, ',' ORDER BY r.status)
-       FROM mapy_inventory_runs r
-       WHERE r.restart_epoch = (SELECT max(restart_epoch) FROM mapy_inventory_runs))
-"""
-
 _RELATIONS = (
     "location_claims", "location_claim_batches", "dirty_locations",
     "portal_contracts", "portal_contract_entries", "portal_raw_payloads",
-    "listing_snapshots", "mapy_affected", "mapy_inventory_runs",
+    "listing_snapshots",
 )
 
 _TIMEOUT_GUARD_SQL = """
@@ -635,14 +597,12 @@ _BODY_JOIN = """
 _SELECT_COLUMNS = """
     SELECT l.id, l.source, l.source_id_native, l.raw_json, l.last_seen_at,
            ST_Y(l.geom::geometry), ST_X(l.geom::geometry),
-           (a.listing_id IS NOT NULL),
            pb.id, (pb.contract_version IS DISTINCT FROM pc.version), pb.page_kind,
            pb.payload_sha256, pb.first_observed_at, pc.version,
 """
 
 _FROM_LISTINGS = """
     FROM listings l
-    LEFT JOIN mapy_affected a ON a.listing_id = l.id
 """
 
 # Keyset over the whole table (active AND inactive: a delisted row's payload is exactly the
@@ -692,7 +652,6 @@ _LISTINGS_INCREMENTAL_SQL = ("""
     + _SELECT_COLUMNS + " c.snapshot_cursor\n" + """
     FROM changed c
     JOIN listings l ON l.id = c.listing_id
-    LEFT JOIN mapy_affected a ON a.listing_id = l.id
 """
     + _BODY_JOIN + """
     ORDER BY l.id
@@ -770,7 +729,6 @@ _UNMINED_BODIES_FROM = """
     FROM portal_raw_payloads p
     JOIN listings l ON l.source = p.source AND l.source_id_native = p.source_id_native
      AND l.is_active
-    LEFT JOIN mapy_affected a ON a.listing_id = l.id
     JOIN portal_contracts pc ON pc.source = p.source AND pc.is_active
 """
 
@@ -923,47 +881,6 @@ def missing_relations(conn: psycopg.Connection) -> list[str]:
     return missing
 
 
-def assert_inventory_ready(conn: psycopg.Connection) -> int:
-    """06 §6.1.2: the C7.2 R2 inventory is a lane INPUT. Without it, `carry_forward` cannot
-    be classified and the licence gate cannot be met, so the lane refuses to run.
-
-    "Without it" means TERMINAL AND COMPLETE, not merely non-empty: absence from a PREFIX
-    is indistinguishable from absence from the inventory, and that is exactly the verdict
-    that admits a Mapy-derived `carry_forward` coordinate as first-party."""
-    with conn.cursor() as cur:
-        cur.execute(_REGCLASS_SQL, {"name": "mapy_affected"})
-        if cur.fetchone()[0] is None:
-            raise IntakeRefused(
-                "mapy_affected does not exist: migration 385 is not applied. The Mapy "
-                "affected-set inventory is a lane INPUT (06 §6.1.2) — run "
-                "`python -m scripts.location_mapy_inventory` first.")
-        cur.execute(_MAPY_COUNT_SQL)
-        count = int(cur.fetchone()[0])
-        cur.execute(_INVENTORY_TERMINAL_SQL)
-        run_count, epoch, complete, statuses = cur.fetchone()
-    if count == 0:
-        raise IntakeRefused(
-            "mapy_affected is empty: the Mapy affected-set inventory has not been "
-            "materialised. Every carry_forward coordinate would be admitted as "
-            "first-party and the licence gate would fail (06 §6.1.2). Run "
-            "`python -m scripts.location_mapy_inventory` to completion first.")
-    if not int(run_count or 0):
-        raise IntakeRefused(
-            "mapy_inventory_runs has no rows: mapy_affected holds data no run "
-            "accounted for, so its completeness cannot be established. The inventory "
-            "is a lane INPUT (06 §6.1.2) — run "
-            "`python -m scripts.location_mapy_inventory` to completion first.")
-    if not complete:
-        raise IntakeRefused(
-            f"the Mapy affected-set inventory is INCOMPLETE: restart epoch {int(epoch)} "
-            f"has no resumable run with status='completed' (saw: {statuses or 'none'}). "
-            f"A partial inventory is worse than none — every listing past the scan's "
-            f"high-water mark reads as ABSENT from it, which is exactly the verdict that "
-            f"admits a Mapy-derived carry_forward coordinate as first-party (06 §6.1.2). "
-            f"Run `python -m scripts.location_mapy_inventory` to completion first.")
-    return count
-
-
 def load_entries(conn: psycopg.Connection) -> dict[str, list[Entry]]:
     by_source: dict[str, list[Entry]] = {}
     with conn.cursor() as cur:
@@ -1002,7 +919,7 @@ def _row_from_record(record: tuple[Any, ...]) -> ScanRow:
     left. The snapshot cursor is the last column for the same reason it used to sit before
     the tail — a column appended after it would be swallowed silently.
     """
-    (listing_id, source, native, raw_json, last_seen_at, lat, lon, in_inventory,
+    (listing_id, source, native, raw_json, last_seen_at, lat, lon,
      body_id, body_unmined, body_page_kind, body_sha, body_first_observed,
      contract_version, snapshot_cursor) = record
     row = ListingRow(
@@ -1014,8 +931,7 @@ def _row_from_record(record: tuple[Any, ...]) -> ScanRow:
         lon=float(lon) if lon is not None else None,
         # 06 §6.6 rule 1: a claim mined from `listings.raw_json` keeps the payload's own
         # observation time — the listing's last sighting — never the migration date.
-        observed_at=last_seen_at,
-        in_mapy_inventory=bool(in_inventory))
+        observed_at=last_seen_at)
     body: page_readers.ArchivedPayload | None = None
     if body_id is not None:
         body = page_readers.ArchivedPayload(
@@ -1477,7 +1393,6 @@ def run(
         raise IntakeRefused(
             f"location schema not applied; missing {', '.join(missing)} "
             f"(migrations 380-387, 403)")
-    inventory_rows = assert_inventory_ready(conn)
 
     entries_by_source = load_entries(conn)
     wanted = [source] if source else list(SOURCES)
@@ -1522,9 +1437,8 @@ def run(
             contract_id = int(row[0]) if row else None
 
     # An operator-anchored run does not certify that everything below its anchor was
-    # scanned, so it neither resumes from a stored cursor nor becomes one (the same guard
-    # migration 385 puts on `mapy_inventory_runs.resumable`). `--start-after-id` means a
-    # `listings.id` in full mode and a `listing_snapshots.id` in incremental mode — the
+    # scanned, so it neither resumes from a stored cursor nor becomes one. `--start-after-id`
+    # means a `listings.id` in full mode and a `listing_snapshots.id` in incremental mode — the
     # keyset each one walks.
     anchored = start_after_id > 0
     after_id = start_after_id
@@ -1550,9 +1464,9 @@ def run(
                 "scan_mode": mode, "resumable": not anchored,
             })
             batch_id = int(cur.fetchone()[0])
-    LOG.info("INTAKE start mode=%s source=%s batch=%d inventory_rows=%d batch_id=%s "
+    LOG.info("INTAKE start mode=%s source=%s batch=%d batch_id=%s "
              "page_sources=%s store=%s budget=%s extract_workers=%d",
-             mode, source or "*", batch_size, inventory_rows, batch_id,
+             mode, source or "*", batch_size, batch_id,
              ",".join(sorted(page_capable)) or "-", "yes" if store else "no",
              f"{max_seconds:.0f}s" if max_seconds is not None else "none",
              page_readers.extraction_workers())

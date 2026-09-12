@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -102,8 +103,8 @@ def entry(entry_id: str) -> Entry:
     return entries()[entry_id]
 
 
-def row(native: str = NATIVE, *, in_mapy_inventory: bool = False) -> ListingRow:
-    return fx.listing("idnes", {}, native=native, in_mapy_inventory=in_mapy_inventory)
+def row(native: str = NATIVE) -> ListingRow:
+    return fx.listing("idnes", {}, native=native)
 
 
 def payload(body: bytes, native: str = NATIVE) -> ArchivedPayload:
@@ -630,14 +631,15 @@ def test_the_pin_branch_is_licensed_portal_by_the_ladder_not_by_the_reader() -> 
     assert reason == "archived_id.det.subject_feature"
 
 
-def test_a_listing_in_the_mapy_inventory_gets_an_absence_and_no_coordinate() -> None:
-    """The Mapy veto applies on the archived substrate exactly as it does on the payload one,
-    and it is COUNTED: a refused coordinate that left no trace would be indistinguishable
-    from a page that carried no pin. The page's other claims are untouched."""
-    result = extract_page(payload(_PINNED.read_bytes()), row(in_mapy_inventory=True),
-                          [entry("id.det.subject_feature")], register=register())
+def test_an_unruled_coordinate_locator_gets_a_counted_refusal_and_no_claim() -> None:
+    """`ARCHIVED_COORDINATE_RULES` names ONE locator per portal, and since W4-b deleted the
+    Mapy veto above it that name is the whole licence. The refusal is COUNTED: one that left
+    no trace would be indistinguishable from a page that carried no pin."""
+    impostor = replace(entry("id.det.subject_feature"), entry_id="id.det.not_the_rule")
+    result = extract_page(payload(_PINNED.read_bytes()), row(), [impostor],
+                          register=register())
     assert result.claims == []
-    assert dict(result.refusals) == {"listing_in_mapy_affected_inventory": 1}
+    assert dict(result.refusals) == {"unrecognised_archived_coordinate_locator": 1}
 
 
 # ------------------------------------ the real archived page: an unparseable blob

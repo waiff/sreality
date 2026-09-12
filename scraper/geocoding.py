@@ -51,11 +51,8 @@ read goes through `.get(...)` and missing fields produce confidence
 
 from __future__ import annotations
 
-import argparse
-import json
 import logging
 import os
-import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -314,36 +311,3 @@ def _parse_bbox(
     if not all(isinstance(x, (int, float)) for x in raw):
         return None
     return (float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3]))
-
-
-# --- live verification helper ---------------------------------------------
-# Run:
-#   python -m scraper.geocoding "Václavské náměstí 1, Praha 1"
-# Prints the parsed result + raw response. Used to confirm the assumed
-# schema once a real MAPY_CZ_API_KEY is available.
-
-def _cli(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="scraper.geocoding")
-    p.add_argument("query")
-    p.add_argument("--lang", default="cs")
-    p.add_argument("--limit", type=int, default=5)
-    args = p.parse_args(argv)
-    try:
-        result = geocode(args.query, lang=args.lang, limit=args.limit)
-    except GeocodingError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
-    print(json.dumps({
-        "lat": result.lat,
-        "lng": result.lng,
-        "confidence": result.confidence,
-        "matched_type": result.matched_type,
-        "matched_address": result.matched_address,
-        "bbox": list(result.bbox) if result.bbox else None,
-        "raw_item_keys": sorted(result.raw.keys()),
-    }, ensure_ascii=False, indent=2))
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(_cli())

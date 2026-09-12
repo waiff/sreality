@@ -470,6 +470,25 @@ component is slimmed twice — each wave rewrites one component and slims its st
     (`test_location_w3_projection` W4-a block, `test_one_place_predicate` reader + payload
     ledgers), +719 the migration (the views/functions exception). Suites: pytest 7267 passed /
     216 skipped, vitest 123 files / 1497 tests, tsc clean.
+  - **W4-b shipped** (code only, no migration): the Mapy geocoder and its veto are GONE.
+    Deleted: `scraper/location.py` (`CoordResolver` / `CachingGeocoder` / `build_geocoder` /
+    `geocode_cached`) and its six drain injection points + `portal_factory`'s bazos wiring;
+    bazos' in-parser text-first geocoder (`_resolve_coords` keeps only the ad's own CZ-guarded
+    maps-link pin) and idnes' locality fallback; `MAPY_COORDS_SOURCES`, `ListingRow.in_mapy_inventory`,
+    `assert_inventory_ready` + `_MAPY_COUNT_SQL` + `_INVENTORY_TERMINAL_SQL` + the two `_RELATIONS`
+    entries + all three `LEFT JOIN mapy_affected`, both verdict functions' inventory rungs and the
+    conditional `carry_forward` rung (**`carry_forward` is inadmissible outright** — it laundered a
+    Mapy geocode through a refetch), `page_readers`' archived-arm veto, the now-unreachable
+    payload-half `coordinate_withheld` counter (the archived arm still counts every class-E pin);
+    `scripts/location_mapy_inventory.py` + `backfill_geocode_coords.py` + `backfill_bazos_coords.py`
+    and their three workflows; the intake chain's `GROUP_WORKFLOWS` entry; the dead
+    `MAPY_CZ_API_KEY` injections in seven scrape/drain workflows; `scraper/geocoding.py`'s CLI.
+    **No data migration**: W4-c drops every column the UPDATE would have nulled, so purge = drop.
+    Kept: `scraper/geocoding.py`'s key helpers + `geocode()` (`api/maps.py`, the on-demand URL
+    parse, `scripts/seed_curated_cities.py` — none of them stores a result). **+328 / −3,454
+    overall; +84 / −1,854 outside tests and docs.** The golden claim sets were re-blessed and the
+    diff is deletions only — no fixture's claims changed, which is the measurement that the veto
+    was never what licensed a pin. Suites: pytest 7265 passed / 219 skipped.
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM

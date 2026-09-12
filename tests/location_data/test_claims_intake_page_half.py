@@ -45,7 +45,7 @@ def _record(listing_id: int, body_id: int | None, unmined: bool) -> tuple[Any, .
     """One scan row in the three selections' column order."""
     return (
         listing_id, "sreality", f"n{listing_id}", dict(SREALITY_POST_CUTOVER),
-        BASE_TS + timedelta(minutes=listing_id), None, None, False,
+        BASE_TS + timedelta(minutes=listing_id), None, None,
         body_id, unmined, "detail" if body_id else None,
         "ab" * 32 if body_id else None, BASE_TS if body_id else None, ACTIVE_VERSION,
         None,
@@ -183,7 +183,6 @@ def _stub_preconditions(monkeypatch: pytest.MonkeyPatch) -> None:
     """The refusal gates and the reader registry have their own tests; this module is about
     the run loop, so the contract is stubbed to "sreality has a page entry"."""
     monkeypatch.setattr(claims_intake, "missing_relations", lambda conn: [])
-    monkeypatch.setattr(claims_intake, "assert_inventory_ready", lambda conn: 2201)
     monkeypatch.setattr(
         claims_intake, "load_entries", lambda conn: {"sreality": entries_for("sreality")})
     monkeypatch.setattr(

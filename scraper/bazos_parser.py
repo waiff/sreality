@@ -7,35 +7,26 @@ listing page into a `ScrapedListing` (the shared multi-portal contract in
 API, attributes buried in free text — so disposition and area come out by
 regex over the title + description.
 
-Coordinates are resolved TEXT-FIRST and cross-checked (`_resolve_coords`):
-a street name mined from the title/description geocodes to a far more precise
-point than the embedded maps-link pin, which is frequently a town-centre
-approximation. The link is used only as corroboration/fallback when it is
-consistent with the text reference; a pin that lands in a different town is
-distrusted. Geocoding is injected (a `Geocoder` callable) so these stay
-hermetically testable and so a missing `MAPY_CZ_API_KEY` degrades gracefully
-to the CZ-guarded link. Precise per-listing coords are what make cross-source
-dedup (the 20m / 150m gates) work.
+The ad's own CZ-guarded maps-link pin is the ONLY coordinate bazos publishes
+and therefore the only one we take (`_resolve_coords`). It is frequently a
+town-centre approximation, and that is what the claim's precision cap says; the
+text geocode that used to beat it is gone with the geocoder (W4-b).
 """
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from selectolax.parser import HTMLParser, Node
 
 from scraper.area import derive_headline_area
 from scraper.floor import floor_from_text
-from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.price_text import is_per_area_price
 from scraper.published import bazos_posted_date
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import clean_street
-
-Geocoder = Callable[[str], GeocodeResult]
 
 # Bazos URL segments -> our canonical labels (mirrors parser.CATEGORY_* style).
 SALE_TYPE: dict[str, str] = {
@@ -89,18 +80,10 @@ _BAZOS_THUMB_RE = re.compile(r"/img/(\d+)t/")
 def _full_size_image_url(src: str) -> str:
     return _BAZOS_THUMB_RE.sub(r"/img/\1/", src, count=1)
 
-# Czech-bbox guard applied to every coordinate candidate (link OR geocode) so a
-# stray decimal pair, a swapped lat/lon, or a geocode that landed abroad can
-# never become a bogus geom.
+# Czech-bbox guard applied to the link pin so a stray decimal pair or a swapped
+# lat/lon can never become a bogus geom.
 _CZ_LAT_MIN, _CZ_LAT_MAX = 48.0, 51.5
 _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
-
-# Cross-check thresholds (km), tunable. A maps-link pin within TRUST of the text
-# reference is a precise pin at the right place — preferred over a coarse
-# locality-only geocode. Beyond DISTRUST it contradicts the stated location and
-# is dropped in favour of the text geocode.
-LINK_TRUST_RADIUS_KM = 2.0
-LINK_DISTRUST_RADIUS_KM = 5.0
 
 # Street extraction over title + description. Keyword-anchored forms are the
 # reliable signal; the bare "<Name> <house-no>" form is gated by a street-like
@@ -118,8 +101,7 @@ _CZ_LOWER = "a-záčďéěíňóřšťúůýž"
 # 2027") or a floor ordinal ("ve 2. patře"), and a wrong street is worse than
 # NULL.
 _NUMERAL_STREET_NAME = rf"\d{{1,2}}\.[^\S\r\n]*[{_CZ_LOWER}]\w+"
-# Optional trailing house number — a street + number geocodes to a precise
-# address (high confidence); the lookahead rejects a PSČ ("679 61").
+# Optional trailing house number; the lookahead rejects a PSČ ("679 61").
 _HOUSE_NO = r"(?:\s+\d{1,4}(?:/\d{1,4})?(?!\s*\d))?"
 # Dotted abbreviations (ul./tř./nám./nábř.) may be glued to the name with no
 # space ("ul.Výstavní"); the spelled-out keywords still require a space.
@@ -337,138 +319,24 @@ def extract_street(haystack: str | None) -> str | None:
     return None
 
 
-def _street_query(street: str, locality: str, psc: str | None) -> str:
-    q = f"{street}, {locality}"
-    return f"{q} {psc}" if psc else q
-
-
-def _locality_query(locality: str, psc: str | None) -> str:
-    return f"{locality} {psc}" if psc else locality
-
-
-def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
-    (lat1, lon1), (lat2, lon2) = a, b
-    radius_km = 6371.0088
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    h = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
-    return 2 * radius_km * math.asin(math.sqrt(h))
-
-
-def _safe_geocode(geocoder: Geocoder | None, query: str) -> GeocodeResult | None:
-    if geocoder is None or not query.strip():
-        return None
-    try:
-        return geocoder(query)
-    except GeocodingError:
-        return None
-
-
 def _resolve_coords(
     *,
     link_lat: float | None,
     link_lon: float | None,
     street: str | None,
-    locality: str | None,
-    psc: str | None,
-    geocoder: Geocoder | None,
 ) -> tuple[float | None, float | None, dict[str, Any]]:
-    """Single text-first, cross-checked coordinate-resolution step.
+    """The ad's own maps-link pin, CZ-guarded, or nothing.
 
-    Priority: (1) a high/medium street geocode; (2) the maps-link pin when it
-    is consistent with the text reference; (3) a coarse locality geocode.
-    Every candidate passes the CZ-bbox guard. The returned provenance dict is
-    stored in raw_json so accuracy is auditable.
+    The provenance dict is stored in raw_json, and `source` is what the claim
+    intake's licence ladder reads: only `"link"` licenses a bazos coordinate.
     """
-    link = (
-        (link_lat, link_lon)
-        if link_lat is not None and link_lon is not None
-        else None
-    )
+    present = link_lat is not None and link_lon is not None
     prov: dict[str, Any] = {
-        "source": None,
+        "source": "link" if present else None,
         "street": street,
-        "link_present": link is not None,
-        "street_confidence": None,
-        "locality_confidence": None,
-        "text_reference": None,
-        "link_text_distance_km": None,
-        "notes": [],
+        "link_present": present,
     }
-
-    # No geocoder (MAPY_CZ_API_KEY unset): trust only the CZ-guarded link.
-    if geocoder is None:
-        if link is not None:
-            prov["source"] = "link"
-            prov["notes"].append("no geocoder; used CZ-guarded maps link")
-        return link_lat, link_lon, prov
-
-    # Street geocode (primary candidate) — needs a street AND a locality to
-    # disambiguate a bare street name nationwide.
-    street_geo = None
-    if street and locality:
-        street_geo = _safe_geocode(geocoder, _street_query(street, locality, psc))
-        if street_geo is not None:
-            prov["street_confidence"] = street_geo.confidence
-
-    # Text reference for cross-checking the link: the street geocode if usable,
-    # otherwise the locality geocode (the most-specific text available).
-    text_ref: tuple[float, float] | None = None
-    locality_geo = None
-    if street_geo is not None and _in_cz_bbox(street_geo.lat, street_geo.lng):
-        text_ref = (street_geo.lat, street_geo.lng)
-        prov["text_reference"] = "street"
-    elif locality:
-        locality_geo = _safe_geocode(geocoder, _locality_query(locality, psc))
-        if locality_geo is not None:
-            prov["locality_confidence"] = locality_geo.confidence
-            if _in_cz_bbox(locality_geo.lat, locality_geo.lng):
-                text_ref = (locality_geo.lat, locality_geo.lng)
-                prov["text_reference"] = "locality"
-
-    if link is not None and text_ref is not None:
-        prov["link_text_distance_km"] = round(_haversine_km(link, text_ref), 3)
-
-    # Priority 1 — street geocode is precise and inherently matches the text.
-    if (
-        street_geo is not None
-        and street_geo.confidence in ("high", "medium")
-        and _in_cz_bbox(street_geo.lat, street_geo.lng)
-    ):
-        prov["source"] = "street"
-        return street_geo.lat, street_geo.lng, prov
-
-    # Priority 2 — the maps link, cross-checked against the text reference.
-    if link is not None:
-        dist = prov["link_text_distance_km"]
-        if text_ref is None:
-            prov["source"] = "link"
-            prov["notes"].append("no text reference; used CZ-guarded maps link")
-            return link_lat, link_lon, prov
-        if dist is not None and dist > LINK_DISTRUST_RADIUS_KM:
-            prov["notes"].append(
-                f"maps link {dist:.1f} km from text "
-                f"({prov['text_reference']}); distrusted"
-            )
-        else:
-            prov["source"] = "link"
-            if dist is not None and dist > LINK_TRUST_RADIUS_KM:
-                prov["notes"].append(
-                    f"maps link {dist:.1f} km from text; accepted (loose)"
-                )
-            return link_lat, link_lon, prov
-
-    # Priority 3 — coarse text fallback (locality geocode, or a low-confidence
-    # street geocode that in practice resolved to the municipality).
-    fallback = locality_geo if locality_geo is not None else street_geo
-    if fallback is not None and _in_cz_bbox(fallback.lat, fallback.lng):
-        prov["source"] = "locality"
-        return fallback.lat, fallback.lng, prov
-
-    if link is not None:
-        prov["notes"].append("no trustworthy coordinate; dropped contradicting link")
-    return None, None, prov
+    return (link_lat, link_lon, prov) if present else (None, None, prov)
 
 
 def _id_from_href(href: str | None) -> str | None:
@@ -547,7 +415,7 @@ def _detail_table(tree: HTMLParser) -> dict[str, Node]:
     The value is the LAST cell, not cells[1]: live bazos renders the Lokalita row
     as three cells — label, a map-icon cell, then the cell holding the PSČ/town
     (and the maps link). Reading cells[1] there grabbed the icon cell (no text),
-    which left `locality` NULL for every listing and disabled street geocoding.
+    which left `locality` NULL for every listing.
     For the ordinary two-cell rows (Cena, Vidělo) cells[-1] is still the value.
     """
     rows: dict[str, Node] = {}
@@ -603,7 +471,6 @@ def parse_detail(
     source_url: str,
     category_main: str | None,
     category_type: str | None,
-    geocoder: Geocoder | None = None,
 ) -> ScrapedListing:
     tree = HTMLParser(html)
     source_id = _id_from_href(source_url) or ""
@@ -638,14 +505,12 @@ def parse_detail(
     )
     locality, psc = _locality(_text(lok_cell))
 
-    # Text-first, cross-checked: street geocode wins, the link only corroborates.
     street = extract_street(haystack)
     trailer_street, trailer_quarter = _trailer_street_quarter(description, locality)
     if street is None:
         street = trailer_street
     lat, lon, coord_provenance = _resolve_coords(
-        link_lat=link_lat, link_lon=link_lon,
-        street=street, locality=locality, psc=psc, geocoder=geocoder,
+        link_lat=link_lat, link_lon=link_lon, street=street,
     )
 
     # The listing's own photos carry its ad id in the URL (/img/N/sub/<id>.jpg); the
@@ -704,8 +569,7 @@ def parse_detail(
         # the payload with listings.zip NULL (W0 item 0c). A municipality-grain
         # anchor far better than bazos's collapsed town pins.
         zip=psc,
-        # The raw extract (with its "ul." prefix) is the better geocoder query;
-        # the STORED street is cleaned to a bare, uniform name (prefix stripped,
+        # The STORED street is cleaned to a bare, uniform name (prefix stripped,
         # trailing description bleed like "ul. Teplého Nabízíme" trimmed).
         street=clean_street(street),
         lat=lat,

@@ -13,7 +13,6 @@
       "row": {
         "lat": 48.8489,
         "lon": 17.1325,
-        "in_mapy_inventory": false,
         "listings.locality": null,
         "listings.street": null,
         "listings.street_source": null
@@ -27,7 +26,6 @@
       "row": {
         "lat": 49.5,
         "lon": 15.5,
-        "in_mapy_inventory": false,
         "listings.locality": null,
         "listings.street": null,
         "listings.street_source": null

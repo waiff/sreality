@@ -37,7 +37,6 @@ import logging
 from typing import Any
 
 from scraper import db, portal_runner
-from scraper.location import CoordResolver
 from scraper.portal import (
     PortalConfig,
     StopReason,
@@ -96,9 +95,6 @@ class RemaxPortal:
         self._price_change_min_pct = config.limits.price_change_min_pct
         self._agenda_cache: dict[int, _AgendaWalk] = {}
         self._swept_agendas: set[int] = set()  # delist each agenda once per run
-        # page > carry-forward > geocode (remax pages without a data-gps pair had
-        # NO coords path until now).
-        self._coords = CoordResolver(SOURCE)
 
     # --- index-walk seams ---
     def set_index_page_cap(self, pages: int | None) -> None:
@@ -122,7 +118,6 @@ class RemaxPortal:
 
     def connect_drain(self) -> Any:
         conn = db.connect()
-        self._coords.preload(conn)
         return conn
 
     def _walk_agenda(
@@ -436,9 +431,6 @@ class RemaxPortal:
             listing = parse_detail(html, source_url=url)
         except Exception as exc:  # noqa: BLE001
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
-        # Page coords win -> carry a stored geom forward -> geocode the locality
-        # (never fails the fetch; scraper.location).
-        listing = self._coords.fill(native_id, listing)
         return DrainItem(
             native_id=native_id, kind="ok",
             payload={"listing": listing, "html": html, "status": status, "url": url},
