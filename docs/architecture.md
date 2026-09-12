@@ -2061,11 +2061,22 @@ and a keyset never looks back. The page half got its own pass AHEAD of that scan
 latest bodies of ACTIVE page-portal listings, selected FROM `portal_raw_payloads` in `p.id` order,
 1 500 a batch, until the backlog empties or half the budget is gone — ~250 000 bodies were unmined
 after the first wave and riding them on the listing scan would have taken ~170 runs. Its cursor is
-an **in-run keyset** on `p.id` (reset to 0 each run, so the contract-version gate still decides
-what is eligible): four paths leave a body unstamped — a bucket miss, a missing scope register, a
+a keyset on `p.id`: four paths leave a body unstamped — a bucket miss, a missing scope register, a
 content-triggered refusal, a scoper that failed closed — and three are deterministic per body, so
 a stamp-only notion of progress would park them at the head of the order, re-fetch them every
-batch, and stall the entire backlog behind them once `cap` of them accumulated. **Each batch is two
+batch, and stall the entire backlog behind them once `cap` of them accumulated. **That keyset
+PERSISTS across runs** (W1-a6, `location_claim_batches.bodies_cursor_after_id`, migration 509),
+under the rule the listing scan already follows: a pass that stopped on budget resumes where it
+stopped, a pass that COMPLETED stamps NULL and the next one restarts at 0 — so an unstampable body
+costs one re-fetch per PASS, not per run. W1-a2 chose per-run, and the measurement that overturned
+it is the dead PREFIX the version gate can never exclude: the body of a DELISTED listing (dropped
+by the `l.is_active` join) and a SUPERSEDED body (dropped by the latest-body anti-join) stay
+eligible to the WINDOW for ever. Run 34695468715 walked 203 windows, 187 of them `eligible=0`, and
+reached its first mineable row at the 87th — 468 s of a 1 169 s pass, re-paid every run. A
+contract bump makes rows below the cursor eligible again; they are picked up when the pass
+completes and the next one restarts at 0, so a bump costs at most one pass of delay. A `failed`
+run's stamp is resumed from like a `stopped` one — the cursor only advances past a closed
+transaction. **Each batch is two
 statements in one transaction** (W1-a4): a fenced WINDOW — `ORDER BY p.id LIMIT %(cap)s` over
 payload columns ALONE — then the `listings` join and the latest-body anti-join over the ids it
 named. With the keyset in one statement's WHERE, Postgres planned the selection from `listings`

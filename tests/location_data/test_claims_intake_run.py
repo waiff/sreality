@@ -19,6 +19,7 @@ from location_data.resolver import drain
 from location_data.claims_intake import (
     _BATCH_FINISH_SQL,
     _BATCH_INSERT_SQL,
+    _BODIES_RESUME_SQL,
     _BODY_JOIN,
     _CLAIM_WRITE_SQL,
     _FROM_LISTINGS,
@@ -404,6 +405,25 @@ def test_the_batch_row_carries_the_cursor_and_the_mode_that_wrote_it():
     # scanned (migration 385 puts the same guard on `mapy_inventory_runs`).
     assert "AND resumable" in resume
     assert "ORDER BY started_at DESC, id DESC" in resume
+
+
+def test_the_bodies_pass_cursor_is_stamped_and_read_back_newest_first():
+    """W1-a6. A THIRD keyset — `portal_raw_payloads.id` — so it gets its own column
+    (migration 509) and its own lookup, and that lookup is NOT scan_mode-scoped: the bodies
+    pass runs ahead of both modes and one keyset carries it. The read is the newest FINISHED
+    row's value, NULL included: NULL means the pass completed, so the next one starts at 0,
+    and a newer completed run must not be overtaken by an older stopped one's position."""
+    assert "bodies_cursor_after_id = %(bodies_cursor_after_id)s" in " ".join(
+        _BATCH_FINISH_SQL.split())
+    sql = " ".join(_BODIES_RESUME_SQL.split())
+    assert sql.startswith("SELECT bodies_cursor_after_id FROM location_claim_batches")
+    assert "source IS NOT DISTINCT FROM %(source)s" in sql
+    assert "scan_mode" not in sql
+    # Terminal rows only: this run's own 'running' row would otherwise be the newest.
+    assert "outcome IN ('ok', 'stopped', 'failed')" in sql
+    assert sql.endswith("ORDER BY started_at DESC, id DESC LIMIT 1")
+    # And no `IS NOT NULL` filter: a NULL from the newest run IS the answer.
+    assert "bodies_cursor_after_id IS NOT NULL" not in sql
 
 
 def test_no_write_statement_touches_an_existing_production_table():
