@@ -53,18 +53,39 @@ from location_data.resolver.types import (
 
 _CURRENT_REGISTRY_SQL = "SELECT id, label FROM registry_versions WHERE is_current LIMIT 1"
 
-# ONE projection, two predicates — the row unpacking in `_claim` is positional, so a second
-# hand-written column list is a silent mis-mapping waiting to happen
+# ONE projection, ONE admissibility predicate — the row unpacking in `_claim` is positional,
+# so a second hand-written column list is a silent mis-mapping waiting to happen
 # (`test_resolver_jobs.test_the_claims_select_maps_onto_claim_positionally` pins it).
 #
 # THE LICENCE RAIL LIVES HERE (W2-a). Migration 384 enforced it with three CHECK constraints
 # on the stores of record — a `position_licence_class` column on each projection and on the
 # resolution, each constrained `<> 'ephemeral_display_only'`. `listing_location` has no such
 # column, because the guard moved one step upstream and became stronger: a Mapy-class
-# coordinate is not refused at write time, it is never READ. `licence_class IN
-# ('portal','operator')` is part of the claim projection itself, so no code path in the
-# resolver can see one at all.
+# coordinate is not refused at write time, it is never READ.
 _ADMISSIBLE_LICENCE_CLASSES = "('portal', 'operator')"
+
+# AND SO DOES THE CONTRACT-VERSION RAIL, for the same reason and in the same predicate.
+# `location_claims` is append-only and its fingerprint hashes `extractor_version`, so a
+# contract BUMP does not supersede the old version's rows — it inserts new ones beside them.
+# W1-c bumped all nine contracts at once, which means every listing whose body has not
+# changed since carries two claims for the same fact, and the SUPERSEDED one has the LOWER
+# id: it would win every "first admissible claim of this type" tie in BIND and FILL, and the
+# resolver would serve the retired contract's answer indefinitely.
+#
+# Filtering at READ is what makes that a cleanup rather than a correctness step: the rows
+# stay on disk (nothing in this program deletes evidence in place) and W2-b's migration
+# deletes the inactive-entry claims at its leisure. `is_active` lives on the contract HEADER,
+# one per source, so the EXISTS is two primary-key hops per claim row.
+#
+# Operator claims carry NO contract entry by construction
+# (`location_data/operator_corrections.py` writes `contract_entry_id NULL` +
+# `licence_class 'operator'`), so they are named explicitly rather than let through by a
+# NULL-tolerant join — a portal claim that somehow lost its entry id must NOT be admitted.
+_ACTIVE_CONTRACT_ENTRY = """
+       (c.contract_entry_id IS NULL AND c.licence_class = 'operator'
+        OR EXISTS (SELECT 1 FROM portal_contract_entries pce
+                     JOIN portal_contracts pc ON pc.id = pce.contract_id
+                    WHERE pce.id = c.contract_entry_id AND pc.is_active))"""
 
 _CLAIMS_SELECT = f"""
 SELECT id, listing_id, source, claim_type::text, surface::text, extraction_method::text,
@@ -73,16 +94,17 @@ SELECT id, listing_id, source, claim_type::text, surface::text, extraction_metho
        CASE WHEN value_geom IS NULL THEN NULL ELSE ST_X(value_geom) END,
        value_jsonb, declared_precision_label, declared_radius_m,
        blur_evidence::text, claim_confidence::text, subject_scoped
-  FROM location_claims
- WHERE licence_class IN {_ADMISSIBLE_LICENCE_CLASSES}
+  FROM location_claims c
+ WHERE c.licence_class IN {_ADMISSIBLE_LICENCE_CLASSES}
+   AND{_ACTIVE_CONTRACT_ENTRY}
 """
 
-_CLAIMS_SQL = _CLAIMS_SELECT + "   AND listing_id = %s\n ORDER BY id"
+_CLAIMS_SQL = _CLAIMS_SELECT + "   AND c.listing_id = %s\n ORDER BY c.id"
 
 # The whole SLICE in one query instead of one per listing; the per-listing order is still
 # `id`, which is what `core.resolve` re-sorts on anyway.
 _CLAIMS_BULK_SQL = (
-    _CLAIMS_SELECT + "   AND listing_id = ANY(%s::bigint[])\n ORDER BY listing_id, id"
+    _CLAIMS_SELECT + "   AND c.listing_id = ANY(%s::bigint[])\n ORDER BY c.listing_id, c.id"
 )
 
 _SOURCES_BULK_SQL = "SELECT id, source FROM listings WHERE id = ANY(%s::bigint[])"

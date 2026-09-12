@@ -178,7 +178,11 @@ component is slimmed twice — each wave rewrites one component and slims its st
   per-slice warm 5 → 2, its write path 7 statements → 1. The resolution identity is five version
   inputs → **three** (`claim_set_hash`, `resolver_version`, `registry_version`), and the sweep
   compares the last two on `listing_location`. The licence rail moved from three CHECK constraints
-  to the claim READ (`licence_class IN ('portal','operator')` in `_CLAIMS_SELECT`).
+  to the claim READ (`licence_class IN ('portal','operator')` in `_CLAIMS_SELECT`), and the same
+  predicate now admits only claims whose `contract_entry_id` belongs to an ACTIVE contract (plus
+  operator claims, which carry none) — W1-c bumped all nine contract versions and the fingerprint
+  hashes `extractor_version`, so the superseded rows sit beside the new ones with LOWER ids and
+  would win every first-claim tie. W2-b's migration deletes them as a cleanup.
   **Cutover:** apply 501 → merge → `resolver:v4` in `version.py` means the daily sweep (or a
   `mode=full-resolve` dispatch) enqueues the whole corpus, and the Railway worker lane drains it in
   **5–11 h**; the gate is `count(listing_location) = count(listings where is_active)`, which

@@ -58,10 +58,88 @@ def test_the_licence_gate_is_in_the_claim_read_not_only_in_the_code():
     each store of record to make a Mapy coordinate unstorable. `listing_location` has no such
     column because the guard moved upstream and got stronger: the resolver's own projection
     refuses to SELECT one."""
-    flat = " ".join(resolve_db._CLAIMS_SELECT.split()).lower()
-    assert "licence_class in ('portal', 'operator')" in flat
-    for derived in (resolve_db._CLAIMS_SQL, resolve_db._CLAIMS_BULK_SQL):
-        assert "licence_class in ('portal', 'operator')" in " ".join(derived.split()).lower()
+    for sql in (resolve_db._CLAIMS_SELECT, resolve_db._CLAIMS_SQL, resolve_db._CLAIMS_BULK_SQL):
+        assert "c.licence_class in ('portal', 'operator')" in " ".join(sql.split()).lower()
+
+
+def test_only_an_active_contracts_claims_are_read():
+    """`location_claims` is append-only and its fingerprint hashes `extractor_version`, so a
+    contract BUMP inserts new rows beside the old ones rather than superseding them — and the
+    superseded row has the LOWER id, so it would win every "first admissible claim of this
+    type" tie. W1-c bumped all nine contracts at once, which makes that the normal case on
+    any listing whose body has not changed since.
+
+    Filtering at READ keeps the evidence on disk and makes W2-b's delete a cleanup rather
+    than a correctness step. `is_active` lives on the contract HEADER, one per source."""
+    for sql in (resolve_db._CLAIMS_SELECT, resolve_db._CLAIMS_SQL, resolve_db._CLAIMS_BULK_SQL):
+        flat = " ".join(sql.split()).lower()
+        assert "join portal_contracts pc on pc.id = pce.contract_id" in flat, flat
+        assert "where pce.id = c.contract_entry_id and pc.is_active" in flat, flat
+        # Operator claims carry no entry by construction and are named EXPLICITLY — a
+        # NULL-tolerant join would also admit a portal claim that lost its entry id.
+        assert "c.contract_entry_id is null and c.licence_class = 'operator'" in flat, flat
+
+
+class _ClaimCursor:
+    """A fake that OBEYS the claim projection's two predicates instead of ignoring them.
+
+    It refuses a statement that does not carry them and then applies them to its own rows, so
+    the test below goes red BOTH when the predicate is dropped from the SQL and when the
+    loader stops using that SQL.
+    """
+
+    #  id, listing_id, licence_class, contract_entry_id, entry_is_active
+    ROWS = (
+        (1, 77, "portal", 10, True),    # the live contract's claim
+        (2, 77, "portal", 9, False),    # the SAME fact, from the superseded version
+        (3, 77, "operator", None, None),  # an operator correction, no entry at all
+        (4, 77, "ephemeral_display_only", 10, True),  # a Mapy coordinate
+        (5, 77, "portal", None, None),  # a portal claim that lost its entry id
+    )
+
+    def __init__(self) -> None:
+        self.result: list[tuple] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+    def execute(self, sql, params=None):
+        flat = " ".join(sql.split()).lower()
+        assert "c.licence_class in ('portal', 'operator')" in flat, "licence rail missing"
+        assert "and pc.is_active" in flat, "active-contract rail missing"
+        assert "c.contract_entry_id is null and c.licence_class = 'operator'" in flat
+        self.result = [
+            _row(claim_id, listing_id)
+            for claim_id, listing_id, licence, entry, active in self.ROWS
+            if licence in ("portal", "operator")
+            and ((entry is None and licence == "operator") or active is True)
+        ]
+
+    def fetchall(self):
+        return self.result
+
+
+def _row(claim_id: int, listing_id: int) -> tuple:
+    return (claim_id, listing_id, "sreality", "obec_name", "api_json",
+            "portal_structured_field", "portal", mm._T0, "Praha", None, None, None,
+            {}, None, None, "none", "high", True)
+
+
+class _ClaimConn:
+    def __init__(self) -> None:
+        self.cur = _ClaimCursor()
+
+    def cursor(self):
+        return self.cur
+
+
+def test_a_retired_contract_entrys_claim_is_never_loaded():
+    """Five rows for one listing; three are inadmissible and only two reach the resolver."""
+    loaded = resolve_db.load_claims_bulk(_ClaimConn(), [77])
+    assert [c.id for c in loaded[77]] == [1, 3]
 
 
 # --------------------------------------------------------------- the carousel street

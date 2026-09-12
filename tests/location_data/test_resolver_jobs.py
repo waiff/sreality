@@ -278,12 +278,13 @@ def test_the_per_listing_reads_are_prefetched_once_per_slice():
     state = _drained([[(101, 0), (102, 0), (103, 0)], [(104, 0), (105, 0)]])
     assert state["stats"].claimed == 5
     for needle in (
-        "from location_claims where licence_class in ('portal', 'operator') and listing_id = any(",
+        "from location_claims c where c.licence_class in ('portal', 'operator')",
         "select id, source from listings where id = any(",
     ):
         assert _count(state, needle) == 2, needle
+    assert _count(state, "and c.listing_id = any(") == 2
     # ...and never the single-listing forms the prefetch replaced.
-    assert _count(state, "and listing_id = %s") == 0
+    assert _count(state, "and c.listing_id = %s") == 0
     for gone in (
         "location_contradictions_open", "location_resolutions",
         "select id, property_id from listings",

@@ -2061,7 +2061,18 @@ projections — so that such a position could not be minted or stored. `listing_
 `position_licence_class` column because the guard is now in the resolver's own claim projection:
 `licence_class IN ('portal','operator')` is part of `_CLAIMS_SELECT`, so a Mapy-class coordinate is
 not refused at the winner, it is never READ. A partial index on `location_claims` still keeps the
-remediation set one indexed predicate away. The claim lane's blocking gate is `claims JOIN
+remediation set one indexed predicate away.
+
+**The same predicate carries the contract-version rail.** `location_claims` is append-only and its
+fingerprint hashes `extractor_version`, so a contract BUMP does not supersede the old version's
+rows — it inserts new ones beside them, and the superseded row has the LOWER id, which means it
+wins every "first admissible claim of this type" tie. W1-c bumped all nine contracts at once, so
+that is the normal case on any listing whose body has not changed since. `_CLAIMS_SELECT` therefore
+admits a claim only when its `contract_entry_id` belongs to a contract whose header is `is_active`,
+plus operator claims, which carry no entry by construction (`contract_entry_id IS NULL` +
+`licence_class = 'operator'` — named explicitly, so a portal claim that lost its entry id is NOT
+let through). Filtering at READ is what makes deleting the superseded rows a cleanup W2-b's
+migration can take at its leisure rather than a correctness step the resolver depends on. The claim lane's blocking gate is `claims JOIN
 mapy_affected WHERE claim_type='coordinate'` = 0, and it refuses to start unless the Mapy affected-set
 inventory (migration 385 — five arms, identity and reason codes, **never** a coordinate, and
 trigger-immutable: 42501 on UPDATE/DELETE/TRUNCATE) is TERMINAL *and* COMPLETE. Half-built is worse
