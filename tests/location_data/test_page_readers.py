@@ -1063,6 +1063,21 @@ def test_the_width_is_bounded_by_the_batch_and_one_worker_stays_serial():
     assert from_r2 == 1 and solo.peak == 1
 
 
+def test_a_corrupt_inline_body_costs_one_listing_not_the_run():
+    """The same rule as the R2 path, which the inline branch was missing: a truncated gzip
+    member or a mis-stamped `content_encoding` on ONE database-resident row would raise out
+    of `load_bodies`, roll back every portal's payload claims computed in the same
+    transaction, and hand the next run the same immutable row to die on. It is dropped from
+    the result instead — absent, not empty — so that body is left UNSTAMPED and retried."""
+    cursor = _BodyCursor([
+        (1, BODY, None, "identity"),
+        (2, b"not-actually-gzip", None, "gzip"),
+        (3, BODY, None, "identity"),
+    ])
+    bodies, from_r2 = page_readers.load_bodies(cursor, [1, 2, 3], store=None)
+    assert sorted(bodies) == [1, 3] and from_r2 == 0
+
+
 def test_an_inline_body_needs_no_store_even_when_the_batch_is_wide(monkeypatch):
     """The database-resident rows are decoded on the spot; only spilled rows reach the pool,
     so a fully inline batch still runs with no credentials at all."""
