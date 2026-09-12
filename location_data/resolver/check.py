@@ -19,8 +19,8 @@ Three reasons ship:
   corpus `foreign_suspect` rows were unambiguously Czech artifacts, so trusting either side
   unconditionally is wrong in both directions.
 
-**Foreign is a determination, never a default** (rule 25). A listing with no Czech town and
-no foreign signal is `undetermined` at `unknown` granularity — the state that says "we have
+**Foreign is a determination, never a default** (rule 25). A listing that bound no Czech
+admin unit at all and carries no foreign signal is `undetermined` at `unknown` granularity — the state that says "we have
 nothing", which is the one thing "foreign" must never be allowed to mean. The §3.4.2
 false-positive rejections below are mandatory and are enforced twice, structurally (a
 `subject_scoped=false` claim is inadmissible at all) and by content: a naive keyword
@@ -200,6 +200,11 @@ def check(
     codes = country_codes(claims, normalized)
     foreign = {c for c in codes if c != "CZ"}
     has_town = filled.obec_kod is not None
+    # A Czech ADMIN UNIT that bound at any level is already a country determination — the
+    # gazetteer it came out of is the Czech one. An okres-only bind used to fall through to
+    # "no town, no pin, no country claim" and collapse to `undetermined`, which reads as "we
+    # have nothing" about a row that names a region.
+    bound_cz = has_town or filled.okres_kod is not None or filled.kraj_kod is not None
     # Only a PORTAL PIN can be somewhere the rest of the row denies. A registry point and an
     # admin centroid both come OUT of the RÚIAN mirror, so asking whether they are in Czechia
     # or inside their own obec is a round trip whose answer is fixed by construction — and it
@@ -208,7 +213,7 @@ def check(
     pin = (position.lat, position.lon) if position.origin == "portal_pin" else None
     in_cz = registry.in_czechia_polygon(*pin) if pin else None
 
-    if not has_town:
+    if not bound_cz:
         if foreign:
             code = next(iter(sorted(foreign))) if len(foreign) == 1 else None
             return Verdict(
@@ -224,12 +229,13 @@ def check(
             return Verdict(country_status="cz", country_code="CZ", granularity=granularity)
         return Verdict(country_status="undetermined", country_code=None, granularity="unknown")
 
-    # ---- a Czech town. Everything below decides whether the row agrees with itself.
+    # ---- a Czech admin unit bound. Everything below decides whether the row agrees with
+    # itself; the containment test needs a TOWN, which a region-only bind does not have.
     if foreign:
         return Verdict("cz", "CZ", disputed="country_conflict", granularity=granularity)
     if in_cz is False:
         return Verdict("cz", "CZ", disputed="pin_outside_cz", granularity=granularity)
-    if pin is not None and not binding.pin_derived:
+    if pin is not None and has_town and not binding.pin_derived:
         covering = registry.containing_obec(*pin)
         if covering is None or covering.code != filled.obec_kod:
             # Keep the pin — it is the only position we have — but say so, and drop to the

@@ -13,22 +13,26 @@ network round trip from a GitHub-hosted runner to the Frankfurt pooler, against 
 of server-side work per registry question. So the wall clock is ~99 % latency and ~1 % query,
 and the lever is the NUMBER of round trips.
 
-W2-a halves that number by deleting questions rather than by tuning them. Fifteen registry
-query kinds become eight:
+W2-a cuts that number by deleting questions rather than by tuning them. Fifteen registry
+query kinds become nine:
 
 * parcels went with the rung that could never reach them;
-* `nearest_obec_within`, `distance_to_admin_boundary_m`, `cast_obce_for_point` and
-  `cast_obce_extent_m` went with the sliver fallback, the rule-2 boundary comparison and the
-  ČástObce point lookup — FILL takes the quarter off the bound entity's own chain instead;
+* `distance_to_admin_boundary_m`, `cast_obce_for_point` and `cast_obce_extent_m` went with
+  the rule-2 boundary comparison and the ČástObce point lookup — FILL takes the quarter off
+  the bound entity's own chain instead;
 * `pin_clusters` went with the collision epoch;
 * `admin_unit_by_code` and `admin_unit` FOLDED into `admin_chain`, which now returns the
   unit itself ahead of its ancestors, so "this unit and its chain" is one trip and not three.
 
+`nearest_obec_within` stays: it is BIND's sliver rung and the thing that keeps a border pin
+from having no town at all, which rule 25 does not allow.
+
 The five policy/constant loaders went with the tables they read. What is left is four
-point-free questions the run cache shares corpus-wide (name, code, street, address point)
-and two point-keyed ones (`containing_obec`, `in_czechia_polygon`) that `warm_points` asks
-once per SLICE. The ~62 % cache plateau was those point-keyed questions; with the other
-three gone, the surviving misses are two per distinct pin.
+point-free questions the run cache shares corpus-wide (name, code, street, address point),
+two point-keyed ones (`containing_obec`, `in_czechia_polygon`) that `warm_points` asks once
+per SLICE, and the sliver fallback, asked lazily because it is reached on ~1 % of listings.
+The ~62 % cache plateau was those point-keyed questions; with the rest gone, the surviving
+misses are two per distinct pin.
 
 The registry view here answers exactly the questions `types.RegistryView` declares, so the
 pure core cannot reach past it into SQL. `purpose IN ('pip','authoritative')` is deliberate:

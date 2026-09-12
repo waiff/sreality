@@ -69,7 +69,8 @@ def resolve(
     )
     pin_is_precise = bool(declared.label) and not declared.blurred
     binding, constraints = step_bind.bind(
-        admissible, normalized, ctx, pin_is_precise=pin_is_precise
+        admissible, normalized, ctx, pin_is_precise=pin_is_precise,
+        pin_claim_id=(pin_claim.id if pin_claim else None),
     )
     position = step_bind.place(binding, pin_claim, declared=declared)
 

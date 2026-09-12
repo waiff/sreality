@@ -1311,7 +1311,8 @@ async def _amain() -> int:
         # this value when the app_settings read RAISES, and the flag lives
         # inside the read that just failed. A positive fallback would turn a
         # dark, deliberately-idled lane ON for one pass on any pooler blip —
-        # e.g. mid-epoch_job, which is exactly when it must not drain.
+        # e.g. mid-migration or mid-registry-load, which is exactly when it must
+        # not drain. (It named `epoch_job` until W2-a deleted the epoch engine.)
         ("location_resolve", lambda: _lane_loop(
             "location_resolve", stop_event, _read_location_resolve_interval,
             lambda: _location_resolve_pass(stop_event, state),

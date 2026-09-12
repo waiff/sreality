@@ -1935,12 +1935,17 @@ rebuild, where the map is the thing that needs it. The steps:
 
 * **BIND** (`bind.py`) picks the finest RÚIAN entity the claims justify — a portal registry key,
   obec + street + čp/čo, a street inside the constraining obec, an obec/část obce by name, a PSČ
-  set, the pin's containing obec, and last the nearest obec within the 250 m sliver tolerance —
-  resolving homonyms locally inside the constraining parent (PSČ, okres/kraj, cadastral
-  territory, qualifier, and only then the coordinate as a tie-break). That last rung is what
-  keeps a border pin from having no town at all, which rule 25 does not allow: it answers at
-  `low` confidence and is NOT a dispute, because a polygon edge is not a disagreement. It also
-  elects the pin, by DECLARED QUALITY and only then by claim id.
+  set, the pin's containing obec, the nearest obec within the 250 m sliver tolerance, and last
+  the okres or kraj alone — resolving homonyms locally inside the constraining parent (PSČ,
+  okres/kraj, cadastral territory, qualifier, and only then the coordinate as a tie-break).
+  The tail of that chain is what keeps a border pin or a region-only listing from having no
+  town at all, which rule 25 does not allow: each answers at `low` confidence, and a sliver is
+  NOT a dispute, because a polygon edge is not a disagreement. **The pin BIND reverse-geocodes
+  from is the pin the row publishes** — it is elected by DECLARED QUALITY and only then by
+  claim id, and handed to the constraint collector, or a listing carrying a blurred pin and a
+  precise one takes its town from one and its `geom` from the other. The four rungs whose
+  entity was INFERRED rather than named (a PSČ lookup, a reverse geocode, the sliver, a bare
+  region) contribute no agreeing field, so they cannot grade above `low`.
 * **FILL** (`fill.py`) joins the hierarchy off the bound ids: ONE `admin_chain` read returning the
   unit itself ahead of its ancestors. Administrative names and codes are ALWAYS the registry's own
   spelling; only street / čp / čo / PSČ may fall back to a claim, preserve-if-null, and only an
@@ -1953,8 +1958,9 @@ rebuild, where the map is the thing that needs it. The steps:
   is ONE nullable text column whose value IS the reason: `pin_outside_obec` (the pin is kept, the
   granularity drops to the admin level; asked only when the town came from a CLAIM, since on
   BIND's two pin-derived rungs the comparison is circular), `pin_outside_cz`, `country_conflict`.
-  **Foreign is a determination, never a default** — no Czech town and no foreign signal is
-  `undetermined`.
+  A Czech admin unit that BOUND at any level — obec, okres or kraj — is itself a country
+  determination, because the gazetteer it came out of is the Czech one. **Foreign is a
+  determination, never a default** — nothing bound and no foreign signal is `undetermined`.
 
 It is a **pure function**: no wall clock, no network, no randomness, enforced by an AST scan, so a
 row replays byte-identically from its inputs and the THREE version ids stamped on it —

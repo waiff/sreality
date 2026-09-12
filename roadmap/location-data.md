@@ -161,7 +161,7 @@ component is slimmed twice — each wave rewrites one component and slims its st
     **Next:** the coverage red line is the acceptance check, and it can only be read after deploy —
     every portal but sreality, bezrealitky and mmreality now mints its town from a STORED PAGE BODY,
     so a portal's number moves as the body-mining half works through its backlog, not at merge.
-- **W2 — the resolver at four steps, the answer table at 27 fields** (= plan S3 + the projection
+- **W2 — the resolver at four steps, the answer table at 26 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and
   36 property columns dropped.
@@ -187,14 +187,25 @@ component is slimmed twice — each wave rewrites one component and slims its st
   operator claims, which carry none) — W1-c bumped all nine contract versions and the fingerprint
   hashes `extractor_version`, so the superseded rows sit beside the new ones with LOWER ids and
   would win every first-claim tie. W2-b's migration deletes them as a cleanup.
-  **Cutover:** apply 501 → merge → `resolver:v4` in `version.py` means the daily sweep (or a
-  `mode=full-resolve` dispatch) enqueues the whole corpus, and the Railway worker lane drains it in
-  **5–11 h**; the gate is `count(listing_location) = count(listings where is_active)`, which
-  `verify_pipeline.check_location_town_coverage` already measures (repointed in the same PR).
+  **Cutover — the precondition is the RE-MINE, not the migration.** The active-contract rail plus
+  W1-c's nine version bumps mean every claim mined under the old versions is invisible until its
+  body is re-mined: the three payload portals (sreality, bezrealitky, mmreality) on the next
+  incremental intake pass, the six page portals as the bodies-first backlog drains at 1,500 a batch
+  — days. Then apply 501 → merge → `resolver:v4` makes the daily sweep (or a `mode=full-resolve`
+  dispatch) enqueue the corpus, and the worker lane drains it in **5–11 h**. **The gate is the
+  `cz_no_town` arm of `location_town_coverage` per portal, NOT `count(listing_location) =
+  count(active)`** — the row count is satisfied at zero towns, because a claimless listing is
+  written `undetermined`/`unknown` by design, so it measures that the drain ran rather than that the
+  resolver answered. Expect the red line to RISE when v4 starts (rows exist, claims not yet
+  re-mined) and fall as `claim_insert` re-enqueues each re-mined listing. No consumer reads
+  `listing_location` yet, so the excursion is invisible to users — which is why it happens before W3
+  and not after.
   **W2-b** then cuts the five remaining readers of `listing_location_current` (the four `toolkit/`
-  modules + `refresh_location_compare_cohort()`) and drops the old tables. Nothing writes them from
-  this PR on; `--workers` on the drain is unblocked but not implemented.
-- **W3 — consumers, display first** (= plan S4): the 27 fields into `browse_list` and the public
+  modules + `refresh_location_compare_cohort()`), deletes the inactive-entry claims and drops the
+  old tables. Nothing writes them from this PR on; `--workers` on the drain is unblocked but not
+  implemented. One reader goes writer-less meanwhile: `toolkit/location_quality.py:244` reads
+  `location_resolution_candidates`, so that admin panel goes EMPTY rather than wrong.
+- **W3 — consumers, display first** (= plan S4): the 26 fields into `browse_list` and the public
   views; one label, one code predicate, one circle; `placeLabel.ts` assemblies, the five chip
   predicates, the sreality-only filters, `home_city_id` deleted rather than ported. Estimation last.
 - **W4 — delete legacy** (= plan S5): Mapy purge, geocoder + cache, street extractor, the trigger

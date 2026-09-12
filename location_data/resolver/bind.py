@@ -8,7 +8,7 @@ constraining parent, in descending discriminating power: PSČ, okres/kraj claims
 territory, `homonym_qualifier`, and only then the coordinate — as a tie-breaker among
 already-qualified candidates, never as the primary disambiguator (the geocode of an
 ambiguous town name IS the town centroid, which is how Krásný Les went 100 km wrong). Its
-three named regression tests are in `tests/location_data/test_resolver_homonyms.py`.
+three named regression tests are in `tests/location_data/test_resolver_bind.py`.
 
 Two things changed in W2-a and both are deletions:
 
@@ -74,7 +74,12 @@ AGREEMENT_QUALIFIERS = frozenset(
 )
 
 _RUNG_BASE_SCORE = {"R0": 100.0, "R1": 90.0, "R2": 70.0, "R3": 60.0, "R4": 45.0,
-                    "R6": 35.0, "R7": 25.0, "R8": 15.0}
+                    "R6": 35.0, "R7": 25.0, "R8": 15.0, "R9": 5.0}
+
+# The rungs whose entity was INFERRED rather than named: a PSČ lookup, a reverse geocode, the
+# sliver fallback, a region with no town under it. Nothing "agreed" with them, so they
+# contribute no field to GRADE's tally and land at `low`.
+INFERENCE_RUNGS = frozenset({"R6", "R7", "R8", "R9"})
 
 # The sliver tolerance, in metres. It was `location_constants.pip_sliver_tolerance_m` (250 m,
 # the value migration 289 had already chosen for the legacy admin-geo trigger) and moves here
@@ -94,9 +99,19 @@ BLURRED_DECLARED_LABELS = frozenset(
     {
         "municipality", "obec", "ward", "quarter", "citypart", "street",
         "approximate", "priblizna", "estimated", "regional", "area", "polygon",
+        # W1-c: the labels the nine slim contracts actually emit. bazos' maps-anchor title
+        # ("Přibližná lokalita" -> `approximate_location`) and maxima's two non-point feature
+        # geometries, which ARE the portal drawing its own imprecision.
+        "approximate_location", "linestring", "circle",
     }
 )
-PRECISE_DECLARED_LABELS = frozenset({"gps", "address", "exact", "presna", "rooftop", "ruian"})
+# `accurate` is mmreality's `/accurate: true` branch — the portal asserting the pin IS the
+# address, the counterpart of its `regional` label above. It is deliberately NOT in
+# `grade.DECLARED_CAP`: membership here RANKS the pin against a blurred sibling, which is
+# what the flag is for, while a cap row would additionally CERTIFY a granularity the portal's
+# own boolean does not predict.
+PRECISE_DECLARED_LABELS = frozenset(
+    {"gps", "address", "exact", "presna", "rooftop", "ruian", "accurate"})
 # A `precision_declaration` with no `declared_precision_label` may still carry the portal's
 # vocabulary in `value_text` (sreality's `inaccuracy_type`). Anything else in `value_text` —
 # our own `coords.source` stamp ('page', 'carry_forward'), a map-legend sentence — is NOT a
@@ -172,8 +187,16 @@ class Constraints:
 
 
 def collect_constraints(
-    claims: Sequence[Claim], normalized: dict[int, NormalizedClaim]
+    claims: Sequence[Claim],
+    normalized: dict[int, NormalizedClaim],
+    *,
+    pin_claim_id: int | None = None,
 ) -> Constraints:
+    """`pin_claim_id` names the coordinate `elect_pin` chose. It matters: without it this
+    took the FIRST coordinate by id while the position took the best-DECLARED one, so a
+    listing carrying a blurred pin and a precise one reverse-geocoded its town from one and
+    published `geom` from the other — and R7/R8 are pin-derived, so CHECK skips the
+    containment test and the row ships clean with its town and its pin 300 km apart."""
     obec_kods: list[int] = []
     psc: str | None = None
     buckets: dict[str, list[str]] = {
@@ -249,9 +272,11 @@ def collect_constraints(
             postal_town_key = _postal_town_key(claim.value_text)
             if postal_town_key:
                 note("postal_town", claim.id)
-        elif t == "coordinate" and claim.has_position and pin is None:
-            pin = (float(claim.lat), float(claim.lon))  # type: ignore[arg-type]
-            note("coordinate", claim.id)
+        elif t == "coordinate" and claim.has_position:
+            elected = claim.id == pin_claim_id if pin_claim_id is not None else pin is None
+            if elected:
+                pin = (float(claim.lat), float(claim.lon))  # type: ignore[arg-type]
+                note("coordinate", claim.id)
 
     return Constraints(
         obec_kods=tuple(dict.fromkeys(obec_kods)),
@@ -441,15 +466,21 @@ def bind(
     ctx: ResolverContext,
     *,
     pin_is_precise: bool = False,
+    pin_claim_id: int | None = None,
 ) -> tuple[Binding, Constraints]:
     """BIND. -> (the winner, the constraints FILL still needs)."""
     registry = ctx.registry
-    constraints = collect_constraints(claims, normalized)
+    constraints = collect_constraints(claims, normalized, pin_claim_id=pin_claim_id)
     out: list[_Candidate] = []
 
     # ---- constraining obec set (feeds R1-R3; also produces R4/R6 candidates below).
     obec_units: list[AdminUnit] = []
     obec_qualifiers: list[str] = []
+    # Which rung the obec set came off. A set seeded from a PSČ is an INFERENCE — the obec
+    # was not named, it was looked up — so it grades at R6 and contributes no agreeing field.
+    # Counting "obec" and "psc" as two fields there was one fact counted twice, and it graded
+    # a PSČ-only bind `high`.
+    obec_rung = "R4"
     if constraints.obec_kods:
         obec_units = [
             chain[0]
@@ -476,6 +507,7 @@ def bind(
             _dedupe_units(by_psc), constraints, registry=registry, pin_is_precise=pin_is_precise
         )
         obec_qualifiers = list(dict.fromkeys(["psc", *applied]))
+        obec_rung = "R6"
 
     constraining_obec_kods = tuple(sorted({u.code for u in obec_units}))
 
@@ -543,8 +575,8 @@ def bind(
     for unit in obec_units:
         out.append(
             _admin_candidate(
-                unit, rung="R4", granularity="obec",
-                claim_ids=_ids(constraints, "obec_name", "obec_code"),
+                unit, rung=obec_rung, granularity="obec",
+                claim_ids=_ids(constraints, "obec_name", "obec_code", "psc"),
                 qualifiers=tuple(obec_qualifiers),
             )
         )
@@ -560,18 +592,6 @@ def bind(
                         unit, rung="R4", granularity="cast_obce_or_quarter",
                         claim_ids=_ids(constraints, "cast_obce_name"),
                         qualifiers=("obec_constrained",),
-                    )
-                )
-
-    # ---- R6: PSČ alone.
-    if not obec_units and constraints.psc:
-        for code in registry.obec_codes_for_psc(constraints.psc):
-            chain = registry.admin_chain_by_code("obec", code)
-            if chain:
-                out.append(
-                    _admin_candidate(
-                        chain[0], rung="R6", granularity="obec",
-                        claim_ids=_ids(constraints, "psc"), qualifiers=("psc",),
                     )
                 )
 
@@ -606,12 +626,36 @@ def bind(
                     )
                 )
 
+    # ---- R9: the region alone, and the last thing the chain has to say. maxima and
+    # mmreality emit an okres name with no town, and "we know the okres" is a real answer at
+    # a real rung — strictly better than `undetermined`, which is what an unbound region used
+    # to collapse to. Low confidence, hierarchy filled ABOVE it by the ordinary chain read.
+    if not out:
+        for keys, level in ((constraints.okres_keys, "okres"), (constraints.kraj_keys, "kraj")):
+            for key in keys:
+                for unit in registry.admin_units_by_name(key, levels=(level,)):
+                    out.append(
+                        _admin_candidate(
+                            unit, rung="R9", granularity=level,
+                            claim_ids=_ids(constraints, f"{level}_name"),
+                            qualifiers=("region_only",),
+                        )
+                    )
+            if out:
+                break
+
     if not out:
         return Binding(target_kind="none", granularity="unknown", rung="none"), constraints
 
     ranked = _rank(out, ctx.granularity_rank)
     top = ranked[0]
-    gap = (top.score - ranked[1].score) if len(ranked) > 1 else None
+    # The margin compares LIKE WITH LIKE. Comparing the top candidate against the next row
+    # whatever it is compared it against its own ANCESTOR: a quarter (45 + 5) ties the obec
+    # that contains it (45 + 5 for the portal's own obec code), the gap is 0 and the answer
+    # grades `low` — so supplying a RÚIAN obec code alongside the quarter made the row score
+    # WORSE than naming the town in prose. One answer containing another is not two answers.
+    rivals = [c for c in ranked[1:] if c.granularity == top.granularity]
+    gap = (top.score - rivals[0].score) if rivals else None
     at_top = [c for c in ranked if c.granularity == top.granularity and c.rung == top.rung]
     ambiguous = (gap is not None and gap < AMBIGUITY_MARGIN) or len(at_top) > 1
     return (
@@ -697,12 +741,11 @@ def _admin_candidate(
     unit: AdminUnit, *, rung: str, granularity: str,
     claim_ids: tuple[int, ...], qualifiers: tuple[str, ...],
 ) -> _Candidate:
-    agreed = ["obec"] if granularity == "obec" else ["cast_obce", "obec"]
+    agreed = ["obec"] if granularity == "obec" else [granularity, "obec"]
     agreed.extend(q for q in qualifiers if q in AGREEMENT_QUALIFIERS)
-    if rung in ("R6", "R7", "R8"):
-        # PSČ alone, a bare reverse-geocode or the sliver fallback: the obec is an
-        # INFERENCE, not a field that agreed with anything, so it may not count toward the
-        # agreement tally.
+    if rung in INFERENCE_RUNGS:
+        # The entity was INFERRED, not named — a PSČ lookup, a reverse geocode, the sliver
+        # fallback, a bare region. Nothing agreed with it, so it contributes no field.
         agreed = []
     return _Candidate(
         rung=rung, score=_RUNG_BASE_SCORE[rung] + 5.0 * len(qualifiers),

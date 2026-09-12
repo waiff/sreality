@@ -204,6 +204,115 @@ def test_a_shared_psc_with_nothing_to_break_the_tie_is_ambiguous_and_still_answe
     assert resolution.match_confidence == "low"
 
 
+# ------------------------------------------------ the pin BIND uses is the pin it publishes
+
+
+def test_the_town_is_reverse_geocoded_from_the_pin_the_row_actually_publishes():
+    """Two coordinate claims — a blurred one that arrived first and a precise one that did
+    not. The town used to come from `collect_constraints`' FIRST coordinate by id while
+    `geom` came from `elect_pin`'s best-DECLARED one, so the row shipped a town in Bílovec
+    and a pin in Praha, 300 km apart. R7/R8 are pin-derived, so CHECK skips the containment
+    test by design and nothing downstream could have caught it."""
+    claims = [
+        mm.claim(2, "coordinate", lat=49.7573, lon=18.0158,
+                 declared_precision_label="municipality"),
+        mm.claim(3, "coordinate", lat=50.0755, lon=14.4378, declared_precision_label="gps"),
+    ]
+    assert step_bind.elect_pin(claims).id == 3
+    resolution = _resolve(claims)
+    assert (resolution.lat, resolution.lon) == (50.0755, 14.4378)
+    assert resolution.obec_kod == 554782  # Praha, the town the PUBLISHED pin is in
+    assert resolution.disputed is None
+
+
+def test_the_psc_tie_break_uses_the_elected_pin_too():
+    """Same defect, the other branch that reads `constraints.pin`: with a shared PSČ the
+    tie-break must consult the pin the row publishes, not whichever coordinate sorted first."""
+    claims = [
+        mm.claim(1, "psc", value_text="67401", source="bazos"),
+        mm.claim(2, "coordinate", lat=49.1980, lon=15.9250, source="bazos",
+                 declared_precision_label="municipality"),
+        mm.claim(3, "coordinate", lat=49.2149, lon=15.8817, source="bazos",
+                 declared_precision_label="gps"),
+    ]
+    resolution = _resolve(claims, _psc_mirror())
+    assert (resolution.lat, resolution.lon) == (49.2149, 15.8817)
+    assert resolution.obec_kod == 590266  # Třebíč, where the elected pin is
+
+
+# --------------------------------------------------- a PSČ is one fact, not two agreeing ones
+
+
+def test_a_psc_only_bind_is_low_confidence():
+    """The obec was not named, it was LOOKED UP. Seeding the qualifier list with "psc" and
+    then counting "obec" + "psc" as two independent fields was one fact counted twice, and it
+    graded a bare postcode `high` — the same grade a town named and corroborated gets."""
+    for psc, obec_kod in (("743 01", 599212), ("160 00", 554782)):
+        resolution = _resolve([mm.claim(1, "psc", value_text=psc)])
+        assert resolution.obec_kod == obec_kod, psc
+        assert resolution.match_confidence == "low", psc
+        assert resolution.granularity == "obec", psc
+
+
+def test_a_named_town_corroborated_by_its_psc_still_grades_high():
+    """The counterpart: two INDEPENDENT fields — the name and the postcode — agreeing on one
+    obec is exactly what `high` is for."""
+    resolution = _resolve([
+        mm.claim(1, "obec_name", value_text="Krásný Les", source="maxima"),
+        mm.claim(2, "psc", value_text="463 46", source="maxima"),
+    ])
+    assert resolution.obec_kod == 563943
+    assert resolution.match_confidence == "high"
+
+
+# ------------------------------------------- the margin compares like with like
+
+
+def test_a_quarter_is_not_ambiguous_against_the_town_that_contains_it():
+    """Reproduced: naming the obec by its RÚIAN CODE scored it 45 + 5, tying the quarter
+    below it at 45 + 5, and the zero gap graded the row `low`. Supplying stronger evidence
+    made the answer worse. One answer containing another is not two answers."""
+    quarter = mm.claim(2, "cast_obce_name", value_text="Vokovice")
+    by_name = _resolve([mm.claim(1, "obec_name", value_text="Praha"), quarter])
+    by_code = _resolve([mm.claim(1, "obec_code", value_text="554782"), quarter])
+    assert by_name.cast_obce_kod == by_code.cast_obce_kod == 490067
+    assert by_code.match_confidence == by_name.match_confidence == "high"
+
+
+# ------------------------------------------------------- the region is the chain's last word
+
+
+def test_an_okres_name_alone_binds_the_okres():
+    """maxima and mmreality emit an okres name with no town. "We know the okres" is a real
+    answer at a real rung, and strictly better than the `undetermined` an unbound region used
+    to collapse to — the hierarchy above it fills by the ordinary chain read."""
+    resolution = _resolve([mm.claim(1, "okres_name", value_text="Liberec", source="maxima")])
+    assert (resolution.okres_kod, resolution.okres_name) == (3506, "Liberec")
+    assert resolution.kraj_name == "Liberecký kraj"
+    assert resolution.obec_kod is None
+    assert resolution.granularity == "okres"
+    assert resolution.match_confidence == "low"
+    # And it is a COUNTRY determination: the gazetteer it came out of is the Czech one.
+    assert (resolution.country_status, resolution.country_code) == ("cz", "CZ")
+
+
+def test_a_kraj_name_alone_binds_the_kraj():
+    resolution = _resolve([mm.claim(1, "kraj_name", value_text="Ústecký kraj")])
+    assert (resolution.kraj_kod, resolution.kraj_name) == (42, "Ústecký kraj")
+    assert resolution.granularity == "kraj"
+    assert resolution.country_status == "cz"
+
+
+def test_a_town_still_outranks_the_region_that_contains_it():
+    """The region rung is the LAST one: it fires only when nothing finer bound."""
+    resolution = _resolve([
+        mm.claim(1, "okres_name", value_text="Liberec"),
+        mm.claim(2, "obec_name", value_text="Krásný Les"),
+    ])
+    assert resolution.obec_kod == 563943
+    assert resolution.granularity == "obec"
+
+
 # ------------------------------------------------------------------- the deleted rung
 
 
