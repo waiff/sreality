@@ -1983,7 +1983,13 @@ a **daily cron** (`location_resolve.yml`, 03:17 UTC, `mode=full-resolve`); a lis
 claim gets an `undetermined` row (granularity `unknown`, no position) instead of no row, so
 coverage is `count(listing_location) = count(active listings)` by construction. Until 2026-09-11
 the sweep was three statements (a claim-driven stale sweep that could not see a claimless listing,
-a kraj-scoped cousin, an orphan sweep); they were folded into the one above under rule 25.
+a kraj-scoped cousin, an orphan sweep); they were folded into the one above under rule 25. Its
+driving predicate is what **Browse serves**, not what is active (W2-a4): `l.is_active OR EXISTS
+(properties pr WHERE pr.repr_listing_ref_id = l.id AND pr.status = 'active')`, because
+`browse_projection` serves `properties.status = 'active'` — the merge lifecycle, not `is_active` —
+so a delisted property is still a Browse row rendered from its `is_active = false` display listing,
+and `check_location_town_coverage` counts that same cohort (`display_no_row`) on the same red line
+(migration 505 indexes the correlated EXISTS).
 
 **The queue is re-entrant, and the sweep is the invariant's backstop** (W2-a2, 2026-09-12). Every
 evidence-producing enqueue — `claims_intake`'s `claim_insert`, `contracts.retract`'s batch,

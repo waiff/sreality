@@ -156,7 +156,7 @@ def test_the_sweep_revisits_every_active_czech_listing_without_a_town():
     assert "or (p.obec_kod is null and p.country_status <> 'foreign')" in flat
     assert flat.count("%s") == 4
     # ...and it is one arm of the SAME disjunction, not a second statement.
-    where = flat[flat.index("where l.is_active"):]
+    where = flat[flat.index("where (l.is_active"):]
     assert where.index("p.obec_kod is null") < where.index("and l.id > %s")
     # Served by migration 501's index, so the arm costs the red count, not the corpus.
     ddl = (MIGRATIONS / "501_location_w2a_listing_location.sql").read_text().lower()
@@ -891,3 +891,72 @@ def test_the_failure_stamp_does_not_clobber_a_newer_enqueue(monkeypatch):
     assert text.endswith("where listing_id = %s and enqueued_at <= %s")
     assert params[1] == drain.BACKOFF_SECONDS[2]
     assert params[2:] == (303, CLAIMED_AT)
+
+
+# ------------------------------------------- W2-a4: the sweep's scope is what Browse serves
+
+
+def test_the_sweep_drives_off_what_browse_serves_not_off_is_active():
+    """`browse_projection` is `from properties p where status = 'active'` — the MERGE
+    lifecycle ('active' vs 'merged_away'), NOT `is_active`. So a DELISTED property is still a
+    Browse row, and the row it renders is its `repr_listing_ref_id` DISPLAY LISTING, which is
+    `is_active = false`. Driving off `l.is_active` alone meant that listing could never be
+    swept, never get a `listing_location` row, and after W3 would show no place and drop off
+    the map."""
+    flat = " ".join(drain._SWEEP_SQL.split()).lower()
+    assert ("where (l.is_active or exists (select 1 from properties pr where "
+            "pr.repr_listing_ref_id = l.id and pr.status = 'active'))") in flat
+    # p.status would read the LEFT JOINed listing_location alias; the properties alias is pr.
+    assert "pr.status = 'active'" in flat and "p.status" not in flat
+    # The merge lifecycle, never the delisting flag: `pr.is_active` here would re-lose exactly
+    # the cohort this arm exists for.
+    assert "pr.is_active" not in flat
+
+
+def test_the_widened_scope_keeps_every_other_arm_and_the_placeholder_count():
+    """The new predicate is the DRIVING one — which listings are candidates. The staleness
+    disjunction (missing row / resolver_version / registry_version / Czech row without a town)
+    and the NOT EXISTS lock-avoiding pre-filter are untouched, and `'active'` is a literal so
+    `enqueue_full_sweep` still binds exactly four values."""
+    flat = " ".join(drain._SWEEP_SQL.split()).lower()
+    for arm in ("p.listing_id is null",
+                "or p.resolver_version <> %s",
+                "or p.registry_version <> %s",
+                "or (p.obec_kod is null and p.country_status <> 'foreign')"):
+        assert arm in flat, arm
+    assert "not exists (select 1 from dirty_locations d where d.listing_id = l.id)" in flat
+    assert "on conflict (listing_id) do nothing" in flat and "do update" not in flat
+    assert flat.count("%s") == 4
+    state = _state(max_listing_id=100_000)
+    drain.enqueue_full_sweep(_FakeConn(state), window=250_000)
+    (_, params), = _sweep_windows(state)
+    assert params == (RESOLVER_VERSION, REGISTRY, 0, 100_000)
+    # The driving predicate gates the staleness arms, not the other way round.
+    where = flat[flat.index("where ("):]
+    assert where.index("pr.status = 'active'") < where.index("p.resolver_version")
+
+
+def test_migration_505_indexes_the_correlated_exists_the_sweep_now_runs():
+    """The EXISTS is correlated (`pr.repr_listing_ref_id = l.id`) and sits under an OR, which
+    blocks the semi-join transform: Postgres evaluates it as a per-row subplan. Without an
+    index that is one SEQ SCAN of `properties` per inactive listing, on a statement that walks
+    the whole corpus — `properties` carried eleven indexes and not one led on
+    `repr_listing_ref_id`. Additive, partial on the same predicate the sweep asks."""
+    text = (MIGRATIONS / "505_location_w2a4_properties_repr_index.sql").read_text()
+    # The EXECUTABLE half only: the header documents a `DROP INDEX CONCURRENTLY` rollback,
+    # and a prose scan that counted it would be reading the comment, not the migration.
+    sql = " ".join(line for line in text.splitlines()
+                   if not line.strip().startswith("--")).lower()
+    sql = " ".join(sql.split())
+    assert ("create index if not exists properties_repr_listing_ref_active_idx on "
+            "public.properties (repr_listing_ref_id) where status = 'active'") in sql
+    # Additive only: an index, never a column/constraint/data change.
+    for destructive in ("drop ", "alter table", "delete from", "update "):
+        assert destructive not in sql, destructive
+    # Bounded like migration 429's blocking build, and not CONCURRENTLY (the MCP wraps
+    # every payload in a transaction, where CONCURRENTLY raises 25001).
+    assert "set lock_timeout" in sql and "set statement_timeout" in sql
+    assert "create index concurrently" not in sql
+    # ...and nothing else claimed 505.
+    numbered = [f.name for f in MIGRATIONS.glob("505_*.sql")]
+    assert numbered == ["505_location_w2a4_properties_repr_index.sql"], numbered
