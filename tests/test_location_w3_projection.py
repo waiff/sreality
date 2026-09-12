@@ -30,6 +30,25 @@ MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 
 W3 = "503_location_w3_serving_views.sql"
 W3_S3 = "504_location_w3_one_code_predicate.sql"
+W3_S4 = "506_location_w3_s4_deletions.sql"
+
+# What S4 removes from each view it re-creates. `obec` SURVIVES on the two views
+# the pipeline board reads: the board's town sort orders by the TOWN, which is
+# the tail of `display_label` rather than its head (lib/pipelineSort).
+_S4_DROPS: dict[str, set[str]] = {
+    "browse_projection": {
+        "locality", "district", "street", "obec", "okres", "region",
+        "place_search_text", "home_city_id",
+    },
+    "listing_feed_public": {"place_search_text"},
+    "properties_public": {
+        "locality", "district", "street", "okres", "region",
+        "place_search_text", "home_city_id",
+    },
+    "pipeline_board_public": {
+        "locality", "district", "street", "okres", "region", "place_search_text",
+    },
+}
 
 # The six views migration 503 widens. The migration each one was defined by
 # BEFORE 503 is DERIVED, never listed: hard-coding it is how the first cut of
@@ -163,6 +182,50 @@ def test_view_only_appends(after: str, view: str) -> None:
         f"wrong column."
     )
     assert len(new) > len(old), f"{view}: nothing appended — is this the right migration?"
+
+
+# ------------------------------------------------------------------ drops-only
+
+
+@pytest.mark.parametrize("view", sorted(_S4_DROPS))
+def test_s4_drops_only(view: str) -> None:
+    """S4 is a DROP VIEW + CREATE VIEW, which is the only way to remove a column
+    — and therefore the only place in the sprint where the append-only rail
+    above does not apply. Two things must hold instead, and neither is checkable
+    by Postgres: the new column list must be the old one MINUS exactly the names
+    S4 declares (nothing else silently left), and the survivors must keep their
+    RELATIVE ORDER. Order is not cosmetic: `sync_browse_list` inserts into
+    `browse_list` POSITIONALLY (toolkit/browse_read_model.py), so a reorder
+    writes every value into the wrong column with no error anywhere."""
+    before = _previous_definition(view, below=W3_S4)
+    old = _columns(_sql(before), view)
+    new = _columns(_sql(W3_S4), view)
+    dropped = _S4_DROPS[view]
+
+    assert set(old) - set(new) == dropped, (
+        f"{view}: migration {W3_S4} removes {sorted(set(old) - set(new))} but S4 "
+        f"declares {sorted(dropped)}. A column that loses its last reader is "
+        f"deleted in the PR that removes the reader, not silently here."
+    )
+    assert set(new) - set(old) == set(), (
+        f"{view}: {W3_S4} ADDS {sorted(set(new) - set(old))}. S4 only deletes "
+        f"(rule 25) — a new column belongs in a widening migration, whose "
+        f"append-only rail is test_view_only_appends above."
+    )
+    assert new == [c for c in old if c not in dropped], (
+        f"{view}: the surviving columns were REORDERED. Expected "
+        f"{[c for c in old if c not in dropped]}, got {new}."
+    )
+
+
+def test_s4_keeps_the_town_on_the_board_lane() -> None:
+    """`obec` is the one piece of legacy place text S4 spares, and only on the
+    two views the pipeline board reads. If a later edit takes it, the board's
+    "Mesto A-Z" sort silently falls back to `display_label` and orders a column
+    by house number."""
+    for view in ("properties_public", "pipeline_board_public"):
+        assert "obec" in _columns(_sql(W3_S4), view), f"{view} lost `obec`"
+    assert "obec" not in _columns(_sql(W3_S4), "browse_projection")
 
 
 def test_browse_projection_appends_exactly_the_w3_four() -> None:

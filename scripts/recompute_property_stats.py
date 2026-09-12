@@ -251,7 +251,23 @@ _RECOMPUTE_BATCH_SQL = """
                k.is_active DESC, k.last_seen_at DESC NULLS LAST, k.sreality_id DESC
     ),
     -- Geom + admin territory (incl. the MF rent-map join key ku_id) from the best
-    -- CZ-located child: a child WITH a Czech territory (obec_id NOT NULL) wins over
+    -- CZ-located child.
+    --
+    -- W3-1 proposed deleting this picker (and best_street below) once the
+    -- property's DISPLAY listing became the one winner for place as well as
+    -- price and area. W3 S4 measured it and the pickers STAY: `display_label`
+    -- is composed from `repr_listing_ref_id` -> listing_location and owes these
+    -- columns nothing, but six of best_geo's targets still have live readers of
+    -- their own -- ku_id + obec_id feed the property-grain MF golden record
+    -- (migration 257), obec_id/okres_id/region_id are properties_public's
+    -- chip codes for the Watchdog, geom drives the lat/lng trigger the
+    -- Watchdog's ST_DWithin is rebuilt from, district is read by
+    -- /properties/merge-candidates, and best_street's `street` by the same
+    -- route. Only `locality`, `okres` and `region` lost their last reader in
+    -- S4; they keep being written rather than freezing at a stale value, and
+    -- W4 removes the columns and these projections together.
+    --
+    -- A child WITH a Czech territory (obec_id NOT NULL) wins over
     -- a foreign/uncoded one, then by source trust + recency. Keeps geom and every
     -- territory field consistent (one child), and prefers a CZ coordinate so a
     -- merged property whose repr happens to carry an off/foreign point still
