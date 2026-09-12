@@ -319,7 +319,7 @@ export const effectiveSort = (f: ListingFilters, sort: SortSpec): SortSpec =>
  * keeps working. What used to live in this file — a PostgREST string builder
  * and a hand-kept in-memory twin, five predicates each, ILIKE patterns and all
  * — is now two renderings of one plan. See districtCodes.ts for the why. */
-import { districtsFilterClause } from './districtCodes';
+import { districtsFilterClause, isValidCode } from './districtCodes';
 
 export {
   districtsFilterClause,
@@ -1325,14 +1325,16 @@ export const buildBrowseStatsArgs = (
     districts_excluded_filter: f.districts.length
       ? f.districts.map((d) => d.excluded === true)
       : null,
-    /* Migration 172 — resolved admin level + id parallel to the names, so the
-     * Stats cohort matches by stable id (obec_id/okres_id/region_id) exactly
-     * like Map/Table. NULL entries = legacy/unresolved chips → name fallback. */
+    /* The level + RÚIAN code parallel to the names — the ONE code predicate the
+     * two RPCs compile (migration 504, lib/districtCodes). A NULL entry is a
+     * chip with no code, which matches NOTHING there exactly as it does here;
+     * `districts_filter` (the names) is now only the array that drives the
+     * unnest, and `districts_context_filter` is inert. */
     districts_levels: f.districts.length
       ? f.districts.map((d) => d.level ?? null)
       : null,
     districts_ids: f.districts.length
-      ? f.districts.map((d) => (d.id == null ? null : d.id))
+      ? f.districts.map((d) => (isValidCode(d.id) ? d.id : null))
       : null,
     dispositions_filter:     f.dispositions.length ? f.dispositions : null,
     price_min_filter:        f.priceMin,

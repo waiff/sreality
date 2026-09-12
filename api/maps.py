@@ -33,6 +33,7 @@ reader for chips stored before codes existed (`upgrade_district_chips`).
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -192,8 +193,14 @@ SELECT id, level, code, name FROM chain
 # makes a část obce unambiguous without a polygon. Several rows can come back on
 # purpose: "Jihlava" is an obec AND an okres, and a chip that means both is the
 # closest code-equality has to the ILIKE-across-four-columns it replaced.
+#
+# DISTINCT because the index stores several NAME KINDS per entity (official,
+# deaccented, qualifier-stripped, aliases — migration 381): without it "Žižkov"
+# comes back twice, which halves the LIMIT and hands the SPA two identical chips.
+# `ORDER BY 1, 2` rather than `u.level` because SELECT DISTINCT may only order by
+# expressions in the select list.
 _NAME_LOOKUP_SQL = """
-SELECT u.level::text, u.code, u.name
+SELECT DISTINCT u.level::text, u.code, u.name
   FROM ruian_name_index n
   JOIN ruian_admin_units u ON u.id = n.entity_id AND u.level = n.entity_kind
  WHERE n.registry_version_id = %(version)s
@@ -201,7 +208,7 @@ SELECT u.level::text, u.code, u.name
    AND u.level::text = ANY(%(levels)s)
    AND u.valid_to IS NULL
    AND (%(obec_unit_id)s::bigint IS NULL OR n.parent_obec_unit_id = %(obec_unit_id)s)
- ORDER BY u.level, u.code
+ ORDER BY 1, 2
  LIMIT 8
 """
 
@@ -264,15 +271,75 @@ def _lookup_name(
         return [(str(lvl), int(code), nm) for lvl, code, nm in cur.fetchall()]
 
 
+def _name_variants(name: str) -> list[str]:
+    """The pick's name, then its last `-` / `,` delimited segment.
+
+    Mapy names a quarter the way a person says it — "Hradec Králové - Třebeš",
+    "Ostrava-Poruba", "Praha-Vinoř" — while RÚIAN stores the bare part name
+    ("Třebeš", "Poruba", "Vinoř"). One retry on the tail is the whole
+    difference between a quarter chip and no chip at all; it is a RETRY, never
+    a widening, because a miss on both still returns no code."""
+    out = [name]
+    tail = re.split(r"[-,]", name)[-1].strip()
+    if tail and tail != name.strip():
+        out.append(tail)
+    return out
+
+
+def _resolve_cast_obce(
+    conn: Any, *, version: int, name: str | None,
+    obec_unit_id: int, obec_code: int,
+) -> dict[str, Any] | None:
+    """A quarter pick, placed by NAME inside the PIP'd obec — or NOT placed.
+
+    `cast_obce` ONLY, never `momc`: the answer table stores `cast_obce_kod` and
+    has no městská-část column, so a momc code would be a chip that matches
+    nothing. That means "Praha 2" and "Brno-střed" (both momc) cannot resolve,
+    and neither can a Mapy neighbourhood the registry has never heard of.
+
+    WHEN IT CANNOT BE PLACED, THE ANSWER IS "NO CODE", NOT "THE TOWN". Falling
+    back to the containing obec would turn a saved "this quarter" filter into
+    "this whole city" — silently, and most visibly in a watchdog that then mails
+    the operator about every listing in Prague. A code-less chip renders as
+    `Nerozpoznáno` and matches nothing (`NO_MATCH_CODE`), which is the same
+    fail-closed posture every other unresolvable chip gets.
+
+    A name that means two different parts of one obec is also refused: picking
+    one of them at random is a cohort the operator did not choose."""
+    if not name:
+        return None
+    for variant in _name_variants(name):
+        matches = _lookup_name(
+            conn, version=version, name=variant, levels=("cast_obce",),
+            obec_unit_id=obec_unit_id,
+        )
+        codes = {code for _lvl, code, _nm in matches}
+        if len(codes) == 1:
+            _lvl, code, nm = matches[0]
+            return {
+                "level": "cast_obce", "id": code, "obec_id": obec_code, "name": nm,
+            }
+        if len(codes) > 1:
+            LOG.info(
+                "maps.resolve: %r names %d parts of obec %s — refusing to guess",
+                variant, len(codes), obec_code,
+            )
+            return None
+    return None
+
+
 def _resolve_admin(
     conn: Any, *, version: int, lat: float, lng: float, level: str, name: str | None
 ) -> dict[str, Any] | None:
-    """Resolve a picked point to its RÚIAN code at `level`.
+    """Resolve a picked point to its RÚIAN code at `level`, or None.
 
     obec polygons tile the country, so any CZ point resolves and a foreign point
     matches nothing. `cast_obce` has no polygon at any registry version, so it is
-    answered by NAME inside the PIP'd obec and falls back to that obec when the
-    name is not one of its parts."""
+    answered by NAME inside the PIP'd obec (`_resolve_cast_obce`) — and when the
+    name cannot be placed the answer is None, never the containing obec.
+
+    None means "no chip code": the caller returns a point + radius, the pick
+    still focuses the map, and the chip it makes matches nothing."""
     chain = _containing_chain(conn, version=version, lat=lat, lng=lng)
     obec = chain.get("obec")
     if obec is None:
@@ -284,25 +351,10 @@ def _resolve_admin(
             return None
         return {"level": level, "id": hit[1], "obec_id": obec_code, "name": hit[2]}
     if level == "cast_obce":
-        # `cast_obce` ONLY, never `momc`: the answer table stores `cast_obce_kod`
-        # and has no městská-část column, so a momc code would be a chip that
-        # matches nothing. A Prague quarter picked in Mapy resolves through its
-        # část obce or falls through to the obec below.
-        matches = (
-            _lookup_name(
-                conn, version=version, name=name, levels=("cast_obce",),
-                obec_unit_id=obec_unit_id,
-            )
-            if name
-            else []
+        return _resolve_cast_obce(
+            conn, version=version, name=name,
+            obec_unit_id=obec_unit_id, obec_code=obec_code,
         )
-        if matches:
-            _lvl, code, nm = matches[0]
-            return {"level": "cast_obce", "id": code, "obec_id": obec_code, "name": nm}
-        # A quarter the registry does not know as a part of this obec (a Mapy
-        # neighbourhood, a colloquial name): narrow to the town rather than
-        # inventing a code.
-        return {"level": "locality", "id": None, "obec_id": obec_code, "name": None}
     if level == "locality":
         return {"level": "locality", "id": None, "obec_id": obec_code, "name": None}
     return {"level": "obec", "id": obec_code, "obec_id": obec_code, "name": obec_name}

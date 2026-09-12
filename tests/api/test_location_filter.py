@@ -110,7 +110,7 @@ def test_excluded_chips_are_negated_separately() -> None:
     )
     assert where == [
         "(l.obec_id = ANY(%(district_codes_obec)s))",
-        "NOT (l.cast_obce_id = ANY(%(district_codes_excl_cast_obce)s))",
+        "NOT COALESCE(l.cast_obce_id = ANY(%(district_codes_excl_cast_obce)s), false)",
     ]
     assert params == {
         "district_codes_obec": [554782],
@@ -122,7 +122,23 @@ def test_exclude_only_filter_keeps_the_whole_cohort_minus_the_chips() -> None:
     where, _params = district_where(
         [DistrictChip(name="Praha", level="obec", id=554782, excluded=True)], alias="l",
     )
-    assert where == ["NOT (l.obec_id = ANY(%(district_codes_excl_obec)s))"]
+    assert where == [
+        "NOT COALESCE(l.obec_id = ANY(%(district_codes_excl_obec)s), false)"
+    ]
+
+
+def test_an_exclude_subtracts_only_what_it_matches() -> None:
+    """A row with NO code at the excluded level survives the exclude.
+
+    `NOT (col = ANY(...))` is NULL for a NULL col, and a NULL WHERE drops the
+    row — so the bare spelling made "not Prague" also mean "and located", while
+    the RPC's `not exists(... case ...)` and the SPA's in-memory `!hits` both
+    kept such a row. COALESCE is what makes the four renderings one predicate."""
+    where, _ = district_where(
+        [DistrictChip(name="Praha", level="obec", id=554782, excluded=True)], alias="l",
+    )
+    assert where[0].startswith("NOT COALESCE(")
+    assert where[0].endswith(", false)")
 
 
 def test_no_text_column_is_read_any_more() -> None:
@@ -236,6 +252,18 @@ def test_parse_csv_full_shape_round_trips() -> None:
             level="cast_obce", id=490017,
         ),
     ]
+
+
+def test_a_non_positive_id_is_not_a_resolved_chip() -> None:
+    """RÚIAN codes are positive. A hand-typed `districts_id=-1` must not be able
+    to spell the no-match sentinel as though it were a real pick — it is simply
+    a chip with no code, and it says so (`unresolved`)."""
+    chips = parse_district_chips_csv(names_raw="Praha", lvl_raw="obec", id_raw="-1")
+    assert chips == [DistrictChip(name="Praha", level="obec")]
+    assert district_code_plan(chips).unresolved == ["Praha"]
+    assert district_code_plan(
+        [DistrictChip(name="Praha", level="obec", id=0)]
+    ).unresolved == ["Praha"]
 
 
 def test_parse_csv_unresolved_level_falls_back_to_no_code() -> None:

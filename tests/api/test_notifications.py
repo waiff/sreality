@@ -301,7 +301,11 @@ def test_build_clauses_excluded_chip_is_negated() -> None:
     )
     where, params = _build_match_clauses(spec)
     clauses = [w for w in where if "district_codes" in w]
-    assert clauses == ["NOT (l.obec_id = ANY(%(district_codes_excl_obec)s))"]
+    # COALESCE: an exclude subtracts only what it MATCHES, so a listing with no
+    # obec code survives it (the same answer the RPC and the board already give).
+    assert clauses == [
+        "NOT COALESCE(l.obec_id = ANY(%(district_codes_excl_obec)s), false)"
+    ]
     assert params["district_codes_excl_obec"] == [554782]
 
 
@@ -315,8 +319,8 @@ def test_build_clauses_mixed_include_exclude() -> None:
     where, params = _build_match_clauses(spec)
     inc = next(w for w in where if "district_codes_obec" in w)
     exc = next(w for w in where if "district_codes_excl_cast_obce" in w)
-    assert not inc.startswith("NOT (")
-    assert exc.startswith("NOT (")
+    assert not inc.startswith("NOT ")
+    assert exc.startswith("NOT COALESCE(")
     assert params["district_codes_obec"] == [554782]
     assert params["district_codes_excl_cast_obce"] == [490017]
 
@@ -355,6 +359,51 @@ def test_match_once_resolves_stored_name_only_chips_before_matching() -> None:
     _where, params = _build_match_clauses(spec)
     assert params["district_codes_obec"] == [586846]
     assert params["district_codes_okres"] == [3707]
+
+
+def test_a_dead_place_filter_is_visible_without_opening_the_watchdog() -> None:
+    """`unresolved_places` runs the SAME read-time upgrade the matcher runs, so
+    it names only the chips that really match nothing.
+
+    A watchdog whose place filter is dead does not error — it goes quiet, which
+    reads exactly like a quiet market. The list endpoint says so instead."""
+    from unittest.mock import patch
+
+    from api.notifications import unresolved_places
+
+    spec = {
+        "districts": [
+            {"name": "Praha", "level": "obec", "id": 554782},  # healthy
+            {"name": "Jihlava"},                               # resolvable by name
+            {"name": "U Kulaťáku"},                            # not in the index
+        ]
+    }
+    with patch(
+        "api.maps.resolve_names",
+        return_value={("Jihlava", None): [("obec", 586846)]},
+    ):
+        assert unresolved_places(object(), spec) == ["U Kulaťáku"]
+
+
+def test_a_healthy_place_filter_says_nothing() -> None:
+    from api.notifications import unresolved_places
+
+    spec = {"districts": [{"name": "Praha", "level": "obec", "id": 554782}]}
+    # No chip needs upgrading, so no resolver call is made at all.
+    assert unresolved_places(object(), spec) == []
+    assert unresolved_places(object(), {}) == []
+    assert unresolved_places(object(), None) == []
+
+
+def test_one_malformed_chip_does_not_break_the_list() -> None:
+    """A list endpoint must survive a blob the matcher would reject."""
+    from unittest.mock import patch
+
+    from api.notifications import unresolved_places
+
+    spec = {"districts": [{"level": "obec"}, 42, {"name": "Brno"}]}
+    with patch("api.maps.resolve_names", return_value={}):
+        assert unresolved_places(object(), spec) == ["Brno"]
 
 
 def test_filter_spec_lifts_legacy_string_districts() -> None:

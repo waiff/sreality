@@ -63,6 +63,12 @@ export const codeLevel = (level: LocationLevel | null | undefined): CodeLevel | 
   return LEVEL_ALIAS[level] ?? null;
 };
 
+/* RÚIAN codes are positive. Anything else — a hand-typed `districts_id=-1` in a
+ * URL, a stored 0 — is NOT a resolved chip, and must never be able to spell the
+ * sentinel from outside. */
+export const isValidCode = (code: number | null | undefined): code is number =>
+  code != null && Number.isFinite(code) && code > 0;
+
 export interface DistrictCodePlan {
   include: Partial<Record<CodeLevel, number[]>>;
   exclude: Partial<Record<CodeLevel, number[]>>;
@@ -77,7 +83,7 @@ export const districtCodePlan = (
   for (const chip of chips) {
     let level = codeLevel(chip.level);
     let code = chip.id ?? null;
-    if (level == null || code == null) {
+    if (level == null || !isValidCode(code)) {
       level = 'obec';
       code = NO_MATCH_CODE;
       plan.unresolved.push(chip.name);
@@ -89,28 +95,42 @@ export const districtCodePlan = (
   return plan;
 };
 
-const arms = (side: Partial<Record<CodeLevel, number[]>>): string[] =>
-  DISTRICT_LEVEL_ORDER.flatMap((level) => {
-    const codes = side[level];
-    return codes && codes.length
-      ? [`${DISTRICT_LEVEL_COLUMN[level]}.in.(${codes.join(',')})`]
-      : [];
+const levelsWithCodes = (
+  side: Partial<Record<CodeLevel, number[]>>,
+): CodeLevel[] => DISTRICT_LEVEL_ORDER.filter((l) => (side[l]?.length ?? 0) > 0);
+
+const includeArms = (side: Partial<Record<CodeLevel, number[]>>): string[] =>
+  levelsWithCodes(side).map(
+    (level) => `${DISTRICT_LEVEL_COLUMN[level]}.in.(${side[level]!.join(',')})`,
+  );
+
+/* An EXCLUDE subtracts only what it MATCHES, so a row whose code at that level
+ * is NULL — an unresolved listing — must SURVIVE it. PostgREST's `not.in.(…)`
+ * is SQL `NOT (col IN (…))`, which is NULL (i.e. drops the row) for a NULL col,
+ * so each level is spelled `or(col.is.null,col.not.in.(…))` and the levels AND
+ * together. That is De Morgan's law over the include arms with NULL read as
+ * "did not match" — exactly what the RPC's `not exists(... case ...)` and the
+ * in-memory `!hits` already do. Without it "not Prague" silently also meant
+ * "and located", and the four renderings of one predicate disagreed. */
+const excludeArms = (side: Partial<Record<CodeLevel, number[]>>): string[] =>
+  levelsWithCodes(side).map((level) => {
+    const col = DISTRICT_LEVEL_COLUMN[level];
+    return `or(${col}.is.null,${col}.not.in.(${side[level]!.join(',')}))`;
   });
 
 /* PostgREST `or=(...)` predicate for the location chips, or null when no chips
- * are set. INCLUDE chips OR together, then AND with NOT-(OR of the EXCLUDE
- * chips) so an excluded place is subtracted from the cohort. Combined into one
- * `and(...)` tree so PostgREST AND's the two groups. */
+ * are set. INCLUDE chips OR together, then AND with the exclude arms so an
+ * excluded place is subtracted from the cohort. Combined into one `and(...)`
+ * tree so PostgREST AND's the groups. */
 export const districtsFilterClause = (
   districts: ReadonlyArray<DistrictChip>,
 ): string | null => {
   if (!districts.length) return null;
   const plan = districtCodePlan(districts);
   const groups: string[] = [];
-  const inc = arms(plan.include);
+  const inc = includeArms(plan.include);
   if (inc.length) groups.push(`or(${inc.join(',')})`);
-  const exc = arms(plan.exclude);
-  if (exc.length) groups.push(`not.or(${exc.join(',')})`);
+  groups.push(...excludeArms(plan.exclude));
   return groups.length ? `and(${groups.join(',')})` : null;
 };
 
@@ -155,7 +175,7 @@ export const DISTRICT_LEVEL_LABEL: Record<LocationLevel, string> = {
 };
 
 export const districtChipBadge = (chip: DistrictChip): string =>
-  chip.level != null && chip.id != null
+  chip.level != null && isValidCode(chip.id)
     ? DISTRICT_LEVEL_LABEL[chip.level]
     : 'Nerozpoznáno';
 
@@ -163,6 +183,6 @@ export const districtChipBadge = (chip: DistrictChip): string =>
  * to the same unit are the same chip however Mapy spelled them; an unresolved
  * one falls back to name+context. Used for dedupe, remove and the React key. */
 export const districtChipKey = (chip: DistrictChip): string =>
-  chip.level != null && chip.id != null
+  chip.level != null && isValidCode(chip.id)
     ? `${chip.level}:${chip.id}`
     : `name:${chip.name}::${chip.context ?? ''}`;

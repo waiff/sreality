@@ -75,14 +75,20 @@ describe('useLegacyChipUpgrade', () => {
     warn.mockRestore();
   });
 
-  it('does not retry a name it already attempted', async () => {
+  it('does not re-ask about a name the index has already answered for', async () => {
+    /* Rerendered with a FRESH array each time — what a navigation or any other
+       filter edit hands the hook — so what stops the second request is the
+       attempted set, not a stable dependency. */
     resolveChipNames.mockResolvedValue([[]]);
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const chips: DistrictChip[] = [{ name: 'U Kulaťáku', context: null }];
-    const { rerender } = renderHook(() => useLegacyChipUpgrade(chips, vi.fn()));
+    const onUpgrade = vi.fn();
+    const { rerender } = renderHook(
+      ({ chips }: { chips: DistrictChip[] }) => useLegacyChipUpgrade(chips, onUpgrade),
+      { initialProps: { chips: [{ name: 'U Kulaťáku', context: null }] } },
+    );
     await waitFor(() => expect(resolveChipNames).toHaveBeenCalledTimes(1));
-    rerender();
-    rerender();
+    rerender({ chips: [{ name: 'U Kulaťáku', context: null }] });
+    rerender({ chips: [{ name: 'U Kulaťáku', context: null }] });
     expect(resolveChipNames).toHaveBeenCalledTimes(1);
   });
 
@@ -94,5 +100,25 @@ describe('useLegacyChipUpgrade', () => {
     await waitFor(() => expect(warn).toHaveBeenCalled());
     expect(onUpgrade).not.toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it('retries after an outage — a failed request is not an answer', async () => {
+    /* A 503 leaves the chips code-less, i.e. matching nothing. Forgetting the
+       attempt means the next render whose chips change identity asks again;
+       it is NOT a spin, because a failure alone re-runs nothing. */
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    resolveChipNames.mockRejectedValueOnce(new Error('503'));
+    resolveChipNames.mockResolvedValueOnce([[{ level: 'obec', id: 582786 }]]);
+    const onUpgrade = vi.fn();
+    const { rerender } = renderHook(
+      ({ chips }: { chips: DistrictChip[] }) => useLegacyChipUpgrade(chips, onUpgrade),
+      { initialProps: { chips: [{ name: 'Brno', context: null }] } },
+    );
+    await waitFor(() => expect(resolveChipNames).toHaveBeenCalledTimes(1));
+    rerender({ chips: [{ name: 'Brno', context: null }] });
+    await waitFor(() => expect(onUpgrade).toHaveBeenCalledTimes(1));
+    expect(onUpgrade.mock.calls[0][0]).toEqual([
+      { name: 'Brno', context: null, level: 'obec', id: 582786 },
+    ]);
   });
 });

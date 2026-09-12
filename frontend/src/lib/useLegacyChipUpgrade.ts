@@ -53,9 +53,15 @@ export const useLegacyChipUpgrade = (
           pending.map((c) => ({ name: c.name, context: c.context })),
         );
       } catch {
+        /* A 503 / offline blip is not an answer about these names, so forget
+         * the attempt: the next render (or the next navigation) tries again.
+         * Keeping them marked would leave the chips code-less — matching
+         * nothing — for the rest of the session over one failed request. */
+        for (const chip of pending) attempted.current.delete(legacyKey(chip));
         console.warn(
           `location chips: could not resolve ${pending.length} name-only chip(s) `
-          + `(${pending.map((c) => c.name).join(', ')}) — they match nothing`,
+          + `(${pending.map((c) => c.name).join(', ')}) — they match nothing `
+          + 'until the next attempt',
         );
         return;
       }

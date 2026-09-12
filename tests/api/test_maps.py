@@ -334,15 +334,65 @@ def test_resolve_cast_obce_is_placed_by_name_inside_the_pipped_obec(client):
     assert body["obec_id"] == 586846
 
 
-def test_resolve_unknown_quarter_narrows_to_its_town(client):
-    """A Mapy neighbourhood the registry does not know as a part of this obec
-    narrows to the town rather than inventing a code."""
-    _override_conn(scripted=[*_MIRROR_PRESENT, _CHAIN_JIHLAVA, []])
+def test_resolve_composite_quarter_name_retries_on_its_last_segment(client):
+    """Mapy names a quarter the way a person says it — "Hradec Králové - Třebeš",
+    "Ostrava-Poruba" — while RÚIAN stores the bare part ("Třebeš", "Poruba").
+
+    RED by: dropping the retry, which turns every composite pick into a chip
+    that matches nothing."""
+    _override_conn(scripted=[
+        *_MIRROR_PRESENT,
+        _CHAIN_JIHLAVA,
+        [],                                  # the full name is not a part
+        [("cast_obce", 647055, "Třebeš")],   # its last segment is
+    ])
+    res = client.post("/maps/resolve", json={
+        **_PART_SUGGESTION, "name": "Hradec Králové - Třebeš",
+    })
+    body = res.json()
+    assert body["kind"] == "admin"
+    assert body["level"] == "cast_obce"
+    assert body["id"] == 647055
+
+
+def test_an_unplaceable_quarter_gets_NO_CODE_never_the_whole_town(client):
+    """THE defect this branch exists to not ship. A městská část ("Praha 2",
+    "Brno-střed" — both `momc`, which the answer table has no column for) and a
+    colloquial Mapy neighbourhood cannot be placed as a `cast_obce`. Falling
+    back to the containing obec would silently turn a saved "this quarter"
+    filter into "this whole city" — most expensively in a watchdog, which would
+    then mail the operator about every listing in Prague.
+
+    No code is the honest answer: the chip renders `Nerozpoznáno` and matches
+    nothing, exactly like every other unresolvable chip."""
+    _override_conn(scripted=[
+        *_MIRROR_PRESENT,
+        _CHAIN_JIHLAVA,
+        [],   # "Praha 2" is not a část obce
+        [],   # neither is its last segment, "2"
+    ])
+    res = client.post("/maps/resolve", json={**_PART_SUGGESTION, "name": "Praha 2"})
+    body = res.json()
+    assert body["kind"] == "point_with_radius"
+    assert body["id"] is None
+    assert body["level"] is None
+    # The obec was found by the PIP and is deliberately NOT published as the
+    # chip's code — that is the whole point.
+    assert body["obec_id"] is None
+
+
+def test_an_ambiguous_quarter_name_is_refused_rather_than_guessed(client):
+    """Two parts of one obec sharing a name is a cohort the operator did not
+    choose. Fail closed rather than take matches[0]."""
+    _override_conn(scripted=[
+        *_MIRROR_PRESENT,
+        _CHAIN_JIHLAVA,
+        [("cast_obce", 490067, "Vinohrady"), ("cast_obce", 490068, "Vinohrady")],
+    ])
     res = client.post("/maps/resolve", json=_PART_SUGGESTION)
     body = res.json()
-    assert body["kind"] == "locality"
+    assert body["kind"] == "point_with_radius"
     assert body["id"] is None
-    assert body["obec_id"] == 586846
 
 
 def test_resolve_street_is_locality_with_containing_obec(client):
