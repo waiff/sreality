@@ -204,7 +204,10 @@ def test_suggest_uses_backup_when_primary_unset(client, monkeypatch):
 
 
 class _FakeCursor:
-    """Minimal psycopg-like cursor for hermetic resolve tests."""
+    """Minimal psycopg-like cursor for hermetic resolve tests.
+
+    Each scripted entry answers ONE `execute`: a tuple for a `fetchone` query,
+    a list for a `fetchall` one."""
 
     def __init__(self, scripted: list[Any]):
         self._scripted = scripted
@@ -216,11 +219,14 @@ class _FakeCursor:
     def __exit__(self, *args: Any) -> None:
         pass
 
-    def execute(self, sql: str, params: tuple[Any, ...] | None = None) -> None:
+    def execute(self, sql: str, params: Any = None) -> None:
         self._next = self._scripted.pop(0) if self._scripted else None
 
     def fetchone(self) -> Any:
         return self._next
+
+    def fetchall(self) -> Any:
+        return self._next if isinstance(self._next, list) else []
 
 
 class _FakeConn:
@@ -235,13 +241,25 @@ def _override_conn(scripted: list[Any]) -> None:
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: _FakeConn(scripted)
 
 
-# Resolve now PIPs the picked point into admin_boundaries at the obec level and
-# walks parent_id to okres/kraj — one row: (obec_id, obec_name, okres_id,
-# okres_name, kraj_id, kraj_name). The id at the PICKED level is what matches.
-_PIP_JIHLAVA = (586846, "Jihlava", 3707, "Jihlava", 108, "Kraj Vysočina")
+# W3 S3: resolve reads the RUIAN MIRROR, not admin_boundaries. The chip carries
+# the RUIAN code, which is the same number `listing_location` answers with, so
+# chip and listing come from one registry version.
+#
+# The scripted sequence for a resolvable point is always:
+#   1. to_regclass('public.ruian_admin_units') -> (True,)
+#   2. the current registry version                -> (7,)
+#   3. the containing-obec PIP + its parent chain  -> [(unit_id, level, code, name)]
+_MIRROR_PRESENT = [(True,), (7,)]
+_CHAIN_JIHLAVA = [
+    (9001, "obec", 586846, "Jihlava"),
+    (9002, "okres", 3707, "Jihlava"),
+    (9003, "kraj", 108, "Kraj Vysočina"),
+    (9004, "stat", 1, "Česko"),
+]
 
 _OBEC_SUGGESTION = {
     "label": "Jihlava, okres Jihlava",
+    "name": "Jihlava",
     "lat": 49.3961,
     "lng": 15.5912,
     "type": "regional.municipality",
@@ -249,6 +267,7 @@ _OBEC_SUGGESTION = {
 
 _OKRES_SUGGESTION = {
     "label": "Okres Jihlava",
+    "name": "okres Jihlava",
     "lat": 49.40,
     "lng": 15.60,
     "type": "regional.region.district",
@@ -256,19 +275,27 @@ _OKRES_SUGGESTION = {
 
 _STREET_SUGGESTION = {
     "label": "Vinohradská 1234, Praha 2",
+    "name": "Vinohradská",
     "lat": 50.078,
     "lng": 14.444,
     "type": "regional.street",
 }
 
+_PART_SUGGESTION = {
+    "label": "Vinohrady, Praha 2",
+    "name": "Vinohrady",
+    "lat": 50.077,
+    "lng": 14.441,
+    "type": "regional.municipality_part",
+}
 
-def test_resolve_obec_matches_obec_id(client):
-    # to_regclass → True; EXISTS → True; obec-level PIP → the Jihlava row.
-    _override_conn(scripted=[(True,), (True,), _PIP_JIHLAVA])
+
+def test_resolve_obec_matches_the_obec_code(client):
+    _override_conn(scripted=[*_MIRROR_PRESENT, _CHAIN_JIHLAVA])
     res = client.post("/maps/resolve", json=_OBEC_SUGGESTION)
     assert res.status_code == 200
     body = res.json()
-    # An obec pick resolves to the obec id — NOT the same-named okres.
+    # An obec pick resolves to the obec code — NOT the same-named okres.
     assert body["kind"] == "admin"
     assert body["level"] == "obec"
     assert body["id"] == 586846
@@ -276,10 +303,10 @@ def test_resolve_obec_matches_obec_id(client):
     assert body["name"] == "Jihlava"
 
 
-def test_resolve_okres_matches_okres_id(client):
-    # Same point, but an okres-level pick resolves to the okres id (3707), so
-    # picking "Okres Jihlava" and obec "Jihlava" are distinct admin units.
-    _override_conn(scripted=[(True,), (True,), _PIP_JIHLAVA])
+def test_resolve_okres_matches_the_okres_code(client):
+    # Same point, but an okres-level pick resolves to the okres code (3707), so
+    # picking "Okres Jihlava" and obec "Jihlava" are distinct units.
+    _override_conn(scripted=[*_MIRROR_PRESENT, _CHAIN_JIHLAVA])
     res = client.post("/maps/resolve", json=_OKRES_SUGGESTION)
     body = res.json()
     assert body["kind"] == "admin"
@@ -288,10 +315,40 @@ def test_resolve_okres_matches_okres_id(client):
     assert body["obec_id"] == 586846
 
 
+def test_resolve_cast_obce_is_placed_by_name_inside_the_pipped_obec(client):
+    """RUIAN publishes no part-of-municipality polygon (ruian_boundaries.LAYERS
+    loads ten levels and neither cast_obce nor momc is one), so a quarter can
+    never be point-in-polygon'd: the POINT places the obec and the NAME places
+    the part inside it. That is the whole reason the pick's `name` is sent."""
+    _override_conn(scripted=[
+        *_MIRROR_PRESENT,
+        _CHAIN_JIHLAVA,
+        [("cast_obce", 490067, "Vinohrady")],
+    ])
+    res = client.post("/maps/resolve", json=_PART_SUGGESTION)
+    body = res.json()
+    assert body["kind"] == "admin"
+    assert body["level"] == "cast_obce"
+    assert body["id"] == 490067
+    assert body["name"] == "Vinohrady"
+    assert body["obec_id"] == 586846
+
+
+def test_resolve_unknown_quarter_narrows_to_its_town(client):
+    """A Mapy neighbourhood the registry does not know as a part of this obec
+    narrows to the town rather than inventing a code."""
+    _override_conn(scripted=[*_MIRROR_PRESENT, _CHAIN_JIHLAVA, []])
+    res = client.post("/maps/resolve", json=_PART_SUGGESTION)
+    body = res.json()
+    assert body["kind"] == "locality"
+    assert body["id"] is None
+    assert body["obec_id"] == 586846
+
+
 def test_resolve_street_is_locality_with_containing_obec(client):
-    # A street resolves to its CONTAINING obec (for a locality-text narrow), not
-    # a circle — so it's scoped to that municipality, no cross-city collisions.
-    _override_conn(scripted=[(True,), (True,), _PIP_JIHLAVA])
+    # A street has no code of its own: it resolves to its CONTAINING obec, so
+    # the chip filters at the obec level.
+    _override_conn(scripted=[*_MIRROR_PRESENT, _CHAIN_JIHLAVA])
     res = client.post("/maps/resolve", json=_STREET_SUGGESTION)
     body = res.json()
     assert body["kind"] == "locality"
@@ -300,8 +357,8 @@ def test_resolve_street_is_locality_with_containing_obec(client):
     assert body["obec_id"] == 586846
 
 
-def test_resolve_falls_back_to_point_when_admin_boundaries_absent(client):
-    # to_regclass returns None → table doesn't exist → point + radius fallback.
+def test_resolve_falls_back_to_point_when_the_mirror_is_absent(client):
+    # to_regclass returns None → the mirror isn't loaded → point + radius.
     _override_conn(scripted=[(None,)])
     res = client.post("/maps/resolve", json=_OBEC_SUGGESTION)
     assert res.status_code == 200
@@ -315,7 +372,7 @@ def test_resolve_falls_back_to_point_when_admin_boundaries_absent(client):
 
 def test_resolve_foreign_point_falls_back_to_point(client):
     # In-bounds query but the point matches no obec polygon (foreign / gap).
-    _override_conn(scripted=[(True,), (True,), None])
+    _override_conn(scripted=[*_MIRROR_PRESENT, []])
     res = client.post("/maps/resolve", json=_OBEC_SUGGESTION)
     body = res.json()
     assert body["kind"] == "point_with_radius"
@@ -334,17 +391,17 @@ def test_resolve_unresolved_when_no_coords(client):
     assert body["id"] is None
 
 
-def test_resolve_table_empty_falls_back(client):
-    # table exists but has no rows → fallback
-    _override_conn(scripted=[(True,), (False,)])
+def test_resolve_no_current_registry_version_falls_back(client):
+    # The mirror table exists but no registry_versions row is current.
+    _override_conn(scripted=[(True,), None])
     res = client.post("/maps/resolve", json=_OBEC_SUGGESTION)
     body = res.json()
     assert body["kind"] == "point_with_radius"
 
 
 def test_resolve_unknown_type_is_unresolved(client):
-    # A type with no admin-level mapping (e.g. country / unknown) narrows
-    # nothing — no PIP is attempted.
+    # A type with no level mapping (e.g. country / unknown) narrows nothing —
+    # no PIP is attempted.
     _override_conn(scripted=[])
     res = client.post(
         "/maps/resolve",
@@ -358,3 +415,50 @@ def test_resolve_unknown_type_is_unresolved(client):
     body = res.json()
     assert body["kind"] == "unresolved"
     assert body["level"] is None
+
+
+# ---------------- /maps/resolve-names (the stored-chip reader) ----------------
+
+
+def test_resolve_names_answers_every_level_a_name_means(client):
+    """"Jihlava" is an obec AND an okres. The ILIKE this replaces matched both,
+    so the compatibility reader keeps both codes and the chip becomes the union
+    — never a silent narrowing to one of them."""
+    _override_conn(scripted=[
+        *_MIRROR_PRESENT,
+        [("obec", 586846, "Jihlava"), ("okres", 3707, "Jihlava")],
+    ])
+    res = client.post("/maps/resolve-names", json={"chips": [{"name": "Jihlava"}]})
+    assert res.status_code == 200
+    assert res.json() == {
+        "chips": [
+            {
+                "name": "Jihlava",
+                "context": None,
+                "matches": [
+                    {"level": "obec", "id": 586846},
+                    {"level": "okres", "id": 3707},
+                ],
+            }
+        ]
+    }
+
+
+def test_resolve_names_unknown_name_gets_no_matches(client):
+    _override_conn(scripted=[*_MIRROR_PRESENT, []])
+    res = client.post("/maps/resolve-names", json={"chips": [{"name": "U Kulaťáku"}]})
+    assert res.json()["chips"][0]["matches"] == []
+
+
+def test_resolve_names_without_the_mirror_answers_empty(client):
+    _override_conn(scripted=[(None,)])
+    res = client.post("/maps/resolve-names", json={"chips": [{"name": "Brno"}]})
+    assert res.status_code == 200
+    assert res.json()["chips"][0]["matches"] == []
+
+
+def test_resolve_names_empty_request_is_a_no_op(client):
+    _override_conn(scripted=[])
+    res = client.post("/maps/resolve-names", json={"chips": []})
+    assert res.status_code == 200
+    assert res.json() == {"chips": []}

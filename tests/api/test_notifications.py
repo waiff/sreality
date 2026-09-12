@@ -11,7 +11,12 @@ import pytest
 
 pytest.importorskip("pydantic")
 
-from api.notifications import WatchdogFilterSpec, _build_match_clauses
+from api.location_filter import NO_MATCH_CODE
+from api.notifications import (
+    WatchdogFilterSpec,
+    _build_match_clauses,
+    _resolve_stored_chips,
+)
 
 
 def test_filter_spec_defaults() -> None:
@@ -233,201 +238,123 @@ def test_build_clauses_no_subtype_by_default() -> None:
     assert not any("l.subtype" in c for c in where)
 
 
-def test_build_clauses_district_chip_without_context() -> None:
-    """A chip with `context=None` produces a single (district ILIKE name OR
-    place-text ILIKE name) clause — same shape as the migration 067
-    behaviour, preserved for picks at the municipality / okres / kraj
-    level (where there's nothing finer to narrow against). Free-text
-    matching reads `place_search_text` (street + locality, migration 182),
-    never bare `locality` — bazos stores the street outside locality."""
-    spec = WatchdogFilterSpec(
-        districts=[{"name": "okres Jihlava", "context": None}],
-    )
-    where, params = _build_match_clauses(spec)
-    district_clause = next(w for w in where if "district_name_0" in w)
-    # Wildcards live in the bound VALUE, not as inline SQL '%' literals —
-    # a bare '%' in the query string is a malformed psycopg placeholder and
-    # raised at execute time, silently killing every matcher pass.
-    assert "l.district ILIKE %(district_name_0)s" in district_clause
-    assert "l.place_search_text ILIKE %(district_name_0)s" in district_clause
-    assert "l.locality ILIKE" not in district_clause
-    assert "'%'" not in district_clause
-    assert " AND " not in district_clause
-    assert params["district_name_0"] == "%okres Jihlava%"
-    assert "district_ctx_0" not in params
+def test_build_clauses_place_chips_are_one_code_predicate() -> None:
+    """Rule 16, in its W3 form: the matcher tests a chip exactly the way Browse,
+    Stats and the map do — `<level>_id = any(codes)`, one array per level.
 
-
-def test_build_clauses_district_chip_with_context_anding_the_narrow() -> None:
-    """A chip with a parent municipality narrows the name match — the
-    fix for 'Edvarda Beneše · Plzeň' no longer dragging in the streets
-    of the same name in Olomouc / Hradec Králové. Generates the same
-    AND'd predicate browse_stats applies (migration 074)."""
-    spec = WatchdogFilterSpec(
-        districts=[{"name": "Edvarda Beneše", "context": "Plzeň"}],
-    )
-    where, params = _build_match_clauses(spec)
-    district_clause = next(w for w in where if "district_name_0" in w)
-    assert "%(district_name_0)s" in district_clause
-    assert "%(district_ctx_0)s" in district_clause
-    assert " AND " in district_clause
-    assert params["district_name_0"] == "%Edvarda Beneše%"
-    assert params["district_ctx_0"] == "%Plzeň%"
-
-
-def test_build_clauses_district_multiple_chips_are_or_joined() -> None:
-    """Two chips OR'd: the cohort matches either (Plzeň-narrowed) or
-    (Olomouc-narrowed). Matches the per-chip OR Browse uses."""
+    RED by: reintroducing a name ILIKE, a `place_search_text` arm or a `context`
+    narrow here. The six copies of the old five-predicate tree are what let this
+    matcher and Browse answer the same saved filter differently."""
     spec = WatchdogFilterSpec(
         districts=[
-            {"name": "Edvarda Beneše", "context": "Plzeň"},
-            {"name": "Edvarda Beneše", "context": "Olomouc"},
-        ],
-    )
-    where, params = _build_match_clauses(spec)
-    district_clause = next(w for w in where if "district_name_0" in w)
-    assert "%(district_name_0)s" in district_clause
-    assert "%(district_name_1)s" in district_clause
-    assert " OR " in district_clause
-    assert params["district_ctx_0"] == "%Plzeň%"
-    assert params["district_ctx_1"] == "%Olomouc%"
-
-
-def test_build_clauses_district_no_inline_percent_literals() -> None:
-    """Regression: the district ILIKE clauses must carry NO inline SQL '%'
-    wildcards. psycopg scans the query string for `%`-placeholders, so a bare
-    '%' (as in the old `ILIKE '%' || %(name)s || '%'`) is a malformed
-    placeholder that raises ProgrammingError at execute time. That raise sat
-    outside the per-subscription guard in match_once, so it silently zeroed
-    the entire watchdog feed for every watchdog with a district chip — 0
-    dispatches despite real matches. Wildcards must live in the bound VALUE."""
-    spec = WatchdogFilterSpec(
-        districts=[{"name": "Jihlava", "context": "Vysočina"}],
-    )
-    where, params = _build_match_clauses(spec)
-    district_clause = next(w for w in where if "district_name_0" in w)
-    # The only '%' in the SQL must be inside %(...)s placeholders; none bare.
-    assert "'%'" not in district_clause
-    assert "||" not in district_clause
-    # Wildcards moved into the parameter values instead.
-    assert params["district_name_0"] == "%Jihlava%"
-    assert params["district_ctx_0"] == "%Vysočina%"
-
-
-def test_build_clauses_district_excluded_chip_is_negated() -> None:
-    """An excluded chip becomes a NOT (...) group that subtracts its
-    matches. With every chip excluded there is no positive include group —
-    only the negation. Mirrors Browse's `not.or(...)` and browse_stats'
-    EXCLUDE gate (migration 146)."""
-    spec = WatchdogFilterSpec(
-        districts=[{"name": "Praha", "context": None, "excluded": True}],
-    )
-    where, params = _build_match_clauses(spec)
-    district_clauses = [w for w in where if "district_name_0" in w]
-    assert len(district_clauses) == 1
-    assert district_clauses[0].startswith("NOT (")
-    assert "l.district ILIKE %(district_name_0)s" in district_clauses[0]
-    assert params["district_name_0"] == "%Praha%"
-    assert "'%'" not in district_clauses[0]  # wildcards stay in the value
-
-
-def test_build_clauses_district_mixed_include_exclude() -> None:
-    """Include + exclude chips emit two WHERE entries — an OR'd include
-    group AND a NOT(...) exclude group — keeping the matcher in lockstep
-    with Browse (queries.ts) and browse_stats (migration 146). Params are
-    keyed by original chip position regardless of the split."""
-    spec = WatchdogFilterSpec(
-        districts=[
-            {"name": "Praha", "context": None},
-            {"name": "Modřany", "context": None, "excluded": True},
-        ],
-    )
-    where, params = _build_match_clauses(spec)
-    inc = next(w for w in where if "district_name_0" in w)
-    exc = next(w for w in where if "district_name_1" in w)
-    assert not inc.startswith("NOT (")
-    assert exc.startswith("NOT (")
-    assert params["district_name_0"] == "%Praha%"
-    assert params["district_name_1"] == "%Modřany%"
-
-
-def test_build_clauses_obec_chip_matches_obec_id() -> None:
-    """A resolved obec pick matches by stable obec_id — NOT a name ILIKE — so
-    picking obec 'Jihlava' can't drag in its same-named okres."""
-    spec = WatchdogFilterSpec(
-        districts=[{"name": "Jihlava", "level": "obec", "id": 586846}],
-    )
-    where, params = _build_match_clauses(spec)
-    clause = next(w for w in where if "district_id_0" in w)
-    assert clause == "(l.obec_id = %(district_id_0)s)"
-    assert params["district_id_0"] == 586846
-    assert "district_name_0" not in params  # no name ILIKE for a resolved chip
-
-
-def test_build_clauses_okres_and_kraj_chips_match_their_id_columns() -> None:
-    spec = WatchdogFilterSpec(
-        districts=[
+            {"name": "Jihlava", "level": "obec", "id": 586846},
             {"name": "okres Jihlava", "level": "okres", "id": 3707},
             {"name": "Kraj Vysočina", "level": "kraj", "id": 108},
+            {"name": "Žižkov", "level": "cast_obce", "id": 490067},
         ],
     )
     where, params = _build_match_clauses(spec)
-    inc = next(w for w in where if "district_id_0" in w)
-    assert "l.okres_id = %(district_id_0)s" in inc
-    assert "l.region_id = %(district_id_1)s" in inc
-    assert params["district_id_0"] == 3707
-    assert params["district_id_1"] == 108
-
-
-def test_build_clauses_locality_chip_narrows_to_containing_obec() -> None:
-    """A street/POI pick matches its containing obec_id AND a place-text
-    ILIKE — scoped to the municipality, no cross-city street collisions."""
-    spec = WatchdogFilterSpec(
-        districts=[
-            {"name": "Edvarda Beneše", "level": "locality", "id": 554791},
-        ],
+    clause = next(w for w in where if "district_codes" in w)
+    assert clause == (
+        "(l.region_id = ANY(%(district_codes_kraj)s) "
+        "OR l.okres_id = ANY(%(district_codes_okres)s) "
+        "OR l.obec_id = ANY(%(district_codes_obec)s) "
+        "OR l.cast_obce_id = ANY(%(district_codes_cast_obce)s))"
     )
-    where, params = _build_match_clauses(spec)
-    clause = next(w for w in where if "district_id_0" in w)
-    assert "l.obec_id = %(district_id_0)s" in clause
-    assert "l.place_search_text ILIKE %(district_name_0)s" in clause
-    assert params["district_id_0"] == 554791
-    assert params["district_name_0"] == "%Edvarda Beneše%"
-    assert "'%'" not in clause  # wildcards stay in the bound value
+    assert params["district_codes_obec"] == [586846]
+    assert params["district_codes_okres"] == [3707]
+    assert params["district_codes_kraj"] == [108]
+    assert params["district_codes_cast_obce"] == [490067]
 
 
-def test_build_clauses_locality_chip_never_matches_bare_locality() -> None:
-    """Regression for the invisible-bazos-listing bug: bazos stores the town
-    in `locality` and the street in `street`, so a street pick matched on
-    bare `locality` can never see a bazos listing. Free-text place matching
-    must go through `place_search_text` (street + locality, migration 182)
-    in EVERY chip branch — street pick, legacy fallback, include and
-    exclude alike."""
+def test_build_clauses_place_chips_read_no_text_column() -> None:
     spec = WatchdogFilterSpec(
         districts=[
             {"name": "Pezinská", "level": "locality", "id": 535419},
-            {"name": "Pezinská", "level": "locality", "id": 535419,
-             "excluded": True},
             {"name": "Brno", "context": "Jihomoravský kraj"},
         ],
     )
     where, _params = _build_match_clauses(spec)
-    chip_clauses = [w for w in where if "district_name_" in w]
-    assert chip_clauses, "expected district chip clauses"
-    for clause in chip_clauses:
-        assert "l.locality ILIKE" not in clause
-    assert any("l.place_search_text ILIKE" in w for w in chip_clauses)
+    for clause in [w for w in where if "district_codes" in w]:
+        assert "ILIKE" not in clause.upper()
+        assert "place_search_text" not in clause
+        assert "l.district" not in clause
+        assert "'%'" not in clause
 
 
-def test_build_clauses_unresolved_chip_falls_back_to_name_match() -> None:
-    """A chip with no level/id (legacy saved filter) keeps the name-ILIKE
-    predicate across district/place_search_text/okres/region — never
-    breaks, and pre-#409 street chips gain street matching too."""
+def test_build_clauses_locality_chip_filters_at_its_containing_obec() -> None:
+    """A street / POI pick carries the obec that contains it, and that is the
+    whole predicate now — the `place_search_text ILIKE` half is gone with the
+    column it read."""
+    spec = WatchdogFilterSpec(
+        districts=[{"name": "Edvarda Beneše", "level": "locality", "id": 554791}],
+    )
+    where, params = _build_match_clauses(spec)
+    clause = next(w for w in where if "district_codes" in w)
+    assert clause == "(l.obec_id = ANY(%(district_codes_obec)s))"
+    assert params["district_codes_obec"] == [554791]
+
+
+def test_build_clauses_excluded_chip_is_negated() -> None:
+    spec = WatchdogFilterSpec(
+        districts=[{"name": "Praha", "level": "obec", "id": 554782, "excluded": True}],
+    )
+    where, params = _build_match_clauses(spec)
+    clauses = [w for w in where if "district_codes" in w]
+    assert clauses == ["NOT (l.obec_id = ANY(%(district_codes_excl_obec)s))"]
+    assert params["district_codes_excl_obec"] == [554782]
+
+
+def test_build_clauses_mixed_include_exclude() -> None:
+    spec = WatchdogFilterSpec(
+        districts=[
+            {"name": "Praha", "level": "obec", "id": 554782},
+            {"name": "Modřany", "level": "cast_obce", "id": 490017, "excluded": True},
+        ],
+    )
+    where, params = _build_match_clauses(spec)
+    inc = next(w for w in where if "district_codes_obec" in w)
+    exc = next(w for w in where if "district_codes_excl_cast_obce" in w)
+    assert not inc.startswith("NOT (")
+    assert exc.startswith("NOT (")
+    assert params["district_codes_obec"] == [554782]
+    assert params["district_codes_excl_cast_obce"] == [490017]
+
+
+def test_build_clauses_a_chip_with_no_code_matches_nothing() -> None:
+    """A stored chip the name index could not place must not widen the cohort:
+    a watchdog whose place filter quietly became "the whole country" mails the
+    operator about the whole country. The sentinel is negative and RÚIAN codes
+    are not, so the arm is false for every row."""
     spec = WatchdogFilterSpec(districts=[{"name": "Brno", "context": None}])
     where, params = _build_match_clauses(spec)
-    clause = next(w for w in where if "district_name_0" in w)
-    assert "l.okres ILIKE %(district_name_0)s" in clause
-    assert "l.place_search_text ILIKE %(district_name_0)s" in clause
-    assert "district_id_0" not in params
+    clause = next(w for w in where if "district_codes" in w)
+    assert clause == "(l.obec_id = ANY(%(district_codes_obec)s))"
+    assert params["district_codes_obec"] == [NO_MATCH_CODE]
+    assert NO_MATCH_CODE < 0
+
+
+def test_match_once_resolves_stored_name_only_chips_before_matching() -> None:
+    """The compatibility reader runs INSIDE the matcher, not in a migration.
+
+    A watchdog saved before chips carried codes keeps working: its names are
+    resolved once, at read time, against the RÚIAN name index — the same index
+    `/maps/resolve-names` serves the SPA from, so Browse and the matcher read
+    one saved filter the same way (rule 16). The stored blob is untouched."""
+    from unittest.mock import patch
+
+    spec = WatchdogFilterSpec(districts=[{"name": "Jihlava", "context": None}])
+    with patch(
+        "api.maps.resolve_names",
+        return_value={("Jihlava", None): [("obec", 586846), ("okres", 3707)]},
+    ):
+        _resolve_stored_chips(object(), spec, "test")
+    assert [(c.level, c.id) for c in spec.districts] == [
+        ("obec", 586846), ("okres", 3707),
+    ]
+    _where, params = _build_match_clauses(spec)
+    assert params["district_codes_obec"] == [586846]
+    assert params["district_codes_okres"] == [3707]
 
 
 def test_filter_spec_lifts_legacy_string_districts() -> None:
@@ -701,18 +628,17 @@ def test_match_once_uses_per_subscription_cursor() -> None:
     assert "l.first_seen_at > %(cursor)s" in sql
     assert isinstance(params, dict) and params["cursor"] == cursor_ts
 
-    # And that the filter spec made it through too. The district chip
-    # without a context lands as a single ILIKE-OR pair under the
-    # `district_name_0` placeholder (matching browse_stats' migration
-    # 069 predicate); the row's legacy string form is lifted by
-    # `WatchdogFilterSpec._lift_legacy_districts` before SQL build.
+    # And that the filter spec made it through too. The stored chip is a legacy
+    # STRING, lifted to a chip by `_lift_legacy_districts` and then run through
+    # the read-time name upgrade; this fake connection resolves no name, so it
+    # compiles to the sentinel that matches nothing (fail closed) rather than to
+    # a cohort-widening no-op.
     # The stored spec carries a legacy scalar category_main; the before-validator
     # lifts it to category_main_in and the matcher emits an = ANY membership.
     assert params["category_main_in"] == ["byt"]
     assert params["category_type"] == "pronajem"
-    assert params["district_name_0"] == "%Praha%"
-    assert "district_ctx_0" not in params  # null context = no narrow
-    assert "l.district ILIKE %(district_name_0)s" in sql
+    assert params["district_codes_obec"] == [NO_MATCH_CODE]
+    assert "l.obec_id = ANY(%(district_codes_obec)s)" in sql
 
     # The 'new' dispatch INSERT writes the unified event shape: source_kind,
     # a per-property dedupe_key, ON CONFLICT on that key (migration 206), and the

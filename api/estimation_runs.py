@@ -2090,8 +2090,6 @@ def _build_filters(
         max_price_czk=body.max_price_czk,
         category_main=body.category_main,
         category_type=body.category_type,
-        locality_district_id=body.locality_district_id,
-        locality_region_id=body.locality_region_id,
         include_unreliable=body.include_unreliable,
         category_sub_cb=body.category_sub_cb,
         furnished=body.furnished,

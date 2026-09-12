@@ -63,8 +63,6 @@ class FindComparablesIn(BaseModel):
     category_main: str | None = Field(...)
     category_type: str | None = Field(...)
     category_sub_cb: int | None = None
-    locality_district_id: int | None = None
-    locality_region_id: int | None = None
     include_unreliable: bool = False
     furnished: EnumListFilter = None
     terrace: bool | None = None
@@ -165,8 +163,6 @@ class ComputeMarketVelocityIn(BaseModel):
     category_main: str | None = Field(...)
     category_type: str | None = Field(...)
     category_sub_cb: int | None = None
-    locality_district_id: int | None = None
-    locality_region_id: int | None = None
     include_unreliable: bool = False
     furnished: EnumListFilter = None
     terrace: bool | None = None
@@ -367,8 +363,6 @@ class CreateEstimationIn(BaseModel):
     category_main: str | None = "byt"
     category_type: str | None = None
     category_sub_cb: int | None = None
-    locality_district_id: int | None = None
-    locality_region_id: int | None = None
     include_unreliable: bool = False
     furnished: EnumListFilter = None
     terrace: bool | None = None
@@ -455,6 +449,26 @@ class ResolveLocationIn(BaseModel):
     type: str | None = None
     regional_structure: list[dict[str, Any]] | None = None
     raw: dict[str, Any] | None = None
+    # The pick's own name (Mapy's `name`, e.g. "Žižkov"). Read for the one
+    # level RÚIAN draws no polygon for — `cast_obce` — where the point places
+    # the obec and the name places the part inside it. Optional: an older
+    # frontend that omits it still resolves obec / okres / kraj.
+    name: str | None = None
+
+
+class ResolveChipNameIn(BaseModel):
+    """One stored chip to resolve at read time (W3 S3).
+
+    Chips saved before migration 172 carry a name and an optional parent
+    `context` and no code. `api.location_filter.upgrade_district_chips` resolves
+    them ONCE on the way into the predicate; the stored blob is never rewritten."""
+
+    name: str
+    context: str | None = None
+
+
+class ResolveChipNamesIn(BaseModel):
+    chips: list[ResolveChipNameIn] = Field(default_factory=list, max_length=50)
 
 
 class EstimateYieldIn(BaseModel):
@@ -484,8 +498,6 @@ class EstimateYieldIn(BaseModel):
     category_main: str | None = Field(...)
     category_type: str | None = None
     category_sub_cb: int | None = None
-    locality_district_id: int | None = None
-    locality_region_id: int | None = None
     include_unreliable: bool = False
     furnished: EnumListFilter = None
     terrace: bool | None = None

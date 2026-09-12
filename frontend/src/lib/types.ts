@@ -746,8 +746,6 @@ export interface EstimationFilters {
   category_main: string | null;
   category_type: string | null;
   category_sub_cb: number | null;
-  locality_district_id: number | null;
-  locality_region_id: number | null;
   include_unreliable: boolean;
   furnished: Furnished | null;
   terrace: boolean | null;
@@ -999,11 +997,13 @@ export interface PipelineBoardCard {
    * children. Distinguishes "observed twice, never moved" (0) from "moved and
    * came back" (>0) when total_price_change_pct is exactly 0. */
   price_change_count: number | null;
-  /* Region fields from properties_public — the in-memory region filter
-   * (matchesDistricts) reuses Browse's admin-id + name-fallback semantics.
-   * `obec_id` doubles as the join key to the curated-city index strip
+  /* The four RÚIAN codes the ONE place predicate tests (W3 S3,
+   * lib/districtCodes) — the board filters its cards in the browser, so it
+   * carries the same codes the server-side predicate uses. `obec_id` doubles
+   * as the join key to the curated-city index strip
    * (= curated_cities.admin_boundary_id; see lib/useCityQuality). */
   obec_id: number | null;
+  cast_obce_id: number | null;
   /* Municipality + free-text locality. The card's place line is `display_label`
    * now; `obec` stays because the "Město A–Ž" sort orders by the TOWN, which is
    * the tail of the label rather than its head (a label that starts with a
@@ -1244,13 +1244,12 @@ export interface WatchdogFilterSpec {
   lat: number | null;
   lng: number | null;
   radius_m: number | null;
-  locality_district_id: number | null;
-  locality_region_id: number | null;
-  /* Each chip is `{name, context}` — context narrows the name match
-   * to a parent municipality so the watchdog matcher (api/
-   * notifications.py) doesn't fire on streets of the same name in
-   * other cities. See migration 075 for the one-shot lift of legacy
-   * `string[]` entries to this shape. */
+  /* Place, as chips. Each chip is a LEVEL plus a RÚIAN CODE — the one
+   * predicate Browse, Stats, the map and the watchdog matcher share
+   * (rule 16, lib/districtCodes + api/location_filter). `context` is
+   * carried for the read-time name lookup that rescues chips saved
+   * before codes existed; it is not a predicate. See migration 075 for
+   * the one-shot lift of legacy `string[]` entries to this shape. */
   districts: DistrictChip[] | null;
   min_price_czk: number | null;
   max_price_czk: number | null;
@@ -1352,8 +1351,6 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   lat: null,
   lng: null,
   radius_m: null,
-  locality_district_id: null,
-  locality_region_id: null,
   districts: null,
   min_price_czk: null,
   max_price_czk: null,

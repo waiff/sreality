@@ -422,8 +422,6 @@ def _filters_used(
         "max_price_czk": filters.max_price_czk,
         "category_main": filters.category_main,
         "category_type": filters.category_type,
-        "locality_district_id": filters.locality_district_id,
-        "locality_region_id": filters.locality_region_id,
         "include_unreliable": filters.include_unreliable,
         "tom_days_min": filters.tom_days_min,
         "tom_days_max": filters.tom_days_max,

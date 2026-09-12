@@ -48,6 +48,7 @@ import {
   browseTitleSummary,
   toSearchParams,
   DEFAULT_FILTERS,
+  type DistrictChip,
   type ListingFilters,
 } from '@/lib/filters';
 import { usePageTitle } from '@/lib/pageTitle';
@@ -96,6 +97,7 @@ import {
   type TableRow,
 } from '@/lib/queries';
 import { useInfiniteList } from '@/lib/useInfiniteList';
+import { useLegacyChipUpgrade } from '@/lib/useLegacyChipUpgrade';
 import { CardHydrationProvider } from '@/lib/hydration';
 
 /* Client-side retention cap for a card's carousel — the same 50 the inline read
@@ -158,6 +160,17 @@ export default function BrowseExperience({
   const f = { ...DEFAULT_FEATURES, ...features };
   const isModal = layout === 'modal';
   const { filters, sort, tab, overlay, activePresetId } = view;
+
+  /* A URL or a preset can still carry a chip written before chips had codes.
+   * Resolve those once, in memory, before they reach a cohort read — the one
+   * predicate treats a code-less chip as "matches nothing" (fail closed), and
+   * the Watchdog resolves the same names through the same index, so a saved
+   * filter cannot mean two things (rule 16). The stored blob is not rewritten. */
+  const upgradeChips = useCallback(
+    (districts: DistrictChip[]) => view.setFilters({ ...view.filters, districts }),
+    [view],
+  );
+  useLegacyChipUpgrade(filters.districts, upgradeChips);
 
   // Browser-tab title reflects the active filters ("LR: 2+kk · 60–90 m² · Praha")
   // so multiple Browse tabs are distinguishable. Skipped in the Explore-area
