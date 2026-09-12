@@ -1936,13 +1936,17 @@ The collision epoch is minted weekly by the same workflow (Sunday 04:41 UTC).
 
 **ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
 `35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a
-listing: `listings.raw_json` plus the class-B legacy columns (ten payload readers), and the
-LATEST stored detail body in `portal_raw_payloads`, joined on `(source, source_id_native)` —
+listing: `listings.raw_json` (seven payload readers), and the LATEST stored detail body in
+`portal_raw_payloads`, joined on `(source, source_id_native)` —
 `portal_raw_payloads.listing_id` is nullable and nothing has ever populated it — fetched from R2
 and scoped by the contract's exclusion zones (fourteen page readers in
 `location_data/page_readers.py`, the vocabulary both halves share in
-`location_data/claims_common.py`). ONE registry, `claims_intake.READERS`, 24 entries keyed by
-substrate; a name outside it is a hard refusal. **The page half is hash-gated**: a body is mined
+`location_data/claims_common.py`). ONE registry, `claims_intake.READERS`, 21 entries keyed by
+substrate; a name outside it is a hard refusal. It was 24 and read a THIRD substrate — the
+class-B `listings` columns (`locality`, `street`, `street_source`) — until W1-c deleted
+`legacy_text_column`, `geom_column` and `coords_stamp_quality`: a column the scraper writes is
+not evidence a portal published, and every claim they minted carried the surface
+`legacy_column`, which is precisely what rule 25's "one store" forbids. **The page half is hash-gated**: a body is mined
 only while `portal_raw_payloads.contract_version IS DISTINCT FROM` the portal's active contract
 version, and the batch stamps the bodies it mined in the same transaction as their claims — so
 a body is fetched once per contract version, the steady-state cost is bounded by page CHURN
@@ -2043,6 +2047,16 @@ top-level YAML key is a refusal, not a shrug — every key in this format fails 
 **Entries are immutable** — a fix is a version bump, never an edit, so a claim's `extractor_id` always
 names the rule that produced it. Hence no per-portal branch in the intake: a new signal is a YAML
 entry, not code.
+
+**The SHAPE of a contract is enforced by the loader** (rule 25, W1-c). At most **one entry per claim
+type**, out of the eleven; an `obec_name` entry is **mandatory and must name a reader**, because a
+contract that cannot state the town cannot satisfy the invariant the wave exists for; only six
+top-level keys are legal (`portal`, `contract_version`, `persistence`, `exclusion_zones`,
+`regressions`, `extractions`) and the unenforced per-entry ones (`required`, `cardinality`,
+`on_conflict`) are gone. All nine were rewritten to that shape on 2026-09-12 — **175 entries became
+68**, 4 to 11 apiece, and every portal's town entry runs on the **hourly** lane rather than on an
+archive sweep that no longer exists. What a portal does NOT publish is now an omission recorded in
+its report, not a placeholder entry: no contract carries an entry no reader executes.
 
 The header carries **one mutable extraction column**: `is_active`, which version the extractor runs.
 It carried a second, `shadow` (migration 404) — a contract that could not meet its frozen-sample

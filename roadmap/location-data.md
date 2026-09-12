@@ -126,8 +126,40 @@ component is slimmed twice — each wave rewrites one component and slims its st
     psc — without them the town the slim contracts mine off a `Lokalita` row is declined at S7).
     `location_town_coverage` also moves to the FRONT of `verify_pipeline`'s `_CHECKS`: on 2026-09-11
     the lane's 120 s budget left the last seven checks `not_run`, the coverage red line among them.
-    **Next:** rewrite each contract to <= 11 entries with the town entry mandatory (the nine YAML
-    rewrites; the loader refuses today's files until they land).
+  - **W1-c contracts landed** (2026-09-12): all nine YAMLs rewritten at once, **175 entries → 68**,
+    one per claim type, and the town entry is live on every portal — on the **hourly** lane, not on
+    an archive sweep (there is none any more). What each portal reads the town off, and what it
+    still does not publish:
+
+    | contract | entries | the town entry | not published |
+    | --- | --- | --- | --- |
+    | `bazos@5` | 4 | `bzs.det.obec_slug` — the town-listings anchor's `/inzeraty/<obec>/<psč>/` href | okres, část obce, kraj, country, street, čp, čo |
+    | `bezrealitky@2` | 8 | `bzr.det.city` — `advert.city`, a typed payload field | precision declaration, okres, kraj |
+    | `ceskereality@6` | 6 | `cr.det.data_city` — `input#driving_calculator_from[data-city]`, split off the `(okres X)` half | country, kraj, část obce, psč, čo |
+    | `idnes@3` | 10 | `id.det.obec` — the dataLayer `viewDetail` block's `listing_localityCity`, id-matched | psč |
+    | `maxima@3` | 6 | `mx.det.locality_obec` — segment 1 of `div.locality` | kraj, psč, čp, čo, country |
+    | `mmreality@3` | 7 | `mm.det.municipality` — the Vue blob's `/municipality` | **psč**, kraj, čp, čo |
+    | `realitymix@5` | 10 | `rm.det.slug` — the canonical link's `/detail/{obec}/` segment | country |
+    | `remax@4` | 6 | `rx.det.header_obec` — the head of `h2.pd-header__address` | precision declaration, country, psč, čp, čo |
+    | `sreality@2` | 11 | `sr.det.name_city` — `/locality/city` | *nothing — all eleven types* |
+
+    Four rulings did the work. A numbered or hyphenated městský obvod is never the town (R4,
+    `statutory_city_obec`); where the portal publishes it, it is claimed as `cast_obce_name` rather
+    than discarded. On a `precision_declaration` the portal's value IS the label and the entry's
+    `blurred_labels` — not the reader, not an entry default — decides the blur axis (R5); that moved
+    into `claims_common._base`, the one funnel both substrates build a claim through, after maxima's
+    hard-coded `blur_evidence: declared` made a PRECISE Point resolve as portal-declared-blurred on
+    every Point listing. bazos' own maps anchor is a first-party pin (R6) and remax's street comes
+    only from the subject map's `data-address`, never the header (R8). Migration **500** adds the one
+    `(regex_text, house_number_co)` policy rung 499 missed — realitymix reads čp and čo out of the
+    same `og:title` capture, and without it the čo half is declined at S7 while its pair wins.
+    Deleted with the rewrite: 6 whole test files superseded by the per-portal ones (R14), the
+    `blur_hint` / `map_zoom` / `address_line_verbatim` / `uncertainty_geometry` arms of the retired
+    vocabulary, and every entry no reader executed — an omission is now a line in the portal's report,
+    never a placeholder entry.
+    **Next:** the coverage red line is the acceptance check, and it can only be read after deploy —
+    every portal but sreality, bezrealitky and mmreality now mints its town from a STORED PAGE BODY,
+    so a portal's number moves as the body-mining half works through its backlog, not at merge.
 - **W2 — the resolver at four steps, the answer table at 27 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and
@@ -263,9 +295,12 @@ re-scan bloat — a same-day observation dedup guard is queued follow-up work).
   exactly the foreign-address cohort — drift there means the unique index stops deduping,
   silently, in an append-only table. A diagnostic mirror + a parity battery keep it documented.
 - **Legacy entries never burn a permanent extractor id.** 02 §2.2.3's ids are fixed on the W2
-  *HTML* parses; the raw_json / `listings.geom` mirrors of the same facts ship as
+  *HTML* parses; the raw_json / `listings.geom` mirrors of the same facts shipped as
   `bzs.det.legacy_psc` / `bzs.det.legacy_link_pin` / `id.det.legacy_pin`, so the two provenances
-  stay distinguishable in `location_claims.extractor_id` when W2 lands.
+  stayed distinguishable in `location_claims.extractor_id`. (**All three entries are gone at
+  W1-c** — the `listings`-column readers went with rule 25 and one-entry-per-type leaves no room
+  for a mirror of a fact the page already states. The decision stands for its own sake: the ids
+  are permanent and none of them is ever reused.)
 - **Withheld coordinates and unreadable payloads are recorded, never silent** — a class-E row gets
   a `location_claim_absences` row; sreality's legacy-shape / truncated rows are routed to the
   refetch lane above.
@@ -1088,7 +1123,11 @@ portals' contracts.
 variable count per row. The run was investigated rather than accepted, by probing the classifier
 against the committed fixtures: legacy-shape sreality yields exactly 1 claim
 (`sr.det.legacy_locality_value` → `address_line_verbatim`) plus 1 coordinate absence, while
-post-cutover yields 21 claims and 0 absences. So snapshot ids 1–90,000 are *entirely* pre-cutover
+post-cutover yields 21 claims and 0 absences. (**Both halves are sreality@1 readings, kept as the
+2026-08-13 record.** At sreality@2 the legacy body yields 0 claims and one counted refusal,
+`sreality_payload_shape:legacy` — R11 accepts that: those rows never had a town, and the recovery
+is a detail refetch — and the post-cutover body yields 11. Absences went with
+`location_claim_absences` in W1-b.) So snapshot ids 1–90,000 are *entirely* pre-cutover
 legacy-shape sreality — the oldest rows in the table, all predating the June-2026 payload change.
 Uniform cohort, not a defect.
 
