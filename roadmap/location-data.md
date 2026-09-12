@@ -126,7 +126,8 @@ component is slimmed twice — each wave rewrites one component and slims its st
     psc — without them the town the slim contracts mine off a `Lokalita` row is declined at S7).
     `location_town_coverage` also moves to the FRONT of `verify_pipeline`'s `_CHECKS`: on 2026-09-11
     the lane's 120 s budget left the last seven checks `not_run`, the coverage red line among them.
-  - **W1-c contracts landed** (2026-09-12): all nine YAMLs rewritten at once, **175 entries → 68**,
+  - **W1-c contracts landed** (2026-09-12): all nine YAMLs rewritten at once, **159 entries → 68**
+    (175 when the sprint opened; W1-a had already dropped bazos' 16 never-executed LLM entries),
     one per claim type, and the town entry is live on every portal — on the **hourly** lane, not on
     an archive sweep (there is none any more). What each portal reads the town off, and what it
     still does not publish:

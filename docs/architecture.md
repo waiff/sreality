@@ -2053,8 +2053,9 @@ type**, out of the eleven; an `obec_name` entry is **mandatory and must name a r
 contract that cannot state the town cannot satisfy the invariant the wave exists for; only six
 top-level keys are legal (`portal`, `contract_version`, `persistence`, `exclusion_zones`,
 `regressions`, `extractions`) and the unenforced per-entry ones (`required`, `cardinality`,
-`on_conflict`) are gone. All nine were rewritten to that shape on 2026-09-12 — **175 entries became
-68**, 4 to 11 apiece, and every portal's town entry runs on the **hourly** lane rather than on an
+`on_conflict`) are gone. All nine were rewritten to that shape on 2026-09-12 — **159 entries became
+68**, 4 to 11 apiece (175 when the sprint opened; W1-a dropped bazos' 16 never-executed LLM
+entries ahead of it), and every portal's town entry runs on the **hourly** lane rather than on an
 archive sweep that no longer exists. What a portal does NOT publish is now an omission recorded in
 its report, not a placeholder entry: no contract carries an entry no reader executes.
 
