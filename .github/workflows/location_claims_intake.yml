@@ -48,6 +48,14 @@ name: "Jobs: Location claim intake"
 # member of the group is already waiting, the chain ends and lets it through; the backlog
 # loses nothing, because the waiting run does the same work.
 #
+# WITH ONE EXCEPTION, measured in production: `location_resolve.yml` is in the group only
+# when a full-resolve is DISPATCHED (or on its 03:17 cron) — its `*/15` drain ticks run in
+# `location-resolve-lane` — and `gh run list` cannot report which group a queued run will
+# take. Counting every queued resolve run stopped the chain on a routine 07:58 drain tick
+# (hop 34681906422 yielding to run 34682089264) and handed a 212 000-body backlog back to a
+# cron that fires ~7 times a day. So for that workflow, and only that one, the yield counts
+# `workflow_dispatch` runs.
+#
 # The page half is HASH-GATED: a body is mined only while
 # `portal_raw_payloads.contract_version IS DISTINCT FROM` the portal's active contract
 # version, and the batch stamps the ones it mined — so the steady-state cost is bounded by
@@ -261,6 +269,17 @@ jobs:
           # hop evicted on 2026-09-10. `test_location_batch_hardening.py` derives this list
           # from the workflows' own concurrency blocks, so a new member cannot be missed.
           GROUP_WORKFLOWS: "location_claims_intake.yml location_mapy_inventory.yml location_registry_load.yml location_resolve.yml"
+          # …but for the resolve lane, only a DISPATCHED run counts. Its group is decided by
+          # the run's own mode and `gh run list` cannot report a group, so "a queued resolve
+          # run" and "a queued resolve run that will hold location-batch" are not the same
+          # question: the lane's `*/15` drain ticks sit in `location-resolve-lane` and are
+          # queued a good share of the time. On 2026-09-12 hop 34681906422 yielded to run
+          # 34682089264 — a routine 07:58 schedule tick, mode=drain — and with 212 000 bodies
+          # left the backlog went back to waiting for a cron that fires ~7 times a day.
+          # A manual full-resolve or epoch mint IS in the group and still stops the chain; the
+          # 03:17 daily sweep is one windowed INSERT with a lock-wait retry and tolerates the
+          # overlap, which is the trade this line makes.
+          DISPATCH_ONLY_WORKFLOWS: "location_resolve.yml"
           WORKFLOW: location_claims_intake.yml
         run: |
           summary=$(grep -o 'INTAKE done {.*' intake.log | tail -1 | sed 's/^INTAKE done //')
@@ -282,9 +301,15 @@ jobs:
           # A chain may only take a slot nobody else wants: if any member of the group has a
           # run waiting (the cron tick among them), the chain ENDS and the backlog waits for
           # that run instead, which loses nothing — the successor's work is the same work.
+          # The exception is the resolve lane, whose queued runs are mostly drain ticks in
+          # ANOTHER group: there, only a `workflow_dispatch` counts (see the env above).
           for wf in $GROUP_WORKFLOWS; do
-            waiting=$(gh run list --workflow="$wf" --limit 10 --json databaseId,status \
-              -q '.[] | select(.status == "queued" or .status == "pending" or .status == "waiting" or .status == "requested") | .databaseId' \
+            picked='select(.status == "queued" or .status == "pending" or .status == "waiting" or .status == "requested")'
+            case " $DISPATCH_ONLY_WORKFLOWS " in
+              *" $wf "*) picked="$picked | select(.event == \"workflow_dispatch\")" ;;
+            esac
+            waiting=$(gh run list --workflow="$wf" --limit 10 --json databaseId,status,event \
+              -q ".[] | $picked | .databaseId" \
               | head -1)
             if [ -n "$waiting" ]; then
               echo "chain yields: $wf run $waiting is already waiting on the location-batch group"
