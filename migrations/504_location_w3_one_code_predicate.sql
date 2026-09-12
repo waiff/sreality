@@ -81,23 +81,30 @@ set local lock_timeout = '5s';
 --    than discovering it from a user's empty map.
 -- ---------------------------------------------------------------------------
 
+-- `pg_attribute`, not `information_schema.columns`: a MATERIALIZED VIEW has no
+-- information_schema row at all (SQL-standard views only), so the catalog-free
+-- spelling reports `properties_map_mv` as missing every column it has. Migration
+-- 503's own assertions use this form for the same reason.
+
 do $$
+declare v_missing text;
 begin
-  if not exists (
-    select 1 from information_schema.columns
-     where table_schema = 'public' and table_name = 'browse_list'
-       and column_name = 'cast_obce_id'
-  ) then
-    raise exception '504 needs browse_list.cast_obce_id — apply 503 (and let its '
-                    'rebuild finish) first';
-  end if;
-  if not exists (
-    select 1 from information_schema.columns
-     where table_schema = 'public' and table_name = 'properties_map_mv'
-       and column_name = 'cast_obce_id'
-  ) then
-    raise exception '504 needs properties_map_mv.cast_obce_id — rerun '
-                    'rebuild_properties_map_mv() from 503';
+  select string_agg(t, ', ') into v_missing from (
+    select 'browse_list' as t where not exists (
+      select 1 from pg_attribute a
+       where a.attrelid = 'public.browse_list'::regclass
+         and a.attname = 'cast_obce_id' and not a.attisdropped)
+    union all
+    select 'properties_map_mv' where not exists (
+      select 1 from pg_attribute a
+       where a.attrelid = 'public.properties_map_mv'::regclass
+         and a.attname = 'cast_obce_id' and not a.attisdropped)
+  ) s;
+  if v_missing is not null then
+    raise exception
+      'read model(s) % lack cast_obce_id -- apply migration 503 and let BOTH its '
+      'rebuilds finish (a concurrent cron tick holding the advisory lock makes '
+      'them skip) before applying 504', v_missing;
   end if;
 end
 $$;
