@@ -221,6 +221,13 @@ component is slimmed twice — each wave rewrites one component and slims its st
     delisted listings and superseded bodies — rows the contract-version gate can never exclude
     — before the first mineable window (the 87th, id 215,621). Poison now costs one re-fetch
     per PASS, not per run; a contract bump costs at most one pass of delay.
+  - **W1-a7 — an incremental run continues a stopped full walk** (the chain lost the full walk
+    to a cron yield, 2026-09-12): a hop is dispatched with the run's OWN mode and the cron is
+    `incremental`, so when the chain yielded at 13:06Z the successor inherited `incremental` and
+    the stopped full walk (a contract-bump re-walk, cursor 80,000 of ~376k served listings) fell
+    off the chain until someone dispatched `full` by hand. An incremental run that empties the
+    change log with budget left now carries that walk on, in its own `full`-stamped batch row so
+    the next resume can see it. It CONTINUES, it never STARTS one, and `--mode full` is unchanged.
 - **W2 — the resolver at four steps, the answer table at 26 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and

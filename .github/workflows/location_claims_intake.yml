@@ -41,6 +41,14 @@ name: "Jobs: Location claim intake"
 # next one the same nothing (the progress term is what stops a lane with no page-capable
 # portal or no R2 credential from chaining clean short runs for ever).
 #
+# AND AN INCREMENTAL RUN CARRIES A STOPPED FULL WALK ON (W1-a7). A hop is dispatched with the
+# run's OWN mode and the cron is `incremental`, so when the chain yields to a waiting cron run
+# (13:06Z on 2026-09-12) the successor inherits `incremental` and a half-finished full walk — a
+# contract-bump re-walk, 80 000 of ~376k served listings — falls off the chain until somebody
+# dispatches `full` by hand. So an incremental run that empties the change log with budget left
+# continues the stopped full walk instead, in its own `full` batch row. It CONTINUES, never
+# STARTS: no stopped cursor, nothing to continue, and `--mode full` keeps its one meaning.
+#
 # The chain YIELDS before it dispatches. `location-batch` keeps one pending slot and GitHub
 # supersedes the OLDER pending run, so a hop dispatched in a run's last seconds evicts
 # whatever was waiting — that is how the hourly intake and an operator's full-resolve were

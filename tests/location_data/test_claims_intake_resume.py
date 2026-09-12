@@ -416,7 +416,9 @@ def test_a_change_still_inside_the_lag_window_is_left_for_the_next_run():
 
 
 def test_a_full_cursor_is_never_resumed_by_an_incremental_scan():
-    """The two cursors are different keysets — `listings.id` vs `listing_snapshots.id`."""
+    """The two cursors are different keysets — `listings.id` vs `listing_snapshots.id`. A
+    full cursor is only ever read back by a FULL phase (W1-a7's continuation included), never
+    as a position in the snapshot log."""
     conn = _Conn([_Listing(i, BASE_TS) for i in range(1, 26)])
     conn.change([3])
 
@@ -429,4 +431,83 @@ def test_a_full_cursor_is_never_resumed_by_an_incremental_scan():
     # It seeded from the snapshot log's own head, not from the full scan's listing id 5.
     assert incremental["mode"] == "incremental"
     assert incremental["resumed_from_id"] == 1
+    # …and then carried the stopped FULL walk on from 5, in its own phase (W1-a7 below).
+    assert incremental["full_walk_continued"] is True
+    assert conn.seen == list(range(6, 26))
+
+
+# ------------------------------------- an incremental run continues a stopped full walk
+
+
+def test_an_incremental_run_continues_a_stopped_full_walk_in_a_full_batch_row():
+    """W1-a7. The chain re-dispatches a run with its OWN mode and the hourly cron is
+    `incremental`, so when a hop yields to a waiting cron run (13:06Z, 2026-09-12) the
+    successor inherits `incremental` — and the stopped full walk (a contract-bump re-walk,
+    80 000 of ~376k served listings) falls off the chain until somebody dispatches `full` by
+    hand. An incremental run that has emptied the change log has budget and nothing to spend
+    it on. The continuation is a `full` PHASE with its own batch row: `_resume_point` keys on
+    `scan_mode`, so a continued walk stamped `incremental` would be invisible to the next
+    resume, and the two cursors are different keysets that must never share a column."""
+    conn = _Conn([_Listing(i, BASE_TS) for i in range(1, 26)])
+
+    stopped = _run(conn, mode="full", limit=10)
+    assert stopped["outcome"] == "stopped" and conn.batches[-1]["cursor_after_id"] == 10
+    conn.seen.clear()
+
+    carried = _run(conn, mode="incremental", batch_size=10)
+
+    assert carried["full_walk_continued"] is True
+    assert carried["full_walk_cursor"] == 10
+    assert conn.seen == list(range(11, 26)), "it carried on, it did not restart"
+    # The continued walk's own end is what the summary reports — the chain's "work left"
+    # decision reads exactly this field.
+    assert carried["reached_end"] is True
+    incremental_row, full_row = conn.batches[-2], conn.batches[-1]
+    assert incremental_row["scan_mode"] == "incremental"
+    assert incremental_row["outcome"] == "ok" and incremental_row["cursor_after_id"] == 0
+    assert full_row["scan_mode"] == "full" and full_row["resumable"] is True
+    assert full_row["outcome"] == "ok" and full_row["cursor_after_id"] == 25
+
+
+def test_an_incremental_run_never_starts_a_full_walk_of_its_own():
+    """It CONTINUES, it never STARTS. `--mode full` keeps its one meaning: no stopped or
+    failed full cursor means there is nothing to continue, and a `full` run that finished
+    left `ok` — the next full pass is the contract-bump re-walk, and an hourly incremental
+    run is not the thing that should decide to open one."""
+    conn = _Conn([_Listing(i, BASE_TS) for i in range(1, 26)])
+    for _ in range(3):                      # walk the table to completion: 'ok', no cursor
+        _run(conn, mode="full", limit=10)
+    assert conn.batches[-1]["outcome"] == "ok"
+    conn.seen.clear()
+    batches_before = len(conn.batches)
+
+    quiet = _run(conn, mode="incremental")
+
+    assert quiet["full_walk_continued"] is False and quiet["full_walk_cursor"] is None
+    assert quiet["reached_end"] is True
     assert conn.seen == []
+    assert len(conn.batches) == batches_before + 1, "one row, no full row opened"
+
+
+def test_a_run_with_no_room_for_another_batch_hands_off_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The budget is ONE budget and the bodies half spends its share first, so the handoff
+    asks the same question every batch start asks: is there room for ANOTHER batch. Opening
+    a full batch row with no budget behind it would stamp a position it never walked to and
+    cost the run a bookkeeping write for nothing."""
+    conn = _Conn([_Listing(i, BASE_TS) for i in range(1, 26)])
+    _run(conn, mode="full", limit=10)
+    conn.seen.clear()
+    batches_before = len(conn.batches)
+    # Each clock reading 40 s later than the last: the first payload batch starts, finds the
+    # log empty, and by the handoff check the 100 s budget is spent.
+    clock = iter(range(0, 10_000, 40))
+    monkeypatch.setattr(claims_intake.time, "monotonic", lambda: float(next(clock)))
+
+    stats = _run(conn, mode="incremental", max_seconds=100.0)
+
+    assert stats["full_walk_continued"] is False
+    assert stats["reached_end"] is True
+    assert conn.seen == []
+    assert len(conn.batches) == batches_before + 1

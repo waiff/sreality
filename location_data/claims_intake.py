@@ -1115,6 +1115,65 @@ def _bodies_resume_point(conn: psycopg.Connection, *, source: str | None) -> int
     return int(row[0]) if row and row[0] is not None else 0
 
 
+def _full_walk_handoff(
+    conn: psycopg.Connection, *, scan_mode: str, source: str | None, anchored: bool,
+    dry_run: bool, budget: "_Budget", last_seconds: float,
+) -> int | None:
+    """The cursor of a STOPPED full walk an incremental run should carry on with, or None.
+
+    W1-a7. A hop is dispatched with the run's OWN mode and the cron is `incremental`, so a
+    chain that yields to a waiting cron run (13:06Z, 2026-09-12) hands the successor
+    `incremental` and the stopped full walk — a contract-bump re-walk, 80 000 of ~376k served
+    listings — falls off the chain until somebody dispatches `full` by hand. A run that has
+    emptied the change log has budget and nothing to spend it on, so it spends it there.
+
+    It CONTINUES, it never STARTS: no stopped/failed cursor means nothing to continue, and
+    `--mode full` keeps its meaning. An anchored or dry run hands off nothing (neither
+    certifies coverage), nor does one with no room for another batch — the bodies half has
+    already taken its share of the same budget.
+    """
+    if scan_mode != "incremental" or anchored or dry_run:
+        return None
+    if not budget.room_for(last_seconds):
+        return None
+    resumed = _resume_point(conn, mode="full", source=source)
+    if resumed is None:
+        return None
+    LOG.info("INTAKE the change log is empty with %.0fs left: continuing the stopped full "
+             "walk for source=%s from after_id=%d",
+             budget.left() or 0.0, source or "*", resumed)
+    return resumed
+
+
+def _finish_and_open_full_batch(
+    conn: psycopg.Connection, *, batch_id: int, stats: dict[str, Any], row_count: int,
+    cursor_after_id: int, source: str | None, contract_id: int | None, note: str | None,
+    statement_timeout: int,
+) -> int:
+    """Close the incremental batch row at its own cursor and open a `full` one (W1-a7).
+
+    TWO ROWS, not one widened row: `_resume_point` keys on `scan_mode`, so a continued walk
+    stamped `incremental` would be invisible to the next resume — and the two cursors are
+    different keysets, which must never share one row's column.
+    """
+    with guarded(conn, statement_timeout) as cur:
+        cur.execute(_BATCH_FINISH_SQL, {
+            "batch_id": batch_id, "outcome": "ok", "row_count": row_count,
+            "cursor_after_id": cursor_after_id,
+            "bodies_cursor_after_id": _bodies_cursor_stamp(stats),
+            "note": f"listings={stats['listings']} reached_end=True through_id="
+                    f"{cursor_after_id} | handing the rest of the budget to the full walk",
+        })
+        cur.execute(_BATCH_INSERT_SQL, {
+            "lane": LANE, "source": source, "extractor_version": INTAKE_VERSION,
+            "contract_id": contract_id, "wave": WAVE,
+            "job_run_id": os.environ.get("GITHUB_RUN_ID"),
+            "note": f"continued from batch {batch_id}" + (f" | {note}" if note else ""),
+            "scan_mode": "full", "resumable": True,
+        })
+        return int(cur.fetchone()[0])
+
+
 def _bodies_cursor_stamp(stats: dict[str, Any]) -> int | None:
     """What the batch row records for the bodies pass: NULL once the pass completed."""
     if stats["bodies_pass_complete"]:
@@ -1565,9 +1624,16 @@ def run(
         "bodies_seconds": 0.0, "bodies_pass_complete": False,
         "bodies_backlog_remaining": None, "payload_seconds": 0.0,
         "bodies_resumed_from_id": 0, "bodies_cursor_after_id": 0,
+        "full_walk_continued": False, "full_walk_cursor": None,
         "stopped_early": False, "reached_end": False, "resumed_from_id": after_id,
     }
     refusals: dict[str, int] = {}
+    # The PHASE's mode and its share of the counters, not the run's: an incremental run that
+    # empties the change log hands its remaining budget to a stopped full walk (W1-a7), and
+    # the scan reads both from here on. Bound BEFORE the try: the failure path stamps them,
+    # and the bodies pass can raise ahead of the first payload batch.
+    scan_mode = mode
+    row_count_base = 0
     try:
         # BODIES FIRST. The backlog is bounded by the corpus, the payload half by the hour's
         # change, and only the first of those can be behind by 250 000 rows.
@@ -1595,7 +1661,7 @@ def run(
             batch_started = time.monotonic()
 
             with guarded(conn, statement_timeout) as cur:
-                statement = (_LISTINGS_INCREMENTAL_SQL if mode == "incremental"
+                statement = (_LISTINGS_INCREMENTAL_SQL if scan_mode == "incremental"
                              else _LISTINGS_FULL_SQL)
                 cur.execute(statement, {
                     "after_id": after_id, "source": source, "batch_size": size})
@@ -1605,8 +1671,22 @@ def run(
                     # budget, a limit, an exception — leaves rows unopened behind the
                     # cursor, and a cursor that moves past unopened rows never comes back
                     # for them.
-                    stats["reached_end"] = True
-                    break
+                    handoff = _full_walk_handoff(
+                        conn, scan_mode=scan_mode, source=source, anchored=anchored,
+                        dry_run=dry_run, budget=budget, last_seconds=last_seconds)
+                    if handoff is None:
+                        stats["reached_end"] = True
+                        break
+                    batch_id = _finish_and_open_full_batch(
+                        conn, batch_id=batch_id, stats=stats,
+                        row_count=stats["claims_inserted"] - row_count_base,
+                        cursor_after_id=after_id, source=source, contract_id=contract_id,
+                        note=note, statement_timeout=statement_timeout)
+                    after_id, scan_mode = handoff, "full"
+                    stats["full_walk_continued"] = True
+                    stats["full_walk_cursor"] = handoff
+                    row_count_base = stats["claims_inserted"]
+                    continue
 
                 result = IntakeResult()
                 candidates: list[BodyCandidate] = []
@@ -1618,7 +1698,7 @@ def run(
                     # and a cursor that stalls on it re-reads the same window forever.
                     batch_cursor = max(
                         batch_cursor,
-                        scan.snapshot_cursor if mode == "incremental"
+                        scan.snapshot_cursor if scan_mode == "incremental"
                         else scan.row.listing_id)
                     entries = entries_by_source.get(scan.row.source)
                     if not entries:
@@ -1679,7 +1759,7 @@ def run(
                 with guarded(conn, _FAILURE_STAMP_TIMEOUT_S) as cur:
                     cur.execute(_BATCH_FINISH_SQL, {
                         "batch_id": batch_id, "outcome": "failed",
-                        "row_count": stats["claims_inserted"],
+                        "row_count": stats["claims_inserted"] - row_count_base,
                         "cursor_after_id": after_id,
                         "bodies_cursor_after_id": _bodies_cursor_stamp(stats),
                         "note": f"{type(exc).__name__}: {exc}"[:500],
@@ -1688,9 +1768,8 @@ def run(
                 LOG.exception("INTAKE could not stamp batch %s as failed", batch_id)
         raise
 
-    # A refusal is a LINE PER REASON WITH A COUNT, which is what the operator reads. It is
-    # not a row: `location_claim_absences` held one per refused entry per listing, was
-    # written by every lane and read by none, and is gone (migration 498).
+    # A refusal is a LINE PER REASON WITH A COUNT, never a row: `location_claim_absences`
+    # held one per refused entry per listing, was read by none, and is gone (migration 498).
     for reason in sorted(refusals):
         LOG.info("INTAKE refused reason=%s count=%d", reason, refusals[reason])
     stats["refusal_reasons"] = dict(sorted(refusals.items()))
@@ -1705,10 +1784,11 @@ def run(
             cur.execute(_BATCH_FINISH_SQL, {
                 "batch_id": batch_id,
                 "outcome": outcome,
-                "row_count": stats["claims_inserted"],
+                "row_count": stats["claims_inserted"] - row_count_base,
                 "cursor_after_id": after_id,
                 "bodies_cursor_after_id": _bodies_cursor_stamp(stats),
-                "note": f"listings={stats['listings']} stopped_early={stats['stopped_early']} "
+                "note": f"scan_mode={scan_mode} listings={stats['listings']} "
+                        f"stopped_early={stats['stopped_early']} "
                         f"reached_end={stats['reached_end']} through_id={after_id} "
                         f"bodies_mined={stats['bodies_mined']} "
                         f"refusals={stats['refusals']}",
@@ -1717,11 +1797,10 @@ def run(
     stats["mode"] = mode
     stats["cursor_after_id"] = after_id
 
-    # THE READOUT COMES AFTER THE TERMINAL STAMP, deliberately. It is a `count(*)` under the
-    # 600 s statement ceiling, run at the moment the budget is already spent — ahead of the
-    # stamp it could push the job past `timeout-minutes: 55` and lose the cursor of a run
-    # that had otherwise finished cleanly, which is the exact failure this wave exists to
-    # close. Nothing below this line is allowed to decide whether the run is resumable.
+    # THE READOUT COMES AFTER THE TERMINAL STAMP, deliberately: a `count(*)` under the 600 s
+    # ceiling, run once the budget is spent. Ahead of the stamp it could push the job past
+    # `timeout-minutes: 55` and lose the cursor of a run that had otherwise finished cleanly.
+    # Nothing below this line decides whether the run is resumable.
     if page_capable and store is not None:
         stats["bodies_backlog_remaining"] = _unmined_body_backlog(
             conn, source=source, page_sources=page_capable,
