@@ -290,6 +290,24 @@ component is slimmed twice — each wave rewrites one component and slims its st
   connection, taken once), the budget (one deadline; a worker finishes its slice and stops), and the
   `RunCache`, now lock-guarded but never holding the lock across a registry question. A worker that
   loses its connection logs, counts `failed_passes` and exits; the run continues with fewer.
+  **W2-a6 shipped: a failed batch costs one slice, never the worker.** The first live pass at
+  four workers read `failed_passes: 4` on a pass that resolved 1,000 of 1,000 with `failed: 0`
+  and no queue row past `attempts=0` — and the counters said where: `claimed=1000` over
+  `batches=8` at `batch_size=250` means four batches that were counted and never reached a
+  write, i.e. each worker completed ONE batch and died in the prefetch of its second. The
+  30 s per-listing `statement_timeout` was cancelling a 250-listing bulk claims read on an
+  IO-bound instance, and an unguarded `_prefetch` inside the batch transaction ended the loop
+  (pre-W2-a5 it ended the whole RUN — same bug, one loop to lose). Now: the batch body is
+  guarded, a raise rolls back and leaves the rows queued exactly as claimed (no backoff stamp
+  — that one is per LISTING and `_run_slice` never ran), the loop backs off 2 s doubling to
+  30 s and claims the next slice, and only five CONSECUTIVE failures stop it. A LOST
+  connection is told apart by SQLSTATE — `QueryCanceled` is an `OperationalError` subclass, so
+  an `isinstance` check would have read the timeout as a dead socket — and is reconnected once
+  by the thread that owns it. The prefetch gets its own 90 s ceiling
+  (`LOCATION_RESOLVE_PREFETCH_TIMEOUT_S`), restored before anything writes. `DrainStats` gains
+  `failed_batches`, and the heartbeat's `last` reports it under that name: `failed_passes`
+  already means "passes that raised" one level up, and a healthy pass reading four of them is
+  what sent an operator hunting failures that had not happened.
   `LOCATION_RESOLVE_WORKERS` (env, default **4**, clamped 1–8) is the lane's knob and the heartbeat
   reports `workers`; the GitHub lane keeps one connection (it is RTT-bound from a US runner, not
   IO-bound beside the instance). Expect ~4x, bounded by the instance rather than by the loop — the

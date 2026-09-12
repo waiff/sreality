@@ -1142,11 +1142,16 @@ def _location_resolve_sync() -> dict[str, Any]:
                 "batches": stats.batches,
                 "fallbacks": stats.fallbacks,
                 # What the pass actually ran with, never what it was configured
-                # with: a worker whose connection died leaves `failed_passes`
-                # behind, and `rate` divided by `workers` is the per-loop number
-                # the next tuning decision needs.
+                # with: `rate` divided by `workers` is the per-loop number the
+                # next tuning decision needs. `failed_batches` counts BATCHES
+                # that raised and were retried (W2-a6) — never worker threads
+                # ending their loop, and deliberately NOT spelled
+                # `failed_passes`: that name already means something else one
+                # level up (the lane's own count of passes that raised), and
+                # reading four of them per healthy pass is what made this lane
+                # look broken when it was working.
                 "workers": stats.workers,
-                "failed_passes": stats.failed_passes,
+                "failed_batches": stats.failed_batches,
                 "seconds": round(stats.seconds, 1),
                 "rate": round(stats.rate, 2),
             }

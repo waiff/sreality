@@ -1003,11 +1003,14 @@ def test_location_resolve_sync_drains_with_the_configured_worker_count(
     out = rw._location_resolve_sync()
 
     assert captured["workers"] == 3
-    # The heartbeat reports what the pass RAN with (drain.run's own count), plus
-    # the workers that died with their connection — "4 configured, 2 alive" is
-    # the shape of a degraded lane, and the lane's rate alone cannot show it.
+    # The heartbeat reports what the pass RAN with (drain.run's own count) and how
+    # many BATCHES raised — never worker threads ending their loop. The key is not
+    # `failed_passes`: that name means "passes that raised" one level up, and a
+    # healthy pass reading "failed_passes: 4" is what sent an operator looking for
+    # four failures that had not happened.
     assert out["workers"] == 3
-    assert out["failed_passes"] == 0
+    assert out["failed_batches"] == 0
+    assert "failed_passes" not in out
 
 
 def test_location_resolve_sync_takes_the_shared_resolver_lease(monkeypatch):
