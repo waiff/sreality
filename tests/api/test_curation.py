@@ -769,6 +769,9 @@ def test_get_collection_properties_repr_join_uses_the_surrogate(monkeypatch):
     # Pre-Gate-2 hardening (mirrors #873's Browse fix): the repr listing must be
     # joined on repr_listing_ref_id (listings.id), not the legacy sreality_id
     # handle, or a non-sreality repr silently blanks `source` on the collection page.
+    # W3: joined to listings_public, not to `listings`. This route runs under
+    # `SET LOCAL ROLE authenticated`, where the bare table is RLS-invisible (no
+    # policy since migration 001) and `source` came back NULL for every row.
     monkeypatch.setattr(
         curation, "_fetch_collection", lambda conn, cid: {"id": cid, "name": "x"},
     )
@@ -776,8 +779,10 @@ def test_get_collection_properties_repr_join_uses_the_surrogate(monkeypatch):
     out = curation.get_collection(conn, 1)
     assert out["properties"] == []
     props_sql = next(q for q, _ in conn.executed if "collection_properties cp" in q)
-    assert "LEFT JOIN listings rl ON rl.id = p.repr_listing_ref_id" in props_sql
+    assert "LEFT JOIN listings_public rl ON rl.id = p.repr_listing_ref_id" in props_sql
     assert "sreality_id = p.repr_listing_id" not in props_sql
+    # The owner-rights view, never the RLS-dark table.
+    assert "JOIN listings rl" not in props_sql
 
 
 # --- the no-account posture (W4) -------------------------------------------

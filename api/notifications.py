@@ -621,23 +621,28 @@ def delete_subscription(
 # --- dispatches (the notification feed) -----------------------------------
 
 
+# EVERY column here reads `listings_public`, not `listings` — and that is a FIX,
+# not a style choice. This feed runs on the tenant pool, i.e. under
+# `SET LOCAL ROLE authenticated`, and `listings` has carried RLS with NO POLICY
+# since migration 001: under that role the table is empty, so the LEFT JOIN this
+# projection used to sit on matched nothing and every one of these fourteen
+# columns arrived NULL in the feed. `listings_public` is an owner-rights view
+# over the same rows with no WHERE of its own (migration 494), so it returns
+# exactly what a BYPASSRLS reader always saw here and what the browser role never
+# did. It is also the only way this query can reach the resolved location at all:
+# migration 501 revoked `listing_location` from `authenticated`, which is the
+# same reason pipeline_board_public reads its label off properties_public.
+#
 # `display_label` is the ONE place string (migration 503). It replaced the
 # `locality, district` pair the feed used to ship, which the SPA fell back
 # through as `locality ?? district` while the extension fell back the other way
 # — two surfaces naming the same listing two different places.
-#
-# It comes off `listings_public`, NOT off a `listing_location` join: this feed
-# runs on the tenant pool, i.e. under `SET LOCAL ROLE authenticated`, and
-# migration 501 revoked `listing_location` from that role outright. An
-# owner-rights `_public` view is how a browser-role query reaches the answer
-# table at all — the same reason pipeline_board_public reads its label off
-# properties_public.
 _LISTING_PROJECTION = (
-    "l.sreality_id, l.category_main, l.category_type, l.price_czk, "
-    "l.price_unit, l.area_m2, l.disposition, l.subtype, "
+    "lp.sreality_id, lp.category_main, lp.category_type, lp.price_czk, "
+    "lp.price_unit, lp.area_m2, lp.disposition, lp.subtype, "
     "lp.display_label, "
-    "l.is_active, l.first_seen_at, l.last_seen_at, l.mf_gross_yield_pct, "
-    "l.source, l.source_url"
+    "lp.is_active, lp.first_seen_at, lp.last_seen_at, lp.mf_gross_yield_pct, "
+    "lp.source, lp.source_url"
 )
 
 # The unified feed projection + FROM, shared by list_dispatches + _fetch_dispatch
@@ -669,11 +674,8 @@ _DISPATCH_FROM = (
     # rows — Phase A4's backfill left zero (sreality_id NOT NULL, listing_id NULL)
     # rows, so no historical dispatch loses its listing fields here. A plain
     # equality keeps this an index lookup; a COALESCE/OR fallback would not.
-    "LEFT JOIN listings l ON l.id = d.listing_id "
-    # Second join to the same row, deliberately: `l` is left exactly as it was
-    # (this PR does not touch what the existing projection returns) and `lp` is
-    # the owner-rights view that can see the resolved location. Same primary key,
-    # so it is one extra index lookup per dispatch.
+    # ONE join, to the VIEW: the bare `listings` join it replaced was invisible to
+    # the tenant role (RLS, no policy) — see _LISTING_PROJECTION.
     "LEFT JOIN listings_public lp ON lp.id = d.listing_id "
     "LEFT JOIN estimation_runs er ON er.id = d.estimation_run_id "
 )

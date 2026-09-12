@@ -33,7 +33,7 @@ import {
 } from '@/lib/growthChoropleth';
 import HoverChart from '@/components/HoverChart';
 import { listingRowPath } from '@/lib/listingUrl';
-import { uncertaintyCircleRadiusM, uncertaintyPixelsAtZoom0 } from '@/lib/uncertaintyCircle';
+import { drawnUncertaintyRadiusM, uncertaintyPixelsAtZoom0 } from '@/lib/uncertaintyCircle';
 
 const psgLayerId = (m: GrowthMetric) => `psg-${m}`;
 
@@ -147,7 +147,9 @@ const formatPriceLabel = (r: MapRow, metric: PriceMetric): string => {
 };
 
 /* `uncertainty_px_z0` is PRESENT only on a pin that draws an uncertainty circle
- * (uncertaintyCircleRadiusM decides — below building level, with a radius), which
+ * (drawnUncertaintyRadiusM decides — below building level, with a radius, and
+ * capped at MAX_DRAWN_CIRCLE_RADIUS_M so a kraj-grain pin does not wash out the
+ * map; the true radius still rides on the feature as `uncertainty_radius_m`), which
  * is what the `point-uncertainty` layer filters on. Absent, not null: `['has']`
  * is the one filter that reads the same on both. */
 type MapFeatureProps = MapRow & { price_label: string; uncertainty_px_z0?: number };
@@ -156,7 +158,7 @@ type FC = GeoJSON.FeatureCollection<GeoJSON.Point, MapFeatureProps>;
 const toFeatureCollection = (rows: MapRow[], metric: PriceMetric): FC => ({
   type: 'FeatureCollection',
   features: rows.map((r) => {
-    const radiusM = uncertaintyCircleRadiusM(r);
+    const radiusM = drawnUncertaintyRadiusM(r);
     return {
       type: 'Feature' as const,
       /* Stable feature id lets maplibre's setFeatureState target this

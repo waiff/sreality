@@ -40,6 +40,28 @@ export const uncertaintyCircleRadiusM = (p: PinPrecision): number | null => {
   return Number.isFinite(m) && m > 0 ? m : null;
 };
 
+/* The widest circle the map will DRAW, in metres. The data keeps the true
+ * radius — `uncertainty_radius_m` rides on every feature and
+ * uncertaintyCircleRadiusM() returns it unclamped — but drawing it is a
+ * different question from knowing it: the coarse rungs carry radii of a
+ * different order (okres ~25 km, kraj ~60 km, unknown ~250 km), and a screen
+ * full of 25 km discs is a wash of colour with no pin readable under it, plus a
+ * circle wider than the viewport clips into a moving arc on pan. 2 km is about
+ * the widest circle that still reads AS a circle at the zoom where a town's
+ * pins separate, so past it the mark says "at least this vague" rather than
+ * claiming a precise vagueness nobody can see. The pin is still drawn, and the
+ * popup still names the place.
+ *
+ * This is a DISPLAY cap, never a data one: nothing downstream reads it, and the
+ * true radius is what any measurement or export should use. */
+export const MAX_DRAWN_CIRCLE_RADIUS_M = 2_000;
+
+/* What the map actually draws: the rule above, clamped. */
+export const drawnUncertaintyRadiusM = (p: PinPrecision): number | null => {
+  const m = uncertaintyCircleRadiusM(p);
+  return m == null ? null : Math.min(m, MAX_DRAWN_CIRCLE_RADIUS_M);
+};
+
 /* Web-Mercator metres per pixel at zoom 0, at the equator. Halves with every
  * zoom level, which is why the layer can interpolate the radius with an
  * exponential base of exactly 2 and be EXACT at every zoom rather than
