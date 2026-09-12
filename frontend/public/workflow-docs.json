@@ -3409,6 +3409,14 @@
           "type": "boolean",
           "default": "false",
           "options": null
+        },
+        {
+          "name": "chain",
+          "description": "dispatch one successor when this run leaves work behind (untick for a one-shot run; crons always chain)",
+          "required": false,
+          "type": "boolean",
+          "default": "true",
+          "options": null
         }
       ],
       "secrets": [
@@ -3421,7 +3429,7 @@
       "concurrencyGroup": "location-batch",
       "cancelInProgress": false,
       "timeoutMinutes": 55,
-      "permissions": null,
+      "permissions": "contents: read, actions: write",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_claims_intake.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_intake.yml"
     },

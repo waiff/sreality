@@ -194,7 +194,17 @@ component is slimmed twice — each wave rewrites one component and slims its st
     takes the same number off the committed fixtures with no database (16 cores, 1 500 bodies:
     317 → 512 b/s at 2 workers, 1 512 b/s at 16). No new flag, no `INTAKE_VERSION` bump — the
     claims are identical; `LOCATION_INTAKE_WORKERS` exists only for a runner that misreports
-    its CPU count.
+    its CPU count. The lane also **self-chains** now: GitHub fires the `35 * * * *` cron ~7
+    times a day (no tick at 02:35 or 03:35 on 2026-09-12), so a 250 000-body backlog drained at
+    ~6 000 bodies a fired tick however fast the extraction got. A run whose summary reports
+    `bodies_pass_complete=false` — or a listing scan short of its end — dispatches ONE successor
+    with the same budget and batch size, and nothing when both reached their end (steady state
+    is cron-only). It YIELDS first: `location-batch` keeps one pending slot and GitHub
+    supersedes the OLDER entry, which is how a chain evicted the hourly intake and an
+    operator's full-resolve on 2026-09-10, so if any member of the group is already waiting the
+    chain ends and lets it through. `test_location_batch_hardening.py`'s ban on self-chaining
+    members becomes the rail that the yield exists, plus seven tests that execute the chain
+    script itself against a stub `gh`.
 - **W2 — the resolver at four steps, the answer table at 27 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and

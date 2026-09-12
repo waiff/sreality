@@ -27,11 +27,21 @@ the claim spine that the intake and the archive sweep WRITE, so it never carried
 "must never overlap" constraint. Its guards are now the job-level `location-resolve` group
 and the `location_jobs` lease CAS; `test_the_resolve_drain_is_out_of_the_shared_group` below
 is the rail that keeps it out.
+
+AMENDED 2026-09-12 (W1-a3): a member SELF-CHAINS again. The hourly cron fires ~7 times a day
+and a contract bump leaves a 250 000-body backlog, so the intake dispatches one successor
+while it has work left. The ban this file used to hold became the yield it always named as
+the fix — `test_a_self_chaining_member_yields_to_every_other_member_first`, plus seven tests
+that execute the chain script itself against a stub `gh`, because a yield that is wrong shows
+up only as somebody else's cancelled run hours later.
 """
 
 from __future__ import annotations
 
 import inspect
+import json
+import os
+import subprocess
 from pathlib import Path
 
 import psycopg
@@ -540,16 +550,166 @@ class _GuardAwareCursor(_Cursor):
             conn.first_in_transaction = len(conn.executed)
         super().execute(sql, params)
 
-def test_no_group_member_self_chains_any_more():
+def test_a_self_chaining_member_yields_to_every_other_member_first():
     """The one pending slot of `location-batch` is a trap for a self-chaining lane: GitHub
     supersedes the OLDER pending run, so a chain hop dispatched in the last seconds evicts
     whatever was waiting. 2026-09-10: the hourly intake (10:00Z) and the corpus-wide
     full-resolve (12:15Z) were both cancelled that way, and the fix was a yield step in the
-    chaining lane. Rule 25 W1-a removed the only self-chaining member (the archived-HTML
-    sweep) outright, so the trap is closed by construction — and this is the rail that keeps
-    it closed if one is ever reintroduced."""
+    chaining lane. Rule 25 W1-a then removed the only self-chaining member outright.
+
+    W1-a3 REINTRODUCES ONE, deliberately: GitHub fires the hourly cron ~7 times a day, and a
+    contract bump leaves a 250 000-body backlog that drains at ~6 000 bodies a fired tick.
+    The trap is answered by the yield rather than by the ban — so the rail is now the yield
+    itself. A member may re-dispatch itself only if, before it does, it asks every member of
+    the group whether one is already waiting.
+    """
     for name in LOCATION_BATCH_WORKFLOWS:
         script = (_WORKFLOWS / name).read_text(encoding="utf-8")
-        assert f"gh workflow run {name}" not in script, (
-            f"{name} re-dispatches itself; a self-chaining member of {OUTER_GROUP!r} "
-            "evicts whatever else is waiting in the group's one pending slot")
+        dispatch = script.find(f'gh workflow run "$WORKFLOW"')
+        if dispatch < 0:
+            assert f"gh workflow run {name}" not in script, (
+                f"{name} re-dispatches itself without the yield this rail describes")
+            continue
+        yields = script.find("gh run list")
+        assert 0 <= yields < dispatch, (
+            f"{name} dispatches its successor before asking whether anything is waiting; a "
+            f"self-chaining member of {OUTER_GROUP!r} evicts whatever else is in the "
+            "group's one pending slot")
+        for member in LOCATION_BATCH_WORKFLOWS:
+            assert member in script[:dispatch], (
+                f"{name}'s chain does not yield to {member}, which shares "
+                f"{OUTER_GROUP!r} with it")
+
+
+# ------------------------------------------------- 4. the intake's chain, as shell
+
+CHAIN_STEP = "Chain the next run"
+INTAKE = "location_claims_intake.yml"
+
+
+def _chain_script() -> str:
+    """The chain step's shell, verbatim. It carries no `${{ }}`, which is what makes the
+    step's DECISION testable rather than only its text: everything it reads is an env var,
+    so the tests below run this exact script against a stub `gh`."""
+    steps = _workflow(INTAKE)["jobs"]["intake"]["steps"]
+    step = next(s for s in steps if s.get("name") == CHAIN_STEP)
+    assert "${{" not in step["run"], (
+        "the chain script interpolates a GitHub expression; keep it env-var-only so the "
+        "yield can be tested")
+    return step["run"]
+
+
+def _run_chain(tmp_path: Path, summary: dict | str, *, waiting: str = "",
+               in_progress: str = "", run_id: str = "77") -> tuple[str, list[str]]:
+    """Execute the chain script with a stub `gh`; returns (stdout, the gh calls it made)."""
+    calls = tmp_path / "gh-calls.txt"
+    calls.write_text("", encoding="utf-8")
+    stub = tmp_path / "bin"
+    stub.mkdir(exist_ok=True)
+    # The stub answers the two `gh run list` questions the script asks apart by the filter
+    # it passed, which is the only thing that distinguishes them.
+    (stub / "gh").write_text(
+        '#!/usr/bin/env bash\n'
+        'printf "%s\\n" "$*" >> "$GH_CALLS"\n'
+        'case "$*" in\n'
+        '  *"run list"*)\n'
+        '    case "$*" in\n'
+        '      *in_progress*) printf "%s" "$GH_IN_PROGRESS" ;;\n'
+        '      *) printf "%s" "$GH_WAITING" ;;\n'
+        '    esac ;;\n'
+        'esac\n', encoding="utf-8")
+    (stub / "gh").chmod(0o755)
+    body = summary if isinstance(summary, str) else f"INTAKE done {json.dumps(summary)}"
+    (tmp_path / "intake.log").write_text(
+        f"2026-09-12 05:00:00 INFO location_data.claims_intake {body}\n", encoding="utf-8")
+    script = tmp_path / "chain.sh"
+    script.write_text(_chain_script(), encoding="utf-8")
+    env = {
+        "PATH": f"{stub}:{os.environ['PATH']}", "GH_CALLS": str(calls),
+        "GH_WAITING": waiting, "GH_IN_PROGRESS": in_progress,
+        "GITHUB_RUN_ID": run_id, "GITHUB_REF_NAME": "main",
+        "GROUP_WORKFLOWS": " ".join(LOCATION_BATCH_WORKFLOWS), "WORKFLOW": INTAKE,
+        "CHAIN_SOURCE": "", "CHAIN_MODE": "incremental",
+        "CHAIN_MAX_SECONDS": "2400", "CHAIN_BATCH_SIZE": "10000",
+    }
+    # `bash -e`, the runner's own shell for a `run:` block: a step that aborts on a stray
+    # non-zero is a chain that silently stops, and that is a property of THIS script.
+    done = subprocess.run(["bash", "-e", str(script)], cwd=tmp_path, env=env,
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    dispatched = [line for line in calls.read_text(encoding="utf-8").splitlines()
+                  if line.startswith("workflow run")]
+    return done.stdout, dispatched
+
+
+BACKLOG = {"bodies_pass_complete": False, "reached_end": True, "outcome": "stopped"}
+DRAINED = {"bodies_pass_complete": True, "reached_end": True, "outcome": "ok"}
+
+
+def test_the_chain_dispatches_one_successor_with_this_run_s_own_budget(tmp_path: Path):
+    """The backlog case, which is every run for the days after a contract bump. ONE
+    successor, and it inherits the budget and batch size this run actually used — a chained
+    run is a `workflow_dispatch`, so it never sees the cron's defaults."""
+    out, dispatched = _run_chain(tmp_path, BACKLOG)
+
+    assert len(dispatched) == 1, out
+    assert "--ref main" in dispatched[0]
+    assert "-f max_seconds=2400" in dispatched[0]
+    assert "-f batch_size=10000" in dispatched[0]
+    assert "-f mode=incremental" in dispatched[0]
+    assert "-f chain=true" in dispatched[0]
+
+
+def test_the_chain_ends_when_both_halves_reached_their_end(tmp_path: Path):
+    """STEADY STATE IS CRON-ONLY. A lane that chained on every run would hold the group's
+    one pending slot for ever and turn an hourly lane into a permanent one."""
+    out, dispatched = _run_chain(tmp_path, DRAINED)
+
+    assert dispatched == []
+    assert "chain ends" in out
+
+
+def test_an_unfinished_listing_scan_chains_too(tmp_path: Path):
+    """The other half's backlog. After a cron gap the snapshot window is hours wide, and a
+    run that stopped on its budget mid-scan has the same claim on a successor as one that
+    stopped mid-drain."""
+    _, dispatched = _run_chain(
+        tmp_path, {"bodies_pass_complete": True, "reached_end": False})
+
+    assert len(dispatched) == 1
+
+
+def test_the_chain_yields_to_a_run_already_waiting_in_the_group(tmp_path: Path):
+    """The 2026-09-10 eviction, as a rail. The cron tick queued behind this run is the run
+    that must get the slot — the chain's work is the same work, so yielding costs the
+    backlog nothing and costs the operator nothing."""
+    out, dispatched = _run_chain(tmp_path, BACKLOG, waiting="4242")
+
+    assert dispatched == []
+    assert "chain yields" in out
+
+
+def test_the_chain_never_stacks_on_an_intake_already_running(tmp_path: Path):
+    """Two intakes share one watermark and re-read each other's window."""
+    out, dispatched = _run_chain(tmp_path, BACKLOG, in_progress="9999")
+
+    assert dispatched == []
+    assert "chain yields" in out
+
+
+def test_this_run_is_not_mistaken_for_a_second_intake(tmp_path: Path):
+    """The in-progress query returns the CHAINING run itself — every time, since it is still
+    running when it asks. Reading that as "another intake is up" would mean the chain never
+    fires at all."""
+    _, dispatched = _run_chain(tmp_path, BACKLOG, in_progress="77", run_id="77")
+
+    assert len(dispatched) == 1
+
+
+def test_a_summary_the_chain_cannot_read_chains_nothing(tmp_path: Path):
+    """A run whose last line is missing or malformed is a run nobody can say has work left.
+    Chaining on an unreadable summary is how a lane loops on its own failure."""
+    out, dispatched = _run_chain(tmp_path, "INTAKE done not-json-at-all")
+
+    assert dispatched == []
+    assert "chain ends" in out

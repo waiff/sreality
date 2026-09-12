@@ -30,6 +30,21 @@ name: "Jobs: Location claim intake"
 # `LOCATION_INTAKE_WORKERS` overrides the width and exists for ONE case: a runner whose CPU
 # count is misreported. Nothing sets it here.
 #
+# THE LANE SELF-CHAINS WHILE IT HAS A BACKLOG (W1-a3). The hourly cron is not hourly:
+# GitHub fires it ~7 times a day on a busy repo (no tick at 02:35 or 03:35 on 2026-09-12),
+# so a 250 000-body backlog — which is what EVERY contract bump creates, since a bump makes
+# the whole corpus unmined again — drains at ~6 000 bodies a fired tick and takes weeks. The
+# last step therefore dispatches ONE successor when the run's own summary says work is left
+# (`bodies_pass_complete=false`, or the listing scan did not reach its end), and NOTHING when
+# both reached their end: the steady state is cron-only. A failed run does not chain either.
+#
+# The chain YIELDS before it dispatches. `location-batch` keeps one pending slot and GitHub
+# supersedes the OLDER pending run, so a hop dispatched in a run's last seconds evicts
+# whatever was waiting — that is how the hourly intake and an operator's full-resolve were
+# both cancelled on 2026-09-10, and why the previous self-chaining lane was removed. If any
+# member of the group is already waiting, the chain ends and lets it through; the backlog
+# loses nothing, because the waiting run does the same work.
+#
 # The page half is HASH-GATED: a body is mined only while
 # `portal_raw_payloads.contract_version IS DISTINCT FROM` the portal's active contract
 # version, and the batch stamps the ones it mined — so the steady-state cost is bounded by
@@ -104,6 +119,11 @@ on:
         required: false
         default: false
         type: boolean
+      chain:
+        description: "dispatch one successor when this run leaves work behind (untick for a one-shot run; crons always chain)"
+        required: false
+        default: true
+        type: boolean
   schedule:
     # Hourly, incremental. sreality's index walk is hourly, so this keeps the claim layer
     # at most one cycle behind the payloads it mines.
@@ -135,6 +155,14 @@ jobs:
       group: location-claims
       cancel-in-progress: false
     timeout-minutes: 55
+    permissions:
+      contents: read
+      # The chain step re-dispatches THIS workflow with the job token. `workflow_dispatch`
+      # is one of the two events a GITHUB_TOKEN-triggered action is allowed to create, so no
+      # PAT is involved. That also means a chained run chains again — nothing in the platform
+      # stops the sequence, which is why the work-left check and the yield are the only things
+      # that end it.
+      actions: write
     steps:
       - uses: actions/checkout@v6
 
@@ -174,11 +202,7 @@ jobs:
           BATCH_SIZE: ${{ inputs.batch_size }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          ARGS="--mode ${MODE:-incremental}"
-          if [ -n "$SOURCE" ]; then ARGS="$ARGS --source $SOURCE"; fi
-          if [ -n "$MAX_SECONDS" ]; then ARGS="$ARGS --max-seconds $MAX_SECONDS"; fi
-          if [ -n "$BATCH_SIZE" ]; then ARGS="$ARGS --batch-size $BATCH_SIZE"; fi
-          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          set -o pipefail   # `| tee` must not hide a failed lane behind tee's exit 0
           # The budget stops the run cleanly BETWEEN batches; it then stamps `stopped`
           # (never `ok`) and the next run resumes from the keyset cursor on that batch row.
           # It must leave the 55-minute job ceiling room for one WORST-CASE batch: after
@@ -192,11 +216,81 @@ jobs:
           # `--max-seconds` also defaults to 2400 inside the CLI, so a dispatch that blanks
           # this input still gets a budget. Both are here on purpose: the default is the
           # rail, this line is the knob.
-          if [ -z "$MAX_SECONDS" ] && [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
-            ARGS="$ARGS --max-seconds 2400"
+          MODE="${MODE:-incremental}"
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            MAX_SECONDS="${MAX_SECONDS:-2400}"
+            BATCH_SIZE="${BATCH_SIZE:-10000}"
           fi
-          if [ -z "$BATCH_SIZE" ] && [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
-            ARGS="$ARGS --batch-size 10000"
-          fi
+          ARGS="--mode $MODE"
+          if [ -n "$SOURCE" ]; then ARGS="$ARGS --source $SOURCE"; fi
+          if [ -n "$MAX_SECONDS" ]; then ARGS="$ARGS --max-seconds $MAX_SECONDS"; fi
+          if [ -n "$BATCH_SIZE" ]; then ARGS="$ARGS --batch-size $BATCH_SIZE"; fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          # THE SUCCESSOR RUNS WHAT THIS RUN RAN. A chained dispatch is a `workflow_dispatch`
+          # event, so it never takes the `schedule` defaults above — passing the values
+          # resolved here is what keeps a chain of runs on the calibrated 2400 s + 10k pair
+          # instead of silently widening to the CLI's 20k on the first hop.
+          {
+            echo "CHAIN_SOURCE=$SOURCE"
+            echo "CHAIN_MODE=$MODE"
+            echo "CHAIN_MAX_SECONDS=$MAX_SECONDS"
+            echo "CHAIN_BATCH_SIZE=$BATCH_SIZE"
+          } >> "$GITHUB_ENV"
           echo "python -m location_data.claims_intake $ARGS"
-          python -m location_data.claims_intake $ARGS
+          python -m location_data.claims_intake $ARGS 2>&1 | tee intake.log
+
+      # ONE SUCCESSOR, ONLY WHILE THERE IS WORK LEFT, AND NEVER OVER SOMETHING WAITING.
+      # The run's own terminal JSON decides: `bodies_pass_complete=false` means the
+      # bodies-first keyset stopped short of its end, `reached_end=false` means the payload
+      # scan did. Both true is the steady state and chains nothing — the cron owns the hour.
+      #
+      # NO `${{ }}` IN THE SCRIPT. Everything it reads is an env var, so
+      # `tests/location_data/test_location_batch_hardening.py` can execute this exact text
+      # against a stub `gh` — a chain whose yield is wrong is the kind of defect that only
+      # shows up as somebody else's cancelled run three hours later.
+      - name: Chain the next run
+        if: (github.event_name == 'schedule' || inputs.chain) && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GROUP_WORKFLOWS: "location_registry_load.yml location_claims_intake.yml location_mapy_inventory.yml"
+          WORKFLOW: location_claims_intake.yml
+        run: |
+          summary=$(grep -o 'INTAKE done {.*' intake.log | tail -1 | sed 's/^INTAKE done //')
+          left=$(printf '%s' "$summary" | python3 -c "import json,sys; s=json.load(sys.stdin); print('yes' if not s.get('bodies_pass_complete') or not s.get('reached_end') else 'no')" 2>/dev/null || echo "unknown")
+          echo "work left: $left"
+          if [ "$left" != "yes" ]; then
+            echo "chain ends: the bodies keyset and the listing scan both reached their end"
+            exit 0
+          fi
+          # YIELD FIRST. `location-batch` keeps ONE pending slot and GitHub supersedes the
+          # OLDER pending run, so a hop dispatched in this run's last seconds evicts whatever
+          # was waiting — on 2026-09-10 that cancelled the hourly intake and an operator's
+          # full-resolve, and it is why the previous self-chaining lane was removed outright.
+          # A chain may only take a slot nobody else wants: if any member of the group has a
+          # run waiting (the cron tick among them), the chain ENDS and the backlog waits for
+          # that run instead, which loses nothing — the successor's work is the same work.
+          for wf in $GROUP_WORKFLOWS; do
+            waiting=$(gh run list --workflow="$wf" --limit 10 --json databaseId,status \
+              -q '.[] | select(.status == "queued" or .status == "pending" or .status == "waiting" or .status == "requested") | .databaseId' \
+              | head -1)
+            if [ -n "$waiting" ]; then
+              echo "chain yields: $wf run $waiting is already waiting on the location-batch group"
+              exit 0
+            fi
+          done
+          # And never stack on a sibling intake. The inner `location-claims` group should
+          # make this impossible, but a chain that assumed so would be the one thing that
+          # discovered otherwise — two intakes share one watermark and re-read each other's
+          # window.
+          running=$(gh run list --workflow="$WORKFLOW" --limit 10 --json databaseId,status \
+            -q '.[] | select(.status == "in_progress") | .databaseId' \
+            | grep -v "^${GITHUB_RUN_ID}$" | head -1)
+          if [ -n "$running" ]; then
+            echo "chain yields: intake run $running is still in progress"
+            exit 0
+          fi
+          gh workflow run "$WORKFLOW" --ref "$GITHUB_REF_NAME" \
+            -f source="$CHAIN_SOURCE" -f mode="$CHAIN_MODE" \
+            -f max_seconds="$CHAIN_MAX_SECONDS" -f batch_size="$CHAIN_BATCH_SIZE" \
+            -f chain=true
+          echo "chained: one successor dispatched on $GITHUB_REF_NAME"
