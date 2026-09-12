@@ -735,8 +735,6 @@ function TownStatistics({ stats }: { stats: NewDedupCandidateStats }) {
   const maxTowns = distribution.reduce((m, d) => Math.max(m, d.towns || 0), 0);
   const topTowns = stats.top_towns ?? [];
   const buckets = stats.top_buckets ?? [];
-  const assignment = stats.town_assignment ?? [];
-  const assignedTotal = assignment.reduce((a, r) => a + (r.listings || 0), 0);
 
   return (
     <div className="space-y-6">
@@ -876,40 +874,6 @@ function TownStatistics({ stats }: { stats: NewDedupCandidateStats }) {
         )}
       </div>
 
-      <div>
-        <h3 className="text-[0.68rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
-          How the town was decided
-        </h3>
-        <p className="mt-1 text-[0.72rem] leading-relaxed text-[var(--color-ink-3)] max-w-[46rem]">
-          The location engine can arrive at a town several ways — by dropping the coordinates into
-          the municipality's boundary, by trusting what the portal claimed, and so on. This is a
-          breakdown for the audit, never a gate: no method is excluded from path C.
-        </p>
-        {assignment.length === 0 ? (
-          <p className="mt-2 text-sm text-[var(--color-ink-3)]">Not computed for this run.</p>
-        ) : (
-          <div className="mt-2 overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className={HEAD}>
-                  <th className={TH}>Method</th>
-                  <th className={`${TH} text-right`}>Listings</th>
-                  <th className={`${TH} text-right`}>Share</th>
-                </tr>
-              </thead>
-              <tbody>
-                {assignment.map((a) => (
-                  <tr key={a.method ?? 'unknown'} className={ROW}>
-                    <td className={`${TD} font-mono text-[0.8rem]`}>{dash(a.method)}</td>
-                    <td className={NUM}>{fmtCount(a.listings)}</td>
-                    <td className={NUM}>{fmtPct(share(a.listings, assignedTotal))}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
     </div>
   );
 }

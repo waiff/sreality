@@ -1,4 +1,4 @@
-"""Location W1v route tests — hermetic (no DB/HTTP), test_broker_routes idiom.
+"""Location route tests — hermetic (no DB/HTTP), test_broker_routes idiom.
 
 The router is admin-gated at the APIRouter level; overriding `verify_jwt` only
 means every 403 below is the REAL `require_admin`'s decision. Toolkit functions
@@ -17,7 +17,7 @@ from api import dependencies as deps
 from api import main as api_main
 from api.routes import location_quality as routes
 from location_data import operator_corrections as oc
-from toolkit import location_labels, location_quality
+from toolkit import location_quality
 
 
 class _NoDbTxn:
@@ -58,9 +58,7 @@ def test_every_location_route_403s_a_plain_user(client):
         ("GET", "/location/quality/summary"),
         ("GET", "/location/quality/source/bezrealitky"),
         ("GET", "/location/listing/1"),
-        ("GET", "/location/sample/bezrealitky"),
-        ("POST", "/location/sample/bezrealitky/labels"),
-        ("GET", "/location/sample/bezrealitky/score"),
+        ("GET", "/location/listing/by-native/bezrealitky/abc"),
         ("POST", "/location/corrections"),
     ]:
         res = client.request(method, path, json={} if method == "POST" else None)
@@ -86,40 +84,31 @@ def test_source_overview_passes_through(admin_client, monkeypatch):
     assert res.json()["data"]["source"] == "bezrealitky"
 
 
-def test_the_deleted_gate_and_shadow_routes_are_gone(admin_client):
-    """W1-b: `/quality/w1v-gate` read `location_claims_live` + a dropped claim type, and
-    `/sample/{source}/score-shadow` scored a contract state that no longer exists. A route
-    that 404s for the admin is the only proof the surface is actually gone."""
-    for path in ("/location/quality/w1v-gate", "/location/sample/bezrealitky/score-shadow"):
+def test_the_deleted_route_families_are_gone(admin_client):
+    """A route that 404s for the ADMIN is the only proof the surface is actually gone.
+
+    W1-b: `/quality/w1v-gate` read `location_claims_live` + a dropped claim type, and
+    `/sample/{source}/score-shadow` scored a contract state that no longer exists.
+    W2-b: the whole frozen-labelled-sample family (its two tables are dropped) and the
+    whole compare bench (its pg_cron cohort joined both dropped projections)."""
+    for path in (
+        "/location/quality/w1v-gate",
+        "/location/sample/bezrealitky",
+        "/location/sample/bezrealitky/score",
+        "/location/sample/bezrealitky/score-shadow",
+        "/location/compare/scope",
+        "/location/compare/map?west=14&south=50&east=14.5&north=50.5",
+    ):
         assert admin_client.get(path).status_code == 404, path
+    assert admin_client.post(
+        "/location/sample/bezrealitky/labels", json={"listing_id": 1, "labels": {}}
+    ).status_code == 404
 
 
 def test_inspector_404_maps_none(admin_client, monkeypatch):
     monkeypatch.setattr(location_quality, "listing_inspector",
                         lambda conn, **kw: None)
     assert admin_client.get("/location/listing/999").status_code == 404
-
-
-def test_labels_unknown_member_is_404(admin_client, monkeypatch):
-    monkeypatch.setattr(location_labels, "save_labels",
-                        lambda conn, source, listing_id, labels: False)
-    res = admin_client.post(
-        "/location/sample/bezrealitky/labels",
-        json={"listing_id": 42, "labels": {"label_obec": "Brno"}},
-    )
-    assert res.status_code == 404
-    assert "frozen" in res.json()["detail"]
-
-
-def test_labels_validation_error_is_422(admin_client, monkeypatch):
-    def boom(conn, source, listing_id, labels):
-        raise ValueError("unknown label field 'label_bogus'")
-    monkeypatch.setattr(location_labels, "save_labels", boom)
-    res = admin_client.post(
-        "/location/sample/bezrealitky/labels",
-        json={"listing_id": 42, "labels": {"label_bogus": "x"}},
-    )
-    assert res.status_code == 422
 
 
 def test_correction_maps_errors_and_resolves(admin_client, monkeypatch):
@@ -169,107 +158,3 @@ def test_correction_invalid_input_422(admin_client, monkeypatch):
         json={"listing_id": 7, "claim_type": "coordinate", "value_text": "1 2"},
     )
     assert res.status_code == 422
-
-
-# ---------------------------------------------------------------------------
-# compare — the dark old-vs-new review surface (location W6).
-# ---------------------------------------------------------------------------
-
-from toolkit import location_compare  # noqa: E402
-
-
-_COMPARE_PATHS = [
-    "/location/compare/scope",
-    "/location/compare/units?level=obec&parent_kod=3100",
-    "/location/compare/unit?level=obec&code=554782",
-    "/location/compare/streets?obec_kod=554782",
-    "/location/compare/map?west=14&south=50&east=14.5&north=50.5",
-    "/location/compare/radius?lat=50.08&lng=14.44&radius_m=1000",
-]
-
-
-def test_every_compare_route_403s_a_plain_user(client):
-    for path in _COMPARE_PATHS:
-        assert client.get(path).status_code == 403, path
-
-
-def test_compare_scope_defaults_to_praha_and_stredocesky(admin_client, monkeypatch):
-    seen = {}
-    monkeypatch.setattr(
-        location_compare, "scope",
-        lambda conn, kraje: (seen.update(kraje=kraje), {"kraje": kraje})[1],
-    )
-    assert admin_client.get("/location/compare/scope").status_code == 200
-    assert seen["kraje"] == [19, 27]
-
-
-def test_compare_scope_accepts_a_kraje_list(admin_client, monkeypatch):
-    seen = {}
-    monkeypatch.setattr(
-        location_compare, "scope",
-        lambda conn, kraje: (seen.update(kraje=kraje), {"kraje": kraje})[1],
-    )
-    admin_client.get("/location/compare/scope?kraje=19,%2027,31")
-    assert seen["kraje"] == [19, 27, 31]
-
-
-@pytest.mark.parametrize("bad", ["abc", "19,abc", "19;27"])
-def test_a_non_integer_kraje_is_a_400(admin_client, monkeypatch, bad):
-    monkeypatch.setattr(location_compare, "scope", lambda conn, kraje: {})
-    assert admin_client.get(f"/location/compare/scope?kraje={bad}").status_code == 400
-
-
-def test_a_junk_level_is_a_400_on_both_level_taking_routes(admin_client):
-    assert admin_client.get(
-        "/location/compare/units?level=kraj&parent_kod=19"
-    ).status_code == 400
-    assert admin_client.get(
-        "/location/compare/unit?level=ulice&code=1"
-    ).status_code == 400
-
-
-def test_an_inverted_map_bbox_is_a_400(admin_client, monkeypatch):
-    monkeypatch.setattr(location_compare, "map_rows", lambda conn, **kw: {})
-    res = admin_client.get("/location/compare/map?west=14.5&south=50&east=14&north=50.5")
-    assert res.status_code == 400
-
-
-def test_an_out_of_range_radius_is_a_400(admin_client, monkeypatch):
-    # The CZ envelope is read from location_constants (migration 380), never a
-    # literal, so the out-of-country arm needs the constant served.
-    monkeypatch.setattr(
-        location_compare,
-        "cz_bbox",
-        lambda conn: {"west": 12.0, "south": 48.0, "east": 19.0, "north": 51.5},
-    )
-    monkeypatch.setattr(location_compare, "_timeout", lambda conn: None)
-    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: _NoDbConn()
-    assert admin_client.get(
-        "/location/compare/radius?lat=50.08&lng=14.44&radius_m=99999"
-    ).status_code == 400
-    assert admin_client.get(
-        "/location/compare/radius?lat=0&lng=0&radius_m=1000"
-    ).status_code == 400
-
-
-def test_compare_limits_are_clamped_by_the_query_constraints(admin_client, monkeypatch):
-    monkeypatch.setattr(location_compare, "unit_detail", lambda conn, **kw: {})
-    assert admin_client.get(
-        "/location/compare/unit?level=obec&code=1&limit=999999"
-    ).status_code == 422
-    assert admin_client.get(
-        "/location/compare/unit?level=obec&code=1&limit=0"
-    ).status_code == 422
-
-
-def test_compare_unit_passes_level_code_kraje_and_limit_through(admin_client, monkeypatch):
-    seen = {}
-    monkeypatch.setattr(
-        location_compare, "unit_detail",
-        lambda conn, **kw: seen.update(kw) or {"level": kw["level"]},
-    )
-    res = admin_client.get(
-        "/location/compare/unit?level=street&code=42&kraje=19&limit=7"
-    )
-    assert res.status_code == 200
-    assert seen == {"level": "street", "code": 42, "kraje": [19], "limit": 7}

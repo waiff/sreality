@@ -28,7 +28,10 @@ def test_every_floor_uses_a_ranked_granularity_and_a_known_confidence() -> None:
 
 def test_the_table_transcribes_the_design_row_by_row() -> None:
     # The design's 21 rows minus the two that declare no floor (see the module docstring),
-    # plus the path C row added by operator ruling on 2026-09-10.
+    # plus the path C row added by operator ruling on 2026-09-10, minus the four W2-b
+    # deleted with the columns they gated on (the two property-grain rows, which read
+    # `property_location_current`, and the building/parcel dedup rungs, whose registry keys
+    # the answer table does not carry).
     expected = {
         "map_pin": ("listing", "building", "high"),
         "map_circle": ("listing", "obec", "any"),
@@ -38,15 +41,11 @@ def test_the_table_transcribes_the_design_row_by_row() -> None:
         "cast_obce_filter": ("listing", "cast_obce_or_quarter", "medium"),
         "street_filter": ("listing", "street", "medium"),
         "dedup_rung_0a": ("listing", "address_point", "high"),
-        "dedup_rung_0b": ("listing", "building", "high"),
-        "dedup_rung_0c": ("listing", "parcel", "high"),
         "dedup_tier_1": ("listing", "street", "medium"),
         "dedup_tier_2": ("listing", "street_segment", "medium"),
         # + the one row ruled after the design was written: path C's "same town" rung
         # (NEW DEDUP ledger 2026-09-10; docs/design/location-serving-contract.md §3).
         "dedup_path_c": ("listing", "obec", "any"),
-        "property_map_pin": ("property", "building", "high"),
-        "property_card_location": ("property", "obec", "any"),
         "comparables_estimation": ("listing", "street", "medium"),
         "per_street_price_stats": ("property", "street", "high"),
         "per_obec_price_stats": ("property", "obec", "any"),
@@ -82,8 +81,8 @@ def test_comparison_is_by_rank_not_by_string_order() -> None:
     # "street" < "street_segment" alphabetically AND by rank, but "parcel" < "street" as a
     # string while ranking finer — a string comparison would get this row backwards.
     assert sc.meets_floor("street_filter", granularity="parcel", match_confidence="medium")
-    assert sc.meets_floor("dedup_rung_0c", granularity="building", match_confidence="high")
-    assert not sc.meets_floor("dedup_rung_0c", granularity="street_segment", match_confidence="high")
+    assert sc.meets_floor("dedup_rung_0a", granularity="address_point", match_confidence="high")
+    assert not sc.meets_floor("dedup_rung_0a", granularity="building", match_confidence="high")
 
 
 def test_a_loaded_rank_table_overrides_the_offline_default() -> None:

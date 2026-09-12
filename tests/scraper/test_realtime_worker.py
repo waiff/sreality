@@ -1096,7 +1096,7 @@ def test_location_resolve_sync_closes_the_connection_and_reraises_when_the_drain
     # re-raises, _lane_loop records the failed pass. Swallowing it would make a
     # broken drain look like a healthy idle lane.
     def boom(*a, **k):
-        raise RuntimeError("no pin_cluster_epochs row")
+        raise RuntimeError("the drain blew up")
 
     conn, _ = _patch_resolver(monkeypatch, run=boom)
 
@@ -1156,7 +1156,7 @@ def test_location_resolve_sync_refuses_to_run_beside_an_abandoned_pass(
 def test_location_resolve_sync_releases_the_pass_lock_when_the_drain_raises(
         monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(*a: Any, **k: Any) -> Any:
-        raise RuntimeError("no pin_cluster_epochs row")
+        raise RuntimeError("the drain blew up")
 
     _patch_resolver(monkeypatch, run=boom)
     with pytest.raises(RuntimeError):

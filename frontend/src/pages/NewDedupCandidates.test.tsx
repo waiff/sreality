@@ -143,10 +143,6 @@ const STATS: NewDedupCandidateStats = {
     /* A bucket of listings that state no disposition at all. */
     { obec_kod: '582786', obec_name: 'Brno', disposition: null, listings: 120, active: 90 },
   ],
-  town_assignment: [
-    { method: 'point_in_polygon', listings: 500 },
-    { method: null, listings: 10 },
-  ],
   partial: false,
   scope: 'all',
   pairs_upserted: 157,
@@ -340,10 +336,9 @@ describe('<NewDedupCandidates>', () => {
     const brno = within(buckets).getByText('Brno').closest('tr')!;
     expect(within(brno).getAllByRole('cell')[1]).toHaveTextContent('—');
 
-    /* …and a town-assignment method the projection did not record. */
-    const assignment = screen.getByRole('columnheader', { name: 'Method' }).closest('table')!;
-    const unknownMethod = within(assignment).getByText('10').closest('tr')!;
-    expect(within(unknownMethod).getAllByRole('cell')[0]).toHaveTextContent('—');
+    /* The town-assignment panel went with W2-b: it keyed on
+     * `admin_assignment_method`, which the answer table does not carry. */
+    expect(screen.queryByRole('columnheader', { name: 'Method' })).toBeNull();
   });
 
   /* ------------------------------------------------------- the run picker */

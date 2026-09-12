@@ -1,14 +1,16 @@
 /* LocationQuality — interactive-semantics rail.
  *
- * Every control on this page is a bare input/select with only a placeholder,
- * a column header, or nothing at all to identify it. What is pinned here is
- * the ACCESSIBLE NAME of each one, computed against the rendered DOM: the six
- * frozen-sample cells take their name from their column header, and the
- * inspector / correction / source-scope controls from their own caption.
+ * Every control on this page is a bare input/select with only a placeholder or
+ * nothing at all to identify it. What is pinned here is the ACCESSIBLE NAME of
+ * each one, computed against the rendered DOM: the inspector query box, the
+ * correction form it opens, and the page's source scope.
  *
  * Hermetic: every `/location/*` wrapper is mocked. The one panel that needs a
  * large fixture (source overview) is deliberately failed — its error banner is
  * a real render path and none of the named controls live in it.
+ *
+ * W2-b deleted the frozen-labelled-sample section with its two tables, so the
+ * six cell names this file used to pin went with it.
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
@@ -17,7 +19,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import LocationQuality from './LocationQuality';
 import * as lq from '../lib/locationQuality';
-import type { Inspector, SampleMember, SampleScore, SampleStatus } from '../lib/locationQuality';
+import type { Inspector } from '../lib/locationQuality';
 
 vi.mock('../lib/locationQuality', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/locationQuality')>();
@@ -25,53 +27,16 @@ vi.mock('../lib/locationQuality', async (importOriginal) => {
     ...actual,
     fetchCorpusSummary: vi.fn(),
     fetchSourceOverview: vi.fn(),
-    fetchSample: vi.fn(),
-    fetchSampleScore: vi.fn(),
     fetchInspector: vi.fn(),
     fetchInspectorByNative: vi.fn(),
     submitCorrection: vi.fn(),
   };
 });
 
-const member: SampleMember = {
-  listing_id: 42,
-  source_id_native: 'BR-42',
-  position: 1,
-  label_street: null,
-  label_street_nd: false,
-  label_house_number: null,
-  label_house_number_nd: false,
-  label_obec: null,
-  label_obec_nd: false,
-  label_okres: null,
-  label_okres_nd: false,
-  label_precision_class: null,
-  label_precision_nd: false,
-  label_note: null,
-  labelled_at: null,
-  is_active: true,
-  source_url: null,
-};
-
-const sample: SampleStatus = {
-  sample: {
-    id: 1, source: 'bezrealitky', drawn_at: new Date().toISOString(),
-    method: 'random', n: 1, note: null, members: 1, labelled: 0,
-  },
-  members: [member],
-};
-
-const emptyBlock = { determinable: 0, new: { asserted: 0, matches: 0, precision_pct: null, yield_pct: null }, floor_pct: 95 };
-const score: SampleScore = {
-  source: 'bezrealitky', grain: 'listing', labelled: 0,
-  street: emptyBlock, obec: emptyBlock, okres: emptyBlock, precision_class: emptyBlock,
-};
-
 const inspector: Inspector = {
   listing_id: 42,
-  projection: { display_label: 'Krátká 3, Brno' },
+  projection: { street_name: 'Krátká', house_number_cp: '3', obec_name: 'Brno' },
   claims: [],
-  candidates: [],
 };
 
 function renderPage() {
@@ -86,8 +51,6 @@ function renderPage() {
 beforeEach(() => {
   vi.mocked(lq.fetchCorpusSummary).mockResolvedValue({ data: { grain: 'listing', sources: [] } });
   vi.mocked(lq.fetchSourceOverview).mockRejectedValue(new Error('overview unavailable'));
-  vi.mocked(lq.fetchSample).mockResolvedValue({ data: sample });
-  vi.mocked(lq.fetchSampleScore).mockResolvedValue({ data: score });
   vi.mocked(lq.fetchInspector).mockResolvedValue({ data: inspector });
 });
 
@@ -95,16 +58,6 @@ describe('LocationQuality accessible names', () => {
   it('names the page scope select after its visible caption', async () => {
     renderPage();
     expect(screen.getByRole('combobox', { name: 'Source' })).toHaveValue('bezrealitky');
-  });
-
-  it('names every frozen-sample cell after its column header', async () => {
-    renderPage();
-    await screen.findByRole('textbox', { name: 'Street' });
-    expect(screen.getByRole('textbox', { name: 'No.' })).toBeInTheDocument();
-    expect(screen.getByRole('textbox', { name: 'Obec' })).toBeInTheDocument();
-    expect(screen.getByRole('textbox', { name: 'Okres' })).toBeInTheDocument();
-    expect(screen.getByRole('textbox', { name: 'Note' })).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: 'Precision' })).toBeInTheDocument();
   });
 
   it('names the inspector query box, and the correction form it opens', async () => {
