@@ -1152,16 +1152,25 @@ renumber.** Navigate by area:
     helper and the `listings_with_city_quality` RPC, and the filters are **agenda-gated to
     BROWSE + WATCHDOG only** (`toolkit/filter_registry.py`) — the estimation agent
     deliberately never sees them, preserving deterministic estimate semantics. **Curated-city
-    *membership* (which city, if any, a property's coordinate falls in) is precomputed onto
-    `properties.home_city_id`** (migration 375, `recompute_home_city()`, hourly incremental job
-    mirroring migration 142's `home_obec_pop`/`near_*` pattern) rather than evaluated live: a
-    per-request `ST_Covers(admin boundary)` / `ST_DWithin(centroid, radius)` scan against all
-    curated cities is only cheap at Watchdog's small per-subscription scale, not at Browse's
-    full-table scale (a live EXPLAIN on the Browse-grain form priced in the billions). All three
-    consumers — `listings_with_city_quality`, `browse_stats_properties`, and
-    `_city_quality_clauses` — join the same `home_city_id` column, so they can no longer drift
-    on the containment test the way `browse_stats_properties` previously had (radius-only,
-    silently disagreeing with the other two's boundary-aware version on edge-of-city listings).
+    *membership* (which city, if any, a property falls in) resolves through ONE SQL function,
+    `curated_cities_matching()` (migration 436), to an `obec_id` allowlist** — `curated_cities
+    .admin_boundary_id` already IS the obec's RÚIAN code, so membership is equality on a code
+    every consumer already carries, and `browse_stats_properties`, `_city_quality_clauses` and
+    the SPA prefilter cannot drift on the containment test the way they once did (one evaluated
+    radius-only and silently disagreed with the other two's boundary-aware version on
+    edge-of-city listings). It was previously PRECOMPUTED onto `properties.home_city_id`
+    (migration 375, `recompute_home_city()`, a daily job measured at 680 MB of buffer traffic
+    per call) because a per-request `ST_Covers` / `ST_DWithin` scan against every curated city
+    is only cheap at Watchdog's per-subscription scale, not at Browse's; 436 removed the need
+    for the scan rather than the cost of it. **W3 S4 (migration 506) deleted the column,
+    `home_city_computed_at`, `recompute_home_city()`, the job — and its one remaining reader,
+    `listings_with_city_quality()`**, the pre-W5 path that joined `curated_cities_public` on
+    `browse_list.home_city_id` and was reachable only through the `?cityQualityLegacy=1` bisect
+    hatch the same PR removed. A column and the function that joins on it leave together:
+    Postgres does not track column dependencies through a function body, so dropping one without
+    the other leaves a function that compiles and fails on its first call. What it does NOT delete is the obec-keyed pair this pattern was
+    modelled on: `home_obec_pop` and the eight `near_*` columns (migration 142) stay, because
+    they are population/proximity FACTS about the obec, not a membership cache.
     The one exception is `near_city_proximity` (an operator-chosen radius search, not curated-city
     membership) — not precomputable the same way, and confirmed dead in the SPA UI today (no
     widget wires it), so left as a live, unoptimized, unexercised code path.
@@ -1727,10 +1736,16 @@ renumber.** Navigate by area:
     in ascending blast-radius order (dashboards → dedup → filters and stats → map → estimation
     last), each preceded by the operator's review of the clustered disagreements; the legacy
     columns stay populated and read-only until W4 prunes them in a forward migration. **There is
-    no flag**: W2-b deleted `location_data/serving_flags.py`, whose `location_v2.<feature>`
-    `app_settings` keys were never seeded and which no consumer ever read — a per-feature switch
-    that only ever documented an intent is a rail that looks enforced and is not, and flipping a
-    reader is a PR, reversible the way every other deploy is. Until a feature flips, its legacy
+    no flag**: W2-b deleted `location_data/serving_flags.py`, whose per-feature `app_settings`
+    keys were never seeded and which no consumer ever read — a per-feature switch that only
+    ever documented an intent is a rail that looks enforced and is not, and flipping a reader
+    is a PR, reversible the way every other deploy is. **And no floor table**: W3 S4 deleted
+    `location_data/serving_contracts.py` the same way and for the same reason — fourteen
+    declared per-consumer minimum-granularity floors, zero production readers. The one line in
+    it that recorded a DECISION rather than an intention, operator action A5's
+    `FILTER_DEFAULT_SEMANTICS = "include_and_badge"`, moved next to the filter it governs
+    (`api/location_filter.py`); path C's town floor is written down where the path is
+    (`toolkit/dedup_candidates.py`, `block_key="obec_kod"`). Until a feature flips, its legacy
     read is correct — the rule is about *new* code and about never back-porting an answer-table
     value into `listings`. The consumer contract, including the dedup floors and the one query, is
     `docs/design/location-serving-contract.md`.
@@ -2105,6 +2120,34 @@ Watchdog's relation, `properties_public`, gains `cast_obce_id` from `listing_loc
 `obec_id` / `okres_id` / `region_id` deliberately stay on the trigger-289 columns for this step
 (same numbers, and re-sourcing a matcher's cohort in the PR that changes its predicate is two
 changes at once) — W4 re-sources them.
+
+**W3 S4: the deletions the first three steps earned** (migration 506). Once every place DISPLAY
+reads `display_label` (S1+S2) and every place FILTER is four codes (S3), the text they replaced has
+no reader, and rule 25 says a location PR deletes at least as much as it adds. Out: `place_search_text`
+from `browse_projection`, `listing_feed_public`, `properties_public` and `pipeline_board_public` —
+and the generated column of the same name on `properties` (migration 302), whose readers were the
+dedup surfaces the 2026-08 cutoff removed; `locality` / `district` / `street` / `okres` / `region`
+from the two property-grain views; `home_city_id`, `home_city_computed_at`, `recompute_home_city()`
+and its daily job (migration 436 re-keyed city-quality onto `obec_id` in 2026-08 and nothing has
+read the column since — not even `listings_with_city_quality()`, which does its own `ST_Covers`);
+`location_data/serving_contracts.py`; and the two bisect hatches `?map=legacy` / `?cityQualityLegacy=1`
+with the legacy listing-id prefilter behind the second. **Two columns survive, both on
+`properties_public`, and each because something still reads it.** `obec`: the pipeline board's
+"Město A–Ž" sort orders by the TOWN, and the label leads with the street when there is one, so
+sorting on the label would order a column by house number. `district`: `region_stats()` and
+`region_active_by_day()` (migrations 425 / 103) still filter `district = any(districts_filter)`,
+a legacy NAME array — neither has a caller in any source tree, but CI's schema-replay lane
+compiles both against a real database, and rule 25 deletes a column in the PR that removes its
+last *reader*, not the one that removes its last *caller*. **The two
+survivorship pickers in `scripts/recompute_property_stats.py` survive too** — W3-1 proposed deleting
+`best_geo` and `best_street` once the display listing became the single winner for place, but six of
+their targets still have readers (`ku_id` + `obec_id` feed the MF golden record, the three codes are
+`properties_public`'s chip columns, `geom` drives the lat/lng the Watchdog's `ST_DWithin` is rebuilt
+from, and `district` + `street` are read by `/properties/merge-candidates`). Because this step
+REMOVES columns it is the one migration in the sprint that is `DROP VIEW` + `CREATE VIEW` rather than
+`CREATE OR REPLACE`, and therefore **the one that must be applied AFTER the deploy, not before**: a
+deployed bundle selecting a column the view has just lost gets a PostgREST 400, while a view carrying
+a column nobody selects is inert.
 
 **ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
 `35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a

@@ -436,8 +436,9 @@ def _build_registry() -> dict[str, FilterDef]:
             default=None,
             description=(
                 "Where the listing must be. Composite filter with three "
-                "complementary sub-fields: a district name list "
-                "(matched against l.district), a map bounding box "
+                "complementary sub-fields: a location chip list "
+                "(see the `districts` filter — RÚIAN code equality per "
+                "level), a map bounding box "
                 "(west/south/east/north on l.geom), and a center+radius "
                 "pair (ST_DWithin around (lat,lng) within radius_m). "
                 "Districts is an independent AND-clause; the map vs "
@@ -453,7 +454,13 @@ def _build_registry() -> dict[str, FilterDef]:
         FilterDef(
             id="districts",
             type=FilterType.DISTRICT_CHIP_LIST,
-            pg_column="district",
+            # No single column backs it: one chip list compiles to equality
+            # against FOUR code columns (region_id / okres_id / obec_id /
+            # cast_obce_id), the same way the `location` composite above is
+            # pg_column=None. It named `district` while the predicate still had
+            # an ILIKE arm on that text column; W3 S3 removed the arm and S4
+            # (migration 506) removed the column from the read models.
+            pg_column=None,
             default=None,
             description=(
                 "Location chips. Each chip is an object `{name: str, "

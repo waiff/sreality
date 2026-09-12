@@ -602,13 +602,21 @@ def test_the_resolver_reads_the_claim_table_itself():
 
 
 def _revoked_roles(sql: str, head: str) -> set[str] | None:
-    """Roles named by the REVOKE whose head matches `head`, or None if there is
-    no such REVOKE. A REVOKE that names the wrong roles is worse than none: it
-    reads as protection and grants nothing back."""
-    m = re.search(head + r"\s+from\s+([a-z0-9_,\s]+?);", sql)
-    if not m:
+    """Roles named by the LAST REVOKE whose head matches `head`, or None if there
+    is no such REVOKE. A REVOKE that names the wrong roles is worse than none: it
+    reads as protection and grants nothing back.
+
+    LAST, not first: the corpus is every location migration concatenated in
+    number order, and an object can be re-created by a later one. A DROP VIEW +
+    CREATE VIEW resets the ACL, so the earlier file's REVOKE protects nothing --
+    only the newest one is in force. Same "highest-numbered migration is the
+    effective definition" rule tests/test_browse_read_path_guardrail.py applies
+    to view bodies. (Read first, this passed migration 506's narrower-than-it-
+    looks predecessor and would have missed a real regression.)"""
+    hits = re.findall(head + r"\s+from\s+([a-z0-9_,\s]+?);", sql)
+    if not hits:
         return None
-    return {role.strip() for role in m.group(1).split(",") if role.strip()}
+    return {role.strip() for role in hits[-1].split(",") if role.strip()}
 
 
 def test_every_created_object_is_revoked():

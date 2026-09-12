@@ -112,23 +112,29 @@ remediation set one indexed predicate away. `position_source`, `blur_evidence`,
 
 ## 3. The floors — what each feature may consume
 
-Declared in `location_data/serving_contracts.py` (`FEATURE_FLOORS`, design 05 §5.5.2) and checked
-with `meets_floor(feature, granularity=…, match_confidence=…)`. An undeclared feature raises —
-never a permissive default. The dedup rows:
+**There is no floor TABLE any more.** `location_data/serving_contracts.py` declared fourteen
+per-consumer minimum-granularity floors and, in a year, acquired zero production readers: every one
+was a declaration of what a consumer *would* accept once it flipped, asserted only by its own unit
+test. W3 S4 deleted it, the same way and for the same reason W2-b deleted `serving_flags.py` — a
+rail that nothing evaluates reads as enforcement and is not. A floor now lives where its consumer
+does, in the code that would violate it.
 
-| feature key | min granularity | min confidence | extra gate (the consumer's job) |
-| --- | --- | --- | --- |
-| `dedup_rung_0a` | `address_point` | `high` | `ruian_adm_kod` present |
-| `dedup_tier_1` | `street` | `medium` | ≥ 1 side has a portal-claimed house number |
-| `dedup_tier_2` | `street_segment` | `medium` | `geom` present, radius inside the rung's tolerance |
-| `dedup_path_c` | `obec` | any | `obec_kod` present (added 2026-09-10 on the dedup operator's path C ruling — not one of 05 §5.5.2's original rows) |
+Two survive as code, because they are the two that were ever reached:
 
-`dedup_rung_0b` (building) and `dedup_rung_0c` (parcel) went with their key columns in W2-b: a
-floor whose gate column does not exist is a floor nothing can evaluate.
+* **path C's town floor** — `obec`, any confidence — is `toolkit/dedup_candidates.PATHS["C"]`
+  itself (`block_key="obec_kod"`, `district_key="cast_obce_kod"`). The path definition IS the floor:
+  it cannot block on anything finer than the column it blocks on.
+* **the filter default** — operator action A5's `FILTER_DEFAULT_SEMANTICS = "include_and_badge"` —
+  is a constant in `api/location_filter.py`, next to the predicate it governs.
+
+`dedup_rung_0a` / `dedup_tier_1` / `dedup_tier_2` described a dedup engine that does not exist: the
+2026-08 cutoff removed it wholesale and the rebuild is path C alone. `dedup_rung_0b` (building) and
+`dedup_rung_0c` (parcel) had already gone with their key columns in W2-b — a floor whose gate column
+does not exist is a floor nothing can evaluate.
 
 The rung the operator raised on 2026-09-08 was ruled on 2026-09-10 as **path C** (NEW DEDUP ledger,
 that date): town = `obec_kod`, no radius, attributes (disposition, then area) do the rest. Its
-floor is the `dedup_path_c` row — `obec` at any confidence. Refined the same day: in Praha, Brno
+floor is the path's own block key — `obec_kod`, any confidence. Refined the same day: in Praha, Brno
 and Ostrava the town is additionally split by **`cast_obce_kod`**, chosen over `momc_kod` on
 measured coverage (85 % vs 24 % of Praha listings, because the quarter is often *claimed* in portal
 text while the administrative district needs a resolved address). That split does not raise the
@@ -136,11 +142,12 @@ floor: a row with no `cast_obce_kod` still qualifies and matches against its who
 
 ## 4. No flag
 
-W2-b deleted `location_data/serving_flags.py`. The `location_v2.<feature>` `app_settings` keys were
-never seeded and no consumer ever read one; the module documented a per-feature switch that the
-program now makes by cutting a reader over in a PR, which is reversible the same way every other
-deploy is. Flipping a consumer is a code change gated by its own program (rule 15 for dedup), not
-a runtime flag.
+W2-b deleted `location_data/serving_flags.py`. Its per-feature `app_settings` keys were never seeded
+and no consumer ever read one; the module documented a per-feature switch that the program now makes
+by cutting a reader over in a PR, which is reversible the same way every other deploy is. Flipping a
+consumer is a code change gated by its own program (rule 15 for dedup), not a runtime flag. W3 S4
+removed the last two runtime switches of any kind on this path — the SPA bisect hatches
+`?map=legacy` and `?cityQualityLegacy=1` — for the same reason.
 
 ## 5. What NOT to read (the legacy path)
 

@@ -321,9 +321,64 @@ component is slimmed twice — each wave rewrites one component and slims its st
     Carried into W4: a row-level parity measurement before `properties_public`'s codes are
     re-sourced (the Watchdog reads trigger-289 columns, Browse reads `listing_location`), and the
     fact that a stored spec still carrying `locality_district_id` now silently WIDENS (unknown
-    request fields are ignored, not rejected). Next: S4 (drop the legacy text columns:
-    `place_search_text`, `district`/`locality`/`obec`/`okres`/`region`/`street` off the
-    projection, `home_city_id`, the bisect hatches).
+    request fields are ignored, not rejected).
+  - **W3 S4 shipped** (migration 506): the deletions S1–S3 earned. It is the one migration in the
+    sprint that is `DROP VIEW` + `CREATE VIEW` rather than `CREATE OR REPLACE` (that statement can
+    only append), so it re-creates `browse_projection`, `listing_feed_public`, `properties_public`
+    and `pipeline_board_public` in dependency order, re-states every revoke/grant on BOTH browser
+    roles (a dropped view loses its ACL and this project's default privileges re-grant it), and
+    forces both read-model rebuilds with the width asserted afterwards. **Apply it AFTER the
+    deploy, not before** — the reverse of S1: a bundle selecting a column the view just lost gets
+    a PostgREST 400, while a view carrying a column nobody selects is inert.
+    **Deletion ledger.**
+    *Columns* — `place_search_text` off all four views AND off `properties` (the migration-302
+    generated column); `locality`/`district`/`street`/`obec`/`okres`/`region` off
+    `browse_projection`; `locality`/`street`/`okres`/`region` off `properties_public` and those
+    plus `district` off `pipeline_board_public`; `home_city_id` + `home_city_computed_at` off
+    `properties`. `district` also leaves `properties_map_mv`'s cover index
+    (`rebuild_properties_map_mv` re-created for it — nothing takes its place: the INCLUDE list has
+    not covered `MAP_COLS` since W6a).
+    *Scripts / jobs / functions* — `scripts/recompute_home_city.py`,
+    `.github/workflows/recompute_home_city.yml` (workflow-docs.json regenerated),
+    `recompute_home_city(boolean)`, and `listings_with_city_quality(jsonb,int,int,jsonb)` —
+    `home_city_id`'s ONE reader, the pre-W5 city-quality path, reachable only through the hatch
+    this PR deletes. A column and the function that joins on it leave together: Postgres does not
+    track column dependencies through a function body, so dropping one without the other leaves a
+    function that compiles and fails on its first call.
+    *Modules* — `location_data/serving_contracts.py` (fourteen floors, zero production readers;
+    A5's `FILTER_DEFAULT_SEMANTICS = "include_and_badge"` carried to `api/location_filter.py`, path
+    C's town floor left where the path is), `PathDef.floor_feature` with it.
+    *Hatches* — `frontend/src/lib/mapLegacy.ts` (`?map=legacy`) and `cityQualityLegacy.ts`
+    (`?cityQualityLegacy=1`), plus `resolveCityQualityPrefilterLegacy`, the `BrowsePrefilters
+    .listingIds` id space and the `city_index_rules` legacy arm behind them.
+    *SPA* — five dead fields off `PipelineBoardCard` / `PipelineBoardRow` / `PIPELINE_BOARD_COLS`;
+    `districts.pg_column` is now `None` (a chip list compiles to four code columns, not one text
+    column) with the registry regenerated.
+    *Tests* — 4 deleted (`test_serving_contracts.py`'s 3, the path-C floor assertion rewritten, one
+    `applyPrefilters` case folded into another), 3 added (`test_s4_drops_only` ×4 views,
+    `test_s4_keeps_the_town_on_the_board_lane`, plus `_revoked_roles` fixed to read the LAST revoke
+    — an object re-created by a later migration was being checked against the earlier file's ACL).
+    Suites: **pytest 7258 passed / 216 skipped**, **vitest 123 files / 1497 tests**, tsc clean.
+    **What did NOT go, and why.** `obec` survives on the two views the pipeline board reads (its
+    "Město A–Ž" sort orders by the TOWN; the label leads with the street, so sorting on the label
+    would order a column by house number). `best_geo` and `best_street` in
+    `scripts/recompute_property_stats.py` survive — W3-1 proposed deleting them, but six of their
+    targets still have readers: `ku_id` + `obec_id` feed the property-grain MF golden record
+    (migration 257), `obec_id`/`okres_id`/`region_id` are `properties_public`'s chip columns for
+    the Watchdog, `geom` drives the lat/lng trigger the Watchdog's `ST_DWithin` is rebuilt from,
+    `district` and `street` are read by `/properties/merge-candidates`. Only `locality`, `okres`
+    and `region` lost their last reader; they keep being written rather than freezing stale, and
+    W4 removes the columns and the projections together. **`district` also survives on
+    `properties_public`** (not on the other two views): `region_stats()` and
+    `region_active_by_day()` (migrations 425/103) still filter `district = any(districts_filter)`
+    off it — a legacy NAME array, no caller in any source tree, but CI's schema-replay lane
+    compiles both against a real database. That is the whole point of the rule: a column is
+    deleted in the PR that removes its last READER, not its last caller. **CI caught this**, not
+    the offline grep — the first push was green on pytest + vitest + tsc and red on schema replay.
+    Left for W4 with no reader found: `properties.locality`/`okres`/`region`,
+    `properties.locality_district_id`/`locality_region_id` (still published by both
+    property-grain views), and `region_stats()` / `region_active_by_day()` themselves — re-point
+    them at codes or drop them, and `properties_public.district` goes with them.
 - **W4 — delete legacy** (= plan S5): Mapy purge, geocoder + cache, street extractor, the trigger
   and the 24 `listings` columns, the property-grain geography, the second page archive, the
   backfill scripts and workflows; rule 24 rewritten to the end state.

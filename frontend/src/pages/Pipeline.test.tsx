@@ -75,7 +75,6 @@ const CARDS: PipelineBoardCard[] = [
     price_per_m2: 90_909,
     price_per_m2_basis: 'sale_capital_czk_m2',
     display_label: 'Sadová, Praha',
-    district: 'Praha',
     disposition: '2+kk',
     subtype: null,
     area_m2: 55,
@@ -87,11 +86,7 @@ const CARDS: PipelineBoardCard[] = [
     cast_obce_id: null,
     okres_id: null,
     region_id: 19,
-    place_search_text: 'Sadová, Praha',
     obec: 'Praha',
-    locality: 'Sadová, Praha',
-    okres: 'Praha',
-    region: 'Hlavní město Praha',
     is_active: true,
   },
 ];
@@ -127,7 +122,6 @@ const CARD_DUM: PipelineBoardCard = {
   price_per_m2: 64_286,
   price_per_m2_basis: 'sale_capital_czk_m2',
   display_label: 'Lesní, Brno',
-  district: 'Brno',
   disposition: '4+1',
   subtype: null,
   area_m2: 140,
@@ -139,11 +133,7 @@ const CARD_DUM: PipelineBoardCard = {
   cast_obce_id: null,
   okres_id: 3702,
   region_id: 116,
-  place_search_text: 'Lesní, Brno',
   obec: 'Brno',
-  locality: 'Lesní, Brno',
-  okres: 'Brno-město',
-  region: 'Jihomoravský kraj',
   is_active: true,
 };
 
@@ -154,14 +144,10 @@ const CARD_INACTIVE: PipelineBoardCard = {
   sreality_id: 333,
   listing_id: 333,
   display_label: 'Polní, Ostrava',
-  district: 'Ostrava',
-  place_search_text: 'Polní, Ostrava',
   // The card's place line is display_label alone now, but the remaining place
   // columns still feed the in-memory chip predicate, so an overriding fixture
   // must move them together or the card filters as if it were still in Brno.
   obec: 'Ostrava',
-  locality: 'Polní, Ostrava',
-  okres: 'Ostrava-město',
   is_active: false,
 };
 

@@ -91,18 +91,20 @@ export interface NearCityProximity {
   radius_km: number;
 }
 
-/* One entry of the district chip list. A resolved chip (level + id)
- * matches by STABLE ADMIN ID at its level; a 'locality' (street/POI)
- * pick additionally matches `name` as an ILIKE substring on
- * `place_search_text` (street + locality combined, migration 182);
- * a legacy chip (no level/id) falls back to the `name` ILIKE across
- * `district` / `place_search_text` / `okres` / `region`. `context` is
- * the parent municipality from Mapy.cz's `regionalStructure` that
- * narrows the legacy match when set, so picking the Plzeň entry for
- * "Edvarda Beneše" doesn't drag in the Olomouc + Hradec Králové
- * streets of the same name. Picks at the municipality / okres / kraj
- * level (or coarser) leave context null and behave exactly like the
- * pre-context chips. `excluded` flips the chip from an INCLUDE to an
+/* One entry of the district chip list. A chip is a LEVEL plus a RÚIAN
+ * CODE, and it compiles to `<level>_id = any(codes)` — plain equality,
+ * nothing else (W3 S3; lib/districtCodes). A 'locality' (street / POI /
+ * address) pick carries its CONTAINING obec code and filters at the obec
+ * level: the ILIKE half of that predicate, on `place_search_text`, went
+ * with the column (W3 S4, migration 506). A chip with no code — an old
+ * saved preset — is resolved by name ONCE at read time, and matches
+ * nothing if the RÚIAN name index cannot place it (fail closed).
+ * `context` is the parent municipality from Mapy.cz's `regionalStructure`;
+ * it disambiguates THAT name lookup, so picking the Plzeň entry for
+ * "Edvarda Beneše" doesn't drag in the Olomouc + Hradec Králové streets
+ * of the same name, and it is never itself a predicate. Picks at the
+ * municipality / okres / kraj level (or coarser) leave context null.
+ * `excluded` flips the chip from an INCLUDE to an
  * EXCLUDE filter: an excluded chip removes its matches from the cohort
  * instead of requiring them (NOT-ed in the query, red in the UI).
  * Absent / false = the legacy include behaviour. The same shape is

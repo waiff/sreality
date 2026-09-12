@@ -50,7 +50,6 @@ def test_path_c_is_the_only_defined_path_with_rungs_c1_and_c3() -> None:
     assert set(dc.PATHS) == {"C"}
     pd = dc.path_def("C")
     assert pd.block_key == "obec_kod"
-    assert pd.floor_feature == "dedup_path_c"
     assert [r.code for r in pd.rungs] == ["C1", "C3"]
     assert pd.rungs[0].needs == ("disposition",)
     assert pd.rungs[1].needs == ("area",)
@@ -59,13 +58,15 @@ def test_path_c_is_the_only_defined_path_with_rungs_c1_and_c3() -> None:
     assert pd.explanation
 
 
-def test_path_c_floor_is_declared_in_the_serving_contract() -> None:
-    from location_data import serving_contracts as sc
-
-    floor = sc.floor_for(dc.path_def("C").floor_feature)
-    assert (floor.grain, floor.min_granularity, floor.min_confidence) == ("listing", "obec", "any")
-    assert sc.meets_floor("dedup_path_c", granularity="obec", match_confidence="low")
-    assert not sc.meets_floor("dedup_path_c", granularity="okres", match_confidence="exact")
+def test_path_c_blocks_on_the_town_and_nothing_finer() -> None:
+    """Path C's floor is the TOWN, any confidence — the grain the input location
+    data is trusted at (PROGRAM.md, ruled 2026-09-10). It used to be asserted
+    against `location_data/serving_contracts.py`; W3 S4 deleted that module (its
+    fourteen floors were declarations no consumer read), so the path definition
+    itself is now the single place the rung's grain is written down."""
+    pd = dc.path_def("C")
+    assert pd.block_key == "obec_kod"
+    assert pd.district_key == "cast_obce_kod"
 
 
 def test_undefined_path_raises() -> None:
