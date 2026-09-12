@@ -10,10 +10,7 @@ HTML (`portal_raw_pages` — NO re-fetch of bazos) with the current parser and
 UPDATEs `locality` / `street` (+ `district`, should the parser ever yield one)
 in place.
 
-No geocoding spend: the parser runs with `geocoder=None` (the no-key degrade
-path), because we only want the text fields — the existing `geom` is left
-untouched, so the Mapy.cz path never fires (unlike scripts.backfill_bazos_coords,
-which exists precisely to re-geocode).
+Text fields only: the existing `geom` is left untouched.
 
 This deliberately writes NO snapshot (architectural rule #2 governs
 source-content changes; surfacing fields we already extracted from the SAME
@@ -186,10 +183,9 @@ def main() -> int:
                 continue
             html = html_row[0]
             try:
-                # geocoder=None: text fields only, zero Mapy.cz spend.
                 listing = parse_detail(
                     html, source_url=url,
-                    category_main=cmain, category_type=ctype, geocoder=None,
+                    category_main=cmain, category_type=ctype,
                 )
             except Exception as exc:  # noqa: BLE001 - a bad staged page must not abort the run
                 LOG.warning("BACKFILL parse error id=%d: %s", sid, exc)

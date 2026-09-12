@@ -10,7 +10,6 @@
       "row": {
         "lat": null,
         "lon": null,
-        "in_mapy_inventory": false,
         "listings.locality": "České Budějovice 4, U Smaltovny",
         "listings.street": "U Smaltovny",
         "listings.street_source": "parser"
@@ -24,7 +23,6 @@
       "row": {
         "lat": 50.0446,
         "lon": 14.3204,
-        "in_mapy_inventory": false,
         "listings.locality": "Praha Stodůlky",
         "listings.street": null,
         "listings.street_source": null

@@ -41,12 +41,10 @@ from scraper.bazos_parser import (
     CATEGORY_MAIN,
     SALE_TYPE,
     SUBTYPE,
-    Geocoder,
     _parse_price,
     parse_detail,
     parse_index,
 )
-from scraper.location import build_geocoder
 from scraper.portal import (
     PortalConfig,
     StopReason,
@@ -95,13 +93,11 @@ class BazosPortal:
         locality: str | None = None,
         radius_km: int | None = None,
         max_pages: int | None = None,
-        geocoder: Geocoder | None = None,
     ) -> None:
         # Each scope is a bazos URL pair {"sale_type", "category"} (e.g.
         # prodam/byt + pronajmu/byt). The drain reads the category off each
         # detail's breadcrumb, so one portal covers all scopes via one queue.
         self._scopes = list(categories)
-        self._geocoder = geocoder
         self._locality = locality
         self._radius_km = radius_km
         self._max_pages = max_pages
@@ -472,7 +468,6 @@ class BazosPortal:
             listing = parse_detail(
                 html, source_url=url,
                 category_main=fb_main, category_type=fb_type,
-                geocoder=self._geocoder,
             )
         except Exception as exc:
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
@@ -570,7 +565,6 @@ def main(argv: list[str] | None = None) -> int:
     portal = BazosPortal(
         categories=scopes,
         locality=args.locality, radius_km=args.radius_km, max_pages=args.max_pages,
-        geocoder=build_geocoder(),
     )
     portal.index_rate = limits.index_rate
     portal.shared_rate_limiter = limits.shared_rate_limiter

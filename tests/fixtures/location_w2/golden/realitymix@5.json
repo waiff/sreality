@@ -17,7 +17,6 @@
       "row": {
         "lat": 48.37498,
         "lon": 17.00147,
-        "in_mapy_inventory": false,
         "listings.locality": null,
         "listings.street": null,
         "listings.street_source": null
@@ -31,7 +30,6 @@
       "row": {
         "lat": 50.427238,
         "lon": 12.742544,
-        "in_mapy_inventory": false,
         "listings.locality": "Stráň, Potůčky, okres Karlovy Vary",
         "listings.street": null,
         "listings.street_source": null

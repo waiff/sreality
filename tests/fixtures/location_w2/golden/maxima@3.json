@@ -14,7 +14,6 @@
       "row": {
         "lat": 50.36339611563554,
         "lon": 15.259603745235422,
-        "in_mapy_inventory": false,
         "listings.locality": "Údrnice, Únětice",
         "listings.street": null,
         "listings.street_source": null
@@ -28,7 +27,6 @@
       "row": {
         "lat": 50.7663,
         "lon": 15.0562,
-        "in_mapy_inventory": false,
         "listings.locality": null,
         "listings.street": null,
         "listings.street_source": null
@@ -42,7 +40,6 @@
       "row": {
         "lat": null,
         "lon": null,
-        "in_mapy_inventory": false,
         "listings.locality": "Krásný Les",
         "listings.street": null,
         "listings.street_source": null
@@ -56,7 +53,6 @@
       "row": {
         "lat": 50.35640416157747,
         "lon": 15.266305699712364,
-        "in_mapy_inventory": false,
         "listings.locality": "Údrnice, Únětice",
         "listings.street": null,
         "listings.street_source": null

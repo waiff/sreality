@@ -94,9 +94,8 @@ def document(body: bytes | str | Path | None = None) -> ScopedDocument:
     return scope_html(body, register=REGISTER)
 
 
-def row(*, in_mapy_inventory: bool = False) -> ListingRow:
-    return fx.listing("realitymix", {}, native=NATIVE,
-                      in_mapy_inventory=in_mapy_inventory)
+def row() -> ListingRow:
+    return fx.listing("realitymix", {}, native=NATIVE)
 
 
 def payload(body: Path | bytes | None = None) -> ArchivedPayload:
@@ -445,14 +444,14 @@ def test_a_coordinate_from_any_other_entry_id_is_refused_by_the_ladder():
     assert licensed is None and reason
 
 
-def test_a_listing_in_the_mapy_inventory_counts_a_refusal_not_a_silence():
-    """Carried over from the superseded suite. The Mapy veto sits ABOVE the substrate branch,
-    so it reaches the archived body too — and it must be COUNTED, or a vetoed pin is
-    indistinguishable from a page that carries none."""
-    result = extract_page(payload(), row(in_mapy_inventory=True), list(ENTRIES.values()),
-                          register=REGISTER)
-    assert dict(result.refusals) == {"listing_in_mapy_affected_inventory": 1}
-    assert "rm.det.gps" not in {c.extractor_id for c in result.claims}
+def test_an_unruled_coordinate_locator_counts_a_refusal_not_a_silence():
+    """The Mapy veto used to sit above the substrate branch; the entry id is the whole gate
+    now. A refusal must still be COUNTED, or a refused pin is indistinguishable from a page
+    that carries none."""
+    impostor = replace(ENTRIES["rm.det.gps"], entry_id="rm.det.not_the_rule")
+    result = extract_page(payload(), row(), [impostor], register=REGISTER)
+    assert dict(result.refusals) == {"unrecognised_archived_coordinate_locator": 1}
+    assert result.claims == []
 
 
 def test_a_blank_gps_attribute_produces_no_declaration_at_all():

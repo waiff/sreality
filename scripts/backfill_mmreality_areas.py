@@ -21,7 +21,7 @@ is deliberately OUT of `_HASH_FIELDS` — so stamping it churns no snapshot.
 
 This writes NO snapshot (rule #2 governs source-content changes; correcting our
 own mis-parse of the SAME staged state is a data-quality fix — the
-backfill_idnes_areas / backfill_bazos_coords posture). `area_m2`, `estate_area`
+backfill_idnes_areas posture). `area_m2`, `estate_area`
 and `usable_area` ARE in the content hash, so each healed listing's NEXT
 successful detail refetch computes a hash differing from its latest snapshot and
 appends ONE genuine snapshot — bounded, correct, self-limiting.

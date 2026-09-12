@@ -14,40 +14,11 @@ import re
 import pytest
 
 from scraper.bazos_parser import (
-    LINK_DISTRUST_RADIUS_KM,
-    LINK_TRUST_RADIUS_KM,
     _resolve_coords,
     extract_street,
     parse_detail,
     parse_index,
 )
-from scraper.geocoding import GeocodeResult, GeocodingError
-
-
-def _gr(
-    lat: float, lng: float, confidence: str, matched_type: str = "regional.street"
-) -> GeocodeResult:
-    return GeocodeResult(
-        lat=lat, lng=lng, confidence=confidence, matched_address="x",
-        matched_type=matched_type, bbox=None, raw={},
-    )
-
-
-def _stub_geocoder(mapping):
-    """Geocoder stub: first query-substring key that matches wins; a None value
-    raises GeocodingError (mimics a no-result query). Never hits the network."""
-    def g(query: str) -> GeocodeResult:
-        for key, value in mapping.items():
-            if key.lower() in query.lower():
-                if value is None:
-                    raise GeocodingError(f"no result for {query}")
-                return value
-        raise GeocodingError(f"unmapped: {query}")
-    return g
-
-
-# Letovice town centre, used as the locality anchor across the resolve tests.
-_LETOVICE = (49.550, 16.570)
 
 INDEX_HTML = """
 <!DOCTYPE html><html><body>
@@ -113,11 +84,9 @@ DOHODOU_DETAIL_HTML = """
 # layout — label, a map-icon cell, then a cell holding the maps link (PSČ as its
 # anchor text) followed by a separate town-listings anchor, i.e. "PSČ Town" order.
 # The hand-authored 2-cell "Town PSČ" fixtures above had diverged from this and
-# hid a 100%-NULL-locality bug that disabled street geocoding for every bazos
-# listing (it always fell back to the page-wide maps-link pin, collapsing whole
-# towns onto one map dot). Note the street ("ul. Koterovská") is at the END of the
-# title and the description opens with "Nabízíme" — the regression that produced
-# "ul. Koterovská Nabízíme" as the street, polluting the geocode query.
+# hid a 100%-NULL-locality bug. Note the street ("ul. Koterovská") is at the END
+# of the title and the description opens with "Nabízíme" — the regression that
+# produced "ul. Koterovská Nabízíme" as the street.
 LIVE_LOKALITA_DETAIL_HTML = """
 <!DOCTYPE html><html><body>
 <div class="drobky"><a href="https://www.bazos.cz/">Hlavní stránka</a> > <a href="https://reality.bazos.cz/">Reality</a> > <a href="https://reality.bazos.cz/pronajmu/">Pronájem</a> > <a href="https://reality.bazos.cz/pronajmu/byt/">Byty</a> > <b>Inzerát č. 219722150</b></div>
@@ -132,18 +101,14 @@ LIVE_LOKALITA_DETAIL_HTML = """
 """
 
 
-def test_parse_detail_live_three_cell_lokalita_enables_street_geocode():
+def test_parse_detail_live_three_cell_lokalita_yields_locality_and_street():
     """Regression for the production bug: the live 3-cell Lokalita layout must
-    yield a real locality (so the street geocode fires) and a clean street name
-    (no description-word bleed across the title/description newline)."""
-    geocoder = _stub_geocoder({
-        "Koterovská": _gr(49.738, 13.410, "high", "regional.address"),
-        "Plzeň": _gr(49.747, 13.377, "low", "regional.municipality"),
-    })
+    yield a real locality and a clean street name (no description-word bleed
+    across the title/description newline)."""
     listing = parse_detail(
         LIVE_LOKALITA_DETAIL_HTML,
         source_url="https://reality.bazos.cz/inzerat/219722150/x.php",
-        category_main="byt", category_type="prodej", geocoder=geocoder,
+        category_main="byt", category_type="prodej",
     )
     # Locality + PSČ now parse from the third cell, in "PSČ Town" order.
     assert listing.locality == "Plzeň"
@@ -152,15 +117,14 @@ def test_parse_detail_live_three_cell_lokalita_enables_street_geocode():
     assert listing.zip == "326 00"
     # Breadcrumb is authoritative for the category.
     assert (listing.category_main, listing.category_type) == ("byt", "pronajem")
-    # The raw extract (used as the geocoder query, where the "ul." prefix helps)
-    # stops at the title's end — no "Nabízíme" from the next line.
+    # The raw extract stops at the title's end — no "Nabízíme" from the next line.
     assert listing.raw["coords"]["street"] == "ul. Koterovská"
     # The STORED street is cleaned to a bare, uniform name (prefix stripped) — it
     # is what the street+disposition dedup engine keys on and Browse displays.
     assert listing.street == "Koterovská"
-    # With a real locality available, the street geocode wins over the link pin.
-    assert listing.raw["coords"]["source"] == "street"
-    assert (listing.lat, listing.lon) == (49.738, 13.410)
+    # The ad's own maps-link pin is the ONLY coordinate bazos publishes.
+    assert listing.raw["coords"]["source"] == "link"
+    assert (listing.lat, listing.lon) == (49.720928, 13.421173)
 
 
 def test_parse_index_total_and_items():
@@ -430,13 +394,13 @@ def test_parsed_listing_bridges_into_ingest_contract():
 
 
 def test_parse_detail_street_survives_into_listing_row():
-    # No geocoder at all: the street extraction is text-only and must still
-    # surface on ScrapedListing.street (cleaned to a bare name) and ride to_row
-    # into listings.street.
+    # The street extraction is text-only and must surface on
+    # ScrapedListing.street (cleaned to a bare name) and ride to_row into
+    # listings.street.
     listing = parse_detail(
         LIVE_LOKALITA_DETAIL_HTML,
         source_url="https://reality.bazos.cz/inzerat/219722150/x.php",
-        category_main="byt", category_type="pronajem", geocoder=None,
+        category_main="byt", category_type="pronajem",
     )
     assert listing.street == "Koterovská"
     assert listing.to_row(-9)["street"] == "Koterovská"
@@ -490,143 +454,34 @@ def test_extract_street_none_on_none():
     assert extract_street(None) is None
 
 
-# --- coordinate resolution / cross-check ------------------------------------
+# --- coordinate resolution ---------------------------------------------------
+# The geocoder and its cross-check are gone (W4-b): the ad's own CZ-guarded maps
+# link is the only coordinate bazos publishes, so these pin exactly two outcomes.
 
-def test_resolve_street_geocode_wins_over_link():
-    geocoder = _stub_geocoder({
-        "Dlouhá": _gr(49.560, 16.560, "high", "regional.address"),
-        "Letovice": _gr(*_LETOVICE, "low", "regional.municipality"),
-    })
+def test_resolve_uses_the_cz_guarded_link():
     lat, lon, prov = _resolve_coords(
-        link_lat=49.555, link_lon=16.575,
-        street="ulice Dlouhá 12", locality="Letovice", psc="679 61",
-        geocoder=geocoder,
-    )
-    assert (lat, lon) == (49.560, 16.560)
-    assert prov["source"] == "street"
-    assert prov["street_confidence"] == "high"
-
-
-def test_resolve_link_consistent_with_text_is_used():
-    geocoder = _stub_geocoder({"Letovice": _gr(*_LETOVICE, "low", "regional.municipality")})
-    lat, lon, prov = _resolve_coords(
-        link_lat=49.555, link_lon=16.575,  # ~0.66 km from text reference
-        street=None, locality="Letovice", psc="679 61", geocoder=geocoder,
-    )
-    assert (lat, lon) == (49.555, 16.575)
-    assert prov["source"] == "link"
-    assert prov["text_reference"] == "locality"
-    assert prov["link_text_distance_km"] < LINK_TRUST_RADIUS_KM
-
-
-def test_resolve_link_far_from_text_is_rejected_for_locality():
-    geocoder = _stub_geocoder({"Letovice": _gr(*_LETOVICE, "low", "regional.municipality")})
-    lat, lon, prov = _resolve_coords(
-        link_lat=50.080, link_lon=14.420,  # Prague: ~165 km from Letovice
-        street=None, locality="Letovice", psc="679 61", geocoder=geocoder,
-    )
-    assert (lat, lon) == _LETOVICE
-    assert prov["source"] == "locality"
-    assert prov["link_text_distance_km"] > LINK_DISTRUST_RADIUS_KM
-    assert any("distrusted" in n for n in prov["notes"])
-
-
-def test_resolve_link_in_loose_band_is_accepted_with_note():
-    geocoder = _stub_geocoder({"Letovice": _gr(*_LETOVICE, "low", "regional.municipality")})
-    lat, lon, prov = _resolve_coords(
-        link_lat=49.577, link_lon=16.570,  # ~3 km: between TRUST and DISTRUST
-        street=None, locality="Letovice", psc=None, geocoder=geocoder,
-    )
-    assert (lat, lon) == (49.577, 16.570)
-    assert prov["source"] == "link"
-    assert LINK_TRUST_RADIUS_KM < prov["link_text_distance_km"] < LINK_DISTRUST_RADIUS_KM
-    assert any("loose" in n for n in prov["notes"])
-
-
-def test_resolve_locality_fallback_when_no_street_and_no_link():
-    geocoder = _stub_geocoder({"Letovice": _gr(*_LETOVICE, "low", "regional.municipality")})
-    lat, lon, prov = _resolve_coords(
-        link_lat=None, link_lon=None,
-        street=None, locality="Letovice", psc=None, geocoder=geocoder,
-    )
-    assert (lat, lon) == _LETOVICE
-    assert prov["source"] == "locality"
-
-
-def test_resolve_geocoder_raises_falls_back_to_link():
-    geocoder = _stub_geocoder({})  # every query raises GeocodingError
-    lat, lon, prov = _resolve_coords(
-        link_lat=49.560, link_lon=16.580,
-        street="ulice Dlouhá", locality="Letovice", psc=None, geocoder=geocoder,
-    )
+        link_lat=49.560, link_lon=16.580, street="ulice Dlouhá")
     assert (lat, lon) == (49.560, 16.580)
     assert prov["source"] == "link"
+    assert prov["link_present"] is True
+    assert prov["street"] == "ulice Dlouhá"
 
 
-def test_resolve_geocoder_raises_no_link_returns_none():
-    geocoder = _stub_geocoder({})  # every query raises GeocodingError
+def test_resolve_without_a_link_yields_no_coordinate():
+    """No street geocode stands in for a missing pin any more — a bazos ad with
+    no maps anchor simply has no position, and the claim intake licenses none."""
     lat, lon, prov = _resolve_coords(
-        link_lat=None, link_lon=None,
-        street="ulice Dlouhá", locality="Letovice", psc=None, geocoder=geocoder,
-    )
+        link_lat=None, link_lon=None, street="ulice Dlouhá")
     assert (lat, lon) == (None, None)
     assert prov["source"] is None
-
-
-def test_resolve_no_geocoder_uses_cz_guarded_link():
-    lat, lon, prov = _resolve_coords(
-        link_lat=49.560, link_lon=16.580,
-        street="ulice Dlouhá", locality="Letovice", psc=None, geocoder=None,
-    )
-    assert (lat, lon) == (49.560, 16.580)
-    assert prov["source"] == "link"
-    assert any("no geocoder" in n for n in prov["notes"])
-
-
-def test_resolve_low_confidence_street_not_promoted_to_primary():
-    # A low-confidence street geocode (Mapy fell back to the municipality) must
-    # NOT be accepted as the precise primary; it serves only as a coarse anchor.
-    geocoder = _stub_geocoder({
-        "Dlouhá": _gr(*_LETOVICE, "low", "regional.municipality"),
-    })
-    lat, lon, prov = _resolve_coords(
-        link_lat=49.555, link_lon=16.575,  # close to the low-conf text anchor
-        street="ulice Dlouhá", locality="Letovice", psc=None, geocoder=geocoder,
-    )
-    assert prov["source"] == "link"
-    assert (lat, lon) == (49.555, 16.575)
-
-
-def test_parse_detail_street_geocode_overrides_coarse_link():
-    html = """
-    <!DOCTYPE html><html><body>
-    <h1 class="nadpisdetail">Prodám byt 2+kk Letovice</h1>
-    <table class="listadvalues">
-      <tr><td>Cena:</td><td>5 499 000 Kč</td></tr>
-      <tr><td>Lokalita:</td><td><a href="https://www.google.com/maps/place/49.500000,16.500000/">Letovice 679 61</a></td></tr>
-    </table>
-    <div class="popisdetail">Pěkný byt v ulici Tyršova 12, klidná lokalita.</div>
-    </body></html>
-    """
-    geocoder = _stub_geocoder({
-        "Tyršova": _gr(49.560, 16.565, "high", "regional.address"),
-        "Letovice": _gr(*_LETOVICE, "low", "regional.municipality"),
-    })
-    listing = parse_detail(
-        html, source_url="https://reality.bazos.cz/inzerat/999/x.php",
-        category_main="byt", category_type="prodej", geocoder=geocoder,
-    )
-    assert (listing.lat, listing.lon) == (49.560, 16.565)
-    assert listing.raw["coords"]["source"] == "street"
-    # locative "v ulici" is what real descriptions write; geocoding tolerates it.
-    assert listing.raw["coords"]["street"] == "ulici Tyršova 12"
+    assert prov["link_present"] is False
 
 
 def test_parse_detail_records_coord_provenance():
     listing = parse_detail(
         DETAIL_HTML,
         source_url="https://reality.bazos.cz/inzerat/219122924/x.php",
-        category_main="byt", category_type="prodej",  # no geocoder injected
+        category_main="byt", category_type="prodej",
     )
     coords = listing.raw["coords"]
     assert coords["source"] == "link"
@@ -637,8 +492,8 @@ def test_parse_detail_records_coord_provenance():
 def test_extract_street_numeral_leading_after_keyword():
     # W0 item 0i: "28. října" (and 1. máje, 17. listopadu, ...) is a very
     # common Czech street-name class the uppercase-first pattern can't match.
-    # extract_street returns the RAW keyword-anchored form (the geocode query);
-    # clean_street produces the stored bare name.
+    # extract_street returns the RAW keyword-anchored form; clean_street
+    # produces the stored bare name.
     from scraper.street import clean_street
 
     raw = extract_street("Pronájem bytu, ul. 28. října 15")

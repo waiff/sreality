@@ -8,8 +8,8 @@ into a `ScrapedListing` (the shared multi-portal contract in
 Unlike bazos (free-text classifieds), idnes is a STRUCTURED portal: a `<dl>`
 spec table (paired `<dt>`/`<dd>`), a clean price element, and — crucially —
 precise per-listing coordinates embedded in the page's map config
-(`"center":[lon,lat]`). So coordinates come straight from the page and a locality
-geocode is only a fallback when the page omits them. The typed `<dl>` fields are
+(`"center":[lon,lat]`). Coordinates come straight from the page; a page that
+omits them carries no coordinate. The typed `<dl>` fields are
 normalised to the same canonical labels the sreality parser emits (e.g.
 "panelová" -> "panel", "osobní" -> "osobni") so cross-portal filters agree.
 """
@@ -20,19 +20,17 @@ from collections.abc import Collection
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
 from scraper.area import derive_headline_area
 from scraper.broker_idnes import parse_idnes_broker
-from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
 
-Geocoder = Callable[[str], GeocodeResult]
 
 # idnes search-URL segments -> our canonical labels (mirrors parser.CATEGORY_*).
 SALE_TYPE: dict[str, str] = {
@@ -126,8 +124,8 @@ def subtype_from_title(text: str | None, category_main: str | None) -> str | Non
             return slug
     return None
 
-# Czech-bbox guard: a coordinate (embedded pin OR geocode) outside it — a swapped
-# lat/lon or a geocode that landed abroad — is dropped rather than stored as geom.
+# Czech-bbox guard: an embedded pin outside it — a swapped lat/lon, or a stray
+# decimal pair — is dropped rather than stored as geom.
 _CZ_LAT_MIN, _CZ_LAT_MAX = 48.0, 51.5
 _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 
@@ -546,21 +544,13 @@ def _next_page(tree: HTMLParser) -> int | None:
     return None
 
 
-def _resolve_coords(
-    html: str, locality: str | None, geocoder: Geocoder | None
-) -> tuple[float | None, float | None, dict[str, Any]]:
+def _resolve_coords(html: str) -> tuple[float | None, float | None, dict[str, Any]]:
+    """The page's own embedded pin, or nothing."""
     m = _CENTER_RE.search(html)
     if m:
         lon, lat = float(m.group(1)), float(m.group(2))
         if _in_cz_bbox(lat, lon):
             return lat, lon, {"source": "page"}
-    if geocoder is not None and locality:
-        try:
-            g = geocoder(locality)
-        except GeocodingError:
-            g = None
-        if g is not None and _in_cz_bbox(g.lat, g.lng):
-            return g.lat, g.lng, {"source": "geocode", "confidence": g.confidence}
     return None, None, {"source": None}
 
 
@@ -619,7 +609,6 @@ def parse_detail(
     source_url: str,
     category_main: str | None,
     category_type: str | None,
-    geocoder: Geocoder | None = None,
 ) -> ScrapedListing:
     tree = HTMLParser(html)
     source_id = _id_from_href(source_url) or ""
@@ -646,7 +635,7 @@ def parse_detail(
     price_czk, price_unit = _parse_price(price_text, category_type)
 
     locality = _text(tree.css_first(".b-detail__info"))
-    lat, lon, coord_provenance = _resolve_coords(html, locality, geocoder)
+    lat, lon, coord_provenance = _resolve_coords(html)
 
     # The three labels reach the shared resolver as SEPARATE typed measures —
     # collapsing them first is exactly what destroys the basis. `area_text` stays

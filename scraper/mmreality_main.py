@@ -23,8 +23,7 @@ nominates on since 2026-09-08), with the declared count kept as the numeric
 coverage signal that writes the slice ledger's outcome (`portal_index_slices`,
 one row per category) and never as the nomination gate. The flag itself is
 flipped by the coverage gate from ledger evidence, not here. Coordinates come
-from the estate JSON; a coords-less row falls back to carry-forward + locality
-geocoding via the shared scraper.location resolver.
+from the estate JSON's own `point{}`; a row without one carries none.
 """
 
 from __future__ import annotations
@@ -35,7 +34,6 @@ import re
 from typing import Any
 
 from scraper import db, portal_runner
-from scraper.location import CoordResolver
 from scraper.mmreality_client import MmRealityClient, detail_url
 from scraper.mmreality_parser import (
     GROUP_SLUGS, NoPropertyObject, PropertyMismatch, index_price, live_groups, parse_detail,
@@ -198,9 +196,6 @@ class MmRealityPortal:
         self.index_rate = config.limits.index_rate
         self.shared_rate_limiter = config.limits.shared_rate_limiter
         self._price_change_min_pct = config.limits.price_change_min_pct
-        # page > carry-forward > geocode (an estate-JSON row without coords had
-        # NO coords path until now).
-        self._coords = CoordResolver(SOURCE)
 
     # --- index-walk seams ---
     def set_index_page_cap(self, pages: int | None) -> None:
@@ -226,7 +221,6 @@ class MmRealityPortal:
         # Single-row ingest (ingest_scraped_listing), not batched prepared writes,
         # so the transaction pooler is fine — no session pooler needed.
         conn = db.connect()
-        self._coords.preload(conn)
         return conn
 
     def walk_category(
@@ -509,9 +503,6 @@ class MmRealityPortal:
                 native_id=native_id, kind="error",
                 error=f"parsed id {parsed_id} != fetched id {native_id}",
             )
-        # Page coords win -> carry a stored geom forward -> geocode the locality
-        # (never fails the fetch; scraper.location).
-        listing = self._coords.fill(native_id, listing)
         return DrainItem(
             native_id=native_id, kind="ok",
             payload={"listing": listing, "html": html, "status": status, "url": url},

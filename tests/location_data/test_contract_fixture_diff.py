@@ -105,7 +105,6 @@ class Body:
     raw_json: dict[str, Any]
     lat: float | None = None
     lon: float | None = None
-    in_mapy_inventory: bool = False
     locality: str | None = None
     street: str | None = None
     street_source: str | None = None
@@ -116,13 +115,11 @@ class Body:
         # column the scan no longer selects. They stay on `Body` (and in `as_json`) as the
         # captured provenance of the row, and are no longer passed to the extractor.
         return fx.listing(
-            source, self.raw_json, native=listing_id, lat=self.lat, lon=self.lon,
-            in_mapy_inventory=self.in_mapy_inventory)
+            source, self.raw_json, native=listing_id, lat=self.lat, lon=self.lon)
 
     def as_json(self) -> dict[str, Any]:
         return {
             "lat": self.lat, "lon": self.lon,
-            "in_mapy_inventory": self.in_mapy_inventory,
             "listings.locality": self.locality,
             "listings.street": self.street,
             "listings.street_source": self.street_source,
@@ -189,7 +186,6 @@ def disk_bodies(source: str, root: Path = _BODY_DIR) -> dict[str, tuple[Body, ..
             name=str(path.relative_to(_ROOT) if path.is_relative_to(_ROOT) else path),
             raw_json=doc["raw_json"],
             lat=doc.get("lat"), lon=doc.get("lon"),
-            in_mapy_inventory=bool(doc.get("in_mapy_inventory", False)),
             locality=doc.get("listings.locality"),
             street=doc.get("listings.street"),
             street_source=doc.get("listings.street_source")))
@@ -331,8 +327,8 @@ def score_archived(contract: contracts.PortalContract) -> list[dict[str, Any]]:
                                           scope_version=document.scope_version)
             # The C6 licence ladder, applied exactly as the real lane applies it. Without
             # this the gate would show a green claim for a coordinate the lane REFUSES —
-            # an entry id absent from ARCHIVED_COORDINATE_RULES, or one vetoed by the Mapy
-            # inventory — which is a false safety signal on the licence rail specifically,
+            # an entry id absent from ARCHIVED_COORDINATE_RULES — which is a false safety
+            # signal on the licence rail specifically,
             # the one place a wrong answer is a legal problem rather than a data problem.
             if stamped.claim_type == "coordinate":
                 stamped, reason = _licensed_coordinate(

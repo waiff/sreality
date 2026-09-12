@@ -26,8 +26,10 @@ import pytest
 from location_data import contracts
 from location_data.claims_intake import (
     ARCHIVED_COORDINATE_RULES,
+    COORDINATE_RULES,
     DEFAULT_MAX_CLAIM_VALUE_BYTES,
     READERS,
+    coordinate_verdict,
     extract_listing,
 )
 from location_data.claims_common import SUBSTRATE_PAYLOAD
@@ -79,10 +81,9 @@ PRECISE_LABEL = "accurate"
 
 
 def claims(raw_json: dict, native: str, *, lat: float | None = None,
-           lon: float | None = None, in_mapy_inventory: bool = False) -> dict:
+           lon: float | None = None) -> dict:
     """One payload row through the real hourly extractor, keyed by extractor id."""
-    row = fx.listing("mmreality", raw_json, native=native, lat=lat, lon=lon,
-                     in_mapy_inventory=in_mapy_inventory)
+    row = fx.listing("mmreality", raw_json, native=native, lat=lat, lon=lon)
     result = extract_listing(row, fx.entries_for("mmreality"),
                              max_value_bytes=DEFAULT_MAX_CLAIM_VALUE_BYTES)
     found: dict = {}
@@ -307,34 +308,21 @@ def test_the_town_extracts_from_every_committed_fixture(fixture: str, native: st
     assert found[TOWN_ENTRY].value_text == town
 
 
-# ---------------------------------------------------------- the Mapy-inventory veto
+# ------------------------------------------------------------ the payload pin, licensed
 
-def test_the_mapy_inventory_veto_still_reaches_the_payload_coordinate():
-    """§6.4's gate is a JOIN on listing_id, and `_read_point_pair` calls
-    `coordinate_verdict(..., in_mapy_inventory=row.in_mapy_inventory)`. Reading the pin off
-    the payload is what ARMS the veto on this portal — mmreality@2 had parked the entry on
-    the archived lane, where the hourly pass emitted no coordinate to veto at all."""
+def test_the_payload_pin_is_licensed_by_the_contracts_pointer_not_by_a_stamp():
+    """mmreality's rule is `payload`: the value is re-derived from the JSON pointer the
+    contract names, so no `coords.source` stamp is consulted and there is nothing left to
+    veto row-by-row — the Mapy inventory that used to sit above this rung is gone (W4-b).
+    mmreality@2 had parked the entry on the archived lane, where the hourly pass emitted no
+    coordinate at all; reading the pin off the payload is what put it back."""
     doc = regression_row()
-    clean = claims(doc["raw_json"], "951845", lat=doc["lat"], lon=doc["lon"])
-    flagged = claims(doc["raw_json"], "951845", lat=doc["lat"], lon=doc["lon"],
-                     in_mapy_inventory=True)
-
-    assert "mm.det.point" in clean
-    assert "mm.det.point" not in flagged
-    # The admin claims are untouched: the veto is about a POSITION's provenance.
-    assert flagged[TOWN_ENTRY].value_text == "Andělská Hora"
-
-
-def test_the_vetoed_coordinate_is_counted_as_a_refusal_not_a_silent_zero():
-    """`location_claim_absences` is gone (migration 498); a withheld coordinate is a
-    counted refusal reason, which is what the operator reads in the run log."""
-    doc = regression_row()
-    row = fx.listing("mmreality", doc["raw_json"], native="951845", lat=doc["lat"],
-                     lon=doc["lon"], in_mapy_inventory=True)
-    result = extract_listing(row, fx.entries_for("mmreality"),
-                             max_value_bytes=DEFAULT_MAX_CLAIM_VALUE_BYTES)
-    assert result.refusals == {
-        "coordinate_withheld:listing_in_mapy_affected_inventory": 1}
+    found = claims(doc["raw_json"], "951845", lat=doc["lat"], lon=doc["lon"])
+    assert "mm.det.point" in found
+    assert COORDINATE_RULES["mmreality"].substrate == "payload"
+    assert coordinate_verdict("mmreality", "geocode").admitted is True
+    # The admin claims ride the same pass.
+    assert found[TOWN_ENTRY].value_text == "Andělská Hora"
 
 
 # ------------------------------------- subject selection, over the real stored bodies

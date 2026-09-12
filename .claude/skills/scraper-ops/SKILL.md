@@ -205,10 +205,9 @@ and its workflows/scripts must never be resurrected; nothing auto-merges (merges
 `stored_height`, migration 496) **must go through `db.invalidate_derived_signals`**: the one chokepoint that re-arms these producers by nulling their
 OWN predicates (`phash`, `clip_tagged_at`). It deletes no label/review/CLIP-cache row; DINOv3 vectors go only on `drop_dinov3=True` (hand-dispatched GPU refill).
 
-A unified `CoordResolver` (`scraper/location.py`, migration 288, PR #749) now backs
-idnes/realitymix/maxima/remax/mmreality/ceskereality — four of those had no geocode path at
-all before. See the `database` skill's "Location/geocode lifecycle" and "Street lifecycle"
-entries for the caching/provenance detail; this is the portal-wiring side of the same change.
+**No drain geocodes.** W4-b deleted `scraper/location.py` (`CoordResolver` / `CachingGeocoder`)
+and every drain's injection point: a portal's coordinate is now whatever its own page or payload
+publishes, or nothing. `scraper/geocoding.py` survives for `/maps/*` and the on-demand URL parse only.
 
 Monitor/alerting workflows watch the rest: `monitor_workflow_failures.yml` ("Monitoring: workflow
 failures", cron `*/30` — records failed / timed-out / startup-failed runs into `workflow_failures`
@@ -368,7 +367,12 @@ Lanes shipped so far:
   per-listing registry reads from ~11 to ~4 and the writes from 7 to 1). Ships DARK; enable via
   `realtime_location_resolve_enabled`. Live tuning:
   `realtime_location_resolve_{interval_seconds,max_seconds,batch_size}` (15/240/250), interval `0`
-  idles. Exclusion, budgets, lease/lock: `docs/design/realtime-scrapers.md`. (The `epoch_job` it
+  idles. Since W2-a5 a pass drains **`LOCATION_RESOLVE_WORKERS`** slices concurrently (env on the
+  Railway service, default 4, clamped 1–8; one thread + one session connection each, disjoint by
+  SKIP LOCKED) — the heartbeat's `workers`/`failed_batches` say what actually ran. A failed
+  batch costs one slice (rolled back, rows stay queued, 2s→30s backoff); five consecutive, or a
+  lost connection after one reconnect, stop a worker. Prefetch ceiling 90 s
+  (`LOCATION_RESOLVE_PREFETCH_TIMEOUT_S`). The GH lane stays single-connection. Exclusion, budgets, lease/lock: `docs/design/realtime-scrapers.md`. (The `epoch_job` it
   had to be idled before is gone with the pin-collision engine, W2-a.)
 
 ## Pipeline verification (migration 274)

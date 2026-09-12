@@ -1974,26 +1974,50 @@ def test_location_town_coverage_is_red_while_any_czech_listing_lacks_a_town() ->
     from scripts.verify_pipeline import check_location_town_coverage
 
     conn = _ShapeDriftConn([
-        ("bazos", 40_000, 0, 120, 39_500),
-        ("idnes", 30_000, 900, 11_000, 18_000),
-        ("sreality", 200_000, 0, 0, 199_000),
+        ("bazos", 40_000, 0, 120, 39_500, 0),
+        ("idnes", 30_000, 900, 11_000, 18_000, 0),
+        ("sreality", 200_000, 0, 0, 199_000, 0),
     ])
     out = check_location_town_coverage(conn, T)
     assert out["status"] == "fail"
     assert out["value"] == 12_020
     assert out["details"]["no_row"] == 900 and out["details"]["cz_no_town"] == 11_120
+    assert out["details"]["display_no_row"] == 0
     assert "idnes: 900 without a row, 11,000 Czech without a town" in out["message"]
     assert "sreality" not in out["message"]
     assert any("statement_timeout" in s for s in conn.executed)
 
 
+def test_location_town_coverage_is_red_on_delisted_display_listings_alone() -> None:
+    """W2-a4. `browse_projection` serves `properties WHERE status = 'active'` — the MERGE
+    lifecycle, not `is_active` — so a DELISTED property is still a Browse row, rendered from
+    its `repr_listing_ref_id` display listing, which is `is_active = false`. Every active
+    listing can have a town and the check still has to be red: after W3 those rows show no
+    place and drop off the map. The old scope could not see them at all."""
+    from scripts.verify_pipeline import check_location_town_coverage
+
+    out = check_location_town_coverage(_ShapeDriftConn([
+        ("bazos", 40_000, 0, 0, 40_000, 0),
+        ("remax", 30_000, 0, 0, 30_000, 4_200),
+    ]), T)
+    assert out["status"] == "fail"
+    assert out["value"] == 4_200
+    assert out["details"]["no_row"] == 0 and out["details"]["cz_no_town"] == 0
+    assert out["details"]["display_no_row"] == 4_200
+    assert out["details"]["cells"][1]["display_no_row"] == 4_200
+    assert "remax: 0 without a row, 0 Czech without a town, 4,200 delisted display " \
+           "listings without a row" in out["message"]
+    assert "bazos" not in out["message"]
+
+
 def test_location_town_coverage_is_ok_only_at_zero() -> None:
     from scripts.verify_pipeline import check_location_town_coverage
 
-    out = check_location_town_coverage(
-        _ShapeDriftConn([("bazos", 40_000, 0, 0, 39_000), ("idnes", 30_000, 0, 0, 10_000)]), T)
+    out = check_location_town_coverage(_ShapeDriftConn([
+        ("bazos", 40_000, 0, 0, 39_000, 0), ("idnes", 30_000, 0, 0, 10_000, 0)]), T)
     assert out["status"] == "ok" and out["value"] == 0
     assert out["details"]["cells"][1]["town_share"] == 10_000 / 30_000
+    assert "delisted display listing" in out["message"]
 
 
 def test_location_town_coverage_counts_undetermined_as_czech() -> None:
@@ -2007,6 +2031,27 @@ def test_location_town_coverage_counts_undetermined_as_czech() -> None:
     # W2-a repointed it: the frozen projection is not the coverage denominator any more.
     assert "listing_location_current" not in flat
     assert "where l.is_active" in flat
+
+
+def test_location_town_coverage_is_scoped_to_what_browse_serves_not_to_is_active() -> None:
+    """W2-a4. The guard and the producer must not disagree about who is in scope, so the
+    driving predicate is stated exactly as `drain._SWEEP_SQL` states it. The four original
+    counts keep their old meaning by filtering on `l.is_active`, so the per-portal series is
+    continuous across the widening; `display_no_row_n` is the cohort the old scope could not
+    see at all."""
+    from location_data.resolver import drain
+    from scripts.verify_pipeline import _LOCATION_TOWN_COVERAGE_SQL
+
+    flat = " ".join(_LOCATION_TOWN_COVERAGE_SQL.split()).lower()
+    served = ("exists (select 1 from properties pr where pr.repr_listing_ref_id = l.id "
+              "and pr.status = 'active')")
+    assert served in flat
+    assert served in " ".join(drain._SWEEP_SQL.split()).lower()
+    assert "where l.is_active or exists" in flat
+    assert "count(*) filter (where not l.is_active and p.listing_id is null) as display_no_row_n" in flat
+    for original in ("as active_n", "as no_row_n", "as cz_no_town_n", "as town_n"):
+        assert original in flat, original
+    assert flat.count("filter (where l.is_active") == 4
 
 
 # --- location_payload_shape_drift (W4's standing P6 check) ---------------------

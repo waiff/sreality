@@ -20,8 +20,7 @@ matched the portal's own absolute <strong> price). Any other price discrepancy
 is logged for operator review, never written.
 
 This writes NO snapshot (rule #2 governs source-content changes; correcting our
-own mis-parse of the SAME staged state is a data-quality fix — the
-backfill_bazos_coords posture). The area columns ARE in the ScrapedListing
+own mis-parse of the SAME staged state is a data-quality fix). The area columns ARE in the ScrapedListing
 content hash, so each healed listing's NEXT successful detail refetch computes
 a hash differing from its latest snapshot and appends ONE genuine snapshot —
 bounded, correct, self-limiting.

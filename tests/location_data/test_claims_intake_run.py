@@ -1,7 +1,7 @@
 """The run loop: refusals, batch discipline, the hash gate, and what gets written.
 
-No database. These assert the invariants that only the RUNNER can break — the lane-input
-refusal, the single-statement atomicity of claim + `dirty_locations`, the keyset/watermark
+No database. These assert the invariants that only the RUNNER can break — the
+single-statement atomicity of claim + `dirty_locations`, the keyset/watermark
 contract of the two batch queries, and the `portal_raw_payloads.contract_version` gate that
 bounds the page half by page churn rather than by corpus size.
 """
@@ -18,7 +18,6 @@ from location_data.claims_intake import (
     _BATCH_FINISH_SQL,
     _BATCH_INSERT_SQL,
     _CLAIM_WRITE_SQL,
-    _INVENTORY_TERMINAL_SQL,
     _LISTINGS_FULL_SQL,
     _LISTINGS_INCREMENTAL_SQL,
     _RESUME_SQL,
@@ -26,15 +25,15 @@ from location_data.claims_intake import (
     _SNAPSHOT_SEED_SQL,
     _STAMP_MINED_SQL,
     _UNMINED_BODIES_SQL,
-    _UNMINED_BODIES_WHERE,
     _UNMINED_BODY_BACKLOG_SQL,
+    _UNMINED_WINDOW_SQL,
+    _UNMINED_WINDOW_WHERE,
     BODIES_BUDGET_SHARE,
     DEFAULT_MAX_SECONDS,
     MAX_BATCH_SIZE,
     MIN_BATCH_SIZE,
     IntakeRefused,
     _row_from_record,
-    assert_inventory_ready,
     extract_listing,
     main,
     stamp_mined_bodies,
@@ -66,10 +65,6 @@ class _Cursor:
         if "to_regclass" in self._sql:
             name = self._conn.executed[-1][1]["name"]
             return (None if name in self._conn.missing else name,)
-        if "count(*) FROM mapy_affected" in self._sql:
-            return (self._conn.inventory_rows,)
-        if "FROM mapy_inventory_runs" in self._sql:
-            return self._conn.inventory_runs
         return (1, 1)
 
     def fetchall(self):
@@ -77,12 +72,8 @@ class _Cursor:
 
 
 class _Conn:
-    def __init__(self, *, missing=(), inventory_rows=1, inventory_runs=None):
+    def __init__(self, *, missing=()):
         self.missing = set(missing)
-        self.inventory_rows = inventory_rows
-        # (run_count, max restart_epoch, a completed+resumable run exists, status list)
-        self.inventory_runs = (
-            inventory_runs if inventory_runs is not None else (3, 0, True, "completed"))
         self.executed: list[tuple[str, object]] = []
 
     def cursor(self):
@@ -90,59 +81,6 @@ class _Conn:
 
     def transaction(self):
         return _Cursor(self)
-
-
-def test_the_lane_refuses_to_run_without_the_mapy_inventory_table():
-    with pytest.raises(IntakeRefused, match="migration 385"):
-        assert_inventory_ready(_Conn(missing={"mapy_affected"}))
-
-
-def test_the_lane_refuses_to_run_on_an_empty_mapy_inventory():
-    """An empty inventory would admit every carry_forward coordinate as first-party — the
-    inventory is a W1 INPUT, not a W1 output (06 §6.1.2)."""
-    with pytest.raises(IntakeRefused, match="empty"):
-        assert_inventory_ready(_Conn(inventory_rows=0))
-    assert assert_inventory_ready(_Conn(inventory_rows=2201)) == 2201
-
-
-def test_a_partially_built_inventory_is_refused_even_though_it_is_not_empty():
-    """The inventory job is batched and resumable, so a budget-stopped run leaves a
-    populated table describing a PREFIX of `listings`. Every listing past that prefix then
-    reads as ABSENT from the inventory — which is precisely the verdict that admits a
-    Mapy-derived `carry_forward` coordinate as first-party (06 §6.1.2). `count(*) > 0` is
-    not the gate; a terminal, complete, unanchored run in the current epoch is."""
-    for runs in (
-        (1, 0, False, "running"),                      # still going
-        (1, 0, False, "stopped"),                      # hit its budget
-        (2, 0, False, "failed,stopped"),               # never finished
-        (3, 1, False, "running"),                      # a --restart epoch, mid-flight
-    ):
-        with pytest.raises(IntakeRefused, match="INCOMPLETE"):
-            assert_inventory_ready(_Conn(inventory_rows=2201, inventory_runs=runs))
-
-    # A completed epoch-0 sweep does NOT vouch for an epoch-1 restart: the completeness
-    # question is asked inside the CURRENT epoch only (migration 385's own contract).
-    with pytest.raises(IntakeRefused, match="restart epoch 1"):
-        assert_inventory_ready(
-            _Conn(inventory_rows=2201, inventory_runs=(4, 1, False, "stopped")))
-
-    # Terminal AND complete AND unanchored: admitted.
-    assert assert_inventory_ready(
-        _Conn(inventory_rows=2201, inventory_runs=(2, 1, True, "completed,stopped"))) == 2201
-
-
-def test_an_unaccounted_inventory_is_refused():
-    """Rows in `mapy_affected` with no run that produced them cannot be shown complete."""
-    with pytest.raises(IntakeRefused, match="no rows"):
-        assert_inventory_ready(_Conn(inventory_rows=2201, inventory_runs=(0, 0, False, None)))
-
-
-def test_only_a_completed_inventory_run_is_read_from_the_current_epoch():
-    """The SQL asks migration 385's question, not a looser one."""
-    sql = " ".join(_INVENTORY_TERMINAL_SQL.split())
-    assert "r.status = 'completed'" in sql
-    assert "AND r.resumable" in sql
-    assert "r.restart_epoch = (SELECT max(restart_epoch) FROM mapy_inventory_runs)" in sql
 
 
 def test_claim_and_dirty_enqueue_are_one_statement():
@@ -161,6 +99,28 @@ def test_claim_and_dirty_enqueue_are_one_statement():
     assert "INSERT INTO dirty_locations" in one
     assert "'claim_insert'" in one
     assert (inserted, enqueued) == (1, 1)
+
+
+def test_the_enqueue_bumps_a_row_that_is_already_queued():
+    """W2-a2. `DO NOTHING` here was total, silent loss of the re-mine: on 2026-09-12 the nine
+    contract bumps re-mined ~60k listings whose rows were already queued from the previous
+    sweep, so the enqueue was a no-op, the drain resolved them from the OLD claims and deleted
+    the queue row — 384,500 answer rows, 135 with a town, and nothing left to re-enqueue them.
+    The statement the lane actually executes must carry the bump, not just the constant."""
+    conn = _Conn()
+    result = extract_listing(
+        listing("sreality", SREALITY_POST_CUTOVER, lat=50.078, lon=14.450),
+        entries_for("sreality"))
+    with conn.cursor() as cur:
+        write_result(cur, result)
+
+    one = next(s for s, _ in conn.executed if "INSERT INTO dirty_locations" in s)
+    enqueue = " ".join(one.split()).lower().split("insert into dirty_locations")[1]
+    assert "on conflict (listing_id) do nothing" not in enqueue
+    assert "on conflict (listing_id) do update" in enqueue
+    for fragment in ("set enqueued_at = now()", "reason = excluded.reason",
+                     "attempts = 0", "next_eligible_at = now()"):
+        assert fragment in enqueue, fragment
 
 
 def test_the_lane_writes_claims_and_nothing_else():
@@ -185,17 +145,13 @@ def test_the_claim_write_dedupes_within_the_batch():
     assert "DISTINCT ON (claim_fingerprint)" in _CLAIM_WRITE_SQL
 
 
-def test_a_licence_refusal_is_counted_not_recorded():
-    """A withheld coordinate used to be an absence ROW per listing. It is a counter on the
-    result and one log line per reason per batch now — the thing an operator reads."""
-    row = listing("sreality", SREALITY_TRUNCATED, lat=50.078, lon=14.450,
-                  in_mapy_inventory=True)
+def test_a_refusal_is_counted_not_recorded():
+    """A refusal used to be an absence ROW per listing. It is a counter on the result and
+    one log line per reason per batch now — the thing an operator reads."""
+    row = listing("sreality", SREALITY_TRUNCATED, lat=50.078, lon=14.450)
     result = extract_listing(row, entries_for("sreality"))
     assert result.claims == []
-    assert dict(result.refusals) == {
-        "coordinate_withheld:listing_in_mapy_affected_inventory": 1,
-        "sreality_payload_shape:absent": 1,
-    }
+    assert dict(result.refusals) == {"sreality_payload_shape:absent": 1}
     conn = _Conn()
     with conn.cursor() as cur:
         write_result(cur, result)
@@ -260,7 +216,7 @@ def test_the_selections_carry_no_listings_column_the_lane_cannot_read():
 
     scan = _row_from_record(_RECORD)
     assert not hasattr(scan.row, "legacy_columns")
-    assert scan.row.lat is None and scan.row.in_mapy_inventory is False
+    assert scan.row.lat is None and scan.row.lon is None
     assert (scan.body.id, scan.body.page_kind) == (91, "detail")
     assert (scan.body_unmined, scan.contract_version) == (True, 5)
     assert scan.snapshot_cursor == 4242
@@ -361,7 +317,7 @@ def test_the_batch_row_carries_the_cursor_and_the_mode_that_wrote_it():
     resume = " ".join(_RESUME_SQL.split())
     assert "scan_mode = %(scan_mode)s" in resume
     # An operator-anchored run's cursor does not certify that everything below it was
-    # scanned (migration 385 puts the same guard on `mapy_inventory_runs`).
+    # scanned.
     assert "AND resumable" in resume
     assert "ORDER BY started_at DESC, id DESC" in resume
 
@@ -385,7 +341,7 @@ def test_no_write_statement_touches_an_existing_production_table():
 # portal's ACTIVE contract version and the snapshot cursor (NULL outside incremental mode),
 # which is the LAST column since W1-c deleted the legacy-column tail that used to follow it.
 _RECORD = (7, "ceskereality", "3822640", {"id": "3822640"},
-           datetime(2026, 8, 13, 6, 0, tzinfo=UTC), None, None, False,
+           datetime(2026, 8, 13, 6, 0, tzinfo=UTC), None, None,
            91, True, "detail", "ab" * 32, datetime(2026, 8, 13, 5, 0, tzinfo=UTC), 5,
            4242)
 
@@ -425,33 +381,61 @@ def test_the_hash_gate_is_is_distinct_from_against_the_portals_own_active_contra
         # Per PORTAL, resolved in SQL: one portal's version can never gate another's body.
         assert "LEFT JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active" in one
     # The bodies-first pass asks the same question as a PREDICATE rather than as a
-    # projected verdict — it selects only what the gate admits.
-    for sql in (_UNMINED_BODIES_SQL, _UNMINED_BODY_BACKLOG_SQL):
+    # projected verdict — it selects only what the gate admits. It lives in the WINDOW (and
+    # in the backlog readout, which is both statements' predicates rebuilt): the window IS
+    # the eligibility gate, and the outer statement only resolves the ids it named.
+    for sql in (_UNMINED_WINDOW_SQL, _UNMINED_BODY_BACKLOG_SQL):
         one = " ".join(sql.split())
         assert "AND p.contract_version IS DISTINCT FROM pc.version" in one
-        assert "JOIN portal_contracts pc ON pc.source = l.source AND pc.is_active" in one
+    # Per PORTAL, off the PAYLOAD row — `p.source`, not `l.source`: the window is planned
+    # without `listings` at all, and the join is the same one on both sides of the fence.
+    for sql in (_UNMINED_WINDOW_SQL, _UNMINED_BODIES_SQL, _UNMINED_BODY_BACKLOG_SQL):
+        one = " ".join(sql.split())
+        assert "JOIN portal_contracts pc ON pc.source = p.source AND pc.is_active" in one
 
 
 def test_the_bodies_first_pass_walks_the_payload_table_on_an_in_run_keyset():
-    """WHY NOT "no cursor, the stamp is the progress": four paths leave a body UNSTAMPED (a
-    bucket miss, a missing scope register, a content-triggered refusal, a scoper that failed
-    closed) and three are deterministic per body. Ordered by id with no cursor, those sit at
-    the head forever — re-fetched every batch, and once `cap` of them accumulate the batch
-    stamps nothing and the whole backlog stalls behind them, silently. The keyset walks
-    past: `after_body_id` starts at 0 each run (so the contract-version gate still decides
-    what is eligible) and advances past every row a batch selected."""
-    selection = " ".join(_UNMINED_BODIES_SQL.split())
-    assert selection.split("SELECT")[0].strip() == ""
-    assert "FROM portal_raw_payloads p" in selection
-    assert "WHERE p.id > %(after_body_id)s" in selection
-    assert "ORDER BY p.id LIMIT %(cap)s" in selection
+    """WHY NOT "no cursor, the stamp is the progress": four paths leave a body UNSTAMPED and
+    three are deterministic per body, so with no cursor they sit at the head for ever —
+    re-fetched every batch, and once `cap` of them accumulate the batch stamps nothing and
+    the whole backlog stalls behind them, silently. The keyset walks past: `after_body_id`
+    starts at 0 each run (the contract-version gate still decides what is eligible) and
+    advances past every id the WINDOW named."""
+    window = " ".join(_UNMINED_WINDOW_SQL.split())
+    assert window.startswith("SELECT p.id FROM portal_raw_payloads p")
+    assert "WHERE p.id > %(after_body_id)s" in window
     # A `pb.` would be a column this FROM clause does not have: the select list is derived
     # from the listing scan's by replacement, so drift has to fail here.
-    assert "pb." not in selection
+    assert "pb." not in " ".join(_UNMINED_BODIES_SQL.split())
+
+
+def test_the_window_is_a_limit_subquery_that_never_touches_listings():
+    """THE PLANNER PROOF (W1-a4). With the keyset in one statement's WHERE, Postgres planned
+    the selection from `listings` — a bitmap scan of every active page-portal row, a payload
+    probe and the latest-body subquery PER ROW, then a sort, with `p.id > after` applied as
+    a POST-FILTER — so each batch paid the whole corpus (~150 s; run 34689928656 died on the
+    600 s statement timeout, 2026-09-12). `ORDER BY p.id LIMIT %(cap)s` over payload columns
+    ALONE is an optimizer fence: planned by itself it is an index scan of the payload
+    primary key that stops after `cap` rows. A `listings` reference anywhere in it — even in
+    a predicate that looks free — puts the join back inside the fence and the plan reverts.
+    """
+    window = " ".join(_UNMINED_WINDOW_SQL.split())
+    assert window.endswith("ORDER BY p.id LIMIT %(cap)s"), (
+        "the window must end at its own ORDER BY + LIMIT: that pair is the fence that "
+        "pins the walk to portal_raw_payloads_pkey")
+    for table in ("listings", " l.", "l.is_active"):
+        assert table not in window, (
+            f"{table!r} inside the window puts the join back inside the fence and the "
+            "planner goes back to walking listings once per batch")
+    # The outer statement resolves ONLY the ids the window named — no bound of its own, or
+    # a window row dropped by the joins would silently shorten the batch.
+    bodies = " ".join(_UNMINED_BODIES_SQL.split())
+    assert "WHERE p.id = ANY(%(ids)s::bigint[])" in bodies
+    assert "LIMIT" not in bodies
 
 
 def test_a_listing_with_no_stored_body_yields_no_candidate():
-    bodiless = (*_RECORD[:8], None, None, None, None, None, 5, None)
+    bodiless = (*_RECORD[:7], None, None, None, None, None, 5, None)
     scan = _row_from_record(bodiless)
     assert scan.body is None and scan.body_unmined is False
     assert scan.contract_version == 5 and scan.row.listing_id == 7
@@ -462,17 +446,24 @@ def test_the_bodies_first_pass_selects_the_latest_body_of_an_active_listing_only
     hold; paying R2 for its stored page body ahead of ~250 000 live ones is not. The
     portals are a parameter, not a literal: only the sources whose contract declares a page
     entry have bodies worth fetching, and that set lives in the reader registry."""
+    # The portal and page-kind filters are on the PAYLOAD row, so the window can ask them
+    # without `listings` (the join makes `p.source` and `l.source` the same column anyway).
+    # They are the WINDOW's job: the outer statement only resolves the ids it named.
+    for sql in (_UNMINED_WINDOW_SQL, _UNMINED_BODY_BACKLOG_SQL):
+        one = " ".join(sql.split())
+        assert "p.page_kind = 'detail'" in one
+        assert "p.source = ANY(%(page_sources)s::text[])" in one
+        assert "(%(source)s::text IS NULL OR p.source = %(source)s)" in one
     for sql in (_UNMINED_BODIES_SQL, _UNMINED_BODY_BACKLOG_SQL):
         one = " ".join(sql.split())
         assert "AND l.is_active" in one
-        assert "l.source = ANY(%(page_sources)s::text[])" in one
-        assert "(%(source)s::text IS NULL OR l.source = %(source)s)" in one
         # THE SAME definition of "the latest detail body" the listing scan's lateral
-        # applies, asked from the other direction: `last_observed_at`, never
-        # `first_observed_at` (a page that goes A -> B -> A appends no third row, it bumps
-        # A) and never `version_seq` (403 added it with no backfill).
-        assert "ORDER BY p2.last_observed_at DESC, p2.id DESC LIMIT 1" in one
-        assert "p.page_kind = 'detail'" in one
+        # applies, asked from the other direction and as an ANTI-JOIN (one probe per
+        # candidate id, not one per listing): `last_observed_at`, never `first_observed_at`
+        # (a page that goes A -> B -> A appends no third row, it bumps A) and never
+        # `version_seq` (403 added it with no backfill).
+        assert "NOT EXISTS ( SELECT 1 FROM portal_raw_payloads p2" in one
+        assert "(p2.last_observed_at, p2.id) > (p.last_observed_at, p.id)" in one
         assert "p2.page_kind = 'detail'" in one
     selection = " ".join(_UNMINED_BODIES_SQL.split())
     # No `raw_json`: the page substrate is the BODY, and a 1 500-row batch would otherwise
@@ -481,18 +472,18 @@ def test_the_bodies_first_pass_selects_the_latest_body_of_an_active_listing_only
     assert "NULL::jsonb" in selection
 
 
-def test_the_backlog_count_is_the_selection_without_its_bound():
+def test_the_backlog_count_is_both_statements_predicates_rebuilt():
     """The summary's "backlog remaining" must be the same question the drain asks, or the
-    operator reads a number that never reaches zero."""
+    operator reads a number that never reaches zero. The drain now asks it in two halves —
+    the window's eligibility gate, then the active listing and the latest-body rule — so the
+    readout is built from the same two pieces rather than written out again."""
     count = " ".join(_UNMINED_BODY_BACKLOG_SQL.split())
-    selection = " ".join(_UNMINED_BODIES_SQL.split())
     assert count.startswith("SELECT count(*) FROM portal_raw_payloads p")
-    # Same predicate, no bound of its own: the drain's `ORDER BY p.id LIMIT %(cap)s` is the
-    # only difference (the `LIMIT 1` inside the latest-body probe is shared). The readout
-    # passes `after_body_id = 0`, so it counts the backlog rather than the run's remainder.
-    where = " ".join(_UNMINED_BODIES_WHERE.split())
-    assert where in count and where in selection
-    assert count.endswith(where)
+    gate = " ".join(_UNMINED_WINDOW_WHERE.split())
+    assert gate in count and gate in " ".join(_UNMINED_WINDOW_SQL.split())
+    # The readout passes `after_body_id = 0`, so it counts the whole backlog rather than
+    # the remainder of the run — and carries no `cap`, so it is never a window.
+    assert "%(after_body_id)s" in count and "%(cap)s" not in count
 
 
 def test_the_backlog_readout_runs_after_the_terminal_stamp():

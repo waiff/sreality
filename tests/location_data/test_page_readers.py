@@ -94,7 +94,6 @@ def listing_row(**overrides: Any) -> ListingRow:
     kwargs: dict[str, Any] = {
         "listing_id": 4242, "source": "remax", "source_id_native": "445781",
         "raw_json": {}, "lat": None, "lon": None, "observed_at": FETCHED_AT,
-        "in_mapy_inventory": False,
     }
     kwargs.update(overrides)
     return ListingRow(**kwargs)
@@ -302,19 +301,18 @@ def test_the_anchor_is_the_only_one_the_check_allows_beside_a_null_snapshot():
 
 # ------------------------------------------------------------------ the licence ladder
 
-def test_mapy_membership_vetoes_a_coordinate_on_the_archived_substrate_too():
-    """06 §6.4's gate is `claims JOIN <R2 inventory> USING (listing_id) WHERE
-    claim_type='coordinate'` = 0. Re-reading the same position out of an archived page is
-    the same position."""
+def test_the_archived_arm_licenses_the_rules_own_locator_and_nothing_else():
+    """The ladder's first rung used to be the Mapy inventory, above the substrate branch.
+    With the geocoder deleted (W4-b) the ENTRY ID is the whole gate on this arm: the one
+    locator `ARCHIVED_COORDINATE_RULES` names is licensed, every other name is refused."""
     admitted = coordinate_verdict(
-        "remax", None, in_mapy_inventory=False, substrate=SUBSTRATE_ARCHIVED_HTML,
-        entry_id="rx.det.gps")
-    vetoed = coordinate_verdict(
-        "remax", None, in_mapy_inventory=True, substrate=SUBSTRATE_ARCHIVED_HTML,
-        entry_id="rx.det.gps")
+        "remax", None, substrate=SUBSTRATE_ARCHIVED_HTML, entry_id="rx.det.gps")
     assert admitted.admitted and admitted.licence_class == "portal"
-    assert not vetoed.admitted
-    assert vetoed.reason == "listing_in_mapy_affected_inventory"
+    for stamp in ("geocode", "street", "locality", "carry_forward"):
+        # The stamp is not consulted on this arm at all — the locator is.
+        assert coordinate_verdict(
+            "remax", stamp, substrate=SUBSTRATE_ARCHIVED_HTML,
+            entry_id="rx.det.gps").admitted
 
 
 def test_remax_admits_the_same_pin_on_both_substrates_once_it_is_stamped():
@@ -322,22 +320,21 @@ def test_remax_admits_the_same_pin_on_both_substrates_once_it_is_stamped():
     provenance, so the payload arm refused the very `#printMap[data-gps]` pin the archived
     arm admitted. The parser now stamps the subject-map pin `page`; an UNSTAMPED row (drained
     before the stamp) is still refused on the payload arm, never admitted on faith."""
-    assert coordinate_verdict("remax", "page", in_mapy_inventory=False).admitted
-    assert coordinate_verdict("remax", None, in_mapy_inventory=False).reason == (
+    assert coordinate_verdict("remax", "page").admitted
+    assert coordinate_verdict("remax", None).reason == (
         "coordinate_provenance_unestablished")
     assert coordinate_verdict(
-        "remax", None, in_mapy_inventory=False, substrate=SUBSTRATE_ARCHIVED_HTML,
-        entry_id="rx.det.gps").admitted
+        "remax", None, substrate=SUBSTRATE_ARCHIVED_HTML, entry_id="rx.det.gps").admitted
 
 
 def test_realitymix_nominatim_branch_is_odbl_never_portal():
     """C6: ODbL follows the geometry, not the republisher. `/build/maps.913b4199.js` calls
     nominatim.openstreetmap.org whenever `data-gps-*` is absent."""
     pinned = coordinate_verdict(
-        "realitymix", None, in_mapy_inventory=False, substrate=SUBSTRATE_ARCHIVED_HTML,
+        "realitymix", None, substrate=SUBSTRATE_ARCHIVED_HTML,
         entry_id="rm.det.gps", portal_pin_present=True)
     geocoded = coordinate_verdict(
-        "realitymix", None, in_mapy_inventory=False, substrate=SUBSTRATE_ARCHIVED_HTML,
+        "realitymix", None, substrate=SUBSTRATE_ARCHIVED_HTML,
         entry_id="rm.det.gps", portal_pin_present=False)
     assert pinned.licence_class == "portal"
     assert geocoded.admitted and geocoded.licence_class == "odbl"
@@ -345,7 +342,7 @@ def test_realitymix_nominatim_branch_is_odbl_never_portal():
 
 def test_a_portal_with_no_geocoded_branch_refuses_a_pinless_coordinate():
     verdict = coordinate_verdict(
-        "remax", None, in_mapy_inventory=False, substrate=SUBSTRATE_ARCHIVED_HTML,
+        "remax", None, substrate=SUBSTRATE_ARCHIVED_HTML,
         entry_id="rx.det.gps", portal_pin_present=False)
     assert not verdict.admitted
     assert verdict.reason == "coordinate_provenance_unestablished"
@@ -355,7 +352,7 @@ def test_an_unruled_locator_gets_no_coordinate():
     """A later per-portal PR cannot license a second coordinate locator by declaring
     `claim_type: coordinate`; it has to add a row to the table and argue for it."""
     verdict = coordinate_verdict(
-        "remax", None, in_mapy_inventory=False, substrate=SUBSTRATE_ARCHIVED_HTML,
+        "remax", None, substrate=SUBSTRATE_ARCHIVED_HTML,
         entry_id="rx.det.carousel_gps")
     assert not verdict.admitted
     assert verdict.reason == "unrecognised_archived_coordinate_locator"
@@ -364,8 +361,7 @@ def test_an_unruled_locator_gets_no_coordinate():
 @pytest.mark.parametrize("source", ["sreality", "bezrealitky", "ceskereality"])
 def test_a_portal_with_no_archived_detail_map_gets_no_archived_coordinate(source):
     verdict = coordinate_verdict(
-        source, None, in_mapy_inventory=False, substrate=SUBSTRATE_ARCHIVED_HTML,
-        entry_id="whatever")
+        source, None, substrate=SUBSTRATE_ARCHIVED_HTML, entry_id="whatever")
     assert not verdict.admitted
 
 
@@ -390,13 +386,14 @@ def test_the_archived_rules_name_the_seven_entries_and_only_current_licence_spel
     assert declared == {"portal", "odbl"}
 
 
-def test_the_payload_substrate_ladder_is_byte_for_byte_unchanged():
-    """Every W1/W3 call site passes no `substrate`, so the default arm must still answer
-    exactly as it did."""
-    assert coordinate_verdict("sreality", None, in_mapy_inventory=False).licence_class == "portal"
-    assert not coordinate_verdict("bazos", "geocode", in_mapy_inventory=False).admitted
-    assert coordinate_verdict("idnes", "carry_forward", in_mapy_inventory=False).admitted
-    assert not coordinate_verdict("idnes", "carry_forward", in_mapy_inventory=True).admitted
+def test_the_payload_arm_takes_only_the_portals_own_pin():
+    """Every W1/W3 call site passes no `substrate`. `carry_forward` used to be admitted on
+    this arm whenever the listing was absent from the Mapy inventory; W4-b deleted the
+    producer and the rung with it, so the stamp licenses nothing on any portal."""
+    assert coordinate_verdict("sreality", None).licence_class == "portal"
+    assert not coordinate_verdict("bazos", "geocode").admitted
+    assert not coordinate_verdict("idnes", "carry_forward").admitted
+    assert coordinate_verdict("idnes", "page").admitted
 
 
 # ------------------------------------------------------- end to end through extract_page
@@ -448,15 +445,17 @@ def test_an_entry_declared_for_another_page_kind_never_runs():
     assert result.claims == []
 
 
-def test_a_coordinate_from_a_listing_in_the_mapy_inventory_becomes_a_refusal():
-    entry = archive_entry(entry_id="rx.det.gps", claim_type="coordinate")
+def test_a_coordinate_at_an_unruled_locator_becomes_a_counted_refusal():
+    """What the Mapy veto used to prove end to end — a refused coordinate is COUNTED, never
+    silently dropped — now proved on the rung that survived it."""
+    entry = archive_entry(entry_id="rx.det.carousel_gps", claim_type="coordinate")
     result = _with_reader(
         lambda entry, row, payload, document: [
             PageRead(_base(entry, row, value_geom_wkt="POINT(14.45 50.08)"),
                         position_branch=POSITION_BRANCH_PORTAL_PIN)],
-        [entry], in_mapy_inventory=True)
+        [entry])
     assert result.claims == []
-    assert dict(result.refusals) == {"listing_in_mapy_affected_inventory": 1}
+    assert dict(result.refusals) == {"unrecognised_archived_coordinate_locator": 1}
 
 
 def _realitymix_coordinate(branch: str | None, licence_class: str = "portal"):

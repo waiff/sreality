@@ -2007,7 +2007,19 @@ granularity-only circle below. The steps:
 * **FILL** (`fill.py`) joins the hierarchy off the bound ids: ONE `admin_chain` read returning the
   unit itself ahead of its ancestors. Administrative names and codes are ALWAYS the registry's own
   spelling; only street / čp / čo / PSČ may fall back to a claim, preserve-if-null, and only an
-  operator correction outranks the registry.
+  operator correction outranks the registry. It also fills **the position: the portal pin when
+  admissible, else the finest bound unit's point on surface** — the boundary's stored
+  inscribed-circle centre, inside the polygon where `ST_Centroid` need not be, read off the same
+  chain rather than as a tenth registry question. It WALKS that chain, because RÚIAN draws no
+  polygon for a část obce or a městský obvod and `ruian_streets` carries no geometry at all, so the
+  finest bound unit is often precisely the one with no point of its own; it refuses `stat` and
+  `region soudržnosti`, whose point would place a listing at the centre of the country. Grade,
+  confidence and radius are untouched — the LEVEL is what says how coarse a position is — and
+  `disputed` is never set by this path. Foreign and undetermined rows bind no Czech unit, so they
+  keep `geom NULL` by construction. Before W2-a3 (2026-09-12) the fallback lived in BIND and read
+  `ruian_admin_units.definition_point`, a column the loader has never written: **29 % of towned
+  rows (8,706 of 29,892) shipped with no position**, which W3's map — which re-sources lat/lng from
+  `listing_location` with no fallback of its own — would have dropped.
 * **GRADE** (`grade.py`) is two tables: `match_confidence` from how many INDEPENDENT fields agreed
   with the bound entity (`exact` an address point the pin corroborates, `high` ≥ 2 fields, `medium`
   one, `low` a tie-break or nothing), and `uncertainty_radius_m` from a per-level constant dict
@@ -2029,14 +2041,40 @@ a **daily cron** (`location_resolve.yml`, 03:17 UTC, `mode=full-resolve`); a lis
 claim gets an `undetermined` row (granularity `unknown`, no position) instead of no row, so
 coverage is `count(listing_location) = count(active listings)` by construction. Until 2026-09-11
 the sweep was three statements (a claim-driven stale sweep that could not see a claimless listing,
-a kraj-scoped cousin, an orphan sweep); they were folded into the one above under rule 25.
+a kraj-scoped cousin, an orphan sweep); they were folded into the one above under rule 25. Its
+driving predicate is what **Browse serves**, not what is active (W2-a4): `l.is_active OR EXISTS
+(properties pr WHERE pr.repr_listing_ref_id = l.id AND pr.status = 'active')`, because
+`browse_projection` serves `properties.status = 'active'` — the merge lifecycle, not `is_active` —
+so a delisted property is still a Browse row rendered from its `is_active = false` display listing,
+and `check_location_town_coverage` counts that same cohort (`display_no_row`) on the same red line
+(migration 505 indexes the correlated EXISTS — `CREATE INDEX CONCURRENTLY`, so it is applied through `apply_migration.yml`, never the MCP, which wraps every payload in a transaction).
+
+**The queue is re-entrant, and the sweep is the invariant's backstop** (W2-a2, 2026-09-12). Every
+evidence-producing enqueue — `claims_intake`'s `claim_insert`, `contracts.retract`'s batch,
+`operator_corrections`' `operator_edit` — is `ON CONFLICT (listing_id) DO UPDATE SET enqueued_at =
+now(), reason = EXCLUDED.reason, attempts = 0, next_eligible_at = now()`, and every statement that
+FINISHES a queue row (both deletes and the failure stamp) is bounded by the `enqueued_at` the slice
+claimed, so evidence arriving mid-slice leaves the row queued instead of deleted-unresolved; the
+sweep alone still uses `NOT EXISTS` + `DO NOTHING`, because it carries no evidence and a bump there
+would reset a poisoned row's backoff and push the queue's oldest row to the back. And `_SWEEP_SQL`
+has a fourth arm, `p.obec_kod IS NULL AND p.country_status <> 'foreign'`, so every active Czech
+listing without a town is re-resolved nightly until it has one or is determined foreign — the three
+version arms could not express it, because a townless row is stamped at the CURRENT version tuple.
+Both rules exist because the 2026-09-12 07:13Z contract bump re-mined ~60k listings whose rows were
+already queued from the previous ~540k-row sweep: every enqueue no-opped, the drain resolved them
+from the old claims and deleted the rows, and 384,500 answer rows with 135 towns had nothing left
+that could ever re-enqueue them.
 
 W2-a **deleted ~3,700 lines** and nine tables' worth of producers: survivorship (policy is code),
 the uncertainty-policy resolver, the contradiction ledger + its disposition log + the auto-close
 engine, the pin-collision epoch and its weekly cron, the parcel rung, the derived-column twin of
-migration 384's SQL functions, and the property-grain projection's builder. The registry protocol
-went from fifteen query kinds to nine and the drain's write path from seven statements per slice to
-one.
+migration 384's SQL functions, and the property-grain projection — which was a verbatim copy of its
+winner's row (migration 493 measured `p.kraj_kod` and `w.kraj_kod` agreeing on 0 of 637,381 rows),
+nothing outside one pg_cron statement read it, and it was the drain's only cross-listing write and
+therefore the stated reason the lane could not run concurrent workers (W2-a5 spent that). The
+registry protocol went from fifteen query kinds to nine — still nine after W2-a3, which folded the
+unit's own point into the chain answer rather than asking a tenth question — and the drain's write
+path from seven statements per slice to one.
 
 **W2-b then cut the readers and dropped the tables** (migration 502). Six modules read the W1
 projection: `location_quality` (the admin dashboard, rewritten onto the answer table — the
@@ -2226,8 +2264,17 @@ an **in-run keyset** on `p.id` (reset to 0 each run, so the contract-version gat
 what is eligible): four paths leave a body unstamped — a bucket miss, a missing scope register, a
 content-triggered refusal, a scoper that failed closed — and three are deterministic per body, so
 a stamp-only notion of progress would park them at the head of the order, re-fetch them every
-batch, and stall the entire backlog behind them once `cap` of them accumulated. The pass ends when
-a batch comes back short of `cap`. **A batch's bodies are extracted across PROCESSES** (W1-a3,
+batch, and stall the entire backlog behind them once `cap` of them accumulated. **Each batch is two
+statements in one transaction** (W1-a4): a fenced WINDOW — `ORDER BY p.id LIMIT %(cap)s` over
+payload columns ALONE — then the `listings` join and the latest-body anti-join over the ids it
+named. With the keyset in one statement's WHERE, Postgres planned the selection from `listings`
+instead — a bitmap scan of every active page-portal row, a payload probe and the latest-body
+subquery per row, then a sort, with `p.id > after` applied as a POST-FILTER — so every batch paid
+the whole corpus (~150 s of selection; the 11:23Z run on 2026-09-12 died on the 600 s statement
+timeout with 186,546 bodies queued). A LIMIT subquery is an optimizer FENCE: planned alone it is an
+index scan of `portal_raw_payloads_pkey` that stops after `cap` rows. **The cursor is the window's
+max id, not the surviving rows'** (a third of a window survives the joins, and advancing on the
+survivors would re-walk the rest for ever), and the pass ends when the WINDOW comes back short. **A batch's bodies are extracted across PROCESSES** (W1-a3,
 `page_readers.extract_pages`, `os.cpu_count()` wide): the parse is pure CPU and threads cannot
 share it, so one core held a 1 500-body batch at 143–313 s against ~48 s to fetch the same bodies.
 The pool is an accelerator only — one outcome per body IN ORDER, the `IntakeResult` or the
@@ -2266,7 +2313,11 @@ the pass complete for the same reason. It dispatches only after asking whether a
 `location-batch` is already waiting — `location_resolve.yml` included, which joins the group
 through a mode-conditional expression — because the group's single pending slot supersedes the
 OLDER entry, and an unyielding chain is what cancelled the hourly intake and an operator's
-full-resolve on 2026-09-10. Both halves complete is the steady state and chains nothing. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
+full-resolve on 2026-09-10. For the resolve lane the yield counts only `workflow_dispatch` runs:
+`gh run list` cannot report which group a queued run will take, and counting its `*/15` drain
+ticks — which run in `location-resolve-lane`, not in the group — stopped the chain on a routine
+07:58 tick and handed a 212 000-body backlog back to the sparse cron (2026-09-12, hop
+34681906422). Both halves complete is the steady state and chains nothing. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
 re-mine, the archived-HTML sweep, the verify lane and the LLM free-text lane, with the refetch
 cohort and the payload backfill/prune/churn tooling. The lane writes `location_claims`,
 `dirty_locations` and its own `location_claim_batches` ledger and nothing else:
@@ -2309,12 +2360,11 @@ deliberately does NOT take it. "The contract's claims" is every listing a portal
 (~5 M rows on sreality); a `DO` block cannot COMMIT, so batching inside one would still be ONE
 transaction that holds locks for its whole run and makes no progress at all if it is killed. The
 cleanup is `python -m location_data.contracts --retract <portal>@<version>`, which already deletes
-in bounded, individually-committed batches and resumes after an interruption. The claim lane's blocking gate is `claims JOIN
-mapy_affected WHERE claim_type='coordinate'` = 0, and it refuses to start unless the Mapy affected-set
-inventory (migration 385 — five arms, identity and reason codes, **never** a coordinate, and
-trigger-immutable: 42501 on UPDATE/DELETE/TRUNCATE) is TERMINAL *and* COMPLETE. Half-built is worse
-than none, because every listing past its high-water mark reads as absent — the verdict that admits a
-Mapy coordinate as first-party.
+in bounded, individually-committed batches and resumes after an interruption. **W4-b deleted the
+Mapy geocoder and the `mapy_affected` veto that policed it**: nothing mints a `geocode`/`street`/
+`locality`/`carry_forward` coordinate any more, so the ladder needs no row-by-row inventory to tell a
+laundered geocode from a portal's own pin — a coordinate claim comes only from the portal's payload
+or its own page, and every other stamp is class E outright.
 
 **The RÚIAN mirror is versioned, not mutated.** `ruian_*` (migration 381) holds ČÚZK's address points,
 streets, parcels, building objects, admin units and a typo-tolerant gazetteer. Every load stamps one
@@ -2391,10 +2441,10 @@ it DELETEs claims, and three tables still FK to `location_claims(id)` until 498.
 `tests/location_data/test_claims_relax_migration.py`, which derives the compulsory-column and CHECK
 lists from 382's own DDL rather than transcribing them.
 
-**Ops rules the incidents wrote.** The heavy lanes — registry load, claim intake, Mapy inventory —
-share the OUTER `location-batch` concurrency group so **at most one runs at a time** (each keeps its
-own inner group at job level); a new heavy lane joins it. It was seven lanes until 2026-09-11; rule
-25 left three. **The resolve drain left the group on 2026-09-10** (operator decision): it is the one
+**Ops rules the incidents wrote.** The heavy lanes — registry load and claim intake — share the
+OUTER `location-batch` concurrency group so **at most one runs at a time** (each keeps its own inner
+group at job level); a new heavy lane joins it. It was seven lanes until 2026-09-11; rule 25 left
+three, and W4-b's Mapy purge left two. **The resolve drain left the group on 2026-09-10** (operator decision): it is the one
 member that is latency-bound rather than instance-bound — a handful of small indexed reads and one
 answer-row write per listing (11 and 7 before W2-a; ~4 and 1 after), no COPY, no corpus scan, no
 detoast — so it contributed least to the incident and lost most
@@ -2414,7 +2464,20 @@ nothing else; per-unit and per-batch work arms `SET LOCAL statement_timeout` in 
 `tests/location_data/test_location_batch_hardening.py`). And the drain's cost is **round trips, not
 work**: from Actions it is network-RTT-bound at ~5–17 listings/s (~75 ms per GitHub↔`eu-west-1` trip
 against 0.02–0.5 ms of server-side work), so the slice-batching, memoization and prefetching that got
-it there compound if the lane ever moves onto the always-on Railway worker (~1–2 ms RTT).
+it there compound if the lane ever moves onto the always-on Railway worker (~1–2 ms RTT). **Since
+W2-a5 the worker lane drains `LOCATION_RESOLVE_WORKERS` slices CONCURRENTLY** (env var, default 4,
+`workers=` on `drain.run`; the GitHub lane stays at one connection) — one thread and one session-mode
+connection each, disjoint by `FOR UPDATE SKIP LOCKED`, sharing one lock-guarded `RunCache` and one
+lease on the caller's connection — which W2-a made safe by deleting the property rollup, the drain's
+only cross-listing write: every write left is keyed on a listing the slice already holds. It is the
+right lever because the loop waits rather than works — measured 2026-09-12 10:27Z, one loop drained
+~8 listings/s against a 448k queue while every backend on the instance sat in `DataFileRead`.
+**A failed BATCH costs one slice, never the worker** (W2-a6): the batch transaction rolls back, its
+rows stay queued exactly as claimed, the loop backs off (2 s doubling to 30 s) and claims again, and
+only five consecutive failures — or a lost connection, told apart by SQLSTATE because
+`QueryCanceled` is an `OperationalError` subclass, and reconnected once — stop a worker. The
+prefetch runs on its own 90 s ceiling, because a 250-listing bulk claims read legitimately outruns
+the 30 s a per-listing statement gets and cancelling it threw the whole batch away.
 
 ## Cross-reference map
 

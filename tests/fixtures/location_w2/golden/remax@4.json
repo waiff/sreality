@@ -10,7 +10,6 @@
       "row": {
         "lat": 50.053749999999994,
         "lon": 17.05588888888889,
-        "in_mapy_inventory": false,
         "listings.locality": "Velké Losiny",
         "listings.street": "Bukovická",
         "listings.street_source": "parser"
@@ -24,7 +23,6 @@
       "row": {
         "lat": 50.081,
         "lon": 14.4508,
-        "in_mapy_inventory": false,
         "listings.locality": null,
         "listings.street": null,
         "listings.street_source": null
@@ -38,7 +36,6 @@
       "row": {
         "lat": 50.081,
         "lon": 14.4508,
-        "in_mapy_inventory": false,
         "listings.locality": null,
         "listings.street": null,
         "listings.street_source": null

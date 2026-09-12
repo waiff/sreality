@@ -12,7 +12,7 @@ error at all:
 
 Two rails answer that, and this file is the gate on both:
 
-  1. the four lanes share ONE outer concurrency group, so they queue instead of competing;
+  1. the lanes share ONE outer concurrency group, so they queue instead of competing;
   2. no batch statement runs without a ceiling — a wedge has to become an error that the
      existing per-row / per-unit resilience already knows how to handle.
 
@@ -62,7 +62,6 @@ LOCATION_BATCH_WORKFLOWS = (
     # stored page body, so it carries what the four deleted lanes carried — a corpus scan,
     # an R2 fan-out and the claim writes in one transaction.
     "location_claims_intake.yml",
-    "location_mapy_inventory.yml",
 )
 OUTER_GROUP = "location-batch"
 
@@ -76,7 +75,7 @@ def _workflow(name: str) -> dict:
 
 @pytest.mark.parametrize("name", LOCATION_BATCH_WORKFLOWS)
 def test_every_location_batch_lane_is_in_the_shared_outer_group(name: str):
-    """One group across all four, so at most one heavy lane runs at a time."""
+    """One group across every lane, so at most one heavy lane runs at a time."""
     wf = _workflow(name)
     concurrency = wf.get("concurrency")
     assert concurrency, f"{name}: no workflow-level concurrency block"
@@ -344,8 +343,9 @@ def test_the_intake_preflight_reads_are_bounded_too():
         # batch row exists.
         "_LEGACY_WATERMARK_SQL": inspect.getsource(claims_intake._snapshot_seed),
         "_SNAPSHOT_SEED_SQL": inspect.getsource(claims_intake._snapshot_seed),
-        # ... and added one more: the drain's selection and its backlog readout.
-        "_UNMINED_BODIES_SQL": inspect.getsource(claims_intake.drain_unmined_bodies),
+        # ... and added one more: the drain's window and its backlog readout. (W1-a4 split
+        # the selection in two; the WINDOW is the statement that opens the block.)
+        "_UNMINED_WINDOW_SQL": inspect.getsource(claims_intake.drain_unmined_bodies),
         "_UNMINED_BODY_BACKLOG_SQL": inspect.getsource(
             claims_intake._unmined_body_backlog),
     }
@@ -354,6 +354,14 @@ def test_the_intake_preflight_reads_are_bounded_too():
         assert opener == "with guarded(conn, statement_timeout) as cur:", (
             f"{sql} is not read inside a guarded transaction (opener was {opener!r})"
         )
+    # And the drain's SECOND statement rides the SAME transaction — a window whose ids were
+    # resolved by a later, separate transaction could see a listing delisted in between.
+    drain = inspect.getsource(claims_intake.drain_unmined_bodies)
+    between = drain.split("cur.execute(_UNMINED_WINDOW_SQL")[1].split(
+        "cur.execute(_UNMINED_BODIES_SQL")[0]
+    assert "with guarded(" not in between, (
+        "the window and the join statement must share one guarded transaction"
+    )
 
 
 def test_the_intake_batch_budget_is_env_overridable(monkeypatch):
@@ -640,16 +648,24 @@ def test_the_chain_asks_every_workflow_that_can_hold_the_group():
     )
 
 
-# The chain's two `gh run list` calls differ only by the jq filter they pass, so a stub that
+# The chain's `gh run list` calls differ only by the jq filter they pass, so a stub that
 # ignored the filter would test the shell around the yield and not the yield. This one emits
-# the real `--json databaseId,status` shape and hands it to jq, exactly as gh does.
+# the real `--json databaseId,status,event` shape and hands it to jq, exactly as gh does —
+# and answers PER WORKFLOW, because the resolve lane's rule is not the others'.
 _GH_STUB = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_CALLS"
 case "$*" in
   *"run list"*) ;;
   *) exit 0 ;;
 esac
-payload="$GH_RUNS_WAITING"
+workflow=""
+for arg in "$@"; do
+  case "$arg" in --workflow=*) workflow="${arg#--workflow=}" ;; esac
+done
+slug=$(printf '%s' "$workflow" | tr 'a-z.-' 'A-Z__')
+per_workflow="GH_RUNS_WAITING_$slug"
+payload="${!per_workflow:-}"
+[ -n "$payload" ] || payload="$GH_RUNS_WAITING"
 case "$*" in *in_progress*) payload="$GH_RUNS_RUNNING" ;; esac
 filter=""
 while [ "$#" -gt 0 ]; do
@@ -661,8 +677,8 @@ done
 if command -v jq >/dev/null 2>&1; then
   printf '%s' "$payload" | jq -r "$filter"
 else
-  # No jq: emit every id in the payload and let the fixture be the filter. The two tests
-  # that need the filter ITSELF applied are skipped in this environment.
+  # No jq: emit every id in the payload and let the fixture be the filter. The tests that
+  # need the filter ITSELF applied are skipped in this environment.
   printf '%s' "$payload" | python3 -c 'import json,sys
 for run in json.load(sys.stdin):
     print(run["databaseId"])'
@@ -674,12 +690,19 @@ NEEDS_JQ = pytest.mark.skipif(
     reason="the stub applies gh's jq filter with jq; GitHub runners have it")
 
 
-def _runs(*rows: tuple[int, str]) -> str:
-    return json.dumps([{"databaseId": i, "status": s} for i, s in rows])
+def _runs(*rows: tuple[int, str] | tuple[int, str, str]) -> str:
+    """`gh run list --json databaseId,status,event`'s own shape. The event defaults to the
+    cron tick, which is what most queued runs in this fleet are."""
+    return json.dumps([
+        {"databaseId": row[0], "status": row[1],
+         "event": row[2] if len(row) > 2 else "schedule"}
+        for row in rows
+    ])
 
 
 def _run_chain(tmp_path: Path, summary: dict | str, *, waiting: str = "[]",
-               running: str = "[]", run_id: str = "77") -> tuple[str, list[str]]:
+               running: str = "[]", run_id: str = "77",
+               waiting_by_workflow: dict[str, str] | None = None) -> tuple[str, list[str]]:
     """Execute the chain script with a stub `gh`; returns (stdout, the gh calls it made)."""
     calls = tmp_path / "gh-calls.txt"
     calls.write_text("", encoding="utf-8")
@@ -698,6 +721,8 @@ def _run_chain(tmp_path: Path, summary: dict | str, *, waiting: str = "[]",
     env = {
         "PATH": f"{stub}:{os.environ['PATH']}", "GH_CALLS": str(calls),
         "GH_RUNS_WAITING": waiting, "GH_RUNS_RUNNING": running,
+        **{f"GH_RUNS_WAITING_{name.upper().replace('.', '_').replace('-', '_')}": rows
+           for name, rows in (waiting_by_workflow or {}).items()},
         "GITHUB_RUN_ID": run_id, "GITHUB_REF_NAME": "main",
         "CHAIN_SOURCE": "", "CHAIN_MODE": "incremental",
         "CHAIN_MAX_SECONDS": "2400", "CHAIN_BATCH_SIZE": "10000",
@@ -796,6 +821,62 @@ def test_the_waiting_query_sees_a_queued_sibling_among_finished_runs(tmp_path: P
 
     assert dispatched == []
     assert "chain yields" in out and "4242" in out
+
+
+RESOLVE = "location_resolve.yml"
+
+
+def test_only_the_resolve_lane_is_counted_by_dispatch(tmp_path: Path):
+    """The exception has to stay an exception. Every other member of `location-batch` is in
+    it whatever fired the run; the resolve lane is the one whose group is decided per run."""
+    env = _chain_step()["env"]
+    dispatch_only = set(env["DISPATCH_ONLY_WORKFLOWS"].split())
+
+    assert dispatch_only == {RESOLVE}
+    assert dispatch_only <= set(env["GROUP_WORKFLOWS"].split())
+    # The rule is only expressible if the query asks for the field it keys on.
+    assert "--json databaseId,status,event" in _chain_script()
+
+
+@NEEDS_JQ
+def test_a_queued_resolve_drain_tick_does_not_stop_the_chain(tmp_path: Path):
+    """THE PRODUCTION DEFECT (2026-09-12). Hop 34681906422 yielded to run 34682089264 — a
+    routine 07:58 `schedule` tick of the resolve lane, mode=drain, which runs in
+    `location-resolve-lane` and never touches `location-batch`. `gh run list` cannot report
+    a run's group, so counting every queued resolve run meant a `*/15` cadence stopped the
+    chain almost every time and handed a 212 000-body backlog back to a cron that fires ~7
+    times a day."""
+    out, dispatched = _run_chain(
+        tmp_path, BACKLOG,
+        waiting_by_workflow={RESOLVE: _runs((34682089264, "queued", "schedule"))})
+
+    assert len(dispatched) == 1, out
+    assert "chain yields" not in out
+
+
+@NEEDS_JQ
+def test_a_dispatched_resolve_run_still_stops_the_chain(tmp_path: Path):
+    """The other half, and the reason the resolve lane is in the list at all: an operator's
+    full-resolve IS in `location-batch`, and it is one of the two runs a chain hop evicted on
+    2026-09-10."""
+    out, dispatched = _run_chain(
+        tmp_path, BACKLOG,
+        waiting_by_workflow={RESOLVE: _runs((555, "queued", "workflow_dispatch"))})
+
+    assert dispatched == []
+    assert "chain yields" in out and "555" in out
+
+
+@NEEDS_JQ
+def test_a_scheduled_tick_of_a_permanent_member_still_stops_the_chain(tmp_path: Path):
+    """The exception is ONE workflow wide. The intake's own cron tick is a `schedule` run
+    that really is queued on `location-batch` — the run the chain exists to let through."""
+    out, dispatched = _run_chain(
+        tmp_path, BACKLOG,
+        waiting_by_workflow={INTAKE: _runs((4242, "queued", "schedule"))})
+
+    assert dispatched == []
+    assert "chain yields" in out
 
 
 def test_the_chain_never_stacks_on_an_intake_already_running(tmp_path: Path):

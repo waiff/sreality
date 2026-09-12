@@ -19,8 +19,7 @@ name: "Scraping: Bazos index walk"
 # backlog on its own bounded cadence.
 #
 # Scopes live in the `portals` registry row; coverage is tuned with a SQL update,
-# no workflow edit. The index walk needs no geocoding (that happens in the drain),
-# so no MAPY_CZ_API_KEY here. Required secret: SUPABASE_DB_URL. workflow_dispatch
+# no workflow edit. Required secret: SUPABASE_DB_URL. workflow_dispatch
 # can narrow to one scope (--sale-type + --category) or a region (locality+radius).
 
 on:

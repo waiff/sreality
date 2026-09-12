@@ -45,7 +45,7 @@ def _task(index: int, *, source: str = "remax",
           body: bytes | None = None) -> tuple[ListingRow, page_readers.ArchivedPayload]:
     row = ListingRow(
         listing_id=index, source=source, source_id_native=str(400000 + index),
-        raw_json={}, lat=None, lon=None, observed_at=FETCHED_AT, in_mapy_inventory=False)
+        raw_json={}, lat=None, lon=None, observed_at=FETCHED_AT)
     payload = page_readers.ArchivedPayload(
         id=9000 + index, source=source, source_id_native=row.source_id_native,
         page_kind="detail", payload_sha256=f"{index:064d}", first_observed_at=FETCHED_AT,

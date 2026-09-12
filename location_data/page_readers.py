@@ -1682,8 +1682,7 @@ def _licensed_coordinate(
             f"the reader knows it — it is never inferred from what the claim was stamped "
             f"with")
     verdict = coordinate_verdict(
-        row.source, None, in_mapy_inventory=row.in_mapy_inventory,
-        substrate=SUBSTRATE_ARCHIVED_HTML, entry_id=entry.entry_id,
+        row.source, None, substrate=SUBSTRATE_ARCHIVED_HTML, entry_id=entry.entry_id,
         portal_pin_present=branch == POSITION_BRANCH_PORTAL_PIN)
     if not verdict.admitted or verdict.licence_class is None:
         return None, verdict.reason

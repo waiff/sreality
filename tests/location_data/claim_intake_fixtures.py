@@ -67,7 +67,6 @@ def listing(
     native: str = "n1",
     lat: float | None = None,
     lon: float | None = None,
-    in_mapy_inventory: bool = False,
 ) -> ListingRow:
     """One scan row, exactly as `_row_from_record` builds it.
 
@@ -83,7 +82,6 @@ def listing(
         lat=lat,
         lon=lon,
         observed_at=OBSERVED_AT,
-        in_mapy_inventory=in_mapy_inventory,
     )
 
 
