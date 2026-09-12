@@ -497,10 +497,9 @@ def _street_fields(
 
 
 def _resolve_coords(html: str) -> tuple[float | None, float | None, dict[str, Any]]:
-    """Page-embedded coords only. Geocoding is NOT a parser concern: the drain
-    resolves coords-less listings after parse via scraper.location.CoordResolver
-    (carry-forward first, then a guarded Mapy fallback) — the parser's old
-    `geocoder` param was plumbing that no caller ever wired."""
+    """Page-embedded coords only. W4-b deleted the drain-side resolver and its
+    guarded Mapy fallback; a coords-less listing is now the location engine's
+    problem, not the parser's."""
     lat_m, lng_m = _COORD_LAT_RE.search(html), _COORD_LNG_RE.search(html)
     if lat_m and lng_m:
         lat, lon = float(lat_m.group(1)), float(lng_m.group(1))
