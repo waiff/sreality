@@ -109,6 +109,50 @@ def _indexed_locator_keys(fn: ast.FunctionDef) -> set[str]:
             and isinstance(node.value, ast.Attribute) and node.value.attr == "locator"}
 
 
+def _got_locator_keys(fn: ast.FunctionDef) -> set[str]:
+    """`entry.locator.get("key")` — the GUARDED reads. Together with the indexed ones they
+    are everything a body actually consults, which is what `ReaderContract.appetite` claims
+    to be."""
+    keys: set[str] = set()
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get" and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "locator"):
+            keys.add(str(node.args[0].value))
+    return keys
+
+
+def _module_functions(tree: ast.Module) -> dict[str, ast.FunctionDef]:
+    return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+
+def _appetite_of(fn: ast.FunctionDef, tree: ast.Module) -> set[str]:
+    """Every locator key this reader reads: its OWN body plus, TRANSITIVELY, every helper it
+    calls in the same module.
+
+    The DOM family reads almost nothing directly — `_entry_css`, `_entry_attr`,
+    `_entry_pattern`, `_coordinate_branch`, `_subject_object` and `embedded_documents` each
+    own one part of the locator and refuse a malformed one — and the delegation is genuinely
+    more than one level deep: the five embedded-JSON readers reach `css` through
+    `embedded_documents`, which calls `_entry_css`. A one-level closure returned too little
+    and made the equality below unprovable rather than wrong; the fixed point is what the
+    `appetite` record claims to be."""
+    functions = _module_functions(tree)
+    seen: set[str] = set()
+    queue = [fn]
+    keys: set[str] = set()
+    while queue:
+        node = queue.pop()
+        keys |= _indexed_locator_keys(node) | _got_locator_keys(node)
+        for name in _called_names(node) & set(functions):
+            if name not in seen:
+                seen.add(name)
+                queue.append(functions[name])
+    return keys
+
+
 # ------------------------------------------------------------------ the nine contracts
 
 def test_every_portal_has_exactly_one_contract_file():
@@ -192,6 +236,53 @@ def test_every_executable_entry_matches_its_readers_contract():
                 assert spec.consults_guards, entry.entry_id
 
 
+def test_no_shipped_entry_declares_a_locator_key_its_reader_never_reads():
+    """The rail `bzs.det.link_pin` cost a round. It declared a `locator.pattern` and
+    `html_point_attrs` did not read one, so the reader `float()`-ed the raw href, raised
+    ValueError, returned silently — and bazos shipped a contract that described a pin the
+    lane could not mint, with a golden that had no pin in it and nothing anywhere saying so.
+    An inert key is worse than a missing one: it reads as a rail."""
+    for source, contract in _all().items():
+        for entry in contract.entries:
+            spec = READER_CONTRACTS[entry.reader]
+            assert set(entry.locator) <= spec.appetite, (source, entry.entry_id,
+                                                         sorted(set(entry.locator)
+                                                                - spec.appetite))
+
+
+def test_a_locator_key_the_reader_never_reads_is_refused():
+    with pytest.raises(contracts.ContractError) as excinfo:
+        _entry(locator={"reader": "scalar", "json_pointer": "/x", "css": "h1"})
+    assert "never reads locator.css" in str(excinfo.value)
+    # And the optional ones are legal: `value_kind` is read, just not required.
+    assert _entry(locator={"reader": "scalar", "json_pointer": "/x",
+                           "value_kind": "num"}).reader == "scalar"
+
+
+def test_a_page_entry_declared_for_a_kind_the_lane_never_stores_is_refused():
+    """`claims_intake._BODY_JOIN` selects `p.page_kind = 'detail'` and nothing else: index
+    bodies are never archived and no scraper writes a map, archive, snapshot or gazetteer
+    body at all. `ceskereality@6` shipped a `page_kind: map` entry over a `/mapa/` marker
+    set that exists in no payload row — unreachable by construction, and it read as a live
+    precision signal for the portal until someone went looking for the body."""
+    page = dict(locator_kind="html_selector", extraction_method="html_selector_parse",
+                locator={"reader": "html_text", "css": "div.locality"})
+    for kind in ("map", "index", "archive", "snapshot", "gazetteer", "none"):
+        with pytest.raises(contracts.ContractError) as excinfo:
+            _entry(page_kind=kind, **page)
+        assert "can never be executed" in str(excinfo.value), kind
+    assert _entry(page_kind="detail", **page).page_kind == "detail"
+    # A PAYLOAD reader is untouched by the rail — it reads `raw_json`, not a stored body.
+    assert contracts.STORED_PAGE_KIND == "detail"
+
+
+def test_every_shipped_page_entry_is_declared_for_the_stored_kind():
+    for source, contract in _all().items():
+        for entry in contract.entries:
+            if READER_CONTRACTS[entry.reader].reads_stored_body:
+                assert entry.page_kind == contracts.STORED_PAGE_KIND, entry.entry_id
+
+
 def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
     """`contracts.READER_CONTRACTS` is pure data — the deploy-time lane must not import
     the extractor — so a reader added to `claims_intake` without a record (or one left
@@ -246,6 +337,7 @@ def test_the_reader_contracts_state_exactly_what_the_reader_bodies_do():
         assert spec.consults_transforms == ("apply_transforms" in calls), name
         assert spec.consults_guards == ("guard_admits" in calls), name
         assert spec.locator_keys == _indexed_locator_keys(fn), name
+        assert spec.appetite - {"reader"} == _appetite_of(fn, _INTAKE_AST), name
     # The scan reads each reader's OWN body, so a helper that applied transforms or
     # evaluated guards on a reader's behalf would let the table lie about it. There is no
     # such helper: the two entry points are called from reader bodies and nowhere else.
@@ -269,13 +361,13 @@ def test_the_archive_reader_contracts_state_exactly_what_those_bodies_do():
     FAMILIES live in two modules behind two decorators, and a single test asserting over
     both would go green if one of them vanished.
 
-    NARROWER than the W1 gate, deliberately and disclosed rather than implied: it checks the
-    two `consults_*` flags but NOT `locator_keys`, because the DOM readers address their
-    locator through `.get()` plus an explicit refusal (`_entry_css`, the attr-pair check)
-    rather than the unguarded `entry.locator["key"]` indexing `_indexed_locator_keys` looks
-    for. Asserting equality there would compare a set against an empty one. Closing it
-    properly needs the scan to recognise the refusal helpers; until then this is a known
-    half, not an assumed whole."""
+    NARROWER than the W1 gate in ONE place, disclosed rather than implied: it cannot check
+    `locator_keys` on its own, because the DOM readers address their REQUIRED keys through
+    `.get()` plus an explicit refusal (`_entry_css`, the attr-pair check) rather than the
+    unguarded `entry.locator["key"]` indexing `_indexed_locator_keys` looks for — which of
+    the keys a reader reads it also DEMANDS stays a contract decision. The whole appetite is
+    derived, via `_appetite_of`'s transitive closure over those helpers, and that is the half
+    that matters: it is the half `bzs.det.link_pin` fell through."""
     bodies = _reader_bodies(_ARCHIVE_AST, "page_reader")
     assert set(bodies) == set(PAGE_READERS)
     for name, fn in bodies.items():
@@ -283,6 +375,14 @@ def test_the_archive_reader_contracts_state_exactly_what_those_bodies_do():
         calls = _called_names(fn)
         assert spec.consults_transforms == ("apply_transforms" in calls), name
         assert spec.consults_guards == ("guard_admits" in calls), name
+        # The "known half" this docstring used to end on is closed: `_appetite_of` follows
+        # the refusal helpers, so the WHOLE locator appetite is derived from the bodies here
+        # too. `locator_keys` alone still cannot be, because these readers address their
+        # required keys through those helpers rather than by unguarded indexing.
+        assert spec.appetite - {"reader"} == _appetite_of(fn, _ARCHIVE_AST), name
+        assert spec.reads_stored_body is True, name
+    for name, spec in READER_CONTRACTS.items():
+        assert spec.reads_stored_body == (name in PAGE_READERS), name
     # The same no-helper rule as the W1 scan, for the same reason: a helper evaluating
     # guards on a reader's behalf would let the table lie. `_evidenced` and `_entry_css` are
     # shared, and neither may touch the two entry points.

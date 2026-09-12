@@ -23,7 +23,11 @@ import pytest
 
 import tests.scraper.test_bazos_parser as bp
 from location_data import contracts
-from location_data.claims_common import ARCHIVED_COORDINATE_RULES, apply_transforms
+from location_data.claims_common import (
+    ARCHIVED_COORDINATE_RULES,
+    IntakeRefused,
+    apply_transforms,
+)
 from location_data.claims_intake import (
     DEFAULT_MAX_CLAIM_VALUE_BYTES,
     Entry,
@@ -220,18 +224,30 @@ def test_the_live_lokalita_layout_yields_the_town_and_the_psc(body, town, psc):
 
 
 @pytest.mark.parametrize("body", [bp.DETAIL_HTML, bp.DOHODOU_DETAIL_HTML])
-def test_the_two_cell_layouts_carry_no_town_at_all_and_claim_nothing(body):
-    """MEASURED, not assumed, and the one thing v5 does not cover (W1-c R6 escalation): the
-    2-cell Lokalita shapes recorded in `tests/scraper/test_bazos_parser.py` carry no
-    `/inzeraty/<slug>/<psc5>/` anchor, so every entry is silent on them. Their anchor/cell
-    text names a place, but on the live layout that same text is the OKRES — so a text read
-    would buy coverage here by publishing a wrong town everywhere else. Silence is the
-    correct answer until a real body of that layout is captured; both constants above are
-    hand-authored, and that file itself records them as having diverged from live."""
+def test_the_two_cell_layouts_carry_no_town_and_the_name_entries_stay_silent(body):
+    """MEASURED, not assumed, and the size of the W1-c R6 escalation: the 2-cell Lokalita
+    shapes recorded in `tests/scraper/test_bazos_parser.py` carry no
+    `/inzeraty/<slug>/<psc5>/` anchor, so the two entries that read it — the TOWN and the
+    PSČ — are silent. Their cell text names a place, but on the live layout that same text
+    is the OKRES, so a text read would buy coverage here by publishing a wrong town
+    everywhere else. Silence is the correct answer until a real body of that layout is
+    captured; both constants above are hand-authored and that file records them as having
+    diverged from live.
+
+    The PIN is a different carrier and is NOT silent: where the layout still writes the maps
+    anchor (`DETAIL_HTML` does, `DOHODOU_DETAIL_HTML` does not), `bzs.det.link_pin` reads it,
+    so this layout yields a position without a name rather than nothing at all. That is
+    coverage the pattern arm bought — before it the entry was inert on every layout."""
     doc = scoped(body)
     assert doc.css("a[href*='/inzeraty/']") == []
-    for entry_id in ENTRY_IDS:
+    for entry_id in (TOWN_ENTRY, "bzs.det.psc"):
         assert run(ENTRIES[entry_id], doc) == [], entry_id
+    has_map_link = doc.css_first("a[href*='/place/']") is not None
+    pin = run(ENTRIES["bzs.det.link_pin"], doc)
+    assert bool(pin) is has_map_link
+    # The blur hint needs the portal's own "Přibližná lokalita" title, which neither
+    # hand-authored constant carries — a marker entry states the label or says nothing.
+    assert run(ENTRIES["bzs.det.blur_hint"], doc) == []
 
 
 def test_a_numbered_postal_district_is_folded_to_the_city_it_belongs_to():
@@ -257,8 +273,13 @@ def test_the_okres_label_can_never_reach_the_statutory_city_transform():
     entry is slug-fed, and on an OKRES label it would manufacture a big-city town out of a
     rural district — "Brno-venkov" -> "Brno", 30 km of villages claimed as the city. bazos
     publishes exactly those 76 labels as the anchor's TEXT, so the rail is that the entry
-    reads the href: a page whose anchor text is "Brno-venkov" claims the href's own obec."""
-    assert apply_transforms("Brno-venkov", ENTRIES[TOWN_ENTRY].transform) == "Brno"
+    reads the href: a page whose anchor text is "Brno-venkov" claims the href's own obec.
+
+    TWO rails now, and the second closes the class rather than this instance: the transform
+    itself refuses every hyphenated OKRES name (`_HYPHENATED_OKRES_NAMES`), so an okres that
+    reaches it by any other route — `address_part_obec` runs on lines that carry one — is
+    returned untouched instead of folded."""
+    assert apply_transforms("Brno-venkov", ENTRIES[TOWN_ENTRY].transform) == "Brno-venkov"
     body = ('<html><body><table><tr><td>Lokalita:</td><td>'
             '<a href="https://www.google.com/maps/place/49.30,16.62/@49.30,16.62,12z" '
             'title="Přibližná lokalita" rel="nofollow">664 51</a> '
@@ -384,25 +405,57 @@ def test_the_pin_is_licensable_only_through_the_id_the_ladder_names():
     assert reason == "archived_bzs.det.link_pin"
 
 
-def test_the_pin_entry_addresses_the_maps_link_and_yields_nothing_until_the_reader_widens():
+def test_the_pin_entry_reads_the_maps_link_on_every_committed_body():
     """bazos publishes its pin as a decimal pair inside ONE attribute
-    (`/maps/place/49.539246,18.210526/@…`). `html_point_attrs` reads an ordered PAIR of
-    decimal attributes, so today it finds no number and returns no claim — silently, never
-    by raising, which is why the entry can ship ahead of the widening (W1-c R6 declares the
-    entry; the reader is the integrator's). This test is the tripwire: it FAILS the moment
-    the reader learns `locator.pattern`, and whoever lands that change re-blesses the golden
-    with bazos' pin in it."""
+    (`/maps/place/49.539246,18.210526/@…`), which is what `locator.pattern` exists for: the
+    `lat`/`lon` groups separate the two halves of the href that `float()` could never parse.
+
+    It fires on BOTH committed bodies, and that is the assertion, not a shape check. The
+    entry shipped for one round with a reader that ignored its pattern — `float(href)` raised
+    ValueError, the reader returned silently, and bazos had no pin at all while the contract
+    read as if it published one (the same PR deleted `geom_column`, the only other path).
+    An entry that cannot fire is the defect this test exists to keep out."""
     entry = ENTRIES["bzs.det.link_pin"]
     assert entry.claim_type == "coordinate"
     assert entry.reader == "html_point_attrs"
-    assert entry.locator["position_branch"] == "portal_pin"
     assert entry.guards == ("reject_outside_cz_bbox",)
     assert entry.precision_map["precision_cap"]["position_source_max"] == "portal_pin_blurred"
     assert "(?P<lat>" in entry.locator["pattern"] and "(?P<lon>" in entry.locator["pattern"]
 
-    doc = document()
-    assert doc.css_first(entry.locator["css"]) is not None, "the map link is on the page"
-    assert run(entry, doc) == []
+    for name, body in (("portal_html", _ARCHIVED.read_bytes()),
+                       ("location_w2", _GOLDEN_BODY.read_bytes())):
+        doc = scoped(body)
+        assert doc.css_first(entry.locator["css"]) is not None, name
+        reads = run(entry, doc)
+        assert len(reads) == 1, name
+        read = reads[0]
+        assert read.position_branch == "portal_pin", name
+        lat, lon = (float(x) for x in read.claim.value_text.split(","))
+        # Inside the CZ envelope the entry's own guard declares, which is what makes it a
+        # pin rather than a number that happened to parse.
+        assert 48.5 <= lat <= 51.1 and 12.0 <= lon <= 18.9, (name, lat, lon)
+        assert read.claim.value_geom_wkt == f"POINT({lon} {lat})", name
+
+
+def test_a_pin_pattern_that_names_no_lat_or_lon_group_is_refused():
+    """Which capture is the latitude is contract data. A positional pattern would make the
+    hemisphere depend on the order the groups happen to be written in — the same reason
+    `_entry_pattern` refuses a defaulted group."""
+    entry = replace(
+        ENTRIES["bzs.det.link_pin"],
+        locator=dict(ENTRIES["bzs.det.link_pin"].locator,
+                     pattern=r"/place/(-?\d+\.\d+),(-?\d+\.\d+)"))
+    with pytest.raises(IntakeRefused) as excinfo:
+        run(entry, document())
+    assert "lat" in str(excinfo.value) and "lon" in str(excinfo.value)
+
+
+def test_an_href_the_pattern_does_not_match_is_silence_not_an_exception():
+    """One page changing shape must not abort a batch of thousands."""
+    doc = scoped('<html><body><table><tr><td>Lokalita:</td><td>'
+                 '<a href="https://www.google.com/maps/place/Praha">Přibližná lokalita</a>'
+                 '</td></tr></table></body></html>')
+    assert run(ENTRIES["bzs.det.link_pin"], doc) == []
 
 
 # ------------------------------------------------------------------ the payload half

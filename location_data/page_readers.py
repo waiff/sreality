@@ -561,6 +561,46 @@ def _coordinate_branch(entry: Entry) -> str:
     return str(branch)
 
 
+def _point_pattern_halves(
+    entry: Entry, pattern: Any, raw_lat: str, raw_lon: str,
+) -> tuple[str | None, str | None]:
+    """Both decimals out of ONE attribute, through the entry's own `pattern`.
+
+    The ordered-pair contract above assumes the portal publishes latitude and longitude as
+    two attributes. bazos publishes them as one: the ad's own
+    `google.com/maps/place/<lat>,<lon>` anchor, where the href IS the pin. Without this the
+    entry names `attr: [href, href]`, `float("https://…")` raises and the reader returns
+    silently — a declared pin that can never fire, which is worse than no entry at all
+    because nothing counts it.
+
+    The pattern must name `lat` and `lon` GROUPS rather than positions, for the reason
+    `_entry_pattern` refuses a defaulted group: which capture is the latitude is a fact the
+    contract states, never one the reader infers from the order they happen to be written
+    in. Each half is matched against its own attribute, so a portal that really does split
+    them across two attributes and still needs a pattern gets the right answer; where
+    `attr` names the same attribute twice (the one-attribute case) both halves see the same
+    string and the two groups separate them. A non-matching attribute is no claim, not an
+    exception: one page changing shape must not abort a batch of thousands."""
+    try:
+        compiled = re.compile(str(pattern))
+    except re.error as exc:
+        raise IntakeRefused(
+            f"{entry.source}:{entry.entry_id} declares an uncompilable `locator.pattern` "
+            f"{pattern!r} ({exc})") from exc
+    missing = [name for name in ("lat", "lon") if name not in compiled.groupindex]
+    if missing:
+        raise IntakeRefused(
+            f"{entry.source}:{entry.entry_id} uses `html_point_attrs` with "
+            f"`locator.pattern` but the pattern names no {' or '.join(missing)} group; "
+            f"which capture is the latitude is contract data, never a position the reader "
+            f"guesses (got groups {sorted(compiled.groupindex)})")
+    lat_match = compiled.search(raw_lat)
+    lon_match = compiled.search(raw_lon)
+    if lat_match is None or lon_match is None:
+        return None, None
+    return lat_match.group("lat"), lon_match.group("lon")
+
+
 @page_reader("html_point_attrs")
 def _read_html_point_attrs(
     entry: Entry, row: ListingRow, payload: ArchivedPayload, document: ScopedDocument,
@@ -576,6 +616,11 @@ def _read_html_point_attrs(
     happen to be self-describing, but a portal publishing `data-x`/`data-y` would not be,
     and silently guessing which is latitude is how a coordinate lands in the wrong
     hemisphere. A malformed pair is refused, never reordered.
+
+    An optional `locator.pattern` with named `lat`/`lon` groups lifts the two decimals out
+    of the attribute text instead of parsing it whole (`_point_pattern_halves`), which is
+    how bazos' one-attribute `google.com/maps/place/<lat>,<lon>` href is read. Same ordered
+    pair, same guard, same evidence — only the step from attribute to decimal changes.
 
     **The CZ-bbox guard is genuinely evaluated here**, and that is the difference from
     `html_point_dms`. That reader gets the envelope for free inside `parse_dms_pair` and
@@ -596,6 +641,11 @@ def _read_html_point_attrs(
     raw_lon = _text(node.attributes.get(str(names[1])))
     if raw_lat is None or raw_lon is None:
         return []
+    pattern = entry.locator.get("pattern")
+    if pattern is not None:
+        raw_lat, raw_lon = _point_pattern_halves(entry, pattern, raw_lat, raw_lon)
+        if raw_lat is None or raw_lon is None:
+            return []
     try:
         lat, lon = float(raw_lat), float(raw_lon)
     except ValueError:

@@ -203,15 +203,32 @@ class ReaderContract:
     mines one document while the entry stamps `portal_structured_field` records a
     provenance the value never had. `locator_keys` are the keys the reader indexes
     UNGUARDED (a missing one is a mid-batch `KeyError` that takes the whole intake down,
-    not a no-op). The two `consults_*` flags say whether the reader ever asks about
-    `transform` / `guards`; a declaration on a reader that does not is inert.
+    not a no-op); `optional_keys` are the rest of what it reads. Together they are the
+    reader's WHOLE appetite, and a locator key outside the union is refused — a declared
+    key no reader consults is a rail that looks enforced and is not (`bzs.det.link_pin`
+    shipped a `pattern` its reader ignored, so the pin was silently inert while the
+    contract read as if it published one). The two `consults_*` flags say whether the
+    reader ever asks about `transform` / `guards`; a declaration on a reader that does not
+    is inert.
     """
 
     substrates: frozenset[str]
     methods: frozenset[str]
     locator_keys: frozenset[str] = frozenset()
+    optional_keys: frozenset[str] = frozenset()
     consults_transforms: bool = False
     consults_guards: bool = False
+    # Which HALF of the lane runs it. Data rather than a substrate test, because
+    # `embedded_json` and `archived_html` are both legal on readers of either half — it is
+    # the registry a reader is REGISTERED in (`PAGE_READERS` vs `READERS`) that decides, and
+    # `test_claims_intake_contracts` derives this back out of those two registries.
+    reads_stored_body: bool = False
+
+    @property
+    def appetite(self) -> frozenset[str]:
+        """Every `locator` key this reader reads. `reader` is the locator's own
+        discriminator rather than a value looked up, so it is always legal."""
+        return self.locator_keys | self.optional_keys | frozenset({"reader"})
 
 
 # One row per `location_data.claims_intake` reader. Payload readers address `raw_json` by
@@ -223,7 +240,8 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     "scalar": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
         locator_keys=frozenset({"json_pointer"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        optional_keys=frozenset({"value_kind"})),
     "namespaced_id": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
         locator_keys=frozenset({"json_pointer", "namespace"}),
@@ -241,20 +259,24 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
         locator_keys=frozenset({"json_pointer"})),
     "declared_bool_quality": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_DECLARED_QUALITY,
-        locator_keys=frozenset({"json_pointer"})),
+        locator_keys=frozenset({"json_pointer"}),
+        optional_keys=frozenset({"labels"})),
     "conflict_signal": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
-        locator_keys=frozenset({"json_pointer"})),
+        locator_keys=frozenset({"json_pointer"}),
+        optional_keys=frozenset({"legacy_source_column"})),
     # --- W2-6: DOM readers. `css` is required on all three, so a selector-less entry fails
     # CI rather than matching nothing forever in production.
     "html_text": ReaderContract(
         substrates=_DOM_SURFACES, methods=_DOM_METHOD,
         locator_keys=frozenset({"css"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        reads_stored_body=True),
     "html_attr": ReaderContract(
         substrates=_DOM_SURFACES, methods=_DOM_METHOD,
         locator_keys=frozenset({"css", "attr"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        reads_stored_body=True),
     # `position_branch` is a REQUIRED locator key, not an optional hint: it decides the
     # coordinate's licence class (C6) and the archived ladder refuses a read without one, so
     # an entry omitting it would fail per-row at runtime instead of once at projection time.
@@ -266,7 +288,8 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     # implemented in the reader body first, and this flag flipped with it.
     "html_point_dms": ReaderContract(
         substrates=_DOM_SURFACES, methods=_DOM_METHOD | _MAP_METHOD,
-        locator_keys=frozenset({"css", "attr", "position_branch"})),
+        locator_keys=frozenset({"css", "attr", "position_branch"}),
+        reads_stored_body=True),
     # A coordinate from an ordered [lat_attr, lon_attr] pair of DECIMAL attributes
     # (realitymix's `div#print-map[data-gps-lat][data-gps-lon]`). `consults_guards` is TRUE
     # here and FALSE on `html_point_dms`, and the difference is real rather than an
@@ -277,7 +300,9 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     "html_point_attrs": ReaderContract(
         substrates=_DOM_SURFACES, methods=_DOM_METHOD | _MAP_METHOD,
         locator_keys=frozenset({"css", "attr", "position_branch"}),
-        consults_guards=True),
+        consults_guards=True,
+        optional_keys=frozenset({"pattern"}),
+        reads_stored_body=True),
     # --- W2 reader canon, DOM family. Each one answers a DIFFERENT question about the same
     # node, and every portal-specific fact (which element, which pattern, which label) stays
     # contract data — that is the property that keeps these shared rather than nine forks.
@@ -289,14 +314,16 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     "html_own_text": ReaderContract(
         substrates=_DOM_SURFACES, methods=_DOM_METHOD,
         locator_keys=frozenset({"css"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        reads_stored_body=True),
     # `group` is REQUIRED and never defaulted to "group 0" or "the only group": a pattern
     # may carry several (bazos' slug carries the obec and the PSČ), and picking one by
     # position would make the claim's meaning depend on the order the groups were written.
     "html_regex": ReaderContract(
         substrates=_DOM_SURFACES, methods=_REGEX_METHOD,
         locator_keys=frozenset({"css", "pattern", "group"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        reads_stored_body=True),
     # The same read over an ATTRIBUTE, and the reader that carries a fact published only in
     # a link. It scans EVERY matching node and lets the PATTERN discriminate, because "the
     # first node matching the selector" is the wrong node about as often as the right one
@@ -304,14 +331,18 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     "html_attr_regex": ReaderContract(
         substrates=_SLUG_SURFACES, methods=_SLUG_METHOD | _REGEX_METHOD,
         locator_keys=frozenset({"css", "attr", "pattern", "group"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        optional_keys=frozenset({"decode"}),
+        reads_stored_body=True),
     # A presence detector: the claim's VALUE is the label the CONTRACT gives the marker and
     # its EVIDENCE is the portal's own text or attribute. `consults_transforms` is FALSE
     # deliberately — normalising a label the contract itself wrote is a no-op with a failure
     # mode, since blur is decided by that label's membership of `precision_cap.blurred_labels`.
     "html_marker": ReaderContract(
         substrates=_DOM_SURFACES, methods=_DECLARED_QUALITY,
-        locator_keys=frozenset({"css", "value_label"})),
+        locator_keys=frozenset({"css", "value_label"}),
+        optional_keys=frozenset({"attr", "contains"}),
+        reads_stored_body=True),
     # --- W2 reader canon, embedded-JSON family: ONE acquisition layer (css + optional attr
     # + optional decode + optional subject match) and five extractors over it. `css` is
     # required on all of them, so a selector-less entry fails CI rather than matching nothing
@@ -323,21 +354,33 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
         substrates=_EMBEDDED_JSON_SURFACES,
         methods=_STRUCTURED | _MAP_METHOD | _DECLARED_QUALITY,
         locator_keys=frozenset({"css", "json_pointer"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        optional_keys=frozenset(
+            {"attr", "decode", "exclude_where", "match", "script_match", "then", "value_kind"}),
+        reads_stored_body=True),
     "json_regex": ReaderContract(
         substrates=_EMBEDDED_JSON_SURFACES, methods=_REGEX_METHOD,
         locator_keys=frozenset({"css", "json_pointer", "pattern", "group"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        optional_keys=frozenset(
+            {"attr", "decode", "exclude_where", "match", "script_match", "then"}),
+        reads_stored_body=True),
     "json_bool": ReaderContract(
         substrates=_EMBEDDED_JSON_SURFACES, methods=_DECLARED_QUALITY,
-        locator_keys=frozenset({"css", "json_pointer", "labels"})),
+        locator_keys=frozenset({"css", "json_pointer", "labels"}),
+        optional_keys=frozenset(
+            {"attr", "decode", "exclude_where", "match", "script_match", "then"}),
+        reads_stored_body=True),
     # `position_branch` is a required key for the same reason it is on `html_point_dms`: it
     # decides the coordinate's licence class (C6) and the archived ladder refuses a read
     # without one, so an entry omitting it must fail at projection time rather than per row.
     "json_point": ReaderContract(
         substrates=_EMBEDDED_JSON_SURFACES, methods=_STRUCTURED | _MAP_METHOD,
         locator_keys=frozenset({"css", "position_branch"}),
-        consults_guards=True),
+        consults_guards=True,
+        optional_keys=frozenset(
+            {"attr", "decode", "exclude_where", "feature", "lat_pointer", "lon_pointer", "match", "reject_points", "script_match", "then"}),
+        reads_stored_body=True),
     # The feature TYPE is the declared precision (Point -> a pin, LineString -> a segment,
     # Circle -> a centre plus a declared radius), so ONE reader serves the coordinate entry
     # and the uncertainty-geometry entry over the same feature; `position_branch` is checked
@@ -346,14 +389,19 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     "json_geometry": ReaderContract(
         substrates=_EMBEDDED_JSON_SURFACES, methods=_MAP_METHOD,
         locator_keys=frozenset({"css", "then"}),
-        consults_guards=True),
+        consults_guards=True,
+        optional_keys=frozenset(
+            {"attr", "decode", "exclude_where", "geometry_reader", "match", "position_branch", "reject_zoom_at_or_below", "script_match", "zoom_pointer"}),
+        reads_stored_body=True),
     # One level of a schema.org BreadcrumbList geo chain, anchored on a contract-declared
     # kraj slug rather than an absolute position — the offset moves with the category path,
     # so `positions: [5,6,7,8]` is wrong on any two-level category.
     "json_breadcrumb": ReaderContract(
         substrates=_JSONLD_SURFACES, methods=_BREADCRUMB_METHOD,
         locator_keys=frozenset({"css", "type", "anchor_slugs", "level"}),
-        consults_transforms=True),
+        consults_transforms=True,
+        optional_keys=frozenset({"attr", "decode", "script_match"}),
+        reads_stored_body=True),
 }
 
 # The substrate axis on its own — what `claims_intake`'s module docstring points at, and
@@ -456,11 +504,23 @@ def _member(value: Any, allowed: frozenset[str], where: str, key: str) -> str:
     return text
 
 
+# The ONE page kind whose bodies are stored. `claims_intake._BODY_JOIN` selects
+# `p.page_kind = 'detail'` and nothing else: index bodies are never archived (their keys are
+# week-stamped, so the storage cap bounds detail and not index — the 2026-08-16 operator
+# decision), and no scraper writes a map, archive, snapshot or gazetteer body at all. A page
+# entry declared for any other kind is therefore unreachable by construction, which is not a
+# shape a contract may describe: `ceskereality@6` shipped a `page_kind: map` entry reading a
+# `/mapa/` marker set that exists in no payload row and in no scraper, and it read as a live
+# precision signal for the portal. Widen this the day a lane stores that kind, never before.
+STORED_PAGE_KIND = "detail"
+
+
 def _check_executable(
     reader: str,
     *,
     surface: str,
     method: str,
+    page_kind: str,
     locator: dict[str, Any],
     transforms: list[str],
     guards: list[str],
@@ -487,12 +547,31 @@ def _check_executable(
             f"{where}: reader '{reader}' extracts by {', '.join(sorted(spec.methods))}; "
             f"extraction_method='{method}' would stamp every claim with a provenance the "
             f"reader does not perform (00 §3)")
+    if spec.reads_stored_body and page_kind != STORED_PAGE_KIND:
+        raise ContractError(
+            f"{where}: reader '{reader}' reads a STORED PAGE BODY and the lane stores only "
+            f"page_kind='{STORED_PAGE_KIND}' bodies, so page_kind='{page_kind}' can never "
+            f"be executed — `page_entries` would never select it and no run would count "
+            f"the miss")
     for key in sorted(spec.locator_keys):
         if not locator.get(key):
             raise ContractError(
                 f"{where}: reader '{reader}' addresses its value through "
                 f"locator.{key}, which this entry does not name; the extractor indexes it "
                 f"unguarded and would KeyError on the first row of this portal")
+    # The other direction, and it is the one that shipped a defect: a key the reader never
+    # looks up reads as a declared rail and is a no-op. `bzs.det.link_pin` named a
+    # `pattern` that `html_point_attrs` did not consult, so the entry described a pin the
+    # lane could not mint and nothing said so — the contract, the projection and the tests
+    # all agreed it was live. A reader's appetite is data on `READER_CONTRACTS`; a locator
+    # that says more than the reader hears is refused here, before it can be believed.
+    unread = sorted(set(locator) - spec.appetite)
+    if unread:
+        raise ContractError(
+            f"{where}: reader '{reader}' never reads locator."
+            f"{', locator.'.join(unread)}; it consults "
+            f"{', '.join(sorted(spec.appetite))}, so the declaration is inert — either the "
+            f"reader widens or the key goes")
 
     for transform_spec in transforms:
         name = transform_spec.partition(":")[0]
@@ -597,8 +676,8 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
             f"{where}: entry names no locator.reader; every entry is executed, so an entry "
             f"nothing can run is refused rather than projected "
             f"({', '.join(sorted(READER_CONTRACTS))})")
-    _check_executable(str(reader), surface=surface, method=method, locator=locator,
-                      transforms=transforms, guards=guards, where=where)
+    _check_executable(str(reader), surface=surface, method=method, page_kind=page_kind,
+                      locator=locator, transforms=transforms, guards=guards, where=where)
 
     precision_map: dict[str, Any] = {}
     if precision_cap:
