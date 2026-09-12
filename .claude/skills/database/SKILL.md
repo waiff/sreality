@@ -410,36 +410,31 @@ So: wrap a gate that sits alongside a column predicate; a standalone gate is alr
   migration 022 (`terrace`, `garage`, `parking_lots`) are the correct fields for new analytical
   work. The legacy columns stay populated for backward compatibility with existing queries /
   RPCs.
-- **A listing has ONE location and it lives in `listing_location`** (migration 501; W4-c
-  migration 508 dropped the rest). `listings` and `properties` carry NO place columns at all —
-  no `geom`, no `obec`/`okres`/`region`, no `*_id` admin codes, no `locality`/`district`/
-  `street`/`house_number`/`zip`, no `street_name_key`/`geo_cell_key`. The geo-derivation
-  trigger (`listings_set_admin_geo`), the geo-cell trigger, `geocode_cache`, the `mapy_affected`
-  inventory and the `address_points` mirror went with them. Read a listing's place by joining
-  `listing_location ll on ll.listing_id = l.id` (from `properties p`, join on
-  `p.repr_listing_ref_id`); a property's place is its representative listing's. Mapping from the
-  old names: `obec_id` → `ll.obec_kod`, `okres_id` → `ll.okres_kod`, `region_id` → `ll.kraj_kod`,
-  `locality` → `ll.obec_name`, `district` → `ll.okres_name`, `street` → `ll.street_name`. One
-  trap: `listings.geom` WAS `geography` and `ll.geom` IS `geometry(Point,4326)`, so a metre-based
-  `ST_DWithin`/`ST_Distance` must cast `ll.geom::geography` (index `listing_location_geog_gist`,
-  migration 507) or it silently measures degrees. The place STRING every surface renders is
-  `location_display_label(...)` (migration 503), never a hand-assembled `locality ?? district`.
+- **A listing has ONE location and it lives in `listing_location`** (26 cols, migration 501).
+  `listings` and `properties` carry NO place column at all: read a listing's place by joining
+  `listing_location ll on ll.listing_id = l.id` (from `properties p`, on `p.repr_listing_ref_id`
+  — a property's place is its representative listing's). The codes are `ll.obec_kod` /
+  `okres_kod` / `kraj_kod` / `cast_obce_kod` (RÚIAN, = `admin_boundaries.id` for obec), the
+  labels `ll.obec_name` / `okres_name` / `street_name`. One trap: `ll.geom` IS
+  `geometry(Point,4326)`, so a metre-based `ST_DWithin`/`ST_Distance` must cast
+  `ll.geom::geography` (index `listing_location_geog_gist`, migration 507) or it silently
+  measures degrees. The place STRING every surface renders is `location_display_label(...)`
+  (migration 503), never a hand-assembled one; every place FILTER is `<level>_id = any(codes)`.
   `admin_boundaries` survives for price stats / the rent map / city proximity only — it is no
   longer a location path. `scraper/street.py` still extracts a street from a portal page; that
   extraction is now a CLAIM the resolver arbitrates, not a column.
 - **Location-data relations (`location_*`, `ruian_*`, `portal_contract*`; migs 380+) are
-  service-role-only and shadow-only** — RLS on + explicit `anon`/`authenticated` REVOKEs on every
-  table, sequence + function; nothing outside `location_data/` reads them before W6. `location_claims`
-  (19 cols since migs 497+498 — **relax before the deploy, drop after it**) is
-  **never UPDATEd**; a wrong contract is RETRACTED, which DELETEs its claims. The resolver writes ONE table, `listing_location` (26 cols, mig 501); mig 502
-  (W2-b) dropped both `*_location_current` projections + every resolver-side relation (resolutions,
-  candidates, the 3 policy tables, pin-cluster, contradictions, labelled samples, compare cohort +
-  its pg_cron job), leaving `location_claims`, `location_granularity_rank`, `dirty_locations`,
-  `location_jobs` + RÚIAN. Every heavy batch lane shares the ONE `location-batch` Actions group +
-  arms `SET LOCAL statement_timeout` — **except the resolve DRAIN (2026-09-10, 8a+8b)**: latency-
-  bound not instance-bound, it left the group and runs from the Railway worker too, serialized ONLY
-  by the `location_jobs` lease + pass lock — **idle it before a heavy batch**; `full-resolve` DOES
-  stay in the group. RÚIAN loaders + drain run on **`connect_session()`** (the loader refuses the fallback — a 3 M-row COPY needs session GUCs). Rationale: `docs/architecture.md` § Location data.
+  service-role-only** — RLS on + explicit `anon`/`authenticated` REVOKEs on every table, sequence
+  + function; the SPA reads a listing's place through the public views, never the store.
+  `location_claims` (19 cols) is append-only and **never UPDATEd**; a wrong contract is RETRACTED,
+  which DELETEs its claims in bounded batches. The live set is `location_claims`,
+  `listing_location`, `location_granularity_rank`, `dirty_locations`, `location_jobs`,
+  `portal_contracts`/`_entries` + RÚIAN. Every heavy batch lane shares the ONE `location-batch`
+  Actions group + arms `SET LOCAL statement_timeout` — **except the resolve DRAIN**: latency-bound
+  not instance-bound, it runs outside the group and from the Railway worker too, serialized ONLY by
+  the `location_jobs` lease + pass lock — **idle it before a heavy batch**; `full-resolve` DOES stay
+  in the group. RÚIAN loaders + drain run on **`connect_session()`** (the loader refuses the fallback
+  — a 3 M-row COPY needs session GUCs). Rationale: `docs/architecture.md` § Location data.
 
 ## See also
 

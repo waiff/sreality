@@ -1519,10 +1519,10 @@ def _build_registry() -> dict[str, FilterDef]:
                 "an unrecognised op falls back to `>=`. Rules are AND'd. "
                 "`index_name` is a slug from `city_index_definitions_public` "
                 "(e.g. `bezpecnost`, `prakticti_lekari`). A listing matches when "
-                "its MUNICIPALITY (`listings.obec_id`) is one of the curated "
-                "cities whose indexes satisfy every rule — resolved once by "
-                "`curated_cities_matching()` (migration 436). Listings with no "
-                "municipality are excluded."
+                "its MUNICIPALITY (`properties_public.obec_id`, sourced from "
+                "`listing_location`) is one of the curated cities whose indexes "
+                "satisfy every rule — resolved once by `curated_cities_matching()` "
+                "(migration 436). Listings with no municipality are excluded."
             ),
             category=CATEGORY_CITY_QUALITY,
             ui_control=UiControl.CITY_INDEX_RULES,

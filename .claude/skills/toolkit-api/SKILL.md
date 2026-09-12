@@ -95,8 +95,9 @@ it (`api/`). They do not apply to the scraper.
    override. Every mutating `/broker-review/*` route binds `require_admin`'s claims and threads
    `claims.get("email") or claims.get("sub")` into `undone_by` / `resolved_by` / `created_by` /
    `lifted_by`.
-6. **Spatial queries use `geography(point, 4326)`.** Always `ST_DWithin(geom, target_geom,
-   radius_m)`. Never compute distance in Python.
+6. **Spatial queries measure in metres, so they cast.** A listing's point is
+   `listing_location.geom`, a `geometry(Point,4326)`: always
+   `ST_DWithin(ll.geom::geography, target, radius_m)`. Never compute distance in Python.
 7. **psycopg directly, not supabase-py.** Same reasoning as the scraper.
    `prepare_threshold=None` for pgbouncer-mode pooler.
 8. **Two auth gates coexist by design: `require_token` (shared secret) and
@@ -410,14 +411,12 @@ LLM + maps (FastAPI service + scoring jobs):
 - `QWEN_API_KEY` — Alibaba DashScope, INTERNATIONAL (Singapore) endpoint; any `qwen*` model
   id. Read lazily: needed only by a lane the operator points at a qwen model. Actions
   secret for those workflows; Railway needs it only to call qwen from the API service.
-- `MAPY_GEOCODE_ENABLED` — **the W0 Mapy kill switch (location-data program, remediation
-  step R1), default OFF.** Mapy.com's terms prohibit storing/caching API results, so
-  `scraper.geocoding.geocode()` raises unless this is explicitly `1`/`true`/`yes`. W4-b
-  deleted every STORING caller (the drains' `CoordResolver`, the bazos in-parser geocoder,
-  the backfills); what remains is the on-demand URL parse, which stores nothing, and
-  `scripts/seed_curated_cities.py`. Display-only Mapy use (`/maps/suggest`, tiles) is NOT
-  gated — the prohibition is on persistence, not display. Do not enable without an
-  operator decision recorded against the Mapy remediation plan.
+- `MAPY_GEOCODE_ENABLED` — **the Mapy kill switch, default OFF.** Mapy.com's terms prohibit
+  storing/caching API results, so `scraper.geocoding.geocode()` raises unless this is
+  explicitly `1`/`true`/`yes`. No caller stores a result any more: what is left is the
+  on-demand URL parse and `scripts/seed_curated_cities.py`. Display-only Mapy use
+  (`/maps/suggest`, tiles) is NOT gated — the prohibition is on persistence, not display.
+  Do not enable without an operator decision recorded against the Mapy remediation plan.
 - `MAPY_CZ_API_KEY` — Mapy.cz REST key; geocodes locality strings and powers `/maps/*`.
 - `MAPY2_CZ_API_KEY` (optional backup) — a second Mapy.cz key. `scraper.geocoding` and the
   `/maps/suggest` proxy fail over to it automatically **only** when the primary is rejected
