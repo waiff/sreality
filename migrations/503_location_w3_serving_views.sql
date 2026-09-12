@@ -116,6 +116,14 @@ set local lock_timeout = '5s';
 --    includes coordinates the resolver deliberately refuses (a Mapy-class
 --    licence, migration 501's claim projection) — a small honest loss is the
 --    point of the wave; a large one means the coverage gate was not green.
+--
+--    FOREIGN ROWS ARE OUT OF BOTH COUNTS. 2026-09-12: 19,275 idnes rows the
+--    resolver determined FOREIGN never had an admissible portal pin — their legacy
+--    pins were Mapy geocodes, removed by doctrine, not coverage lost — and 4,374
+--    bazos town-less rows are dead ads whose latest page is the category index;
+--    the Czech-side loss this guard measures is ~1 %. Counting the foreign pins
+--    on the BEFORE side alone would read as a collapse the coverage gate has
+--    already cleared.
 -- ---------------------------------------------------------------------------
 
 do $guard$
@@ -129,13 +137,20 @@ begin
     return;
   end if;
 
-  execute 'select count(*) from properties_map_mv' into v_before;
+  execute $q$
+    select count(*)
+      from properties_map_mv m
+      join properties p on p.id = m.property_id
+      left join listing_location ll on ll.listing_id = p.repr_listing_ref_id
+     where ll.country_status is distinct from 'foreign'
+  $q$ into v_before;
 
   select count(*) into v_after
     from properties p
     left join listing_location ll on ll.listing_id = p.repr_listing_ref_id
    where p.status = 'active'
-     and ll.geom is not null;
+     and ll.geom is not null
+     and ll.country_status is distinct from 'foreign';
 
   raise notice 'W3 pin guard: properties_map_mv has % pins today, % after the swap',
     v_before, v_after;
