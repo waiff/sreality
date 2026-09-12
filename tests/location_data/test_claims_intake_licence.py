@@ -27,6 +27,7 @@ from location_data.claims_intake import (
     MAPY_COORDS_SOURCES,
     coordinate_verdict,
     extract_listing,
+    payload_entries,
 )
 from location_data.contracts import CONTRACT_LICENCE_CLASSES, load_all
 from tests.location_data.claim_intake_fixtures import (
@@ -37,6 +38,7 @@ from tests.location_data.claim_intake_fixtures import (
     IDNES_CARRY_FORWARD,
     IDNES_PAGE,
     IDNES_UNSTAMPED,
+    MMREALITY_ACCURATE,
     REALITYMIX_GEOCODE,
     REMAX,
     SREALITY_POST_CUTOVER,
@@ -55,13 +57,26 @@ CLASS_E_CASES = (
 )
 
 
+def _reads_a_payload_coordinate(source: str) -> bool:
+    """Does this contract still lift a pin out of `raw_json` at all?
+
+    W1-c left exactly three that do — sreality, bezrealitky and mmreality. On the other six
+    the pin moved onto the stored page body, so `extract_listing` has no payload coordinate
+    entry and therefore nothing to WITHHOLD; the ladder that refuses a class-E pin is the
+    same function either way (`_licensed_coordinate` -> `coordinate_verdict`), and it is
+    pinned below."""
+    return any(e.claim_type == "coordinate" for e in payload_entries(entries_for(source)))
+
+
 @pytest.mark.parametrize("source,payload,why", CLASS_E_CASES)
 def test_class_e_rows_never_produce_a_coordinate_claim(source, payload, why):
     row = listing(source, payload, lat=49.5, lon=15.5)
     result = extract_listing(row, entries_for(source))
     assert "coordinate" not in claims_by_type(result), why
-    # The withholding is counted rather than silent: one reason, one tally, one log line.
-    assert any(r.startswith("coordinate_withheld:") for r in result.refusals), why
+    # The withholding is counted rather than silent: one reason, one tally, one log line —
+    # on the portals that have a payload coordinate to withhold.
+    if _reads_a_payload_coordinate(source):
+        assert any(r.startswith("coordinate_withheld:") for r in result.refusals), why
 
 
 @pytest.mark.parametrize("source,payload,why", CLASS_E_CASES)
@@ -73,38 +88,51 @@ def test_class_e_rows_never_produce_an_ephemeral_claim(source, payload, why):
 
 
 def test_no_payload_can_make_the_extractor_emit_ephemeral_display_only():
-    """The adversarial case: a payload that ASKS for the forbidden class."""
-    hostile = dict(IDNES_PAGE)
+    """The adversarial case: a payload that ASKS for the forbidden class.
+
+    On sreality rather than idnes since W1-c: the class a claim carries is the CONTRACT's
+    (`entry.default_licence_class`), never the payload's, so this has to run on a portal the
+    payload lane still extracts anything from at all — idnes@3 reads only the page body and
+    would pass vacuously."""
+    hostile = dict(SREALITY_POST_CUTOVER)
     hostile["coords"] = {"source": "page", "licence_class": "ephemeral_display_only",
                          "confidence": "ephemeral_display_only"}
-    result = extract_listing(listing("idnes", hostile, lat=50.0, lon=14.0),
-                             entries_for("idnes"))
+    result = extract_listing(listing("sreality", hostile, lat=50.0, lon=14.0),
+                             entries_for("sreality"))
     assert result.claims
     assert {c.licence_class for c in result.claims} == {"portal"}
 
 
 def test_carry_forward_is_admitted_only_when_absent_from_the_inventory():
-    present = listing("idnes", IDNES_CARRY_FORWARD, lat=50.0, lon=14.4,
-                      in_mapy_inventory=True)
-    absent = listing("idnes", IDNES_CARRY_FORWARD, lat=50.0, lon=14.4,
-                     in_mapy_inventory=False)
+    """Provenance laundering, pinned on the LADDER rather than on one portal's extraction.
 
-    assert "coordinate" not in claims_by_type(extract_listing(present, entries_for("idnes")))
-    admitted = claims_by_type(extract_listing(absent, entries_for("idnes")))["coordinate"]
-    assert admitted[0].licence_class == "portal"
-    assert admitted[0].value_jsonb["ladder"] == "carry_forward_absent_from_mapy_inventory"
+    Every `carry_forward_admissible` portal reads its pin off the page since W1-c, so there
+    is no payload arm left to drive this through `extract_listing` — and the archived arm
+    calls exactly this function (`_licensed_coordinate`). Asserting it here covers all six
+    instead of whichever one still happened to have a raw_json entry."""
+    admissible = [s for s, r in COORDINATE_RULES.items() if r.carry_forward_admissible]
+    assert admissible, "carry_forward stopped being admissible anywhere — rail is dead"
+    for source in admissible:
+        absent = coordinate_verdict(source, "carry_forward", in_mapy_inventory=False)
+        assert absent.admitted is True, source
+        assert absent.licence_class == "portal", source
+        assert absent.reason == "carry_forward_absent_from_mapy_inventory", source
+        present = coordinate_verdict(source, "carry_forward", in_mapy_inventory=True)
+        assert present.admitted is False, source
+        assert present.licence_class is None, source
+    # The payload fixture that used to drive this still yields no idnes coordinate at all.
+    row = listing("idnes", IDNES_CARRY_FORWARD, lat=50.0, lon=14.4)
+    assert "coordinate" not in claims_by_type(extract_listing(row, entries_for("idnes")))
 
 
-# mmreality left this list at mmreality@2: `mm.det.point` moved onto the archived lane
-# (`json_point`), so W1 emits no mmreality coordinate to veto. The veto itself did not
-# narrow — it is a JOIN on listing_id and applies to the archived read too
-# (`_licensed_coordinate` -> `coordinate_verdict(..., in_mapy_inventory=...)`); what
-# changed is only which lane produces the portal's coordinate.
+# The three portals whose pin is still in `raw_json`. bazos and idnes left this list at
+# W1-c, not because the veto narrowed — it is a JOIN on listing_id and applies to the
+# archived read too (`_licensed_coordinate` -> `coordinate_verdict(..., in_mapy_inventory=)`)
+# — but because their pin moved onto the page, so the payload lane has nothing to veto.
 @pytest.mark.parametrize("source,payload", (
     ("sreality", SREALITY_POST_CUTOVER),
     ("bezrealitky", BEZREALITKY),
-    ("bazos", BAZOS_LINK),
-    ("idnes", IDNES_PAGE),
+    ("mmreality", MMREALITY_ACCURATE),
 ))
 def test_inventory_membership_vetoes_a_coordinate_on_every_substrate(source, payload):
     """§6.4's W1 gate is a JOIN on listing_id, not on the coordinate's substrate: a listing

@@ -274,10 +274,14 @@ def test_ceskereality_operator_footer_and_similar_block_go_and_the_title_survive
         assert not scoped.contains(decoy), decoy
 
     title = scoped.css_first("title")
-    assert title is not None and "ulice Nádražní" in title.text()   # accented, cr.det.title_line
-    assert scoped.css_first("#driving_calculator_from").attributes["data-city"] == "České Budějovice"
-    markers = json.loads(scoped.css_first("#mapCanvas").attributes["data-markers"])
-    assert markers["data"][0]["nid"] == 3790435                      # cr.map.coordinate
+    assert title is not None and "ulice Nádražní" in title.text()   # accented page title
+    # ceskereality@6 reads the town, the okres, the street, the číslo popisné and the pin off
+    # ONE node, so this is the one that has to survive scoping. `data-city` carries the okres
+    # in parentheses — `split_paren_okres` is the entry's transform, not the scoper's job.
+    subject = scoped.css_first("#driving_calculator_from").attributes
+    assert subject["data-city"] == "České Budějovice (okres České Budějovice)"
+    assert subject["value"] == "Nádražní 1067, České Budějovice"
+    assert (subject["data-coord-lat"], subject["data-coord-lng"]) == ("48.9745", "14.4744")
 
 
 def test_the_ceskereality_jsonld_script_survives_and_the_office_is_stripped_in_json() -> None:
@@ -367,8 +371,11 @@ def test_maxima_similar_block_goes_and_the_openlayers_config_survives() -> None:
     for decoy in ("Kounicova 42", "Nerudova 7", "Palackého třída 118"):
         assert not scoped.contains(decoy), decoy
 
-    assert scoped.contains("Brno, Brno-střed, Veveří")     # mx.det.locality
-    assert scoped.contains('"coordinates":[16.60411,49.20256]')   # mx.det.map_features
+    assert scoped.contains("Brno-střed, Veveří, Grohova")  # the three locality entries
+    # The map config is a JS string LITERAL — the quotes are backslash-escaped in the page
+    # source, which is what `decode: js_string` on the two map entries exists for.
+    assert scoped.contains(r'\"coordinates\":[16.60411,49.20256]')  # mx.det.map_features
+    assert scoped.contains("okres Brno-město")             # mx.det.description_okres
     assert scoped.css_first("div.locality") is not None
 
 
@@ -826,10 +833,10 @@ REGISTER_GAPS = (
      ".area-listings__item[data-gps]", ".similar-property", "Velké Popovice",
      "Pod Slovany"),
     ("remax", "remax_detail.html", "footer", ".footer", "Bulgaria", "Pod Slovany"),
-    ("idnes", "idnes_detail.html", ".b-similar, .broker, nav",
-     ".grid-similar-offers", "Josefův Důl - Dolní Maxov", "Na Balkáně"),
-    ("idnes", "idnes_detail.html", ".b-similar, .broker, nav",
-     ".b-detail-contact", "Arbesova", "Na Balkáně"),
+    # idnes' two rows are GONE the same way: idnes@3 declares
+    # `.b-similar, div.grid-similar-offers, .b-detail-contact, .broker, nav`, so both gaps
+    # this table pinned (a neighbour's town in the similar-offers grid, the agent's street
+    # in the contact block) are closed by the shipped register.
     # realitymix's row is GONE: contract v4 (the W2-8 activation) declared
     # `.offer-detail-sidebar__company` — plus the agent block, the similar-adverts carousel
     # and the footer — so the gap this table pinned is closed and the test's own failure
@@ -884,8 +891,10 @@ def test_a_zone_that_matches_is_counted_per_component() -> None:
     """`.b-similar, .broker, nav` matching twice hides that `.broker` matched zero."""
     scoped = _scoped("idnes", _ARCHIVED / "idnes_detail.html")
 
-    assert dict(scoped.zone_matches) == {".b-similar": 0, ".broker": 0, "nav": 2}
-    assert scoped.nodes_removed == 2
+    assert dict(scoped.zone_matches) == {
+        ".b-similar": 0, "div.grid-similar-offers": 1, ".b-detail-contact": 1,
+        ".broker": 0, "nav": 2}
+    assert scoped.nodes_removed == 4
 
 
 @pytest.mark.parametrize("portal,fixture,declared,proposed,decoy,subject", REGISTER_GAPS)
