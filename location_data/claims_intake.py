@@ -680,9 +680,8 @@ _LISTINGS_INCREMENTAL_SQL = ("""
 
 # THE BODIES-FIRST BACKLOG (W1-a2), drained in TWO statements (W1-a4).
 #
-# ~250 000 latest detail bodies of ACTIVE page-portal listings were unmined after the first
-# wave — ~170 runs on the listing scan — so this pass names them directly. A delisted row's
-# stored body is a page nobody will ever see again, so `is_active` gates the walk.
+# It mines what the resolver SERVES (`SERVED_LISTING_PREDICATE`, W1-a8) — one definition for the
+# walk, this pass and the sweep: a delisted DISPLAY listing is shown by Browse and the map.
 #
 # WHY TWO. With the keyset in one statement's WHERE, Postgres planned it from `listings`: a
 # bitmap scan of all ~250 000 active rows, a payload probe and the latest-body subquery PER
@@ -746,13 +745,13 @@ _UNMINED_WINDOW_SQL = ("""
     LIMIT %(cap)s
 """)
 
-_UNMINED_BODIES_FROM = """
+_UNMINED_BODIES_FROM = ("""
     FROM portal_raw_payloads p
     JOIN listings l ON l.source = p.source AND l.source_id_native = p.source_id_native
-     AND l.is_active
+     AND """ + SERVED_LISTING_PREDICATE + """
     LEFT JOIN mapy_affected a ON a.listing_id = l.id
     JOIN portal_contracts pc ON pc.source = p.source AND pc.is_active
-"""
+""")
 
 _UNMINED_BODIES_SQL = (
     _UNMINED_BODIES_SELECT + _UNMINED_BODIES_FROM + """
@@ -1108,6 +1107,7 @@ def _bodies_resume_point(conn: psycopg.Connection, *, source: str | None) -> int
     The listing scan's rule, on the payload keyset (W1-a6): a pass that stopped on budget
     resumes, a pass that completed restarts at 0. A `failed` run's stamp counts like a
     `stopped` one — the cursor only advances past a batch whose transaction closed.
+    Widening the served set (W1-a8) needed no reset: the next pass restarts at 0 regardless.
     """
     with conn.cursor() as cur:
         cur.execute(_BODIES_RESUME_SQL, {"lane": LANE, "source": source})

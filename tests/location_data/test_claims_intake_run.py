@@ -545,11 +545,11 @@ def test_a_listing_with_no_stored_body_yields_no_candidate():
     assert scan.contract_version == 5 and scan.row.listing_id == 7
 
 
-def test_the_bodies_first_pass_selects_the_latest_body_of_an_active_listing_only():
-    """ACTIVE, unlike the listing scan. A delisted row's PAYLOAD is evidence we already
-    hold; paying R2 for its stored page body ahead of ~250 000 live ones is not. The
-    portals are a parameter, not a literal: only the sources whose contract declares a page
-    entry have bodies worth fetching, and that set lives in the reader registry."""
+def test_the_bodies_first_pass_selects_the_latest_body_of_a_served_listing_only():
+    """THE SERVED SET, like the listing scan (W1-a8): a delisted DISPLAY listing still fills
+    Browse and the map (336 813 of 672 299 pins), and `l.is_active` alone held those rows on
+    old-contract claims until 503's guard measured a 23.2 % map loss. The portals stay a
+    parameter: only sources whose contract declares a page entry have bodies worth fetching."""
     # The portal and page-kind filters are on the PAYLOAD row, so the window can ask them
     # without `listings` (the join makes `p.source` and `l.source` the same column anyway).
     # They are the WINDOW's job: the outer statement only resolves the ids it named.
@@ -558,9 +558,10 @@ def test_the_bodies_first_pass_selects_the_latest_body_of_an_active_listing_only
         assert "p.page_kind = 'detail'" in one
         assert "p.source = ANY(%(page_sources)s::text[])" in one
         assert "(%(source)s::text IS NULL OR p.source = %(source)s)" in one
+    served = " ".join(SERVED_LISTING_PREDICATE.split())  # backlog count shares the same FROM
     for sql in (_UNMINED_BODIES_SQL, _UNMINED_BODY_BACKLOG_SQL):
         one = " ".join(sql.split())
-        assert "AND l.is_active" in one
+        assert served in one and "AND l.is_active" not in one
         # THE SAME definition of "the latest detail body" the listing scan's lateral
         # applies, asked from the other direction and as an ANTI-JOIN (one probe per
         # candidate id, not one per listing): `last_observed_at`, never `first_observed_at`
@@ -579,7 +580,7 @@ def test_the_bodies_first_pass_selects_the_latest_body_of_an_active_listing_only
 def test_the_backlog_count_is_both_statements_predicates_rebuilt():
     """The summary's "backlog remaining" must be the same question the drain asks, or the
     operator reads a number that never reaches zero. The drain now asks it in two halves —
-    the window's eligibility gate, then the active listing and the latest-body rule — so the
+    the window's eligibility gate, then the served listing and the latest-body rule — so the
     readout is built from the same two pieces rather than written out again."""
     count = " ".join(_UNMINED_BODY_BACKLOG_SQL.split())
     assert count.startswith("SELECT count(*) FROM portal_raw_payloads p")
