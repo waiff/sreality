@@ -426,8 +426,8 @@ grant select on listings_public to authenticated;
 --     per-portal coverage rates were the last plain-view reader of
 --     `listings.geom` and `listings.street`; they now measure the resolver's
 --     point and street, which is what "does this portal give us a location"
---     means after this wave. Same five output columns, so `create or replace`
---     keeps portal_health_mv's dependency and the view's anon grant intact.
+--     means after this wave. Same eight output columns, so `create or replace`
+--     keeps portal_health_mv's dependency -- and the ACL -- untouched.
 create or replace view portal_listing_counts as
   select
     l.source,
@@ -447,7 +447,10 @@ create or replace view portal_listing_counts as
   left join listing_location ll on ll.listing_id = l.id
   group by l.source;
 
-grant select on portal_listing_counts to anon;
+-- No grant re-stated: `create or replace view` preserves the ACL, and migration
+-- 299 part F revoked this view's anon SELECT. Copying 219's `grant ... to anon`
+-- would re-open it (tests/test_tenant_isolation_live.py::test_anon_holds_no_
+-- relation_grants is the rail that says so).
 
 -- 1e. properties_public -- 507's body, `district`, `locality_district_id` and
 --     `locality_region_id` removed. `district` is the column 506 deliberately
