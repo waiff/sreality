@@ -28,15 +28,36 @@ import pytest
 
 MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 
-# (view, migration that defined it BEFORE W3, migration that widens it)
+W3 = "503_location_w3_serving_views.sql"
+
+# The six views migration 503 widens. The migration each one was defined by
+# BEFORE 503 is DERIVED, never listed: hard-coding it is how the first cut of
+# this file passed while the migration itself failed to apply — it compared
+# `broker_listings_public` against 224 when 358 had already appended
+# `listing_id`, so 503 was silently dropping a live column and Postgres refused
+# it ("cannot change name of view column"). Same max-numeric-prefix rule
+# tests/test_browse_read_path_guardrail.py uses for "the effective definition".
 _WIDENED = [
-    ("browse_projection", "475_new_dedup_teardown_finish.sql", "503_location_w3_serving_views.sql"),
-    ("listing_feed_public", "475_new_dedup_teardown_finish.sql", "503_location_w3_serving_views.sql"),
-    ("properties_public", "475_new_dedup_teardown_finish.sql", "503_location_w3_serving_views.sql"),
-    ("listings_public", "494_listings_public_source_url.sql", "503_location_w3_serving_views.sql"),
-    ("pipeline_board_public", "425_measure_price_per_m2.sql", "503_location_w3_serving_views.sql"),
-    ("broker_listings_public", "224_broker_listings_public_subtype.sql", "503_location_w3_serving_views.sql"),
+    "browse_projection",
+    "listing_feed_public",
+    "properties_public",
+    "listings_public",
+    "pipeline_board_public",
+    "broker_listings_public",
 ]
+
+
+def _previous_definition(view: str) -> str:
+    """Filename of the highest-numbered migration below 503 that defines `view`."""
+    pat = re.compile(
+        rf"create\s+(or\s+replace\s+)?view\s+(public\.)?{re.escape(view)}\b", re.IGNORECASE
+    )
+    hits = [
+        p for p in MIGRATIONS.glob("*.sql")
+        if p.name != W3 and pat.search(p.read_text(encoding="utf-8"))
+    ]
+    assert hits, f"no migration before {W3} defines {view}"
+    return max(hits, key=lambda p: int(p.name.split("_", 1)[0])).name
 
 # The seven inputs of the label, in the order W3-2 names them. The house number
 # pair is two columns because Czech addresses carry two numbers (popisné /
@@ -113,8 +134,9 @@ def _columns(sql: str, view: str) -> list[str]:
 # ------------------------------------------------------------------ append-only
 
 
-@pytest.mark.parametrize("view,before,after", _WIDENED, ids=[v for v, _, _ in _WIDENED])
-def test_view_only_appends(view: str, before: str, after: str) -> None:
+@pytest.mark.parametrize("view", _WIDENED)
+def test_view_only_appends(view: str) -> None:
+    before, after = _previous_definition(view), W3
     old = _columns(_sql(before), view)
     new = _columns(_sql(after), view)
     assert new[: len(old)] == old, (
@@ -130,8 +152,8 @@ def test_view_only_appends(view: str, before: str, after: str) -> None:
 
 
 def test_browse_projection_appends_exactly_the_w3_four() -> None:
-    old = _columns(_sql("475_new_dedup_teardown_finish.sql"), "browse_projection")
-    new = _columns(_sql("503_location_w3_serving_views.sql"), "browse_projection")
+    old = _columns(_sql(_previous_definition("browse_projection")), "browse_projection")
+    new = _columns(_sql(W3), "browse_projection")
     assert new[len(old):] == [
         "display_label", "cast_obce_id", "uncertainty_radius_m", "granularity_rank",
     ]
@@ -140,8 +162,7 @@ def test_browse_projection_appends_exactly_the_w3_four() -> None:
 def test_browse_projection_resources_the_codes_and_the_pin() -> None:
     """The five re-sourced columns keep their NAMES (so every reader and every
     index keeps working) and change their SOURCE to listing_location."""
-    body = " ".join(_view_select_list(
-        _sql("503_location_w3_serving_views.sql"), "browse_projection").split())
+    body = " ".join(_view_select_list(_sql(W3), "browse_projection").split())
     for frag in (
         "ll.obec_kod as obec_id",
         "ll.okres_kod as okres_id",
@@ -156,8 +177,7 @@ def test_no_window_function_in_the_projection() -> None:
     """W3-2 refused the shared-pin count. `sync_browse_list` filters
     `WHERE property_id = ANY(...)`, and that qual cannot be pushed below a window
     function — every merge would aggregate the whole corpus."""
-    body = _view_select_list(
-        _sql("503_location_w3_serving_views.sql"), "browse_projection").lower()
+    body = _view_select_list(_sql(W3), "browse_projection").lower()
     assert " over (" not in body and " over(" not in body
 
 
@@ -165,7 +185,7 @@ def test_no_window_function_in_the_projection() -> None:
 
 
 def _label_function_body() -> str:
-    sql = _sql("503_location_w3_serving_views.sql")
+    sql = _sql(W3)
     m = re.search(
         r"create\s+or\s+replace\s+function\s+location_display_label\s*\((.*?)\)\s*returns\s+text(.*?)\$fn\$",
         sql,
@@ -178,7 +198,7 @@ def _label_function_body() -> str:
 
 
 def test_label_takes_exactly_the_w3_2_inputs_in_order() -> None:
-    sql = _sql("503_location_w3_serving_views.sql")
+    sql = _sql(W3)
     m = re.search(
         r"create\s+or\s+replace\s+function\s+location_display_label\s*\((.*?)\)\s*returns\s+text",
         sql,
@@ -220,11 +240,11 @@ def test_label_fallback_order_is_exactly_w3_2() -> None:
     assert "btrim(p_cast_obce_name) <> btrim(p_obec_name)" in body
 
 
-@pytest.mark.parametrize("view", [v for v, _, _ in _WIDENED])
+@pytest.mark.parametrize("view", _WIDENED)
 def test_every_serving_view_calls_the_one_label(view: str) -> None:
     """No view composes a place string of its own — including the two that read
     it from another view rather than computing it."""
-    sql = _sql("503_location_w3_serving_views.sql")
+    sql = _sql(W3)
     select_list = " ".join(_view_select_list(sql, view).split())
     assert "as display_label" in select_list or "p.display_label" in select_list, (
         f"{view} does not publish display_label"

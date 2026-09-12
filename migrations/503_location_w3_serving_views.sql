@@ -611,7 +611,7 @@ revoke all on pipeline_board_public from public, anon;
 grant select on pipeline_board_public to authenticated;
 
 -- ---------------------------------------------------------------------------
--- 7. broker_listings_public -- migration 224's body plus the label. The broker
+-- 7. broker_listings_public -- migration 358's body plus the label. The broker
 --    inventory table is one of the eleven place-rendering sites; without this it
 --    would be the only surface still assembling `locality ?? district` by hand.
 -- ---------------------------------------------------------------------------
@@ -633,6 +633,7 @@ select
   l.last_seen_at,
   l.property_id,
   l.subtype,
+  l.id as listing_id,
   -- ---- appended by migration 503 (W3 S1) ----
   location_display_label(ll.street_name, ll.house_number_cp, ll.house_number_co,
                          ll.obec_name, ll.cast_obce_name, ll.country_code,
