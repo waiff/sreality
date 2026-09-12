@@ -86,6 +86,11 @@
 --   properties.home_obec_pop / near_*_{5,15}km -- Browse filters read them.
 --     Their producer, recompute_city_proximity(), is re-sourced below onto
 --     listing_location rather than dropped.
+--   listings_public's NINE legacy place columns -- see section 1c. Five
+--     matviews hold an object dependency on that view; the columns are
+--     re-sourced from listing_location (or typed NULL for the two sreality
+--     portal ids) instead of removed, so no matview has to be re-created and
+--     repopulated inside this window.
 --   raw_json -- untouched. It is the content-hash substrate (rule 2) and the
 --     resolver's evidence; the legacy keys stay in it as history forever.
 
@@ -101,21 +106,15 @@ set lock_timeout = '5s';
 --    Dependency order matters twice over (each statement autocommits):
 --      pipeline_board_public   -> properties_public
 --      properties_map_mv       -> browse_projection
---      image_storage_overview_mv / scraper_health_checks_mv / health_summary_mv
---                              -> listings_public
 --      broker_geo_options      -> broker_region_type_stats
 --    so the dependents drop first and are re-created after.
 --
---    The three health matviews are the surprise in this section: none of them
---    reads a dropped COLUMN (they take source / sreality_id / category_* /
---    is_active / first_seen_at / last_seen_at off `listings_public`), but a
---    matview holds an object-level dependency on the view, so `drop view
---    listings_public` is refused while they exist. Their bodies below are
---    migration 354's, carried over VERBATIM -- not retyped, not re-planned --
---    together with their unique indexes and revokes. `create materialized
---    view` populates, which is why statement_timeout is raised around them:
---    their pg_cron refresh (*/10, migration 371) uses REFRESH ... CONCURRENTLY
---    and would fail on a never-populated matview.
+--    TWO views deliberately do NOT get the DROP + CREATE and keep their width:
+--    `listings_public` (five matviews depend on it -- see 1c) and
+--    `portal_listing_counts` (portal_health_mv depends on it -- see 1d). Both
+--    take an in-place `create or replace` that re-sources their place columns
+--    from listing_location, so no matview has to be re-created and repopulated
+--    inside the window that holds ACCESS EXCLUSIVE on `listings`.
 --
 --    `rebuild_properties_map_mv()` is NOT re-created: 506 already took
 --    `district` out of its cover INCLUDE list, and nothing else in its body
@@ -137,10 +136,6 @@ drop materialized view if exists properties_map_mv;
 drop view if exists properties_public;
 drop view if exists browse_projection;
 drop view if exists listing_feed_public;
-drop materialized view if exists image_storage_overview_mv;
-drop materialized view if exists scraper_health_checks_mv;
-drop materialized view if exists health_summary_mv;
-drop view if exists listings_public;
 drop view if exists broker_geo_options;
 drop materialized view if exists broker_region_type_stats;
 drop view if exists broker_listings_public;
@@ -332,12 +327,27 @@ where p.status = 'active';
 revoke all on listing_feed_public from anon, authenticated;
 grant select on listing_feed_public to authenticated;
 
--- 1c. listings_public -- 507's body, nine legacy place columns removed. The
---     three chip codes, lat/lng and display_label already come from
---     listing_location; nothing in api/, toolkit/, frontend/src/ or the
---     extension selects from this view (migration 494 censused it), and its
---     only readers are the three health matviews re-created in 1d.
-create view listings_public as
+-- 1c. listings_public -- KEEPS ITS WIDTH, and this is the one deliberate
+--     compatibility surface in the wave. FIVE matviews hold an object-level
+--     dependency on this view -- image_storage_overview_mv,
+--     scraper_health_checks_mv, health_summary_mv (migration 354),
+--     portal_health_mv (219) and category_trends_mv (233). Not one of them
+--     reads a place column (they take source / sreality_id / category_* /
+--     is_active / first_seen_at off it), but a matview dependency is on the
+--     VIEW, not on the columns, so `drop view listings_public` is refused
+--     while they exist -- and narrowing it would mean DROP + CREATE + REPOPULATE
+--     of all five, inside the same ten-minute window that holds ACCESS
+--     EXCLUSIVE on `listings`. That trade is not worth taking here.
+--
+--     So: `create or replace view` (append-only, ACL preserved, zero
+--     dependents touched) re-sources the seven place columns that HAVE a twin
+--     in listing_location, and the two sreality portal ids -- which have none,
+--     and never were a query dimension -- become typed NULL. Nothing in api/,
+--     toolkit/, frontend/src/, scripts/ or the extension selects from this view
+--     (migration 494 censused it). Narrowing it belongs to the wave that
+--     re-points those five matviews at `listings`, which is not a wave that
+--     should also be dropping columns.
+create or replace view listings_public as
 select
   sreality_id,
   first_seen_at,
@@ -349,6 +359,10 @@ select
   price_unit,
   area_m2,
   disposition,
+  ll.obec_name  as locality,
+  ll.okres_name as district,
+  null::integer as locality_district_id,
+  null::integer as locality_region_id,
   st_y(ll.geom) as lat,
   st_x(ll.geom) as lng,
   floor,
@@ -381,9 +395,14 @@ select
   apartment_condition_level,
   description,
   source,
+  ll.street_name      as street,
+  ll.house_number_cp  as house_number,
   mf_reference_rent_czk,
   mf_gross_yield_pct,
   mf_reference_rent,
+  ll.obec_name  as obec,
+  ll.okres_name as okres,
+  ll.kraj_name  as region,
   subtype,
   ll.obec_kod  as obec_id,
   ll.okres_kod as okres_id,
@@ -400,515 +419,35 @@ select
 from listings
      left join listing_location ll on ll.listing_id = listings.id;
 
-revoke all on listings_public from anon, authenticated;
+revoke all on listings_public from anon;
 grant select on listings_public to authenticated;
 
--- 1d. The three health matviews, VERBATIM from migration 354. They lose
---     nothing -- they are here only because they hold a dependency on
---     listings_public.
-set statement_timeout = '900s';
+-- 1d. portal_listing_counts -- 219's body, re-sourced. The Health page's three
+--     per-portal coverage rates were the last plain-view reader of
+--     `listings.geom` and `listings.street`; they now measure the resolver's
+--     point and street, which is what "does this portal give us a location"
+--     means after this wave. Same five output columns, so `create or replace`
+--     keeps portal_health_mv's dependency and the view's anon grant intact.
+create or replace view portal_listing_counts as
+  select
+    l.source,
+    count(*)                                                            as listings_total,
+    count(*) filter (where l.is_active)                                 as listings_active,
+    count(*) filter (where l.is_active and l.last_seen_at > now() - interval '7 days')
+                                                                        as listings_active_7d,
+    max(l.last_seen_at)                                                 as last_seen_at,
+    round(100.0 * count(*) filter (where l.is_active and ll.geom is not null)
+          / nullif(count(*) filter (where l.is_active), 0), 1)           as geo_pct,
+    round(100.0 * count(*) filter (where l.is_active and ll.street_name is not null)
+          / nullif(count(*) filter (where l.is_active), 0), 1)           as street_pct,
+    round(100.0 * count(*) filter (where l.is_active and ll.street_name is not null
+                                     and l.disposition is not null)
+          / nullif(count(*) filter (where l.is_active), 0), 1)           as dedup_eligible_pct
+  from listings l
+  left join listing_location ll on ll.listing_id = l.id
+  group by l.source;
 
--- ci-allow-ungated: image_storage_overview_mv admin-only ops matview; kept dark to browser roles by the revoke below, a matview cannot embed is_platform_admin().
-create materialized view image_storage_overview_mv as
-  select
-    l.category_main,
-    l.category_type,
-    count(i.id)                                       as total,
-    count(i.storage_path)                             as stored,
-    count(i.id) filter (where l.is_active)            as total_active,
-    count(i.storage_path) filter (where l.is_active)  as stored_active
-  from listings_public l
-  left join images i on i.listing_id = l.id
-  group by 1, 2;
-
-create unique index if not exists image_storage_overview_mv_cat
-  on image_storage_overview_mv (category_main, category_type);
-
-revoke all on image_storage_overview_mv from anon, authenticated;
-
--- ci-allow-ungated: scraper_health_checks_mv admin-only ops matview; kept dark to browser roles by the revoke below, a matview cannot embed is_platform_admin().
-create materialized view scraper_health_checks_mv as
-with
-sources as (
-  select source, coalesce(scrape_cadence_minutes, 60) as cad_mins
-  from portals
-  where kind = 'scraper'
-),
-runs_agg as (
-  select
-    source,
-    max(started_at) filter (where index_pages > 0) as last_start,
-    count(*) filter (where ended_at is null
-                       and started_at < now() - interval '30 minutes'
-                       and started_at > now() - interval '6 hours') as stuck,
-    coalesce(sum(listings_scraped_new) filter (where started_at > now() - interval '24 hours'), 0) as scraped_new,
-    coalesce(sum(listings_updated)     filter (where started_at > now() - interval '24 hours'), 0) as updated,
-    coalesce(max(listings_inactive)    filter (where started_at > now() - interval '24 hours'), 0) as inactive_max,
-    coalesce(sum(errors)               filter (where started_at > now() - interval '24 hours'), 0) as errors_sum
-  from scrape_runs_public
-  group by source
-),
-listings_agg as (
-  select
-    source,
-    count(*) filter (where first_seen_at > now() - interval '24 hours') as new_listings_fs,
-    count(*) filter (where is_active and last_seen_at < now() - interval '7 days') as stale_active,
-    max(last_seen_at) filter (where is_active) as last_fresh
-  from listings_public
-  group by source
-),
-fails_agg as (
-  select
-    coalesce(l.source, 'sreality') as source,
-    count(*) filter (where not f.given_up) as active_fail,
-    count(*) filter (where f.given_up) as given_up
-  from listing_fetch_failures_public f
-  left join listings_public l on l.sreality_id = f.sreality_id
-  group by coalesce(l.source, 'sreality')
-),
-queue_agg as (
-  select
-    source,
-    count(*) filter (where claimed_at is null and not given_up) as claimable,
-    count(*) filter (where claimed_at is null and not given_up and priority = 1) as changed,
-    count(*) filter (where given_up) as q_given_up
-  from listing_detail_queue_public
-  group by source
-),
-lag_agg as (
-  select
-    q.source,
-    coalesce(round((percentile_cont(0.5) within group (order by extract(epoch from now() - q.enqueued_at)/60.0))::numeric, 1), 0) as p50_min,
-    coalesce(round((percentile_cont(0.9) within group (order by extract(epoch from now() - q.enqueued_at)/60.0))::numeric, 1), 0) as p90_min,
-    count(*) filter (where q.enqueued_at < now() - make_interval(mins => (s.cad_mins * 3)::int))::int as unhealthy_n,
-    count(*)::int as n
-  from listing_detail_queue_public q
-  join sources s on s.source = q.source
-  where q.claimed_at is null and not q.given_up and q.priority <> 2
-  group by q.source
-),
-attach_agg as (
-  select
-    source,
-    count(*)::int as n,
-    coalesce(round(extract(epoch from now() - min(first_seen_at))/60.0, 1), 0) as oldest_min
-  from listings
-  where is_active and property_id is null
-  group by source
-),
-delist_agg as (
-  select
-    source,
-    count(*)::int as n,
-    coalesce(round((percentile_cont(0.5) within group (order by extract(epoch from inactive_at - last_seen_at)/60.0))::numeric, 1), 0) as p50_min,
-    coalesce(round((percentile_cont(0.9) within group (order by extract(epoch from inactive_at - last_seen_at)/60.0))::numeric, 1), 0) as p90_min
-  from listings
-  where inactive_at is not null
-    and inactive_at > now() - interval '7 days'
-  group by source
-),
-churn_agg as (
-  select source, snaps_24h, active_n,
-         round(snaps_24h / nullif(active_n, 0)::numeric, 2) as ratio
-  from snapshot_churn_24h_mv
-),
-drift_fresh as (
-  select distinct on (source, field) source, field, pct_populated
-  from data_quality_snapshots
-  where field in ('price_czk', 'area_m2', 'geom', 'locality', 'disposition')
-    and captured_at > now() - interval '20 hours'
-  order by source, field, captured_at desc
-),
-drift_baseline as (
-  select distinct on (source, field) source, field, pct_populated
-  from data_quality_snapshots
-  where field in ('price_czk', 'area_m2', 'geom', 'locality', 'disposition')
-    and captured_at < now() - interval '20 hours'
-    and captured_at > now() - interval '8 days'
-  order by source, field, captured_at desc
-),
-drift_agg as (
-  select
-    f.source,
-    count(*)::int as n_fields,
-    coalesce(max(b.pct_populated - f.pct_populated), 0) as max_drift,
-    (array_agg(f.field order by (b.pct_populated - f.pct_populated) desc))[1] as worst_field
-  from drift_fresh f
-  join drift_baseline b using (source, field)
-  group by f.source
-),
-recon_agg as (
-  select
-    s.source,
-    count(d.gap_pct) as n_with_data,
-    max(d.gap_pct) as max_gap_pct
-  from sources s
-  left join lateral (
-    select by_category
-    from scrape_runs_public
-    where ended_at is not null and index_pages > 0 and source = s.source
-    order by started_at desc
-    limit 1
-  ) latest on true
-  left join lateral (
-    select abs((e->>'collected')::numeric - (e->>'sreality_result_size')::numeric)
-             / nullif((e->>'sreality_result_size')::numeric, 0) * 100.0 as gap_pct
-    from jsonb_array_elements(coalesce(latest.by_category, '[]'::jsonb)) e
-    where (e->>'sreality_result_size') is not null and (e->>'collected') is not null
-      and (e->>'sreality_result_size')::numeric > 0
-  ) d on true
-  group by s.source
-),
-calc as (
-  select
-    s.source,
-    s.cad_mins,
-    ra.last_start,
-    extract(epoch from now() - ra.last_start)/60.0 as mins_since_start,
-    coalesce(ra.stuck, 0)        as stuck,
-    coalesce(ra.scraped_new, 0)  as scraped_new,
-    coalesce(ra.updated, 0)      as updated,
-    coalesce(ra.inactive_max, 0) as inactive_max,
-    coalesce(ra.errors_sum, 0)   as errors_sum,
-    round(100.0 * coalesce(ra.errors_sum, 0)
-          / nullif(coalesce(ra.errors_sum, 0) + coalesce(ra.scraped_new, 0) + coalesce(ra.updated, 0), 0), 1) as err_pct,
-    coalesce(la.new_listings_fs, 0) as new_listings_fs,
-    coalesce(la.stale_active, 0)    as stale_active,
-    extract(epoch from now() - la.last_fresh)/60.0 as mins_fresh,
-    coalesce(fa.active_fail, 0) as active_fail,
-    coalesce(fa.given_up, 0)    as given_up,
-    coalesce(qa.claimable, 0)   as q_claimable,
-    coalesce(qa.changed, 0)     as q_changed,
-    coalesce(qa.q_given_up, 0)  as q_given_up,
-    coalesce(lg.p50_min, 0)     as lag_p50,
-    coalesce(lg.p90_min, 0)     as lag_p90,
-    coalesce(lg.unhealthy_n, 0) as lag_unhealthy,
-    coalesce(lg.n, 0)           as lag_n,
-    coalesce(at.n, 0)           as attach_n,
-    coalesce(at.oldest_min, 0)  as attach_oldest,
-    coalesce(dl.n, 0)           as delist_n,
-    coalesce(dl.p50_min, 0)     as delist_p50,
-    coalesce(dl.p90_min, 0)     as delist_p90,
-    coalesce(ch.snaps_24h, 0)   as churn_snaps,
-    coalesce(ch.active_n, 0)    as churn_active,
-    coalesce(ch.ratio, 0)       as churn_ratio,
-    coalesce(dr.n_fields, 0)    as drift_nfields,
-    coalesce(dr.max_drift, 0)   as drift_max,
-    dr.worst_field             as drift_worst,
-    coalesce(rc.n_with_data, 0) as recon_n,
-    rc.max_gap_pct             as recon_gap
-  from sources s
-  left join runs_agg     ra on ra.source = s.source
-  left join listings_agg la on la.source = s.source
-  left join fails_agg    fa on fa.source = s.source
-  left join queue_agg    qa on qa.source = s.source
-  left join lag_agg      lg on lg.source = s.source
-  left join attach_agg   at on at.source = s.source
-  left join delist_agg   dl on dl.source = s.source
-  left join churn_agg    ch on ch.source = s.source
-  left join drift_agg    dr on dr.source = s.source
-  left join recon_agg    rc on rc.source = s.source
-)
-select
-  c.source,
-  jsonb_build_object(
-    'source', c.source,
-    'checks', jsonb_build_array(
-      jsonb_build_object(
-        'key', 'liveness', 'label', 'Scraper running on schedule',
-        'status', case when c.last_start is null then 'warn'
-                       when c.mins_since_start < c.cad_mins * 1.5 then 'pass'
-                       when c.mins_since_start < c.cad_mins * 3 then 'warn' else 'fail' end,
-        'value', case when c.last_start is null then 'never'
-                      else coalesce(round(c.mins_since_start::numeric, 0)::text, '–') || ' min ago' end,
-        'detail', 'Last index walk started ' || coalesce(to_char(c.last_start, 'YYYY-MM-DD HH24:MI'), 'never')
-                  || ' UTC. Expected cadence ~' || c.cad_mins::text || ' min (GitHub throttles short crons). '
-                  || 'Warn >' || round(c.cad_mins * 1.5)::text || ' min, fail >' || round(c.cad_mins * 3)::text || ' min.'),
-      jsonb_build_object('key', 'runs_completing', 'label', 'Runs finishing cleanly',
-        'status', case when c.stuck = 0 then 'pass' when c.stuck = 1 then 'warn' else 'fail' end,
-        'value', c.stuck::text || ' stuck',
-        'detail', 'Index-walk or detail-drain runs started >30 min ago (last 6h) that never recorded an end timestamp — a crash or timeout before finalize. Expected 0.'),
-      jsonb_build_object('key', 'new_listings', 'label', 'New listings flowing',
-        'status', case when c.new_listings_fs > 0 then 'pass' else 'warn' end,
-        'value', c.new_listings_fs::text || ' / 24h',
-        'detail', 'New listings first seen in the last 24h (from listings.first_seen_at — immune to a crashed or SIGKILLed drain''s lost run counters). 0 over a full day suggests the index-walk enqueue or the detail-drain is blocked.'),
-      jsonb_build_object('key', 'delisting_spike', 'label', 'No false mass-delisting',
-        'status', case when c.inactive_max <= 500 then 'pass' when c.inactive_max <= 2000 then 'warn' else 'fail' end,
-        'value', c.inactive_max::text || ' max/run',
-        'detail', 'Largest single-run inactivation in 24h (the index-walk''s mark_inactive). A big spike usually means a truncated index walk falsely delisted live listings; the walk-completeness guard mitigates this. Warn >500, fail >2000.'),
-      jsonb_build_object('key', 'delisting_latency', 'label', 'Delisting latency (gone → flipped)',
-        'status', case when c.delist_n = 0 then 'pass'
-                       when c.delist_p90 < 2160 then 'pass'
-                       when c.delist_p90 < 4320 then 'warn' else 'fail' end,
-        'value', case when c.delist_n = 0 then 'no flips recorded yet'
-                      else 'p50 ' || c.delist_p50::text || 'm / p90 ' || c.delist_p90::text || 'm' end,
-        'detail', 'How long a delisted listing stayed nominally active: inactive_at − last_seen_at over the '
-                  || c.delist_n::text || ' listings flipped inactive in the last 7 days. Rows flipped before migration 175 carry no stamp and are ignored. Warn p90 >36h (2160 min), fail >72h (4320 min).'),
-      jsonb_build_object('key', 'error_rate', 'label', 'Detail-fetch error rate',
-        'status', case when coalesce(c.err_pct, 0) < 5 then 'pass' when coalesce(c.err_pct, 0) < 15 then 'warn' else 'fail' end,
-        'value', coalesce(c.err_pct, 0)::text || '%',
-        'detail', 'Errors as a share of detail work (errors + new + updated) over 24h. Elevated values usually mean the portal is rate-limiting. Warn >5%, fail >15%.'),
-      jsonb_build_object('key', 'snapshot_churn', 'label', 'Snapshot churn (hash thrash)',
-        'status', case when coalesce(c.churn_ratio, 0) < 0.5 then 'pass'
-                       when coalesce(c.churn_ratio, 0) < 1.5 then 'warn' else 'fail' end,
-        'value', coalesce(c.churn_ratio, 0)::text || '× / 24h',
-        'detail', c.churn_snaps::text || ' snapshots written in the last 24h across ' || c.churn_active::text
-                  || ' active listings. A ratio near 1 means the average listing re-snapshots DAILY — almost always a volatile field thrashing the content hash (the idnes A/B/A storm ran for weeks undetected), not real market churn. Warn ≥0.5, fail ≥1.5.'),
-      jsonb_build_object('key', 'stale_active', 'label', 'No stale active listings',
-        'status', case when c.stale_active < 50 then 'pass' when c.stale_active < 500 then 'warn' else 'fail' end,
-        'value', c.stale_active::text,
-        'detail', 'Listings still is_active=true but not seen in the index for >7 days — they should have been marked inactive. Warn >50, fail >500.'),
-      jsonb_build_object('key', 'field_null_drift', 'label', 'Field completeness drift',
-        'status', case when c.drift_nfields = 0 then 'pass'
-                       when c.drift_max < 5 then 'pass'
-                       when c.drift_max < 15 then 'warn' else 'fail' end,
-        'value', case when c.drift_nfields = 0 then 'no baseline yet'
-                      else c.drift_worst || ' −' || round(greatest(c.drift_max, 0), 1)::text || ' pts' end,
-        'detail', 'Largest drop in field population (percentage points) vs the daily data-quality baseline (data_quality_snapshots, latest capture 20h–8d old), across price_czk / area_m2 / geom / locality / disposition. Catches a parser silently losing a field within a day — the bazos locality breakage took weeks to surface this way. Warn ≥5 pts, fail ≥15 pts.'),
-      jsonb_build_object('key', 'fetch_failures', 'label', 'Fetch-failure backlog',
-        'status', case when c.active_fail < 1000 then 'pass' when c.active_fail < 5000 then 'warn' else 'fail' end,
-        'value', c.active_fail::text || ' active',
-        'detail', c.given_up::text || ' listings given up after repeated failures. Active failures retry with priority next run. Warn >1000, fail >5000.'),
-      jsonb_build_object('key', 'detail_queue_backlog', 'label', 'Detail-drain backlog',
-        'status', case when c.q_claimable < 2000 then 'pass' when c.q_claimable < 10000 then 'warn' else 'fail' end,
-        'value', c.q_claimable::text || ' queued',
-        'detail', 'New + price-changed listings the index walk enqueued but the detail-drain has not fetched yet ('
-                  || c.q_changed::text || ' price-changed). A new listing becomes an active row only once drained, so THIS backlog — not data loss — is what opens the gap in "Index walk completeness". The drain closes it; raise its cap/cadence if it grows. '
-                  || c.q_given_up::text || ' given up. Warn >2k, fail >10k.'),
-      jsonb_build_object('key', 'detail_queue_lag', 'label', 'Detail-drain lag (index→fetch)',
-        'status', case when c.lag_n = 0 then 'pass'
-                       when c.lag_p90 < c.cad_mins * 1.5 then 'pass'
-                       when c.lag_p90 < c.cad_mins * 3 then 'warn' else 'fail' end,
-        'value', case when c.lag_n = 0 then 'empty'
-                      else 'p50 ' || c.lag_p50::text || 'm / p90 ' || c.lag_p90::text || 'm' end,
-        'detail', 'Time between the index walk enqueueing a listing and the detail-drain fetching it, over listings still waiting (in-flight only — completed queue rows are deleted, so a caught-up drain reads empty). '
-                  || c.lag_unhealthy::text || ' have waited >' || round(c.cad_mins * 3)::text || ' min (~3 missed cycles). '
-                  || 'Fresh + price-changed rows only (excludes failure-retry). Warn p90 >' || round(c.cad_mins * 1.5)::text || ' min, fail p90 >' || round(c.cad_mins * 3)::text || ' min.'),
-      jsonb_build_object('key', 'property_attach_lag', 'label', 'Property attach lag (Browse-visible)',
-        'status', case when c.attach_n = 0 then 'pass'
-                       when c.attach_oldest < 30 then 'pass'
-                       when c.attach_oldest < 90 then 'warn' else 'fail' end,
-        'value', case when c.attach_n = 0 then 'all attached'
-                      else c.attach_n::text || ' waiting, oldest ' || c.attach_oldest::text || 'm' end,
-        'detail', 'A scraped listing lands with no properties row and is invisible in Browse (which reads the property grain) until the async property-maintenance job (recompute_property_stats --incremental, ~every 5 min; daily full sweep as backstop) attaches it as a singleton. The remaining gap between "scraped into listings" and "Browse-visible" — pairs with the detail-drain lag above for end-to-end latency. Warn oldest >30 min, fail >90 min.'),
-      jsonb_build_object('key', 'e2e_latency', 'label', 'End-to-end latency (portal → Browse)',
-        'status', case when (c.lag_p90 + c.attach_oldest) < 90 then 'pass'
-                       when (c.lag_p90 + c.attach_oldest) < 240 then 'warn' else 'fail' end,
-        'value', round((c.lag_p90 + c.attach_oldest)::numeric, 0)::text || ' min',
-        'detail', 'Composed pipeline latency: detail-drain p90 (' || c.lag_p90::text
-                  || 'm, index-seen → fetched) + oldest unattached listing (' || c.attach_oldest::text
-                  || 'm, fetched → Browse-visible). The two segment checks above are the components; this is the single "how far behind the portal is Browse" number. Warn ≥90 min, fail ≥240 min.'),
-      jsonb_build_object('key', 'data_freshness', 'label', 'Data freshness',
-        'status', case when c.mins_fresh is null then 'warn'
-                       when c.mins_fresh < c.cad_mins then 'pass'
-                       when c.mins_fresh < c.cad_mins * 3 then 'warn' else 'fail' end,
-        'value', case when c.mins_fresh is null then '–'
-                      else coalesce(round(c.mins_fresh::numeric, 0)::text, '–') || ' min' end,
-        'detail', 'Time since the most recently seen active listing. Warn >' || c.cad_mins::text || ' min, fail >' || round(c.cad_mins * 3)::text || ' min.'),
-      jsonb_build_object('key', 'index_completeness', 'label', 'Index walk completeness',
-        'status', case when c.recon_n = 0 then 'warn'
-                    when coalesce(c.recon_gap, 0) < 2 then 'pass'
-                    when coalesce(c.recon_gap, 0) < 5 then 'warn' else 'fail' end,
-        'value', case when c.recon_n = 0 then 'no data yet'
-                      else round(coalesce(c.recon_gap, 0), 1)::text || '% max gap' end,
-        'detail', 'Largest per-category gap between how many index entries we collected and the portal''s reported result_size on the latest completed index walk — i.e. did the walk SEE every listing. Whether we have FETCHED them is the separate detail-drain backlog. Populates once the walk records per-category result_size. Warn >2%, fail >5%.')
-    )
-  ) as payload
-from calc c;
-
-create unique index if not exists scraper_health_checks_mv_source_idx
-  on scraper_health_checks_mv (source);
-
-revoke all on scraper_health_checks_mv from anon, authenticated;
-
--- ci-allow-ungated: health_summary_mv admin-only ops matview; kept dark to browser roles by the revoke below, a matview cannot embed is_platform_admin().
-create materialized view health_summary_mv as
-with
-category_pairs as (
-  select * from (values
-    ('byt',      'pronajem', 1),
-    ('byt',      'prodej',   2),
-    ('dum',      'pronajem', 3),
-    ('dum',      'prodej',   4),
-    ('komercni', 'pronajem', 5),
-    ('komercni', 'prodej',   6)
-  ) as t(category_main, category_type, sort_order)
-),
-series14 as (
-  select generate_series((now() - interval '13 days')::date, now()::date, '1 day')::date as day
-),
-series7 as (
-  select generate_series((now() - interval '6 days')::date, now()::date, '1 day')::date as day
-),
--- ONE full scan: every count metric (national rollups + per-category cards).
-cat_counts as materialized (
-  select
-    category_main,
-    category_type,
-    count(*) filter (where is_active = true)::int as active_now,
-    count(*) filter (where is_active = false and last_seen_at >= now() - interval '7 days')::int as flipped_7d,
-    count(*) filter (where first_seen_at <= now() - interval '7 days'
-                       and (is_active = true or last_seen_at >= now() - interval '7 days'))::int as active_7d_ago,
-    max(last_seen_at) as last_seen
-  from listings_public
-  group by category_main, category_type
-),
--- ONE recent-slice scan: new listings per (cm, ct, day) over the 14-day window.
-new_counts as materialized (
-  select category_main, category_type,
-    (date_trunc('day', first_seen_at))::date as day,
-    count(*)::int as n
-  from listings_public
-  where first_seen_at >= (now() - interval '13 days')::date
-  group by category_main, category_type, (date_trunc('day', first_seen_at))::date
-),
--- ONE recent-slice scan: flipped-inactive per (cm, ct, day) over the 7-day window.
-flip_counts as materialized (
-  select category_main, category_type,
-    (date_trunc('day', last_seen_at))::date as day,
-    count(*)::int as n
-  from listings_public
-  where is_active = false and last_seen_at >= (now() - interval '6 days')::date
-  group by category_main, category_type, (date_trunc('day', last_seen_at))::date
-),
--- Non-listings CTEs carried forward verbatim from migration 136, EXCEPT snap_density,
--- whose per-listing snapshot count is now keyed on listing_id (Gate 2).
-snap_density as (
-  with counts as (
-    select listing_id, count(*) as snap_count
-    from listing_snapshots_public
-    group by listing_id
-  )
-  select
-    case when snap_count >= 4 then '4+' else snap_count::text end as bucket,
-    count(*)::int as n
-  from counts
-  group by 1
-),
-freshness_24h as (
-  select outcome, count(*)::int as n
-  from listing_freshness_checks_public
-  where checked_at >= now() - interval '24 hours'
-  group by outcome
-  order by n desc
-),
-failures_summary as (
-  select
-    count(*) filter (where given_up = true)::int as given_up,
-    count(*)::int                                as total
-  from listing_fetch_failures_public
-),
-failures_top10 as (
-  select sreality_id, attempts, first_failure_at, last_failure_at, given_up
-  from listing_fetch_failures_public
-  order by attempts desc, last_failure_at desc nulls last
-  limit 10
-),
-cat_failures as (
-  select
-    l.category_main,
-    l.category_type,
-    count(*)::int                                  as total,
-    count(*) filter (where f.given_up = true)::int as given_up
-  from listing_fetch_failures_public f
-  join listings_public l on l.sreality_id = f.sreality_id
-  group by l.category_main, l.category_type
-),
--- Per-category series rebuilt from the pre-aggregated passes (no extra scans).
-cat_new_per_day_14 as (
-  select cp.category_main, cp.category_type,
-    jsonb_agg(jsonb_build_object('day', s.day::text, 'n', coalesce(c.n, 0)) order by s.day) as series
-  from category_pairs cp
-  cross join series14 s
-  left join new_counts c
-    on c.category_main = cp.category_main
-   and c.category_type = cp.category_type
-   and c.day = s.day
-  group by cp.category_main, cp.category_type
-),
-cat_flipped_per_day_7 as (
-  select cp.category_main, cp.category_type,
-    jsonb_agg(jsonb_build_object('day', s.day::text, 'n', coalesce(c.n, 0)) order by s.day) as series
-  from category_pairs cp
-  cross join series7 s
-  left join flip_counts c
-    on c.category_main = cp.category_main
-   and c.category_type = cp.category_type
-   and c.day = s.day
-  group by cp.category_main, cp.category_type
-),
-by_category as (
-  select
-    cp.sort_order,
-    jsonb_build_object(
-      'category_main',       cp.category_main,
-      'category_type',       cp.category_type,
-      'active_now',          coalesce(cc.active_now, 0),
-      'flipped_inactive_7d', coalesce(cc.flipped_7d, 0),
-      'new_per_day_14d',     coalesce(npd.series, '[]'::jsonb),
-      'flipped_per_day_7d',  coalesce(fpd.series, '[]'::jsonb),
-      'failures_total',      coalesce(cf.total,    0),
-      'failures_given_up',   coalesce(cf.given_up, 0)
-    ) as obj
-  from category_pairs cp
-  left join cat_counts cc
-    on cc.category_main = cp.category_main and cc.category_type = cp.category_type
-  left join cat_new_per_day_14 npd
-    on npd.category_main = cp.category_main and npd.category_type = cp.category_type
-  left join cat_flipped_per_day_7 fpd
-    on fpd.category_main = cp.category_main and fpd.category_type = cp.category_type
-  left join cat_failures cf
-    on cf.category_main = cp.category_main and cf.category_type = cp.category_type
-)
-select 1 as id, jsonb_build_object(
-  'last_scrape_at',         (select max(last_seen) from cat_counts),
-  'active_now',             (select coalesce(sum(active_now), 0)::int from cat_counts),
-  'active_7d_ago',          (select coalesce(sum(active_7d_ago), 0)::int from cat_counts),
-  'flipped_inactive_7d',    (select coalesce(sum(flipped_7d), 0)::int from cat_counts),
-  'new_per_day_14d',        coalesce(
-                              (select jsonb_agg(jsonb_build_object('day', s.day::text, 'n', coalesce(nd.n, 0)) order by s.day)
-                               from series14 s
-                               left join (select day, sum(n)::int as n from new_counts group by day) nd on nd.day = s.day),
-                              '[]'::jsonb),
-  'flipped_per_day_7d',     coalesce(
-                              (select jsonb_agg(jsonb_build_object('day', s.day::text, 'n', coalesce(fd.n, 0)) order by s.day)
-                               from series7 s
-                               left join (select day, sum(n)::int as n from flip_counts group by day) fd on fd.day = s.day),
-                              '[]'::jsonb),
-  'snapshot_density',       coalesce(
-                              (select jsonb_agg(
-                                 jsonb_build_object('bucket', bucket, 'n', n)
-                                 order by case when bucket = '4+' then 4 else bucket::int end
-                               )
-                               from snap_density),
-                              '[]'::jsonb),
-  'freshness_24h',          coalesce(
-                              (select jsonb_agg(jsonb_build_object('outcome', outcome, 'n', n))
-                               from freshness_24h),
-                              '[]'::jsonb),
-  'failures_given_up',      (select given_up from failures_summary),
-  'failures_total',         (select total    from failures_summary),
-  'failures_top10',         coalesce(
-                              (select jsonb_agg(jsonb_build_object(
-                                 'sreality_id',      sreality_id,
-                                 'attempts',         attempts,
-                                 'first_failure_at', first_failure_at,
-                                 'last_failure_at',  last_failure_at,
-                                 'given_up',         given_up
-                               ))
-                               from failures_top10),
-                              '[]'::jsonb),
-  'by_category',            coalesce(
-                              (select jsonb_agg(obj order by sort_order)
-                               from by_category),
-                              '[]'::jsonb)
-) as payload;
-
-create unique index if not exists health_summary_mv_pk on health_summary_mv (id);
-
-revoke all on health_summary_mv from anon, authenticated;
-
-reset statement_timeout;
+grant select on portal_listing_counts to anon;
 
 -- 1e. properties_public -- 507's body, `district`, `locality_district_id` and
 --     `locality_region_id` removed. `district` is the column 506 deliberately
