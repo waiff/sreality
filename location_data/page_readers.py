@@ -1715,9 +1715,16 @@ def extract_page(
             # `on_miss: fail` — an id-matched reader looked and found no object that is this
             # listing's. Counted, not swallowed: without the tally, "the portal changed its
             # id scheme" and "this page carried no address" are the same green zero.
-            LOG.info("PAGE subject miss listing_id=%d source=%s entry=%s %s",
-                     row.listing_id, row.source, entry.entry_id, miss)
-            result.refuse("subject_not_found")
+            #
+            # DEBUG, not INFO, and counted PER SOURCE. idnes' two subject-scoped entries
+            # logged 1 398 INFO lines in one run — a per-listing line for a per-portal
+            # fact, which buries everything else the run said. The batch summary prints one
+            # line per reason per batch, so `subject_not_found:<source>` is the readout and
+            # the per-listing detail is there under `--verbose` when a portal's id scheme
+            # actually moves.
+            LOG.debug("PAGE subject miss listing_id=%d source=%s entry=%s %s",
+                      row.listing_id, row.source, entry.entry_id, miss)
+            result.refuse(f"subject_not_found:{row.source}")
             continue
         for read in reads:
             claim = stamp_page_claim(
@@ -1812,7 +1819,17 @@ def load_bodies(
     for payload_id, body, body_r2_key, content_encoding in cur.fetchall():
         encoding = content_encoding or "identity"
         if body is not None:
-            bodies[int(payload_id)] = payloads.decode_body(bytes(body), encoding)
+            try:
+                bodies[int(payload_id)] = payloads.decode_body(bytes(body), encoding)
+            except Exception as exc:  # noqa: BLE001 - one bad body, never the batch
+                # The SAME rule the R2 path below follows, and it was missing here: a
+                # truncated gzip member or a mis-stamped `content_encoding` on ONE
+                # database-resident row would raise out of the fan-out, roll back every
+                # portal's payload claims computed beside it, and hand the next run the
+                # same immutable row to die on. Dropped from the result, so the caller
+                # finds no body, leaves it UNSTAMPED, and retries it next run.
+                LOG.warning("PAGE inline body decode failed payload_id=%s encoding=%s: %s",
+                            payload_id, encoding, exc)
             continue
         if not body_r2_key:
             # `prp_body_present` (382) forbids this: exactly one of the two is always set.

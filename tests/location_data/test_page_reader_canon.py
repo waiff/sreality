@@ -1048,7 +1048,9 @@ def test_extract_page_turns_a_subject_miss_into_one_refusal_and_no_claims():
         payload("mmreality", "999999", body), listing_row("mmreality", "999999"), [item],
         register=register)
     assert result.claims == []
-    assert dict(result.refusals) == {"subject_not_found": 1}
+    # Per SOURCE: the batch summary prints one line per reason, and a fleet-wide
+    # `subject_not_found` count cannot say which portal's id scheme moved.
+    assert dict(result.refusals) == {"subject_not_found:mmreality": 1}
 
 
 def test_extract_page_still_produces_the_claim_for_the_matching_subject():

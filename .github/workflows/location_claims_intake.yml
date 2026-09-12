@@ -7,11 +7,27 @@ name: "Jobs: Location claim intake"
 #   * the latest stored detail body in `portal_raw_payloads`, fetched from R2 and scoped by
 #     the contract's exclusion zones — the fourteen page readers.
 #
-# No model. The page half is HASH-GATED: a body is mined only while
+# No model. TWO HALVES, in this order, both inside one budget (W1-a2):
+#
+#   * BODIES FIRST — the unmined latest detail bodies of ACTIVE page-portal listings,
+#     drained directly in 1 500-row batches on an in-run keyset over
+#     `portal_raw_payloads.id`, until the backlog is empty or half the budget is gone. The
+#     keyset (not the mined-at stamp) is what carries the pass past a body it can never
+#     stamp, so a handful of bad objects cannot stall the whole backlog behind them.
+#   * THEN THE CHANGED LISTINGS — a keyset walk of `listing_snapshots.id`, the
+#     append-on-content-change log, standing 15 MINUTES BEHIND THE CLOCK: a bigserial id is
+#     allocated at INSERT and visible at COMMIT, so a concurrent `write_detail_batch`
+#     transaction can land a row below a cursor that has already moved, and a keyset never
+#     looks back. A run opens an hour's CHANGE, not every listing the index walks happened
+#     to re-sight: the `last_seen_at` watermark it replaces opened ~180 000 listings an
+#     hour to re-mine claims that already existed.
+#
+# The page half is HASH-GATED: a body is mined only while
 # `portal_raw_payloads.contract_version IS DISTINCT FROM` the portal's active contract
-# version, and the batch stamps the ones it mined — so the hourly cost is bounded by page
-# CHURN (~50-80 new bodies an hour fleet-wide), not by corpus size. If R2 is unconfigured
-# the page half is skipped with one warning and the payload half runs unchanged.
+# version, and the batch stamps the ones it mined — so the steady-state cost is bounded by
+# page CHURN (~50-80 new bodies an hour fleet-wide), not by corpus size. If R2 is
+# unconfigured the page half is skipped with one warning and the payload half runs
+# unchanged.
 #
 # It writes `location_claims`, `dirty_locations` and its own `location_claim_batches`
 # ledger, with the §6.1.2 licence ladder applied at the INPUT. Refusals are logged with a
@@ -29,10 +45,14 @@ name: "Jobs: Location claim intake"
 # Mapy-derived `carry_forward` coordinate as first-party (06 §6.1.2). It is a W1 INPUT,
 # not an output.
 #
-# A run that hits its budget stamps `outcome='stopped'`, NOT 'ok'. The incremental
-# watermark reads 'ok' only, so a budgeted run leaves the floor where it found it and the
-# next run resumes from the keyset cursor on the batch row (migration 387). 'ok' means one
-# thing: the scan ran out of rows.
+# EVERY run has a budget, dispatches included. An unbudgeted run walks until
+# `timeout-minutes` kills it, is CANCELLED before it can stamp anything, and leaves the
+# next run to repeat it from the same cursor — which is what the first production run of
+# this lane did (run 34658123746). A run that hits its budget stamps `outcome='stopped'`,
+# NOT 'ok', and both keep the keyset cursor on the batch row (migration 387): in
+# incremental mode that cursor is a `listing_snapshots.id`, a position in an append-only
+# log, so a completed run resumes from the end of the log rather than from zero. 'ok' still
+# means one thing: the scan ran out of rows.
 #
 # Required secrets: SUPABASE_DB_URL, plus R2_* for the page half.
 
@@ -62,9 +82,9 @@ on:
         type: choice
         options: [incremental, full]
       max_seconds:
-        description: "wall-clock budget; stops between batches (blank = none)"
+        description: "wall-clock budget; stops between batches, never mid-batch"
         required: false
-        default: ""
+        default: "2400"
         type: string
       batch_size:
         description: "listings per batch (10000-30000; blank = 20000)"
@@ -151,17 +171,19 @@ jobs:
           if [ -n "$MAX_SECONDS" ]; then ARGS="$ARGS --max-seconds $MAX_SECONDS"; fi
           if [ -n "$BATCH_SIZE" ]; then ARGS="$ARGS --batch-size $BATCH_SIZE"; fi
           if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
-          # The scheduled run gets a budget under the job timeout so a long pass stops
-          # cleanly between batches. It then stamps `stopped` (never `ok`) and the next
-          # hour resumes from the keyset cursor on that batch row — the watermark does not
-          # move until a scan actually reaches the end of its range.
-          # Scheduled defaults must leave the 55-minute job ceiling room for one WORST-CASE
-          # batch: the budget is checked BETWEEN batches, and after the W2 activations
-          # (69 -> 112 executable entries fleet-wide) a 20k-listing batch over a dense
-          # sreality slice measured 18 minutes (run 34159613249, 2026-09-07). At 2700 s
-          # + 20k that batch overran the ceiling and the run was CANCELLED before it could
-          # stamp a resumable `stopped` — restarting from the watermark every hour.
-          # 2400 s + 10k batches: worst case ~9 min inside 15 min of headroom.
+          # The budget stops the run cleanly BETWEEN batches; it then stamps `stopped`
+          # (never `ok`) and the next run resumes from the keyset cursor on that batch row.
+          # It must leave the 55-minute job ceiling room for one WORST-CASE batch: after
+          # the W2 activations (69 -> 112 executable entries fleet-wide) a 20k-listing
+          # batch over a dense sreality slice measured 18 minutes (run 34159613249,
+          # 2026-09-07). At 2700 s + 20k that batch overran the ceiling and the run was
+          # CANCELLED before it could stamp a resumable `stopped`. 2400 s + 10k batches:
+          # worst case ~9 min inside 15 min of headroom — and the lane now refuses to START
+          # a batch that its predecessor's measured duration says will not finish in time.
+          #
+          # `--max-seconds` also defaults to 2400 inside the CLI, so a dispatch that blanks
+          # this input still gets a budget. Both are here on purpose: the default is the
+          # rail, this line is the knob.
           if [ -z "$MAX_SECONDS" ] && [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
             ARGS="$ARGS --max-seconds 2400"
           fi

@@ -3388,10 +3388,10 @@
         },
         {
           "name": "max_seconds",
-          "description": "wall-clock budget; stops between batches (blank = none)",
+          "description": "wall-clock budget; stops between batches, never mid-batch",
           "required": false,
           "type": "string",
-          "default": "",
+          "default": "2400",
           "options": null
         },
         {
