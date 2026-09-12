@@ -141,8 +141,10 @@ def test_the_fingerprint_function_is_untouched():
     """Migration 386's 23-argument function still takes every value the readers compute —
     nine of which are no longer stored. Narrowing it would re-dialect 5 M fingerprints on
     disk, and a re-dialected fingerprint does not conflict, it inserts."""
+    # The executable body starts at the lock_timeout line (statement autocommit since the
+    # 2026-09-12 deadlock — see the file's own header); everything above it is prose.
     assert "location_claim_fingerprint" not in _SLIM.replace(
-        "-- ", "").split("begin;")[1], (
+        "-- ", "").split("set lock_timeout")[1], (
         "the migration must not touch location_claim_fingerprint")
 
 

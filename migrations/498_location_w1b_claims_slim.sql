@@ -62,9 +62,20 @@
 -- Nothing is created. The one `add constraint` below re-states an invariant that already
 -- existed, minus a column it names.
 
-begin;
-
-set local lock_timeout = '5s';
+-- STATEMENT AUTOCOMMIT, deliberately — no `begin`/`commit`. The first apply
+-- (2026-09-12 06:35Z, apply_migration.yml run 34678272535) wrapped the file in one
+-- transaction and died on `deadlock detected`: by the time it reached
+-- `alter table dirty_locations` it already held ACCESS EXCLUSIVE on location_claims
+-- and portal_contracts, while a resolver slice on the worker lane held its
+-- dirty_locations rows and waited for portal_contracts. Every statement below is a
+-- metadata-only change and idempotent, so each one takes exactly ONE lock, waits for
+-- the transactions in flight to finish, commits, and releases — nothing is ever held
+-- while waiting for something else, which is what makes a deadlock impossible. The
+-- lock_timeout is long on purpose: the location lanes (worker drain, hourly intake)
+-- run continuously and a batch can hold location_claims for minutes; queuing behind
+-- them for up to ten minutes once is the cost of never deadlocking. A re-run after a
+-- timeout is safe: every statement is `if exists` / guarded.
+set lock_timeout = '600s';
 
 ------------------------------------------------------------------
 -- 1. Views first — all three are `select c.*`, so they depend on every column
@@ -199,12 +210,18 @@ alter table location_claims
 alter table portal_contracts drop column if exists shadow;
 
 -- 404 widened this CHECK by one value; 384's inline name is Postgres-generated and
--- deterministic. Dropped by that name WITHOUT `if exists` for 404's own reason: a
--- rename would leave the old constraint standing next to the new one.
-alter table dirty_locations drop constraint dirty_locations_reason_check;
-alter table dirty_locations add constraint dirty_locations_reason_check
-  check (reason in
-    ('claim_insert', 'resolution_written', 'registry_version', 'policy_version',
-     'collision_recompute', 'property_grouping', 'operator_edit', 'full_sweep'));
-
-commit;
+-- deterministic. Dropped and re-added under that one name so a rename can never leave
+-- the old constraint standing next to the new one; both halves are guarded so a
+-- lock-timeout re-run of the file is a no-op here.
+alter table dirty_locations drop constraint if exists dirty_locations_reason_check;
+do $$
+begin
+  if not exists (select 1 from pg_constraint
+                  where conrelid = 'dirty_locations'::regclass
+                    and conname = 'dirty_locations_reason_check') then
+    alter table dirty_locations add constraint dirty_locations_reason_check
+      check (reason in
+        ('claim_insert', 'resolution_written', 'registry_version', 'policy_version',
+         'collision_recompute', 'property_grouping', 'operator_edit', 'full_sweep'));
+  end if;
+end $$;
