@@ -274,10 +274,11 @@ def build_corridor_query(
     """Render the corridor SQL + params. Pure; exposed so the schema-aware
     PREPARE gate can reach a statement built by in-function concatenation."""
     shared_where, params = _shared_filter_where(target, filters)
-    # _shared_filter_where adds a ST_DWithin(l.geom, anchor, radius_m)
-    # clause we don't want here — strip it.
+    # _shared_filter_where adds a ST_DWithin(ll.geom, anchor, radius_m)
+    # clause we don't want here — strip it. (W4-a moved the pin to
+    # listing_location; the fragment this matches moved with it.)
     listing_where = [
-        w for w in shared_where if "ST_DWithin(l.geom" not in w
+        w for w in shared_where if "ST_DWithin(ll.geom" not in w
     ]
     params.pop("radius_m", None)
 
@@ -316,12 +317,11 @@ def build_corridor_query(
         f"    {per_m2_basis_sql('l')} AS price_per_m2_basis,\n"
         "    l.category_main, l.category_type, l.area_basis,\n"
         "    l.disposition, l.district,\n"
-        "    l.locality_district_id, l.locality_region_id,\n"
         "    l.floor, l.total_floors,\n"
         "    l.building_type, l.condition, l.energy_rating,\n"
         "    l.has_balcony, l.has_lift, l.has_parking,\n"
         "    ST_Distance(\n"
-        "      l.geom,\n"
+        "      ll.geom::geography,\n"
         "      ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography\n"
         "    ) AS distance_m,\n"
         "    l.first_seen_at, l.last_seen_at,\n"
@@ -329,18 +329,21 @@ def build_corridor_query(
         "    nl.source_id      AS nearest_line_source_id,\n"
         "    nl.transport_type AS nearest_line_transport_type,\n"
         "    nl.route_ref      AS nearest_line_route_ref,\n"
-        "    ST_Distance(l.geom, nl.geom) AS corridor_distance_m,\n"
+        "    ST_Distance(ll.geom::geography, nl.geom) AS corridor_distance_m,\n"
         # Partition on the surrogate (R2): this window picks each listing's
         # nearest corridor line via `rn = 1`, so partitioning on a column that
         # goes NULL post-Gate-2 would collapse EVERY non-sreality listing into
         # one partition and keep exactly one of them for the whole cohort.
         "    ROW_NUMBER() OVER (\n"
         "      PARTITION BY l.id\n"
-        "      ORDER BY ST_Distance(l.geom, nl.geom)\n"
+        "      ORDER BY ST_Distance(ll.geom::geography, nl.geom)\n"
         "    ) AS rn\n"
         "  FROM listings l\n"
+        # W4-a: the pin comes from listing_location, cast to geography so the
+        # corridor stays a metre distance (ll.geom is geometry).
+        "  JOIN listing_location ll ON ll.listing_id = l.id\n"
         "  JOIN near_lines nl\n"
-        "    ON ST_DWithin(l.geom, nl.geom, %(corridor_m)s)\n"
+        "    ON ST_DWithin(ll.geom::geography, nl.geom, %(corridor_m)s)\n"
         f"  WHERE {listing_where_sql}\n"
         ")\n"
         "SELECT *\n"

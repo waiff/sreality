@@ -95,12 +95,14 @@ class _FakeConn:
 
 
 def _merged_row(pid: int, source_count: int, *, active: int, sources) -> tuple[Any, ...]:
-    # 16 columns matching list_merged_properties' SELECT. `distinct_site_count`
+    # 15 columns matching list_merged_properties' SELECT. `distinct_site_count`
     # (col 3) is its OWN properties column, independent of the agg `sources` array
-    # (col 14) — which is NULL when a property has no children.
+    # (col 13) — which is NULL when a property has no children. W4-a replaced the
+    # `district` + `street` pair (two legacy columns filled from two different
+    # children) with the one server-composed `display_label`.
     return (
         pid, pid * 10, source_count, len(sources or []), "byt", "prodej", "2+kk",
-        68.0, None, 4_200_000, "Praha 5", "Kábrova", "2026-06-01T00:00:00Z",
+        68.0, None, 4_200_000, "Kábrova 5, Praha", "2026-06-01T00:00:00Z",
         "2026-06-18T00:00:00Z", sources, active,
     )
 

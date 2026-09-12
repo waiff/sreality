@@ -454,7 +454,7 @@ def test_listing_velocity_by_listing_id_uses_id_arm_and_surrogate_exclude():
     res = compute_listing_velocity(conn, listing_id=42)  # type: ignore[arg-type]
 
     fetch_sql, fetch_params = listing_cur.executed[0]
-    assert "WHERE id = %s" in fetch_sql
+    assert "WHERE l.id = %s" in fetch_sql
     assert fetch_params == (42,)
 
     cohort_sql, cohort_params = peer_cur.executed[0]

@@ -250,38 +250,14 @@ _RECOMPUTE_BATCH_SQL = """
       ORDER BY k.property_id, k.src_rank,
                k.is_active DESC, k.last_seen_at DESC NULLS LAST, k.sreality_id DESC
     ),
-    -- Geom + admin territory (incl. the MF rent-map join key ku_id) from the best
-    -- CZ-located child.
-    --
-    -- W3-1 proposed deleting this picker (and best_street below) once the
-    -- property's DISPLAY listing became the one winner for place as well as
-    -- price and area. W3 S4 measured it and the pickers STAY: `display_label`
-    -- is composed from `repr_listing_ref_id` -> listing_location and owes these
-    -- columns nothing, but six of best_geo's targets still have live readers of
-    -- their own -- ku_id + obec_id feed the property-grain MF golden record
-    -- (migration 257), obec_id/okres_id/region_id are properties_public's
-    -- chip codes for the Watchdog, geom drives the lat/lng trigger the
-    -- Watchdog's ST_DWithin is rebuilt from, district is read by
-    -- /properties/merge-candidates, and best_street's `street` by the same
-    -- route. Only `locality`, `okres` and `region` lost their last reader in
-    -- S4; they keep being written rather than freezing at a stale value, and
-    -- W4 removes the columns and these projections together.
-    --
-    -- A child WITH a Czech territory (obec_id NOT NULL) wins over
-    -- a foreign/uncoded one, then by source trust + recency. Keeps geom and every
-    -- territory field consistent (one child), and prefers a CZ coordinate so a
-    -- merged property whose repr happens to carry an off/foreign point still
-    -- resolves its MF territory. Falls back to the best child overall (NULL
-    -- territory) for a genuinely foreign property.
-    best_geo AS (
-      SELECT DISTINCT ON (k.property_id)
-        k.property_id AS pid, k.geom, k.locality, k.district,
-        k.ku_id, k.obec_id, k.okres_id, k.region_id, k.obec, k.okres, k.region,
-        k.locality_district_id, k.locality_region_id
-      FROM kids k
-      ORDER BY k.property_id, (k.obec_id IS NOT NULL) DESC, k.src_rank,
-               k.is_active DESC, k.last_seen_at DESC NULLS LAST, k.sreality_id DESC
-    ),
+    -- W4-a DELETED `best_geo` and `best_street`. Both picked a property's PLACE
+    -- from a different child than its price, and every one of their readers has
+    -- moved: the Watchdog's lat/lng and chip codes, the kanban town and the merge
+    -- audit's label all come off `properties_public`, which reads
+    -- `repr_listing_ref_id -> listing_location` (migration 507); the MF rent map
+    -- keys on the same point. So a property's place is now the SAME child its
+    -- price and area come from -- `repr` -- and the twelve `properties` columns
+    -- they used to write are unwritten from here on and dropped in W4-c.
     repr AS (
       SELECT DISTINCT ON (l.property_id)
         l.property_id AS pid, l.sreality_id, l.id AS listing_ref_id,
@@ -304,20 +280,6 @@ _RECOMPUTE_BATCH_SQL = """
       -- if that listing later delisted; the two goals legitimately differ.
       ORDER BY l.property_id, l.is_active DESC, source_trust_rank(l.source),
                l.last_seen_at DESC NULLS LAST, l.sreality_id DESC
-    ),
-    -- Group-best street (migration 183): the best non-null child street, in the
-    -- shared source-trust order (migration 311 — was a bare source='sreality'
-    -- boolean), then active + most recently seen. Lets place_search_text match a
-    -- street even when the representative listing lacks one. LEFT-JOINed below ->
-    -- NULL when no child carries a street.
-    best_street AS (
-      SELECT DISTINCT ON (l.property_id)
-        l.property_id AS pid, l.street
-      FROM listings l
-      JOIN batch b ON b.id = l.property_id
-      WHERE l.street IS NOT NULL AND l.street <> ''
-      ORDER BY l.property_id, source_trust_rank(l.source),
-               l.is_active DESC, l.last_seen_at DESC NULLS LAST, l.sreality_id DESC
     ),
     -- PER-LISTING price series. The window PARTITIONs by listing, not by
     -- property: a multi-portal property's children are independent asking-price
@@ -420,15 +382,11 @@ _RECOMPUTE_BATCH_SQL = """
       category_type       = r.category_type,
       disposition         = r.disposition,
       area_m2             = coalesce(r.area_m2, ba.area_m2),
-      district            = bg.district,
-      geom                = bg.geom,
       current_price_czk   = r.price_czk,
       -- Numerator and denominator, then the row both came from -- NULL unless
       -- ONE child supplies a price and a positive area (migration 424).
       price_per_m2_source_listing_id =
           price_per_m2_source_id(r.price_czk, r.area_m2, r.listing_ref_id),
-      locality            = bg.locality,
-      street              = bs.street,
       has_balcony         = g.has_balcony,
       has_parking         = g.has_parking,
       has_lift            = g.has_lift,
@@ -445,19 +403,10 @@ _RECOMPUTE_BATCH_SQL = """
       usable_area         = g.usable_area,
       garden_area         = g.garden_area,
       parking_lots        = g.parking_lots,
-      ku_id                     = bg.ku_id,
-      region_id                 = bg.region_id,
-      okres_id                  = bg.okres_id,
-      obec_id                   = bg.obec_id,
-      obec                      = bg.obec,
-      okres                     = bg.okres,
-      region                    = bg.region,
       building_condition_level  = r.building_condition_level,
       apartment_condition_level = r.apartment_condition_level,
       energy_rating             = g.energy_rating,
       source                    = r.source,
-      locality_district_id      = bg.locality_district_id,
-      locality_region_id        = bg.locality_region_id,
       price_drop_count    = coalesce(ph.drops, 0),
       price_rise_count    = coalesce(ph.rises, 0),
       max_price_drop_pct  = ph.max_drop_pct,
@@ -474,9 +423,7 @@ _RECOMPUTE_BATCH_SQL = """
     FROM child_agg ca
     JOIN repr r ON r.pid = ca.pid
     JOIN golden g ON g.pid = ca.pid
-    JOIN best_geo bg ON bg.pid = ca.pid
     LEFT JOIN best_area ba ON ba.pid = ca.pid
-    LEFT JOIN best_street bs ON bs.pid = ca.pid
     LEFT JOIN price_hist ph ON ph.pid = ca.pid
     LEFT JOIN repr_span rs ON rs.pid = ca.pid
     LEFT JOIN changes ch ON ch.pid = ca.pid

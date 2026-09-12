@@ -58,6 +58,8 @@ def build_market_velocity_query(
     sql = (
         "SELECT l.sreality_id, l.first_seen_at, l.last_seen_at, l.is_active\n"
         "FROM listings l\n"
+        # W4-a: the radius in _shared_filter_where reads `ll`.
+        "JOIN listing_location ll ON ll.listing_id = l.id\n"
         "WHERE " + "\n  AND ".join(where) + "\n"
         "ORDER BY l.first_seen_at\n"
         f"LIMIT {_HARD_LIMIT}"
@@ -283,13 +285,17 @@ def _fetch_listing_for_velocity(
 ) -> dict[str, Any] | None:
     from toolkit import _listing_id_clause
 
-    id_clause, id_val = _listing_id_clause(sreality_id, listing_id)
+    id_clause, id_val = _listing_id_clause(
+        sreality_id, listing_id, lid_col="l.id", sid_col="l.sreality_id",
+    )
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT first_seen_at, last_seen_at, is_active, disposition,\n"
-            "  ST_Y(geom::geometry) AS lat, ST_X(geom::geometry) AS lng,\n"
-            "  category_main, category_type\n"
-            f"FROM listings WHERE {id_clause}",
+            "SELECT l.first_seen_at, l.last_seen_at, l.is_active, l.disposition,\n"
+            "  ST_Y(ll.geom) AS lat, ST_X(ll.geom) AS lng,\n"
+            "  l.category_main, l.category_type\n"
+            "FROM listings l\n"
+            "LEFT JOIN listing_location ll ON ll.listing_id = l.id\n"
+            f"WHERE {id_clause}",
             (id_val,),
         )
         row = cur.fetchone()

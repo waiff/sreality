@@ -2149,6 +2149,38 @@ REMOVES columns it is the one migration in the sprint that is `DROP VIEW` + `CRE
 deployed bundle selecting a column the view has just lost gets a PostgREST 400, while a view carrying
 a column nobody selects is inert.
 
+**W4-a: every reader takes its location from `listing_location`** (migration 507, additive). W3 moved
+the two Browse relations; this moves the rest, so W4-c can drop the columns. `properties_public` and
+`listings_public` re-source `lat`/`lng` (`st_y/st_x(ll.geom)`) and `obec_id`/`okres_id`/`region_id`
+(`ll.obec_kod`/`okres_kod`/`kraj_kod`) — the property grain through `repr_listing_ref_id`, the
+listing grain through `listing_id` — and `properties_public.obec` re-sources from `ll.obec_name`, so
+the kanban's town sort moves with no SPA change at all. **Re-sourced, never appended**: a column
+keeps its name, type and position (so `create or replace` is legal and every select list still
+works), and a new `obec_name` beside a legacy `obec` would only have kept the legacy reader alive.
+In code the spatial pair in `_shared_filter_where` (rule 16 — Browse and the Watchdog share it) and
+every other reader of `listings.geom` — comparables, velocity, the transit corridor, neighbourhoods,
+broker map ids, the two estimation subject resolvers, the watchdog's estimate kickoff — join
+`listing_location ll on ll.listing_id = l.id` and read **`ll.geom::geography`**. That cast is the
+whole risk of the wave: `listings.geom` is `geography` and `listing_location.geom` is `geometry`, so
+an uncast `ST_DWithin` would compile and silently measure in DEGREES; migration 507 builds
+`listing_location_geog_gist on listing_location using gist ((geom::geography))` first (CONCURRENTLY,
+hence no transaction in that file), and `tests/test_one_place_predicate.py` pins both halves.
+The MF rent map loses its stored key: `recompute_mf_gross_yields()` and `recompute_property_mf()`
+now resolve the obec from `ll.obec_kod` and the **katastr by point-in-polygon** against the RÚIAN
+mirror (`ruian_katastr_code()`, the same walk `api/maps.py` does), evaluated after the eligibility
+gate so it runs over sale flats, not the corpus; if the katastr layer is absent the calc falls
+through to its existing obec branch — coarser, never a wrong territory. With that, `best_geo` and
+`best_street` in `scripts/recompute_property_stats.py` lose their last readers and are **deleted**:
+a property's place is now the same child its price and area come from, and the twelve `properties`
+columns they wrote are unwritten from here on. `/properties/merge-candidates` swaps `district` +
+`street` (two columns, two different children) for one `display_label`. Also gone end to end: the
+`locality_district_id` / `locality_region_id` payload fields — sreality portal ids that W3 S3
+removed as filters and that five projections still carried (rule 12 is intact: written traces keep
+their keys, the Timeline just has no row for them). 507 is **applied BEFORE the deploy** (it only
+changes where a value comes from, so today's bundle is unaffected); what it deliberately leaves is
+W4-b's Mapy purge and W4-c's drops — including the `DROP VIEW` + `CREATE VIEW` that finally takes
+the legacy place text off `listings_public` and `listing_feed_public`.
+
 **ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
 `35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a
 listing: `listings.raw_json` (seven payload readers), and the LATEST stored detail body in
