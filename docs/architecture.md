@@ -2085,7 +2085,11 @@ the pass complete for the same reason. It dispatches only after asking whether a
 `location-batch` is already waiting — `location_resolve.yml` included, which joins the group
 through a mode-conditional expression — because the group's single pending slot supersedes the
 OLDER entry, and an unyielding chain is what cancelled the hourly intake and an operator's
-full-resolve on 2026-09-10. Both halves complete is the steady state and chains nothing. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
+full-resolve on 2026-09-10. For the resolve lane the yield counts only `workflow_dispatch` runs:
+`gh run list` cannot report which group a queued run will take, and counting its `*/15` drain
+ticks — which run in `location-resolve-lane`, not in the group — stopped the chain on a routine
+07:58 tick and handed a 212 000-body backlog back to the sparse cron (2026-09-12, hop
+34681906422). Both halves complete is the steady state and chains nothing. Four lanes preceded it and are **deleted** (2026-09-11): the snapshot
 re-mine, the archived-HTML sweep, the verify lane and the LLM free-text lane, with the refetch
 cohort and the payload backfill/prune/churn tooling. The lane writes `location_claims`,
 `dirty_locations` and its own `location_claim_batches` ledger and nothing else:
