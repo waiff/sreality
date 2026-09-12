@@ -104,14 +104,11 @@ possibly-stale stored page and could regress a price the portal has since change
 ## The payload archive riding the ingest path
 
 **A `detail` body is ALWAYS archived; every other `page_kind` NEVER is.** One page-kind comparison
-(`scraper.db._payload_archive_enabled`) — no flag, no per-portal limit, no measurement corpus. The
-three gates that stood here until 2026-09-11 (`PortalLimits.payload_dual_write`, the non-detail
-`payload_index_archive`, a weighed-surface check against `location_data.payload_budget`) went with
-the modules that read them, along with the `location_payload_shadow_hash` churn instrument: rule 25
-makes the stored detail body the hourly claim lane's SECOND SUBSTRATE, not an opt-in experiment. The
-surviving rule is GRAIN — a `detail` body is ONE listing's page and is mined for that listing's
-claims; index/map/gazetteer/snapshot bodies are whole-SURFACE artefacts refetched on the walk cadence
-that no listing's claim can come from.
+(`scraper.db._payload_archive_enabled`) — no flag, no per-portal limit, no measurement corpus: rule
+25 makes the stored detail body the hourly claim lane's SECOND SUBSTRATE, not an opt-in experiment.
+The rule is GRAIN — a `detail` body is ONE listing's page and is mined for that listing's claims;
+index/map/gazetteer/snapshot bodies are whole-SURFACE artefacts refetched on the walk cadence that
+no listing's claim can come from.
 
 Everything `upsert_portal_raw_page` stages (7 HTML detail writers) passes through it, plus sreality's
 estate JSON and bezrealitky's advert-with-query from their own `append_payload_if_enabled` call
