@@ -1,21 +1,25 @@
 name: "Location: resolve"
 
-# The steady-state resolution lane of the location subsystem (design 03 §3.14.1). Without
-# it a newly scraped listing gets claims and never gets a resolution — no row in
-# listing_location_current, invisible to Browse, map, watchdog and dedup.
+# The steady-state resolution lane of the location subsystem. Without it a newly scraped
+# listing gets claims and never gets an answer row in `listing_location` — invisible to
+# every consumer of the location programme.
 #
 #   mode=drain         `location_resolve_incremental` — claims dirty_locations in bounded
-#                      slices (FOR UPDATE SKIP LOCKED), resolves S1-S9 and rebuilds the
-#                      projection row in the SAME transaction. Runs every 15 minutes; judge
-#                      the queue by oldest-row AGE, not by length. The run measures itself:
-#                      every batch logs `BATCH n=… rate=…/s` and the phase split.
-#   mode=epoch         `pin_collision_recompute` — mints a NEW immutable pin_cluster_epochs
-#                      row plus its pin_clusters, then enqueues only the listings whose
-#                      bucket changed. An epoch that never advances silently freezes
-#                      precision.
-#   mode=full-resolve  `location_resolve_sweep` — the reconcile backstop: ONE statement off
-#                      `listings` enqueues every active listing whose projection row is
-#                      missing or built at a stale version tuple, then the drain works it.
+#                      slices (FOR UPDATE SKIP LOCKED), runs bind -> fill -> grade -> check
+#                      and writes the answer row in the SAME transaction. Runs every 15
+#                      minutes; judge the queue by oldest-row AGE, not by length. The run
+#                      measures itself: every batch logs `BATCH n=… rate=…/s` and the phase
+#                      split.
+#   mode=full-resolve  `location_resolve_sweep` — the reconcile backstop AND the way a
+#                      version bump reaches the corpus: ONE statement off `listings`
+#                      enqueues every active listing whose answer row is missing or carries
+#                      a stale (resolver_version, registry_version) pair, then the drain
+#                      works it.
+#
+# `mode=epoch` (`pin_collision_recompute`) and its Sunday cron were REMOVED in W2-a with the
+# pin-collision engine itself: `collision_epoch_id` was the fifth version input of a
+# resolution identity that now has three, `pin_clusters` fed a precision axis the answer
+# table does not carry, and the job had been unscheduled since 2026-08-11 anyway.
 #
 # Both jobs take a lease-row CAS on location_jobs, never a session advisory lock (a lock
 # taken on one transaction-pooler backend and released on another strands), and the
@@ -45,7 +49,6 @@ on:
         type: choice
         options:
           - drain
-          - epoch
           - full-resolve
       max_seconds:
         description: "drain budget in seconds (drain / full-resolve); cron uses 1800"
@@ -56,11 +59,6 @@ on:
         description: "listings claimed per slice (one transaction — bigger is not better)"
         required: false
         default: "250"
-        type: string
-      sources:
-        description: "epoch mode: comma-separated portals; blank = every source"
-        required: false
-        default: ""
         type: string
       dry_run:
         description: "resolve and log, write nothing"
@@ -84,17 +82,16 @@ on:
     # each other. That is why pausing the hourly claim intake alone did not free a slot, and
     # why a backfill that needs this group should expect to pause both.
     - cron: "*/15 * * * *"
-    # The DAILY reconcile backstop (`mode=full-resolve`, one sweep off `listings`) and the WEEKLY
-    # collision epoch — both existed only behind `workflow_dispatch` until 2026-09-11, so the
-    # net every other repair mechanism leans on was never deployed (audit findings
-    # projection-5/6). The env block below maps each cron expression to its mode; a cron
-    # carries no inputs, so the expression is the only thing that can name it.
+    # The DAILY reconcile backstop (`mode=full-resolve`, one sweep off `listings`). It existed
+    # only behind `workflow_dispatch` until 2026-09-11, so the net every other repair mechanism
+    # leans on was never deployed (audit finding projection-6). The env block below maps the
+    # cron expression to its mode; a cron carries no inputs, so the expression is the only
+    # thing that can name it. The Sunday `41 4 * * 0` epoch tick went with the epoch job.
     - cron: "17 3 * * *"
-    - cron: "41 4 * * 0"
 
 # The group depends on the MODE, because the two modes are not the same animal.
 #
-# `drain` (and `epoch`) left the outer `location-batch` group on 2026-09-10. `full-resolve`
+# `drain` left the outer `location-batch` group on 2026-09-10. `full-resolve`
 # did NOT, and the reason is a production failure the same afternoon: its FIRST step is one
 # corpus-wide `INSERT ... ON CONFLICT` into `dirty_locations`, and the archived-HTML sweep
 # bulk-inserts into that same table with overlapping listing ids. Two transactions inserting
@@ -143,9 +140,7 @@ jobs:
   resolve:
     runs-on: ubuntu-latest
     concurrency:
-      # INNER, per-lane: 00 §14's `location-resolve` group. The epoch job declares
-      # `location-collision` in its own lease row; it shares this group so a recompute never
-      # overlaps a drain that is reading the epoch it is replacing.
+      # INNER, per-lane: the `location-resolve` group. This lane never overlaps ITSELF.
       group: location-resolve
       cancel-in-progress: false
     timeout-minutes: 60
@@ -154,10 +149,9 @@ jobs:
     env:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
-      MODE: ${{ inputs.mode || (github.event.schedule == '17 3 * * *' && 'full-resolve') || (github.event.schedule == '41 4 * * 0' && 'epoch') || 'drain' }}
+      MODE: ${{ inputs.mode || (github.event.schedule == '17 3 * * *' && 'full-resolve') || 'drain' }}
       MAX_SECONDS: ${{ inputs.max_seconds || '1800' }}
       BATCH_SIZE: ${{ inputs.batch_size || '250' }}
-      SOURCES: ${{ inputs.sources }}
       DRY_RUN: ${{ inputs.dry_run }}
     steps:
       - uses: actions/checkout@v6
@@ -180,9 +174,6 @@ jobs:
             drain)
               python -m location_data.resolver.drain \
                 --max-seconds "$MAX_SECONDS" --batch-size "$BATCH_SIZE" $ARGS
-              ;;
-            epoch)
-              python -m location_data.resolver.epoch_job --sources "$SOURCES" $ARGS
               ;;
             full-resolve)
               python -m location_data.resolver.drain --full-sweep \

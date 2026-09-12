@@ -84,12 +84,11 @@ _VERSION_NAMES = frozenset(
 # A soft floor, not a pin: adding a lane must not break this file, but a parser that stops
 # finding anything must. Every value here is load-bearing in production today.
 # Re-pinned by rule 25 W1-a: four claim-producing lanes became one. What survives is the
-# hourly intake (which now reads BOTH substrates), the resolve drain, the epoch/collision
-# recompute and the registry load.
+# hourly intake (which now reads BOTH substrates), the resolve drain and the registry load.
+# W2-a removed `pin_collision_recompute` with the pin-collision epoch it minted — the whole
+# engine, its weekly cron and the `location_resolve.yml` mode that ran it.
 _KNOWN_LANES = frozenset({"location_claims_intake"})
-_KNOWN_JOB_NAMES = frozenset({
-    "location_resolve_incremental", "pin_collision_recompute",
-})
+_KNOWN_JOB_NAMES = frozenset({"location_resolve_incremental"})
 _KNOWN_VERSIONS = frozenset({"claims_intake@5"})
 
 

@@ -32,9 +32,11 @@ Which A.2 check each test covers:
   01 0.4  enum ordinality never enters an index predicate, a CHECK or a stored
           generated column
           -> test_no_enum_ordinality_in_ddl
-  D3/05 P5 all four axes plus blur_evidence and radius_semantics are NOT NULL on
-          both serving projections (a NULL reads as "no gate" and fails open)
+  D3/05 P5 every grade axis a table declares is NOT NULL (a NULL reads as "no
+          gate" and fails open). Per table: `listing_location` declares four,
+          the two frozen projections six.
           -> test_projections_declare_every_axis_not_null
+             test_the_answer_table_does_not_re_declare_a_dropped_axis
   00 6.1  the three-artifact licensing guard ships whole
           -> test_licence_guard_ships_all_three_artifacts
   00 10.3 collision_epoch_id is inside the resolution's unique key
@@ -516,17 +518,34 @@ def test_no_enum_ordinality_in_ddl():
     )
 
 
-def test_projections_declare_every_axis_not_null():
-    """D3 / 05 P5: a NULL axis reads as 'no gate' and fails open — a NULL
-    uncertainty_radius_m makes both branches of the three-valued containment test
-    evaluate NULL, so the row silently drops out of `certain` AND `possible`."""
-    sql = _clean()
-    axes = (
+# The axes that must be NOT NULL, per table. A NULL axis reads as "no gate" and fails
+# open — a NULL uncertainty_radius_m makes both branches of the three-valued containment
+# test evaluate NULL, so the row silently drops out of `certain` AND `possible`.
+#
+# W2-a's answer table declares FOUR, not six: `position_source`, `blur_evidence` and
+# `radius_semantics` are not columns any more (the producers went with the policy tables
+# and the collision epoch), and `country_status` joins the list because "foreign is a
+# determination, never a default" is the same kind of rule — `undetermined` is a VALUE.
+# The two frozen projections keep their six until W2-b drops them.
+_NOT_NULL_AXES = {
+    "listing_location": (
+        "granularity", "match_confidence", "uncertainty_radius_m", "country_status",
+    ),
+    "listing_location_current": (
         "granularity", "position_source", "match_confidence",
         "uncertainty_radius_m", "blur_evidence", "radius_semantics",
-    )
+    ),
+    "property_location_current": (
+        "granularity", "position_source", "match_confidence",
+        "uncertainty_radius_m", "blur_evidence", "radius_semantics",
+    ),
+}
+
+
+def test_projections_declare_every_axis_not_null():
+    sql = _clean()
     offenders: list[str] = []
-    for table in ("listing_location_current", "property_location_current"):
+    for table, axes in _NOT_NULL_AXES.items():
         defs = _column_defs(_table_body(sql, table))
         by_name = {d.split(None, 1)[0]: d for d in defs if d.split(None, 1)}
         for axis in axes:
@@ -538,6 +557,17 @@ def test_projections_declare_every_axis_not_null():
     assert not offenders, (
         "serving projection axis column(s) not NOT NULL:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_the_answer_table_does_not_re_declare_a_dropped_axis():
+    """The three axes W2-a dropped. Adding one back is adding a column nothing produces:
+    the policy tables, the collision epoch and the licence CHECK are all deleted."""
+    defs = _column_defs(_table_body(_clean(), "listing_location"))
+    names = {d.split(None, 1)[0] for d in defs if d.split(None, 1)}
+    assert names & {
+        "position_source", "blur_evidence", "radius_semantics", "position_licence_class",
+        "pin_collision_class", "policy_version",
+    } == set()
 
 
 def test_pin_collision_class_vocabulary_is_not_null_default_normal():

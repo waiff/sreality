@@ -31,11 +31,11 @@ from location_data.claims_intake import (
     extract_listing,
 )
 from location_data.claims_common import SUBSTRATE_PAYLOAD
-from location_data.resolver.position import (
+from location_data.resolver.bind import (
     BLURRED_DECLARED_LABELS,
     PRECISE_DECLARED_LABELS,
 )
-from location_data.resolver.precision import DECLARED_CAP
+from location_data.resolver.grade import DECLARED_CAP
 from scraper.mmreality_parser import PropertyMismatch, extract_property
 from tests.location_data import claim_intake_fixtures as fx
 

@@ -1,46 +1,68 @@
-"""S8 listing grain — the projection row the serving layer reads (01 §7.1, 00 §7).
+"""The answer row: 26 columns, and the list is the contract.
 
-Every derived value on the row is builder-written from `resolver.derived`, and two of them
-carry rules that are easy to get quietly wrong: `geo_cell_key` is written ONLY when
-`geo_blockable` (that is what keeps the granularity rung out of an IMMUTABLE expression),
-and `location_disputed` is a builder-derived CACHE of the ledger — the reconciler never
-writes the projection.
+`listing_location` (migration 501) replaces `listing_location_current`'s 81. The test that
+matters is the one below: the builder's keys and the migration's columns are the SAME list,
+so a column added to one and not the other fails here rather than at the first INSERT.
+
+The row is a CACHE, never truth — truncating it is always legal and the drain is its only
+writer.
 """
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from location_data.resolver import core, projection
-from location_data.resolver.types import ClusterEvidence, GranularityRank
 from location_data.resolver.version import RESOLVER_VERSION
 from tests.location_data import mini_mirror as mm
 
-RANK = GranularityRank()
+MIGRATION = (
+    Path(__file__).resolve().parents[2] / "migrations"
+    / "501_location_w2a_listing_location.sql"
+)
+
+# The 26, spelled out. Transcribing them is the point: this list and the DDL are two
+# independent statements of the same contract, and they are compared below.
+EXPECTED_COLUMNS = (
+    "listing_id",
+    "geom",
+    "country_code", "kraj_name", "okres_name", "obec_name", "cast_obce_name",
+    "street_name", "house_number_cp", "house_number_co", "psc",
+    "kraj_kod", "okres_kod", "obec_kod", "cast_obce_kod", "ulice_kod", "ruian_adm_kod",
+    "match_confidence", "granularity", "uncertainty_radius_m",
+    "country_status", "disputed",
+    "resolver_version", "resolved_at", "claim_set_hash", "registry_version",
+)
 
 
-def _resolution(claims, collision=None):
-    return core.resolve(
-        claims, mm.context(collision=collision), resolver_version=RESOLVER_VERSION,
-        registry_version_id=7, policy_version="v1", collision_epoch_id=11,
+def _ddl_columns() -> list[str]:
+    sql = MIGRATION.read_text(encoding="utf-8")
+    sql = re.sub(r"--[^\n]*", "", sql)
+    body = sql.split("create table listing_location (", 1)[1]
+    depth, out, current = 0, [], []
+    for ch in body:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    out.append("".join(current).strip())
+    return [c.split()[0] for c in out if c.strip()]
+
+
+def _row(claims):
+    resolution = core.resolve(
+        claims, mm.context(), resolver_version=RESOLVER_VERSION,
+        registry_version="ruian:2026-07-31",
     )
-
-
-def _row(claims, *, cluster=None, threshold_n=4, disputed=False):
-    # The cluster the BUILDER sees is the same one the RESOLVER saw at its stamped epoch —
-    # feeding one without the other would test a state the pipeline cannot produce.
-    collision = (
-        mm.StaticCollision({(cluster.source, cluster.cell_key): cluster}) if cluster else None
-    )
-    resolution = _resolution(claims, collision)
-    return projection.build_listing_row(
-        resolution,
-        property_id=None,
-        resolution_id=1,
-        registry_version_label="ruian:2026-07-31",
-        rank=RANK,
-        cluster=cluster,
-        threshold_n=threshold_n,
-        location_disputed=disputed,
-    )
+    return projection.build_listing_row(resolution)
 
 
 def _address_claims():
@@ -52,111 +74,82 @@ def _address_claims():
     ]
 
 
-def test_the_four_axes_travel_with_the_coordinate_and_are_never_null():
+def test_the_table_is_exactly_these_twenty_six_columns():
+    assert _ddl_columns() == list(EXPECTED_COLUMNS)
+    assert len(EXPECTED_COLUMNS) == 26
+    assert list(projection.LISTING_LOCATION_COLUMNS) == list(EXPECTED_COLUMNS)
+
+
+def test_the_builder_binds_every_column_the_statement_does_not_default():
+    """`geom` is built in SQL from the lat/lon pair and `resolved_at` is the statement's own
+    `now()`; everything else travels as a named parameter."""
     row = _row(_address_claims())
-    for column in (
-        "granularity", "position_source", "blur_evidence", "match_confidence",
-        "uncertainty_radius_m", "radius_semantics", "position_licence_class",
-        "country_status", "admin_assignment_method", "admin_position_source",
-    ):
-        assert row[column] is not None, column
+    expected = (set(EXPECTED_COLUMNS) - {"geom", "resolved_at"}) | {"lat", "lon"}
+    assert set(row) == expected
+    assert set(projection.ROW_PARAMS) == expected
 
 
-def test_the_blocking_keys_are_written_from_the_named_functions():
-    row = _row(_address_claims())
-    assert row["addr_block_key"] == "a:21690278"
-    assert row["building_block_key"] == "b:555001"
-    assert row["street_block_key"] == "554782:nad borislavkou:487"
+def test_no_column_the_wave_deleted_came_back():
+    """The 55 that went. Four classes: provably NULL on every row, reachable through a join,
+    derivable at read, or the output of an engine this wave deletes.
 
-
-def test_geo_cell_key_is_written_only_when_geo_blockable():
-    blockable = _row(_address_claims())
-    assert blockable["geo_blockable"] is True
-    assert blockable["geo_cell_key"] == "c:50.1010:14.3480"
-
-    collapsed = _row(
-        _address_claims(),
-        cluster=ClusterEvidence(
-            cluster_id=5, source="sreality", cell_key="c:50.1010:14.3480", listing_count=40,
-            distinct_streets=9, distinct_obec_kods=1, classification="town_centroid_suspect",
-        ),
-    )
-    assert collapsed["geo_blockable"] is False
-    assert collapsed["geo_cell_key"] is None
-
-
-def test_a_disputed_row_is_never_renderable_as_a_point():
-    row = _row(_address_claims(), disputed=True)
-    assert row["location_disputed"] is True
-    assert row["renderable_as_point"] is False
-    assert row["render_as"] != "point"
-
-
-def test_pin_collision_class_defaults_to_normal_and_is_never_null():
-    row = _row(_address_claims())
-    assert row["pin_collision_class"] == "normal"
-    assert row["cluster_heterogeneity_ok"] is True
-    assert row["pin_shared_by_n"] == 1
-
-
-def test_the_display_label_never_folds_in_the_postal_town():
-    """For bazos neither value is wrong — they answer different questions — and 57.0 % of
-    rows disagree between the two."""
-    claims = _address_claims() + [
-        mm.claim(5, "postal_town", value_text="Hodonín", source="bazos"),
-    ]
-    row = _row(claims)
-    assert row["postal_town"] == "Hodonín"
-    assert "Hodonín" not in row["display_label"]
-
-
-def test_the_row_carries_its_whole_version_tuple():
-    row = _row(_address_claims())
-    assert row["registry_version"] == "ruian:2026-07-31"
-    assert row["registry_version_id"] == 7
-    assert row["resolver_version"] == RESOLVER_VERSION
-    assert row["policy_version"] == "v1"
-
-
-def test_field_provenance_names_the_claims_behind_every_winning_field():
-    row = _row(_address_claims())
-    assert row["field_provenance"]["obec_name"]["claim_ids"] == [1]
-    # A registry-bound row's street comes from the MIRROR, not from a claim (2026-09-10), so
-    # the truthful provenance is no claim id at all and the rule that names the producer.
-    assert row["field_provenance"]["street_name"] == {
-        "claim_ids": [], "method": "registry_derived", "rule": "registry:street"
+    `pin_shared_by_n` is the one that came out LATE, and for the sharpest version of the
+    rule: its producer was the pin-collision epoch, so the column would have shipped writing
+    0 on every row forever. The shared-pin count is a read-time aggregate
+    (`count(*) over (partition by geom)`) and W3 computes it where the map needs it."""
+    gone = {
+        "pin_shared_by_n",
+        "source", "property_id", "resolution_id", "policy_version", "registry_version_id",
+        "is_cz", "display_label", "display_path", "place_search_text", "admin_path",
+        "position_source", "blur_evidence", "radius_semantics", "position_licence_class",
+        "match_components", "field_provenance", "geom_claim_id", "street_claim_id",
+        "pin_cluster_id", "pin_collision_class", "cluster_heterogeneity_ok",
+        "pin_shared_by_n_25m", "pin_shared_by_n_100m", "collision_epoch_id",
+        "position_quality_class", "render_as", "renderable_as_point", "is_low_precision",
+        "geo_blockable", "location_disputed", "distance_to_nearest_boundary_m",
+        "history_completeness", "addr_block_key", "building_block_key", "street_block_key",
+        "geo_cell_key", "h3_r10", "momc_kod", "ku_kod", "pou_kod", "orp_kod",
+        "obec_unit_id", "cast_obce_unit_id", "okres_unit_id", "kraj_unit_id",
+        "admin_assignment_method", "admin_position_source", "admin_sliver_distance_m",
+        "evidencni", "postal_town", "development_name", "country_method",
+        "country_confidence", "country_driving_claim_ids", "stavebni_objekt_kod",
+        "parcela_id", "built_at",
     }
-    assert row["street_claim_id"] is None
+    assert gone & set(EXPECTED_COLUMNS) == set()
+    assert gone & set(projection.ROW_PARAMS) == set()
 
 
-def test_a_declared_gps_pin_with_no_street_is_coarse_but_still_precise_positionally():
-    """03 §3.16.2: `granularity='obec'` AND `position_quality_class='precise'` — the axes
-    are independent — while `geo_blockable` and `renderable_as_point` stay FALSE because
-    the canonical predicates keep their granularity rung."""
-    claims = [
-        mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "coordinate", lat=50.0755, lon=14.4378, declared_precision_label="gps"),
-    ]
-    row = _row(claims)
-    assert row["granularity"] == "obec"
-    assert row["position_quality_class"] == "precise"
-    assert row["geo_blockable"] is False
-    assert row["renderable_as_point"] is False
-    assert row["is_low_precision"] is True
+def test_the_row_carries_its_three_version_inputs():
+    """`claim_set_hash` says the claims moved, `resolver_version` says a rule moved,
+    `registry_version` says the mirror moved. Those three are what the sweep compares."""
+    row = _row(_address_claims())
+    assert row["resolver_version"] == RESOLVER_VERSION
+    assert row["registry_version"] == "ruian:2026-07-31"
+    assert len(row["claim_set_hash"]) == 64  # sha256, hex, decoded to bytea by the statement
 
 
-def test_a_bazos_town_pin_is_excluded_by_class_at_every_granularity():
-    cluster = ClusterEvidence(
-        cluster_id=9, source="bazos", cell_key="c:50.1010:14.3480", listing_count=276,
-        distinct_streets=99, distinct_obec_kods=1, classification="town_centroid_suspect",
-    )
-    claims = [
-        mm.claim(1, "obec_name", value_text="Praha", source="bazos"),
-        mm.claim(2, "street_name", value_text="Nad Bořislavkou 487/40", source="bazos"),
-        mm.claim(3, "coordinate", lat=50.10102, lon=14.34804, source="bazos"),
-    ]
-    row = _row(claims, cluster=cluster)
-    assert row["pin_collision_class"] == "town_centroid_suspect"
-    assert row["geo_blockable"] is False
-    assert row["renderable_as_point"] is False
-    assert row["position_quality_class"] == "area"
+def test_the_grade_columns_are_never_null():
+    """A NULL axis reads as "no gate" and fails open — a NULL radius makes both branches of
+    the three-valued containment test evaluate NULL, so the row silently drops out of
+    `certain` AND `possible`. The DDL says NOT NULL; the builder must never try."""
+    for claims in (_address_claims(), []):
+        row = _row(claims)
+        for column in ("granularity", "match_confidence", "uncertainty_radius_m",
+                       "country_status"):
+            assert row[column] is not None, column
+
+
+def test_the_position_travels_as_a_lat_lon_pair_and_may_be_absent():
+    row = _row(_address_claims())
+    assert (row["lat"], row["lon"]) == (50.10100, 14.34800)
+    empty = _row([mm.claim(1, "obec_name", value_text="Neexistující")])
+    assert (empty["lat"], empty["lon"]) == (None, None)
+
+
+def test_a_foreign_row_carries_the_country_and_nothing_else():
+    row = _row([
+        mm.claim(1, "address_line_verbatim", value_text="Benahavís, Španělsko", source="idnes"),
+    ])
+    assert (row["country_status"], row["country_code"]) == ("foreign", "ES")
+    for column in ("obec_kod", "obec_name", "street_name", "psc", "ruian_adm_kod"):
+        assert row[column] is None, column

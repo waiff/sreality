@@ -16,7 +16,7 @@ exists to detect. These rails are what close it, offline, before the typo ships.
 Every test below states the specific mutation that makes it RED.
 
 Lane: migrations, with `DB_RAILS_REQUIRED=1` so a lane that loses its `TEST_DATABASE_URL`
-goes RED instead of reporting a green skip (the `tests/test_location_drain_index_plan.py`
+goes RED instead of reporting a green skip (the `tests/test_listing_location_index_plan.py`
 idiom). The `conn` fixture is `autocommit=True`, so any GUC these tests ever need must be
 a plain `SET` — `SET LOCAL` outside a transaction is a silent no-op.
 """

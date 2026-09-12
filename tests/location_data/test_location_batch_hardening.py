@@ -297,9 +297,11 @@ def test_every_statement_the_drain_runs_outside_a_batch_is_bounded_too():
     for fn in (drain._queue_health, drain.enqueue_full_sweep):
         assert "_bounded(" in inspect.getsource(fn), f"{fn.__name__} runs unbounded"
     start = inspect.getsource(drain.run)
-    assert start.count("with _bounded(conn, batch_timeout_s)") >= 2, (
-        "the run-start constant loads must be bounded: a run that hangs there logs "
-        "nothing at all"
+    # ONE run-start read survives W2-a (which registry version is current); the five policy
+    # loads and the epoch probe went with their tables. It still has to be bounded — a run
+    # that hangs on its first statement logs nothing at all.
+    assert start.count("with _bounded(conn, batch_timeout_s)") >= 1, (
+        "the run-start constant load must be bounded"
     )
 
 
@@ -375,16 +377,13 @@ def _flat(sql: str) -> str:
 
 
 def test_address_point_lookups_address_the_indexed_column():
-    """`ruian_ap_obec_hn` is (obec_unit_id, cislo_domovni) and `ruian_ap_cast_obce` is
-    (cast_obce_unit_id); `obec_kod` / `cast_obce_kod` have no index at all. Measured on
-    the live 3,020,222-row mirror: 21,494 ms -> 25 ms and 5,059 ms -> 35 ms."""
+    """`ruian_ap_obec_hn` is (obec_unit_id, cislo_domovni); `obec_kod` has no index at all.
+    Measured on the live 3,020,222-row mirror: 21,494 ms -> 25 ms. (The `cast_obce_kod`
+    half of this lesson went with `_CAST_OBCE_EXTENT_SQL` in W2-a — the question had no
+    reader left.)"""
     by_number = _flat(resolve_db._ADDRESS_POINTS_BY_NUMBER_SQL)
     assert "ap.obec_unit_id in (select u.id from ruian_admin_units u" in by_number
     assert "ap.obec_kod = %s" not in by_number
-
-    extent = _flat(resolve_db._CAST_OBCE_EXTENT_SQL)
-    assert "ap.cast_obce_unit_id in (" in extent
-    assert "ap.cast_obce_kod = %s" not in extent
 
 
 def test_the_unit_id_hop_does_not_narrow_the_answer_to_open_scd2_rows():
@@ -392,17 +391,17 @@ def test_the_unit_id_hop_does_not_narrow_the_answer_to_open_scd2_rows():
     current when it was loaded, so restricting the code->id hop to `valid_to IS NULL`
     would return nothing for rows whose unit has since been superseded — strictly less
     than `obec_kod = %s` matched."""
-    for sql in (resolve_db._ADDRESS_POINTS_BY_NUMBER_SQL, resolve_db._CAST_OBCE_EXTENT_SQL):
-        hop = _flat(sql).split("from ruian_admin_units u", 1)[1].split(")", 1)[0]
-        assert "valid_to" not in hop, f"the unit hop narrows to open rows only: {hop!r}"
+    hop = _flat(resolve_db._ADDRESS_POINTS_BY_NUMBER_SQL).split(
+        "from ruian_admin_units u", 1)[1].split(")", 1)[0]
+    assert "valid_to" not in hop, f"the unit hop narrows to open rows only: {hop!r}"
 
 
 def test_the_level_predicate_casts_the_parameter_not_the_column():
     """`u.level::text = %s` casts the COLUMN and throws away the leading column of
     `ruian_admin_units_code (level, code)`; `u.level = %s::ruian_level` casts the
     parameter and keeps both."""
-    for sql in (resolve_db._ADMIN_BY_CODE_SQL, resolve_db._ADDRESS_POINTS_BY_NUMBER_SQL,
-                resolve_db._CAST_OBCE_EXTENT_SQL):
+    for sql in (resolve_db._ADMIN_CHAIN_BY_CODE_SQL,
+                resolve_db._ADDRESS_POINTS_BY_NUMBER_SQL):
         flat = _flat(sql)
         assert "u.level::text = %s" not in flat
         if "ruian_admin_units u" in flat:
@@ -422,46 +421,54 @@ def test_containing_obec_lets_the_partial_pip_index_do_its_job():
 
 
 def test_every_point_keyed_question_binds_one_array_shape():
-    """The five coordinate-keyed questions have ONE statement each, taking parallel arrays,
+    """The coordinate-keyed questions have ONE statement each, taking parallel arrays,
     so `warm_points` (whole slice, one round trip) and the lazy single-point path cannot
     drift — which is what makes warming invisible to the pure core. A placeholder mismatch
     here is a runtime error on the first coordinate the drain resolves."""
     for sql, expected in (
         (resolve_db._CONTAINING_OBEC_SQL, 5),      # 3 arrays + a version per branch
         (resolve_db._NEAREST_OBEC_SQL, 9),         # 3 arrays + (version, box, radius) x2
-        (resolve_db._CAST_OBCE_FOR_POINT_SQL, 5),  # 3 arrays + box + radius
         (resolve_db._IN_CZ_SQL, 4),                # 3 arrays + a version
-        (resolve_db._BOUNDARY_DISTANCE_SQL, 5),    # 4 arrays + a version
     ):
         assert sql.count("%s") == expected, _flat(sql)
-    for name in ("containing_obec", "cast_obce_for_point", "in_czechia_polygon"):
+    for name in ("containing_obec", "in_czechia_polygon"):
         single = inspect.getsource(getattr(resolve_db.SqlRegistryView, name))
         assert f"self.{name}_bulk([(lat, lon)]).get(0)" in single
 
 
-def test_the_geography_predicates_carry_an_index_usable_bbox():
+def test_the_geography_predicate_carries_an_index_usable_bbox():
     """`ST_DWithin(geom::geography, ...)` is a FILTER against a geometry GiST index, so the
-    unbounded forms scanned everything: 6,752 ms/point for `nearest_obec_within` (every
-    boundary row cast to geography, the state polygon included) and 2,944 ms/point for
-    `cast_obce_for_point` (a KNN walk of all 3.02 M address points when nothing is near).
-    The `&&` box is the Index Cond that bounds both; 60,000 under-estimates metres per
-    degree at CZ latitudes, so the box strictly CONTAINS the geodesic circle."""
-    for sql in (resolve_db._NEAREST_OBEC_SQL, resolve_db._CAST_OBCE_FOR_POINT_SQL):
-        flat = _flat(sql)
-        assert "&& st_expand(" in flat, flat
-        assert "/ 60000.0)" in flat, flat
-        assert "st_dwithin(" in flat, flat
+    unbounded form scanned everything: 6,752 ms/point for `nearest_obec_within`, every
+    boundary row cast to geography, the state polygon included. The `&&` box is the Index
+    Cond that bounds it; 60,000 under-estimates metres per degree at CZ latitudes, so the box
+    strictly CONTAINS the geodesic circle and cannot hide a row the exact `ST_DWithin` kept.
+
+    (`cast_obce_for_point` carried the same lesson and went with the question in W2-a — FILL
+    takes the quarter off the bound entity's own chain now.)"""
+    flat = _flat(resolve_db._NEAREST_OBEC_SQL)
+    assert "&& st_expand(" in flat, flat
+    assert "/ 60000.0)" in flat, flat
+    assert "st_dwithin(" in flat, flat
 
 
 def test_nearest_obec_prefers_the_subdivided_pieces_like_containment_does():
     """The pip pieces TILE the authoritative polygon, so the minimum distance over them IS
-    the distance to the polygon — and they are small enough that the geography cast is
-    cheap (2.95 ms/point vs 6,752). The authoritative branch stays for a partially loaded
-    boundary pack, exactly as in `_CONTAINING_OBEC_SQL`."""
+    the distance to the polygon — and they are small enough that the geography cast is cheap
+    (2.95 ms/point vs 6,752). The authoritative branch stays for a partially loaded boundary
+    pack, exactly as in `_CONTAINING_OBEC_SQL`."""
     flat = _flat(resolve_db._NEAREST_OBEC_SQL)
     assert "g.purpose = 'pip'" in flat
     assert "g.purpose = 'authoritative'" in flat
     assert flat.count("union all") == 1
+
+
+def test_the_sliver_fallback_is_asked_lazily_not_warmed():
+    """It is reached only when `containing_obec` missed — ~1 % of listings — so warming it
+    would run a two-branch geography lateral for all 250 of a slice's points to answer the
+    two or three that ask. The other two point-keyed questions ARE warmed."""
+    warm = inspect.getsource(resolve_db.warm_points)
+    assert "containing_obec_bulk" in warm and "in_czechia_polygon_bulk" in warm
+    assert "nearest_obec" not in warm
 
 
 def test_the_registry_lookup_index_migration_ships_as_a_file():

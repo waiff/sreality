@@ -2003,7 +2003,9 @@ def test_location_town_coverage_counts_undetermined_as_czech() -> None:
 
     flat = " ".join(_LOCATION_TOWN_COVERAGE_SQL.split()).lower()
     assert "p.country_status <> 'foreign' and p.obec_kod is null" in flat
-    assert "from listings l left join listing_location_current p on p.listing_id = l.id" in flat
+    assert "from listings l left join listing_location p on p.listing_id = l.id" in flat
+    # W2-a repointed it: the frozen projection is not the coverage denominator any more.
+    assert "listing_location_current" not in flat
     assert "where l.is_active" in flat
 
 

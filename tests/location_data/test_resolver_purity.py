@@ -8,6 +8,8 @@ clock, a socket or an RNG. The core's ONLY notion of "now" is
 
 The three JOB modules are excluded by name and by nothing else: they are allowed a clock
 (a drain budget), a connection and a lease id, and they are the only modules that are.
+`as_of` is gone with the policy evaluator that read it — nothing in the four steps has a
+notion of "now" at all now, not even a derived one.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ import pytest
 _PACKAGE = Path(__file__).resolve().parents[2] / "location_data" / "resolver"
 
 # Jobs, not the resolver: they own the DB connection, the run budget and the lease.
-_JOB_MODULES = {"drain.py", "epoch_job.py", "resolve_db.py", "lease.py"}
+_JOB_MODULES = {"drain.py", "resolve_db.py", "lease.py"}
 
 _FORBIDDEN_ATTRS = {
     ("datetime", "now"), ("datetime", "utcnow"), ("datetime", "today"),
@@ -34,9 +36,21 @@ def _pure_modules() -> list[Path]:
     return sorted(p for p in _PACKAGE.glob("*.py") if p.name not in _JOB_MODULES)
 
 
-def test_the_scan_actually_covers_the_core():
+def test_the_scan_actually_covers_the_four_steps():
     names = {p.name for p in _pure_modules()}
-    assert {"core.py", "candidates.py", "position.py", "precision.py", "survivorship.py"} <= names
+    assert {"core.py", "bind.py", "fill.py", "grade.py", "check.py"} <= names
+
+
+def test_the_deleted_stages_are_actually_gone():
+    """W2-a's deletion ledger, as a gate: a module resurrected by a merge would otherwise
+    sit there importable and unreferenced until something imported it."""
+    gone = {
+        "survivorship.py", "uncertainty.py", "reconciler.py", "collision.py",
+        "epoch_job.py", "derived.py", "candidates.py", "position.py", "admin.py",
+        "precision.py", "country.py", "projection_property.py",
+    }
+    present = {p.name for p in _PACKAGE.glob("*.py")}
+    assert gone & present == set(), sorted(gone & present)
 
 
 @pytest.mark.parametrize("path", _pure_modules(), ids=lambda p: p.name)

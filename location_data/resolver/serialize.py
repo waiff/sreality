@@ -14,9 +14,9 @@ encoding is pinned here and nowhere else:
   DB round-trip and a fixture cannot change the hash;
 * NaN / ±Inf raise. A hash over a non-finite coordinate is a silent data bug.
 
-`claim_set_hash` deliberately hashes the CONSUMED claim set — its ids, types, values and
-observation instants — because `as_of` (03 §3.0 rule 2) must be derivable from what the key
-already covers, without adding a sixth key component.
+`claim_set_hash` hashes the CONSUMED claim set — its ids, types, values and observation
+instants. It is one of the three version inputs the answer row stamps, and the one that
+says the listing's own evidence moved rather than a rule or the mirror.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -94,18 +94,3 @@ def _claim_value(claim: Any) -> Any:
         "lon": claim.lon,
         "jsonb": claim.value_jsonb or {},
     }
-
-
-def epoch_seconds(moment: datetime) -> float:
-    """Seconds since the epoch under the SAME convention `_plain` uses — a naive datetime
-    is UTC, never process-local. `datetime.timestamp()` on a naive value reads the host's
-    timezone, which is a replay divergence with no visible cause."""
-    aware = moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
-    return aware.timestamp()
-
-
-def as_of(claims: Iterable[Any]) -> datetime | None:
-    """`as_of = max(observed_at)` over the consumed claims — the resolver's ONLY notion of
-    "now" (03 §3.0 rule 2)."""
-    moments = [c.observed_at for c in claims if c.observed_at is not None]
-    return max(moments) if moments else None
