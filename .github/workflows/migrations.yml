@@ -153,21 +153,23 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_tenant_isolation_live.py -q
 
-      # The location drain's bulk member read was the platform's single largest disk
-      # consumer — 39,488 calls x 69,327 blocks = 2.74 BILLION blocks, because
-      # listing_location_current carried 15 indexes and none led on property_id. The
-      # statement type-checks either way, so the PREPARE sweep above passes with or
-      # without migration 429's index, and the fake connections cannot produce a plan at
-      # all. Only EXPLAIN against a real schema can tell the two apart.
+      # This rail replaced migration 429's on 2026-09-12 (W2-a). That one EXPLAINed the
+      # drain's bulk member read of listing_location_current — the platform's single
+      # largest disk consumer at 39,488 calls x 69,327 blocks — and the drain does not make
+      # that read any more: the property rollup it fed is deleted, and the index it guarded
+      # drops with the table in W2-b. What migration 501 ships instead is two indexes, and
+      # the DDL type-checks either way: the PREPARE sweep above passes with or without
+      # them, and the fake connections cannot produce a plan at all. Only EXPLAIN against a
+      # real schema can tell the two apart.
       #
       # DB_RAILS_REQUIRED=1 is what makes this a rail rather than a wish: without it a
       # missing TEST_DATABASE_URL would report `skipped` and this step would stay green
       # while asserting nothing. With it, a misconfigured lane goes RED.
-      - name: Location drain's bulk read stays index-servable (migration 429)
+      - name: listing_location's indexes can serve their reads (migration 501)
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
           DB_RAILS_REQUIRED: "1"
-        run: pytest tests/test_location_drain_index_plan.py -q
+        run: pytest tests/test_listing_location_index_plan.py -q
 
       # The admin gate is SECURITY DEFINER and, in all 10 tenancy policies, sits inside an
       # OR with column references — so it is not pseudoconstant and the executor calls it
