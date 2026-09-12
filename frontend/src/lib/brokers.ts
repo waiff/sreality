@@ -217,9 +217,15 @@ export function contactState(
   return has ? { state: 'masked' } : { state: 'none' };
 }
 
-// Split Browse location chips into per-level admin-id arrays for the leaderboard
-// RPC. Only resolved, non-excluded chips contribute; a 'locality' chip's id is its
-// containing obec.
+// Split Browse location chips into per-level RÚIAN-code arrays for the
+// leaderboard RPC. Only chips that carry a code, and only includes, contribute;
+// a 'locality' chip's code is its containing obec.
+//
+// The leaderboard RPC takes THREE levels, not the four the place predicate has
+// (lib/districtCodes): a `cast_obce` chip is skipped here rather than widened to
+// its town, because a broker leaderboard silently scoped to the whole of Prague
+// when the operator picked Žižkov is worse than one that ignores the chip. W4
+// gives the RPC the fourth level.
 export function chipsToGeoArrays(chips: DistrictChip[]): {
   regionIds: number[];
   okresIds: number[];
@@ -233,6 +239,7 @@ export function chipsToGeoArrays(chips: DistrictChip[]): {
     if (c.level === 'kraj') regionIds.push(c.id);
     else if (c.level === 'okres') okresIds.push(c.id);
     else if (c.level === 'obec' || c.level === 'locality') obecIds.push(c.id);
+    // c.level === 'cast_obce' — no arm on this RPC; see the note above.
   }
   return { regionIds, okresIds, obecIds };
 }

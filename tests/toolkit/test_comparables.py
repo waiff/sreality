@@ -345,22 +345,20 @@ def test_find_comparables_on_an_empty_cohort_claims_no_unit():
     assert res["metadata"]["filters_used"]["price_per_m2_basis"] == "unknown"
 
 
-def test_locality_district_id_filter():
-    sql, params = build_query(
-        TargetSpec(lat=50.0, lng=14.0),
-        ComparableFilters(locality_district_id=42),
-    )
-    assert "l.locality_district_id = %(locality_district_id)s" in sql
-    assert params["locality_district_id"] == 42
+def test_the_sreality_only_locality_ids_are_not_filters_any_more():
+    """W3 S3 deleted `locality_district_id` / `locality_region_id`: they were
+    SREALITY's own portal ids, filterable on one portal out of nine. Place is
+    one thing now — a RÚIAN code at a level (the `districts` chips). The
+    COLUMNS survive on `listings` until W4; only the filters are gone."""
+    import dataclasses
 
-
-def test_locality_region_id_filter():
-    sql, params = build_query(
-        TargetSpec(lat=50.0, lng=14.0),
-        ComparableFilters(locality_region_id=8),
-    )
-    assert "l.locality_region_id = %(locality_region_id)s" in sql
-    assert params["locality_region_id"] == 8
+    fields = {f.name for f in dataclasses.fields(ComparableFilters)}
+    assert "locality_district_id" not in fields
+    assert "locality_region_id" not in fields
+    sql, params = build_query(TargetSpec(lat=50.0, lng=14.0), ComparableFilters())
+    assert "l.locality_district_id = " not in sql
+    assert "l.locality_region_id = " not in sql
+    assert "locality_district_id" not in params
 
 
 def test_amenity_booleans_three_state():
@@ -628,7 +626,7 @@ def test_user_values_never_string_interpolated():
         ComparableFilters(
             condition_match=["'; drop table listings; --"],
             min_price_czk=42,
-            locality_district_id=99,
+            category_sub_cb=99,
         ),
     )
     assert "drop table" not in sql.lower()

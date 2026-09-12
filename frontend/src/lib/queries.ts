@@ -9,7 +9,6 @@ import { fetchBrokerListingIds, type ListingBroker } from './brokers';
 import type { LlmCostDailyRow, LlmCostHourlyRow } from './llmCosts';
 import {
   type CenterRadius,
-  type DistrictChip,
   type ListingFilters,
   type MapBounds,
   type PipelineScope,
@@ -315,133 +314,19 @@ export const effectiveSort = (f: ListingFilters, sort: SortSpec): SortSpec =>
     ? { field: 'portal_sort_key', direction: sort.direction }
     : sort;
 
-/* Escape a literal user-supplied substring for embedding in a
- * PostgREST `or=(...)` clause as the right-hand side of `ilike`.
- * Reserved chars: `*` (wildcard), `,` (clause separator), `(` `)`
- * (grouping), `"` (quote), `\` (escape). Wrap in quotes and escape
- * the breakouts. Mapy.cz suggestion names are usually clean Czech
- * place names, but some POI names include parentheses. */
-const escapeIlikePattern = (raw: string): string => {
-  const escaped = raw
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\*/g, '\\*')
-    .replace(/,/g, '\\,')
-    .replace(/\(/g, '\\(')
-    .replace(/\)/g, '\\)');
-  return `"*${escaped}*"`;
-};
+/* The location chips compile to ONE code predicate, defined once in
+ * `lib/districtCodes.ts` and re-exported here so every existing import site
+ * keeps working. What used to live in this file — a PostgREST string builder
+ * and a hand-kept in-memory twin, five predicates each, ILIKE patterns and all
+ * — is now two renderings of one plan. See districtCodes.ts for the why. */
+import { districtsFilterClause } from './districtCodes';
 
-/* PostgREST `or=(...)` predicate for the location chips, or null when no
- * chips are set. Each chip resolves to a STABLE ADMIN ID at the level the
- * user picked (migration 171/172): an obec pick matches `obec_id`, an okres
- * pick `okres_id`, a kraj pick `region_id` — so picking obec "Jihlava" can't
- * collide with its same-named okres. A `locality` pick (street / POI /
- * address) matches its containing `obec_id` AND an ILIKE on
- * `place_search_text` (street + locality, migration 182 — bazos stores the
- * street outside `locality`, so bare `locality` would miss it), narrowing a
- * street to its municipality without dragging in same-named streets
- * elsewhere. A legacy / unresolved chip (no level/id — a pre-resolution
- * saved filter, or a point that matched no admin unit) falls back to the
- * name ILIKE across district/place_search_text/okres/region with an
- * optional parent-municipality context narrow.
- *
- * Chips split by `excluded`: INCLUDE chips are OR'd (match any), then
- * AND'd with NOT-(OR of the EXCLUDE chips) so an excluded locality is
- * subtracted from the cohort. Combined into a single `and(...)` tree so
- * PostgREST AND's the two groups. Kept in lockstep with the watchdog
- * matcher (`_build_match_clauses`) and browse_stats (migration 182),
- * which apply the same per-chip predicate + include/exclude split. */
-export const districtsFilterClause = (districts: DistrictChip[]): string | null => {
-  if (!districts.length) return null;
-  const ID_COL: Record<string, string> = {
-    obec: 'obec_id', okres: 'okres_id', kraj: 'region_id',
-  };
-  const chipClause = (d: DistrictChip): string => {
-    if (d.id != null && d.level != null && d.level in ID_COL) {
-      return `${ID_COL[d.level]}.eq.${d.id}`;
-    }
-    const namePat = escapeIlikePattern(d.name);
-    if (d.level === 'locality') {
-      const loc = `place_search_text.ilike.${namePat}`;
-      return d.id != null ? `and(obec_id.eq.${d.id},${loc})` : loc;
-    }
-    const cols = (pat: string): string =>
-      `district.ilike.${pat},place_search_text.ilike.${pat},okres.ilike.${pat},region.ilike.${pat}`;
-    const nameHalf = `or(${cols(namePat)})`;
-    if (!d.context) return nameHalf;
-    const ctxPat = escapeIlikePattern(d.context);
-    return `and(${nameHalf},or(${cols(ctxPat)}))`;
-  };
-  const inc = districts.filter((d) => !d.excluded).map(chipClause);
-  const exc = districts.filter((d) => d.excluded).map(chipClause);
-  const groups: string[] = [];
-  if (inc.length) groups.push(`or(${inc.join(',')})`);
-  if (exc.length) groups.push(`not.or(${exc.join(',')})`);
-  return groups.length ? `and(${groups.join(',')})` : null;
-};
-
-/* Client-side counterpart to `districtsFilterClause` — the SAME include/exclude
- * + admin-id + name-fallback semantics, but as a row predicate for in-memory
- * filtering. The SQL builder above can't be reused directly (it emits a
- * PostgREST string, not a predicate); the pipeline board loads its small card
- * set fully and filters locally (rule #22), so it needs this. Keep the two in
- * LOCKSTEP — they share the column contract (obec_id/okres_id/region_id +
- * district/place_search_text/okres/region on properties_public) pinned by
- * queries.test.ts. A resolved chip matches by exact admin id; an unresolved one
- * by case-insensitive substring across the place columns (mirroring ILIKE
- * "*…*"), AND its context when present. */
-export interface DistrictMatchRow {
-  obec_id: number | null;
-  okres_id: number | null;
-  region_id: number | null;
-  district: string | null;
-  place_search_text: string | null;
-  okres: string | null;
-  region: string | null;
-}
-
-const ilikeContains = (text: string | null, needle: string): boolean =>
-  text != null && text.toLowerCase().includes(needle.toLowerCase());
-
-const matchesDistrictChip = (row: DistrictMatchRow, d: DistrictChip): boolean => {
-  if (
-    d.id != null
-    && (d.level === 'obec' || d.level === 'okres' || d.level === 'kraj')
-  ) {
-    const col = { obec: 'obec_id', okres: 'okres_id', kraj: 'region_id' }[d.level] as
-      'obec_id' | 'okres_id' | 'region_id';
-    return row[col] === d.id;
-  }
-  if (d.level === 'locality') {
-    const loc = ilikeContains(row.place_search_text, d.name);
-    return d.id != null ? row.obec_id === d.id && loc : loc;
-  }
-  const nameHalf =
-    ilikeContains(row.district, d.name)
-    || ilikeContains(row.place_search_text, d.name)
-    || ilikeContains(row.okres, d.name)
-    || ilikeContains(row.region, d.name);
-  if (!d.context) return nameHalf;
-  const ctxHalf =
-    ilikeContains(row.district, d.context)
-    || ilikeContains(row.place_search_text, d.context)
-    || ilikeContains(row.okres, d.context)
-    || ilikeContains(row.region, d.context);
-  return nameHalf && ctxHalf;
-};
-
-export const matchesDistricts = (
-  row: DistrictMatchRow,
-  districts: DistrictChip[],
-): boolean => {
-  if (!districts.length) return true;
-  const inc = districts.filter((d) => !d.excluded);
-  const exc = districts.filter((d) => d.excluded);
-  const included = inc.length === 0 || inc.some((d) => matchesDistrictChip(row, d));
-  const notExcluded = !exc.some((d) => matchesDistrictChip(row, d));
-  return included && notExcluded;
-};
+export {
+  districtsFilterClause,
+  matchesDistricts,
+  districtCodePlan,
+  type DistrictMatchRow,
+} from './districtCodes';
 
 /* Generic identity-typed helper. Postgrest's filter methods all return the
  * same builder, so passing the chain through any subset of them preserves

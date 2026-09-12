@@ -31,6 +31,7 @@ const card = (over: Partial<PipelineBoardCard> = {}): PipelineBoardCard => ({
   total_price_change_pct: null,
   price_change_count: null,
   obec_id: null,
+  cast_obce_id: null,
   obec: null,
   locality: null,
   okres_id: null,
