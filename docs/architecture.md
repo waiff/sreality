@@ -1162,10 +1162,13 @@ renumber.** Navigate by area:
     (migration 375, `recompute_home_city()`, a daily job measured at 680 MB of buffer traffic
     per call) because a per-request `ST_Covers` / `ST_DWithin` scan against every curated city
     is only cheap at Watchdog's per-subscription scale, not at Browse's; 436 removed the need
-    for the scan rather than the cost of it, and **W3 S4 (migration 506) deleted the column,
-    `home_city_computed_at`, `recompute_home_city()` and the job** once a reader census found
-    none left — not even `listings_with_city_quality()`, which does its own `ST_Covers` and
-    never touched the column. What it does NOT delete is the obec-keyed pair this pattern was
+    for the scan rather than the cost of it. **W3 S4 (migration 506) deleted the column,
+    `home_city_computed_at`, `recompute_home_city()`, the job — and its one remaining reader,
+    `listings_with_city_quality()`**, the pre-W5 path that joined `curated_cities_public` on
+    `browse_list.home_city_id` and was reachable only through the `?cityQualityLegacy=1` bisect
+    hatch the same PR removed. A column and the function that joins on it leave together:
+    Postgres does not track column dependencies through a function body, so dropping one without
+    the other leaves a function that compiles and fails on its first call. What it does NOT delete is the obec-keyed pair this pattern was
     modelled on: `home_obec_pop` and the eight `near_*` columns (migration 142) stay, because
     they are population/proximity FACTS about the obec, not a membership cache.
     The one exception is `near_city_proximity` (an operator-chosen radius search, not curated-city
@@ -2128,9 +2131,14 @@ from the two property-grain views; `home_city_id`, `home_city_computed_at`, `rec
 and its daily job (migration 436 re-keyed city-quality onto `obec_id` in 2026-08 and nothing has
 read the column since — not even `listings_with_city_quality()`, which does its own `ST_Covers`);
 `location_data/serving_contracts.py`; and the two bisect hatches `?map=legacy` / `?cityQualityLegacy=1`
-with the legacy listing-id prefilter behind the second. **`obec` survives** on the two views the
-pipeline board reads: its "Město A–Ž" sort orders by the TOWN, and the label leads with the street
-when there is one, so sorting on the label would order a column by house number. **The two
+with the legacy listing-id prefilter behind the second. **Two columns survive, both on
+`properties_public`, and each because something still reads it.** `obec`: the pipeline board's
+"Město A–Ž" sort orders by the TOWN, and the label leads with the street when there is one, so
+sorting on the label would order a column by house number. `district`: `region_stats()` and
+`region_active_by_day()` (migrations 425 / 103) still filter `district = any(districts_filter)`,
+a legacy NAME array — neither has a caller in any source tree, but CI's schema-replay lane
+compiles both against a real database, and rule 25 deletes a column in the PR that removes its
+last *reader*, not the one that removes its last *caller*. **The two
 survivorship pickers in `scripts/recompute_property_stats.py` survive too** — W3-1 proposed deleting
 `best_geo` and `best_street` once the display listing became the single winner for place, but six of
 their targets still have readers (`ku_id` + `obec_id` feed the MF golden record, the three codes are

@@ -41,8 +41,11 @@ _S4_DROPS: dict[str, set[str]] = {
         "place_search_text", "home_city_id",
     },
     "listing_feed_public": {"place_search_text"},
+    # `district` stays HERE and nowhere else: region_stats() and
+    # region_active_by_day() (migrations 425/103) filter on it by NAME off this
+    # view, and CI's schema-replay lane runs both.
     "properties_public": {
-        "locality", "district", "street", "okres", "region",
+        "locality", "street", "okres", "region",
         "place_search_text", "home_city_id",
     },
     "pipeline_board_public": {
@@ -219,13 +222,36 @@ def test_s4_drops_only(view: str) -> None:
 
 
 def test_s4_keeps_the_town_on_the_board_lane() -> None:
-    """`obec` is the one piece of legacy place text S4 spares, and only on the
-    two views the pipeline board reads. If a later edit takes it, the board's
-    "Mesto A-Z" sort silently falls back to `display_label` and orders a column
-    by house number."""
+    """`obec` is one of two pieces of legacy place text S4 spares, and it is
+    spared on the two views the pipeline board reads. If a later edit takes it,
+    the board's "Mesto A-Z" sort silently falls back to `display_label` and
+    orders a column by house number."""
     for view in ("properties_public", "pipeline_board_public"):
         assert "obec" in _columns(_sql(W3_S4), view), f"{view} lost `obec`"
     assert "obec" not in _columns(_sql(W3_S4), "browse_projection")
+
+
+def test_s4_keeps_district_where_the_region_functions_read_it() -> None:
+    """The other survivor. `region_stats()` and `region_active_by_day()` filter
+    `district = any(districts_filter)` -- a legacy NAME array -- off
+    `properties_public`. Neither has a repo caller, but CI's schema-replay lane
+    compiles both against a real database, and rule 25 deletes a column in the PR
+    that removes its last READER. It is spared on that view ONLY."""
+    assert "district" in _columns(_sql(W3_S4), "properties_public")
+    for view in ("browse_projection", "pipeline_board_public"):
+        assert "district" not in _columns(_sql(W3_S4), view), (
+            f"{view} kept `district` -- nothing reads it there"
+        )
+
+
+def test_s4_drops_home_city_ids_last_reader_with_it() -> None:
+    """A column and the function that joins on it leave together. Dropping
+    `home_city_id` while `listings_with_city_quality()` still selected it would
+    leave a function that compiles and fails on its first call -- Postgres does
+    not track column dependencies through a function body."""
+    sql = _sql(W3_S4)
+    assert "drop function if exists listings_with_city_quality" in sql.lower()
+    assert "home_city_id" not in _columns(sql, "browse_projection")
 
 
 def test_browse_projection_appends_exactly_the_w3_four() -> None:

@@ -333,12 +333,18 @@ component is slimmed twice — each wave rewrites one component and slims its st
     **Deletion ledger.**
     *Columns* — `place_search_text` off all four views AND off `properties` (the migration-302
     generated column); `locality`/`district`/`street`/`obec`/`okres`/`region` off
-    `browse_projection`; the same minus `obec` off `properties_public` and `pipeline_board_public`;
-    `home_city_id` + `home_city_computed_at` off `properties`. `district` also leaves
-    `properties_map_mv`'s cover index (`rebuild_properties_map_mv` re-created for it — nothing
-    takes its place: the INCLUDE list has not covered `MAP_COLS` since W6a).
-    *Scripts / jobs* — `scripts/recompute_home_city.py`, `.github/workflows/recompute_home_city.yml`
-    (workflow-docs.json regenerated), the SQL function `recompute_home_city(boolean)`.
+    `browse_projection`; `locality`/`street`/`okres`/`region` off `properties_public` and those
+    plus `district` off `pipeline_board_public`; `home_city_id` + `home_city_computed_at` off
+    `properties`. `district` also leaves `properties_map_mv`'s cover index
+    (`rebuild_properties_map_mv` re-created for it — nothing takes its place: the INCLUDE list has
+    not covered `MAP_COLS` since W6a).
+    *Scripts / jobs / functions* — `scripts/recompute_home_city.py`,
+    `.github/workflows/recompute_home_city.yml` (workflow-docs.json regenerated),
+    `recompute_home_city(boolean)`, and `listings_with_city_quality(jsonb,int,int,jsonb)` —
+    `home_city_id`'s ONE reader, the pre-W5 city-quality path, reachable only through the hatch
+    this PR deletes. A column and the function that joins on it leave together: Postgres does not
+    track column dependencies through a function body, so dropping one without the other leaves a
+    function that compiles and fails on its first call.
     *Modules* — `location_data/serving_contracts.py` (fourteen floors, zero production readers;
     A5's `FILTER_DEFAULT_SEMANTICS = "include_and_badge"` carried to `api/location_filter.py`, path
     C's town floor left where the path is), `PathDef.floor_feature` with it.
@@ -362,10 +368,17 @@ component is slimmed twice — each wave rewrites one component and slims its st
     the Watchdog, `geom` drives the lat/lng trigger the Watchdog's `ST_DWithin` is rebuilt from,
     `district` and `street` are read by `/properties/merge-candidates`. Only `locality`, `okres`
     and `region` lost their last reader; they keep being written rather than freezing stale, and
-    W4 removes the columns and the projections together. Left for W4 with no reader found:
-    `properties.locality`/`okres`/`region`, `properties.locality_district_id`/`locality_region_id`
-    (still published by both property-grain views), and `listings_with_city_quality()` — now
-    caller-less, since the hatch that reached it is gone.
+    W4 removes the columns and the projections together. **`district` also survives on
+    `properties_public`** (not on the other two views): `region_stats()` and
+    `region_active_by_day()` (migrations 425/103) still filter `district = any(districts_filter)`
+    off it — a legacy NAME array, no caller in any source tree, but CI's schema-replay lane
+    compiles both against a real database. That is the whole point of the rule: a column is
+    deleted in the PR that removes its last READER, not its last caller. **CI caught this**, not
+    the offline grep — the first push was green on pytest + vitest + tsc and red on schema replay.
+    Left for W4 with no reader found: `properties.locality`/`okres`/`region`,
+    `properties.locality_district_id`/`locality_region_id` (still published by both
+    property-grain views), and `region_stats()` / `region_active_by_day()` themselves — re-point
+    them at codes or drop them, and `properties_public.district` goes with them.
 - **W4 — delete legacy** (= plan S5): Mapy purge, geocoder + cache, street extractor, the trigger
   and the 24 `listings` columns, the property-grain geography, the second page archive, the
   backfill scripts and workflows; rule 24 rewritten to the end state.

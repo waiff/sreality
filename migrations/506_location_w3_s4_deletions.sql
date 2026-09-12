@@ -21,18 +21,23 @@
 --   street/obec/        sites onto `display_label`; `browse_list` and
 --   okres/region        `properties_map_mv` are selected by three explicit
 --                       column lists (MAP_COLS / TABLE_COLS / CARD_COLS) and
---                       none of them names one. `obec` SURVIVES on
---                       properties_public + pipeline_board_public: the board's
+--                       none of them names one. TWO SURVIVE, both on
+--                       properties_public: `obec`, because the board's
 --                       "Mesto A-Z" sort orders by the TOWN, which is the tail
---                       of the label rather than its head (lib/pipelineSort).
+--                       of the label rather than its head (lib/pipelineSort);
+--                       and `district`, because `region_stats()` /
+--                       `region_active_by_day()` still filter on it BY NAME.
+--                       A column is deleted in the PR that removes its last
+--                       reader -- these two still have one.
 --
 --   home_city_id        migration 375's precomputed curated-city key. Migration
 --                       436 re-keyed city-quality membership onto `obec_id` via
---                       curated_cities_matching(), and the last thing that was
---                       thought to read it -- listings_with_city_quality() --
---                       does its own ST_Covers against curated_cities_public and
---                       never touches the column. Zero readers, on the serving
---                       path or off it. Its job (recompute_home_city.yml, daily,
+--                       curated_cities_matching(), leaving it exactly ONE
+--                       reader: listings_with_city_quality(), reachable only
+--                       through the `?cityQualityLegacy=1` bisect hatch that
+--                       this same PR deletes. The function is dropped below, so
+--                       the column really does end with no reader rather than
+--                       with a stranded one. Its job (recompute_home_city.yml, daily,
 --                       measured at 680 MB of buffer traffic per call) and its
 --                       driver go with it, so `home_city_computed_at` and
 --                       `recompute_home_city()` -- which exist only to schedule
@@ -349,6 +354,16 @@ select
     l.price_unit,
     p.area_m2,
     p.disposition,
+    -- KEPT, unlike on browse_projection: `region_stats()` and
+    -- `region_active_by_day()` (migrations 425 / 103) still filter
+    -- `district = any(districts_filter)` -- a legacy NAME array -- on this view.
+    -- Neither has a caller in api/, toolkit/, frontend/src/, scripts/ or the
+    -- extension (migration 425 verified that before it re-created region_stats),
+    -- but CI's schema-replay lane exercises both against a real database, and
+    -- rule 25 deletes a column in the PR that removes its last READER, not
+    -- before. W4 re-points or drops the two functions and the column goes with
+    -- them.
+    p.district,
     p.locality_district_id,
     p.locality_region_id,
     p.lat,
@@ -580,6 +595,17 @@ commit;
 begin;
 
 set local lock_timeout = '5s';
+
+-- `home_city_id`'s ONE reader, and the SPA hatch that was its one caller goes
+-- in the same PR. `listings_with_city_quality(jsonb,int,int,jsonb)` (live body:
+-- migration 375) is the pre-W5 city-quality path: it walks `browse_list`, joins
+-- `curated_cities_public` on `l.home_city_id` and returns a listing-id
+-- allowlist. Migration 436 replaced it with `curated_cities_matching()` ->
+-- `obec_id = any(...)`, ONE definition of "matches" (rule 16), and the only
+-- thing still able to reach this one was `?cityQualityLegacy=1`. Dropping it
+-- with the hatch is the bundle roadmap/hydration-sprint W7b already names --
+-- leaving it would strand a function whose join column this file removes.
+drop function if exists listings_with_city_quality(jsonb, int, int, jsonb);
 
 alter table properties drop column if exists place_search_text;
 alter table properties drop column if exists home_city_id;
