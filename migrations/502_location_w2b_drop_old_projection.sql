@@ -150,7 +150,19 @@ drop table if exists property_location_current;
 --    got a writer. W2-a's resolver stores no trace: a row REPLAYS from the three
 --    version ids stamped on `listing_location`, which is the property the AST
 --    purity scan exists to keep true.
+--
+--    THE FK IS CIRCULAR, so the constraint comes off first. `candidates.resolution_id`
+--    references `location_resolutions(id)` and `location_resolutions.chosen_candidate_id`
+--    references `location_resolution_candidates(id)` back (383:167, DEFERRABLE) — neither
+--    table can be dropped before the other. The way out is either CASCADE or this one
+--    named constraint; the constraint is the narrow instrument, and CASCADE is the one
+--    that silently takes whatever else happens to depend on the table. CI's replay found
+--    this, which is the argument for using no CASCADE anywhere in this file: the failure
+--    was loud and local.
 ------------------------------------------------------------------
+
+alter table if exists location_resolutions
+  drop constraint if exists location_resolutions_chosen_fk;
 
 drop table if exists location_resolution_verifications;
 drop table if exists location_resolution_candidates;
