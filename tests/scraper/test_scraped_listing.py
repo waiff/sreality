@@ -24,9 +24,16 @@ def _listing(**overrides) -> ScrapedListing:
     return ScrapedListing(**base)
 
 
-def test_street_lands_in_to_row():
-    row = _listing().to_row(-5)
-    assert row["street"] == "Husova 12"
+def test_the_place_reading_never_reaches_a_column():
+    """W4-c dropped every place column from `listings`, so `to_row` emits none.
+    The parser still READS the page's locality/street/pin — that reading is the
+    claim `location_data` resolves into `listing_location`, and it rides
+    raw_json, not a column."""
+    listing = _listing()
+    row = listing.to_row(-5)
+    assert listing.street == "Husova 12" and listing.locality == "Letovice"
+    for key in ("locality", "district", "street", "house_number", "zip", "lat", "lon"):
+        assert key not in row, f"to_row still emits {key!r}"
 
 
 def test_street_is_not_hashed():

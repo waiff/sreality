@@ -33,8 +33,8 @@ export const PIPELINE_BOARD_COLS =
   /* The town, and ONLY the town: the "Mesto A-Z" sort orders by it because the
    * label leads with the street when there is one (lib/pipelineSort). W4-a
    * re-sourced this column from `listing_location.obec_name` (migration 507) --
-   * same name, same type, same sort; the legacy `properties.obec` behind it is
-   * unwritten from that wave on and dropped in W4-c. */
+   * same name, same type, same sort; W4-c (migration 508) then dropped the
+   * legacy `properties.obec` behind it. */
   'obec, is_active, ' +
   /* Migration 425 widened the view for exactly this: the board is deal-agnostic
    * by rule 22 (a card can be added from any cohort, and the pipeline scope is

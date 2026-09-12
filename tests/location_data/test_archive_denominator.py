@@ -308,12 +308,11 @@ _FIXTURE_LISTINGS: list[dict[str, Any]] = [
 
 
 def _column_counts(row: dict[str, Any]) -> list[int]:
-    """The four `count(*) FILTER (...)` expressions, evaluated in Python."""
+    """The three `count(*) FILTER (...)` expressions, evaluated in Python."""
     street = row["street"]
     return [
         int(street is not None),
         int(street is not None and not (set(street) & _DIACRITICS)),
-        int(row["street_source"] == "resolver"),
         int(bool(row["geom"])),
     ]
 
@@ -326,7 +325,7 @@ def _aggregate(pages: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
             page["source"], page["page_kind"], page["fetched_at"].date(),
             page["matched"], page["is_active"],
         )
-        counts = groups.setdefault(key, [0, 0, 0, 0, 0])
+        counts = groups.setdefault(key, [0, 0, 0, 0])
         counts[0] += 1
         for index, value in enumerate(_column_counts(page), start=1):
             counts[index] += value
@@ -339,7 +338,7 @@ def _aggregate_population(listings: list[dict[str, Any]]) -> list[tuple[Any, ...
     for row in listings:
         stamp = row["inactive_at"]
         key = (row["source"], row["is_active"], stamp.date() if stamp else None)
-        counts = groups.setdefault(key, [0, 0, 0, 0, 0])
+        counts = groups.setdefault(key, [0, 0, 0, 0])
         counts[0] += 1
         for index, value in enumerate(_column_counts(row), start=1):
             counts[index] += value
@@ -474,7 +473,6 @@ def test_an_accented_street_is_not_counted_as_de_accented(
     cr = _report(measured, "ceskereality")
     assert cr.columns["street_present"]["archived_rows"] == 2
     assert cr.columns["street_ascii_only"]["archived_rows"] == 1
-    assert cr.columns["street_resolver_source"]["archived_rows"] == 1
 
 
 def test_index_pages_are_reported_separately_and_never_floor_split(
@@ -572,7 +570,6 @@ def test_the_whole_column_is_measured_alongside_the_archived_subset(
         "delisted_before_floor": 1, "delisted_date_unknown": 1,
     }
     assert bazos.columns["street_present"]["whole_column"] == 4
-    assert bazos.columns["street_resolver_source"]["whole_column"] == 1
 
 
 @pytest.mark.parametrize(
@@ -619,7 +616,6 @@ def test_the_un_archived_remainder_is_reported_per_target_column(
     )
     assert rows["listings"] == (7, 3, 4)
     assert rows["street_present"] == (4, 2, 2)
-    assert rows["street_resolver_source"] == (1, 0, 1)
     for whole, archived, remainder in rows.values():
         assert archived + remainder == whole
 

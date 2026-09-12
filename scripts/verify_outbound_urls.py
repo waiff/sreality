@@ -43,7 +43,7 @@ from typing import Any
 import requests
 
 from scraper import db, sreality_url
-from scripts.reconcile_source_url import critical_segments
+from scraper.sreality_url import critical_segments
 from scripts.verify_pipeline import insert_result, load_thresholds
 from toolkit.system_alerts import AlertPolicy, check_states, emit_transition_alerts
 

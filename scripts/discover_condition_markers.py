@@ -11,7 +11,7 @@ Usage (typically via .github/workflows/discover_condition_markers.yml):
 Stratification spreads the sample across:
   * category_main x category_type (six pairs)
   * `condition` text enum (~11 values incl. NULL)
-  * district (locality_district_id)
+  * district (listing_location.okres_kod)
   * within each cell, a price-quartile shuffle so a cell isn't
     dominated by one price band.
 
@@ -160,6 +160,7 @@ def _select_stratified_sample(
 ) -> list[int]:
     """Pick sreality_ids spread across cat × cat_type × condition × district × price-quartile.
 
+    `dist_id` is a banding key only — an unresolved listing bands as -1, never dropped.
     NTILE(4) over price_czk inside (category_main, category_type) gives
     even quartile bands per category pair, so the cell coordinates are
     naturally aligned to "how much one usually pays for that kind of
@@ -170,12 +171,13 @@ def _select_stratified_sample(
         "WITH banded AS ( "
         "  SELECT l.sreality_id, l.category_main, l.category_type, "
         "         l.condition, "
-        "         coalesce(l.locality_district_id, -1) AS dist_id, "
+        "         coalesce(ll.okres_kod, -1) AS dist_id, "
         "         NTILE(4) OVER ( "
         "           PARTITION BY l.category_main, l.category_type "
         "           ORDER BY l.price_czk "
         "         ) AS price_band "
         "  FROM listings l "
+        "  LEFT JOIN listing_location ll ON ll.listing_id = l.id "
         "  WHERE l.is_active = true "
         "    AND l.last_seen_at > now() - interval '60 days' "
         "    AND l.price_czk IS NOT NULL "

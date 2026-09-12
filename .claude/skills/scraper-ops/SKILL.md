@@ -205,9 +205,10 @@ and its workflows/scripts must never be resurrected; nothing auto-merges (merges
 `stored_height`, migration 496) **must go through `db.invalidate_derived_signals`**: the one chokepoint that re-arms these producers by nulling their
 OWN predicates (`phash`, `clip_tagged_at`). It deletes no label/review/CLIP-cache row; DINOv3 vectors go only on `drop_dinov3=True` (hand-dispatched GPU refill).
 
-**No drain geocodes.** W4-b deleted `scraper/location.py` (`CoordResolver` / `CachingGeocoder`)
-and every drain's injection point: a portal's coordinate is now whatever its own page or payload
-publishes, or nothing. `scraper/geocoding.py` survives for `/maps/*` and the on-demand URL parse only.
+**No drain geocodes, and no place columns.** W4-c dropped every location column from `listings`
+and `properties`, so a parser's coordinate/locality/street reading is evidence for the resolver,
+not a write; a listing's place is `listing_location` (join on `listing_id`).
+`scraper/geocoding.py` survives for `/maps/*` and the on-demand URL parse only.
 
 Monitor/alerting workflows watch the rest: `monitor_workflow_failures.yml` ("Monitoring: workflow
 failures", cron `*/30` — records failed / timed-out / startup-failed runs into `workflow_failures`
@@ -298,9 +299,9 @@ they select the same pending listings and the sync scorer doesn't skip in-flight
 The scoring model is `app_settings.llm_condition_model` (Haiku today), so batch+Haiku ≈ 25%
 of the original Sonnet-sync cost. Both scrape workflows still pass `--no-condition-scoring`.
 Scoring is **kraj-scoped and reuse-first** (migration 174):
-the selector targets only listings whose geo-derived `region_id` is in
+the selector targets only listings whose resolved kraj (`listing_location.kraj_kod`) is in
 `app_settings.condition_scoring_enabled_region_ids` (operator-edited via the Settings page
-"Hodnocení stavu — kraje" toggles; empty = paused; `region_id` NULL = parked), and
+"Hodnocení stavu — kraje" toggles; empty = paused; an unresolved listing is parked), and
 `propagate_condition_levels` copies a property's genuine score to its cross-portal siblings
 (`listings.condition_levels_propagated_from` records provenance) before every submit/backfill,
 so a duplicate never re-bills the LLM. `check_llm_health` mirrors the same scope.

@@ -7,7 +7,7 @@ relevant section here before modifying any code an architectural rule touches.
 - Operational how-tos live in the on-demand skills under `.claude/skills/` — `database`,
   `toolkit-api`, `llm-pipelines`, `scraper-ops`.
 - Design-time specs live in `docs/design/` (new-dedup/PROGRAM + CUTOFF, notifications-unified,
-  price-stats-datasets, street-coverage-ruian, realtime-scrapers).
+  price-stats-datasets, realtime-scrapers).
 - Sequencing lives in `ROADMAP.md` + `roadmap/`.
 
 ## Data sources — per-portal narratives
@@ -373,8 +373,8 @@ rules. Identify which one a task belongs to before you start.
 - Connects with the **publishable (`anon`) key only**. Never embed the service-role
   key, the `SUPABASE_DB_URL`, or any other secret in browser-shipped code.
 - Reads exclusively from the `*_public` views and the page-specific RPCs (e.g.
-  `listings_public` / `properties_public`, `browse_stats`, `region_stats`,
-  `health_summary`, `listings_with_city_quality`). All RPCs are `SECURITY INVOKER` and
+  `listings_public` / `properties_public`, `browse_stats_properties`,
+  `health_summary`). All RPCs are `SECURITY INVOKER` and
   rely on anon's existing SELECT grant on the public views — they don't escalate. New
   public-data RPCs follow the same pattern; new private RPCs go through the FastAPI
   service.
@@ -970,7 +970,8 @@ renumber.** Navigate by area:
     `property_merge_events.generation`
     stamps `'legacy'` on every pre-cutoff row so the future engine's merges (`'v2'`) are
     distinguishable. The blocking keys `listings.street_name_key` and `geo_cell_key` (+ their
-    trigger) **stay** — the new Level 0 reuses them.
+    triggers) were dropped by W4-c (mig 508) with the rest of the legacy location store; the
+    rebuilt engine blocks on `listing_location.obec_kod` instead (Path C).
     **Standing rule: the removed code, its comments and its design docs are never consulted
     again for any purpose.** They survive in git history and on branch
     `backup/pre-new-dedup-2026-08` for forensic recovery only. The operator owns all
@@ -1731,11 +1732,11 @@ renumber.** Navigate by area:
     answer row carries its grade (`granularity`, `match_confidence`, `uncertainty_radius_m`, all
     NOT NULL), the registry codes it resolved to, and one `disputed` word when the row disagrees
     with itself. A consumer that reads the answer table inherits all of that; one that
-    reads `listings.geom` inherits none of it, and a 75 m dedup circle around a town-centroid pin
-    is exactly the false-merge class the axes exist to prevent. The cutover (W3) is per feature,
+    read the dropped `listings.geom` inherited none of it, and a 75 m dedup circle around a
+    town-centroid pin is exactly the false-merge class the axes exist to prevent. The cutover (W3) is per feature,
     in ascending blast-radius order (dashboards → dedup → filters and stats → map → estimation
-    last), each preceded by the operator's review of the clustered disagreements; the legacy
-    columns stay populated and read-only until W4 prunes them in a forward migration. **There is
+    last), each preceded by the operator's review of the clustered disagreements; W4-c
+    (migration 508) then dropped the legacy columns in a forward migration. **There is
     no flag**: W2-b deleted `location_data/serving_flags.py`, whose per-feature `app_settings`
     keys were never seeded and which no consumer ever read — a per-feature switch that only
     ever documented an intent is a rail that looks enforced and is not, and flipping a reader
@@ -1953,9 +1954,9 @@ shared contact plus a name match is the entire case for those merges.
 ## Location data — the greenfield location SSOT
 
 W1 (migrations 380–389, PRs #1008–#1013 + fixes) shipped a **parallel** truth model for where a
-listing is — not a change to the existing one. It is **shadow-only**: `listings.geom`, the geo-derived
-admin columns and `scraper/street.py` still back Browse, the map, the watchdog and dedup, and **no
-consumer flips before W6**. The authoritative plan is operator-held outside this repo —
+listing is — not a change to the existing one. It is no longer parallel: W3 flipped every
+consumer onto it and W4-c (migration 508) dropped the legacy store, so `listing_location` is now
+the ONLY place a listing's location is stored. The authoritative plan is operator-held outside this repo —
 `~/location-data-architecture-2026-08-10/design/final/MASTER.md`, `00-shared-contracts.md` the
 tie-breaker (the `00 §…` / `03 §…` citations in the code are that corpus); shipped state and
 sequencing live in `roadmap/location-data.md`.
@@ -2218,6 +2219,66 @@ their keys, the Timeline just has no row for them). 507 is **applied BEFORE the 
 changes where a value comes from, so today's bundle is unaffected); what it deliberately leaves is
 W4-b's Mapy purge and W4-c's drops — including the `DROP VIEW` + `CREATE VIEW` that finally takes
 the legacy place text off `listings_public` and `listing_feed_public`.
+
+**W4-c: the legacy location columns, caches and mirrors are DROPPED** (migration 508, destructive —
+operator word + `pg_dump` of `listings`, `properties` and the seven tables below, applied in the
+05:20–05:30 UTC window, and the ONE migration in this program applied AFTER the deploy rather than
+before: today's bundle still writes these columns, so the code has to stop first). Gone from
+`listings`, all 24 in one `ALTER` (one ACCESS EXCLUSIVE acquisition on the hottest table; the drop
+is catalog-only, so the risk is queueing, not work): `geom`, the four admin codes
+(`obec_id`/`okres_id`/`region_id`/`ku_id`), the three admin names (`obec`/`okres`/`region`), the
+portal place text (`locality`/`district`/`street`/`house_number`/`zip`), the five sreality portal
+ids (`street_id` + the four `locality_*_id`), and the derived/lifecycle five (`street_name_key`,
+`street_source`, `geo_cell_key`, `coord_street_attempt_version`, `geocode_attempted_at`). Gone from
+`properties`: the whole geography set (`geom`, `lat`, `lng`, the three names, the five codes, the
+two sreality ids, `street`, `locality`, `district`) — a property has no place of its own any more,
+only its representative listing's through `repr_listing_ref_id`. Gone as tables: `geocode_cache`,
+`mapy_affected` ×3 + `mapy_inventory_runs`, and the pre-RÚIAN `address_points` / `_revisions`
+mirror (1.5M rows; `ruian_address_points` replaces it, and the coord→nearest-street-point
+capability it alone had is an accepted loss — nothing scheduled it). Gone as machinery: the three
+write-side triggers and their four functions — `listings_set_admin_geo` was the entire
+geo-derivation epoch in one body — the two CHECKs, 25 indexes, and three unreferenced RPCs whose
+last live reader was a column this file drops (`region_stats`, `region_active_by_day`, and
+migration 083's `browse_stats`, which 425 had already commented "intended end state is DROP, held
+back only for want of operator sign-off").
+
+Ten views and matviews had to be DROPped and re-created to let the columns go, because
+`create or replace view` can only append. Four lose columns (`browse_projection`,
+`listing_feed_public`, `listings_public`, `properties_public` — `district` finally leaves the last
+of these, freed by dropping the two region functions); four are re-created verbatim because they
+merely DEPEND on one that did (`pipeline_board_public`, `broker_geo_options`, and the three health
+matviews of migration 354, which read only `source`/`sreality_id`/`category_*` off
+`listings_public` but hold an object-level dependency on it); and two are re-sourced onto
+`listing_location` because they were the last DB-side readers of the columns —
+`broker_region_type_stats`, the one matview that blocked the drop outright, and
+`broker_leaderboard()`'s price/subtype branch. `recompute_city_proximity()` is re-sourced the same
+way (it keeps `home_obec_pop` / `near_*_{5,15}km`, which Browse filters read) and
+`data_quality_by_source` swaps seven legacy field probes for three read off `listing_location` —
+keeping the NAMES `geom`/`locality`, because `scraper_health_checks_mv` alarms on exactly those
+five field-population rates.
+
+**What stays, and why.** `admin_boundaries` — price stats, the rent map and city proximity still
+read its geometry and population; its LOCATION role died with trigger 289, and re-keying those
+three onto `ruian_admin_unit_geometries` is a later wave. `curated_cities.admin_boundary_id` — an
+FK to that table, and already the RÚIAN obec code. `portal_raw_pages` — preservation substrate,
+not a location path (`tests/test_portal_raw_pages_guard.py` fails CI on any DROP naming it).
+`location_granularity_rank`. `properties.home_obec_pop` + the eight `near_*` columns. And
+`raw_json`, untouched: it is the content-hash substrate (rule 2) and the resolver's evidence, so
+the legacy keys live there as history forever. One consequence worth stating plainly: for the six
+portals whose `CoordinateRule` substrate is `geom_column` (bazos, idnes, ceskereality, realitymix,
+maxima, remax) the live coordinate existed ONLY in `listings.geom` — after 508 the resolver's
+point in `listing_location` is the value, the archived page body is the re-derivation path, and
+the `pg_dump` is the backstop.
+
+On the code side the same cut runs through the write path: `scraper/db.py`'s `LISTING_COLUMNS`
+loses twelve entries and both ingest upserts lose their `geom` / `street_source` arms, the
+singleton-property insert and the inline rollup lose every location column (as do
+`toolkit/property_identity.py`'s split insert and `scripts/recompute_property_stats.py`'s attach
+insert), and `scraper/parser.py` stops emitting the sreality place keys. `ScrapedListing` KEEPS
+`locality`, `district`, `street`, `house_number` and `zip` — `locality` and `district` are
+content-hash inputs, so removing them would churn a snapshot for every listing in the corpus
+(rule 2), and all five are the parser's reading of the page, which is the CLAIM the resolver
+arbitrates. They are simply no longer columns.
 
 **ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
 `35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a

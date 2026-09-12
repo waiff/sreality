@@ -258,12 +258,16 @@ def _fetch_listing(
     from toolkit import _listing_id_clause
 
     id_clause, id_val = _listing_id_clause(sreality_id, listing_id)
+    # W4-c: the "locality"/"district" KEYS stay (cached prompt shape); only their
+    # source moved -- `listings.locality` / `.district` are dropped.
     sql = (
-        "SELECT category_main, category_type, price_czk, price_unit, "
-        "area_m2, disposition, locality, district, floor, "
-        "has_balcony, has_parking, has_lift, "
-        "building_type, condition, energy_rating "
-        f"FROM listings WHERE {id_clause}"
+        "SELECT l.category_main, l.category_type, l.price_czk, l.price_unit, "
+        "l.area_m2, l.disposition, ll.obec_name, ll.okres_name, l.floor, "
+        "l.has_balcony, l.has_parking, l.has_lift, "
+        "l.building_type, l.condition, l.energy_rating "
+        "FROM listings l "
+        "LEFT JOIN listing_location ll ON ll.listing_id = l.id "
+        f"WHERE {id_clause}"
     )
     with conn.cursor() as cur:
         cur.execute(sql, (id_val,))

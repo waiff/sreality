@@ -489,6 +489,41 @@ component is slimmed twice — each wave rewrites one component and slims its st
     overall; +84 / −1,854 outside tests and docs.** The golden claim sets were re-blessed and the
     diff is deletions only — no fixture's claims changed, which is the measurement that the veto
     was never what licensed a pin. Suites: pytest 7265 passed / 219 skipped.
+  - **W4-c BUILT, NOT APPLIED** (migration 508, destructive — needs the operator's word +
+    a `pg_dump` of `listings`, `properties`, `geocode_cache`, `mapy_affected` ×3,
+    `mapy_inventory_runs`, `address_points` ×2; apply 05:20–05:30 UTC, and AFTER the deploy,
+    not before — today's bundle still writes these columns). DROPPED: all **24** legacy
+    location columns on `listings` in ONE `ALTER` (one ACCESS EXCLUSIVE acquisition on the
+    hottest table; the drop is catalog-only) and the **15** on `properties`; the seven tables
+    above; the three write-side triggers + their four functions (`listings_set_admin_geo` was
+    the whole geo-derivation epoch), the two CHECKs, 25 indexes; and three unreferenced RPCs
+    whose last live reader was a column this file drops — `region_stats()`,
+    `region_active_by_day()` and migration 083's `browse_stats()` (425's own header: "the
+    intended end state is DROP, held back only for want of operator sign-off"). Ten views /
+    matviews DROP+CREATE because `create or replace` can only append: four lose columns
+    (`browse_projection`, `listing_feed_public`, `listings_public`, `properties_public` —
+    `district` freed at last), four are verbatim re-creates of dependents
+    (`pipeline_board_public`, `broker_geo_options`, and the three health matviews of
+    migration 354, which read only `source`/`sreality_id`/`category_*` off `listings_public`
+    but hold an object dependency on it), and two are re-sourced onto `listing_location`
+    because they were the last DB-side readers — `broker_region_type_stats` (the one matview
+    that blocked the drop outright) and `broker_leaderboard()`'s price/subtype branch.
+    `recompute_city_proximity()` re-sourced the same way (it keeps `home_obec_pop` /
+    `near_*`, which Browse filters read); `data_quality_by_source` swaps seven legacy field
+    probes for three off `listing_location`, keeping the NAMES `geom`/`locality` because
+    `scraper_health_checks_mv` alarms on exactly those five rates. Code: `LISTING_COLUMNS`
+    −12, both ingest upserts lose their `geom`/`street_source` arms, the singleton insert +
+    inline rollup + the split insert + the attach insert lose every location column,
+    `scraper/parser.py` stops emitting the sreality place keys and `scraper/street.py` loses
+    `street_name_key`. Eight scripts + eight workflows deleted (the five street backfills,
+    `ingest_address_points`, `apply_r2_maintenance_indexes`, `reconcile_source_url` — the
+    stored URL is a fact now, never reconstructed). `ScrapedListing` KEEPS
+    locality/district/street/house_number/zip/lat/lon: two are content-hash inputs (removing
+    them churns a snapshot for every listing, rule 2) and all seven are the parser's reading
+    of the page — the CLAIM the resolver arbitrates, no longer a column. **+259 / −2,835
+    runtime code, +238 / −889 tests, +117 / −1,427 docs/skills/workflows, +1,825 the
+    migration** (the views/functions exception; 105 files, 2,439 / −5,151 overall). Suites:
+    pytest 7165 passed / 219 skipped, vitest 123 files / 1497 tests, tsc clean.
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM

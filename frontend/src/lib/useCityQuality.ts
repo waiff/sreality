@@ -10,20 +10,19 @@
  *
  * All 206 curated cities have an `admin_boundary_id`, so the second arm is
  * dead code today and the predicate reduces to "is the point inside this
- * city's obec polygon". `properties.obec_id` is precisely the geom-derived
- * containing obec (a BEFORE-trigger point-in-polygon, migration 289), so
- * `obec_id = admin_boundary_id` is an integer equi-join that reproduces the
- * live predicate — no PostGIS, no RPC, no migration.
+ * city's obec polygon". `properties_public.obec_id` is the resolver's own obec
+ * code (`listing_location.obec_kod`, migration 507; the geom-derived trigger it
+ * replaced went in W4-c), so `obec_id = admin_boundary_id` is an integer
+ * equi-join that reproduces the live predicate — no PostGIS, no RPC, no migration.
  *
- * IT IS A VERY CLOSE APPROXIMATION, NOT AN IDENTITY. Two documented gaps:
- *   - migration 289 falls back to the NEAREST obec within 250 m when
- *     ST_Covers misses, so `obec_id` is a slight SUPERSET of containment
- *     (~2-4k rows market-wide). For a badge this is arguably the better
- *     behaviour — a property 100 m outside the line still belongs to the town
- *     — but it means the strip can appear on a card the city-quality FILTER
- *     would not match.
- *   - `obec_id` is a cached PIP refreshed only when a listing's geom changes,
- *     so it can reflect an older boundary vintage after a RÚIAN re-ingest.
+ * IT IS A VERY CLOSE APPROXIMATION, NOT AN IDENTITY. The resolver binds a
+ * listing to an obec by more than containment (a named town, a PSČ, an address
+ * point), so `obec_id` can be a slight SUPERSET of "inside this polygon". For a
+ * badge that is arguably the better behaviour — a property 100 m outside the
+ * line still belongs to the town — but it means the strip can appear on a card
+ * the city-quality FILTER would not match. The code is also resolved against a
+ * registry VERSION, so it can reflect an older vintage after a RÚIAN re-ingest
+ * until the row is re-resolved.
  *
  * COVERAGE. 206 curated cities out of ~6,250 Czech obce; about half of all
  * properties resolve to one. A card outside every curated city renders NO

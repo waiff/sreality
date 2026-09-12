@@ -154,22 +154,25 @@ def main() -> int:
 def _pick_target(conn: Any, sreality_id: int | None) -> dict[str, Any] | None:
     """Pick a real recent Prague 2+kk apartment rental (or the explicit id)."""
     sql = (
-        "SELECT sreality_id, locality, disposition, area_m2, price_czk, "
-        "ROUND(ST_Y(geom::geometry)::numeric, 5) AS lat, "
-        "ROUND(ST_X(geom::geometry)::numeric, 5) AS lng "
-        "FROM listings WHERE category_main = 'byt' AND category_type = 'pronajem' "
-        "AND is_active = true AND last_seen_at > now() - interval '3 days' "
-        "AND price_czk IS NOT NULL AND geom IS NOT NULL "
+        "SELECT l.sreality_id, ll.obec_name AS locality, l.disposition, l.area_m2, "
+        "l.price_czk, "
+        "ROUND(ST_Y(ll.geom)::numeric, 5) AS lat, "
+        "ROUND(ST_X(ll.geom)::numeric, 5) AS lng "
+        "FROM listings l JOIN listing_location ll ON ll.listing_id = l.id "
+        "WHERE l.category_main = 'byt' AND l.category_type = 'pronajem' "
+        "AND l.is_active = true AND l.last_seen_at > now() - interval '3 days' "
+        "AND l.price_czk IS NOT NULL AND ll.geom IS NOT NULL "
     )
     if sreality_id is not None:
-        sql += "AND sreality_id = %s LIMIT 1"
+        sql += "AND l.sreality_id = %s LIMIT 1"
         params = (sreality_id,)
     else:
+        # ll.geom is geometry; the metre radius needs the geography cast (migration 507).
         sql += (
-            "AND disposition = '2+kk' AND area_m2 BETWEEN 55 AND 70 "
-            "AND ST_DWithin(geom, "
+            "AND l.disposition = '2+kk' AND l.area_m2 BETWEEN 55 AND 70 "
+            "AND ST_DWithin(ll.geom::geography, "
             "ST_SetSRID(ST_MakePoint(14.43, 50.08), 4326)::geography, 1500) "
-            "ORDER BY last_seen_at DESC LIMIT 1"
+            "ORDER BY l.last_seen_at DESC LIMIT 1"
         )
         params = ()
     with conn.cursor() as cur:

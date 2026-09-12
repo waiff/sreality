@@ -18,7 +18,6 @@ from unicodedata import combining, normalize
 from scraper import sreality_url
 from scraper.area import derive_headline_area
 from scraper.published import iso_date
-from scraper.street import street_from_locality
 
 CATEGORY_MAIN: dict[int, str] = {
     1: "byt",
@@ -87,93 +86,6 @@ SUBTYPE: dict[int, str] = {
     49: "virtualni_kancelar",   # Virtuální kancelář
 }
 
-# Canonical district labels keyed by sreality's locality_district_id.
-# IDs 1..77 are the 76 Czech okresy outside Prague (47 is the city of
-# Prague). 5001..5022 are Praha 1..22 — all collapsed to a single "Praha"
-# label per operator preference; the locality_district_id column still
-# carries the finer value. Unknown IDs return None so the locality.district
-# text fallback still labels them.
-DISTRICTS: dict[int, str] = {
-    1:  "okres České Budějovice",
-    2:  "okres Český Krumlov",
-    3:  "okres Jindřichův Hradec",
-    4:  "okres Písek",
-    5:  "okres Prachatice",
-    6:  "okres Strakonice",
-    7:  "okres Tábor",
-    8:  "okres Domažlice",
-    9:  "okres Cheb",
-    10: "okres Karlovy Vary",
-    11: "okres Klatovy",
-    12: "okres Plzeň-město",
-    13: "okres Plzeň-jih",
-    14: "okres Plzeň-sever",
-    15: "okres Rokycany",
-    16: "okres Sokolov",
-    17: "okres Tachov",
-    18: "okres Česká Lípa",
-    19: "okres Děčín",
-    20: "okres Chomutov",
-    21: "okres Jablonec nad Nisou",
-    22: "okres Liberec",
-    23: "okres Litoměřice",
-    24: "okres Louny",
-    25: "okres Most",
-    26: "okres Teplice",
-    27: "okres Ústí nad Labem",
-    28: "okres Hradec Králové",
-    29: "okres Chrudim",
-    30: "okres Jičín",
-    31: "okres Náchod",
-    32: "okres Pardubice",
-    33: "okres Rychnov nad Kněžnou",
-    34: "okres Semily",
-    35: "okres Svitavy",
-    36: "okres Trutnov",
-    37: "okres Ústí nad Orlicí",
-    38: "okres Zlín",
-    39: "okres Kroměříž",
-    40: "okres Prostějov",
-    41: "okres Uherské Hradiště",
-    42: "okres Olomouc",
-    43: "okres Přerov",
-    44: "okres Šumperk",
-    45: "okres Vsetín",
-    46: "okres Jeseník",
-    47: "Praha",
-    48: "okres Benešov",
-    49: "okres Beroun",
-    50: "okres Kladno",
-    51: "okres Kolín",
-    52: "okres Kutná Hora",
-    53: "okres Mladá Boleslav",
-    54: "okres Mělník",
-    55: "okres Nymburk",
-    56: "okres Praha-východ",
-    57: "okres Praha-západ",
-    58: "okres Příbram",
-    59: "okres Rakovník",
-    60: "okres Bruntál",
-    61: "okres Frýdek-Místek",
-    62: "okres Karviná",
-    63: "okres Nový Jičín",
-    64: "okres Opava",
-    65: "okres Ostrava-město",
-    66: "okres Havlíčkův Brod",
-    67: "okres Jihlava",
-    68: "okres Pelhřimov",
-    69: "okres Třebíč",
-    70: "okres Žďár nad Sázavou",
-    71: "okres Blansko",
-    72: "okres Brno-město",
-    73: "okres Brno-venkov",
-    74: "okres Břeclav",
-    75: "okres Hodonín",
-    76: "okres Vyškov",
-    77: "okres Znojmo",
-    **{i: "Praha" for i in range(5001, 5023)},
-}
-
 _DISPOSITION_RE = re.compile(r"\b(\d\+(?:kk|\d))\b", re.IGNORECASE)
 _ENERGY_CLASS_RE = re.compile(r"\s*([A-G])\b")
 
@@ -204,10 +116,6 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
     if sreality_id is None:
         raise ValueError("could not determine sreality_id from response")
 
-    loc = raw.get("locality") or {}
-    lat = _coord(loc.get("gps_lat"))
-    lon = _coord(loc.get("gps_lon"))
-
     category_main = CATEGORY_MAIN.get(_cb_value(raw.get("category_main_cb")))
     # sreality's only interior measure is `usable_area`; the headline value is
     # unchanged, the shared resolver just stamps which physical area it is.
@@ -225,15 +133,6 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "area_m2": area_m2,
         "area_basis": area_basis,
         "disposition": _disposition(raw),
-        "locality": _locality_value(loc),
-        "district": _district(loc),
-        "locality_district_id": _id_or_none(loc.get("district_id")),
-        "locality_region_id": _id_or_none(loc.get("region_id")),
-        "locality_municipality_id": _id_or_none(loc.get("municipality_id")),
-        "locality_quarter_id": _id_or_none(loc.get("quarter_id")),
-        "locality_ward_id": _id_or_none(loc.get("ward_id")),
-        "lon": lon,
-        "lat": lat,
         "floor": _int_or_none(raw.get("floor_number")),
         "total_floors": _int_or_none(raw.get("floors")),
         "has_balcony": _has_balcony(raw),
@@ -254,16 +153,6 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "parking_lots": _int_or_none(raw.get("parking")),
         "ownership": OWNERSHIP.get(_cb_value(raw.get("ownership"))),
         "description": _description(raw),
-        # Prefer sreality's structured street; on index-shape rows that key is
-        # empty but the free-text `value` ("Street, City - Quarter") carries it,
-        # so fall back to the shared first-segment extractor (foreign/okres/
-        # quarter guarded). Structured always wins — no estimation.
-        "street": _loc_str(loc, "street") or _street_from_value(loc, lat, lon),
-        "house_number": _loc_str(loc, "housenumber") or _loc_str(loc, "streetnumber"),
-        # sreality sends -1 for "unknown" on numeric locality fields; _loc_str
-        # stringifies it, so 31k rows stored a literal '-1' zip (W0 item 0b).
-        "zip": None if (_z := _loc_str(loc, "zip")) == "-1" else _z,
-        "street_id": _id_or_none(loc.get("street_id")),
         # sreality exposes no publish date — `edited` (day-granular last-edit,
         # present on ~40% of rows) is the weak fallback bound for publish-to-
         # ingest SLO math, not first publication.
@@ -274,6 +163,20 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         # part is missing, and preserve-if-null at the write so a None never erases.
         "source_url": sreality_url.from_payload(raw)[0],
     }
+
+
+def locality_coords(raw: dict[str, Any]) -> tuple[float | None, float | None]:
+    """The payload's own pin, as (lat, lon).
+
+    NOT part of the listings row: W4-c dropped `listings.geom`, so a coordinate
+    reaches the database only as a claim the resolver arbitrates. This is the
+    on-demand URL-parse path (scraper.url_parser), where the estimation spec
+    needs the subject's point in the same request that fetched it.
+    """
+    loc = raw.get("locality") or {}
+    def _f(value: Any) -> float | None:
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+    return _f(loc.get("gps_lat")), _f(loc.get("gps_lon"))
 
 
 def parse_images(raw: dict[str, Any]) -> list[dict[str, Any]]:
@@ -297,10 +200,6 @@ def _cb_value(obj: Any) -> int | None:
         if isinstance(v, int) and not isinstance(v, bool) and v != 0:
             return v
     return None
-
-
-def _coord(value: Any) -> float | None:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
 def _price_czk(raw: dict[str, Any]) -> int | None:
@@ -335,48 +234,6 @@ def _disposition(raw: dict[str, Any]) -> str | None:
             if match:
                 return match.group(1).lower()
     return None
-
-
-def _locality_value(loc: dict[str, Any]) -> str | None:
-    parts = [p for p in (loc.get("city"), loc.get("citypart")) if isinstance(p, str) and p]
-    if not parts:
-        return None
-    if len(parts) == 2 and parts[0] == parts[1]:
-        parts = parts[:1]
-    return " - ".join(parts)
-
-
-def _loc_str(loc: dict[str, Any], key: str) -> str | None:
-    """A structured-address string field from the rich `locality` shape.
-
-    Only the detail response carries street / housenumber / zip / street_id; the
-    index-only `{name, value, accuracy}` shape lacks them, so this returns None
-    there. bazos and other crawler sources carry none of these either.
-    """
-    val = loc.get(key)
-    if isinstance(val, (int, float)) and not isinstance(val, bool):
-        val = str(val)
-    return val.strip() or None if isinstance(val, str) else None
-
-
-def _street_from_value(loc: dict[str, Any], lat: float | None, lon: float | None) -> str | None:
-    """Recover the street from the index-shape free-text `value` ("Street, City
-    - Quarter") when the structured `street` key is empty — via the same shared
-    first-segment extractor idnes/remax use."""
-    value = loc.get("value")
-    if not isinstance(value, str):
-        return None
-    return street_from_locality(value, position="first", lat=lat, lon=lon)
-
-
-def _district(loc: dict[str, Any]) -> str | None:
-    did = _int_or_none(loc.get("district_id"))
-    if did is not None:
-        label = DISTRICTS.get(did)
-        if label:
-            return label
-    text = loc.get("district")
-    return text if isinstance(text, str) and text else None
 
 
 def _description(raw: dict[str, Any]) -> str | None:
@@ -464,12 +321,6 @@ def _int_or_none(value: Any) -> int | None:
     if isinstance(value, str) and value.lstrip("-").isdigit():
         return int(value)
     return None
-
-
-def _id_or_none(value: Any) -> int | None:
-    """Like _int_or_none but maps sreality's -1 sentinel ("unknown") to None."""
-    out = _int_or_none(value)
-    return None if out is None or out < 0 else out
 
 
 def _numeric_or_none(value: Any) -> float | None:

@@ -79,16 +79,14 @@ def entry(entry_id: str) -> contracts.ContractEntry:
     return next(e for e in CONTRACT.entries if e.entry_id == entry_id)
 
 
-def claims(raw: dict[str, Any], lat: float | None = None, lon: float | None = None):
-    row = fx.listing("sreality", raw, native="probe", lat=lat, lon=lon)
+def claims(raw: dict[str, Any]):
+    row = fx.listing("sreality", raw, native="probe")
     result = extract_listing(row, fx.entries_for("sreality"))
     return {c.extractor_id: c for c in result.claims}, result
 
 
-POST_CUTOVER, POST_CUTOVER_RESULT = claims(
-    fx.SREALITY_POST_CUTOVER, lat=50.0784977, lon=14.4501973)
-W2_FIXTURE, _ = claims(json.loads(_W2_BODY.read_text(encoding="utf-8")),
-                       lat=50.0776, lon=14.4394)
+POST_CUTOVER, POST_CUTOVER_RESULT = claims(fx.SREALITY_POST_CUTOVER)
+W2_FIXTURE, _ = claims(json.loads(_W2_BODY.read_text(encoding="utf-8")))
 
 
 # ------------------------------------------------------------------ contract shape
@@ -248,7 +246,7 @@ def test_the_town_extracts_from_the_second_committed_body_too() -> None:
 def test_the_town_survives_a_row_that_has_nothing_else() -> None:
     """The zip:-1 sentinel row (regression 3067969612): street/citypart/region absent and
     the sentinel dropped — and the town still lands, which is the invariant."""
-    by_id, _ = claims(fx.SREALITY_ZIP_SENTINEL, lat=49.3955, lon=13.2951)
+    by_id, _ = claims(fx.SREALITY_ZIP_SENTINEL)
     assert by_id["sr.det.name_city"].value_text == "Klatovy"
     assert "sr.det.zip" not in by_id
 
@@ -260,7 +258,7 @@ def test_a_numbered_obvod_in_the_city_field_is_folded_to_the_city() -> None:
     publishes the obvod where the town belongs."""
     obvod = copy.deepcopy(fx.SREALITY_POST_CUTOVER)
     obvod["locality"]["city"] = "Praha 8"
-    by_id, _ = claims(obvod, lat=50.0784977, lon=14.4501973)
+    by_id, _ = claims(obvod)
     assert by_id["sr.det.name_city"].value_text == "Praha"
     assert POST_CUTOVER["sr.det.name_city"].value_text == "Praha"
 
@@ -290,7 +288,7 @@ def test_a_legacy_shape_row_claims_nothing_and_says_so() -> None:
     the cohort stays visible in the run log rather than reading as 'portal published
     nothing'."""
     assert sreality_payload_shape(fx.SREALITY_LEGACY) == "legacy"
-    by_id, result = claims(fx.SREALITY_LEGACY, lat=49.3955, lon=13.2951)
+    by_id, result = claims(fx.SREALITY_LEGACY)
     assert by_id == {}
     assert dict(result.refusals) == {"sreality_payload_shape:legacy": 1}
 
@@ -299,7 +297,7 @@ def test_a_truncated_payload_claims_nothing_and_says_so() -> None:
     """1588965452: an 80 KB geometry blob truncated raw_json and destroyed the locality
     object. `absent`, not `legacy` — a different cohort with a different recovery."""
     assert sreality_payload_shape(fx.SREALITY_TRUNCATED) == "absent"
-    by_id, result = claims(fx.SREALITY_TRUNCATED, lat=50.0, lon=14.0)
+    by_id, result = claims(fx.SREALITY_TRUNCATED)
     assert by_id == {}
     assert dict(result.refusals) == {"sreality_payload_shape:absent": 1}
 

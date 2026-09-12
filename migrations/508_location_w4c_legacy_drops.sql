@@ -408,6 +408,7 @@ grant select on listings_public to authenticated;
 --     listings_public.
 set statement_timeout = '900s';
 
+-- ci-allow-ungated: image_storage_overview_mv admin-only ops matview; kept dark to browser roles by the revoke below, a matview cannot embed is_platform_admin().
 create materialized view image_storage_overview_mv as
   select
     l.category_main,
@@ -425,6 +426,7 @@ create unique index if not exists image_storage_overview_mv_cat
 
 revoke all on image_storage_overview_mv from anon, authenticated;
 
+-- ci-allow-ungated: scraper_health_checks_mv admin-only ops matview; kept dark to browser roles by the revoke below, a matview cannot embed is_platform_admin().
 create materialized view scraper_health_checks_mv as
 with
 sources as (
@@ -719,6 +721,7 @@ create unique index if not exists scraper_health_checks_mv_source_idx
 
 revoke all on scraper_health_checks_mv from anon, authenticated;
 
+-- ci-allow-ungated: health_summary_mv admin-only ops matview; kept dark to browser roles by the revoke below, a matview cannot embed is_platform_admin().
 create materialized view health_summary_mv as
 with
 category_pairs as (

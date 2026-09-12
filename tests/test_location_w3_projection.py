@@ -32,6 +32,7 @@ W3 = "503_location_w3_serving_views.sql"
 W3_S3 = "504_location_w3_one_code_predicate.sql"
 W3_S4 = "506_location_w3_s4_deletions.sql"
 W4A = "507_location_w4a_readers.sql"
+W4C = "508_location_w4c_legacy_drops.sql"
 
 # What S4 removes from each view it re-creates. `obec` SURVIVES on the two views
 # the pipeline board reads: the board's town sort orders by the TOWN, which is
@@ -233,11 +234,12 @@ def test_s4_keeps_the_town_on_the_board_lane() -> None:
 
 
 def test_s4_keeps_district_where_the_region_functions_read_it() -> None:
-    """The other survivor. `region_stats()` and `region_active_by_day()` filter
-    `district = any(districts_filter)` -- a legacy NAME array -- off
-    `properties_public`. Neither has a repo caller, but CI's schema-replay lane
-    compiles both against a real database, and rule 25 deletes a column in the PR
-    that removes its last READER. It is spared on that view ONLY."""
+    """The other survivor -- until W4-c. `region_stats()` and
+    `region_active_by_day()` filter `district = any(districts_filter)` -- a legacy
+    NAME array -- off `properties_public`. Neither has a repo caller, but CI's
+    schema-replay lane compiles both against a real database, and rule 25 deletes
+    a column in the PR that removes its last READER: migration 508 drops the two
+    functions, and `district` goes with them (see test_w4c_drops_only)."""
     assert "district" in _columns(_sql(W3_S4), "properties_public")
     for view in ("browse_projection", "pipeline_board_public"):
         assert "district" not in _columns(_sql(W3_S4), view), (
@@ -438,3 +440,101 @@ def test_w4a_builds_the_geography_index_before_the_readers_flip() -> None:
     assert "create index concurrently if not exists listing_location_geog_gist" in sql
     assert "using gist ((geom::geography))" in sql
     assert "begin;" not in sql and "commit;" not in sql
+
+
+# ------------------------------------------------------------------ W4-c drops
+
+
+# What W4-c removes from each view it re-creates. Same three invariants as the S4
+# block above (exact set, nothing added, survivors keep their relative order),
+# for the same reason: `sync_browse_list` inserts into `browse_list`
+# POSITIONALLY, so a silent reorder writes every value into the wrong column.
+_W4C_DROPS: dict[str, set[str]] = {
+    "browse_projection": {"locality_district_id", "locality_region_id"},
+    "listing_feed_public": {
+        "locality", "district", "obec", "okres", "region", "street", "house_number",
+    },
+    "listings_public": {
+        "locality", "district", "locality_district_id", "locality_region_id",
+        "street", "house_number", "obec", "okres", "region",
+    },
+    "properties_public": {"district", "locality_district_id", "locality_region_id"},
+    "broker_listings_public": {"locality", "district"},
+    # Re-created VERBATIM: it only DEPENDS on properties_public, which had to be
+    # dropped. Declared here so a future edit that quietly narrows it fails.
+    "pipeline_board_public": set(),
+}
+
+
+@pytest.mark.parametrize("view", sorted(_W4C_DROPS))
+def test_w4c_drops_only(view: str) -> None:
+    before = _previous_definition(view, below=W4C)
+    old = _columns(_sql(before), view)
+    new = _columns(_sql(W4C), view)
+    dropped = _W4C_DROPS[view]
+
+    assert set(old) - set(new) == dropped, (
+        f"{view}: migration {W4C} removes {sorted(set(old) - set(new))} but W4-c "
+        f"declares {sorted(dropped)}."
+    )
+    assert set(new) - set(old) == set(), (
+        f"{view}: {W4C} ADDS {sorted(set(new) - set(old))}. W4-c only deletes (rule 25)."
+    )
+    assert new == [c for c in old if c not in dropped], (
+        f"{view}: the surviving columns were REORDERED. Expected "
+        f"{[c for c in old if c not in dropped]}, got {new}."
+    )
+
+
+def test_w4c_leaves_no_legacy_place_column_on_any_serving_view() -> None:
+    """The point of the wave: after 508 not one serving view names a dropped
+    base-table column, so the ALTERs below it can succeed."""
+    gone = {
+        "geom", "obec_id", "okres_id", "region_id", "ku_id", "locality", "district",
+        "obec", "okres", "region", "street", "house_number", "zip", "street_id",
+        "locality_municipality_id", "locality_quarter_id", "locality_ward_id",
+        "locality_district_id", "locality_region_id", "street_name_key",
+        "street_source", "geo_cell_key", "coord_street_attempt_version",
+        "geocode_attempted_at", "place_search_text",
+    }
+    sql = _sql(W4C)
+    for view in ("browse_projection", "listing_feed_public", "listings_public",
+                 "broker_listings_public"):
+        body = " ".join(_view_select_list(sql, view).split()).lower()
+        for col in sorted(gone):
+            # A bare "l.<col>" would also match the "ll.<col>" this wave moved TO.
+            assert not re.search(r"(?<![a-z_])l\." + col + r"\b", body), (
+                f"{view} still reads listings.{col}"
+            )
+            assert f"listings.{col}" not in body, f"{view} still reads listings.{col}"
+    body = " ".join(_view_select_list(sql, "properties_public").split()).lower()
+    for col in sorted(gone):
+        assert not re.search(r"(?<![a-z_])p\." + col + r"\b", body), (
+            f"properties_public still reads properties.{col}"
+        )
+
+
+def test_w4c_drops_the_two_region_functions_that_held_district() -> None:
+    """A column and its last reader leave together (rule 25). Both are dropped by
+    NAME through pg_proc rather than by a transcribed signature -- region_stats
+    carries 40+ parameters across two overloads, and hand-typing a signature is
+    how a drop silently targets nothing (migration 428's own header)."""
+    sql = _sql(W4C).lower()
+    assert "p.proname in ('region_stats', 'region_active_by_day', 'browse_stats')" in sql
+    assert "district" not in _columns(_sql(W4C), "properties_public")
+
+
+def test_w4c_carries_no_transaction_and_one_alter_per_hot_table() -> None:
+    """Statement autocommit (the apply workflow retries lock_timeout errors from
+    statement 1, so a partial apply must be resumable), `lock_timeout = '5s'`
+    never raised, and exactly ONE `alter table listings` -- 24 DROP COLUMN
+    clauses under a single ACCESS EXCLUSIVE acquisition on the hottest table."""
+    sql = _sql(W4C)
+    low = sql.lower()
+    assert "begin;" not in low and "commit;" not in low
+    assert "set lock_timeout = '5s';" in low
+    assert low.count("alter table listings\n") == 1
+    assert low.count("alter table properties\n") == 1
+    assert sum(1 for line in sql.splitlines()
+               if line.strip().startswith("drop column if exists")
+               ) == 24 + 16  # listings + properties (place_search_text leads, idempotent)

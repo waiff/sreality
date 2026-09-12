@@ -15,16 +15,15 @@ street ("Brno", a foreign "Estepona, Španělsko", a "Town - Quarter" tail, a
 village last-segment) poisons the dedup street-key and Browse worse than a NULL
 does. So every extractor routes through the ONE don't-fabricate guard here
 (`reject_as_town`) rather than re-implementing it five times. `clean_street` is
-the matching ONE cleaner. The stored value stays human-readable (Browse displays
-it); `street_name_key` (below) is the SEPARATE match-time grouping key — the bare,
-diacritics-folded, decoration-stripped form matchers group on. It lives here, the
-single home for all street string logic, and is imported by the write path
-(`scraper.db` stores it on `listings.street_name_key`).
-Four guards hold stored == function:
-golden-case tests pin the normalization, a write-path test asserts every backfill
-stamps the column, the migration-264 presence CHECK fails a keyless street write
-loudly, and the weekly sampled-parity job (scripts/check_street_key_parity.py)
-alerts on any stored key drifting from this function.
+the matching ONE cleaner. This module is the single home for all street string
+logic, shared by the parsers and by the location claims lane
+(`location_data.claims_common`).
+
+W4-c dropped `listings.street` and its derived `street_name_key`, and the
+grouping-key function went with them: a street a listing HAS is now
+`listing_location.street_name`, written by the resolver from the portal's own
+payload. What survives here is the extraction and the don't-fabricate guard,
+which is what produces the claim the resolver arbitrates.
 """
 
 from __future__ import annotations
@@ -143,53 +142,6 @@ def clean_street(raw: str | None) -> str | None:
 # (a trailing dot tolerated) from both ends, so "Třebízského" is never touched.
 # This is the GROUPING set — distinct in purpose from `_STREET_KEYWORDS` (which
 # POSITIVELY identifies a street for morphology); keep them separate.
-_KEY_STREET_WORDS: frozenset[str] = frozenset({
-    "ul", "ulice", "ulici",
-    "nam", "namesti",
-    "tr", "trida", "tride", "tridu", "tridy",
-    "nabr", "nabrezi",
-    "sidliste", "sidlisti",
-})
-# A trailing house-number token: 12, 12a, 123/45, 160/26b. Bounded at 4 digits;
-# "679 61" (PSČ) strips as two successive tokens.
-_KEY_HOUSE_NO_RE = re.compile(r"\d{1,4}[a-z]?(?:/\d{1,4}[a-z]?)?")
-
-
-def street_name_key(street: str | None) -> str | None:
-    """Grouping form of a street NAME: diacritics-stripped lowercase with street
-    words and trailing house-number tokens removed. Portals disagree on
-    decoration (sreality stores the bare canonical name; bazos mines "ul.
-    Koterovská 12"-style strings from free text), so the key must not. Falls back
-    to the undecorated-folded form rather than going empty (a street literally
-    named "Náměstí" keeps a usable key).
-
-    THE single source of the street-group name key: stored on
-    `listings.street_name_key` at write time (scraper.db). EDITING THIS
-    NORMALIZATION requires a full re-key of the stored column — dispatch
-    backfill_street_name_key.yml with all=true — or every not-yet-rewritten row
-    silently carries a stale key (the weekly street_key_parity job will fail
-    until the re-key completes; that failure is the alarm, not an error in the
-    job)."""
-    collapsed = _fold(street)  # NFKD + diacritics-strip + lowercase + whitespace-collapse
-    if not collapsed:
-        return None
-    tokens = collapsed.split()
-    changed = True
-    while changed and tokens:
-        changed = False
-        if tokens[0].rstrip(".") in _KEY_STREET_WORDS:
-            tokens.pop(0)
-            changed = True
-        if tokens and tokens[-1].rstrip(".") in _KEY_STREET_WORDS:
-            tokens.pop()
-            changed = True
-        if tokens and _KEY_HOUSE_NO_RE.fullmatch(tokens[-1]):
-            tokens.pop()
-            changed = True
-    stripped = " ".join(tokens)
-    return stripped or collapsed
-
-
 def looks_like_czech_street(name: str | None) -> bool:
     """A conservative positive test: prepositional prefix, an explicit street
     keyword, or a street-adjective ending. Used to gate ambiguous last-segment

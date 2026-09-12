@@ -308,7 +308,6 @@ def test_content_hash_stable_and_bridges_to_ingest():
     assert row["sreality_id"] == -7
     assert row["category_main"] == "byt"
     assert row["price_czk"] == 3_190_000
-    assert row["lat"] == 49.47841185
 
 
 def test_title_street_fallback_from_original_title():

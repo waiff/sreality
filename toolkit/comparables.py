@@ -185,9 +185,9 @@ _HARD_LIMIT = 500
 #
 # Until W5 the SCHEMA enforced rule 17 for free: `listings` has no `home_city_id`,
 # so a city-quality clause on a listings-grain query died at parse with 42703
-# before a row was read. W5 (migration 436) re-keys membership onto `l.obec_id`
-# -- a column `listings` DOES have -- so the identical bypass would now plan,
-# execute, and silently return an estimate narrowed by operator-curated,
+# before a row was read. W5 (migration 436) re-keyed membership onto `l.obec_id`
+# -- a column `listings` HAD until W4-c -- so for that window the identical bypass
+# planned, executed, and silently returned an estimate narrowed by operator-curated,
 # revision-versioned, SUBJECTIVE city scores, with a `status='success'` row in
 # `estimation_runs` and a full trace. Nothing would fail.
 #
@@ -239,9 +239,10 @@ def _city_quality_clauses(
 
     `_shared_filter_where` no longer calls this. Its callers are `FROM listings l`
     and feed estimation, and since W5 (migration 436) re-keyed membership onto
-    `l.obec_id` -- a column `listings` HAS -- a stray call would resolve and
-    silently narrow an estimate instead of throwing 42703. `_shared_filter_where`
-    raises via `_assert_no_city_quality` instead.
+    `l.obec_id` -- a column `listings` HAD until W4-c -- a stray call resolved and
+    silently narrowed an estimate instead of throwing 42703. `_shared_filter_where`
+    raises via `_assert_no_city_quality` instead, which is the rail regardless of
+    what the `listings` catalog happens to carry.
 
     Rule evaluation itself is owned by `curated_cities_matching()` (migration 436);
     this function renders one `obec_id = ANY(...)` predicate and nothing else.
@@ -639,7 +640,7 @@ def build_query(
         f"  {per_m2_sql('l')} AS price_per_m2,\n"
         f"  {per_m2_basis_sql('l')} AS price_per_m2_basis,\n"
         "  l.category_main, l.category_type, l.price_unit, l.area_basis,\n"
-        "  l.disposition, l.district,\n"
+        "  l.disposition, ll.okres_name AS district,\n"
         "  l.floor, l.total_floors,\n"
         "  l.building_type, l.condition, l.energy_rating,\n"
         "  l.has_balcony, l.has_lift, l.has_parking,\n"

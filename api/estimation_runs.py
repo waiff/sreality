@@ -377,17 +377,20 @@ _HAS_FEEDBACK_SUBSELECT = (
     ") AS has_feedback"
 )
 # Best-available city/locality string for the /estimations list:
-# - runs with a resolved subject use listings.district ("Praha 2"-style) via
-#   LEFT JOIN (matched on the surrogate input_listing_id; input_sreality_id is
-#   only the fallback join key for pre-#914 rows never stamped with it —
-#   Gate 2, a post-Gate-2 non-sreality subject has input_sreality_id NULL)
-# - subjects with no matched listings row fall back to the locality the LLM
-#   parser stored in parsed_url_cache.parse_result.extraction.locality.value
+# - runs with a resolved subject use the resolver's municipality name
+#   (listing_location.obec_name; W4-c dropped listings.district, which this used
+#   to read) via LEFT JOIN (matched on the surrogate input_listing_id;
+#   input_sreality_id is only the fallback join key for pre-#914 rows never
+#   stamped with it — Gate 2, a post-Gate-2 non-sreality subject has
+#   input_sreality_id NULL)
+# - subjects with no matched listings row, and subjects the resolver has not
+#   placed, fall back to the locality the LLM parser stored in
+#   parsed_url_cache.parse_result.extraction.locality.value
 # Scalar subquery (not a join) on parsed_url_cache since source_url
 # isn't unique there — pick the freshest row.
 _LOCALITY_DISPLAY_EXPR = (
     "coalesce("
-    "l.district, "
+    "ll.obec_name, "
     "(SELECT puc.parse_result->'extraction'->'locality'->>'value' "
     "FROM parsed_url_cache puc "
     "WHERE puc.source_url = er.input_url "
@@ -413,7 +416,8 @@ _LIST_PROJECTION = (
 _LIST_FROM = (
     "estimation_runs er "
     "LEFT JOIN listings l ON l.id = er.input_listing_id "
-    "OR (er.input_listing_id IS NULL AND l.sreality_id = er.input_sreality_id)"
+    "OR (er.input_listing_id IS NULL AND l.sreality_id = er.input_sreality_id) "
+    "LEFT JOIN listing_location ll ON ll.listing_id = l.id"
 )
 _RUN_COLUMNS_OUT: tuple[str, ...] = _RUN_COLUMNS + (
     "cost_usd_total", "has_feedback",

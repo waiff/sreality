@@ -206,9 +206,13 @@ POPULATION_COHORTS: tuple[str, ...] = (
 
 # 06 §6.4's "per target column": the W2 gates are shares of the archived rows that
 # hold (or lack) one of these, not of the archived rows as a whole. Order is the
-# projection order of the aggregate below.
+# projection order of the aggregate below. The columns are `listing_location`'s
+# (migration 501) — a LEFT JOIN, so a listing with no resolved location counts as
+# holding neither. The old street-provenance dimension went with `listings.street_source`
+# (migration 508): every street in `listing_location` is resolver-written, so the split
+# has nothing left to separate.
 COLUMN_DENOMINATORS: tuple[str, ...] = (
-    "street_present", "street_ascii_only", "street_resolver_source", "geom_present",
+    "street_present", "street_ascii_only", "geom_present",
 )
 
 # NEVER project `html`. Grouping by the fetch DAY rather than by a floor comparison
@@ -223,15 +227,15 @@ _GROUPS_SQL = """
            (l.id IS NOT NULL) AS listing_matched,
            l.is_active,
            count(*) AS pages,
-           count(*) FILTER (WHERE l.street IS NOT NULL) AS street_present,
-           count(*) FILTER (WHERE l.street IS NOT NULL
-                              AND l.street !~ %(diacritics)s::text) AS street_ascii_only,
-           count(*) FILTER (WHERE l.street_source = 'resolver') AS street_resolver_source,
-           count(*) FILTER (WHERE l.geom IS NOT NULL) AS geom_present
+           count(*) FILTER (WHERE ll.street_name IS NOT NULL) AS street_present,
+           count(*) FILTER (WHERE ll.street_name IS NOT NULL
+                              AND ll.street_name !~ %(diacritics)s::text) AS street_ascii_only,
+           count(*) FILTER (WHERE ll.geom IS NOT NULL) AS geom_present
     FROM portal_raw_pages p
     LEFT JOIN listings l
       ON l.source = p.source
      AND l.source_id_native = p.source_id_native
+    LEFT JOIN listing_location ll ON ll.listing_id = l.id
     GROUP BY 1, 2, 3, 4, 5
 """
 
@@ -250,12 +254,12 @@ _POPULATION_SQL = """
            l.is_active,
            (l.inactive_at AT TIME ZONE %(timezone)s::text)::date AS inactive_day,
            count(*) AS listings,
-           count(*) FILTER (WHERE l.street IS NOT NULL) AS street_present,
-           count(*) FILTER (WHERE l.street IS NOT NULL
-                              AND l.street !~ %(diacritics)s::text) AS street_ascii_only,
-           count(*) FILTER (WHERE l.street_source = 'resolver') AS street_resolver_source,
-           count(*) FILTER (WHERE l.geom IS NOT NULL) AS geom_present
+           count(*) FILTER (WHERE ll.street_name IS NOT NULL) AS street_present,
+           count(*) FILTER (WHERE ll.street_name IS NOT NULL
+                              AND ll.street_name !~ %(diacritics)s::text) AS street_ascii_only,
+           count(*) FILTER (WHERE ll.geom IS NOT NULL) AS geom_present
     FROM listings l
+    LEFT JOIN listing_location ll ON ll.listing_id = l.id
     GROUP BY 1, 2, 3
 """
 

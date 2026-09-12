@@ -2643,8 +2643,8 @@ def check_outbound_url_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[s
     if offenders:
         message = (
             f"{named}. A sreality NULL means a sub-category code outside the closed "
-            "codebook (scraper/sreality_url.py) — add the entry, then run "
-            "reconcile_source_url; a crawler NULL is a parser regression."
+            "codebook (scraper/sreality_url.py) — add the entry; the row fills on its "
+            "next detail fetch. A crawler NULL is a parser regression."
         )
     else:
         message = "Every active listing on every portal carries its page URL."

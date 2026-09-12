@@ -596,7 +596,6 @@ _BODY_JOIN = """
 # TEXT column is neither.)
 _SELECT_COLUMNS = """
     SELECT l.id, l.source, l.source_id_native, l.raw_json, l.last_seen_at,
-           ST_Y(l.geom::geometry), ST_X(l.geom::geometry),
            pb.id, (pb.contract_version IS DISTINCT FROM pc.version), pb.page_kind,
            pb.payload_sha256, pb.first_observed_at, pc.version,
 """
@@ -919,7 +918,7 @@ def _row_from_record(record: tuple[Any, ...]) -> ScanRow:
     left. The snapshot cursor is the last column for the same reason it used to sit before
     the tail — a column appended after it would be swallowed silently.
     """
-    (listing_id, source, native, raw_json, last_seen_at, lat, lon,
+    (listing_id, source, native, raw_json, last_seen_at,
      body_id, body_unmined, body_page_kind, body_sha, body_first_observed,
      contract_version, snapshot_cursor) = record
     row = ListingRow(
@@ -927,8 +926,6 @@ def _row_from_record(record: tuple[Any, ...]) -> ScanRow:
         source=source,
         source_id_native=str(native) if native is not None else str(listing_id),
         raw_json=raw_json if isinstance(raw_json, dict) else {},
-        lat=float(lat) if lat is not None else None,
-        lon=float(lon) if lon is not None else None,
         # 06 §6.6 rule 1: a claim mined from `listings.raw_json` keeps the payload's own
         # observation time — the listing's last sighting — never the migration date.
         observed_at=last_seen_at)

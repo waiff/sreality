@@ -33,7 +33,7 @@ on:
         default: "40"
         type: string
       region_ids:
-        description: Comma-separated locality_region_id list (empty = all regions)
+        description: Comma-separated kraj_kod list (empty = all regions)
         required: false
         default: ""
         type: string

@@ -320,7 +320,6 @@ def test_parse_detail_content_hash_and_to_row():
     assert row["sreality_id"] == -11
     assert row["category_main"] == "byt"
     assert row["price_czk"] == 9_962_000
-    assert row["lat"] == a.lat and row["lon"] == a.lon
 
 
 def test_parse_detail_najemni_dum_subtype():

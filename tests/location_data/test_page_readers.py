@@ -93,7 +93,7 @@ def archive_entry(
 def listing_row(**overrides: Any) -> ListingRow:
     kwargs: dict[str, Any] = {
         "listing_id": 4242, "source": "remax", "source_id_native": "445781",
-        "raw_json": {}, "lat": None, "lon": None, "observed_at": FETCHED_AT,
+        "raw_json": {}, "observed_at": FETCHED_AT,
     }
     kwargs.update(overrides)
     return ListingRow(**kwargs)

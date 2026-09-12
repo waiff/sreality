@@ -74,7 +74,7 @@ def test_region_clause_uses_admin_region_id_without_null_passthrough():
     conn = _make_conn([("fetchall", [])])
     _select_pending(conn, region_ids=[27], max_age_days=30, limit=10)
     sql = conn.cursor_obj.executed[0][0]
-    assert "l.region_id = ANY(%s::bigint[])" in sql
+    assert "ll.kraj_kod = ANY(%s::bigint[])" in sql
     assert "locality_region_id" not in sql
     assert "l.region_id IS NULL" not in sql, "region_id NULL = parked, not selected"
 
