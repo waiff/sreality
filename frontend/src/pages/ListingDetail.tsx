@@ -6,7 +6,6 @@ import {
   type NewEstimationPrefill,
 } from '@/components/NewEstimationModal';
 import { useExploreAreaModal } from '@/components/ExploreAreaModal';
-import { placePrimary } from '@/lib/placeLabel';
 import { listingTypeLabel } from '@/lib/enums';
 import { usePageTitle } from '@/lib/pageTitle';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -323,19 +322,17 @@ export default function ListingDetail() {
     };
   }, [listingQ.data, sourcesQ.data]);
 
-  // Tab title = "type · disposition · street-or-city" once the listing loads
-  // (falls back to the route's "Listing" handle while loading / on the
-  // ?property redirect). Location prefers the parsed street, else the
-  // municipality (obec), else the richer place label. MUST stay above the early
-  // returns — same React #310 hook-order trap as above.
+  // Tab title = "type · disposition · place" once the listing loads (falls back
+  // to the route's "Listing" handle while loading / on the ?property redirect).
+  // The place is the ONE label the page itself shows (migration 503) — the tab
+  // and the header can no longer name two different places for one listing.
+  // MUST stay above the early returns — same React #310 hook-order trap.
   usePageTitle(
     listingQ.data
       ? [
           listingTypeLabel(listingQ.data),
           listingQ.data.disposition,
-          listingQ.data.street?.trim()
-            || listingQ.data.obec?.trim()
-            || placePrimary(listingQ.data),
+          listingQ.data.display_label?.trim() || null,
         ]
           .filter(Boolean)
           .join(' · ') || null
@@ -726,7 +723,7 @@ function ExploreAreaButton({
 }) {
   const { open } = useExploreAreaModal();
   if (listing.lat == null || listing.lng == null) return null;
-  const label = [placePrimary(listing), listing.disposition]
+  const label = [listing.display_label, listing.disposition]
     .filter(Boolean)
     .join(' · ');
   return (

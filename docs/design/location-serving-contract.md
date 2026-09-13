@@ -57,6 +57,40 @@ are ALWAYS the RÚIAN chain's own spelling, never a portal's. Never match on the
 codes. There is **no stored display label, `place_search_text`, `admin_path` or blocking key**: a
 stored derivation is a second definition, so a reader composes what it needs from the parts.
 
+**The label is composed ONCE, at read time** (W3, migration 503). "A reader composes what it needs"
+became eleven readers composing five different strings, so the composition moved into ONE immutable
+SQL function, `location_display_label(street_name, house_number_cp, house_number_co, obec_name,
+cast_obce_name, country_code, country_status)`, and every serving view publishes its result as
+`display_label`: `browse_projection` (→ `browse_list`, `properties_map_mv`), `listing_feed_public`,
+`properties_public`, `listings_public`, `broker_listings_public`, and `pipeline_board_public` (which
+reads it off `properties_public` — it is `security_invoker` and `listing_location` is revoked from
+`authenticated`). The four API surfaces that read `listings` directly — the extension's
+`/listings/lookup`, the notification composer and outbox, the dispatch feed, the collections route
+— call the same function. Still no STORED label: a function over the answer table's own columns is
+one definition, computed where it is read.
+
+**The fallback order, which is the rule and not a detail:**
+
+1. `country_status = 'foreign'` → the country code. Foreign is a DETERMINATION, never a default for
+   "no town found", and a foreign row has no RÚIAN chain to fall through to.
+2. a street → `"Street čp/čo, Obec"`. Both house numbers when both are known, whichever exists
+   otherwise, and a street with neither is still a street.
+3. a část obce that DIFFERS from the town → `"Část obce, Obec"`. "Brno, Brno" is noise.
+4. the town alone → `"Obec"`.
+5. nothing → NULL. A CZ row with no town is the red line rule 25 measures; it renders as an em-dash,
+   never as a bare "CZ".
+
+**Precision is DRAWN, not described** (W3-3). `browse_projection` and `listing_feed_public` also
+publish `granularity_rank` (the INT from `location_granularity_rank` — the SPA compares numbers,
+never enum text) and `uncertainty_radius_m`. In point mode the Browse map draws a translucent
+true-metre circle of that radius under any pin **below building level** (rank < 90); at or above it
+the pin is the building and stands alone. Clusters and server-side grid cells carry no per-pin
+identity or radius, so there is no per-pin circle above the point budget. The DRAWN radius is
+capped at **2 km** (`MAX_DRAWN_CIRCLE_RADIUS_M`, `frontend/src/lib/uncertaintyCircle.ts`) — the
+coarse rungs carry radii of a different order (okres ~25 km, kraj ~60 km, unknown ~250 km) and a
+screen of 25 km discs is a wash of colour with a moving clipped arc on pan. The cap is display
+only: the true radius rides on every feature and is what any measurement reads.
+
 **Country and self-disagreement.** `country_status` (NOT NULL: `cz` | `foreign` | `disputed` |
 `undetermined`) — foreign is a DETERMINATION the resolver makes, never a default for "no town
 found". `disputed` is ONE nullable text column whose VALUE is the reason (`pin_outside_obec`,
@@ -70,8 +104,10 @@ resolution trace is stored.
 
 **Not on the table, and where each went.** `source` — join `listings`, one primary-key hop away.
 `pin_shared_by_n` and the whole pin-collision block — the epoch that produced them is deleted; the
-shared-pin count is a read-time aggregate (`count(*) over (partition by geom)`) and W3 computes it
-in the `browse_list` rebuild, where the map needs it. `position_licence_class` — the licence rail
+shared-pin count was parked as a read-time aggregate (`count(*) over (partition by geom)`) and W3
+REFUSED it (decision W3-2): `sync_browse_list` filters `WHERE property_id = ANY(…)` and that qual
+cannot be pushed below a window function, so every merge would aggregate the whole corpus. No
+producer, no measured need; the circle rule above is granularity-only. `position_licence_class` — the licence rail
 moved UPSTREAM: the resolver's claim projection admits only `licence_class IN ('portal','operator')`,
 so a Mapy-class coordinate is never READ, and a partial index on `location_claims` keeps the
 remediation set one indexed predicate away. `position_source`, `blur_evidence`,

@@ -21,7 +21,7 @@ export interface ComparablePoint {
   area_m2: number | null;
   disposition: string | null;
   subtype: string | null;
-  district: string | null;
+  display_label: string | null;
 }
 
 interface Subject {
@@ -328,7 +328,7 @@ export default function ComparablesMap({
             urls={previewUrls}
             price={fmtCzk(pinHover.price_czk)}
             meta={`${listingKindLabel(pinHover) ?? '—'} · ${fmtArea(pinHover.area_m2)}`}
-            district={pinHover.district}
+            place={pinHover.display_label}
             onMouseEnter={() => {
               clearCloseTimer();
               onHoverRef.current?.(pinHover.listing_id);

@@ -500,13 +500,8 @@ function Row({
           className="block hover:text-[var(--color-copper)] hover:underline underline-offset-2"
         >
           <span className="block text-[var(--color-ink)] truncate">
-            {dispatch.locality ?? dispatch.district ?? '—'}
+            {dispatch.display_label ?? '—'}
           </span>
-          {dispatch.district && dispatch.locality ? (
-            <span className="block text-[0.7rem] text-[var(--color-ink-3)] truncate">
-              {dispatch.district}
-            </span>
-          ) : null}
         </Link>
       </td>
       <td className="px-4 py-2.5 align-middle text-[var(--color-ink-2)] tabular-nums">

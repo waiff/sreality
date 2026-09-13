@@ -112,14 +112,28 @@ def get_collection(
         raise HTTPException(404, "collection not found")
 
     properties_sql = (
-        "SELECT cp.property_id, p.repr_listing_id, p.district, p.disposition, p.subtype, "
+        "SELECT cp.property_id, p.repr_listing_id, "
+        # ONE place string (migration 503), composed from the property's DISPLAY
+        # listing — the same listing its price and area come from, and the same
+        # label Browse shows for the same card. Taken off properties_public
+        # rather than from a `listing_location` join because this route runs on
+        # the tenant pool (`SET LOCAL ROLE authenticated`) and migration 501
+        # revoked the answer table from that role; an owner-rights `_public` view
+        # is how a browser-role query reaches it.
+        "       pp.display_label, "
+        "       p.disposition, p.subtype, "
         "       p.area_m2, p.current_price_czk, p.last_seen_at, p.is_active, cp.added_at, "
         "       rl.source "
         "FROM collection_properties cp "
         "JOIN properties p ON p.id = cp.property_id "
         # Surrogate join, not the legacy handle — same pre-Gate-2 hardening as
         # #873's Browse fix (a non-sreality repr would otherwise blank `source`).
-        "LEFT JOIN listings rl ON rl.id = p.repr_listing_ref_id "
+        # The VIEW, not the table: this route runs under `SET LOCAL ROLE
+        # authenticated` and `listings` carries RLS with no policy, so the bare
+        # table matched nothing and `source` came back NULL for every row.
+        # listings_public is the same rows through owner rights (migration 494).
+        "LEFT JOIN listings_public rl ON rl.id = p.repr_listing_ref_id "
+        "LEFT JOIN properties_public pp ON pp.property_id = cp.property_id "
         "WHERE cp.collection_id = %s "
         "ORDER BY cp.added_at DESC"
     )
@@ -130,7 +144,7 @@ def get_collection(
         {
             "property_id":  int(r[0]),
             "sreality_id":  int(r[1]) if r[1] is not None else None,
-            "district":     r[2],
+            "display_label": r[2],
             "disposition":  r[3],
             "subtype":      r[4],
             "area_m2":      float(r[5]) if r[5] is not None else None,

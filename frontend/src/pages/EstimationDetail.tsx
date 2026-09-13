@@ -149,8 +149,11 @@ function subjectAsListing(run: EstimationRun): ListingPublic | null {
     last_seen_at: run.created_at,
     area_m2: spec?.area_m2 ?? num(a.area_m2),
     disposition: (spec?.disposition ?? str(a.disposition)) as ListingPublic['disposition'],
-    locality: str(a.locality),
-    district: str(a.district),
+    /* The subject of an estimation is a spec, not a resolved listing, so there
+       is no listing_location row to label it from: keep the estimate's own
+       stored place text and present it under the one field every consumer of a
+       ListingPublic now reads. */
+    display_label: str(a.locality) ?? str(a.district),
     lat: spec?.lat ?? null,
     lng: spec?.lng ?? null,
     floor: spec?.floor ?? num(a.floor),

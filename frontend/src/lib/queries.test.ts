@@ -426,7 +426,7 @@ describe('portal-mirror mode selection', () => {
   it('passes every other sort field straight through — they all exist on the feed', () => {
     const mirror = withPortals(['bazos']);
     for (const field of ['price_czk', 'price_per_m2', 'area_m2', 'last_seen_at',
-                         'district', 'mf_gross_yield_pct'] as const) {
+                         'display_label', 'mf_gross_yield_pct'] as const) {
       expect(effectiveSort(mirror, { field, direction: 'desc' })).toEqual({
         field, direction: 'desc',
       });

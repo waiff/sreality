@@ -895,6 +895,27 @@ def test_dispatch_select_projects_message() -> None:
     assert "d.message" in _DISPATCH_SELECT
 
 
+def test_dispatch_feed_reads_listings_through_the_public_view() -> None:
+    """Every listing column on the feed comes from `listings_public`, never from
+    `listings`.
+
+    This feed runs on the tenant pool — `SET LOCAL ROLE authenticated` — and
+    `listings` has carried RLS with NO POLICY since migration 001, so the bare
+    table is empty under that role and the whole projection arrived NULL. The
+    owner-rights view returns the same rows with no WHERE of its own. It is also
+    the only relation in reach that can publish `display_label`: migration 501
+    revokes `listing_location` from `authenticated` outright, so a direct join
+    would be a hard permission error rather than a silent blank.
+    """
+    from api.notifications import _DISPATCH_FROM, _LISTING_PROJECTION
+
+    assert "LEFT JOIN listings_public lp ON lp.id = d.listing_id" in _DISPATCH_FROM
+    assert "JOIN listings l " not in _DISPATCH_FROM
+    assert "lp.display_label" in _LISTING_PROJECTION
+    # No column may sneak back onto the RLS-dark table alias.
+    assert " l." not in f" {_LISTING_PROJECTION}"
+
+
 def test_mark_all_seen_scoped_filters_by_source() -> None:
     script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
         (lambda s: "UPDATE notification_dispatches SET seen_at" in s, [], 5),

@@ -13,7 +13,6 @@ import {
 } from '@/lib/format';
 import { ppm2BasisFromToken } from '@/lib/measure';
 import type { Furnished, Ownership } from '@/lib/types';
-import { placePrimary } from '@/lib/placeLabel';
 import { listingKindLabel } from '@/lib/enums';
 import { listingRowPath } from '@/lib/listingUrl';
 
@@ -37,7 +36,7 @@ const COLUMNS: ReadonlyArray<Column> = [
   /* Not sortable: sreality_id mixes real positive ids with synthetic negative
    * ones (non-sreality portals), so ordering by it is meaningless. */
   { field: 'sreality_id',   label: 'ID',          align: 'left',  sortable: false },
-  { field: 'district',      label: 'Location',    align: 'left',  sortable: true  },
+  { field: 'display_label', label: 'Location',    align: 'left',  sortable: true  },
   { field: 'disposition',   label: 'Type',        align: 'left',  sortable: true  },
   { field: 'area_m2',       label: 'Area',        align: 'right', sortable: true  },
   { field: 'estate_area',   label: 'Lot',         align: 'right', sortable: true  },
@@ -253,7 +252,7 @@ function Row({
         </Link>
       </td>
       <td className="px-4 py-2.5 align-middle text-[var(--color-ink)] truncate max-w-[260px]">
-        {placePrimary(row) ?? <span className="text-[var(--color-ink-4)]">—</span>}
+        {row.display_label ?? <span className="text-[var(--color-ink-4)]">—</span>}
       </td>
       <td className="px-4 py-2.5 align-middle font-mono tabular-nums text-[var(--color-ink-2)]">
         {listingKindLabel(row) ?? <span className="text-[var(--color-ink-4)]">—</span>}

@@ -127,13 +127,21 @@ export const CARD_PAGE_SIZE = 24;
  * cohort) and `tom_days` (fully populated, read nowhere) were both dropped in W6a --
  * ~1.5 MB of the measured 22.66 MB. Add a column here only if ListingMap actually
  * renders it. */
-const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat,lng,price_czk,price_per_m2,price_per_m2_basis,category_main,category_type,disposition,area_m2,district,last_seen_at,is_active';
+/* W3: `district` came OUT and `display_label` went in -- one string per pin, from
+ * listing_location through the projection, so the popup no longer names the okres
+ * when it knows the street. The two that joined it are what the UNCERTAINTY CIRCLE
+ * reads, and they are the only two columns on this list that ListingMap draws
+ * rather than prints: a pin resolved below building level is drawn with a circle
+ * of `uncertainty_radius_m` metres around it, and `granularity_rank` is the INT
+ * form of the rung (migration 380), because granularity is compared by rank and
+ * never by enum text. */
+const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat,lng,price_czk,price_per_m2,price_per_m2_basis,category_main,category_type,disposition,area_m2,display_label,uncertainty_radius_m,granularity_rank,last_seen_at,is_active';
 /* `property_id` is listed explicitly rather than arriving via withKeysetColumns:
  * it used to come free because the tiebreak was ALWAYS property_id, but the
  * portal-mirror lane tiebreaks on listing_id, which would have left
  * TableRow.property_id undefined at runtime while still typed `number`. */
 const TABLE_COLS =
-  'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
+  'listing_id,property_id,sreality_id,source,source_id_native,display_label,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
   /* The Kč/m² cell reads the SERVER measure (migration 425), not price/area:
    * the column is what the sort and the Kč/m² filter already use, so selecting
    * it is what keeps the number on screen identical to the number the cohort
@@ -152,7 +160,7 @@ const TABLE_COLS =
   'price_per_m2_basis,category_main,category_type,' +
   'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type,total_price_change_pct,price_change_count';
 const CARD_COLS =
-  'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
+  'listing_id,property_id,sreality_id,source,source_id_native,display_label,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
   /* Same server measure the table cell reads (migration 425) — see TABLE_COLS. */
   'price_per_m2,' +
   /* The published BASIS label — see TABLE_COLS. category_main also names the
@@ -174,7 +182,7 @@ export const BROWSE_SELECT_COLUMNS = {
 } as const;
 
 export type SortField =
-  | 'sreality_id' | 'district' | 'disposition'
+  | 'sreality_id' | 'display_label' | 'disposition'
   | 'area_m2' | 'price_czk' | 'price_per_m2'
   | 'first_seen_at' | 'last_seen_at' | 'is_active'
   | 'estate_area' | 'usable_area' | 'parking_lots'
@@ -202,7 +210,11 @@ export const DEFAULT_SORT: SortSpec = { field: 'first_seen_at', direction: 'desc
  * negative ones, so sorting by it is meaningless. Saved presets / URLs that
  * still carry sort=sreality_id fall back to DEFAULT_SORT via parseSort. */
 const SORTABLE_FIELDS: ReadonlyArray<SortField> = [
-  'district', 'disposition',
+  /* W3: the Location column sorts on what it SHOWS. It used to sort on
+   * `district` (the okres text) while printing placePrimary()'s town-or-locality
+   * -- two different strings, so the order looked arbitrary. An old
+   * `?sort=district` URL falls back to DEFAULT_SORT through parseSort. */
+  'display_label', 'disposition',
   'area_m2', 'price_czk', 'price_per_m2',
   'first_seen_at', 'last_seen_at', 'is_active',
   'estate_area', 'usable_area', 'parking_lots',
@@ -571,7 +583,16 @@ export interface MapRow {
   category_type: string | null;
   disposition: string | null;
   area_m2: number | null;
-  district: string | null;
+  /* The one server-composed place string (migration 503) -- what the popup
+   * prints. */
+  display_label: string | null;
+  /* The two the circle rule reads. `granularity_rank` is the INT rung from
+   * location_granularity_rank (migration 380): compare it, never the enum text.
+   * A pin below BUILDING is drawn inside a circle of `uncertainty_radius_m`
+   * metres -- see ListingMap. Both are NULL for an unresolved row, which draws
+   * no circle rather than a circle of unknown size. */
+  uncertainty_radius_m: number | null;
+  granularity_rank: number | null;
   last_seen_at: string;
   is_active: boolean;
 }
@@ -1096,11 +1117,10 @@ export interface TableRow {
   sreality_id: number | null;
   source: string | null;
   source_id_native: string | null;
-  district: string | null;
-  locality: string | null;
-  obec: string | null;
-  okres: string | null;
-  street: string | null;
+  /* The one server-composed place string (migration 503). The five columns it
+   * replaced (district / locality / obec / okres / street) are no longer
+   * selected on this lane -- there is nothing left to assemble. */
+  display_label: string | null;
   disposition: string | null;
   subtype: string | null;
   area_m2: number | null;
@@ -1252,11 +1272,8 @@ export interface CardRow {
    * Gate-2 and is only the fast detail link + the (sreality-backed) estimate. */
   listing_id: number;
   sreality_id: number | null;
-  district: string | null;
-  locality: string | null;
-  obec: string | null;
-  okres: string | null;
-  street: string | null;
+  /* The one server-composed place string (migration 503) -- see TableRow. */
+  display_label: string | null;
   disposition: string | null;
   /* Portal-agnostic property sub-type (migration 152) — the meaningful "kind"
    * for commercial/houses, where disposition is NULL. NULL for apartments. */
@@ -1554,7 +1571,7 @@ export const fetchBrowseStats = async (
 const DETAIL_COLS =
   'id,sreality_id,first_seen_at,last_seen_at,is_active,source,source_id_native,property_id,tom_days,' +
   'category_main,category_type,price_czk,price_unit,' +
-  'area_m2,disposition,subtype,locality,district,obec,okres,street,locality_district_id,locality_region_id,' +
+  'area_m2,disposition,subtype,display_label,street,locality_district_id,locality_region_id,' +
   'lat,lng,floor,total_floors,has_balcony,has_parking,has_lift,' +
   'building_type,condition,energy_rating,' +
   'estate_area,usable_area,garden_area,category_sub_cb,' +
