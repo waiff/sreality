@@ -11,6 +11,13 @@
  * Every number on the page comes from ONE payload (the summary RPC), so the
  * matrix, the totals and the list can never tell three different stories. The
  * list is a separate keyset read of the same relation under the same filters.
+ *
+ * TWO STATES (W7-b, migration 518), and the page always looks at exactly one:
+ * "čeká na zpracování" is the lane still working (no verdict yet, queued for
+ * one, or the ad changed after the verdict) — normal traffic; "zpracováno,
+ * nerozhodnuto" is a finished verdict with no location — the issue. Both counts
+ * are always in the header, so choosing one never hides the other's size, and
+ * the nav badge counts only the issue.
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -32,12 +39,14 @@ import {
   PIN_AUDIT_TOTAL_KEY,
   PIN_AUDIT_PAGE_SIZE,
   PIN_AUDIT_QUALITIES,
+  PIN_AUDIT_STATES,
   fetchPinAuditPage,
   fetchPinAuditSummary,
   summaryRowMatches,
   type PinAuditFilters,
   type PinAuditQuality,
   type PinAuditRow,
+  type PinAuditState,
   type PinAuditSummaryRow,
 } from '@/lib/pinAudit';
 import { Link } from 'react-router-dom';
@@ -110,6 +119,18 @@ const QUALITY_LABEL: Record<PinAuditQuality, string> = {
   delisted_unresolved: 'inzerát stažen · podklady byly, poloha nevyšla',
 };
 
+/* The two states, in the operator's words and with the verdict attached: one of
+ * them is a finding and the other is not, and the label has to say so. */
+const STATE_LABEL: Record<PinAuditState, string> = {
+  pending: 'čeká na zpracování',
+  unresolved: 'zpracováno, nerozhodnuto',
+};
+
+const STATE_NOTE: Record<PinAuditState, string> = {
+  pending: 'není problém, systém je zatím nestihl zpracovat',
+  unresolved: 'toto je problém',
+};
+
 const QUALITY_SHORT: Record<PinAuditQuality, string> = {
   active_no_claims: 'běží · nebylo z čeho',
   active_unresolved: 'běží · nevyšlo',
@@ -141,15 +162,29 @@ export default function LocationPinAudit() {
   );
 
   /* The axes are read off the data, never hardcoded: a portal that stops
-   * appearing must vanish from the matrix rather than show a stale zero. */
+   * appearing must vanish from the matrix rather than show a stale zero. Scoped
+   * to the selected state, so the matrix carries no all-dash row. */
+  const stateRows = useMemo(
+    () => rows.filter((r) => r.state === filters.state),
+    [rows, filters.state],
+  );
   const sources = useMemo(
-    () => Array.from(new Set(rows.map((r) => r.source))).sort(),
-    [rows],
+    () => Array.from(new Set(stateRows.map((r) => r.source))).sort(),
+    [stateRows],
   );
   const categories = useMemo(
-    () => Array.from(new Set(rows.map((r) => r.category_main ?? ''))).sort(),
-    [rows],
+    () => Array.from(new Set(stateRows.map((r) => r.category_main ?? ''))).sort(),
+    [stateRows],
   );
+
+  /* Both state totals, always over the WHOLE payload — the header states the
+   * size of the set the operator is NOT looking at too, so switching can never
+   * be a surprise. */
+  const stateTotals = useMemo(() => {
+    const t: Record<PinAuditState, number> = { pending: 0, unresolved: 0 };
+    for (const r of rows) t[r.state] += r.n;
+    return t;
+  }, [rows]);
 
   const matched = useMemo(
     () => rows.filter((r) => summaryRowMatches(r, filters)),
@@ -169,22 +204,20 @@ export default function LocationPinAudit() {
     () => matched.reduce((a, r) => a + r.n, 0),
     [matched],
   );
-  const totalAll = useMemo(() => rows.reduce((a, r) => a + r.n, 0), [rows]);
-
-  /* The split the ruling turns on, always over the WHOLE set (not the current
-   * filters): how much of the loss is live ads, and how much a sibling listing
-   * could recover with no resolver change at all. */
+  /* The split the ruling turns on, over the whole SELECTED state (not the
+   * current filters): how much of it is live ads, and how much a sibling
+   * listing could recover with no resolver change at all. */
   const split = useMemo(() => {
     let active = 0;
     let delisted = 0;
     let sibling = 0;
-    for (const r of rows) {
+    for (const r of rows.filter((x) => x.state === filters.state)) {
       if (r.quality.startsWith('active_')) active += r.n;
       else delisted += r.n;
       if (r.sibling_has_pin) sibling += r.n;
     }
     return { active, delisted, sibling };
-  }, [rows]);
+  }, [rows, filters.state]);
 
   const refreshedAt = useMemo(
     () => rows.find((r) => r.refreshed_at != null)?.refreshed_at ?? null,
@@ -229,10 +262,35 @@ export default function LocationPinAudit() {
         buď neměl z čeho vyjít, nebo podklady měl a polohu z nich nedokázal
         určit — a dokud ji nemá, nejdou vidět nikde: ve vyhledávání, na mapě, v
         hlídacích psech ani při hledání duplicit. Jakmile je systém určí, inzerát
-        se objeví sám a z tohoto seznamu zmizí.
+        se objeví sám a z tohoto seznamu zmizí. Jsou tu dvě různé skupiny a
+        stránka ukazuje vždy jen jednu z nich: ty, které systém teprve čekají, a
+        ty, u kterých už doběhl a polohu neurčil.
       </p>
+      <div
+        className="mt-3 grid gap-1 text-[0.82rem] max-w-[52rem]"
+        data-testid="pin-audit-state-totals"
+      >
+        <p>
+          <span className="text-[var(--color-ink-2)]">čeká na zpracování:</span>{' '}
+          <span className="font-medium tabular-nums">
+            {fmtCount(stateTotals.pending)}
+          </span>{' '}
+          <span className="text-[var(--color-ink-3)]">
+            — není problém, systém je zatím nezpracoval
+          </span>
+        </p>
+        <p>
+          <span className="text-[var(--color-ink-2)]">
+            zpracováno, nerozhodnuto:
+          </span>{' '}
+          <span className="font-medium tabular-nums">
+            {fmtCount(stateTotals.unresolved)}
+          </span>{' '}
+          <span className="text-[var(--color-ink-3)]">— toto je problém</span>
+        </p>
+      </div>
       <p className="mt-2 text-[0.78rem] text-[var(--color-ink-3)]">
-        Celkem {fmtCount(totalAll)} inzerátů · {fmtCount(split.active)} běží ·{' '}
+        Níže: {STATE_LABEL[filters.state]} · {fmtCount(split.active)} běží ·{' '}
         {fmtCount(split.delisted)} stažených · u {fmtCount(split.sibling)} má
         jiný inzerát téže nemovitosti polohu určenou
         {refreshedAt ? ` · stav k ${fmtDateSlash(refreshedAt)}` : ''}
@@ -247,6 +305,32 @@ export default function LocationPinAudit() {
       {err ? <ErrorBanner message={(err as Error).message} /> : null}
 
       <div className="mt-6 grid gap-5">
+        <div
+          className="flex flex-wrap items-center gap-2"
+          role="group"
+          aria-label="Skupina inzerátů"
+          data-testid="pin-audit-state-toggle"
+        >
+          {PIN_AUDIT_STATES.map((st) => (
+            <Chip
+              key={st}
+              on={filters.state === st}
+              /* Switching state drops the quality chips with it: they explain a
+               * verdict, and under „čeká na zpracování“ there is none. */
+              onClick={() =>
+                setFilters((f) =>
+                  f.state === st ? f : { ...f, state: st, qualities: [] },
+                )
+              }
+            >
+              {STATE_LABEL[st]} ({fmtCount(stateTotals[st])})
+            </Chip>
+          ))}
+          <span className="text-[0.78rem] text-[var(--color-ink-3)]">
+            {STATE_NOTE[filters.state]}
+          </span>
+        </div>
+
         <Card
           title="Přehled"
           lede="Řádky jsou portály, sloupce druhy nemovitosti. Číslo v buňce je počet skrytých inzerátů — po započtení filtrů níže. Kliknutím na buňku se filtr nastaví právě na ni."
@@ -328,7 +412,7 @@ export default function LocationPinAudit() {
 
         <Card
           title="Filtry"
-          lede="Filtry platí pro přehled, mapu i seznam zároveň. Nevybrat nic znamená „bez omezení“."
+          lede="Filtry platí pro přehled i seznam zároveň a vždy jen v rámci skupiny vybrané nahoře. Nevybrat nic znamená „bez omezení“."
         >
           <div className="grid gap-3">
             <div>
@@ -370,7 +454,10 @@ export default function LocationPinAudit() {
                 ))}
               </div>
             </div>
-            <div>
+            {/* Only under „zpracováno, nerozhodnuto“: these four buckets explain
+                a VERDICT, and a listing the system has not finished with has
+                none to explain. */}
+            <div hidden={filters.state !== 'unresolved'}>
               <p className="text-[0.7rem] uppercase tracking-[0.1em] text-[var(--color-ink-3)]">
                 Proč poloha chybí
               </p>
@@ -427,7 +514,9 @@ export default function LocationPinAudit() {
               <button
                 type="button"
                 className="self-start text-[0.78rem] text-[var(--color-ink-3)] underline decoration-dotted underline-offset-2 hover:text-[var(--color-ink)]"
-                onClick={() => setFilters(EMPTY_PIN_AUDIT_FILTERS)}
+                onClick={() =>
+                  setFilters((f) => ({ ...EMPTY_PIN_AUDIT_FILTERS, state: f.state }))
+                }
               >
                 Zrušit všechny filtry
               </button>
@@ -532,7 +621,13 @@ export default function LocationPinAudit() {
                       <td className={NUM}>{fmtCzk(r.price_czk)}</td>
                       <td className={TD}>{r.is_active ? 'běží' : 'stažen'}</td>
                       <td className={NUM}>{fmtDateSlash(r.last_seen_at)}</td>
-                      <td className={TD}>{QUALITY_SHORT[r.quality]}</td>
+                      <td className={TD}>
+                        {r.state === 'unresolved'
+                          ? QUALITY_SHORT[r.quality]
+                          : r.has_row
+                            ? 'čeká na přepočet'
+                            : 'zatím nezpracováno'}
+                      </td>
                       <td className={TD}>
                         {r.sibling_has_pin ? (
                           <span className="text-[var(--color-copper)]">
@@ -545,7 +640,7 @@ export default function LocationPinAudit() {
                       <td className={`${TD} text-[var(--color-ink-3)]`}>
                         {r.has_row
                           ? `${dash(r.country_status)} · ${dash(r.granularity)} · ${dash(r.match_confidence)}`
-                          : 'nový systém tento inzerát vůbec nezpracoval'}
+                          : 'nový systém tento inzerát zatím nezpracoval'}
                       </td>
                     </tr>
                   );

@@ -2349,6 +2349,13 @@ columns (the Mapy-era pin, the legacy PSČ/locality fields W1-b dropped), plus `
 can only say "žádná" reads as a finding. `claims_now` survives as one EXISTS instead of a
 three-aggregate lateral — 75 % off the hourly refresh's planned cost.) `sibling_has_pin` is the cheap recovery the operator can take without any resolver
 change: **1,163 rows (~3 %)** where another listing of the same property already has a `geom`.
+**W7-b (migration 518) puts a `state` above all of it**: `pending` — no `listing_location` row yet,
+or the listing sits in `dirty_locations`, or its newest `listing_snapshots.scraped_at` is past the
+verdict's `resolved_at` — is the lane still working and NOT a finding; `unresolved` (a verdict
+exists, nothing queued, no newer evidence, still no location) is the issue, and the four `quality`
+buckets refine that half alone. The page toggles between the two and defaults to `unresolved`; the
+nav badge counts `unresolved` only, because a badge that climbed whenever the scrapers ran would
+teach the operator to ignore it. Measured at the split: 11 pending, 44,370 unresolved.
 `quality` buckets the set on active/delisted × `has_claims`; the SPA page `/new-dedup/pin-audit`
 filters on those four axes plus the sibling flag, draws the legacy pins (capped at 5,000, and it
 says when it capped), and reads its overview matrix from `location_pin_audit_summary()` so the

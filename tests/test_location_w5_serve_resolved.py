@@ -162,8 +162,22 @@ def test_514_forces_both_rebuilds_and_proves_the_rule_landed() -> None:
 PIN_AUDIT_TS = REPO / "frontend" / "src" / "lib" / "pinAudit.ts"
 
 
+def _audit_matview_relation_file() -> Path:
+    """The migration that LAST created the relation, not 514 forever. A matview
+    cannot gain or lose a column in place, so every change to it is another
+    DROP + CREATE in a new file (515 dropped `old_evidence`, 518 added `state`);
+    a rail pinned to 514 would keep checking a body production no longer has."""
+    creators = sorted(
+        f
+        for f in MIGRATIONS.glob("[0-9][0-9][0-9]_*.sql")
+        if "create materialized view location_pin_audit_mv as" in _sql(f)
+    )
+    assert creators, "no migration creates location_pin_audit_mv"
+    return creators[-1]
+
+
 def _audit_matview_sql() -> str:
-    sql = _sql(W5)
+    sql = _sql(_audit_matview_relation_file())
     start = sql.index("create materialized view location_pin_audit_mv as")
     masked = re.sub(r"--[^\n]*", lambda c: " " * len(c.group(0)), sql)
     return sql[start: masked.index(";", start) + 1]

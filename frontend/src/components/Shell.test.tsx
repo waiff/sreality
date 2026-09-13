@@ -102,7 +102,9 @@ describe('<Shell> notifications badge', () => {
 });
 
 /* The hidden set leads the nav, and the count of rows in it rides on the entry
- * — but navigation can never depend on that number arriving. */
+ * — but navigation can never depend on that number arriving. The number is the
+ * ISSUE count (W7-b): `fetchPinAuditTotal` asks for `state=unresolved` only,
+ * which `lib/pinAudit.test.ts` pins on the read itself. */
 describe('<Shell> !AUDIT POLOH', () => {
   it('is the first nav entry and carries the audit count', async () => {
     vi.mocked(pinAudit.fetchPinAuditTotal).mockResolvedValue(37052);
@@ -110,7 +112,9 @@ describe('<Shell> !AUDIT POLOH', () => {
     const link = await screen.findByRole('link', { name: /^!AUDIT POLOH/ });
     expect(link).toHaveAttribute('href', '/new-dedup/pin-audit');
     await waitFor(() =>
-      expect(link).toHaveAccessibleName('!AUDIT POLOH 37052 inzerátů k auditu'),
+      expect(link).toHaveAccessibleName(
+        '!AUDIT POLOH 37052 inzerátů s nevyřešenou polohou',
+      ),
     );
     const nav = screen.getByRole('navigation');
     expect(nav.querySelectorAll('a')[0]).toBe(link);

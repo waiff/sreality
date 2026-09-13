@@ -5,6 +5,13 @@
  * cannot answer for. It is a WORK QUEUE, not a one-off review — a row leaves it
  * the moment the resolver lane places the listing.
  *
+ * TWO STATES, and the page is always looking at exactly one of them (W7-b,
+ * migration 518). `pending` = the lane has not finished with the listing (no
+ * verdict yet, queued for one, or the ad changed after the verdict) — normal
+ * traffic, not a finding. `unresolved` = a verdict exists, nothing is queued,
+ * and there is still no location — the issue. The four `quality` buckets refine
+ * `unresolved` only; under `pending` there is no verdict to explain.
+ *
  * Two reads, deliberately shaped so the page never counts anything itself:
  *   - `fetchPinAuditSummary` — one RPC returning (portal, type, bucket, n).
  *     ~120 rows, so the overview matrix AND every "how many match the current
@@ -34,6 +41,13 @@ export const PIN_AUDIT_PAGE_SIZE = 100;
 /* The keyset tiebreaker. `property_id` — applyKeyset's default — is NOT legal
  * here: the relation is listing-grain, and `listing_id` is its primary key. */
 const TIEBREAK = 'listing_id';
+
+export type PinAuditState = 'pending' | 'unresolved';
+
+export const PIN_AUDIT_STATES: ReadonlyArray<PinAuditState> = [
+  'unresolved',
+  'pending',
+];
 
 export type PinAuditQuality =
   | 'active_no_claims'
@@ -80,10 +94,13 @@ export interface PinAuditRow {
   claims_now: boolean;
   sibling_has_pin: boolean;
   quality: PinAuditQuality;
+  /* Has the lane finished with this listing? (migration 518) */
+  state: PinAuditState;
   refreshed_at: string;
 }
 
 export interface PinAuditSummaryRow {
+  state: PinAuditState;
   source: string;
   category_main: string | null;
   quality: PinAuditQuality;
@@ -94,6 +111,9 @@ export interface PinAuditSummaryRow {
 }
 
 export interface PinAuditFilters {
+  /* NOT fail-open: every read is scoped to ONE state, because the two sets
+   * answer different questions and a total over both means nothing. */
+  state: PinAuditState;
   /* Empty array = no constraint on that axis (the fail-open filter idiom). */
   sources: ReadonlyArray<string>;
   categories: ReadonlyArray<string>;
@@ -104,7 +124,10 @@ export interface PinAuditFilters {
   sibling: 'all' | 'yes' | 'no';
 }
 
+/* The default is the ISSUE. Opening the page on `pending` would show a list
+ * that empties itself and hide the one the operator came for. */
 export const EMPTY_PIN_AUDIT_FILTERS: PinAuditFilters = {
+  state: 'unresolved',
   sources: [],
   categories: [],
   qualities: [],
@@ -118,7 +141,7 @@ const ROW_COLS = [
   'display_label', 'price_czk', 'is_active', 'first_seen_at',
   'last_seen_at', 'country_status', 'granularity',
   'match_confidence', 'resolver_version', 'resolved_at', 'has_row',
-  'has_claims', 'claims_now', 'sibling_has_pin', 'quality',
+  'has_claims', 'claims_now', 'sibling_has_pin', 'quality', 'state',
   'refreshed_at',
 ].join(',');
 
@@ -126,17 +149,21 @@ const ROW_COLS = [
  * helper below is shared without leaking supabase-js's generics. */
 interface FilterBuilder {
   in: (column: string, values: readonly string[]) => FilterBuilder;
-  eq: (column: string, value: boolean) => FilterBuilder;
+  eq: (column: string, value: boolean | string) => FilterBuilder;
 }
 
 function applyPinAuditFilters<T extends FilterBuilder>(
   query: T,
   f: PinAuditFilters,
 ): T {
-  let q = query;
+  let q = query.eq('state', f.state) as T;
   if (f.sources.length > 0) q = q.in('source', f.sources) as T;
   if (f.categories.length > 0) q = q.in('category_main', f.categories) as T;
-  if (f.qualities.length > 0) q = q.in('quality', f.qualities) as T;
+  /* The quality buckets explain a VERDICT, so they only mean something under
+   * `unresolved` — carrying them into `pending` would silently hide rows. */
+  if (f.state === 'unresolved' && f.qualities.length > 0) {
+    q = q.in('quality', f.qualities) as T;
+  }
   if (f.status !== 'all') q = q.eq('is_active', f.status === 'active') as T;
   if (f.sibling !== 'all') {
     q = q.eq('sibling_has_pin', f.sibling === 'yes') as T;
@@ -150,11 +177,18 @@ export function summaryRowMatches(
   row: PinAuditSummaryRow,
   f: PinAuditFilters,
 ): boolean {
+  if (row.state !== f.state) return false;
   if (f.sources.length > 0 && !f.sources.includes(row.source)) return false;
   if (f.categories.length > 0 && !f.categories.includes(row.category_main ?? '')) {
     return false;
   }
-  if (f.qualities.length > 0 && !f.qualities.includes(row.quality)) return false;
+  if (
+    f.state === 'unresolved' &&
+    f.qualities.length > 0 &&
+    !f.qualities.includes(row.quality)
+  ) {
+    return false;
+  }
   if (f.status === 'active' && !row.quality.startsWith('active_')) return false;
   if (f.status === 'delisted' && !row.quality.startsWith('delisted_')) return false;
   if (f.sibling === 'yes' && !row.sibling_has_pin) return false;
@@ -162,17 +196,20 @@ export function summaryRowMatches(
   return true;
 }
 
-/* The nav badge's number: every row in the audit set, no filters — the same
- * total the page header prints. A `head` request with an exact count, so
- * PostgREST answers with the number in the Content-Range header and zero rows:
- * one cheap round trip, cheap enough to sit in the app shell. The nav must
- * never depend on it — a caller renders the label alone when this throws. */
+/* The nav badge's number: the `unresolved` rows, and ONLY those (W7-b). A badge
+ * is an alarm, and counting `pending` too would make it climb every time the
+ * scrapers do their job — the fastest way to teach the operator to ignore it.
+ * A `head` request with an exact count, so PostgREST answers with the number in
+ * the Content-Range header and zero rows: one cheap round trip, cheap enough to
+ * sit in the app shell. The nav must never depend on it — a caller renders the
+ * label alone when this throws. */
 export const PIN_AUDIT_TOTAL_KEY = ['pin-audit', 'total'] as const;
 
 export const fetchPinAuditTotal = async (): Promise<number> => {
   const { count, error } = await supabase
     .from(PIN_AUDIT_RELATION)
-    .select(TIEBREAK, { count: 'exact', head: true });
+    .select(TIEBREAK, { count: 'exact', head: true })
+    .eq('state', 'unresolved');
   if (error) throw error;
   return count ?? 0;
 };

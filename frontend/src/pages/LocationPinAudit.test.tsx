@@ -5,7 +5,9 @@
  *     of its own invents or drops a listing);
  *   - a filter reaches the SERVER, so the list under a matrix cell is the same
  *     cohort the cell counted;
- *   - the listing link is built by the shared helper, not hand-assembled.
+ *   - the listing link is built by the shared helper, not hand-assembled;
+ *   - W7-b: the page shows ONE state at a time, says how big the other one is,
+ *     and the quality buckets never leak into „čeká na zpracování“.
  */
 
 import { render, screen, waitFor, within } from '@testing-library/react';
@@ -30,12 +32,17 @@ vi.mock('@/lib/pinAudit', async (importOriginal) => {
 const REFRESHED = '2026-09-13T05:25:00Z';
 
 const SUMMARY: pinAudit.PinAuditSummaryRow[] = [
-  { source: 'sreality', category_main: 'byt', quality: 'delisted_no_claims', sibling_has_pin: false, n: 290, refreshed_at: REFRESHED },
-  { source: 'sreality', category_main: 'byt', quality: 'delisted_no_claims', sibling_has_pin: true, n: 10, refreshed_at: REFRESHED },
-  { source: 'sreality', category_main: 'byt', quality: 'active_unresolved', sibling_has_pin: false, n: 20, refreshed_at: REFRESHED },
-  { source: 'sreality', category_main: 'pozemek', quality: 'delisted_no_claims', sibling_has_pin: false, n: 7, refreshed_at: REFRESHED },
-  { source: 'bazos', category_main: 'byt', quality: 'active_no_claims', sibling_has_pin: false, n: 1000, refreshed_at: REFRESHED },
-  { source: 'bazos', category_main: 'pozemek', quality: 'active_no_claims', sibling_has_pin: false, n: 5, refreshed_at: REFRESHED },
+  { state: 'unresolved', source: 'sreality', category_main: 'byt', quality: 'delisted_no_claims', sibling_has_pin: false, n: 290, refreshed_at: REFRESHED },
+  { state: 'unresolved', source: 'sreality', category_main: 'byt', quality: 'delisted_no_claims', sibling_has_pin: true, n: 10, refreshed_at: REFRESHED },
+  { state: 'unresolved', source: 'sreality', category_main: 'byt', quality: 'active_unresolved', sibling_has_pin: false, n: 20, refreshed_at: REFRESHED },
+  { state: 'unresolved', source: 'sreality', category_main: 'pozemek', quality: 'delisted_no_claims', sibling_has_pin: false, n: 7, refreshed_at: REFRESHED },
+  { state: 'unresolved', source: 'bazos', category_main: 'byt', quality: 'active_no_claims', sibling_has_pin: false, n: 1000, refreshed_at: REFRESHED },
+  { state: 'unresolved', source: 'bazos', category_main: 'pozemek', quality: 'active_no_claims', sibling_has_pin: false, n: 5, refreshed_at: REFRESHED },
+  /* The other state: the lane simply has not reached these yet. Deliberately a
+   * portal and a type the unresolved set does not carry, so a leak between the
+   * two shows up as an extra matrix row rather than a bigger number. */
+  { state: 'pending', source: 'idnes', category_main: 'dum', quality: 'active_no_claims', sibling_has_pin: false, n: 40, refreshed_at: REFRESHED },
+  { state: 'pending', source: 'idnes', category_main: 'dum', quality: 'active_unresolved', sibling_has_pin: true, n: 5, refreshed_at: REFRESHED },
 ];
 
 const ROW: pinAudit.PinAuditRow = {
@@ -64,6 +71,7 @@ const ROW: pinAudit.PinAuditRow = {
   claims_now: false,
   sibling_has_pin: true,
   quality: 'delisted_no_claims',
+  state: 'unresolved',
   refreshed_at: REFRESHED,
 };
 
@@ -176,18 +184,86 @@ describe('LocationPinAudit', () => {
     expect(within(row).getByText('má polohu')).toBeInTheDocument();
   });
 
-  it('states the split the ruling turns on, over the whole set', async () => {
+  it('states the split the ruling turns on, over the selected state', async () => {
     renderPage();
-    /* 1332 total, 1025 active (1000 + 5 + 20), 307 delisted, 10 recoverable
-     * from a sibling listing — all read off the same summary payload. */
+    /* The unresolved set: 1332 rows, 1025 active (1000 + 5 + 20), 307 delisted,
+     * 10 recoverable from a sibling listing — all off the same payload. */
     await waitFor(() =>
-      expect(
-        screen.getByText(/Celkem 1 332 inzerátů · 1 025 běží · 307 stažených/),
-      ).toBeInTheDocument(),
+      expect(screen.getByText(/1 025 běží · 307 stažených/)).toBeInTheDocument(),
     );
     expect(
       screen.getByText(/u 10 má jiný inzerát téže nemovitosti polohu určenou/),
     ).toBeInTheDocument();
+  });
+
+  it('prints BOTH state totals, and says which one is the problem', async () => {
+    renderPage();
+    const totals = await screen.findByTestId('pin-audit-state-totals');
+    /* 45 waiting (40 + 5) and 1 332 processed-but-undecided. */
+    await waitFor(() =>
+      expect(totals).toHaveTextContent(/čeká na zpracování:\s*45/),
+    );
+    expect(totals).toHaveTextContent(/není problém/);
+    expect(totals).toHaveTextContent(/zpracováno, nerozhodnuto:\s*1\s*332/);
+    expect(totals).toHaveTextContent(/toto je problém/);
+  });
+
+  it('opens on the issue, not on the waiting room', async () => {
+    renderPage();
+    await waitFor(() =>
+      expect(vi.mocked(pinAudit.fetchPinAuditPage)).toHaveBeenCalled(),
+    );
+    const first = vi.mocked(pinAudit.fetchPinAuditPage).mock.calls[0];
+    expect(first[0].state).toBe('unresolved');
+    /* And the matrix is the unresolved cohort only: idnes is pending-only. */
+    expect(screen.queryByTestId('pin-audit-matrix-idnes')).toBeNull();
+  });
+
+  it('the state toggle re-scopes the matrix AND the server read', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('pin-audit-matrix-sreality');
+
+    await user.click(
+      screen.getByRole('button', { name: /čeká na zpracování \(45\)/ }),
+    );
+
+    await waitFor(() => {
+      const calls = vi.mocked(pinAudit.fetchPinAuditPage).mock.calls;
+      expect(calls[calls.length - 1][0].state).toBe('pending');
+    });
+    const idnes = screen.getByTestId('pin-audit-matrix-idnes');
+    const cells = within(idnes).getAllByRole('cell');
+    expect(cells[cells.length - 1]).toHaveTextContent('45');
+    expect(screen.queryByTestId('pin-audit-matrix-sreality')).toBeNull();
+  });
+
+  it('hides the verdict buckets under pending — there is no verdict yet', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('pin-audit-matrix-sreality');
+    /* Chosen first, so the assertion cannot pass on a stale render. */
+    await user.click(
+      screen.getByRole('button', {
+        name: 'inzerát běží · nebylo z čeho polohu určit',
+      }),
+    );
+
+    await user.click(
+      screen.getByRole('button', { name: /čeká na zpracování \(45\)/ }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', {
+          name: 'inzerát běží · nebylo z čeho polohu určit',
+        }),
+      ).toBeNull(),
+    );
+    /* And the filter goes with the chips: a leftover bucket must not narrow the
+     * pending list behind the operator's back. */
+    const calls = vi.mocked(pinAudit.fetchPinAuditPage).mock.calls;
+    expect(calls[calls.length - 1][0].qualities).toEqual([]);
   });
 
   it('sends the sibling filter to the server', async () => {

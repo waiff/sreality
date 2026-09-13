@@ -146,7 +146,10 @@ function TopBar() {
     refetchInterval: 60_000,
   });
   const unread = unreadQ.data?.unread_count ?? 0;
-  /* The !AUDIT POLOH count. One head-count request, held for the session
+  /* The !AUDIT POLOH count — the UNRESOLVED rows only (W7-b): the listings the
+   * system finished and could not place. The ones it simply has not reached yet
+   * are normal traffic, and a badge that counted them would climb every time the
+   * scrapers ran. One head-count request, held for the session
    * (`staleTime: Infinity`) because the matview behind it only refreshes
    * hourly; the audit page invalidates this key on open, which is the one
    * moment a fresh number is worth a round trip. `retry: false` + reading
@@ -231,7 +234,7 @@ function TopBar() {
                           </span>
                           <span className="sr-only">
                             {' '}
-                            {pinAuditTotal} inzerátů k auditu
+                            {pinAuditTotal} inzerátů s nevyřešenou polohou
                           </span>
                         </>
                       )}
