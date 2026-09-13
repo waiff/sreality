@@ -48,8 +48,6 @@ import type {
   ScraperHealthChecks,
 } from './types';
 import type { BorderCase } from './api';
-import { CITY_QUALITY_LEGACY } from './cityQualityLegacy';
-import { MAP_LEGACY } from './mapLegacy';
 
 /* Circle → bounding box approximation. Used when the operator picks
  * the centre+radius mode on the map: PostgREST has no native
@@ -547,16 +545,6 @@ async function resolveTagPrefilter(
   return rows.map((r) => r.property_id);
 }
 
-/* Phase QUAL — `listings_with_city_quality` RPC prefilter. Same
- * composition pattern as the tags prefilter above: when ANY city-quality
- * predicate is active, the RPC returns the listing_id allowlist and the
- * main listings query AND's it via `.in('listing_id', ids)`. Returns
- * null when no city-quality filter is set so the fast path stays
- * unchanged. Keyed on the surrogate `listing_id` (migration 351), NOT
- * sreality_id — a post-Gate-2 non-sreality repr has a NULL sreality_id, and
- * `IN` never matches NULL, so the old sreality-keyed filter silently dropped
- * those listings from Map/Table/Cards/Count while browse_stats still counted
- * them (count-vs-list divergence). */
 /* min/max city population and the near_* proximity filters are NOT here:
  * since migration 142 they're precomputed columns on properties_public, so
  * they dispatch directly via applyRegistryFilters (no prefilter RPC, no anon
@@ -594,38 +582,6 @@ async function resolveCityQualityObecPrefilter(
     );
   }
   return ids;
-}
-
-async function resolveCityQualityPrefilterLegacy(
-  f: ListingFilters,
-): Promise<number[] | null> {
-  if (!hasCityQualityFilter(f)) return null;
-  /* Filters carry the wire shape (snake_case) directly so no translation layer
-   * is needed before calling the RPC. Exhaustive by contract, same reason as
-   * `resolveTagPrefilter`. */
-  const rows = await fetchAllRows<{ listing_id: number }>({
-    relation: 'listings_with_city_quality',
-    build: () =>
-      supabase.rpc(
-        'listings_with_city_quality',
-        {
-          p_index_rules: f.cityIndexRules.length === 0 ? null : f.cityIndexRules,
-          /* pop bounds moved to the home_obec_pop column filter (migration 142);
-           * never sent through this RPC anymore. */
-          p_pop_min: null,
-          p_pop_max: null,
-          p_proximity: f.nearCityProximity,
-        },
-        { count: 'exact' },
-      ),
-    /* The RPC returns the surrogate `listing_id` (migration 351); the row type
-     * pins that so a stray `r.sreality_id` can't silently reintroduce the
-     * id-space half-swap. Applied downstream via `.in('listing_id', ids)`. */
-    orderBy: [{ column: 'listing_id' }],
-    key: ['listing_id'],
-    expectMax: 100_000,
-  });
-  return rows.map((r) => r.listing_id);
 }
 
 /* Market-growth (price-stats datasets) prefilter. For each active rule the
@@ -746,7 +702,6 @@ const intersectPrefilters = (
  * matched nothing, so the caller can short-circuit to zero results without
  * issuing the main query. Shared by the Map / Table / Cards fetchers. */
 export interface BrowsePrefilters {
-  listingIds: number[] | null;    // LEGACY city-quality path only (?cityQualityLegacy=1); W7 deletes this field
   obecIds: number[] | null;       // market growth (price-stats datasets)
   propertyIds: number[] | null;   // tags ∩ with-estimates (property grain)
   brokerListingIds: number[] | null;  // broker scope (listing grain) — see resolveBrokerPrefilter
@@ -756,11 +711,10 @@ export interface BrowsePrefilters {
 async function resolveBrowsePrefilters(
   f: ListingFilters,
 ): Promise<BrowsePrefilters> {
-  const [tagProps, cityObec, cityLegacyIds, growthObec, estimateProps, pipelineProps, brokerListingIds] =
+  const [tagProps, cityObec, growthObec, estimateProps, pipelineProps, brokerListingIds] =
     await Promise.all([
       resolveTagPrefilter(f),
-      CITY_QUALITY_LEGACY ? Promise.resolve(null) : resolveCityQualityObecPrefilter(f),
-      CITY_QUALITY_LEGACY ? resolveCityQualityPrefilterLegacy(f) : Promise.resolve(null),
+      resolveCityQualityObecPrefilter(f),
       resolvePriceGrowthPrefilter(f),
       resolveEstimatesPrefilter(f),
       resolvePipelinePrefilter(f),
@@ -779,21 +733,19 @@ async function resolveBrowsePrefilters(
   const obecIds = intersectPrefilters(cityObec, growthObec);
   const empty =
     (obecIds != null && obecIds.length === 0)
-    || (cityLegacyIds != null && cityLegacyIds.length === 0)
     || (propertyIds != null && propertyIds.length === 0)
     || (brokerListingIds != null && brokerListingIds.length === 0);
-  return { listingIds: cityLegacyIds, obecIds, propertyIds, brokerListingIds, empty };
+  return { obecIds, propertyIds, brokerListingIds, empty };
 }
 
-/* Exported for queries.test.ts — pins that the city-quality allowlist filters on
- * the surrogate `listing_id` (migration 351), not the nullable `sreality_id`
+/* Exported for queries.test.ts — pins that the broker allowlist filters on the
+ * surrogate `listing_id` (migration 351), not the nullable `sreality_id`
  * (passing a sreality_id into an `IN listing_id` predicate would silently read a
  * DIFFERENT listing, the id-spaces overlap by ~435). */
 export const applyPrefilters = <T>(q: T, p: BrowsePrefilters): T => {
   let r = q as unknown as {
     in: (c: string, v: readonly unknown[]) => typeof r;
   };
-  if (p.listingIds != null) r = r.in('listing_id', p.listingIds);
   if (p.obecIds != null) r = r.in('obec_id', p.obecIds);
   if (p.propertyIds != null) r = r.in('property_id', p.propertyIds);
   if (p.brokerListingIds != null) r = r.in('listing_id', p.brokerListingIds);
@@ -896,7 +848,7 @@ export const fetchListingsForMap = async (
   const pre = await resolveBrowsePrefilters(f);
   if (pre.empty) return { rows: [], cells: null, total: 0, offGrid: 0, capped: false };
 
-  /* W6b. Two lanes still read points unbounded, and both are deliberate:
+  /* W6b. One lane still reads points unbounded, and it is deliberate:
    *
    *  - PORTAL MIRROR reads `listing_feed_public`, a live listing-grain view over
    *    `listings` with no matview twin and no cover index to aggregate against.
@@ -904,7 +856,6 @@ export const fetchListingsForMap = async (
    *    inside one function AND would silently swap the mirror's grain. The
    *    mirror's largest cohort (idnes) exceeds MAP_CAP, so it can still truncate
    *    — the pill says so, and closing it is FILED, not attempted here.
-   *  - ?map=legacy is the bisect hatch (lib/mapLegacy.ts).
    *
    * The BROKER SCOPE takes the same point lane, for the same reason: it is
    * listing-grain by construction (isBrokerScoped — a merged property can carry
@@ -917,7 +868,7 @@ export const fetchListingsForMap = async (
    * relation swap and the lane choice can never disagree.
    *
    * Everything else asks the server for a bounded answer first. */
-  if (MAP_LEGACY || isListingGrain(f)) {
+  if (isListingGrain(f)) {
     const rows = await fetchMapPoints(f, pre);
     return {
       rows,
@@ -937,20 +888,15 @@ export const fetchListingsForMap = async (
    *   (idempotent, but the tag one is a GROUP BY ... HAVING subquery, so it is
    *   not free), and, worse, would put two resolution paths in one fetcher.
    *
-   *   listing_ids_filter is the third id space applyPrefilters emits `.in()` on.
-   *   browse_stats_properties has no such parameter because the legacy
-   *   city-quality path reaches it as city_index_rules instead; the map resolves
-   *   it to listing ids, and an RPC carrying only obec_id and property_id would
-   *   drop it silently. Live whenever ?cityQualityLegacy=1 is in localStorage.
-   *
-   *   The broker allowlist is the FOURTH `.in()` applyPrefilters emits, on the
-   *   same listing_id column — so it is handed over intersected into the same
-   *   parameter (listing_id ∈ A ∩ B is exact). A broker scope never actually
-   *   reaches this lane (it is listing-grain and routed above), so this is the
-   *   contract being kept complete, not the path that plots a broker's pins:
-   *   if a future lane change ever did send one here, it would be constrained
-   *   (repr-grain, degraded) rather than silently widened to the whole market.
-   *   tests/test_browse_map_read_contract.py pins every emitted id space. */
+   *   listing_ids_filter carries the broker allowlist, the one listing-grain
+   *   `.in()` applyPrefilters still emits (W3 S4 deleted the legacy
+   *   city-quality path, which was the other one). A broker scope never
+   *   actually reaches this lane (it is listing-grain and routed above), so
+   *   this is the contract being kept complete, not the path that plots a
+   *   broker's pins: if a future lane change ever did send one here, it would
+   *   be constrained (repr-grain, degraded) rather than silently widened to the
+   *   whole market. tests/test_browse_map_read_contract.py pins every emitted
+   *   id space. */
   const { data, error } = await supabase.rpc('browse_map_cells', {
     ...buildBrowseStatsArgs(f, {
       obec_ids_filter: pre.obecIds,
@@ -959,7 +905,7 @@ export const fetchListingsForMap = async (
     tag_ids: null,
     with_estimates: false,
     city_index_rules: null,
-    listing_ids_filter: intersectPrefilters(pre.listingIds, pre.brokerListingIds),
+    listing_ids_filter: pre.brokerListingIds,
     point_budget: MAP_POINT_BUDGET,
   });
   if (error) throw error;
@@ -1371,13 +1317,13 @@ export const buildBrowseStatsArgs = (
     bbox_south:              effBbox?.south ?? null,
     bbox_east:               effBbox?.east  ?? null,
     bbox_north:              effBbox?.north ?? null,
-    /* Phase QUAL — same shape the `listings_with_city_quality` RPC
-     * accepts. Migration 080 added these four params to browse_stats
-     * so Stats counts stay aligned with Map / Table when a city-
-     * quality filter is active. */
-    city_index_rules:        CITY_QUALITY_LEGACY && f.cityIndexRules.length > 0
-                               ? f.cityIndexRules
-                               : null,
+    /* Phase QUAL. The rules never travel as rules any more: W5 resolved them
+     * to an obec allowlist (curated_cities_matching -> obec_ids_filter) and W3
+     * S4 deleted the `?cityQualityLegacy=1` hatch that was the only caller
+     * still sending them here. The parameter stays in the signature because
+     * dropping it needs a DROP FUNCTION and would break every deployed bundle
+     * mid-rollout; it is inert. */
+    city_index_rules:        null,
     city_pop_min:            f.minCityPopulation,
     city_pop_max:            f.maxCityPopulation,
     city_proximity:          null,   // retired (W5); the RPC raises on a non-null value
@@ -1426,12 +1372,10 @@ export const fetchBrowseStats = async (
    * qualifies (the RPC's `= any('{}')` then yields total 0). Keeps Stats
    * aligned with Map/Table. */
   const growthObec = await resolvePriceGrowthPrefilter(f);
-  /* City-quality is obec-grain now and feeds the SAME obec_ids_filter parameter, so the two
-   * allowlists intersect here exactly as they do on the cohort reads. Under the legacy flag
-   * the rules travel as city_index_rules instead — browse_stats_properties still accepts the
-   * parameter and routes it through curated_cities_matching(), so BOTH spellings resolve to
-   * one definition (rule 16). W7 drops the parameter. */
-  const cityObec = CITY_QUALITY_LEGACY ? null : await resolveCityQualityObecPrefilter(f);
+  /* City-quality is obec-grain and feeds the SAME obec_ids_filter parameter, so the two
+   * allowlists intersect here exactly as they do on the cohort reads — ONE definition of
+   * "matches" (rule 16), with no second spelling left to keep in step. */
+  const cityObec = await resolveCityQualityObecPrefilter(f);
   /* Deal-pipeline allowlist (property_ids); same contract as growthObec above —
    * null = scope off, [] = an empty pipeline (the RPC's `= any('{}')` then
    * yields total 0). Without this the Stats tab would keep counting the whole

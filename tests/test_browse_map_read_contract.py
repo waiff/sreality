@@ -36,7 +36,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 QUERIES_TS = REPO / "frontend" / "src" / "lib" / "queries.ts"
-MAP_LEGACY_TS = REPO / "frontend" / "src" / "lib" / "mapLegacy.ts"
 MIGRATIONS = REPO / "migrations"
 
 # The two parameters browse_map_cells has on purpose and browse_stats_properties does not.
@@ -167,23 +166,24 @@ def test_the_map_rpc_carries_all_three_prefilter_id_spaces() -> None:
     emits `.in()` on three columns. The RPC read has no `.in()` to inherit, so each space
     has to be handed over by name.
 
-    RED by: deleting `listing_ids_filter: pre.listingIds` from the browse_map_cells call
-    (the shape an RPC modelled on browse_stats_properties' parameter list alone would
-    have had), or by adding a fourth `.in()` to applyPrefilters without a matching
+    RED by: deleting `listing_ids_filter: pre.brokerListingIds` from the browse_map_cells
+    call (the shape an RPC modelled on browse_stats_properties' parameter list alone
+    would have had), or by adding a fourth `.in()` to applyPrefilters without a matching
     argument. Neither raises: the map would simply show a cohort the rest of Browse does
     not.
     """
     src = _ts()
     at = src.index("export const applyPrefilters")
     body = _strip_ts_comments(_balanced_block(src, src.index("{", at)))
-    # Every (column, field) pair, NOT a dict keyed on column: two allowlists share
-    # listing_id (the legacy city-quality one and the broker scope), and a dict
-    # would keep only the last, silently un-pinning the other.
+    # Every (column, field) pair, NOT a dict keyed on column: the shape has to
+    # survive two allowlists sharing one column again (W3 S4 deleted the legacy
+    # city-quality listing-id space, which was listing_id's second claimant), and
+    # a dict would keep only the last, silently un-pinning the other.
     pairs = re.findall(r"\.in\('([a-z_]+)',\s*p\.([A-Za-z]+)\)", body)
     assert {column for column, _ in pairs} == {"listing_id", "obec_id", "property_id"}, (
         f"applyPrefilters' id spaces changed: {pairs}"
     )
-    assert len(pairs) >= 4, f"applyPrefilters lost an allowlist: {pairs}"
+    assert len(pairs) >= 3, f"applyPrefilters lost an allowlist: {pairs}"
 
     call = _rpc_call_block("browse_map_cells")
     for column, field in pairs:
@@ -210,8 +210,8 @@ def test_every_listing_grain_scope_takes_the_point_lane() -> None:
     src = _strip_ts_comments(_ts())
     at = src.index("export const fetchListingsForMap")
     body = _balanced_block(src, src.index("{", at))
-    assert re.search(r"if \(MAP_LEGACY \|\| isListingGrain\(f\)\)", body), (
-        "fetchListingsForMap's point-lane guard is no longer `MAP_LEGACY || isListingGrain(f)` "
+    assert re.search(r"if \(isListingGrain\(f\)\)", body), (
+        "fetchListingsForMap's point-lane guard is no longer `isListingGrain(f)` "
         "— a listing-grain scope can reach the property-grain browse_map_cells lane."
     )
     for fn in ("listRelation", "mapRelation", "keysetTiebreak"):
@@ -223,31 +223,23 @@ def test_every_listing_grain_scope_takes_the_point_lane() -> None:
         )
 
 
-def test_the_map_legacy_flag_is_read_once_at_module_load() -> None:
-    """`?map=legacy` must be a module-load constant, not a runtime lookup.
+def test_the_map_lane_is_chosen_from_the_filters_alone() -> None:
+    """The points-vs-cells lane must be a function of the FILTERS, nothing else.
 
-    The map query is keyed `['map', filters]`. A flag that can change between renders
-    without changing that key lets react-query serve a CLUSTER payload out of a cache
-    entry warmed by a POINTS payload — ListingMap is then handed `cells` for `rows` or the
-    reverse, with no refetch and no error. cityQualityLegacy.ts made the same choice for
-    the same reason.
+    The map query is keyed `['map', filters]`. Anything outside that key that can change
+    the SHAPE of the answer between renders lets react-query serve a CLUSTER payload out
+    of a cache entry warmed by a POINTS payload — ListingMap is then handed `cells` for
+    `rows` or the reverse, with no refetch and no error. That is exactly why `?map=legacy`
+    was a module-load constant while it existed; W3 S4 deleted the hatch, and this is the
+    invariant it was obeying, kept without it.
 
-    RED by: exporting the detector itself (`export const MAP_LEGACY = detect`) or reading
-    `window.location` / `localStorage` inside fetchListingsForMap.
+    RED by: reading `window.location` / `localStorage` inside fetchListingsForMap to
+    resurrect a runtime lane switch.
     """
-    src = _strip_ts_comments(MAP_LEGACY_TS.read_text(encoding="utf-8"))
-    assert re.search(r"export const MAP_LEGACY\s*=\s*detect\(\)\s*;", src), (
-        "mapLegacy.ts must export the RESULT of detect(), evaluated once at module load"
-    )
-    assert "try {" in src and "catch" in src, (
-        "the localStorage accessor itself throws in a private window (or with site data "
-        "blocked) — cityQualityLegacy.ts guards it and this must too"
-    )
-
     fetcher_at = _ts().index("export const fetchListingsForMap")
     fetcher = _strip_ts_comments(_ts()[fetcher_at: fetcher_at + 4000])
     for forbidden in ("window.location", "localStorage", "URLSearchParams"):
         assert forbidden not in fetcher, (
             f"fetchListingsForMap reads {forbidden} directly — the lane choice must come "
-            "from the module-load constant, or the react-query cache can mix shapes."
+            "from the filters, or the react-query cache can mix shapes."
         )

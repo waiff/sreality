@@ -68,6 +68,14 @@ LEVEL_ALIASES: dict[str, str] = {"locality": "obec"}
 # Positive RÚIAN codes only, so this matches no row at any level.
 NO_MATCH_CODE = -1
 
+# Operator action A5, DECIDED 2026-09-09: a location filter's default is
+# `certain ∪ possible` with the possible rows BADGED, never strict-by-default
+# with an "include approximate" toggle. It lives here because this module is the
+# filter — W3 S4 deleted `location_data/serving_contracts.py`, whose fourteen
+# per-feature floors were declarations no consumer ever read, and this was the
+# one line in it that recorded a DECISION rather than an intention.
+FILTER_DEFAULT_SEMANTICS = "include_and_badge"
+
 CHIP_LEVELS: frozenset[str] = frozenset(LEVEL_COLUMN) | frozenset(LEVEL_ALIASES)
 
 

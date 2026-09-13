@@ -250,7 +250,7 @@ incident history: `docs/architecture.md` § Architectural rules.
     relation and deleted `serving_flags.py` — no `location_v2` flag; flipping a reader is a PR. The legacy `listings`
     columns (`geom`, `obec_id`…`ku_id` from trigger 289, `street`/`street_name_key`) survive until the sprint's
     legacy-deletion wave (`roadmap/location-data.md` § The simplification sprint, W4 — NOT the older location W4,
-    closed 09-10); NEW code never reads them, `serving_contracts.py` declares the floor, granularity compares by RANK.
+    closed 09-10); NEW code never reads them. W3 S4 (mig 506) deleted `serving_contracts.py`; granularity compares by RANK.
 25. **Location: one store, one lane, eleven claim types, no flags; every location PR deletes at least as much
     as it adds.** One answer table (`listing_location`, 26 fields) by ONE four-step resolver (bind → fill →
     grade → check), one hourly intake lane over the payload + page body, ≤ 1 contract entry per claim type + a

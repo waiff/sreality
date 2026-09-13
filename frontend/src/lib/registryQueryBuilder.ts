@@ -47,7 +47,7 @@ export const HAND_CODED_BROWSE_FILTERS: ReadonlySet<string> = new Set([
   'recently_changed_days',
   // One enum → IN over multiple building_type values (cihla/panel/smisena/ostatni-bucket).
   'building_material',
-  // Multi-chip → admin-id match + place_search_text ILIKE (districtsFilterClause).
+  // Multi-chip → RUIAN code equality per level (districtCodes.districtsFilterClause).
   'districts',
   // Multi-select enums whose '__unknown__' sentinel needs an `.or(is.null,…)`
   // predicate the plain `.in` auto-path can't express.
