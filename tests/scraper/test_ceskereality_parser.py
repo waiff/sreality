@@ -256,9 +256,6 @@ def test_parse_detail_content_hash_and_bridges_to_ingest():
     assert row["category_main"] == "byt"
     assert row["price_czk"] == 6_999_000
     assert row["area_m2"] == 41.0
-    assert row["lat"] == 50.06975
-    assert row["lon"] == 14.462591944444
-    assert row["street"] == "Moldavská"
 
 
 def test_category_from_detail_url():

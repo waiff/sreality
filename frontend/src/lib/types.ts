@@ -664,7 +664,7 @@ export interface EstimationRun {
    * overrides the comparables-based primary estimate. */
   reference_rent: ReferenceRent | null;
   /* Server-derived display string emitted only by GET /estimations:
-   * listings.district for sreality runs, else the latest
+   * the resolved town (listing_location.obec_name) for sreality runs, else the latest
    * parsed_url_cache extraction.locality.value for the run's input_url.
    * Null when neither path resolves. Not returned by GET /estimations/:id. */
   locality_display?: string | null;

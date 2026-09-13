@@ -316,7 +316,7 @@ def build_corridor_query(
         f"    {per_m2_sql('l')} AS price_per_m2,\n"
         f"    {per_m2_basis_sql('l')} AS price_per_m2_basis,\n"
         "    l.category_main, l.category_type, l.area_basis,\n"
-        "    l.disposition, l.district,\n"
+        "    l.disposition, ll.okres_name AS district,\n"
         "    l.floor, l.total_floors,\n"
         "    l.building_type, l.condition, l.energy_rating,\n"
         "    l.has_balcony, l.has_lift, l.has_parking,\n"

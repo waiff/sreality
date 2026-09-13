@@ -73,11 +73,11 @@ def _seed(
     area: float,
     category_main: str = "byt",
     category_type: str = "prodej",
-) -> tuple[int, int, str]:
+) -> tuple[int, int]:
     """One property and its single representative child, with a coherent
     numerator and denominator (that coherence is W3 / migration 424's job; this
-    wave assumes it and measures the ratio)."""
-    district = f"w4-{uuid.uuid4()}"
+    wave assumes it and measures the ratio). No place at all: W4-c dropped every
+    location column from both tables, and the per-m2 measure never read one."""
     sid = next(_SREALITY_IDS)
 
     cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
@@ -85,23 +85,22 @@ def _seed(
 
     cur.execute(
         "INSERT INTO listings (sreality_id, source, source_id_native, raw_json, "
-        "category_main, category_type, price_czk, area_m2, disposition, district, "
+        "category_main, category_type, price_czk, area_m2, disposition, "
         "is_active, published_at, property_id) "
-        "VALUES (%s, 'sreality', %s, '{}'::jsonb, %s, %s, %s, %s, '3+kk', %s, "
+        "VALUES (%s, 'sreality', %s, '{}'::jsonb, %s, %s, %s, %s, '3+kk', "
         "true, now(), %s) RETURNING id",
-        (sid, f"w4-{uuid.uuid4()}", category_main, category_type, price, area,
-         district, pid),
+        (sid, f"w4-{uuid.uuid4()}", category_main, category_type, price, area, pid),
     )
     lid = int(cur.fetchone()[0])
 
     cur.execute(
         "UPDATE properties SET category_main = %s, category_type = %s, "
         "       current_price_czk = %s, area_m2 = %s, disposition = '3+kk', "
-        "       district = %s, status = 'active', is_active = true, "
+        "       status = 'active', is_active = true, "
         "       published_at = now(), repr_listing_id = %s, "
         "       repr_listing_ref_id = %s "
         " WHERE id = %s",
-        (category_main, category_type, price, area, district, sid, lid, pid),
+        (category_main, category_type, price, area, sid, lid, pid),
     )
 
     # browse_list is a materialised copy of browse_projection (`select *`), so
@@ -113,7 +112,7 @@ def _seed(
     )
     assert cur.rowcount == 1, "browse_projection did not publish the seeded property"
 
-    return pid, lid, district
+    return pid, lid
 
 
 def _put_on_the_board(cur: Any, pid: int) -> None:
@@ -200,12 +199,6 @@ def _browse_stats(cur: Any, pids: int | list[int]) -> dict[str, Any]:
     )
 
 
-def _region_stats(cur: Any, district: str) -> dict[str, Any]:
-    return _one(
-        cur, "SELECT region_stats(districts_filter => %s::text[])", ([district],)
-    )
-
-
 # --------------------------------------------------------------------------
 # The keystone assertion
 # --------------------------------------------------------------------------
@@ -224,7 +217,7 @@ def _region_stats(cur: Any, district: str) -> dict[str, Any]:
     ],
 )
 def test_every_relation_publishes_the_identical_per_m2(cur, price, area, expected):
-    pid, lid, district = _seed(cur, price=price, area=area)
+    pid, lid = _seed(cur, price=price, area=area)
     _put_on_the_board(cur, pid)
 
     got = _every_surface(cur, pid, lid)
@@ -252,13 +245,12 @@ def test_every_relation_publishes_the_identical_per_m2(cur, price, area, expecte
 
 
 def test_every_relation_publishes_the_identical_basis_label(cur):
-    pid, lid, district = _seed(cur, price=5_000_000, area=50.0)
+    pid, lid = _seed(cur, price=5_000_000, area=50.0)
     _put_on_the_board(cur, pid)
 
     bases = _bases(cur, pid, lid)
     assert set(bases.values()) == {"sale_capital_czk_m2"}, bases
     assert _browse_stats(cur, pid)["ppm2_basis"] == "sale_capital_czk_m2"
-    assert _region_stats(cur, district)["ppm2_basis"] == "sale_capital_czk_m2"
 
 
 @pytest.mark.parametrize(
@@ -279,7 +271,7 @@ def test_every_relation_publishes_the_identical_basis_label(cur):
 def test_basis_resolves_from_the_category_pair(
     cur, category_main, category_type, expected_basis
 ):
-    pid, lid, _district = _seed(
+    pid, lid = _seed(
         cur, price=5_000_000, area=50.0,
         category_main=category_main, category_type=category_type,
     )
@@ -293,7 +285,7 @@ def test_basis_resolves_from_the_category_pair(
 def test_an_unknown_category_type_yields_no_measure_and_no_label(cur):
     """... and anything OUTSIDE the vocabulary yields a visible gap, never a
     guess. A silent basis switch is strictly worse than a missing number."""
-    pid, lid, _district = _seed(
+    pid, lid = _seed(
         cur, price=5_000_000, area=50.0, category_type="zcela-novy-typ"
     )
     _put_on_the_board(cur, pid)
@@ -318,7 +310,7 @@ def test_an_unknown_category_type_yields_no_measure_and_no_label(cur):
     ],
 )
 def test_per_basis_validity_floors(cur, category_main, category_type, price, survives):
-    pid, lid, _district = _seed(
+    pid, lid = _seed(
         cur, price=price, area=50.0,
         category_main=category_main, category_type=category_type,
     )
@@ -349,12 +341,11 @@ def test_a_mixed_cohort_is_labelled_mixed_not_guessed(cur):
     """`category_type_filter` is nullable by architectural rule 22 ("Vse"), so a
     cohort pooling a capital sale and a monthly rent is ONE click away. It must
     say so rather than pick one of the two."""
-    sale, _l1, district = _seed(cur, price=5_000_000, area=50.0)
+    sale, _l1 = _seed(cur, price=5_000_000, area=50.0)
     cur.execute(
         "INSERT INTO properties (category_main, category_type, current_price_czk, "
-        "area_m2, district, status, is_active, published_at) "
-        "VALUES ('byt', 'pronajem', 20000, 50, %s, 'active', true, now()) RETURNING id",
-        (district,),
+        "area_m2, status, is_active, published_at) "
+        "VALUES ('byt', 'pronajem', 20000, 50, 'active', true, now()) RETURNING id"
     )
     rent = int(cur.fetchone()[0])
     cur.execute(
@@ -368,39 +359,6 @@ def test_a_mixed_cohort_is_labelled_mixed_not_guessed(cur):
         "a cohort pooling capital sale prices and monthly rents into one Kc/m2 "
         "distribution must be labelled 'mixed'"
     )
-    assert _region_stats(cur, district)["ppm2_basis"] == "mixed"
-
-
-def test_region_stats_can_finally_be_scoped_to_one_basis(cur):
-    """Before 425 region_stats had NO category parameter at all: sale flats,
-    monthly rentals, houses and land pooled into one Kc/m2 distribution
-    unconditionally. This is the fix, and the two new parameters are appended
-    with defaults so every existing 5-argument call keeps working."""
-    _sale, _l1, district = _seed(cur, price=5_000_000, area=50.0)
-    cur.execute(
-        "INSERT INTO properties (category_main, category_type, current_price_czk, "
-        "area_m2, district, status, is_active, published_at) "
-        "VALUES ('byt', 'pronajem', 20000, 50, %s, 'active', true, now())",
-        (district,),
-    )
-
-    pooled = _region_stats(cur, district)
-    assert pooled["ppm2_basis"] == "mixed"
-
-    scoped = _one(
-        cur,
-        "SELECT region_stats(districts_filter => %s::text[], "
-        "                    category_type_filter => 'prodej')",
-        ([district],),
-    )
-    assert scoped["ppm2_basis"] == "sale_capital_czk_m2"
-    assert scoped["ppm2"]["p50"] == 100_000
-    assert scoped["total_active"] == 1
-
-
-# --------------------------------------------------------------------------
-# The plans
-# --------------------------------------------------------------------------
 
 
 def _plan(cur: Any, sql: str, args: tuple[Any, ...] = ()) -> str:
@@ -513,11 +471,11 @@ def test_coverage_arm_counts_rows_whose_area_is_NULL(cur):
     pid = int(cur.fetchone()[0])
     cur.execute(
         "INSERT INTO listings (sreality_id, source, source_id_native, raw_json, "
-        "category_main, category_type, price_czk, area_m2, district, is_active, "
+        "category_main, category_type, price_czk, area_m2, is_active, "
         "published_at, property_id) "
-        "VALUES (%s, 'sreality', %s, '{}'::jsonb, %s, %s, 3000000, NULL, %s, "
+        "VALUES (%s, 'sreality', %s, '{}'::jsonb, %s, %s, 3000000, NULL, "
         "true, now(), %s)",
-        (next(_SREALITY_IDS), f"w9-{uuid.uuid4()}", *cell, f"w9-{uuid.uuid4()}", pid),
+        (next(_SREALITY_IDS), f"w9-{uuid.uuid4()}", *cell, pid),
     )
 
     cur.execute(

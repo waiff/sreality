@@ -73,6 +73,10 @@ def parse_sreality_url(
                 sreality_id,
             )
 
+    # The subject's point, for the estimation spec only — `parse_listing` stops at
+    # the listings row, and W4-c left that row with no place at all.
+    spec["lat"], spec["lon"] = parser.locality_coords(raw)
+
     return {
         "sreality_id": sreality_id,
         "spec": spec,

@@ -52,7 +52,7 @@ class _Cursor:
                 (key, row["value"], row.get("description"), None)
                 if row is not None else None
             )
-        elif s.startswith("select region_id, count(*) from listings"):
+        elif s.startswith("select ll.kraj_kod as region_id, count(*) from listings"):
             self._rows = list(self._p.unscored_counts.items())
             self._last = None
         elif s.startswith("insert into app_settings"):

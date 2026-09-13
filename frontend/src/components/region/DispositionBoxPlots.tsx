@@ -1,5 +1,5 @@
-/* Per-disposition price-per-m² box plots backed by region_stats.dispositions[*].ppm2_box
- * (migration 021). One row per disposition that has a non-null ppm2_box; rows
+/* Per-disposition price-per-m² box plots backed by the region stats payload's
+ * dispositions[*].ppm2_box. One row per disposition that has a non-null ppm2_box; rows
  * with n < MIN_BOX_N render an "insufficient data" placeholder instead.
  *
  * Whisker convention: Tukey 1.5×IQR fences clipped to [min, max]. Individual

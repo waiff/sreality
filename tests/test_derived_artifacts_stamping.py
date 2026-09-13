@@ -122,6 +122,15 @@ def function_bodies(conn) -> dict[str, str]:
         return {r[0]: r[1] for r in cur.fetchall()}
 
 
+# A migration whose objects have been dropped again still carries its stamp call in
+# its text, and that call now names an artifact no database has a row for. 510 built
+# the TEMPORARY pin-loss audit matview; 513 retired it (and had to — 508 cannot drop
+# the `properties` place columns the matview depended on), and the CI replay skips
+# 510 for the same reason. The file stays on disk unedited: migrations are
+# append-only. Scanning it here would report a phantom producer.
+_RETIRED_MIGRATIONS = {"migrations/510_location_pin_audit.sql"}
+
+
 def _source_files() -> list[Path]:
     out: list[Path] = []
     for tree in _SOURCE_TREES:
@@ -156,6 +165,8 @@ def _repo_call_sites() -> tuple[dict[str, set[str]], dict[str, list[str]]]:
         if "stamp_derived_artifact" not in text:
             continue
         rel = path.relative_to(_REPO).as_posix()
+        if rel in _RETIRED_MIGRATIONS:
+            continue
         if path.suffix == ".sql":
             text = _drop_sql_comment_lines(text)
         pattern = _SQL_CALL if path.suffix == ".sql" else _PY_CALL

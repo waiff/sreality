@@ -14,7 +14,6 @@ from scraper.street import (
     looks_like_czech_street,
     reject_as_town,
     street_from_locality,
-    street_name_key,
 )
 
 
@@ -185,52 +184,3 @@ class TestRemaxDataAddress:
         assert street_from_locality(
             "Roztoky, Praha-západ", position="first", geo_names=("Roztoky",)
         ) is None
-
-
-class TestStreetNameKey:
-    """The match-time grouping key (migration 256 stores it on listings.street_name_key).
-
-    These golden cases are the REGRESSION GUARD: every stored key comes from THIS
-    one function, so a silent edit that changes its output would stale the whole
-    column. Lock the contract down."""
-
-    @pytest.mark.parametrize("street,expected", [
-        (None, None),
-        ("", None),
-        ("   ", None),
-        # diacritics folded + lowercased
-        ("Koterovská", "koterovska"),
-        ("Nádražní", "nadrazni"),
-        # leading "ul." / "ulice" decoration stripped
-        ("ul. Koterovská", "koterovska"),
-        ("ulice Dlouhá", "dlouha"),
-        # trailing house-number tokens stripped (bazos mines "ul. Koterovská 12")
-        ("ul. Koterovská 12", "koterovska"),
-        ("Hlavní 123/45", "hlavni"),
-        ("hlavni 123/4a", "hlavni"),
-        # generic street words ("náměstí"/"třída"/"sídliště"/"nábřeží") folded out
-        ("náměstí Míru", "miru"),
-        ("nám. Míru", "miru"),
-        ("třída Svobody", "svobody"),
-        ("tř. Svobody", "svobody"),
-        ("sídliště Máj 7", "maj"),
-        ("nábřeží Edvarda Beneše", "edvarda benese"),
-        # a street literally named only by a generic word keeps a usable key (fallback)
-        ("Náměstí", "namesti"),
-        # an internal abbreviation that is NOT a street word is preserved
-        ("tř. Kpt. Jaroše", "kpt. jarose"),
-        # prepositional names survive intact
-        ("K Lesu 8a", "k lesu"),
-    ])
-    def test_golden_cases(self, street, expected):
-        assert street_name_key(street) == expected
-
-    def test_portals_decorate_differently_but_key_the_same(self):
-        # The whole point: sreality's bare canonical name and bazos' decorated free-text
-        # capture of the SAME street must collapse to one key so they group together.
-        assert (
-            street_name_key("Koterovská")
-            == street_name_key("ul. Koterovská")
-            == street_name_key("ul. Koterovská 12")
-            == "koterovska"
-        )

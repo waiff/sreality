@@ -49,7 +49,7 @@ def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
     for source, payload, lat, lon in cases:
         entries = entries_for(source)
         (expected_version,) = {e.contract_version for e in entries}
-        result = extract_listing(listing(source, payload, lat=lat, lon=lon), entries)
+        result = extract_listing(listing(source, payload), entries)
         for claim in result.claims:
             seen += 1
             assert claim.blur_evidence in ("none", "declared"), (source, claim.extractor_id)

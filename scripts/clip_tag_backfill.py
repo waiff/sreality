@@ -50,8 +50,9 @@ LOG = logging.getLogger("clip_tag_backfill")
 _SELECT_REGION = """
     SELECT i.id, i.storage_path, (l.is_active IS TRUE) AS is_active
     FROM listings l
+    JOIN listing_location ll ON ll.listing_id = l.id
     JOIN images i ON i.listing_id = l.id
-    WHERE l.region_id = %(region)s
+    WHERE ll.kraj_kod = %(region)s
       AND i.clip_tagged_at IS NULL AND i.storage_path IS NOT NULL
       AND (%(shards)s = 1 OR i.id %% %(shards)s = %(shard)s)
     ORDER BY (l.is_active IS TRUE) DESC, i.id DESC

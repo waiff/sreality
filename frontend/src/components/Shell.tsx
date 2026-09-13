@@ -16,8 +16,6 @@ import { useBuildSkew } from '@/lib/useBuildSkew';
 import { MAIN_ID, useRouteFocus } from '@/lib/useRouteFocus';
 import SkipLink from './SkipLink';
 import { ROUTES } from '@/lib/routes';
-import { PIN_AUDIT_TOTAL_KEY, fetchPinAuditTotal } from '@/lib/pinAudit';
-import { fmtCount } from '@/lib/format';
 
 type NavItem = { to: string; label: string; disabled?: boolean; title?: string; admin?: boolean; agenda?: string };
 
@@ -25,12 +23,6 @@ type NavItem = { to: string; label: string; disabled?: boolean; title?: string; 
 // link to the session plan's agenda-visibility map (Settings › Tiers). Both
 // are UX — the routes themselves carry the security gates.
 const navItems: ReadonlyArray<NavItem> = [
-  /* FIRST on purpose, and shouting on purpose. The pin-loss audit is a
-   * decision the operator has to make before migration 503 can collapse the
-   * Browse map onto the new location store, and it was buried three clicks
-   * deep in the NEW DEDUP dropdown. It leaves this list (and loses the '!')
-   * when the ruling lands — see pages/LocationPinAudit.tsx. */
-  { to: ROUTES.newDedupPinAudit.build(), label: '!AUDIT POLOH', admin: true },
   { to: ROUTES.browse.build(),      label: 'Browse', agenda: 'browse' },
   { to: ROUTES.pipeline.build(),    label: 'Pipeline', agenda: 'pipeline' },
   { to: ROUTES.estimations.build(), label: 'Estimations', agenda: 'estimations' },
@@ -146,20 +138,6 @@ function TopBar() {
     refetchInterval: 60_000,
   });
   const unread = unreadQ.data?.unread_count ?? 0;
-  /* The !AUDIT POLOH count. One head-count request, held for the session
-   * (`staleTime: Infinity`) because the matview behind it only refreshes
-   * hourly; the audit page invalidates this key on open, which is the one
-   * moment a fresh number is worth a round trip. `retry: false` + reading
-   * `data` (never `isError`) is what keeps a failed count from touching
-   * navigation — the entry renders with no badge and still works. */
-  const pinAuditQ = useQuery({
-    queryKey: PIN_AUDIT_TOTAL_KEY,
-    queryFn: fetchPinAuditTotal,
-    enabled: isAdmin || !isSupabaseConfigured(),
-    staleTime: Infinity,
-    retry: false,
-  });
-  const pinAuditTotal = pinAuditQ.data ?? null;
   // Unconfigured local dev has no session (so no is_admin claim) — show the
   // full nav there, mirroring the guards' allow-through posture.
   const showAdmin = isAdmin || !isSupabaseConfigured();
@@ -220,21 +198,6 @@ function TopBar() {
                 {({ isActive }) => (
                   <NavLabel active={isActive}>
                     {item.label}
-                    {item.to === ROUTES.newDedupPinAudit.build() &&
-                      pinAuditTotal !== null && (
-                        <>
-                          <span
-                            className="ml-1.5 inline-flex items-center justify-center h-[1.05rem] px-1.5 rounded-full bg-[var(--color-brick)] text-white text-[0.6rem] font-medium tabular-nums"
-                            aria-hidden="true"
-                          >
-                            {fmtCount(pinAuditTotal)}
-                          </span>
-                          <span className="sr-only">
-                            {' '}
-                            {pinAuditTotal} inzerátů k auditu
-                          </span>
-                        </>
-                      )}
                     {item.to === '/notifications' && unread > 0 && (
                       <>
                         {/* The badge is a glyph; the count reaches the link's

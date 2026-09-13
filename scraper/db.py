@@ -28,7 +28,6 @@ from psycopg.types.json import Jsonb, set_json_dumps
 
 from scraper import media
 from scraper.scraped_listing import ScrapedListing
-from scraper.street import street_name_key
 from toolkit.broker_sources import BROKER_FINGERPRINT_KEYS, BROKER_SOURCE_NAMES
 
 LOG = logging.getLogger(__name__)
@@ -71,13 +70,6 @@ LISTING_COLUMNS: tuple[str, ...] = (
     # a value — out of every content hash, so backfilling it churns no snapshot.
     "area_basis",
     "disposition",
-    "locality",
-    "district",
-    "locality_district_id",
-    "locality_region_id",
-    "locality_municipality_id",
-    "locality_quarter_id",
-    "locality_ward_id",
     "floor",
     "total_floors",
     "has_balcony",
@@ -98,16 +90,6 @@ LISTING_COLUMNS: tuple[str, ...] = (
     "parking_lots",
     "ownership",
     "description",
-    "street",
-    "house_number",
-    "zip",
-    "street_id",
-    # Derived (NOT parsed): the dedup street-group name key, a pure function of
-    # `street` (scraper.street.street_name_key). Stamped from `street` at every
-    # write path by _set_street_name_key — never read from the parsed row. Out of
-    # the content hash (the hash covers raw_json, not derived columns), so
-    # populating it never churns a snapshot.
-    "street_name_key",
     # Portal-declared publication/last-bump timestamp (migration 266). Out of
     # every content hash (bazos re-stamps it per bump; backfills stay free).
     "published_at",
@@ -129,13 +111,6 @@ _LISTING_COLUMN_PGTYPE: dict[str, str] = {
     "area_m2": "numeric",
     "area_basis": "text",
     "disposition": "text",
-    "locality": "text",
-    "district": "text",
-    "locality_district_id": "integer",
-    "locality_region_id": "integer",
-    "locality_municipality_id": "integer",
-    "locality_quarter_id": "integer",
-    "locality_ward_id": "integer",
     "floor": "integer",
     "total_floors": "integer",
     "has_balcony": "boolean",
@@ -156,11 +131,6 @@ _LISTING_COLUMN_PGTYPE: dict[str, str] = {
     "parking_lots": "integer",
     "ownership": "text",
     "description": "text",
-    "street": "text",
-    "house_number": "text",
-    "zip": "text",
-    "street_id": "integer",
-    "street_name_key": "text",
     "published_at": "timestamptz",
     "source_url": "text",
 }
@@ -168,28 +138,16 @@ assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
     "_LISTING_COLUMN_PGTYPE drifted from LISTING_COLUMNS"
 )
 
-# The RÚIAN coord→street resolver (resolve_coord_streets.yml) fills these on rows whose
-# PORTAL page carries no street — so the row's next detail refetch (correctly) re-parses
-# NULL, and a plain `street = EXCLUDED.street` CLOBBERS the resolver's fill back to NULL
-# (measured: 40% of a resolver cohort lost in 2.5 days). These columns carry forward when
-# the incoming value is NULL: a parser that DOES produce a street still wins (fresher,
-# page-sourced), but an incoming NULL never erases a stored value. Safe precisely because
-# the trio is OUT of the content hash (no snapshot churn), a wrong-street risk is guarded
-# upstream (street.reject_as_town) and downstream (the admin-geo trigger NULLs a
-# resolver-sourced street when the listing's coordinates change — migration 262).
-# published_at joins the set (migration 266): the signal is intermittent at the source
-# (sreality's `edited` exists on ~40% of rows; a portal can stop rendering its date), so a
-# fetch that yields no date must not erase what an earlier fetch or a raw_json backfill
-# recorded — a fresher portal date still wins. Same rails: out of the content hash,
-# informational only.
+# published_at (migration 266): the signal is intermittent at the source (sreality's
+# `edited` exists on ~40% of rows; a portal can stop rendering its date), so a fetch that
+# yields no date must not erase what an earlier fetch or a raw_json backfill recorded — a
+# fresher portal date still wins. Out of the content hash, informational only.
 # source_url (docs/design/portal-listing-url.md): an incoming NULL can only mean "the
 # parser could not assemble the URL" (a sreality code outside its codebook, a missing
 # locality), never "the listing left its page" — so it must not erase a stored URL, or
-# one detail-drain cycle would wipe the history reconciler's fill (the migration-262
-# street incident again). Clearing a known-bad URL is a deliberate act that belongs to
-# scripts/reconcile_source_url.py, never to the ingest path. Behaviour-preserving for the
-# crawler portals, whose parsers always emit a non-empty URL (ScrapedListing enforces it).
-_PRESERVE_IF_NULL_COLUMNS = frozenset({"street", "house_number", "published_at", "source_url"})
+# one detail-drain cycle would wipe the backfilled history (the migration-262 street
+# incident). Clearing a known-bad URL is a deliberate act, never the ingest path's.
+_PRESERVE_IF_NULL_COLUMNS = frozenset({"published_at", "source_url"})
 
 
 def detail_ref(source: str, source_url: str | None) -> str | None:
@@ -204,44 +162,14 @@ def detail_ref(source: str, source_url: str | None) -> str | None:
     """
     return None if source == "sreality" else source_url
 
-# street_name_key is NOT independently preserve-if-null: it is a pure function of
-# street, so it must follow the STREET's preserve decision — preserved exactly when
-# the street is preserved, else written as stamped (even when that stamp is NULL: a
-# non-NULL street can legitimately fold to a NULL key, and keeping the OLD key under
-# a NEW street would store a pair the weekly parity job rightly flags as drift).
-_STREET_NAME_KEY_UPDATE_SQL = (
-    "street_name_key = CASE WHEN EXCLUDED.street IS NULL "
-    "THEN listings.street_name_key ELSE EXCLUDED.street_name_key END"
-)
-
-# street_source provenance ('parser' | 'resolver', migration 262): a page-parsed street
-# marks 'parser'; a preserved (incoming-NULL) value keeps whatever provenance it had; the
-# resolver stamps 'resolver' in its own UPDATE. The geom-change guard keys off it.
-_STREET_SOURCE_UPDATE_SQL = (
-    "street_source = CASE WHEN EXCLUDED.street IS NOT NULL THEN 'parser' "
-    "ELSE listings.street_source END"
-)
-
-
 def _listing_update_set_sql() -> str:
     """The ONE ON CONFLICT SET builder shared by upsert_listing and the batched drain
     upsert, so preserve-if-null semantics can never drift between the two write paths."""
     return ",\n          ".join(
-        (_STREET_NAME_KEY_UPDATE_SQL if c == "street_name_key"
-         else f"{c} = COALESCE(EXCLUDED.{c}, listings.{c})" if c in _PRESERVE_IF_NULL_COLUMNS
+        (f"{c} = COALESCE(EXCLUDED.{c}, listings.{c})" if c in _PRESERVE_IF_NULL_COLUMNS
          else f"{c} = EXCLUDED.{c}")
         for c in LISTING_COLUMNS
     )
-
-
-def _set_street_name_key(d: dict[str, Any]) -> None:
-    """Derive `street_name_key` from the row's `street`, in place. The single
-    write-time derivation, called by every street-writing chokepoint
-    (upsert_listing, write_detail_batch) so the stored key is always consistent
-    with the stored street — the load-scoping invariant the dedup --dirty drain
-    relies on. Pure function of `street` (scraper.street.street_name_key); a
-    parsed value the row may already carry under this key is ignored."""
-    d["street_name_key"] = street_name_key(d.get("street"))
 
 
 # No real Czech property is priced anywhere near a billion crowns; a value this
@@ -585,13 +513,12 @@ def upsert_listing(
         INSERT INTO listings (
             sreality_id, last_seen_at, is_active,
             {column_list},
-            street_source, source, source_id_native, geom, raw_json, discovery_seq,
+            source, source_id_native, raw_json, discovery_seq,
             discovered_at
         )
         VALUES (
             %(sreality_id)s, now(), true,
             {placeholders},
-            CASE WHEN %(street)s::text IS NOT NULL THEN 'parser' END,
             -- The FULL natural key (migration 091) is stamped inline at INSERT, not
             -- healed afterward: non-sreality callers pass source + the portal's native
             -- id in the row; sreality (no row values) falls back to 'sreality' +
@@ -603,20 +530,6 @@ def upsert_listing(
             -- → the whole ingest aborts and the portal drain wedges).
             %(source)s,
             %(source_id_native)s,
-            CASE
-              -- Cast to double precision so a NULL lon/lat (common for bazos and
-              -- other portals; rare for sreality) carries a concrete type. Without
-              -- the cast psycopg sends untyped NULL and Postgres can't resolve the
-              -- parameter type inside IS NOT NULL / ST_MakePoint, failing the whole
-              -- insert ("could not determine data type of parameter").
-              WHEN %(lon)s::double precision IS NOT NULL
-               AND %(lat)s::double precision IS NOT NULL
-              THEN ST_SetSRID(
-                     ST_MakePoint(%(lon)s::double precision, %(lat)s::double precision),
-                     4326
-                   )::geography
-              ELSE NULL
-            END,
             %(raw_json)s,
             %(discovery_seq)s,
             %(discovered_at)s
@@ -632,17 +545,9 @@ def upsert_listing(
           is_active = true,
           inactive_at = NULL,
           {update_set},
-          {_STREET_SOURCE_UPDATE_SQL},
           -- Heal a legacy NULL natural key on any refetch, but never overwrite a
-          -- set one (preserve-if-null, same rail as geom below).
+          -- set one (preserve-if-null).
           source_id_native = COALESCE(listings.source_id_native, EXCLUDED.source_id_native),
-          -- Preserve-if-null (mig-263 rail, extended to geom): an incoming NULL
-          -- means "the page carried no coords", never "coords removed" — a bare
-          -- EXCLUDED.geom silently wiped geocoded/backfilled coordinates on the
-          -- next coords-less refetch (and with them the admin hierarchy's
-          -- freshness and the geo_cell_key). Real moves still win: a non-NULL
-          -- incoming geom replaces the stored one.
-          geom = COALESCE(EXCLUDED.geom, listings.geom),
           raw_json = EXCLUDED.raw_json,
           -- Set-once (migration 368): a listing's discovery_seq is a first-discovery
           -- fact, never regenerated by a later refetch — same COALESCE-preserve shape
@@ -660,8 +565,6 @@ def upsert_listing(
     params: dict[str, Any] = {
         "sreality_id": sreality_id,
         "raw_json": raw_jsonb,
-        "lon": row.get("lon"),
-        "lat": row.get("lat"),
         # The natural-key pair, stamped inline (see the INSERT comment). sreality's
         # native id IS its sreality_id; non-sreality callers (ingest) put their
         # source + portal id in the row so the pair is written atomically.
@@ -680,7 +583,6 @@ def upsert_listing(
         params[col] = row.get(col)
     params["price_czk"] = sane_price_czk(params["price_czk"])
     sane_listing_numerics(params)
-    _set_street_name_key(params)
 
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(upsert_sql, params)
@@ -999,24 +901,22 @@ def _create_singleton_property(
             """
             INSERT INTO properties (
                 repr_listing_id, repr_listing_ref_id, category_main, category_type, disposition,
-                area_m2, district, locality, geom, current_price_czk,
+                area_m2, current_price_czk,
                 has_balcony, has_parking, has_lift, building_type, condition,
                 ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
                 estate_area, usable_area, garden_area, parking_lots,
-                ku_id, obec_id, okres_id, region_id, obec, okres, region,
-                locality_district_id, locality_region_id, source, energy_rating,
+                source, energy_rating,
                 building_condition_level, apartment_condition_level,
                 is_active, first_seen_at, last_seen_at,
                 source_count, distinct_site_count, price_per_m2_source_listing_id
             )
             SELECT
                 sreality_id, id, category_main, category_type, disposition,
-                area_m2, district, locality, geom, price_czk,
+                area_m2, price_czk,
                 has_balcony, has_parking, has_lift, building_type, condition,
                 ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
                 estate_area, usable_area, garden_area, parking_lots,
-                ku_id, obec_id, okres_id, region_id, obec, okres, region,
-                locality_district_id, locality_region_id, source, energy_rating,
+                source, energy_rating,
                 building_condition_level, apartment_condition_level,
                 is_active, first_seen_at, last_seen_at, 1, 1,
                 -- One child, so price and area trivially come from one row:
@@ -1055,10 +955,7 @@ def _cheap_property_rollup(conn: psycopg.Connection, listing_id: int) -> None:
                 price_per_m2_source_listing_id = CASE WHEN agg.cnt = 1
                     THEN price_per_m2_source_id(l.price_czk, l.area_m2, l.id)
                     ELSE p.price_per_m2_source_listing_id END,
-                district            = CASE WHEN agg.cnt = 1 THEN l.district        ELSE p.district END,
-                locality            = CASE WHEN agg.cnt = 1 THEN l.locality        ELSE p.locality END,
                 disposition         = CASE WHEN agg.cnt = 1 THEN l.disposition     ELSE p.disposition END,
-                geom                = CASE WHEN agg.cnt = 1 THEN l.geom            ELSE p.geom END,
                 category_main       = CASE WHEN agg.cnt = 1 THEN l.category_main   ELSE p.category_main END,
                 category_type       = CASE WHEN agg.cnt = 1 THEN l.category_type   ELSE p.category_type END,
                 has_balcony         = CASE WHEN agg.cnt = 1 THEN l.has_balcony     ELSE p.has_balcony END,
@@ -1077,15 +974,6 @@ def _cheap_property_rollup(conn: psycopg.Connection, listing_id: int) -> None:
                 usable_area         = CASE WHEN agg.cnt = 1 THEN l.usable_area     ELSE p.usable_area END,
                 garden_area         = CASE WHEN agg.cnt = 1 THEN l.garden_area     ELSE p.garden_area END,
                 parking_lots        = CASE WHEN agg.cnt = 1 THEN l.parking_lots    ELSE p.parking_lots END,
-                ku_id               = CASE WHEN agg.cnt = 1 THEN l.ku_id           ELSE p.ku_id END,
-                obec_id             = CASE WHEN agg.cnt = 1 THEN l.obec_id         ELSE p.obec_id END,
-                okres_id            = CASE WHEN agg.cnt = 1 THEN l.okres_id        ELSE p.okres_id END,
-                region_id           = CASE WHEN agg.cnt = 1 THEN l.region_id       ELSE p.region_id END,
-                obec                = CASE WHEN agg.cnt = 1 THEN l.obec            ELSE p.obec END,
-                okres               = CASE WHEN agg.cnt = 1 THEN l.okres           ELSE p.okres END,
-                region              = CASE WHEN agg.cnt = 1 THEN l.region          ELSE p.region END,
-                locality_district_id = CASE WHEN agg.cnt = 1 THEN l.locality_district_id ELSE p.locality_district_id END,
-                locality_region_id  = CASE WHEN agg.cnt = 1 THEN l.locality_region_id    ELSE p.locality_region_id END,
                 source              = CASE WHEN agg.cnt = 1 THEN l.source          ELSE p.source END,
                 energy_rating       = CASE WHEN agg.cnt = 1 THEN l.energy_rating   ELSE p.energy_rating END,
                 building_condition_level  = CASE WHEN agg.cnt = 1 THEN l.building_condition_level  ELSE p.building_condition_level END,
@@ -2282,25 +2170,6 @@ def index_summary_native(
         }
 
 
-def native_ids_with_geom(
-    conn: psycopg.Connection, source: str,
-) -> dict[str, tuple[float, float]]:
-    """Stored (lat, lon) per source_id_native of `source` rows that already
-    carry coordinates.
-
-    Lets a detail drain carry a stored coordinate forward onto a refetched
-    listing whose page gave none — geom is never wiped by the upsert and a
-    geocode credit is only ever spent once per listing."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT source_id_native, ST_Y(geom::geometry), ST_X(geom::geometry) "
-            "FROM listings "
-            "WHERE source = %s AND geom IS NOT NULL AND source_id_native IS NOT NULL",
-            (source,),
-        )
-        return {native: (lat, lon) for native, lat, lon in cur.fetchall()}
-
-
 def active_count(
     conn: psycopg.Connection,
     category_main: str,
@@ -3082,37 +2951,31 @@ _BATCH_RECORD_SPEC = ", ".join(
     f"{c} {_LISTING_COLUMN_PGTYPE[c]}" for c in LISTING_COLUMNS
 )
 _BATCH_SELECT_COLS = ", ".join(f"j.{c}" for c in LISTING_COLUMNS)
-# One shared builder with upsert_listing — preserve-if-null for the resolver street trio
-# (see _PRESERVE_IF_NULL_COLUMNS) applies identically to both write paths.
+# One shared builder with upsert_listing — preserve-if-null (see
+# _PRESERVE_IF_NULL_COLUMNS) applies identically to both write paths.
 _BATCH_UPDATE_SET = _listing_update_set_sql()
 
 _BATCH_UPSERT_SQL = f"""
     INSERT INTO listings (
         sreality_id, last_seen_at, is_active,
         {", ".join(LISTING_COLUMNS)},
-        street_source, source_id_native, geom, raw_json, discovery_seq,
+        source_id_native, raw_json, discovery_seq,
         discovered_at
     )
     SELECT
         j.sreality_id, now(), true,
         {_BATCH_SELECT_COLS},
-        CASE WHEN j.street IS NOT NULL THEN 'parser' END,
         -- sreality-only path: its native id IS sreality_id. Stamped inline so the
         -- drain (the primary sreality write path since the cadence split) no longer
         -- leaves the (source, source_id_native) natural key NULL — the hole that
         -- accumulated 396 NULL sreality rows before this fix.
         j.sreality_id::text,
-        CASE
-          WHEN j.lon IS NOT NULL AND j.lat IS NOT NULL
-          THEN ST_SetSRID(ST_MakePoint(j.lon, j.lat), 4326)::geography
-          ELSE NULL
-        END,
         j.raw_json,
         j.discovery_seq,
         j.discovered_at
     FROM jsonb_to_recordset(%s::jsonb) AS j(
         sreality_id bigint, {_BATCH_RECORD_SPEC},
-        lon double precision, lat double precision, raw_json jsonb,
+        raw_json jsonb,
         discovery_seq bigint, discovered_at timestamptz
     )
     -- Arbiter is the natural key, not sreality_id (R2 Phase D) — see upsert_listing's
@@ -3125,9 +2988,7 @@ _BATCH_UPSERT_SQL = f"""
       is_active = true,
       inactive_at = NULL,
       {_BATCH_UPDATE_SET},
-      {_STREET_SOURCE_UPDATE_SQL},
       source_id_native = COALESCE(listings.source_id_native, EXCLUDED.source_id_native),
-      geom = COALESCE(EXCLUDED.geom, listings.geom),
       raw_json = EXCLUDED.raw_json,
       -- Set-once (migrations 368 + 444) — same shape as upsert_listing's identical clause.
       discovery_seq = COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq),
@@ -3244,10 +3105,7 @@ def write_detail_batch(
         obj: dict[str, Any] = {c: row.get(c) for c in LISTING_COLUMNS}
         obj["price_czk"] = price_czk
         sane_listing_numerics(obj)
-        _set_street_name_key(obj)
         obj["sreality_id"] = sid
-        obj["lon"] = row.get("lon")
-        obj["lat"] = row.get("lat")
         obj["raw_json"] = r.raw or {}
         obj["discovery_seq"] = r.discovery_seq
         obj["discovered_at"] = r.discovered_at

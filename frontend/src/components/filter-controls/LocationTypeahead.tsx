@@ -94,8 +94,8 @@ export function LocationTypeahead({
   /* Fires once per picked suggestion. The Browse map listens for this
    * to fly the viewport to the picked place — independent of the chip
    * filter (which may or may not narrow the cohort, depending on
-   * whether the suggestion's `name` matches a real listings.district
-   * value). Picks without a `position` are still emitted; the
+   * whether the suggestion's place resolves to a code any listing carries).
+   * Picks without a `position` are still emitted; the
    * receiver should no-op when `position` is missing. */
   onPick?: (s: MapySuggestion) => void;
 }) {

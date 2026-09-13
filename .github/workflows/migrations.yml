@@ -119,6 +119,17 @@ jobs:
               psql -v ON_ERROR_STOP=1 -q -c \
                 "insert into auth.users (email) values ('ci-operator@replay.local');"
             fi
+            # 510 is the TEMPORARY pin-loss audit surface. It builds a matview out
+            # of `properties.street/district/locality/lat/lng`, which migration 508
+            # — numbered BEFORE it — drops. Production applied 510 first and then
+            # retired it (513) ahead of 508; a numeric replay can only ever reach
+            # it after those columns are gone. Skipping it here reaches the same end
+            # state 513 leaves on production: no audit objects at all. The file stays
+            # on disk unedited — migrations are append-only (CLAUDE.md rule 1).
+            if [[ "$(basename "$f")" == 510_* ]]; then
+              echo ">>> skipping $f (retired by 513; its source columns are dropped by 508)"
+              continue
+            fi
             echo ">>> applying $f"
             psql -v ON_ERROR_STOP=1 -q -f "$f"
           done

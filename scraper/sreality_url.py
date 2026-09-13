@@ -14,10 +14,11 @@ dům" is `rodinny`, 28 "Obchodní prostory" is `obchodni-prostor`, 32 "Ostatní"
 and a counted reason — never a guess. Every code outside the table is rejected by sreality's
 own search API (HTTP 422), so only a HISTORIC row can carry one.
 
-One codebook, one assembly rule (`canonical_url`), two thin input adapters: `from_payload`
-for ingest (sreality's own `*_seo_name` values pass through unslugged) and `from_columns` for
-the reconciler over stored typed columns (`slugify(display)` reproduces the seo names). Nothing
-here raises: every non-derivation is a `Declined` reason the caller counts.
+One codebook, one assembly rule (`canonical_url`), ONE input adapter: `from_payload` for
+ingest (sreality's own `*_seo_name` values pass through unslugged). The column adapter that
+re-derived a URL from display text died with the columns it read (migration 508); the stored
+`listings.source_url` is the fact now, and `critical_segments` below reads one back apart.
+Nothing here raises: every non-derivation is a `Declined` reason the caller counts.
 
 DISPLAY ONLY. sreality's server-rendered detail page 302s into a login.seznam.cz autologin
 chain and then an infinite `cwtkn=` redirect loop (contracts/portals/sreality.yaml). Nothing
@@ -27,22 +28,14 @@ may FETCH a sreality source_url — the scraper reaches sreality by id through /
 
 from __future__ import annotations
 
-import re
 from enum import Enum
 from typing import Any
-from unicodedata import combining, normalize
 
 BASE_URL = "https://www.sreality.cz/detail"
 
 # category_type_cb.value -> URL segment. NOT the stored listings.category_type vocabulary:
 # scraper.parser stores 'drazba' / 'podil', and both 404 in a URL (sreality's plurals).
 TYPE_SLUG: dict[int, str] = {1: "prodej", 2: "pronajem", 3: "drazby", 4: "podily"}
-
-# The stored vocabulary (scraper.parser.CATEGORY_TYPE) -> URL segment, for the reconciler,
-# which only has the column. tests/test_sreality_url.py pins the two in lockstep.
-STORED_TYPE_SLUG: dict[str, str] = {
-    "prodej": "prodej", "pronajem": "pronajem", "drazba": "drazby", "podil": "podily",
-}
 
 # category_main_cb.value -> URL segment; identical to the stored listings.category_main.
 MAIN_SLUG: dict[int, str] = {1: "byt", 2: "dum", 3: "pozemek", 4: "komercni", 5: "ostatni"}
@@ -157,86 +150,16 @@ def from_payload(raw: dict[str, Any]) -> Derived:
     )
 
 
-def from_columns(
-    *,
-    category_type: str | None,
-    category_main: str | None,
-    category_sub_cb: int | None,
-    locality: str | None,
-    street: str | None,
-    street_source: str | None,
-    sreality_id: int | None,
-) -> Derived:
-    """Adapter 2 — the reconciler, over stored typed columns (never raw_json).
-
-    `slugify(display column)` reproduces sreality's seo names (223/223 on a live sample). The
-    street is used unless the RESOLVER wrote it (`street_source = 'resolver'`, migration 262):
-    a RÚIAN-resolved street was never on sreality's page. A NULL provenance is a street the
-    parser stored BEFORE stamping existed (155k rows) and counts as the portal's — the first
-    live conformance sample (2026-09-11) showed 7/40 active rows redirecting to a canonical
-    WITH the street while the column held it under a NULL stamp. When the street column is
-    empty, the legacy locality shape ("Street, City - Part") still carries it. Omitting a
-    street yields sreality's own trailing-hyphen form — at worst a 301, never a 404.
-    """
-    if category_type and category_type not in STORED_TYPE_SLUG:
-        return None, Declined.TYPE_UNMAPPED
-    city, citypart = split_locality(locality)
-    if street_source == "resolver":
-        street = None
-    elif not street:
-        street = legacy_street(locality)
-    return canonical_url(
-        type_slug=STORED_TYPE_SLUG.get(category_type or ""),
-        main_slug=category_main,
-        sub_cb=category_sub_cb,
-        city_slug=slugify(city),
-        citypart_slug=slugify(citypart),
-        street_slug=slugify(street),
-        listing_id=sreality_id,
-    )
-
-
-def slugify(text: str | None) -> str | None:
-    """NFD -> drop combining marks -> lower -> non-[a-z0-9] runs -> '-' -> strip. Empty -> None.
-
-    Never used on the sub segment (that comes from the codebook, '+' intact).
-    """
-    if not isinstance(text, str):
+def critical_segments(url: str | None) -> tuple[str, str, str, str] | None:
+    """(type, main, sub, id) of a stored sreality URL — the segments sreality 404s on. The
+    locality segment is deliberately NOT part of it: sreality 301s any locality to the
+    canonical, so two URLs differing only there name the same page."""
+    if not url or not url.startswith(BASE_URL + "/"):
         return None
-    ascii_text = "".join(ch for ch in normalize("NFD", text) if not combining(ch))
-    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")
-    return slug or None
-
-
-def split_locality(locality: str | None) -> tuple[str | None, str | None]:
-    """`listings.locality` -> (city, citypart). Two stored shapes:
-
-      * current (scraper.parser._locality_value): "Olomouc - Slavonín", or just "Olomouc"
-        when the citypart is absent or equal to the city;
-      * legacy v2 (rows written before 2026-05-26): "Jižní, Olomouc - Slavonín" — a leading
-        "Street, " that is stripped first.
-
-    A single part means citypart is absent; `canonical_url` then repeats the city, which is
-    sreality's own canonical for both the absent and the equal case.
-    """
-    if not isinstance(locality, str) or not locality.strip():
-        return None, None
-    value = locality.strip()
-    if ", " in value:
-        value = value.split(", ", 1)[1].strip()
-    city, sep, citypart = value.partition(" - ")
-    city = city.strip() or None
-    citypart = citypart.strip() or None if sep else None
-    return city, citypart
-
-
-def legacy_street(locality: str | None) -> str | None:
-    """The "Street, " prefix of the legacy v2 locality shape ("Jižní, Olomouc - Slavonín"),
-    else None. The current shape never carries a comma-prefixed street."""
-    if not isinstance(locality, str) or ", " not in locality:
+    parts = url[len(BASE_URL) + 1:].split("/")
+    if len(parts) != 5:
         return None
-    prefix = locality.split(", ", 1)[0].strip()
-    return prefix or None
+    return parts[0], parts[1], parts[2], parts[4]
 
 
 def _cb_value(obj: Any) -> int | None:

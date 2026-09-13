@@ -126,94 +126,19 @@ def test_disposition_falls_back_to_name():
     assert row["disposition"] == "3+1"
 
 
-def test_geo(sample):
+def test_the_row_carries_no_place_at_all(sample):
+    """W4-c: `listings` has no location columns, so the sreality row dict emits
+    none. The payload's own locality block still reaches the DB verbatim inside
+    raw_json, which is what the claims lane mines and what the content hash
+    covers — a place is a CLAIM the resolver arbitrates into listing_location,
+    never a column the parser writes."""
     row = parse_listing(sample)
-    assert math.isclose(row["lon"], 18.2552, abs_tol=0.001)
-    assert math.isclose(row["lat"], 49.8727, abs_tol=0.001)
-
-
-def test_locality(sample):
-    assert parse_listing(sample)["locality"] == "Ostrava - Petřkovice"
-
-
-def test_district(sample):
-    # district_id 65 maps to the canonical okres label.
-    assert parse_listing(sample)["district"] == "okres Ostrava-město"
-
-
-def test_district_okres_label():
-    assert parse_listing(_estate(locality={"district_id": 42}))["district"] == "okres Olomouc"
-
-
-def test_district_falls_back_to_locality_text():
-    # Unknown district_id (e.g. -1 for foreign listings) → use the locality's
-    # own district text so the country/region name still surfaces.
-    row = parse_listing(_estate(locality={"district_id": -1, "district": "Toskánsko"}))
-    assert row["district"] == "Toskánsko"
-
-
-def test_district_collapses_praha_subdistricts():
-    assert parse_listing(_estate(locality={"district_id": 5003}))["district"] == "Praha"
-
-
-def test_locality_ids(sample):
-    row = parse_listing(sample)
-    assert row["locality_district_id"] == 65
-    assert row["locality_region_id"] == 12
-    assert row["locality_municipality_id"] == 4730
-    assert row["locality_ward_id"] == 8277
-    assert row["locality_quarter_id"] == 45
-
-
-def test_locality_ids_minus_one_sentinel_maps_to_none():
-    row = parse_listing(_estate(locality={
-        "municipality_id": -1, "quarter_id": -1, "ward_id": -1,
-    }))
-    assert row["locality_municipality_id"] is None
-    assert row["locality_quarter_id"] is None
-    assert row["locality_ward_id"] is None
-
-
-def test_zip_minus_one_sentinel_maps_to_none():
-    # W0 item 0b: sreality sends zip=-1 for "unknown"; 31k rows stored the
-    # stringified sentinel as a literal '-1' postal code.
-    assert parse_listing(_estate(locality={"zip": -1}))["zip"] is None
-    assert parse_listing(_estate(locality={"zip": "-1"}))["zip"] is None
-    assert parse_listing(_estate(locality={"zip": 72529}))["zip"] == "72529"
-    assert parse_listing(_estate(locality={}))["zip"] is None
-
-
-def test_locality_ids_missing_keys_are_none():
-    row = parse_listing(_estate(locality={}))
-    assert row["locality_municipality_id"] is None
-    assert row["locality_quarter_id"] is None
-    assert row["locality_ward_id"] is None
-
-
-def test_street_structured_wins():
-    # When sreality supplies a structured street, that is used verbatim — the
-    # free-text `value` fallback never overrides it.
-    row = parse_listing(_estate(locality={
-        "street": "Koterovská", "value": "Jiná, Plzeň",
-    }))
-    assert row["street"] == "Koterovská"
-
-
-def test_street_falls_back_to_index_value():
-    # Index-shape rows have an empty structured street but carry the street in
-    # the free-text `value` ("Street, City - Quarter") — recovered via the
-    # shared first-segment extractor.
-    row = parse_listing(_estate(locality={
-        "value": "Pařížská, Praha 1 - Josefov",
-        "gps_lat": 50.09, "gps_lon": 14.42,
-    }))
-    assert row["street"] == "Pařížská"
-
-
-def test_street_value_town_only_stays_none():
-    # A town-only `value` ("Town, okres X") must not fabricate a street.
-    row = parse_listing(_estate(locality={"value": "Studénka, okres Nový Jičín"}))
-    assert row["street"] is None
+    for key in ("lat", "lon", "geom", "locality", "district", "street",
+                "house_number", "zip", "street_id", "locality_district_id",
+                "locality_region_id", "locality_municipality_id",
+                "locality_quarter_id", "locality_ward_id"):
+        assert key not in row, f"parse_listing still emits {key!r}"
+    assert sample["locality"]["gps_lat"] is not None
 
 
 def test_floor(sample):

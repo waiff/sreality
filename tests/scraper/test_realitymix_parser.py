@@ -351,8 +351,6 @@ def test_content_hash_and_to_row_bridge_to_ingest():
     assert row["category_main"] == "byt"
     assert row["price_czk"] == 5_290_000
     assert row["area_m2"] == 66.0
-    assert row["lat"] == 49.989288333333
-    assert row["street"] == "Luční"
 
 
 # Two DIFFERENT labelled measures on one page: the discriminating case for the

@@ -255,10 +255,11 @@ def _select_pending(
     Region scope: `region_ids` (the CLI override) wins when non-empty;
     otherwise the Settings-page enabled list
     (app_settings.condition_scoring_enabled_region_ids). The clause gates
-    on `l.region_id` — the geo-derived admin_boundaries kraj id, present
-    for every portal — with NO null passthrough: a listing outside the
-    enabled kraje, or without a region yet, is parked, not scored. An
-    empty effective list pauses scoring entirely.
+    on `listing_location.kraj_kod` — the resolved RÚIAN kraj, present for
+    every portal — with NO null passthrough: the INNER join parks a
+    listing outside the enabled kraje, or one the resolver has not reached
+    yet, rather than scoring it. An empty effective list pauses scoring
+    entirely.
 
     Category scope: the two-axis rubric (building + apartment condition)
     only carries meaning for byt/dum, so the selector hard-scopes to
@@ -297,6 +298,7 @@ def _select_pending(
         ") "
         "SELECT l.sreality_id "
         "FROM listings l "
+        "JOIN listing_location ll ON ll.listing_id = l.id "
         "JOIN latest_snapshot ls ON ls.sreality_id = l.sreality_id "
         "LEFT JOIN listing_condition_scores cs "
         "  ON cs.sreality_id = ls.sreality_id "
@@ -304,7 +306,7 @@ def _select_pending(
         "WHERE l.is_active = true "
         + freshness_clause +
         "  AND cs.id IS NULL "
-        "  AND l.region_id = ANY(%s::bigint[]) "
+        "  AND ll.kraj_kod = ANY(%s::bigint[]) "
         "  AND l.category_main IN ('byt', 'dum') "
         "  AND (l.property_id IS NULL OR NOT EXISTS ( "
         "    SELECT 1 FROM listings sib "

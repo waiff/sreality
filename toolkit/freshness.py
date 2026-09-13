@@ -29,6 +29,12 @@ _LISTING_COLS: tuple[str, ...] = (
     "has_balcony", "has_parking", "has_lift",
     "building_type", "condition", "energy_rating",
 )
+# W4-c: the two place KEYS stay (they are envelope fields the agent reads); only
+# their source moved -- `listings.locality` / `.district` are dropped.
+_LISTING_COL_SOURCES: dict[str, str] = {
+    "locality": "ll.obec_name",
+    "district": "ll.okres_name",
+}
 
 
 def verify_listing_freshness(
@@ -147,10 +153,14 @@ def _fetch_listing(
     from toolkit import _listing_id_clause
 
     id_clause, id_val = _listing_id_clause(sreality_id, listing_id)
-    cols_sql = ", ".join(_LISTING_COLS)
+    cols_sql = ", ".join(
+        _LISTING_COL_SOURCES.get(c, f"l.{c}") for c in _LISTING_COLS
+    )
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT {cols_sql} FROM listings WHERE {id_clause}",
+            f"SELECT {cols_sql} FROM listings l "
+            "LEFT JOIN listing_location ll ON ll.listing_id = l.id "
+            f"WHERE {id_clause}",
             (id_val,),
         )
         row = cur.fetchone()

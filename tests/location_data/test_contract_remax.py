@@ -97,7 +97,7 @@ def entry_named(entry_id: str) -> Entry:
 def listing_row(native: str = "fixture", **overrides: Any) -> ListingRow:
     kwargs: dict[str, Any] = {
         "listing_id": 4242, "source": "remax", "source_id_native": native, "raw_json": {},
-        "lat": None, "lon": None, "observed_at": FETCHED_AT,
+        "observed_at": FETCHED_AT,
     }
     kwargs.update(overrides)
     return ListingRow(**kwargs)

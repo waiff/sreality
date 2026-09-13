@@ -14,8 +14,7 @@ name: "Data: ingest admin boundaries"
 #
 # The script reads SUPABASE_DB_URL via env. It TRUNCATEs admin_boundaries
 # at the start of the load by default so re-runs reproduce live ČÚZK
-# state rather than accumulating retired units. The spatial-join phase
-# afterwards rebuilds admin_boundaries.sreality_id from current listings.
+# state rather than accumulating retired units.
 
 on:
   workflow_dispatch:
@@ -31,11 +30,6 @@ on:
         default: "kraj,okres,obec,ku"
       dry_run:
         description: "Parse and validate only; do not write to DB."
-        required: false
-        type: boolean
-        default: false
-      skip_spatial_join:
-        description: "Skip the listings -> sreality_id population step."
         required: false
         type: boolean
         default: false
@@ -71,9 +65,6 @@ jobs:
           fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
-          fi
-          if [ "${{ inputs.skip_spatial_join }}" = "true" ]; then
-            ARGS="$ARGS --skip-spatial-join"
           fi
           if [ "${{ inputs.no_truncate }}" = "true" ]; then
             ARGS="$ARGS --no-truncate"

@@ -221,24 +221,22 @@ def merge_properties(
 _SPLIT_INSERT_ONE_SQL = """
     INSERT INTO properties (
         repr_listing_id, repr_listing_ref_id, category_main, category_type, disposition,
-        area_m2, district, locality, geom, current_price_czk,
+        area_m2, current_price_czk,
         has_balcony, has_parking, has_lift, building_type, condition,
         ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
         estate_area, usable_area, garden_area, parking_lots,
-        ku_id, obec_id, okres_id, region_id, obec, okres, region,
-        locality_district_id, locality_region_id, source, energy_rating,
+        source, energy_rating,
         building_condition_level, apartment_condition_level,
         is_active, first_seen_at, last_seen_at, last_change_at,
         source_count, distinct_site_count, price_per_m2_source_listing_id
     )
     SELECT
         l.sreality_id, l.id, l.category_main, l.category_type, l.disposition,
-        l.area_m2, l.district, l.locality, l.geom, l.price_czk,
+        l.area_m2, l.price_czk,
         l.has_balcony, l.has_parking, l.has_lift, l.building_type, l.condition,
         l.ownership, l.furnished, l.terrace, l.cellar, l.garage, l.category_sub_cb, l.subtype,
         l.estate_area, l.usable_area, l.garden_area, l.parking_lots,
-        l.ku_id, l.obec_id, l.okres_id, l.region_id, l.obec, l.okres, l.region,
-        l.locality_district_id, l.locality_region_id, l.source, l.energy_rating,
+        l.source, l.energy_rating,
         l.building_condition_level, l.apartment_condition_level,
         l.is_active, l.first_seen_at, l.last_seen_at, l.first_seen_at, 1, 1,
         -- One child: price and area come from one row by construction (mig 424).
