@@ -457,14 +457,9 @@ that don't key on street.
   `matched_type='regional.address'`; realitymix `locality_text` arm PR #756. The SEPARATE
   text-derived backfill (`scripts/backfill_portal_streets.py`, parser-grain, dispatch-only)
   is unaffected by 0a; it gained `--include-inactive` (PR #758) and fixed ID windows (PR #759).
-- **Location/geocode lifecycle** (migration 288, PR #749): a unified `CoordResolver`
-  (`scraper/location.py`) now backs idnes/realitymix/maxima/remax/mmreality/ceskereality —
-  four of which had no geocode path before. `geocode_cache` persists negative results (don't
-  re-query a coordinate known to fail) and `listings.geocode_attempted_at` is a row-grain
-  attempt-ledger **column**, not a `raw_json` marker (the same lesson migration 263 already
-  learned for the street resolver: a marker in `raw_json` gets clobbered by the next refetch).
-  Both ingest upserts extend `COALESCE(EXCLUDED.geom, listings.geom)` preserve-if-null to
-  coordinates, mirroring the street-lifecycle rails below.
+- **No geocode lifecycle any more** (W4-b): `CoordResolver`, `geocode_cache` and the
+  `mapy_affected` inventory are gone; `listings.geocode_attempted_at` and the rest of the legacy
+  geography columns drop in W4-c. A coordinate comes from the portal's own page or payload.
 - **Street lifecycle: resolver fills survive refetches (migration 263).** The RÚIAN coord→street
   resolver fills `street`/`street_name_key`/`house_number` on rows whose portal page has no street —
   so the row's next detail refetch re-parses NULL, and a plain `street = EXCLUDED.street` used to
@@ -479,12 +474,11 @@ that don't key on street.
   (derived from the old point → may be wrong → "wrong street worse than NULL"), and its existing
   tail block then re-opens the resolver for the new coords. Parser streets are untouched by the
   guard (the page re-derives them every fetch).
-- **Location-data relations (`location_*`, `ruian_*`, `mapy_*`, `portal_contract*`; migs 380+) are
+- **Location-data relations (`location_*`, `ruian_*`, `portal_contract*`; migs 380+) are
   service-role-only and shadow-only** — RLS on + explicit `anon`/`authenticated` REVOKEs on every
   table, sequence + function; nothing outside `location_data/` reads them before W6. `location_claims`
   (19 cols since migs 497+498 — **relax before the deploy, drop after it**) is
-  **never UPDATEd**; a wrong contract is RETRACTED, which DELETEs its claims; Mapy evidence is
-  trigger-immutable. The resolver writes ONE table, `listing_location` (26 cols, mig 501); mig 502
+  **never UPDATEd**; a wrong contract is RETRACTED, which DELETEs its claims. The resolver writes ONE table, `listing_location` (26 cols, mig 501); mig 502
   (W2-b) dropped both `*_location_current` projections + every resolver-side relation (resolutions,
   candidates, the 3 policy tables, pin-cluster, contradictions, labelled samples, compare cohort +
   its pg_cron job), leaving `location_claims`, `location_granularity_rank`, `dirty_locations`,

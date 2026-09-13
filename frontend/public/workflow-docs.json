@@ -425,57 +425,6 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_area_basis.yml"
     },
     {
-      "filename": "backfill_bazos_coords.yml",
-      "name": "Backfill bazos coordinates (street geocode)",
-      "description": "One-off, dispatch-only backfill. Re-places active bazos listings that are stuck on the shared maps-link pin (coords.source='link') and carry an extractable street: re-parses each from its already-staged detail HTML (portal_raw_pages, NO re-fetch of bazos) with the migration-406 parser fix + a cached Mapy.cz geocoder, and updates geom + locality in place where the street geocode is precise. Idempotent + resumable (each row stamped coords.reparsed); rerun until \"pending=0\". NOT a portal ingest workflow, so it carries no `# portal:` tag.",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "limit",
-          "description": "Max listings processed per run",
-          "required": false,
-          "type": "string",
-          "default": "20000",
-          "options": null
-        },
-        {
-          "name": "max_seconds",
-          "description": "Wall-clock budget in seconds (blank = no budget)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "dry_run",
-          "description": "Report the pending count and exit without writing",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        }
-      ],
-      "secrets": [
-        "MAPY2_CZ_API_KEY",
-        "MAPY_CZ_API_KEY",
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "backfill-bazos-coords",
-      "cancelInProgress": false,
-      "timeoutMinutes": 90,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_bazos_coords.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_bazos_coords.yml"
-    },
-    {
       "filename": "backfill_bazos_street_locality.yml",
       "name": "Backfill bazos street + locality",
       "description": "One-off, dispatch-only backfill. Persists `street` + `locality` on active bazos listings that are missing either: re-parses each from its already-staged detail HTML (portal_raw_pages, NO re-fetch of bazos) with the current parser — the one that surfaces the extracted street on ScrapedListing and carries the PR #406 locality fix — and fills the columns in place. Runs the parser with NO geocoder, so there is zero Mapy.cz spend and geom is untouched. Populating `street` is what makes bazos rows eligible for the street+disposition dedup engine. Idempotent + resumable (each row stamped raw_json.street_locality_backfill); rerun until \"pending=0\". NOT a portal ingest workflow, so it carries no `# portal:` tag.",
@@ -593,62 +542,6 @@
       "permissions": "contents: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_child_listing_ids.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_child_listing_ids.yml"
-    },
-    {
-      "filename": "backfill_geocode.yml",
-      "name": "Jobs: backfill geocode coordinates (any portal, from stored locality)",
-      "description": "DISPATCH-ONLY backfill for the standing no-coords stock of any portal (default: idnes, realitymix, maxima, remax, mmreality, ceskereality — bazos is excluded, its coords need the link-corroborating tree in backfill_bazos_coords). Geocodes each row's STORED locality via the persistent geocode_cache (migration 288) and stamps listings.geocode_attempted_at on every processed row (placed or not), so the pool self-empties and re-runs are cheap — re-dispatch until pending=0. Writes geom only (triggers derive hierarchy + dedup cell); no snapshots. Supersedes the completed one-off backfill_realitymix_coords.",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "source",
-          "description": "single portal source to process (blank = all default sources)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "limit",
-          "description": "max listings processed this run (blank = 20000)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "max_seconds",
-          "description": "wall-clock budget; stops claiming + exits cleanly (blank = none)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "dry_run",
-          "description": "report the pending count and exit without writing",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        }
-      ],
-      "secrets": [
-        "MAPY2_CZ_API_KEY",
-        "MAPY_CZ_API_KEY",
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "geocode-coords-backfill",
-      "cancelInProgress": false,
-      "timeoutMinutes": 60,
-      "permissions": null,
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_geocode.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_geocode.yml"
     },
     {
       "filename": "backfill_idnes_areas.yml",
@@ -1105,8 +998,6 @@
         }
       ],
       "secrets": [
-        "MAPY2_CZ_API_KEY",
-        "MAPY_CZ_API_KEY",
         "R2_ACCESS_KEY_ID",
         "R2_ACCOUNT_ID",
         "R2_BUCKET_NAME",
@@ -1320,8 +1211,6 @@
         }
       ],
       "secrets": [
-        "MAPY2_CZ_API_KEY",
-        "MAPY_CZ_API_KEY",
         "R2_ACCESS_KEY_ID",
         "R2_ACCOUNT_ID",
         "R2_BUCKET_NAME",
@@ -2788,8 +2677,6 @@
         }
       ],
       "secrets": [
-        "MAPY2_CZ_API_KEY",
-        "MAPY_CZ_API_KEY",
         "R2_ACCESS_KEY_ID",
         "R2_ACCOUNT_ID",
         "R2_BUCKET_NAME",
@@ -3434,76 +3321,6 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_intake.yml"
     },
     {
-      "filename": "location_mapy_inventory.yml",
-      "name": "Jobs: Mapy affected-set inventory (location W1 / R2)",
-      "description": "DISPATCH-ONLY evidence job for the Mapy.cz licensing remediation. Materialises the five-arm affected set of the location design (04-connectors-ops.md C7.2 R2) into the immutable tables of migration 385: per-listing arm evidence, the geocode_cache identity ledger, and the property closure. It records IDENTITY and REASON CODES only — never a coordinate, matched_type or confidence, which would be the same storage violation the remediation exists to end.",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "batch_size",
-          "description": "listings per batch (10000-30000; blank = 20000)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "limit",
-          "description": "max listings scanned this run (blank = the whole table)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "max_seconds",
-          "description": "wall-clock budget; stops between batches (blank = none)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "restart",
-          "description": "rescan from the first listing instead of resuming",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        },
-        {
-          "name": "note",
-          "description": "free-text note stamped on the run row",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "dry_run",
-          "description": "scan and report the arm counts without writing anything",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "location-batch",
-      "cancelInProgress": false,
-      "timeoutMinutes": 120,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_mapy_inventory.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_mapy_inventory.yml"
-    },
-    {
       "filename": "location_registry_load.yml",
       "name": "Location: RÚIAN registry load",
       "description": "The registry-group jobs of the location subsystem (design 04 §4.4.2):",
@@ -4001,8 +3818,6 @@
         }
       ],
       "secrets": [
-        "MAPY2_CZ_API_KEY",
-        "MAPY_CZ_API_KEY",
         "R2_ACCESS_KEY_ID",
         "R2_ACCOUNT_ID",
         "R2_BUCKET_NAME",
@@ -4935,8 +4750,6 @@
         }
       ],
       "secrets": [
-        "MAPY2_CZ_API_KEY",
-        "MAPY_CZ_API_KEY",
         "R2_ACCESS_KEY_ID",
         "R2_ACCOUNT_ID",
         "R2_BUCKET_NAME",
@@ -5008,8 +4821,6 @@
         }
       ],
       "secrets": [
-        "MAPY2_CZ_API_KEY",
-        "MAPY_CZ_API_KEY",
         "R2_ACCESS_KEY_ID",
         "R2_ACCOUNT_ID",
         "R2_BUCKET_NAME",
@@ -5160,8 +4971,6 @@
         }
       ],
       "secrets": [
-        "MAPY2_CZ_API_KEY",
-        "MAPY_CZ_API_KEY",
         "R2_ACCESS_KEY_ID",
         "R2_ACCOUNT_ID",
         "R2_BUCKET_NAME",

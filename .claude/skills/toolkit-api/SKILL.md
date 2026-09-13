@@ -411,20 +411,19 @@ LLM + maps (FastAPI service + scoring jobs):
   id. Read lazily: needed only by a lane the operator points at a qwen model. Actions
   secret for those workflows; Railway needs it only to call qwen from the API service.
 - `MAPY_GEOCODE_ENABLED` — **the W0 Mapy kill switch (location-data program, remediation
-  step R1), default OFF.** Mapy.com's terms prohibit storing/caching API results and every
-  geocode path persisted them, so `scraper.geocoding.geocode()` raises and
-  `location.build_geocoder()` returns `None` unless this is explicitly `1`/`true`/`yes`.
-  Applies to every geocode caller (portal drains, bazos in-parser, realtime worker, URL
-  parser, seed/backfill scripts). Display-only Mapy use (`/maps/suggest`, tiles) is NOT
+  step R1), default OFF.** Mapy.com's terms prohibit storing/caching API results, so
+  `scraper.geocoding.geocode()` raises unless this is explicitly `1`/`true`/`yes`. W4-b
+  deleted every STORING caller (the drains' `CoordResolver`, the bazos in-parser geocoder,
+  the backfills); what remains is the on-demand URL parse, which stores nothing, and
+  `scripts/seed_curated_cities.py`. Display-only Mapy use (`/maps/suggest`, tiles) is NOT
   gated — the prohibition is on persistence, not display. Do not enable without an
   operator decision recorded against the Mapy remediation plan.
 - `MAPY_CZ_API_KEY` — Mapy.cz REST key; geocodes locality strings and powers `/maps/*`.
 - `MAPY2_CZ_API_KEY` (optional backup) — a second Mapy.cz key. `scraper.geocoding` and the
   `/maps/suggest` proxy fail over to it automatically **only** when the primary is rejected
   (401/403) or rate-limited (429); a Mapy outage (5xx) does not trigger failover. Set it in
-  **both runtimes** that geocode — the GitHub Actions secret (already injected into the bazos /
-  idnes detail drains + the seed/backfill jobs) and the **Railway API service env var** (powers
-  `/maps/suggest` + URL-parse geocoding). Unset → no-op, primary behaviour unchanged.
+  the two places that still geocode — the GitHub Actions secret (`seed_curated_cities.yml`) and
+  the **Railway API service env var** (`/maps/suggest` + URL-parse geocoding). Unset → no-op.
 - `LLM_DAILY_COST_WARN_USD` (optional, default `5.0`) — soft cross-provider warning
   threshold; `LLMClient` logs one WARNING per day when the `llm_calls.cost_usd` sum first
   crosses it. Each provider's own console spend cap is the hard guard.

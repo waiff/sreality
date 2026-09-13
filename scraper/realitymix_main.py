@@ -33,7 +33,6 @@ from math import ceil
 from typing import Any
 
 from scraper import db, portal_runner
-from scraper.location import CoordResolver
 from scraper.portal import (
     PortalConfig,
     StopReason,
@@ -87,9 +86,6 @@ class RealitymixPortal:
         self.index_rate = config.limits.index_rate
         self.shared_rate_limiter = config.limits.shared_rate_limiter
         self._price_change_min_pct = config.limits.price_change_min_pct
-        # page > carry-forward > geocode; preloaded once in connect_drain (the
-        # 2026-06 Mapy-credit incident guard — see scraper.location).
-        self._coords = CoordResolver(SOURCE)
         # per-(cm, ct) union of complete slices' seen ids + completed-slice
         # counts — the cross-slice nomination buffer (see presence_candidates).
         self._sweep_seen: dict[tuple[str, str], set[str]] = {}
@@ -115,11 +111,6 @@ class RealitymixPortal:
 
     def connect_drain(self) -> Any:
         conn = db.connect()
-        # Preload (once, on the main thread) the stored coords so the worker-pool
-        # fetch_detail carries them forward instead of re-geocoding a map-less
-        # page — the ~28% of realitymix (the 2026-06 Mapy-credit incident guard;
-        # rationale in scraper.location).
-        self._coords.preload(conn)
         return conn
 
     def walk_category(
@@ -378,9 +369,6 @@ class RealitymixPortal:
             listing = parse_detail(html, source_url=url)
         except Exception as exc:  # noqa: BLE001
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
-        # Page coords win -> carry a stored geom forward -> geocode the locality
-        # (map-less listings), at most once per listing.
-        listing = self._coords.fill(native_id, listing)
         return DrainItem(
             native_id=native_id, kind="ok",
             payload={"listing": listing, "html": html, "status": status, "url": url},

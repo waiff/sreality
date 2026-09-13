@@ -275,14 +275,14 @@ def test_the_psc_is_normalised_to_five_digits(claims: dict[str, list[Claim]]) ->
     assert claims["bzr.det.zip"][0].value_text == "15400"
 
 
-def test_a_listing_in_the_mapy_inventory_yields_no_coordinate() -> None:
-    """§6.4's licence rail, on this portal's own pin: inventory membership is a JOIN on
-    listing_id, so a first-party-looking payload coordinate is vetoed with it. The rest of
-    the contract keeps claiming — only the coordinate is withheld."""
-    flagged = _by_id(fx.listing("bezrealitky", fx.BEZREALITKY, native="1037096",
-                                lat=50.1092, lon=14.4749, in_mapy_inventory=True))
-    assert "bzr.det.gps" not in flagged
-    assert flagged[TOWN_ENTRY_ID][0].value_text == "Praha"
+def test_the_portals_own_pin_is_claimed_off_the_contracts_pointer() -> None:
+    """§6.4's licence rail, on this portal's own pin. The Mapy inventory used to veto it
+    row-by-row; with the geocoder gone, `advert.gps{lat,lng}` — the pointer the contract
+    names — is first-party by construction and there is nothing left to veto."""
+    found = _by_id(fx.listing("bezrealitky", fx.BEZREALITKY, native="1037096",
+                              lat=50.1092, lon=14.4749))
+    assert "bzr.det.gps" in found
+    assert found[TOWN_ENTRY_ID][0].value_text == "Praha"
 
 
 def test_the_advert_description_is_never_a_claim_substrate(

@@ -100,8 +100,7 @@ def bounded(
 ) -> Iterator[psycopg.Cursor]:
     """One transaction whose statements are bounded, yielding its cursor.
 
-    Mirrors `scripts/location_mapy_inventory.guarded`. Use it for per-statement /
-    per-unit phases; a genuine bulk phase (COPY, index build, whole-table rebuild) keeps
+    Use it for per-statement / per-unit phases; a genuine bulk phase (COPY, index build, whole-table rebuild) keeps
     the session's `statement_timeout = 0` and must NOT be wrapped.
     """
     with conn.transaction():
@@ -198,8 +197,7 @@ def record_discrepancy(
     connection of its own and swallows its own errors. A bookkeeping write must never
     mask the exception that caused it — the 2026-08 boundary run died reporting "the
     connection is closed" from this INSERT instead of the SSL drop that actually killed
-    it (same reasoning as `scripts/location_mapy_inventory.record_failure`). `conn` is
-    ignored in that mode; callers on a possibly-dead handle pass None.
+    it. `conn` is ignored in that mode; callers on a possibly-dead handle pass None.
     """
     params = (version_id, entity_kind, entity_code, discrepancy, json.dumps(detail or {}))
     if not own_connection:

@@ -604,22 +604,3 @@ def test_write_details_ingests_and_counts(monkeypatch):
     assert counts["images_discovered"] == 2
 
 
-# --- geocoder wiring (text-first coordinate resolution) ---------------------
-# The builder + memo cache now live in scraper.location (shared across portals);
-# their behavior is tested in tests/scraper/test_location.py. Here we only pin
-# bazos's wiring: the parser receives the geocoder.
-
-
-def test_fetch_detail_passes_geocoder_to_parser(monkeypatch):
-    captured: dict[str, Any] = {}
-
-    def fake_parse(html, *, source_url, category_main, category_type, geocoder=None):
-        captured["geocoder"] = geocoder
-        return SimpleNamespace(raw={})
-
-    monkeypatch.setattr(bazos_main, "parse_detail", fake_parse)
-    sentinel = object()
-    portal = BazosPortal(categories=[_BYT_SALE], geocoder=sentinel)
-    item = portal.fetch_detail(_DetailClient("ok"), "a", "/a")
-    assert item.kind == "ok"
-    assert captured["geocoder"] is sentinel
