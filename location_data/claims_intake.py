@@ -129,6 +129,23 @@ INTAKE_VERSION = "claims_intake@5"
 LANE = "location_claims_intake"
 WAVE = "W1"
 
+# ONE LANE, TWO SCHEDULES (W7-a). This module is still the only claim producer; what W7-a
+# adds is a SECOND schedule for its incremental listing scan — the realtime worker runs it
+# every ~60 s with a 2-minute lag and a 45 s budget, because the hourly GitHub run plus the
+# 15-minute lag left a listing written just after a tick invisible to Browse for up to ~75
+# minutes (measured 2026-09-13: two sreality listings first seen 45 s into the 18:19 run had
+# no claims and no verdict 27 minutes later).
+#
+# THE TWO SCHEDULES MUST NOT SHARE A CURSOR. `_RESUME_SQL` keys on `(lane, source,
+# scan_mode)`, so the fast schedule stamps its batches under its OWN lane name and the two
+# keysets never read each other's position. That separation is also the SAFETY: the short
+# lag can skip a snapshot id allocated by a transaction that commits late (the bigserial
+# race `_SNAPSHOT_SEED_SQL` explains), and the hourly run — still 15 minutes back, on its
+# own cursor — re-reads that id within the hour. Mining a listing twice is free: claim
+# fingerprints are ON CONFLICT DO NOTHING and the enqueue is a bump (W2-a2).
+FAST_LANE = "location_claims_intake_fast"
+DEFAULT_SNAPSHOT_LAG_MINUTES = 15.0
+
 MIN_BATCH_SIZE = 10_000
 MAX_BATCH_SIZE = 30_000
 DEFAULT_BATCH_SIZE = 20_000
@@ -547,9 +564,13 @@ _LEGACY_WATERMARK_SQL = """
 # the drains, so a row can appear BELOW a cursor that already moved, and `s.id > after_id`
 # never looks back. Standing 15 minutes back keeps the window below every in-flight
 # transaction. The seed takes the same predicate, or a cold start would jump over them.
+#
+# A PARAMETER SINCE W7-a, not a widened default: the fast schedule trades the rail for
+# latency (2 minutes), which is safe ONLY because it carries its own cursor and the hourly
+# schedule re-reads the same log 15 minutes back. Nothing else may shorten it.
 _SNAPSHOT_SEED_SQL = """
     SELECT coalesce(max(id), 0) FROM listing_snapshots
-    WHERE scraped_at < now() - interval '15 minutes'
+    WHERE scraped_at < now() - make_interval(secs => %(lag_seconds)s::double precision)
       AND (%(watermark)s::timestamptz IS NULL OR scraped_at <= %(watermark)s)
 """
 
@@ -619,8 +640,10 @@ _LISTINGS_FULL_SQL = (
 
 # THE CHANGE-DRIVEN SELECTION (W1-a2; the measurement is in the module docstring).
 #
-# THE WINDOW STANDS 15 MINUTES BEHIND THE CLOCK — `_SNAPSHOT_SEED_SQL` has the why. The lag
-# costs one run of latency and closes the hole.
+# THE WINDOW STANDS BEHIND THE CLOCK — `_SNAPSHOT_SEED_SQL` has the why, and since W7-a by
+# how much is the schedule's own parameter (15 minutes hourly, 2 minutes on the worker's
+# fast lane, which carries a separate cursor). The lag costs one run of latency and closes
+# the hole.
 #
 # The WINDOW is a keyset slice of the snapshot LOG, not of `listings`, deduped to one row per
 # listing afterwards: the readers read `listings.raw_json`, the CURRENT payload, so a listing
@@ -637,7 +660,8 @@ _LISTINGS_INCREMENTAL_SQL = ("""
         JOIN listings f ON f.id = s.listing_id
          AND (%(source)s::text IS NULL OR f.source = %(source)s)
         WHERE s.id > %(after_id)s
-          AND s.scraped_at < now() - interval '15 minutes'
+          AND s.scraped_at < now()
+                          - make_interval(secs => %(lag_seconds)s::double precision)
         ORDER BY s.id
         LIMIT %(batch_size)s
     ), changed AS (
@@ -1005,7 +1029,7 @@ def stamp_mined_bodies(cur: psycopg.Cursor, stamps: list[dict[str, Any]]) -> Non
 
 
 def _resume_point(
-    conn: psycopg.Connection, *, mode: str, source: str | None,
+    conn: psycopg.Connection, *, mode: str, source: str | None, lane: str = LANE,
 ) -> int | None:
     """Where this scan picks up, or None to start at the beginning of its range.
 
@@ -1020,7 +1044,7 @@ def _resume_point(
     silently skip every snapshot below it. This lane writes no timestamp cursor at all.
     """
     with conn.cursor() as cur:
-        cur.execute(_RESUME_SQL, {"lane": LANE, "source": source, "scan_mode": mode})
+        cur.execute(_RESUME_SQL, {"lane": lane, "source": source, "scan_mode": mode})
         row = cur.fetchone()
     if not row:
         return None
@@ -1063,7 +1087,7 @@ def _bodies_resume_point(
 
 def _full_walk_handoff(
     conn: psycopg.Connection, *, scan_mode: str, source: str | None, anchored: bool,
-    dry_run: bool, budget: "_Budget", last_seconds: float,
+    dry_run: bool, budget: "_Budget", last_seconds: float, lane: str = LANE,
 ) -> int | None:
     """The cursor of a STOPPED full walk an incremental run should carry on with, or None.
 
@@ -1077,12 +1101,16 @@ def _full_walk_handoff(
     `--mode full` keeps its meaning. An anchored or dry run hands off nothing (neither
     certifies coverage), nor does one with no room for another batch — the bodies half has
     already taken its share of the same budget.
+
+    LANE-SCOPED, which is what keeps the W7-a fast schedule out of it: it never runs
+    `--mode full`, so its lane has no stopped full cursor to continue and this returns None
+    every time. A 45 s tick must never inherit a 376k-listing re-walk.
     """
     if scan_mode != "incremental" or anchored or dry_run:
         return None
     if not budget.room_for(last_seconds):
         return None
-    resumed = _resume_point(conn, mode="full", source=source)
+    resumed = _resume_point(conn, mode="full", source=source, lane=lane)
     if resumed is None:
         return None
     LOG.info("INTAKE the change log is empty with %.0fs left: continuing the stopped full "
@@ -1094,7 +1122,7 @@ def _full_walk_handoff(
 def _finish_and_open_full_batch(
     conn: psycopg.Connection, *, batch_id: int, stats: dict[str, Any], row_count: int,
     cursor_after_id: int, source: str | None, contract_id: int | None, note: str | None,
-    statement_timeout: int,
+    statement_timeout: int, lane: str = LANE,
 ) -> int:
     """Close the incremental batch row at its own cursor and open a `full` one (W1-a7).
 
@@ -1111,7 +1139,7 @@ def _finish_and_open_full_batch(
                     f"{cursor_after_id} | handing the rest of the budget to the full walk",
         })
         cur.execute(_BATCH_INSERT_SQL, {
-            "lane": LANE, "source": source, "extractor_version": INTAKE_VERSION,
+            "lane": lane, "source": source, "extractor_version": INTAKE_VERSION,
             "contract_id": contract_id, "wave": WAVE,
             "job_run_id": os.environ.get("GITHUB_RUN_ID"),
             "note": f"continued from batch {batch_id}" + (f" | {note}" if note else ""),
@@ -1133,17 +1161,19 @@ def _bodies_cursor_stamp(stats: dict[str, Any]) -> dict[str, Any]:
 
 def _snapshot_seed(
     conn: psycopg.Connection, statement_timeout: int, *, source: str | None,
+    lane: str = LANE, lag_seconds: float = DEFAULT_SNAPSHOT_LAG_MINUTES * 60.0,
 ) -> tuple[int, Any]:
     """The cutover cursor and the anchor it was derived from. See `_SNAPSHOT_SEED_SQL`.
 
     Two statements, two guarded blocks: they are separate reads, and each one is bounded on
     its own so neither can hang the run before its first batch row exists."""
     with guarded(conn, statement_timeout) as cur:
-        cur.execute(_LEGACY_WATERMARK_SQL, {"lane": LANE, "source": source})
+        cur.execute(_LEGACY_WATERMARK_SQL, {"lane": lane, "source": source})
         row = cur.fetchone()
         watermark = row[0] if row else None
     with guarded(conn, statement_timeout) as cur:
-        cur.execute(_SNAPSHOT_SEED_SQL, {"watermark": watermark})
+        cur.execute(_SNAPSHOT_SEED_SQL,
+                    {"watermark": watermark, "lag_seconds": lag_seconds})
         row = cur.fetchone()
     return (int(row[0]) if row and row[0] is not None else 0), watermark
 
@@ -1478,7 +1508,13 @@ def run(
     dry_run: bool,
     note: str | None,
     store: page_readers.BodyStore | None = None,
+    lane: str = LANE,
+    lag_minutes: float = DEFAULT_SNAPSHOT_LAG_MINUTES,
+    skip_bodies: bool = False,
 ) -> dict[str, Any]:
+    """One pass of the claim lane. The last three parameters are the W7-a SCHEDULE knobs —
+    their defaults ARE the hourly GitHub run, which must keep behaving byte for byte."""
+    lag_seconds = max(0.0, float(lag_minutes) * 60.0)
     missing = missing_relations(conn)
     if missing:
         raise IntakeRefused(
@@ -1507,12 +1543,21 @@ def run(
     # kind has no body this lane can mine. Without the distinction the bodies-first pass
     # would select that portal's rows every batch, stamp none of them, and stop on its own
     # no-progress rail with the rest of the backlog untouched.
-    page_capable = {
+    #
+    # `skip_bodies` EMPTIES THIS SET rather than branching further down (W7-a): with no
+    # page-capable portal the bodies-first pass is skipped, `_body_candidate` returns None
+    # for every row, and `page_readers.extract_pages` — the forkserver process pool — is
+    # never built. A 45 s worker tick must cost one R2-free payload scan and nothing else.
+    page_capable = set() if skip_bodies else {
         s for s in wanted
         if page_readers.page_entries(entries_by_source.get(s, []), "detail")
     }
     registers = page_readers.load_registers(conn) if page_capable else {}
-    if store is None:
+    if skip_bodies:
+        # Dropped even when the caller passed one: `_body_candidate` gates on the store,
+        # so keeping it would leave the opportunistic mining live in a bodies-free pass.
+        store = None
+    elif store is None:
         store = _open_body_store(bool(page_capable))
     body_cap = env_positive_int(BODY_FETCH_CAP_ENV, DEFAULT_BODY_FETCH_CAP)
 
@@ -1534,13 +1579,15 @@ def run(
     anchored = start_after_id > 0
     after_id = start_after_id
     if not anchored:
-        resumed = _resume_point(conn, mode=mode, source=source)
+        resumed = _resume_point(conn, mode=mode, source=source, lane=lane)
         if resumed is not None:
             after_id = resumed
             LOG.info("INTAKE resuming the %s scan for source=%s from after_id=%d",
                      mode, source or "*", after_id)
         elif mode == "incremental":
-            after_id, anchor = _snapshot_seed(conn, statement_timeout, source=source)
+            after_id, anchor = _snapshot_seed(
+                conn, statement_timeout, source=source, lane=lane,
+                lag_seconds=lag_seconds)
             LOG.info("INTAKE no incremental cursor for source=%s; seeding at snapshot "
                      "id=%d from the pre-W1-a2 anchor %s (the exhaustive pass is "
                      "--mode full)", source or "*", after_id, anchor or "none (log head)")
@@ -1549,7 +1596,7 @@ def run(
     if not dry_run:
         with guarded(conn, statement_timeout) as cur:
             cur.execute(_BATCH_INSERT_SQL, {
-                "lane": LANE, "source": source, "extractor_version": INTAKE_VERSION,
+                "lane": lane, "source": source, "extractor_version": INTAKE_VERSION,
                 "contract_id": contract_id, "wave": WAVE,
                 "job_run_id": os.environ.get("GITHUB_RUN_ID"), "note": note,
                 "scan_mode": mode, "resumable": not anchored,
@@ -1616,7 +1663,8 @@ def run(
                 statement = (_LISTINGS_INCREMENTAL_SQL if scan_mode == "incremental"
                              else _LISTINGS_FULL_SQL)
                 cur.execute(statement, {
-                    "after_id": after_id, "source": source, "batch_size": size})
+                    "after_id": after_id, "source": source, "batch_size": size,
+                    "lag_seconds": lag_seconds})
                 records = cur.fetchall()
                 if not records:
                     # The ONLY way this scan earns outcome='ok'. Everything else — a
@@ -1625,7 +1673,8 @@ def run(
                     # for them.
                     handoff = _full_walk_handoff(
                         conn, scan_mode=scan_mode, source=source, anchored=anchored,
-                        dry_run=dry_run, budget=budget, last_seconds=last_seconds)
+                        dry_run=dry_run, budget=budget, last_seconds=last_seconds,
+                        lane=lane)
                     if handoff is None:
                         stats["reached_end"] = True
                         break
@@ -1633,7 +1682,7 @@ def run(
                         conn, batch_id=batch_id, stats=stats,
                         row_count=stats["claims_inserted"] - row_count_base,
                         cursor_after_id=after_id, source=source, contract_id=contract_id,
-                        note=note, statement_timeout=statement_timeout)
+                        note=note, statement_timeout=statement_timeout, lane=lane)
                     after_id, scan_mode = handoff, "full"
                     stats["full_walk_continued"] = True
                     stats["full_walk_cursor"] = handoff

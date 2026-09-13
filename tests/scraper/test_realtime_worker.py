@@ -1211,3 +1211,196 @@ def test_location_resolve_pass_returns_early_when_stopping(monkeypatch):
     state = rw._new_state()
     asyncio.run(rw._location_resolve_pass(stop, state))
     assert "location_resolve" not in state["lanes"]
+
+
+# ------------------------------------- location_intake_fast (W7-a): one lane, two schedules
+
+_FAST_STATS = {
+    "listings": 12, "claims_inserted": 34, "enqueued": 7,
+    "payload_seconds": 1.234, "cursor_after_id": 987654,
+}
+
+
+def _patch_intake_fast(
+    monkeypatch: pytest.MonkeyPatch, *, stats: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Stub the intake entry points the lane touches and capture run()'s kwargs."""
+    captured: dict[str, Any] = {}
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    conn = _Conn()
+
+    def fake_run(c: Any, **kwargs: Any) -> dict[str, Any]:
+        captured["conn"] = c
+        captured.update(kwargs)
+        return dict(stats or _FAST_STATS)
+
+    monkeypatch.setattr(rw.db, "connect_session", lambda *a, **k: conn)
+    monkeypatch.setattr("location_data.claims_intake.run", fake_run)
+    monkeypatch.setattr(rw, "_project_contracts_once", lambda: True)
+    monkeypatch.setattr(rw, "_INTAKE_FAST_PASS_LOCK", threading.Lock())
+    monkeypatch.setattr(rw, "_INTAKE_FAST_WEDGE_LOGGED", False)
+    monkeypatch.setattr(rw, "_INTAKE_FAST_LAST_IDLE", True)
+    captured["conn_obj"] = conn
+    return captured
+
+
+def test_location_intake_fast_lane_registered_and_live_by_default(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Registered in _amain, and LIVE: this lane IS the latency fix (a new listing was
+    # invisible to Browse for up to ~75 minutes), so the flag defaults ON and the kill
+    # switch is an explicit 0.
+    src = inspect.getsource(rw._amain)
+    assert '("location_intake_fast"' in src
+    monkeypatch.delenv(rw.LOCATION_INTAKE_FAST_ENABLED_ENV, raising=False)
+    assert rw._read_location_intake_fast_interval() == 60
+    monkeypatch.setenv(rw.LOCATION_INTAKE_FAST_ENABLED_ENV, "0")
+    assert rw._read_location_intake_fast_interval() == 0
+
+
+def test_location_intake_fast_knobs_are_env_vars_and_clamped(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Env vars, not app_settings rows: the reader must not touch the database, because
+    # _lane_loop falls back to this lane's OWN cadence when the read raises and a lane
+    # that ships live cannot have a fail-open reader.
+    for env in (rw.LOCATION_INTAKE_FAST_INTERVAL_ENV, rw.LOCATION_INTAKE_FAST_LAG_ENV,
+                rw.LOCATION_INTAKE_FAST_BUDGET_ENV):
+        monkeypatch.delenv(env, raising=False)
+    assert rw._read_location_intake_fast_lag_seconds() == 120
+    assert rw._read_location_intake_fast_budget() == 45
+
+    monkeypatch.setenv(rw.LOCATION_INTAKE_FAST_BUDGET_ENV, "99999")
+    assert rw._read_location_intake_fast_budget() == rw.LOCATION_INTAKE_FAST_BUDGET_CEILING
+    # A healthy pass must never read as a stall, nor be abandoned by the lane loop.
+    assert rw.LOCATION_INTAKE_FAST_BUDGET_CEILING < 1200
+    assert rw.LOCATION_INTAKE_FAST_BUDGET_CEILING < rw.LANE_PASS_TIMEOUT_SECONDS
+    # A typo must not stop a lane that ships live.
+    monkeypatch.setenv(rw.LOCATION_INTAKE_FAST_BUDGET_ENV, "forty-five")
+    assert rw._read_location_intake_fast_budget() == 45
+    monkeypatch.setenv(rw.LOCATION_INTAKE_FAST_INTERVAL_ENV, "0")
+    assert rw._read_location_intake_fast_interval() == 5, "an interval knob is not the flag"
+
+
+def test_location_intake_fast_sync_runs_the_shared_scan_on_its_own_lane(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _patch_intake_fast(monkeypatch)
+    monkeypatch.setenv(rw.LOCATION_INTAKE_FAST_LAG_ENV, "120")
+    monkeypatch.setenv(rw.LOCATION_INTAKE_FAST_BUDGET_ENV, "45")
+
+    out = rw._location_intake_fast_sync()
+
+    from location_data import claims_intake
+
+    # ITS OWN CURSOR. `location_claim_batches` resumes on (lane, source, scan_mode), so a
+    # re-spelled literal here would silently advance the hourly run's position past the
+    # rows its 15-minute rail exists to re-read.
+    assert captured["lane"] == claims_intake.FAST_LANE
+    assert captured["lane"] != claims_intake.LANE
+    assert captured["mode"] == "incremental"
+    assert captured["lag_minutes"] == 2.0
+    assert captured["skip_bodies"] is True
+    assert captured["max_seconds"] == 45.0
+    assert captured["dry_run"] is False
+    assert captured["source"] is None
+    assert captured["conn_obj"].closed is True
+    # The heartbeat's `last`: what the tick achieved and where it left the keyset.
+    assert out == {
+        "ran": True, "listings": 12, "claims_inserted": 34, "enqueued": 7,
+        "seconds": 1.2, "cursor": 987654,
+    }
+
+
+def test_location_intake_fast_sync_skips_while_the_previous_tick_is_running(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # A pass abandoned at LANE_PASS_TIMEOUT_SECONDS keeps running (Python cannot kill the
+    # thread). Two scans sharing one cursor would each re-read the other's window, so the
+    # in-process lock — not the interval — is what makes the next tick cheap and safe.
+    def never(*a: Any, **k: Any) -> None:
+        raise AssertionError("a second tick must not scan beside a running one")
+
+    _patch_intake_fast(monkeypatch)
+    monkeypatch.setattr("location_data.claims_intake.run", never)
+    rw._INTAKE_FAST_PASS_LOCK.acquire()
+    try:
+        out = rw._location_intake_fast_sync()
+    finally:
+        rw._INTAKE_FAST_PASS_LOCK.release()
+
+    assert out == {"ran": False, "previous_pass_running": True}
+
+
+def test_location_intake_fast_pass_records_the_heartbeat_shape(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_intake_fast(monkeypatch)
+    state = rw._new_state()
+    rw._record_pass_start(state, "location_intake_fast")
+
+    asyncio.run(rw._location_intake_fast_pass(asyncio.Event(), state))
+
+    lane = state["lanes"]["location_intake_fast"]
+    assert lane["passes"] == 1
+    assert lane["started_at"] is None, "a cleared stamp is what says the pass ENDED"
+    assert lane["last"]["listings"] == 12
+    assert lane["last"]["cursor"] == 987654
+    # check_worker_lane_stall reads every lane key off `details`, so the new lane is
+    # covered the moment it beats — no threshold change for a 60 s lane.
+    assert set(lane) >= {"last_pass_at", "passes", "last_duration_s", "failed_passes"}
+
+
+def test_location_intake_fast_pass_returns_early_when_stopping(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    def never() -> None:
+        raise AssertionError("a stopping worker must not start a new scan")
+
+    monkeypatch.setattr(rw, "_location_intake_fast_sync", never)
+    stop = asyncio.Event()
+    stop.set()
+    state = rw._new_state()
+    asyncio.run(rw._location_intake_fast_pass(stop, state))
+    assert "location_intake_fast" not in state["lanes"]
+
+
+def test_a_failed_contract_projection_never_stops_the_lane(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The projection raises by design when a contract's governed bytes changed without a
+    # version bump, and the AUTHORITATIVE projector is location_claims_intake.yml. A worker
+    # that refused to scan over that would trade a loud failure for a silent one.
+    def boom(*a: Any, **k: Any) -> None:
+        raise RuntimeError("sreality@3 is already loaded with a different sha256")
+
+    monkeypatch.setattr(rw, "_INTAKE_FAST_CONTRACTS_PROJECTED", False)
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: pytest.fail(
+        "the contracts are parsed before a connection is opened"))
+    monkeypatch.setattr("location_data.contracts.load_all", boom)
+
+    assert rw._project_contracts_once() is False
+    assert rw._INTAKE_FAST_CONTRACTS_PROJECTED is False
+
+
+def test_the_contract_projection_runs_once_per_process(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Idempotent per (portal, contract_version), so re-projecting is a handful of no-op
+    # reads — but doing it every 60 s would be ten pointless round trips a minute for ever.
+    calls: list[int] = []
+    monkeypatch.setattr(rw, "_INTAKE_FAST_CONTRACTS_PROJECTED", False)
+    monkeypatch.setattr("location_data.contracts.load_all",
+                        lambda *a, **k: calls.append(1) or [])
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _NullConn())
+
+    assert rw._project_contracts_once() is True
+    assert rw._project_contracts_once() is True
+    assert calls == [1]
+
+
+class _NullConn:
+    def __enter__(self) -> "_NullConn":
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False

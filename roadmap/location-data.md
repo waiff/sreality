@@ -703,6 +703,17 @@ component is slimmed twice — each wave rewrites one component and slims its st
     of its own, logging `backlog_remaining=? (count skipped after 60 s)` if even that overruns. On a
     contract bump the cursor is 0 and the count is the full one again, correctly.
 
+  - **W7-a — the change-driven listing scan runs in the realtime worker every minute** (code only;
+    new listings were invisible for up to 75 min under W5). One lane, TWO SCHEDULES: the same
+    `claims_intake.run()` also ticks in `scraper/realtime_worker.py` (lane `location_intake_fast`,
+    LIVE) every ~60 s — payload half only (`skip_bodies=True`: no bodies drain, no R2, no process
+    pool), a **2-minute** snapshot lag instead of 15 and a 45 s budget, stamping its own
+    `FAST_LANE` cursor. The short lag is safe because the cursors are separate: the hourly run
+    stays 15 minutes back and re-reads whatever the bigserial race made the fast tick skip, and
+    mining twice is free. Measured 2026-09-13: two sreality listings first seen 45 s into the 18:19
+    hourly run had no claim and no verdict 27 minutes later. Latency now: ≤2 min lag → ≤1 min tick
+    → the resolve lane → `browse_list`'s */15 rebuild.
+
   - **W7-b — the audit page separates "pending" (the lane has not finished) from "unresolved"
     (processed, no location)** (migration **518**). The operator's words: the queued rows are "a very
     different set of listings (not really an issue) from the ones that were run and not resolved
@@ -712,8 +723,9 @@ component is slimmed twice — each wave rewrites one component and slims its st
     row) — and `location_pin_audit_summary()` groups by it, so both header counts and the matrix
     stay sums over ONE payload. The page toggles between the two states (default `unresolved`), the
     quality buckets apply under `unresolved` only, and `!AUDIT POLOH (N)` counts the issue alone.
-    Measured against the 18:25 refresh of 2026-09-13: **11 pending, 44,370 unresolved** (the drain
-    was caught up; during a burst the pending half is thousands, which is the point).
+    Measured on 2026-09-13: **11 pending / 44,370 unresolved** at the pre-apply probe (the drain was
+    caught up), **39 / 44,370** on the first build after the apply — the pending half is small only
+    between bursts, and during a sweep it is thousands, which is the point.
 
 **What is left of the sprint** (nothing further to build):
   1. **The gate** — `check_location_town_coverage` red until every portal reports zero served
