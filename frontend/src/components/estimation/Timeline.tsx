@@ -76,8 +76,6 @@ interface SelectionRoundFilters {
   category_main?: string | null;
   category_type?: string | null;
   category_sub_cb?: number | null;
-  locality_district_id?: number | null;
-  locality_region_id?: number | null;
   include_unreliable?: boolean | null;
   furnished?: string | null;
   terrace?: boolean | null;
@@ -384,8 +382,6 @@ const FILTER_ROWS: Array<{
   { key: 'category_main', label: 'Category', fmt: fmtString },
   { key: 'category_type', label: 'Type', fmt: fmtString },
   { key: 'category_sub_cb', label: 'Sub-category', fmt: (v) => (typeof v === 'number' ? String(v) : EM_DASH) },
-  { key: 'locality_district_id', label: 'District id', fmt: (v) => (typeof v === 'number' ? String(v) : EM_DASH) },
-  { key: 'locality_region_id', label: 'Region id', fmt: (v) => (typeof v === 'number' ? String(v) : EM_DASH) },
   { key: 'include_unreliable', label: 'Include unreliable', fmt: fmtBool },
   { key: 'furnished', label: 'Furnished', fmt: fmtString },
   { key: 'terrace', label: 'Terrace', fmt: fmtBool },

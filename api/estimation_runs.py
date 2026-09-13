@@ -1374,7 +1374,7 @@ def list_estimation_runs(
 
 _LISTING_FIELDS: tuple[str, ...] = (
     "price_czk", "price_unit", "category_main", "category_type",
-    "locality", "district", "locality_district_id", "locality_region_id",
+    "locality", "district",
     "total_floors", "has_balcony", "has_lift", "has_parking",
     "building_type", "condition", "energy_rating",
 )
@@ -1511,14 +1511,17 @@ def _match_listing_by_url(
     canon = source_dispatcher.canonical_url(url)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT sreality_id, id AS listing_id, "
-            "ST_Y(geom::geometry) AS lat, ST_X(geom::geometry) AS lng, "
-            "area_m2, disposition, floor, price_czk, category_type "
-            "FROM listings "
-            "WHERE geom IS NOT NULL AND source_url IS NOT NULL "
-            "AND (source_url = %(url)s OR source_url = %(canon)s "
-            "     OR rtrim(source_url, '/') = %(canon)s) "
-            "ORDER BY last_seen_at DESC NULLS LAST LIMIT 1",
+            "SELECT l.sreality_id, l.id AS listing_id, "
+            # W4-a: coordinates come from listing_location, so "a known-portal
+            # subject with a coordinate" now means "the resolver placed it".
+            "ST_Y(ll.geom) AS lat, ST_X(ll.geom) AS lng, "
+            "l.area_m2, l.disposition, l.floor, l.price_czk, l.category_type "
+            "FROM listings l "
+            "JOIN listing_location ll ON ll.listing_id = l.id "
+            "WHERE ll.geom IS NOT NULL AND l.source_url IS NOT NULL "
+            "AND (l.source_url = %(url)s OR l.source_url = %(canon)s "
+            "     OR rtrim(l.source_url, '/') = %(canon)s) "
+            "ORDER BY l.last_seen_at DESC NULLS LAST LIMIT 1",
             {"url": url, "canon": canon},
         )
         row = cur.fetchone()
@@ -1558,8 +1561,12 @@ def _match_listing_by_id(
     with conn.cursor() as cur:
         cur.execute(
             "SELECT l.sreality_id, "
-            "ST_Y(COALESCE(p.geom, l.geom)::geometry) AS lat, "
-            "ST_X(COALESCE(p.geom, l.geom)::geometry) AS lng, "
+            # W4-a: the golden record's PLACE is its representative listing's
+            # resolved point (properties.geom is unwritten from this wave on and
+            # dropped in W4-c). Same precedence as the other four COALESCEs --
+            # property first, the listing's own row as the fallback.
+            "ST_Y(COALESCE(pll.geom, ll.geom)) AS lat, "
+            "ST_X(COALESCE(pll.geom, ll.geom)) AS lng, "
             "COALESCE(p.area_m2, l.area_m2) AS area_m2, "
             "COALESCE(p.disposition, l.disposition) AS disposition, "
             "l.floor, "
@@ -1567,6 +1574,8 @@ def _match_listing_by_id(
             "COALESCE(p.category_type, l.category_type) AS category_type "
             "FROM listings l "
             "LEFT JOIN properties p ON p.id = l.property_id AND p.status = 'active' "
+            "LEFT JOIN listing_location ll ON ll.listing_id = l.id "
+            "LEFT JOIN listing_location pll ON pll.listing_id = p.repr_listing_ref_id "
             "WHERE l.sreality_id = %(id)s LIMIT 1",
             {"id": int(sreality_id)},
         )

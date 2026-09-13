@@ -7,6 +7,8 @@ no real Postgres.
 
 from __future__ import annotations
 
+import re
+
 from datetime import datetime, timezone
 from typing import Any
 
@@ -153,11 +155,16 @@ def test_corridor_excludes_radius_from_shared_filter():
     )
     # The corridor SELECT is the first fetchall (second SQL after cache check).
     corridor_sql = conn.cursor_obj.executed[1][0]
-    # The corridor ST_DWithin against the line geom IS present.
-    assert "ST_DWithin(l.geom, nl.geom" in corridor_sql
+    # The corridor ST_DWithin against the line geom IS present -- on the
+    # resolved point, cast to geography so the corridor is still metres (W4-a).
+    assert "ST_DWithin(ll.geom::geography, nl.geom" in corridor_sql
     # But the anchor-circle ST_DWithin against the listing geom is NOT.
-    assert "ST_DWithin(\n      l.geom" not in corridor_sql
+    assert "ST_DWithin(\n      ll.geom" not in corridor_sql
     assert "%(radius_m)s" not in corridor_sql
+    # And the listing's place comes from listing_location, not listings.geom
+    # (the lookbehind is what keeps `ll.geom` from matching as `l.geom`).
+    assert "JOIN listing_location ll ON ll.listing_id = l.id" in corridor_sql
+    assert re.search(r"(?<![a-z])l\.geom", corridor_sql) is None
 
 
 def test_corridor_honours_lifecycle():

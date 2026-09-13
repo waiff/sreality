@@ -324,8 +324,8 @@ def broker_listing_ids(conn: Any, broker_id: int, *, limit: int = 50_000) -> dic
     Feeds Browse's `brokerId` cohort prefilter (frontend/src/lib/queries.ts
     `resolveBrokerPrefilter`): a prefilter allowlist that silently truncated would
     silently under-plot the map (the fail-open-filter class of bug), so this is
-    deliberately NOT `broker_listings()`'s cap. `geom IS NOT NULL` — a listing with no
-    coordinates can never appear on a map; it stays visible in the Inventory table via
+    deliberately NOT `broker_listings()`'s cap. `ll.geom IS NOT NULL` — a listing the resolver
+    has not placed can never appear on a map; it stays visible in the Inventory table via
     the separate, unfiltered `broker_listings()` call, so nothing is hidden overall.
     `limit + 1` detects an actual overflow without a second COUNT query.
     """
@@ -334,7 +334,10 @@ def broker_listing_ids(conn: Any, broker_id: int, *, limit: int = 50_000) -> dic
         cur.execute(
             "SELECT l.id FROM listings l "
             "JOIN broker_identities bi ON bi.id = l.broker_identity_id "
-            "WHERE bi.broker_id = %s AND l.geom IS NOT NULL "
+            # W4-a: mappable == the resolver placed it (listing_location), not
+            # the legacy listings.geom the map stopped reading in W3.
+            "JOIN listing_location ll ON ll.listing_id = l.id "
+            "WHERE bi.broker_id = %s AND ll.geom IS NOT NULL "
             "ORDER BY l.id LIMIT %s",
             (broker_id, limit + 1))
         ids = [r["id"] for r in cur.fetchall()]

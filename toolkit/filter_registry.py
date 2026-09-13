@@ -439,7 +439,7 @@ def _build_registry() -> dict[str, FilterDef]:
                 "complementary sub-fields: a location chip list "
                 "(see the `districts` filter — RÚIAN code equality per "
                 "level), a map bounding box "
-                "(west/south/east/north on l.geom), and a center+radius "
+                "(west/south/east/north on the resolved point), and a center+radius "
                 "pair (ST_DWithin around (lat,lng) within radius_m). "
                 "Districts is an independent AND-clause; the map vs "
                 "center+radius pair are mutually exclusive — when both "
@@ -493,7 +493,8 @@ def _build_registry() -> dict[str, FilterDef]:
             default=1000,
             description=(
                 "Spatial radius around the target listing, in metres. "
-                "Applied as ST_DWithin(l.geom, target_point, radius_m). "
+                "Applied as ST_DWithin(ll.geom::geography, target_point, radius_m) "
+                "against the listing_location point. "
                 "Defaults to 1000 m — a tight 10-minute walk. Widen "
                 "for sparse rural cohorts; tighten for dense urban "
                 "blocks where a few hundred metres changes the price "
