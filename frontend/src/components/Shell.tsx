@@ -65,6 +65,7 @@ const newDedupItems: ReadonlyArray<MenuItem> = [
   { to: ROUTES.newDedupTrainingSet.build(), label: 'Training set' },
   { to: ROUTES.newDedupExam.build(), label: 'Exam' },
   { to: ROUTES.newDedupTaggingBakeoff.build(), label: 'Tagging bake-off' },
+  { to: ROUTES.newDedupPinAudit.build(), label: 'Audit poloh' },
 ];
 
 function isPathActive(pathname: string, to: string): boolean {
