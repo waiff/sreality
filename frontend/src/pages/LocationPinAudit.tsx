@@ -36,6 +36,7 @@ import {
   fetchPinAuditSummary,
   summaryRowMatches,
   type PinAuditFilters,
+  type PinAuditOldEvidence,
   type PinAuditQuality,
   type PinAuditRow,
   type PinAuditSummaryRow,
@@ -119,6 +120,18 @@ const QUALITY_SHORT: Record<PinAuditQuality, string> = {
   delisted_unresolved: 'stažen · nevyšlo',
 };
 
+/* What superseded evidence the ad still carries. This replaces an earlier,
+ * WRONG line that told the operator evidence had "arrived after the verdict":
+ * measured on production, the claims these rows carry sit under NO active
+ * contract — they are legacy-column copies (the Mapy-era pin, the legacy
+ * PSČ/locality fields) and claims off older page versions. Nothing is queued
+ * and nothing is coming. */
+const OLD_EVIDENCE_LABEL: Record<PinAuditOldEvidence, string> = {
+  legacy: 'jen stará data (Mapy, legacy sloupce)',
+  archived: 'starší verze stránky',
+  none: 'žádná',
+};
+
 const dash = (v: string | null | undefined): string =>
   v == null || v === '' ? '—' : v;
 
@@ -174,6 +187,21 @@ export default function LocationPinAudit() {
   );
   const totalAll = useMemo(() => rows.reduce((a, r) => a + r.n, 0), [rows]);
 
+  /* The split the ruling turns on, always over the WHOLE set (not the current
+   * filters): how much of the loss is live ads, and how much a sibling listing
+   * could recover with no resolver change at all. */
+  const split = useMemo(() => {
+    let active = 0;
+    let delisted = 0;
+    let sibling = 0;
+    for (const r of rows) {
+      if (r.quality.startsWith('active_')) active += r.n;
+      else delisted += r.n;
+      if (r.sibling_has_pin) sibling += r.n;
+    }
+    return { active, delisted, sibling };
+  }, [rows]);
+
   const refreshedAt = useMemo(
     () => rows.find((r) => r.refreshed_at != null)?.refreshed_at ?? null,
     [rows],
@@ -218,9 +246,15 @@ export default function LocationPinAudit() {
         podívat, než o tom rozhodnete.
       </p>
       <p className="mt-2 text-[0.78rem] text-[var(--color-ink-3)]">
-        Celkem {fmtCount(totalAll)} inzerátů
+        Celkem {fmtCount(totalAll)} inzerátů · {fmtCount(split.active)} běží ·{' '}
+        {fmtCount(split.delisted)} stažených · u {fmtCount(split.sibling)} má
+        jiný inzerát téže nemovitosti polohu určenou
         {refreshedAt ? ` · stav k ${fmtDateSlash(refreshedAt)}` : ''}
         {' · '}seznam se obnovuje každou hodinu
+      </p>
+      <p className="mt-1 text-[0.78rem] text-[var(--color-ink-3)] max-w-[52rem]">
+        Těch {fmtCount(split.sibling)} by šlo zachránit bez jakékoli změny v
+        určování polohy — stačilo by špendlík vzít od sourozeneckého inzerátu.
       </p>
 
       {err ? <ErrorBanner message={(err as Error).message} /> : null}
@@ -387,6 +421,22 @@ export default function LocationPinAudit() {
               </div>
             </div>
             <div>
+              <p className="text-[0.7rem] uppercase tracking-[0.1em] text-[var(--color-ink-3)]">
+                Jiný inzerát téže nemovitosti má polohu
+              </p>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {(['all', 'yes', 'no'] as const).map((v) => (
+                  <Chip
+                    key={v}
+                    on={filters.sibling === v}
+                    onClick={() => setFilters((f) => ({ ...f, sibling: v }))}
+                  >
+                    {v === 'all' ? 'Vše' : v === 'yes' ? 'Má' : 'Nemá'}
+                  </Chip>
+                ))}
+              </div>
+            </div>
+            <div>
               <button
                 type="button"
                 className="self-start text-[0.78rem] text-[var(--color-ink-3)] underline decoration-dotted underline-offset-2 hover:text-[var(--color-ink)]"
@@ -474,6 +524,8 @@ export default function LocationPinAudit() {
                   <th className={TH}>Stav</th>
                   <th className={`${TH} text-right`}>Naposledy viděno</th>
                   <th className={TH}>Proč poloha chybí</th>
+                  <th className={TH}>Stará data</th>
+                  <th className={TH}>Sourozenec</th>
                   <th className={TH}>Verdikt</th>
                   <th className={`${TH} text-right`}>Staré souřadnice</th>
                 </tr>
@@ -534,14 +586,21 @@ export default function LocationPinAudit() {
                       <td className={NUM}>{fmtDateSlash(r.last_seen_at)}</td>
                       <td className={TD}>{QUALITY_SHORT[r.quality]}</td>
                       <td className={`${TD} text-[var(--color-ink-3)]`}>
+                        {OLD_EVIDENCE_LABEL[r.old_evidence]}
+                      </td>
+                      <td className={TD}>
+                        {r.sibling_has_pin ? (
+                          <span className="text-[var(--color-copper)]">
+                            má polohu
+                          </span>
+                        ) : (
+                          <span className="text-[var(--color-ink-4)]">—</span>
+                        )}
+                      </td>
+                      <td className={`${TD} text-[var(--color-ink-3)]`}>
                         {r.has_row
                           ? `${dash(r.country_status)} · ${dash(r.granularity)} · ${dash(r.match_confidence)}`
                           : 'nový systém tento inzerát vůbec nezpracoval'}
-                        {r.claims_now && !r.has_claims ? (
-                          <span className="block">
-                            podklady o poloze přibyly až po vyhodnocení
-                          </span>
-                        ) : null}
                       </td>
                       <td className={NUM}>
                         {r.legacy_lat.toFixed(5)}, {r.legacy_lng.toFixed(5)}

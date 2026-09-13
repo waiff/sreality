@@ -36,11 +36,12 @@ vi.mock('@/components/PinAuditMap', () => ({
 const REFRESHED = '2026-09-13T05:25:00Z';
 
 const SUMMARY: pinAudit.PinAuditSummaryRow[] = [
-  { source: 'sreality', category_main: 'byt', quality: 'delisted_no_claims', n: 300, refreshed_at: REFRESHED },
-  { source: 'sreality', category_main: 'byt', quality: 'active_unresolved', n: 20, refreshed_at: REFRESHED },
-  { source: 'sreality', category_main: 'pozemek', quality: 'delisted_no_claims', n: 7, refreshed_at: REFRESHED },
-  { source: 'bazos', category_main: 'byt', quality: 'active_no_claims', n: 1000, refreshed_at: REFRESHED },
-  { source: 'bazos', category_main: 'pozemek', quality: 'active_no_claims', n: 5, refreshed_at: REFRESHED },
+  { source: 'sreality', category_main: 'byt', quality: 'delisted_no_claims', sibling_has_pin: false, n: 290, refreshed_at: REFRESHED },
+  { source: 'sreality', category_main: 'byt', quality: 'delisted_no_claims', sibling_has_pin: true, n: 10, refreshed_at: REFRESHED },
+  { source: 'sreality', category_main: 'byt', quality: 'active_unresolved', sibling_has_pin: false, n: 20, refreshed_at: REFRESHED },
+  { source: 'sreality', category_main: 'pozemek', quality: 'delisted_no_claims', sibling_has_pin: false, n: 7, refreshed_at: REFRESHED },
+  { source: 'bazos', category_main: 'byt', quality: 'active_no_claims', sibling_has_pin: false, n: 1000, refreshed_at: REFRESHED },
+  { source: 'bazos', category_main: 'pozemek', quality: 'active_no_claims', sibling_has_pin: false, n: 5, refreshed_at: REFRESHED },
 ];
 
 const ROW: pinAudit.PinAuditRow = {
@@ -70,7 +71,9 @@ const ROW: pinAudit.PinAuditRow = {
   resolved_at: '2026-09-12T19:58:11Z',
   has_row: true,
   has_claims: false,
-  claims_now: true,
+  claims_now: false,
+  old_evidence: 'legacy',
+  sibling_has_pin: true,
   quality: 'delisted_no_claims',
   refreshed_at: REFRESHED,
 };
@@ -102,6 +105,7 @@ describe('LocationPinAudit', () => {
           legacy_lng: 14.44,
           quality: 'delisted_no_claims',
           is_active: false,
+          sibling_has_pin: true,
         },
       ],
       capped: false,
@@ -194,11 +198,48 @@ describe('LocationPinAudit', () => {
       within(row).getByRole('link', { name: /portál/ }).getAttribute('href'),
     ).toBe(ROW.source_url);
     expect(within(row).getByText(/undetermined/)).toBeInTheDocument();
-    /* has_claims=false but claims_now=true — the page must say so rather than
-     * let the operator read "no evidence". */
+    /* What the ad still carries is SUPERSEDED evidence, and the page names it.
+     * It must never claim evidence "arrived after the verdict" — measured on
+     * production, nothing these rows hold sits under an active contract. */
     expect(
-      within(row).getByText(/podklady o poloze přibyly až po vyhodnocení/),
+      within(row).getByText('jen stará data (Mapy, legacy sloupce)'),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/přibyly až po vyhodnocení/),
+    ).not.toBeInTheDocument();
+    expect(within(row).getByText('má polohu')).toBeInTheDocument();
+  });
+
+  it('states the split the ruling turns on, over the whole set', async () => {
+    renderPage();
+    /* 1332 total, 1025 active (1000 + 5 + 20), 307 delisted, 10 recoverable
+     * from a sibling listing — all read off the same summary payload. */
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Celkem 1 332 inzerátů · 1 025 běží · 307 stažených/),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(/u 10 má jiný inzerát téže nemovitosti polohu určenou/),
+    ).toBeInTheDocument();
+  });
+
+  it('sends the sibling filter to the server', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId('pin-audit-matrix-sreality');
+
+    await user.click(screen.getByRole('button', { name: 'Má' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(pinAudit.fetchPinAuditPage).mock.calls;
+      expect(calls[calls.length - 1][0].sibling).toBe('yes');
+    });
+    /* And the matrix narrows with it: sreality's row total falls 327 -> 10. */
+    const cells = within(
+      screen.getByTestId('pin-audit-matrix-sreality'),
+    ).getAllByRole('cell');
+    expect(cells[cells.length - 1]).toHaveTextContent('10');
   });
 
   it('says when the map is showing only a prefix of the cohort', async () => {
@@ -209,6 +250,7 @@ describe('LocationPinAudit', () => {
         legacy_lng: 14,
         quality: 'delisted_no_claims' as const,
         is_active: false,
+        sibling_has_pin: false,
       })),
       capped: true,
     });

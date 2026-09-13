@@ -7,11 +7,12 @@
 --
 -- WHAT IT AUDITS. The Browse map still draws a pin for every active property
 -- that carries legacy coordinates. The new location store (`listing_location`,
--- migration 501) has no Czech point for a large slice of them — it either never
--- saw any evidence, or saw some and could not turn it into a position. If 503's
--- guard collapses the map onto the new store, those pins disappear. This view
--- is exactly that set, one row per property (at its representative listing), so
--- the operator can look at them before ruling.
+-- migration 501) has no Czech point for a large slice of them. If 503's guard
+-- collapses the map onto the new store, those pins disappear. This view is
+-- exactly that set, one row per property (at its representative listing), so
+-- the operator can look at them before ruling. Measured 2026-09-13 06:25Z:
+-- 36,970 rows — 2,413 still-live ads (almost all bazos dead ads, which #1451
+-- delists over the coming days) and 34,557 delisted display listings.
 --
 -- The cohort predicate mirrors the map feed's own (`properties_map_mv` =
 -- `browse_projection` where lat/lng are not null = `properties` where
@@ -25,21 +26,47 @@
 -- correct answer, not a loss.
 --
 -- WHY A MATVIEW. The cohort is a full scan of the ~672k-row active-property
--- set plus a per-row EXISTS on `location_claims`. As a live view that is far
--- over PostgREST's 3s browser budget; materialized and refreshed hourly it is a
--- ~37k-row indexed relation the page pages through in milliseconds.
+-- set plus per-row evidence lookups. As a live view that is far over
+-- PostgREST's 3s browser budget; materialized and refreshed hourly it is a
+-- ~37k-row indexed relation the page pages through in milliseconds. The cohort
+-- CTE is MATERIALIZED so the three lateral lookups run ~37k times and not once
+-- per active property.
 --
--- THE TWO EVIDENCE SIGNALS ARE NOT THE SAME QUESTION, and the page shows both:
+-- WHAT THE EVIDENCE COLUMNS MEAN — and the reading that was WRONG. The first
+-- cut of this migration carried a `claims_now` that counted ANY row in
+-- `location_claims`, and concluded from it that ~35.6k verdicts predate their
+-- own evidence, i.e. the claims were mined afterwards. That is not what the
+-- data says. Measured on production 2026-09-13 06:05Z, of the newest 366 rows
+-- in the set 361 have claims and ZERO of them sit under an active contract:
+-- they are bazos@1/@3/@4 `surface=legacy_column, extraction_method=
+-- legacy_column` copies of the legacy `listings` columns (the Mapy-era pin, the
+-- legacy PSČ/locality fields the doctrine dropped in W1-b), plus some
+-- `archived_html` / `url_slug_parse` claims under superseded contract versions.
+-- None was observed after the verdict; none is queued. So:
 --   * has_claims  — the SAVED verdict consumed at least one claim.
---     `claim_set_hash` is NOT NULL on every row, and the resolver hashes the
+--     `claim_set_hash` is NOT NULL on every row and the resolver hashes the
 --     CONSUMED claim list, so an empty consumption is the digest of the empty
 --     list, not a NULL (location_data/resolver/serialize.py::claim_set_hash ->
---     digest([]) = sha256('[]')). Measured 2026-09-13: 35,608 of 36,959 rows.
---   * claims_now  — the claim store holds location evidence for this listing
---     TODAY. Measured on the same set, nearly all of them do. The gap between
---     the two is the finding: most saved verdicts predate their own evidence
---     (the claims were mined afterwards), so the pin loss is mostly a stale
---     verdict rather than a genuinely unlocatable ad.
+--     digest([]) = sha256('[]')).
+--   * claims_now  — evidence exists TODAY under an ACTIVE contract
+--     (`portal_contract_entries` -> `portal_contracts.is_active`). Measured:
+--     1,351 rows, which is exactly the `has_claims` set. The lane has consumed
+--     everything a live contract offers; there is no backlog to wait for.
+--   * old_evidence — what the SUPERSEDED evidence is, so "no live evidence"
+--     never reads as "nothing was ever there": 'legacy' (every superseded claim
+--     is a `legacy_column` copy — Mapy-era pin / legacy columns, 4.6k rows),
+--     'archived' (some came off an older page version, 32.2k), 'none' (172).
+--   * sibling_has_pin — ANOTHER listing of the same property DOES have a
+--     `listing_location.geom`. 1,163 rows: the property-level fallback would
+--     recover ~3 % of the set without any resolver change, which is a decision
+--     the operator can take on its own.
+--
+-- IDEMPOTENCE. The matview is DROPPED and rebuilt rather than guarded with
+-- `if not exists`, and the summary function likewise, because this migration
+-- was revised after its first version was pushed and an `if not exists` would
+-- silently keep a stale definition on any database that got the first one. It
+-- is a rebuildable cache created by this same file — dropping it destroys no
+-- history and no other object depends on it.
 --
 -- GRANTS. `authenticated` only, never `anon` — the same posture migration 376
 -- enforces on `properties_map_mv`. PostgREST reads matviews directly, so there
@@ -48,71 +75,100 @@
 -- set). `listing_location` and `location_claims` stay revoked from both browser
 -- roles — the audit columns reach the SPA only through this relation.
 
-create materialized view if not exists location_pin_audit_mv as
+drop materialized view if exists location_pin_audit_mv;
+
+create materialized view location_pin_audit_mv as
+with cohort as materialized (
+  select
+    p.repr_listing_ref_id                          as listing_id,
+    p.id                                           as property_id,
+    p.repr_listing_id                              as sreality_id,
+    p.source,
+    p.category_main,
+    p.category_type,
+    p.disposition,
+    p.area_m2,
+    p.street,
+    p.locality,
+    p.district,
+    p.current_price_czk                            as price_czk,
+    p.is_active,
+    p.first_seen_at,
+    p.last_seen_at,
+    p.lat                                          as legacy_lat,
+    p.lng                                          as legacy_lng,
+    ll.country_status::text                        as country_status,
+    ll.granularity::text                           as granularity,
+    ll.match_confidence::text                      as match_confidence,
+    ll.resolver_version,
+    ll.resolved_at,
+    (ll.listing_id is not null)                    as has_row,
+    -- The saved verdict consumed evidence: a non-empty claim set (see header).
+    (ll.claim_set_hash is not null
+       and ll.claim_set_hash <> sha256('[]'::bytea)) as has_claims
+  from properties p
+       left join listing_location ll on ll.listing_id = p.repr_listing_ref_id
+  where p.status = 'active'
+    and p.lat is not null
+    and p.lng is not null
+    -- The unique index below is what REFRESH ... CONCURRENTLY diffs on, and a
+    -- unique index tolerates repeated NULLs — two representative-less
+    -- properties would fail the refresh with "contains duplicate rows".
+    and p.repr_listing_ref_id is not null
+    and ll.geom is null
+    and (ll.country_status is null or ll.country_status <> 'foreign')
+)
 select
-  p.repr_listing_ref_id                          as listing_id,
-  p.id                                           as property_id,
-  p.repr_listing_id                              as sreality_id,
-  p.source,
+  c.*,
   l.source_id_native,
   l.source_url,
-  p.category_main,
-  p.category_type,
-  p.disposition,
-  p.area_m2,
-  p.street,
-  p.locality,
-  p.district,
-  p.current_price_czk                            as price_czk,
-  p.is_active,
-  p.first_seen_at,
-  p.last_seen_at,
-  p.lat                                          as legacy_lat,
-  p.lng                                          as legacy_lng,
-  ll.country_status::text                        as country_status,
-  ll.granularity::text                           as granularity,
-  ll.match_confidence::text                      as match_confidence,
-  ll.resolver_version,
-  ll.resolved_at,
-  (ll.listing_id is not null)                    as has_row,
-  -- The saved verdict consumed evidence (see the header): a non-empty claim set.
-  (ll.claim_set_hash is not null
-     and ll.claim_set_hash <> sha256('[]'::bytea))  as has_claims,
-  -- Evidence exists in the claim store right now, consumed or not.
-  exists (
-    select 1 from location_claims c
-     where c.listing_id = p.repr_listing_ref_id
-  )                                              as claims_now,
+  (ev.n_active > 0)                                as claims_now,
   case
-    when p.is_active and not (ll.claim_set_hash is not null
-                              and ll.claim_set_hash <> sha256('[]'::bytea))
-      then 'active_no_claims'
-    when p.is_active
-      then 'active_unresolved'
-    when not (ll.claim_set_hash is not null
-              and ll.claim_set_hash <> sha256('[]'::bytea))
-      then 'delisted_no_claims'
-    else 'delisted_unresolved'
-  end                                            as quality,
-  now()                                          as refreshed_at
-from properties p
-     left join listing_location ll on ll.listing_id = p.repr_listing_ref_id
-     left join listings l          on l.id          = p.repr_listing_ref_id
-where p.status = 'active'
-  and p.lat is not null
-  and p.lng is not null
-  -- The unique index below is what REFRESH ... CONCURRENTLY diffs on, and a
-  -- unique index tolerates repeated NULLs — two representative-less properties
-  -- would make the refresh fail with "contains duplicate rows". Guard the key.
-  and p.repr_listing_ref_id is not null
-  and ll.geom is null
-  and (ll.country_status is null or ll.country_status <> 'foreign');
+    when coalesce(ev.n_superseded, 0) = 0          then 'none'
+    when ev.n_superseded_nonlegacy = 0             then 'legacy'
+    else                                                'archived'
+  end                                              as old_evidence,
+  sib.found                                        as sibling_has_pin,
+  -- The bucket the page filters on. Active/delisted x "did the saved verdict
+  -- consume anything". `has_claims` is a plain boolean by here (a missing
+  -- listing_location row yields false, never NULL), so the CASE is total.
+  case
+    when c.is_active and not c.has_claims          then 'active_no_claims'
+    when c.is_active                               then 'active_unresolved'
+    when not c.has_claims                          then 'delisted_no_claims'
+    else                                                'delisted_unresolved'
+  end                                              as quality,
+  now()                                            as refreshed_at
+from cohort c
+     left join listings l on l.id = c.listing_id
+     left join lateral (
+       select
+         count(*) filter (where pc.is_active)                   as n_active,
+         count(*) filter (where not coalesce(pc.is_active, false)) as n_superseded,
+         count(*) filter (where not coalesce(pc.is_active, false)
+                            and cl.extraction_method <> 'legacy_column')
+                                                                as n_superseded_nonlegacy
+       from location_claims cl
+            left join portal_contract_entries pce on pce.id = cl.contract_entry_id
+            left join portal_contracts pc         on pc.id  = pce.contract_id
+       where cl.listing_id = c.listing_id
+     ) ev on true
+     left join lateral (
+       select exists (
+         select 1
+         from listings sib
+              join listing_location sll on sll.listing_id = sib.id
+         where sib.property_id = c.property_id
+           and sib.id <> c.listing_id
+           and sll.geom is not null
+       ) as found
+     ) sib on true;
 
 -- REFRESH ... CONCURRENTLY requires a unique index.
 create unique index if not exists location_pin_audit_mv_pk
   on location_pin_audit_mv (listing_id);
 
--- The page's three filter axes. Small relation, but these keep the summary
+-- The page's filter axes. Small relation, but these keep the summary
 -- function's group-by and the filtered pages off a full scan.
 create index if not exists location_pin_audit_mv_source
   on location_pin_audit_mv (source);
@@ -120,8 +176,12 @@ create index if not exists location_pin_audit_mv_category
   on location_pin_audit_mv (category_main);
 create index if not exists location_pin_audit_mv_quality
   on location_pin_audit_mv (quality);
+-- Partial: `sibling_has_pin` is true on ~3 % of the set, so the interesting
+-- half of that filter is a small index and the other half a seq scan.
+create index if not exists location_pin_audit_mv_sibling
+  on location_pin_audit_mv (listing_id) where sibling_has_pin;
 
--- The list's keyset lane (`last_seen_at`, tiebroken on `listing_id` — the same
+-- The list's keyset lanes (sort column, tiebroken on `listing_id` — the same
 -- (col, id) btree shape frontend/src/lib/keyset.ts pages against).
 create index if not exists location_pin_audit_mv_last_seen
   on location_pin_audit_mv (last_seen_at, listing_id);
@@ -135,14 +195,23 @@ grant select on location_pin_audit_mv to authenticated;
 -- At most (portals x category_main x 4 buckets) rows — ~120 — so the page reads
 -- the whole thing once and sums it for whatever the filters select, instead of
 -- issuing a count per cell.
--- `refreshed_at` rides along (it is one value across the whole relation) so the
--- page can print "stav k HH:MM" without a second read, and without inferring
--- freshness from whichever list page happens to be loaded.
-create or replace function location_pin_audit_summary()
+-- `sibling_has_pin` is a group-by column and not a separate count, so the
+-- page's "how many would the property-level fallback recover" number is a sum
+-- over the SAME payload as every other number on the page. `refreshed_at`
+-- rides along (it is one value across the whole relation) so the page can print
+-- "stav k HH:MM" without a second read.
+--
+-- DROP first: the signature gained a column after the first version of this
+-- file was pushed, and `create or replace function` cannot change a return
+-- type.
+drop function if exists location_pin_audit_summary();
+
+create function location_pin_audit_summary()
 returns table (
   source text,
   category_main text,
   quality text,
+  sibling_has_pin boolean,
   n bigint,
   refreshed_at timestamptz
 )
@@ -151,12 +220,18 @@ stable
 security invoker
 set search_path = public
 as $$
-  select a.source, a.category_main, a.quality, count(*)::bigint, max(a.refreshed_at)
+  select a.source, a.category_main, a.quality, a.sibling_has_pin,
+         count(*)::bigint, max(a.refreshed_at)
   from location_pin_audit_mv a
-  group by a.source, a.category_main, a.quality
+  group by a.source, a.category_main, a.quality, a.sibling_has_pin
 $$;
 
-revoke all on function location_pin_audit_summary() from public, anon;
+-- Revoke the default ACL from all three, THEN grant back deliberately. `public`
+-- matters most: the default is EXECUTE TO PUBLIC, which anon and authenticated
+-- inherit, so naming only the two roles would leave the function callable
+-- (tests/location_data/test_location_schema_contracts.py).
+revoke execute on function location_pin_audit_summary()
+  from public, anon, authenticated;
 grant execute on function location_pin_audit_summary() to authenticated;
 
 -- The refresh entry point (the refresh_health_matviews shape, migration 136).
@@ -174,19 +249,29 @@ begin
 end;
 $$;
 
-revoke all on function refresh_location_pin_audit_mv() from public, anon, authenticated;
+revoke execute on function refresh_location_pin_audit_mv()
+  from public, anon, authenticated;
 
 -- Hourly, off the top of the hour so it does not land with the */15 map rebuild.
 -- Guarded exactly like migrations 136 and 274: the CI schema-replay container
 -- has no pg_cron, and the migration must still apply there (it logs a notice and
 -- skips the schedule). Re-applying upserts the named job.
+--
+-- THE TIMEOUT IS ARMED IN THE CRON COMMAND, not in the function's proconfig —
+-- migration 371's lesson, which shipped twice before it was understood: Postgres
+-- arms statement_timeout once, when the top-level statement begins, so a
+-- function can never raise its own budget. Without this the refresh runs on the
+-- 120s database default; the cohort scan plus its evidence laterals can exceed
+-- that, and it would fail at exactly 120.0s every hour with nothing else to see.
+-- pg_cron runs the command over the simple query protocol, so the `set` is its
+-- own top-level statement in the same session — the one place it takes effect.
 do $cron$
 begin
   create extension if not exists pg_cron;
   perform cron.schedule(
     'refresh-location-pin-audit',
     '25 * * * *',
-    $$select public.refresh_location_pin_audit_mv();$$
+    $$set statement_timeout='900s'; select public.refresh_location_pin_audit_mv();$$
   );
 exception when others then
   raise notice 'pg_cron unavailable; location pin audit refresh not scheduled (%). Refresh via refresh_location_pin_audit_mv() on another scheduler.', sqlerrm;

@@ -2345,23 +2345,35 @@ the 30 s a per-listing statement gets and cancelling it threw the whole batch aw
 Migration **510** materialises the exact set migration 503's pin-collapse guard would cost the map:
 every active property that still carries legacy coordinates and for which `listing_location` holds
 no Czech `geom` (a determined `country_status='foreign'` is excluded — that is a correct answer, not
-a loss). ~36.9k rows measured 2026-09-13, ~2.4k of them on live ads. `location_pin_audit_mv` is one
-row per property at its representative listing, carrying the portal, the type, the listing's own
-`source_url`, the legacy pin, the resolver's verdict and two evidence booleans that are NOT the same
-question: `has_claims` (the SAVED verdict consumed at least one claim — `claim_set_hash` is NOT NULL,
-so an empty consumption is the digest of the empty list, `sha256('[]')`, never a NULL) and
-`claims_now` (the claim store holds evidence for that listing today). The gap between them IS the
-finding — 35.6k of the 36.9k verdicts were computed from nothing while the claims were mined
-afterwards, so most of the loss is a stale verdict rather than an unlocatable ad, and the page says
-so on the row rather than letting "no evidence" be read off it. `quality` buckets the set on
-active/delisted x `has_claims`; the SPA page `/new-dedup/pin-audit` filters on those, on the portal
-and on the type, draws the legacy pins (capped at 5,000, and it says when it capped), and reads its
-overview matrix from `location_pin_audit_summary()` so the matrix, the totals and the list cannot
-disagree. It is built over `properties` rather than over `properties_map_mv` because the map matview
-is rebuilt at runtime by `rebuild_properties_map_mv()` and its live column set is newer than the one
-migration 254 statically creates — which is all the CI schema replay ever sees. Refreshed hourly by
-pg_cron (`refresh-location-pin-audit`, guarded so the replay container skips it). Rule 25's deletion
-parity does not apply: this is an operator-requested review surface with a stated end.
+a loss). Measured 2026-09-13: **36,970 rows — 2,413 live ads** (almost all bazos dead ads, which
+#1451 delists over the coming days) **and 34,557 delisted display listings**.
+`location_pin_audit_mv` is one row per property at its representative listing, carrying the portal,
+the type, the listing's own `source_url`, the legacy pin, the resolver's verdict and four audit
+columns. `has_claims` is what the SAVED verdict consumed (`claim_set_hash` is NOT NULL, so an empty
+consumption is the digest of the empty list, `sha256('[]')`, never a NULL). `claims_now` is evidence
+under an **ACTIVE contract** (`portal_contract_entries` → `portal_contracts.is_active`) — 1,351 rows,
+**exactly the `has_claims` set**, which is the finding: the lane has already consumed everything a
+live contract offers, so there is no backlog to wait for. The first cut of this view counted ANY
+`location_claims` row and concluded the evidence had been mined after the verdict; that was wrong.
+Of the newest 366 rows, 361 carry claims and none sits under an active contract — they are bazos
+@1/@3/@4 `surface=legacy_column, extraction_method=legacy_column` copies of the legacy `listings`
+columns (the Mapy-era pin, the legacy PSČ/locality fields W1-b dropped), plus `archived_html` /
+`url_slug_parse` claims under superseded versions. `old_evidence` names that superseded material so
+"no live evidence" is never read as "nothing was ever there" — `legacy` (4.6k), `archived` (32.2k),
+`none` (172). `sibling_has_pin` is the cheap recovery the operator can take without any resolver
+change: **1,163 rows (~3 %)** where another listing of the same property already has a `geom`.
+`quality` buckets the set on active/delisted × `has_claims`; the SPA page `/new-dedup/pin-audit`
+filters on those four axes plus the sibling flag, draws the legacy pins (capped at 5,000, and it
+says when it capped), and reads its overview matrix from `location_pin_audit_summary()` so the
+matrix, the header split and the list cannot disagree. It is built over `properties` rather than
+over `properties_map_mv` because the map matview is rebuilt at runtime by
+`rebuild_properties_map_mv()` and its live column set is newer than the one migration 254 statically
+creates — which is all the CI schema replay ever sees; the cohort CTE is MATERIALIZED so the
+evidence laterals run ~37k times and not once per active property. Refreshed hourly by pg_cron
+(`refresh-location-pin-audit`, guarded so the replay container skips it) with the budget armed **in
+the cron command** — migration 371's rule, or the refresh would silently die at the 120 s database
+default. Rule 25's deletion parity does not apply: this is an operator-requested review surface with
+a stated end.
 
 ## Cross-reference map
 

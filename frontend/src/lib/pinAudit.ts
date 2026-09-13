@@ -43,6 +43,13 @@ export type PinAuditQuality =
   | 'delisted_no_claims'
   | 'delisted_unresolved';
 
+/* What SUPERSEDED evidence the listing carries, so "no live evidence" is never
+ * read as "nothing was ever there". `legacy` = every superseded claim is a
+ * `legacy_column` copy (the Mapy-era pin, the legacy PSČ/locality columns the
+ * doctrine dropped in W1-b); `archived` = some came off an older page version;
+ * `none` = there is none. */
+export type PinAuditOldEvidence = 'none' | 'legacy' | 'archived';
+
 export const PIN_AUDIT_QUALITIES: ReadonlyArray<PinAuditQuality> = [
   'active_no_claims',
   'active_unresolved',
@@ -77,7 +84,12 @@ export interface PinAuditRow {
   resolved_at: string | null;
   has_row: boolean;
   has_claims: boolean;
+  /* Evidence under an ACTIVE contract. Measured 2026-09-13 this is exactly the
+   * `has_claims` set — the lane has consumed everything a live contract
+   * offers, so there is no backlog to wait for. */
   claims_now: boolean;
+  old_evidence: PinAuditOldEvidence;
+  sibling_has_pin: boolean;
   quality: PinAuditQuality;
   refreshed_at: string;
 }
@@ -86,6 +98,7 @@ export interface PinAuditSummaryRow {
   source: string;
   category_main: string | null;
   quality: PinAuditQuality;
+  sibling_has_pin: boolean;
   n: number;
   /* One value across the whole relation — the last refresh. */
   refreshed_at: string | null;
@@ -97,6 +110,9 @@ export interface PinAuditFilters {
   categories: ReadonlyArray<string>;
   qualities: ReadonlyArray<PinAuditQuality>;
   status: 'all' | 'active' | 'delisted';
+  /* Does another listing of the same property already have a pin? That is the
+   * property-level fallback the operator can take without a resolver change. */
+  sibling: 'all' | 'yes' | 'no';
 }
 
 export const EMPTY_PIN_AUDIT_FILTERS: PinAuditFilters = {
@@ -104,6 +120,7 @@ export const EMPTY_PIN_AUDIT_FILTERS: PinAuditFilters = {
   categories: [],
   qualities: [],
   status: 'all',
+  sibling: 'all',
 };
 
 const ROW_COLS = [
@@ -112,10 +129,12 @@ const ROW_COLS = [
   'street', 'locality', 'district', 'price_czk', 'is_active', 'first_seen_at',
   'last_seen_at', 'legacy_lat', 'legacy_lng', 'country_status', 'granularity',
   'match_confidence', 'resolver_version', 'resolved_at', 'has_row',
-  'has_claims', 'claims_now', 'quality', 'refreshed_at',
+  'has_claims', 'claims_now', 'old_evidence', 'sibling_has_pin', 'quality',
+  'refreshed_at',
 ].join(',');
 
-const POINT_COLS = 'listing_id,legacy_lat,legacy_lng,quality,is_active';
+const POINT_COLS =
+  'listing_id,legacy_lat,legacy_lng,quality,is_active,sibling_has_pin';
 
 /* A PostgREST builder narrowed to the filter methods this module uses, so the
  * helper below is shared by the list read and the map read without either
@@ -134,6 +153,9 @@ function applyPinAuditFilters<T extends FilterBuilder>(
   if (f.categories.length > 0) q = q.in('category_main', f.categories) as T;
   if (f.qualities.length > 0) q = q.in('quality', f.qualities) as T;
   if (f.status !== 'all') q = q.eq('is_active', f.status === 'active') as T;
+  if (f.sibling !== 'all') {
+    q = q.eq('sibling_has_pin', f.sibling === 'yes') as T;
+  }
   return q;
 }
 
@@ -150,6 +172,8 @@ export function summaryRowMatches(
   if (f.qualities.length > 0 && !f.qualities.includes(row.quality)) return false;
   if (f.status === 'active' && !row.quality.startsWith('active_')) return false;
   if (f.status === 'delisted' && !row.quality.startsWith('delisted_')) return false;
+  if (f.sibling === 'yes' && !row.sibling_has_pin) return false;
+  if (f.sibling === 'no' && row.sibling_has_pin) return false;
   return true;
 }
 
@@ -198,6 +222,7 @@ export interface PinAuditPoint {
   legacy_lng: number;
   quality: PinAuditQuality;
   is_active: boolean;
+  sibling_has_pin: boolean;
 }
 
 export interface PinAuditPoints {
