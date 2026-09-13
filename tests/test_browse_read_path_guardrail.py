@@ -187,6 +187,31 @@ def test_map_rebuild_analyzes_before_swap_and_notifies() -> None:
     )
 
 
+# ------------------------------------------------------- the consumer rule --
+
+
+@pytest.mark.parametrize("view", ["browse_projection", "listing_feed_public"])
+def test_the_effective_list_definition_carries_the_consumer_rule(view: str) -> None:
+    """W5, operator ruling 2026-09-13: a listing reaches a consumer only once
+    `listing_location` has an answer for it. `browse_projection` is where Browse, Stats
+    and the map all get it from — `browse_list` and `properties_map_mv` are both
+    `select * from browse_projection` — so this is the one definition that has to carry
+    it, and the EFFECTIVE (highest-numbered) migration is the only one worth asking.
+
+    RED by: a later migration re-creating either view from an older body and dropping
+    the clause on the way — exactly the failure mode `_latest_migration_defining` exists
+    for. The character-level pin against the Python constant is
+    tests/test_location_w5_serve_resolved.py."""
+    from location_data.claims_common import SERVED_LOCATION_PREDICATE
+
+    sql = _strip_comments(_latest_migration_defining(view).read_text())
+    body = sql[sql.lower().index(f"view {view} as"):]
+    body = " ".join(body[: body.index(";")].split())
+    rule = SERVED_LOCATION_PREDICATE[: SERVED_LOCATION_PREDICATE.index("sl.listing_id")]
+    assert rule in body, f"{view}'s effective definition dropped the consumer rule"
+    assert "sl.geom IS NOT NULL OR sl.country_status = 'foreign'" in body
+
+
 # ------------------------------------------------------------- read contract --
 
 def _projection_columns() -> set[str]:

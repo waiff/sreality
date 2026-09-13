@@ -35,6 +35,33 @@ SERVED_LISTING_PREDICATE = """(l.is_active
         OR EXISTS (SELECT 1 FROM properties pr
                     WHERE pr.repr_listing_ref_id = l.id AND pr.status = 'active'))"""
 
+# THE CONSUMER RULE (operator ruling 2026-09-13, rule 25). A listing is SERVED to
+# consumers -- Browse, the map, the feed, the watchdog, dedup -- only when this store
+# has an ANSWER for it: a point, or the determination that it is abroad. No flag and no
+# new column: the rule reads `listing_location` directly, so it covers every listing
+# whose page carries no location today as well as every one the lane resolves tomorrow,
+# and a row comes back the moment it has a geom with nothing to re-stamp and no backfill.
+#
+# ONE definition, rendered for whatever a surface calls the listing id (`l.id` on
+# `listings`, `l.listing_id` on `properties_public`, `p.repr_listing_ref_id` on
+# `browse_projection`). The inner alias is `sl` and not `ll`, because every surface that
+# carries this rule ALREADY joins `listing_location ll` for the label and the chip codes.
+# The SQL surfaces carry the rendered text verbatim, pinned against this constant by
+# tests/test_location_w5_serve_resolved.py, so the two can never drift.
+_SERVED_LOCATION_TEMPLATE = (
+    "EXISTS (SELECT 1 FROM listing_location {alias}"
+    " WHERE {alias}.listing_id = {listing_id}"
+    " AND ({alias}.geom IS NOT NULL OR {alias}.country_status = 'foreign'))"
+)
+
+
+def served_location_predicate(listing_id: str = "l.id", *, alias: str = "sl") -> str:
+    """The consumer rule, re-keyed onto a surface's own listing-id expression."""
+    return _SERVED_LOCATION_TEMPLATE.format(alias=alias, listing_id=listing_id)
+
+
+SERVED_LOCATION_PREDICATE = served_location_predicate()
+
 # The second rail, and the one that survives a pathological single row: no chunk budget can
 # split ONE array element, so a claim whose value alone dwarfs the budget would still be
 # handed to Postgres verbatim. A value this large is not a location claim — it is a portal

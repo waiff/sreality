@@ -610,13 +610,30 @@ component is slimmed twice — each wave rewrites one component and slims its st
     `properties_public.obec_id` sourced from `listing_location` (the frontend registry regenerated
     with it). The wave log lives here, in this ledger, and is not duplicated in architecture.md.
 
+  - **W5 — consumers serve resolved locations only** (operator ruling 2026-09-13; 36,981 rows hidden
+    until processed). The ruling: "any consumer will only work with those [listings] not within the
+    exempted set, and any of these in the exempted set will become visible to consumers (browse,
+    dedup, notifications etc) only after they are properly processed." Implemented as ONE predicate
+    over the store — `claims_common.SERVED_LOCATION_PREDICATE`, no flag and no new column — carried by
+    `browse_projection` (so `browse_list`, `properties_map_mv`, `browse_stats_properties` and
+    `browse_map_cells` inherit) and `listing_feed_public` in migration **512**, and rendered in code
+    by the watchdog matcher (which reads `properties_public` and cannot inherit) and path C candidate
+    generation. Detail-by-id surfaces are deliberately untouched: a direct link, the extension, the
+    audit page's own links and a pipeline card all keep working. Measured at the ruling: 44,702 of
+    711,600 Browse rows (2,953 still-live ads, 37,173 drawing a map pin); 1,163 of them have a sibling
+    listing of the same property WITH a resolved location, so choosing a resolved display listing
+    would recover ~3 % — a separate, later decision. `check_location_town_coverage` now reports
+    `hidden_n` per portal, so the number is visible outside the audit page.
+
 **What is left of the sprint** (nothing further to build):
   1. **The gate** — `check_location_town_coverage` red until every portal reports zero served
      listings with no row and zero active Czech listings with no `obec_kod`. Everything downstream
      (the map's NULL-lat drop, the browse re-source) is gated on it.
   2. **Operator applies, in order**: migration **502** (W2-b drops), **506** (W3 S4 deletions —
      DROP+CREATE views, so AFTER the deploy), **508** (W4-c, destructive — operator word + `pg_dump`,
-     05:20–05:30 UTC, AFTER the deploy).
+     05:20–05:30 UTC, AFTER the deploy), **512** (W5, additive — BEFORE its merge: it only HIDES rows,
+     so a database that has it while the old code runs is correct; the reverse would leak the exempted
+     set into the watchdog).
   3. **The later lock-free wave**: narrow `listings_public` + `portal_listing_counts` and re-point
      their six dependent matviews at `listings` — held back only because narrowing them inside 508's
      ACCESS EXCLUSIVE window would mean repopulating all six.
