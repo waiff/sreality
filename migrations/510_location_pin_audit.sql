@@ -75,6 +75,11 @@
 -- set). `listing_location` and `location_claims` stay revoked from both browser
 -- roles — the audit columns reach the SPA only through this relation.
 
+-- The first population scans the 672k-row map matview with ~37k evidence laterals;
+-- the role's default budget (120 s) cancelled it on 2026-09-13 (apply run 34743551009).
+set statement_timeout = '900s';
+set lock_timeout = '30s';
+
 drop materialized view if exists location_pin_audit_mv;
 
 create materialized view location_pin_audit_mv as
