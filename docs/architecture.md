@@ -2064,8 +2064,15 @@ superseded row has the LOWER id, which wins every "first admissible claim of thi
 resolver's claim projection (`_CLAIMS_SELECT`) admits a claim only when its `contract_entry_id`
 belongs to a contract whose header is `is_active`, plus operator claims, which carry no entry by
 construction (`contract_entry_id IS NULL` + `licence_class = 'operator'` — named explicitly, so a
-portal claim that lost its entry id is NOT let through). Filtering at READ is what makes deleting the
-superseded rows a cleanup that can be taken at leisure rather than a correctness step. **Licence
+portal claim that lost its entry id is NOT let through). Filtering at READ is what made deleting the
+superseded rows a cleanup rather than a correctness step, and **W6-a took it**: a claim under a
+retired contract version is now DELETED — 9.5 M of 13.2 M rows, the large majority of the table —
+by `.github/workflows/location_claims_retire.yml`, which `\copy`s the doomed rows to a gzipped CSV
+artifact (rule 1's backup, 90-day retention) and then runs `scripts/location_claims_retire.py` in
+20,000-row id-keyset batches, bounded, paused and resumable. It enqueues NOTHING: the resolver never
+read these rows, so no verdict can move — which is the whole difference from `contracts.py
+--retract`, the mechanism that withdraws a version's evidence BECAUSE it was wrong and must
+re-resolve every listing it touched. Re-dispatch the workflow after any future retirement. **Licence
 enforcement rides the same predicate**: `licence_class` is the program's single licence vocabulary
 and `ephemeral_display_only` (Mapy.cz-class) its poison value; `listing_location` carries no
 `position_licence_class` column because `licence_class IN ('portal','operator')` is part of
@@ -2327,9 +2334,11 @@ live contract offers, so there is no backlog to wait for. The first cut of this 
 Of the newest 366 rows, 361 carry claims and none sits under an active contract — they are bazos
 @1/@3/@4 `surface=legacy_column, extraction_method=legacy_column` copies of the legacy `listings`
 columns (the Mapy-era pin, the legacy PSČ/locality fields W1-b dropped), plus `archived_html` /
-`url_slug_parse` claims under superseded versions. `old_evidence` names that superseded material so
-"no live evidence" is never read as "nothing was ever there" — `legacy` (4.6k), `archived` (32.2k),
-`none` (172). `sibling_has_pin` is the cheap recovery the operator can take without any resolver
+`url_slug_parse` claims under superseded versions. (`old_evidence` named that superseded material so
+"no live evidence" was never read as "nothing was ever there" — `legacy` 4.6k, `archived` 32.2k,
+`none` 172. **W6-a deleted the rows behind it and migration 515 dropped the column**: a column that
+can only say "žádná" reads as a finding. `claims_now` survives as one EXISTS instead of a
+three-aggregate lateral — 75 % off the hourly refresh's planned cost.) `sibling_has_pin` is the cheap recovery the operator can take without any resolver
 change: **1,163 rows (~3 %)** where another listing of the same property already has a `geom`.
 `quality` buckets the set on active/delisted × `has_claims`; the SPA page `/new-dedup/pin-audit`
 filters on those four axes plus the sibling flag, draws the legacy pins (capped at 5,000, and it

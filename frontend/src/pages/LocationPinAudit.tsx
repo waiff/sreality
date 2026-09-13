@@ -36,7 +36,6 @@ import {
   fetchPinAuditSummary,
   summaryRowMatches,
   type PinAuditFilters,
-  type PinAuditOldEvidence,
   type PinAuditQuality,
   type PinAuditRow,
   type PinAuditSummaryRow,
@@ -116,18 +115,6 @@ const QUALITY_SHORT: Record<PinAuditQuality, string> = {
   active_unresolved: 'běží · nevyšlo',
   delisted_no_claims: 'stažen · nebylo z čeho',
   delisted_unresolved: 'stažen · nevyšlo',
-};
-
-/* What superseded evidence the ad still carries. This replaces an earlier,
- * WRONG line that told the operator evidence had "arrived after the verdict":
- * measured on production, the claims these rows carry sit under NO active
- * contract — they are legacy-column copies (the Mapy-era pin, the legacy
- * PSČ/locality fields) and claims off older page versions. Nothing is queued
- * and nothing is coming. */
-const OLD_EVIDENCE_LABEL: Record<PinAuditOldEvidence, string> = {
-  legacy: 'jen stará data (Mapy, legacy sloupce)',
-  archived: 'starší verze stránky',
-  none: 'žádná',
 };
 
 const dash = (v: string | null | undefined): string =>
@@ -492,7 +479,6 @@ export default function LocationPinAudit() {
                   <th className={TH}>Stav</th>
                   <th className={`${TH} text-right`}>Naposledy viděno</th>
                   <th className={TH}>Proč poloha chybí</th>
-                  <th className={TH}>Stará data</th>
                   <th className={TH}>Sourozenec</th>
                   <th className={TH}>Verdikt</th>
                 </tr>
@@ -547,9 +533,6 @@ export default function LocationPinAudit() {
                       <td className={TD}>{r.is_active ? 'běží' : 'stažen'}</td>
                       <td className={NUM}>{fmtDateSlash(r.last_seen_at)}</td>
                       <td className={TD}>{QUALITY_SHORT[r.quality]}</td>
-                      <td className={`${TD} text-[var(--color-ink-3)]`}>
-                        {OLD_EVIDENCE_LABEL[r.old_evidence]}
-                      </td>
                       <td className={TD}>
                         {r.sibling_has_pin ? (
                           <span className="text-[var(--color-copper)]">

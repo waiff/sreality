@@ -62,7 +62,6 @@ const ROW: pinAudit.PinAuditRow = {
   has_row: true,
   has_claims: false,
   claims_now: false,
-  old_evidence: 'legacy',
   sibling_has_pin: true,
   quality: 'delisted_no_claims',
   refreshed_at: REFRESHED,
@@ -170,15 +169,10 @@ describe('LocationPinAudit', () => {
       within(row).getByRole('link', { name: /portál/ }).getAttribute('href'),
     ).toBe(ROW.source_url);
     expect(within(row).getByText(/undetermined/)).toBeInTheDocument();
-    /* What the ad still carries is SUPERSEDED evidence, and the page names it.
-     * It must never claim evidence "arrived after the verdict" — measured on
-     * production, nothing these rows hold sits under an active contract. */
-    expect(
-      within(row).getByText('jen stará data (Mapy, legacy sloupce)'),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(/přibyly až po vyhodnocení/),
-    ).not.toBeInTheDocument();
+    /* W6-a: the superseded-evidence column is GONE, because the rows behind it
+     * are. A claim is deleted the moment its contract version is retired, so a
+     * column that could only ever say "žádná" would read as a finding. */
+    expect(screen.queryByText('Stará data')).not.toBeInTheDocument();
     expect(within(row).getByText('má polohu')).toBeInTheDocument();
   });
 
