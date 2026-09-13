@@ -250,8 +250,11 @@ component is slimmed twice — each wave rewrites one component and slims its st
     live contract are legacy-column copies and superseded page versions — nothing is queued, so the
     earlier "the claims were mined after the verdict" reading was wrong, and `old_evidence` names
     the superseded material instead); and `sibling_has_pin` shows the **1,163 rows (~3 %)** the
-    property-level fallback would recover with no resolver change. TEMPORARY — the page,
-    `lib/pinAudit.ts`, `PinAuditMap.tsx` and 510's objects are deleted once the ruling lands.
+    property-level fallback would recover with no resolver change. **RETIRED 2026-09-13** with the
+    ruling (503 = zero new loss, the audited residue exempt): migration **513** drops the matview,
+    both functions and the cron job — it also had to, since 508 cannot drop the five `properties`
+    place columns the matview depends on — and the page is unrouted. `pages/LocationPinAudit.tsx`,
+    `lib/pinAudit.ts` and `PinAuditMap.tsx` are dead files awaiting deletion.
 - **W2 — the resolver at four steps, the answer table at 26 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and

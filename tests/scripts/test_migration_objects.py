@@ -118,8 +118,15 @@ def test_load_migrations_window_takes_the_newest():
 
 def test_every_recent_migration_is_either_probeable_or_openly_unverifiable():
     """A parser that silently returns nothing for most files would render the
-    whole check green while proving nothing. Hold the line: the great majority of
-    recent migrations must declare at least one probeable object."""
+    whole check green while proving nothing. Hold the line: most recent
+    migrations must declare at least one probeable object.
+
+    The floor is a TRIPWIRE on the parser, not a rule about how migrations are
+    written — a migration that only drops, only seeds a policy row or only
+    rebuilds a read model declares nothing to probe, and says so. It moved 28 ->
+    24 when the location simplification sprint's deletion wave (502, 511, 512,
+    513) entered the window alongside the six field-policy seeds already in it.
+    A broken parser reads ZERO here, nowhere near the floor."""
     migs = load_migrations(_MIGRATIONS, newest=40)
     probeable = [m for m in migs if m.objects]
-    assert len(probeable) >= 28, [m.filename for m in migs if not m.objects]
+    assert len(probeable) >= 24, [m.filename for m in migs if not m.objects]

@@ -2591,8 +2591,12 @@ only five consecutive failures — or a lost connection, told apart by SQLSTATE 
 prefetch runs on its own 90 s ceiling, because a 250-listing bulk claims read legitimately outruns
 the 30 s a per-listing statement gets and cancelling it threw the whole batch away.
 
-**Pin-loss audit page (operator review surface, temporary — delete after the 503 ruling).**
-Migration **510** materialises the exact set migration 503's pin-collapse guard would cost the map:
+**Pin-loss audit page — RETIRED 2026-09-13 (migration 513), kept here for the record.** The ruling
+it was built for landed (503 now allows zero new pin loss, exempting the audited residue), and its
+matview depended on the five `properties` place columns W4-c drops, so 508 could not run while it
+existed. 513 drops the matview, both functions and the hourly cron job; the page is unrouted. The
+CI replay skips 510 for the same reason — see `.github/workflows/migrations.yml`. What it was:
+migration **510** materialised the exact set migration 503's pin-collapse guard would cost the map:
 every active property that still carries legacy coordinates and for which `listing_location` holds
 no Czech `geom` (a determined `country_status='foreign'` is excluded — that is a correct answer, not
 a loss). Measured 2026-09-13: **36,970 rows — 2,413 live ads** (almost all bazos dead ads, which
@@ -2622,11 +2626,10 @@ creates — which is all the CI schema replay ever sees; the cohort CTE is MATER
 evidence laterals run ~37k times and not once per active property. Refreshed hourly by pg_cron
 (`refresh-location-pin-audit`, guarded so the replay container skips it) with the budget armed **in
 the cron command** — migration 371's rule, or the refresh would silently die at the 120 s database
-default. Rule 25's deletion parity does not apply: this is an operator-requested review surface with
-a stated end. It leads the TOP-LEVEL nav as `!AUDIT POLOH` (admin-only, first entry, badged with
-the unfiltered row count — one `head`+`count=exact` request held for the session, re-read when the
-page is opened, and never a gate on navigation: a failed count just renders the label alone), not
-buried in the NEW DEDUP dropdown, because it is a decision waiting on the operator.
+default. Rule 25's deletion parity did not apply: it was an operator-requested review surface with
+a stated end. While it was live it led the TOP-LEVEL nav as `!AUDIT POLOH` (admin-only, first entry,
+badged with the unfiltered row count), not buried in the NEW DEDUP dropdown, because it was a
+decision waiting on the operator.
 **The map's container carries an inline `position/inset/size` style and that is NOT redundant with
 Tailwind's `absolute inset-0`**: `globals.css` imports `maplibre-gl.css` AFTER `tailwindcss`, so the
 `.maplibregl-map` class MapLibre stamps onto the container at init wins the cascade with its own
