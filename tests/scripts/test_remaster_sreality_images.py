@@ -8,6 +8,7 @@ each failure produces, and what is (and is NOT) written for each.
 
 from __future__ import annotations
 
+import logging
 import pathlib
 import re
 import time
@@ -318,6 +319,62 @@ def test_legacy_crop_dimensions_are_an_anomaly_not_a_master(
     assert [sql for sql, _ in _updates(conn)] == [
         " ".join(db._MARK_IMAGE_REMASTER_DEFERRED_SQL.split())
     ]
+
+
+def _one_listing_many_images_conn(count: int) -> _Conn:
+    """One listing, `count` first-sighting rows, all on the same CDN host."""
+    return _Conn(
+        listings=[(101, 55501, True)],
+        images=[
+            (9000 + i, 101, i, f"https://d18-a.sdn.cz/x/{i}.jpg", f"101/{i:04d}.jpg", False)
+            for i in range(count)
+        ],
+    )
+
+
+def _breaker_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "REMASTER breaker" in r.getMessage()]
+
+
+def test_first_strike_dead_rows_never_feed_the_breaker(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The inactive cohort is MOSTLY dead URLs — expected outcomes, not a sick host.
+
+    Live incident: the first shard to leave the active listings tripped the
+    breaker three times inside one listing page and quit 13 minutes early, on
+    a host that had answered every request.
+    """
+    from scraper.portal_base import ListingGoneError
+
+    monkeypatch.setattr(remaster, "_download_bytes", _boom(404))
+    monkeypatch.setattr(remaster, "_BREAKER_SLEEP_S", 0.0)
+    count = remaster.SUSPICIOUS_STOP_WINDOW + 20
+    conn = _one_listing_many_images_conn(count)
+
+    with caplog.at_level(logging.WARNING):
+        stats = _run(
+            conn, _R2(), remaster._DetailResolver(_Client({55501: ListingGoneError("u", 404)}))
+        )
+
+    assert stats.deferred == count and stats.terminal == 0 and stats.stopped == ""
+    assert _breaker_warnings(caplog) == []
+
+
+def test_throttled_rows_still_trip_the_breaker(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A 403 wall is exactly what the breaker exists for."""
+    monkeypatch.setattr(remaster, "_download_bytes", _boom(403))
+    monkeypatch.setattr(remaster, "_BREAKER_SLEEP_S", 0.0)
+    count = remaster.SUSPICIOUS_STOP_WINDOW + 20
+    conn = _one_listing_many_images_conn(count)
+
+    with caplog.at_level(logging.WARNING):
+        stats = _run(conn, _R2(), remaster._DetailResolver(_Client({})))
+
+    assert stats.deferred == count
+    assert len(_breaker_warnings(caplog)) == 1
 
 
 def test_a_repeat_anomaly_is_retired_instead_of_re_downloaded_forever(

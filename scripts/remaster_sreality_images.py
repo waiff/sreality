@@ -193,6 +193,12 @@ class _ImageRow:
 class _Outcome:
     row: _ImageRow
     kind: str  # remastered | terminal | deferred | anomaly | bad_key
+    # Feeds the per-host breaker. Only a failure that a retry could fix is
+    # transient (throttle, 5xx, timeout, a flaky detail fetch, R2). A first-strike
+    # dead URL is also "deferred", but it is the EXPECTED outcome across the
+    # inactive cohort, and counting it tripped the breaker within one listing
+    # page once the walk left the active listings behind.
+    transient: bool = False
     host: str = ""
     width: int | None = None
     height: int | None = None
@@ -364,7 +370,7 @@ def remaster_one(
             # then retires rather than deferring forever with no ceiling.
             return _Outcome(row=row, kind="anomaly", host=host, note=str(exc))
         if not _dead_url(exc):
-            return _Outcome(row=row, kind="deferred", host=host, note=str(exc))
+            return _Outcome(row=row, kind="deferred", transient=True, host=host, note=str(exc))
         candidate = (
             resolver.fresh_url(row.sreality_id, row.sequence)
             if resolver is not None
@@ -373,7 +379,7 @@ def remaster_one(
         if candidate is _DETAIL_GONE:
             return _dead_outcome(row, host, str(exc))
         if candidate is None:
-            return _Outcome(row=row, kind="deferred", host=host, note=str(exc))
+            return _Outcome(row=row, kind="deferred", transient=True, host=host, note=str(exc))
         fresh_url = str(candidate)
         if fresh_url == row.sreality_url:
             # The listing was never edited: the live detail hands back the very
@@ -390,7 +396,9 @@ def remaster_one(
                 return _Outcome(row=row, kind="anomaly", host=fresh_host, note=str(retry_exc))
             if _dead_url(retry_exc):
                 return _dead_outcome(row, fresh_host, str(retry_exc))
-            return _Outcome(row=row, kind="deferred", host=fresh_host, note=str(retry_exc))
+            return _Outcome(
+                row=row, kind="deferred", transient=True, host=fresh_host, note=str(retry_exc)
+            )
 
     if media.is_image_bytes(data) != "image/jpeg":
         return _Outcome(row=row, kind="anomaly", host=host, note="not a jpeg")
@@ -403,7 +411,7 @@ def remaster_one(
     try:
         r2.upload_bytes(row.storage_path, data, "image/jpeg")
     except Exception as exc:  # noqa: BLE001 - R2 trouble is transient, retry next tick
-        return _Outcome(row=row, kind="deferred", host=host, note=str(exc))
+        return _Outcome(row=row, kind="deferred", transient=True, host=host, note=str(exc))
     return _Outcome(
         row=row,
         kind="remastered",
@@ -579,8 +587,10 @@ def run_remaster(
                     outcome = future.result()
                     _apply(conn, outcome, stats)
                     if outcome.host:
+                        # Same rule as the scrape's breaker: a confirmed-gone
+                        # outcome is expected and never counts against the host.
                         host_windows[outcome.host].append(
-                            "transient" if outcome.kind == "deferred" else "ok"
+                            "transient" if outcome.transient else "ok"
                         )
                     if _anomalies_exceeded(stats):
                         raise _StopRun("anomalies")
