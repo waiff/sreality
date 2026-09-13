@@ -1,9 +1,19 @@
-# sreality — contract_version 2 (slim, rule 25).
+# sreality — contract_version 3 (slim, rule 25).
 # Reads `listings.raw_json`: the v1 estate JSON the detail-drain persists verbatim.
 # No page substrate — the SSR detail page 302s into a login.seznam.cz autologin loop.
+#
+# @3: that JSON comes in TWO shapes. The client changed what it stores mid-2026, and a
+# listing first seen before the change and never content-changed since still carries the
+# older one — its address is ONE line in `/locality/value` with the pin in `/map`, and
+# @2 read only the flat post-cutover fields. 30,265 delisted rows and 80 live ones
+# resolved to nothing because of it, which is a town-coverage hole (rule 25) that looked
+# like a portal publishing no town. The older shape is not a second set of entries — one
+# claim type has exactly one carrier per portal — it is a `locator.fallback` path on the
+# entries that already carry those types, each with the normaliser ITS shape needs.
+# Entry count is unchanged from @2.
 
 portal: sreality
-contract_version: 2
+contract_version: 3
 
 persistence:
   # What this portal's body carries that changes without the listing changing —
@@ -79,6 +89,10 @@ regressions:
   - "520268 — inaccuracy_type='street' over a ~15 km bbox"
   - "1588965452 — geometry blob truncated raw_json, locality object lost"
   - "3067969612 — zip:-1 sentinel"
+  # @3: the frozen older shape, one row per arm of it.
+  - "3526070348 — legacy locality.value, street-leading, map.type=coordinates"
+  - "2052886604 — legacy accuracy='not_address', map.type=geometry, no street in the line"
+  - "1600352844 — legacy hyphen obvod outside Praha (Brno - Dolní Heršpice)"
 
 extractions:
   - id: sr.det.gps
@@ -89,6 +103,12 @@ extractions:
       reader: point_pair
       lat_pointer: /locality/gps_lat
       lon_pointer: /locality/gps_lon
+      fallback:
+        # The older shape's pin. `/map/type` says which kind it is — `coordinates` on the
+        # rows whose accuracy is `address`, `geometry` (the centroid of a drawn quarter
+        # polygon) on the rest — and the caps below already read that distinction off the
+        # precision label, so the point is stated once and graded once.
+        - {lat_pointer: /map/lat, lon_pointer: /map/lon}
     claim_type: coordinate
     precision_cap:
       granularity_max: per_inaccuracy_type
@@ -102,7 +122,13 @@ extractions:
     locator_kind: api_json
     extraction_method: portal_declared_quality
     page_kind: detail
-    locator: {reader: declared_quality, json_pointer: /locality/inaccuracy_type}
+    locator:
+      reader: declared_quality
+      json_pointer: /locality/inaccuracy_type
+      # The older shape's own precision field. Two values across the sampled corpus,
+      # `address` (shared with the post-cutover vocabulary) and `not_address`.
+      fallback:
+        - {json_pointer: /locality/accuracy}
     claim_type: precision_declaration
     precision_cap:
       granularity_max:
@@ -112,7 +138,8 @@ extractions:
         ward: cast_obce_or_quarter
         quarter: cast_obce_or_quarter
         municipality: obec
-      blurred_labels: [street, ward, quarter, municipality]
+        not_address: cast_obce_or_quarter
+      blurred_labels: [street, ward, quarter, municipality, not_address]
     prior: {match_confidence: low}
     notes: "Grades the ANSWER's precision; a cap, never a certification."
 
@@ -120,7 +147,15 @@ extractions:
     locator_kind: api_json
     extraction_method: portal_structured_field
     page_kind: detail
-    locator: {reader: scalar, json_pointer: /locality/street}
+    locator:
+      reader: scalar
+      json_pointer: /locality/street
+      # A bare street name post-cutover; the LEADING segment of the address line before it.
+      # `address_part_street` is the shared splitter, and it refuses rather than guesses —
+      # a line whose leading segment does not survive the street tests claims no street and
+      # leaves it to the resolver's binding.
+      fallback:
+        - {json_pointer: /locality/value, transform: [address_part_street]}
     claim_type: street_name
     prior: {granularity: street}
 
@@ -152,7 +187,14 @@ extractions:
     locator_kind: api_json
     extraction_method: portal_structured_field
     page_kind: detail
-    locator: {reader: scalar, json_pointer: /locality/city}
+    locator:
+      reader: scalar
+      json_pointer: /locality/city
+      # The obec segment of the older shape's one address line. `address_part_obec` IS
+      # `statutory_city_obec` on a single-segment value, so the two paths agree wherever
+      # they overlap; what it adds is the comma walk and the `okres …` qualifier rail.
+      fallback:
+        - {json_pointer: /locality/value, transform: [address_part_obec]}
     claim_type: obec_name
     transform: [statutory_city_obec]
     prior: {granularity: obec}
@@ -162,7 +204,13 @@ extractions:
     locator_kind: api_json
     extraction_method: portal_structured_field
     page_kind: detail
-    locator: {reader: scalar, json_pointer: /locality/citypart}
+    locator:
+      reader: scalar
+      json_pointer: /locality/citypart
+      # The named tail the statutory-city fold drops: "Praha 4 - Podolí" states the town
+      # and the quarter in one segment, and @2 kept only the town.
+      fallback:
+        - {json_pointer: /locality/value, transform: [address_part_cast_obce]}
     claim_type: cast_obce_name
     prior: {granularity: cast_obce_or_quarter}
     notes: "The RÚIAN část obce; /locality/quarter is the městská část."

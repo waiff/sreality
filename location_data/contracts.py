@@ -241,7 +241,7 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
         substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
         locator_keys=frozenset({"json_pointer"}),
         consults_transforms=True,
-        optional_keys=frozenset({"value_kind"})),
+        optional_keys=frozenset({"value_kind", "fallback"})),
     "namespaced_id": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
         locator_keys=frozenset({"json_pointer", "namespace"}),
@@ -249,14 +249,17 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     "point_pair": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
         locator_keys=frozenset({"lat_pointer", "lon_pointer"}),
-        consults_guards=True),
+        consults_guards=True,
+        optional_keys=frozenset({"fallback"})),
     "bbox_envelope": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
         locator_keys=frozenset({"json_pointer"}),
         consults_guards=True),
     "declared_quality": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_DECLARED_QUALITY,
-        locator_keys=frozenset({"json_pointer"})),
+        locator_keys=frozenset({"json_pointer"}),
+        consults_transforms=True,
+        optional_keys=frozenset({"fallback"})),
     "declared_bool_quality": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_DECLARED_QUALITY,
         locator_keys=frozenset({"json_pointer"}),
@@ -435,6 +438,9 @@ IMPLEMENTED_TRANSFORMS = frozenset({
     # W1-c: a numbered/hyphenated městský obvod is never the town (R4), and the trailing
     # segment of an address is sometimes a country rather than an obec (R1's `country`).
     "statutory_city_obec", "address_part_country",
+    # sreality@3: the část obce the statutory-city fold drops ("Praha 4 - Podolí" states
+    # both the town and the quarter, and only the town had a transform).
+    "address_part_cast_obce",
     # idnes@4: the same `country` type off a STRUCTURED alpha-2 field instead of an address
     # tail — no name table to fall outside of, and CZ dropped rather than claimed.
     "foreign_country_code",
@@ -518,6 +524,58 @@ def _member(value: Any, allowed: frozenset[str], where: str, key: str) -> str:
 STORED_PAGE_KIND = "detail"
 
 
+def _check_fallback(
+    reader: str, spec: ReaderContract, raw: Any, *, where: str,
+) -> None:
+    """`locator.fallback`: ordered alternative PATHS inside the one entry (W7-b).
+
+    A portal whose payload changed shape may not answer with a second entry — one claim type
+    has exactly one carrier per portal (`_check_shape`), and two entries of a type reach S7
+    as a vote nothing asked for. So the entry that already carries the type names the older
+    path too, and `claims_common.locator_reads` takes the first that answers.
+
+    Every rail the primary locator has applies to each alternative, because an alternative is
+    a read, not an annotation: it addresses the value through the SAME reader's required
+    keys (a `point_pair` fallback names both halves of the pair), it may carry its own
+    `transform` where the two shapes need different normalisers, and it may say nothing else
+    — a key the reader never consults would be as inert here as on the primary, which is the
+    defect `bzs.det.link_pin` shipped.
+    """
+    if raw is None:
+        return
+    if not isinstance(raw, list) or not raw:
+        raise ContractError(
+            f"{where}: locator.fallback is an ORDERED list of alternative reads "
+            f"(got {raw!r}); one mapping per path, tried in the order written")
+    allowed = spec.locator_keys | frozenset({"transform"})
+    for index, alternative in enumerate(raw):
+        at = f"{where}: locator.fallback[{index}]"
+        if not isinstance(alternative, dict):
+            raise ContractError(f"{at} is not a mapping ({alternative!r})")
+        for key in sorted(spec.locator_keys):
+            if not alternative.get(key):
+                raise ContractError(
+                    f"{at} does not name locator.{key}; reader '{reader}' indexes it "
+                    f"unguarded, so this path would KeyError on the first row that "
+                    f"reaches it rather than falling through")
+        unread = sorted(set(alternative) - allowed)
+        if unread:
+            raise ContractError(
+                f"{at} names {', '.join(unread)}, which reader '{reader}' never reads on "
+                f"a fallback path ({', '.join(sorted(allowed))}); a declaration that "
+                f"cannot be consulted is a rail that looks enforced and is not")
+        for transform_spec in [str(t) for t in (alternative.get("transform") or [])]:
+            name = transform_spec.partition(":")[0]
+            if not spec.consults_transforms:
+                raise ContractError(
+                    f"{at}: reader '{reader}' never applies transforms, so '{name}' "
+                    f"would silently not run")
+            if name not in IMPLEMENTED_TRANSFORMS:
+                raise ContractError(
+                    f"{at}: transform '{name}' is not implemented by the extractor "
+                    f"({', '.join(sorted(IMPLEMENTED_TRANSFORMS))})")
+
+
 def _check_executable(
     reader: str,
     *,
@@ -575,6 +633,8 @@ def _check_executable(
             f"{', locator.'.join(unread)}; it consults "
             f"{', '.join(sorted(spec.appetite))}, so the declaration is inert — either the "
             f"reader widens or the key goes")
+
+    _check_fallback(reader, spec, locator.get("fallback"), where=where)
 
     for transform_spec in transforms:
         name = transform_spec.partition(":")[0]

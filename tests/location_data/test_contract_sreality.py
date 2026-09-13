@@ -1,4 +1,4 @@
-"""sreality@2 — the slim location contract (rule 25), and the portal guarantees it carries.
+"""sreality@3 — the slim location contract (rule 25), and the portal guarantees it carries.
 
 One entry per claim type over ONE substrate: the v1 estate JSON the detail-drain persists
 into `listings.raw_json`. Every entry names a payload reader, so every entry runs on the one
@@ -27,7 +27,7 @@ from tests.location_data import claim_intake_fixtures as fx
 
 CONTRACT = next(c for c in contracts.load_all() if c.source == "sreality")
 
-VERSION = 2
+VERSION = 3
 TOWN_ENTRY = "sr.det.name_city"
 
 # 02 §2.1.8: ids are permanent and never reused. Every one of these survives from @1.
@@ -91,7 +91,7 @@ W2_FIXTURE, _ = claims(json.loads(_W2_BODY.read_text(encoding="utf-8")))
 
 # ------------------------------------------------------------------ contract shape
 
-def test_the_contract_is_at_version_2() -> None:
+def test_the_contract_is_at_version_3() -> None:
     assert CONTRACT.version == VERSION
 
 
@@ -168,8 +168,14 @@ def test_the_precision_entry_carries_the_blurred_label_set() -> None:
     contract data — re-calibrating it is a version bump, not a code change."""
     precision = entry("sr.det.inaccuracy_type")
     assert precision.precision_map["blurred_labels"] == [
-        "street", "ward", "quarter", "municipality"]
+        "street", "ward", "quarter", "municipality", "not_address"]
     assert precision.locator["json_pointer"] == "/locality/inaccuracy_type"
+    # @3: the older shape's own precision field, on the SAME entry. `not_address` rides
+    # with `map.type: geometry` — a quarter polygon's centroid, so it is capped there and
+    # calibrated as blurred.
+    assert precision.locator["fallback"] == [{"json_pointer": "/locality/accuracy"}]
+    assert precision.precision_map["precision_cap"]["granularity_max"]["not_address"] == \
+        "cast_obce_or_quarter"
     assert precision.precision_map["precision_cap"]["granularity_max"]["municipality"] == \
         "obec"
 
@@ -188,7 +194,9 @@ def test_the_archive_profile_is_the_one_the_scraper_reads_at_runtime() -> None:
 def test_the_pinned_regressions_still_stand() -> None:
     assert [str(line).split(" —")[0]
             for line in CONTRACT.fetch_config["regressions"]] == [
-        "520268", "1588965452", "3067969612"]
+        "520268", "1588965452", "3067969612",
+        # @3: one row per arm of the frozen older shape.
+        "3526070348", "2052886604", "1600352844"]
 
 
 def test_the_agency_office_zone_is_still_excluded() -> None:
@@ -280,17 +288,61 @@ def test_the_agency_office_never_becomes_a_claim() -> None:
                for e in CONTRACT.entries)
 
 
-def test_a_legacy_shape_row_claims_nothing_and_says_so() -> None:
-    """The pre-cutover payload carries no `/locality/*` structured field at all — a display
-    string plus a coarse `accuracy` flag — and the slim vocabulary has no
-    `address_line_verbatim`, so it yields zero claims (W1-c R11: accepted; the recovery is
-    a detail refetch by the scraper, not a contract entry). The shape is REFUSED by name so
-    the cohort stays visible in the run log rather than reading as 'portal published
-    nothing'."""
+def test_a_legacy_shape_row_is_read_through_the_fallback_paths() -> None:
+    """@3 reverses W1-c R11's "accepted, the recovery is a refetch".
+
+    A refetch only ever reached the LIVE rows: a delisted listing is never fetched again and
+    its content hash never changes, so 30,265 rows were frozen on the pre-cutover shape and
+    resolved to nothing — a town-coverage hole (rule 25) that read as a portal publishing no
+    town. The older shape is not a second set of entries (one claim type has exactly one
+    carrier per portal); it is a `locator.fallback` path on the entries that already carry
+    those types. The refusal counter STAYS: it now sizes the frozen cohort rather than
+    saying the row published nothing."""
     assert sreality_payload_shape(fx.SREALITY_LEGACY) == "legacy"
     by_id, result = claims(fx.SREALITY_LEGACY)
-    assert by_id == {}
     assert dict(result.refusals) == {"sreality_payload_shape:legacy": 1}
+    # THE TOWN, off the one address line, with the `okres …` qualifier segment ignored.
+    assert by_id[TOWN_ENTRY].value_text == "Klatovy"
+    assert by_id["sr.det.gps"].value_geom_wkt == "POINT(13.2951 49.3955)"
+    assert by_id["sr.det.inaccuracy_type"].value_text == "not_address"
+    # The line leads with the obec, so there is no street to claim and none is invented.
+    assert "sr.det.street" not in by_id
+    assert "sr.det.name_citypart" not in by_id
+    # Nothing the older shape does not carry is fabricated out of it.
+    assert {"sr.det.zip", "sr.det.housenumber", "sr.det.streetnumber",
+            "sr.det.name_district", "sr.det.name_region",
+            "sr.det.name_country"}.isdisjoint(by_id)
+
+
+def test_the_legacy_fallback_never_fires_where_the_post_cutover_field_answers() -> None:
+    """`locator.fallback` is an ordered ALTERNATIVE, not a second opinion: a row on the
+    current shape must extract exactly what @2 extracted. The rail matters most on the two
+    entries whose paths disagree about normalisation — `/locality/street` is a bare street
+    name and would not survive `address_part_street`, and `/locality/city` is already the
+    obec."""
+    assert POST_CUTOVER["sr.det.street"].value_text == "náměstí Jiřího z Poděbrad"
+    assert POST_CUTOVER[TOWN_ENTRY].value_text == "Praha"
+    for entry_id, claim in POST_CUTOVER.items():
+        assert claim.value_text != "not_address", entry_id
+
+
+def test_a_statutory_city_line_states_the_town_and_the_quarter_from_one_segment() -> None:
+    """"Praha 4 - Podolí" names both; @2's `statutory_city_obec` kept the town and dropped
+    the quarter on the floor. Both spellings of the obvod are covered — the ordinal one and
+    the hyphen one — because sreality writes both."""
+    ordinal, _ = claims({"locality": {"name": "Adresa", "accuracy": "address",
+                                      "value": "Sinkulova, Praha 4 - Podolí"},
+                         "map": {"lat": 50.0587064, "lon": 14.4222091,
+                                 "type": "coordinates"}})
+    assert ordinal[TOWN_ENTRY].value_text == "Praha"
+    assert ordinal["sr.det.name_citypart"].value_text == "Podolí"
+    assert ordinal["sr.det.street"].value_text == "Sinkulova"
+    hyphen, _ = claims({"locality": {"name": "Adresa", "accuracy": "address",
+                                     "value": "Bernáčkova, Brno - Dolní Heršpice"},
+                        "map": {"lat": 49.1543468643, "lon": 16.6247708777,
+                                "type": "coordinates"}})
+    assert hyphen[TOWN_ENTRY].value_text == "Brno"
+    assert hyphen["sr.det.name_citypart"].value_text == "Dolní Heršpice"
 
 
 def test_a_truncated_payload_claims_nothing_and_says_so() -> None:

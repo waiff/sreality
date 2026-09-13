@@ -1,0 +1,25 @@
+{
+  "_note": "Prod listings.raw_json 2026-09-13, trimmed to the keys any sreality entry addresses. The FROZEN older shape: one address line in locality.value with the street leading, accuracy 'address', and the pin in map (type 'coordinates').",
+  "raw_json": {
+    "locality": {
+      "name": "Adresa",
+      "value": "Sinkulova, Praha 4 - Podolí",
+      "accuracy": "address"
+    },
+    "map": {
+      "lat": 50.0587064,
+      "lon": 14.4222091,
+      "type": "coordinates",
+      "zoom": 14
+    },
+    "seo": {
+      "locality": "praha-podoli-sinkulova",
+      "category_sub_cb": 5,
+      "category_main_cb": 1,
+      "category_type_cb": 1
+    },
+    "locality_district_id": 5004
+  },
+  "lat": 50.0587064,
+  "lon": 14.4222091
+}

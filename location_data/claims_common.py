@@ -653,6 +653,35 @@ def _address_part_obec(value: str, arg: str) -> str | None:
     return _statutory_city_obec(segments[index], "")
 
 
+_STATUTORY_CITY_TAIL_RE = re.compile(
+    r"^(?:Praha|Plzeň|Brno|Ostrava|Pardubice|Opava|Liberec|Ústí nad Labem)"
+    r"(?:\s*[-–]?\s*(?:\d+|[IVX]+))?\s*[-–]\s*(?P<tail>\S.*)$")
+
+
+@transform("address_part_cast_obce")
+def _address_part_cast_obce(value: str, arg: str) -> str | None:
+    """The NAMED tail of a statutory-city obvod segment — the mirror of the fold.
+
+    `statutory_city_obec` answers "Praha 4 - Podolí" -> "Praha" and drops "Podolí" on the
+    floor; this keeps it, because a portal that writes the address as one line states the
+    část obce in exactly that tail and nowhere else. It is keyed on the city NAME, never on
+    position or on the hyphen alone: "Frýdek-Místek" is a town, and the hyphenated-okres
+    table is consulted first so "Brno-venkov" never publishes "venkov" as a city district.
+    A bare obvod ("Praha 8") has no tail and claims nothing.
+    """
+    segments = _address_segments(value)
+    if not segments:
+        return None
+    index = _obec_index(segments)
+    if index < 0:
+        return None
+    segment = segments[index].strip()
+    if segment in _HYPHENATED_OKRES_NAMES:
+        return None
+    found = _STATUTORY_CITY_TAIL_RE.match(segment)
+    return found.group("tail").strip() if found else None
+
+
 @transform("address_part_street")
 def _address_part_street(value: str, arg: str) -> str | None:
     """The LEADING segment, but only when it survives the street tests.

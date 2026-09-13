@@ -495,6 +495,50 @@ def test_a_non_enum_confidence_is_rejected_on_both_of_its_spellings():
                         "claim_confidence": "very-high"})
 
 
+def test_a_fallback_path_is_held_to_every_rail_the_primary_locator_is():
+    """`locator.fallback` (@3) is how one entry reads a portal whose payload changed shape
+    without becoming two entries of one claim type. It is a READ, not an annotation, so the
+    alternative is validated exactly like the primary — otherwise the loader would hand the
+    lane a path that KeyErrors mid-batch, or a normaliser that silently never runs."""
+    with pytest.raises(ContractError, match="ORDERED list"):
+        _entry(locator={"reader": "scalar", "json_pointer": "/a",
+                        "fallback": {"json_pointer": "/b"}})
+    with pytest.raises(ContractError, match="does not name locator.json_pointer"):
+        _entry(locator={"reader": "scalar", "json_pointer": "/a",
+                        "fallback": [{"transform": ["psc_normalise"]}]})
+    with pytest.raises(ContractError, match="never reads on"):
+        _entry(locator={"reader": "scalar", "json_pointer": "/a",
+                        "fallback": [{"json_pointer": "/b", "reader": "scalar"}]})
+    with pytest.raises(ContractError, match="not implemented"):
+        _entry(locator={"reader": "scalar", "json_pointer": "/a",
+                        "fallback": [{"json_pointer": "/b", "transform": ["nope"]}]})
+    # A point pair's fallback names BOTH halves: one of them is the axis-order contract.
+    with pytest.raises(ContractError, match="does not name locator.lon_pointer"):
+        _entry(claim_type="coordinate",
+               precision_cap={"granularity_max": {"_default": "obec"}},
+               locator={"reader": "point_pair", "lat_pointer": "/a", "lon_pointer": "/b",
+                        "fallback": [{"lat_pointer": "/c"}]})
+    # And a reader that never applies transforms may not smuggle one in on a fallback.
+    with pytest.raises(ContractError, match="never applies transforms"):
+        _entry(claim_type="coordinate",
+               precision_cap={"granularity_max": {"_default": "obec"}},
+               locator={"reader": "point_pair", "lat_pointer": "/a", "lon_pointer": "/b",
+                        "fallback": [{"lat_pointer": "/c", "lon_pointer": "/d",
+                                      "transform": ["psc_normalise"]}]})
+
+
+def test_only_the_readers_that_walk_fallback_paths_may_declare_one():
+    """`fallback` is `optional_keys` on the three payload readers that call `locator_reads`
+    and on nothing else — a declaration on any other reader is the inert rail this gate
+    exists to refuse."""
+    walkers = {name for name, spec in READER_CONTRACTS.items()
+               if "fallback" in spec.optional_keys}
+    assert walkers == {"scalar", "point_pair", "declared_quality"}
+    with pytest.raises(ContractError, match="never reads locator.fallback"):
+        _entry(locator={"reader": "conflict_signal", "json_pointer": "/a",
+                        "fallback": [{"json_pointer": "/b"}]})
+
+
 def test_a_wrong_prefix_is_rejected():
     with pytest.raises(ContractError, match="permanent"):
         parse_entry(dict(MINIMAL, id="bz.det.thing"), source="sreality", index=0)
