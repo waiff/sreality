@@ -177,6 +177,21 @@ export function summaryRowMatches(
   return true;
 }
 
+/* The nav badge's number: every row in the audit set, no filters — the same
+ * total the page header prints. A `head` request with an exact count, so
+ * PostgREST answers with the number in the Content-Range header and zero rows:
+ * one cheap round trip, cheap enough to sit in the app shell. The nav must
+ * never depend on it — a caller renders the label alone when this throws. */
+export const PIN_AUDIT_TOTAL_KEY = ['pin-audit', 'total'] as const;
+
+export const fetchPinAuditTotal = async (): Promise<number> => {
+  const { count, error } = await supabase
+    .from(PIN_AUDIT_RELATION)
+    .select(TIEBREAK, { count: 'exact', head: true });
+  if (error) throw error;
+  return count ?? 0;
+};
+
 export const fetchPinAuditSummary = async (): Promise<PinAuditSummaryRow[]> => {
   const { data, error } = await supabase.rpc('location_pin_audit_summary');
   if (error) throw error;

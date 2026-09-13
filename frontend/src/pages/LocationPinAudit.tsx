@@ -11,13 +11,13 @@
  * list is a separate keyset read of the same relation under the same filters.
  */
 
-import { Suspense, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 
 import ErrorBanner from '@/components/ErrorBanner';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
 import Spinner from '@/components/Spinner';
 import { lazyChunk } from '@/lib/lazyChunk';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { categoryMainLabelPlural, categoryMainLabel, categoryTypeLabel } from '@/lib/enums';
 import { fmtArea, fmtCount, fmtCzk, fmtDateSlash } from '@/lib/format';
@@ -29,6 +29,7 @@ import type { KeysetCursor } from '@/lib/keyset';
 import {
   EMPTY_PIN_AUDIT_FILTERS,
   PIN_AUDIT_MAP_CAP,
+  PIN_AUDIT_TOTAL_KEY,
   PIN_AUDIT_PAGE_SIZE,
   PIN_AUDIT_QUALITIES,
   fetchPinAuditPage,
@@ -222,6 +223,14 @@ export default function LocationPinAudit() {
     pageSize: PIN_AUDIT_PAGE_SIZE,
     getRowId: (r) => r.listing_id,
   });
+
+  /* The nav badge holds its count for the whole session (the matview behind it
+   * refreshes hourly), so opening this page is where it gets re-read — the one
+   * moment the operator is actually looking at the number. */
+  const qc = useQueryClient();
+  useEffect(() => {
+    void qc.invalidateQueries({ queryKey: PIN_AUDIT_TOTAL_KEY });
+  }, [qc]);
 
   const points = useQuery({
     queryKey: ['pin-audit', 'points', filterKey],

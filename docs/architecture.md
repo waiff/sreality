@@ -2373,7 +2373,17 @@ evidence laterals run ~37k times and not once per active property. Refreshed hou
 (`refresh-location-pin-audit`, guarded so the replay container skips it) with the budget armed **in
 the cron command** — migration 371's rule, or the refresh would silently die at the 120 s database
 default. Rule 25's deletion parity does not apply: this is an operator-requested review surface with
-a stated end.
+a stated end. It leads the TOP-LEVEL nav as `!AUDIT POLOH` (admin-only, first entry, badged with
+the unfiltered row count — one `head`+`count=exact` request held for the session, re-read when the
+page is opened, and never a gate on navigation: a failed count just renders the label alone), not
+buried in the NEW DEDUP dropdown, because it is a decision waiting on the operator.
+**The map's container carries an inline `position/inset/size` style and that is NOT redundant with
+Tailwind's `absolute inset-0`**: `globals.css` imports `maplibre-gl.css` AFTER `tailwindcss`, so the
+`.maplibregl-map` class MapLibre stamps onto the container at init wins the cascade with its own
+`position: relative` at equal specificity, `inset-0` then sizes nothing, and the container collapses
+to 0 height — no tiles, no points, an empty panel. Every map in the app (DetailMap, ListingMap,
+ComparablesMap) carries the same override for the same reason; the audit map shipped without it and
+rendered blank in production.
 
 ## Cross-reference map
 
