@@ -714,6 +714,19 @@ component is slimmed twice — each wave rewrites one component and slims its st
     hourly run had no claim and no verdict 27 minutes later. Latency now: ≤2 min lag → ≤1 min tick
     → the resolve lane → `browse_list`'s */15 rebuild.
 
+  - **W7-b — the audit page separates "pending" (the lane has not finished) from "unresolved"
+    (processed, no location)** (migration **518**). The operator's words: the queued rows are "a very
+    different set of listings (not really an issue) from the ones that were run and not resolved
+    properly (an issue...)". `location_pin_audit_mv` gains `state`, computed in the hourly refresh
+    from three pending arms — no `listing_location` row, a row in `dirty_locations`, or a snapshot
+    newer than `resolved_at` (one descent of the `(listing_id, scraped_at DESC)` btree per cohort
+    row) — and `location_pin_audit_summary()` groups by it, so both header counts and the matrix
+    stay sums over ONE payload. The page toggles between the two states (default `unresolved`), the
+    quality buckets apply under `unresolved` only, and `!AUDIT POLOH (N)` counts the issue alone.
+    Measured on 2026-09-13: **11 pending / 44,370 unresolved** at the pre-apply probe (the drain was
+    caught up), **39 / 44,370** on the first build after the apply — the pending half is small only
+    between bursts, and during a sweep it is thousands, which is the point.
+
 **What is left of the sprint** (nothing further to build):
   1. **The gate** — `check_location_town_coverage` red until every portal reports zero served
      listings with no row and zero active Czech listings with no `obec_kod`. Everything downstream
